@@ -1367,7 +1367,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       const interactive = args.tty ?? !lossless;
       const remoteExec =
         session.cancelExecCommand && useRemoteOpCancellation
-          ? this.registerRemoteExec(session, `${sanitizeOpIdToken(correlationId)}:0`)
+          ? this.registerRemoteExec(session, `${sanitizeOpIdToken(correlationId)}:0`, {
+              // A lifecycle command always reports its own exit, never a handle.
+              yieldsToSteer: false,
+            })
           : null;
       const markerPath = shellMarkerPath(
         crypto.randomUUID(),
@@ -1843,7 +1846,9 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     const interactive = parsed.tty !== false;
     const remoteExec =
       cancelExecCommand && useRemoteOpCancellation
-        ? this.registerRemoteExec(cancellationSession!, `${sanitizeOpIdToken(correlationId)}:0`)
+        ? this.registerRemoteExec(cancellationSession!, `${sanitizeOpIdToken(correlationId)}:0`, {
+            yieldsToSteer: true,
+          })
         : null;
     const wrappedCommand = useRemoteOpCancellation
       ? null
@@ -1854,9 +1859,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       secret?.carry ?? null,
       wrappedCommand ?? commandText,
     );
-    // A remote operation waits in the provider for its own yield (Connected
-    // Machines cap it at the finish floor), so it is sent the effective wait:
-    // a finish floor, or the ordinary cap when cut polling is off.
+    // A remote operation waits in the provider for its own yield, so it is
+    // sent the effective wait: a finish floor, or the ordinary cap when cut
+    // polling is off. Connected Machines cap it at the floor and end it early
+    // for a Steer (yieldExecCommand); OpenSandbox has no early yield yet.
     const remoteYieldMs = parsed.yield_time_ms === execWait.waitMs ? null : execWait.waitMs;
     const cancellableInput = useRemoteOpCancellation
       ? commandText === parsed.cmd && !backgroundArgumentPresent && remoteYieldMs === null
@@ -2837,7 +2843,11 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     }
   }
 
-  private registerRemoteExec(session: CommandCancellationSession, opId: string): ActiveRemoteExec {
+  private registerRemoteExec(
+    session: CommandCancellationSession,
+    opId: string,
+    options: { yieldsToSteer: boolean },
+  ): ActiveRemoteExec {
     let resolveSettled!: () => void;
     const settledPromise = new Promise<void>((resolve) => {
       resolveSettled = resolve;
@@ -2848,9 +2858,8 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     let ownershipTransferPending = false;
     let transport: RemoteOperationControl | null =
       session.requiresPinnedRemoteOperationControl?.() === true ? null : session;
-    let yieldRequested = false;
     const requestYield = () => {
-      if (entry.settled || entry.ownershipTransferred) return;
+      if (!options.yieldsToSteer || entry.settled || entry.ownershipTransferred) return;
       transport?.yieldExecCommand?.(opId);
     };
     const entry: ActiveRemoteExec = {
@@ -2867,12 +2876,9 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       bindTransport: (selected) => {
         if (selected.cancelExecCommand || selected.observeExecCommand) transport = selected;
         // A Steer that arrived before the provider selected this operation.
-        if (yieldRequested || this.foregroundWaitYield) requestYield();
+        if (this.foregroundWaitYield) requestYield();
       },
-      requestYield: () => {
-        yieldRequested = true;
-        requestYield();
-      },
+      requestYield,
       observe: async () => {
         if (entry.observation?.status === "completed") return entry.observation;
         if (ownershipTransferPending) return null;
