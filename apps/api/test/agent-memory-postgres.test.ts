@@ -329,6 +329,26 @@ describe("an agent's Memory (real PostgreSQL)", () => {
         select scope from knowledge_entries
         where id = ${(JSON.parse((saved.content as Array<{ text: string }>)[0]!.text) as { entryId: string }).entryId}`;
       expect(row?.scope).toBe("personal");
+      // Shared later (set directly; the transition is not under test): a plain
+      // chat, without the agent's Memory or its other chats.
+      await shared!.admin.begin(async (tx) => {
+        await tx`set local session_replication_role = replica`;
+        await tx`update sessions set visibility = 'workspace_shared', owner_subject_id = null,
+            owner_organization_membership_id = null
+          where id = ${own.sessionId}`;
+      });
+      const unread = await own.callTool({
+        name: "knowledge_search",
+        arguments: { query: "mornings", groupId: fixture.collectionId },
+      });
+      expect(errorOf(unread)).toMatchObject({ code: "agent_memory_off" });
+      expect(errorOf(unread)!.message).toContain("not its owner's Only me chat");
+      const listed = await listSlackAgentChatsForSession(
+        { db: app.db, settings } as unknown as ApiRouteDeps,
+        { grant: own.agentGrant, sessionId: own.sessionId },
+      );
+      expect(listed.chats).toEqual([]);
+      expect(listed.message).toContain("not its owner's Only me chat");
     } finally {
       await own.close();
     }

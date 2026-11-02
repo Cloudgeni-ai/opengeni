@@ -228,6 +228,10 @@ own Knowledge collection and its chats may read its other shared chats
   are refused (`agent_memory_off`; collections nested inside it stay ordinary
   workspace Knowledge), and `slack_agent_chats` lists nothing.
 - `slack_agent_chats` never lists Only me chats or Slack DMs.
+- An Only me agent's Memory and other chats are only for its owner's Only me
+  chats; a shared chat with it (one shared later, or after the agent became
+  Only me) runs as a plain chat: reads of the collection are refused and
+  `slack_agent_chats` lists nothing.
 - The chat is told its collection and whether it may save when it starts:
   Slack agent chats in their Slack instructions, app chats in their own
   instructions, which also get `slack_agent_chats`. The guidance is fixed when

@@ -3,6 +3,7 @@ import {
   agentMemoryAccess,
   agentMemoryGuidance,
   agentMemoryReadOnlyMessage,
+  agentMemoryUnreadableMessage,
   type AgentMemoryAgent,
 } from "../src/domain/agent-memory";
 
@@ -50,6 +51,20 @@ describe("an agent's Memory", () => {
     expect(
       agentMemoryAccess(onlyMe, chat({ private: true, ownerSubjectId: "user:ola" })).write,
     ).toBe(false);
+  });
+
+  test("an Only me agent's Memory stays out of any chat but its owner's Only me chats", () => {
+    for (const other of [chat(), chat({ private: true, ownerSubjectId: "user:ola" })]) {
+      const access = agentMemoryAccess(onlyMe, other);
+      expect(access).toMatchObject({ read: false, write: false, listChats: false });
+      expect(agentMemoryGuidance(access)).toBeNull();
+      expect(agentMemoryUnreadableMessage(access)).toContain("not its owner's Only me chat");
+    }
+    expect(agentMemoryAccess(onlyMe, chat({ private: true }))).toMatchObject({
+      read: true,
+      write: true,
+      listChats: true,
+    });
   });
 
   test("a chat with Memory scope off (open use) reads but never writes", () => {

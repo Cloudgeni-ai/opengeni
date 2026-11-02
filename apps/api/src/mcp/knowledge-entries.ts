@@ -13,7 +13,7 @@ import {
   withLearningRefusalMeta,
 } from "@opengeni/contracts/learning-refusal";
 import {
-  AGENT_MEMORY_UNREADABLE_MESSAGE,
+  agentMemoryUnreadableMessage,
   agentMemoryAccess,
   type AgentMemoryAccess,
   agentMemoryReadOnlyMessage,
@@ -280,7 +280,7 @@ export function registerKnowledgeEntryTools(
         : false);
     if (touches) throw new AgentMemoryReadOnlyError(agentMemoryReadOnlyMessage(access));
   }
-  /** Refuse reading the agent's collection while its Memory is off. */
+  /** Refuse reading the agent's collection while its Memory is off (or from a shared chat with an Only me agent). */
   async function requireAgentMemoryRead(target: {
     groupId?: string | undefined;
     entryId?: string | undefined;
@@ -295,7 +295,7 @@ export function registerKnowledgeEntryTools(
       target.entryId === collection ||
       (target.groupIds ?? []).includes(collection)
     ) {
-      throw new AgentMemoryReadOnlyError(AGENT_MEMORY_UNREADABLE_MESSAGE, "agent_memory_off");
+      throw new AgentMemoryReadOnlyError(agentMemoryUnreadableMessage(access), "agent_memory_off");
     }
   }
   // Compatibility recovery for tool selections persisted before the cutover.

@@ -66,12 +66,21 @@ export function agentMemoryAccess(
       saveKnowledge,
     };
   }
-  const audienceMatches =
-    agent.visibility === "workspace"
-      ? !chat.private
-      : chat.private &&
-        chat.ownerSubjectId !== null &&
-        chat.ownerSubjectId === agent.ownerSubjectId;
+  const ownersOnlyMeChat =
+    chat.private && chat.ownerSubjectId !== null && chat.ownerSubjectId === agent.ownerSubjectId;
+  // An Only me agent serves only its owner's Only me chats; any other chat
+  // with it (one shared later) runs as a plain chat, without its Memory.
+  if (agent.visibility !== "workspace" && !ownersOnlyMeChat) {
+    return {
+      collectionId,
+      read: false,
+      write: false,
+      listChats: false,
+      readOnlyReason: "private_chat",
+      saveKnowledge,
+    };
+  }
+  const audienceMatches = agent.visibility === "workspace" ? !chat.private : ownersOnlyMeChat;
   const readOnlyReason = chat.memoryOff
     ? ("memory_off_for_chat" as const)
     : audienceMatches
@@ -106,6 +115,16 @@ export function agentMemoryReadOnlyMessage(access: AgentMemoryAccess): string {
 /** What a read of the agent's collection tells a chat that may not read it. */
 export const AGENT_MEMORY_UNREADABLE_MESSAGE =
   "Memory is off for this agent, so its Memory collection is not read. Answer from this chat.";
+
+/** The same for a shared chat with an Only me agent, which runs as a plain chat. */
+export const AGENT_MEMORY_NOT_THIS_CHAT_MESSAGE =
+  "This agent is Only me and this chat is not its owner's Only me chat, so its Memory is not read. Answer from this chat.";
+
+export function agentMemoryUnreadableMessage(access: AgentMemoryAccess): string {
+  return access.readOnlyReason === "private_chat"
+    ? AGENT_MEMORY_NOT_THIS_CHAT_MESSAGE
+    : AGENT_MEMORY_UNREADABLE_MESSAGE;
+}
 
 const CONTEXT_MISSING =
   "When context is missing (for example someone continues a topic outside a thread, or refers to something said before)";

@@ -99,7 +99,7 @@ import {
   getSlackInteractionInboxByProviderEvent,
   getSlackProviderEventIdForTurn,
   getSlackInteractionForSession,
-  getSessionAgent,
+  getSessionAgentMemoryState,
   SessionAgentNotFoundError,
   listSlackAgentChats,
   listSlackAgentsForConnection,
@@ -171,6 +171,7 @@ import {
 } from "@opengeni/db";
 import {
   acceptSessionUserMessage,
+  agentMemoryAccess,
   controlHumanSessionWorkstream,
   createSessionForRequest,
   getActorNewSessionModelChoice,
@@ -4229,21 +4230,28 @@ export async function listSlackAgentChatsForSession(
   deps: ApiRouteDeps,
   input: { grant: AccessGrant; sessionId: string; limit?: number | undefined },
 ) {
-  const state = await getSessionAgent(deps.db, {
+  const state = await getSessionAgentMemoryState(deps.db, {
     workspaceId: input.grant.workspaceId,
     sessionId: input.sessionId,
   });
-  const agentId = state.agentChat ? (state.agent?.id ?? null) : null;
-  if (!state.agentChat) {
+  if (!state?.agentChat) {
     return { chats: [], message: "This chat is not an agent's chat." };
   }
-  if (!agentId) {
+  const agentId = state.agent?.id ?? null;
+  if (!state.agent || !agentId) {
     return { chats: [], message: "This chat's agent was deleted." };
   }
-  if (!state.agent?.memoryEnabled) {
+  if (!state.agent.memoryEnabled) {
     return {
       chats: [],
       message: "Memory is off for this agent, so it does not read its other chats.",
+    };
+  }
+  if (!agentMemoryAccess(state.agent, state.chat).listChats) {
+    return {
+      chats: [],
+      message:
+        "This agent is Only me and this chat is not its owner's Only me chat, so it does not read its other chats.",
     };
   }
   const chats = await listSlackAgentChats(deps.db, {
