@@ -1336,7 +1336,10 @@ fallback when patch sections and metadata do not match. The fallback must read
 all selected files under the existing per-file content contract, with bounded
 physical concurrency. `SandboxChannelAService` admits four file reads per
 fallback, preserves result order, and stops admitting queued reads on failure
-or cancellation while joining those already dispatched. This is scheduling,
+or cancellation while joining those already dispatched. Turn-end capture passes
+its owner/deadline AbortSignal into Git read admission: superseding the capture
+stops queued files even when the provider itself keeps answering successfully.
+Already-started file reads retain their chunk collection and exact spool cleanup. This is scheduling,
 not a limit on the agent's work or the number of files reviewed. Eagerly
 constructing one command promise per changed file can flood the runner and
 command ledger before cancellation takes effect. This inherited bug can be

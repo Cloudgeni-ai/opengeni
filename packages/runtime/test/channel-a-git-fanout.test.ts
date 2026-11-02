@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SandboxChannelAService } from "../src/sandbox/channel-a";
@@ -58,15 +58,19 @@ function fixture(tracked: boolean) {
 }
 
 for (const tracked of [true, false]) {
-  for (const failure of [null, "unknown", "cancelled"] as const) {
+  for (const failure of [null, "unknown", "cancelled", "owner_abort"] as const) {
     const fail = failure !== null;
     test(`oversized ${tracked ? "tracked" : "untracked"} Git review ${fail ? `joins ${failure} without starting queued files` : "reads every file with bounded provider concurrency"}`, async () => {
       const { root, count } = fixture(tracked);
+      const spoolRoot = mkdtempSync(join(tmpdir(), "opengeni-git-fanout-spools-"));
+      roots.push(spoolRoot);
       let active = 0;
       let peak = 0;
       let started = 0;
+      const owner = new AbortController();
       const service = new SandboxChannelAService({
         workspaceRoot: root,
+        signal: owner.signal,
         session: {
           exec: async (args) => {
             // The initial combined reads contain no individual filename. Observe
@@ -76,15 +80,17 @@ for (const tracked of [true, false]) {
               started++;
               active++;
               peak = Math.max(peak, active);
+              if (failure === "owner_abort" && started === 4) owner.abort("new turn");
             }
             try {
-              if (perFile && fail) {
+              if (perFile && fail && failure !== "owner_abort") {
                 await Bun.sleep(25);
                 if (failure === "cancelled") throw new TurnSandboxCommandCancelledError("new turn");
                 throw new SynchronousCommandOutcomeUnknownError(null, { stdout: "", stderr: "" });
               }
               const p = Bun.spawn(["/bin/bash", "-c", args.cmd], {
                 cwd: root,
+                env: { ...process.env, TMPDIR: spoolRoot },
                 stdout: "pipe",
                 stderr: "pipe",
               });
@@ -111,17 +117,19 @@ for (const tracked of [true, false]) {
       });
       if (fail) {
         await expect(request).rejects.toBeInstanceOf(
-          failure === "cancelled"
+          failure === "cancelled" || failure === "owner_abort"
             ? TurnSandboxCommandCancelledError
             : SynchronousCommandOutcomeUnknownError,
         );
         expect(started).toBeLessThan(count);
+        if (failure === "owner_abort") expect(started).toBe(4);
       } else {
         const result = await request;
         expect(result.files).toHaveLength(count);
         expect(result.files.every((file) => file.hunks.length > 0 && !file.truncated)).toBe(true);
       }
       expect(active).toBe(0);
+      expect(readdirSync(spoolRoot)).toEqual([]);
       expect(peak).toBeGreaterThan(0);
       expect(peak).toBeLessThanOrEqual(4);
     }, 120_000);
