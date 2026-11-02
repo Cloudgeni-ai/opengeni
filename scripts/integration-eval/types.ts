@@ -92,6 +92,13 @@ export type EvalCase = {
    */
   servedBy?: readonly IntegrationId[];
   /**
+   * Where the row runs. Rows default to the empty workspace for
+   * `not_connected` and the connected workspace otherwise. A `not_connected`
+   * row in the connected workspace checks that a connect card still appears
+   * while other integrations' tools match the request strongly.
+   */
+  workspace?: "connected" | "empty";
+  /**
    * Write: whether the deployment's default tool policy should ask for
    * approval first. `optional` when the default policy lets the write run
    * (for example personal Slack under the Recommended policy). Default required.

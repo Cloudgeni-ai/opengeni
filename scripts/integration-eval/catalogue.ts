@@ -228,6 +228,15 @@ export const CASES: readonly EvalCase[] = [
     { slug: "my-tasks", prompt: "What Asana tasks are due for me this month?", core: true },
   ]),
   {
+    // The connected workspace's Linear and Jira tools match "task" and
+    // "project" strongly; the Asana card must still appear.
+    id: "asana.not_connected.strong-match",
+    integration: "asana",
+    kind: "not_connected",
+    workspace: "connected",
+    prompt: "Add a task for the Halcyon launch checklist to our Asana project.",
+  },
+  {
     id: "asana.read.due",
     integration: "asana",
     kind: "read",
@@ -408,6 +417,9 @@ export const CASES: readonly EvalCase[] = [
   // ── Airtable ──────────────────────────────────────────────────────────────
   ...notConnected("airtable", [
     { slug: "crm", prompt: "Look up our accounts in the Airtable CRM base.", core: true },
+    // Near-miss names: spacing and case, and a swapped-letter typo.
+    { slug: "spacing", prompt: "Which vendors are in our Air Table base?" },
+    { slug: "typo", prompt: "Show me the Halcyon vendors from Airtabel." },
   ]),
   {
     id: "airtable.read.mrr",

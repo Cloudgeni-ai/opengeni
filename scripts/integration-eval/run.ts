@@ -334,7 +334,7 @@ async function runJob(api: OpengeniApi, job: Job, outDir: string): Promise<RunRe
   const { testCase, cell, repeat } = job;
   const marker = runMarker();
   const workspaceId =
-    testCase.kind === "not_connected"
+    (testCase.workspace ?? (testCase.kind === "not_connected" ? "empty" : "connected")) === "empty"
       ? env("OPENGENI_EVAL_EMPTY_WORKSPACE_ID")
       : env("OPENGENI_EVAL_CONNECTED_WORKSPACE_ID");
   const appUrl = (process.env.OPENGENI_EVAL_APP_URL ?? api.baseUrl).replace(/\/+$/, "");

@@ -110,6 +110,13 @@ Wilson 95% interval). Each run's parsed receipts are kept in `DIR/receipts/`.
 
 ## Checking a fix
 
+Regression rows for specific fixes:
+
+| Fix | Rows |
+|---|---|
+| Workspace Slack bot tools only where a bot is installed, and Ask first for interactive bot sends | `slack.write.post` (an approval must be requested), `slack.write.denied`, `slack.not_connected.channel-summary` (no bot tools hide the Slack card) |
+| Connect card for a named integration despite strong matches on installed tools; near-miss integration names | `asana.not_connected.strong-match` (runs in the connected workspace), `airtable.not_connected.spacing`, `airtable.not_connected.typo` |
+
 Rerun the same rows, with the same models and efforts, into a new directory:
 
 ```sh
