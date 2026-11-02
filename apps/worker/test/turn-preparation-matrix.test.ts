@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { protocol } from "@openai/agents-core";
 import {
   buildCompactionReplacementHistory,
   normalizeProtocolJsonValue,
@@ -275,7 +276,7 @@ function storedTurns(round: string): Item[] {
     claudeSearch(`${round}b`, "Vertex Claude regions", false),
     toolCall(`toolu_${round}`),
     // Text PostgreSQL cannot store as is: NUL and a lone surrogate.
-    toolResult(`toolu_${round}`, [{ type: "text", text: "region: eu\u0000central\ud800-1" }]),
+    toolResult(`toolu_${round}`, [{ type: "input_text", text: "region: eu\u0000central\ud800-1" }]),
     claudeCitedAssistant,
     user(`And the OpenAI ones? (${round})`),
     openAiReasoning,
@@ -297,15 +298,17 @@ function storedTurns(round: string): Item[] {
 
 /**
  * What the next turn loads: history rows as the worker writes them, through
- * the canonical JSON codec and JSON text, and read back.
+ * the canonical JSON codec and JSON text, and read back. Each row and its
+ * loaded form are kept so a test can check the round trip by name.
  */
+const storageRoundTrips: Array<{ stored: Item; loaded: Item }> = [];
 function persistedAndLoaded(history: Item[]): Item[] {
   return historyRowsToAppend(history, 0).rows.map(({ item }) => {
     const loaded = fromPostgresLosslessJson(
       JSON.parse(JSON.stringify(toPostgresLosslessJson(item))) as Item,
       LOSSLESS_CONTENT_CODEC_VERSION,
     );
-    expect(loaded).toEqual(item);
+    storageRoundTrips.push({ stored: item, loaded });
     return loaded;
   });
 }
@@ -383,6 +386,21 @@ const hasClaudeThinking = (history: Item[]) =>
   history.some(
     (item) => item.type === "reasoning" && anthropicData(item)?.block?.type === "thinking",
   );
+
+describe("the matrix fixtures", () => {
+  test("are items the Agents SDK accepts", () => {
+    // context_compaction is a Responses item the SDK schema does not define.
+    const fixtures = [...storedTurns("1"), remoteCompaction];
+    const rejected = fixtures.filter((item) => !protocol.ModelItem.safeParse(item).success);
+    expect(rejected).toEqual([]);
+  });
+
+  test("survive storage exactly", () => {
+    historiesToPrepare();
+    expect(storageRoundTrips.length).toBeGreaterThan(0);
+    for (const { stored, loaded } of storageRoundTrips) expect(loaded).toEqual(stored);
+  });
+});
 
 describe("turn preparation for every persisted item kind", () => {
   for (const { name, history, apis = APIS } of historiesToPrepare()) {
