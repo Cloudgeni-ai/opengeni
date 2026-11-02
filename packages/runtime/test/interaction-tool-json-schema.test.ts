@@ -130,6 +130,36 @@ describe("interaction tool model schema", () => {
     ).toBe(
       "Interaction tool arguments are invalid: action.actions.1.key: expected string, received undefined.",
     );
+    // A batch is still the branch chosen when its inner action is wrong,
+    // including an inner action whose own type or locator kind is unknown.
+    expect(
+      explain({
+        type: "batch",
+        fenceEachAction: true,
+        actions: [
+          { type: "click", locator: { kind: "ref", ref: "e1" } },
+          {
+            type: "scroll",
+            locator: { kind: "role", role: "dialog", name: "Notes" },
+            deltaY: 1200,
+          },
+        ],
+      }),
+    ).toBe(
+      "Interaction tool arguments are invalid: action.actions.1.deltaX: expected number, received undefined.",
+    );
+    expect(
+      explain({
+        type: "batch",
+        actions: [{ type: "click", locator: { kind: "ref", ref: "e1" } }, { type: "scrol" }],
+      }),
+    ).toContain("action.actions.1.type: Invalid discriminator value.");
+    expect(
+      explain({
+        type: "batch",
+        actions: [{ type: "click", locator: { kind: "rol", role: "button" } }],
+      }),
+    ).toContain("action.actions.0.locator.kind: Invalid discriminator value.");
     expect(explain({ type: "teleport" })).toContain("action.type: Invalid discriminator value.");
   });
 
