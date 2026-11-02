@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   CURATED_CATALOG,
   canonicalMcpUrl,
+  catalogIdentityEntriesByMcpUrl,
   curatedCatalogByMcpUrl,
   curatedCatalogEntriesByMcpUrl,
   curatedCatalogFingerprintInput,
@@ -424,8 +425,10 @@ describe("unmatched curated entries are reported", () => {
         },
       ],
     });
-    // Every committed curated URL is absent from this one-row snapshot.
-    expect(normalized.unmatchedCurated).toEqual([...curatedCatalogEntriesByMcpUrl.keys()].sort());
+    // Every committed curated and identity URL is absent from this one-row snapshot.
+    expect(normalized.unmatchedCurated).toEqual(
+      [...curatedCatalogEntriesByMcpUrl.keys(), ...catalogIdentityEntriesByMcpUrl.keys()].sort(),
+    );
     expect(normalized.rows).toHaveLength(1);
   });
 });

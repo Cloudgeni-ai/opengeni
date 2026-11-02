@@ -910,6 +910,14 @@ and [`../AGENTS.md`](../AGENTS.md) Sandbox Notes.
 
 ### 3.9 Compute routing and sandbox ownership stay explicit
 
+A new session may name only a sandbox backend the deployment serves
+(`sandboxBackendServed` in `packages/config`): its default, `none`,
+`selfhosted` with Connected Machines on, and providers whose credentials are
+configured; `local` and `docker` run on the host and are served only as the
+default. Every create path applies it (REST/SDK, `session_create`, forks,
+schedule save and run admission) because the worker builds whatever provider
+a session row names. Shared children and existing rows keep their backend.
+
 A human owner's personal-machine move during a turn is explicit consent for
 that logical turn, independent of the initiating person. The separate turn
 receipt and attempt bindings survive recovery without rewriting accepted
@@ -2915,7 +2923,7 @@ Canonical: `packages/runtime/src/sandbox/`,
 
 ---
 
-Turn-end review capture yields to queued turns and fences late commits. Single-read files and unique storage keys isolate cleanup. Recovery snapshots retain their separate fifteen-minute cadence.
+Turn-end review capture yields to queued turns and fences late commits. Its cancellation signal also fences admission of queued per-file Git reads; already-started reads retain output collection and exact spool cleanup. Single-read files and unique storage keys isolate cleanup. Recovery snapshots retain their separate fifteen-minute cadence.
 
 ## 9. Data and storage
 

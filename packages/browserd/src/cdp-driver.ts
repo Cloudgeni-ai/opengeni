@@ -721,6 +721,10 @@ type TargetState = {
   /** The document an input action resolved its element in. The action's first
    * input event goes out only while that document is still the current one. */
   inputFence: string | null;
+  /** The page-frame field a fill is writing and the value it writes, from its
+   * first input on. When the tab's debugging ends under the fill, the next
+   * attachment reads the field back (see fillHeldOnNewAttachment). */
+  pendingFill?: { backendDOMNodeId: number; value: string };
   /** The document already known to draw, so input sent to it while its tab
    * is hidden reaches the page (see drawHiddenTabForInput). */
   inputDrawnDocument?: string;
@@ -3179,7 +3183,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
     }).catch(async (error: unknown) => {
       const failure = await this.actionFailure(error, effects);
-      if (effects) await this.observeOnNewAttachment(failure, effects.state, command, secretValues);
+      if (effects) {
+        await this.observeOnNewAttachment(failure, effects.state, command, secretValues);
+        // The fill's field holds the requested value on the new attachment:
+        // the fill completed, and the receipt shows the page as it left it.
+        if (
+          failure instanceof InteractionOutcomeUnknownDriverError &&
+          failure.observation &&
+          (await this.fillHeldOnNewAttachment(failure, effects.state, command))
+        )
+          return failure.observation as BrowserObservationValue;
+      }
       throw failure;
     });
     this.refreshSubscribedFrame(targetId);
@@ -3219,7 +3233,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     ) {
       return new InteractionOutcomeUnknownDriverError(
         "outcome_unknown",
-        "The tab disconnected while browser input was being sent. Check the current tabs before continuing; do not repeat the action automatically.",
+        TAB_DISCONNECTED_UNDER_INPUT,
       );
     }
     return error;
@@ -3257,6 +3271,34 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       );
     } catch {
       // Optional context only.
+    }
+  }
+
+  /**
+   * Whether a single fill whose tab's debugging ended under it (Chrome ends it
+   * when another extension adds a frame as the field gets focus, as password
+   * managers' card and login menus do) left its field holding the requested
+   * value, read on the tab's new attachment. Only then is the fill known to be
+   * complete; anything else stays unknown.
+   */
+  private async fillHeldOnNewAttachment(
+    failure: InteractionOutcomeUnknownDriverError,
+    state: TargetState,
+    command: BrowserActionCommandValue,
+  ): Promise<boolean> {
+    const fill = state.pendingFill;
+    if (failure.message !== TAB_DISCONNECTED_UNDER_INPUT || command.action.type !== "fill" || !fill)
+      return false;
+    const current = this.states.get(state.targetId);
+    if (!current || current === state || current.nodeRoute) return false;
+    try {
+      return (
+        (await this.callOnNode(current, fill.backendDOMNodeId, CONFIRM_EDITABLE_VALUE_FUNCTION, [
+          { value: fill.value },
+        ])) === true
+      );
+    } catch {
+      return false;
     }
   }
 
@@ -7193,10 +7235,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         return;
       }
       case "fill": {
+        delete state.pendingFill;
         const node = await this.resolveActionLocator(state, action.locator);
         if (await this.fillNativeDateTimeInput(state, node.backendDOMNodeId, action.value)) return;
         if (await this.fillSlider(state, node.backendDOMNodeId, action.value)) return;
         await this.assertFillableTarget(state, node.backendDOMNodeId);
+        // Only a field in the page's own frame: a node of a cross-origin
+        // frame is addressed through that frame's attachment.
+        if (node.backendDOMNodeId !== null && !state.nodeRoute)
+          state.pendingFill = { backendDOMNodeId: node.backendDOMNodeId, value: action.value };
         await this.focusNode(state, node.backendDOMNodeId);
         await this.selectAllAndDelete(state, node.backendDOMNodeId);
         if (action.value || this.engine === "lightpanda")
@@ -9134,12 +9181,55 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // the target is measured only once it has stopped moving.
     if (!unscrolled)
       await this.settleAfterScroll(state, backendDOMNodeId, frameId ?? settleFrameId);
+    // The page can still be moving when the target is scrolled to: after an
+    // earlier click in the same batch opened a section, the page animates its
+    // own scroll to that section (or the section grows) and carries the
+    // target back out of the window. Once it stops moving, it is scrolled
+    // into view again, as a person follows it.
+    if (
+      requireHit &&
+      !(await this.hitsAtCenter(state, backendDOMNodeId)) &&
+      (await this.callOnNode(state, backendDOMNodeId, UNREACHABLE_REASON_FUNCTION, []).catch(
+        () => null,
+      )) === "outside"
+    ) {
+      await this.settleAfterScroll(state, backendDOMNodeId, frameId ?? settleFrameId);
+      // As above: a scroll that moved nothing is no effect, so a refusal of a
+      // target no scroll can reach stays definite.
+      const retryBefore = await this.scrollPositions(state, backendDOMNodeId, frameId);
+      const effectsBeforeRetry = state.actionEffectCount;
+      await this.sendActionTarget(state, "DOM.scrollIntoViewIfNeeded", {
+        backendNodeId: backendDOMNodeId,
+      }).catch((error: unknown) => {
+        if (error instanceof CdpProtocolError && error.code === -32_001) throw error;
+      });
+      if (
+        retryBefore !== null &&
+        (await this.scrollPositions(state, backendDOMNodeId, frameId)) === retryBefore
+      )
+        state.actionEffectCount = effectsBeforeRetry;
+      else await this.settleAfterScroll(state, backendDOMNodeId, frameId ?? settleFrameId);
+    }
     let point = await this.centerPoint(state, backendDOMNodeId).catch(async (error: unknown) => {
       throw (
         (await this.unmeasuredRefusal(state, backendDOMNodeId, frameId ?? settleFrameId, error)) ??
         error
       );
     });
+    // A cover still animating away (a dialog fading out after its close
+    // button was pressed in the same batch) is waited out, as a person waits.
+    if (
+      requireHit &&
+      !(await this.hitsAtCenter(state, backendDOMNodeId)) &&
+      (await this.callOnNode(
+        state,
+        backendDOMNodeId,
+        ANIMATING_COVER_CLEARS_FUNCTION,
+        [{ value: ANIMATING_COVER_WAIT_MS }],
+        frameId === undefined || this.engine === "lightpanda" ? {} : { isolatedFrameId: frameId },
+      ).catch(() => false)) === true
+    )
+      point = await this.centerPoint(state, backendDOMNodeId);
     if (requireHit && !(await this.hitsAtCenter(state, backendDOMNodeId))) {
       const visible =
         (await this.revealFromStickyCover(state, backendDOMNodeId, frameId)) ??
@@ -13456,6 +13546,47 @@ const STICKY_COVER_FUNCTION = `function() {
   return false;
 }`;
 
+// Resolves true once nothing covers the target's centre, waiting only while
+// what covers it (or a box around that) is still animating: a dialog fading
+// out after its close button was pressed, a toast or menu sliding away. A
+// cover with no running animation is not waited for. Polled on timers, not
+// frames, since a hidden tab may not render frames.
+const ANIMATING_COVER_CLEARS_FUNCTION = `function(limitMs) {
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element) || !element.isConnected) return false;
+  ${HIT_HELPERS}
+  const animating = (node) => {
+    if (typeof document.getAnimations !== "function") return false;
+    const targets = new Set();
+    for (const animation of document.getAnimations()) {
+      if (animation.playState !== "running" && !animation.pending) continue;
+      const target = animation.effect && animation.effect.target;
+      if (target) targets.add(target);
+    }
+    for (let current = node; current instanceof Element; ) {
+      if (targets.has(current)) return true;
+      const parentRoot = current.getRootNode();
+      current = current.parentElement ?? (parentRoot instanceof ShadowRoot ? parentRoot.host : null);
+    }
+    return false;
+  };
+  const start = performance.now();
+  return new Promise((resolve) => {
+    const check = () => {
+      if (!element.isConnected) return resolve(false);
+      const rect = element.getBoundingClientRect();
+      const hit = topHit(element, rect.left + rect.width / 2, rect.top + rect.height / 2);
+      if (hit && owns(element, hit)) return resolve(true);
+      if (!hit || !animating(hit) || performance.now() - start >= limitMs) return resolve(false);
+      setTimeout(check, 50);
+    };
+    check();
+  });
+}`;
+
+/** How long a click waits for a cover that is animating away. */
+const ANIMATING_COVER_WAIT_MS = 1_500;
+
 const SCROLL_INTO_VIEW_FUNCTION = `function(alignment) {
   const element = this instanceof Element ? this : this.parentElement;
   if (!(element instanceof Element)) return false;
@@ -14770,6 +14901,9 @@ const SET_RANGE_VALUE_FUNCTION = `async function(expected) {
   await Promise.resolve();
   return this.isConnected && Number(this.value) === Number(expected) ? { kind: "set" } : { kind: "lost" };
 }`;
+
+const TAB_DISCONNECTED_UNDER_INPUT =
+  "The tab disconnected while browser input was being sent. Check the current tabs before continuing; do not repeat the action automatically.";
 
 const CONFIRM_EDITABLE_VALUE_FUNCTION = `async function(expected) {
   await Promise.resolve();

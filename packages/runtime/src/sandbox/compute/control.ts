@@ -103,6 +103,8 @@ export type ComputeCreateRequest = {
   memory_mib: number;
   memory_request_mib?: number;
   cpu_request_millis?: number;
+  /** How long its disk is in MiB, where longer than its image's. */
+  disk_mib?: number;
   metadata: Record<string, string>;
   init: {
     env_vars: Record<string, string>;

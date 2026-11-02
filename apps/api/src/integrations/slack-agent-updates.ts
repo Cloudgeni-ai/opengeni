@@ -15,7 +15,7 @@
  */
 import { createHash } from "node:crypto";
 
-import { slackAgentHandle } from "@opengeni/contracts";
+import { slackAgentCallText, slackAgentDescriptionSentence } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   claimSlackAgentUpdateDelivery,
@@ -122,7 +122,7 @@ export function buildSlackAgentUpdateMessage(input: {
   const first = agents[0];
   if (!first) throw new Error("an update message names at least one agent");
   const mention = input.botUserId ? `<@${input.botUserId}>` : "@Opengeni";
-  const call = `${mention} +${slackAgentHandle(first.name)}`;
+  const call = slackAgentCallText(escapeSlackMrkdwn(first.name), mention);
   const single = agents.length === 1;
   const lines: string[] = [];
   let text: string;
@@ -130,7 +130,7 @@ export function buildSlackAgentUpdateMessage(input: {
     lines.push("Welcome to Opengeni in Slack.");
     lines.push(
       single
-        ? `You can ask *${escapeSlackMrkdwn(first.name)}*: ${escapeSlackMrkdwn(first.description)}`
+        ? `You can ask *${escapeSlackMrkdwn(first.name)}*: ${escapeSlackMrkdwn(slackAgentDescriptionSentence(first.description))}`
         : `Agents you can ask: ${agentNames(agents)}.`,
     );
     lines.push(`${single ? "Ask it" : "Try one"} with ${call}`);
@@ -138,7 +138,7 @@ export function buildSlackAgentUpdateMessage(input: {
   } else if (input.kind === "update") {
     lines.push(
       single
-        ? `New agent you can ask: *${escapeSlackMrkdwn(first.name)}*. ${escapeSlackMrkdwn(first.description)}`
+        ? `New agent you can ask: *${escapeSlackMrkdwn(first.name)}*. ${escapeSlackMrkdwn(slackAgentDescriptionSentence(first.description))}`
         : `New agents you can ask: ${agentNames(agents)}.`,
     );
     lines.push(`${single ? "Ask it" : "Try one"} with ${call}`);
@@ -146,7 +146,7 @@ export function buildSlackAgentUpdateMessage(input: {
   } else {
     lines.push(
       single
-        ? `*${escapeSlackMrkdwn(first.name)}* is here when you need it. ${escapeSlackMrkdwn(first.description)}`
+        ? `*${escapeSlackMrkdwn(first.name)}* is here when you need it. ${escapeSlackMrkdwn(slackAgentDescriptionSentence(first.description))}`
         : `Agents you can ask in Slack: ${agentNames(agents)}.`,
     );
     lines.push(`${single ? "Ask it" : "Try one"} with ${call}`);

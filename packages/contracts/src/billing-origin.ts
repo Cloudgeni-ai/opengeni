@@ -39,10 +39,11 @@ export const UPGRADE_PLAN_ACTION = Object.freeze({
   href: "/billing",
 } as const);
 /**
- * Bring-your-own-key use (the person's own provider keys, or their own
- * Claude, Codex or SuperGrok subscription) pays a platform fee on the
- * list-price equivalent of each call. The fee is payable only from paid
- * credit: a paid plan's credit (app use) and credits that were paid for.
+ * Bring-your-own-key use (the person's own provider, gateway or custom
+ * endpoint API key) pays a platform fee on the list-price equivalent of each
+ * call. The fee is payable only from paid credit: a paid plan's credit (app
+ * use) and credits that were paid for. The person's own subscriptions
+ * (Claude, Codex, SuperGrok) pay no fee; they need a paid plan instead.
  */
 export const BYOK_PLATFORM_FEE_TYPE = "byok_platform_fee";
 export const BYOK_PAID_CREDIT_REQUIRED_CODE = "byok_paid_credit_required";
@@ -53,4 +54,32 @@ export const BYOK_UPGRADE_REQUIRED_MESSAGE = "Upgrade to Pro to use your own key
 /** The one action that fixes an own-key refusal with `message`. */
 export function byokRefusalAction(message: string) {
   return message === BYOK_UPGRADE_REQUIRED_MESSAGE ? UPGRADE_PLAN_ACTION : ADD_CREDITS_ACTION;
+}
+
+/**
+ * The person's own subscriptions (Claude, Codex, SuperGrok and any other
+ * subscription connection) pay no platform fee: the paid plan is the fee.
+ * Using them needs a paid plan of at least $20 a month (Pro or higher); the
+ * Free plan is refused with the one action that fixes it.
+ */
+export const SUBSCRIPTION_PLAN_REQUIRED_CODE = "subscription_plan_required";
+export const SUBSCRIPTION_PLAN_REQUIRED_MESSAGE = "Upgrade to Pro to use your own subscription.";
+
+/** The cheapest monthly plan price that includes the person's own subscriptions. */
+export const OWN_SUBSCRIPTION_MIN_PLAN_PRICE_MICROS = 20_000_000;
+
+/**
+ * Does a catalog plan include the person's own subscriptions? A paid plan of
+ * at least $20 a month, or a custom-priced one (Enterprise, or a plan the
+ * catalog no longer lists); never Free.
+ */
+export function planIncludesOwnSubscriptions(plan: {
+  key: string;
+  monthlyPriceMicros: number | null;
+}): boolean {
+  return (
+    plan.key !== "free" &&
+    (plan.monthlyPriceMicros === null ||
+      plan.monthlyPriceMicros >= OWN_SUBSCRIPTION_MIN_PLAN_PRICE_MICROS)
+  );
 }

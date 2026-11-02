@@ -154,13 +154,16 @@ describe("own-key platform fee math", () => {
     expect(byokRefusalAction(BYOK_PAID_CREDIT_REQUIRED_MESSAGE)).toBe(ADD_CREDITS_ACTION);
   });
 
-  test("own keys and subscriptions are byok; a deployment-funded free model is not", () => {
+  test("own keys are byok; own subscriptions and deployment-funded models are not", () => {
     expect(modelFundingForAdmission(settings(), OWN_KEY_MODEL, false)).toMatchObject({
       fundedWithoutCredits: true,
       byok: true,
     });
-    // A Codex subscription turn is the person's own subscription.
-    expect(modelFundingForAdmission(settings(), "gpt-6-luna", true).byok).toBe(true);
+    // A Codex subscription turn is the person's own subscription: no fee.
+    expect(modelFundingForAdmission(settings(), "gpt-6-luna", true)).toMatchObject({
+      byok: false,
+      ownSubscription: true,
+    });
     // Opengeni's own credit-billed model pays credits, not the fee.
     expect(modelFundingForAdmission(settings(), "gpt-6-luna", false).byok).toBe(false);
   });
@@ -399,8 +402,8 @@ describe("own-key fee on the turn's real response paths", () => {
     debit.mockRestore();
   });
 
-  // A subscription serves a catalog model Opengeni would otherwise fund, so
-  // only the turn's funding (not the model) says it is the person's own.
+  // A turn's funding (not the model id alone) says whether it is on the
+  // person's own key: the claim derives it from the turn's served route.
   const common = (byok?: boolean) => ({
     dispatchId: "activity-A",
     settings: settings(),
@@ -434,7 +437,7 @@ describe("own-key fee on the turn's real response paths", () => {
   });
   const usage = { inputTokens: 1_000_000, outputTokens: 100_000, totalTokens: 1_100_000 };
 
-  test("streamed responses and compaction charge the fee when the turn is on the person's own subscription", async () => {
+  test("streamed responses and compaction charge the fee when the turn is on the person's own key", async () => {
     await processModelResponseTerminalEvent({
       ...common(true),
       event: new RunRawModelStreamEvent({

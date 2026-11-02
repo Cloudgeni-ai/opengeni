@@ -328,6 +328,31 @@ describe("scheduled-task creator policy inheritance (real PostgreSQL)", () => {
     expect(readTurnExecutionPolicyV1(session.metadata)).toEqual({ kind: "absent" });
   }, 60_000);
 
+  test("a task saved with retired secret permission names still starts its chat", async () => {
+    if (!available) return;
+    const grant = await workspaceGrant();
+    const task = await generatedTask(grant, {
+      firstPartyMcpTools: ["set_session_title"],
+      firstPartyMcpPermissions: ["sessions:read", "secrets:list"],
+      sessionPolicy: null,
+    });
+    // Tasks saved before the names were unified still hold the aliases; new
+    // saves canonicalize them, so write the stored row the way it was then.
+    await shared!.admin`update scheduled_tasks
+      set creator_first_party_mcp_permissions =
+        '["sessions:read","variable-sets:list","secrets:list","variable-sets:write","variable-sets:attach","variable-sets:use"]'::jsonb
+      where id = ${task.id}`;
+    // Before the fix the database refused the chat as an authority change.
+    const { session, accepted } = await dispatchGeneratedSession(grant, task.id);
+    expect(session.firstPartyMcpPermissions).toEqual([
+      "sessions:read",
+      "secrets:list",
+      "secrets:write",
+      "secrets:use",
+    ]);
+    expect(accepted?.resolvedFirstPartyMcpPermissions).toEqual(session.firstPartyMcpPermissions);
+  }, 60_000);
+
   test.each(["omitted", "connection only"] as const)(
     "an explicit creator selection is preserved with destination %s",
     async (destination) => {

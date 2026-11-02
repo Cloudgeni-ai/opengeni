@@ -4418,6 +4418,7 @@ export type FirstPartyMcpToolName =
   | "slack_bot_prepare_message"
   | "slack_bot_send_prepared_message"
   | "slack_agent_handoff"
+  | "slack_agent_suggest"
   | "slack_agent_chats"
   | "slack_agent_propose"
   | "fiken_companies_list"
@@ -5944,10 +5945,20 @@ export type ClientConfig = {
 export type ClientVoiceInputConfig = {
   available: boolean;
   providers?: VoiceInputProviderId[] | undefined;
+  /** Every model a dictation may name, of each ready provider. */
+  models?: DictationModelOption[] | undefined;
   maxDurationSeconds: number;
   maxSizeBytes: number;
   acceptedMimeTypes: string[];
   resumable?: ClientResumableVoiceInputConfig | undefined;
+};
+
+/** A model a dictation can name, such as for one desktop dictation shortcut. */
+export type DictationModelOption = {
+  providerId: VoiceInputProviderId;
+  providerName: string;
+  model: string;
+  name: string;
 };
 
 export type ClientResumableVoiceInputConfig = {

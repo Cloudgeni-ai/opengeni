@@ -870,6 +870,8 @@ export interface ComputeSandboxClientOptions {
   memoryMib: number;
   memoryRequestMib?: number;
   cpuRequestMillis?: number;
+  /** How long a new sandbox's disk is; omitted, its image's length. */
+  diskMib?: number;
   /** Start the agent with its own virtual desktop (the desktop image). */
   desktop: boolean;
   readyTimeoutMs: number;
@@ -969,6 +971,7 @@ export class ComputeSandboxClient {
       ...(this.options.cpuRequestMillis !== undefined
         ? { cpu_request_millis: this.options.cpuRequestMillis }
         : {}),
+      ...(this.options.diskMib !== undefined ? { disk_mib: this.options.diskMib } : {}),
       metadata: {
         [COMPUTE_METADATA.gateway]: this.options.gateway,
         [COMPUTE_METADATA.workspaceId]: identity.workspaceId,

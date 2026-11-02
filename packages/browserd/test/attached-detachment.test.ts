@@ -1221,6 +1221,87 @@ for (const ending of ["during", "before"] as const)
     }
   });
 
+for (const holds of [true, false])
+  test(`a fill whose tab debugging ends under it is ${holds ? "completed when the field holds the value" : "unknown when the field does not hold the value"} on the new attachment`, async () => {
+    // Focusing a card field opens a password manager's autofill frame, and
+    // Chrome ends the attachment while the fill's text is being inserted.
+    class FieldBridge extends NotAttachedBridge {
+      fieldValue = "";
+      override async request<T>(payload: Readonly<Record<string, unknown>>): Promise<T> {
+        if (payload.type === "debugger.command" && this.attached.has(String(payload.tabId))) {
+          const params = (payload.params ?? {}) as Record<string, unknown>;
+          if (payload.method === "DOM.resolveNode" && params.backendNodeId === 42) {
+            this.commands.push(payload);
+            return { result: { object: { objectId: "field-42" } } } as T;
+          }
+          if (
+            payload.method === "Runtime.callFunctionOn" &&
+            params.objectId === "field-42" &&
+            String(params.functionDeclaration).includes("site-added grouping")
+          ) {
+            this.commands.push(payload);
+            const expected = String((params.arguments as Array<{ value: unknown }>)[0]?.value);
+            // The page's formatting script groups the digits.
+            const value = this.fieldValue.replace(/\s/g, "") === expected;
+            return { result: { result: { value } } } as T;
+          }
+        }
+        return await super.request<T>(payload);
+      }
+    }
+    const bridge = new FieldBridge();
+    const { connection, driver } = await fixture(bridge);
+    const internals = driver as unknown as Record<string, unknown>;
+    internals.resolveActionLocator = async () => ({ backendDOMNodeId: 42 });
+    internals.fillNativeDateTimeInput = async () => false;
+    internals.fillSlider = async () => false;
+    internals.assertFillableTarget = async () => undefined;
+    internals.focusNode = async () => undefined;
+    internals.selectAllAndDelete = async () => undefined;
+    try {
+      const observation = await driver.observe("7");
+      bridge.beforeCommandReply = async (method) => {
+        if (method !== "Input.insertText") return;
+        bridge.fieldValue = holds ? "4242 4242 4242 4242" : "4242";
+        bridge.detach("7", "target_closed");
+        await drainDetach(bridge);
+        throw new AttachedBrowserBridgeError(
+          "driver_rejected",
+          "Detached while handling command.",
+          false,
+        );
+      };
+      const receipt = await controllerFor(driver, observation).run({
+        protocolVersion: 1,
+        actor: { kind: "agent", subjectId: "agent:test" },
+        operationId: randomUUID(),
+        browserSessionId: observation.browserSessionId,
+        controllerGeneration: observation.target.controllerGeneration,
+        targetId: "7",
+        expectedTargetGeneration: observation.target.targetGeneration,
+        expectedDocumentGeneration: observation.target.documentGeneration!,
+        expectedFrameId: observation.frameId,
+        action: {
+          type: "fill",
+          locator: { kind: "css", selector: "#card" },
+          value: "4242424242424242",
+        },
+      });
+      expect(bridge.commands.filter((c) => c.type === "debugger.attach")).toHaveLength(2);
+      // The text went out once and was never sent again.
+      expect(bridge.commands.filter((c) => c.method === "Input.insertText")).toHaveLength(1);
+      if (holds) {
+        expect(receipt.state).toBe("completed");
+        expect(receipt.observation?.target.id).toBe("7");
+      } else {
+        expect(receipt.state).toBe("outcome_unknown");
+        expect(receipt.error?.message).toContain("The tab disconnected while browser input");
+      }
+    } finally {
+      connection.close();
+    }
+  });
+
 test("commands Chrome refuses while the tab holds another extension's frame fail plainly, without leaving the tab uncertain", async () => {
   // Chrome can keep a tab attached while another extension's page is a frame
   // of it, and then refuses every command without running it. The first

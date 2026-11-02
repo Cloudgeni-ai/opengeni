@@ -4928,6 +4928,11 @@ function launchFailureCode(error: unknown): string {
 }
 
 const BROWSER_LAUNCH_REASON_MAX_CHARS = 1_000;
+const BROWSER_MISSING_PATH_MAX_CHARS = 500;
+/** Ends both missing-browser messages: the browser tool only finds a browser
+ * installed system-wide, so one unpacked into a project folder never helps it
+ * and clutters the user's project. */
+const BROWSER_NOT_IN_PROJECT = "Do not install a browser or its libraries inside a project folder.";
 
 /** A browser that cannot start says why, so the caller can act on it instead
  * of retrying an opaque failure. The driver's own launch message (a missing
@@ -4936,9 +4941,16 @@ const BROWSER_LAUNCH_REASON_MAX_CHARS = 1_000;
 export function browserLaunchFailure(error: unknown): unknown {
   if (!(error instanceof AgentBrowserCommandError) || !error.driverMessage) return error;
   if (/^Chrome not found\b/u.test(error.driverMessage)) {
+    // "Chrome not found at <path>." names the executable this machine resolved
+    // or was configured with, which vanished before launch.
+    const missingPath = /^Chrome not found at (.+?)\.?$/u
+      .exec(error.driverMessage)?.[1]
+      ?.slice(0, BROWSER_MISSING_PATH_MAX_CHARS);
     return new InteractionDefiniteDriverError(
       "unsupported",
-      "No Google Chrome or Chromium is installed on this machine, so a browser cannot start here. Install Google Chrome on it, or open the browser on another placement.",
+      missingPath
+        ? `The browser this machine is set up to use (${missingPath}) is missing, so a browser cannot start here. Reinstall it there, or open the browser on another placement. ${BROWSER_NOT_IN_PROJECT}`
+        : `No Google Chrome or Chromium is installed on this machine, so a browser cannot start here. Install Google Chrome or Chromium system-wide in its standard location, with the official installer or the system package manager, and open the browser again, or open it on another placement. ${BROWSER_NOT_IN_PROJECT}`,
     );
   }
   const reason = error.driverMessage.slice(0, BROWSER_LAUNCH_REASON_MAX_CHARS);

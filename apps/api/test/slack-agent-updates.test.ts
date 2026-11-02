@@ -112,7 +112,8 @@ describe("update message content", () => {
           "Mute updates",
         ]);
         expect(actions.elements[0]!.url).toBe("slack://app?team=T123&id=A456&tab=home");
-        expect(section.text.text).toContain("<@UOPENGENI> +analytics");
+        expect(section.text.text).toContain("<@UOPENGENI> Analytics");
+        expect(section.text.text).not.toContain("+analytics");
         expect(visibleText(message.blocks)).not.toMatch(/\bbots?\b/iu);
         expect(message.text).not.toMatch(/\bbots?\b/iu);
         // No agent identity: the message has no username or icon override.
@@ -881,6 +882,40 @@ describe("update messages with PostgreSQL", () => {
     expect(await f.deliveries()).toHaveLength(0);
   }, 120_000);
 
+  test("an organization admin picks the channel new agents are announced in", async () => {
+    if (!available) return;
+    const f = await fixture();
+    const admin = await f.headers(f.owner.subjectId, ["account:admin", "workspace:admin"]);
+    const put = (body: Record<string, unknown>) =>
+      f.app.request(f.base, {
+        method: "PUT",
+        headers: admin,
+        body: JSON.stringify({
+          connectionId: f.connectionId,
+          updatesEnabled: false,
+          channelPostsOnly: false,
+          ...body,
+        }),
+      });
+    const read = async () =>
+      await (
+        await f.app.request(`${f.base}?connectionId=${f.connectionId}`, { headers: admin })
+      ).json();
+    expect(await read()).toMatchObject({ announcementChannelId: null });
+    expect((await put({ announcementChannelId: "C0ANNOUNCE" })).status).toBe(200);
+    expect(await read()).toMatchObject({ announcementChannelId: "C0ANNOUNCE" });
+    // Saving the switches without the field keeps the channel.
+    expect((await put({ updatesEnabled: true })).status).toBe(200);
+    expect(await read()).toMatchObject({
+      updatesEnabled: true,
+      announcementChannelId: "C0ANNOUNCE",
+    });
+    // Only channel ids; null clears it.
+    expect((await put({ announcementChannelId: "#general" })).status).toBe(400);
+    expect((await put({ announcementChannelId: null })).status).toBe(200);
+    expect(await read()).toMatchObject({ announcementChannelId: null });
+  }, 120_000);
+
   test("only an organization admin changes the settings", async () => {
     if (!available) return;
     const f = await fixture();
@@ -909,8 +944,9 @@ describe("update messages with PostgreSQL", () => {
     const before = await f.person("before");
     await f.setSwitch(true);
     const newcomer = await f.person("newcomer");
-    // Any time, not only at 10:00: they are in Slack right now.
-    const now = new Date();
+    // Any time, not only at 10:00: they are in Slack right now. A fixed
+    // afternoon keeps the daily 10:00 update for others out of this count.
+    const now = weekdayAt(15);
     expect((await f.sweep(now)).sent).toBe(1);
     expect(f.slack.posts).toHaveLength(1);
     expect(f.slack.posts[0]!.channel).toBe(newcomer.channel);

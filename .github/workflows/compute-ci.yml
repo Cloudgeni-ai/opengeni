@@ -174,10 +174,13 @@ jobs:
           shellcheck --severity=warning compute/deploy/host/install.sh compute/deploy/host/bundle.sh \
             compute/deploy/host/check-host compute/deploy/host/host-setup \
             compute/deploy/host/compute-host-certificate \
-            compute/deploy/host/test-compute-host-certificate compute/ci/*.sh \
+            compute/deploy/host/test-compute-host-certificate \
+            compute/deploy/host/agent-inputs compute/deploy/host/test-agent-inputs compute/ci/*.sh \
             deploy/terraform/gcp-compute/host-startup.sh
       - name: host certificate script
         run: compute/deploy/host/test-compute-host-certificate
+      - name: what the agent starts with (install.sh restarts it only when that changed)
+        run: compute/deploy/host/test-agent-inputs
       - uses: hashicorp/setup-terraform@v4
       - name: Terraform (GCP host fleet)
         run: |

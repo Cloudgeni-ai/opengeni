@@ -5,6 +5,7 @@ import {
 import {
   getScheduledTaskClaudeProviderAccountAuthoritySnapshot,
   readScheduledTaskBillingOrigin,
+  canonicalSecretPermissions,
 } from "@opengeni/db";
 import { retryScheduledTaskAdmission } from "./scheduled-task-admission";
 import { scheduledTaskSessionTitle } from "./scheduled-task-title";
@@ -130,6 +131,8 @@ import {
   resolveFirstPartyMcpToolPolicy,
   resolveTurnExecutionPolicyV1,
   TurnExecutionPolicyModelUnavailableError,
+  sandboxBackendServed,
+  unservedSandboxBackendMessage,
 } from "@opengeni/config";
 import { Context } from "@temporalio/activity";
 import { createHash } from "node:crypto";
@@ -707,6 +710,21 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       const generatedTarget =
         task.runMode === "new_session_per_run" ||
         (task.runMode === "reusable_session" && task.reusableSessionId === null);
+      // A generated run creates its session on the task's explicit backend.
+      // Refuse one this deployment does not serve (a schedule saved before the
+      // create-time check, or a deployment whose configuration changed) instead
+      // of building that provider on the worker; the task must be edited.
+      if (
+        generatedTarget &&
+        task.agentConfig.sandboxBackend !== undefined &&
+        !sandboxBackendServed(settings, task.agentConfig.sandboxBackend)
+      ) {
+        return await refuseAdmission(
+          "machine_target_unavailable",
+          false,
+          unservedSandboxBackendMessage(settings, task.agentConfig.sandboxBackend),
+        );
+      }
       if (generatedTarget) {
         try {
           const agentResolution = resolveSessionAgentConfigForCreate({
@@ -745,8 +763,12 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           );
         }
       }
+      // A task saved before the secret permission names were unified may still
+      // hold their retired aliases. The chat a run creates stores the canonical
+      // names, so the accepted run must name the same set or the database
+      // refuses the chat as an authority change.
       const firstPartyMcpPermissions = creatorPolicy?.firstPartyMcpPermissions
-        ? [...creatorPolicy.firstPartyMcpPermissions]
+        ? canonicalSecretPermissions(creatorPolicy.firstPartyMcpPermissions)
         : [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS];
       // A fresh occurrence resolves the immutable owner's current accounts.
       // Retry/recovery above uses the already accepted occurrence snapshot.
@@ -1253,12 +1275,14 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       if (admissionDenial) {
         // Credits and monthly limits clear on their own (top-up, new period):
         // skip this occurrence visibly; a later one is admitted normally.
-        // A run receipt records API work without credits, and an own key
-        // without paid credit for its fee, as out of credits.
+        // A run receipt records API work without credits, an own key
+        // without paid credit for its fee, and an own subscription without a
+        // paid plan, as out of credits.
         return await refuseAdmission(
           admissionDenial === "api_credits_required" ||
             admissionDenial === "byok_paid_credit_required" ||
-            admissionDenial === "byok_upgrade_required"
+            admissionDenial === "byok_upgrade_required" ||
+            admissionDenial === "subscription_plan_required"
             ? "insufficient_credits"
             : admissionDenial,
           true,

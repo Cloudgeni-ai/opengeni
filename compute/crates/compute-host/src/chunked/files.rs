@@ -185,7 +185,10 @@ impl Chunked {
                     .await
                     .map_err(|error| storage_error(OP, error))?;
                 if put.new {
-                    crate::observe::notes::bytes("uploaded", chunk.bytes.len() as u64);
+                    // A copy within the store, of what an archive a sweep stopped
+                    // stored an hour before, moves nothing over the network.
+                    let how = if put.copied { "copied" } else { "uploaded" };
+                    crate::observe::notes::bytes(how, chunk.bytes.len() as u64);
                 }
                 // Named as stored, under the day it was stored on.
                 Some(put.reference)

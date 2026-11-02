@@ -228,10 +228,11 @@ describe("Slack agents section", () => {
     );
     const text = view.host.textContent ?? "";
     expect(text).toContain("Data team");
-    expect(text).toContain("@Opengeni +data-team");
+    expect(text).toContain("@Opengeni Data team");
+    expect(text).not.toContain("+data-team");
     expect(text).toContain("Deal desk");
     expect(text).toContain("Sales");
-    expect(text).toContain("@Opengeni +deal-desk");
+    expect(text).toContain("@Opengeni Deal desk");
     expect(buttonNamed(view.host, "Create agent")).toBeTruthy();
     // Only the manageable agent has Edit and Delete.
     const items = [...view.host.querySelectorAll('[role="menuitem"]')].map(
@@ -353,7 +354,18 @@ describe("Slack agent form", () => {
     // Memory is made with the agent; there is nothing to set yet.
     expect(view.host.textContent).not.toContain("Memory");
     await fill(view.host, "Data Team", "Answers questions about our metrics.");
-    expect(view.host.textContent).toContain("People call it with @Opengeni +data-team");
+    expect(view.host.textContent).toContain("People ask it with @Opengeni Data Team.");
+    // Two words: no warning.
+    expect(view.host.textContent).not.toContain("Two words");
+    // The live preview shows the exact intro text.
+    const preview = view.host.querySelector("[data-slack-agent-intro-preview]")!;
+    expect(preview.textContent).toContain("Preview in Slack");
+    expect(preview.textContent).toContain(
+      "Hi, I'm Data Team, an Opengeni agent. Answers questions about our metrics.",
+    );
+    expect(preview.textContent).toContain(
+      "Ask me in any channel: @Opengeni Data Team, then your question.",
+    );
     await submit(view.host);
     expect(createOpenGeniSlackAgent).toHaveBeenCalledWith(WORKSPACE_ID, {
       connectionId: CONNECTION_ID,
@@ -374,6 +386,75 @@ describe("Slack agent form", () => {
     await submit(view.host);
     expect(createOpenGeniSlackAgent).not.toHaveBeenCalled();
     expect(view.host.textContent).toContain('"Help" already means something in Slack.');
+    await view.unmount();
+  });
+
+  test("warns about a one-word name without blocking it", async () => {
+    const createOpenGeniSlackAgent = mock(async () => ({ agent: agent({ name: "Data" }) }));
+    setContext({ createOpenGeniSlackAgent });
+    const view = await render(<SlackAgentFormPage {...form()} />);
+    await fill(view.host, "Data", "answers questions about metrics");
+    expect(view.host.textContent).toContain(
+      'Messages starting with "Data …" go to this agent. Two words, like "Data team", are safer.',
+    );
+    // The preview punctuates the description as a sentence.
+    expect(view.host.querySelector("[data-slack-agent-intro-preview]")!.textContent).toContain(
+      "an Opengeni agent. Answers questions about metrics.",
+    );
+    await submit(view.host);
+    expect(createOpenGeniSlackAgent).toHaveBeenCalled();
+    await view.unmount();
+  });
+
+  test("refuses names that start ordinary sentences, and too-short names", async () => {
+    const createOpenGeniSlackAgent = mock(async () => ({ agent: agent() }));
+    setContext({ createOpenGeniSlackAgent });
+    const view = await render(<SlackAgentFormPage {...form()} />);
+    await fill(view.host, "Test", "Tests things.");
+    await submit(view.host);
+    expect(view.host.textContent).toContain(
+      'Messages starting with "Test" would go to this agent. Choose another name.',
+    );
+    await fill(view.host, "Q", "Tests things.");
+    await submit(view.host);
+    expect(view.host.textContent).toContain("Use at least two letters.");
+    expect(createOpenGeniSlackAgent).not.toHaveBeenCalled();
+    await view.unmount();
+  });
+
+  test("asks for a description in one sentence", async () => {
+    const createOpenGeniSlackAgent = mock(async () => ({ agent: agent() }));
+    setContext({ createOpenGeniSlackAgent });
+    const view = await render(<SlackAgentFormPage {...form()} />);
+    expect(view.host.textContent).toContain("What it helps with");
+    expect(view.host.textContent).toContain(
+      "Shown to people in Slack and used to suggest this agent. One sentence, starting with a verb.",
+    );
+    await fill(view.host, "Data team", "");
+    await submit(view.host);
+    expect(view.host.textContent).toContain("Say in one sentence what it helps with.");
+    expect(createOpenGeniSlackAgent).not.toHaveBeenCalled();
+    await view.unmount();
+  });
+
+  test("an agent named before the stricter rules can still be saved unchanged", async () => {
+    const existing = agent({ name: "Test", handle: "test" });
+    const updateOpenGeniSlackAgent = mock(async () => ({ agent: existing }));
+    setContext({ updateOpenGeniSlackAgent });
+    const view = await render(<SlackAgentFormPage {...form({ agent: existing })} />);
+    // No warning or error for a name that isn't changing.
+    expect(view.host.textContent).not.toContain("Two words");
+    await type(
+      [...view.host.querySelectorAll<HTMLInputElement>("input")].find((input) =>
+        input.placeholder.startsWith("Answers questions"),
+      )!,
+      "Runs our test suite.",
+    );
+    await submit(view.host);
+    expect(updateOpenGeniSlackAgent).toHaveBeenCalledWith(WORKSPACE_ID, existing.id, {
+      expectedVersion: 3,
+      description: "Runs our test suite.",
+    });
     await view.unmount();
   });
 
@@ -754,6 +835,14 @@ describe("Introduce in channels", () => {
         ],
         nextCursor: null,
       })),
+      getOpenGeniSlackAgentUpdateSettings: mock(async () => ({
+        connectionId: CONNECTION_ID,
+        updatesEnabled: false,
+        channelPostsOnly: false,
+        announcementChannelId: null,
+        viewerCanManage: false,
+        updatedAt: null,
+      })),
       postOpenGeniSlackAgentIntro,
     });
     const view = await render(
@@ -775,6 +864,89 @@ describe("Introduce in channels", () => {
     });
     expect(view.host.textContent).toContain("Posted.");
     expect(view.host.textContent).toContain("Add the Opengeni app to this channel first.");
+    await view.unmount();
+  });
+
+  function introClient(overrides: Record<string, unknown> = {}) {
+    return {
+      listOpenGeniSlackAgentChannels: mock(async () => ({
+        channels: [
+          { id: "C3", name: "sales", isPrivate: false, introduced: false },
+          { id: "C1", name: "announcements", isPrivate: false, introduced: false },
+          { id: "C2", name: "data", isPrivate: false, introduced: true },
+        ],
+        nextCursor: null,
+      })),
+      getOpenGeniSlackAgentUpdateSettings: mock(async () => ({
+        connectionId: CONNECTION_ID,
+        updatesEnabled: false,
+        channelPostsOnly: false,
+        announcementChannelId: "C1",
+        viewerCanManage: false,
+        updatedAt: null,
+      })),
+      ...overrides,
+    };
+  }
+
+  test("shows the intro preview, sorts channels, marks posted ones and preselects the announcement channel", async () => {
+    const postOpenGeniSlackAgentIntro = mock(async () => ({
+      results: [{ channelId: "C1", status: "posted" as const }],
+    }));
+    setContext(introClient({ postOpenGeniSlackAgentIntro }));
+    const view = await render(
+      <SlackAgentIntroPage agent={agent()} justCreated onClose={() => undefined} />,
+    );
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+    const preview = view.host.querySelector("[data-slack-agent-intro-preview]")!;
+    expect(preview.textContent).toContain("Hi, I'm Data team, an Opengeni agent.");
+    const text = view.host.textContent ?? "";
+    expect(text.indexOf("#announcements")).toBeLessThan(text.indexOf("#data"));
+    expect(text.indexOf("#data")).toBeLessThan(text.indexOf("#sales"));
+    expect(text).toContain("Intro already posted.");
+    await submit(view.host);
+    expect(postOpenGeniSlackAgentIntro).toHaveBeenCalledWith(WORKSPACE_ID, agent().id, {
+      channelIds: ["C1"],
+    });
+    await view.unmount();
+  });
+
+  test("a channel where only some people can post says so, without asking to try again", async () => {
+    const postOpenGeniSlackAgentIntro = mock(async () => ({
+      results: [{ channelId: "C1", status: "restricted" as const }],
+    }));
+    setContext(introClient({ postOpenGeniSlackAgentIntro }));
+    const view = await render(<SlackAgentIntroPage agent={agent()} onClose={() => undefined} />);
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+    await submit(view.host);
+    expect(view.host.textContent).toContain(
+      "Opengeni can't post in this channel. Slack limits who can post here.",
+    );
+    expect(view.host.textContent).not.toContain("Try again");
+    await view.unmount();
+  });
+
+  test("searches a long channel list", async () => {
+    const channels = Array.from({ length: 12 }, (_, index) => ({
+      id: `CT${index}`,
+      name: `team-${index}`,
+      isPrivate: false,
+      introduced: false,
+    }));
+    channels.push({ id: "CX", name: "metrics", isPrivate: false, introduced: false });
+    setContext(
+      introClient({
+        listOpenGeniSlackAgentChannels: mock(async () => ({ channels, nextCursor: null })),
+      }),
+    );
+    const view = await render(<SlackAgentIntroPage agent={agent()} onClose={() => undefined} />);
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+    const search = view.host.querySelector<HTMLInputElement>(
+      'input[aria-label="Search channels"]',
+    )!;
+    await type(search, "metr");
+    expect(view.host.textContent).toContain("#metrics");
+    expect(view.host.textContent).not.toContain("#team-1");
     await view.unmount();
   });
 });

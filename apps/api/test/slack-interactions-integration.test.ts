@@ -87,8 +87,10 @@ import {
   registerSlackInteractionRoutes,
   slackTaskFirstPartyMcpTools,
   SLACK_SESSION_INSTRUCTIONS,
+  suggestSlackAgentForChat,
   verifySlackUserLinkToken,
 } from "../src/integrations/slack-interactions";
+import { SLACK_AGENT_SUGGESTION_ASK_ACTION_ID } from "../src/integrations/slack-agents";
 import { proposeSlackAgentFromChat } from "../src/integrations/slack-agent-proposals";
 import { assertSlackTaskUploadTarget } from "../src/integrations/slack-task-file-upload";
 import {
@@ -214,6 +216,9 @@ type SlackPrivateFileFixture = {
   contentType: "image/png" | "image/jpeg" | "image/webp";
   bytes: Uint8Array;
 };
+
+/** People the fake Slack knows by name; everyone else has no profile. */
+const SLACK_TEST_DISPLAY_NAMES = new Map([["U0SAM", "Sam Lee"]]);
 
 function fakeSlack(
   deniedChannels: Set<string> = new Set(),
@@ -457,6 +462,9 @@ function fakeSlack(
           is_external: external,
           is_restricted: guest,
           is_ultra_restricted: false,
+          ...(SLACK_TEST_DISPLAY_NAMES.has(userId)
+            ? { profile: { display_name: SLACK_TEST_DISPLAY_NAMES.get(userId) } }
+            : {}),
         },
       });
     }
@@ -5728,6 +5736,41 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     expect(inbox).toEqual({ status: "failed", last_error_code: "http_402" });
   });
 
+  test("a chat started from a mention shows the request without the mention, with people by name", async () => {
+    if (!available) return;
+    const value = await fixture();
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_READABLE_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.ownerSlackUserId,
+            channel: "C_TEAM",
+            ts: "1720000100.000001",
+            text: `<@${value.botUserId}> do you work? cc <@U0SAM> and <@U0NOBODY>`,
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    const [session] = await shared!.admin<{ initial_message: string }[]>`
+      select initial_message from sessions where id = ${route!.session_id}`;
+    expect(session!.initial_message).toBe("do you work? cc @Sam Lee and <@U0NOBODY>");
+    const [message] = await shared!.admin<{ text: string; model_context: string | null }[]>`
+      select event.payload ->> 'text' as text, event.payload ->> 'modelContext' as model_context
+      from session_events event
+      where event.workspace_id = ${value.owner.workspaceId}
+        and event.session_id = ${route!.session_id}
+        and event.type = 'user.message'
+      order by event.sequence asc
+      limit 1`;
+    expect(message!.text).toBe("do you work? cc @Sam Lee and <@U0NOBODY>");
+    expect(message!.model_context).toContain("@Sam Lee is <@U0SAM>");
+  });
+
   test("channel mentions adopt existing threads; only a mention continues, with untagged messages as context", async () => {
     if (!available) return;
     const value = await fixture({ linkOther: true });
@@ -5781,7 +5824,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
         and event.type = 'user.message'
       order by event.sequence asc
       limit 1`;
-    expect(initialMessage!.text).toBe(`<@${value.botUserId}> Can check this out?`);
+    expect(initialMessage!.text).toBe("Can check this out?");
     expect(initialMessage!.model_context).toContain(
       "Do we support Google Drive integration in Opengeni currently?",
     );
@@ -5848,7 +5891,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     const afterSecondMention = await userMessages();
     expect(afterSecondMention).toHaveLength(2);
     const continued = afterSecondMention[1]!;
-    expect(continued.text).toBe(`<@${value.botUserId}> Continue as another authorized participant`);
+    expect(continued.text).toBe("Continue as another authorized participant");
     expect(continued.model_context).toContain("since Opengeni was last invoked (oldest to newest)");
     const davlet = continued.model_context!.indexOf(
       `1720000000.000003 ${value.ownerSlackUserId}: <@U_DAVLET> Did you create this integration?`,
@@ -6216,7 +6259,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
         and event.type = 'user.message'
       order by event.sequence asc
       limit 1`;
-    expect(initialMessage!.text).toBe(`<@${value.botUserId}> Can you answer this question?`);
+    expect(initialMessage!.text).toBe("Can you answer this question?");
     expect(initialMessage!.model_context).toContain(
       "What deployment is currently running in production?",
     );
@@ -6355,7 +6398,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     expect(session!.resources.map((resource) => resource.mountPath)).toEqual([
       "attachments/slack/01-incident.png",
     ]);
-    expect(session!.initial_message).toBe(`<@${value.botUserId}> Read this screenshot.`);
+    expect(session!.initial_message).toBe("Read this screenshot.");
     expect(session!.initial_model_context).toContain("Surrounding thread history was omitted");
     expect(session!.initial_model_context).not.toContain("Optional old context");
     expect(objectStore.objects.size).toBe(1);
@@ -9209,7 +9252,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     expect(allowedSession!.resources.map((resource) => resource.mountPath)).toEqual([
       "attachments/slack/01-partner-incident.png",
     ]);
-    expect(allowedSession!.initial_message).toBe(`<@${allowed.botUserId}> investigate privately`);
+    expect(allowedSession!.initial_message).toBe("investigate privately");
     expect(allowedSession!.initial_model_context).toContain("Imported invocation attachments");
     expect(allowed.slack.calls.filter((call) => call.method === "files.info")).toHaveLength(1);
     expect(objectStore.objects.size).toBe(1);
@@ -11476,7 +11519,8 @@ describe("Slack agents", () => {
     });
     expect(session!.instructions).toContain("You are Analytics");
     expect(session!.instructions).toContain("Always sign off as Analytics.");
-    expect(session!.instructions).toContain("- Ops Desk (+ops-desk): Handles incidents.");
+    expect(session!.instructions).toContain("- Ops Desk: Handles incidents.");
+    expect(session!.instructions).not.toContain("+ops-desk");
 
     const first = value.slack.posts.find((post) => post.text.includes("Analytics is on it"));
     expect(first).toBeDefined();
@@ -11513,7 +11557,12 @@ describe("Slack agents", () => {
     const [opsChat] = await agentInteractions(value.owner.workspaceId);
     expect(opsChat).toMatchObject({ slack_agent_id: ops.id });
     const first = value.slack.posts.find((post) => post.text.includes("Ops Desk is on it"));
-    expect(first!.text).toContain(`Ops Desk · next time: <@${value.botUserId}> +ops-desk`);
+    // The fixture's bot id is not Slack-shaped, so the mention is plain text.
+    expect(first!.text).toContain(
+      "_Ops Desk: Handles incidents. Next time, ask directly with @Opengeni Ops Desk.",
+    );
+    // The channel's setting chose the agent: a workspace prefix reaches Opengeni itself.
+    expect(first!.text).toContain("To ask Opengeni itself here, start with `in ");
 
     await mention(
       value,
@@ -11576,14 +11625,19 @@ describe("Slack agents", () => {
       ),
     ).toBe(true);
     expect(replies).toContain(
-      "No agent called nobody. Available: +analytics, +ops-desk. No chat was started.",
+      "No agent called nobody. Available: Analytics, Ops Desk. No chat was started.",
     );
   }, 90_000);
 
   test("a chat hands a misrouted request to another agent once, never back", async () => {
     if (!available) return;
     const { value, analytics, ops } = await agentFixture();
-    await mention(value, "C_HANDOFF", "1765000003.000100", "+ops-desk how did revenue do?");
+    await mention(
+      value,
+      "C_HANDOFF",
+      "1765000003.000100",
+      "+ops-desk how did revenue do? Ask Analytics.",
+    );
     const [opsChat] = await agentInteractions(value.owner.workspaceId);
     const grant = value.owner as AccessGrant;
 
@@ -11651,7 +11705,12 @@ describe("Slack agents", () => {
   test("a hand-off passes on the message the turn answers, not a later one", async () => {
     if (!available) return;
     const { value, analytics } = await agentFixture({ linkOther: true });
-    await mention(value, "C_TURN", "1765000006.000100", "+ops-desk how did revenue do?");
+    await mention(
+      value,
+      "C_TURN",
+      "1765000006.000100",
+      "+ops-desk how did revenue do? Ask Analytics.",
+    );
     const [opsChat] = await agentInteractions(value.owner.workspaceId);
     const [turn] = await shared!.admin<{ id: string }[]>`
       select id from session_turns where session_id = ${opsChat!.session_id} order by created_at limit 1`;
@@ -11679,7 +11738,8 @@ describe("Slack agents", () => {
     expect(analyticsChat).toMatchObject({ slack_agent_id: analytics.id });
     const [session] = await shared!.admin<{ initial_message: string }[]>`
       select initial_message from sessions where id = ${analyticsChat!.session_id}`;
-    expect(session!.initial_message).toContain("how did revenue do?");
+    expect(session!.initial_message).toContain("how did revenue do? Ask Analytics.");
+    expect(session!.initial_message).not.toContain("+ops-desk");
     expect(session!.initial_message).not.toContain("churn");
   }, 90_000);
 
@@ -11711,7 +11771,12 @@ describe("Slack agents", () => {
   test("a hand-off is dropped, with a note, when another chat took the thread meanwhile", async () => {
     if (!available) return;
     const { value } = await agentFixture();
-    await mention(value, "C_STALE", "1765000008.000100", "+ops-desk how did revenue do?");
+    await mention(
+      value,
+      "C_STALE",
+      "1765000008.000100",
+      "+ops-desk how did revenue do? Ask Analytics.",
+    );
     await mention(value, "C_ELSEWHERE", "1765000008.000300", "+ops-desk unrelated");
     const [opsChat, otherChat] = await agentInteractions(value.owner.workspaceId);
     expect(
@@ -11731,6 +11796,206 @@ describe("Slack agents", () => {
         post.text.startsWith("Your request couldn't be passed on because the thread has moved"),
       ),
     ).toBe(true);
+  }, 90_000);
+
+  test("a chat hands off only a message that asks for the agent", async () => {
+    if (!available) return;
+    const { value } = await agentFixture();
+    const firstTurn = async (sessionId: string) => {
+      const [turn] = await shared!.admin<{ id: string }[]>`
+        select id from session_turns where session_id = ${sessionId} order by created_at desc limit 1`;
+      return { ...value.owner, metadata: { turnId: turn!.id } } as unknown as AccessGrant;
+    };
+    const handOff = async (channel: string, ts: string, text: string, agent = "Analytics") => {
+      await mention(value, channel, ts, text);
+      const chats = await agentInteractions(value.owner.workspaceId);
+      const chat = chats.at(-1)!;
+      return await handOffSlackAgentChat(value.deps, {
+        grant: await firstTurn(chat.session_id!),
+        sessionId: chat.session_id!,
+        agent,
+        reason: "test",
+      });
+    };
+    // Greetings, tests, questions about agents and requests that only fit
+    // another agent stay with the chat.
+    let ts = 1765000010;
+    for (const text of [
+      "+ops-desk hi",
+      "+ops-desk test I am testing",
+      "+ops-desk what agents are there?",
+      "+ops-desk how did revenue do last week?",
+    ]) {
+      ts += 1;
+      expect(await handOff(`C_STRICT_${ts}`, `${ts}.000100`, text)).toEqual({
+        status: "refused",
+        message:
+          "The message doesn't ask for Analytics. Answer it yourself; you may suggest the agent.",
+      });
+    }
+    // Asking for it, even misspelled, passes it on.
+    expect(
+      await handOff("C_STRICT_TYPO", "1765000020.000100", "+ops-desk ask analytcs about revenue"),
+    ).toMatchObject({ status: "passed_on", agent: "Analytics" });
+    await drainAll(value.deps);
+
+    // Mid-thread, the message the turn answers counts, not the thread's first.
+    await mention(value, "C_STRICT_MID", "1765000021.000100", "+ops-desk ask analytics later");
+    const midChat = (await agentInteractions(value.owner.workspaceId)).find((chat) =>
+      chat.route_key.startsWith("C_STRICT_MID:"),
+    );
+    await mention(
+      value,
+      "C_STRICT_MID",
+      "1765000021.000200",
+      "and how is the API doing?",
+      "1765000021.000100",
+    );
+    expect(midChat).toBeDefined();
+    expect(
+      await handOffSlackAgentChat(value.deps, {
+        grant: await firstTurn(midChat!.session_id!),
+        sessionId: midChat!.session_id!,
+        agent: "Analytics",
+      }),
+    ).toMatchObject({ status: "refused" });
+  }, 120_000);
+
+  test("a chat suggests an agent with a button that asks it as the person who clicks", async () => {
+    if (!available) return;
+    const { value, analytics } = await agentFixture({ linkOther: true });
+    await mention(value, "C_SUGGEST", "1765000030.000100", "+ops-desk how did revenue do?");
+    const [opsChat] = await agentInteractions(value.owner.workspaceId);
+    const [turn] = await shared!.admin<{ id: string }[]>`
+      select id from session_turns where session_id = ${opsChat!.session_id} order by created_at limit 1`;
+    const grant = { ...value.owner, metadata: { turnId: turn!.id } } as unknown as AccessGrant;
+
+    expect(
+      await suggestSlackAgentForChat(value.deps, {
+        grant,
+        sessionId: opsChat!.session_id!,
+        agent: "Ops Desk",
+      }),
+    ).toMatchObject({ status: "refused" });
+    expect(
+      await suggestSlackAgentForChat(value.deps, {
+        grant,
+        sessionId: opsChat!.session_id!,
+        agent: "Analytics",
+      }),
+    ).toMatchObject({ status: "suggested", agent: "Analytics" });
+    // Without a turn there is no answer to put it under.
+    expect(
+      await suggestSlackAgentForChat(value.deps, {
+        grant: value.owner as AccessGrant,
+        sessionId: opsChat!.session_id!,
+        agent: "Analytics",
+      }),
+    ).toMatchObject({ status: "refused" });
+
+    // The answer is posted, then the suggestion under it.
+    const before = value.slack.posts.length;
+    await appendSessionEvents(client.db, value.owner.workspaceId, opsChat!.session_id!, [
+      { type: "turn.completed", payload: { output: "Revenue was flat." }, turnId: turn!.id },
+    ]);
+    await drainAll(value.deps);
+    const posted = value.slack.posts.slice(before);
+    const answerIndex = posted.findIndex((post) => post.text.includes("Revenue was flat."));
+    const suggestion = posted.find((post) =>
+      post.text.includes("Analytics handles questions like this."),
+    );
+    expect(answerIndex).toBeGreaterThanOrEqual(0);
+    expect(suggestion).toBeDefined();
+    expect(posted.indexOf(suggestion!)).toBeGreaterThan(answerIndex);
+    expect(suggestion!.threadTimestamp).toBe("1765000030.000100");
+    const button = (
+      suggestion!.blocks!.at(-1) as {
+        elements: Array<{ action_id: string; value: string; text: { text: string } }>;
+      }
+    ).elements[0]!;
+    expect(button).toMatchObject({
+      action_id: SLACK_AGENT_SUGGESTION_ASK_ACTION_ID,
+      text: { text: "Ask Analytics" },
+    });
+
+    const suggestionUpdates = () =>
+      value.slack.calls.filter(
+        (call) => call.method === "chat.update" && call.timestamp === suggestion!.timestamp,
+      ).length;
+
+    // Someone who can't use Analytics clicks: nothing starts for them, and the
+    // button stays for the person who asked.
+    await pressSlackButton(value, {
+      post: { channel: suggestion!.channel, timestamp: suggestion!.timestamp },
+      rootTimestamp: "1765000030.000100",
+      actionId: SLACK_AGENT_SUGGESTION_ASK_ACTION_ID,
+      handleId: button.value,
+      actionTs: "1765000030.000300",
+      userId: value.otherSlackUserId,
+    });
+    await drainAll(value.deps);
+    expect(await agentInteractions(value.routed!.workspaceId)).toHaveLength(0);
+    expect(suggestionUpdates()).toBe(0);
+
+    // The person who asked clicks: the same message goes to Analytics in the thread.
+    await pressSlackButton(value, {
+      post: { channel: suggestion!.channel, timestamp: suggestion!.timestamp },
+      rootTimestamp: "1765000030.000100",
+      actionId: SLACK_AGENT_SUGGESTION_ASK_ACTION_ID,
+      handleId: button.value,
+      actionTs: "1765000030.000400",
+    });
+    const [analyticsChat] = await agentInteractions(value.routed!.workspaceId);
+    expect(analyticsChat).toMatchObject({
+      slack_agent_id: analytics.id,
+      route_key: "C_SUGGEST:1765000030.000100",
+    });
+    const [session] = await shared!.admin<{ initial_message: string }[]>`
+      select initial_message from sessions where id = ${analyticsChat!.session_id}`;
+    expect(session!.initial_message).toContain("how did revenue do?");
+    // The first agent's address is not sent on, so Analytics can't pass it straight back.
+    expect(session!.initial_message).not.toContain("+ops-desk");
+    // Once Analytics' chat has started, the line says who asked and loses its button.
+    await drainAll(value.deps);
+    expect(suggestionUpdates()).toBe(1);
+
+    // A button pressed on any other message starts nothing and says so privately.
+    await pressSlackButton(value, {
+      post: { channel: suggestion!.channel, timestamp: "1765000030.999999" },
+      rootTimestamp: "1765000030.000100",
+      actionId: SLACK_AGENT_SUGGESTION_ASK_ACTION_ID,
+      handleId: button.value,
+      actionTs: "1765000030.000500",
+      userId: value.otherSlackUserId,
+    });
+    await drainAll(value.deps);
+    expect(await agentInteractions(value.routed!.workspaceId)).toHaveLength(1);
+    expect(
+      value.slack.posts.some(
+        (post) => post.text === "This suggestion is no longer available. No chat was started.",
+      ),
+    ).toBe(true);
+  }, 120_000);
+
+  test("a chat never suggests an agent the person who asked can't use", async () => {
+    if (!available) return;
+    const { value, create } = await agentFixture();
+    const secret = await createWorkspace(client.db, {
+      accountId: value.owner.accountId,
+      name: "Secret",
+    });
+    await create("Vault", secret.id, "Keeps secrets.");
+    await mention(value, "C_SUGGEST_NO", "1765000031.000100", "+ops-desk where is the key?");
+    const [opsChat] = await agentInteractions(value.owner.workspaceId);
+    const [turn] = await shared!.admin<{ id: string }[]>`
+      select id from session_turns where session_id = ${opsChat!.session_id} order by created_at limit 1`;
+    expect(
+      await suggestSlackAgentForChat(value.deps, {
+        grant: { ...value.owner, metadata: { turnId: turn!.id } } as unknown as AccessGrant,
+        sessionId: opsChat!.session_id!,
+        agent: "Vault",
+      }),
+    ).toMatchObject({ status: "refused" });
   }, 90_000);
 
   test("info lists the agents the caller can use", async () => {
@@ -11755,7 +12020,7 @@ describe("Slack agents", () => {
       const body = (await response.json()) as { text: string };
       expect(body.text).toContain("*Agents you can ask*");
       expect(body.text).toContain(
-        "• *Analytics:* Answers revenue questions. `@Opengeni +analytics`",
+        "• *Analytics:* Answers revenue questions. `@Opengeni Analytics`",
       );
     }
     expect(await agentInteractions(value.owner.workspaceId)).toHaveLength(0);
@@ -12230,7 +12495,8 @@ describe("Slack agents", () => {
     expect(cardJson).toContain("*New agent: Finance*");
     expect(cardJson).toContain("Be precise.");
     expect(cardJson).toContain("Works in *Slack interactions*");
-    expect(cardJson).toContain("+finance");
+    expect(cardJson).toContain("Ask it with @Opengeni Finance");
+    expect(cardJson).not.toContain("+finance");
 
     const agents = async () =>
       await shared!.admin<{ id: string; name: string; knowledge_collection_id: string | null }[]>`
@@ -12264,7 +12530,7 @@ describe("Slack agents", () => {
     expect(created).toHaveLength(1);
     expect(created[0]!.id).toBe(proposalId);
     expect(created[0]!.knowledge_collection_id).not.toBeNull();
-    expect(card.text).toBe(`Finance is ready. Ask it with <@${value.botUserId}> +finance`);
+    expect(card.text).toBe("Finance is ready. Ask it with @Opengeni Finance");
     expect(JSON.stringify(card.blocks)).toContain(`Created by <@${value.ownerSlackUserId}>`);
     expect(JSON.stringify(card.blocks)).not.toContain("opengeni.agent_proposal.create");
 
@@ -12272,7 +12538,7 @@ describe("Slack agents", () => {
     await press("opengeni.agent_proposal.create", value.ownerSlackUserId);
     await press("opengeni.agent_proposal.cancel", value.ownerSlackUserId);
     expect(await agents()).toHaveLength(1);
-    expect(card.text).toBe(`Finance is ready. Ask it with <@${value.botUserId}> +finance`);
+    expect(card.text).toBe("Finance is ready. Ask it with @Opengeni Finance");
 
     // The same name cannot be proposed again.
     expect(

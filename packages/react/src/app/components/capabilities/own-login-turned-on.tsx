@@ -41,11 +41,57 @@ export async function turnOnOwnLoginHere(
   return issued.grant.grantId;
 }
 
-export async function stopOwnLoginHere(
+/**
+ * Turn your own logins on here: one account's connections, each once. The
+ * same standing grant as `turnOnOwnLoginHere`. Tries every connection, then
+ * reports the first failure.
+ */
+export async function turnOnOwnLoginsHere(
   client: OwnLoginClient,
   workspaceId: string,
-  account: Pick<ConnectionMetadata, "turnedOnHereGrantId">,
+  accounts: readonly Pick<ConnectionMetadata, "authorityId">[],
 ): Promise<void> {
-  if (!account.turnedOnHereGrantId) return;
-  await client.revokeUserResourceGrant(workspaceId, account.turnedOnHereGrantId);
+  const authorities = new Map(
+    accounts.flatMap((account) =>
+      account.authorityId ? [[account.authorityId, account] as const] : [],
+    ),
+  );
+  if (authorities.size === 0) throw new Error("This login isn't listed as yours yet. Try again.");
+  const failures: unknown[] = [];
+  for (const account of authorities.values()) {
+    try {
+      await turnOnOwnLoginHere(client, workspaceId, account);
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length > 0) throw failures[0];
+}
+
+/**
+ * Turn your own logins off here: every standing grant behind them, once
+ * each. One account connected twice has two connections, and turning it off leaves
+ * neither on. Tries every grant, then reports the first failure.
+ */
+export async function stopOwnLoginsHere(
+  client: OwnLoginClient,
+  workspaceId: string,
+  accounts: readonly Pick<ConnectionMetadata, "turnedOnHereGrantId">[],
+): Promise<void> {
+  const grantIds = new Set(
+    accounts.flatMap((account) =>
+      account.turnedOnHereGrantId ? [account.turnedOnHereGrantId] : [],
+    ),
+  );
+  // Nothing to take back: it is on from where it was added, not by a grant here.
+  if (grantIds.size === 0) throw new Error("This login can't be turned off here.");
+  const failures: unknown[] = [];
+  for (const grantId of grantIds) {
+    try {
+      await client.revokeUserResourceGrant(workspaceId, grantId);
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length > 0) throw failures[0];
 }
