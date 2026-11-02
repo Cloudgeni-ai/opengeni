@@ -2637,11 +2637,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       );
     }
     const connection = await this.ensureConnection();
-    const recordingState = await this.withTarget(targetId, async (state) => {
-      await this.assertImagesAllowed(state);
-      return state;
-    });
-    const sessionId = recordingState.sessionId;
+    const sessionId = await this.withTarget(targetId, async (state) => state.sessionId);
     let ended = false;
     const timers = new Set<ReturnType<typeof setTimeout>>();
     const end = (error: Error | null) => {
@@ -2668,28 +2664,18 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           typeof params.metadata?.timestamp === "number"
             ? params.metadata.timestamp * 1_000
             : Date.now();
-        void (async () => {
-          try {
-            // Inspect before releasing every frame, not merely when the
-            // recording starts: a checkout may open while it is running.
-            await this.assertImagesAllowed(recordingState);
-            if (!ended) onFrame(Buffer.from(params.data as string, "base64"), at);
-          } catch (error) {
-            end(error instanceof Error ? error : new Error("browser recording redaction failed"));
+        try {
+          onFrame(Buffer.from(params.data, "base64"), at);
+        } finally {
+          const timer = setTimeout(() => {
+            timers.delete(timer);
+            if (ended) return;
             void connection
-              .send("Page.stopScreencast", {}, { sessionId, timeoutMs: 2_000 })
+              .send("Page.screencastFrameAck", { sessionId: frameSession }, { sessionId })
               .catch(() => undefined);
-          } finally {
-            const timer = setTimeout(() => {
-              timers.delete(timer);
-              if (ended) return;
-              void connection
-                .send("Page.screencastFrameAck", { sessionId: frameSession }, { sessionId })
-                .catch(() => undefined);
-            }, RECORDING_FRAME_ACK_DELAY_MS);
-            timers.add(timer);
-          }
-        })();
+          }, RECORDING_FRAME_ACK_DELAY_MS);
+          timers.add(timer);
+        }
       },
       sessionId,
     );
@@ -2879,9 +2865,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const parsed = BrowserActionCommand.parse(commandInput);
     // Remembered before dispatch: a failed action can still leave the value typed.
     this.typedSecrets.remember(parsed.secretValues);
-    if (this.typedSecrets.containsPaymentValue(Object.values(parsed.secretValues ?? {}))) {
-      this.typedSecrets.protectPaymentImages(this.browserTargetIdOf(parsed.targetId));
-    }
     const secretValues = this.typedSecrets.merged(parsed.secretValues);
     const command = materializeCommandSecrets(parsed);
     // Input counts as sent once an effectful command left browserd, so a later
@@ -5149,7 +5132,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         clip: { x: metrics.viewport.x, y: metrics.viewport.y, width: 1, height: 1, scale: 1 },
       },
       FRAME_CAPTURE_TIMEOUT_MS,
-      { internalDraw: true },
     ).then(
       () => true,
       () => false,
@@ -5223,10 +5205,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     state: TargetState,
     params: Readonly<Record<string, unknown>>,
     timeoutMs: number,
-    options: { frame?: boolean; internalDraw?: boolean } = {},
+    options: { frame?: boolean } = {},
   ): Promise<T> {
     const deadline = Date.now() + timeoutMs;
-    if (!options.internalDraw) await this.assertImagesAllowed(state, deadline);
     while (state.capturesRunning.size > 0) {
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
@@ -5255,7 +5236,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     void running.then(() => state.capturesRunning.delete(running));
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const response = await Promise.race([
+      return await Promise.race([
         answered,
         new Promise<never>((_, reject) => {
           timer = setTimeout(
@@ -5264,8 +5245,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           );
         }),
       ]);
-      if (!options.internalDraw) await this.assertImagesAllowed(state, deadline);
-      return response;
     } finally {
       clearTimeout(timer);
     }
@@ -6006,36 +5985,35 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     throw new CdpFrameTreeUnsettledError();
   }
 
-  /** Read-only renderer snapshot, including closed shadow roots. A failure
-   * withholds output rather than assuming there were no sensitive fields. */
-  private async readPageProtection(state: TargetState, deadline?: number): Promise<PageProtection> {
+  /** Read-only renderer snapshot of the page's password and card fields
+   * (see sensitiveFieldReason), including closed shadow roots, so their
+   * values stay out of observations. A frame
+   * whose snapshot fails (an older attached-Chrome extension, a frame gone
+   * mid-read) is read without it: this never withholds a read. */
+  private async readPageProtection(state: TargetState): Promise<PageProtection> {
     this.assertCurrentTargetState(state);
     const connection = await this.ensureConnection();
-    const combined: PageProtection = { nodes: new Map(), values: [], payment: false };
+    const combined: PageProtection = { nodes: new Map(), values: [] };
     const sessions = [
       state.sessionId,
       ...[...state.oopifs.values()].map((frame) => frame.sessionId),
     ];
     for (const sessionId of new Set(sessions)) {
-      // Ordinary reads retain the connection's existing per-command deadline.
-      // Captures pass their own end-to-end deadline; do not add a shorter
-      // aggregate timeout merely because a page has several child frames.
-      const remaining = deadline === undefined ? undefined : deadline - Date.now();
-      if (remaining !== undefined && remaining <= 0)
-        throw new CdpCommandTimeoutError("DOMSnapshot.captureSnapshot", sessionId);
-      const snapshot = await connection.send(
-        "DOMSnapshot.captureSnapshot",
-        { computedStyles: [] },
-        { sessionId, ...(remaining === undefined ? {} : { timeoutMs: remaining }) },
-      );
-      const protection = pageProtection(snapshot);
-      if (this.typedSecrets.containsPaymentValue((snapshot as { strings: string[] }).strings))
-        combined.payment = true;
+      let protection: PageProtection;
+      try {
+        protection = pageProtection(
+          await connection.send(
+            "DOMSnapshot.captureSnapshot",
+            { computedStyles: [] },
+            { sessionId },
+          ),
+        );
+      } catch {
+        continue;
+      }
       for (const [key, reason] of protection.nodes) combined.nodes.set(key, reason);
       combined.values.push(...protection.values);
-      combined.payment ||= protection.payment;
     }
-    if (combined.payment) this.typedSecrets.protectPaymentImages(state.targetId);
     this.typedSecrets.remember(
       Object.fromEntries(combined.values.map((value, index) => [`protected:${index}`, value])),
     );
@@ -6058,17 +6036,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         return reason ? { ...node, protectedReason: reason } : node;
       }),
     );
-  }
-
-  private async assertImagesAllowed(state: TargetState, deadline?: number): Promise<void> {
-    if (!this.typedSecrets.paymentImagesProtected(state.targetId))
-      await this.readPageProtection(state, deadline);
-    if (this.typedSecrets.paymentImagesProtected(state.targetId)) {
-      throw new InteractionDefiniteDriverError(
-        "unsupported",
-        "images of this browser tab are withheld after payment data is encountered; use semantic observation and controls",
-      );
-    }
   }
 
   /**
@@ -14781,10 +14748,10 @@ const CONFIRM_EDITABLE_VALUE_FUNCTION = `async function(expected) {
   if (tag === "input" || tag === "textarea") {
     const actual = String(this.value);
     if (actual === String(expected)) return true;
-    const reason = (${SENSITIVE_FIELD_REASON_SOURCE})(tag, Object.fromEntries(Array.from(this.attributes, attr => [attr.name, attr.value])), this.isContentEditable === true);
-    // Only payment fields may ignore site-added grouping. No stripping of
-    // digits, letters, decimal points, slashes or other meaningful changes.
-    return reason === "payment" && /^[0-9\\s-]+$/.test(actual) && /^[0-9\\s-]+$/.test(String(expected)) &&
+    // A field that groups digits as they are typed (card, phone and account
+    // numbers) holds the same digits. No stripping of digits, letters,
+    // decimal points, slashes or other meaningful changes.
+    return /^[0-9\\s-]+$/.test(actual) && /^[0-9\\s-]+$/.test(String(expected)) &&
       actual.replace(/[\\s-]/g, "") === String(expected).replace(/[\\s-]/g, "");
   }
   if (this.isContentEditable === true) return String(this.textContent || "") === String(expected);

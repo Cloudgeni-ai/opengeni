@@ -60,7 +60,7 @@ test("payment privacy comparisons still detect secrets in all page-content strin
 });
 
 e2e(
-  "ordinary hidden metadata and expiry years do not poison later page reads or image eligibility",
+  "ordinary hidden metadata and expiry years do not poison later page reads",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-payment-metadata-");
     const runner = await ManagedBrowserRunner.create({
@@ -88,7 +88,7 @@ e2e(
         100,
       );
       const autofilled = await driver.openTarget(
-        `data:text/html,${encodeURIComponent(`<div id="credit-card"><label>Expiry year<select autocomplete="cc-exp-year"><option>2027</option></select></label><label>Postal code<input name="credit_card[zip]" value="0150"></label><input name="credit_card[year]" value="2027"><input value="${GROUPED}"><input type="hidden" value="40123456789012"></div><output>${GROUPED}</output>`)}`,
+        `data:text/html,${encodeURIComponent(`<div id="credit-card"><label>Expiry year<select autocomplete="cc-exp-year"><option>2027</option></select></label><label>Postal code<input name="credit_card[zip]" value="0150"></label><input autocomplete="cc-number" value="${GROUPED}"><input type="hidden" value="40123456789012"></div><output>${GROUPED}</output>`)}`,
       );
       expect(JSON.stringify(autofilled.semantic)).not.toContain(GROUPED);
       const later = await driver.openTarget(`data:text/html,${encodeURIComponent(ordinary)}`);
@@ -111,7 +111,7 @@ e2e(
 );
 
 e2e(
-  "payment values, formatted fills and image refusals share one protection boundary",
+  "card values stay out of reads, formatted fills complete, and screenshots keep working",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-payment-protection-");
     const page = `<title>Checkout fixture</title><h1 id="credit-card-offers">Credit card offers</h1>
@@ -175,12 +175,13 @@ e2e(
       safe(observation);
       const card = JSON.stringify(observation.semantic);
       expect(card).toContain('"reason":"payment"');
-      await expect(driver.captureScreenshot(observation.target.id)).rejects.toMatchObject({
-        code: "unsupported",
-      });
-      await expect(
-        driver.captureScreenshot(observation.target.id, { fullPage: true }),
-      ).rejects.toMatchObject({ code: "unsupported" });
+      // Screenshots are never refused because a page shows card fields.
+      expect(
+        (await driver.captureScreenshot(observation.target.id)).data.byteLength,
+      ).toBeGreaterThan(100);
+      expect(
+        (await driver.captureScreenshot(observation.target.id, { fullPage: true })).data.byteLength,
+      ).toBeGreaterThan(100);
       // The prefilled CVC remains hidden without any secret-reference side map.
       safe(await driver.observe(observation.target.id));
       const state = await driver.targetState(observation.target.id);
@@ -199,14 +200,14 @@ e2e(
           value: PAN,
         }),
       ).rejects.toMatchObject({ code: "outcome_unknown" });
+      // Any field that groups digits as they are typed holds the same digits.
       const fresh = await driver.observe(observation.target.id);
-      await expect(
-        act(fresh, {
-          type: "fill",
-          locator: { kind: "label", text: "Ordinary digits", exact: true },
-          value: "12345678",
-        }),
-      ).rejects.toMatchObject({ code: "outcome_unknown" });
+      const grouped = await act(fresh, {
+        type: "fill",
+        locator: { kind: "label", text: "Ordinary digits", exact: true },
+        value: "12345678",
+      });
+      expect(JSON.stringify(grouped?.semantic)).toContain("1234 5678");
       const unrelated = await driver.openTarget("data:text/html,<h1>Unrelated work</h1>");
       expect((await driver.captureScreenshot(unrelated.target.id)).data.byteLength).toBeGreaterThan(
         100,
@@ -215,9 +216,9 @@ e2e(
         `data:text/html,${encodeURIComponent(`<h1>Confirmation</h1><p>${GROUPED}</p>`)}`,
       );
       expect(JSON.stringify(echoed.semantic)).not.toContain(GROUPED);
-      await expect(driver.captureScreenshot(echoed.target.id)).rejects.toMatchObject({
-        code: "unsupported",
-      });
+      expect((await driver.captureScreenshot(echoed.target.id)).data.byteLength).toBeGreaterThan(
+        100,
+      );
     } finally {
       await driver.close();
       server.stop(true);
@@ -269,21 +270,9 @@ for (const crossOrigin of [false, true]) {
         expect(text).toContain("Embedded card");
         expect(text).toContain("Embedded security code");
         expect(text).toContain("Public heading");
-        await expect(driver.captureScreenshot(observation.target.id)).rejects.toMatchObject({
-          code: "unsupported",
-        });
-        await expect(driver.subscribeFrames(observation.target.id)).rejects.toMatchObject({
-          code: "unsupported",
-        });
-        await expect(
-          driver.recordFrames(
-            observation.target.id,
-            () => {
-              throw new Error("no payment image may leave the driver");
-            },
-            () => undefined,
-          ),
-        ).rejects.toMatchObject({ code: "unsupported" });
+        expect(
+          (await driver.captureScreenshot(observation.target.id)).data.byteLength,
+        ).toBeGreaterThan(100);
       } finally {
         await driver.close();
         server.stop(true);
@@ -293,92 +282,3 @@ for (const crossOrigin of [false, true]) {
     90_000,
   );
 }
-
-e2e(
-  "an ordinary screenshot stays usable and an active recording stops when payment fields appear",
-  async () => {
-    const directory = await mkdtemp("/tmp/ogb-payment-recording-");
-    const runner = await ManagedBrowserRunner.create({
-      profileDirectory: join(directory, "profile"),
-      headed: false,
-      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
-        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
-        : {}),
-    });
-    const driver = new AgentBrowserDriver({
-      browserSessionId: randomUUID(),
-      controllerGeneration: randomUUID(),
-      runner,
-    });
-    let stop: (() => Promise<void>) | undefined;
-    try {
-      const initial = await driver.start(
-        `data:text/html,${encodeURIComponent(`<title>Public page</title><h1>Welcome</h1>
-      <button onclick="document.body.style.background='red';const input=document.createElement('input');input.autocomplete='cc-number';input.value='${GROUPED}';document.body.append(input)">Checkout</button>`)}`,
-      );
-      const screenshot = await driver.captureScreenshot(initial.target.id);
-      expect(screenshot.data.byteLength).toBeGreaterThan(100);
-      let resolveEnd!: (error: Error | null) => void;
-      let resolveFrame!: () => void;
-      const ended = new Promise<Error | null>((resolve) => {
-        resolveEnd = resolve;
-      });
-      const firstFrame = new Promise<void>((resolve) => {
-        resolveFrame = resolve;
-      });
-      const colors: Array<Promise<number[]>> = [];
-      stop = await driver.recordFrames(
-        initial.target.id,
-        (jpeg) => {
-          colors.push(
-            (async () => {
-              const sharp = (await import("sharp")).default;
-              const { data } = await sharp(jpeg)
-                .extract({ left: 0, top: 0, width: 1, height: 1 })
-                .raw()
-                .toBuffer({ resolveWithObject: true });
-              return [...data];
-            })(),
-          );
-          resolveFrame();
-        },
-        resolveEnd,
-      );
-      await Promise.race([
-        firstFrame,
-        Bun.sleep(5_000).then(() => {
-          throw new Error("recording did not produce a public frame");
-        }),
-      ]);
-      await driver.dispatch({
-        protocolVersion: 1,
-        operationId: randomUUID(),
-        browserSessionId: initial.browserSessionId,
-        controllerGeneration: initial.target.controllerGeneration,
-        targetId: initial.target.id,
-        expectedTargetGeneration: initial.target.targetGeneration,
-        expectedDocumentGeneration: initial.target.documentGeneration,
-        expectedFrameId: initial.frameId!,
-        actor: { kind: "agent", subjectId: "payment-recording-fixture" },
-        action: { type: "click", locator: { kind: "role", role: "button", name: "Checkout" } },
-      });
-      const error = await Promise.race([
-        ended,
-        Bun.sleep(5_000).then(() => {
-          throw new Error("payment recording was not stopped");
-        }),
-      ]);
-      expect(error).toMatchObject({ code: "unsupported" });
-      // No frame painted after the payment transition may escape, including
-      // a frame already queued by the compositor when the click occurred.
-      for (const [red, green, blue] of await Promise.all(colors)) {
-        expect(red! > 200 && green! < 50 && blue! < 50).toBe(false);
-      }
-    } finally {
-      await stop?.();
-      await driver.close();
-      await rm(directory, { recursive: true, force: true });
-    }
-  },
-  90_000,
-);

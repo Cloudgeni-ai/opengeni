@@ -52,44 +52,13 @@ export function sensitiveFieldReason(
     ].some(passwordName)
   )
     return "password";
-  const field = ["input", "textarea", "select"].includes(tag) || editable;
-  const paymentName = (name: string) =>
-    /card.?(?:number|num\b)|credit.?card|cvv|cvc|\bcsc\b|security.?code|(?:card|cc|payment).{0,12}?exp|exp(?:iry|iration)?.?(?:date|month|year|mm|yy)/iu.test(
-      name,
-    ) || /^(?:expiry|expiration|exp)$/iu.test(name);
-  const paymentSecretName = (name: string) =>
-    /card.?(?:number|num\b)|cvv|cvc|\bcsc\b|security.?code/iu.test(name) ||
-    /^credit.?card$/iu.test(name);
-  // Preserve existing explicitly named payment containers as protected too,
-  // without hiding headings such as "credit-card-offers".
-  const paymentContainer = [attributes.name ?? "", attributes.id ?? ""].some((name) =>
-    /^(?:card.?number|credit.?card|cvv|cvc|security.?code|expiry|expiration)$/iu.test(name),
-  );
-  if (
-    paymentContainer ||
-    /(?:^|\s)cc-/u.test(autocomplete) ||
-    (field &&
-      [
-        attributes.name ?? "",
-        attributes.id ?? "",
-        attributes["aria-label"] ?? "",
-        attributes.placeholder ?? "",
-        attributes["data-elements-stable-field-name"] ?? "",
-      ].some(paymentName))
-  ) {
+  // Card fields are the ones a page marks with the standard autocomplete
+  // tokens (cc-number, cc-csc, cc-exp, cc-name...), which checkouts and
+  // payment widgets set so browsers can autofill them. Only the card number
+  // and security code are remembered as values; the rest are hidden in place.
+  if (/(?:^|\s)cc-/u.test(autocomplete)) {
     if (purpose === "read") return "payment";
-    // Expiry dates, cardholder names and select options stay protected in
-    // place, but common words and years must not become session secrets.
-    return /(?:^|\s)cc-(?:number|csc)(?:\s|$)/u.test(autocomplete) ||
-      [
-        attributes.name ?? "",
-        attributes.id ?? "",
-        attributes["aria-label"] ?? "",
-        attributes.placeholder ?? "",
-        attributes["data-elements-stable-field-name"] ?? "",
-      ].some(paymentSecretName)
-      ? "payment"
-      : null;
+    return /(?:^|\s)cc-(?:number|csc)(?:\s|$)/u.test(autocomplete) ? "payment" : null;
   }
   if (purpose === "remember") return null;
   if (
@@ -105,7 +74,6 @@ export const SENSITIVE_FIELD_REASON_SOURCE = sensitiveFieldReason.toString();
 export type PageProtection = {
   nodes: Map<string, ProtectedReason>;
   values: string[];
-  payment: boolean;
 };
 
 export function protectedNodeKey(frameId: string, backendId: number): string {
@@ -131,7 +99,7 @@ export function pageProtection(snapshot: unknown): PageProtection {
       throw new Error("invalid page protection string");
     return strings[index as number] as string;
   };
-  const found: PageProtection = { nodes: new Map(), values: [], payment: false };
+  const found: PageProtection = { nodes: new Map(), values: [] };
   for (const document of snapshot.documents) {
     if (!isRecord(document) || !isRecord(document.nodes))
       throw new Error("invalid page protection document");
@@ -143,22 +111,16 @@ export function pageProtection(snapshot: unknown): PageProtection {
     const backendIds = nodes.backendNodeId as unknown[];
     const reasons: Array<ProtectedReason | null> = [];
     const memoryReasons: Array<ProtectedReason | null> = [];
-    const paymentFields: boolean[] = [];
     const editableRoots: Array<number | null> = [];
     const editableText = new Map<number, string>();
-    const remember = (
-      value: string,
-      reason: ProtectedReason | null | undefined,
-      paymentField = false,
-    ) => {
-      if (!value || (!reason && !paymentField)) return;
-      // Only actual card numbers/CVCs from primary payment fields enter
-      // memory, not labels, option years or arbitrary hidden/private text.
+    const remember = (value: string, reason: ProtectedReason | null | undefined) => {
+      if (!value || !reason) return;
+      // Only actual card numbers/CVCs from card fields enter memory, not
+      // labels, option years or arbitrary hidden/private text.
       const digits = value.replace(/[\s-]/gu, "");
       if (
         reason === "password" ||
-        (reason === "payment" && /^(?:[0-9]{3,4}|[0-9]{12,19})$/u.test(digits)) ||
-        (paymentField && /^[0-9]{12,19}$/u.test(digits))
+        (reason === "payment" && /^(?:[0-9]{3,4}|[0-9]{12,19})$/u.test(digits))
       )
         found.values.push(value);
     };
@@ -192,21 +154,11 @@ export function pageProtection(snapshot: unknown): PageProtection {
       const ownReason = sensitiveFieldReason(tag, attributes, editable, "read", labelText);
       const reason = ownReason ?? inherited;
       reasons.push(reason);
-      // Protection inherits; permission to remember does not. A named
-      // payment wrapper must not turn its expiry options or postal code
-      // into permanent secrets.
+      // Protection inherits; permission to remember does not.
       const memoryReason = sensitiveFieldReason(tag, attributes, editable, "remember", labelText);
       memoryReasons.push(memoryReason);
-      // Autofill may populate an unnamed field inside a payment wrapper.
-      // Remember a complete card-sized number there, never a 3–4 digit
-      // year/postcode or hidden metadata inherited from the wrapper.
-      const paymentField =
-        reason === "payment" &&
-        attributes.type?.toLowerCase() !== "hidden" &&
-        (["input", "textarea"].includes(tag) || editable);
-      paymentFields.push(paymentField);
       const editableRoot =
-        editable && (memoryReason || paymentField)
+        editable && memoryReason
           ? index
           : !["input", "textarea", "select", "option"].includes(tag) &&
               attributes.contenteditable !== "false" &&
@@ -225,11 +177,9 @@ export function pageProtection(snapshot: unknown): PageProtection {
         // form controls above break the inheritance.
         if (tag === "#text" && editableRoot !== null)
           editableText.set(editableRoot, (editableText.get(editableRoot) ?? "") + text);
-        if (reason === "payment" || ownReason === "payment") found.payment = true;
       }
     }
-    for (const [index, text] of editableText)
-      remember(text, memoryReasons[index], paymentFields[index]);
+    for (const [index, text] of editableText) remember(text, memoryReasons[index]);
     for (const key of ["inputValue", "textValue"]) {
       const values = nodes[key];
       if (values === undefined) continue;
@@ -250,7 +200,7 @@ export function pageProtection(snapshot: unknown): PageProtection {
           throw new Error("invalid protected input index");
         if (reasons[index as number]) {
           const value = stringAt(values.value[at]);
-          remember(value, memoryReasons[index as number], paymentFields[index as number]);
+          remember(value, memoryReasons[index as number]);
         }
       }
     }

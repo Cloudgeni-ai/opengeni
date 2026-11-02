@@ -26,19 +26,6 @@ describe("TypedSecretMemory", () => {
     expect(memory.redact("Order 824601 and total 57.30")).toBe("Order 824601 and total 57.30");
   });
 
-  test("payment image protection survives controller replacement and stays session-scoped", () => {
-    const id = randomUUID();
-    TypedSecretMemory.forSession("browser", id).protectPaymentImages("tab-a");
-    expect(TypedSecretMemory.forSession("browser", id).paymentImagesProtected("tab-a")).toBe(true);
-    expect(TypedSecretMemory.forSession("browser", id).paymentImagesProtected("tab-b")).toBe(false);
-    expect(
-      TypedSecretMemory.forSession("browser", randomUUID()).paymentImagesProtected("tab-a"),
-    ).toBe(false);
-    expect(TypedSecretMemory.forSession("computer", id).paymentImagesProtected("tab-a")).toBe(
-      false,
-    );
-  });
-
   test("payment values cannot be evicted by later remembered values", () => {
     const id = randomUUID();
     const memory = TypedSecretMemory.forSession("browser", id);
@@ -47,8 +34,6 @@ describe("TypedSecretMemory", () => {
       memory.remember({ other: `unrelated-value-${index}` });
     const replacement = TypedSecretMemory.forSession("browser", id);
     expect(replacement.redact("4000 0000 0000 0002 / 731")).toBe("[secret] / [secret]");
-    expect(replacement.containsPaymentValue(["4000 0000 0000 0002"])).toBe(true);
-    expect(replacement.containsPaymentValue(["40123456789012"])).toBe(false);
     expect(Object.values(replacement.merged() ?? {})).toContain("4000000000000002");
     expect(Object.values(replacement.merged() ?? {})).toContain("731");
   });

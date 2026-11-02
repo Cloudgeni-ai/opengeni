@@ -15,7 +15,6 @@ const MAX_REMEMBERED_SECRETS = 256;
  * them again. */
 type SessionSecrets = {
   memory: SecretValueMemory;
-  paymentTargets: Set<string>;
   /** Card numbers and security codes must not age out behind other values. */
   paymentValues: Set<string>;
 };
@@ -29,7 +28,7 @@ function newMemory(): SecretValueMemory {
 }
 
 function newSessionSecrets(): SessionSecrets {
-  return { memory: newMemory(), paymentTargets: new Set(), paymentValues: new Set() };
+  return { memory: newMemory(), paymentValues: new Set() };
 }
 
 /**
@@ -49,24 +48,6 @@ function newSessionSecrets(): SessionSecrets {
  */
 export class TypedSecretMemory {
   private localState: SessionSecrets | null = null;
-
-  protectPaymentImages(targetId: string): void {
-    this.state(true)!.paymentTargets.add(targetId);
-  }
-
-  paymentImagesProtected(targetId: string): boolean {
-    return this.state(false)?.paymentTargets.has(targetId) === true;
-  }
-
-  containsPaymentValue(candidate: unknown): boolean {
-    const entries = [...(this.state(false)?.paymentValues ?? [])]
-      .filter((value) => value.length >= 12)
-      .map((value) => ({ value, label: INTERACTION_REDACTED_SECRET }));
-    return (
-      entries.length > 0 &&
-      maskSecretValues(candidate, entries, INTERACTION_SECRET_MASK_OPTIONS) !== candidate
-    );
-  }
 
   /** A memory of its own (tests, one-off use); forSession shares one per session. */
   constructor(private readonly sessionKey: string | null = null) {}

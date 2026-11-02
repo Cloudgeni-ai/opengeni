@@ -25,18 +25,16 @@ const validViewport = {
   maxTouchPoints: 0,
 };
 
-test("a failed privacy snapshot withholds pixels before capture and leaves unrelated targets usable", async () => {
+test("a screenshot neither reads nor depends on the page's protected fields", async () => {
   const fixture = await captureFixture();
   try {
     await fixture.driver.start();
     fixture.calls.length = 0;
     fixture.setProtectionSnapshot({});
-    await expect(fixture.driver.captureScreenshot("target-1")).rejects.toThrow("page redaction");
-    expect(fixture.calls.some((call) => call.method === "Page.captureScreenshot")).toBe(false);
-    fixture.setProtectionSnapshot({ strings: [], documents: [] });
     expect(
-      (await fixture.driver.captureScreenshot("target-2", { format: "jpeg" })).data.byteLength,
+      (await fixture.driver.captureScreenshot("target-1", { format: "jpeg" })).data.byteLength,
     ).toBeGreaterThan(0);
+    expect(fixture.calls.some((call) => call.method === "DOMSnapshot.captureSnapshot")).toBe(false);
   } finally {
     await fixture.driver.close();
   }

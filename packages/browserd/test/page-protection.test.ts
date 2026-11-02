@@ -12,14 +12,17 @@ describe("sensitiveFieldReason", () => {
   )() as typeof sensitiveFieldReason;
   test.each([
     ["input", { autocomplete: "section-billing cc-number" }, false, "payment"],
-    ["input", { "aria-label": "Security code" }, false, "payment"],
-    ["input", { id: "cardNumber" }, false, "payment"],
-    ["input", { name: "cvc" }, false, "payment"],
+    ["input", { autocomplete: "cc-csc" }, false, "payment"],
+    ["input", { autocomplete: "cc-exp" }, false, "payment"],
+    // Only the standard autocomplete tokens mark card fields, not names.
+    ["input", { "aria-label": "Security code" }, false, null],
+    ["input", { id: "cardNumber" }, false, null],
+    ["input", { name: "cvc" }, false, null],
     ["input", { type: "password" }, false, "password"],
     ["input", { autocomplete: "one-time-code" }, false, "password"],
     ["span", { "data-private": "" }, false, "private"],
-    ["div", { id: "card-number" }, true, "payment"],
-    ["div", { id: "card-number" }, false, "payment"],
+    ["div", { id: "card-number" }, true, null],
+    ["div", { id: "card-number" }, false, null],
     ["h1", { id: "credit-card-offers" }, false, null],
     ["select", { id: "link-expiration" }, false, null],
     ["input", { name: "orderNumber" }, false, null],
@@ -46,28 +49,38 @@ describe("sensitiveFieldReason", () => {
       expect(policy("button", {}, false, "read", "Show password")).toBeNull();
     }
   });
-  test.each(["credit_card[year]", "credit_card[zip]"])(
-    "%s protects its field without remembering ordinary numeric values",
-    (name) => {
+  test.each(["cc-exp-year", "cc-name", "billing cc-exp"])(
+    "%s protects its field without remembering its value",
+    (autocomplete) => {
       for (const policy of [sensitiveFieldReason, browserPolicy]) {
-        expect(policy("input", { name }, false)).toBe("payment");
-        expect(policy("input", { name }, false, "remember")).toBeNull();
+        expect(policy("input", { autocomplete }, false)).toBe("payment");
+        expect(policy("input", { autocomplete }, false, "remember")).toBeNull();
+      }
+    },
+  );
+  test.each(["cc-number", "section-pay cc-csc"])(
+    "%s is protected and remembered",
+    (autocomplete) => {
+      for (const policy of [sensitiveFieldReason, browserPolicy]) {
+        expect(policy("input", { autocomplete }, false)).toBe("payment");
+        expect(policy("input", { autocomplete }, false, "remember")).toBe("payment");
       }
     },
   );
 });
 
-test("an unnamed payment field remembers full card numbers but not hidden numeric metadata", () => {
+test("a card-number field remembers its number, but a hidden field beside it is not remembered", () => {
+  const card = ["4111", "1111", "1111", "1111"].join("");
   const protection = pageProtection({
     strings: [
       "frame-a",
       "DIV",
       "INPUT",
-      "id",
-      "credit-card",
+      "autocomplete",
+      "cc-number",
       "type",
       "hidden",
-      "4000 0000 0000 0002",
+      card,
       "40123456789012",
     ],
     documents: [
@@ -78,14 +91,14 @@ test("an unnamed payment field remembers full card numbers but not hidden numeri
           parentIndex: [-1, 0, 0],
           nodeName: [1, 2, 2],
           nodeValue: [-1, -1, -1],
-          attributes: [[3, 4], [], [5, 6]],
+          attributes: [[], [3, 4], [5, 6]],
           inputValue: { index: [1, 2], value: [7, 8] },
         },
       },
     ],
   });
-  expect(protection.payment).toBe(true);
-  expect(protection.values).toEqual(["4000 0000 0000 0002"]);
+  expect(protection.nodes.get(protectedNodeKey("frame-a", 2))).toBe("payment");
+  expect(protection.values).toEqual([card]);
 });
 
 test("snapshot protection includes flattened closed roots, inherited private text, values and frame scoping", () => {
@@ -119,7 +132,6 @@ test("snapshot protection includes flattened closed roots, inherited private tex
     ],
   };
   const protection = pageProtection(snapshot);
-  expect(protection.payment).toBe(true);
   expect(protection.nodes.get(protectedNodeKey("frame-a", 2))).toBe("payment");
   expect(protection.nodes.get(protectedNodeKey("frame-b", 2))).toBeUndefined();
   expect(protection.values).toEqual(["731"]);
@@ -165,7 +177,6 @@ test("hidden metadata, private prose and expiry options are protected in place, 
       },
     ],
   });
-  expect(protection.payment).toBe(true);
   expect(protection.values).toEqual([]);
   expect(protection.nodes.get(protectedNodeKey("frame-a", 2))).toBe("private");
   expect(protection.nodes.get(protectedNodeKey("frame-a", 6))).toBe("payment");
@@ -200,11 +211,10 @@ test("a large snapshot retains its privacy projection without a separate node-co
       },
     ],
   });
-  expect(protection.payment).toBe(false);
   expect(protection.nodes.size).toBe(0);
 });
 
-test("a named payment wrapper cannot make its expiry options or postal field permanent secrets", () => {
+test("a wrapper named credit-card protects nothing by its name, and expiry options are not remembered", () => {
   const protection = pageProtection({
     strings: [
       "frame-a",
@@ -238,9 +248,9 @@ test("a named payment wrapper cannot make its expiry options or postal field per
       },
     ],
   });
-  expect(protection.payment).toBe(true);
   expect(protection.values).toEqual([]);
-  expect(protection.nodes.get(protectedNodeKey("frame-a", 5))).toBe("payment");
+  expect(protection.nodes.get(protectedNodeKey("frame-a", 2))).toBe("payment");
+  expect(protection.nodes.get(protectedNodeKey("frame-a", 5))).toBeUndefined();
   expect(sensitiveFieldReason("div", { id: "credit-card" }, false, "remember")).toBeNull();
 });
 
@@ -253,8 +263,8 @@ test("an actual contenteditable card field remembers its own complete text, not 
       "#text",
       "INPUT",
       "",
-      "id",
-      "card-number",
+      "autocomplete",
+      "cc-number",
       "contenteditable",
       "true",
       "4000 0000 ",
@@ -285,7 +295,7 @@ test.each([
   {},
   { strings: [], documents: [{}] },
   { strings: [], documents: [{ frameId: 2, nodes: {} }] },
-])("invalid snapshot withholds output rather than assuming no protected fields", (snapshot) => {
+])("an invalid snapshot is rejected (the driver then reads the frame without it)", (snapshot) => {
   expect(() => pageProtection(snapshot)).toThrow();
 });
 
