@@ -1227,30 +1227,27 @@ async fn adopt_resized(
     assert!(matches!(adopted, Reply::Done), "{adopted:?}");
 }
 
-/// The size in MiB of the guest's root file system, once it is at least
-/// `least`: a guest grows it a moment after it learns its disk grew.
-async fn root_mib(agent: &Agent, id: Id, least: u64) -> u64 {
-    let started = Instant::now();
-    loop {
-        let output = exec(
-            &agent.client,
-            id,
-            "echo root=$(df -m / | tail -1 | awk '{print $2}')",
-        )
-        .await;
-        let mib: u64 = field(&output, "root").parse().unwrap();
-        if mib >= least || started.elapsed() > Duration::from_secs(30) {
-            return mib;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
+/// How long, in MiB, the guest sees the drive its root file system is on.
+/// This lab's guests take no restore notices, so they do not grow their
+/// file system when their drive grows: the guest tests check that.
+async fn root_drive_mib(agent: &Agent, id: Id) -> u64 {
+    let output = exec(
+        &agent.client,
+        id,
+        "echo sectors=$(cat /sys/dev/block/$(awk '$5 == \"/\" {print $3}' /proc/self/mountinfo | tail -1)/size)",
+    )
+    .await;
+    let sectors: u64 = field(&output, "sectors")
+        .parse()
+        .unwrap_or_else(|_| panic!("{output}"));
+    (sectors * 512) >> 20
 }
 
 /// A sandbox resized as the fleet resizes one (ADR 27): handed off, then
 /// adopted at its new shape. Given a longer disk and a new request, it is
-/// restored with its programs and its file system grows to fill the disk;
-/// given more processors and memory, it boots from its disk at that
-/// machine, its programs gone and its files kept.
+/// restored with its programs and its VM told its drive grew; given more
+/// processors and memory, it boots from its disk at that machine, its
+/// programs gone and its files and disk kept.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_resized_sandbox_keeps_its_files_and_its_programs_only_on_the_same_machine() {
     const UID: u32 = (1 << 30) + 5000;
@@ -1296,12 +1293,13 @@ async fn a_resized_sandbox_keeps_its_files_and_its_programs_only_on_the_same_mac
     )
     .await;
     let sum = field(&setup, "sum").to_owned();
-    let before = root_mib(&one, id, 0).await;
+    let before = root_drive_mib(&one, id).await;
 
     // A longer disk and a new request: the same machine.
     saved_and_handed_off(&one, id, 1).await;
     let base = std::fs::metadata(lab.join("base.ext4")).unwrap().len() >> 20;
-    config.disk_mib = Some(u32::try_from(base + 512).unwrap());
+    let longer = before.max(base) + 512;
+    config.disk_mib = Some(u32::try_from(longer).unwrap());
     config.memory_request_mib = Some(256);
     adopt_resized(&two, id, 2, config.clone(), true).await;
     let output = exec(
@@ -1318,8 +1316,11 @@ async fn a_resized_sandbox_keeps_its_files_and_its_programs_only_on_the_same_mac
     );
     assert_eq!(field(&output, "was"), sum, "{output}");
     assert_eq!(field(&output, "disk"), "kept", "{output}");
-    let grown = root_mib(&two, id, before + 400).await;
-    assert!(grown >= before + 400, "grown from {before} MiB to {grown}");
+    assert_eq!(
+        root_drive_mib(&two, id).await,
+        longer,
+        "its drive grew from {before} MiB before it ran on"
+    );
 
     // More processors and memory: another machine, booted from its disk.
     // This lab's agents have no notice port to ask the guest to write its
@@ -1343,7 +1344,7 @@ async fn a_resized_sandbox_keeps_its_files_and_its_programs_only_on_the_same_mac
     let memory_kib: u64 = field(&output, "memory").parse().unwrap();
     assert!(memory_kib > 768 * 1024, "{output}");
     assert_eq!(field(&output, "disk"), "kept", "{output}");
-    assert!(root_mib(&one, id, grown).await >= grown, "it kept its disk");
+    assert_eq!(root_drive_mib(&one, id).await, longer, "it kept its disk");
     let removed = one
         .client
         .call(&Request::Remove {
