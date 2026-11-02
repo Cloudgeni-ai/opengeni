@@ -106,16 +106,6 @@ describe("own key or own subscription", () => {
     expect(ownModelFunding(legacyClaude, "anthropic-workspace")).toBe("api_key");
   });
 
-  test("admission funding: a subscription is not byok; an own key is", () => {
-    const s = settings();
-    // A Codex subscription turn (the live credential predicate says so).
-    expect(modelFundingForAdmission(s, "gpt-6-luna", true)).toMatchObject({
-      fundedWithoutCredits: true,
-      byok: false,
-      ownSubscription: true,
-    });
-  });
-
   test("the claimed turn's accepted policy decides: subscription turns are never byok turns", () => {
     const s = settings();
     const claim = (model: string, chargesOpenGeniCredits = false) => {

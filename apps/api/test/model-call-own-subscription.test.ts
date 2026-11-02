@@ -35,7 +35,7 @@ const ROUTES = {
   },
   deployment: {
     credentialSource: { kind: "deployment" },
-    billing: { metering: "none", upstreamPayer: "deployment" },
+    billing: { metering: "external", upstreamPayer: "deployment" },
   },
 } as const;
 

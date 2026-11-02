@@ -76,3 +76,11 @@ test("without subscription plans the plan is never read and the subscription sta
   });
   expect(standing).not.toHaveBeenCalled();
 });
+
+test("a failed plan read keeps the subscription selectable instead of failing the default", async () => {
+  const mocked = spyOn(opengeniDb, "getOrganizationPlanStanding").mockRejectedValue(
+    new Error("Subscription plan catalog is missing"),
+  );
+  restores.push(() => mocked.mockRestore());
+  expect(await defaultFor(settings())).toMatchObject({ source: "subscription" });
+});

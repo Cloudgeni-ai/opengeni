@@ -322,7 +322,9 @@ export async function resolveDefaultSessionModelForSelections(
  * (Free), a connected subscription stays connected but every use is refused
  * with Upgrade, so it is never chosen as a default: new chats and scheduled
  * tasks fall through to a model the account can run. The plan is read only
- * when a selectable own-subscription model could be chosen.
+ * when a selectable own-subscription model could be chosen. A failed plan
+ * read keeps every model: admission still refuses an unusable subscription
+ * with Upgrade, so a default is never worth failing a create or catalog read.
  */
 async function withoutUnusableOwnSubscriptions(
   db: Database,
@@ -342,9 +344,10 @@ async function withoutUnusableOwnSubscriptions(
   ) {
     return input.selections;
   }
-  if (await ownSubscriptionPlanAllows(db, input.settings, input.accountId)) {
-    return input.selections;
-  }
+  const allowed = await ownSubscriptionPlanAllows(db, input.settings, input.accountId).catch(
+    () => true,
+  );
+  if (allowed) return input.selections;
   return input.selections.filter((selection) => !isOwnSubscription(selection));
 }
 
