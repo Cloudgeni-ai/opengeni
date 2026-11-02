@@ -498,25 +498,31 @@ test("the Plans section states the two pricing lines", async () => {
 });
 
 test("plans of at least $20 a month include own subscriptions with no fee, Free does not", async () => {
+  // A cheaper paid plan sits below the $20 line and does not include them.
+  const lite = {
+    ...previewPlans.find((item) => item.key === "pro")!,
+    key: "lite",
+    label: "Lite",
+    monthlyPriceMicros: 10_000_000,
+  };
+  const catalogPlans = [...previewPlans, lite];
   await mount(
     <SubscriptionPlans
       client={clientFixture() as unknown as OpenGeniBrowserClient}
       accountId="org-a"
       returnUrl="https://console.example.test/workspaces/a/organization?section=billing"
-      catalog={{ accountId: "org-a", revision: 1, plans: previewPlans, plan: previewPlan("free") }}
+      catalog={{ accountId: "org-a", revision: 1, plans: catalogPlans, plan: previewPlan("free") }}
       plan={previewPlan("free")}
       canManage
       supportEmail="support@example.test"
       onChanged={() => {}}
     />,
   );
-  const cards = [...document.body.querySelectorAll("li, article, [data-plan-key]")];
   const lines = document.body.textContent?.match(/Your own AI subscriptions, no fee/g) ?? [];
-  const qualifying = previewPlans.filter((item) => item.key !== "free").length;
-  expect(qualifying).toBeGreaterThan(0);
-  expect(lines).toHaveLength(qualifying);
-  const freeCard = cards.find((card) => /^\s*Free/.test(card.textContent ?? ""));
-  if (freeCard) expect(freeCard.textContent).not.toContain("Your own AI subscriptions");
+  // Pro, Max and Enterprise (custom price) qualify; Free and Lite do not.
+  expect(previewPlans.map((item) => item.key)).toEqual(["free", "pro", "max", "enterprise"]);
+  expect(document.body.textContent).toContain("Lite");
+  expect(lines).toHaveLength(3);
 });
 
 test("an organization without a monthly grant shows no empty plan credit meter or row", async () => {

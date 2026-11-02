@@ -17,6 +17,7 @@ import {
   byokPaidCreditRefusalMessage,
   byokPlatformFeeActive,
   directPersonalConnectionSubjectId,
+  ownModelFunding,
   ownSubscriptionPlanAllows,
 } from "@opengeni/core";
 import type { TurnActivityServices as ActivityServices } from "../types";
@@ -140,6 +141,23 @@ export function turnExecutionPolicyBillingIdentity(policy: TurnExecutionPolicyV1
       policy.credentialSource.kind === "connected_subscription" &&
       policy.credentialSource.provider === "xai",
   };
+}
+
+/**
+ * Who funds the turn's model when Opengeni does not: the person's own API key
+ * pays the platform fee from paid credit; their own subscription pays none
+ * and needs a paid plan instead. A credits-billed or deployment-funded turn is
+ * neither. `providerKind` is the verified provider's kind, so an older frozen
+ * Claude policy still counts as a subscription.
+ */
+export function turnExecutionPolicyOwnFunding(
+  policy: TurnExecutionPolicyV1,
+  input: { chargesOpenGeniCredits: boolean; providerKind?: string | null },
+): { isByokTurn: boolean; isOwnSubscriptionTurn: boolean } {
+  const funding = input.chargesOpenGeniCredits
+    ? null
+    : ownModelFunding(policy, input.providerKind ?? null);
+  return { isByokTurn: funding === "api_key", isOwnSubscriptionTurn: funding === "subscription" };
 }
 
 export function legacyTurnExecutionPolicyInput(

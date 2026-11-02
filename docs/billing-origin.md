@@ -359,7 +359,9 @@ and no credits. Instead, using an own subscription needs a paid plan of at
 least $20 a month (`OWN_SUBSCRIPTION_MIN_PLAN_PRICE_MICROS`): Pro, Max or a
 custom (Enterprise) plan, `active` or `trialing`. On such a plan subscription
 use is unlimited and the plan keeps its normal included credits; the plan
-price is the platform fee for subscriptions. The rule applies only with
+price is the platform fee for subscriptions. The price is the plan's current
+catalog price (`getOrganizationPlanStanding`); a plan with no catalog price
+(custom, or no longer listed) counts as custom. The rule applies only with
 Stripe billing and subscription plans enabled
 (`OPENGENI_BILLING_MODE=stripe`, `OPENGENI_SUBSCRIPTION_PLANS_ENABLED=true`),
 in the app and over the API alike, and skips accounts on legacy billing
@@ -380,8 +382,10 @@ other route Opengeni does not pay for upstream is an own API key.
 - **Already connected on Free:** a subscription connected before this rule
   stays connected and keeps its settings; only its use is refused with the
   upgrade action, and it works again as soon as the account is on a qualifying
-  plan. Free accounts can still use Opengeni's models within the Free plan's
-  monthly credit, or their own API keys with paid credit.
+  plan. It is never picked as the default model for a new chat or scheduled
+  task while the plan does not allow it, so those fall through to a model the
+  account can run. Free accounts can still use Opengeni's models within the
+  Free plan's monthly credit, or their own API keys with paid credit.
 - **Session titles:** a title generated on the person's own subscription costs
   Opengeni nothing and is not gated or charged.
 

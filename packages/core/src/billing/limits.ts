@@ -17,7 +17,6 @@ import {
   byokPlatformFeeActive,
   ownModelFunding,
   ownSubscriptionPlanAllows,
-  ownSubscriptionPlanRequired,
 } from "./byok-platform-fee";
 import type {
   LimitAction,
@@ -328,7 +327,6 @@ export async function checkOwnSubscriptionPlan(
   deps: Pick<LimitDependencies, "db" | "settings">,
   accountId: string,
 ): Promise<LimitDecision> {
-  if (!ownSubscriptionPlanRequired(deps.settings, accountId)) return { allowed: true };
   return (await ownSubscriptionPlanAllows(deps.db, deps.settings, accountId))
     ? { allowed: true }
     : {

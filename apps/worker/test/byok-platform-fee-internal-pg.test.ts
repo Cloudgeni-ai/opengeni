@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
 import {
   DEFAULT_BILLING_LEGACY_ACCOUNT_IDS,
+  withCodexCatalogProvider,
   withOrganizationAzureOpenAICredential,
 } from "@opengeni/config";
 import { BYOK_PAID_CREDIT_REQUIRED_CODE } from "@opengeni/contracts";
@@ -18,7 +19,7 @@ import { ensureRunAllowedBetweenModelCalls } from "../src/activities/agent-turn/
 // account still does. Own subscriptions never pay the fee for anyone.
 const INTERNAL = "67435f59-7f73-4996-8845-cd7baa2b7268"; // production "Cloudgeni Internal"
 const OWN_KEY_MODEL = "organization-azure-openai/gpt-6.1-sol";
-const SUBSCRIPTION_MODEL = "gpt-6-luna"; // served on the person's own subscription
+const SUBSCRIPTION_MODEL = "codex/gpt-6-luna"; // served on the person's own Codex subscription
 const OWN_KEY_TURN_MODEL = "gpt-6-luna"; // a turn the claim found on the person's own key
 const M = 1_000_000;
 
@@ -38,19 +39,22 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-/** Billing on, a 5% fee, the built-in internal list, and an own Azure key. */
-const settings = withOrganizationAzureOpenAICredential(
-  testSettings({
-    billingMode: "stripe",
-    usageLimitsMode: "managed",
-    byokPlatformFeeBps: 500,
-    billingLegacyAccountIds: [...DEFAULT_BILLING_LEGACY_ACCOUNT_IDS],
-  }),
-  "azure-org-key",
-  {
-    endpoint: "https://contoso.openai.azure.com/openai/v1",
-    models: [{ upstreamModelId: "gpt-6.1-sol" }],
-  },
+/** Billing on, a 5% fee, the built-in internal list, an own Azure key and Codex. */
+const settings = withCodexCatalogProvider(
+  withOrganizationAzureOpenAICredential(
+    testSettings({
+      billingMode: "stripe",
+      usageLimitsMode: "managed",
+      byokPlatformFeeBps: 500,
+      codexSubscriptionEnabled: true,
+      billingLegacyAccountIds: [...DEFAULT_BILLING_LEGACY_ACCOUNT_IDS],
+    }),
+    "azure-org-key",
+    {
+      endpoint: "https://contoso.openai.azure.com/openai/v1",
+      models: [{ upstreamModelId: "gpt-6.1-sol" }],
+    },
+  ),
 );
 
 async function workspace(externalId: string) {
@@ -109,9 +113,10 @@ async function settleOwnKeyResponses(ids: { accountId: string; workspaceId: stri
   // The usage event needs a real chat; the fee debit and balances stay real.
   const recorded = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
   try {
-    for (const [model, sourceKey, byok] of [
-      [OWN_KEY_MODEL, "own-key", true],
-      [SUBSCRIPTION_MODEL, "subscription", false],
+    // The caller does not say: the served route decides, as on the API path.
+    for (const [model, sourceKey] of [
+      [OWN_KEY_MODEL, "own-key"],
+      [SUBSCRIPTION_MODEL, "subscription"],
     ] as const) {
       await recordModelUsageAndDebitCredits(settings, client!.db, {
         ...ids,
@@ -122,7 +127,6 @@ async function settleOwnKeyResponses(ids: { accountId: string; workspaceId: stri
         externallyBilled: true,
         chargesOpenGeniCredits: false,
         countsTowardTokenCap: false,
-        byok,
         usage: { inputTokens: 1_000_000, outputTokens: 100_000, totalTokens: 1_100_000 },
         sourceKey,
       });

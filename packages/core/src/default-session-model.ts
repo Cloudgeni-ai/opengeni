@@ -42,6 +42,11 @@ import {
 } from "./model-catalog";
 
 import { loadWorkspaceCodexCatalogReadiness } from "./codex-model-availability";
+import {
+  ownModelFunding,
+  ownSubscriptionPlanAllows,
+  ownSubscriptionPlanRequired,
+} from "./billing/byok-platform-fee";
 
 const REASONING_EFFORT_ORDER: readonly ReasoningEffort[] = [
   "none",
@@ -291,9 +296,10 @@ export async function resolveDefaultSessionModelForSelections(
     input.organizationDefaults !== undefined
       ? (input.organizationDefaults?.sessionDefaults ?? null)
       : (await getOrganizationModelDefaults(db, input.accountId)).sessionDefaults;
+  const selections = await withoutUnusableOwnSubscriptions(db, input);
   const decision = {
     settings: input.settings,
-    selections: input.selections,
+    selections,
     workspaceDefaults,
     organizationDefaults,
   };
@@ -301,7 +307,7 @@ export async function resolveDefaultSessionModelForSelections(
   if (
     withoutCredits.source !== "deployment" ||
     input.settings.billingMode !== "stripe" ||
-    !input.selections.some(
+    !selections.some(
       (selection) => selection.availability.selectable && selection.model.cost === "credits",
     )
   ) {
@@ -309,6 +315,37 @@ export async function resolveDefaultSessionModelForSelections(
   }
   const creditBalance = input.creditBalance ?? (await getBillingBalance(db, input.accountId));
   return selectDefaultSessionModel({ ...decision, creditsAvailable: true, creditBalance });
+}
+
+/**
+ * Own subscriptions need a paid plan of at least $20 a month. Without one
+ * (Free), a connected subscription stays connected but every use is refused
+ * with Upgrade, so it is never chosen as a default: new chats and scheduled
+ * tasks fall through to a model the account can run. The plan is read only
+ * when a selectable own-subscription model could be chosen.
+ */
+async function withoutUnusableOwnSubscriptions(
+  db: Database,
+  input: {
+    settings: Settings;
+    accountId: string;
+    selections: readonly WorkspaceModelSelection[];
+  },
+): Promise<readonly WorkspaceModelSelection[]> {
+  const isOwnSubscription = (selection: WorkspaceModelSelection) =>
+    ownModelFunding(selection.model) === "subscription";
+  if (
+    !ownSubscriptionPlanRequired(input.settings, input.accountId) ||
+    !input.selections.some(
+      (selection) => selection.availability.selectable && isOwnSubscription(selection),
+    )
+  ) {
+    return input.selections;
+  }
+  if (await ownSubscriptionPlanAllows(db, input.settings, input.accountId)) {
+    return input.selections;
+  }
+  return input.selections.filter((selection) => !isOwnSubscription(selection));
 }
 
 export type WorkspaceModelSelectionContext = {

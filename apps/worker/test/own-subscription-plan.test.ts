@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import {
   resolveModelProviderForTurn,
+  resolveTurnExecutionPolicyV1,
   withCodexCatalogProvider,
   withOrganizationAzureOpenAICredential,
   withXaiSubscriptionCatalogProvider,
@@ -26,7 +27,10 @@ import type { Database } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";
 import { recordModelUsageAndDebitCredits } from "../src/activities/agent-turn";
-import { ensureRunAllowedBetweenModelCalls } from "../src/activities/agent-turn/admission";
+import {
+  ensureRunAllowedBetweenModelCalls,
+  turnExecutionPolicyOwnFunding,
+} from "../src/activities/agent-turn/admission";
 
 // Own subscriptions (Claude, Codex, SuperGrok) pay no platform fee; using one
 // needs a paid plan of at least $20 a month. Own API keys keep the 5% fee.
@@ -103,6 +107,56 @@ describe("own key or own subscription", () => {
   });
 
   test("admission funding: a subscription is not byok; an own key is", () => {
+    const s = settings();
+    // A Codex subscription turn (the live credential predicate says so).
+    expect(modelFundingForAdmission(s, "gpt-6-luna", true)).toMatchObject({
+      fundedWithoutCredits: true,
+      byok: false,
+      ownSubscription: true,
+    });
+  });
+
+  test("the claimed turn's accepted policy decides: subscription turns are never byok turns", () => {
+    const s = settings();
+    const claim = (model: string, chargesOpenGeniCredits = false) => {
+      const policy = resolveTurnExecutionPolicyV1(s, {
+        modelId: model,
+        requestedModelId: model,
+        modelSource: "explicit",
+        reasoningEffort: "medium",
+        reasoningSource: "deployment",
+      });
+      return turnExecutionPolicyOwnFunding(policy, {
+        chargesOpenGeniCredits,
+        providerKind: resolveModelProviderForTurn(s, model)?.provider.kind ?? null,
+      });
+    };
+    for (const model of [CODEX_MODEL, SUPERGROK_MODEL]) {
+      expect(claim(model)).toEqual({ isByokTurn: false, isOwnSubscriptionTurn: true });
+    }
+    expect(claim(OWN_KEY_MODEL)).toEqual({ isByokTurn: true, isOwnSubscriptionTurn: false });
+    // The deployment default: Opengeni pays upstream.
+    expect(claim(s.openaiModel)).toEqual({ isByokTurn: false, isOwnSubscriptionTurn: false });
+    // A credits-billed turn is never the person's own model.
+    expect(claim(OWN_KEY_MODEL, true)).toEqual({ isByokTurn: false, isOwnSubscriptionTurn: false });
+    // An older frozen Claude policy with workspace labels: the verified
+    // provider kind says subscription.
+    const legacyClaude = resolveTurnExecutionPolicyV1(s, {
+      modelId: OWN_KEY_MODEL,
+      requestedModelId: OWN_KEY_MODEL,
+      modelSource: "explicit",
+      reasoningEffort: "medium",
+      reasoningSource: "deployment",
+    });
+    expect(
+      turnExecutionPolicyOwnFunding(legacyClaude, {
+        chargesOpenGeniCredits: false,
+        providerKind: "claude-subscription-workspace",
+      }),
+    ).toEqual({ isByokTurn: false, isOwnSubscriptionTurn: true });
+  });
+
+  test("admission funding on every route: a subscription is not byok; an own key is", () => {
     const s = settings();
     // A Codex subscription turn (the live credential predicate says so).
     expect(modelFundingForAdmission(s, "gpt-6-luna", true)).toMatchObject({
