@@ -186,6 +186,29 @@ describe("a Personal workspace's owner has one real membership row", () => {
     ).toBe("pass");
   });
 
+  test("the owner's permissions in another order are still the owner's row", async () => {
+    if (!client) return;
+    const org = await organization();
+    // The guard compares the permission sets, so a reordered row is accepted;
+    // provisioning and the parity gate must compare them the same way.
+    await shared!.admin`
+      update workspace_memberships
+      set permissions = (select jsonb_agg(value order by ordinality desc)
+        from jsonb_array_elements(permissions) with ordinality)
+      where workspace_id = ${org.personalWorkspaceId}`;
+    const [reordered] = await shared!.admin<Array<{ permissions: string[] }>>`
+      select permissions from workspace_memberships where workspace_id = ${org.personalWorkspaceId}`;
+    expect(reordered!.permissions).toEqual([...managedPersonalWorkspacePermissions].reverse());
+    const again = await provision(org.owner);
+    expect(again.organizationMemberships[0]!.personalWorkspaceId).toBe(org.personalWorkspaceId);
+    const parity = await checkOrganizationTenancyParity(client.db, {
+      organizationId: org.organizationId,
+    });
+    expect(
+      parity.gates.find((gate) => gate.id === "personal_workspace_has_no_membership_row")?.status,
+    ).toBe("pass");
+  });
+
   test("a second member, an organization admin, or a moved row is refused", async () => {
     if (!client) return;
     const org = await organization();

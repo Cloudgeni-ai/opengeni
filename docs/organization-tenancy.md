@@ -404,7 +404,17 @@ subscription readers and 1127's insights rows) was checked against the row:
 each accepts it only where it already accepts the owner's pointer under the
 same active-membership conditions, needs an administering role or
 `workspace:admin` that the row never has, or only reads a display name the
-viewer can already see.
+viewer can already see. One reader is newly satisfied without a pointer arm:
+1120's `recover_subscription_core_connection_health` checks that a
+shared-session choice's participant holds a row in the workspace. The owner's
+row passes it only for the owner's own entry in their own Personal workspace,
+the only place that row exists, so nothing new is exposed.
+
+The parity gate compares the owner's permissions as a set, as the guard does.
+A row whose owner stopped being active before 1231 (so the trigger never saw
+the change) is reported until that membership changes again or an operator
+removes the row; such a report is expected and is not new access, because the
+runtime never reads the row.
 
 Local single-user (`dev`) and `external_user:` Personal workspaces keep
 pointer-only access: 0302's session fence admits only `user:` owners through

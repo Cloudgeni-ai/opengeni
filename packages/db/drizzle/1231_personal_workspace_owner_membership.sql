@@ -266,7 +266,8 @@ AS $function$
           AND NOT (personal_access.subject_id = p_subject_id
           AND personal_access.account_id = p_account_id
           AND personal_access.role = 'member'
-          AND personal_access.permissions = personal_workspace_owner_permissions())
+          AND personal_access.permissions @> personal_workspace_owner_permissions()
+          AND personal_workspace_owner_permissions() @> personal_access.permissions)
       ) THEN
         RAISE EXCEPTION 'human personal workspace already has runtime access'
           USING ERRCODE = '42501';
@@ -468,7 +469,8 @@ BEGIN
     AND NOT (candidate.workspace_id = setup.personal_workspace_id
       AND candidate.subject_id = actor_subject
       AND candidate.role = 'member'
-      AND candidate.permissions = personal_workspace_owner_permissions());
+      AND candidate.permissions @> personal_workspace_owner_permissions()
+      AND personal_workspace_owner_permissions() @> candidate.permissions);
   IF workspace.id IS NULL
     OR workspace_count <> 1
     OR workspace_control_count <> 1
@@ -764,7 +766,8 @@ BEGIN
     AND NOT (membership.workspace_id = creation.personal_workspace_id
       AND membership.subject_id = creation.actor_subject_id
       AND membership.role = 'member'
-      AND membership.permissions = personal_workspace_owner_permissions());
+      AND membership.permissions @> personal_workspace_owner_permissions()
+      AND personal_workspace_owner_permissions() @> membership.permissions);
   SELECT * INTO shared_access
   FROM workspace_memberships membership
   WHERE membership.account_id = creation.account_id
@@ -1048,8 +1051,8 @@ BEGIN
         AND membership.status = 'active'
         AND membership.revoked_at IS NULL
         AND workspace_membership.role = 'member'
-        AND workspace_membership.permissions
-          = personal_workspace_owner_permissions())
+        AND workspace_membership.permissions @> personal_workspace_owner_permissions()
+        AND personal_workspace_owner_permissions() @> workspace_membership.permissions)
 
     UNION ALL
     -- Stable authority uniqueness. The physical unique index is per
