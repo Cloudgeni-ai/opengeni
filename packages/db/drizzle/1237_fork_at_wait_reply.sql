@@ -33,7 +33,7 @@ BEGIN
   END IF;
   anchor_count := (length(definition) - length(replace(definition, anchor, ''))) / length(anchor);
   IF anchor_count <> 1 THEN
-    RAISE EXCEPTION 'fork boundary check of % changed before 1236 (% matches)', target, anchor_count;
+    RAISE EXCEPTION 'fork boundary check of % changed before 1237 (% matches)', target, anchor_count;
   END IF;
   definition := replace(definition, anchor, $q$  IF coalesce(boundary_matches, 0) = 0
     AND selected_event.type = 'agent.message.completed'
