@@ -184,8 +184,7 @@ export function importedSkillBundleRow(
             }
           : {
               kind: "locked",
-              message:
-                "Workspace administrators can install, update, and remove imported Skills and Plugins.",
+              message: "Ask a workspace admin to update or remove this.",
             },
       },
     },
@@ -194,16 +193,46 @@ export function importedSkillBundleRow(
 }
 
 /** A Plugin installed from a reviewed manifest URL. */
+/**
+ * Why an installed plugin can't be updated here, or nothing when it can.
+ * Updating a plugin that is already installed is integration admin work.
+ */
+export function pluginUpdateUnavailable(
+  plugin: Pick<PluginInstallationSummary, "sourceUrl">,
+  canUpdate: boolean,
+): { updateUnavailableReason?: string } {
+  if (!canUpdate) return { updateUnavailableReason: "Only an admin can update this plugin." };
+  return plugin.sourceUrl
+    ? {}
+    : { updateUnavailableReason: "This plugin didn't keep its source link." };
+}
+
+/**
+ * Whether the viewer may remove this plugin. The server decides it (admins
+ * remove any plugin, a member only one they added); an older server omits
+ * it, so the viewer's removal permission stands in.
+ */
+export function pluginRemovable(
+  plugin: Pick<PluginInstallationSummary, "canRemove">,
+  canRemovePlugins: boolean,
+): boolean {
+  return plugin.canRemove ?? canRemovePlugins;
+}
+
 export function pluginBundleRow(
   plugin: PluginInstallationSummary,
   options: {
+    /** Remove plugins (members, connections:write); the plugin's own `canRemove` wins. */
     canManage: boolean;
+    /** Update it (integration admins); defaults to canManage. */
+    canUpdate?: boolean;
     busy: boolean;
     onUpdate: () => void;
     onRemove: () => void;
   },
 ): BundleRow {
   const active = plugin.status === "active";
+  const canRemove = pluginRemovable(plugin, options.canManage);
   const chip: IntegrationChip = active
     ? { label: "Installed", tone: "ok" }
     : { label: "Needs attention", tone: "warn" };
@@ -211,6 +240,11 @@ export function pluginBundleRow(
   // every Plugin that never supplied its own description.
   const rawDescription = plugin.description || "A portable set of tools and instructions.";
   const sourceAvailable = plugin.sourceUrl !== null;
+  const updateUnavailable = !(options.canUpdate ?? options.canManage)
+    ? "Only an admin can update this plugin."
+    : sourceAvailable
+      ? undefined
+      : "This installed Plugin did not retain a source URL.";
   return {
     id: `plugin:${plugin.pluginKey}`,
     kind: "plugin",
@@ -243,24 +277,21 @@ export function pluginBundleRow(
           { label: "Installation version", value: String(plugin.installationVersion) },
         ],
         options: [],
-        footer: options.canManage
+        footer: canRemove
           ? {
               kind: "actions",
               primary: {
                 label: "Review update",
                 onClick: options.onUpdate,
-                disabled: !sourceAvailable,
-                ...(sourceAvailable
-                  ? {}
-                  : { unavailableReason: "This installed Plugin did not retain a source URL." }),
+                disabled: updateUnavailable !== undefined,
+                ...(updateUnavailable ? { unavailableReason: updateUnavailable } : {}),
               },
               secondary: { label: "Remove", onClick: options.onRemove, destructive: true },
               busy: options.busy,
             }
           : {
               kind: "locked",
-              message:
-                "Workspace administrators can install, update, and remove imported Skills and Plugins.",
+              message: "Ask a workspace admin to update or remove this.",
             },
         ...(active
           ? {}

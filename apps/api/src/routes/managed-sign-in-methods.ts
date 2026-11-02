@@ -29,6 +29,7 @@ import { getCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import {
+  findManagedAuthOAuthState,
   isolatedManagedAuthOAuthCallbackRequest,
   hashManagedAuthPassword,
   verifyManagedAuthPassword,
@@ -604,9 +605,7 @@ export async function handleManagedSignInConnectCallback(
 ): Promise<Response | null> {
   const state = context.req.query("state");
   if (!state || !deps.managedAuth) return null;
-  const verification = await (
-    await deps.managedAuth.$context
-  ).internalAdapter.findVerificationValue(state);
+  const verification = await findManagedAuthOAuthState(deps.managedAuth, state);
   if (!verification?.value) return null;
   let rawState: unknown;
   try {

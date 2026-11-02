@@ -98,9 +98,7 @@ test("plugin rows and detail pages preserve keyboard focus, scrolling, and insta
             0,
           );
           expect(
-            await detail
-              .getByText("Only workspace admins can install, update and remove plugins.")
-              .count(),
+            await detail.getByText("Ask a workspace admin to install this plugin.").count(),
           ).toBe(1);
         } else {
           expect(

@@ -292,10 +292,10 @@ test("a team invitation for an unapproved address says the invitation alone can'
     expect(notice).not.toBeNull();
     expect(notice!.textContent).toContain("Ask for your email to be allowed");
     expect(notice!.textContent).toContain(
-      "an invitation to Acme Labs doesn't approve new@example.test on its own",
+      "an invitation to Acme Labs doesn't give new@example.test access on its own",
     );
     expect(notice!.textContent).toContain(
-      "Ask whoever runs this service to allow new@example.test",
+      "Ask the admin of this service to allow new@example.test, then open your invitation link again.",
     );
     expect(notice!.textContent).not.toContain("open the invitation link from your email");
   } finally {
@@ -496,7 +496,9 @@ test("an address that is not approved for the service gets who to ask, not a ret
     expect(host.textContent).toContain(
       "new@example.test isn't on this service's list of approved email addresses.",
     );
-    expect(host.textContent).toContain("Ask whoever runs this service to allow your email address");
+    expect(host.textContent).toContain(
+      "This email can't create an account here. Ask your admin for access.",
+    );
     expect(host.textContent).not.toContain("Couldn't create account");
     expect(host.textContent).not.toContain("try again");
     // Nothing to resubmit: no form fields, submit button or provider buttons.
@@ -529,3 +531,57 @@ test("an address that is not approved for the service gets who to ask, not a ret
     host.remove();
   }
 });
+
+test("an address the deployment doesn't allow is told it can't sign in, for a password or a passkey", async () =>
+  withPasskeyBrowser(async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const refusal = () =>
+      new AuthApiError(403, "SIGN_IN_EMAIL_NOT_ALLOWED", null, "sign in email not allowed");
+    const setField = async (selector: string, value: string) => {
+      const input = host.querySelector<HTMLInputElement>(selector)!;
+      const propsKey = Object.keys(input).find((k) => k.startsWith("__reactProps$"))!;
+      await act(async () => {
+        (input as unknown as Record<string, { onChange: (e: unknown) => void }>)[
+          propsKey
+        ]!.onChange({ target: { value } });
+      });
+    };
+    const message = "This email can't sign in here. Ask your admin for access.";
+    try {
+      await act(async () =>
+        root.render(
+          <ManagedAuthPanel
+            passkeySignIn
+            onPasskeySubmit={async () => {
+              throw refusal();
+            }}
+            onSubmit={async () => {
+              throw refusal();
+            }}
+          />,
+        ),
+      );
+      await setField("#managed-auth-email", "person@example.test");
+      await setField('input[type="password"]', "any-password");
+      await act(async () =>
+        host
+          .querySelector("form")!
+          .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+      );
+      expect(host.textContent).toContain("Couldn't sign in");
+      expect(host.textContent).toContain(message);
+      expect(host.textContent).not.toContain("Please try again");
+
+      const passkey = Array.from(host.querySelectorAll("button")).find(
+        (b) => b.textContent?.trim() === "Sign in with a passkey",
+      )!;
+      await act(async () => passkey.click());
+      expect(host.textContent).toContain(message);
+      expect(host.textContent).not.toContain("Couldn't sign in with your passkey");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  }));

@@ -14,15 +14,10 @@
 //! When an object already exists under a content name, GCS reports the
 //! checksums it computed when the object was stored, so [`Gcs::stored`]
 //! compares them with ours without downloading the object.
-//!
-//! The same answer says when the object was stored and which write of its
-//! name it is (its generation), which a sweep needs to delete an object
-//! only if nothing stored it again since the sweep looked (see
-//! [`crate::fresh`]).
 
 use std::fmt::{self, Write as _};
 use std::future::Future;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -60,20 +55,6 @@ pub(crate) struct Stored {
     /// The checksums GCS computed when it stored the object, in
     /// `x-goog-hash` form; empty for composite objects, which have no MD5.
     pub(crate) checksums: String,
-    /// When the object was stored, to the second.
-    pub(crate) at: Option<SystemTime>,
-    /// Which write of the name this object is.
-    pub(crate) generation: Option<String>,
-}
-
-/// What a delete of one generation of an object did.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Deleted {
-    Yes,
-    /// The name holds another generation now: it was stored again.
-    Changed,
-    /// Nothing is stored under the name.
-    Gone,
 }
 
 /// Checksummed uploads to one Google Cloud Storage bucket: create-only, or
@@ -174,48 +155,7 @@ impl Gcs {
             // Composite objects have no MD5; never match them.
             _ => String::new(),
         };
-        let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
-        Ok(Attempt::Done(Some(Stored {
-            checksums,
-            at: header(http::header::LAST_MODIFIED.as_str()).and_then(|value| {
-                chrono::DateTime::parse_from_rfc2822(value)
-                    .ok()
-                    .map(SystemTime::from)
-            }),
-            generation: header("x-goog-generation").map(str::to_owned),
-        })))
-    }
-
-    /// Deletes the object at `path` if it is still `generation`, the write
-    /// of the name its caller looked at.
-    pub(crate) async fn delete_generation(&self, path: &Path, generation: &str) -> Result<Deleted> {
-        retried(
-            || format!("DELETE {path}"),
-            || self.delete_once(path, generation),
-        )
-        .await
-    }
-
-    async fn delete_once(&self, path: &Path, generation: &str) -> Result<Attempt<Deleted>> {
-        let request = self
-            .request(http::Method::DELETE, path)
-            .await?
-            .header("x-goog-if-generation-match", generation)
-            .body(HttpRequestBody::empty())
-            .map_err(|error| Error::Transfer(error.to_string()))?;
-        Ok(match self.client.execute(request).await {
-            Ok(response) => match response.status() {
-                status if status.is_success() => Attempt::Done(Deleted::Yes),
-                http::StatusCode::PRECONDITION_FAILED => Attempt::Done(Deleted::Changed),
-                http::StatusCode::NOT_FOUND => Attempt::Done(Deleted::Gone),
-                status if transient(status) => Attempt::Retry(format!("status {status}")),
-                status => Attempt::Fail(format!("status {status}")),
-            },
-            // A delete whose answer was lost may have happened: the retry
-            // then finds the name changed or gone, never wrongly deletes,
-            // since it names the same generation.
-            Err(error) => Attempt::Retry(error.to_string()),
-        })
+        Ok(Attempt::Done(Some(Stored { checksums })))
     }
 
     async fn request(&self, method: http::Method, path: &Path) -> Result<http::request::Builder> {
@@ -407,13 +347,6 @@ mod tests {
         assert!(waited >= all / 2 && waited <= all, "waited {waited:?}");
         *fake.unavailable.lock().unwrap() = refusals;
         assert_eq!(store.stored(&Path::from("p/none")).await.unwrap(), None);
-        let generation = stored.generation.unwrap();
-        *fake.unavailable.lock().unwrap() = refusals;
-        assert_eq!(
-            store.delete_generation(&path, &generation).await.unwrap(),
-            Deleted::Yes
-        );
-        assert_eq!(*fake.unavailable.lock().unwrap(), 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -439,14 +372,6 @@ mod tests {
                 .starts_with("transfer failed: PUT p/chunks/v1/d: status 503"),
             "{error}"
         );
-        *fake.unavailable.lock().unwrap() = u32::MAX;
-        let error = store.delete_generation(&path, "1").await.unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("DELETE p/chunks/v1/d: status 503"),
-            "{error}"
-        );
         assert_eq!(fake.names().len(), 0);
     }
 
@@ -465,50 +390,6 @@ mod tests {
             .unwrap()
             .saturating_sub(*waits.iter().min().unwrap());
         assert!(spread > wait / 4, "barely spread: {spread:?}");
-    }
-
-    /// The stored time and generation come from the same answer as the
-    /// checksums, and a delete names the generation it means.
-    #[tokio::test]
-    async fn only_the_generation_looked_at_is_deleted() {
-        let fake = Arc::new(Fake::default());
-        let store = gcs(&fake);
-        let path = Path::from("p/chunks/v1/b");
-        let first = Bytes::from_static(b"first");
-        store.create(&path, &first).await.unwrap();
-        let seen = store.stored(&path).await.unwrap().unwrap();
-        let object = fake.object("p/chunks/v1/b").unwrap();
-        assert_eq!(seen.generation, Some(object.generation.to_string()));
-        let at = seen.at.unwrap();
-        let truncated = object.at.duration_since(at).unwrap();
-        assert!(
-            truncated < Duration::from_secs(1),
-            "to the second: {truncated:?}"
-        );
-        // Stored again since it was looked at: the delete changes nothing.
-        store.replace(&path, &first).await.unwrap();
-        let looked_at = seen.generation.unwrap();
-        assert_eq!(
-            store.delete_generation(&path, &looked_at).await.unwrap(),
-            Deleted::Changed
-        );
-        assert!(fake.bytes("p/chunks/v1/b").is_some());
-        let now = store
-            .stored(&path)
-            .await
-            .unwrap()
-            .unwrap()
-            .generation
-            .unwrap();
-        assert_eq!(
-            store.delete_generation(&path, &now).await.unwrap(),
-            Deleted::Yes
-        );
-        assert!(fake.bytes("p/chunks/v1/b").is_none());
-        assert_eq!(
-            store.delete_generation(&path, &now).await.unwrap(),
-            Deleted::Gone
-        );
     }
 
     #[test]

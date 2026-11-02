@@ -119,7 +119,11 @@ export type {
   UseSessionMcpApprovalPolicyResult,
 } from "./hooks/use-session-mcp-approval-policy";
 
-export { approvalsFromRequiresAction, projectPendingApprovals } from "./approvals";
+export {
+  approvalsDecidable,
+  approvalsFromRequiresAction,
+  projectPendingApprovals,
+} from "./approvals";
 export type { PendingApproval } from "./approvals";
 
 export { humanInputRequestFromEvent, projectPendingHumanInputRequests } from "./human-input";
@@ -133,6 +137,7 @@ export type {
 export {
   buildTimeline,
   creditExhaustedFromEvents,
+  creditRefusalFromEvents,
   extractSessionRef,
   groupTimeline,
   sessionStatusFromEvents,

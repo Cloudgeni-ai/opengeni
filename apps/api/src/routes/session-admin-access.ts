@@ -195,7 +195,9 @@ export function registerSessionAdminAccessRoutes(app: Hono, deps: ApiRouteDeps):
 
   app.put(sessionPath, async (c) => {
     requireFullAccessIfAgent(c, "Giving a session admin access");
-    requireSameOriginBrowserMutation(c, deps);
+    // The phone and desktop apps sign in with a bearer credential, which a
+    // page on another site can't send; only a cookie session must be same-origin.
+    if (!c.req.header("authorization")) requireSameOriginBrowserMutation(c, deps);
     const target = await authorizeSession(c, deps, "session.tool_policy.write");
     // Only the person themselves (or an agent with their full access): never
     // an API key or another principal acting on the workspace.

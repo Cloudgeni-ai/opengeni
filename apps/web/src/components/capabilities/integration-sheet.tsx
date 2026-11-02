@@ -182,6 +182,33 @@ export function IntegrationSheetBody({ model }: { model: IntegrationViewModel })
             ) : null}
           </DetailDisclosure>
         ) : null}
+        {model.sections?.map((section) => (
+          <Block
+            key={section.id}
+            title={section.title}
+            action={
+              section.action ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={section.action.primary ? "default" : "outline"}
+                  data-integration-section-action={section.id}
+                  disabled={section.action.disabled || section.action.busy}
+                  onClick={section.action.onClick}
+                >
+                  {section.action.busy ? <Loader2Icon className="animate-spin" /> : null}
+                  {section.action.label}
+                </Button>
+              ) : undefined
+            }
+          >
+            <p className="text-xs leading-5 text-fg-muted">{section.description}</p>
+            {section.status ? <p className="text-sm leading-6 text-fg">{section.status}</p> : null}
+            {section.note ? (
+              <p className="text-xs leading-5 text-fg-muted">{section.note}</p>
+            ) : null}
+          </Block>
+        ))}
         {!model.presentation && model.connection.length > 0 ? (
           <Block title="Connection">
             <ConnectionFacts facts={model.connection} />

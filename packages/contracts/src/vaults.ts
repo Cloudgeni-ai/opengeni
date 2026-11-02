@@ -710,6 +710,14 @@ export const ListVaultsResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({ vaults: z.array(VaultSummary) }),
 );
 export type ListVaultsResponse = z.infer<typeof ListVaultsResponse>;
+/**
+ * Every organization vault, wherever it works. `complete` is false while the
+ * server can only list the ones that work in the requested workspace.
+ */
+export const ListOrganizationVaultsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ vaults: z.array(VaultSummary), complete: z.boolean() }),
+);
+export type ListOrganizationVaultsResponse = z.infer<typeof ListOrganizationVaultsResponse>;
 export const ListVaultItemsResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     items: z.array(VaultItemSummary),

@@ -230,16 +230,34 @@ export function nativeIntegrationModel(
   const providerId = primaryProviderId(model.id, slackBotMode);
   if (!providerId) return model;
   const managed = hasManagedConnection(model);
-  const available = nativeProviderAvailable(catalog, providerId);
-  const options = model.options.filter((option) => {
+  // A section that starts another provider (personal GitHub next to the
+  // workspace App) keeps the integration available on its own.
+  const available =
+    nativeProviderAvailable(catalog, providerId) ||
+    (model.sections ?? []).some(
+      (section) =>
+        section.action?.connectProviderId !== undefined &&
+        nativeProviderAvailable(catalog, section.action.connectProviderId),
+    );
+  const sections = model.sections?.map((section) => {
+    const sectionProviderId = section.action?.connectProviderId;
     if (
-      model.id === "github" &&
-      option.id === "github-personal-identity" &&
-      option.kind === "link" &&
-      option.action.label === "Connect"
-    ) {
-      return nativeProviderAvailable(catalog, "github-personal");
-    }
+      !section.action ||
+      !sectionProviderId ||
+      nativeProviderAvailable(catalog, sectionProviderId)
+    )
+      return section;
+    if (catalog.status === "loading")
+      return { ...section, action: { ...section.action, disabled: true } };
+    const { action: _unavailable, ...rest } = section;
+    return {
+      ...rest,
+      note:
+        catalog.providers.find((candidate) => candidate.id === sectionProviderId)?.reason ??
+        "Setting this up isn't available with your access here.",
+    };
+  });
+  const options = model.options.filter((option) => {
     if (
       model.id === "google-drive" &&
       option.id === "google-drive-publish" &&
@@ -261,22 +279,13 @@ export function nativeIntegrationModel(
   if (!available && footer.kind === "setup") {
     footer = { kind: "locked", message: "" };
     blockedSetup = true;
-  } else if (
-    !available &&
-    model.id === "github" &&
-    footer.kind === "actions" &&
-    footer.primary &&
-    (!model.access || footer.primary.label === "Connect another account")
-  ) {
-    // Personal GitHub can be connected before the workspace App is installed.
-    footer = footer.secondary ? { ...footer, primary: undefined } : { kind: "locked", message: "" };
-    blockedSetup = true;
   }
   const blockedFresh = !available && !managed;
   return {
     ...model,
     options,
     ...(access ? { access } : {}),
+    ...(sections ? { sections } : {}),
     footer,
     ...(blockedFresh && model.chip.label !== "Loading"
       ? {

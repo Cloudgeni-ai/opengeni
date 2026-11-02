@@ -73,6 +73,7 @@ import {
   type EntryRowActions,
 } from "./knowledge-library";
 import { KnowledgeOriginalFile } from "./knowledge-original-file";
+import { KnowledgeReachItem } from "./knowledge-reach";
 import { MoreMenu } from "@opengeni/react/ui/page-actions";
 
 /* ----------------------------------------------------------------------------
@@ -498,6 +499,14 @@ function EntryPageContent({
             ? "Organization"
             : "This workspace"}
       </DetailAsideItem>
+      {record.scope !== "workspace" ? (
+        <KnowledgeReachItem
+          workspaceId={workspaceId}
+          entryId={record.id}
+          scope={record.scope}
+          title={entry.title}
+        />
+      ) : null}
       {/* One collection is already the header's path; several are listed here. */}
       {!collection && entry.groupIds.length !== 1 ? (
         <DetailAsideItem label="Collections" icon={<FolderIcon />}>

@@ -7,6 +7,7 @@ import { analyticsAction } from "../../../ui/analytics-actions";
 import { apiErrorFacts } from "../../../ui/api-error";
 import { modelListSummary } from "../../lib/credit-coverage";
 import type { FreeCreditGap } from "../../lib/free-credit-gap";
+import type { PaymentRefusalCode } from "../../lib/model-access";
 import { useAppContext } from "../../app-context";
 import { useCreditBalance } from "./use-credit-balance";
 
@@ -23,6 +24,7 @@ import { useCreditBalance } from "./use-credit-balance";
 export function CreditRefusalNotice({
   gap,
   message,
+  refusalCode,
   workspaceId,
   accountId,
   canBuyCredits,
@@ -36,6 +38,8 @@ export function CreditRefusalNotice({
   gap: FreeCreditGap;
   /** The API's refusal text. */
   message?: string | null | undefined;
+  /** A refusal one action fixes (own-key fee, API use): no model choice applies. */
+  refusalCode?: PaymentRefusalCode | null | undefined;
   workspaceId: string;
   /** The organization whose balance tells "no credit" from "credit this model can't use". */
   accountId?: string | null | undefined;
@@ -60,7 +64,7 @@ export function CreditRefusalNotice({
   // Nothing left to switch to, so the server's advice to pick a model covered
   // by promotional credit doesn't apply. The balance says why: no credit at
   // all, or credit this model can't use.
-  const uncovered = gap.covered.length === 0 && !gap.selectionUsable;
+  const uncovered = !refusalCode && gap.covered.length === 0 && !gap.selectionUsable;
   const client = useAppContext().client;
   const { balance, settled } = useCreditBalance(
     client,
@@ -69,6 +73,46 @@ export function CreditRefusalNotice({
   );
   // Wait for the balance rather than show words it would contradict.
   if (uncovered && !settled) return null;
+  if (refusalCode) {
+    // One action fixes this, whichever model is chosen.
+    const upgrade = refusalCode === "byok_upgrade_required";
+    const askOwner = canBuyCredits
+      ? null
+      : upgrade
+        ? "Ask an organization owner to upgrade to Pro."
+        : "Ask an organization owner to add credits.";
+    return (
+      <Notice
+        tone="waiting"
+        live="assertive"
+        title={
+          upgrade
+            ? "Upgrade to Pro to use your own key"
+            : refusalCode === "byok_paid_credit_required"
+              ? "Add credits to use your own key"
+              : "API usage uses credits, not your plan credit"
+        }
+        {...(onDismiss ? { onDismiss } : {})}
+      >
+        <div data-testid="credit-refusal-notice">
+          {askOwner ? <span>{askOwner}</span> : null}
+          {canBuyCredits ? (
+            <div className="mt-2 flex flex-wrap gap-2">
+              {upgrade ? (
+                <UpgradeButton workspaceId={workspaceId} />
+              ) : (
+                <AddCreditsButton
+                  workspaceId={workspaceId}
+                  outline={false}
+                  {...(onAddCredits ? { onAddCredits } : {})}
+                />
+              )}
+            </div>
+          ) : null}
+        </div>
+      </Notice>
+    );
+  }
   const credit = !uncovered ? null : !balance ? "unknown" : balance.someCredit ? "some" : "none";
   // The server's sentence, without the SDK's "API 402:" prefix or the reference.
   const reason =
@@ -117,29 +161,12 @@ export function CreditRefusalNotice({
               Use {switchTo.label}
             </Button>
           ) : null}
-          {canBuyCredits && onAddCredits ? (
-            <Button
-              type="button"
-              size="sm"
-              variant={switchTo ? "outline" : "default"}
-              onClick={onAddCredits}
-              {...analyticsAction("buy_credits")}
-            >
-              <CreditCardIcon className="size-3.5" />
-              Add credits
-            </Button>
-          ) : canBuyCredits ? (
-            <Button asChild type="button" size="sm" variant={switchTo ? "outline" : "default"}>
-              <Link
-                to="/workspaces/$workspaceId/organization"
-                params={{ workspaceId }}
-                search={{ section: "billing" }}
-                {...analyticsAction("buy_credits")}
-              >
-                <CreditCardIcon className="size-3.5" />
-                Add credits
-              </Link>
-            </Button>
+          {canBuyCredits ? (
+            <AddCreditsButton
+              workspaceId={workspaceId}
+              outline={Boolean(switchTo)}
+              {...(onAddCredits ? { onAddCredits } : {})}
+            />
           ) : null}
           {connect ? (
             <Button asChild type="button" size="sm" variant="outline">
@@ -156,5 +183,57 @@ export function CreditRefusalNotice({
         </div>
       ) : null}
     </Notice>
+  );
+}
+
+/** Opens billing, where the plan picker offers Pro. */
+function UpgradeButton({ workspaceId }: { workspaceId: string }) {
+  return (
+    <Button asChild type="button" size="sm">
+      <Link
+        to="/workspaces/$workspaceId/organization"
+        params={{ workspaceId }}
+        search={{ section: "billing" }}
+        {...analyticsAction("upgrade_plan")}
+      >
+        Upgrade to Pro
+      </Link>
+    </Button>
+  );
+}
+
+/** Opens the add-credits prompt on this page, or billing without one. */
+function AddCreditsButton({
+  workspaceId,
+  outline,
+  onAddCredits,
+}: {
+  workspaceId: string;
+  outline: boolean;
+  onAddCredits?: (() => void) | undefined;
+}) {
+  return onAddCredits ? (
+    <Button
+      type="button"
+      size="sm"
+      variant={outline ? "outline" : "default"}
+      onClick={onAddCredits}
+      {...analyticsAction("buy_credits")}
+    >
+      <CreditCardIcon className="size-3.5" />
+      Add credits
+    </Button>
+  ) : (
+    <Button asChild type="button" size="sm" variant={outline ? "outline" : "default"}>
+      <Link
+        to="/workspaces/$workspaceId/organization"
+        params={{ workspaceId }}
+        search={{ section: "billing" }}
+        {...analyticsAction("buy_credits")}
+      >
+        <CreditCardIcon className="size-3.5" />
+        Add credits
+      </Link>
+    </Button>
   );
 }

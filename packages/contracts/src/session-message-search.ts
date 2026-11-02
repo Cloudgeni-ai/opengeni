@@ -9,6 +9,9 @@ export const SessionMessageSearchRequest = /* @__PURE__ */ defineSchema(() =>
       query: z.string().min(1).max(200),
       sessionId: primitives.optionalUuid,
       groupBy: z.literal("session").optional(),
+      /** Traversal direction. `newest` visits messages newest first; the
+       * occurrences inside one message stay in text order. */
+      order: z.enum(["oldest", "newest"]).optional(),
       archiveStatus: z.enum(["active", "archived", "all"]).optional(),
       limit: z.number().int().min(1).max(50).optional(),
       cursor: z.string().min(1).max(4096).optional(),
@@ -17,6 +20,10 @@ export const SessionMessageSearchRequest = /* @__PURE__ */ defineSchema(() =>
     .refine((request) => !request.groupBy || !request.sessionId, {
       message: "groupBy=session is only supported for workspace search without sessionId",
       path: ["groupBy"],
+    })
+    .refine((request) => !request.groupBy || request.order !== "newest", {
+      message: "groupBy=session only supports order=oldest",
+      path: ["order"],
     }),
 );
 export type SessionMessageSearchRequest = z.infer<typeof SessionMessageSearchRequest>;

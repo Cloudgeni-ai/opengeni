@@ -1,12 +1,19 @@
 import { assertMcpCredentialContentFlowAllowed } from "./mcp-credential-content-flow";
 import { authorizeTeamsConversationAdmission } from "../application/teams-private-session";
 import type { TeamsConversationProof } from "@opengeni/db";
+import type { BillingOrigin } from "@opengeni/contracts";
 import {
   isDirectModelId,
   MESSAGE_TIME_ZONE_METADATA_KEY,
+  messageSentByPerson,
   ModelUnavailableError,
   normalizeMessageTimeZone,
 } from "@opengeni/contracts";
+import {
+  CLAUDE_SUBSCRIPTION_PROVIDER_ID,
+  isClaudeSubscriptionModelId,
+  isClaudeSubscriptionProviderId,
+} from "@opengeni/contracts/claude-subscription-model-ids";
 import { requireExplicitPermissionDelegation } from "../access";
 import { acceptSessionFileAttachments } from "@opengeni/db";
 import { knowledgeContextForAccess } from "./knowledge";
@@ -26,6 +33,7 @@ import type {
   SessionTurnSurface,
 } from "@opengeni/contracts";
 import { resolveTurnSurface } from "../turn-surface";
+import { resolveTurnBillingOrigin } from "../billing-origin";
 import { turnAppActionGrant } from "../app-action-turn-grant";
 import { recordTurnAppActionGrant } from "@opengeni/db";
 import {
@@ -186,6 +194,7 @@ import {
   getSessionLineage,
   getSessionTurn,
   getSessionTurnInitiatingHumanSubjectId,
+  readTurnBillingOrigin,
   getSessionTurnForAttempt,
   getSessionTurnPersonalConnectionDelegations,
   getSessionTurnXaiProviderAccountAuthoritySnapshot,
@@ -206,12 +215,16 @@ import {
   updateSessionProfileWithEvent,
   setSessionKeepLive,
   type SetSessionKeepLiveResult,
+  setSessionUnattendedSetting,
+  endSessionUnattendedDefault,
+  type SetSessionUnattendedResult,
   withWorkspaceSubjectSessionActivityRls,
   type CreateSessionMcpServerInput,
   type Database,
   type FrozenTurnInitiator,
   type UpdateSessionMcpServerCredentialsInput,
   QueueCommandConflictError,
+  SessionRepositoryRemovedError,
   AgentCommandAuthorityError,
   runIdempotentPersistenceTransaction,
   SessionSpawnDeniedDbError,
@@ -358,6 +371,7 @@ function isCatalogOverlayModel(modelId: string | null | undefined): boolean {
     modelId?.startsWith(WORKSPACE_OPPER_MODEL_ID_PREFIX) === true ||
     modelId?.startsWith(ORGANIZATION_OPPER_MODEL_ID_PREFIX) === true ||
     organizationDirectModelProviderOf(modelId) !== null ||
+    (modelId != null && isClaudeSubscriptionModelId(modelId)) ||
     CLAUDE_CONNECTION_KINDS.some((kind) =>
       ["workspace", "organization"].some((scope) =>
         modelId?.startsWith(claudeProviderId(kind, scope as "workspace" | "organization") + "/"),
@@ -750,6 +764,17 @@ export function settingsWithSessionMcpServerMetadata(
   return settingsWithSessionMcpServerConfigs(settings, servers.map(mcpServerConfigFromMetadata));
 }
 
+/**
+ * Settings that include the servers a chat will attach, so its tool selection
+ * may name them, as a session create's does. Validate the servers separately.
+ */
+export function settingsWithSessionMcpServerInputs(
+  settings: Settings,
+  servers: Array<Omit<SessionMcpServerInput, "headers">>,
+): Settings {
+  return settingsWithSessionMcpServerConfigs(settings, servers.map(mcpServerConfigFromInput));
+}
+
 /** Session-create MCP server validation, shared by automations that start chats. */
 export function validateSessionMcpServersForCreate(
   settings: Settings,
@@ -926,6 +951,11 @@ export type SessionCreateRequestOptions = {
    */
   surface?: SessionTurnSurface;
   /**
+   * Who pays (`BillingOrigin`) when the entry point knows it, for example a
+   * schedule's frozen origin. Omitted derives it (see resolveTurnBillingOrigin).
+   */
+  billingOrigin?: BillingOrigin;
+  /**
    * Agent-configuration creator kind (renderer default and default-config
    * policy). Omitted derives `slack` from a Slack surface, else the public API.
    */
@@ -1012,6 +1042,8 @@ export async function createAndStartSessionWithOutcome(input: {
   initialMessage: string;
   /** Content-free product surface the create request entered through. */
   surface?: SessionTurnSurface | null;
+  /** Funding origin frozen on the initial turn (`BillingOrigin`). */
+  billingOrigin?: BillingOrigin | null;
   /**
    * Live product usage counters: a newly created session (never a replay)
    * counts once, and its initial user message once unless deferred.
@@ -1042,6 +1074,8 @@ export async function createAndStartSessionWithOutcome(input: {
   reasoningEffort: Settings["openaiReasoningEffort"];
   /** Session default Fast/standard; mirrored into metadata when set. */
   latencyMode?: "standard" | "priority" | "fast" | "ultrafast";
+  /** No person answers during the task; frozen in the session metadata. */
+  unattended?: boolean;
   turnExecutionPolicy: TurnExecutionPolicyV1;
   sandboxBackend: Settings["sandboxBackend"];
   metadata: Record<string, unknown>;
@@ -1238,16 +1272,23 @@ export async function createAndStartSessionWithOutcome(input: {
                     upstreamModelId: input.turnExecutionPolicy.upstreamModelId,
                   }
                 : {
-                    scope: input.turnExecutionPolicy.providerId.startsWith("organization-")
-                      ? ("organization" as const)
-                      : ("workspace" as const),
+                    // The canonical Claude subscription provider admits like
+                    // the organization list (its admission reads every
+                    // connection serving the workspace).
+                    scope:
+                      input.turnExecutionPolicy.providerId.startsWith("organization-") ||
+                      input.turnExecutionPolicy.providerId === CLAUDE_SUBSCRIPTION_PROVIDER_ID
+                        ? ("organization" as const)
+                        : ("workspace" as const),
                     providerKind:
-                      CLAUDE_CONNECTION_KINDS.find(
-                        (kind) =>
-                          claudeProviderId(kind) === input.turnExecutionPolicy.providerId ||
-                          claudeProviderId(kind, "workspace") ===
-                            input.turnExecutionPolicy.providerId,
-                      ) ??
+                      (isClaudeSubscriptionProviderId(input.turnExecutionPolicy.providerId)
+                        ? ("claude_subscription" as const)
+                        : CLAUDE_CONNECTION_KINDS.find(
+                            (kind) =>
+                              claudeProviderId(kind) === input.turnExecutionPolicy.providerId ||
+                              claudeProviderId(kind, "workspace") ===
+                                input.turnExecutionPolicy.providerId,
+                          )) ??
                       (input.turnExecutionPolicy.providerId.includes("openrouter")
                         ? ("openrouter" as const)
                         : input.turnExecutionPolicy.providerId.endsWith("-opper")
@@ -1338,6 +1379,7 @@ export async function createAndStartSessionWithOutcome(input: {
           firstPartyMcpTools: input.firstPartyMcpTools,
           ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
           instructions: input.instructions ?? null,
+          ...(input.unattended ? { unattended: true } : {}),
           ...(input.vaultPolicy ? { vaultPolicy: input.vaultPolicy } : {}),
           policyRole: input.policyRole ?? null,
           ...(input.agentAccess ? { agentAccess: input.agentAccess } : {}),
@@ -1372,7 +1414,9 @@ export async function createAndStartSessionWithOutcome(input: {
           subjectId: input.subjectId ?? null,
           ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
         }),
-    );
+    ).catch((error: unknown) => {
+      throw repositoryRemovedHttpError(error);
+    });
     if (keyedResult.denied) {
       throw new SessionSpawnDeniedError(SessionSpawnDenial.parse(keyedResult.denial));
     }
@@ -1450,6 +1494,7 @@ export async function createAndStartSessionWithOutcome(input: {
         firstPartyMcpTools: input.firstPartyMcpTools,
         ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
         instructions: input.instructions ?? null,
+        ...(input.unattended ? { unattended: true } : {}),
         ...(input.vaultPolicy ? { vaultPolicy: input.vaultPolicy } : {}),
         policyRole: input.policyRole ?? null,
         ...(input.agentAccess ? { agentAccess: input.agentAccess } : {}),
@@ -1489,7 +1534,7 @@ export async function createAndStartSessionWithOutcome(input: {
     if (error instanceof SessionSpawnDeniedDbError) {
       throw new SessionSpawnDeniedError(SessionSpawnDenial.parse(error.denial));
     }
-    throw error;
+    throw repositoryRemovedHttpError(error);
   }
   const finished = await finishNewlyCreatedSession(
     targetSeededBeforeCreateCommit ? { ...input, seedTargetSandbox: null } : input,
@@ -1576,6 +1621,7 @@ async function finishStartSession(
     ) => Promise<void>;
     deferInitialTurn?: boolean;
     surface?: SessionTurnSurface | null;
+    billingOrigin?: BillingOrigin | null;
     modelContext?: string | null;
     timeZone?: string | null;
     openingTools?: readonly string[];
@@ -1671,6 +1717,7 @@ async function finishStartSession(
       ...(initialTimeZone ? { initialTimeZone } : {}),
       ...(input.openingTools?.length ? { initialOpeningTools: [...input.openingTools] } : {}),
       surface: input.surface ?? null,
+      billingOrigin: input.billingOrigin ?? null,
       createdEventPayload: {
         toolPolicy: input.toolPolicy,
         ...(input.sessionMcpServers?.length ? { mcpServers: input.sessionMcpServers } : {}),
@@ -1959,6 +2006,8 @@ type PostUserMessageTurnInput = {
   origin?: "human" | "operator";
   /** Content-free product surface the request entered through. */
   surface?: SessionTurnSurface | null;
+  /** Funding origin of the sender, frozen on the turn (`BillingOrigin`). */
+  billingOrigin?: BillingOrigin | null;
   actor?: string;
   actorLabel?: string;
   commandActor?: SessionCommandActor;
@@ -2163,6 +2212,7 @@ export async function postUserMessageTurn(
               turnExecutionPolicy: input.turnExecutionPolicy,
               source: input.origin === "operator" ? "api" : "user",
               surface: input.surface ?? null,
+              billingOrigin: input.billingOrigin ?? null,
               ...(input.recordAgentRunUsage !== undefined
                 ? { recordAgentRunUsage: input.recordAgentRunUsage }
                 : {}),
@@ -2229,6 +2279,7 @@ export async function postUserMessageTurn(
         { message: error.message, cause: error },
       );
     }
+    if (error instanceof SessionRepositoryRemovedError) throw repositoryRemovedHttpError(error);
     if (
       error instanceof QueueCommandConflictError ||
       error instanceof SessionControlConflictError
@@ -2244,6 +2295,16 @@ export async function postUserMessageTurn(
     throw error;
   }
   return finalizePostUserMessageTurn(input, result);
+}
+
+/**
+ * A person removed the repository from the chat; an agent cannot attach it
+ * again (to the chat or to a child it creates). Other errors pass through.
+ */
+function repositoryRemovedHttpError(error: unknown): unknown {
+  return error instanceof SessionRepositoryRemovedError
+    ? new HTTPException(403, { message: error.message, cause: error })
+    : error;
 }
 
 /**
@@ -2482,7 +2543,18 @@ export async function retryFailedSession(
       action: "agent_run:create",
       quantity: 1,
       model,
-      ...(turn ? { acceptedTurn: { sessionId: session.id, turnId: turn.id } } : {}),
+      // A retry runs the failed turn again, billed as that turn was.
+      ...(turn
+        ? {
+            acceptedTurn: { sessionId: session.id, turnId: turn.id },
+            billingOrigin:
+              (await readTurnBillingOrigin(deps.db, {
+                accountId: grant.accountId,
+                workspaceId,
+                turnId: turn.id,
+              })) ?? "app",
+          }
+        : {}),
     },
   );
   const result = await runIdempotentPersistenceTransaction(
@@ -2588,6 +2660,15 @@ async function createSessionForRequestInFileScope(
     grant,
     authorization,
     requested: requestOptions.surface,
+  });
+  // Who pays for this chat's work: frozen on its first turn, inherited after.
+  const billingOrigin = await resolveTurnBillingOrigin(unresolvedDeps.db, {
+    grant,
+    authorization,
+    // A Teams conversation is a bot set up in the app.
+    requestedOrigin:
+      requestOptions.billingOrigin ?? (requestOptions.teamsConversation ? "app" : undefined),
+    requestedSurface: requestOptions.surface,
   });
   payload.metadata = sessionCreationMetadata(payload.metadata);
   const creationMetadata = externalCreationMetadata(payload.metadata, authorization, grant);
@@ -3452,6 +3533,13 @@ async function createSessionForRequestInFileScope(
         message: `unknown channelId: ${payload.channelId}`,
       });
     }
+    // Only its owner sees an Only me project, and it holds only their own
+    // Only me chats; the database leaves any other chat out of it.
+    if (channel.visibility === "private" && effectiveVisibility !== "user_private") {
+      throw new HTTPException(422, {
+        message: "An Only me project holds only your own Only me chats.",
+      });
+    }
     channelId = channel.id;
   }
   // A spawned worker is causally part of the exact turn that created it. Omitted
@@ -4011,6 +4099,7 @@ async function createSessionForRequestInFileScope(
         action: "agent_run:create",
         quantity: 1,
         model,
+        billingOrigin,
       }),
     );
   }
@@ -4091,6 +4180,7 @@ async function createSessionForRequestInFileScope(
       visibility: effectiveVisibility,
       initialMessage: payload.initialMessage ?? "",
       surface,
+      billingOrigin,
       metrics: unresolvedDeps.observability ?? null,
       ...(unresolvedDeps.observability
         ? { startupObservability: unresolvedDeps.observability }
@@ -4151,6 +4241,7 @@ async function createSessionForRequestInFileScope(
                     action: "agent_run:create",
                     quantity: 1,
                     model,
+                    billingOrigin,
                     acceptedTurn: { sessionId, turnId },
                   },
                 );
@@ -4180,6 +4271,8 @@ async function createSessionForRequestInFileScope(
       // contracts schema). Persisted on the row; composed system-level at turn
       // time. Not surfaced as an event.
       instructions: payload.instructions ?? null,
+      // No person answers during the task. Never inherited by a child.
+      ...(payload.unattended === true ? { unattended: true } : {}),
       // Session and agent-config vault narrowing, intersected (AX-2). Ancestor
       // policies apply again whenever this session resolves a reference.
       vaultPolicy: intersectVaultPolicies(
@@ -4400,6 +4493,8 @@ async function acceptSessionUserMessageInFileScope(
      * in-process embedding host). Omitted derives it from the grant.
      */
     surface?: SessionTurnSurface;
+    /** Who pays, when the entry point knows it (see resolveTurnBillingOrigin). */
+    billingOrigin?: BillingOrigin;
     controlEtag?: string | null;
     expectedDraftRevision?: number | null;
     personalResourceAttachment?: PersonalResourceAttachmentIntent;
@@ -4427,6 +4522,14 @@ async function acceptSessionUserMessageInFileScope(
       })
     : undefined;
 
+  // Who pays for this message's work, frozen on its turn.
+  const billingOrigin = await resolveTurnBillingOrigin(db, {
+    grant,
+    authorization: input.authorization,
+    // A Teams conversation is a bot set up in the app.
+    requestedOrigin: input.billingOrigin ?? (input.teamsConversation ? "app" : undefined),
+    requestedSurface: input.surface,
+  });
   const promptInitiator = creationInitiatorForGrant(grant);
   const delegatedServiceInitiator =
     promptInitiator.initiator?.kind === "service"
@@ -4631,6 +4734,7 @@ async function acceptSessionUserMessageInFileScope(
         action: "agent_run:create",
         quantity: 1,
         model: effectiveModel,
+        billingOrigin,
       });
     }
     if (requestedResources.some((resource) => resource.kind === "file") && !objectStorage) {
@@ -4727,6 +4831,12 @@ async function acceptSessionUserMessageInFileScope(
         input.authorization !== undefined &&
         (await workspaceSettingsAuthorized(deps, input.authorization, workspaceId)),
     });
+    // A person writing in a chat an automation started is there to answer:
+    // its unattended default ends before this turn can be claimed. An
+    // explicit choice (the chat's switch or the API) stays.
+    if (existingSession.unattended === true && messageSentByPerson({ source, surface })) {
+      await endSessionUnattendedDefault(db, { workspaceId, sessionId: existingSession.id });
+    }
     const {
       accepted,
       turn,
@@ -4782,6 +4892,7 @@ async function acceptSessionUserMessageInFileScope(
               action: "agent_run:create",
               quantity: 1,
               model: effectiveModel,
+              billingOrigin,
               acceptedTurn: { sessionId, turnId },
             },
           );
@@ -4792,6 +4903,7 @@ async function acceptSessionUserMessageInFileScope(
       delivery,
       origin: source === "api" ? "operator" : "human",
       surface,
+      billingOrigin,
       actor: grant.subjectId,
       ...(grant.subjectLabel ? { actorLabel: grant.subjectLabel } : {}),
       commandActor,
@@ -5035,6 +5147,36 @@ export async function setSessionRetention(
     workspaceId: grant.workspaceId,
     sessionId,
     keepLive,
+  });
+  return { result, relatedSessionAccess: authorization?.relatedSessionAccess ?? "root" };
+}
+
+/**
+ * Turn a chat's unattended mode on or off ("work without me") from its next
+ * turn. An explicit choice: a person's later message does not change it.
+ */
+export async function setSessionUnattended(
+  deps: {
+    db: Database;
+    sessionAuthorization?: SessionAuthorizationPort | null;
+  },
+  grant: AccessGrant,
+  sessionId: string,
+  unattended: boolean,
+): Promise<{
+  result: SetSessionUnattendedResult;
+  relatedSessionAccess: "target" | "root";
+}> {
+  requirePermission(grant, "sessions:control");
+  const authorization = await requireSessionAuthorization(deps, grant, {
+    sessionId,
+    operation: "session.tool_policy.write",
+    surface: "core",
+  });
+  const result = await setSessionUnattendedSetting(deps.db, {
+    workspaceId: grant.workspaceId,
+    sessionId,
+    unattended,
   });
   return { result, relatedSessionAccess: authorization?.relatedSessionAccess ?? "root" };
 }

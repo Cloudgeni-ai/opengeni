@@ -1,5 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import type { SessionAuthorizationOperation, SessionAuthorizationPort } from "@opengeni/contracts";
+import {
+  normalizePermission,
+  type Permission,
+  type SessionAuthorizationOperation,
+  type SessionAuthorizationPort,
+} from "@opengeni/contracts";
 import {
   acceptOrganizationInvitation,
   claimSessionWorkForAttempt,
@@ -444,6 +449,37 @@ describe("managed-human session tenancy application service", () => {
     await expect(open(personalWorkspaceId)).resolves.toBeUndefined();
   }, 180_000);
 
+  test("the Personal workspace limit takes the usage-allowance switch to set, never to remove", async () => {
+    if (!shared || !client) return;
+    const userId = `core-personal-limit-${crypto.randomUUID()}`;
+    const subjectId = `user:${userId}`;
+    const access = await ensureManagedAccessForUser(client.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Personal limit",
+    });
+    const accountId = access.defaultAccountId!;
+    const change = (usageAllowancesEnabled: boolean, credits: number | null) =>
+      updateOrganizationPrivacySettings(
+        { db: client!.db, settings: { ...testSettings(), usageAllowancesEnabled } },
+        {
+          organizationId: accountId,
+          actorSubjectId: subjectId,
+          request: { personalWorkspaceMonthlyCredits: credits },
+        },
+      );
+
+    expect(
+      await getOrganizationPrivacySettings({ db: client.db, settings: testSettings() }, accountId),
+    ).toMatchObject({ personalWorkspaceMonthlyCredits: null });
+    await expect(change(false, 50_000_000)).rejects.toBeInstanceOf(OrganizationPrivacyLockedError);
+    expect(await change(true, 50_000_000)).toMatchObject({
+      personalWorkspaceMonthlyCredits: 50_000_000,
+      personalWorkspaces: true,
+    });
+    expect(await change(false, null)).toMatchObject({ personalWorkspaceMonthlyCredits: null });
+  }, 180_000);
+
   test("serves personal-resource discovery for a receipt-less organization; unknown authorities deny", async () => {
     if (!shared || !client) return;
     const userId = `core-personal-discovery-inactive-${crypto.randomUUID()}`;
@@ -536,6 +572,68 @@ describe("managed-human session tenancy application service", () => {
         crypto.randomUUID(),
       ),
     ).rejects.not.toBeInstanceOf(SessionTenancyNotActivatedError);
+  }, 180_000);
+
+  test("personal-resource gates accept canonical or historical secret grants without rewriting either", async () => {
+    if (!shared || !client) return;
+    const userId = `core-personal-secret-grants-${crypto.randomUUID()}`;
+    const access = await ensureManagedAccessForUser(client.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Personal secret grants",
+    });
+    const grant = access.workspaceGrants.find(
+      (candidate) => candidate.workspaceId !== access.defaultWorkspaceId,
+    );
+    if (!grant) throw new Error("managed human has no personal workspace grant");
+    const deps = { db: client.db };
+    const permissionSets: Permission[][] = [
+      ["secrets:list", "secrets:use", "sessions:create"],
+      ["variable-sets:list", "variable-sets:attach", "variable-sets:use", "sessions:create"],
+    ];
+    for (const permissions of permissionSets) {
+      Object.freeze(permissions);
+      const before = JSON.stringify(permissions);
+      const authorization = {
+        grant: { ...grant, permissions, permissionMode: "explicit" },
+        accountGrant: access.accountGrants[0] ?? null,
+        authenticatedSubjectId: grant.subjectId,
+        contextIntegrity: true,
+        canonicalManagedHumanSession: true,
+      } satisfies AccessGrantAuthorization;
+      await expect(
+        listManagedHumanUserResourceAuthorities(deps, authorization, grant.workspaceId, {
+          resourceKind: "variable_set",
+          limit: 100,
+        }),
+      ).resolves.toEqual({ authorities: [], nextCursor: null });
+      const issue = (input: AccessGrantAuthorization) =>
+        issueManagedHumanUserResourceGrant(deps, input, grant.workspaceId, crypto.randomUUID(), {
+          scope: "user",
+          resourceKind: "variable_set",
+          mode: "always",
+          context: "user_private",
+          workspaceSharedAcknowledged: false,
+        });
+      // Full permission is not resource authority: an unknown target still
+      // fails the database's exact owner/authority check.
+      const failure = await issue(authorization).catch((error: unknown) => error);
+      expect(nestedPostgresSqlState(failure)).toBe("42501");
+      for (const missing of ["secrets:list", "secrets:use", "sessions:create"] as const) {
+        await expect(
+          issue({
+            ...authorization,
+            grant: {
+              ...authorization.grant,
+              permissions: permissions.filter(
+                (permission) => normalizePermission(permission) !== missing,
+              ),
+            },
+          }),
+        ).rejects.toMatchObject({ status: 403, permission: missing });
+      }
+      expect(JSON.stringify(permissions)).toBe(before);
+    }
   }, 180_000);
 
   test("lists, issues, reissues expired identities, and route-fences revocation", async () => {

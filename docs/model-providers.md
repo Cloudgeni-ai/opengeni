@@ -125,6 +125,17 @@ Hosted GPT image generation is attached only for built-in GPT-5.6 ids on
 `OPENGENI_OPENAI_PROVIDER_ITEM_IDS`, `OPENGENI_OPENAI_REASONING_ENCRYPTED_CONTENT`,
 `OPENGENI_WEB_SEARCH_ENABLED`.
 
+Responses requests to Azure OpenAI and the OpenAI platform (the built-in
+provider on `https://api.openai.com/v1`, or a workspace or organization key)
+send `store: false`, so the provider keeps no response objects: Opengeni sends
+the whole history with each request (over WebSocket, only the new items on the
+same connection, still storeless), with provider item ids stripped and
+reasoning round-tripped encrypted. A request is left alone when it chose
+`store`, chains `previous_response_id` over HTTP or a `conversation`, or still
+carries provider item ids (`OPENGENI_OPENAI_PROVIDER_ITEM_IDS=preserve`).
+OpenAI-compatible servers, gateways and an operator's registry provider keep
+their own contracts, even when a registry provider points at api.openai.com.
+
 **Keyless Azure OpenAI, without a console connection.** Set
 `OPENGENI_AZURE_OPENAI_AUTH_MODE` on the API and workers:
 
@@ -237,7 +248,7 @@ singleton owns membership.
 ### Customer OpenAI and Azure OpenAI keys
 
 The web console offers **OpenAI** and **Azure OpenAI** in the model step after
-organization setup and in **Workspace settings → Models → OpenAI and Azure OpenAI**. OpenAI
+organization setup and in **Workspace settings → Models → OpenAI, Azure OpenAI and compatible endpoints**. OpenAI
 asks for an API key, with the model preselected and an optional Change model
 control. Azure asks for an API key, resource endpoint
 (`https://RESOURCE.openai.azure.com` or its `/openai/v1` URL), and deployment
@@ -271,6 +282,63 @@ key for that turn. Revocation or an identity mismatch fails closed. Missing
 customer connections never fall back to deployment credentials. Customer routes
 use conservative text/function capabilities; hosted tools and reasoning controls
 are not enabled implicitly for an arbitrary Azure deployment name.
+
+#### A workspace's own OpenAI-compatible endpoint
+
+**Workspace settings → Models** also offers **Connect an OpenAI-compatible
+endpoint**, for any provider or self-run server whose API follows OpenAI's Chat
+Completions or Responses format. It asks for an optional name, the API's HTTPS
+base URL (such as `https://api.example.com/v1`; a pasted `/chat/completions`
+or `/responses` path is trimmed), an API key, the model ID exactly as the
+provider lists it under `/models` (IDs such as `org/model:tag` are accepted),
+and the API format (Chat Completions by default, or Responses). Connect each
+model you want to use as its own connection.
+
+It is the same workspace-owned rail as OpenAI and Azure OpenAI above, with
+`credentialRole: "direct_openai_compatible"` and
+`directModelProvider: { provider: "openai_compatible", baseUrl, model, api?, label? }`.
+`providerDomain` must be the base URL's host. Over the API:
+
+```json
+{
+  "providerDomain": "api.example.com",
+  "kind": "api_key",
+  "subjectId": null,
+  "credential": { "apiKey": "<the provider key>" },
+  "grantedScopes": [],
+  "operationId": "<uuid>",
+  "verifyModelAccess": true,
+  "metadata": {
+    "credentialRole": "direct_openai_compatible",
+    "credentialLabel": "Example",
+    "directModelProvider": {
+      "provider": "openai_compatible",
+      "baseUrl": "https://api.example.com/v1",
+      "model": "example-model",
+      "api": "chat",
+      "label": "Example"
+    }
+  }
+}
+```
+
+The setup check sends one short message (32 output tokens maximum, no tools)
+to `/chat/completions` or `/responses`. Because the URL is chosen by the
+workspace, the check and every model request resolve its host once, refuse
+private and special-use addresses (operators can allow private targets with
+the existing private integration targets setting), pin the connection to the
+vetted addresses, and never follow redirects. The base URL must be HTTPS with
+no credentials, query, or fragment, and IP literals and single-label or
+`.local`/`.internal` hosts are refused when the connection is saved.
+
+Model IDs are `workspace-compatible-<connection id>/<version>/<model>`. The key
+is sent only to that base URL and only for that workspace's turns. Usage is
+billed by the provider and uses no Opengeni credits. The route gets the
+conservative text, function-calling and SSE capabilities every compatible API
+shares; no hosted tools, reasoning controls or images are assumed, the model
+SDK does not retry a failed request on its own, and no price is inferred from
+the model ID. Its residency is recorded as unknown, so deployments that
+require EU-only inference refuse these routes.
 
 #### Organization OpenAI and Azure OpenAI
 
@@ -381,8 +449,11 @@ provider hook `apps/web/src/components/organization-model-provider-connection.ts
 | Codex ChatGPT subscription   | `OPENGENI_CODEX_SUBSCRIPTION_ENABLED`         | Responses        | `codex/…` after the workspace connection is ready                 |
 | SuperGrok / xAI subscription | `OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED`     | Responses        | `supergrok/…` after the workspace connection is ready             |
 
-Workspace BYOK for an arbitrary OpenAI-compatible server is not a registry
-switch. Voice input, image, and video use separate provider settings.
+A workspace connects its own OpenAI-compatible server through the encrypted
+workspace connection described in
+[A workspace's own OpenAI-compatible endpoint](#a-workspaces-own-openai-compatible-endpoint),
+not through this registry. Voice input, image, and video use separate provider
+settings.
 
 ### Compatibility
 
@@ -738,7 +809,7 @@ derives both from the provider kind:
 | Workspace OpenRouter                 | workspace connection          | workspace              | external         |
 | Deployment Opper                     | deployment                    | deployment             | Opengeni credits |
 | Workspace Opper                      | workspace connection          | workspace              | external         |
-| Workspace OpenAI / Azure OpenAI       | workspace connection          | workspace              | external         |
+| Workspace OpenAI / Azure OpenAI / OpenAI-compatible | workspace connection | workspace | external |
 | Organization Vercel AI Gateway      | organization connection       | organization           | external         |
 | Organization OpenRouter             | organization connection       | organization           | external         |
 | Organization Opper                  | organization connection       | organization           | external         |
@@ -969,8 +1040,10 @@ deployment-keyed HMAC and their reserved operation fields are stripped from all
 public connection metadata projections. The picker hides this rail until the
 connection is active.
 
-Admins may also add one exact Vercel model slug at a time in the same Settings
-card. The durable row stores only the workspace, slug, optional label, actor,
+Workspace admins, and anyone who can start chats in a shared workspace
+(`sessions:create`, signed in as themselves), may also add or remove one exact
+Vercel model slug at a time in the same Settings card. The key stays with
+admins. The durable row stores only the workspace, slug, optional label, actor,
 and timestamps. Custom IDs are `workspace-gateway/<slug>`; they receive the
 reviewed generic text/function-calling Gateway capability envelope and no
 provider pin, route order, pricing form, or upstream `/models` discovery.
@@ -1071,10 +1144,12 @@ connection and policy. These turns have `upstreamPayer: workspace` and
 deployment's free/credits rail. Billing settles directly through the
 workspace's OpenRouter account.
 
-Admins may add exact OpenRouter slugs in the same card. The API does not call
+Workspace admins, and anyone who can start chats in a shared workspace
+(`sessions:create`, signed in as themselves), may add or remove exact OpenRouter
+slugs in the same card; the key stays with admins. The API does not call
 OpenRouter `GET /models` or infer capabilities dynamically. Custom IDs receive
-the reviewed conservative text/function-calling Chat envelope, and the admin is
-asserting that the upstream slug supports that behavior. Opengeni does not claim
+the reviewed conservative text/function-calling Chat envelope, and whoever adds
+one is asserting that the upstream slug supports that behavior. Opengeni does not claim
 a reasoning vocabulary or context-window size for these unreviewed slugs.
 Duplicate and curated collisions are scoped to the OpenRouter workspace
 provider, not to Vercel AI Gateway or deployment-managed `openrouter/*`.
@@ -1197,7 +1272,7 @@ Opper membership is available through this rail even without
 `OPENGENI_OPPER_API_KEY`; turns are `upstreamPayer: workspace`,
 `metering: external`, and spend no Opengeni credits.
 
-Admins may add exact Opper ids in the same card (`/v1/workspaces/:id/opper-custom-models`,
+Workspace admins and members who can start chats there may add exact Opper ids in the same card (`/v1/workspaces/:id/opper-custom-models`,
 SDK `listWorkspaceOpperCustomModels` / `createWorkspaceOpperCustomModel` /
 `deleteWorkspaceOpperCustomModel`). An id may be a pool name or a pinned
 `provider/model` route. Curated collisions are scoped to the Opper provider.
@@ -1732,13 +1807,22 @@ DELETE /v1/workspaces/:workspaceId/model-policy
 
 Organization owners and admins also set an allowlist once for every workspace
 (**Organization settings → Models → Defaults for every workspace**, or
-`modelPolicy` on `PATCH /v1/organizations/:organizationId/model-defaults`). A
-workspace without a policy row follows it; a workspace row, including one that
-allows every model, is that workspace's own choice and wins. The GET response
-reports `source` (`workspace`, `organization` or `none`) and the `organization`
-policy the workspace would follow; DELETE removes the workspace's own policy so
-it follows the organization again (`deleteWorkspaceModelAccessPolicy`). In the
-form, **Use <organization>'s allowed models** switches between the two.
+`modelPolicy` on `PATCH /v1/organizations/:organizationId/model-defaults`). It
+is a ceiling: a workspace without a policy row uses it as is, and a workspace
+row only narrows it. A model runs in a workspace only when both lists allow its
+provider and both allow the model, so a workspace row that allows every model
+allows exactly what the organization allows, and listing a model the
+organization doesn't allow never lets it run. The API edges, the omitted-model
+default, goal admission, subscription placement and failover, and the worker's
+post-resolution gate all apply the combined policy. The GET response reports
+the workspace's own lists as saved, `source` (`workspace`, `organization` or
+`none`) and the `organization` lists; DELETE removes the workspace's own policy
+so it uses the organization's again (`deleteWorkspaceModelAccessPolicy`). The
+workspace catalog's `policyAllowed` is the combined verdict per model, and
+`organizationAllowed: false` marks a model the organization's list rules out
+(omitted when the organization allows every model); the form shows those
+models locked. In the form, **Use <organization>'s allowed models** switches
+between the two.
 
 Each workspace also has a credit switch, the workspace setting
 `allowCreditModels` (default `true`; `PATCH /v1/workspaces/:workspaceId/settings`,
@@ -2411,7 +2495,10 @@ Workspace Claude custom models use `/v1/workspaces/:workspaceId/model-providers/
 :providerKind/custom-models` (`anthropic` or `claude_subscription`) and the shared subscription account APIs for Claude. Anthropic API keys keep the
 workspace connection create/rotate/revoke API. Model IDs are scoped under
 `workspace-anthropic/` and `workspace-claude-subscription/`; organization models use
-`organization-anthropic/` and `organization-claude-subscription/`. Custom models use
+`organization-anthropic/` and `organization-claude-subscription/`. As with
+Gateway, OpenRouter and Opper custom models, anyone who can start chats in a
+shared workspace adds and removes its custom model entries; connecting a key or
+subscription for the workspace stays with admins. Custom models use
 immutable generations: retiring one prevents fresh selection while preserving
 accepted execution history. Connection/model allowlists still govern execution.
 

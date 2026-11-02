@@ -457,7 +457,6 @@ export type SessionSidebarEvidence = {
     workspaceId: string;
     sessionId: string;
     archived: boolean;
-    expectedVersion: number;
     previousChannelId: string | null;
     returnedChannelId: string | null;
   }[];
@@ -714,15 +713,9 @@ export const client = {
         : {}),
     };
   },
-  updateSessionArchive: async (
-    workspace: string,
-    id: string,
-    request: { archived: boolean; expectedVersion: number },
-  ) => {
+  updateSessionArchive: async (workspace: string, id: string, request: { archived: boolean }) => {
     const row = rows.find((candidate) => candidate.id === id);
     if (!row) throw new Error("Preview session not found");
-    if (request.expectedVersion !== row.archiveVersion)
-      throw new Error("Preview archive version changed");
     const previousChannelId = row.channelId ?? null;
     row.archived = request.archived;
     row.archivedAt = request.archived ? new Date().toISOString() : null;
@@ -1084,7 +1077,6 @@ const context = {
   manualRepos: [],
   repositoryGroups: [],
   repositoryValidationError: null,
-  selectedInstallationId: null,
   busy: false,
   repoBusy: false,
   githubAppBusy: false,
@@ -1098,6 +1090,7 @@ const context = {
   },
   accessContext: {
     subjectId,
+    accountGrants: [],
     workspaceGrants: [
       {
         workspaceId,
@@ -1153,6 +1146,8 @@ export const useRail = () => ({
   isMobile: window.innerWidth < 768,
   setDrawerOpen: () => {},
 });
+// The settings shell reads the rail where it may be absent; it has no sidebar state here.
+export const useOptionalRail = () => null;
 
 declare global {
   interface Window {

@@ -1,3 +1,6 @@
+// The models section renders the shared models page, which navigates through
+// the page's navigation host; the router mock below backs it.
+import "@/navigation-host";
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -22,7 +25,9 @@ const toastError = mock((_message: string) => undefined);
 const toastSuccess = mock((_message: string, _options?: unknown) => undefined);
 const navigate = mock(async (_options: unknown) => undefined);
 const captureAnalyticsEvent = mock((_name: string) => true);
-let accountRole: "owner" | "admin" = "owner";
+let accountRole: "owner" | "admin" | "member" = "owner";
+// Replaces the role's permissions for one test; null keeps the role's own.
+let accountPermissionsOverride: string[] | null = null;
 
 const getBilling = mock(async () => ({
   mode: "stripe" as const,
@@ -121,6 +126,24 @@ const listOrganizationMcpConnections = mock(async (_accountId: string) => ({
   connections: [],
   canManageAll: true,
 }));
+// Billing shows the per-person Personal-workspace limit from the
+// organization's privacy settings.
+const getOrganizationPrivacySettings = mock(async (_organizationId: string) => ({
+  organizationId: accountId,
+  defaultVisibility: "workspace" as const,
+  personalWorkspaces: true,
+  personalWorkspaceMonthlyCredits: null,
+  adminsSeePrivateSchedules: false,
+  limits: {
+    onlyMeAllowed: true,
+    defaultVisibilityLocked: false,
+    adminsSeePrivateSchedulesLocked: false,
+  },
+  updatedAt: null,
+}));
+const updateOrganizationPrivacySettings = mock(async () => {
+  throw new Error("not used");
+});
 const useBillingUsage = mock((_options: unknown) => ({
   loading: false,
   error: null,
@@ -145,6 +168,8 @@ const context = {
     getWorkspaceModelCatalog,
     getOrganizationAdministrationOverview,
     listOrganizationMcpConnections,
+    getOrganizationPrivacySettings,
+    updateOrganizationPrivacySettings,
   } as unknown as OpenGeniBrowserClient,
   clientConfig: { auth: { mode: "managedSession" } },
   authSession: { user: { email: "owner@example.test" } },
@@ -156,10 +181,18 @@ const context = {
       {
         accountId,
         subjectId: "user:strict-owner",
-        get role(): "owner" | "admin" {
+        get role(): "owner" | "admin" | "member" {
           return accountRole;
         },
-        permissions: ["account:admin", "billing:read", "billing:manage", "api_keys:manage"],
+        // An admin holds what the API grants admins; account:admin stays the owner's.
+        get permissions(): string[] {
+          if (accountPermissionsOverride) return accountPermissionsOverride;
+          return accountRole === "owner"
+            ? ["account:admin", "billing:read", "billing:manage", "api_keys:manage"]
+            : accountRole === "admin"
+              ? ["account:read", "members:manage", "workspace:create", "billing:read"]
+              : ["account:read"];
+        },
       },
     ],
     workspaceGrants: [],
@@ -387,6 +420,8 @@ describe("organization billing StrictMode ownership", () => {
 
     expect(getBilling.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(getBillingEntitlements.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(getOrganizationPrivacySettings.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(container.textContent).toContain("Monthly limit per person");
     const creditSection = container.querySelector('section[aria-label="Credits and payments"]');
     expect(creditSection).not.toBeNull();
     expect(creditSection?.textContent).toContain("$25.00");
@@ -602,32 +637,36 @@ describe("organization billing StrictMode ownership", () => {
     }
   });
 
-  test("does not load the owner-only agent identity policy for an account administrator", async () => {
-    getCompanyProfileAgentPolicy.mockClear();
-    accountRole = "admin";
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
+  test("an organization admin loads the agent identity policy; a member does not", async () => {
+    for (const role of ["admin", "member"] as const) {
+      getCompanyProfileAgentPolicy.mockClear();
+      accountRole = role;
+      const container = document.createElement("div");
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <OrgSettingsRoute workspaceId={workspaceId} section="identity" />
+            </StrictMode>,
+          );
+        });
+        await flush();
 
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <OrgSettingsRoute workspaceId={workspaceId} section="identity" />
-          </StrictMode>,
-        );
-      });
-      await flush();
-
-      expect(getCompanyProfileAgentPolicy).not.toHaveBeenCalled();
-      expect(container.textContent).not.toContain("Agent learning");
-      expect(container.textContent).toContain(
-        "Only organization owners can change whether agents may update the identity",
-      );
-    } finally {
-      accountRole = "owner";
-      await act(async () => root.unmount());
-      container.remove();
+        if (role === "admin") {
+          expect(getCompanyProfileAgentPolicy).toHaveBeenCalled();
+          expect(container.textContent).toContain("Agent learning");
+        } else {
+          expect(getCompanyProfileAgentPolicy).not.toHaveBeenCalled();
+          expect(container.textContent).not.toContain("Agent learning");
+          expect(container.textContent).toContain("Organization identity is read-only for you.");
+        }
+      } finally {
+        accountRole = "owner";
+        await act(async () => root.unmount());
+        container.remove();
+      }
     }
   });
 
@@ -658,10 +697,8 @@ describe("organization billing StrictMode ownership", () => {
 
   test("keeps model connections unavailable to a key without account:admin", async () => {
     const priorMode = context.clientConfig.auth.mode;
-    const grant = context.accessContext.accountGrants[0]!;
-    const priorPermissions = grant.permissions;
     context.clientConfig.auth.mode = "deploymentKey";
-    grant.permissions = ["billing:read"];
+    accountPermissionsOverride = ["billing:read"];
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -683,7 +720,7 @@ describe("organization billing StrictMode ownership", () => {
       ).toBeNull();
     } finally {
       context.clientConfig.auth.mode = priorMode;
-      grant.permissions = priorPermissions;
+      accountPermissionsOverride = null;
       await act(async () => root.unmount());
       container.remove();
     }

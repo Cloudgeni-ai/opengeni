@@ -42,6 +42,11 @@ fn size(millis: u64) -> Size {
     Size::whole(GIB).with_cpu(millis)
 }
 
+/// How the sandboxes in these tests sleep: the host may save them.
+fn rules() -> SleepPolicy {
+    SleepPolicy::new(SleepRules::RECOMMENDED).unwrap()
+}
+
 struct Rig {
     host: Host,
     now: At,
@@ -82,13 +87,29 @@ impl Rig {
     }
 
     fn create_as(&mut self, id: u128, size: Size, remote: bool) -> CreateRoom {
-        let room =
-            self.host
-                .create_room(self.now, SandboxId(id), size, remote, DiskSpace::default());
+        self.create_with(id, size, rules(), remote)
+    }
+
+    fn create_with(
+        &mut self,
+        id: u128,
+        size: Size,
+        policy: SleepPolicy,
+        remote: bool,
+    ) -> CreateRoom {
+        let room = self.host.create_room(
+            self.now,
+            SandboxId(id),
+            size,
+            policy,
+            remote,
+            DiskSpace::default(),
+        );
         if room == CreateRoom::Fits {
             self.send(Input::Creating {
                 sandbox: SandboxId(id),
                 size,
+                policy,
                 remote,
                 until: self.now + BOOKED_FOR,
             });
@@ -101,6 +122,7 @@ impl Rig {
         self.send(Input::Creating {
             sandbox: SandboxId(id),
             size: Size::default(),
+            policy: SleepPolicy::NEVER,
             remote: false,
             until: self.now,
         });
@@ -110,7 +132,7 @@ impl Rig {
         self.send(Input::Add {
             sandbox: SandboxId(id),
             state,
-            policy: SleepPolicy::new(SleepRules::RECOMMENDED).unwrap(),
+            policy: rules(),
             size,
             last_activity: self.now,
         })
@@ -307,14 +329,27 @@ fn free_and_reclaimable_memory_are_what_a_create_could_take_and_no_more() {
     assert_eq!(rig.capacity().free(), 6 * GIB);
     assert_eq!(rig.host.reclaimable_memory(rig.now), 2 * GIB);
     assert_eq!(
-        rig.host
-            .create_room(rig.now, SandboxId(9), size(0), false, DiskSpace::default()),
+        rig.host.create_room(
+            rig.now,
+            SandboxId(9),
+            size(0),
+            rules(),
+            false,
+            DiskSpace::default()
+        ),
         CreateRoom::Fits
     );
     let more = Size::whole(8 * GIB + (1 << 20));
     assert_eq!(
         rig.host
-            .create_room(rig.now, SandboxId(9), more, false, DiskSpace::default())
+            .create_room(
+                rig.now,
+                SandboxId(9),
+                more,
+                rules(),
+                false,
+                DiskSpace::default()
+            )
             .short_of(),
         Some(Resource::Memory)
     );
@@ -420,6 +455,41 @@ fn a_create_books_the_disk_its_first_wake_needs() {
     assert_eq!(short, Some(Resource::Disk), "kept once it is added");
 }
 
+/// A sandbox the host never saves unasked, such as a CI runner, books no
+/// save for its first wake, only what its disk may grow by: it would
+/// otherwise book a save it never takes.
+#[test]
+fn a_create_the_host_never_saves_books_no_save() {
+    let mut rig = Rig::with(&HostPolicy {
+        disk: Some(DiskPolicy {
+            reserve: GIB,
+            reserve_inodes: 100,
+        }),
+        ..HostPolicy::default()
+    });
+    // Room for the reserve and 3 GiB more.
+    rig.send(Input::Disk {
+        available: DiskSpace {
+            bytes: 4 * GIB,
+            inodes: 1000,
+        },
+    });
+    let mut size = Size::whole(GIB);
+    size.disk = GIB;
+    // One the host saves books its save and its disk's growth, 2 GiB.
+    assert_eq!(rig.create(1, size), CreateRoom::Fits);
+    assert_eq!(rig.create(2, size).short_of(), Some(Resource::Disk));
+    // One it never saves books only its disk's growth, 1 GiB, which fits.
+    assert_eq!(
+        rig.create_with(3, size, SleepPolicy::NEVER, false),
+        CreateRoom::Fits
+    );
+    let short = rig
+        .create_with(4, size, SleepPolicy::NEVER, false)
+        .short_of();
+    assert_eq!(short, Some(Resource::Disk), "and keeps it booked");
+}
+
 /// A create short of disk by no more than what a booking that ended
 /// since the last reading stood for waits for the next reading, with what
 /// is written for it before it joins counted together with its first
@@ -446,7 +516,7 @@ fn a_create_that_may_fit_once_the_disk_is_read_awaits_the_reading() {
     };
     let room = |rig: &Rig, id: u128| {
         rig.host
-            .create_room(rig.now, SandboxId(id), whole, false, files)
+            .create_room(rig.now, SandboxId(id), whole, rules(), false, files)
     };
     // Its first files and its first wake's save, 2 GiB, fit.
     assert_eq!(room(&rig, 1), CreateRoom::Fits);
@@ -479,7 +549,7 @@ fn a_create_that_may_fit_once_the_disk_is_read_awaits_the_reading() {
     assert_eq!(rig.create(1, size(100)), CreateRoom::Fits);
     assert_eq!(
         rig.host
-            .create_room(rig.now, SandboxId(2), size(100), false, files),
+            .create_room(rig.now, SandboxId(2), size(100), rules(), false, files),
         CreateRoom::Short(Resource::Memory, GIB, 0)
     );
 }

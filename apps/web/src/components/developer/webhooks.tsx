@@ -2,7 +2,6 @@
 // its deliveries and Send test event, and the Add / Edit webhook form page.
 import type {
   IntegrationEndpointTestResult,
-  IntegrationWorkspaceFilter,
   WorkspaceInheritedIntegrationsResponse,
   WorkspaceWebhookDelivery,
   WorkspaceWebhookEventType,
@@ -67,7 +66,7 @@ import {
   type Load,
 } from "./shared";
 import { CodeSample, EndpointTestResult, WEBHOOKS_GUIDE_URL } from "./test-result";
-import { WorkspaceFilterField } from "./workspace-filter-field";
+import { WorkspaceFilterField, type RegistrationReach } from "./workspace-filter-field";
 import {
   DEFAULT_WEBHOOK_EVENTS,
   WEBHOOK_EVENT_GROUPS,
@@ -272,7 +271,7 @@ export function WebhooksSection({
               status={<HealthBadge health={health} variant="dot" />}
               description={
                 organization
-                  ? `${workspaceFilterLabel(webhook.workspaceFilter)} · ${webhookEventsSummary(webhook.eventTypes, 1)}`
+                  ? `${workspaceFilterLabel(webhook)} · ${webhookEventsSummary(webhook.eventTypes, 1)}`
                   : webhookEventsSummary(webhook.eventTypes, 1)
               }
               cells={{
@@ -580,9 +579,7 @@ export function WebhookPage({
         }
         meta={[
           <span key="events">{webhookEventsSummary(webhook.eventTypes)}</span>,
-          organization ? (
-            <span key="filter">{workspaceFilterLabel(webhook.workspaceFilter)}</span>
-          ) : null,
+          organization ? <span key="filter">{workspaceFilterLabel(webhook)}</span> : null,
           <span key="added" className="whitespace-nowrap">
             added {dateLabel(webhook.createdAt)}
           </span>,
@@ -636,9 +633,7 @@ export function WebhookPage({
               </ul>
             </DetailAsideItem>
             {organization ? (
-              <DetailAsideItem label="Workspaces">
-                {workspaceFilterLabel(webhook.workspaceFilter)}
-              </DetailAsideItem>
+              <DetailAsideItem label="Workspaces">{workspaceFilterLabel(webhook)}</DetailAsideItem>
             ) : null}
             <DetailAsideItem label="Signing secret">
               <span className="text-fg-muted">Shown once, when it was made.</span>
@@ -827,9 +822,11 @@ export function WebhookFormPage({
   const [events, setEvents] = useState<Set<WorkspaceWebhookEventType>>(
     () => new Set(current?.eventTypes ?? DEFAULT_WEBHOOK_EVENTS),
   );
-  const [filter, setFilter] = useState<IntegrationWorkspaceFilter | null>(
-    current?.workspaceFilter ?? null,
-  );
+  const [reach, setReach] = useState<RegistrationReach>({
+    filter: current?.workspaceFilter ?? null,
+    workspaceIds: current?.allowedWorkspaceIds ?? null,
+  });
+  const filter = reach.filter;
   const [errors, setErrors] = useState<{ url?: string; events?: string; filter?: string }>({});
   const [created, setCreated] = useState<{ webhook: IntegrationWebhook; secret: string } | null>(
     null,
@@ -839,7 +836,10 @@ export function WebhookFormPage({
     if (!current) return;
     setUrl(current.url);
     setEvents(new Set(current.eventTypes));
-    setFilter(current.workspaceFilter ?? null);
+    setReach({
+      filter: current.workspaceFilter ?? null,
+      workspaceIds: current.allowedWorkspaceIds ?? null,
+    });
   }, [current]);
 
   const back = { label: backLabel, onClick: onClose };
@@ -892,6 +892,9 @@ export function WebhookFormPage({
     if (organization && filter && !filter.externalSource.trim()) {
       nextErrors.filter = "Enter the external source, or send for every shared workspace.";
     }
+    if (organization && reach.workspaceIds?.length === 0) {
+      nextErrors.filter = "Pick at least one workspace.";
+    }
     setErrors(nextErrors);
     if (nextErrors.url || nextErrors.events || nextErrors.filter) return false;
     const eventTypes = WEBHOOK_EVENT_GROUPS.flatMap((group) => group.events)
@@ -907,7 +910,7 @@ export function WebhookFormPage({
         const updated = await api.updateWebhook(current.id, {
           url: trimmed,
           eventTypes,
-          ...(organization ? { workspaceFilter } : {}),
+          ...(organization ? { workspaceFilter, allowedWorkspaceIds: reach.workspaceIds } : {}),
         });
         toast("Webhook saved");
         onFinished(updated);
@@ -917,7 +920,7 @@ export function WebhookFormPage({
         await api.createWebhook({
           url: trimmed,
           eventTypes,
-          ...(organization ? { workspaceFilter } : {}),
+          ...(organization ? { workspaceFilter, allowedWorkspaceIds: reach.workspaceIds } : {}),
         }),
       );
       return true;
@@ -964,12 +967,13 @@ export function WebhookFormPage({
         </Field>
         {organization ? (
           <WorkspaceFilterField
-            value={filter}
+            value={reach}
             error={errors.filter}
             onChange={(next) => {
-              setFilter(next);
+              setReach(next);
               setErrors((value) => ({ ...value, filter: undefined }));
             }}
+            listWorkspaces={api.listSharedWorkspaces}
           />
         ) : null}
         <Field label="Events" group error={errors.events}>

@@ -484,6 +484,49 @@ export function recentSessionsForHome<T extends SessionListRow>(
   );
 }
 
+/** A chat the person opened in this app, as the app remembers it across reloads. */
+export type OpenedChat = Readonly<{ id: string; title: string; openedAt: number }>;
+
+/** One row of the home screen's recent sessions: a listed session, or a chat known only as opened. */
+export type RecentHomeEntry<T> =
+  | Readonly<{ kind: "session"; session: T }>
+  | Readonly<{ kind: "opened"; chat: OpenedChat }>;
+
+/**
+ * The home screen's recent sessions, led by the chats the person opened here
+ * most recently (newest first), then `recentSessionsForHome`'s pins, running
+ * and recency rows. In a busy workspace, other running sessions would
+ * otherwise fill every slot and hide the chat they just left. An opened chat
+ * the list also holds shows as that row, with its live status.
+ */
+export function recentSessionsWithOpened<T extends SessionListRow>(
+  t: OpenGeniText,
+  sessions: T[],
+  pinned: T[],
+  opened: readonly OpenedChat[],
+  limit = 6,
+  now: Date = new Date(),
+): RecentHomeEntry<T>[] {
+  const listed = new Map<string, T>();
+  for (const session of [...sessions, ...pinned]) listed.set(session.id, session);
+  const entries: RecentHomeEntry<T>[] = [];
+  const seen = new Set<string>();
+  for (const chat of opened) {
+    if (entries.length >= limit) break;
+    if (seen.has(chat.id)) continue;
+    seen.add(chat.id);
+    const session = listed.get(chat.id);
+    entries.push(session ? { kind: "session", session } : { kind: "opened", chat });
+  }
+  for (const session of recentSessionsForHome(t, sessions, pinned, limit, now)) {
+    if (entries.length >= limit) break;
+    if (seen.has(session.id)) continue;
+    seen.add(session.id);
+    entries.push({ kind: "session", session });
+  }
+  return entries;
+}
+
 /**
  * The phone home screen's chats in two sections: every pinned conversation,
  * then the most recently used others (running first, then by recency), so

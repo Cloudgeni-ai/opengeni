@@ -3,11 +3,10 @@ import { testSettings } from "@opengeni/testing/settings";
 import {
   startGoogleDriveOAuth,
   completeGoogleDriveOAuthCallback,
-  saveGoogleDriveFacetSource,
 } from "../src/integrations/google-drive";
 import { createSignedState } from "@opengeni/github";
 
-test("retired native OAuth and source authoring cannot create credentials even with configured clients", async () => {
+test("retired native OAuth cannot create credentials even with configured clients", async () => {
   const effects = new Proxy(
     {},
     {
@@ -23,7 +22,6 @@ test("retired native OAuth and source authoring cannot create credentials even w
   });
   const deps = { db: effects, settings } as any;
   await expect(startGoogleDriveOAuth(deps, {} as any)).rejects.toMatchObject({ status: 410 });
-  await expect(saveGoogleDriveFacetSource(deps, {} as any)).rejects.toMatchObject({ status: 410 });
 });
 
 test("signed states from another flow cannot redeem a native Google Drive grant", async () => {

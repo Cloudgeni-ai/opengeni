@@ -96,7 +96,9 @@ pub struct SleepRules {
 
 /// The longest a sandbox with no copy in object storage runs before its
 /// first checkpoint, whatever [`SleepRules::checkpoint_every`] says: until
-/// then, losing its host loses the sandbox, not only its latest changes.
+/// then, losing its host loses the sandbox, not only its latest changes,
+/// and it is its only copy, which runs on through a lapse of its host's
+/// lease (ADR 18 counts on this bound).
 pub const FIRST_CHECKPOINT: Duration = Duration::from_secs(60);
 
 impl SleepRules {
@@ -243,6 +245,17 @@ impl SleepPolicy {
     #[must_use]
     pub const fn sleeps(&self) -> bool {
         self.rules.pause_after.is_some()
+    }
+
+    /// Whether the host may save the sandbox's VM without being asked: to
+    /// put it to sleep, to relieve memory or to checkpoint it. A policy
+    /// that only checkpoints never saves unasked, but books a save all the
+    /// same, since its checkpoints' memory images land in that booking.
+    /// One the host never saves so, such as a CI runner's, is saved only by
+    /// an [`crate::Input::Sleep`] request, as a hand-off makes.
+    #[must_use]
+    pub const fn saves(&self) -> bool {
+        self.rules.save_after.is_some() || self.rules.checkpoint_every.is_some()
     }
 
     /// The next step that moves an unneeded sandbox in `state`, idle for
@@ -446,6 +459,14 @@ pub struct Outgrowth {
     /// request, or the kernel unable to hold a sandbox to its bound,
     /// before a shrink.
     pub hold: Duration,
+    /// How long a sandbox above its bound may go without coming down a
+    /// step while the engine is still bringing it down, before it counts
+    /// as one the kernel cannot hold: before the kernel compresses a VM
+    /// that has just written gigabytes it ages its pages, which on a busy
+    /// host takes many seconds before the first megabytes compress. Once
+    /// the engine has brought it down as far as the kernel takes, `hold`
+    /// counts instead.
+    pub descent: Duration,
     /// How long a guest has to answer a shrink before it counts as unable;
     /// the guest answers with what it managed well within it.
     pub answer: Duration,
@@ -464,6 +485,7 @@ impl Default for Outgrowth {
     fn default() -> Self {
         Self {
             hold: Duration::from_secs(10),
+            descent: Duration::from_secs(60),
             answer: Duration::from_secs(15),
             settle: Duration::from_secs(10),
             least: 256 << 20,

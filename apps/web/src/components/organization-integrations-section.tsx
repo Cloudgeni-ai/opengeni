@@ -279,17 +279,17 @@ function IntegrationPolicyEditor({ client, identity }: Props) {
               }
             />
             <SettingRow
-              label="Members can turn on integrations for their own accounts"
+              label="Members can turn on integrations"
               description={
                 personalSetup === "members"
-                  ? "When a member connects their own account to an allowed catalog integration, it turns on for everyone in that workspace to connect their own account. Custom connections still need an admin."
+                  ? "Members can turn on allowed integrations, add MCP servers and install plugins. Admins still choose which tools run without asking."
                   : "Only admins can turn integrations on. Members can still connect their own accounts to integrations that are already on."
               }
               control={
                 <Switch
                   checked={personalSetup === "members"}
                   disabled={locked}
-                  aria-label="Members can turn on integrations for their own accounts"
+                  aria-label="Members can turn on integrations"
                   onCheckedChange={(next) => {
                     setPersonalSetup(next ? "members" : "admins");
                     setMessage("");

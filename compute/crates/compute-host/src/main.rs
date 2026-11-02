@@ -711,6 +711,13 @@ async fn agent_main(cli: Cli) -> anyhow::Result<()> {
         Command::Sweep { store, delete } => {
             let chunked = Chunked::from_url(&store)?
                 .with_context(|| format!("{store} is not an object storage URL"))?;
+            // A sweep fences every pointer, on condition: the store must
+            // enforce conditions. A fleet's sweep runs from its control
+            // service, which keeps the pointers.
+            chunked
+                .check_pointers()
+                .await
+                .with_context(|| format!("{store} cannot keep pointers"))?;
             let report = chunked.sweep(delete).await?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
@@ -777,9 +784,19 @@ fn pool_config(args: &ServeArgs) -> Option<PoolConfig> {
     })
 }
 
+/// When a running sandbox counts as busy, if the host was told.
+fn busy_rule(args: &ServeArgs) -> Option<BusyRule> {
+    (args.busy_cpu_percent > 0 || args.busy_io_kib > 0).then_some(BusyRule {
+        cpu_percent: args.busy_cpu_percent,
+        io_bytes_per_second: args.busy_io_kib.saturating_mul(1024),
+        window: args.busy_window,
+    })
+}
+
 async fn run_serve(mut args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
     let network = args.take_network();
     let pool = pool_config(&args);
+    let busy = busy_rule(&args);
     let threads = args.threads();
     tracing::info!(?threads, "thread counts");
     let memory_profile = args.memory_profile.map_or_else(chosen_memory_profile, Ok)?;
@@ -839,6 +856,7 @@ async fn run_serve(mut args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         base_image: args.base_image,
         policy,
         sample_every,
+        first_wake_within: HostConfig::FIRST_WAKE_WITHIN,
         disk_reading: None,
         stream_idle: Duration::from_secs(args.stream_idle_secs),
         guest_ports: args.guest_ports,
@@ -848,11 +866,7 @@ async fn run_serve(mut args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         host_lock: Some(args.host_lock),
         pool,
         network,
-        busy: (args.busy_cpu_percent > 0 || args.busy_io_kib > 0).then_some(BusyRule {
-            cpu_percent: args.busy_cpu_percent,
-            io_bytes_per_second: args.busy_io_kib.saturating_mul(1024),
-            window: args.busy_window,
-        }),
+        busy,
         can_compress: !args.no_compress,
         // The running binary even once an upgrade has replaced its file,
         // so a pager always speaks its agent's protocol.
@@ -946,7 +960,14 @@ async fn run_with_store(
             .with_compress_threads(threads.compress)
             .with_watch(Arc::new(StoreAlarms(config.observer.clone())));
         if let Some((fleet, prepared)) = fleet {
-            let leased = Leased::new(chunked, prepared.gate.clone());
+            // The control service keeps a fleet's pointers (ADR 25), and
+            // what the host stores is named by the fleet's clock it tells.
+            let pointers = fleet.pointers(&prepared.gate)?;
+            let clock = pointers.clock();
+            let leased = Leased::new(
+                chunked.with_pointers(Arc::new(pointers)).with_clock(clock),
+                prepared.gate.clone(),
+            );
             return run_agent(
                 config,
                 engine,
@@ -957,6 +978,10 @@ async fn run_with_store(
             )
             .await;
         }
+        chunked
+            .check_pointers()
+            .await
+            .with_context(|| format!("{store} cannot keep this host's pointers"))?;
         return run_agent(config, engine, chunked, socket, canary, None).await;
     }
     anyhow::ensure!(

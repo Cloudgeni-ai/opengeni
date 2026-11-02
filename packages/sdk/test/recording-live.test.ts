@@ -6,6 +6,7 @@ import {
   resamplePcm16,
   type LiveFetch,
   type LiveMediaTrack,
+  type LiveTranscriptState,
   type LiveWebSocket,
 } from "../src/recording-live";
 
@@ -250,6 +251,52 @@ describe("live transcriber", () => {
     expect(api.saved.at(-1)!.streamedMilliseconds).toBe(200);
   });
 
+  test("the save made when recording stops is retried, so its last text and audio aren't lost", async () => {
+    for (const [failure, retried] of [
+      [Object.assign(new Error("Gateway timeout"), { status: 504 }), true],
+      [new TypeError("fetch failed"), true],
+      [
+        new OpenGeniApiError(
+          409,
+          JSON.stringify({ error: { code: "conflict", message: "No live transcript." } }),
+        ),
+        false,
+      ],
+    ] as const) {
+      FakeSocket.opened = [];
+      const api = client();
+      let failures = 1;
+      const flaky = {
+        ...api,
+        appendRecordingLiveSegments: async (
+          ...args: Parameters<typeof api.appendRecordingLiveSegments>
+        ) => {
+          if (failures-- > 0) throw failure;
+          return await api.appendRecordingLiveSegments(...args);
+        },
+      };
+      const live = createLiveTranscriber({
+        client: flaky,
+        workspaceId: "w",
+        recordingId: "r",
+        trackNumber: 1,
+        WebSocket: FakeSocket,
+      });
+      live.push(tenth(), 16_000, 0);
+      await settle();
+      FakeSocket.opened[0]!.open();
+      live.push(tenth(), 16_000, 100);
+      await live.close();
+      // The final save failed once; a passing failure is retried, a refusal isn't.
+      expect(api.saved.map((request) => request.streamedMilliseconds)).toEqual(
+        retried ? [200] : [],
+      );
+      if (retried) {
+        expect(api.saved[0]!.segments.map((segment) => segment.text)).toEqual(["See you."]);
+      }
+    }
+  });
+
   test("a missing provider key makes it unavailable without retrying", async () => {
     FakeSocket.opened = [];
     const api = client({
@@ -280,6 +327,121 @@ describe("live transcriber", () => {
     expect(live.snapshot.error?.code).toBe("credential_unavailable");
     expect(api.grants()).toBe(1);
     expect(FakeSocket.opened).toHaveLength(0);
+  });
+
+  test("no credits, a limit or a model not served here is final; a passing failure is retried", async () => {
+    const refusal = (status: number, code: string, retryable?: boolean) =>
+      new OpenGeniApiError(
+        status,
+        JSON.stringify({
+          error: {
+            code,
+            message: "The live transcript isn't available.",
+            ...(retryable === undefined ? {} : { retryable }),
+            details: { code },
+          },
+        }),
+      );
+    const cases: { error: OpenGeniApiError; state: LiveTranscriptState }[] = [
+      { error: refusal(402, "insufficient_credits", false), state: "unavailable" },
+      { error: refusal(429, "monthly_model_cost_limit", false), state: "unavailable" },
+      // A live model the deployment can't price while credits are billed.
+      { error: refusal(503, "unavailable", false), state: "unavailable" },
+      { error: refusal(503, "unavailable", true), state: "reconnecting" },
+      // The recording may not have reached the server yet.
+      { error: refusal(404, "not_found", false), state: "reconnecting" },
+    ];
+    for (const { error, state } of cases) {
+      FakeSocket.opened = [];
+      const api = client({ failFirstGrant: error });
+      const live = createLiveTranscriber({
+        client: api,
+        workspaceId: "w",
+        recordingId: "r",
+        trackNumber: 0,
+        WebSocket: FakeSocket,
+      });
+      live.push(tenth(), 16_000, 0);
+      await settle();
+      expect({ status: error.status, state: live.snapshot.state }).toEqual({
+        status: error.status,
+        state,
+      });
+      if (state === "unavailable") expect(live.snapshot.error?.code).toBe(error.code!);
+      live.abort();
+    }
+  });
+
+  test("a silent track reports its audio every minute, on pause and resume, and before asking again", async () => {
+    FakeSocket.opened = [];
+    const api = client();
+    const calls: string[] = [];
+    const live = createLiveTranscriber({
+      client: {
+        createRecordingLiveSession: async () => {
+          calls.push("grant");
+          return await api.createRecordingLiveSession();
+        },
+        appendRecordingLiveSegments: async (workspace, recording, request) => {
+          calls.push(`report ${request.streamedMilliseconds}`);
+          return await api.appendRecordingLiveSegments(workspace, recording, request);
+        },
+      },
+      workspaceId: "w",
+      recordingId: "r",
+      trackNumber: 0,
+      WebSocket: FakeSocket,
+    });
+    live.push(tenth(0), 16_000, 0);
+    await settle();
+    FakeSocket.opened[0]!.open();
+    // Silence: no text, so nothing to save but the audio streamed.
+    for (let at = 100; at < 60_000; at += 100) live.push(tenth(0), 16_000, at);
+    await settle();
+    expect(calls).toEqual(["grant", "report 60000"]);
+    live.push(tenth(0), 16_000, 60_000);
+    live.setPaused(true);
+    await settle();
+    live.setPaused(false);
+    await settle();
+    expect(calls.slice(2)).toEqual(["report 60100", "report 60100"]);
+    // The session drops; the next one is asked for only after a report.
+    FakeSocket.opened[0]!.close();
+    await new Promise((done) => setTimeout(done, 1_050));
+    live.push(tenth(0), 16_000, 60_100);
+    await settle();
+    expect(calls.slice(4)).toEqual(["report 60100", "grant"]);
+    expect(api.saved.every((request) => request.segments.length === 0)).toBe(true);
+    live.abort();
+  });
+
+  test("asks for no new session while paused, and asks again on resuming", async () => {
+    FakeSocket.opened = [];
+    const api = client();
+    const live = createLiveTranscriber({
+      client: api,
+      workspaceId: "w",
+      recordingId: "r",
+      trackNumber: 0,
+      WebSocket: FakeSocket,
+    });
+    live.push(tenth(0), 16_000, 0);
+    await settle();
+    FakeSocket.opened[0]!.open();
+    live.setPaused(true);
+    // The provider ends the session during the pause; audio arriving anyway
+    // asks for no new one.
+    FakeSocket.opened[0]!.close();
+    await new Promise((done) => setTimeout(done, 1_050));
+    live.push(tenth(0), 16_000, 100);
+    await settle();
+    expect(api.grants()).toBe(1);
+    live.setPaused(false);
+    live.push(tenth(0), 16_000, 200);
+    await settle();
+    await settle();
+    expect(api.grants()).toBe(2);
+    live.abort();
   });
 
   test("a dropped connection holds audio and reconnects with a new grant", async () => {

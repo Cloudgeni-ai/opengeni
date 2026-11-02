@@ -101,6 +101,10 @@ import {
   initialCustomApiFlowState,
 } from "@/components/capabilities/custom-api-flow";
 import { CustomApiSection } from "@/components/capabilities/custom-api-section";
+import {
+  OrganizationApiKeyDialog,
+  organizationApiKeyNoun,
+} from "@/components/capabilities/organization-api-key-dialog";
 import { featuredConnectors } from "@/components/capabilities/featured-connectors";
 import { useApiIntegrationOAuthCallback } from "@/components/capabilities/use-api-integration-accounts";
 import {
@@ -130,6 +134,7 @@ import { ListRow, RowList } from "@opengeni/react/ui/list-row";
 import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { PageHeader } from "@opengeni/react/ui/page-header";
 import { SECTION_TITLE_CLASS } from "@opengeni/react/ui/section";
+import { WindowBarTitleBoundary } from "@opengeni/react/ui/window-bar-title";
 import { cn } from "@opengeni/react/app/lib/utils";
 import { PrReviewAutomationCard } from "@/components/capabilities/pr-review-automation-card";
 import { Button } from "@opengeni/react/ui/button";
@@ -164,10 +169,16 @@ import {
   oauthCallbackReasonMessage,
 } from "@opengeni/react/app/lib/oauth-callback-messages";
 import {
+  markPersonalGitHubRepositoryChooser,
   personalGitHubOAuthFailureMessage,
   personalGitHubOAuthReturn,
 } from "@/lib/personal-github-oauth";
-import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import {
+  canAddWorkspaceIntegrations,
+  canChangeWorkspaceIntegrations,
+  canManageWorkspaceIntegrations,
+  hasWorkspacePermission,
+} from "@opengeni/react/app/lib/permissions";
 import { request } from "@/api";
 import { LoadErrorState } from "@opengeni/react/app/components/common";
 import { userErrorText } from "@opengeni/react/ui/api-error";
@@ -194,6 +205,7 @@ import type {
   CapabilityCatalogItem,
   ConnectionMetadata,
   ConnectionOwnership,
+  CreateConnectionRequest,
   SkillUninstallPreview,
 } from "@opengeni/react/app/types";
 
@@ -254,11 +266,21 @@ export function fetchOAuthReturnRows(
   return Promise.all([client.listCapabilities(workspaceId), fetchConnections()]);
 }
 
-export function canManageApiIntegrations(
+/**
+ * What the viewer may do with plugins and API integrations here, matching the
+ * API: members add (unless their organization keeps that for admins) and
+ * remove; changing what is already set up stays with integration admins.
+ */
+export function apiIntegrationAccess(
   accessContext: AccessContext | null,
   workspaceId: string,
-): boolean {
-  return hasWorkspacePermission(accessContext, workspaceId, "capabilities:manage");
+  memberIntegrationSetup?: "members" | "admins",
+): { add: boolean; manage: boolean; change: boolean } {
+  return {
+    add: canAddWorkspaceIntegrations(accessContext, workspaceId, memberIntegrationSetup),
+    manage: canManageWorkspaceIntegrations(accessContext, workspaceId),
+    change: canChangeWorkspaceIntegrations(accessContext, workspaceId),
+  };
 }
 
 type CapabilitiesRouteProps = {
@@ -304,6 +326,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     apiIntegrationInstances,
     socialConnections,
     slackInstallationBindings,
+    memberIntegrationSetup,
     loading,
     loadError,
     refresh,
@@ -454,6 +477,8 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     initialCustomApiFlowState,
   );
   const [customApiBusyKey, setCustomApiBusyKey] = useState<string | null>(null);
+  // An organization API where each person signs in, the person adding their own key.
+  const [ownKeyFor, setOwnKeyFor] = useState<ApiIntegrationInstallationSummary | null>(null);
   const [customApiRemoveTarget, setCustomApiRemoveTarget] = useState<{
     instance: ApiIntegrationInstallationSummary;
     removesDefinition: boolean;
@@ -511,12 +536,12 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   );
   const connectionsLoaded = connections !== null;
   const connectionsRetryable = connectionsLoadFailed && !connectionsAccessDenied;
-  const canManageApiIntegrationInstances = canManageApiIntegrations(
+  const integrationAccess = apiIntegrationAccess(
     context.accessContext,
     workspaceId,
+    memberIntegrationSetup,
   );
-  // Skills are shared team procedures that Members may install and manage;
-  // plugins can add connections and MCP servers and stay administrative.
+  // Skills are shared team procedures that Members may install and manage.
   const canManageSkills = hasWorkspacePermission(
     context.accessContext,
     workspaceId,
@@ -834,6 +859,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         selectedItem,
         context.accessContext?.workspaceGrants.find((grant) => grant.workspaceId === workspaceId),
         currentWorkspace?.kind,
+        memberIntegrationSetup,
       )
     : null;
   const selectedSetupUnavailable = selectedItem
@@ -1153,6 +1179,46 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     }
   }
 
+  // An organization's API is managed in its settings; a workspace manager
+  // only turns it off here or back on.
+  async function setOrganizationApiHere(
+    instance: ApiIntegrationInstallationSummary,
+    enabledHere: boolean,
+  ) {
+    setCustomApiBusyKey(instance.instanceKey);
+    try {
+      await client.setOrganizationApiIntegrationHere(workspaceId, instance.capabilityId, {
+        enabledHere,
+      });
+      await refresh();
+      onRuntimeChanged();
+      toast.success(
+        enabledHere ? `${instance.displayName} is on here` : `${instance.displayName} is off here`,
+        {
+          description: enabledHere
+            ? "Chats in this workspace can use it again."
+            : "Chats in this workspace stop using it. Your organization's other workspaces keep it.",
+        },
+      );
+    } catch (error) {
+      toast.error("Couldn't change it", { description: userErrorText(error) });
+    } finally {
+      setCustomApiBusyKey(null);
+    }
+  }
+
+  async function addOrganizationApiKey(connectionRequest: CreateConnectionRequest) {
+    if (!ownKeyFor) return;
+    const instance = ownKeyFor;
+    await client.createConnection(workspaceId, connectionRequest);
+    await refresh();
+    onRuntimeChanged();
+    setOwnKeyFor(null);
+    toast.success(`Your ${organizationApiKeyNoun(instance)} for ${instance.displayName} is added`, {
+      description: "Only you can use it.",
+    });
+  }
+
   async function removeCustomApiInstance(): Promise<boolean> {
     if (!customApiRemoveTarget) return false;
     const { instance } = customApiRemoveTarget;
@@ -1284,14 +1350,16 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     );
     setOpenIntegration("github", true);
     if (result.outcome === "success") {
+      // The GitHub page opens its repository chooser once the connection loads.
+      markPersonalGitHubRepositoryChooser(workspaceId);
       void context
         .refreshPersonalGitHub(workspaceId, undefined, { userInitiated: true })
         .then(() => {
-          toast.success("Your GitHub identity is connected");
+          toast.success("Your GitHub is connected");
         });
       return;
     }
-    toast.error("Couldn't connect your GitHub identity", {
+    toast.error("Couldn't connect your GitHub", {
       description: personalGitHubOAuthFailureMessage(result.reason),
     });
   }, [context, workspaceId, setOpenIntegration]);
@@ -1722,6 +1790,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
           workspaceId={workspaceId}
           items={items}
           connections={connections}
+          connectionsLoadFailed={connectionsRetryable}
           bindings={slackInstallationBindings}
           refresh={refresh}
           onRuntimeChanged={onRuntimeChanged}
@@ -1779,6 +1848,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         canManageSocial={canManageSocial}
         socialSetupAvailable={selectedSocialSetupAvailable}
         canManageSkills={canManageSkills}
+        canTurnOnOrOff={integrationAccess.change}
         onAction={(action) => void handleAction(action)}
         onConnectAccount={() => setAccountConnectOpen(true)}
         onRetryAuthInspection={
@@ -1904,25 +1974,33 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
           className="mx-auto w-full max-w-[1200px] px-4 pt-6 pb-[max(1.25rem,env(safe-area-inset-bottom))] sm:px-6 lg:px-8"
         >
           <LineTabs value={activeTab} onValueChange={setActiveTab} className="min-w-0">
-            <PageHeader
-              icon={<PlugIcon />}
-              title="Capabilities"
-              description="Tools, skills, and plugins your agents can use"
-              actions={
-                <div
-                  ref={setCatalogActionTarget}
-                  className="flex items-center gap-2 empty:hidden"
-                />
-              }
-              tabs={
-                <LineTabsList aria-label="Capability types">
-                  <LineTabsTrigger value="all">All</LineTabsTrigger>
-                  <LineTabsTrigger value="connections">Connections</LineTabsTrigger>
-                  <LineTabsTrigger value="skills">Skills</LineTabsTrigger>
-                  <LineTabsTrigger value="plugins">Plugins</LineTabsTrigger>
-                </LineTabsList>
-              }
-            />
+            {/*
+              The catalog stays mounted, hidden, under the pages it opens: its
+              header names the macOS window bar only until an open page does.
+              Only the header: skill, plugin and bundle pages render inside
+              this tree (portaled out) and take the bar.
+            */}
+            <WindowBarTitleBoundary fallback>
+              <PageHeader
+                icon={<PlugIcon />}
+                title="Capabilities"
+                description="Tools, skills, and plugins your agents can use"
+                actions={
+                  <div
+                    ref={setCatalogActionTarget}
+                    className="flex items-center gap-2 empty:hidden"
+                  />
+                }
+                tabs={
+                  <LineTabsList aria-label="Capability types">
+                    <LineTabsTrigger value="all">All</LineTabsTrigger>
+                    <LineTabsTrigger value="connections">Connections</LineTabsTrigger>
+                    <LineTabsTrigger value="skills">Skills</LineTabsTrigger>
+                    <LineTabsTrigger value="plugins">Plugins</LineTabsTrigger>
+                  </LineTabsList>
+                }
+              />
+            </WindowBarTitleBoundary>
             {(connectionsAccessDenied ||
               (context.accessContext?.workspaceGrants.some(
                 (grant) => grant.workspaceId === workspaceId,
@@ -2124,12 +2202,18 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                       <CustomApiSection
                         instances={visibleCustomApiInstances}
                         connections={connections}
-                        canManage={canManageApiIntegrationInstances}
+                        canAdd={integrationAccess.add}
+                        canManage={integrationAccess.manage}
+                        canChange={integrationAccess.change}
                         busyKey={customApiBusyKey}
                         onConnect={openCustomApi}
                         onUpdate={(instance) => editCustomApi(instance, "update")}
                         onReconnect={(instance) => editCustomApi(instance, "reconnect")}
                         onRemove={(instance) => void previewRemoveCustomApi(instance)}
+                        onAddOwnKey={setOwnKeyFor}
+                        onSetOrganizationHere={(instance, enabledHere) =>
+                          void setOrganizationApiHere(instance, enabledHere)
+                        }
                       />
                     ) : null}
 
@@ -2265,7 +2349,9 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                       workspaceId={workspaceId}
                       connections={connections}
                       canManage={canManageSkills}
-                      canManagePlugins={canManageApiIntegrationInstances}
+                      canManagePlugins={integrationAccess.manage}
+                      canInstallPlugins={integrationAccess.add}
+                      canUpdatePlugins={integrationAccess.change}
                       items={items}
                       logoUrl={logoUrl}
                       busyCatalogId={busyId}
@@ -2360,6 +2446,14 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
           onSubmit={submitAddCustom}
         />
 
+        <OrganizationApiKeyDialog
+          instance={ownKeyFor}
+          onOpenChange={(open) => {
+            if (!open) setOwnKeyFor(null);
+          }}
+          onAdd={addOrganizationApiKey}
+        />
+
         <ConfirmDialog
           open={customApiRemoveTarget !== null}
           onOpenChange={(open) => {
@@ -2384,7 +2478,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
           <CustomApiSetupDialog
             state={customApi}
             connections={connections}
-            canManage={canManageApiIntegrationInstances}
+            canManage={integrationAccess.add}
             onOpenChange={(open) => dispatchCustomApi({ type: open ? "open" : "close" })}
             onDraftChange={(patch) => dispatchCustomApi({ type: "draft", patch })}
             onPreview={() => void previewCustomApi()}

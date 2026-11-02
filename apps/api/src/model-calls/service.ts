@@ -9,6 +9,8 @@ import {
 } from "@opengeni/codex";
 import { codexUpstreamModelSlugs, type ConfiguredModel, type Settings } from "@opengeni/config";
 import {
+  API_CREDITS_REQUIRED_CODE,
+  BYOK_PAID_CREDIT_REQUIRED_CODE,
   modelCallProcessingResidency,
   type ModelCallProcessingResidencyV1,
   type EntitlementsPort,
@@ -69,6 +71,7 @@ import {
 import { XaiSubscriptionReloginRequired } from "@opengeni/xai-subscription";
 import { PendingUsageSettlements } from "./pending-usage-settlements";
 import {
+  billingOriginForAccessGrant,
   creditDebitAttributionForGrant,
   withAccessGrantSessionRlsContext,
 } from "../access-grant-rls";
@@ -165,11 +168,16 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
       const subscription = source.kind === "connected_subscription" ? source.provider : null;
       const chargesOpenGeniCredits = model.billing.metering === "opengeni_credits";
       const countsTowardTokenCap = model.billing.upstreamPayer === "deployment";
+      // The person's own key or subscription: pays the platform fee.
+      const byok = !chargesOpenGeniCredits && model.billing.upstreamPayer !== "deployment";
       // a call made by a live agent attempt (its grant was verified
       // by the attempt boundary) counts against that task's usage limit and is
       // refused once the limit is reached. Other callers have no task.
       const usageLimitSessionId = attemptSessionId(input.grant);
       const sourceId = `model_call:${input.requestId}`;
+      // Who pays: API work spends credits only, never plan credit. Decided
+      // before custody opens, so a failed read leaves no marker behind.
+      const billingOrigin = await billingOriginForAccessGrant(deps, input.grant);
       if (usageLimitSessionId) {
         if (pendingSettlements.full) {
           // Never drop a retained receipt to make room for another call.
@@ -216,12 +224,18 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
           chargesOpenGeniCredits,
           countsTowardTokenCap,
           subjectId: input.subjectId,
+          billingOrigin,
+          byok,
         });
         if (!admission.allowed) {
           throw new ModelCallError({
             status: admission.denial === "insufficient_credits" ? 402 : 429,
             type: "insufficient_quota",
-            code: admission.denial,
+            code: admission.apiCreditsRequired
+              ? API_CREDITS_REQUIRED_CODE
+              : admission.byokPaidCreditRequired
+                ? BYOK_PAID_CREDIT_REQUIRED_CODE
+                : admission.denial,
             message: admission.message,
           });
         }
@@ -326,6 +340,8 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
               logSettlementFailure(error);
             },
             debitMetadata: { modelCallId: input.requestId },
+            billingOrigin,
+            byok,
           }),
         ).catch(async (error: unknown) => {
           logSettlementFailure(error);

@@ -124,6 +124,8 @@ const context = new Proxy(
     githubStatusFailed: false,
     repoBusy: false,
     personalGitHubBusy: false,
+    personalGitHubStatus: { enabled: true, connection: null, reviewUrl: null },
+    personalGitHubSelection: null,
     workspaces: [],
     accessContext: {
       subjectId: "kit-person",
@@ -246,6 +248,22 @@ const CARDS: Record<string, { label: string; item: AuthNeededItem; ask: [string,
       ),
     }),
     ask: ["Open a PR with the fix.", "I need GitHub access for this repository. Connect it below."],
+  },
+  personalGitHub: {
+    label: "Your GitHub (not connected)",
+    item: notice("github-personal", {
+      providerDomain: "github.com",
+      capability: capability(
+        "api:github-personal",
+        "Your GitHub",
+        "api",
+        "Connect your GitHub so the pull request opens under your name.",
+      ),
+    }),
+    ask: [
+      "Open the PR as me.",
+      "Connect your GitHub below, then choose the repos I may use as you.",
+    ],
   },
   plugin: {
     label: "Plugin (Skills and an MCP server)",

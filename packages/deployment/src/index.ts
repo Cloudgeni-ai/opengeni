@@ -335,6 +335,11 @@ export const CREDIT_MARGIN_BPS_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE",
 ];
 
+/** Optional switch for credit billing of provider-hosted tools (default on). */
+export const PAID_HOSTED_TOOLS_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING",
+];
+
 /** Public workspace MCP OAuth rollout settings. The enable switch is
  * deployment-sensitive because OAuth needs a canonical managed/local human
  * session and one stable public issuer origin. */
@@ -2567,6 +2572,8 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_LEGAL_PRIVACY_POLICY_URL", env.OPENGENI_LEGAL_PRIVACY_POLICY_URL),
     valueEnv("OPENGENI_LEGAL_TERMS_OF_SERVICE_URL", env.OPENGENI_LEGAL_TERMS_OF_SERVICE_URL),
     valueEnv("OPENGENI_SUPPORT_EMAIL", env.OPENGENI_SUPPORT_EMAIL),
+    valueEnv("OPENGENI_DATA_HOSTING_LOCATION", env.OPENGENI_DATA_HOSTING_LOCATION),
+    valueEnv("OPENGENI_LEGAL_SUBPROCESSORS_URL", env.OPENGENI_LEGAL_SUBPROCESSORS_URL),
     valueEnv("OPENGENI_INTEGRATIONS_ENABLED", env.OPENGENI_INTEGRATIONS_ENABLED),
     valueEnv("OPENGENI_INTEGRATIONS_STATE_SECRET", env.OPENGENI_INTEGRATIONS_STATE_SECRET),
     valueEnv("OPENGENI_MCP_OAUTH_ENABLED", env.OPENGENI_MCP_OAUTH_ENABLED),
@@ -2967,6 +2974,9 @@ function runtimeEnvValues(
   for (const key of CREDIT_MARGIN_BPS_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
+  for (const key of PAID_HOSTED_TOOLS_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
 
   return dedupeRuntimeEnv(entries);
 }
@@ -3149,6 +3159,8 @@ function addRuntimeConfigHelmValues(
     "OPENGENI_LEGAL_PRIVACY_POLICY_URL",
     "OPENGENI_LEGAL_TERMS_OF_SERVICE_URL",
     "OPENGENI_SUPPORT_EMAIL",
+    "OPENGENI_DATA_HOSTING_LOCATION",
+    "OPENGENI_LEGAL_SUBPROCESSORS_URL",
     "OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS",
     "OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS",
     "OPENGENI_MCP_OAUTH_ENABLED",

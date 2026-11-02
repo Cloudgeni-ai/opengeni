@@ -5,7 +5,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::thread;
 use std::time::Duration;
 
@@ -19,6 +19,28 @@ const MEMORY_HIGH_LOOK: Duration = Duration::from_millis(20);
 
 /// The controllers a parent group hands its VMs' groups.
 const CONTROLLERS: &str = "+memory +cpu";
+
+/// The extended attribute on a VM's group that marks the VM its sandbox's
+/// only copy (see [`Cgroup::set_only_copy`]). Its value names the process
+/// that set it: its number and when it started, `<pid> <start>`.
+pub const ONLY_COPY: &str = "user.compute.only-copy";
+
+/// A VM's group's mark that the VM is its sandbox's only copy (see
+/// [`Cgroup::set_only_copy`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum OnlyCopy {
+    /// Not marked.
+    No,
+    /// Marked by a process that still runs: the agent that marked it,
+    /// which clears the mark before it makes any copy of the sandbox.
+    Yes,
+    /// Marked by a process that has ended, such as an agent that
+    /// restarted, or a mark this release cannot read. Nothing vouches for
+    /// it any more: an agent of an earlier release, which knows no marks,
+    /// may have made a copy of the sandbox since. It is not the sandbox's
+    /// only copy until the agent that runs now marks it again.
+    Orphaned,
+}
 
 /// One cgroup v2 directory.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -470,6 +492,58 @@ impl Cgroup {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             other => other,
         }
+    }
+
+    /// Marks the group's VM its sandbox's only copy, or clears the mark: no
+    /// copy of the sandbox is in object storage and the VM makes none, so
+    /// no other host can ever run it, and the host's guard leaves it
+    /// running when the host's lease runs out (see `compute_fleet::Group`).
+    /// The mark is the group's own, an extended attribute of its
+    /// directory: it goes with the group, and a group made again under the
+    /// same name starts without it. It names this process, and holds only
+    /// while this process runs ([`OnlyCopy::Orphaned`]): only the process
+    /// that keeps the promise, to clear it before any copy, vouches for
+    /// it. Clearing a mark that is not there, or of a group that is gone,
+    /// succeeds.
+    pub fn set_only_copy(&self, only: bool) -> io::Result<()> {
+        let dir = self.path.as_path();
+        if only {
+            let setter = this_process()?;
+            return rustix::fs::setxattr(
+                dir,
+                ONLY_COPY,
+                setter.as_bytes(),
+                rustix::fs::XattrFlags::empty(),
+            )
+            .map_err(io::Error::from);
+        }
+        match rustix::fs::removexattr(dir, ONLY_COPY) {
+            Ok(()) | Err(rustix::io::Errno::NODATA | rustix::io::Errno::NOENT) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// The group's mark that its VM is its sandbox's only copy (see
+    /// [`Self::set_only_copy`]). A group that does not exist has none.
+    /// Reads the mark, and the setter's procfs file.
+    pub fn only_copy(&self) -> io::Result<OnlyCopy> {
+        let mut value = [0_u8; 64];
+        let length = match rustix::fs::getxattr(self.path.as_path(), ONLY_COPY, &mut value[..]) {
+            Ok(length) => length,
+            Err(rustix::io::Errno::NODATA | rustix::io::Errno::NOENT) => return Ok(OnlyCopy::No),
+            // Longer than any mark this release sets.
+            Err(rustix::io::Errno::RANGE) => return Ok(OnlyCopy::Orphaned),
+            Err(error) => return Err(error.into()),
+        };
+        let setter = value
+            .get(..length)
+            .and_then(|value| std::str::from_utf8(value).ok())
+            .unwrap_or_default();
+        Ok(if runs(setter)? {
+            OnlyCopy::Yes
+        } else {
+            OnlyCopy::Orphaned
+        })
     }
 
     /// Asks the kernel to freeze every process in the group and its
@@ -1057,6 +1131,41 @@ fn enable_controllers(group: &Path) -> io::Result<()> {
 /// here.
 fn encloses(outer: &Path, inner: &Path) -> bool {
     !outer.as_os_str().is_empty() && inner.starts_with(outer)
+}
+
+/// This process as a mark of [`ONLY_COPY`] names it: `<pid> <start>`,
+/// its number and when it started, in clock ticks since boot, which no
+/// later process with the same number shares.
+fn this_process() -> io::Result<&'static str> {
+    static THIS: OnceLock<String> = OnceLock::new();
+    if let Some(this) = THIS.get() {
+        return Ok(this);
+    }
+    let own = fs::read_to_string("/proc/self/stat")?;
+    let started = crate::firecracker::process::start_time(&own)
+        .ok_or_else(|| io::Error::other("unreadable process start time"))?;
+    let this = format!("{} {started}", std::process::id());
+    Ok(THIS.get_or_init(|| this))
+}
+
+/// Whether the process a mark names (see [`this_process`]) runs: its
+/// number names a process that started then and has not ended. A mark
+/// that names no process this way names none that runs.
+fn runs(setter: &str) -> io::Result<bool> {
+    let mut fields = setter.split_ascii_whitespace();
+    let (Some(Ok(pid)), Some(Ok(started)), None) = (
+        fields.next().map(str::parse::<u32>),
+        fields.next().map(str::parse::<u64>),
+        fields.next(),
+    ) else {
+        return Ok(false);
+    };
+    let procfs = match fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(procfs) => procfs,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    Ok(crate::firecracker::process::running_since(&procfs) == Some(started))
 }
 
 #[cfg(test)]

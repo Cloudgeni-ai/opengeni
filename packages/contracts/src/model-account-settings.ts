@@ -108,6 +108,12 @@ export const OrganizationModelAccountSettings = /* @__PURE__ */ defineSchema(() 
     /** Pass back as `expectedVersion` to refuse a write over a concurrent change. */
     version: primitives.nonnegativeInteger,
     updatedAt: primitives.nullableString,
+    /**
+     * False when this deployment doesn't switch models when subscriptions run
+     * out, so `crossProviderFailover` has no effect here. Absent from older
+     * servers.
+     */
+    crossProviderFailoverAvailable: primitives.optionalBoolean,
   }),
 );
 export type OrganizationModelAccountSettings = z.infer<typeof OrganizationModelAccountSettings>;
@@ -158,6 +164,8 @@ export const WorkspaceModelAccountSettings = /* @__PURE__ */ defineSchema(() =>
     updatedAt: primitives.nullableString,
     /** Whether the caller may change this workspace's overrides. */
     canEdit: primitives.boolean,
+    /** As on the organization's settings: false when switching models is off here. */
+    crossProviderFailoverAvailable: primitives.optionalBoolean,
   }),
 );
 export type WorkspaceModelAccountSettings = z.infer<typeof WorkspaceModelAccountSettings>;

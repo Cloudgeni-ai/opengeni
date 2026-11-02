@@ -467,7 +467,7 @@ export function ModelContextInspectorPane(props: {
                   type="button"
                   data-instruction-section={row.key}
                   className={
-                    "group flex w-full min-w-0 items-center gap-3 border-b border-border py-3 text-left hover:bg-bg-muted focus-visible:outline focus-visible:outline-2 " +
+                    "group flex w-full min-w-0 items-center gap-3 border-b border-border py-3 text-left hover:bg-surface-2 focus-visible:outline focus-visible:outline-2 " +
                     (row.depth === 1 ? "pl-4" : "")
                   }
                   onClick={() => setInstructionSection(row.key)}

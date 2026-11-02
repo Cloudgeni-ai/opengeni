@@ -6,15 +6,17 @@ use std::future::{Future, ready};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use compute_fleet::{HostEpoch, HostId, HostState};
+use compute_fleet::{HostEpoch, HostId, HostState, Stamp};
 use compute_protocol::fleet::{Register, Renew, Report, Ruling};
 use compute_protocol::host::{Id, ImageId};
 
 use super::{
-    Admission, Admits, Collector, Counted, HostRow, Inserted, LifecycleRow, Linked, RequestRow,
-    Result, SandboxRow, Store, TemplateRow, Write, admits, rule,
+    Admission, Admits, Collector, Counted, Found, HostRow, Import, Imported, Inserted,
+    LifecycleRow, Linked, PointerRow, RequestRow, Result, SandboxRow, Store, TemplateRow, Write,
+    admits, rule,
 };
 
+mod pointers;
 mod templates;
 
 #[derive(Debug)]
@@ -46,6 +48,7 @@ struct Inner {
     templates: BTreeMap<(String, String), TemplateRow>,
     /// Every image captured for a template.
     captured: HashMap<ImageId, templates::Captured>,
+    pointers: pointers::Pointers,
     next_host: u64,
     next_host_epoch: u64,
     changes: u64,
@@ -126,6 +129,9 @@ impl MemoryStore {
 
     fn register_now(&self, register: &Register) -> Admission {
         let mut inner = self.lock();
+        if inner.outdated(register.capacity.pointers_in_service) {
+            return Admission::Outdated;
+        }
         let known = inner.by_name.get(&register.info.name).copied();
         let row = known
             .and_then(|id| inner.hosts.get(&id))
@@ -180,7 +186,7 @@ impl MemoryStore {
                     },
                     renewals,
                     seq: 0,
-                    capacity: register.capacity.clone(),
+                    capacity: register.capacity.split().0,
                     changed,
                 },
                 attempt: register.attempt,
@@ -201,6 +207,13 @@ impl MemoryStore {
 impl MemoryStore {
     fn renew_now(&self, renew: &Renew, names: &[String]) -> bool {
         let mut inner = self.lock();
+        if renew
+            .capacity
+            .as_ref()
+            .is_some_and(|capacity| inner.outdated(capacity.pointers_in_service))
+        {
+            return false;
+        }
         let changed = inner.changes + 1;
         let Some(row) = inner.current(renew.host, renew.epoch, names) else {
             return false;
@@ -209,7 +222,7 @@ impl MemoryStore {
         row.seq = row.seq.max(renew.seq);
         // A renewal without a capacity keeps the one last heard.
         if let Some(capacity) = &renew.capacity {
-            row.capacity = capacity.clone();
+            row.told(capacity);
         }
         row.changed = changed;
         inner.changes = changed;
@@ -218,11 +231,14 @@ impl MemoryStore {
 
     fn report_now(&self, report: &Report, names: &[String]) -> bool {
         let mut inner = self.lock();
+        if inner.outdated(report.capacity.pointers_in_service) {
+            return false;
+        }
         let changed = inner.changes + 1;
         let Some(row) = inner.current(report.host, report.epoch, names) else {
             return false;
         };
-        row.capacity = report.capacity.clone();
+        row.told(&report.capacity);
         row.changed = changed;
         inner.changes = changed;
         true
@@ -774,5 +790,63 @@ impl Store for MemoryStore {
     ) -> impl Future<Output = Result<()>> + Send {
         self.lock().collected(image, collector);
         ready(Ok(()))
+    }
+
+    fn registered(
+        &self,
+        epoch: u64,
+        names: &[String],
+    ) -> impl Future<Output = Result<bool>> + Send {
+        let inner = self.lock();
+        ready(Ok(inner.hosts.values().any(|host| {
+            host.row.epoch == HostEpoch(epoch)
+                && host.row.state != HostState::Lost
+                && names.contains(&host.row.info.name)
+        })))
+    }
+
+    fn pointer(&self, name: &str) -> impl Future<Output = Result<Option<PointerRow>>> + Send {
+        ready(Ok(self.lock().pointer(name)))
+    }
+
+    fn write_pointer(
+        &self,
+        name: &str,
+        owner: Stamp,
+        pointer: &[u8],
+        on: Option<i64>,
+    ) -> impl Future<Output = Result<Option<i64>>> + Send {
+        ready(Ok(self.lock().write_pointer(name, owner, pointer, on)))
+    }
+
+    fn pointer_names(&self) -> impl Future<Output = Result<Vec<String>>> + Send {
+        ready(Ok(self.lock().pointer_names()))
+    }
+
+    fn pointers_imported(&self) -> impl Future<Output = Result<Option<Imported>>> + Send {
+        ready(Ok(self.lock().pointers_imported()))
+    }
+
+    fn adopt_pointers(&self, found: &[Found]) -> impl Future<Output = Result<usize>> + Send {
+        ready(Ok(self.lock().adopt_pointers(found)))
+    }
+
+    fn clock_ms(&self) -> impl Future<Output = Result<u64>> + Send {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| {
+                u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+            });
+        ready(Ok(now))
+    }
+
+    fn import_pointers(
+        &self,
+        found: &[Found],
+        from: &str,
+        at_ms: u64,
+        seen: u64,
+    ) -> impl Future<Output = Result<Import>> + Send {
+        ready(Ok(self.lock().import_pointers(found, from, at_ms, seen)))
     }
 }

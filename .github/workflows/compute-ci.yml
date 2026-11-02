@@ -283,24 +283,32 @@ jobs:
         run: |
           df -h / /lab
           sudo du -xsh /lab/* 2>/dev/null | sort -h | tail -15
-      - name: Collect the conformance logs and results
+      - name: Collect the gate's logs and results
         if: failure()
         run: |
-          # Only its text: the directory also holds sockets and the test
-          # authority's key, which the upload cannot or should not take.
           out=$RUNNER_TEMP/conformance
           mkdir -p "$out"
+          # The lab and guest tests' results, a failed test's agent log and
+          # a failed step's whole output (ci/gate.sh RESULTS).
+          if [ -d /lab/gate-results ]; then
+            mkdir -p "$out/gate"
+            sudo find /lab/gate-results -type f -size -50M -exec cp {} "$out/gate" \;
+          fi
+          sudo chown -R "$(id -u):$(id -g)" "$out"
+          # Only the conformance suite's text: its directory also holds
+          # sockets and the test authority's key, which the upload cannot or
+          # should not take.
           [ -d /lab/t/e2b-conformance ] || exit 0
           cd /lab/t/e2b-conformance
           sudo find . -path ./clients/node_modules -prune -o -type f \
             \( -name '*.log' -o -name '*.json' -o -name '*.jsonl' -o -name '*.md' -o -name '*.txt' -o -name '*.xml' \) \
             -size -20M -exec cp --parents {} "$out" \;
           sudo chown -R "$(id -u):$(id -g)" "$out"
-      - name: Keep the conformance logs and results
+      - name: Keep the gate's logs and results
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: compute-conformance-${{ github.run_id }}
+          name: compute-gate-${{ github.run_id }}
           path: ${{ runner.temp }}/conformance
           if-no-files-found: ignore
           retention-days: 14

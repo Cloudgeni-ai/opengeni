@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { RunContext, tool } from "@openai/agents";
-import { parseSecretReference } from "@opengeni/contracts";
+import { parseSecretReference, type ResolvedAgentConfig } from "@opengeni/contracts";
 import { maskSecretValuesForStorage } from "@opengeni/db";
 import {
   installToolResultSecretMasking,
@@ -9,6 +9,7 @@ import {
 } from "@opengeni/runtime";
 import { createStaticSecretResolver } from "@opengeni/vaults/testing";
 import { z } from "zod";
+import { taskVaultSecretCaptureEnabled } from "../src/activities/agent-turn/secret-resolver";
 import {
   createAttemptSecretValueMemory,
   currentAttemptSecretValues,
@@ -217,5 +218,33 @@ describe("secret-shaped values in tool output", () => {
       const shown = String(await invokeFirst(agent));
       expect(shown).toContain("postgres://user:[masked url password]@host:5432/db");
     });
+  });
+});
+
+describe("task vault capture eligibility", () => {
+  const secretsOff = { capabilities: { secrets: false } } as unknown as ResolvedAgentConfig;
+  const secretsOn = { capabilities: { secrets: true } } as unknown as ResolvedAgentConfig;
+
+  test("a session narrowed to permissions without secrets has no task vault to save into", () => {
+    expect(taskVaultSecretCaptureEnabled(secretsOn, ["sessions:read", "files:write"])).toBe(false);
+    expect(taskVaultSecretCaptureEnabled(null, [])).toBe(false);
+  });
+
+  test("any secret-using permission, or no narrowing, keeps saving", () => {
+    for (const permission of [
+      "secrets:use",
+      "variable-sets:use",
+      "variable-sets:attach",
+      "environments:use",
+    ]) {
+      expect(taskVaultSecretCaptureEnabled(secretsOn, ["sessions:read", permission])).toBe(true);
+    }
+    expect(taskVaultSecretCaptureEnabled(secretsOn, null)).toBe(true);
+    expect(taskVaultSecretCaptureEnabled(undefined, undefined)).toBe(true);
+  });
+
+  test("the secrets capability off never saves", () => {
+    expect(taskVaultSecretCaptureEnabled(secretsOff, null)).toBe(false);
+    expect(taskVaultSecretCaptureEnabled(secretsOff, ["secrets:use"])).toBe(false);
   });
 });

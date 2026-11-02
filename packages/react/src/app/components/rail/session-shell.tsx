@@ -1,4 +1,4 @@
-import { requestSessionArchive, useArchiveConfirmation } from "../../lib/archive-session";
+import { requestSessionArchive } from "../../lib/archive-session";
 // The session shell every session surface renders: the left rail (fixed and
 // resizable on desktop, an overlay drawer on phones), the canvas top strip with
 // the session header on session routes, and the canvas itself. Surface-owned
@@ -59,11 +59,8 @@ import { TooltipProvider } from "../../../ui/tooltip";
 import { Link, useNavigate, useRouterState } from "../../lib/navigation";
 import { useWorkspaceModelCatalog } from "../../lib/use-workspace-model-catalog";
 import { desktopPlatform } from "../../lib/desktop";
-import {
-  chatHeaderInWindowBar,
-  isSessionRoutePath,
-  useWindowBarRowLeft,
-} from "../../lib/window-bar-row";
+import { chatHeaderInWindowBar, isSessionRoutePath } from "../../lib/window-bar-row";
+import { useWindowBarRow, WindowBarPageTitle, windowBarRowActive } from "../window-bar";
 import { useAppContext } from "../../app-context";
 import { isPersonalWorkspace } from "../../lib/managed-self-context";
 import { isIntelligenceEffort } from "../../lib/session-tools";
@@ -290,7 +287,11 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
     pathname,
   });
   const canvasRef = useRef<HTMLDivElement | null>(null);
-  useWindowBarRowLeft(canvasRef, headerInWindowBar);
+  // Every other page's title line is the bar's row instead, as on a chat.
+  const pageTitleInWindowBar =
+    windowBarRowActive({ platform: desktopPlatform, mobile: rail.isMobile }) &&
+    !isSessionRoutePath(pathname);
+  const windowBarRow = useWindowBarRow(canvasRef, headerInWindowBar || pageTitleInWindowBar);
   // Focus returns here when the mobile drawer closes (D9.1): the drawer is a
   // controlled Sheet with no in-tree trigger, so radix can't restore focus on
   // its own — we point it back at the hamburger that opened it.
@@ -410,14 +411,16 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
         <div
           ref={canvasRef}
           data-canvas
-          data-window-bar-row={headerInWindowBar ? "" : undefined}
+          {...windowBarRow}
           className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
         >
-          <SessionStartupProvider session={context.session}>
-            <CanvasTopStrip hamburgerRef={hamburgerRef} />
-            {canvasBanners}
-            <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">{children}</div>
-          </SessionStartupProvider>
+          <WindowBarPageTitle enabled={pageTitleInWindowBar}>
+            <SessionStartupProvider session={context.session}>
+              <CanvasTopStrip hamburgerRef={hamburgerRef} />
+              {canvasBanners}
+              <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">{children}</div>
+            </SessionStartupProvider>
+          </WindowBarPageTitle>
         </div>
       </div>
     </TooltipProvider>
@@ -552,16 +555,13 @@ function SessionRouteHeader({
   const catalog = useWorkspaceModelCatalog(session.workspaceId);
   const selectedRow = findPickerRow(catalog.rows, displayModelId);
   const policyLoading = lastStarted.loading || catalog.loading;
-  const accountProvider = subscriptionAccountProvider(
-    displayModelId,
-    selectedRow?.catalog.credentialSource,
-  );
+  const accountProvider = subscriptionAccountProvider(displayModelId, selectedRow?.catalog);
   const repliesMute = useSessionRepliesMute(session);
   const sessionAdminAccess = useSessionAdminAccess(session);
   const adminAccess = useSessionUiFeature("adminAccess") ? sessionAdminAccess : null;
   const dock = useSessionUiFeature("dock");
-  const confirmArchive = useArchiveConfirmation();
   const archiveInFlight = useRef(false);
+  const onArchiveRef = useRef<((target: Session, archived: boolean) => Promise<void>) | null>(null);
   const onArchive = useCallback(
     async (target: Session, archived: boolean) => {
       if (archiveInFlight.current) return;
@@ -573,8 +573,8 @@ function SessionRouteHeader({
           context,
           target,
           archived,
-          confirmArchive,
           sessionDisplayTitle(target),
+          () => void onArchiveRef.current?.(target, false),
         );
         if (!updated) return;
         if (!context.ownsWorkspaceInvocation(target.workspaceId, accepted)) return;
@@ -588,18 +588,18 @@ function SessionRouteHeader({
           sessionId: target.id,
           archived: updated.archived,
         });
-        toast.success(updated.archived ? "Chat archived." : "Chat restored.");
       } catch (error) {
         if (!context.ownsWorkspaceInvocation(target.workspaceId, accepted)) return;
-        toast.error(archived ? "Couldn't archive the chat." : "Couldn't restore the chat.", {
+        toast.error(archived ? "Couldn't archive the chat." : "Couldn't undo the archive.", {
           description: errorMessage(error),
         });
       } finally {
         archiveInFlight.current = false;
       }
     },
-    [context, confirmArchive],
+    [context],
   );
+  onArchiveRef.current = onArchive;
 
   return (
     <SessionHeader

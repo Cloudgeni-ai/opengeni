@@ -10,13 +10,21 @@ import {
   type ConnectNavigation,
   type ConnectOwnership,
 } from "@opengeni/connect";
-import { OpenGeniApiError, type CapabilityCatalogItem } from "@opengeni/sdk";
+import {
+  OpenGeniApiError,
+  type CapabilityCatalogItem,
+  type ConnectionMetadata,
+} from "@opengeni/sdk";
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
 import { useEffect, useRef, useState } from "react";
 import { ConnectCardMessage } from "../connect-card-message";
 import { attemptHint, type ConnectWindowHost } from "../connect-window-host";
 import { useConnect, type ConnectView } from "../hooks/use-connect";
 import { matchingActiveMcpConnections } from "../mcp-connection-status";
+import {
+  ownLoginOffHere,
+  turnOnOwnLoginHere,
+} from "../app/components/capabilities/own-login-turned-on";
 import { useOpenGeniText } from "../messages/runtime";
 import {
   attachSessionCapability,
@@ -50,6 +58,11 @@ export type McpCapabilityConnect = {
   complete: boolean;
   /** An account is connected; the capability still has to be added here. */
   connected: boolean;
+  /**
+   * Your own login for this, added in another workspace and not turned on in
+   * this one: the card asks once whether to use it here too (D-54).
+   */
+  offHere: ConnectionMetadata | null;
   waiting: boolean;
   reconciling: boolean;
   busy: boolean;
@@ -64,6 +77,8 @@ export type McpCapabilityConnect = {
   open: () => void;
   signIn: () => void;
   addHere: () => void;
+  /** Turn `offHere` on in this workspace, then add it here like `addHere`. */
+  useHere: () => void;
   close: () => void;
   stopWaiting: () => void;
 };
@@ -119,6 +134,7 @@ export function useMcpCapabilityConnect({
   const [expanded, setExpanded] = useState(dialogOnly);
   const [complete, setComplete] = useState(false);
   const [connected, setConnected] = useState(false);
+  const [offHere, setOffHere] = useState<ConnectionMetadata | null>(null);
   const [waiting, setWaiting] = useState(false);
   const [reconciling, setReconciling] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -193,6 +209,7 @@ export function useMcpCapabilityConnect({
     )
       setOwnership("personal");
     let accountReady = false;
+    let ownLoginElsewhere: ConnectionMetadata | null = null;
     if (resolved.enabled && resolved.connectionRef) {
       const connections =
         resolved.connectionRef.subjectScope === "subject"
@@ -200,7 +217,9 @@ export function useMcpCapabilityConnect({
           : await client.listConnections(workspaceId);
       if (invocation.signal.aborted || lifetime.current !== invocation || !active()) return null;
       const matches = matchingActiveMcpConnections(resolved, connections);
-      accountReady = matches.length === 1;
+      const usableHere = matches.filter((entry) => !ownLoginOffHere(entry));
+      accountReady = usableHere.length === 1;
+      if (usableHere.length === 0) ownLoginElsewhere = matches.find(ownLoginOffHere) ?? null;
     }
     if (invocation.signal.aborted || lifetime.current !== invocation || !active()) return null;
     const selected =
@@ -208,6 +227,7 @@ export function useMcpCapabilityConnect({
         ? session.effectiveToolPolicy?.selectedIds
         : session?.tools.filter((tool) => tool.kind === "mcp").map((tool) => tool.id);
     setConnected(accountReady);
+    setOffHere(ownLoginElsewhere);
     setComplete(
       accountReady &&
         !!selected &&
@@ -530,7 +550,11 @@ export function useMcpCapabilityConnect({
     if (capability.connectionRef?.subjectScope === "subject") {
       const accounts = await client.listOwnConnectionAccounts(workspaceId);
       if (!active()) return;
-      if (matchingActiveMcpConnections(capability, accounts).length === 0)
+      if (
+        matchingActiveMcpConnections(capability, accounts).filter(
+          (entry) => !ownLoginOffHere(entry),
+        ).length === 0
+      )
         throw new ConnectCardMessage(
           t("sessionMcpCapabilityCard.yourAccountNeedsReconnectionBefore"),
         );
@@ -549,6 +573,22 @@ export function useMcpCapabilityConnect({
     await run(async (active) => {
       if (item) await finishConnection(item, active);
     });
+  }
+
+  async function useHere() {
+    let finished = false;
+    await run(async (active) => {
+      const login = offHere;
+      if (!item || !login) return;
+      await turnOnOwnLoginHere(client, workspaceId, login);
+      if (!active()) return;
+      setOffHere(null);
+      setConnected(true);
+      await finishConnection(item, active);
+      finished = true;
+    });
+    // Started from the closed card: open it so a failure is shown, not lost.
+    if (!finished && current()) setExpanded(true);
   }
 
   function close() {
@@ -583,6 +623,7 @@ export function useMcpCapabilityConnect({
     expanded,
     complete,
     connected,
+    offHere,
     waiting,
     reconciling,
     busy,
@@ -596,6 +637,7 @@ export function useMcpCapabilityConnect({
     open: () => void open(),
     signIn,
     addHere: () => void addHere(),
+    useHere: () => void useHere(),
     close,
     stopWaiting: () => authorization.current?.abort(new ConnectPopupClosedError()),
   };

@@ -125,6 +125,22 @@ class Fixture implements CuaDesktopRuntime {
   }
 }
 
+test("friendly cursor metadata never replaces the private control-session keys", async () => {
+  const runtime = new Fixture();
+  const first = await CuaComputerBackend.open(runtime, "macos", {
+    cursorIdentity: { label: "Research", avatarPng: "aWNvbg==" },
+  });
+  const second = await CuaComputerBackend.open(runtime, "macos", {
+    cursorIdentity: { label: "Research" },
+  });
+  const starts = runtime.calls.filter((call) => call.name === "start_session");
+  expect(starts[0]!.args.cursor_identity).toEqual({ label: "Research", avatar_png: "aWNvbg==" });
+  expect(starts[1]!.args.cursor_identity).toEqual({ label: "Research" });
+  expect(starts[0]!.args.session).not.toBe(starts[1]!.args.session);
+  await first.close();
+  await second.close();
+});
+
 class LinuxPermissionsFixture extends Fixture {
   async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
     if (name === "check_permissions") return result({ atspi: true, x11: true });
@@ -1096,6 +1112,80 @@ describe("CUA desktop boundary", () => {
       await click("confirmed click");
       await invoke("confirmed invoke");
       expect(reported).toEqual(["click", "key", "invoke"]);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("typing right after a click goes to the clicked point when accessibility shows no focused field", async () => {
+    // A Simulator device (or a sign-in sheet in one) is drawn outside the
+    // window's accessibility tree: the field a click focused is not seen as
+    // focused, and CUA refuses typing at the window without a point.
+    class OpaqueFieldFixture extends Fixture {
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+        if (name === "type_text" && args.x === undefined) {
+          this.calls.push({ name, args });
+          return result(
+            { effect: "refused", code: "no_focused_text_input", reason: "CUA's own reason" },
+            true,
+          );
+        }
+        return await super.callTool(name, argumentsJson);
+      }
+    }
+    const fixture = new OpaqueFieldFixture();
+    fixture.mutation = result({ effect: "unverifiable", route: "synthetic_events" });
+    const backend = await CuaComputerBackend.open(fixture, "macos");
+    try {
+      const target = (await backend.targets())[0]!;
+      const click = async () => {
+        const frame = await backend.capture(target.id);
+        await backend.dispatch({
+          ...command(await backend.observe(target.id)),
+          expectedFrameId: frame.frameId,
+          action: { type: "pointer", action: "click", frameId: frame.frameId, x: 30, y: 40 },
+        });
+      };
+      const type = async (value: string) =>
+        await backend.dispatch({
+          ...command(await backend.observe(target.id)),
+          action: { type: "keyboard", action: "type", value },
+        });
+      const typed = () => fixture.calls.filter((call) => call.name === "type_text");
+
+      await click();
+      await type("person@example.test");
+      expect(typed().map((call) => [call.args.text, call.args.x, call.args.y])).toEqual([
+        ["person@example.test", undefined, undefined],
+        ["person@example.test", 30, 40],
+      ]);
+      expect(typed()[1]!.args).not.toHaveProperty("element_token");
+      expect(typed()[1]!.args).toMatchObject({ window_id: 1, delivery_mode: "background" });
+
+      // The click is used once: typing again has no point to go to.
+      const before = typed().length;
+      const refusal = {
+        code: "invalid_action",
+        dispatched: false,
+        message: expect.stringContaining(
+          "click it with a pointer action and then type as the next action in this window",
+        ),
+      };
+      await expect(type("again")).rejects.toMatchObject(refusal);
+      expect(typed().length).toBe(before + 1);
+
+      // Another action after the click: its point no longer says where the
+      // focus is, so nothing is typed there.
+      await click();
+      await backend.dispatch({
+        ...command(await backend.observe(target.id)),
+        action: { type: "keyboard", action: "press", value: "Tab" },
+      });
+      await expect(type("later")).rejects.toMatchObject(refusal);
+      expect(typed().every((call) => call.args.text !== "later" || call.args.x === undefined)).toBe(
+        true,
+      );
     } finally {
       await backend.close();
     }
@@ -3049,7 +3139,8 @@ describe("CUA desktop boundary", () => {
       }
     }
 
-    // An app that opens no window leaves the action's own target observed.
+    // An app that opens no window observes nothing: the action's own target
+    // (another app's window) is never passed off as the launched app's.
     const fixture = new Fixture();
     const original = fixture.callTool.bind(fixture);
     fixture.callTool = async (name, json) =>
@@ -3063,7 +3154,7 @@ describe("CUA desktop boundary", () => {
         ...command(observation),
         action: { type: "launch", applicationId: "Menu Bar Helper" },
       });
-      expect(launched?.target.id).toBe(target.id);
+      expect(launched).toBeNull();
       // It waits out the window wait, and no longer.
       expect(Date.now() - started).toBeGreaterThanOrEqual(300);
       expect(Date.now() - started).toBeLessThan(2_000);
@@ -3096,6 +3187,52 @@ describe("CUA desktop boundary", () => {
       await waiting.close();
     }
   }, 20_000);
+
+  test("a launch from one of the app's windows observes that window", async () => {
+    // An app already running shows a window someone else works in (9), which
+    // launch_app reports first, and the caller's own window (10).
+    const theirs = { pid: 77, window_id: 9, title: "Theirs", app_name: "Editor" };
+    const mine = { pid: 77, window_id: 10, title: "Mine", app_name: "Editor" };
+    const fixture = new Fixture();
+    const original = fixture.callTool.bind(fixture);
+    fixture.callTool = async (name, json) => {
+      const args = JSON.parse(json) as Record<string, unknown>;
+      if (name === "launch_app") return result({ pid: 77, windows: [theirs] });
+      const response = await original(name, json);
+      if (name === "list_windows") {
+        const data = JSON.parse(response.structuredJson!);
+        data.windows.push(
+          { ...theirs, bounds: { x: 400, y: 50, width: 200, height: 100 } },
+          { ...mine, bounds: { x: 700, y: 50, width: 200, height: 100 } },
+        );
+        response.structuredJson = JSON.stringify(data);
+      }
+      if (name === "get_window_state" && args.pid === 77) {
+        const data = JSON.parse(response.structuredJson!);
+        Object.assign(data, { pid: 77, window_id: args.window_id });
+        response.structuredJson = JSON.stringify(data);
+      }
+      return response;
+    };
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      const own = await backend.observe("cua:window:77:10");
+      const fromOwn = await backend.dispatch({
+        ...command(own),
+        action: { type: "launch", applicationId: "com.example.Editor" },
+      });
+      expect(fromOwn?.target.id).toBe("cua:window:77:10");
+      // From another app's window, the window the launch reported comes first.
+      const other = await backend.observe("cua:window:42:1");
+      const fromOther = await backend.dispatch({
+        ...command(other),
+        action: { type: "launch", applicationId: "com.example.Editor" },
+      });
+      expect(fromOther?.target.id).toBe("cua:window:77:9");
+    } finally {
+      await backend.close();
+    }
+  });
 
   test("a launch observes the app's own window before a window lying within it", async () => {
     // A document app launching to its Open panel reports the panel's
@@ -4052,7 +4189,12 @@ describe("CUA desktop boundary", () => {
 
     test("a CUA whose run_steps cannot stop at a stale token runs batches one action at a time", async () => {
       for (const listToolsJson of [
-        async () => JSON.stringify({ tools: CUA_WINDOWS_DESKTOP_TOOLS }),
+        async () => {
+          const tools = structuredClone(CUA_WINDOWS_DESKTOP_TOOLS);
+          const batchTool = tools.find((tool) => tool.name === "run_steps")!;
+          delete (batchTool.inputSchema.properties as Record<string, unknown>).refind_stale;
+          return JSON.stringify({ tools });
+        },
         undefined,
       ]) {
         const fixture = new BatchFixture();
@@ -4064,6 +4206,18 @@ describe("CUA desktop boundary", () => {
         } finally {
           await backend.close();
         }
+      }
+    });
+
+    test("the pinned Windows worker supports stale-fenced native batches", async () => {
+      const fixture = new BatchFixture();
+      fixture.listToolsJson = async () => JSON.stringify({ tools: CUA_WINDOWS_DESKTOP_TOOLS });
+      const backend = await CuaComputerBackend.open(fixture, "windows");
+      try {
+        expect(backend.initialCapabilities.actionBatches).toBe(true);
+        expect((await backend.capabilities()).actionBatches).toBe(true);
+      } finally {
+        await backend.close();
       }
     });
 

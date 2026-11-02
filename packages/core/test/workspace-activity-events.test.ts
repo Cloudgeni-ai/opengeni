@@ -39,6 +39,9 @@ describe("This workspace event types", () => {
     expect(workspaceEventTypesNotOffered()).toEqual([
       "session.status.changed",
       "session.notification.withdrawn",
+      "session.agentCall.ringing",
+      "session.agentCall.settled",
+      "turn.superseded",
     ]);
     expect(workspaceEventTypeCatalog().map((entry) => entry.type)).toEqual(
       WORKSPACE_WEBHOOK_EVENT_TYPES.filter(

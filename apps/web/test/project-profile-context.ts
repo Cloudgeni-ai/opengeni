@@ -277,3 +277,5 @@ export function useRail() {
     startNewSession: () => {},
   };
 }
+// The settings shell reads the rail where it may be absent; here it is present.
+export const useOptionalRail = useRail;

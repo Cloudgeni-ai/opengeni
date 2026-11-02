@@ -5,6 +5,8 @@ import { Button } from "../../../ui/button";
 import type { SessionFailureSummary } from "../../lib/events";
 import { failedSessionCopy } from "../../lib/failed-session-copy";
 import type { FreeCreditGap } from "../../lib/free-credit-gap";
+import { creditRefusalHeadline, type CreditRefusalKind } from "../../../lib/format";
+import { t } from "../../lib/console-text";
 import { analyticsAction } from "../../../ui/analytics-actions";
 import {
   noteTurnFailureAction,
@@ -27,6 +29,7 @@ const NO_SUBSCRIPTIONS: ConnectableSubscriptions = { codex: false, supergrok: fa
 export function FailedSessionBanner({
   failure,
   creditExhausted,
+  creditRefusal: stopRefusal,
   freeCreditGap = null,
   onChooseModel,
   workspaceId,
@@ -48,6 +51,8 @@ export function FailedSessionBanner({
   /** Stable identity of this failure for the consent-gated recovery journey. */
   analyticsKey?: string | undefined;
   creditExhausted?: boolean | undefined;
+  /** The one-fix refusal the last turn ended on (`creditRefusalFromEvents`), if known. */
+  creditRefusal?: CreditRefusalKind | null | undefined;
   /** Free credit remains for other models but not this one. */
   freeCreditGap?: FreeCreditGap | null | undefined;
   /** Select a model in the composer; offered for a covered model after a free-credit gap. */
@@ -89,11 +94,19 @@ export function FailedSessionBanner({
   const billingFailure = creditExhausted && !structuralFailure;
   const chooseModel = canChooseModel && !structuralFailure;
   const creditGap = billingFailure ? freeCreditGap : null;
-  const { reason, unavailableModel, retryUnhelpful, detail, dailyLimit, compaction } =
-    failedSessionCopy(failure, billingFailure, modelChanged, chooseModel, creditGap);
-  // Offer the switch until the composer selects a model that can run.
+  const {
+    reason,
+    unavailableModel,
+    retryUnhelpful,
+    detail,
+    dailyLimit,
+    compaction,
+    creditRefusal,
+  } = failedSessionCopy(failure, billingFailure, modelChanged, chooseModel, creditGap, stopRefusal);
+  // Offer the switch until the composer selects a model that can run. An
+  // own-key or API stop has one fix, never another model.
   const switchTo =
-    creditGap && !creditGap.selectionUsable && chooseModel && onChooseModel
+    !creditRefusal && creditGap && !creditGap.selectionUsable && chooseModel && onChooseModel
       ? creditGap.covered[0]
       : undefined;
   // The free model's daily allowance is deployment-wide: name it and offer the
@@ -115,7 +128,10 @@ export function FailedSessionBanner({
           subscriptions,
           canChooseModel: hasModelPicker ?? canChooseModel,
         })
-      : reason;
+      : creditRefusal && !offerCredits
+        ? // Without billing access the one fix is asking an owner.
+          creditRefusalHeadline(t, creditRefusal, false)
+        : reason;
   // Retrying the same request on the same model cannot fix a missing model or
   // rejected credentials; a new model can. Billing, access and limit failures
   // keep Retry because their condition can clear.
@@ -206,7 +222,15 @@ export function FailedSessionBanner({
           </>
         ) : null}
         {billingFailure ? (
-          switchTo ? (
+          creditRefusal === "byok_upgrade_required" ? (
+            workspaceId && canBuyCredits ? (
+              <UpgradeLink workspaceId={workspaceId} />
+            ) : null
+          ) : creditRefusal ? (
+            workspaceId && canBuyCredits ? (
+              <BuyCreditsLink workspaceId={workspaceId} primary onAddCredits={onAddCredits} />
+            ) : null
+          ) : switchTo ? (
             <>
               <Button
                 type="button"
@@ -281,6 +305,22 @@ function BuyCreditsLink({
         {...analyticsAction("buy_credits")}
       >
         Add credits
+      </Link>
+    </Button>
+  );
+}
+
+function UpgradeLink({ workspaceId }: { workspaceId: string }) {
+  return (
+    <Button asChild size="sm">
+      <Link
+        to="/workspaces/$workspaceId/organization"
+        params={{ workspaceId }}
+        search={{ section: "billing" }}
+        onClick={() => noteTurnFailureAction("upgrade_plan")}
+        {...analyticsAction("upgrade_plan")}
+      >
+        Upgrade to Pro
       </Link>
     </Button>
   );

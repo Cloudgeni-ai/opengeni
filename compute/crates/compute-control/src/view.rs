@@ -10,8 +10,11 @@
 //! sent again, and ownership is always read from the store.
 //!
 //! Placement passes over a host this replica has read no renewal from for
-//! its lease's term: the host runs no VM by then, and the leader may wait
-//! a while longer before giving up on it while it holds sandboxes.
+//! three renewal intervals, or its lease's term if that is shorter
+//! ([`compute_fleet::LeaseTerms::silent_after`]): a host that missed three
+//! is most likely cut off, though its VMs may run until its deadline, and
+//! the leader gives up on it only after the term and margin, or later
+//! while it holds sandboxes.
 //!
 //! A replica that has itself read nothing for that long cannot tell which
 //! hosts renew, so it places nothing and says so ([`Unplaced::Blind`]),
@@ -201,8 +204,9 @@ pub enum Unplaced {
 pub struct View {
     inner: RwLock<Inner>,
     /// How long a host may go without a renewal this replica reads before
-    /// placement passes it over: its lease's term, after which it runs no
-    /// VM, so a create sent to it could only wait for it to come back.
+    /// placement passes it over ([`compute_fleet::LeaseTerms::silent_after`]):
+    /// one cut off that long would most likely only hold a create sent to
+    /// it until it comes back.
     silent_after: Duration,
 }
 

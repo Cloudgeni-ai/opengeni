@@ -16,6 +16,8 @@ import {
   v4aToGitFileDiff,
   type ApplyPatchOperation,
 } from "./parsers";
+import { commandStepTitle } from "./command-step";
+import { redactDeep, redactSignedUrls, signedValuesDeep } from "./credential-redaction";
 import { invokedToolCall } from "./invoked-tool";
 import { rawTypeOf } from "./registry";
 import { mcpToolLeaf, toolDisplayName } from "./tool-display-name";
@@ -77,6 +79,7 @@ export type ToolIconKind =
   | "skill"
   | "settings"
   | "bell"
+  | "phone"
   | "inbox"
   | "help"
   | "model"
@@ -264,6 +267,15 @@ function textPreview(text: string, running?: boolean): ToolPreview {
 
 /* ---- exec_command ---------------------------------------------------------- */
 
+/**
+ * A command row's title: what the command did in plain words ("Downloaded
+ * report.json"), or "Ran a command" when it can't be placed. A call that ended
+ * badly keeps the ongoing form so its chip finishes the sentence.
+ */
+function execTitle(t: OpenGeniText, cmd: string, phase: ToolStepPhase): string {
+  return commandStepTitle(t, cmd, phase) ?? toolStepLabel(t, "runCommand", phase);
+}
+
 export function execPresentation(
   t: OpenGeniText,
   item: ToolCallItem,
@@ -271,24 +283,32 @@ export function execPresentation(
 ): ToolRowPresentation {
   const args = parseToolArgs(item.arguments);
   const cmd = typeof args.cmd === "string" ? args.cmd : "";
+  // The command is one click away in the body; signed links never show their signature.
+  const command = cmd.trim() ? redactSignedUrls(cmd) : null;
   const workdir = typeof args.workdir === "string" ? args.workdir : null;
   const out = item.output;
-  const title = `$ ${cmd}`;
   const computeLabel = context.computeLabel ?? null;
   const base = {
     tool: "exec" as const,
     icon: "terminal" as const,
-    title,
-    titleMono: true,
+    title: execTitle(t, cmd, "running"),
   };
 
   if (isConnectedMachineOutcomeUnknownOutput(out)) {
+    // The call has ended; only its effects are unknown, which the chip says.
     return {
       ...base,
+      title: execTitle(t, cmd, "done"),
       iconTone: "failed",
       failed: true,
       chip: { tone: "bad", text: t("timeline.toolPresentation.outcomeUnknown") },
-      body: { kind: "term", command: null, workdir, output: out, failed: true },
+      body: {
+        kind: "term",
+        command,
+        workdir,
+        output: redactSignedUrls(out, undefined, "text"),
+        failed: true,
+      },
     };
   }
 
@@ -303,9 +323,12 @@ export function execPresentation(
         withComputePreview(computeLabel, t("timeline.toolPresentation.outputLostNulByteCould")),
       ),
       body: {
-        kind: "note",
-        tone: "error",
-        text: t("timeline.toolPresentation.outputContainedANulByte"),
+        kind: "term",
+        command,
+        workdir,
+        output: "",
+        failed: true,
+        note: t("timeline.toolPresentation.outputContainedANulByte"),
       },
     };
   }
@@ -319,15 +342,19 @@ export function execPresentation(
         withComputePreview(computeLabel, t("timeline.toolPresentation.toolCallFailed")),
       ),
       body: {
-        kind: "note",
-        tone: "error",
-        text: t("timeline.toolPresentation.theToolCallFailedWith"),
+        kind: "term",
+        command,
+        workdir,
+        output: "",
+        failed: true,
+        note: t("timeline.toolPresentation.theToolCallFailedWith"),
       },
     };
   }
 
   if (item.status === "running") {
-    const streamed = typeof out === "string" ? stripExecBanner(out) : "";
+    const streamed =
+      typeof out === "string" ? redactSignedUrls(stripExecBanner(out), undefined, "text") : "";
     const runningPreview = streamed ? `${streamed.split("\n").length} lines` : "running…";
     return {
       ...base,
@@ -336,7 +363,7 @@ export function execPresentation(
       preview: textPreview(withComputePreview(computeLabel, runningPreview), true),
       body: {
         kind: "term",
-        command: null,
+        command,
         workdir,
         output: streamed,
         live: true,
@@ -345,10 +372,11 @@ export function execPresentation(
   }
 
   const text = typeof out === "string" ? out : stringifyPayload(out);
-  const stripped = stripExecBanner(text);
+  const stripped = redactSignedUrls(stripExecBanner(text), undefined, "text");
   const bgSession = parseExecBannerSessionId(text);
   const exitCode = sandboxCommandExitCode(text);
   const binary = looksBinary(stripped);
+  const exitedBadly = exitCode != null && exitCode !== 0;
 
   // Color is spent on the exception only: a clean exit earns no chip.
   let chip: ToolChip | undefined;
@@ -370,6 +398,11 @@ export function execPresentation(
   );
   return {
     ...base,
+    title: execTitle(
+      t,
+      cmd,
+      item.status === "complete" && !exitedBadly && bgSession == null ? "done" : "running",
+    ),
     iconTone,
     ...(chip ? { chip } : {}),
     failed: item.status === "failed",
@@ -377,10 +410,10 @@ export function execPresentation(
     preview: textPreview(preview),
     body: {
       kind: "term",
-      command: null,
+      command,
       workdir,
       output: binary ? t("timeline.toolPresentation.binaryOutputSuppressed") : stripped,
-      failed: item.status === "failed" || (exitCode != null && exitCode !== 0),
+      failed: item.status === "failed" || exitedBadly,
       ...(bgSession != null
         ? {
             note: t("timeline.toolPresentation.sessionBgsessionALaterWrite", { bgSession }),
@@ -757,7 +790,7 @@ export function runOnOpPreview(args: Record<string, unknown>): string | null {
   }
   const record = op as Record<string, unknown>;
   if (record.kind === "exec" && typeof record.cmd === "string" && record.cmd.trim()) {
-    return `$ ${record.cmd.trim()}`;
+    return `$ ${redactSignedUrls(record.cmd.trim())}`;
   }
   if (
     (record.kind === "read" || record.kind === "write") &&
@@ -875,6 +908,7 @@ const TOOL_STEP_ICONS: Readonly<Record<ToolStepId, ToolIconKind>> = {
   nameChat: "rename",
   saveBotTemplate: "rename",
   notify: "bell",
+  callYou: "phone",
   withdrawNotification: "bell",
   tidyInbox: "inbox",
   setGoal: "target",
@@ -1279,7 +1313,9 @@ function computerActPreview(action: ComputerActAction): string | undefined {
  */
 export function genericToolPresentation(t: OpenGeniText, item: ToolCallItem): ToolRowPresentation {
   const goalPreview =
-    goalToolPreview(item.name, parseToolArgs(item.arguments)) ?? skillToolPreview(item);
+    goalToolPreview(item.name, parseToolArgs(item.arguments)) ??
+    skillToolPreview(item) ??
+    callUserPreview(t, item);
   const title = toolDisplayName(t, item.name, item.display, callStepPhase(item));
   if (item.status !== "running") {
     const { text: outText, isError } = unwrapMcpOutput(item.output);
@@ -1333,6 +1369,36 @@ export function genericToolPresentation(t: OpenGeniText, item: ToolCallItem): To
 
 /** The runtime's exact refusal for a tool whose effective permission is Block. */
 const BLOCKED_OUTPUT = /Connector action was not executed: blocked\b/;
+
+/**
+ * An agent calling the person: why while it rings, then how it ended
+ * ("No answer · Production is down").
+ */
+export function callUserPreview(t: OpenGeniText, item: ToolCallItem): string | null {
+  if (mcpToolLeaf(item.name) !== "call_user") return null;
+  const args = parseToolArgs(item.arguments);
+  const reason =
+    args && typeof args === "object" && typeof (args as { reason?: unknown }).reason === "string"
+      ? truncatePreview((args as { reason: string }).reason, 80)
+      : null;
+  if (item.status === "running") return reason;
+  const result = tryParseJson(unwrapMcpOutput(item.output).text);
+  const record = result && typeof result === "object" ? (result as Record<string, unknown>) : null;
+  const outcome =
+    record?.placed === false
+      ? t("timeline.toolPresentation.callUser.notPlaced")
+      : record?.outcome === "answered"
+        ? t("timeline.toolPresentation.callUser.answered")
+        : record?.outcome === "declined"
+          ? t("timeline.toolPresentation.callUser.declined")
+          : record?.outcome === "missed"
+            ? t("timeline.toolPresentation.callUser.missed")
+            : record?.outcome === "cancelled"
+              ? t("timeline.toolPresentation.callUser.cancelled")
+              : null;
+  if (outcome && reason) return `${outcome} · ${reason}`;
+  return outcome ?? reason;
+}
 /** The runtime's refusal to guess whether an approved action ran. */
 const UNCERTAIN_OUTPUT = /Connector action outcome is uncertain\b/;
 
@@ -1776,6 +1842,7 @@ export function plainToolRow(
   if (row.tool === "exec" || row.tool === "write_stdin") {
     const failed =
       row.iconTone === "failed" || row.chip?.tone === "bad" || item.status === "failed";
+    // Plain rows name no files, links or tools taken from the command itself.
     plain.title = toolStepLabel(t, "runCommand", failed ? "running" : toolStepPhase(item.status));
     if (isConnectedMachineOutcomeUnknownOutput(item.output)) {
       // The call has ended, but its effects remain unknown. Keep that verdict
@@ -1887,10 +1954,23 @@ export function toolRowPresentation(
   item = invokedToolCall(item);
   const row = presentedToolRow(t, item, context);
   const presented = context.details === "plain" ? plainToolRow(t, item, row, context) : row;
-  if (item.awaitingApproval) return awaitingApprovalRow(t, presented);
-  return item.approvalRejected
-    ? rejectedApprovalRow(t, presented, item.approvalRejected === "automatic")
-    : presented;
+  const shown = item.awaitingApproval
+    ? awaitingApprovalRow(t, presented)
+    : item.approvalRejected
+      ? rejectedApprovalRow(t, presented, item.approvalRejected === "automatic")
+      : presented;
+  return redactRow(shown, item);
+}
+
+/**
+ * A signature, token or key never shows on a row, whichever tool produced it
+ * and wherever the text puts it: every string the row shows (title, preview,
+ * command, output, payloads) is redacted, including any credential value
+ * found anywhere in the call's arguments or output.
+ */
+function redactRow(row: ToolRowPresentation, item: ToolCallItem): ToolRowPresentation {
+  const values = signedValuesDeep([item.arguments, item.output, item.raw, row]);
+  return redactDeep(row, values);
 }
 
 /** A call waiting for the person's approval has not run: say so, never "Done". */

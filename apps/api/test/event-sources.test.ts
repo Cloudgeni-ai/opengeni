@@ -31,6 +31,7 @@ import {
   getScheduledTask,
   githubInstallationRouteKey,
   markEventOccurrenceStarted,
+  withBillingOriginOverride,
   type DbClient,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -1164,6 +1165,68 @@ describe("agent tools", () => {
       ),
     ).toEqual([linear.source.id]);
     await Promise.all([owner.close(), other.close()]);
+  });
+
+  test("an outside agent that sets a webhook's secret or format makes its deliveries API use; an agent in an app chat does not", async () => {
+    const f = await fixture({ enabled: true });
+    const holder = async (sourceId: string) => {
+      const [row] = await shared.admin<{ holder: string | null }[]>`
+        select secret_billing_origin as holder from event_sources where id = ${sourceId}::uuid`;
+      return row?.holder;
+    };
+    // An agent in a chat the person started in the app, and an outside
+    // agent signed in over MCP OAuth.
+    const chat = await agent(f, f.owner.subjectId);
+    const inApp = (name: string, args: Record<string, unknown>) =>
+      withBillingOriginOverride("app", () => chat.call(name, args));
+    const outside = await agent(f, f.owner.subjectId, { mcpOAuth: true });
+    const format = { signature: { scheme: "url_token" }, type: { path: "event" } };
+    const token = () => randomBytes(24).toString("hex");
+
+    const own = await inApp("event_sources_create_webhook", {
+      name: "Page watcher",
+      format,
+      signingSecret: token(),
+    });
+    const sourceId = own.source.id as string;
+    await inApp("event_sources_update", { sourceId, signingSecret: token() });
+    await inApp("event_sources_update", { sourceId, format: { ...format, eventId: "id" } });
+    // Renaming touches neither the secret nor the format.
+    await outside.call("event_sources_update", { sourceId, name: "Prices" });
+    expect(await holder(sourceId)).toBeNull();
+
+    // The format says how deliveries are verified and read.
+    expect(
+      await outside.call("event_sources_update", {
+        sourceId,
+        format: { ...format, signature: { scheme: "url_token", parameter: "key" } },
+      }),
+    ).toMatchObject({ source: { id: sourceId, status: "active" } });
+    expect(await holder(sourceId)).toBe("api");
+
+    const second = await inApp("event_sources_create_webhook", {
+      name: "Linear",
+      preset: "linear",
+    });
+    await outside.call("event_sources_update", {
+      sourceId: second.source.id,
+      signingSecret: "lin_wh_0123456789abcdef",
+    });
+    expect(await holder(second.source.id)).toBe("api");
+
+    // Creating one: with its secret, or a preset whose secret comes later.
+    const created = await outside.call("event_sources_create_webhook", {
+      name: "Outside watcher",
+      format,
+      signingSecret: token(),
+    });
+    const preset = await outside.call("event_sources_create_webhook", {
+      name: "Sentry",
+      preset: "sentry",
+    });
+    expect(await holder(created.source.id)).toBe("api");
+    expect(await holder(preset.source.id)).toBe("api");
+    await Promise.all([chat.close(), outside.close()]);
   });
 
   test("an agent finds a source, sets up a trigger without a schedule, and reads what a run carried", async () => {

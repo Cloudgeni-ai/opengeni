@@ -3,6 +3,7 @@ import { useRef, useState } from "react";
 import { OpenGeniProvider, WorkspaceDock } from "@opengeni/react";
 import { SessionHeader } from "@opengeni/react/app/components/rail/session-header";
 import { useWindowBarRowLeft } from "@opengeni/react/app/lib/window-bar-row";
+import { applyDesktopWindowBar, desktopBridge } from "@opengeni/react/app/lib/desktop";
 import type { Session } from "@opengeni/react/app/types";
 import { createRootRoute, createRoute, createRouter, RouterProvider } from "@tanstack/react-router";
 import { RailBody } from "../src/components/rail/rail-shell";
@@ -14,6 +15,7 @@ import "../src/styles.css";
 const params = new URLSearchParams(location.search);
 const platform = params.get("platform") ?? "macos";
 if (platform !== "browser") document.documentElement.dataset.desktop = platform;
+applyDesktopWindowBar(document.documentElement, desktopBridge);
 const theme = params.get("theme") === "light" ? "light" : "dark";
 document.documentElement.classList.toggle("dark", theme === "dark");
 document.documentElement.dataset.ogTheme = theme;
@@ -21,8 +23,10 @@ localStorage.setItem("opengeni.rail.nav", "true");
 // `?view=chat`: a chat's page, with the real chat header at the top of the
 // canvas, marked as the session shell marks it in the macOS app
 // (`data-window-bar-row`). `?rail=none`: no rail beside the canvas (an embed).
+// `?subchat=1`: the chat is a sub-chat, with its parent's line above the title.
 const chat = params.get("view") === "chat";
 const withRail = params.get("rail") !== "none";
+const subchat = params.get("subchat") === "1";
 
 const session = {
   id: "00000000-0000-4000-8000-0000000000c1",
@@ -33,7 +37,7 @@ const session = {
   status: "idle",
   archived: false,
   pinned: false,
-  parentSessionId: null,
+  parentSessionId: subchat ? "00000000-0000-4000-8000-0000000000c0" : null,
   model: "codex/gpt-5.6-sol",
   reasoningEffort: "medium",
   latencyMode: "standard",
@@ -81,6 +85,7 @@ function Preview() {
               <SessionHeader
                 session={session}
                 ancestors={[]}
+                lineageLoading={subchat}
                 connectionState="live"
                 status={session.status}
                 keyAuthRequired={false}

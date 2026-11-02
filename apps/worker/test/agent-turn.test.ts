@@ -4103,6 +4103,31 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(failed).toBe(0);
   });
 
+  test("a sibling warming wait yields once to same-turn recovery without local retries", async () => {
+    const transition = new SandboxLeaseTransitionError(
+      "group-1",
+      3,
+      "provider_recovery_in_progress",
+      "local",
+      "box-1",
+      "warming",
+    );
+    let establishes = 0;
+    const provisioner = createTurnSandboxProvisioner(async () => {
+      establishes += 1;
+      throw transition;
+    });
+    await expect(provisioner.get()).rejects.toBe(transition);
+    await expect(provisioner.get()).rejects.toBe(transition);
+    expect(establishes).toBe(1);
+    expect(isLazySandboxProvisionRetryable(transition)).toBe(false);
+    expect(classifySandboxLogicalProvisionFailure("local", transition)).toMatchObject({
+      expected: true,
+      retryable: true,
+      code: "provider_recovery_in_progress",
+    });
+  });
+
   test("an exhausted expected transition settles one logical id before a later re-read", async () => {
     let sequence = 0;
     const failures: Array<{ provisionId: string; internalAttempts: number }> = [];

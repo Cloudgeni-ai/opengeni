@@ -1498,24 +1498,19 @@ never replays historical work or changes the accepted account selection of a
 capacity-waiting turn. A capacity waiter pinned to an allocator-disabled account
 requires an authorized account change; time or a deploy cannot override it.
 
-Personal sidebar Archive composes native Pause and the member's archive row in
-one transaction, taking the personal-state fence before the control/workspace/
-session prefix. It pauses idle chats too; active work anywhere in the tree
-requires explicit confirmation under the control lock. `sessions:control` governs
-Pause regardless of the chat creator; `hide_for_me` explicitly changes only the
-caller's sidebar visibility. Shared Pause affects everyone. Restore changes only
-personal visibility and never resumes. A stable `clientEventId` replays an archive
-intent without undoing a later explicit Resume; use a new ID for a new intent.
-Native Pause interrupts descendant work and requests background-command
-cancellation through the existing durable settlement protocol. Completion of the
-HTTP request does not mean every external command has already stopped.
-
-Archive does not rewrite schedule ownership or enabled flags. Existing-session
-and reusable-session schedules cannot admit work into an effectively paused chat
-or descendant. Their definitions remain visible and enabled for their owners;
-only an explicit Resume can make the chat executable again. Independent
-new-chat-per-run schedules are not schedules *in* the archived chat and remain
-unaffected. Personal hiding alone makes no execution guarantee.
+The chat Archive action needs `sessions:control`, regardless of the chat
+creator, and applies to everyone. It refuses while something keeps the chat live
+on purpose (keep-live, a repeating automation in it, a site sign-in). Otherwise
+it marks the tree archived at once: new messages, steers and agent sends are
+refused, and machine inputs are settled like input to a cancelled chat. Running
+work is left alone for the ten-second Undo window, so Undo returns the chat
+exactly as it was. When the window ends, a delayed workflow retires the tree's
+one-time automations, pauses active goals, and cancels running work as the
+person who archived it (native cancel, so background commands are asked to stop
+through the existing durable settlement protocol). The idle-session archive
+then stores the chat as soon as nothing runs. Repeating an Archive changes
+nothing. See [session storage
+lifecycle](session-storage-lifecycle.md#archiving-a-chat).
 
 Scheduled admission refuses an effectively paused session under every overlap
 policy (`refusePaused`), not only skip: an occurrence queued behind a Pause
@@ -2731,9 +2726,28 @@ REPL does not hold the turn for minutes, the call still returns once output it
 produced has been quiet for 5 seconds after the ordinary 30-second window, or
 after 2 seconds when that output ends in an input prompt
 (`looksLikeInputPrompt`). A call that produced no output waits for exit or its
-requested window. `OPENGENI_EXPERIMENT_CUT_POLLING=false` restores the
-30-second cap. Connected Machine (op-stream) commands keep their own 30-second
-background yield and are unaffected. Live output still streams to the command card while the call
+requested window. While cut polling and the lean schema
+(settings.experimentOutputCost) are both on, an `exec_command` without a TTY
+that the model did not mark `background: true` waits at least 60 seconds
+(`COMMAND_FINISH_FLOOR_MS`) however short a wait it asked for, still returning
+the moment the command exits; when the requested wait is that short, its
+quiet-output return applies only after those 60 seconds, while the input-prompt
+return still applies at once. A requested wait above the ordinary 30-second window
+keeps the ordinary quiet-output return. Models often ask for a yield of
+a second or less and then poll the handle with `command_read`, although most
+such commands finish within a minute. Servers, watchers and deliberate parallel
+runs pass `background: true` (or use a TTY) to keep the requested short wait;
+the turn-cancellation layer removes the flag before the SDK and providers see
+the arguments. The floor applies only where the schema offers `background`
+(`finishFloor`), so `OPENGENI_EXPERIMENT_OUTPUT_COST=false` or
+`OPENGENI_EXPERIMENT_CUT_POLLING=false` keeps the requested wait, and the
+latter also restores the 30-second cap. Connected Machine (op-stream) commands
+keep their own 30-second background yield ceiling; the floor is sent to them as
+the requested yield, so a tiny requested yield there waits up to 30 seconds.
+The machine waits that window in one block, so a Steer during such a wait takes
+effect when it ends (up to 30 seconds), while Pause and turn cancellation still
+cancel the operation at once.
+Live output still streams to the command card while the call
 waits, and Pause/Steer cancellation is still checked between slices. The
 model-facing `exec_command` schema is non-strict and requires only `cmd` and
 `max_output_tokens` (settings.experimentOutputCost, on by default;
@@ -3724,9 +3738,29 @@ to active with its provider proof intact; the reaper defers that exact proof and
 never repeats provider execution.
 `command_read` returns command-specific bounded retained output and current
 status with a continuation cursor; reads work while running and after settlement,
-subject to explicit retention limits. `command_wait` uses the same read path,
-with output/terminal events as live hints rather than command-state authority.
-Waits also recheck durable state once a second if a hint is missed. Sending
+subject to explicit retention limits. While the command runs, `command_read`
+waits for it to finish (default 30 seconds; `waitSeconds: 0` reads at once) and
+`command_wait` uses the same read path with a 45-second default. `command_wait`
+also accepts `commandIds` (up to eight) with `waitFor: "all"` (default) or
+`"any"`, and an optional cursor per command; the output budget is split across
+them. A wait ends when the commands settle, at its deadline, on a pending Steer
+for the caller's turn, or on abort, never on new output alone; finish events are
+live hints rather than command-state authority, and waits recheck durable
+command state (reauthorizing) once a second if a hint is missed. The output is
+read once at the end. A read without a cursor that exceeds the byte budget
+returns its start (half the budget) as `chunks`, its end as `tail`, and the
+approximate size and cursor of the omitted middle as `omitted`; head and tail
+together stay within one 64-row page, so very many small frames show at most
+64 of them. The size counts the exact parts of the boundary rows plus the
+other rows in between at the average size of the rows the read fetched, from
+the event index alone. `nextCursor` then points at that middle, and a read with
+an explicit cursor pages on from it without repeating the tail, so callers that
+page still receive every byte; `endCursor` follows the newest output for later
+reads of new output only. A malformed cursor fails before any wait. The model
+receives these reads as plain text (state, exit code, output with an
+omitted-middle marker, and the cursor for newer output, with a hint to pass
+`waitSeconds: 0` when paging a running command); Codemode and other
+programmatic callers keep the structured receipt. Sending
 stdin is a separate capability, explicitly unsupported when the provider has no
 interactive transport. A longer wait uses session-level `wait_for_input`,
 whose timeout never cancels the command.
@@ -4167,8 +4201,10 @@ If a live refresh encounters a recognized temporary failure, the runtime
 reauthorizes and rereads the API instead of discarding retained output.
 Recognized temporary failures are transport outages and a provider observation
 that missed its bounded read window when the provider marks another read of the
-same invocation safe. A `command_wait` keeps its requested wait and refreshes
-the same command again on its ordinary one-second cadence; that is a read, never
+same invocation safe. A `command_read` or `command_wait` keeps its requested
+wait (ending, like the API wait, when the commands settle or the API reports a
+yield, not on new output) and refreshes each still-running command again on its
+ordinary one-second cadence; that is a read, never
 a Start or stdin replay. A still-running result whose latest refresh failed
 reports `freshness.status: "refresh_unavailable"` and `retryable: true`; this is
 a freshness warning, not proof of command failure or completion. Authorization,
@@ -4873,6 +4909,27 @@ are unchanged for every requester: a missing row is still `deleted`, a
 non-ready or expired row still fails as before, and bytes that do not match the
 recorded size, SHA-256 or dimensions still fail closed as `invalid_content`.
 
+Only the newest tool-result images reach the model with their pixels. When a
+turn attempt prepares its history from stored history, images older than the
+newest three are replaced, in batches of five, by a short text note (one per
+tool result): for `view_image` it names the path to view again (showing the
+file as it is now); for any other tool it asks the model to take a fresh
+screenshot or observation instead of repeating an action, because tools such as
+`interaction__browser_act` act as well as capture. When an attempt starts, the
+history therefore carries three to seven images; images added during the
+attempt all stay until the next one. The note is computed once per attempt, so
+every model call of a turn sees the same prefix, and the omitted set only grows,
+so the provider's prompt cache stays valid between batches. Each new batch
+makes the provider re-read the history after the first newly omitted image
+once; the batch size spreads that over five images, and the saving grows with
+every later call that no longer resends them. Context compaction's summarizer
+sees the same notes. Omitted images are not read from storage, canonical
+history keeps their markers, and user attachments and native
+`computer_call_result` screenshots are not affected; Opengeni's own
+`interaction__browser_*` and `interaction__computer_*` screenshots are function
+results and are omitted like any other
+(`omitOlderHistoryImages` in `apps/worker/src/activities/retained-screenshots.ts`).
+
 Generated images have a separate permanent workspace-file lifecycle. Adapter
 provider calls first cross a durable prepared/provider-started fence; after the
 provider may have run, recovery may finish an existing deterministic upload but
@@ -5031,7 +5088,10 @@ hides its search evidence behind the stored `ws_` ID even when results are inlin
 When native search is attached, the Azure request policy requests sources and,
 with enabled reasoning, result snippets. `hosted-search-evidence.ts` exposes only
 actually returned URLs/titles/snippets as one bounded, explicitly untrusted
-assistant historical-fact message before model and portable-compaction accounting.
+search record before model and portable-compaction accounting: a user-role
+runtime record for sessions in the `runtime` form, the original assistant-role
+message for older sessions until that changes no sent text (see
+[search record forms](web-search.md#hosted-evidence-across-tool-calls)).
 Canonical hosted records remain unchanged. Missing legacy includes cannot be
 reconstructed; sources alone cannot supply page facts, and native citations are
 not guaranteed. See [hosted evidence across tool calls](web-search.md#hosted-evidence-across-tool-calls).
@@ -5126,6 +5186,19 @@ operation's result. `startup_phase_delivery` measures that batch delivery, and
 `run_git_credential_mint` measures the full prefetched mint, distinct from the
 remaining wait in the visible `credential_mint` row. Shared rig claim/join time
 remains covered by the existing shared-preparation metric.
+
+These startup checkpoints and receipts are progress only: nothing reads them
+back before the first model request, so startup does not wait for their
+delivery. Each attempt writes its events through one ordered lane. A checkpoint
+or receipt starts its append at once, after every append the attempt already
+issued, and the preparation continues; every awaited append (the
+`agent.model.request` started audit among them) and the turn settlement start
+only after the checkpoints issued before them. The event log therefore keeps
+the order the work produced, and the audit still commits before the request
+leaves the worker. A checkpoint that cannot be delivered does not fail the
+turn; a fenced attempt is still refused by its next awaited append. Activity
+finalization waits for any checkpoint still in flight. `startup_phase_delivery`
+measures only the append itself, not time spent queued behind earlier appends.
 
 The managed client download is gzip-compressed under a `.json.gz` object key.
 Its identity remains the digest of the original release JSON, not the compressed

@@ -1,4 +1,4 @@
-use super::runtime::{Format, cpu_model, runtime_of};
+use super::runtime::{Format, cpu_model, host_label, runtime_of};
 use super::*;
 use crate::spec::{Drive, Network};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -24,6 +24,11 @@ fn the_runtime_names_the_processor_model() {
     assert_eq!(cpu_model(cpuinfo), "AMD EPYC 9B14");
     assert_eq!(cpu_model("processor : 0\n"), "an unknown processor");
     assert!(runtime_of(Path::new("/nonexistent/firecracker")).is_err());
+    assert_eq!(
+        host_label("AMD EPYC 9B14", "6.12.106"),
+        " on AMD EPYC 9B14 under Linux 6.12.106"
+    );
+    assert_eq!(host_label("AMD EPYC 9B14", ""), " on AMD EPYC 9B14");
 }
 
 fn binary(runtime: &str) -> Binary {
@@ -53,6 +58,12 @@ fn snapshot_formats_parse_and_read_like_firecracker() {
         Some(format("v8.0.0"))
     );
     assert_eq!(
+        Format::of_runtime(
+            "Firecracker snapshot format v8.0.0 on AMD EPYC 9B14 under Linux 6.18.4"
+        ),
+        Some(format("v8.0.0"))
+    );
+    assert_eq!(
         Format::of_runtime("Firecracker v1.13.1 on AMD EPYC 9B14"),
         None
     );
@@ -60,9 +71,10 @@ fn snapshot_formats_parse_and_read_like_firecracker() {
 }
 
 /// Only proof gives an image up: a format every kept binary names and
-/// none reads. Another processor, an unnamed format, or a binary too old
-/// to name its own leaves the question open, and an image goes to the
-/// binary that made it, else to one that reads its format.
+/// none reads. An unnamed format, or a binary too old to name its own,
+/// leaves the question open, and one made on another processor is read but
+/// made elsewhere. An image goes to the binary that made it, else to one
+/// that reads its format.
 #[test]
 fn an_image_is_unreadable_only_when_no_binary_reads_its_format() {
     let new = binary("Firecracker snapshot format v12.1.0 on Intel Xeon");
@@ -74,7 +86,10 @@ fn an_image_is_unreadable_only_when_no_binary_reads_its_format() {
 
     assert_eq!(readable(&current, &new.runtime), Readable::Yes);
     let elsewhere = "Firecracker snapshot format v12.0.0 on AMD EPYC";
-    assert_eq!(readable(&current, elsewhere), Readable::Yes);
+    assert!(matches!(
+        readable(&current, elsewhere),
+        Readable::Elsewhere(why) if why.contains("AMD EPYC") && why.contains("Intel Xeon")
+    ));
     assert_eq!(
         chosen(&current, elsewhere).map(|binary| &binary.runtime),
         Some(&new.runtime)
@@ -97,6 +112,44 @@ fn an_image_is_unreadable_only_when_no_binary_reads_its_format() {
     assert_eq!(readable(&current, ""), Readable::Unknown);
     assert_eq!(readable(&with_legacy, &old.runtime), Readable::Unknown);
     assert_eq!(chosen(&current, &legacy.runtime).map(|_| ()), None);
+}
+
+/// The processor state KVM saves depends on the host kernel, and an image
+/// made under a newer one can hold registers an older one refuses. So an
+/// image made under another kernel is read but made elsewhere, while the
+/// binary that made it still restores it; so may be an image labelled
+/// before labels named the kernel.
+#[test]
+fn an_image_made_under_another_kernel_is_made_elsewhere() {
+    let new = binary("Firecracker snapshot format v12.1.0 on Intel Xeon under Linux 6.12.106");
+    let old = binary("Firecracker snapshot format v8.0.0 on Intel Xeon under Linux 6.12.106");
+    let both = [&new, &old];
+
+    assert_eq!(readable(&both, &new.runtime), Readable::Yes);
+    let newer_kernel = "Firecracker snapshot format v8.0.0 on Intel Xeon under Linux 6.18.47";
+    assert!(matches!(
+        readable(&both, newer_kernel),
+        Readable::Elsewhere(why) if why.contains("6.18.47") && why.contains("6.12.106")
+    ));
+    assert_eq!(
+        chosen(&both, newer_kernel).map(|binary| &binary.runtime),
+        Some(&old.runtime),
+        "the binary that made it, whatever the kernel"
+    );
+    let unlabelled = "Firecracker snapshot format v8.0.0 on Intel Xeon";
+    assert!(matches!(
+        readable(&both, unlabelled),
+        Readable::Elsewhere(why) if why.contains("6.12.106")
+    ));
+    assert_eq!(
+        chosen(&both, unlabelled).map(|binary| &binary.runtime),
+        Some(&old.runtime)
+    );
+    let both_differ = "Firecracker snapshot format v12.0.0 on AMD EPYC under Linux 6.18.47";
+    assert!(matches!(
+        readable(&both, both_differ),
+        Readable::Elsewhere(why) if why.contains("AMD EPYC")
+    ));
 }
 
 /// Only a VMM that answered, or died loading, has judged the image; a lost

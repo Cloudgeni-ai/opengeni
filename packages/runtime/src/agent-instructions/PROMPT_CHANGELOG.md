@@ -1,5 +1,102 @@
 # Modular prompt changelog
 
+The agent knows both GitHub identities. When personal GitHub sign-in is
+enabled on the deployment (new `personalGitHub` resource fact) and
+`github_connect_link` is available, the admin module adds one sentence (about
+195 bytes) mapping "connect my GitHub" or "do it as me" to the person's own
+account (Your GitHub) and "install the GitHub app" to the Opengeni app. The
+repositories module gains a "GitHub identity per mounted repository:" block
+only when a repository is mounted as the person: one bullet per GitHub
+repository (as the person, with their login when known, or as the Opengeni
+app), plus a sentence saying to use plain git and the github_personal__* tools
+on personal repositories because gh and raw GitHub API calls do not act as the
+person, and, with both identities, a sentence pointing to the github_app__*
+tools. With a personal repository, the gh sentence is limited to repositories
+not mounted as the person. Deployments without personal sign-in and sessions
+that mount only Opengeni app repositories render byte-for-byte as before. The
+`github_connect_link` description and response add the `personal` identity
+(see docs/github-app.md).
+
+```diff
++ For GitHub, `github_connect_link` reports both identities: 'connect my GitHub' or 'do it as me' means the person's own account (Your GitHub), and 'install the GitHub app' means the Opengeni app.
+```
+
+Automatic chat titles are written in the language the person writes in, and
+a chat that has only a greeting, thanks or small talk stays untitled until it
+has a task, question or subject. The title request's instructions
+(`SESSION_TITLE_GENERATION_INSTRUCTIONS`, a separate single call outside the
+agent's conversation) say so and answer exactly `NO_TITLE` when there is
+nothing to name yet. That answer saves no title, so a later turn titles the
+chat. On a later turn the title request also receives that turn's message
+after the chat's first message. The descriptions of the agent's
+`opengeni__set_session_title` tool and the first-party MCP `set_session_title`
+tool gain the same two rules: write the label in the person's language, and
+call it once the chat has a task, question or subject, not while it holds only
+a greeting or small talk. Nothing else in the instructions or tool list
+changes.
+
+Privacy questions are answered from server facts. One bullet joins "Rules for
+getting work done" in both the legacy CORE and the modular base behavior (about
+210 bytes): answer questions about privacy, retention, training, the model or
+provider, or where data is processed only from `privacy_facts`, link its
+policies, say what is unknown, and never claim more than it states. The tool
+description says when to call it. `privacy_facts` joins the always-visible
+first-request tools.
+Before, agents answered these questions from general knowledge and could
+over-claim. The legacy locks change by that one bullet; legacy and modular stay
+sentence-identical.
+
+The Skill index lists every installed Skill. Its last header sentence changes
+from "Use the id when names are ambiguous." to "Read a Skill by its name; an
+entry shows an id only when several Skills share that name, and then you read
+it by that id." Entries drop their id unless two Skills share a name, and the
+32 KB / 128-entry cut that silently dropped the Skills sorting last is
+replaced by a 96 KB bound that shortens only the longest descriptions. The
+index is delivered as a context item that replaces earlier indexes, so an
+existing session receives the new index as one appended item and nothing an
+earlier request sent changes. The legacy lock for a prompt with an empty
+Skill index grows by 85 characters for the new header sentence.
+
+Chats that start unattended through their setting say so from the first
+request, and nothing a chat started with changes later. A chat that a scheduled
+task or event trigger starts unattended (by default, or because the task says
+so) gets the same unattended paragraph and tool list as a session created with
+`unattended: true`; that it started unattended is frozen at create. The **Work
+without me** switch, and a person writing in an automation's chat, change only
+whether approvals and questions wait for a person, never the instructions or
+tools an earlier request already sent. So a chat switched to unattended after
+it started keeps `request_human_input` and `interaction_request_human`, and a
+call to either returns at once with the tool result "Not sent: this chat is now
+set to work without a person, so no one will answer until the task ends.
+Settle open choices with the most conventional option and continue. Do not take
+anything destructive, outside the workspace or needing authority you were not
+given; list it, with any step only a person can take, among the steps left for
+a person." (about 330 bytes, appended as that call's result like the approval
+refusal). When a turn's attendance differs from how the chat started, that
+turn's input (not the system prompt) carries an `[Opengeni attendance]` note:
+the unattended paragraph itself when the chat was switched to work without a
+person, or "A person is now present in this chat and will see and can answer
+questions, so the unattended-session guidance no longer applies. Follow the
+ordinary guidance on when to ask, asking in your reply." when a chat that
+started unattended has a person again (about 200 bytes). Its approvals then
+wait for that person. Interactive chats, and chats whose setting matches how
+they started, get no note and keep their bytes.
+
+Unattended sessions say so. A session created with `unattended: true` (no
+person will see or answer a question until the task ends) adds one paragraph,
+in the legacy CORE and as the last modular module (`unattended`, "# Unattended
+session"): asking, or waiting for human input, ends the work unanswered, so
+where any guidance says to ask, settle open choices with the most conventional
+option and finish the reversible work inside the workspace; never take or stand
+in for a step only a person can take, and leave it undone with anything
+destructive, outside the workspace or needing authority not given; end with
+the result, the assumptions made and the steps left for a person. Such a
+session is not given `request_human_input` or `interaction_request_human`, so
+the modular prompt also drops the clauses that offer them. A setup check of the
+general Autonomy principle alone still saw headless runs end with a question,
+because nothing told the model that no one would answer. Interactive sessions
+keep their bytes; the legacy lock adds an `unattended` case.
+
 A voice handoff answers in the user's language. When a person ends a realtime
 voice session, the remaining transcript reaches the agent as a message whose
 `<input>` is a fixed English note about the handoff. That note gains one last

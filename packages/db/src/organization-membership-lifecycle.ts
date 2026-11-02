@@ -4,6 +4,7 @@ import {
   ListOrganizationAdministrationMembersResponse,
   ListOrganizationInvitationsResponse,
   ListOrganizationInvitationsPageResponse,
+  ListOrganizationMemberNamesResponse,
   ListOrganizationMembersResponse,
   ListSelfOrganizationMembershipsResponse,
   OrganizationInvitation,
@@ -25,6 +26,7 @@ import {
   type OrganizationAdministrationOverview as OrganizationAdministrationOverviewType,
   type OrganizationInvitation as OrganizationInvitationType,
   type OrganizationMember as OrganizationMemberType,
+  type OrganizationMemberName as OrganizationMemberNameType,
   type OrganizationPrivateSessionSettings as OrganizationPrivateSessionSettingsType,
   type OrganizationMembershipRole,
   type OrganizationRetentionDeletionClaim as OrganizationRetentionDeletionClaimType,
@@ -828,6 +830,48 @@ export async function listOrganizationAdministrationMembers(
         ) as result`,
       );
       return ListOrganizationAdministrationMembersResponse.parse({
+        members: row?.result ?? [],
+      }).members;
+    },
+  );
+}
+
+const MEMBER_NAMES_ROUTINE = "opengeni_private.list_organization_member_names_v1(uuid)";
+
+/**
+ * The names of the active people in the actor's organization, for any of its
+ * members (owner, admin or member), or null while the deployment's database
+ * still withholds the names list from the runtime (1211 creates it withheld;
+ * a later migration grants it). The database refuses an actor who is not an
+ * active member of exactly this organization (42501). Product users,
+ * services and keys are never listed, and no email, role or status is
+ * returned.
+ */
+export async function listOrganizationMemberNames(
+  db: Database,
+  input: { organizationId: string; actorSubjectId: string },
+): Promise<OrganizationMemberNameType[] | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.organizationId, workspaceId: null },
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.actorSubjectId);
+      // A separate statement: EXECUTE is checked when a statement starts, so a
+      // guard inside the calling statement would not avoid the permission error.
+      const [granted] = await rawRows<{ granted: boolean | null }>(
+        scopedDb,
+        sql`select has_function_privilege(to_regprocedure(${MEMBER_NAMES_ROUTINE})::oid, 'EXECUTE')
+          as granted`,
+      );
+      if (granted?.granted !== true) return null;
+      const [row] = await rawRows<{ result: unknown }>(
+        scopedDb,
+        sql`select opengeni_private.list_organization_member_names_v1(
+          ${input.organizationId}::uuid
+        ) as result`,
+      );
+      return ListOrganizationMemberNamesResponse.parse({
+        available: true,
         members: row?.result ?? [],
       }).members;
     },

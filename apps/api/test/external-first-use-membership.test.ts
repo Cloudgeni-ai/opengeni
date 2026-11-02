@@ -400,8 +400,15 @@ test("first use never re-creates a member removed after the request authenticate
 test("a request needing a permission outside the defaults creates nothing", async () => {
   const org = await organization();
   const { externalId, client } = org.user();
-  // PATCH /v1/workspaces/:id requires workspace:admin.
+  // PATCH /v1/workspaces/:id and custom model entries take people who can start
+  // chats here, acting as themselves; a product's user never is one.
   expect(await status(client.updateWorkspace(org.workspace.id, { name: "Renamed" }))).toBe(403);
+  const added = await client.fetchApi(`/v1/workspaces/${org.workspace.id}/gateway-custom-models`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ operationId: crypto.randomUUID(), upstreamModelId: "acme/first-use" }),
+  });
+  expect(added.status).toBe(403);
   expect(
     await memberships(org.workspace.id, await subjectOf(org.accountId, externalId)),
   ).toHaveLength(0);

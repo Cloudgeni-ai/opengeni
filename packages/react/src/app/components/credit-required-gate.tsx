@@ -5,6 +5,7 @@ import { useAppContext } from "../app-context";
 import { CHECKOUT_RETURN_QUERY, readCheckoutPageReturn } from "../lib/credit-checkout";
 import { usePage } from "../lib/navigation";
 import { hasAccountPermission } from "../lib/permissions";
+import type { PaymentRefusalCode } from "../lib/model-access";
 
 const CreditRequiredPrompt = lazy(() =>
   import("./credit-required-prompt").then((module) => ({
@@ -12,7 +13,12 @@ const CreditRequiredPrompt = lazy(() =>
   })),
 );
 
-export type CreditRequired = { workspaceId: string; accountId: string | null };
+export type CreditRequired = {
+  workspaceId: string;
+  accountId: string | null;
+  /** A refusal one action fixes (own-key fee, API use); absent is "no credit". */
+  code?: PaymentRefusalCode | null | undefined;
+};
 
 /**
  * The "add credits" prompt the app state raises when the API refuses work for
@@ -34,6 +40,7 @@ export function CreditRequiredGate(props: {
         open
         workspaceId={creditRequired.workspaceId}
         accountId={creditRequired.accountId}
+        refusalCode={creditRequired.code ?? null}
         canBuyCredits={
           Boolean(creditRequired.accountId) &&
           hasAccountPermission(accessContext, creditRequired.accountId ?? "", "billing:manage")

@@ -39,10 +39,11 @@ import {
   getOrganizationCredentialProvider,
   getWorkspaceCredentialProvider,
   getWorkspaceWebhook,
-  integrationWorkspaceFilterMatches,
   listOrganizationWebhooks,
   listWorkspaceWebhookDeliveries,
   listWorkspaceWebhooks,
+  organizationCredentialProviderReaches,
+  organizationWebhookReaches,
   redeliverWorkspaceWebhookDelivery,
   resolveInitiatingHuman,
   resolveWorkspaceCredentialProvider,
@@ -426,8 +427,7 @@ export function registerWorkspaceIntegrationRoutes(
     const grant = await requireIntegrationAdmin(c, workspaceId);
     const workspace = await getWorkspace(deps.db, workspaceId);
     c.header("cache-control", "private, no-store");
-    // Organization registrations never cover a Personal workspace.
-    if (!workspace || workspace.accountId !== grant.accountId || workspace.kind !== "shared") {
+    if (!workspace || workspace.accountId !== grant.accountId) {
       return c.json(
         WorkspaceInheritedIntegrationsResponse.parse({ credentialProvider: null, webhooks: [] }),
       );
@@ -439,12 +439,14 @@ export function registerWorkspaceIntegrationRoutes(
     });
     const inheritedProvider =
       organizationProvider?.enabled &&
-      integrationWorkspaceFilterMatches(organizationProvider.workspaceFilter, workspace)
+      organizationCredentialProviderReaches(organizationProvider, workspace)
         ? organizationProvider
         : null;
-    const organizationWebhooks = await listOrganizationWebhooks(deps.db, {
-      accountId: grant.accountId,
-    });
+    // Organization webhooks never cover a Personal workspace.
+    const organizationWebhooks =
+      workspace.kind === "shared"
+        ? await listOrganizationWebhooks(deps.db, { accountId: grant.accountId })
+        : [];
     return c.json(
       WorkspaceInheritedIntegrationsResponse.parse({
         credentialProvider: inheritedProvider
@@ -455,11 +457,7 @@ export function registerWorkspaceIntegrationRoutes(
             }
           : null,
         webhooks: organizationWebhooks
-          .filter(
-            (webhook) =>
-              webhook.enabled &&
-              integrationWorkspaceFilterMatches(webhook.workspaceFilter, workspace),
-          )
+          .filter((webhook) => webhook.enabled && organizationWebhookReaches(webhook, workspace))
           .map((webhook) => ({
             id: webhook.id,
             url: webhook.url,

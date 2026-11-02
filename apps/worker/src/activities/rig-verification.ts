@@ -613,6 +613,11 @@ export async function runWithOwnedRigVerificationSandbox<T>(
       dependencies.establish(input.settings, null, {
         sessionId: `${input.sessionIdPrefix}-${holderId}`,
         recovery: "create-or-restore",
+        createIdentity: {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sandboxGroupId: input.sandboxGroupId,
+        },
         environment: {},
         onSandboxCreated: async (created) => {
           // Retain the exact handle before the durable write. If registration

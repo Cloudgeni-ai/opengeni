@@ -4798,6 +4798,8 @@ function assertRestoredManifestAuthority(
   }
   const platform = browserRuntimePlatform();
   const architecture = browserRuntimeArchitecture();
+  // Its cookies and saved passwords are encrypted for the operating system
+  // that saved them, so the profile opens only where the same one runs.
   if (
     !platform ||
     !architecture ||
@@ -4805,23 +4807,69 @@ function assertRestoredManifestAuthority(
     manifest.architecture !== architecture ||
     manifest.profileCrypto !== browserProfileCryptoPolicy(process.platform)
   ) {
+    const saved = `${PLATFORM_NAMES[manifest.platform]} ${manifest.architecture}`;
+    const samePlace = manifest.platform === platform && manifest.architecture === architecture;
     throw new InteractionControllerError(
       "unsupported",
-      "saved browser state is incompatible with this placement",
+      samePlace
+        ? "saved browser state is incompatible with this placement: its sign-ins are encrypted in a way this placement's browser cannot read. Open a new browser here and sign in again"
+        : `saved browser state is incompatible with this placement: it was saved on ${saved}${
+            platform && architecture
+              ? `, and this placement is ${PLATFORM_NAMES[platform]} ${architecture}`
+              : ""
+          }. Open it on a ${saved} placement, or open a new browser here and sign in again`,
     );
   }
 }
 
+const PLATFORM_NAMES: Record<BrowserProfileManifest["platform"], string> = {
+  linux: "Linux",
+  macos: "macOS",
+  windows: "Windows",
+};
+
+/**
+ * A saved profile continues in the build that saved it or a newer one of the
+ * same engine: Chromium migrates a profile forward when a newer build opens
+ * it (as when the browser updates itself), but an older build cannot read
+ * what a newer one wrote. The saved revision itself is never touched: it was
+ * materialized into this browser's own directory, and the next save records
+ * the build that runs now. A version that does not read as dotted numbers
+ * must match exactly.
+ */
 function assertRestoredRuntimeCompatible(
   manifest: BrowserProfileManifest,
   snapshot: BrowserRuntimeSnapshot,
 ): void {
-  if (snapshot.engine !== manifest.engine || snapshot.engineVersion !== manifest.engineVersion) {
-    throw new InteractionControllerError(
-      "unsupported",
-      "saved browser state requires another Chromium build",
-    );
+  if (
+    snapshot.engine === manifest.engine &&
+    engineContinuesProfile(snapshot.engineVersion, manifest.engineVersion)
+  )
+    return;
+  const saved = manifest.engineVersion ? ` ${manifest.engineVersion}` : "";
+  const running = snapshot.engineVersion ? ` ${snapshot.engineVersion}` : "";
+  throw new InteractionControllerError(
+    "unsupported",
+    snapshot.engine === manifest.engine
+      ? `saved browser state was saved by Chromium${saved} and needs that build or a newer one, but this placement runs Chromium${running}; open it on a placement with a newer Chromium, or update Chromium here`
+      : "saved browser state requires another Chromium build",
+  );
+}
+
+export function engineContinuesProfile(running: string | null, saved: string | null): boolean {
+  if (running === saved) return true;
+  const parse = (version: string | null) =>
+    version !== null && /^\d{1,9}(\.\d{1,9}){0,3}$/.test(version)
+      ? version.split(".").map(Number)
+      : null;
+  const runningParts = parse(running);
+  const savedParts = parse(saved);
+  if (!runningParts || !savedParts) return false;
+  for (let index = 0; index < Math.max(runningParts.length, savedParts.length); index += 1) {
+    const difference = (runningParts[index] ?? 0) - (savedParts[index] ?? 0);
+    if (difference !== 0) return difference > 0;
   }
+  return true;
 }
 
 function browserManifestDigest(manifest: BrowserProfileManifest): string {

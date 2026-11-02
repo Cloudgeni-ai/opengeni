@@ -6,8 +6,8 @@
 use std::time::Duration;
 
 use compute_core::{
-    Action, Admission, At, DiskPolicy, DiskSpace, Durability, Host, HostPolicy, Input, Level,
-    MemoryPolicy, Priority, SandboxId, Size, SleepPolicy, SleepRules, State, Step,
+    Action, Admission, At, Claims, DiskPolicy, DiskSpace, Durability, Host, HostPolicy, Input,
+    Level, MemoryPolicy, Priority, SandboxId, Size, SleepPolicy, SleepRules, State, Step,
 };
 
 const GIB: u64 = 1 << 30;
@@ -147,6 +147,39 @@ fn a_spare_vm_takes_only_room_above_the_buffer_that_no_wake_wants() {
     assert_eq!(Rig::new(None, None).host.spare_room(), None);
 }
 
+/// A spare keeps room in the budget, above its buffer, for what creates
+/// claiming spares would book beyond what those hold; the watermark only
+/// bounds what the spare itself takes.
+#[test]
+fn a_spare_leaves_room_above_the_buffer_for_claims() {
+    let mut rig = Rig::new(Some(admission(4 * GIB, GIB)), None);
+    let claims = |memory| Claims { memory, cpu: 0 };
+    let fits = |rig: &Rig, memory| {
+        rig.host
+            .spare_fits(GIB, DiskSpace::default(), 0, claims(memory))
+    };
+    assert!(fits(&rig, 2 * GIB));
+    assert!(
+        !fits(&rig, 2 * GIB + 1),
+        "the buffer is no room for a claim"
+    );
+    rig.spare(GIB, false);
+    assert!(fits(&rig, GIB));
+    assert!(
+        !fits(&rig, GIB + 1),
+        "what spares hold already is no room for a claim"
+    );
+
+    let mut rig = Rig::new(None, Some(watermarks()));
+    rig.send(Input::Memory { available: 8 * GIB });
+    assert_eq!(rig.host.spare_room(), Some(3 * GIB));
+    assert!(
+        rig.host
+            .spare_fits(3 * GIB, DiskSpace::default(), 0, claims(64 * GIB)),
+        "without admission, claims book nothing"
+    );
+}
+
 #[test]
 fn a_wake_ends_a_ready_spare_before_any_saved_sandbox() {
     let mut rig = Rig::new(Some(admission(4 * GIB, 0)), None);
@@ -190,7 +223,10 @@ fn a_spare_still_filling_is_not_ended_for_a_wake() {
 fn a_filling_spare_claims_room_above_the_watermark_until_memory_is_read_again() {
     let mut rig = Rig::new(None, Some(watermarks()));
     assert_eq!(rig.host.spare_room(), Some(0), "nothing before a reading");
-    assert!(!rig.host.spare_fits(1, DiskSpace::default(), 0));
+    assert!(
+        !rig.host
+            .spare_fits(1, DiskSpace::default(), 0, Claims::default())
+    );
     rig.send(Input::Memory { available: 8 * GIB });
     assert_eq!(rig.host.spare_room(), Some(3 * GIB));
     rig.spare(2 * GIB, true);
@@ -375,16 +411,19 @@ fn what_a_spare_may_write_is_booked_on_disk_until_a_reading_after_it_ends() {
     });
     let snapshot = DiskSpace::save(2 * GIB);
     assert!(
-        !rig.host.spare_fits(GIB, snapshot, 0),
+        !rig.host.spare_fits(GIB, snapshot, 0, Claims::default()),
         "nothing that writes before a disk reading"
     );
-    assert!(rig.host.spare_fits(GIB, DiskSpace::default(), 0));
+    assert!(
+        rig.host
+            .spare_fits(GIB, DiskSpace::default(), 0, Claims::default())
+    );
     let reading = DiskSpace {
         bytes: 4 * GIB,
         inodes: 1000,
     };
     rig.send(Input::Disk { available: reading });
-    assert!(rig.host.spare_fits(GIB, snapshot, 0));
+    assert!(rig.host.spare_fits(GIB, snapshot, 0, Claims::default()));
     rig.send(Input::Spare {
         sandbox: SPARE,
         bytes: GIB,
@@ -394,7 +433,10 @@ fn what_a_spare_may_write_is_booked_on_disk_until_a_reading_after_it_ends() {
     });
     let free = |rig: &Rig| rig.host.disk().unwrap().free().bytes;
     assert_eq!(free(&rig), GIB);
-    assert!(!rig.host.spare_fits(GIB, snapshot, 0), "the disk is booked");
+    assert!(
+        !rig.host.spare_fits(GIB, snapshot, 0, Claims::default()),
+        "the disk is booked"
+    );
     // A sandbox's next save cannot book what the build may write.
     rig.send(Input::Add {
         sandbox: SandboxId(1),

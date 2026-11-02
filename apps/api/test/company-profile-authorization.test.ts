@@ -63,12 +63,15 @@ function expectForbidden(operation: () => void, message: string): void {
 }
 
 /**
- * The manual administration route keeps the pre-existing admission contract:
- * a direct human session whose exact account grant carries `account:admin`
- * (granted to organization owners). Organization admins, members, machines,
- * and service-initiated requests are refused. Delegated (embedded) human
- * sessions carrying `account:admin` remain admitted exactly as before this
- * change; narrowing that is a deliberate product decision, not a silent one.
+ * The manual administration route admits a direct human session that
+ * administers the organization: an exact account grant carrying
+ * `account:admin` (organization owners), or an owner/admin role on a
+ * canonical Better Auth cookie session (covered end to end in
+ * organization-admin-knowledge-administration.test.ts). The contexts built
+ * here are not cookie-stamped, so a bare admin role without that proof is
+ * still refused. Members, machines, and service-initiated requests are
+ * refused. Delegated (embedded) human sessions carrying `account:admin`
+ * remain admitted.
  */
 describe("company-profile human mutation authorization", () => {
   test("admits a direct human session holding account:admin", () => {
@@ -88,7 +91,7 @@ describe("company-profile human mutation authorization", () => {
     ).not.toThrow();
   });
 
-  test("denies organization admins and members without account:admin", () => {
+  test("denies members, and admin roles without a canonical human session proof", () => {
     for (const role of ["admin", "member"] as const) {
       expectForbidden(
         () => requireDirectAccountAdmin(authorization({ role })),

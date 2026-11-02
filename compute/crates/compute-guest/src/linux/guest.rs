@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::supervise::Children;
 use super::vsock::Stream;
-use super::{agent, log, shrink, sys, system};
+use super::{agent, disk, log, shrink, sys, system};
 use crate::ENVD_PORT;
 use crate::envd::{self, AgentInit, InitData};
 use crate::gateway::{self, Header};
@@ -406,6 +406,12 @@ impl Guest {
             return;
         }
         let seeded = notice.seed().is_some_and(|seed| system::reseed(&seed));
+        // A claim or a create from a template may have lengthened the disk
+        // past what this memory knew: the sandbox gets the room it asked
+        // for before anything uses it.
+        if let Some(length) = notice.disk {
+            disk::grow_to(length, disk::LENGTH_WAIT);
+        }
         // envd learns of the restore before the host may use the sandbox;
         // with no answer, the host tries again.
         if !self.wait_envd(ENVD_WAIT) {

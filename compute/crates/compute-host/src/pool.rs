@@ -158,6 +158,11 @@ pub(crate) struct Sources {
     pub networked: bool,
     /// How guest memory is backed, as the engine describes it.
     pub memory: String,
+    /// The runtime new VMs run under (see [`compute_engine::Engine::runtime`]):
+    /// a template's clones wake under the runtime that saved it, so one
+    /// saved under another, before the host's kernel changed say, would
+    /// give every new sandbox an image this host may refuse.
+    pub runtime: String,
     /// The guest port that says a booted guest is ready for work: a guest
     /// image that answers elsewhere is another guest.
     pub ready_port: u32,
@@ -193,6 +198,7 @@ impl Sources {
             boot_args: self.boot_args.clone(),
             networked: self.networked,
             memory: self.memory.clone(),
+            runtime: self.runtime.clone(),
             ready_port: self.ready_port,
         })
     }
@@ -233,6 +239,7 @@ pub(crate) struct Inputs {
     boot_args: String,
     networked: bool,
     memory: String,
+    runtime: String,
     ready_port: u32,
 }
 
@@ -551,6 +558,20 @@ impl Pool {
             }
         };
         self.entries.insert(shape, entry);
+    }
+
+    /// Puts off `shape`'s build, which found no memory, disk or processor
+    /// time to spare: as after a failed build, new sandboxes boot cold and
+    /// a later one tries again, but nothing failed, so it is not warned
+    /// about each time.
+    pub fn put_off(&mut self, shape: Shape, now: Instant) {
+        tracing::debug!(%shape, "template build put off: no room to spare for it");
+        self.entries.insert(
+            shape,
+            Entry::Failed {
+                retry: now + RETRY_AFTER,
+            },
+        );
     }
 
     /// Forgets `template`, which no longer fits today's inputs, and asks for

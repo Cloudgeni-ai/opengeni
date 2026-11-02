@@ -12,6 +12,7 @@ import {
 } from "../src/attached-cdp";
 import { CdpCommandTimeoutError, CdpProtocolError, CdpTransportError } from "../src/cdp";
 import { AttachedBrowserBridgeError } from "../src/attached-bridge";
+import { protectedFieldsProbeAnswer } from "./fixtures/protected-fields-probe";
 
 class DetachmentBridge implements AttachedBrowserBridgeTransport {
   readonly commands: Array<Readonly<Record<string, unknown>>> = [];
@@ -90,6 +91,8 @@ class DetachmentBridge implements AttachedBrowserBridgeTransport {
             cssContentSize: { x: 0, y: 0, width: 800, height: 600 },
           };
         if (payload.method === "Accessibility.getFullAXTree") result = { nodes: [] };
+        if (payload.method === "DOMSnapshot.captureSnapshot")
+          result = { strings: [], documents: [] };
         if (payload.method === "Runtime.evaluate")
           result = {
             result: {
@@ -100,6 +103,7 @@ class DetachmentBridge implements AttachedBrowserBridgeTransport {
                 : 1,
             },
           };
+        result = protectedFieldsProbeAnswer(String(payload.method), payload.params) ?? result;
         await this.beforeCommandReply?.(payload.method);
         return { result } as T;
       }

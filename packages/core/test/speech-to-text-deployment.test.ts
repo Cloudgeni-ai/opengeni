@@ -1,18 +1,23 @@
 import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing/settings";
 import {
+  asRecordingTranscriptionError,
+  asTranscriptionServiceError,
   createSpeechToTextDeployment,
   createTranscriptionService,
   dictationProviders,
   meetingModelFor,
   meetingModelWithoutCreditsFor,
+  responseError,
   speechToTextModelFor,
   transcriptText,
+  withoutFallback,
 } from "../src/transcription-service";
 import {
   RecordingTranscriptionError,
   type RecordingTranscriptionProvider,
 } from "../src/recording-transcription";
+import { TranscriptionServiceError } from "../src/transcription";
 import { textModelCapabilities } from "../src/transcription-service/text-models";
 import { openAiLanguage } from "../src/transcription-service/providers/openai-realtime";
 import { createOpenAiTranscriptionProvider } from "../src/transcription-service/providers/openai";
@@ -298,6 +303,7 @@ describe("the model a workspace's meetings run", () => {
     keyed?: readonly string[];
     wordAlignment?: boolean;
     settings?: Parameters<typeof testSettings>[0];
+    providers?: readonly RecordingTranscriptionProvider[];
   }) {
     return createSpeechToTextDeployment(
       {
@@ -308,7 +314,7 @@ describe("the model a workspace's meetings run", () => {
         }),
       },
       {
-        providers: [subscription(input.signedIn ?? [])],
+        providers: [subscription(input.signedIn ?? []), ...(input.providers ?? [])],
         // Without a database the EU-only setting cannot be read (fail closed);
         // these workspaces are not EU-only.
         isEuOnly: async () => false,
@@ -376,6 +382,44 @@ describe("the model a workspace's meetings run", () => {
       settings: { ...azure, speechToTextPinned: "azure-speech/MAI-Transcribe-2" },
     });
     expect(await meetingModelWithoutCreditsFor(pinned, scope)).toBe(null);
+  });
+
+  test("while credits are billed an unpriced deployment model isn't chosen, except for a legacy billing account", async () => {
+    // The deployment's Azure Speech account is the default and has no credit price.
+    const billed = { ...azure, usageLimitsMode: "managed" as const };
+    const defaultModel = { providerId: "azure-speech", model: "MAI-Transcribe-2" };
+    // A workspace signed in to a subscription runs it instead.
+    const signedIn = deploymentWith({ signedIn: ["w"], settings: billed });
+    expect(signedIn.meetingDefault).toEqual(defaultModel);
+    expect(signedIn.unpriced("azure-speech", "MAI-Transcribe-2", "a")).toBe(true);
+    expect(await meetingModelFor(signedIn, null, scope)).toEqual({
+      providerId: "subscription",
+      model: "subscription-model",
+    });
+    // A deployment model with a price can run, so it is chosen.
+    const base = fakeTextProvider("priced", "deployment", async () => {
+      throw new Error("not called");
+    });
+    const priced: RecordingTranscriptionProvider = {
+      ...base,
+      models: base.models.map((spec) => ({ ...spec, creditPricing: { microsPerMinute: 100 } })),
+    };
+    const withPriced = deploymentWith({ settings: billed, providers: [priced] });
+    expect(withPriced.unpriced("priced", "priced-model", "a")).toBe(false);
+    expect(await meetingModelFor(withPriced, null, scope)).toEqual({
+      providerId: "priced",
+      model: "priced-model",
+    });
+    // CloudGeni's legacy account, or credits not billed: the default as before.
+    const legacy = deploymentWith({
+      signedIn: ["w"],
+      settings: { ...billed, billingLegacyAccountIds: ["a"] },
+    });
+    expect(legacy.unpriced("azure-speech", "MAI-Transcribe-2", "a")).toBe(false);
+    expect(await meetingModelFor(legacy, null, scope)).toEqual(defaultModel);
+    const unbilled = deploymentWith({ signedIn: ["w"], settings: azure });
+    expect(unbilled.unpriced("azure-speech", "MAI-Transcribe-2", "a")).toBe(false);
+    expect(await meetingModelFor(unbilled, null, scope)).toEqual(defaultModel);
   });
 });
 
@@ -562,6 +606,111 @@ describe("dictation over the shared providers", () => {
     await expect(service.transcribe({ ...request, providerId: "openai" })).rejects.toMatchObject({
       code: "unavailable",
     });
+  });
+});
+
+describe("a provider out of credit", () => {
+  const audio = { bytes: new Uint8Array([1, 2, 3]), mimeType: "audio/wav", fileName: "a.wav" };
+  const request = {
+    workspaceId: "workspace",
+    accountId: "account",
+    subjectId: "subject",
+    requestId: "request",
+    audio: new Uint8Array([1, 2, 3]),
+    mimeType: "audio/webm",
+  };
+  const failingOpenAi = (status: number, body: unknown) =>
+    createOpenAiTranscriptionProvider({
+      apiKey: "key",
+      baseUrl: "https://api.example.test/v1",
+      model: "gpt-4o-transcribe",
+      fetch: (async () => Response.json(body, { status })) as unknown as typeof fetch,
+    });
+  const meetingError = async (provider: RecordingTranscriptionProvider) => {
+    try {
+      await provider.transcribe({ audio, model: "gpt-4o-transcribe", diarize: false }, {});
+    } catch (error) {
+      return asRecordingTranscriptionError(error) as RecordingTranscriptionError;
+    }
+    throw new Error("expected a failure");
+  };
+
+  test("a meeting says the OpenAI account is out of credit, not that its key is wrong", async () => {
+    const spent = await meetingError(
+      failingOpenAi(429, {
+        error: {
+          message: "You exceeded your current quota, please check your plan and billing details.",
+          type: "insufficient_quota",
+          code: "insufficient_quota",
+        },
+      }),
+    );
+    expect([spent.code, spent.retryable]).toEqual(["quota_exceeded", false]);
+    const rejected = await meetingError(
+      failingOpenAi(401, {
+        error: { message: "Incorrect API key provided.", code: "invalid_api_key" },
+      }),
+    );
+    expect(rejected.code).toBe("unauthorized");
+    // A busy provider is neither.
+    const busy = await meetingError(
+      failingOpenAi(429, {
+        error: {
+          message: "Rate limit reached for requests. Please try again in 20s.",
+          type: "requests",
+          code: "rate_limit_exceeded",
+        },
+      }),
+    );
+    expect(busy.code).toBe("provider");
+  });
+
+  test("the provider's code survives the trip through voice input and back", () => {
+    for (const code of ["quota_exceeded", "unauthorized", "rate_limited"] as const) {
+      const original = new RecordingTranscriptionError("no", code, code === "rate_limited");
+      const voice = asTranscriptionServiceError(original) as TranscriptionServiceError;
+      expect([voice.code, voice.fallbackSafe]).toEqual(["unavailable", true]);
+      const meeting = asRecordingTranscriptionError(voice) as RecordingTranscriptionError;
+      expect([meeting.code, meeting.retryable]).toEqual([code, code === "rate_limited"]);
+    }
+    // A subscription keeps it too, though nothing falls back from it.
+    const pinned = withoutFallback(responseError(402, { error: { code: "insufficient_quota" } }));
+    expect(pinned.fallbackSafe).toBe(false);
+    expect((asRecordingTranscriptionError(pinned) as RecordingTranscriptionError).code).toBe(
+      "quota_exceeded",
+    );
+  });
+
+  test("a spent provider still lets dictation fall back to the next one", async () => {
+    const settings = testSettings({ voiceInputProviderOrder: "openai" });
+    const deployment = createSpeechToTextDeployment(
+      { settings },
+      {
+        isEuOnly: async () => false,
+        providers: [
+          fakeTextProvider("first", "workspace_subscription", async () => {
+            throw new RecordingTranscriptionError("no credit", "quota_exceeded", false);
+          }),
+          fakeTextProvider("second", "workspace_subscription", async () => ({
+            languages: [],
+            audioMilliseconds: null,
+            diarized: false,
+            words: [
+              {
+                text: "Hello",
+                startMilliseconds: 0,
+                endMilliseconds: 1,
+                speaker: null,
+                spaceBefore: false,
+              },
+            ],
+          })),
+        ],
+      },
+    );
+    const service = createTranscriptionService({ settings, db: {} as never, deployment });
+    const result = await service.transcribe({ ...request, preferredProvider: "first" });
+    expect(result).toMatchObject({ text: "Hello", providerId: "second" });
   });
 });
 

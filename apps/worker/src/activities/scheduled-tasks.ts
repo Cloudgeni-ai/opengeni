@@ -1,15 +1,14 @@
 import {
-  GOOGLE_DRIVE_NATIVE_RETIRED_REASON,
-  isRetiredNativeGoogleDriveTask,
-} from "@opengeni/contracts/google-drive-native-retirement";
-import { getScheduledTaskClaudeProviderAccountAuthoritySnapshot } from "@opengeni/db";
+  isKnowledgeSourceSyncRetirementReason,
+  retiredKnowledgeSourceSyncTask,
+} from "@opengeni/contracts/knowledge-source-sync-retirement";
+import {
+  getScheduledTaskClaudeProviderAccountAuthoritySnapshot,
+  readScheduledTaskBillingOrigin,
+} from "@opengeni/db";
 import { retryScheduledTaskAdmission } from "./scheduled-task-admission";
 import { scheduledTaskSessionTitle } from "./scheduled-task-title";
 export { scheduledTaskSessionTitle } from "./scheduled-task-title";
-import {
-  ATLASSIAN_NATIVE_RETIRED_REASON,
-  isRetiredNativeAtlassianTask,
-} from "@opengeni/contracts/atlassian-native-retirement";
 import { PERSONAL_GITHUB_CONNECTION_SURFACE_ID } from "@opengeni/contracts/personal-github";
 import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
@@ -29,8 +28,10 @@ import {
   mergeResourceRefs,
   resolveWorkspaceSessionToolDefaults,
   scheduledOccurrencePayloadUtf8Bytes,
+  scheduledTaskRunUnattendedSetting,
   stableJson,
   TurnExecutionPolicyV1,
+  withSessionUnattendedMetadata,
   type McpConnectionAccountSelection,
   type ScheduledTask,
   type ScheduledTaskDegradedAccount,
@@ -94,6 +95,7 @@ import {
   getEnrollment,
   getSandbox,
   getSessionAuthorityEpoch,
+  getSessionVisibility,
   issueSelfUserResourceGrant,
   listSelfUserResourceAuthorities,
   getRig,
@@ -137,7 +139,7 @@ import {
   workflowIdForSession,
 } from "./common";
 import { withFirstPartyTools } from "./goals";
-import { agentRunAdmissionDenial } from "@opengeni/core";
+import { agentRunAdmissionDenial, fundedBillingOrigin } from "@opengeni/core";
 import {
   scheduledAlertOccurrenceIdentity,
   scheduledAlertResponderSessionCreateIdempotencyKey,
@@ -159,6 +161,19 @@ import type {
 import type { Database } from "@opengeni/db";
 import type { CreateSessionMcpServerInput } from "@opengeni/db";
 import type { ScheduledTaskAgentConfig } from "@opengeni/contracts";
+
+/**
+ * The unattended setting for a chat this task starts: nobody answers during a
+ * scheduled or event-triggered run unless the task says otherwise.
+ * Creating the chat with an unattended setting also freezes that it started
+ * unattended, so its instructions and tools say so from the first turn and
+ * never change; the setting alone can later change, and only call-time
+ * behaviour follows it.
+ */
+function unattendedSettingFor(config: ScheduledTask["agentConfig"]) {
+  const unattendedSetting = scheduledTaskRunUnattendedSetting(config);
+  return unattendedSetting ? { unattendedSetting } : {};
+}
 
 type ScheduledTemporalActivityIdentity = {
   namespace: string;
@@ -431,26 +446,20 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           }
           throw new Error("scheduled agent run is missing accepted execution truth");
         }
-        if (
-          priorRun.status === "queued" &&
-          isRetiredNativeGoogleDriveTask(acceptedExecution.task)
-        ) {
+        // A queued run accepted before Knowledge-source sync was retired
+        // settles failed once instead of recovering a new session.
+        const retiredSource =
+          priorRun.status === "queued"
+            ? retiredKnowledgeSourceSyncTask(acceptedExecution.task)
+            : null;
+        if (retiredSource) {
           await markScheduledTaskRunFailedIfQueued(
             db,
             priorRun.workspaceId,
             priorRun.id,
-            GOOGLE_DRIVE_NATIVE_RETIRED_REASON,
+            retiredSource.reason,
           );
-          return scheduledRunTerminalResult(GOOGLE_DRIVE_NATIVE_RETIRED_REASON);
-        }
-        if (priorRun.status === "queued" && isRetiredNativeAtlassianTask(acceptedExecution.task)) {
-          await markScheduledTaskRunFailedIfQueued(
-            db,
-            priorRun.workspaceId,
-            priorRun.id,
-            ATLASSIAN_NATIVE_RETIRED_REASON,
-          );
-          return scheduledRunTerminalResult(ATLASSIAN_NATIVE_RETIRED_REASON);
+          return scheduledRunTerminalResult(retiredSource.reason);
         }
         await recordScheduledTaskFiredUsage(db, acceptedExecution, priorRun);
         if (priorRun.status === "dispatched") {
@@ -520,18 +529,13 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       if (!task) {
         return { action: "deleted" };
       }
-      if (isRetiredNativeGoogleDriveTask(task))
-        return { action: "blocked", reason: GOOGLE_DRIVE_NATIVE_RETIRED_REASON };
-      if (isRetiredNativeAtlassianTask(task))
-        return { action: "blocked", reason: ATLASSIAN_NATIVE_RETIRED_REASON };
-      if (task.action.kind !== "agent_turn") {
-        return { action: "blocked", reason: "legacy_source_schedule_requires_migration" };
-      }
+      // Saved Knowledge-source tasks (frozen sync actions and source-bound
+      // agent tasks) never fetch provider content again; they fail closed
+      // before run admission, model selection or session creation.
+      const retiredSource = retiredKnowledgeSourceSyncTask(task);
+      if (retiredSource) return { action: "blocked", reason: retiredSource.reason };
       if (task.status !== "active") {
         return { action: "blocked", reason: "scheduled_task_paused" };
-      }
-      if (task.agentConfig.knowledgeSource && knowledgeSourceSyncEffectivelyPaused(task)) {
-        return { action: "blocked", reason: "knowledge_source_paused" };
       }
       const structuredAlertOccurrence = scheduledAlertOccurrenceIdentity({
         workspaceId: task.workspaceId,
@@ -911,10 +915,11 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             WORKSPACE_DEFAULT_PERSONAL_MACHINE_SCHEDULE_MESSAGE,
           );
         }
-        // A personal machine runs only its owner's Only me schedule. The scoped
-        // lookup returns a personal machine to its owner alone, and every attempt
-        // re-proves the owner's membership, workspace access and grant in the
-        // database before the machine is used.
+        // A personal machine runs only its owner's schedules, Only me or shared:
+        // a schedule runs as its owner. The scoped lookup returns a personal
+        // machine to its owner alone, and every attempt re-proves the owner's
+        // membership, workspace access and grant in the database before the
+        // machine is used.
         if (
           !machine ||
           machine.kind !== "selfhosted" ||
@@ -1232,12 +1237,33 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           model: targetSessionExecution?.model ?? model,
           requestedAgentRuns: input.agentRunUsageIdempotencyKey ? 0 : 1,
           initiatingHumanSubjectId: causalHumanSubjectId,
+          // Runs are billed as whoever set the task up.
+          // An internal (legacy) account stays app even for a task it can't see.
+          billingOrigin: async () =>
+            fundedBillingOrigin(
+              task.accountId,
+              await readScheduledTaskBillingOrigin(db, {
+                accountId: task.accountId,
+                workspaceId: task.workspaceId,
+                taskId: task.id,
+              }),
+            ),
         },
       );
       if (admissionDenial) {
         // Credits and monthly limits clear on their own (top-up, new period):
         // skip this occurrence visibly; a later one is admitted normally.
-        return await refuseAdmission(admissionDenial, true, "agent run admission denied");
+        // A run receipt records API work without credits, and an own key
+        // without paid credit for its fee, as out of credits.
+        return await refuseAdmission(
+          admissionDenial === "api_credits_required" ||
+            admissionDenial === "byok_paid_credit_required" ||
+            admissionDenial === "byok_upgrade_required"
+            ? "insufficient_credits"
+            : admissionDenial,
+          true,
+          "agent run admission denied",
+        );
       }
       if (acceptedTargetSessionId && targetSessionExecutionBase) {
         // An occurrence that targets an existing task tree counts against
@@ -1629,6 +1655,8 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 accountId: task.accountId,
                 workspaceId: task.workspaceId,
                 initialMessage: task.agentConfig.prompt,
+                // No person answers during a run this task starts, unless it says so.
+                ...unattendedSettingFor(task.agentConfig),
                 resources: task.agentConfig.resources,
                 bundledSkillIds: task.agentConfig.bundledSkillIds,
                 tools: taskTools,
@@ -2442,10 +2470,7 @@ function scheduledAdmissionRefusalResult(
 function scheduledRunTerminalResult(
   error: string | null,
 ): Extract<DispatchScheduledTaskRunResult, { action: "blocked" }> {
-  if (error === GOOGLE_DRIVE_NATIVE_RETIRED_REASON)
-    return { action: "blocked", reason: GOOGLE_DRIVE_NATIVE_RETIRED_REASON };
-  if (error === ATLASSIAN_NATIVE_RETIRED_REASON)
-    return { action: "blocked", reason: ATLASSIAN_NATIVE_RETIRED_REASON };
+  if (isKnowledgeSourceSyncRetirementReason(error)) return { action: "blocked", reason: error };
   if (error === "scheduled_authority_exhausted") {
     return { action: "blocked", reason: "scheduled_authority_exhausted" };
   }
@@ -2573,17 +2598,13 @@ async function recordScheduledTaskFiredUsage(
 }
 
 function personalMachineScheduleOwner(task: ScheduledTask, subjectId: string | null): boolean {
-  return (
-    task.visibility === "private" &&
-    task.ownerSubjectId !== null &&
-    task.ownerSubjectId === subjectId
-  );
+  return task.ownerSubjectId !== null && task.ownerSubjectId === subjectId;
 }
 
 /**
- * The owner and machine authority when an Only me schedule runs on its owner's
- * personal machine; null for a shared machine. Throws when a personal machine is
- * no longer usable by the owner, so the run fails closed.
+ * The owner and machine authority when a schedule runs on its owner's personal
+ * machine; null for a shared machine. Throws when a personal machine is no
+ * longer usable by the owner, so the run fails closed.
  */
 async function scheduledPersonalMachineOwner(
   db: Database,
@@ -2591,7 +2612,7 @@ async function scheduledPersonalMachineOwner(
   target: NonNullable<ScheduledTask["agentConfig"]["machineTarget"]>,
 ): Promise<{ subjectId: string; authorityId: string } | null> {
   const subjectId = task.ownerSubjectId;
-  if (task.visibility !== "private" || !subjectId) return null;
+  if (!subjectId) return null;
   const access = { accountId: task.accountId, workspaceId: task.workspaceId, subjectId };
   const machine = await getSandbox(db, access, target.targetSandboxId);
   if (machine?.scope !== "user") return null;
@@ -2699,14 +2720,21 @@ async function seedScheduledGeneratedSessionRoute(input: {
   );
   if (seeded.swapped) {
     if (personalOwner) {
-      // Saving an Only me schedule on your own machine is the consent. Each run
-      // gets a grant for exactly its own chat, so other chats keep asking.
+      // Picking your own machine on your schedule is the consent. Each run gets
+      // a grant for exactly its own chat, Only me or shared like the schedule.
+      // Other people's messages in a shared run chat still wait for the owner.
       const authorityEpoch = await getSessionAuthorityEpoch(input.db, {
         accountId: input.task.accountId,
         workspaceId: input.task.workspaceId,
         sessionId: input.session.id,
       });
       if (authorityEpoch === null) throw new Error("scheduled run chat has no authority epoch");
+      const visibility = await getSessionVisibility(
+        input.db,
+        input.task.workspaceId,
+        input.session.id,
+      );
+      if (visibility === null) throw new Error("scheduled run chat has no visibility");
       await issueSelfUserResourceGrant(input.db, {
         accountId: input.task.accountId,
         workspaceId: input.task.workspaceId,
@@ -2714,10 +2742,10 @@ async function seedScheduledGeneratedSessionRoute(input: {
         authorityId: personalOwner.authorityId,
         resourceKind: "connected_machine",
         mode: "session",
-        context: "user_private",
+        context: visibility,
         sessionId: input.session.id,
         expectedAuthorityEpoch: authorityEpoch,
-        workspaceSharedAcknowledged: false,
+        workspaceSharedAcknowledged: visibility === "workspace_shared",
       });
     }
     return await requireSession(input.db, input.task.workspaceId, input.session.id);
@@ -2845,6 +2873,8 @@ async function recoverBoundScheduledTaskDispatch(input: {
       accountId: task.accountId,
       workspaceId: task.workspaceId,
       initialMessage: task.agentConfig.prompt,
+      // The same rule as admission, from the same accepted task snapshot.
+      ...unattendedSettingFor(task.agentConfig),
       resources: task.agentConfig.resources,
       bundledSkillIds: task.agentConfig.bundledSkillIds,
       tools: input.acceptedExecution.resolvedTools,
@@ -3055,7 +3085,10 @@ async function recoverBoundScheduledTaskDispatch(input: {
       session.sandboxGroupId !== session.id ||
       session.channelId !== null ||
       session.codexCompactionMode !== generatedBinding.codexCompactionMode ||
-      stableJson(session.metadata) !== stableJson(expectedMetadata) ||
+      // Session reads project the frozen `started_unattended` column into the
+      // reserved unattended key; the scheduler never writes that key itself.
+      stableJson(withSessionUnattendedMetadata(session.metadata, false)) !==
+        stableJson(expectedMetadata) ||
       session.createdBy.kind !== "service" ||
       session.createdBy.subjectId !== "scheduler" ||
       stableJson(session.createdByContext) !==
@@ -3467,15 +3500,4 @@ export function scheduledGeneratedChatSettings(
       : {}),
     ...(agentConfig.skills?.length ? { skills: SessionSkills.parse(agentConfig.skills) } : {}),
   };
-}
-
-function knowledgeSourceSyncEffectivelyPaused(task: {
-  status: "active" | "paused";
-  metadata: Record<string, unknown>;
-}): boolean {
-  if (task.status === "paused") return true;
-  const value = task.metadata.knowledgeSourceSync;
-  if (!value || typeof value !== "object") return false;
-  const control = value as Record<string, unknown>;
-  return control.sourceEnabled === false || control.connectionPaused === true;
 }

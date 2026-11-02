@@ -406,6 +406,73 @@ export type WebhookFormat = z.infer<typeof WebhookFormat>;
 export type WebhookFormatInput = z.input<typeof WebhookFormat>;
 
 /**
+ * The header a signature is read from, lower-cased: for `token`, the secret
+ * itself. Null for `url_token`, whose secret is in the address's query, which
+ * a format never reads.
+ */
+export function webhookSignatureHeader(signature: WebhookSignatureFormat): string | null {
+  switch (signature.scheme) {
+    case "standard_webhooks":
+      return "webhook-signature";
+    case "url_token":
+      return null;
+    default:
+      return signature.header.toLowerCase();
+  }
+}
+
+/**
+ * Where a format reads its event type, delivery id or an event id part from
+ * the header its signature is in, as paths into the format. Such a format
+ * would store the signature, or a `token` scheme's secret itself, in events
+ * and the delivery log, so it is refused, and intake reads that header as
+ * absent.
+ */
+export function webhookFormatSignatureHeaderReads(
+  format: Pick<WebhookFormat, "signature" | "type" | "deliveryId" | "eventId">,
+): Array<Array<string | number>> {
+  const signed = webhookSignatureHeader(format.signature);
+  if (signed === null) return [];
+  const reads = (source: object | undefined) =>
+    source !== undefined && "header" in source && typeof source.header === "string"
+      ? source.header.toLowerCase() === signed
+      : false;
+  const found: Array<Array<string | number>> = [];
+  if ("parts" in format.type) {
+    format.type.parts.forEach((part, index) => {
+      if (reads(part)) found.push(["type", "parts", index, "header"]);
+    });
+  } else if (reads(format.type)) {
+    found.push(["type", "header"]);
+  }
+  if (reads(format.deliveryId)) found.push(["deliveryId", "header"]);
+  if (
+    format.eventId !== undefined &&
+    typeof format.eventId === "object" &&
+    "parts" in format.eventId
+  ) {
+    format.eventId.parts.forEach((part, index) => {
+      if (reads(part)) found.push(["eventId", "parts", index, "header"]);
+    });
+  }
+  return found;
+}
+
+function refuseSignatureHeaderReads(
+  format: WebhookFormat | undefined,
+  context: z.RefinementCtx,
+): void {
+  if (format === undefined) return;
+  for (const path of webhookFormatSignatureHeaderReads(format)) {
+    context.addIssue({
+      code: "custom",
+      path: ["format", ...path],
+      message: "This header carries the signature, so the event type and ids can't be read from it",
+    });
+  }
+}
+
+/**
  * Formats for apps whose webhooks are well known, keyed by their `preset`.
  * A custom source made with one is the same as one that spells it out.
  */
@@ -688,6 +755,7 @@ export const CreateEventSourceRequest = /* @__PURE__ */ defineSchema(() =>
               : "Only a custom webhook takes a format",
         });
       }
+      if (value.kind === "webhook") refuseSignatureHeaderReads(value.format, context);
     }),
 );
 /** What a caller sends; a webhook source's `visibility` defaults to `private`. */
@@ -717,7 +785,8 @@ export const UpdateEventSourceRequest = /* @__PURE__ */ defineSchema(() =>
       format: WebhookFormat.optional(),
     })
     .strict()
-    .refine((value) => Object.keys(value).length > 0, "Supply at least one field"),
+    .refine((value) => Object.keys(value).length > 0, "Supply at least one field")
+    .superRefine((value, context) => refuseSignatureHeaderReads(value.format, context)),
 );
 export type UpdateEventSourceRequest = z.infer<typeof UpdateEventSourceRequest>;
 

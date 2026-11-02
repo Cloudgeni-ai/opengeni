@@ -472,7 +472,7 @@ for (const menuTabs of [0, 1]) {
             type: "click",
             locator: ref(before, "textbox", "Email"),
           });
-          expect(["completed", "outcome_unknown"]).toContain(focus.state);
+          expect(["completed", "outcome_unknown"], JSON.stringify(focus)).toContain(focus.state);
           // Chrome neither reports nor lets the extension script the page's
           // data frame, and counts other tabs' menus with this one, so the
           // extension cannot tell which unseen frame is the menu: it removes

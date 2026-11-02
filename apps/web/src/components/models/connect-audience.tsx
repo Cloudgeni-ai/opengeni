@@ -3,17 +3,18 @@ import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useCallback, useEffect, useState } from "react";
 
 import type { ConnectionAccessKind } from "@/components/connection-access-settings";
-import { Button } from "@opengeni/react/ui/button";
-import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
-import { CheckboxField } from "@opengeni/react/ui/field";
-import { Skeleton } from "@opengeni/react/ui/skeleton";
+import {
+  WorkspaceReachFields,
+  type WorkspaceReach,
+} from "@opengeni/react/app/components/workspace-reach";
 
 /* ----------------------------------------------------------------------------
    Connect account, step two: which workspaces can use what you connect.
    Connecting creates an organization account; by default every workspace in
-   the organization can use it (new ones too), and "Only selected workspaces"
-   limits it from the start. The choice is the account's own "Available in"
-   (connection-access-settings.tsx), so it stays editable on the account page.
+   the organization can use it (new ones too, and members' Personal
+   workspaces), and "Selected workspaces" limits it from the start. The choice
+   is the account's own "Available in" (connection-access-settings.tsx), with
+   the same control, so it stays editable on the account page.
 
    Personal workspaces are one all-or-nothing choice ("Personal workspaces":
    everyone's), because an organization account can't be limited to one
@@ -21,17 +22,16 @@ import { Skeleton } from "@opengeni/react/ui/skeleton";
    them.
 
    Owning an account by one workspace is not a choice here: to a person it
-   reads the same as "Only selected workspaces" with that one ticked. It stays
+   reads the same as "Selected workspaces" with that one ticked. It stays
    where it is genuinely needed, explained there: Codex Apps, redeeming Codex
    usage limit resets, an API key in a Personal workspace, and workspace admins
    who can't connect for everyone.
    -------------------------------------------------------------------------- */
 
-export type ConnectAudience =
-  | { kind: "everyone" }
-  | { kind: "selected"; workspaceIds: string[]; personalWorkspaces: boolean };
+export type ConnectAudience = WorkspaceReach;
 
-export const EVERYONE: ConnectAudience = { kind: "everyone" };
+/** A new organization account's default: every workspace, new ones and Personal ones too. */
+export const EVERYONE: ConnectAudience = { workspaceIds: null, personalWorkspaces: true };
 
 /** The organization's shared workspaces, for the "Only selected workspaces" list. */
 export function useOrganizationWorkspaces(
@@ -71,19 +71,20 @@ export function useOrganizationWorkspaces(
 
 /** Why the choice can't be connected yet, or null. */
 export function audienceBlockedReason(audience: ConnectAudience): string | null {
-  if (audience.kind !== "selected") return null;
-  return audience.workspaceIds.length === 0 && !audience.personalWorkspaces
+  return audience.workspaceIds !== null &&
+    audience.workspaceIds.length === 0 &&
+    !audience.personalWorkspaces
     ? "Choose at least one workspace."
     : null;
 }
 
-/** The account's "Available in" for a choice. Null keeps the default (every workspace). */
+/** The account's "Available in" for a choice. Null keeps the default (every workspace, Personal too). */
 export function audiencePolicy(
   audience: ConnectAudience,
 ): Pick<ModelConnectionAccessPolicy, "allowedWorkspaces" | "allowPersonalWorkspaces"> | null {
-  if (audience.kind !== "selected") return null;
+  if (audience.workspaceIds === null && audience.personalWorkspaces) return null;
   return {
-    allowedWorkspaces: audience.workspaceIds,
+    allowedWorkspaces: audience.workspaceIds === null ? null : [...audience.workspaceIds],
     allowPersonalWorkspaces: audience.personalWorkspaces,
   };
 }
@@ -118,10 +119,11 @@ export async function applyConnectAudience(
 }
 
 /**
- * "Who can use it" at the top of a provider's connect step. `here` is the
- * workspace Connect account was opened from, if any: a shared one is checked
- * first under "Only selected workspaces", and from a Personal one the
- * Personal workspaces choice is.
+ * "Available in" at the top of a provider's connect step. `here` is the
+ * workspace Connect account was opened from, if any. Switching to "Selected
+ * workspaces" starts an explicit pick from there: a shared one is ticked, and
+ * from a Personal one the Personal workspaces choice is; nothing else is
+ * carried over from the every-workspace default.
  */
 export function ConnectAudienceFields({
   organizationName,
@@ -144,81 +146,26 @@ export function ConnectAudienceFields({
   onChange: (next: ConnectAudience) => void;
   disabled?: boolean;
 }) {
-  const selected = value.kind === "selected" ? value : null;
   return (
-    <div className="flex min-w-0 flex-col gap-3">
-      <ChoiceCards
-        label="Which workspaces can use it"
-        description={`Owners and admins of ${organizationName} can see and change it on its account page.`}
-        value={value.kind}
-        disabled={disabled}
-        onValueChange={(next) =>
-          onChange(
-            next === "selected"
-              ? {
-                  kind: "selected",
-                  workspaceIds: here && !here.personal ? [here.id] : [],
-                  personalWorkspaces: Boolean(here?.personal),
-                }
-              : EVERYONE,
-          )
-        }
-      >
-        <ChoiceCard
-          value="everyone"
-          title={`All workspaces in ${organizationName}`}
-          description="Every workspace, including new ones and everyone's Personal workspace."
-        />
-        <ChoiceCard
-          value="selected"
-          title="Only selected workspaces"
-          description="Other workspaces can't use it for new work."
-        />
-      </ChoiceCards>
-      {selected ? (
-        <fieldset className="m-0 flex min-w-0 flex-col gap-3 border-0 p-0">
-          <legend className="mb-2 text-xs leading-4.5 font-medium text-fg">Workspaces</legend>
-          {workspaces === null && workspacesError ? (
-            <div className="flex min-w-0 flex-wrap items-center gap-3">
-              <p className="m-0 text-sm leading-5 text-fg-muted">
-                Couldn't load the organization's workspaces.
-              </p>
-              {onRetryWorkspaces ? (
-                <Button type="button" variant="outline" size="sm" onClick={onRetryWorkspaces}>
-                  Try again
-                </Button>
-              ) : null}
-            </div>
-          ) : workspaces === null ? (
-            <Skeleton className="h-5 w-48 rounded-md" />
-          ) : (
-            workspaces.map((workspace) => (
-              <CheckboxField
-                key={workspace.id}
-                label={
-                  workspace.id === here?.id ? `${workspace.name} (this workspace)` : workspace.name
-                }
-                disabled={disabled}
-                checked={selected.workspaceIds.includes(workspace.id)}
-                onCheckedChange={(checked) =>
-                  onChange({
-                    ...selected,
-                    workspaceIds: checked
-                      ? [...new Set([...selected.workspaceIds, workspace.id])]
-                      : selected.workspaceIds.filter((id) => id !== workspace.id),
-                  })
-                }
-              />
-            ))
-          )}
-          <CheckboxField
-            label="Personal workspaces"
-            disabled={disabled}
-            checked={selected.personalWorkspaces}
-            onCheckedChange={(checked) => onChange({ ...selected, personalWorkspaces: checked })}
-          />
-        </fieldset>
-      ) : null}
-    </div>
+    <WorkspaceReachFields
+      owner={{ kind: "organization", name: organizationName }}
+      organizationName={organizationName}
+      managedBy="Organization owners and admins manage it, and can change this later on its page."
+      value={value}
+      onChange={(next) =>
+        onChange(
+          value.workspaceIds === null && next.workspaceIds !== null
+            ? { ...next, personalWorkspaces: Boolean(here?.personal) }
+            : next,
+        )
+      }
+      workspaces={workspaces}
+      workspacesError={workspacesError}
+      onRetryWorkspaces={onRetryWorkspaces}
+      hereId={here && !here.personal ? here.id : null}
+      seedSelected={() => (here && !here.personal ? [here.id] : [])}
+      personalWorkspaces="choice"
+      disabled={disabled}
+    />
   );
 }

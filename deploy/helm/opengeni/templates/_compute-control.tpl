@@ -118,11 +118,11 @@ round to a revision another value also gives. */ -}}
 {{- if and $cc.database.provision (not (include "opengeni.computeControl.ownDatabase" .)) -}}
 {{- fail "computeControl.database.provision makes the role and schema in the chart's own Postgres, with the migration owner URL; for any other database set provision to false and make them there (compute/docs/operations.md, The control service)" -}}
 {{- end -}}
-{{- if and $cc.sweep.enabled (not (regexMatch "^gs://" ($cc.archive | default ""))) -}}
-{{- fail "computeControl.sweep deletes only from Google Cloud Storage archives (ADR 17); set sweep.enabled to false for az:// and s3:// archives" -}}
-{{- end -}}
 {{- if not (regexMatch "^[a-z_][a-z0-9_]*$" $cc.database.role) -}}
 {{- fail "computeControl.database.role must be a plain lowercase identifier" -}}
+{{- end -}}
+{{- if not (has ($cc.database.sslmode | default "disable") (list "disable" "prefer" "require")) -}}
+{{- fail "computeControl.database.sslmode must be disable, prefer or require: with require the service checks the database's certificate against the system's authorities (or COMPUTE_CONTROL_DATABASE_CA), as verify-full would" -}}
 {{- end -}}
 {{- if not (regexMatch "^[a-z_][a-z0-9_]*$" $cc.database.schema) -}}
 {{- fail "computeControl.database.schema must be a plain lowercase identifier" -}}

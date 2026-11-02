@@ -376,6 +376,9 @@ Replay: [notices/catalogs](run-lifecycle.md),
 shares prepared prefixes with both Responses compaction modes; Chat retains
 its transcript adapter. Both modes retain recent system-role input batches
 within existing budgets, preserving chronological accepted goal snapshots.
+At a worker compaction boundary, the SDK finishes through model-step handover
+so queued tool events drain before the original compaction signal is raised.
+Tool outputs and receipts are published before compaction can retire their history.
 
 Failed-session retry (`packages/db/src/session-retry.ts`) fences failure identity,
 reserves actor-scoped receipts, rejects unresolved execution/safety refusals,
@@ -448,6 +451,10 @@ into bounded snippets/cursors, not histories. See
 Docker/local SDK processes expose bounded-wait, turn-scoped handles, stay
 cancellation-fenced and stop before finalization; agents can test preview
 servers without awaiting exit.
+The Unix-local/Docker durable supervisor retains terminal run directories for
+one day. Cleanup runs independently of command launch with a PID/start-identity
+lock, so a slow disk or large history cannot consume the command response deadline;
+a later launcher recovers a dead cleanup owner without treating commands as lost.
 
 Interactive ttyd input readiness is separate from command execution proof.
 `agent/native/terminal-ready` owns the stock image's Bash 5.2 Readline producer;
@@ -1051,6 +1058,9 @@ Archive capture/restore: [storage](workspace-archive-storage.md).
 
 Lease liveness, provider existence, route attachment, archives, workspace readiness,
 and operation availability are independent; a warm row does not prove executability.
+An attached sibling whose bounded warming wait expires yields to same-turn
+lifecycle recovery rather than failing the turn or replacing the elected creator.
+Only that creator renews the warming lease; the reaper still fences abandoned owners.
 
 Resolve synthetic groups' effective backend once from session policy and deployment
 configuration. Fleet, swaps, viewers, API operations and worker turns share that answer.
@@ -1655,7 +1665,8 @@ errors or a failure of every catalog entry. See [startup decisions and measureme
 
 Always-visible first-request local tools (closed set): `exec_command`,
 `write_stdin`, `apply_patch`, `view_image`, `skill_read`, `repository_skill_read`,
-`request_human_input`, `list_models` (lists, never switches models), optional
+`request_human_input`, `list_models` (lists, never switches models),
+[`privacy_facts`](privacy-facts.md) (privacy and data-handling facts), optional
 [`code_search`](code-search.md), and optional provider
 [`web_search`/`web_fetch`](web-search.md). Authorized first-party harness control
 tools (`opengeni__goal_*` lifecycle, `opengeni__command_read`/`command_wait`,
@@ -2336,6 +2347,39 @@ requires consent. Computer frames bind screenshot digest to controller/session/t
 runtime, API and SDK independently verify. The browser extension only attaches;
 Lightpanda is semantic-only.
 
+`packages/browserd/src/page-protection.ts` owns the shared protected-field
+policy for DOM reads, editable-value confirmation and accessibility reads.
+Chromium DOM snapshots find protected nodes in child documents and flattened
+shadow roots; out-of-process frames are read through their own sessions.
+Snapshots stay inside the controller. Known values are masked before semantic
+normalization and on result delivery, including digit-grouped numeric secrets
+and three-digit CVCs. Protection discovery or masking failure withholds output.
+Only primary password/card-field values are remembered; hidden metadata and
+expiry options are protected in place. Card values do not age out of memory.
+After a browser tab encounters payment fields or known card data, its screenshots,
+live frames and recordings are refused (semantic controls and unrelated tabs
+remain usable). This state is shared across controllers for that tab in the
+browserd process; it is not
+a claim of pixel-level redaction or arbitrary canvas/OCR protection.
+Transient pixels between DOM checks and desktop captures of the browser are
+outside that per-tab guarantee. Attached Chrome admits the read-only snapshot
+through the matching extension method allowlist.
+The extension advertises that read-only capability in its existing handshake;
+an agent needing it refuses an older extension as `extension_outdated`, which
+starts Chrome's existing update check. Older agents ignore the additive field,
+so extension-first rollout remains compatible.
+
+Computer cursor badges carry the source chat's display title and a bounded PNG
+of its existing sidebar avatar. The API resolves image access as the caller and
+sends pixels, never a signed storage URL, through the internal controller-create
+request (including recovery). Missing avatars fall back to initials or the name.
+Display metadata never replaces the private CUA session key. All desktop
+platforms use the same source-pinned supervised CUA worker; the published SDK
+provides only its local transport.
+Identity is captured when a controller opens or recovers. Avatar work has a
+750 ms cosmetic deadline and falls back to the name. GNOME keeps its existing
+single-cursor/no-hover behavior; avatars require helper v11 there.
+
 Connected-machine tool failures preserve the API's closed failure details and
 opaque request references at the model boundary. The MCP error renderer retains
 `outcomeUnknown` and discourages automatic action retries; uncertain execution
@@ -2889,6 +2933,10 @@ runtime-role/RLS posture.
 Readiness is forward-compatible only for entirely unknown, securely shaped
 objects; named-object ACL, RLS and capability contracts remain exact. Unknown
 callable SECURITY DEFINER routines require a prior explicit binary contract.
+The explicit removed-feature retirement inventory additionally permits absent
+legacy tables while preserving their exact contracts when present; it does not
+authorize dropping live SQL dependencies. See
+[retirement sequencing](migrations-expand-contract.md#retiring-removed-feature-schema).
 The pinned previous-binary inspector/evaluator CI and its release bootstrap are
 documented in [expand/contract migrations](migrations-expand-contract.md#pinned-previous-binary-readiness).
 The migration runner partitions the live pending ledger into a posture-inert rolling prefix,
@@ -3326,13 +3374,14 @@ Teams reply discovery uses a content-free sequence wake on relevant durable sess
 An invoker-rights trigger updates the reserved route in the event transaction; delivery still
 checks the exact linked human and current session audience before reading reply content.
 Idle routes are excluded from pump claims, and pending output keeps its durable delivery state.
-Personal sidebar Archive is an atomic composition of native Pause and personal
-visibility in `archiveHumanSessionWorkstream` (`packages/core/src/application/session-commands.ts`).
-Its personal-state fence precedes the normal control/workspace/session locks;
-post-commit fanout uses the existing durable control outboxes. Shared-chat control
-authority is independent of creator identity. Restore never resumes, and explicit
-Hide for me does not pause. See [run lifecycle](run-lifecycle.md) for schedule and
-background-command semantics.
+The chat Archive action (`archiveHumanSessionWorkstream` in
+`packages/core/src/application/session-commands.ts`) is the one archive, for
+everyone, and needs session control regardless of who started the chat. It marks
+the chat tree archived (`sessions.archived_at`) and schedules a delayed workflow
+for the end of a ten-second Undo window; that workflow retires the chat's
+one-time automations, pauses its goals, cancels its running work and stores it
+through the idle-session archive. See [session storage
+lifecycle](session-storage-lifecycle.md#archiving-a-chat).
 
 Teams group chats use a separate native workspace-visible session namespace.
 The Connector roster freezes exact Teams actor-to-Opengeni human mappings in

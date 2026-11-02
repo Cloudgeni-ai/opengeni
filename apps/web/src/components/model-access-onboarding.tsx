@@ -98,6 +98,7 @@ const FAMILY_LABELS: Record<ConnectedModelFamily, string> = {
   credits: "Opengeni credits",
   openai: "OpenAI",
   azure_openai: "Azure OpenAI",
+  openai_compatible: "Your endpoint",
 };
 
 /** ChatGPT keeps device code login behind a per-account (or workspace-admin) setting. */
@@ -690,8 +691,8 @@ export function ModelAccessOnboardingPanel({
         >
           {busy ? <Loader2Icon className="size-4 animate-spin" /> : null}
           {validAmount
-            ? `Buy $${Number(topupAmount).toLocaleString("en-US", { maximumFractionDigits: 2 })} in credits`
-            : "Buy credits"}
+            ? `Add $${Number(topupAmount).toLocaleString("en-US", { maximumFractionDigits: 2 })} in credits`
+            : "Add credits"}
           <ArrowUpRightIcon className="size-4" />
         </Button>
         <p className="m-0 text-xs text-fg-subtle">You’ll review your payment in Stripe Checkout.</p>

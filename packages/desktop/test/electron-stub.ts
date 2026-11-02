@@ -19,6 +19,7 @@ export const electronStub = {
   clipboard: {},
   contextBridge: { exposeInMainWorld: (_key: string, _api: unknown): void => {} },
   ipcRenderer: new EventEmitter(),
+  webFrame: { getZoomFactor: () => 1 },
   nativeImage: { createFromPath: () => ({ isEmpty: () => true }) },
   nativeTheme: {},
   screen: {},

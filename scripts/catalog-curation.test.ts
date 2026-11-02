@@ -343,12 +343,18 @@ describe("curated fields flow through import normalization", () => {
         introduction: "Let agents work with the Gmail account you choose.",
       },
     });
-    // The three curated scope labels cover exactly the row's scopesHint, so
-    // every requested scope renders with a human label.
+    // A first connection asks only for scopesHint (read access); compose and
+    // modify are asked for later in the chat. The curated labels cover every
+    // scope either request can carry, so each renders with a human label.
     const presentation = dbInput.metadata.presentation as {
       scopeLabels: Record<string, unknown>;
     };
-    expect(Object.keys(presentation.scopeLabels).sort()).toEqual([...gmail.scopesHint].sort());
+    expect(gmail.scopesHint).toEqual(["https://www.googleapis.com/auth/gmail.readonly"]);
+    expect(Object.keys(presentation.scopeLabels).sort()).toEqual([
+      "https://www.googleapis.com/auth/gmail.compose",
+      "https://www.googleapis.com/auth/gmail.modify",
+      "https://www.googleapis.com/auth/gmail.readonly",
+    ]);
   });
 
   test("an uncurated row carries no category, no curation, and no metadata curation key", () => {

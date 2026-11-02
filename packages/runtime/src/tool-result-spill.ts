@@ -9,6 +9,7 @@ import {
   type AttemptToolResult as AttemptToolResultValue,
   type ToolResultSpilledReceipt as ToolResultSpilledReceiptValue,
 } from "@opengeni/contracts";
+import { projectCommandReadToolResultForModel } from "./command-read-model-projection";
 import { projectKnowledgeToolResultForModel } from "./knowledge-model-projection";
 import { MCP_MAX_TOOL_RESULT_BYTES, mcpSerializedSizeBytes } from "./mcp-network";
 
@@ -88,7 +89,7 @@ export function modelToolResultFits(result: AttemptToolResultValue): boolean {
  * The single per-caller seam over one executor result. Codemode receives the
  * exact result. The model receives its model-visible projection (the tool's
  * own `projectForModel`, such as compact Gmail cards, or compact Knowledge
- * discovery output for the exact tool identity) when that fits in 1 MiB;
+ * discovery output or plain-text command reads for the exact tool identity) when that fits in 1 MiB;
  * otherwise the exact result is spilled to a file, as for any tool. A
  * projection that throws leaves the exact result in place.
  * MCP-backed exact results are bounded only by the 8 MiB MCP transport cap
@@ -107,7 +108,12 @@ export async function projectAttemptToolResultForCaller(
       return result;
     case "model": {
       const own = projectForModel ? toolOwnModelProjection(projectForModel, result) : result;
-      const visible = identity ? projectKnowledgeToolResultForModel(identity, own) : own;
+      const visible = identity
+        ? projectCommandReadToolResultForModel(
+            identity,
+            projectKnowledgeToolResultForModel(identity, own),
+          )
+        : own;
       if (modelToolResultFits(visible)) return visible;
       if (!spill) return modelToolResultOverflowError();
       try {

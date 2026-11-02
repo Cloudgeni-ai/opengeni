@@ -10,6 +10,9 @@ import {
 import type { ToolReviewContext } from "@opengeni/contracts";
 
 import { webSecretsUi } from "@opengeni/react/app/lib/secrets-ui";
+import DescendantRequests, {
+  type DescendantRequestsClient,
+} from "@opengeni/react/app/components/session/descendant-requests";
 import { KitBlock, KitSection, StateCell, StatesGrid } from "../kit";
 import { ChatFrame, kitEvent, lead, showPart } from "./chat-shared";
 
@@ -188,7 +191,29 @@ const LEGACY = scene(
   { legacy: true },
 );
 
-const SCENES = [SEND_EMAIL, TRASH, PULL_REQUEST, DELETE_BRANCH, APP_ACTION, LEGACY];
+// Four parallel calls of one step, as in a cleanup the person approves one by one.
+const DELETE_CONNECTIONS = ["Linear", "Notion", "Slack", "Jira"].map((name) =>
+  scene(
+    `delete-${name.toLowerCase()}`,
+    "admin_action_call",
+    {
+      actionId: "workspace.connections.delete",
+      method: "DELETE",
+      path: `/v1/workspaces/ws/connections/${name.toLowerCase()}`,
+    },
+    { context: { kind: "generic", title: `Delete the ${name} connection?` } },
+  ),
+);
+
+const SCENES = [
+  SEND_EMAIL,
+  TRASH,
+  PULL_REQUEST,
+  DELETE_BRANCH,
+  APP_ACTION,
+  LEGACY,
+  ...DELETE_CONNECTIONS,
+];
 
 const loadReview = async (approval: PendingApproval): Promise<ToolActionReview> => {
   const found = SCENES.find((entry) => entry.approval.id === approval.id);
@@ -229,6 +254,52 @@ function Surface({
   );
 }
 
+/**
+ * A sub-session resuming from the first of its parallel approvals, decided on
+ * its card in the parent chat: the card keeps the rest decidable meanwhile.
+ */
+const RESUMING_CHILD = {
+  id: "session-kit-cleanup",
+  workspaceId: "ws-kit",
+  status: "running",
+  title: "Clean up old connections",
+  titleSource: "user",
+  lastSequence: 12,
+  createdAt: "2026-09-26T11:40:00Z",
+  updatedAt: "2026-09-26T11:48:00Z",
+  requiresActionSince: null,
+} as never;
+
+const resumingChildClient = {
+  getSession: async () => RESUMING_CHILD,
+  streamEvents: async function* () {},
+  listHumanInputRequests: async () => [],
+  submitHumanInputResponse: async () => {
+    throw new OpenGeniApiError(409, "No question is waiting");
+  },
+  listEventPage: async () => ({
+    events: [
+      kitEvent("session.requiresAction", {
+        approvals: DELETE_CONNECTIONS.map((entry) => entry.approval),
+      }),
+      kitEvent("user.approvalDecision", {
+        approvalId: DELETE_CONNECTIONS[0]!.approval.id,
+        decision: "approve",
+      }),
+    ],
+  }),
+  getToolActionReview: async (_workspaceId: string, _sessionId: string, approvalId: string) =>
+    await loadReview({ id: approvalId } as PendingApproval),
+  getToolReviewDetails: async () => {
+    throw new OpenGeniApiError(404, "Details not found");
+  },
+  sendApprovalDecision: async () => {
+    await wait(900);
+    return {};
+  },
+  sendMessage: async () => ({}),
+} as unknown as DescendantRequestsClient;
+
 export default function ChatApprovalsSection() {
   return (
     <SecretsUiProvider value={webSecretsUi}>
@@ -250,6 +321,48 @@ export default function ChatApprovalsSection() {
             >
               <Surface scenes={[SEND_EMAIL]} />
             </ChatFrame>
+          </KitBlock>
+        ) : null}
+
+        {showPart("resuming") ? (
+          <KitBlock
+            title="While a decision resumes the turn"
+            description="The first of four parallel actions was approved and the turn resumes. The other three stay up and can be decided right away; the decided one is not asked again."
+          >
+            <ChatFrame
+              status="running"
+              events={[
+                ...lead(
+                  "Delete the four connections we no longer use.",
+                  "Each deletion needs your OK.",
+                ),
+                kitEvent("session.requiresAction", {
+                  approvals: DELETE_CONNECTIONS.map((entry) => entry.approval),
+                }),
+                kitEvent("user.approvalDecision", {
+                  approvalId: DELETE_CONNECTIONS[0]!.approval.id,
+                  decision: "approve",
+                }),
+                kitEvent("session.status.changed", { status: "running" }),
+              ]}
+              height={640}
+            >
+              <Surface scenes={DELETE_CONNECTIONS.slice(1)} />
+            </ChatFrame>
+          </KitBlock>
+        ) : null}
+
+        {showPart("resuming-sub-session") ? (
+          <KitBlock
+            title="A sub-session's approvals while it resumes"
+            description="Decided on the sub-session's card in the parent chat: the card stays while the sub-session resumes, with only the undecided actions."
+          >
+            <DescendantRequests
+              client={resumingChildClient}
+              workspaceId="ws-kit"
+              parentSessionId="session-kit"
+              waiting={[RESUMING_CHILD]}
+            />
           </KitBlock>
         ) : null}
 

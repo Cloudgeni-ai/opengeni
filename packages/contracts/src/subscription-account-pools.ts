@@ -40,6 +40,13 @@ export const SubscriptionAccountSummary = /* @__PURE__ */ defineSchema(() =>
     allocatorUpdatedAt: z.string().datetime().nullable(),
     /** The organization's list only. */
     reach: SubscriptionAccountReach.optional(),
+    /**
+     * The workspace whose own account this is, or null for the organization's
+     * and personal accounts. In another workspace's list it was shared there
+     * by its owner, and that workspace can only remove it. Absent from older
+     * servers.
+     */
+    ownerWorkspaceId: primitives.nullableUuid.optional(),
   }),
 );
 export type SubscriptionAccountSummary = z.infer<typeof SubscriptionAccountSummary>;

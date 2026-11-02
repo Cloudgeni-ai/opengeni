@@ -332,7 +332,7 @@ test("All isolates archives in the last collapsed folder and uses archive filing
   expect(archiveCall?.options.sortBy).toBeUndefined();
 }, 30_000);
 
-test("Archived filter opens only the archive folder; restore retains the original project", async () => {
+test("Archived filter opens only the archive folder; an archived chat can't be restored", async () => {
   await openActive();
   await selectView("Status", "Archived");
   await waitForRows("Archived", 4);
@@ -346,29 +346,17 @@ test("Archived filter opens only the archive folder; restore retains the origina
   expect(await group("Website redesign").count()).toBe(0);
   expect(await group("Bugfixes").count()).toBe(0);
   await rows(archived).first().click({ button: "right" });
-  await page.getByRole("menuitem", { name: "Restore", exact: true }).click();
-  await page.waitForFunction(() => window.sessionSidebarQa.archiveCalls.length === 1);
-  expect(await page.evaluate(() => window.sessionSidebarQa.archiveCalls)).toEqual([
-    {
-      workspaceId,
-      sessionId: "00000000-0000-4000-9000-000000000401",
-      archived: false,
-      expectedVersion: 1,
-      mode: "hide_for_me",
-      confirmPause: false,
-      clientEventId: expect.stringMatching(
-        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
-      ),
-      previousChannelId: redesignId,
-      returnedChannelId: redesignId,
-    },
-  ]);
+  await page.getByRole("menuitem", { name: "Delete chat", exact: true }).waitFor();
+  expect(await page.getByRole("menuitem", { name: "Restore", exact: true }).count()).toBe(0);
+  expect(await page.getByRole("menuitem", { name: /^Archive/ }).count()).toBe(0);
+  await page.keyboard.press("Escape");
+  expect(await page.evaluate(() => window.sessionSidebarQa.archiveCalls)).toEqual([]);
   await selectView("Status", "Active");
-  await group("Website redesign").getByText("Archived design kickoff", { exact: true }).waitFor();
+  await group("Website redesign").waitFor();
   expect(await group("Archived").count()).toBe(0);
-  expect(await group("Default").getByText("Archived design kickoff", { exact: true }).count()).toBe(
-    0,
-  );
+  expect(
+    await group("Website redesign").getByText("Archived design kickoff", { exact: true }).count(),
+  ).toBe(0);
 }, 30_000);
 
 test("a discovered creator auto-hydrates to four before disclosure and expands independently to eight", async () => {
@@ -1341,7 +1329,7 @@ test("Archive hides a Site row for this person with Undo; a spawned row archives
   await sessionRowBox(childId)
     .getByRole("button", { name: "Archive workstream", exact: true })
     .click();
-  await page.getByText("Chat archived", { exact: true }).waitFor();
+  await page.getByText(/^Archived “/).waitFor();
   await page.waitForFunction(
     (id) => !document.querySelector(`a[data-session-row="${id}"]`),
     parentId,

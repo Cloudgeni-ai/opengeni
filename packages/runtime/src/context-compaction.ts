@@ -40,7 +40,11 @@ import {
 } from "@opengeni/contracts";
 import { createHash } from "node:crypto";
 import { isProxy } from "node:util/types";
-import { projectHostedSearchEvidence } from "./hosted-search-evidence";
+import {
+  isHostedSearchEvidenceRecord,
+  projectHostedSearchEvidence,
+  withSearchRecordsAfterOpenCalls,
+} from "./hosted-search-evidence";
 
 import {
   latestReasoningConfiguration,
@@ -1608,8 +1612,10 @@ export function prepareCompactionPromptInput(
   maxInputTokens: number,
 ): PreparedCompactionPromptInput {
   const budget = Math.max(0, Math.floor(maxInputTokens));
-  let history = omitOpaqueArtifactsFromPortableCompactionHistory(items).map((item) =>
-    projectHostedSearchEvidence(item),
+  let history = withSearchRecordsAfterOpenCalls(
+    omitOpaqueArtifactsFromPortableCompactionHistory(items).map((item) =>
+      projectHostedSearchEvidence(item),
+    ),
   );
   let estimatedInputTokens = estimateTokens(buildCompactionPromptInput(history));
   let rewrittenToolOutputs = 0;
@@ -1667,7 +1673,9 @@ function minimalToolResultForCompaction(item: CompactionItem): CompactionItem {
 function oldestLogicalUnitCuts(items: readonly CompactionItem[]): number[] {
   const userMessageIndexes: number[] = [];
   for (let index = 0; index < items.length; index += 1) {
-    if (isUserMessage(items[index])) userMessageIndexes.push(index);
+    // A search record is runtime input inside a unit, not a person's message.
+    if (isUserMessage(items[index]) && !isHostedSearchEvidenceRecord(items[index]))
+      userMessageIndexes.push(index);
   }
   const cuts: number[] = [];
   if (userMessageIndexes.length === 0) {

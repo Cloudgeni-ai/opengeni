@@ -523,7 +523,7 @@ export const englishMessages = {
   "automations.rows.sentAgain_other": "Sent again {count} times",
   "automations.rows.type": "Type",
   "automations.run.error.accessUnavailable":
-    "The access it was saved with has changed. Save it again to approve it with your current access.",
+    "The access it was saved with has changed. Its owner can save it again to approve it with their current access. If they've left, it can't run as them again.",
   "automations.run.error.accountUnavailable":
     "A connected account it needs can no longer be used. Reconnect that account.",
   "automations.run.error.allowanceUsed": "The usage allowance is used up.",
@@ -1876,7 +1876,7 @@ export const englishMessages = {
     "This chat's working folder isn't inside that machine's workspace. Start a new chat on that machine instead.",
   "hooks.useMachines.onlyTheMachineSOwner": "Only the machine's owner can use it in this chat.",
   "hooks.useMachines.theMachineSOwnerHas":
-    "The machine's owner has not allowed this chat to use it.",
+    "The machine's owner hasn't turned it on in this workspace.",
   "hooks.useNewConversation.newChatsAreNotEnabled": "New chats are not enabled for this product.",
   "hooks.useSandboxFiles.createFile": "create file",
   "hooks.useSandboxFiles.createFolder": "create folder",
@@ -2058,8 +2058,36 @@ export const englishMessages = {
   "interactiveAnswer.viewAs": "View as",
   "interactiveAnswer.writing": "Writing options…",
   "interactiveAnswer.yes": "Yes",
+  "lib.format.apiCreditsRequired":
+    "API usage uses credits, not your plan credit. Add credits to continue. The conversation is preserved.",
+  "lib.format.apiCreditsRequiredAskOwner":
+    "API usage uses credits, not your plan credit. Ask an organization owner to add credits.",
+  "lib.format.apiCreditsRequiredHeadline":
+    "API usage uses credits, not your plan credit. Add credits to continue.",
+  "lib.format.byokPaidCreditRequired":
+    "Add credits to use your own key. The conversation is preserved.",
+  "lib.format.byokPaidCreditRequiredAskOwner":
+    "Ask an organization owner to add credits to use your own key.",
+  "lib.format.byokPaidCreditRequiredHeadline": "Add credits to use your own key.",
+  "lib.format.byokUpgradeRequired":
+    "Upgrade to Pro to use your own key. The conversation is preserved.",
+  "lib.format.byokUpgradeRequiredAskOwner":
+    "Ask an organization owner to upgrade to Pro to use your own key.",
+  "lib.format.byokUpgradeRequiredHeadline": "Upgrade to Pro to use your own key.",
   "lib.format.capacityRecoveryExhausted":
     "The connected subscription kept running out of capacity, so automatic retries stopped. Retry, or send a message to continue, once it has capacity again.",
+  "lib.format.composerApiCreditsRequired":
+    "API usage uses credits, not your plan credit. Add credits to continue. Your message and attachments are saved.",
+  "lib.format.composerApiCreditsRequiredAskOwner":
+    "API usage uses credits, not your plan credit. Ask an organization owner to add credits. Your message and attachments are saved.",
+  "lib.format.composerByokPaidCreditRequired":
+    "Add credits to use your own key. Your message and attachments are saved.",
+  "lib.format.composerByokPaidCreditRequiredAskOwner":
+    "Ask an organization owner to add credits to use your own key. Your message and attachments are saved.",
+  "lib.format.composerByokUpgradeRequired":
+    "Upgrade to Pro to use your own key. Your message and attachments are saved.",
+  "lib.format.composerByokUpgradeRequiredAskOwner":
+    "Ask an organization owner to upgrade to Pro to use your own key. Your message and attachments are saved.",
   "lib.format.days": "{count}d",
   "lib.format.hours": "{count}h",
   "lib.format.messageReferenceCorrelationid": "{message} Reference: {correlationId}.",
@@ -2252,8 +2280,12 @@ export const englishMessages = {
   "machines.machineDetail.backToMachines": "Back to machines",
   "machines.machineDetail.everyoneInThisWorkspaceCan":
     "Everyone in this workspace can run chats on it.",
-  "machines.machineDetail.everyWorkspaceInTheOrganization":
-    "Every workspace in the organization can use it.",
+  "machines.machineDetail.availableIn": "Available in",
+  "machines.machineDetail.availableInNameLabel": "Where {name} is available: {summary}",
+  "machines.machineDetail.membersCanUseItWhere":
+    "Members can use it in the workspaces it's available in.",
+  "machines.machineDetail.organizationOwnersChooseWhere":
+    "Organization owners and admins choose the workspaces it works in.",
   "machines.machineDetail.justNow": "just now",
   "machines.machineDetail.keptOutExtraCopiesOf_one": "Kept out {count} extra copy of the agent",
   "machines.machineDetail.keptOutExtraCopiesOf_other": "Kept out {count} extra copies of the agent",
@@ -2461,6 +2493,8 @@ export const englishMessages = {
     "The audio, transcript and speaker names are deleted. This can't be undone.",
   "meetings.detailPage.aboutEstimateForThisDuration":
     "About ${estimate} for this {duration} meeting.",
+  "meetings.detailPage.aboutEstimateForTracks":
+    "About ${estimate} for this {duration} meeting. Each of its {count} audio tracks is transcribed and billed separately.",
   "meetings.detailPage.aboutLessThan001": "Less than $0.01 for this {duration} meeting.",
   "meetings.detailPage.aboutThisTranscript": "About this transcript",
   "meetings.detailPage.addCredits": "Add credits",
@@ -2497,13 +2531,14 @@ export const englishMessages = {
   "meetings.detailPage.itSStillBeingRecorded":
     "It's still being recorded on another device. The transcript appears here when it's done.",
   "meetings.detailPage.language": "Language",
-  "meetings.detailPage.leaveEmptyToLetThe": "Leave empty if you're not sure.",
+  "meetings.detailPage.leaveEmptyToLetThe":
+    "How many people talk in the meeting. Leave empty if you're not sure.",
   "meetings.detailPage.leftUnnamed": "Left unnamed",
   "meetings.detailPage.listeningWhatSSaidShows": "Listening…",
   "meetings.detailPage.loadingMeeting": "Loading meeting",
   "meetings.detailPage.makesANewTranscriptNotesToo":
     "Makes a new transcript from the audio. Speaker names carry over, and notes written automatically that no one has changed are written again. Corrected words don't carry over.",
-  "meetings.detailPage.maximumNumberOfSpeakers": "Maximum number of speakers",
+  "meetings.detailPage.numberOfSpeakers": "Number of speakers",
   "meetings.detailPage.me": "Me",
   "meetings.detailPage.meetings": "Meetings",
   "meetings.detailPage.model": "Model",
@@ -2547,10 +2582,26 @@ export const englishMessages = {
   "meetings.detailPage.sharedWithTheWorkspace": "Shared with the workspace",
   /** A person's own Only me meeting opened from another workspace of the same organization. */
   "meetings.detailPage.onlyMeRecordedIn": "Only me · recorded in {workspace}",
+  /** The meeting menu item that opens where the owner's Only me meeting works. */
+  "meetings.detailPage.availableInMenu": "Available in…",
+  /** Title of the dialog choosing the workspaces an Only me meeting works in. */
+  "meetings.detailPage.availableIn": "Available in",
+  "meetings.detailPage.onlyYouSeeItInThese":
+    "It stays Only me: in each of these workspaces, only you and agent turns you start can use it.",
+  /** The workspace that stores the meeting, always ticked. */
+  "meetings.detailPage.recordedThereAlwaysIncluded":
+    "It was recorded there, so it's always included.",
+  "meetings.detailPage.itWillNoLongerShowHere":
+    "It will no longer show in this workspace, and you'll go back to Meetings.",
+  "meetings.detailPage.itNoLongerShowsHere": "This meeting no longer shows in this workspace",
+  "meetings.detailPage.couldnTChangeWhereItWorks": "Couldn't change where this meeting works.",
+  /** Stands in for the organization's name when the app doesn't give it. */
+  "meetings.detailPage.thisOrganization": "this organization",
   /** Names the Summary · Transcript · Notepad switch for screen readers. */
   "meetings.detailPage.show": "Show",
   "meetings.detailPage.speakers": "Speakers",
   "meetings.detailPage.speakersToReview": "Speakers to review",
+  "meetings.detailPage.wrongNumberOfSpeakers": "Wrong number of speakers?",
   "meetings.detailPage.starting": "Starting…",
   "meetings.detailPage.suggestedFromTheirVoice": "Suggested by voice",
   "meetings.detailPage.suggestionDismissed": "Suggestion dismissed",
@@ -2739,12 +2790,12 @@ export const englishMessages = {
     "Microphone only: other people on a call won't be heard.",
   "meetings.recorderPanel.nameIt": "Name it",
   "meetings.recorderPanel.nameThisMeeting": "Name this meeting",
-  "meetings.recorderPanel.nameThisMeetingOptional": "Name this meeting (optional)",
+  "meetings.recorderPanel.nameThisMeetingOptional": "Name this meeting, or it's named for you",
+  "meetings.recorderPanel.namedForYou": "Named for you",
   "meetings.recorderPanel.newRecording": "New recording",
   "meetings.recorderPanel.noLiveTranscriptionProviderIs":
     "Live transcription isn't set up. Ask an admin to connect it.",
   "meetings.recorderPanel.noMicrophoneFound": "No microphone found",
-  "meetings.recorderPanel.noNameYet": "No name yet",
   "meetings.recorderPanel.noSoundServerIsRunning":
     "No sound server (PipeWire or PulseAudio) is running. Start one, or record without computer audio.",
   "meetings.recorderPanel.nothingIsRecordedWhilePaused": "Nothing is recorded while paused.",
@@ -2945,6 +2996,8 @@ export const englishMessages = {
   "meetings.settings.meetingsAreDeletedAfterRetentionperiodname":
     "Meetings are deleted after {retentionPeriodName}",
   "meetings.settings.meetingsAreKeptUntilSomeone": "Meetings are kept until someone deletes them",
+  "meetings.settings.meetingsListenForNoWords": "Meetings no longer listen for particular words",
+  "meetings.settings.meetingsListenForTheseWords": "Meetings listen for these words",
   "meetings.settings.meetingsNoLongerGetNotes": "Meetings no longer get notes written for them",
   "meetings.settings.meetingsRecordedMoreThanPeriod":
     "Meetings older than {period} are deleted now with their audio and transcripts, and the rest when they turn {period}. This can't be undone.",
@@ -2992,6 +3045,7 @@ export const englishMessages = {
     "Audio older than {retentionPeriodName} is deleted now. Transcripts stay, but those meetings can't be played or transcribed again. This can't be undone.",
   "meetings.settings.thisDeploymentUsesOneModel":
     "This deployment uses one model for all transcription.",
+  "meetings.settings.tooManyWords": "Keep the list to {max} names and words.",
   "meetings.settings.transcriptionModel": "Transcription model",
   "meetings.settings.turnOffAndForgetVoices": "Turn off and forget voices",
   "meetings.settings.turnsAMeetingSAudio":
@@ -3005,6 +3059,11 @@ export const englishMessages = {
   "meetings.settings.whenATranscriptIsReady":
     "When a meeting's transcript is ready, an agent writes its notes: a summary, decisions and action items.",
   "meetings.settings.whoSeesNewMeetings": "Who sees new meetings",
+  "meetings.settings.wordTooLong": "“{term}” is too long. Keep each to {max} characters.",
+  "meetings.settings.wordsToListenFor": "Words to listen for",
+  "meetings.settings.wordsToListenForDescription":
+    "Names and words every meeting transcript listens for, such as people, customers, products and trade terms. One per line. Some models charge a little more when given words.",
+  "meetings.settings.wordsToListenForPlaceholder": "Ada Lovelace\nKubernetes",
   "meetings.settings.workspace": "Workspace",
   "meetings.settings.writeNotesAfterEachMeeting": "Write notes after each meeting",
   "meetings.settings.youAgreedOpengeniLearnsYour":
@@ -3059,11 +3118,17 @@ export const englishMessages = {
   "meetings.transcript.valueMatch": "{value}% match",
   "meetings.transcript.whoIsDisplayname": "Who is {displayName}?",
   "meetings.transcript.yesItSDisplayname": "Yes, it's {displayName}",
+  "messageTimeline.accessDraftAndSendEmail": "draft and send email",
+  "messageTimeline.accessJoin": " and ",
+  "messageTimeline.accessOrganizeMailbox": "organize your mailbox",
   "messageTimeline.agentAnswered": "Agent answered",
   "messageTimeline.agentAsked": "Agent asked",
+  "messageTimeline.agentCarriesOnAfterAllowing":
+    "After you allow it, the agent carries on where it stopped.",
   "messageTimeline.agentDecided": "Agent decided",
   "messageTimeline.agentDecidedSummary": "Agent decided: {summary}",
   "messageTimeline.agentSkipped": "Agent skipped",
+  "messageTimeline.allowAccess": "Allow",
   "messageTimeline.answered": "Answered",
   "messageTimeline.answeredSummary": "Answered: {summary}",
   "messageTimeline.asked": "Asked",
@@ -3093,6 +3158,7 @@ export const englishMessages = {
   "messageTimeline.expired": "Expired",
   "messageTimeline.fromSource": "from {source}",
   "messageTimeline.generatedVideo": "Generated video",
+  "messageTimeline.giveProviderMoreAccess": "Give {provider} more access",
   "messageTimeline.goalCleared": "Goal cleared",
   "messageTimeline.goalCompleted": "Goal completed",
   "messageTimeline.goalHeld": "Goal held",
@@ -3103,6 +3169,8 @@ export const englishMessages = {
   "messageTimeline.installProvider": "Install {provider}",
   "messageTimeline.itIsnTConnectedYet": "It isn't connected yet.",
   "messageTimeline.itNeedsAdditionalAccessTo": "It needs additional access to continue.",
+  "messageTimeline.itNeedsPermissionTo":
+    "It needs your permission to {access}. Everything it can already do stays the same.",
   "messageTimeline.itsAccessExpired": "Its access expired.",
   "messageTimeline.itsConnectionNeedsAttention": "Its connection needs attention.",
   "messageTimeline.jumpingToStart": "Jumping to start…",
@@ -3397,6 +3465,19 @@ export const englishMessages = {
   "native.presentation.youAnswered": "You answered",
   "native.presentation.youLetTheAgentDecide": "You let the agent decide",
   "native.presentation.yourInputIsNeeded": "Your input is needed",
+  /** Heads the alert when an audio file shared to the app or picked with Import doesn't become a meeting. */
+  "native.meetings.audioImport.couldntImport": "Couldn't import the recording",
+  /** The Import button on the phone's meetings screen, under Record a meeting. */
+  "native.meetings.audioImport.importARecording": "Import a recording",
+  "native.meetings.audioImport.importHint":
+    "Recorded a phone call or a voice memo? Share it to this app, or import it here, for a transcript and notes.",
+  "native.meetings.audioImport.importing": "Importing…",
+  "native.meetings.audioImport.unreadable": "The file couldn't be read. Share it to the app again.",
+  "native.meetings.audioImport.unsupported":
+    "This kind of audio can't be imported. Phone call recordings and voice memos (M4A) can, as can AAC, WebM and Ogg files.",
+  /** While imported recordings upload, before they show in the list. */
+  "native.meetings.audioImport.uploading_one": "Uploading the imported recording…",
+  "native.meetings.audioImport.uploading_other": "Uploading {count} imported recordings…",
   "native.meetings.meetingView.aNewTranscriptAndNotesToo":
     "Makes a new transcript from the audio. Speaker names carry over, and notes written automatically that no one has changed are written again.",
   "native.meetings.meetingView.delete": "Delete",
@@ -3807,6 +3888,13 @@ export const englishMessages = {
   "openGeniChat.send": "Send",
   "openGeniLinks.fileIsTooLargeTo": "File is too large to download here.",
   "organizationModel.orgShortaccountid": "Org {shortAccountId}",
+  "ownLogins.couldNotStop": "Couldn't stop it. Try again.",
+  "ownLogins.sharedHeadsUp_one":
+    "Your {logins} login works for your messages here. People in this workspace see what the agent does with it.",
+  "ownLogins.sharedHeadsUp_other":
+    "Your {logins} logins work for your messages here. People in this workspace see what the agent does with them.",
+  "ownLogins.stopUsingHere": "Stop using it here",
+  "ownLogins.stopUsingLoginHere": "Stop using {login} here",
   "pierreDiff.diffForPath": "Diff for {path}",
   "pierreDiff.loadingDiff": "Loading diff…",
   "pierreDiff.noChanges": "No changes",
@@ -4317,6 +4405,8 @@ export const englishMessages = {
     "This chat runs on your personal machine “{machine}”. Messages from other people cannot start work on it.",
   "sessionAdmission.ownMachineQueuedNext":
     "The queued message is saved. Choose a workspace or cloud machine, or ask a workspace admin to share this machine. After changing machines or access, recheck to run the saved message.",
+  "sessionAdmission.ownMachineSharedHeadsUp":
+    "This chat runs on your personal machine “{machine}”. People in this workspace see what the agent does on it.",
   "sessionAdmission.ownerRequest":
     "This chat runs on your personal machine “{machine}”, so my message can't start there. Could you make the machine available to the workspace, or help me choose a shared machine?",
   "sessionAdmission.pausedNote":
@@ -4624,7 +4714,8 @@ export const englishMessages = {
     "Finish signing in to {name}. If you closed the sign-in window, open it again.",
   "sessionIntegrationCapabilityCard.stopWaiting": "Cancel",
   "sessionIntegrationCapabilityCard.tryAgain": "Try again",
-  "sessionList.archive": "Hide for me",
+  "sessionList.archive": "Archive",
+  "sessionList.archived": "Archived",
   "sessionList.cancel": "Cancel",
   "sessionList.chats": "Chats",
   "sessionList.loadingChats": "Loading chats…",
@@ -4633,10 +4724,12 @@ export const englishMessages = {
   "sessionList.rename": "Rename",
   "sessionList.save": "Save",
   "sessionList.showMore": "Show more",
+  "sessionList.undo": "Undo",
   "sessionListModel.older": "Older",
   "sessionListModel.previous7Days": "Previous 7 days",
   "sessionListModel.today": "Today",
   "sessionListModel.yesterday": "Yesterday",
+  "sessionMcpCapabilityCard.connectADifferentAccount": "Connect a different account",
   "sessionMcpCapabilityCard.connected": "Connected",
   "sessionMcpCapabilityCard.connectionDetailsAreUnavailable": "Connection details are unavailable.",
   "sessionMcpCapabilityCard.connectionSetupCouldNotFinish":
@@ -4691,12 +4784,18 @@ export const englishMessages = {
     "This recommendation is not an available OAuth MCP integration. Review the current connection catalog.",
   "sessionMcpCapabilityCard.trySigningInAgain": "Try signing in again",
   "sessionMcpCapabilityCard.useInThisConversation": "Use in this conversation",
+  "sessionMcpCapabilityCard.useItHere": "Use it here",
+  "sessionMcpCapabilityCard.useYourLoginHereScope":
+    "Only you can use it. In shared chats here, people see what the agent does with it.",
+  "sessionMcpCapabilityCard.useYourLoginHereToo":
+    "You added {account} in another workspace. Use it for your messages here too?",
   "sessionMcpCapabilityCard.whoCanUseThisConnection": "Who can use this connection?",
   "sessionMcpCapabilityCard.yourAccountIsConnected": "Your account is connected.",
   "sessionMcpCapabilityCard.yourAccountIsConnectedEnable":
     "Your account is connected. Enable it for this conversation to finish.",
   "sessionMcpCapabilityCard.yourAccountNeedsReconnectionBefore":
     "Your account needs reconnection before it can be used here.",
+  "sessionMcpCapabilityCard.yourNameAccount": "your {name} account",
   "sessionProxyScope.chatIsUnavailableRightNow":
     "Chat is unavailable right now. Ask an administrator for help.",
   "sessionProxyScope.couldNotLoadTheConversation": "Could not load the conversation.",
@@ -4980,6 +5079,97 @@ export const englishMessages = {
   "timeline.chip.failed": "failed",
   "timeline.chip.interrupted": "interrupted",
   "timeline.chip.lost": "lost",
+  /** A shell command in plain words (`command-step`); the command itself is in the row's body. */
+  "timeline.commandStep.checkChanges.done": "Checked changes",
+  "timeline.commandStep.checkChanges.running": "Checking changes",
+  "timeline.commandStep.convert.done": "Converted {name}",
+  "timeline.commandStep.convert.running": "Converting {name}",
+  "timeline.commandStep.convertFile.done": "Converted a file",
+  "timeline.commandStep.convertFile.running": "Converting a file",
+  "timeline.commandStep.copy.done": "Copied {name}",
+  "timeline.commandStep.copy.running": "Copying {name}",
+  "timeline.commandStep.copyFiles.done": "Copied files",
+  "timeline.commandStep.copyFiles.running": "Copying files",
+  "timeline.commandStep.createFile.done": "Created {name}",
+  "timeline.commandStep.createFile.running": "Creating {name}",
+  "timeline.commandStep.createFileUnnamed.done": "Created files",
+  "timeline.commandStep.createFileUnnamed.running": "Creating files",
+  "timeline.commandStep.createFolder.done": "Created the {name} folder",
+  "timeline.commandStep.createFolder.running": "Creating the {name} folder",
+  "timeline.commandStep.createFolderUnnamed.done": "Created folders",
+  "timeline.commandStep.createFolderUnnamed.running": "Creating folders",
+  "timeline.commandStep.delete.done": "Deleted {name}",
+  "timeline.commandStep.delete.running": "Deleting {name}",
+  "timeline.commandStep.deleteFiles.done": "Deleted files",
+  "timeline.commandStep.deleteFiles.running": "Deleting files",
+  "timeline.commandStep.download.done": "Downloaded {name}",
+  "timeline.commandStep.download.running": "Downloading {name}",
+  "timeline.commandStep.edit.done": "Edited {name}",
+  "timeline.commandStep.edit.running": "Editing {name}",
+  /** A request that only reads from a web address; `host` is the site, never the full link. */
+  "timeline.commandStep.fetch.done": "Got data from {host}",
+  "timeline.commandStep.fetch.running": "Getting data from {host}",
+  "timeline.commandStep.getChanges.done": "Got the latest changes",
+  "timeline.commandStep.getChanges.running": "Getting the latest changes",
+  "timeline.commandStep.install.done": "Installed {name}",
+  "timeline.commandStep.install.running": "Installing {name}",
+  "timeline.commandStep.installPackages.done": "Installed packages",
+  "timeline.commandStep.installPackages.running": "Installing packages",
+  "timeline.commandStep.list.done": "Looked through {name}",
+  "timeline.commandStep.list.running": "Looking through {name}",
+  "timeline.commandStep.browseFiles.done": "Looked through files",
+  "timeline.commandStep.browseFiles.running": "Looking through files",
+  "timeline.commandStep.move.done": "Moved {name}",
+  "timeline.commandStep.move.running": "Moving {name}",
+  "timeline.commandStep.moveFiles.done": "Moved files",
+  "timeline.commandStep.moveFiles.running": "Moving files",
+  "timeline.commandStep.pack.done": "Compressed {name}",
+  "timeline.commandStep.pack.running": "Compressing {name}",
+  "timeline.commandStep.packFiles.done": "Compressed files",
+  "timeline.commandStep.packFiles.running": "Compressing files",
+  "timeline.commandStep.queryDatabase.done": "Queried the database",
+  "timeline.commandStep.queryDatabase.running": "Querying the database",
+  "timeline.commandStep.read.done": "Read {name}",
+  "timeline.commandStep.read.running": "Reading {name}",
+  "timeline.commandStep.readFile.done": "Read a file",
+  "timeline.commandStep.readFile.running": "Reading a file",
+  "timeline.commandStep.readFiles.done_one": "Read {count} file",
+  "timeline.commandStep.readFiles.done_other": "Read {count} files",
+  "timeline.commandStep.readFiles.running_one": "Reading {count} file",
+  "timeline.commandStep.readFiles.running_other": "Reading {count} files",
+  "timeline.commandStep.reinstallPackages.done": "Reinstalled packages",
+  "timeline.commandStep.reinstallPackages.running": "Reinstalling packages",
+  /** Code fetched from the internet and run straight away (`curl … | sh`). */
+  "timeline.commandStep.runDownloadedCode.done": "Ran a downloaded script",
+  "timeline.commandStep.runDownloadedCode.running": "Running a downloaded script",
+  /** Inline code run by an interpreter; `language` is "Python", "JavaScript", "shell", … */
+  "timeline.commandStep.runCode.done": "Ran {language} code",
+  "timeline.commandStep.runCode.running": "Running {language} code",
+  "timeline.commandStep.runScript.done": "Ran {name}",
+  "timeline.commandStep.runScript.running": "Running {name}",
+  "timeline.commandStep.runTests.done": "Ran tests",
+  "timeline.commandStep.runTests.running": "Running tests",
+  "timeline.commandStep.saveChanges.done": "Saved changes",
+  "timeline.commandStep.saveChanges.running": "Saving changes",
+  "timeline.commandStep.search.done": "Searched for “{query}”",
+  "timeline.commandStep.search.running": "Searching for “{query}”",
+  "timeline.commandStep.searchFiles.done": "Searched files",
+  "timeline.commandStep.searchFiles.running": "Searching files",
+  /** A request that sends data to a web address; `host` is the site, never the full link. */
+  "timeline.commandStep.send.done": "Sent data to {host}",
+  "timeline.commandStep.send.running": "Sending data to {host}",
+  "timeline.commandStep.unpack.done": "Unpacked {name}",
+  "timeline.commandStep.unpack.running": "Unpacking {name}",
+  "timeline.commandStep.unpackFiles.done": "Unpacked files",
+  "timeline.commandStep.unpackFiles.running": "Unpacking files",
+  "timeline.commandStep.uploadChanges.done": "Uploaded changes",
+  "timeline.commandStep.uploadChanges.running": "Uploading changes",
+  "timeline.commandStep.useGitHub.done": "Used GitHub",
+  "timeline.commandStep.useGitHub.running": "Using GitHub",
+  "timeline.commandStep.write.done": "Wrote {name}",
+  "timeline.commandStep.write.running": "Writing {name}",
+  "timeline.commandStep.writeFile.done": "Wrote a file",
+  "timeline.commandStep.writeFile.running": "Writing a file",
   "timeline.compactionCopy.chatHistoryIsUnchangedIf":
     "Chat history is unchanged. If your next message fails too, start a new session.",
   "timeline.compactionCopy.checkpointExceedsThisModelS":
@@ -5181,16 +5371,21 @@ export const englishMessages = {
     "Waiting for {count} agents · since {since}",
   "timeline.noticePresentation.waitingSince": "Waiting · since {since}",
   "timeline.noticePresentation.declinedAutomatically": "Declined automatically.",
+  "timeline.noticePresentation.declinedAutomaticallyTitle": "Declined automatically: “{title}”.",
+  "timeline.noticePresentation.declinedAutomaticallyTitleWithDetail":
+    "Declined automatically: “{title}” ({detail}).",
   "timeline.noticePresentation.youApprovedActions_one": "You approved {count} action.",
   "timeline.noticePresentation.youApprovedActions_other": "You approved {count} actions.",
   "timeline.noticePresentation.youApprovedAndRejected":
-    "You approved {approved} and rejected {rejected}.",
+    "You approved {approved} and declined {rejected}.",
   "timeline.noticePresentation.youApprovedThis": "You approved this.",
   "timeline.noticePresentation.youApprovedTitle": "You approved “{title}”.",
-  "timeline.noticePresentation.youRejectedActions_one": "You rejected {count} action.",
-  "timeline.noticePresentation.youRejectedActions_other": "You rejected {count} actions.",
-  "timeline.noticePresentation.youRejectedThis": "You rejected this.",
-  "timeline.noticePresentation.youRejectedTitle": "You rejected “{title}”.",
+  "timeline.noticePresentation.youApprovedTitleWithDetail": "You approved “{title}” ({detail}).",
+  "timeline.noticePresentation.youRejectedActions_one": "You declined {count} action.",
+  "timeline.noticePresentation.youRejectedActions_other": "You declined {count} actions.",
+  "timeline.noticePresentation.youRejectedThis": "You declined this.",
+  "timeline.noticePresentation.youRejectedTitle": "You declined “{title}”.",
+  "timeline.noticePresentation.youRejectedTitleWithDetail": "You declined “{title}” ({detail}).",
   "timeline.noticePresentation.youRespondedToThisApproval": "You responded to this approval.",
   "timeline.patchApplyCommand.commandToApplyTheseChanges": "Command to apply these changes",
   "timeline.patchApplyCommand.copied": "Copied",
@@ -5210,7 +5405,7 @@ export const englishMessages = {
   "timeline.patchApplyCommand.tryAgain": "Try again",
   "timeline.paymentPage.balanceNow": "Balance {balance}",
   "timeline.paymentPage.billingPortal": "Billing",
-  "timeline.paymentPage.buyCredits": "Buy credits",
+  "timeline.paymentPage.buyCredits": "Add credits",
   "timeline.paymentPage.continueToPayment": "Continue to payment",
   "timeline.paymentPage.checkFailed":
     "Couldn't check your payment from here. If you paid, your credits still arrive.",
@@ -5430,6 +5625,11 @@ export const englishMessages = {
   "timeline.toolPresentation.binaryOutputSuppressed": "(binary output suppressed)",
   "timeline.toolPresentation.blockedByYourPermissionSettings":
     "Blocked by your permission settings",
+  "timeline.toolPresentation.callUser.answered": "Answered",
+  "timeline.toolPresentation.callUser.cancelled": "Cancelled",
+  "timeline.toolPresentation.callUser.declined": "Declined",
+  "timeline.toolPresentation.callUser.missed": "No answer",
+  "timeline.toolPresentation.callUser.notPlaced": "Didn't ring",
   "timeline.toolPresentation.created": "Created",
   "timeline.toolPresentation.deleted": "Deleted",
   "timeline.toolPresentation.deletedPathbasename": "Deleted {pathBasename}",
@@ -5636,7 +5836,7 @@ export const englishMessages = {
   "timeline.toolRenderers.waited": "Waited",
   "timeline.toolRenderers.waitingForYourApproval": "Waiting for your approval",
   "timeline.toolRenderers.declinedAutomatically": "Declined automatically",
-  "timeline.toolRenderers.youRejectedThis": "You rejected this",
+  "timeline.toolRenderers.youRejectedThis": "You declined this",
   "timeline.toolRenderers.wasNotFound": "was not found",
   "timeline.toolStep.archiveDocument.done": "Archived a document",
   "timeline.toolStep.archiveDocument.running": "Archiving a document",
@@ -5736,6 +5936,8 @@ export const englishMessages = {
   "timeline.toolStep.nameChat.running": "Naming the chat",
   "timeline.toolStep.noteProgress.done": "Noted progress",
   "timeline.toolStep.noteProgress.running": "Noting progress",
+  "timeline.toolStep.callYou.done": "Called you",
+  "timeline.toolStep.callYou.running": "Calling you",
   "timeline.toolStep.notify.done": "Notified you",
   "timeline.toolStep.notify.running": "Notifying you",
   "timeline.toolStep.openBrowser.done": "Opened the browser",

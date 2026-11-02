@@ -192,15 +192,8 @@ async function addWorkspaceMember(org: Org, workspaceId: string, role: string): 
   return subjectId;
 }
 
-/** What the follow-up release's rolling migration does (as 0950 did for 0946). */
-async function grantRuntimeExecute(): Promise<void> {
-  await shared.admin`
-    grant execute on function opengeni_private.grant_subscription_account_administrator(jsonb)
-      to opengeni_app`;
-}
-
-describe("before the follow-up release grants runtime EXECUTE", () => {
-  test("1103 leaves the grant to its owner, and the constraints are validated", async () => {
+describe("the migrations", () => {
+  test("1149 grants runtime EXECUTE (never PUBLIC), and 1104 validated the constraints", async () => {
     const [acl] = await shared.admin<{ publicExecute: boolean; appExecute: boolean }[]>`
       select
         exists (
@@ -210,7 +203,7 @@ describe("before the follow-up release grants runtime EXECUTE", () => {
         has_function_privilege('opengeni_app', oid, 'EXECUTE') as "appExecute"
       from pg_proc
       where oid = 'opengeni_private.grant_subscription_account_administrator(jsonb)'::regprocedure`;
-    expect(acl).toEqual({ publicExecute: false, appExecute: false });
+    expect(acl).toEqual({ publicExecute: false, appExecute: true });
     const constraints = await shared.admin<{ name: string; validated: boolean }[]>`
       select conname as name, convalidated as validated from pg_constraint
       where conrelid = 'opengeni_private.subscription_runtime_capabilities'::regclass
@@ -220,26 +213,9 @@ describe("before the follow-up release grants runtime EXECUTE", () => {
       { name: "subscription_runtime_capabilities_provider_chk", validated: true },
     ]);
   });
-
-  test("a proof is not yet honoured, and the writer still answers normally", async () => {
-    const org = await organization();
-    const id = await revokedOrganizationConnection(org, "not-yet");
-    const stamp = stampFor(org.accountId, org.keySubjectId);
-    expect(
-      await asAccountAdministrator([stamp], () =>
-        connect(org, org.keySubjectId, org.workspaceIds[1], "not-yet"),
-      ),
-    ).toEqual({ kind: "refused", reason: "managed_elsewhere" });
-    expect((await connectionRow(org, id)).status).toBe("needs_relogin");
-    // Workspace-owner authority needs no grant and works already.
-    const own = await connect(org, org.keySubjectId, org.workspaceIds[0], "not-yet-own");
-    expect(own.kind).toBe("connected");
-  });
 });
 
 describe("the configured key as an account administrator", () => {
-  beforeAll(grantRuntimeExecute);
-
   test("reconnects the organization's revoked account from a workspace it reaches", async () => {
     const org = await organization();
     const id = await revokedOrganizationConnection(org, "reconnect");

@@ -192,6 +192,14 @@ agentConfig: {
 
 See [Goals](/concepts/goals).
 
+## Nobody watching
+
+A run that a schedule or event starts is **unattended**: no person answers while it works. The agent is told so, settles open choices with the most conventional option instead of asking, and ends with its result, the assumptions it made and any steps left for a person. A call that needs someone's approval is not run and not approved; the agent gets an error result and works around it. Your tool permissions stay as you set them.
+
+Set `agentConfig.unattended: false` for a schedule whose runs someone answers (for example approvals with `approvalTimeoutSeconds`, which also keeps runs attended). For a session your backend starts with no person behind it, pass `unattended: true` to `createSession`. People can switch any chat with **Work without me** in its Agent tab; your code can do the same with `updateSessionUnattended`. Switching changes only whether the agent waits for a person: the agent's instructions and tools stay as the chat started, so a question in a chat switched to unattended gets an immediate "no one will answer" result instead.
+
+Explicit choices stay until someone changes them. Only the default for scheduled and event-triggered chats ends by itself: when someone writes in that chat from the web app, Slack or a call, it runs attended from that message on.
+
 ## Bring results back
 
 - **Write back through your tools.** The agent calls your API to update a ticket, post a comment, or store a report. This is the most direct path.

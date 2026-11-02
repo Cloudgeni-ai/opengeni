@@ -24,10 +24,10 @@ import { PageHeader } from "@opengeni/react/ui/page-header";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
 import {
-  canManageWorkspaceSettings,
-  hasAccountPermission,
+  canContributeWorkspaceContent,
   hasWorkspacePermission,
 } from "@opengeni/react/app/lib/permissions";
+import { canAdministerOrganization } from "@opengeni/react/app/lib/workspaces";
 
 import { errorText, useArchiveKnowledge } from "./knowledge-data";
 import { AddKnowledgePage, EntryEditPage, EntryPage, NewCollectionDialog } from "./knowledge-entry";
@@ -91,11 +91,12 @@ export function KnowledgePage({
     ? "your Personal workspace"
     : (workspace?.name ?? "this workspace");
   const canEdit = hasWorkspacePermission(context.accessContext, workspaceId, "documents:manage");
-  const canWriteOrganization = Boolean(
-    workspace?.accountId &&
-    hasAccountPermission(context.accessContext, workspace.accountId, "account:admin"),
-  );
-  const canEditInstructions = canManageWorkspaceSettings(
+  const canWriteOrganization = canAdministerOrganization({
+    accessContext: context.accessContext,
+    clientConfig: context.clientConfig,
+    accountId: workspace?.accountId,
+  });
+  const canEditInstructions = canContributeWorkspaceContent(
     context.accessContext,
     workspace,
     context.managedSelfContext,

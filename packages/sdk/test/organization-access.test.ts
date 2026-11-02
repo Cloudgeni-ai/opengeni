@@ -293,7 +293,8 @@ describe("organization access wire parity", () => {
     ).toEqual(["workspace:admin"]);
     expect(organizationAccessPresetPermissions("custom")).toEqual([]);
     const canonical = KNOWN_PERMISSIONS.filter(
-      (permission) => permission !== "environments:manage" && permission !== "environments:use",
+      (permission) =>
+        !permission.startsWith("environments:") && !permission.startsWith("variable-sets:"),
     );
     const read = organizationAccessPresetPermissions("read_only");
     expect(read).not.toContain("secrets:read");

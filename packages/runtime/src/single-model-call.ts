@@ -345,7 +345,7 @@ async function runResponsesCall(
     ...(request.topP !== undefined ? { top_p: request.topP } : {}),
     ...(request.reasoningEffort ? { reasoning: { effort: request.reasoningEffort } } : {}),
     ...(Object.keys(text).length > 0 ? { text } : {}),
-    ...(provider.wireProfile === "azure-openai" ? {} : { store: false }),
+    store: false,
     ...(request.serviceTier ? { service_tier: request.serviceTier } : {}),
   };
   const requestOptions = request.signal ? { signal: request.signal } : undefined;

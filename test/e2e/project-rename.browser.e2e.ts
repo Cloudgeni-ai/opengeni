@@ -160,6 +160,11 @@ test("an off-page project keeps its first-page retry visible", async () => {
     for (const key of Object.keys(sessionStorage)) {
       if (key.startsWith("og.session.groupWindows:")) sessionStorage.removeItem(key);
     }
+    // The first test collapsed Bugfixes, and collapsed projects are remembered
+    // across reloads; this test needs Bugfixes open.
+    for (const key of Object.keys(localStorage)) {
+      if (key.endsWith(":collapsed-sections")) localStorage.removeItem(key);
+    }
     sessionStorage.setItem("rename-qa-fail-channel-page", "00000000-0000-4000-8000-000000000002");
   });
   await page.reload();

@@ -351,6 +351,7 @@ async function device(revision: number, generation: string): Promise<ExtensionDe
       diagnostics: true,
       rawCdp: false,
       linkedComputer: true,
+      paymentFieldPrivacy: true,
     },
   };
 }

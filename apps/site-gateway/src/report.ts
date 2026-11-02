@@ -1,5 +1,5 @@
 import type { SiteAbuseReportRequest } from "@opengeni/contracts";
-import { rateLimitKeys, underRateLimit } from "./api";
+import { readBodyCapped, rateLimitKeys, underRateLimit } from "./api";
 import { formToken, mintVisitor, verifyFormToken } from "./cookies";
 import { utf8 } from "./crypto";
 import { messagePage, reportFormPage } from "./pages";
@@ -22,14 +22,13 @@ export async function handleReport(site: SiteContext): Promise<Response> {
   if (!isSameOriginRequest(site.request, site.siteOrigin))
     return messagePage(site, 403, "Not allowed", "Send the report from this Site's report page.");
   const type = site.request.headers.get("content-type") ?? "";
-  const declared = Number(site.request.headers.get("content-length") ?? "0");
   if (!type.toLowerCase().startsWith("application/x-www-form-urlencoded"))
     return messagePage(site, 415, "Unsupported report", "Use the report form.");
-  if (declared > MAX_REPORT_FORM_BYTES)
+  // Read at most the cap: a chunked body without a length is never held whole.
+  const body = await readBodyCapped(site.request, MAX_REPORT_FORM_BYTES);
+  if (body === "too_large")
     return messagePage(site, 413, "Report too long", "Shorten the report and try again.");
-  const text = await site.request.text();
-  if (text.length > MAX_REPORT_FORM_BYTES)
-    return messagePage(site, 413, "Report too long", "Shorten the report and try again.");
+  const text = new TextDecoder().decode(body);
   const form = new URLSearchParams(text);
   const token = form.get("token") ?? "";
   if (!(await verifyFormToken(site.config.secret, "report", token, site.hostname, site.visitor)))

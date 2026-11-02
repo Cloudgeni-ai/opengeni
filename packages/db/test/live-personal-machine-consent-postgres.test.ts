@@ -195,6 +195,7 @@ async function submitAs(
   subjectId: string,
   text: string,
   delivery: "send" | "steer" = "send",
+  mode: "session" | "always" = "session",
 ) {
   const [authority] =
     await shared.admin`select authority_epoch from sessions where id = ${sessionId}`;
@@ -215,7 +216,7 @@ async function submitAs(
         ...(subjectId === f.owner
           ? {
               personalResourceAttachment: {
-                mode: "session" as const,
+                mode,
                 expectedAuthorityEpoch: Number(authority!.authority_epoch),
                 workspaceSharedAcknowledged: true,
                 sharedOutputWarningVersion: 1 as const,
@@ -225,6 +226,75 @@ async function submitAs(
       }),
     ),
   );
+}
+
+/**
+ * The owner's message without a turn-bound approval for any machine, like an
+ * API caller or an agent's own continuation sends it.
+ */
+async function submitWithoutApproval(f: Fixture, sessionId: string, text: string) {
+  return await withWorkspaceSubjectSessionActivityRls(client.db, f.workspaceId, f.owner, (db) =>
+    db.transaction((tx) =>
+      submitHumanPromptInTransaction(tx as unknown as typeof db, {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        sessionId,
+        subjectId: f.owner,
+        actor: { type: "human", subjectId: f.owner },
+        operationKey: crypto.randomUUID(),
+        delivery: "send",
+        text,
+        resources: [],
+        reasoningEffortFallback: "medium",
+        source: "user",
+      }),
+    ),
+  );
+}
+
+async function machineAuthorityId(enrollmentId: string): Promise<string> {
+  const [row] = await shared.admin`select authority_id from enrollments where id = ${enrollmentId}`;
+  return row!.authority_id as string;
+}
+
+/** The owner's standing permission for the machine in the fixture workspace. */
+async function standingGrants(f: Fixture, enrollmentId: string) {
+  return [
+    ...(await shared.admin`select mode, context, status from organization_user_resource_grants
+      where authority_id = ${await machineAuthorityId(enrollmentId)}
+        and workspace_id = ${f.workspaceId} and action = 'connected_machine.use'
+        and mode = 'always' and session_id is null
+      order by created_at`),
+  ];
+}
+
+/** The owner turns the machine on in the fixture workspace, for chats of `context`. */
+async function turnOnHere(
+  f: Fixture,
+  enrollmentId: string,
+  context: "user_private" | "workspace_shared",
+) {
+  return await issueSelfUserResourceGrant(client.db, {
+    accountId: f.accountId,
+    workspaceId: f.workspaceId,
+    subjectId: f.owner,
+    authorityId: await machineAuthorityId(enrollmentId),
+    resourceKind: "connected_machine",
+    mode: "always",
+    context,
+    workspaceSharedAcknowledged: context === "workspace_shared",
+  });
+}
+
+/** The owner turns the machine off in the fixture workspace. */
+async function turnOffHere(f: Fixture, enrollmentId: string) {
+  const grant = await turnOnHere(f, enrollmentId, "user_private");
+  await revokeSelfUserResourceGrant(client.db, {
+    accountId: f.accountId,
+    workspaceId: f.workspaceId,
+    subjectId: f.owner,
+    grantId: grant.grantId,
+  });
 }
 
 async function claimOutcome(workspaceId: string, sessionId: string) {
@@ -865,8 +935,18 @@ describe("an agent's move between the owner's personal machines", () => {
     expect((await claim(f.workspaceId, session.id)).turnId).toBe(scenario.first.turnId);
   }, 120_000);
 
-  test("a machine the turn never held is refused with the grant-required cause", async () => {
+  test("a machine the turn never held runs the owner's turn where they have it on", async () => {
     const { f, other, session, first } = await agentMovedTurn();
+    // The pointer moved without this turn ever being authorized for it.
+    await shared.admin`update sessions set active_sandbox_id = ${other.sandboxId},
+      active_epoch = active_epoch + 1 where id = ${session.id}`;
+    await recover(f.workspaceId, session.id, first.attemptId);
+    expect((await claim(f.workspaceId, session.id)).turnId).toBe(first.turnId);
+  }, 120_000);
+
+  test("a machine the turn never held is refused with the grant-required cause once its owner turned it off here", async () => {
+    const { f, other, session, first, grant, runtime } = await agentMovedTurn();
+    await revokeSelfUserResourceGrant(client.db, { ...runtime, grantId: grant.grantId });
     // The pointer moved without this turn ever being authorized for it.
     await shared.admin`update sessions set active_sandbox_id = ${other.sandboxId},
       active_epoch = active_epoch + 1 where id = ${session.id}`;
@@ -886,6 +966,9 @@ describe("an agent's move between the owner's personal machines", () => {
         from finalize_scoped_enrollment(${f.accountId}::uuid, ${f.workspaceId}::uuid, 'user',
           ${`ed25519:other-${crypto.randomUUID()}`}, true, false, 'linux', 'x86_64', 'Home server', false)`;
     });
+    // The owner turned the other machine off in this workspace, so their
+    // message needs the machine it was sent for.
+    await turnOffHere(f, other!.enrollmentId);
     const session = await createSession(client.db, {
       accountId: f.accountId,
       workspaceId: f.workspaceId,
@@ -980,6 +1063,118 @@ describe("an agent's move between the owner's personal machines", () => {
       queuedTurnApprovedMachines: [],
     });
     expect((await claim(f.workspaceId, session.id)).turnId).toBeTruthy();
+  }, 120_000);
+});
+
+describe("the owner's own machine runs their turns wherever they have it on", () => {
+  test("where it was connected it is on from the start, and that is recorded so the owner can turn it off", async () => {
+    const f = await fixture();
+    const session = await chatOnOwnersMachine(f);
+    expect(await standingGrants(f, f.enrollmentId)).toEqual([]);
+    const sent = await submitWithoutApproval(f, session.id, "Keep going");
+    expect((await claim(f.workspaceId, session.id)).turnId).toBe(sent.turnId);
+    const [visibility] =
+      await shared.admin`select visibility from sessions where id = ${session.id}`;
+    expect(await standingGrants(f, f.enrollmentId)).toEqual([
+      { mode: "always", context: visibility!.visibility, status: "active" },
+    ]);
+  }, 120_000);
+
+  test("once the owner turned it off there, their turn without an approval waits", async () => {
+    const f = await fixture();
+    await turnOffHere(f, f.enrollmentId);
+    const session = await chatOnOwnersMachine(f);
+    await submitWithoutApproval(f, session.id, "Keep going");
+    expect(await rejectedClaimCause(f.workspaceId, session.id)).toMatchObject({
+      sqlState: "42501",
+      message: "personal machine use requires explicit grant",
+    });
+    // Nothing turned it back on behind the owner's back.
+    expect(
+      (await standingGrants(f, f.enrollmentId)).filter((grant) => grant.status === "active"),
+    ).toEqual([]);
+  }, 120_000);
+
+  test("in another workspace it waits until the owner turns it on there, for private and shared chats alike", async () => {
+    const f = await fixture();
+    const [owner] = await shared.admin`select personal_workspace_id from organization_memberships
+      where account_id = ${f.accountId} and subject_id = ${f.owner}`;
+    expect(owner!.personal_workspace_id).not.toBe(f.workspaceId);
+    // Connected from the owner's Personal workspace, so not on here yet.
+    await shared.admin`update enrollments set origin_workspace_id = ${owner!.personal_workspace_id}
+      where id = ${f.enrollmentId}`;
+    const session = await chatOnOwnersMachine(f);
+    await submitWithoutApproval(f, session.id, "Keep going");
+    expect(await rejectedClaimCause(f.workspaceId, session.id)).toMatchObject({
+      sqlState: "42501",
+      message: "personal machine use requires explicit grant",
+    });
+    // Standing permission for either kind of chat turns it on for both.
+    const [chat] = await shared.admin`select visibility from sessions where id = ${session.id}`;
+    await turnOnHere(
+      f,
+      f.enrollmentId,
+      chat!.visibility === "user_private" ? "workspace_shared" : "user_private",
+    );
+    expect((await claim(f.workspaceId, session.id)).turnId).toBeTruthy();
+  }, 120_000);
+
+  test("allowing it in another workspace turns it on there, so the owner's later chats run without asking", async () => {
+    const f = await fixture();
+    const [owner] = await shared.admin`select personal_workspace_id from organization_memberships
+      where account_id = ${f.accountId} and subject_id = ${f.owner}`;
+    await shared.admin`update enrollments set origin_workspace_id = ${owner!.personal_workspace_id}
+      where id = ${f.enrollmentId}`;
+    const first = await chatOnOwnersMachine(f);
+    const allowed = await submitAs(f, first.id, f.owner, "Use my machine", "send", "always");
+    expect((await claim(f.workspaceId, first.id)).turnId).toBe(allowed.turnId);
+    expect(
+      (await standingGrants(f, f.enrollmentId)).filter((grant) => grant.status === "active"),
+    ).toHaveLength(1);
+    const later = await chatOnOwnersMachine(f);
+    const sent = await submitWithoutApproval(f, later.id, "Keep going");
+    expect((await claim(f.workspaceId, later.id)).turnId).toBe(sent.turnId);
+  }, 120_000);
+
+  test("an owner's message sent for one machine runs on their other machine where that one is on", async () => {
+    const f = await fixture();
+    const [other] = await app.begin(async (tx) => {
+      await tx`select set_config('opengeni.account_id', ${f.accountId}, true),
+        set_config('opengeni.workspace_id', ${f.workspaceId}, true), set_config('opengeni.subject_id', ${f.owner}, true)`;
+      return await tx<Array<{ enrollmentId: string; sandboxId: string }>>`
+        select enrollment_id as "enrollmentId", sandbox_id as "sandboxId"
+        from finalize_scoped_enrollment(${f.accountId}::uuid, ${f.workspaceId}::uuid, 'user',
+          ${`ed25519:other-${crypto.randomUUID()}`}, true, false, 'linux', 'x86_64', 'Home server', false)`;
+    });
+    const session = await chatOnOwnersMachine(f);
+    const sent = await submitAs(f, session.id, f.owner, "Build it here");
+    expect(
+      await setActiveSandbox(client.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        sessionId: session.id,
+        subjectId: f.owner,
+        expectedEpoch: session.activeEpoch + 1,
+        targetSandboxId: other!.sandboxId,
+      }),
+    ).toMatchObject({ swapped: true });
+    expect(
+      await getSessionMachineAccess(client.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        sessionId: session.id,
+        subjectId: f.owner,
+      }),
+    ).toMatchObject({ sandboxId: other!.sandboxId, queuedTurnNotApprovedHere: false });
+    expect((await claim(f.workspaceId, session.id)).turnId).toBe(sent.turnId);
+  }, 120_000);
+
+  test("another member's message still waits for the owner where the machine is on", async () => {
+    const f = await fixture();
+    const session = await chatOnOwnersMachine(f);
+    await turnOnHere(f, f.enrollmentId, "workspace_shared");
+    const message = await submitAs(f, session.id, f.member, "Member: please check the logs");
+    expect(message).toMatchObject({ waitsForMachineOwner: true });
   }, 120_000);
 });
 

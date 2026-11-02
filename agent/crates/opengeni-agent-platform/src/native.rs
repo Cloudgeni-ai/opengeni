@@ -46,8 +46,8 @@ pub struct NativePlatform {
     /// The per-op OOM cgroup manager, wired by the supervisor at startup on a
     /// delegated Linux cgroup v2 host (issue #345). `None` until then (and on every
     /// non-Linux / non-delegated host), in which case exec runs with no per-op
-    /// memory isolation — its children still receive the minimal relative
-    /// `oom_score_adj` preference derived from the live supervisor.
+    /// memory isolation — its children still receive the `oom_score_adj`
+    /// victim preference derived from the live supervisor.
     cgroups: Option<Arc<OpCgroups>>,
 }
 
@@ -474,9 +474,9 @@ impl ExecProcessGroup {
         }
         group.child = crate::exec_handover::UnixProc::Owned(command.spawn()?);
 
-        // Give this child (and its inheriting descendants) the smallest higher
-        // global OOM victim bias when the kernel ABI can represent one. A
-        // supervisor already at 1000 remains equal. Always applied on Linux —
+        // Make this child (and its inheriting descendants) the kernel OOM
+        // killer's preferred victim over an unprotected supervisor (see
+        // `exec_oom_score_adj_for_supervisor`). Always applied on Linux —
         // independent of, and composing with, the per-op cgroup below (which
         // bounds systemd-oomd's scope).
         #[cfg(target_os = "linux")]
@@ -2599,10 +2599,11 @@ mod tests {
         assert_process_exits(descendant_pid, "runner-crash exec").await;
     }
 
-    /// Every exec child receives the smallest OOM-score adjustment above the live
-    /// supervisor when representable, or the same ABI ceiling. This needs no
-    /// cgroup delegation, so it runs on any Linux host. The direct child reports
-    /// its own PID and stays live for the authoritative `/proc` read.
+    /// Every exec child receives the OOM-score adjustment derived from the live
+    /// supervisor: neutral under a protected supervisor, the ABI maximum
+    /// otherwise. This needs no cgroup delegation, so it runs on any Linux host.
+    /// The direct child reports its own PID and stays live for the
+    /// authoritative `/proc` read.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn exec_child_gets_raised_oom_score_adj() {
@@ -2633,7 +2634,7 @@ mod tests {
             .trim()
             .parse::<i32>()
             .expect("numeric supervisor OOM score");
-        let expected = crate::cgroup::minimal_exec_oom_score_adj(supervisor).to_string();
+        let expected = crate::cgroup::exec_oom_score_adj_for_supervisor(supervisor).to_string();
         assert_eq!(observed, expected, "exec child {child_pid} OOM bias");
     }
 
@@ -2680,7 +2681,7 @@ mod tests {
             .trim()
             .parse::<i32>()
             .expect("numeric supervisor OOM score");
-        let expected = crate::cgroup::minimal_exec_oom_score_adj(supervisor).to_string();
+        let expected = crate::cgroup::exec_oom_score_adj_for_supervisor(supervisor).to_string();
         for pid in [parent, descendant] {
             let score = tokio::fs::read_to_string(format!("/proc/{pid}/oom_score_adj"))
                 .await

@@ -78,6 +78,7 @@ import { useRecordSiteOpened } from "../lib/site-opened";
 import { siteMayHaveChanged, useSiteLiveVersion } from "../lib/site-live-version";
 import { useSessionListHintRefresh } from "../lib/use-session-list-hint-refresh";
 import { cn } from "../lib/utils";
+import { useWindowBarTitle } from "../../ui/window-bar-title";
 
 // Loaded when someone opens it, from the Artifacts route that already holds
 // the publish form and the Site's management (a separate lazy entry would
@@ -194,6 +195,12 @@ export function SiteViewRoute({
   const publishingSite =
     publishingFor === siteKey && artifact?.status === "active" ? artifact : null;
   const publishing = publishingSite !== null;
+  // In the macOS app the Site's name is the window bar's title, as a page's
+  // is, instead of in its toolbar (which shows it again in full screen, where
+  // the bar's row is hidden). The publish form, opened in front of the Site,
+  // names the bar once it has loaded; the Site's claim mounted first, so it
+  // yields while the form is open.
+  const titleInWindowBar = useWindowBarTitle(artifact?.title ?? null, publishing);
   // Full screen is the route's so opening the form can leave it first.
   const [fullScreen, setFullScreen] = useState(false);
   const openPublishing = useCallback(() => {
@@ -294,6 +301,7 @@ export function SiteViewRoute({
               siteLocation={page ?? "/"}
               onSiteLocationChange={onSiteLocationChange}
               toolbarStart={backControl}
+              showTitle={!titleInWindowBar || fullScreen}
               // The one publication control. The Site view never says "Live":
               // it stays current, and says so only while Updating or Reconnecting.
               liveStatus={

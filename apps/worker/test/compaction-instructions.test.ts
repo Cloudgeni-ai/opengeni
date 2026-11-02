@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { DEFAULT_AGENT_INSTRUCTIONS } from "@opengeni/config";
 import { allAgentCapabilities, noneAgentCapabilities } from "@opengeni/contracts";
 import {
+  UNATTENDED_SESSION_GUIDANCE,
   appendSessionInstructions,
   appendWorkspaceMemory,
   composeAgentInstructions,
@@ -70,5 +71,47 @@ describe("standalone compaction instructions (AC16)", () => {
     expect(instructions).not.toContain("knowledge_search");
     // Governance is a durable history item, never part of the system prompt.
     expect(instructions).not.toContain("governance");
+  });
+
+  test("an unattended session keeps its guidance through compaction", () => {
+    const metadata = { _opengeniUnattended: true };
+    const legacy = { agent: null, instructions: "SESSION", resources: [], metadata };
+    expect(standaloneCompactionInstructions({ settings, session: legacy, ...context })).toBe(
+      appendWorkspaceMemory(
+        appendSessionInstructions(
+          composeAgentInstructions(DEFAULT_AGENT_INSTRUCTIONS, undefined, context.rig, undefined, {
+            unattended: true,
+          }),
+          "SESSION",
+        ),
+        "MEMORY",
+      ),
+    );
+    const config = agentConfig();
+    const configured = { agent: config, instructions: "SESSION", resources: [], metadata };
+    const instructions = standaloneCompactionInstructions({
+      settings,
+      session: configured,
+      ...context,
+    });
+    expect(instructions).toBe(
+      inspectPersistentAgentInstructions(settings, {
+        agentConfig: config,
+        workspaceAgentIdentity: context.workspaceAgentIdentity,
+        workspaceMemory: "MEMORY",
+        sessionInstructions: "SESSION",
+        rig: context.rig,
+        unattended: true,
+      }).composed,
+    );
+    expect(instructions).toContain(UNATTENDED_SESSION_GUIDANCE);
+    // An interactive session never carries it.
+    expect(
+      standaloneCompactionInstructions({
+        settings,
+        session: { ...configured, metadata: {} },
+        ...context,
+      }),
+    ).not.toContain(UNATTENDED_SESSION_GUIDANCE);
   });
 });

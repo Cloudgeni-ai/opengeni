@@ -143,13 +143,13 @@ test("simultaneous routes retain canonical restrictions and distinct exact accou
     expect(server.headers).toBeUndefined();
   }
   expect(result.accountLabels.get(personal.serverId)).toEqual({
-    model: "mail — Personal: alice@example.test",
+    model: "mail — alice@example.test · Yours",
     connector: "mail",
     providerDomain: "example.test",
     account: "alice@example.test",
   });
   expect(result.accountLabels.get(workspace.serverId)).toEqual({
-    model: "mail — Workspace: Team inbox",
+    model: "mail — Team inbox · Shared",
     connector: "mail",
     providerDomain: "example.test",
     account: "Team inbox",
@@ -163,9 +163,10 @@ test("people see a connector's account only when there are several to tell apart
     tools: [{ kind: "mcp", id: "mail" }],
     bindings: [{ ...personal, accountLabel: "alice@example.test · Only me" }],
   });
-  // The model is still told exactly which account it is using.
+  // The model is still told exactly which account it is using, and whose it is;
+  // a label admitted with the older scope words reads the same.
   expect(single.accountLabels.get(personal.serverId)).toEqual({
-    model: "mail — Personal: alice@example.test · Only me",
+    model: "mail — alice@example.test · Yours",
     connector: "mail",
     providerDomain: "example.test",
   });
@@ -174,22 +175,22 @@ test("people see a connector's account only when there are several to tell apart
     settings: settings(),
     tools: [{ kind: "mcp", id: "mail" }],
     bindings: [
-      { ...personal, accountLabel: "alice@example.test · Only me" },
-      { ...workspace, accountLabel: "alice@example.test · This workspace" },
+      { ...personal, accountLabel: "alice@example.test · Yours" },
+      { ...workspace, accountLabel: "alice@example.test · Shared" },
     ],
   });
   expect(sameIdentity.accountLabels.get(personal.serverId)?.account).toBe(
-    "alice@example.test · Only me",
+    "alice@example.test · Yours",
   );
   expect(sameIdentity.accountLabels.get(workspace.serverId)?.account).toBe(
-    "alice@example.test · This workspace",
+    "alice@example.test · Shared",
   );
 
   const distinct = expandMcpAccountRoutes({
     settings: settings(),
     tools: [{ kind: "mcp", id: "mail" }],
     bindings: [
-      { ...personal, accountLabel: "alice@example.test · Only me" },
+      { ...personal, accountLabel: "alice@example.test · Yours" },
       { ...workspace, accountLabel: "team@example.test · This workspace" },
     ],
   });

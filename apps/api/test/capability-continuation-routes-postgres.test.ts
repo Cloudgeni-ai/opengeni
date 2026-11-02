@@ -510,4 +510,179 @@ describe("capability continuation API", () => {
       "The person finished setting up Outlook Mail from your request. Its tools are now available, so continue the request that needed it.",
     ]);
   });
+
+  test("an account's own card continues once the account holds the access it asked for", async () => {
+    const f = await fixture();
+    const created = await f.app.request(sessionsPath(f), {
+      method: "POST",
+      headers: f.host,
+      body: JSON.stringify({ initialMessage: "reply to Anna", model: "scripted-model" }),
+    });
+    expect(created.status, await created.clone().text()).toBe(202);
+    const session = (await created.json()) as Session;
+    const subjectId = (session.createdBy as { subjectId: string }).subjectId;
+    const readonly = "https://www.googleapis.com/auth/gmail.readonly";
+    const compose = "https://www.googleapis.com/auth/gmail.compose";
+    // The person's own mailbox, connected with read access only.
+    const connection = await createConnection(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      subjectId,
+      providerDomain: "gmailmcp.googleapis.com",
+      kind: "oauth2",
+      credentialEncrypted: encryptEnvironmentValue(
+        Buffer.from(ENCRYPTION_KEY, "base64"),
+        JSON.stringify({ accessToken: "gmail-test" }),
+      ),
+      grantedScopes: [readonly],
+      expiresAt: null,
+      metadata: {},
+      createdBySubjectId: subjectId,
+    });
+    const continueAccount = async (connectionId: string) =>
+      await f.app.request(sessionsPath(f, `/${session.id}/capability-continuations`), {
+        method: "POST",
+        headers: f.host,
+        body: JSON.stringify({ connectionId }),
+      });
+
+    // No card for this account in the chat yet.
+    expect(await (await continueAccount(connection.id)).json()).toEqual({
+      outcome: "not_needed",
+      reason: "no_card",
+    });
+
+    // A draft needed compose access: the bridge showed the account's own card.
+    const first = await claim(f, session.id);
+    await settle(f, session.id, first, true);
+    await appendSessionEventsForTurnAttempt(
+      client.db,
+      f.workspaceId,
+      session.id,
+      first.turn.id,
+      first.turn.executionGeneration,
+      first.attemptId,
+      [
+        {
+          type: "tool.auth_needed",
+          payload: {
+            serverId: "gmail",
+            toolName: "create_draft",
+            providerDomain: "gmailmcp.googleapis.com",
+            connectionId: connection.id,
+            reason: "insufficient_scope",
+            scopes: [compose],
+          },
+        },
+      ],
+    );
+    await settle(f, session.id, first, false);
+    const wakes = () => f.workflow.calls.filter((call) => call === "wakeSessionWorkflow").length;
+    const wakesBefore = wakes();
+
+    // The person unticked the permission on the provider's screen: the next
+    // call would only stop again, so nothing is sent.
+    const declined = await continueAccount(connection.id);
+    expect(declined.status, await declined.clone().text()).toBe(200);
+    expect(await declined.json()).toEqual({ outcome: "not_needed", reason: "not_ready" });
+    // An inactive account is not ready either.
+    await shared.admin`
+      UPDATE connections SET status = 'needs_reauth', granted_scopes = jsonb_build_array(${readonly}::text, ${compose}::text)
+      WHERE id = ${connection.id}`;
+    expect(await (await continueAccount(connection.id)).json()).toEqual({
+      outcome: "not_needed",
+      reason: "not_ready",
+    });
+    expect(wakes()).toBe(wakesBefore);
+
+    // Allowed: the agent is woken once and carries on.
+    await shared.admin`UPDATE connections SET status = 'active' WHERE id = ${connection.id}`;
+    const queued = await continueAccount(connection.id);
+    expect(queued.status, await queued.clone().text()).toBe(200);
+    const body = (await queued.json()) as { outcome: string; updateId: string };
+    expect(body.outcome).toBe("queued");
+    expect(wakes()).toBe(wakesBefore + 1);
+    expect(await (await continueAccount(connection.id)).json()).toEqual({
+      outcome: "already_queued",
+      updateId: body.updateId,
+    });
+    expect(wakes()).toBe(wakesBefore + 1);
+    // Another account's id finds no card in this chat.
+    expect(await (await continueAccount(crypto.randomUUID())).json()).toEqual({
+      outcome: "not_needed",
+      reason: "no_card",
+    });
+
+    const resumed = await claim(f, session.id);
+    const delivered = await listSessionSystemUpdatesForTurn(
+      client.db,
+      f.workspaceId,
+      session.id,
+      resumed.turn.id,
+    );
+    expect(delivered.map((update) => update.summary)).toEqual([
+      "The person finished setting up gmailmcp.googleapis.com from your request, so continue the request that needed it.",
+    ]);
+  });
+
+  test("an account continuation needs the account's own person and a card", async () => {
+    const f = await fixture();
+    const created = await f.app.request(sessionsPath(f), {
+      method: "POST",
+      headers: f.host,
+      body: JSON.stringify({ initialMessage: "reply to Anna", model: "scripted-model" }),
+    });
+    expect(created.status, await created.clone().text()).toBe(202);
+    const session = (await created.json()) as Session;
+    const other = await createConnection(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      subjectId: "user:someone-else",
+      providerDomain: "gmailmcp.googleapis.com",
+      kind: "oauth2",
+      credentialEncrypted: encryptEnvironmentValue(
+        Buffer.from(ENCRYPTION_KEY, "base64"),
+        JSON.stringify({ accessToken: "gmail-other" }),
+      ),
+      grantedScopes: [],
+      expiresAt: null,
+      metadata: {},
+      createdBySubjectId: "user:someone-else",
+    });
+    // A card naming someone else's account, as a shared chat could show.
+    const first = await claim(f, session.id);
+    await settle(f, session.id, first, true);
+    await appendSessionEventsForTurnAttempt(
+      client.db,
+      f.workspaceId,
+      session.id,
+      first.turn.id,
+      first.turn.executionGeneration,
+      first.attemptId,
+      [
+        {
+          type: "tool.auth_needed",
+          payload: {
+            serverId: "gmail",
+            providerDomain: "gmailmcp.googleapis.com",
+            connectionId: other.id,
+            reason: "expired",
+          },
+        },
+      ],
+    );
+    await settle(f, session.id, first, false);
+    const response = await f.app.request(
+      sessionsPath(f, `/${session.id}/capability-continuations`),
+      { method: "POST", headers: f.host, body: JSON.stringify({ connectionId: other.id }) },
+    );
+    expect(await response.json()).toEqual({ outcome: "not_needed", reason: "not_ready" });
+    // Both names at once, or neither, are refused.
+    const both = await f.app.request(sessionsPath(f, `/${session.id}/capability-continuations`), {
+      method: "POST",
+      headers: f.host,
+      body: JSON.stringify({ capabilityId: "api:fiken", connectionId: other.id }),
+    });
+    expect(both.status).toBe(400);
+  });
 });

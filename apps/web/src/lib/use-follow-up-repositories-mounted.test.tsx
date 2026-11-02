@@ -17,6 +17,16 @@ const repository = {
   accountLogin: "acme",
   accountType: "Organization",
 };
+const otherAccountRepository = {
+  ...repository,
+  id: 202,
+  installationId: 77,
+  fullName: "globex/core",
+  name: "core",
+  htmlUrl: "https://github.com/globex/core",
+  cloneUrl: "https://github.com/globex/core.git",
+  accountLogin: "globex",
+};
 const context = {
   accessContext: {
     mode: "local",
@@ -38,7 +48,7 @@ const context = {
   refreshPersonalGitHub: async () => {},
   repoBusy: false,
   personalGitHubBusy: false,
-  githubRepos: [repository],
+  githubRepos: [repository, otherAccountRepository],
   personalGitHubRepositories: [],
   personalGitHubSelection: null,
   // Read only to build the picker's display props.
@@ -88,6 +98,31 @@ describe("follow-up repositories", () => {
     });
     expect(hook.result.current.error).toBeNull();
     expect(hook.result.current.pendingResources).toEqual([]);
+    await hook.unmount();
+  });
+
+  test("adds a repository from another GitHub account next to a mounted one", async () => {
+    const mounted = {
+      kind: "repository",
+      uri: "https://github.com/acme/api.git",
+      ref: "main",
+      provider: "github",
+      mountPath: "repos/github.com/acme/api",
+      githubRepositoryId: 101,
+      githubInstallationId: 42,
+    };
+    const hook = await renderHook(() => useFollowUpRepositories(session([mounted]), () => {}), {});
+    await act(async () => {
+      hook.result.current.pickerProps(false).onToggleRepo(otherAccountRepository);
+    });
+    expect(hook.result.current.error).toBeNull();
+    expect(hook.result.current.pendingResources).toEqual([
+      expect.objectContaining({
+        uri: "https://github.com/globex/core.git",
+        githubRepositoryId: 202,
+        githubInstallationId: 77,
+      }),
+    ]);
     await hook.unmount();
   });
 });

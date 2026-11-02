@@ -183,6 +183,17 @@ export type SessionAppActionAuthority = Awaited<
 >;
 type ActingAuthority = Exclude<SessionAppActionAuthority, { kind: "unavailable" }>;
 
+/**
+ * Reads whose first check (`sessions:create`) an external person's access may
+ * pass but whose route refuses them: the workspace budget is for people of the
+ * organization, never someone using Opengeni through another product (see
+ * `requireAllowanceAuthority`). Not offering them saves a refused call.
+ */
+const EXTERNAL_PERSON_REFUSED_READS: ReadonlySet<string> = new Set([
+  "getWorkspaceAllowance",
+  "getWorkspaceAllowanceState",
+]);
+
 /** Someone who uses Opengeni through another product, such as a person in an embedded chat. */
 function isExternalPerson(subjectId: string): boolean {
   return subjectId.startsWith("external_user:");
@@ -197,6 +208,7 @@ function isExternalPerson(subjectId: string): boolean {
  */
 function externalPersonCanRun(entry: ActionCatalogEntry, authority: ActingAuthority): boolean {
   if (!actionInOneWorkspace(entry)) return false;
+  if (EXTERNAL_PERSON_REFUSED_READS.has(entry.id)) return false;
   if (authority.kind === "full_access") return true;
   if (authority.kind === "read_only" && appActionNeedsConfirmation(entry)) return false;
   if (appActionCallCarriesSecrets(entry, undefined)) return false;

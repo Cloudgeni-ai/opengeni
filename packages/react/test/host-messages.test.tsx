@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { TOOL_STEP_IDS } from "../src/timeline/tool-steps";
+import { COMMAND_STEP_IDS } from "../src/timeline/command-step";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -201,6 +202,11 @@ describe("English catalog", () => {
     for (const step of TOOL_STEP_IDS) {
       used.add(`timeline.toolStep.${step}.running`);
       used.add(`timeline.toolStep.${step}.done`);
+    }
+    // Command step keys likewise (`timeline.commandStep.<step>.<phase>`).
+    for (const step of COMMAND_STEP_IDS) {
+      used.add(`timeline.commandStep.${step}.running`);
+      used.add(`timeline.commandStep.${step}.done`);
     }
     const unused = entries
       .map(([key]) => key)

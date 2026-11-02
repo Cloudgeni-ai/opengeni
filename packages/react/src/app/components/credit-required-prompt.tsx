@@ -27,6 +27,7 @@ import { validTopupAmount } from "../lib/format";
 import { analyticsAction } from "../../ui/analytics-actions";
 import { checkoutPageReturnUrl, checkoutTabReturnUrl } from "../lib/credit-checkout";
 import { subscriptionAction } from "../lib/subscription-plans";
+import type { PaymentRefusalCode } from "../lib/model-access";
 
 const DEFAULT_TOPUP = "25.00";
 
@@ -36,6 +37,8 @@ type CreditRequiredPromptProps = {
   accountId: string | null;
   canBuyCredits: boolean;
   purpose?: "required" | "topup" | undefined;
+  /** A refusal one action fixes (own-key fee, API use): no model choice applies. */
+  refusalCode?: PaymentRefusalCode | null | undefined;
   onOpenChange: (open: boolean) => void;
   /**
    * Runs before this page leaves for checkout, such as saving the composer's
@@ -55,6 +58,7 @@ export function CreditRequiredPromptView({
   accountId,
   canBuyCredits,
   purpose = "required",
+  refusalCode = null,
   onOpenChange,
   beforeLeave,
 }: CreditRequiredPromptProps & { client: OpenGeniBrowserClient }) {
@@ -134,17 +138,72 @@ export function CreditRequiredPromptView({
     return <CreditsCelebrationDialog status={granted} open={open} onOpenChange={onOpenChange} />;
   }
 
+  if (refusalCode === "byok_upgrade_required") {
+    // On the Free plan, own keys need a paid plan: one action.
+    return (
+      <Dialog open={open} onOpenChange={onOpenChange}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Upgrade to Pro to use your own key</DialogTitle>
+            <DialogDescription className={canBuyCredits ? "sr-only" : undefined}>
+              {canBuyCredits
+                ? "Upgrade to Pro on Billing."
+                : "Ask an organization owner to upgrade to Pro."}
+            </DialogDescription>
+          </DialogHeader>
+          {canBuyCredits ? (
+            <DialogFooter>
+              <Button asChild type="button">
+                <Link
+                  to="/workspaces/$workspaceId/organization"
+                  params={{ workspaceId }}
+                  search={{ section: "billing" }}
+                  onClick={() => onOpenChange(false)}
+                  {...analyticsAction("upgrade_plan")}
+                >
+                  Upgrade to Pro
+                </Link>
+              </Button>
+            </DialogFooter>
+          ) : null}
+        </DialogContent>
+      </Dialog>
+    );
+  }
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {purpose === "topup" ? "Add Opengeni credits" : "Add Opengeni credits to continue"}
-          </DialogTitle>
-          <DialogDescription>
             {purpose === "topup"
-              ? "Choose an amount and pay in Stripe Checkout, or redeem a coupon code."
-              : "Add credits to use this model, or choose another model."}
+              ? "Add Opengeni credits"
+              : refusalCode === "byok_paid_credit_required"
+                ? "Add credits to use your own key"
+                : refusalCode === "api_credits_required"
+                  ? "API usage uses credits, not your plan credit"
+                  : "Add Opengeni credits to continue"}
+          </DialogTitle>
+          {/* A refusal's title names its fix; the line below it says how. With
+              only the Billing link to show, the link says it. */}
+          <DialogDescription
+            className={
+              purpose === "required" && refusalCode && canBuyCredits && !stripeEnabled
+                ? "sr-only"
+                : undefined
+            }
+          >
+            {purpose === "topup"
+              ? refusalCode === "byok_paid_credit_required"
+                ? "Choose an amount and pay in Stripe Checkout."
+                : "Choose an amount and pay in Stripe Checkout, or redeem a coupon code."
+              : refusalCode
+                ? canBuyCredits && stripeEnabled
+                  ? "Choose an amount and pay in Stripe Checkout."
+                  : canBuyCredits
+                    ? "Add credits on Billing."
+                    : "Ask an organization owner to add credits."
+                : "Add credits to use this model, or choose another model."}
           </DialogDescription>
         </DialogHeader>
         {canBuyCredits && stripeEnabled ? (
@@ -163,7 +222,8 @@ export function CreditRequiredPromptView({
               )}
               {purpose === "topup" ? "Continue to Stripe" : "Add credits"}
             </Button>
-            {accountId ? (
+            {/* A coupon's credit can't pay the own-key fee, so it would not fix this refusal. */}
+            {accountId && refusalCode !== "byok_paid_credit_required" ? (
               <div className="border-t border-border pt-3">
                 <CouponRedeem
                   client={client}
@@ -176,11 +236,29 @@ export function CreditRequiredPromptView({
             ) : null}
           </div>
         ) : !canBuyCredits ? (
-          <p className="text-sm text-fg-muted">
-            Ask an organization owner to add credits, or an admin to connect a model.
-          </p>
+          refusalCode ? null : (
+            <p className="text-sm text-fg-muted">
+              Ask an organization owner to add credits, or an admin to connect a model.
+            </p>
+          )
+        ) : refusalCode && purpose === "required" ? (
+          // Checkout isn't available here (yet): Billing still has the one fix.
+          <DialogFooter>
+            <Button asChild type="button">
+              <Link
+                to="/workspaces/$workspaceId/organization"
+                params={{ workspaceId }}
+                search={{ section: "billing" }}
+                onClick={() => onOpenChange(false)}
+                {...analyticsAction("buy_credits")}
+              >
+                Add credits
+              </Link>
+            </Button>
+          </DialogFooter>
         ) : null}
-        {purpose === "required" ? (
+        {/* Own-key and API refusals have one fix: credits. */}
+        {purpose === "required" && !refusalCode ? (
           <DialogFooter>
             {/* Credits are the main action when they can be bought here. */}
             <Button

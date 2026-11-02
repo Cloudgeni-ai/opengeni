@@ -1,8 +1,10 @@
 {{- if and .Values.computeControl.enabled .Values.computeControl.sweep.enabled }}
 {{- $cc := .Values.computeControl }}
-# The store's daily sweep (ADR 17): deletes chunks and manifests no stored
-# copy names any more, after the safety age. Safe while hosts archive; one
-# at a time.
+# The store's daily sweep (ADR 17, 25): fences every pointer the service
+# keeps, then deletes chunks and manifests none names whose day ended a
+# whole day before. Safe while hosts archive, on any object store; one at a
+# time. It reads the pointers from the service's database, so it refuses to
+# start until the fleet's pointers are in it.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -49,13 +51,29 @@ spec:
                   drop:
                     - ALL
               command:
-                - /usr/local/bin/compute-host
+                - /usr/local/bin/compute-control
                 - sweep
                 - --store={{ $cc.archive }}
+                - --connections=2
                 - --delete
               env:
                 - name: RUST_LOG
                   value: info
+                {{- if $cc.database.urlKey }}
+                - name: COMPUTE_CONTROL_DATABASE
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $cc.database.existingSecret }}
+                      key: {{ $cc.database.urlKey }}
+                {{- else }}
+                - name: COMPUTE_CONTROL_DATABASE_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $cc.database.existingSecret }}
+                      key: {{ $cc.database.passwordKey }}
+                - name: COMPUTE_CONTROL_DATABASE
+                  value: {{ include "opengeni.computeControl.databaseSettings" . | quote }}
+                {{- end }}
                 {{- with $cc.extraEnv }}
                 {{- toYaml . | nindent 16 }}
                 {{- end }}

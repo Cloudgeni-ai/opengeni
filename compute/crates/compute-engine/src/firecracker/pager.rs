@@ -28,6 +28,7 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use super::FirecrackerVm;
+use super::logs::PAGER_LOG;
 use super::process;
 use crate::cgroup::Cgroup;
 use crate::spec::PagerSpec;
@@ -38,7 +39,7 @@ const READY_TIMEOUT: Duration = Duration::from_secs(10);
 /// Starts `pager` for `vm`, whose VMM runs as `uid`:`gid` and has not
 /// loaded its state yet, and returns once the pager listens on a socket
 /// the VMM may use, runs as the VM's user and belongs to the VM's group.
-/// Its standard error goes to `pager.log` in `logs`. On failure no pager
+/// Its standard error goes to [`PAGER_LOG`] in `logs`. On failure no pager
 /// is left running.
 pub(super) async fn start(
     pager: &PagerSpec,
@@ -47,7 +48,7 @@ pub(super) async fn start(
     uid: u32,
     gid: u32,
 ) -> io::Result<()> {
-    let log_path = logs.join("pager.log");
+    let log_path = logs.join(PAGER_LOG);
     let log = {
         let (path, dir) = (log_path.clone(), pager.dir.clone());
         tokio::task::spawn_blocking(move || {

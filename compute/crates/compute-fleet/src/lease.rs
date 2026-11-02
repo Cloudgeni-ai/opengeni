@@ -103,13 +103,28 @@ impl fmt::Display for LeaseError {
 const MILLION: u128 = 1_000_000;
 
 impl LeaseTerms {
-    /// A ten-second term, renewed every third of it, with a five-second
-    /// margin; requests stay good for two renewals, about seven seconds.
-    /// A three-second watchdog and a second to stop leave the margin about
-    /// 0.7 s to spare with clocks 1 % off, a hundred times what an
-    /// unsynchronised server clock drifts.
+    /// A thirty-second term, renewed every 3⅓ seconds, with a five-second
+    /// margin: a host rides out the service going unanswered for nearly
+    /// half a minute, as a network that drops for a few seconds, a rollout
+    /// of the service or a host whose disk stalls can make it, before its
+    /// guard starts freezing its VMs ([`crate::Guard::LEAD`] ahead of the
+    /// deadline). Requests stay good for two renewals, about seven
+    /// seconds. A three-second watchdog and a second to stop leave the
+    /// margin about 0.3 s to spare with clocks 1 % off, a hundred times
+    /// what an unsynchronised server clock drifts.
+    ///
+    /// Hosts and the service must run the same terms: a host refuses to
+    /// register with a service that names others. A release that changes
+    /// them rolls out to the service first, and hosts follow promptly:
+    /// hosts still on the shorter term stop their VMs earlier than the
+    /// service assumes, which is safe, but cannot register again, so one
+    /// whose lease runs out meanwhile (cut off, or restarted for longer
+    /// than its term) stays frozen until it is upgraded. The service is
+    /// never rolled back below
+    /// a release while hosts run its longer term: an older leader would
+    /// give up on a host whose VMs still run. Roll hosts back first.
     pub const RECOMMENDED: Self = Self {
-        term: Duration::from_secs(10),
+        term: Duration::from_secs(30),
         margin: Duration::from_secs(5),
         renew_every: Duration::from_millis(3_333),
         register_every: Duration::from_secs(1),
@@ -144,6 +159,16 @@ impl LeaseTerms {
             return Err(LeaseError::MarginTooSmall { needed });
         }
         Ok(self)
+    }
+
+    /// How long a host may go unheard before placement passes it over:
+    /// three renewals missed in a row, or the term if that is shorter. A
+    /// host that missed three is most likely cut off, and a create sent
+    /// to it would only wait for it, though its VMs may run on until its
+    /// deadline.
+    #[must_use]
+    pub fn silent_after(self) -> Duration {
+        self.renew_every.saturating_mul(3).min(self.term)
     }
 
     /// The smallest margin with which a host's VMs have stopped before the
@@ -547,10 +572,45 @@ mod tests {
 
     use super::{At, Expiry, HostEpoch, HostId, HostLease, LeaseError, LeaseRecord, LeaseTerms};
 
-    const T: LeaseTerms = LeaseTerms::RECOMMENDED;
+    /// The recommended terms with a ten-second term, which keeps the
+    /// numbers below easy to follow.
+    const T: LeaseTerms = LeaseTerms {
+        term: Duration::from_secs(10),
+        ..LeaseTerms::RECOMMENDED
+    };
 
     fn at(ms: u64) -> At {
         At::from_millis(ms)
+    }
+
+    #[test]
+    fn the_recommended_terms_ride_out_half_a_minute_safely() {
+        let terms = LeaseTerms::RECOMMENDED;
+        assert_eq!(terms.validate(), Ok(terms));
+        assert_eq!(terms.term, Duration::from_secs(30));
+        let needed = terms.needed_margin();
+        assert!(
+            needed > Duration::from_millis(4_600) && needed < Duration::from_millis(4_700),
+            "{needed:?}"
+        );
+        let ppm = f64::from(terms.rate_error_ppm);
+        let (stopped, given_up) = stop_and_give_up(terms, -ppm, ppm);
+        assert!(stopped < given_up, "{stopped} s against {given_up} s");
+        // Placement still passes a host over after three missed renewals,
+        // as it did when the term was ten seconds.
+        assert_eq!(terms.silent_after(), Duration::from_millis(9_999));
+    }
+
+    #[test]
+    fn a_host_is_silent_after_three_missed_renewals_or_its_term() {
+        assert_eq!(T.silent_after(), Duration::from_millis(9_999));
+        let short = LeaseTerms {
+            term: Duration::from_secs(8),
+            margin: Duration::from_secs(5),
+            ..T
+        };
+        assert_eq!(short.validate(), Ok(short));
+        assert_eq!(short.silent_after(), Duration::from_secs(8));
     }
 
     #[test]

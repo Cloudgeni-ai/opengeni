@@ -80,17 +80,25 @@ test("route keeps suggestions below recent sessions and uses the ordinary draft/
   expect(route).toContain("setMessage(prompt)");
   expect(route).toContain("value: message");
   expect(route).toContain("setValue: setMessage");
-  // Visibility and where it runs are "+" drill-ins, not controls under the composer.
+  // Visibility and where it runs are setup chips above the message, not "+"
+  // drill-ins or controls under the composer.
   expect(route).toContain("<VisibilityMenuBody");
   expect(route).toContain("<RunsOnMenuBody");
   expect(route).toContain("<ComputeTargetControl");
+  expect(route).toContain("runsOn={runsOnSetup}");
+  expect(route).toContain("visibility={visibilitySetup}");
+  expect(route).not.toMatch(/\n\s+runsOn: \{\n\s+summary: runsOnSummary/);
 });
 
 test("without the chat list, the new-chat page shows no recent chats or project picker", () => {
   const route = readFileSync(new URL("../routes/sessions-index.tsx", import.meta.url), "utf8");
   expect(route).toContain('const chatList = useSessionUiFeature("chatList");');
   expect(route).toContain("{chatList ? <RecentSessions workspaceId={workspaceId} /> : null}");
-  expect(route).toMatch(/chatList \? \(\s*<SessionSetupStrip/);
+  // The strip still shows Runs on and Visibility; only the project chip goes.
+  expect(route).toMatch(
+    /chatList \|\| runsOnSetup \|\| visibilitySetup \? \(\s*<SessionSetupStrip/,
+  );
+  expect(route).toMatch(/project=\{\s*chatList\s*\?/);
 });
 
 test("the new-chat page's Add credits button follows the addCredits switch", () => {
@@ -142,6 +150,59 @@ test("help with everyday things gets six plain everyday asks, with no services t
       container.querySelector<HTMLButtonElement>('[data-starter="explain"]')!.click(),
     );
     expect(onSelect.mock.calls[0]?.[0]).toContain("attach a photo");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("a host's own starters replace Opengeni's, whatever the signup answer", async () => {
+  const onSelect = mock((_prompt: string) => {});
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  const hostStarters = [
+    {
+      id: "chart",
+      title: "Make a chart",
+      description: "From the selected data.",
+      prompt: "Make a chart from the selected data.",
+      icon: <svg data-icon="chart" />,
+    },
+    { id: "formula", title: "Write a formula", prompt: "Help me write a formula." },
+  ];
+  try {
+    for (const set of ["general", "everyday", "product"] as const) {
+      await act(async () =>
+        root.render(
+          <NewSessionStarters
+            set={set}
+            workspaceId="w1"
+            hostStarters={hostStarters}
+            onSelect={onSelect}
+          />,
+        ),
+      );
+      const buttons = [...container.querySelectorAll("button")];
+      expect(buttons.map((button) => button.dataset.starter)).toEqual(["chart", "formula"]);
+      expect(container.querySelector("a")).toBeNull();
+      expect(container.textContent).not.toMatch(/Slack|GitHub|Linear|Plan a trip/);
+    }
+    expect(container.querySelector('[data-icon="chart"]')?.closest("[aria-hidden]")).not.toBeNull();
+    // A starter without a description shows just its title.
+    expect(
+      container.querySelector('[data-starter="formula"]')?.querySelectorAll("span span"),
+    ).toHaveLength(1);
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[data-starter="formula"]')!.click(),
+    );
+    expect(onSelect.mock.calls).toEqual([["Help me write a formula."]]);
+
+    // An empty list shows no suggestions at all.
+    await act(async () =>
+      root.render(<NewSessionStarters hostStarters={[]} onSelect={onSelect} />),
+    );
+    expect(container.querySelector("section")).toBeNull();
   } finally {
     await act(async () => root.unmount());
     container.remove();

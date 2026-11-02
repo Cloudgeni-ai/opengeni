@@ -130,6 +130,10 @@ describe("decideScheduledTaskBlocker", () => {
       if (decision.kind !== "block") throw new Error("expected a block");
       expect(decision.message).toContain("The access it was saved with has changed");
       expect(decision.message).toContain("open it and save it");
+      // An owner who left can never save it again; the others are told what is left.
+      expect(decision.message).toContain(
+        "If its owner has left, it can't run as them again: someone else can set it up as theirs, or delete it.",
+      );
     }
     const refusal = run("failed", {
       error: "scheduled_authority_unavailable",

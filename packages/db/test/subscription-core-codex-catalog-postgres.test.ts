@@ -160,10 +160,14 @@ async function personalConnection(org: Org, label: string): Promise<string> {
   return connectionId;
 }
 
-async function allowPersonalFallback(org: Org, allowed: boolean): Promise<void> {
-  await shared!.admin`
-    update subscription_settings set personal_fallback_allowed = ${allowed}
-    where account_id = ${org.accountId}::uuid and workspace_id is null`;
+/** D-53: the owner turns their own subscription on for their own turns in a workspace. */
+async function turnOn(connectionId: string, workspaceId: string): Promise<void> {
+  await shared!.admin`insert into organization_user_resource_grants (
+      account_id, authority_id, owner_organization_membership_id, workspace_id, action, mode, context
+    )
+    select connection.account_id, connection.authority_id, connection.owner_organization_membership_id,
+      ${workspaceId}::uuid, 'subscription_connection.use', 'always', 'workspace_shared'
+    from subscription_connections connection where connection.id = ${connectionId}::uuid`;
 }
 
 /** A legacy Personal-workspace-style credential, written before any cutover row. */
@@ -264,11 +268,9 @@ describe.skipIf(!realDb)("Codex readiness on the shared core after the cutover",
 
   test("personal funding in a private shared-workspace session requires its exact accepted v2", async () => {
     const org = await organization();
-    await personalConnection(org, "exact-personal");
-    await allowPersonalFallback(org, true);
-    await shared!.admin`insert into subscription_person_preferences
-      (account_id, organization_membership_id, personal_fallback_opt_in)
-      values (${org.accountId}::uuid, ${org.ownerMembershipId}::uuid, true)`;
+    const personal = await personalConnection(org, "exact-personal");
+    // Turned on here by its owner (D-53); the retired opt-in no longer funds anything.
+    await turnOn(personal, org.sharedWorkspaceId);
     const accept = (human: boolean) =>
       withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, async () => {
         const session = await createSession(client!.db, {

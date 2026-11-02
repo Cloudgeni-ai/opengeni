@@ -7,7 +7,10 @@ import {
   type OrganizationAdminSection,
 } from "@opengeni/react/app/lib/organization-admin";
 import { hasAccountPermission } from "@opengeni/react/app/lib/permissions";
-import { administersOrganization } from "@opengeni/react/app/lib/workspaces";
+import {
+  administersOrganization,
+  canAdministerOrganization,
+} from "@opengeni/react/app/lib/workspaces";
 import type {
   AccessContext,
   ClientConfig,
@@ -40,7 +43,20 @@ export type OrganizationSettingsAccess = {
   canManageBilling: boolean;
   canManageOrganizationKnowledge: boolean;
   canManageCompanyProfileAgentPolicy: boolean;
+  /**
+   * Organization API keys and service accounts: a literal `api_keys:manage`
+   * (the owner), or an organization admin who manages only member-level ones.
+   */
   canManageOrganizationApiKeys: boolean;
+  /** Keys and service accounts that manage people, keys or billing: the owner only. */
+  canManageOwnerLevelApiKeys: boolean;
+  /**
+   * Organization webhooks and the credential provider: the owner or an admin
+   * signed in as themselves (or the single local user), as the server allows.
+   */
+  canManageOrganizationIntegrations: boolean;
+  /** Only a literal `account:admin` (the owner) makes a service account an admin. */
+  canMakeServiceAccountAdmin: boolean;
   /** Pages this person can use. The rest are hidden. */
   visibleSections: ReadonlySet<OrganizationAdminSection>;
 };
@@ -56,15 +72,14 @@ export function organizationSettingsAccess(input: {
   const canManageBilling = hasAccountPermission(accessContext, accountId, "billing:manage");
   const canReadBilling =
     canManageBilling || hasAccountPermission(accessContext, accountId, "billing:read");
-  const canManageOrganizationKnowledge = hasAccountPermission(
-    accessContext,
-    accountId,
-    "account:admin",
-  );
+  // Organization Knowledge and the company profile: the owner or an admin.
+  const canManageOrganizationKnowledge = canAdministerOrganization(input);
   const accountGrant =
     accessContext.accountGrants.find((grant) => grant.accountId === accountId) ?? null;
-  const canManageCompanyProfileAgentPolicy = accountGrant?.role === "owner";
-  const canManageOrganizationApiKeys = hasAccountPermission(
+  const canManageCompanyProfileAgentPolicy =
+    canManageOrganizationKnowledge &&
+    (accountGrant?.role === "owner" || accountGrant?.role === "admin");
+  const canManageOwnerLevelApiKeys = hasAccountPermission(
     accessContext,
     accountId,
     "api_keys:manage",
@@ -78,9 +93,19 @@ export function organizationSettingsAccess(input: {
   const singleUser = input.clientConfig.productAccessMode === "local";
   const managedHumanSession = input.clientConfig.auth.mode === "managedSession";
   const organizationAdministratorSession = managedHumanSession || singleUser;
+  const canManageOrganizationIntegrations =
+    organizationAdministratorSession && canAdministerOrganization(input);
+  const canManageOrganizationApiKeys =
+    canManageOwnerLevelApiKeys || canManageOrganizationIntegrations;
+  const canMakeServiceAccountAdmin =
+    organizationAdministratorSession &&
+    hasAccountPermission(accessContext, accountId, "account:admin");
   // The one rule the rail's picker also uses to tell administrators from a key that creates by name.
   const administrator = administersOrganization(input);
-  const modelsAdministrator = administrator || canManageOrganizationKnowledge;
+  // Subscription accounts keep their own rule: an owner-or-admin session or a
+  // literal account:admin grant (a key or service), not organization Knowledge's.
+  const modelsAdministrator =
+    administrator || hasAccountPermission(accessContext, accountId, "account:admin");
   const administeredWorkspaceIds = accessContext.workspaceGrants
     .filter(
       (grant) =>
@@ -95,7 +120,18 @@ export function organizationSettingsAccess(input: {
     visible.add("general");
     if (managedHumanSession && !singleUser) visible.add("people");
     visible.add("workspaces");
+    visible.add("shared");
     visible.add("integrations");
+  }
+  // Every signed-in member sees who is in the organization, by name only;
+  // owners and admins manage people on the same page.
+  if (
+    managedHumanSession &&
+    !singleUser &&
+    actorRole === "member" &&
+    accessContext.subjectId.startsWith("user:")
+  ) {
+    visible.add("people");
   }
   // Every model setting lives on Organization > Models: owners and admins manage
   // all of it, an account administrator without a person (a key or service)
@@ -142,6 +178,9 @@ export function organizationSettingsAccess(input: {
     canManageOrganizationKnowledge,
     canManageCompanyProfileAgentPolicy,
     canManageOrganizationApiKeys,
+    canManageOwnerLevelApiKeys,
+    canManageOrganizationIntegrations,
+    canMakeServiceAccountAdmin,
     visibleSections: visible,
   };
 }

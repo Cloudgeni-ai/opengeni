@@ -2,7 +2,7 @@
 //! `restore_notice` module sends them:
 //!
 //! ```text
-//! restored <unix time in nanoseconds> sandbox=<sandbox id> seed=<hex> order=<generation>.<revision> owner=<owner epoch>
+//! restored <unix time in nanoseconds> sandbox=<sandbox id> seed=<hex> order=<generation>.<revision> owner=<owner epoch> disk=<bytes>
 //! ```
 //!
 //! The guest applies notices one at a time and ignores one whose order is
@@ -13,7 +13,9 @@
 //! owner, at a higher epoch) starts there with a fence that may be lower
 //! than the one its memory last saw. Every notice names its owner epoch:
 //! one that does not is not acted on, rather than taken for an epoch that
-//! could order it below or above the notices before it. The host's
+//! could order it below or above the notices before it. A notice's `disk`
+//! says how long the sandbox's disk is now; the guest grows its root file
+//! system to fill it before it answers. The host's
 //! `activity` question is answered with the count Opengeni's agent
 //! registers (see [`crate::agent`]), and its `sync` request with
 //! [`SYNCED`] once the guest's disks hold what it wrote and the root file
@@ -39,6 +41,9 @@ pub struct Notice {
     /// The seed as the host sent it, in hex, if it is valid hex.
     pub seed_hex: Option<String>,
     pub order: Order,
+    /// How long the sandbox's disk is in bytes, as the host made it, if
+    /// the host says.
+    pub disk: Option<u64>,
 }
 
 /// The longest line a guest reads.
@@ -54,7 +59,8 @@ impl Notice {
             return None;
         }
         let nanos = words.next()?.parse().ok()?;
-        let (mut sandbox, mut seed_hex, mut fence, mut owner) = (None, None, None, None);
+        let (mut sandbox, mut seed_hex, mut fence, mut owner, mut disk) =
+            (None, None, None, None, None);
         for field in words {
             let (key, value) = field.split_once('=').unwrap_or((field, ""));
             match key {
@@ -62,6 +68,7 @@ impl Notice {
                 "seed" => seed_hex = decode_hex(value).is_some().then(|| value.to_owned()),
                 "order" => fence = parse_fence(value),
                 "owner" => owner = value.parse().ok(),
+                "disk" => disk = value.parse().ok(),
                 _ => {}
             }
         }
@@ -71,6 +78,7 @@ impl Notice {
             sandbox,
             seed_hex,
             order: (owner?, generation, revision),
+            disk,
         })
     }
 
@@ -223,7 +231,7 @@ mod tests {
     #[test]
     fn reads_the_hosts_line() {
         let notice = Notice::parse(
-            "restored 1760000000123456789 sandbox=abc seed=00ff10 order=3.17 owner=2 later=field",
+            "restored 1760000000123456789 sandbox=abc seed=00ff10 order=3.17 owner=2 disk=21474836480 later=field",
         )
         .unwrap();
         assert_eq!(
@@ -233,9 +241,15 @@ mod tests {
                 sandbox: Some("abc".into()),
                 seed_hex: Some("00ff10".into()),
                 order: (2, 3, 17),
+                disk: Some(21_474_836_480),
             }
         );
         assert_eq!(notice.seed(), Some(vec![0x00, 0xff, 0x10]));
+        // A host of a release before disks were said says none.
+        assert_eq!(
+            Notice::parse("restored 1 order=1.1 owner=1").unwrap().disk,
+            None
+        );
     }
 
     #[test]
@@ -263,10 +277,11 @@ mod tests {
     #[test]
     fn drops_fields_it_cannot_use() {
         let notice =
-            Notice::parse("restored 5 sandbox=a/b seed=0g order=1.2 owner=1 seed").unwrap();
+            Notice::parse("restored 5 sandbox=a/b seed=0g order=1.2 owner=1 seed disk=-1").unwrap();
         assert_eq!(notice.sandbox, None);
         assert_eq!(notice.seed_hex, None);
         assert_eq!(notice.seed(), None);
+        assert_eq!(notice.disk, None);
         assert_eq!(
             Notice::parse("restored 5 seed=abc order=0.0 owner=1")
                 .unwrap()

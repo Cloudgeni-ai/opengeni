@@ -187,6 +187,60 @@ describe("worker agent-run admission funding", () => {
     }
   });
 
+  test("API work without credits gets its own refusal; the origin is read only when credits decide", async () => {
+    const balance = spyOn(opengeniDb, "getSpendableCreditBalance").mockResolvedValue({
+      accountId: ACCOUNT,
+      balanceMicros: 0,
+      currency: "usd",
+      updatedAt: new Date().toISOString(),
+    });
+    const restoreCodex = mockCodexBilled(false);
+    const input = {
+      accountId: ACCOUNT,
+      workspaceId: WORKSPACE,
+      model: "gpt-6-luna",
+      requestedAgentRuns: 1,
+    };
+    const billed = {
+      db: {} as opengeniDb.Database,
+      entitlements: null,
+      settings: testSettings({ billingMode: "stripe" }),
+    };
+    try {
+      expect(await agentRunAdmissionDenial(billed, { ...input, billingOrigin: "api" })).toBe(
+        "api_credits_required",
+      );
+      expect(balance.mock.calls.at(-1)?.[5]).toBe("api");
+      expect(await agentRunAdmissionDenial(billed, { ...input, billingOrigin: "app" })).toBe(
+        "insufficient_credits",
+      );
+      // A lazily read origin decides the same way.
+      const resolve = async () => "api" as const;
+      expect(await agentRunAdmissionDenial(billed, { ...input, billingOrigin: resolve })).toBe(
+        "api_credits_required",
+      );
+      expect(balance.mock.calls.at(-1)?.[5]).toBe("api");
+      // Without credit billing nothing reads the origin.
+      let reads = 0;
+      expect(
+        await agentRunAdmissionDenial(
+          { ...billed, settings: testSettings() },
+          {
+            ...input,
+            billingOrigin: async () => {
+              reads += 1;
+              return "api";
+            },
+          },
+        ),
+      ).toBeNull();
+      expect(reads).toBe(0);
+    } finally {
+      restoreCodex();
+      balance.mockRestore();
+    }
+  });
+
   test("keeps an unconnected Codex model behind the credit gate", async () => {
     const restoreBalance = mockZeroBalance();
     const restoreCodex = mockCodexBilled(false);

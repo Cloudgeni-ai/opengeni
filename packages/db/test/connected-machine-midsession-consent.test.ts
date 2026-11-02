@@ -74,6 +74,10 @@ describe("moving a chat onto a personal Connected Machine mid-session", () => {
         )`;
     });
     if (!machine) throw new Error("personal machine fixture missing");
+    // Connected from the owner's Personal workspace, so it is not on in the
+    // shared workspace until the owner says so.
+    await admin`update enrollments set origin_workspace_id = ${personalWorkspaceId}
+      where id = ${machine.enrollmentId}`;
 
     const client = createDb(blank.databaseUrl, { max: 1 });
     try {

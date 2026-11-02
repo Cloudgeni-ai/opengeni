@@ -767,6 +767,40 @@ describe("SDK / contracts parity", () => {
     expect(ContractScheduledTaskAgentConfigInput.parse(machineConfig).machineTarget).toEqual(
       machineConfig.machineTarget,
     );
+    // Every field the contract accepts or returns is typed in the SDK.
+    const inputFieldsCovered: Exclude<
+      keyof z.input<typeof ContractScheduledTaskAgentConfigInput>,
+      keyof ScheduledTaskAgentConfigInput
+    > extends never
+      ? true
+      : false = true;
+    const taskFieldsCovered: Exclude<
+      keyof z.infer<typeof ContractScheduledTask>,
+      keyof ScheduledTask
+    > extends never
+      ? true
+      : false = true;
+    const chatConfig: ScheduledTaskAgentConfigInput = {
+      prompt: "Review the open findings",
+      mcpServers: [{ id: "product", name: "Product", url: "https://mcp.example.com/mcp" }],
+      memoryScope: "off",
+      agentAccess: "session",
+      skills: [
+        {
+          activationMode: "session_selected",
+          files: [
+            {
+              path: "SKILL.md",
+              content: "---\nname: review\ndescription: Review findings.\n---\nReview them.",
+            },
+          ],
+        },
+      ],
+    };
+    const parsedChatConfig = ContractScheduledTaskAgentConfigInput.parse(chatConfig);
+    expect(parsedChatConfig.mcpServers).toEqual(chatConfig.mcpServers);
+    expect(parsedChatConfig.skills).toEqual(chatConfig.skills);
+    expect(inputFieldsCovered && taskFieldsCovered).toBe(true);
     expect(
       [acceptScheduledTask, acceptScheduledTaskMachineTarget].every(
         (fn) => typeof fn === "function",

@@ -26,6 +26,8 @@ import {
   INTERACTION_ATTEMPT_TOOL_NAMES,
   createInteractionAttemptToolDefinitions,
   interactionRequestNeedingCurrentTarget,
+  launchCarrier,
+  launchReceiptOnAppWindow,
   nativeCuaSchema,
   openComputerAppWindow,
   readInteractionRequestTarget,
@@ -1791,6 +1793,195 @@ describe("interaction attempt tools", () => {
       });
     },
   );
+
+  describe("a stopped browser whose working directory was moved, copied or restored", () => {
+    const digest = "ab".repeat(32);
+    const inspection = (overrides: Record<string, unknown> = {}) => ({
+      browserSessionId,
+      controllerGeneration: "controller-1",
+      adoptable: true,
+      refusal: null,
+      explanation: "This working copy can be adopted.",
+      manifest: { digest, entries: 412, bytes: 9_876_543, excluded: [] },
+      platformSupported: true,
+      profileIdentityMatches: false,
+      profileInUse: false,
+      receipt: null,
+      freshness: { status: "unknown" as const, latestCheckpointAt: "2026-10-30T22:00:00.000Z" },
+      activeAdoption: null,
+      ...overrides,
+    });
+    const adoption = (phase: string, operationId: string) => ({
+      operationId,
+      browserSessionId,
+      controllerGeneration: "controller-1",
+      manifestDigest: digest,
+      phase,
+      failureCode: null,
+      retainedDirectories: [],
+      createdAt: "2026-10-31T08:00:00.000Z",
+      updatedAt: "2026-10-31T08:00:01.000Z",
+    });
+    const browser = (options: {
+      inspected?: ReturnType<typeof inspection>;
+      phase?: string;
+      lifecycle?: BrowserSession["lifecycle"];
+    }) => {
+      const lost = discoveredBrowserSession(browserSessionId, sessionId);
+      lost.lifecycle = options.lifecycle ?? "lost";
+      lost.failureCode = "controller_resource_missing";
+      const active = discoveredBrowserSession(browserSessionId, sessionId);
+      active.lifecycle = "active";
+      active.controller = {
+        controllerId: "synthetic-controller",
+        controllerGeneration: "controller-1",
+        placementInstanceId: "placement-1",
+      };
+      const target = browserTarget();
+      const calls: string[] = [];
+      const adoptions: Array<{ operationId: string; manifestDigest: string }> = [];
+      let adopted = false;
+      const transport = {
+        ...partialTransport({
+          getBrowserSession: async () => lost,
+          resumeBrowserSession: async () => {
+            calls.push("resume");
+            if (!adopted)
+              throw new OpenGeniApiError(
+                409,
+                JSON.stringify({
+                  error: {
+                    code: "conflict",
+                    message:
+                      "BrowserSession was lost when its controller restarted, and its working copy could not be recovered. Current browser is unavailable: its working directory is not the directory it was launched in (it was moved, copied or restored). If this copy should be kept, inspect it with inspectBrowserSessionWorkingCopy and adopt it with adoptBrowserSessionWorkingCopy",
+                    retryable: false,
+                  },
+                }),
+              );
+            return { session: active } as never;
+          },
+          listBrowserTargets: async () => ({
+            browserSessionId,
+            controllerGeneration: "controller-1",
+            targets: [target],
+          }),
+          observeBrowserTarget: async () => browserObservation(target),
+        }),
+        inspectBrowserSessionWorkingCopy: async () => {
+          calls.push("inspect");
+          return (options.inspected ?? inspection()) as never;
+        },
+        adoptBrowserSessionWorkingCopy: async (
+          _workspaceId: string,
+          _browserSessionId: string,
+          request: { operationId: string; manifestDigest: string },
+        ) => {
+          calls.push("adopt");
+          adoptions.push(request);
+          const phase = options.phase ?? "adopted";
+          adopted = phase === "adopted";
+          return {
+            inFlight: false,
+            adoption: adoption(phase, request.operationId),
+            explanation: "synthetic",
+          } as never;
+        },
+      };
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport,
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_open"],
+        permissions: ["sessions:control"],
+      });
+      const open = async (input: Record<string, unknown>) =>
+        await definitions[0]!.execute(input, {
+          operationId: randomUUID(),
+          caller: { kind: "model", subjectId: "model:test" },
+        });
+      return { open, calls, adoptions, target };
+    };
+    const errorMessage = (result: unknown) =>
+      (result as { structuredContent: { error: { message: string } } }).structuredContent.error
+        .message;
+
+    test("its refusal offers adopting exactly that copy through browser_open, or a new browser", async () => {
+      const { open, calls } = browser({});
+      const result = await open({ browserSessionId });
+      expect(result).toMatchObject({ isError: true });
+      const message = errorMessage(result);
+      expect(message).toBe(
+        `API 409: BrowserSession ${browserSessionId} cannot continue by itself: its working directory was moved, copied or restored since it last ran, and how recent that copy is cannot be proven (its latest saved checkpoint is from 2026-10-30T22:00:00.000Z). To continue from exactly this copy (412 files, 9876543 bytes), call browser_open with browserSessionId "${browserSessionId}" and adoptWorkingCopy "${digest}"; the directory it replaces is kept. To start over without it, call browser_open with mode "new".`,
+      );
+      expect(message).not.toContain("inspectBrowserSessionWorkingCopy");
+      // Reading why changes nothing.
+      expect(calls).toEqual(["resume", "inspect"]);
+    });
+
+    test("browser_open with that digest adopts the copy and continues the browser from it", async () => {
+      const { open, calls, adoptions, target } = browser({});
+      const first = await open({ browserSessionId, adoptWorkingCopy: digest });
+      expect(first.isError ?? false).toBe(false);
+      expect(first.structuredContent).toMatchObject({
+        session: { lifecycle: "active" },
+        targets: [agentTarget(target)],
+      });
+      expect(calls).toEqual(["adopt", "resume"]);
+      expect(adoptions[0]!.manifestDigest).toBe(digest);
+      // Another call adopting the same copy is the same adoption, so a retry
+      // settles one that stopped instead of starting another.
+      await open({ browserSessionId, adoptWorkingCopy: digest });
+      expect(adoptions[1]!.operationId).toBe(adoptions[0]!.operationId);
+    });
+
+    test("an adoption that stopped part way is finished by the same call again", async () => {
+      const unfinished = browser({
+        phase: "source_preserved",
+      });
+      const stopped = await unfinished.open({ browserSessionId, adoptWorkingCopy: digest });
+      expect(errorMessage(stopped)).toBe(
+        `API 409: BrowserSession ${browserSessionId}'s working copy was not adopted: the adoption stopped part way; call browser_open with browserSessionId "${browserSessionId}" and adoptWorkingCopy "${digest}" again to finish it.`,
+      );
+      expect(unfinished.calls).toEqual(["adopt"]);
+      // A plain open of the browser names the same step.
+      const operationId = unfinished.adoptions[0]!.operationId;
+      const later = browser({
+        inspected: inspection({
+          adoptable: false,
+          refusal: "adoption_unresolved",
+          manifest: null,
+          activeAdoption: adoption("source_preserved", operationId),
+        }),
+      });
+      expect(errorMessage(await later.open({ browserSessionId }))).toBe(
+        `API 409: BrowserSession ${browserSessionId} cannot continue yet: adopting its working copy did not finish. Call browser_open with browserSessionId "${browserSessionId}" and adoptWorkingCopy "${digest}" again to finish it.`,
+      );
+    });
+
+    test("a collision leaves the browser to a person and points to a new browser", async () => {
+      const { open } = browser({ phase: "collision" });
+      expect(errorMessage(await open({ browserSessionId, adoptWorkingCopy: digest }))).toContain(
+        'stays unavailable until a person reverts the adoption. Call browser_open with mode "new"',
+      );
+    });
+
+    test("a resume refused for another reason keeps its own refusal", async () => {
+      const { open } = browser({
+        inspected: inspection({ adoptable: false, refusal: "authority_changed", manifest: null }),
+      });
+      expect(errorMessage(await open({ browserSessionId }))).toContain(
+        "working copy could not be recovered",
+      );
+    });
+
+    test("a browser that is not stopped has no copy to adopt", async () => {
+      const { open, calls } = browser({ lifecycle: "active" });
+      expect(errorMessage(await open({ browserSessionId, adoptWorkingCopy: digest }))).toBe(
+        `API 409: BrowserSession ${browserSessionId} is active, so it has no stopped working copy to adopt; call browser_open without adoptWorkingCopy.`,
+      );
+      expect(calls).toEqual([]);
+    });
+  });
 
   test.each([
     ["observe on the current tab", "browser_observe", {}, "replay"],
@@ -5812,11 +6003,15 @@ describe("interaction attempt tools", () => {
     });
     const text = (result.content[0] as { text: string }).text;
     expect(text).toContain("2 targets:");
-    expect(text).toContain(
-      "This action opened window-calculator; act on that target with the observation below.",
-    );
+    // The receipt names the app's window, not the screen it was sent through.
+    expect(text).toContain("Action completed on window-calculator (operation");
+    expect(text).not.toContain("on screen-1");
     expect(result.structuredContent).toMatchObject({
-      launch: { state: "completed", observation: { target: { id: "window-calculator" } } },
+      launch: {
+        state: "completed",
+        targetId: "window-calculator",
+        observation: { target: { id: "window-calculator" } },
+      },
     });
 
     // A retried call repeats the same launch operation; a plain open launches nothing.
@@ -5825,6 +6020,104 @@ describe("interaction attempt tools", () => {
     const plain = await open({}, randomUUID());
     expect(requests).toHaveLength(2);
     expect(plain.structuredContent).not.toHaveProperty("launch");
+  });
+
+  test("a launch rides on the computer's current window and names the app window it observed", async () => {
+    // A computer that lists no screen: a system window is focused, and the
+    // app already shows a window someone else works in and this computer's own.
+    const system: ComputerTarget = {
+      ...computerTarget(),
+      id: "window-system",
+      applicationId: "System Helper",
+      processId: 7,
+    };
+    const theirs: ComputerTarget = { ...computerTarget(), id: "window-theirs", focused: false };
+    const mine: ComputerTarget = { ...computerTarget(), id: "window-mine", focused: false };
+    const hidden: ComputerTarget = { ...mine, id: "window-hidden", offScreen: true, current: true };
+    expect(launchCarrier([system, theirs, { ...mine, current: true }])?.id).toBe("window-mine");
+    expect(launchCarrier([system, theirs, mine])?.id).toBe("window-system");
+    expect(launchCarrier([hidden, theirs, mine])?.id).toBe("window-theirs");
+    expect(launchCarrier([system, { ...computerTarget(), id: "screen", kind: "screen" }])?.id).toBe(
+      "screen",
+    );
+    expect(launchCarrier([])).toBeNull();
+
+    // Sent through another app's window, the receipt names the app's window.
+    const sent = {
+      ...computerReceipt(randomUUID(), computerObservation(theirs)),
+      targetId: system.id,
+    };
+    expect(launchReceiptOnAppWindow(sent).targetId).toBe("window-theirs");
+    // A receipt that observed no window keeps the target it was sent through.
+    expect(launchReceiptOnAppWindow({ ...sent, observation: null }).targetId).toBe(system.id);
+
+    const session = {
+      ...discoveredComputerSession(randomUUID(), sessionId),
+      lifecycle: "active" as const,
+      placement: { kind: "connected_machine" as const, sandboxId: randomUUID() },
+      controller: {
+        controllerId: "controller",
+        controllerGeneration: "controller-1",
+        placementInstanceId: "placement-1",
+      },
+      platform: "macos" as const,
+      adapter: "opengeni.cua.macos.v1",
+      seatId: "seat-1",
+      displayId: "aqua",
+      capabilities: {
+        semanticObservation: true,
+        appDiscovery: true,
+        appLaunch: true,
+        windowCapture: true,
+        screenCapture: false,
+        semanticActions: true,
+        pointerInput: true,
+        keyboardInput: true,
+        clipboard: true,
+        backgroundActions: true,
+        parallelApps: true,
+      },
+    };
+    const requests: ComputerActionRequest[] = [];
+    let listed: ComputerTarget[] = [system, theirs, { ...mine, current: true }];
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listComputerSessions: async () => ({ revision: 0, sessions: [session] }),
+        listComputerTargets: async () => ({ computerSessionId, targets: listed }),
+        actInComputer: async (_workspaceId, _computerSessionId, value) => {
+          requests.push(value);
+          // The computer observes its own window when the launch rides on it,
+          // and otherwise the window the app reports first.
+          const observed = value.targetId === mine.id ? mine : theirs;
+          return {
+            ...computerReceipt(value.operationId, computerObservation(observed)),
+            targetId: value.targetId,
+          };
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const open = async () =>
+      await definitions[0]!.execute(
+        { placement: session.placement, applicationId: "com.example.editor" },
+        { operationId: randomUUID(), caller: { kind: "model" as const, subjectId: "model:test" } },
+      );
+    const own = await open();
+    expect(requests.at(-1)?.targetId).toBe("window-mine");
+    expect(own.structuredContent).toMatchObject({
+      launch: { targetId: "window-mine", observation: { target: { id: "window-mine" } } },
+    });
+    // With no window of its own, the launch rides on the focused window, and
+    // its receipt names the app's window it observed, never the system one.
+    listed = [system, theirs, mine];
+    const fresh = await open();
+    expect(requests.at(-1)?.targetId).toBe("window-system");
+    expect(fresh.structuredContent).toMatchObject({
+      launch: { targetId: "window-theirs", observation: { target: { id: "window-theirs" } } },
+    });
   });
 
   test("computer_open with applicationId and includeScreenshot captures the app's window, and a failed launch keeps the open", async () => {

@@ -105,7 +105,7 @@ pub const RESULTS: [&str; 14] = [
 /// Which way a stream's bytes went.
 pub const DIRECTIONS: [&str; 2] = ["to_guest", "to_client"];
 /// Things that must never happen.
-pub const ALARMS: [&str; 8] = [
+pub const ALARMS: [&str; 9] = [
     "only_copy_kept",
     "verification_failed",
     "quarantined",
@@ -114,6 +114,7 @@ pub const ALARMS: [&str; 8] = [
     "programs_lost",
     "ended_for_memory",
     "oom_killed",
+    "fenced",
 ];
 /// How a guest asked to shrink for host memory answered.
 pub const SHRINK_OUTCOMES: [&str; 3] = ["freed", "spent", "failed"];
@@ -201,7 +202,7 @@ const fn by(metric: Metric, labels: &'static [Label]) -> Metric {
 
 /// Every metric a host exports: its own, and its process's as
 /// OpenTelemetry's semantic conventions name them.
-pub const METRICS: [Metric; 42] = [
+pub const METRICS: [Metric; 43] = [
     by(
         sum(
             "compute.step.count",
@@ -489,6 +490,13 @@ pub const METRICS: [Metric; 42] = [
         "{sandbox}",
         "Running sandboxes holding more than their bound while the host is below its low \
          watermark: memory the kernel cannot compress.",
+    ),
+    gauge(
+        "compute.memory.bringing_down",
+        "{sandbox}",
+        "Running sandboxes holding more than their bound while the host is below its low \
+         watermark that the kernel is still bringing down: slow to start compressing, \
+         aging their pages first, and not yet counted over their bound.",
     ),
     by(
         sum(

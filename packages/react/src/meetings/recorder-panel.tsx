@@ -46,7 +46,7 @@ import { Input } from "../ui/input";
 import { Notice } from "../ui/notice";
 import { cn } from "../app/lib/utils";
 
-import { defaultMeetingTitle, formatClock, ownerLiveLaneName } from "../recordings";
+import { formatClock, ownerLiveLaneName } from "../recordings";
 import type { MeetingRecorder } from "./recorder-context";
 import { canStartRecording } from "./recorder-state";
 import { LiveTranscript, liveStatus, type LiveTranscriptLine } from "./live-transcript";
@@ -403,7 +403,7 @@ function RecordingTitle({ recorder }: { recorder: MeetingRecorder }) {
           title ? "text-fg" : "text-fg-muted",
         )}
       >
-        {title ?? msg("meetings.recorderPanel.noNameYet")}
+        {title ?? msg("meetings.recorderPanel.namedForYou")}
       </p>
       <Button
         type="button"
@@ -615,7 +615,10 @@ function RecorderPanelContent({
    * defaults, as a desktop call notification asked. `take` returns the
    * request once, so it starts one recording.
    */
-  autoStart?: { pending: boolean; take: () => { title: string } | null } | null;
+  autoStart?: {
+    pending: boolean;
+    take: () => { title: string; titleSource?: "person" | "app" } | null;
+  } | null;
   /** The host's own id for what new recordings belong to, such as a project. */
   externalRef?: string | null | undefined;
   /** A short line shown before every start, such as a reminder to tell the people present. */
@@ -641,12 +644,16 @@ function RecorderPanelContent({
   const state = recorder?.state ?? "idle";
   const live = state === "recording" || state === "paused" || state === "stopping";
 
-  const start = async (titleText: string = title) => {
+  /** `guess` is the app's name for the meeting, used only when nobody typed one. */
+  const start = async (titleText: string = title, guess?: string) => {
     if (!recorder) return;
     setErrorDismissed(false);
+    const name = titleText.trim();
+    const guessed = guess?.trim();
     await recorder.start({
-      // Unnamed, it is named after when it starts, in the viewer's own words and time.
-      title: titleText.trim() || defaultMeetingTitle(new Date(), msg),
+      // Unnamed, Opengeni names it: after the calendar event at the time, or
+      // from the conversation once its notes are written.
+      ...(name ? { title: name } : guessed ? { title: guessed, titleSource: "app" as const } : {}),
       systemAudio: tabAudio,
       ...(liveOn ? { liveTranscript: true } : {}),
       ...(externalRef ? { externalRef } : {}),
@@ -669,6 +676,11 @@ function RecorderPanelContent({
     if (!autoStartReady) return;
     const request = autoStart?.take();
     if (!request) return;
+    // The call app's name is a guess: a title already typed wins over it.
+    if (request.titleSource === "app") {
+      void startRef.current(undefined, request.title);
+      return;
+    }
     // A start without a title (the Start recording key) keeps one already typed, as the button does.
     if (request.title) setTitle(request.title);
     void startRef.current(request.title || undefined);

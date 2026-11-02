@@ -1053,9 +1053,19 @@ function deriveAuthContract(surface: UnknownRecord): Record<string, unknown> | n
 }
 
 /**
+ * Reviewed endpoints whose query string is a documented, non-secret part of the
+ * MCP URL. Atlassian's `?tools=all` lists every tool flat instead of gateway
+ * discover/execute tools, so each tool keeps its own approval policy.
+ */
+const REVIEWED_QUERY_MCP_URLS: ReadonlySet<string> = new Set([
+  "https://mcp.atlassian.com/v2/mcp?tools=all",
+]);
+
+/**
  * Reject URL forms whose authority cannot be proven public during catalog
  * import. Query strings, opaque path segments, and credentials must never be
- * persisted as an MCP endpoint or retained in a rejected diagnostic.
+ * persisted as an MCP endpoint or retained in a rejected diagnostic, except an
+ * exact reviewed URL in REVIEWED_QUERY_MCP_URLS.
  */
 export function catalogMcpUrlRejection(value: string | null | undefined): string | null {
   if (!value) {
@@ -1075,7 +1085,7 @@ export function catalogMcpUrlRejection(value: string | null | undefined): string
     if (parsed.hash) {
       return "url_fragment";
     }
-    if (parsed.search) {
+    if (parsed.search && !REVIEWED_QUERY_MCP_URLS.has(parsed.href)) {
       return "credential_query_parameter";
     }
     if (parsed.pathname.split("/").some((segment) => segment.length >= 24)) {

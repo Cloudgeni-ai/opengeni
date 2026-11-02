@@ -315,9 +315,9 @@ function ApprovalRequest({
       version: 1,
       id: value.id,
       actionDigest: value.actionDigest,
-      ...toolReviewDetails(stableApproval.arguments, undefined, path, offset),
+      ...toolReviewDetails(stableApproval.arguments, undefined, path, offset, 25, toolName),
     }),
-    [stableApproval],
+    [stableApproval, toolName],
   );
   if (reviewLoader && !loaded && !failed && !legacy)
     return (

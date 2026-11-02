@@ -1,11 +1,7 @@
 import {
-  GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE,
-  isRetiredNativeGoogleDriveTask,
-} from "@opengeni/contracts/google-drive-native-retirement";
-import {
-  ATLASSIAN_NATIVE_RETIRED_MESSAGE,
-  isRetiredNativeAtlassianTask,
-} from "@opengeni/contracts/atlassian-native-retirement";
+  isRetiredKnowledgeSourceSyncTask,
+  retiredKnowledgeSourceSyncTask,
+} from "@opengeni/contracts/knowledge-source-sync-retirement";
 /**
  * One automation's own page: back to Automations, the header with its
  * actions, then Overview (on/off, the events it listens for, instructions,
@@ -464,7 +460,7 @@ export function ScheduleDetailPage({
                 ) : null}
                 {task.status === "paused" &&
                 perms.canPauseOrDelete &&
-                !(isRetiredNativeAtlassianTask(task) || isRetiredNativeGoogleDriveTask(task)) ? (
+                !isRetiredKnowledgeSourceSyncTask(task) ? (
                   <Button
                     type="button"
                     size="sm"
@@ -475,8 +471,7 @@ export function ScheduleDetailPage({
                     <PlayIcon aria-hidden="true" />
                     Resume
                   </Button>
-                ) : perms.canRun &&
-                  !(isRetiredNativeAtlassianTask(task) || isRetiredNativeGoogleDriveTask(task)) ? (
+                ) : perms.canRun && !isRetiredKnowledgeSourceSyncTask(task) ? (
                   <Button
                     type="button"
                     size="sm"
@@ -761,10 +756,7 @@ function Overview({
         ) : null}
         {retired ? (
           <Notice tone="muted" title="Previous source sync retired">
-            {isRetiredNativeGoogleDriveTask(task)
-              ? GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE
-              : ATLASSIAN_NATIVE_RETIRED_MESSAGE}{" "}
-            Imported documents and previous runs remain.
+            {retiredKnowledgeSourceSyncTask(task)?.message}
           </Notice>
         ) : (
           <SettingRow
@@ -812,7 +804,7 @@ function Overview({
             )}
           </p>
           <p className="mt-1 text-xs leading-4.5 text-fg-muted">
-            Brings the source into Knowledge without starting a chat or using agent runs.
+            Previously synced into Knowledge. Its imported documents remain readable.
           </p>
         </DetailSection>
       ) : (

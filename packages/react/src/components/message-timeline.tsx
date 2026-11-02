@@ -3286,7 +3286,7 @@ function TimelineGroupRenderError() {
     <div
       data-testid="timeline-group-render-error"
       role="status"
-      className="flex items-start gap-2 rounded-lg border border-og-border bg-og-surface-muted px-3 py-2 text-og-menu text-og-fg-muted"
+      className="flex items-start gap-2 rounded-lg border border-og-border bg-og-surface-2 px-3 py-2 text-og-menu text-og-fg-muted"
     >
       <TriangleAlertIcon aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
       <div>
@@ -5365,7 +5365,7 @@ function VideoGenerationResultRow({
         </div>
         <CheckCircle2Icon
           aria-label={t("messageTimeline.ready")}
-          className="size-4 shrink-0 text-og-status-success"
+          className="size-4 shrink-0 text-og-status-idle"
         />
       </div>
     </section>

@@ -26,6 +26,7 @@ import { captureAnalyticsEvent } from "@opengeni/react/app/lib/analytics-observe
 import { userErrorText } from "@opengeni/react/ui/api-error";
 import { readyNewChat } from "@opengeni/react/app/lib/ready-new-chat";
 import { cn } from "@opengeni/react/app/lib/utils";
+import { useWindowBarTitle } from "@opengeni/react/ui/window-bar-title";
 
 /** The callouts, in order. Each moves on only when the person acts. */
 export type Tip = "chat" | "color" | "code" | "tool" | "ship";
@@ -60,6 +61,7 @@ const TARGETS: Record<Tip, string | readonly string[]> = {
 export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const navigate = useNavigate();
+  const titleInWindowBar = useWindowBarTitle("Playground");
 
   // Each action counts once.
   const reported = useRef(new Set<string>());
@@ -190,7 +192,9 @@ export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
           </Link>
         </Button>
         <span aria-hidden="true" className="hidden h-5 w-px bg-border sm:block" />
-        <h1 className="truncate text-sm font-semibold text-fg">Playground</h1>
+        <h1 className={cn("truncate text-sm font-semibold text-fg", titleInWindowBar && "sr-only")}>
+          Playground
+        </h1>
         <p className="hidden truncate text-xs text-fg-muted sm:block">A recorded demo</p>
         <Button
           type="button"

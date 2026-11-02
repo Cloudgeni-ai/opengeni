@@ -4,6 +4,9 @@
 > shadow producer. References to that removed code below are historical (see
 > git history); they are not current runtime authority. Current deployment requires
 > the drained, codec-aware 0689 receipt/readiness gate.
+> The unused legacy ORM declarations and provider-pool schema factory are also
+> removed. Historical paths below refer to their former definitions; physical
+> legacy tables remain migration-owned until the separate contract release.
 >
 > M4: the Codex turn-time and operation entry points on the shared core
 > (placement, leases, credential load and refresh, health, request

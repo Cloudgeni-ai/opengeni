@@ -3,12 +3,18 @@ import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import {
   ApplyWorkspaceSkillRevisionRequest,
+  OrganizationSkillReachResponse,
   RemoveWorkspaceSkillRequest,
   SaveWorkspaceSkillRequest,
+  UpdateOrganizationSkillReachRequest,
   type PreferenceRegistryScope,
   type SkillWriteReceipt,
 } from "@opengeni/contracts";
-import { getSessionForSubject, readSkillRemovalScope } from "@opengeni/db";
+import {
+  getSessionForSubject,
+  readSkillRemovalScope,
+  updateOrganizationSkillReach,
+} from "@opengeni/db";
 import {
   approveSkill,
   rejectSkill,
@@ -42,6 +48,13 @@ export function authorizeSkillScopeMutation(
 
 /** Every Skill write names its invalid fields with the same status and lead-in. */
 const invalidSkillRequest = { status: 422, message: "Invalid Skill request" } as const;
+
+/**
+ * People see every organization Skill on their Skills page, including ones
+ * that don't work in this workspace (marked `availableHere: false`), so
+ * whoever manages it can change that from here. Agents' reads never do.
+ */
+const everywhere = { includeOrganizationElsewhere: true } as const;
 
 function skillIdentifier(value: string): string {
   const parsed = z.uuid().safeParse(value);
@@ -92,6 +105,7 @@ export function registerSkillContentRoutes(app: Hono, deps: ApiRouteDeps): void 
       {
         limit: query.limit + 1,
         metadataOnly: true,
+        ...everywhere,
         ...(after ? { after } : {}),
         ...(query.sessionId ? { sessionId: query.sessionId } : {}),
       },
@@ -119,6 +133,7 @@ export function registerSkillContentRoutes(app: Hono, deps: ApiRouteDeps): void 
       { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
       skillId,
       revisionId,
+      everywhere,
     );
     if (!skill) throw new HTTPException(404, { message: "Skill not found" });
     return c.json(skill);
@@ -143,6 +158,7 @@ export function registerSkillContentRoutes(app: Hono, deps: ApiRouteDeps): void 
       context,
       skillId,
       request.expectedRevisionId ?? undefined,
+      everywhere,
     );
     if (request.expectedRevisionId && !current)
       throw new HTTPException(404, { message: "Skill not found" });
@@ -200,7 +216,7 @@ export function registerSkillContentRoutes(app: Hono, deps: ApiRouteDeps): void 
       workspaceId,
       subjectId: access.grant.subjectId,
     };
-    const current = await readSkill(deps.db, context, skillId);
+    const current = await readSkill(deps.db, context, skillId, undefined, everywhere);
     const scope =
       current?.scope ??
       (await readSkillRemovalScope(deps.db, context, skillId, request.operationId));
@@ -234,6 +250,8 @@ export function registerSkillContentRoutes(app: Hono, deps: ApiRouteDeps): void 
         deps.db,
         { accountId: access.grant.accountId, workspaceId, subjectId: access.grant.subjectId },
         skillId,
+        undefined,
+        everywhere,
       );
       const scope =
         current?.scope ??
@@ -274,6 +292,40 @@ export function registerSkillContentRoutes(app: Hono, deps: ApiRouteDeps): void 
       );
     });
   }
+  // Where an organization Skill works: every shared workspace or chosen ones,
+  // and members' Personal workspaces when switched on. Whoever may change the
+  // organization's Skills decides this, from any workspace; agents in a
+  // workspace it no longer works in stop seeing it from their next turn.
+  app.put(`${base}/:skillId/reach`, async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "workspace:read");
+    const skillId = skillIdentifier(c.req.param("skillId"));
+    const request = parseRequestBody(
+      UpdateOrganizationSkillReachRequest,
+      await c.req.json().catch(() => null),
+      invalidSkillRequest,
+    );
+    authorizeSkillScopeMutation(access, "organization");
+    const result = await updateOrganizationSkillReach(deps.db, {
+      accountId: access.grant.accountId,
+      workspaceId,
+      subjectId: access.grant.subjectId,
+      skillId,
+      allowedWorkspaceIds: request.allowedWorkspaceIds,
+      allowPersonalWorkspaces: request.allowPersonalWorkspaces,
+    });
+    if (result.status === "not_found") throw new HTTPException(404, { message: "Skill not found" });
+    if (result.status === "not_organization")
+      throw new HTTPException(409, {
+        message:
+          "Only an organization Skill works in chosen workspaces. A workspace Skill works in its workspace, and a personal one wherever its owner works.",
+      });
+    if (result.status === "unknown_workspaces")
+      throw new HTTPException(422, {
+        message: `These aren't shared workspaces of this organization: ${result.workspaceIds.join(", ")}`,
+      });
+    return c.json(OrganizationSkillReachResponse.parse({ reach: result.reach }));
+  });
 }
 
 async function skillMutation(run: () => Promise<SkillWriteReceipt>): Promise<SkillWriteReceipt> {

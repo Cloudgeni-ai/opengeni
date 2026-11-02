@@ -554,7 +554,7 @@ export function ToolActionReviewDetails({
       <h2
         ref={heading}
         tabIndex={-1}
-        className="m-0 break-words text-og-lg font-semibold outline-hidden [overflow-wrap:anywhere]"
+        className="m-0 break-words text-og-md font-semibold outline-hidden [overflow-wrap:anywhere]"
       >
         {review.title}
       </h2>

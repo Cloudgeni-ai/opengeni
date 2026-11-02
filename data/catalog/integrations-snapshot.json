@@ -3,8 +3,8 @@
   "source": "integrations.sh",
   "cleanedAt": "2026-08-17T11:18:21.937Z",
   "cleaning": {
-    "inputRows": 1334,
-    "outputRows": 645,
+    "inputRows": 1335,
+    "outputRows": 646,
     "skippedRows": 687,
     "quarantinedRows": 4,
     "duplicateDomainNameRows": 109,
@@ -13,9 +13,9 @@
     "controlCharacterFields": 0
   },
   "probe": {
-    "kept": 645,
+    "kept": 646,
     "dropped": 143,
-    "real": 645,
+    "real": 646,
     "unverified": 111,
     "googleapisDropped": 2
   },
@@ -6396,9 +6396,37 @@
     {
       "domain": "jira.com",
       "name": "Atlassian",
-      "description": "Jira issues and Confluence pages through Atlassian's hosted Rovo MCP server, scoped to what you can already see.",
+      "description": "Jira, Confluence, Jira Service Management, Bitbucket, Loom and Compass through Atlassian's hosted MCP server, scoped to what you can already see.",
       "category": "project-management",
       "featured": true,
+      "mcpUrl": "https://mcp.atlassian.com/v2/mcp?tools=all",
+      "transport": "streamable-http",
+      "authKind": "oauth2",
+      "scopesHint": [],
+      "credentialFacts": [
+        {
+          "id": "atlassian_oauth_3lo_app",
+          "type": "oauth2",
+          "generateUrl": null,
+          "setup": "## OAuth 2.0 — self-onboarding\nPoint your MCP client at the server URL and approve access in the browser. The server supports OAuth Dynamic Client Registration (RFC 7591), so the client registers itself automatically — no developer-portal app, `client_id`, or `client_secret` to create.",
+          "fields": null
+        }
+      ],
+      "tier": "verified",
+      "provenance": "detected",
+      "logoSourceUrl": "https://integrations.sh/logo/jira.com",
+      "documentationUrl": "https://developer.atlassian.com/cloud/rovo-mcp/guides/getting-started/",
+      "probe": {
+        "status": "real",
+        "reason": "auth_challenge",
+        "httpStatus": 401
+      }
+    },
+    {
+      "domain": "jira.com",
+      "name": "Atlassian (v1)",
+      "description": "Atlassian's earlier MCP endpoint, kept so existing connections keep working. Connect Atlassian to use the current endpoint.",
+      "category": "project-management",
       "mcpUrl": "https://mcp.atlassian.com/v1/mcp/authv2",
       "transport": "streamable-http",
       "authKind": "oauth2",

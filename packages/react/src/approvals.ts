@@ -119,3 +119,19 @@ export function projectPendingApprovals(events: SessionEvent[]): PendingApproval
   }
   return pending;
 }
+
+/**
+ * Whether a session in `status` takes decisions for its pending approvals.
+ * Deciding one approval resumes the turn, and the pause's other approvals stay
+ * decidable while it resumes: their cards stay up instead of vanishing until
+ * the turn pauses again. Only a session whose turn ended has none.
+ */
+export function approvalsDecidable(status: string | null | undefined): boolean {
+  return (
+    status === "requires_action" ||
+    status === "running" ||
+    status === "queued" ||
+    status === "recovering" ||
+    status === "waiting_capacity"
+  );
+}

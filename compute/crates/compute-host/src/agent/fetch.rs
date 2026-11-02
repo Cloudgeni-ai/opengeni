@@ -9,6 +9,11 @@
 //! An image an earlier agent left on the host is checked against its id
 //! first: when it matches, the creates go on with it, and the store is
 //! neither asked nor needed.
+//!
+//! A waiting create keeps the memory and processor time of its first wake
+//! booked (see [`HostAgent::hold_room`]): the host took it, so nothing
+//! that comes after it, a template build included, takes its room while
+//! the image comes.
 
 use std::sync::Arc;
 
@@ -37,11 +42,17 @@ impl Fetch {
     pub(super) fn key(&self) -> Id {
         self.key
     }
+
+    /// The creates waiting for the fetch, each with what it asks for.
+    pub(super) fn waiting(&self) -> impl Iterator<Item = (Id, &SandboxConfig)> {
+        self.waiting.iter().map(|(id, config, ..)| (*id, config))
+    }
 }
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
     /// Creates sandbox `id` once the host has `image`, fetching it unless a
-    /// fetch already runs. The id is reserved meanwhile.
+    /// fetch already runs. The id is reserved meanwhile, and the room of
+    /// its first wake held.
     pub(super) fn create_after_fetch(
         &mut self,
         image: ImageId,
@@ -51,6 +62,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         reply: Reply<()>,
     ) {
         self.preparing.insert(id.0);
+        self.hold_room(id, &config);
         if let Some(fetch) = self.fetching.get_mut(&image) {
             fetch.waiting.push((id, config, owner, reply));
             return;
@@ -131,8 +143,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// The fetch of `image` ended: the creates waiting for it go on, or are
-    /// refused with why it failed. What it wrote shows in the next disk
-    /// reading.
+    /// refused with why it failed and the room they held let go. What it
+    /// wrote shows in the next disk reading.
     pub(super) fn fetch_ended(&mut self, image: ImageId, result: &Result<(), HostError>) {
         let Some(fetch) = self.fetching.remove(&image) else {
             return;
@@ -150,6 +162,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 // Just fetched, it counts as used now, so it is kept.
                 Ok(()) if self.rootfs.has(image) => self.create_fresh(id, config, owner, reply),
                 Ok(()) => {
+                    self.first_wake_unbooked(id);
                     let missing = Missing::Failed {
                         image,
                         error: "it was removed again before its creates".into(),
@@ -157,6 +170,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     let _ = reply.send(Err(missing.into()));
                 }
                 Err(error) => {
+                    self.first_wake_unbooked(id);
                     let error = match error {
                         HostError::HostFull {
                             resource,

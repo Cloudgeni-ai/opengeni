@@ -3,12 +3,18 @@ import { generateKeyPairSync } from "node:crypto";
 import type { ClaimedNativePushDelivery } from "@opengeni/db";
 import {
   createFcmSender,
+  nativeCallPushBody,
   nativePushAlert,
   nativePushInterruptionLevel,
   nativePushCategory,
   nativePushData,
+  nativePushRingsCall,
 } from "../src/native-push-dispatch";
-import { nativeAppRedirectAllowed, pkceS256Challenge } from "../src/routes/native-app-auth";
+import {
+  nativeAppRedirectAllowed,
+  pkceS256Challenge,
+  unregisteredNativeRedirectMessage,
+} from "../src/routes/native-app-auth";
 
 const payload: ClaimedNativePushDelivery["payload"] = {
   rule: "needs_input",
@@ -157,6 +163,37 @@ describe("native push presentation", () => {
     });
     expect(nativePushData({ ...payload, sequence: 42 })).toMatchObject({ sequence: 42 });
   });
+
+  test("a call ring goes to PushKit with the call, and shows as a call on Android", () => {
+    const ring = {
+      ...payload,
+      rule: "call" as const,
+      callId: "44444444-4444-4444-8444-444444444444",
+      title: "Deploy watcher",
+      body: "Production is down",
+      ringUntil: "2026-10-26T18:00:40.000Z",
+    };
+    expect(nativePushRingsCall(ring)).toBe(true);
+    expect(nativePushRingsCall(payload)).toBe(false);
+    expect(nativeCallPushBody(ring)).toEqual({
+      aps: {},
+      call: {
+        callId: ring.callId,
+        sessionId: payload.sessionId,
+        workspaceId: payload.workspaceId,
+        subjectId: "user:abc",
+        title: "Deploy watcher",
+        reason: "Production is down",
+        ringUntil: ring.ringUntil,
+      },
+    });
+    expect(nativePushAlert(ring)).toEqual({
+      title: "Deploy watcher is calling",
+      body: "Production is down",
+    });
+    expect(nativePushInterruptionLevel(ring)).toBe("time-sensitive");
+    expect(nativePushData(ring)).toMatchObject({ callId: ring.callId, ringUntil: ring.ringUntil });
+  });
 });
 
 describe("FCM sender", () => {
@@ -247,6 +284,32 @@ describe("native app sign-in helpers", () => {
     expect(
       nativeAppRedirectAllowed("https://app.example.com/office/auth-callback.html", ["opengeni"]),
     ).toBe(false);
+  });
+
+  test("an add-in installed from another address is told to reinstall from the current page", () => {
+    const addin = { name: "Opengeni", installUrl: "https://app.example.com/excel" };
+    expect(
+      unregisteredNativeRedirectMessage("https://old.example.net/office/auth-callback.html", addin),
+    ).toBe(
+      "This copy of the Opengeni add-in is out of date: it was installed from an address that no longer signs in. Remove it from Excel, add the current one from https://app.example.com/excel, then sign in again.",
+    );
+    expect(
+      unregisteredNativeRedirectMessage("https://old.example.net/office/auth-callback.html", {
+        name: "Acme",
+        installUrl: null,
+      }),
+    ).toBe(
+      "This copy of the Acme add-in is out of date: it was installed from an address that no longer signs in. Remove it from Excel, add the current one, then sign in again.",
+    );
+    for (const other of [
+      "evil://auth/callback",
+      "https://old.example.net/office/other.html",
+      "not a url",
+    ]) {
+      expect(unregisteredNativeRedirectMessage(other, addin)).toBe(
+        "Unregistered native app redirect",
+      );
+    }
   });
 
   test("PKCE S256 matches RFC 7636 appendix B", () => {

@@ -38,8 +38,13 @@ export { canStartRecording } from "./recorder-state";
 
 export type MeetingRecorder = UseRecorderResult;
 
-/** A recording someone asked for outside the recorder, such as from a desktop call notification. */
-export type MeetingStartRequest = { title: string };
+/**
+ * A recording someone asked for outside the recorder, such as from a desktop
+ * call notification. An empty title leaves the name to Opengeni; `app` marks
+ * a title the app guessed (the call app's name), which a calendar event or
+ * the conversation replaces.
+ */
+export type MeetingStartRequest = { title: string; titleSource?: "person" | "app" };
 
 export type MeetingRecorderStore = {
   get: () => MeetingRecorder | null;
@@ -276,7 +281,10 @@ function useDesktopMeetingRequests(
         // signs in next, a call that may be long over.
         if (latest.current.signedOut) return;
         // Already recording shows that recording rather than start a second one.
-        if (canStartRecording(recorder?.state)) store.requestStart({ title: request.title });
+        // The call app's name is only a guess at the meeting's.
+        if (canStartRecording(recorder?.state)) {
+          store.requestStart({ title: request.title, titleSource: "app" });
+        }
         latest.current.onOpenMeetings?.();
         return;
       }

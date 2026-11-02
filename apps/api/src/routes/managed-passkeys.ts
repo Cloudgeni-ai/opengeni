@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { MANAGED_AUTH_SIGN_IN_EMAIL_NOT_ALLOWED_CODE } from "@opengeni/contracts";
 import {
   ManagedPasskeyCeremony,
   ManagedPasskeySignInRequest,
@@ -138,6 +139,7 @@ async function signInVerifiedPerson(
   const internal = (await auth.$context).internalAdapter;
   const address = trustedRequestSourceAddress(context, deps.settings);
   let session: { token: string } | null;
+  let refusedCode: string | null = null;
   try {
     session = await runManagedAuthProvider("passkey", () =>
       internal.createSession(authUserId, false, {
@@ -148,8 +150,13 @@ async function signInVerifiedPerson(
   } catch (error) {
     // Admission refuses through Better Auth; anything else (a database
     // outage) is a failure, not a refusal of this account.
-    if (!managedAuthRefusal(error)) throw error;
+    const refused = managedAuthRefusal(error);
+    if (!refused) throw error;
+    refusedCode = refused.code;
     session = null;
+  }
+  if (refusedCode === MANAGED_AUTH_SIGN_IN_EMAIL_NOT_ALLOWED_CODE) {
+    return refusal(403, refusedCode, "This email can't sign in here");
   }
   if (!session?.token) {
     return refusal(403, "PASSKEY_SIGN_IN_REFUSED", "This account can't sign in right now");
@@ -293,12 +300,15 @@ export function registerManagedPasskeyRoutes(
       try {
         user = await runManagedAuthProvider("passkey", () =>
           runWithSignupChallenge(ceremony.signupChallengeVerified === true, () =>
-            internal.createUser({
-              id: userId,
-              email: passkeyOnlyAccountEmail(userId),
-              name: ceremony.name ?? "Passkey user",
-              emailVerified: true,
-            }),
+            internal.createUser(
+              {
+                id: userId,
+                email: passkeyOnlyAccountEmail(userId),
+                name: ceremony.name ?? "Passkey user",
+                emailVerified: true,
+              },
+              { method: "passkey" },
+            ),
           ),
         );
       } catch (error) {

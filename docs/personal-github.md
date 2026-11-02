@@ -34,8 +34,9 @@ Local and self-hosted installations use the same ordinary browser OAuth flow:
    can be `http://127.0.0.1:8000/v1/integrations/github-personal/oauth/callback`.
 3. Configure the client ID, client secret, state-signing secret, and environment
    encryption key above, then restart Opengeni.
-4. Open **Integrations → GitHub → Your GitHub identity**, connect, and choose the
-   repositories Opengeni may use as that user.
+4. Open **Integrations → GitHub → Your GitHub**, select **Connect**, and choose
+   the repositories Opengeni may use as that user. The repository chooser opens
+   by itself when GitHub returns.
 
 Single-user `local` mode recognizes only its exact built-in `dev` human as the
 credential owner and stores a standing grant for that same local workspace.
@@ -61,11 +62,42 @@ Opengeni bearer.
 
 ## User experience
 
-GitHub remains one integration tile. The workspace GitHub App is the bot
-identity used for workspace-owned automation; **Your GitHub identity** is the
-personal connection used when an action must appear as the signed-in user. The
-personal dialog contains only sign-in status, a searchable repository allowlist,
-read/write choice, reconnect, and disconnect.
+GitHub remains one integration tile. With personal OAuth enabled, its sheet has
+two named sections, each with one action:
+
+- **Your GitHub** ("Work appears under your name. Only in chats you start, on
+  repos you choose."): **Connect** (or **Reconnect**), then **Choose repos**,
+  with the status `Connected as @login · N repos`. Commits, branches, pull
+  requests and reviews appear as the signed-in user.
+- **Opengeni app** ("Work appears as the Opengeni bot, shared with the
+  workspace."): **Install app**, **Install on another account** or **Repair**,
+  installed per organization or account. Its shared repositories are listed as
+  **Opengeni app repositories**; the sheet header keeps only **Disconnect
+  Opengeni app**.
+
+Without `connections:write` or `github:manage`, the matching section shows a
+short note instead of its action. After a successful personal connect started
+from the sheet, the repository chooser opens directly. The chooser contains
+only sign-in status, a searchable repository allowlist, read/write choice,
+reconnect, and disconnect. Without personal OAuth, the sheet keeps the single
+Opengeni app layout.
+
+`/workspaces/<workspaceId>/plugins?open=integration%3Agithub&github=personal`
+opens the sheet on **Your GitHub**: the repository chooser when connected,
+otherwise the focused **Connect** action (it does not start the OAuth redirect
+by itself). The agent hands this link to the person for "connect my GitHub".
+
+The agent knows both identities. `github_connect_link` returns a `personal`
+field next to the App fields (see [GitHub App](github-app.md#status-contract)),
+and `capability_catalog_search` offers `api:github-personal` (**Your GitHub**)
+next to `api:github-app`. Its in-chat card connects the person's account and
+then links to the repository chooser. Requests such as "connect my GitHub" or
+"do it as me" map to the personal identity; "install the GitHub app" or "give
+Opengeni access to the org" map to the App. The repositories prompt lists each
+mounted GitHub repository's identity (as the person, with their login when
+known, or as the Opengeni app) and says that on personal repositories the agent
+uses plain git and `github_personal__*` tools: the token never reaches the
+sandbox, so `gh` and raw GitHub API calls do not act as the person.
 
 The session repository picker labels personal choices with `@login` and
 **As you**. Choosing one both selects the exact repository and grants this

@@ -242,16 +242,21 @@ export function buildPersonalResourceAttachmentIntent(input: {
  * machine from the chat's active pointer and checks the owner and the chat's
  * authority epoch. Without it a chat moved mid-session has no grant for the
  * machine, and every turn after the move is refused at admission.
+ *
+ * `always` is for an explicit move: the person choosing their own machine for
+ * a chat turns it on for their own work in this workspace, so their other
+ * chats here don't ask again. Ordinary sends only renew it for this chat.
  */
 export function personalMachineUseIntent(
   tenancy:
     | Pick<NonNullable<Session["tenancy"]>, "visibility" | "authorityEpoch">
     | null
     | undefined,
+  mode: "session" | "always" = "session",
 ): PersonalResourceAttachmentIntent | undefined {
   if (!tenancy) return undefined;
   return buildPersonalResourceAttachmentIntent({
-    mode: "session",
+    mode,
     visibility: tenancy.visibility === "workspace" ? "workspace" : "private",
     acknowledged: true,
     expectedAuthorityEpoch: tenancy.authorityEpoch,

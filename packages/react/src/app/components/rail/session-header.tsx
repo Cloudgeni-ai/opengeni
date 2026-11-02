@@ -16,6 +16,7 @@ import {
   SessionStatus as SessionStatusBadge,
   SESSION_STATUS_META,
   StatusDot,
+  StatusPill,
 } from "../../../components/session-status";
 import { sessionDisplayStatus, type SessionDisplayStatus } from "../../../session-status-model";
 import { ModelMark } from "../../../components/model-mark";
@@ -24,10 +25,11 @@ import type { SessionEventsConnectionState } from "../../../hooks/use-session-ev
 import type { SessionSummary } from "@opengeni/sdk";
 import { SiteOriginLink, SiteOriginMenuItem } from "../session/site-origin-link";
 import { sessionSiteOrigin } from "../../lib/session-site-origin";
+import { sessionSlackAgentInfo } from "../../lib/session-slack-agent";
+import { MetaChip } from "../../../ui/meta-chip";
 import type { CreateBotTemplateRequest, WorkspaceBotTemplate } from "@opengeni/contracts";
 import {
   ArchiveIcon,
-  ArchiveRestoreIcon,
   BellIcon,
   BellOffIcon,
   BotIcon,
@@ -73,7 +75,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuMeta,
   DropdownMenuSeparator,
   DropdownMenuShortcut,
   DropdownMenuTrigger,
@@ -264,7 +265,15 @@ export function SessionHeader({
   const rename = useInlineRename(session, onRename);
   const pin = useSessionPinToggle(session, onPin);
   const context = useOptionalAppContext();
-  const canArchive = Boolean(onArchive) && session.parentSessionId === null;
+  // Archiving is one-way, so an archived chat offers no archive action, and
+  // only people who can control the chat archive it.
+  const canArchive =
+    Boolean(onArchive) &&
+    session.parentSessionId === null &&
+    !session.archived &&
+    (context ? archiveActionLabel(context, session) !== null : true);
+  // An archived chat cannot be pinned.
+  const canPin = !session.archived;
   const [grantAdminOpen, setGrantAdminOpen] = useState(false);
   const shareLinksFeature = useSessionUiFeature("shareLinks");
   // Only the person who started a top-level chat can share it; the server
@@ -290,6 +299,8 @@ export function SessionHeader({
   const panelKeys = useActionShortcut("view.workspacePanel");
   const hasCrumb =
     Boolean(session.parentSessionId) || ancestors.length > 0 || Boolean(lineageError);
+  // A chat started for a Slack agent says which one; its avatar is the agent's icon.
+  const slackAgent = sessionSlackAgentInfo(session.metadata);
   const overflow = useSessionHeaderOverflow({
     present: SESSION_HEADER_PARTS.filter((part) => {
       switch (part) {
@@ -305,6 +316,8 @@ export function SessionHeader({
           return Boolean(sandboxSlot);
         case "site":
           return sessionSiteOrigin(session) !== null;
+        case "slackAgent":
+          return slackAgent !== null;
         case "accessKey":
           return keyAuthRequired;
         default:
@@ -421,6 +434,19 @@ export function SessionHeader({
               <SiteOriginLink session={session} />
             </span>
           ) : null}
+          {slackAgent && !inMenu("slackAgent") ? (
+            <span ref={part("slackAgent")} className="flex min-w-0 shrink-0 items-center">
+              <MetaChip
+                variant="soft"
+                title={`Slack agent: ${slackAgent.name}`}
+                className="max-w-48"
+              >
+                <span data-session-slack-agent="" className="min-w-0 truncate">
+                  Slack agent: {slackAgent.name}
+                </span>
+              </MetaChip>
+            </span>
+          ) : null}
           {onOpenAutomations && !inMenu("automations") ? (
             // The first to give way: its words shorten to its icon before
             // anything moves into the menu. The weight is high enough that
@@ -487,7 +513,7 @@ export function SessionHeader({
             <SearchIcon className="size-4" />
           </Button>
         )}
-        {inMenu("pin") ? null : (
+        {inMenu("pin") || !canPin ? null : (
           <Button
             ref={part("pin")}
             type="button"
@@ -515,13 +541,12 @@ export function SessionHeader({
                 imply the session is still "Running"/"Idle" under a pause gate. */}
             {!sessionControlPaused(session) ? (
               waiting ? (
-                <span
-                  className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-surface px-2 py-0.5 text-control font-medium text-fg-muted"
+                <StatusPill
+                  className="border-border bg-surface text-fg-muted"
                   data-session-wait-badge=""
                 >
-                  <span aria-hidden className="size-1.5 rounded-full bg-current" />
                   Waiting
-                </span>
+                </StatusPill>
               ) : (
                 <SessionStatusBadge status={displayStatus} label={startupLabel} />
               )
@@ -663,16 +688,18 @@ export function SessionHeader({
                 Share…
               </DropdownMenuItem>
             ) : null}
-            <DropdownMenuItem
-              className={inMenu("pin") ? undefined : "lg:hidden"}
-              aria-keyshortcuts={pinKeys?.ariaKeys}
-              disabled={pin.busy}
-              onSelect={() => pin.toggle()}
-            >
-              <PinIcon className={session.pinned ? "fill-current" : undefined} />
-              {session.pinned ? "Unpin" : "Pin"}
-              {pinKeys ? <DropdownMenuShortcut>{pinKeys.label}</DropdownMenuShortcut> : null}
-            </DropdownMenuItem>
+            {canPin ? (
+              <DropdownMenuItem
+                className={inMenu("pin") ? undefined : "lg:hidden"}
+                aria-keyshortcuts={pinKeys?.ariaKeys}
+                disabled={pin.busy}
+                onSelect={() => pin.toggle()}
+              >
+                <PinIcon className={session.pinned ? "fill-current" : undefined} />
+                {session.pinned ? "Unpin" : "Pin"}
+                {pinKeys ? <DropdownMenuShortcut>{pinKeys.label}</DropdownMenuShortcut> : null}
+              </DropdownMenuItem>
+            ) : null}
             {currentPhoneAppPlatform() ? (
               <DropdownMenuItem
                 onSelect={() => {
@@ -709,6 +736,11 @@ export function SessionHeader({
               />
             ) : null}
             {inMenu("site") ? <SiteOriginMenuItem session={session} /> : null}
+            {slackAgent && inMenu("slackAgent") ? (
+              <div className="flex min-h-9 min-w-0 items-center px-2 text-sm text-fg-muted">
+                <span className="min-w-0 truncate">Slack agent: {slackAgent.name}</span>
+              </div>
+            ) : null}
             {keyAuthRequired && inMenu("accessKey") ? (
               <DropdownMenuItem onSelect={onForgetAccessKey}>
                 <LockIcon />
@@ -763,17 +795,11 @@ export function SessionHeader({
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
                   aria-keyshortcuts={archiveKeys?.ariaKeys}
-                  onSelect={() => void onArchive?.(session, !session.archived)}
+                  onSelect={() => void onArchive?.(session, true)}
                 >
-                  {session.archived ? <ArchiveRestoreIcon /> : <ArchiveIcon />}
-                  {context
-                    ? archiveActionLabel(context, session)
-                    : session.archived
-                      ? "Restore"
-                      : "Archive"}
-                  {session.archived ? (
-                    <DropdownMenuMeta>Archived</DropdownMenuMeta>
-                  ) : archiveKeys ? (
+                  <ArchiveIcon />
+                  Archive
+                  {archiveKeys ? (
                     <DropdownMenuShortcut>{archiveKeys.label}</DropdownMenuShortcut>
                   ) : null}
                 </DropdownMenuItem>

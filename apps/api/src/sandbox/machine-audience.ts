@@ -19,6 +19,12 @@ import { ApiHttpError } from "../http/api-error";
 type AudienceCaller = {
   subjectId: string;
   permissions: readonly string[];
+  /**
+   * Whether the caller may share a machine with this whole workspace: a
+   * workspace admin, or the verified owner of a Personal workspace (where the
+   * workspace is still only them).
+   */
+  mayShareWithWorkspace: boolean;
 };
 
 type AudienceMachine = {
@@ -30,8 +36,9 @@ type AudienceMachine = {
  * Decide whether the caller may ask for this change and who would own the
  * machine. Narrowing to Only me: the person who will own it, or a workspace
  * admin acting for that person. Sharing with the workspace: a workspace admin
- * (the database also requires the caller to be the machine's owner, so nobody
- * can expose another person's Only me machine).
+ * or the owner of a Personal workspace (the database also requires the caller
+ * to be the machine's owner, so nobody can expose another person's Only me
+ * machine).
  */
 export function machineAudienceRequestFor(
   caller: AudienceCaller,
@@ -64,7 +71,7 @@ export function machineAudienceRequestFor(
         retryable: false,
       });
     }
-    if (!workspaceAdmin) {
+    if (!caller.mayShareWithWorkspace) {
       throw new ApiHttpError(403, {
         code: "forbidden",
         message: "Only workspace admins can share a machine with the whole workspace.",

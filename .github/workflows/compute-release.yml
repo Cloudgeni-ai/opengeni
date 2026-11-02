@@ -138,7 +138,11 @@ jobs:
         run: |
           set -euo pipefail
           docker run --rm "$IMAGE@$DIGEST" --help >/dev/null
-          docker run --rm --entrypoint /usr/local/bin/compute-host "$IMAGE@$DIGEST" sweep --help >/dev/null
+          docker run --rm "$IMAGE@$DIGEST" sweep --help >/dev/null
+          if docker run --rm --entrypoint /usr/local/bin/compute-host "$IMAGE@$DIGEST" --help >/dev/null 2>&1; then
+            echo "::error::The control image carries the host agent; a chart could sweep a fleet's store by an object store's pointers"
+            exit 1
+          fi
           docker run --rm --entrypoint /usr/local/bin/compute-runners "$IMAGE@$DIGEST" serve --help >/dev/null
           echo "Pushed the candidate \`$IMAGE@$DIGEST\`" >> "$GITHUB_STEP_SUMMARY"
 

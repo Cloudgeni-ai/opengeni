@@ -1407,7 +1407,7 @@ function BrowserSessionGroup(props: {
             <span
               className={cn(
                 "size-1.5 rounded-full",
-                session.lifecycle === "active" ? "bg-og-status-running" : "bg-og-muted",
+                session.lifecycle === "active" ? "bg-og-status-running" : "bg-og-fg-subtle",
               )}
             />
             <span className="min-w-0 flex-1">
@@ -1960,9 +1960,9 @@ function siteAuthHealth(
     case "needs_repair":
       return { label: t("browserViewer.signInNeedsAttention"), dotClass: "bg-og-status-waiting" };
     case "failed":
-      return { label: t("browserViewer.verificationFailed"), dotClass: "bg-og-status-error" };
+      return { label: t("browserViewer.verificationFailed"), dotClass: "bg-og-status-failed" };
     case "unknown":
-      return { label: t("browserViewer.notCheckedYet"), dotClass: "bg-og-muted" };
+      return { label: t("browserViewer.notCheckedYet"), dotClass: "bg-og-fg-subtle" };
   }
 }
 
@@ -2868,7 +2868,7 @@ function BrowserStatusBar(props: {
           "size-1.5 rounded-full",
           props.connectionState === "live" || props.connectionState === "semantic"
             ? "bg-og-status-running"
-            : "bg-og-muted",
+            : "bg-og-fg-subtle",
         )}
       />
       <span>
@@ -3058,7 +3058,7 @@ function BrowserDiagnosticsDrawer(props: {
             />
           </dl>
           {session?.failureCode ? (
-            <p className="mt-2 rounded-og-sm border border-og-status-error/30 bg-og-status-error/5 px-2.5 py-2 text-og-xs text-og-danger">
+            <p className="mt-2 rounded-og-sm border border-og-danger/30 bg-og-danger/5 px-2.5 py-2 text-og-xs text-og-danger">
               {t("browserViewer.browserStateFailurecode", { failureCode: session.failureCode })}
             </p>
           ) : null}

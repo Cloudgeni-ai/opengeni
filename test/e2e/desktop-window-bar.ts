@@ -1,5 +1,8 @@
 import { expect } from "bun:test";
 import type { BrowserContext, Page } from "playwright";
+import { DESKTOP_MAC_TRAFFIC_LIGHT_SIZE } from "@opengeni/sdk/desktop-bridge";
+
+import { MAC_TRAFFIC_LIGHT_POSITION } from "../../packages/desktop/src/main/window-bar";
 
 /**
  * The desktop window bar: on macOS and Windows a strip across the top of the
@@ -20,6 +23,20 @@ export const MACOS_BAR_CONTROLS_LEFT = 84;
  * the sidebar toggle (84px + 32px) with a small gap.
  */
 export const MACOS_BAR_ROW_LEFT = 120;
+
+/** Where the macOS app puts the traffic lights, in window points. */
+export { MAC_TRAFFIC_LIGHT_POSITION };
+
+/**
+ * Where macOS shells that don't report their window bar's height (the
+ * desktop app 0.1.33 and older) put the traffic lights.
+ */
+export const LEGACY_MAC_TRAFFIC_LIGHT_POSITION = { x: 18, y: 21 };
+
+/** The traffic lights' vertical centre, in window points. */
+export function trafficLightCentre(position: { y: number }): number {
+  return position.y + DESKTOP_MAC_TRAFFIC_LIGHT_SIZE / 2;
+}
 
 /**
  * A plain browser has no Windows window controls overlay, so stand in for the
@@ -107,6 +124,8 @@ export async function windowBarRow(page: Page) {
       drag: getComputedStyle(header).getPropertyValue("-webkit-app-region"),
       // While a full-window layer is open the row must step aside.
       layerOpen: document.documentElement.hasAttribute("data-window-layer-open"),
+      // A page's title line (not a chat's header) has no buttons of its own.
+      titleOnly: header.hasAttribute("data-window-bar-title"),
       shown: header.getClientRects().length > 0,
       buttons: [...header.querySelectorAll<HTMLElement>("button")]
         .filter((button) => button.getClientRects().length > 0)
@@ -178,7 +197,8 @@ export async function windowBar(page: Page) {
  * the window controls and nothing of the page sits under it; elsewhere there
  * is no bar and the page starts at the top of the window. Only the macOS app
  * puts controls of its own in the bar (the sidebar toggle, and on a chat the
- * chat's header as the bar's row), right of the traffic lights; its buttons
+ * chat's header, or another page's title line, as the bar's row), right of
+ * the traffic lights; its buttons
  * are not draggable and take clicks, and the header's empty space drags.
  */
 export async function expectWindowTop(page: Page, platform: string) {
@@ -215,7 +235,7 @@ export async function expectWindowTop(page: Page, platform: string) {
       );
       expect(row.top).toBe(0);
       expect(row.drag).toBe("drag");
-      expect(row.buttons.length).toBeGreaterThan(0);
+      if (!row.titleOnly) expect(row.buttons.length).toBeGreaterThan(0);
       for (const button of row.buttons) {
         expect(button.drag).toBe("no-drag");
         expect({ label: button.label, clickable: button.clickable }).toEqual({

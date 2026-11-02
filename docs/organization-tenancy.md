@@ -239,6 +239,51 @@ admitted and revalidated against a `connected_machine.use` grant. Workspace acce
 loss removes workspace resources immediately without deleting the user's resources;
 cross-organization visibility remains impossible.
 
+### Available here
+
+Workspace settings › Available here shows what agent turns in one workspace can
+use, grouped by owner: the workspace's own things, the organization's things
+that reach the workspace, and the viewer's own things. It reads the same lists
+each kind's own page reads (the connector catalog, Connected Machines, rigs,
+vaults, Skills and Knowledge), so it never shows anything those pages would not:
+other people's personal resources never appear, and a kind the viewer may not
+list is left out instead of shown as an error. Connectors are the workspace's
+own installations, the organization's connectors that reach the workspace (one
+the workspace turned off is left out, and one whose organization setup is
+broken is marked unavailable), and, in a Personal workspace, the owner's Only
+me connectors carried in from other workspaces. Each row says who manages it
+(workspace admins for connectors and machines, workspace members and admins for
+rigs, vaults, Skills and Knowledge, organization owners for organization things,
+only the owner for personal things) and opens the thing's own page. Model plans
+and keys stay on Organization settings › Models, which already shows each
+one's owner; the page links there for people who may open it.
+
+### Shared
+
+Organization settings › Shared, for organization owners and admins, shows
+everything the organization shares with its workspaces and where each works.
+Model plans and keys link to Organization settings › Models. Each organization
+machine, sandbox environment, vault, Skill and Knowledge entry works only where
+its "Available in" says, and a workspace's own lists hold only what works
+there, so the page reads the organization-wide lists:
+`GET /v1/workspaces/:workspaceId/organization-machines`,
+`GET /v1/workspaces/:workspaceId/organization-rigs` and
+`GET /v1/workspaces/:workspaceId/organization-vaults` each list every
+organization one wherever it works, with its reach (organization owners and
+admins only). For each it says where it works (a machine or sandbox environment
+always works in the workspace it came from) and where it opens: in this
+workspace when it works here, else in the first workspace by name that it
+works in and the viewer can open, else nowhere. A caller those lists refuse
+(anyone but an organization owner or admin, or an agent acting as itself), or
+a server that has not granted a list yet (`complete: false`), gets the
+organization ones that work in the current workspace, and the page says so.
+The Skills row counts the organization's Skills and says how many don't work
+here (the Skills list already holds those for the people who manage them).
+Knowledge has no organization-wide list: the row appears when the
+organization's Knowledge works here, and each entry's page says where it
+works. The page links to Developer (webhooks and the credential provider) for
+people who manage the organization's API keys.
+
 ## Slice B: managed-human lifecycle provisioning and first runtime projection
 
 Migration `0219_organization_tenancy_managed_human_provisioning.sql` adds the
@@ -268,6 +313,44 @@ This runtime projection does not create user-resource authority or grant rows.
 The personal workspace still receives no `workspace_memberships` row, so
 membership CRUD and subject-membership fallback cannot discover or widen the
 owner-only projection.
+
+### One member, enforced by the database (migration 1159)
+
+Migration `1159_personal_workspace_single_member.sql` turns "a Personal
+workspace has exactly one member, its owner" from a runtime property into a
+database rule. It comes ahead of giving the owner a real membership row in a later
+release. A workspace is Personal when it carries the Personal identity:
+`external_source = 'opengeni:organization-membership'` and
+`external_id = '<organization id>:<owner subject>'`
+(`PERSONAL_WORKSPACE_EXTERNAL_SOURCE`). Triggers refuse, for every writer:
+
+- any `workspace_memberships` row there except its owner's, including an
+  organization owner's or admin's;
+- an owner row with an `owner` or `admin` role, or with `workspace:admin`,
+  `members:manage`, `api_keys:manage` or `usage_allowances:manage`, so the row
+  can never let anyone else in;
+- moving a row into, out of, or within a Personal workspace to another person,
+  workspace or organization;
+- pointing an organization membership at someone else's Personal workspace,
+  or moving it to another person while it points at one (the existing
+  `(personal_workspace_id, account_id)` foreign key already keeps it in the
+  same organization);
+- changing a Personal workspace's identity, or giving an existing workspace one.
+
+`POST /v1/workspaces` and `PUT /v1/workspaces/external` refuse that external
+source (422), so nobody can create someone's Personal workspace before they
+join.
+
+A row in a Personal workspace is never membership to the runtime. Every
+TypeScript membership reader (`getWorkspaceGrant`, workspace lists, member
+lists, the session-list, pin, draft and search fences, Slack, recordings,
+Sites, MCP OAuth and `subjectHasLiveWorkspaceAuthorityInScope`) excludes it
+through `membershipOutsidePersonalWorkspace`
+(`packages/db/src/personal-workspace-membership.ts`). A membership row admits
+whoever names its subject, so the owner keeps reaching Personal only through
+the pointer with verified owning-user proof. The previous release reads rows
+without that exclusion. The owner's row can therefore be created and backfilled
+only in a release after this one is in production.
 
 ### Session ownership at the mint (migration 0302)
 
@@ -562,6 +645,16 @@ The managed-human API surface is:
   operational access;
 - `GET /v1/organizations/:organizationId/members` and
   `PATCH /v1/organizations/:organizationId/members/:membershipId`; and
+- `GET /v1/organizations/:organizationId/member-names` for any active owner,
+  administrator, or member of that organization, acting as themselves. It
+  returns only each active person's membership id, display name, and whether
+  it is the caller, through the `list_organization_member_names_v1` definer
+  (1211). Emails, roles, status, invitations, workspace access, and usage stay
+  with `/members`. External (`external_user:`) and service subjects, suspended
+  and offboarded people, and other organizations never appear; outsiders get
+  `403`. Until the deployment grants the definer it answers
+  `{ "available": false, "members": [] }`, and the People page tells members
+  only owners and admins can see who is there;
 - `PATCH /v1/organizations/:organizationId/workspaces/:workspaceId` plus its
   `/settings` route, `PUT
 /v1/organizations/:organizationId/workspaces/:workspaceId/members/:membershipId`
@@ -813,6 +906,12 @@ browsers and vaults, which keep working from shared workspaces, and existing
 chats, their workers and existing schedules there keep working and stay
 reachable by link.
 
+They also choose whether members connect machines of their own
+(`membersConnectOwnMachines`, column `members_connect_own_machines`, migration
+1148, on by default). Off, only owners and admins connect new Only me machines,
+or any machine in a Personal workspace; machines already connected keep
+working. See [Connect a machine](connected-machines.md#connect-a-machine).
+
 EU-only inference is an organization setting too
 (`organization_inference_residency` and its append-only
 `organization_inference_residency_events`, migration 1060,
@@ -830,10 +929,9 @@ other actor. Changes carry the current `version` (stale: `409`) and an
 `operationId`: an exact replay returns the stored result, and the same id with
 a different request is `409`. A request that changes nothing keeps the
 version, so repeating "on" never makes someone else's change stale. 1060
-withholds the runtime's EXECUTE on that
-function for one release (see
-[migrations-expand-contract.md](migrations-expand-contract.md)); until a later
-migration grants it, changes answer `503` and the setting stays off.
+withheld the runtime's EXECUTE on that function for one release and 1210
+granted it (see [migrations-expand-contract.md](migrations-expand-contract.md));
+readiness requires the grant.
 
 Only Opengeni sign-in (managed access) has people in browsers who could turn
 it off, so in local and configured access modes it can't be changed at all
@@ -1242,16 +1340,29 @@ or model subscriptions; it includes `connections:personal`, below), `mcp_servers
 `rigs:manage` (create and edit Sandbox Environments, which are versioned) and
 `enrollments:read` (see and pick Connected Machines). A Member also manages any
 Site they can see (Site Data, Site SQL, publication settings, takedown and
-restore) and authors, installs and reviews workspace Skills
-(`documents:manage`). Settings-class powers stay Admin-only:
-`workspace:admin` (workspace settings, instructions, Insights, automations),
+restore), authors, installs and reviews workspace Skills
+(`documents:manage`), creates and runs schedules, automations and event
+sources (`scheduled_tasks:*`), changes or deletes any bot template shared with
+the workspace, and records posts on their own social accounts. A signed-in
+Member also edits the workspace instructions
+and reviews the agent's proposed changes to them (`sessions:create`, see
+[workspace instruction policies](workspace-instruction-policies.md)), renames a
+shared workspace (`PATCH /v1/workspaces/:workspaceId` with `name`; its `slug`
+stays Admin-only; a Personal workspace is renamed only by its verified owner,
+acting as themselves, the same check as its other settings), and adds or removes
+its custom model entries (Gateway, OpenRouter, Opper and Claude custom models;
+the keys and subscriptions they run on stay Admin-only).
+Settings-class powers stay Admin-only:
+`workspace:admin` (workspace settings, learning settings, Insights),
 `members:manage`, `api_keys:manage`, `github:manage` (the workspace GitHub
 App), `variable-sets:manage`, `enrollments:manage` (enrolling and changing
 workspace and organization machines; a signed-in Member connects and changes
 their own Only me machine with `enrollments:read`, see
 [Connected Machines](connected-machines.md#connect-a-machine)),
-`capabilities:manage` (integration and plugin install, workspace
-tool policy) and `secrets:read`. Routes where a newly granted permission would
+`capabilities:manage` (workspace tool policy, auto-approval, and changing or
+turning off an integration that is on; Members add integrations and plugins
+with `connections:write`, see [Capability Catalog](capabilities.md)) and
+`secrets:read`. Routes where a newly granted permission would
 otherwise reach workspace-wide configuration check the settings power
 explicitly: workspace-owned model-provider keys and the Slack bot need
 `capabilities:manage`, and the workspace default Sandbox Environment needs
@@ -1263,9 +1374,11 @@ external (`external_user:`) memberships are excluded too: an organization
 service key stores them as role `member` with a caller-chosen permission set,
 which a preset change must not widen.
 Organization owners and administrators may create and rename shared
-workspaces, grant or replace access, and revoke access. Ordinary organization
-members, cross-organization membership ids, and every Personal workspace fail
-closed. Organization membership role changes keep the 0263 sole-owner
+workspaces, grant or replace access, and revoke access through these
+organization routes. Ordinary organization members, cross-organization
+membership ids, and every Personal workspace fail closed here; a member who can
+start chats in a shared workspace still renames it from its own settings
+(`PATCH /v1/workspaces/:workspaceId`). Organization membership role changes keep the 0263 sole-owner
 invariant; workspace roles do not alter organization roles.
 
 That authority covers every shared workspace in the organization and every
@@ -1358,7 +1471,17 @@ identity with no person behind it (`/v1/organizations/:id/service-accounts`,
 SDK `listOrganizationServiceAccounts`, `createOrganizationServiceAccount`,
 `updateOrganizationServiceAccount`, `deleteOrganizationServiceAccount`).
 Whoever may manage the organization's keys (`api_keys:manage`) manages service
-accounts; only an organization administrator can make one an admin.
+accounts; only the organization owner (a literal `account:admin`) can make one
+an admin.
+
+An organization admin signed in as themselves (managed cookie session) also
+manages the organization's keys and service accounts, at member level only: they
+list every key and service account, but create, change or revoke only keys whose
+effective permissions hold none of the administration permissions below and that
+no admin service account holds, and change or delete only member service
+accounts. A legacy `workspace:admin` key counts as owner-level. Admin rights in
+one organization grant nothing in another; API keys and agents never qualify
+through the admin role.
 
 - Role is `admin` or `member`, never owner. A member's keys never hold
   `account:admin`, `members:manage`, `billing:manage`, `api_keys:manage` or

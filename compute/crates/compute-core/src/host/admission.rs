@@ -12,6 +12,7 @@ use super::disk::{DiskRoom, DiskSpace, Resource};
 use super::{Action, Host, Notice, Squeeze};
 use crate::ids::SandboxId;
 use crate::level::{Level, Priority, Step};
+use crate::policy::SleepPolicy;
 use crate::sandbox::{QueueKey, Sandbox};
 use crate::time::At;
 
@@ -31,7 +32,8 @@ pub struct Size {
     /// sandbox reserves none.
     pub cpu: u64,
     /// Bytes of local disk one save of its VM may write at most, booked
-    /// while its VM holds state not saved yet; see [`crate::DiskPolicy`].
+    /// while its VM holds state not saved yet and the host may save it
+    /// unasked, or a save of it is asked for; see [`crate::DiskPolicy`].
     pub save: u64,
     /// Bytes its disk may grow by at most while its VM runs, booked while
     /// it is awake or waking, until [`crate::Input::DiskGrowth`] measures
@@ -135,6 +137,8 @@ const COMPRESSED_PERCENT: u8 = 25;
 pub(super) struct FirstWake {
     /// What the sandbox may take of host memory.
     pub(super) size: Size,
+    /// Whether the host may save it unasked; see [`Sandbox::books_save`].
+    pub(super) saves: bool,
     /// Whether that wake fetches it from object storage.
     pub(super) remote: bool,
     /// When the booking lapses.
@@ -142,11 +146,25 @@ pub(super) struct FirstWake {
 }
 
 impl FirstWake {
+    /// The first wake of a sandbox of `size` that sleeps by `policy`,
+    /// booked until `until`; with `remote` it fetches the sandbox.
+    pub(super) const fn new(size: Size, policy: SleepPolicy, remote: bool, until: At) -> Self {
+        Self {
+            size,
+            saves: policy.saves(),
+            remote,
+            until,
+        }
+    }
+
     /// What the wake books on local disk, as the sandbox does once added:
-    /// its next save, what its disk may grow by, and from object storage
-    /// its local copy.
+    /// its next save if the host may save it unasked, what its disk may
+    /// grow by, and from object storage its local copy.
     pub(super) fn disk(&self) -> DiskSpace {
-        let mut disk = DiskSpace::save(self.size.save).add(DiskSpace::bytes(self.size.disk));
+        let mut disk = DiskSpace::bytes(self.size.disk);
+        if self.saves {
+            disk = disk.add(DiskSpace::save(self.size.save));
+        }
         if self.remote {
             disk = disk.add(DiskSpace::save(self.size.fetch));
         }
@@ -365,16 +383,17 @@ impl Host {
     /// adopted here and woken at once. Its first wake must fit as a wake
     /// queued behind those already queued would: memory counting the
     /// instant relief a wake may wait for, processor time, and the local
-    /// disk the wake books, from object storage with `remote`, together
-    /// with `files`, what is written for it before it joins the core (its
-    /// first files). What it books already with [`crate::Input::Creating`]
-    /// counts as free for it.
+    /// disk the wake books for a sandbox that sleeps by `policy`, from
+    /// object storage with `remote`, together with `files`, what is written
+    /// for it before it joins the core (its first files). What it books
+    /// already with [`crate::Input::Creating`] counts as free for it.
     #[must_use]
     pub fn create_room(
         &self,
         now: At,
         sandbox: SandboxId,
         size: Size,
+        policy: SleepPolicy,
         remote: bool,
         files: DiskSpace,
     ) -> CreateRoom {
@@ -397,13 +416,7 @@ impl Host {
             if let Some(own) = own {
                 room.give_back(own.disk());
             }
-            let disk = FirstWake {
-                size,
-                remote,
-                until: now,
-            }
-            .disk()
-            .add(files);
+            let disk = FirstWake::new(size, policy, remote, now).disk().add(files);
             if let Err(short) = room.take(disk) {
                 if !room.may_take(disk, self.disk_spent) {
                     return CreateRoom::Short(short.resource, short.needed, short.free);

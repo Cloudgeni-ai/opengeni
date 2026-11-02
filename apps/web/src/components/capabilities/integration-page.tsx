@@ -15,6 +15,7 @@ import {
   type IntegrationAccess,
   type IntegrationFooter,
   type IntegrationOption,
+  type IntegrationSection,
   type IntegrationViewModel,
 } from "@opengeni/react/app/components/capabilities/integration-view-model";
 import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
@@ -152,6 +153,9 @@ export function IntegrationPage({
       </DetailSection>
 
       {children}
+      {model.sections?.map((section) => (
+        <IntegrationSectionView key={section.id} section={section} />
+      ))}
       {model.presentation?.routing ? (
         <DetailSection
           title={compactSettings ? "Work started from Slack" : "Where work starts"}
@@ -346,6 +350,53 @@ function IntegrationActions({
         </DropdownMenuItem>
       </MoreMenu>
     </>
+  );
+}
+
+/** One named part of the integration: what it means, its state, one action. */
+function IntegrationSectionView({ section }: { section: IntegrationSection }) {
+  const action = section.action;
+  return (
+    <DetailSection
+      title={section.title}
+      description={section.description}
+      action={
+        action ? (
+          action.primary ? (
+            <Button
+              type="button"
+              size="sm"
+              className="rounded-[10px] pointer-coarse:h-11"
+              data-integration-section-action={section.id}
+              disabled={action.disabled || action.busy}
+              onClick={action.onClick}
+            >
+              {action.busy ? <Loader2Icon className="animate-spin" aria-hidden="true" /> : null}
+              {action.label}
+            </Button>
+          ) : (
+            <RowButton
+              data-integration-section-action={section.id}
+              disabled={action.disabled || action.busy}
+              onClick={action.onClick}
+            >
+              {action.label}
+            </RowButton>
+          )
+        ) : undefined
+      }
+    >
+      {section.status || section.note ? (
+        <div className="grid gap-1">
+          {section.status ? (
+            <p className="m-0 text-sm leading-5 text-fg">{section.status}</p>
+          ) : null}
+          {section.note ? (
+            <p className="m-0 text-xs leading-4.5 text-fg-muted">{section.note}</p>
+          ) : null}
+        </div>
+      ) : null}
+    </DetailSection>
   );
 }
 

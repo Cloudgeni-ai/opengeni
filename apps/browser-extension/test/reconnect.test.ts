@@ -29,6 +29,7 @@ function harness() {
   const onMessage = event();
   const storage: Record<string, unknown> = {};
   let reloads = 0;
+  let updateChecks = 0;
   const chrome = {
     runtime: {
       getManifest: () => ({ version: "0.1.0" }),
@@ -39,6 +40,10 @@ function harness() {
       onUpdateAvailable: event(),
       reload: () => {
         reloads += 1;
+      },
+      requestUpdateCheck: async () => {
+        updateChecks += 1;
+        return { status: "no_update" };
       },
       lastError: undefined,
       connectNative: () => {
@@ -121,6 +126,7 @@ function harness() {
     chrome,
     ports,
     reloads: () => reloads,
+    updateChecks: () => updateChecks,
     status() {
       let result: any;
       onMessage.emit({ type: "status" }, {}, (r: unknown) => {
@@ -166,6 +172,24 @@ async function readyPort(h: ReturnType<typeof harness>) {
 }
 
 describe("extension updates", () => {
+  test("an extension-update refusal starts Chrome's update check and keeps the useful diagnosis", async () => {
+    const h = harness();
+    await flush();
+    const port = h.ports[0];
+    expect(port.messages[0].device.capabilities.paymentFieldPrivacy).toBe(true);
+    port.onMessage.emit({
+      type: "unavailable",
+      protocolVersion: 1,
+      reason: "extension_outdated",
+      agentVersion: "1.0.0",
+      detail: "browser extension update is required for protected page reads",
+    });
+    await flush();
+    expect(h.updateChecks()).toBe(1);
+    expect(port.disconnected).toBe(true);
+    expect(h.status().title).toBe("Update this extension");
+    expect(h.status().detail).toContain("Chrome is updating it now");
+  });
   test("a downloaded update is applied at once when no agent is driving a tab", async () => {
     const h = harness();
     await readyPort(h);

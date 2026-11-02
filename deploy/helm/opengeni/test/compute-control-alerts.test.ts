@@ -240,6 +240,28 @@ describe("compute alerts", () => {
         fires: [{}],
       },
       {
+        name: "pointers wait on old hosts",
+        series: [
+          { series: `compute_control_pointers_waiting_hosts{${own},pod="a"}`, values: "2x80" },
+          { series: `compute_control_pointers_waiting_hosts{${other},pod="b"}`, values: "0x80" },
+        ],
+        alert: "OpenGeniComputePointersWaiting",
+        at: "31m",
+        fires: [{ value: 2 }],
+      },
+      {
+        name: "pointers moved in after a while",
+        series: [
+          {
+            series: `compute_control_pointers_waiting_hosts{${own},pod="a"}`,
+            values: "1x20 0x60",
+          },
+        ],
+        alert: "OpenGeniComputePointersWaiting",
+        at: "31m",
+        fires: [],
+      },
+      {
         name: "a host lost",
         series: [
           {

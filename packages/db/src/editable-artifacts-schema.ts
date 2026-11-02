@@ -120,6 +120,16 @@ export const editableArtifacts = pgTable(
     stateHash: text("state_hash").notNull(),
     currentSnapshotId: text("current_snapshot_id"),
     createdBySubjectId: text("created_by_subject_id").notNull(),
+    /**
+     * Who can open it: the whole workspace, or only its owner ("Only me"),
+     * like a chat or a Site. Enforced by
+     * `opengeni_private.authorize_editable_artifact_actor` (migration 1160).
+     */
+    visibility: text("visibility", { enum: ["workspace_shared", "user_private"] })
+      .notNull()
+      .default("workspace_shared"),
+    /** The person who may change the audience; required for Only me. */
+    ownerSubjectId: text("owner_subject_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -148,6 +158,11 @@ export const editableArtifacts = pgTable(
       "editable_artifacts_modality_state_chk",
       sql`(${table.modality} = 'spreadsheet' and jsonb_typeof(${table.causalFrontier}) = 'array')
         or (${table.modality} in ('document', 'presentation') and ${table.causalFrontier} is null)`,
+    ),
+    visibilityValid: check(
+      "editable_artifacts_visibility_chk",
+      sql`${table.visibility} in ('workspace_shared', 'user_private')
+        and (${table.visibility} = 'workspace_shared' or ${table.ownerSubjectId} is not null)`,
     ),
   }),
 );

@@ -41,6 +41,7 @@ export const TURN_FAILURE_ACTIONS = [
   "retry",
   "switch_model",
   "buy_credits",
+  "upgrade_plan",
   "connect_model",
   "new_session",
   "send_message",

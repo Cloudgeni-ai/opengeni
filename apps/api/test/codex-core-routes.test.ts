@@ -1206,6 +1206,99 @@ describe("the organization access editor for a workspace-managed Codex account",
     }
     expect(wakes).toEqual([]);
   });
+
+  test("D-52: a workspace's own account going wider without a move is a 422", async () => {
+    editor();
+    mock("updateSubscriptionCoreProviderModelConnectionAccess", async () => {
+      throw new opengeniDb.SubscriptionCoreAccessMoveRequiredError();
+    });
+    const body = JSON.stringify({
+      allowedModels: null,
+      allowedWorkspaces: null,
+      allowPersonalWorkspaces: false,
+      version: 1,
+    });
+    const response = await app().fetch(organizationAdminRequest(path, { method: "PUT", body }));
+    expect(response.status).toBe(422);
+    expect(wakes).toEqual([]);
+  });
+});
+
+describe("the workspace access editor for a workspace's own Codex account (D-52)", () => {
+  const OTHER = "00000000-0000-4000-8000-0000000000b9";
+  const path = `/v1/workspaces/${WS}/model-connections/codex/${CONNECTION}/access`;
+  const policy = {
+    allowedModels: null,
+    allowedWorkspaces: [WS, OTHER],
+    allowPersonalWorkspaces: false,
+    version: 1,
+  };
+  async function put(body: Record<string, unknown>) {
+    return await app().request(path, {
+      method: "PUT",
+      headers: {
+        authorization: await bearer(["workspace:read", "workspace:admin"]),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
+  test("people, Personal workspaces and a move are refused before any write", async () => {
+    coreRoutes();
+    const write = mock("updateSubscriptionCoreProviderModelConnectionAccess", async () => {
+      throw new Error("must not write");
+    });
+    for (const body of [
+      { ...policy, allowedWorkspaces: [], allowedPeople: [] },
+      { ...policy, allowPersonalWorkspaces: true },
+      { ...policy, moveToOrganization: true },
+    ])
+      expect((await put(body)).status).toBe(422);
+    expect(write.mock.calls).toHaveLength(0);
+  });
+
+  test("a workspace the person doesn't administer is a 403; chosen workspaces are written", async () => {
+    coreRoutes();
+    mock("updateSubscriptionCoreProviderModelConnectionAccess", async () => {
+      throw new opengeniDb.SubscriptionCoreAccessWorkspaceNotAdministeredError();
+    });
+    expect((await put(policy)).status).toBe(403);
+    const write = mock(
+      "updateSubscriptionCoreProviderModelConnectionAccess",
+      async () => ({ ...policy, version: 2 }) as never,
+    );
+    await put(policy);
+    expect(write.mock.calls[0]![1]).toMatchObject({ workspaceId: WS, connectionId: CONNECTION });
+    expect(write.mock.calls[0]![2]).toMatchObject({ allowedWorkspaces: [WS, OTHER] });
+  });
+
+  test("stopping its use here: 204 when removed, 404 when not shared here, 403 when refused", async () => {
+    coreRoutes();
+    const remove = (permissions: Permission[]) =>
+      bearer(permissions).then((authorization) =>
+        app().request(path, { method: "DELETE", headers: { authorization } }),
+      );
+    const removed = mock(
+      "removeSubscriptionCoreProviderModelConnectionFromWorkspace",
+      async () => true,
+    );
+    expect((await remove(["workspace:read", "workspace:admin"])).status).toBe(204);
+    expect(removed.mock.calls[0]![1]).toMatchObject({
+      kind: "codex",
+      connectionId: CONNECTION,
+      workspaceId: WS,
+    });
+    // Without workspace:admin the route refuses before reaching the database.
+    expect((await remove(["workspace:read"])).status).toBe(403);
+    expect(removed.mock.calls).toHaveLength(1);
+    mock("removeSubscriptionCoreProviderModelConnectionFromWorkspace", async () => null);
+    expect((await remove(["workspace:read", "workspace:admin"])).status).toBe(404);
+    mock("removeSubscriptionCoreProviderModelConnectionFromWorkspace", async () => {
+      throw new opengeniDb.ModelConnectionAccessForbiddenError();
+    });
+    expect((await remove(["workspace:read", "workspace:admin"])).status).toBe(403);
+  });
 });
 
 describe("the Codex Apps designation for a run", () => {

@@ -19,10 +19,13 @@
 
 import { describe, expect, test } from "bun:test";
 import { applyGitAuthPointerEnvironment, stableSandboxEnvironmentForRun } from "@opengeni/config";
-import { githubAppBotIdentity } from "@opengeni/github";
 import { testSettings } from "@opengeni/testing/settings";
 import type { ConnectionCredentialsPort, ResourceRef } from "@opengeni/contracts";
-import { mintRunGitToken, sandboxEnvironmentForRun } from "../src/activities/environment";
+import {
+  mintRunGitCredentials,
+  mintRunGitToken,
+  sandboxEnvironmentForRun,
+} from "../src/activities/environment";
 
 // The exact SDK delta predicate (validateNoEnvironmentDelta): true iff every key
 // the turn declares is present in the attach env with an equal value.
@@ -162,10 +165,7 @@ describe("repo-attached turn: token VALUE is OFF the manifest, only the FILE PAT
     expect(gitTokens).toBeUndefined();
 
     // The STABLE pointer layer is present even when the value mint is skipped.
-    const attachEnv = applyGitAuthPointerEnvironment(
-      stableSandboxEnvironmentForRun(settings),
-      githubAppBotIdentity(settings),
-    );
+    const attachEnv = applyGitAuthPointerEnvironment(stableSandboxEnvironmentForRun(settings));
     expect(turnEnv.OPENGENI_GIT_TOKEN_FILE).toBe("/workspace/.opengeni/git-token");
     expect(turnEnv.OPENGENI_GIT_CREDENTIALS_DIR).toBe("/workspace/.opengeni/git-credentials");
     expect(turnEnv.OPENGENI_GIT_CLI_WRAPPER_DIR).toBe("/workspace/.opengeni/bin");
@@ -249,10 +249,7 @@ describe("repo-attached attach-vs-turn parity (the viewer-attach cold-create rac
 
       // What the attach paths (viewer.ts sessionAttachEnvironment / channel-a.ts)
       // cold-create a repo session's box with.
-      const attachEnv = applyGitAuthPointerEnvironment(
-        stableSandboxEnvironmentForRun(settings),
-        githubAppBotIdentity(settings),
-      );
+      const attachEnv = applyGitAuthPointerEnvironment(stableSandboxEnvironmentForRun(settings));
       expect(attachEnv).toEqual(turnEnv);
       expect(hasNoEnvironmentDelta(attachEnv, turnEnv)).toBe(true);
       expect(turnEnv.GIT_ASKPASS).toBe("/workspace/.opengeni/askpass");
@@ -266,16 +263,13 @@ describe("repo-attached attach-vs-turn parity (the viewer-attach cold-create rac
 
   test("FAILURE-SENSITIVITY: the pointer-less attach env (the 0566bad3 bug) DOES delta against a repo turn", async () => {
     const settings = repoSettings();
-    const turnEnv = applyGitAuthPointerEnvironment(
-      stableSandboxEnvironmentForRun(settings),
-      githubAppBotIdentity(settings),
-    );
+    const turnEnv = applyGitAuthPointerEnvironment(stableSandboxEnvironmentForRun(settings));
     // The pre-fix attach env: stable base only, no pointers.
     const oldAttachEnv = stableSandboxEnvironmentForRun(settings);
     expect(hasNoEnvironmentDelta(oldAttachEnv, turnEnv)).toBe(false);
   });
 
-  test("bot identity fallback applies when the deployment carries no git identity", async () => {
+  test("no box-wide bot identity: commit identity is per repository, not manifest env", async () => {
     const settings = testSettings({
       sandboxBackend: "modal",
       gitAuthorName: undefined,
@@ -283,15 +277,17 @@ describe("repo-attached attach-vs-turn parity (the viewer-attach cold-create rac
       githubAppId: "12345",
       githubAppSlug: "opengeni-test",
     });
-    const env = applyGitAuthPointerEnvironment(
-      stableSandboxEnvironmentForRun(settings),
-      githubAppBotIdentity(settings),
-    );
-    expect(env.GIT_AUTHOR_NAME).toBe("opengeni-test[bot]");
-    expect(env.GIT_AUTHOR_EMAIL).toBe("12345+opengeni-test[bot]@users.noreply.github.com");
+    const env = applyGitAuthPointerEnvironment(stableSandboxEnvironmentForRun(settings));
+    // Whichever surface cold-creates the box, it carries no identity a later
+    // personal repository would inherit; the clone hook writes it per repo.
+    expect(env.GIT_AUTHOR_NAME).toBeUndefined();
+    expect(env.GIT_AUTHOR_EMAIL).toBeUndefined();
+    expect(env.GIT_COMMITTER_NAME).toBeUndefined();
+    expect(env.GIT_COMMITTER_EMAIL).toBeUndefined();
+    expect(env.GIT_ASKPASS).toBe("/workspace/.opengeni/askpass");
   });
 
-  test("lazy defer uses BYO gitCredentials identity before provision while token value waits for mint", async () => {
+  test("lazy defer declares no identity up front; the minted binding carries the host identity", async () => {
     const settings = testSettings({
       sandboxBackend: "modal",
       gitAuthorName: undefined,
@@ -346,19 +342,21 @@ describe("repo-attached attach-vs-turn parity (the viewer-attach cold-create rac
     );
 
     expect(gitToken).toBeUndefined();
-    expect(lazyEnv.GIT_AUTHOR_NAME).toBe("Host Git Bot");
-    expect(lazyEnv.GIT_AUTHOR_EMAIL).toBe("host-git@example.com");
-    expect(lazyEnv.GIT_COMMITTER_NAME).toBe("Host Git Bot");
-    expect(lazyEnv.GIT_COMMITTER_EMAIL).toBe("host-git@example.com");
+    expect(lazyEnv.GIT_AUTHOR_NAME).toBeUndefined();
+    expect(lazyEnv.GIT_COMMITTER_EMAIL).toBeUndefined();
     expect(Object.values(lazyEnv)).not.toContain("ghs_lazy_mint");
-    expect(calls).toEqual([{ purpose: "identity" }]);
+    expect(calls).toEqual([]);
 
-    const token = await mintRunGitToken(settings, [repoResource], {
+    const minted = await mintRunGitCredentials(settings, [repoResource], {
       scope,
       authority,
       gitCredentials,
     });
-    expect(token).toBe("ghs_lazy_mint");
-    expect(calls).toEqual([{ purpose: "identity" }, { purpose: "token" }]);
+    expect(minted?.gitTokens.github).toBe("ghs_lazy_mint");
+    expect(minted?.bindings[0]?.identity).toEqual({
+      name: "Host Git Bot",
+      email: "host-git@example.com",
+    });
+    expect(calls).toEqual([{ purpose: "token" }]);
   });
 });

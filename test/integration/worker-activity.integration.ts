@@ -790,13 +790,18 @@ describe("worker activities integration", () => {
         });
 
         // The test driver acts as the human; the scripted agent never decides.
-        const decide = (approvalId: string, clientEventId: string) =>
+        const opposite = decision === "approve" ? "reject" : "approve";
+        const decide = (
+          approvalId: string,
+          clientEventId: string,
+          choice: "approve" | "reject" = decision,
+        ) =>
           acceptSessionApprovalDecision(dbClient.db, {
             accountId: grant.accountId,
             workspaceId: grant.workspaceId,
             sessionId: session.id,
             subjectId: grant.subjectId,
-            payload: { approvalId, decision },
+            payload: { approvalId, decision: choice },
             clientEventId,
           });
         expect(await decide("stale-call-id", crypto.randomUUID())).toMatchObject({
@@ -842,7 +847,13 @@ describe("worker activities integration", () => {
         if (replay.action !== "accepted") throw new Error("decision replay was not accepted");
         expect(replay.event.id).toBe(accepted.event.id);
         expect(replay.events).toEqual([]);
-        expect(await decide("call-appr-1", crypto.randomUUID())).toMatchObject({
+        // The same decision under a new key (a second click, another device)
+        // is the decision already recorded; the opposite one is refused.
+        const repeat = await decide("call-appr-1", crypto.randomUUID());
+        if (repeat.action !== "accepted") throw new Error("repeated decision was not accepted");
+        expect(repeat.event.id).toBe(accepted.event.id);
+        expect(repeat.events).toEqual([]);
+        expect(await decide("call-appr-1", crypto.randomUUID(), opposite)).toMatchObject({
           action: "conflict",
         });
         expect(
@@ -918,7 +929,11 @@ describe("worker activities integration", () => {
         expect(afterSecond.filter((event) => event.type === "user.approvalDecision")).toHaveLength(
           1,
         );
-        expect(await decide("call-appr-1", crypto.randomUUID())).toMatchObject({
+        const settledRepeat = await decide("call-appr-1", crypto.randomUUID());
+        if (settledRepeat.action !== "accepted") throw new Error("settled repeat was not accepted");
+        expect(settledRepeat.event.id).toBe(accepted.event.id);
+        expect(settledRepeat.events).toEqual([]);
+        expect(await decide("call-appr-1", crypto.randomUUID(), opposite)).toMatchObject({
           action: "conflict",
         });
         const settledReplay = await decide("call-appr-1", decisionKey);
@@ -2671,7 +2686,7 @@ describe("worker activities integration", () => {
       });
     }) as typeof fetch;
     try {
-      const { environment, gitToken } = await sandboxEnvironmentForRun(
+      const { environment, gitToken, gitCredentialBindings } = await sandboxEnvironmentForRun(
         testSettings({
           sandboxBackend: "modal",
           githubAppId: "99",
@@ -2697,10 +2712,15 @@ describe("worker activities integration", () => {
       expect(environment.GITHUB_TOKEN).toBeUndefined();
       expect(environment.GIT_ASKPASS).toBe("/workspace/.opengeni/askpass");
       expect(environment.OPENGENI_GIT_TOKEN_FILE).toBe("/workspace/.opengeni/git-token");
-      expect(environment.GIT_AUTHOR_NAME).toBe("opengeni[bot]");
-      expect(environment.GIT_AUTHOR_EMAIL).toBe("99+opengeni[bot]@users.noreply.github.com");
-      expect(environment.GIT_COMMITTER_NAME).toBe("opengeni[bot]");
-      expect(environment.GIT_COMMITTER_EMAIL).toBe("99+opengeni[bot]@users.noreply.github.com");
+      // Commit identity is per repository (written into its local git config),
+      // never sandbox-wide env, so App and personal repositories can share a box.
+      expect(environment.GIT_AUTHOR_NAME).toBeUndefined();
+      expect(environment.GIT_AUTHOR_EMAIL).toBeUndefined();
+      expect(environment.GIT_COMMITTER_NAME).toBeUndefined();
+      expect(environment.GIT_COMMITTER_EMAIL).toBeUndefined();
+      expect(gitCredentialBindings?.map((binding) => binding.identity)).toEqual([
+        { name: "opengeni[bot]", email: "99+opengeni[bot]@users.noreply.github.com" },
+      ]);
     } finally {
       globalThis.fetch = originalFetch;
     }

@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import type { ClientModelResidencyV1 } from "@opengeni/contracts";
+import {
+  DirectModelProvider,
+  directModelProviderOfProviderId,
+  type ClientModelResidencyV1,
+} from "@opengeni/contracts";
 import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
 
 import {
@@ -7,6 +11,7 @@ import {
   billingClassForModel,
   coerceReasoningEffortForModel,
   compactModelPill,
+  connectedSubscriptionProvider,
   effortOptionsForModel,
   groupPickerRowsByBillingClass,
   payerSummaryForModel,
@@ -301,6 +306,63 @@ describe("model-policy", () => {
     );
     expect(billingClassForModel(deploymentModel)).toBe("opengeni_credits");
     expect(payerSummaryForModel(englishText, deploymentModel)).toBe("Free in this deployment");
+  });
+
+  test("bills every kind of workspace direct model connection to the workspace", () => {
+    const providerIds = [
+      "workspace-openai-c1",
+      "workspace-azure-openai-c2",
+      "workspace-compatible-c3",
+    ];
+    // The picker inlines these prefixes; every direct provider kind must be covered.
+    expect(providerIds.map((id) => directModelProviderOfProviderId(id)).sort()).toEqual(
+      [...DirectModelProvider.options].sort(),
+    );
+    for (const provider of providerIds) {
+      const model = catalogModel({ id: `${provider}/some-model`, label: "Some model", provider });
+      expect(billingClassForModel(model)).toBe("byok");
+    }
+  });
+
+  test("names the subscription of catalog models, which carry no credential source", () => {
+    const subscription = { upstreamPayer: "connected_subscription", metering: "external" } as const;
+    const claude = catalogModel({
+      id: "organization-claude-subscription/claude-opus-5-5",
+      label: "Claude Opus 5.5",
+      provider: "organization-claude-subscription",
+      providerLabel: "Claude subscription",
+      cost: "subscription",
+      billing: subscription,
+    });
+    const supergrok = catalogModel({
+      id: "supergrok/grok-4.7",
+      label: "Grok 4.7",
+      provider: "supergrok",
+      providerLabel: "SuperGrok",
+      source: "supergrok",
+      cost: "subscription",
+      billing: subscription,
+    });
+    const codex = catalogModel({
+      id: "codex/gpt-6-astra",
+      label: "GPT-6 Astra",
+      provider: "codex",
+      providerLabel: "Codex",
+      source: "codex",
+      cost: "subscription",
+      billing: subscription,
+    });
+    expect(connectedSubscriptionProvider(claude)).toBe("claude");
+    expect(connectedSubscriptionProvider(supergrok)).toBe("xai");
+    expect(connectedSubscriptionProvider(codex)).toBe("codex");
+    expect(payerSummaryForModel(englishText, claude)).toBe(
+      "Claude subscription · external billing",
+    );
+    expect(payerSummaryForModel(englishText, { ...claude, cost: undefined })).toBe(
+      "Claude subscription · external billing",
+    );
+    expect(advancedSourceSummary(englishText, claude)).toBe("Connected Claude subscription");
+    expect(advancedSourceSummary(englishText, codex)).toBe("Connected Codex subscription");
   });
 
   test("keeps workspace and organization Opper billing separate from deployment Opper", () => {

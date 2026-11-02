@@ -1,7 +1,7 @@
 /**
  * One display identity for a model everywhere outside the Models settings page.
  *
- * Catalog ids carry routing facts (`codex/`, `organization-claude-subscription/`,
+ * Catalog ids carry routing facts (`codex/`, `claude/`, `organization-claude-subscription/`,
  * `workspace-openrouter/anthropic/...`) and custom models may have no curated
  * label. People should only ever see the model itself: `GPT-6.1 Sol`,
  * `Opus 5.5`. The same upstream model therefore renders identically

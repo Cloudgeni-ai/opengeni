@@ -91,7 +91,8 @@ import {
   retainCreateSessionAttemptAfterFailure,
   type PendingCreateAttempt,
 } from "./lib/session-create";
-import { isPaymentRequiredError } from "./lib/model-access";
+import { isPaymentRequiredError, paymentRefusalCode } from "./lib/model-access";
+import type { CreditRequired } from "./components/credit-required-gate";
 import {
   applySessionPinProjection,
   notifySessionPinChanged,
@@ -378,10 +379,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   >(host.initialInvalidSlackLinkQueryWorkspaceId);
   const [accessLoading, setAccessLoading] = useState(false);
   const [accessError, setAccessError] = useState<BootstrapErrorPresentation | null>(null);
-  const [creditRequired, setCreditRequired] = useState<{
-    workspaceId: string;
-    accountId: string | null;
-  } | null>(null);
+  const [creditRequired, setCreditRequired] = useState<CreditRequired | null>(null);
   const [model, setModel] = useState("gpt-6-astra");
   const [reasoningEffort, setReasoningEffort] = useState<IntelligenceEffort>("low");
   const [latencyMode, setLatencyMode] = useState<LatencyMode>("standard");
@@ -434,6 +432,10 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   const [workspaceCapabilityCatalog, setWorkspaceCapabilityCatalog] = useState<
     CapabilityCatalogItem[]
   >([]);
+  // Who the organization lets turn integrations on, read with the catalog.
+  const [workspaceMemberIntegrationSetup, setWorkspaceMemberIntegrationSetup] = useState<
+    "members" | "admins" | undefined
+  >(undefined);
   const [workspaceMcpCatalogReady, setWorkspaceMcpCatalogReady] = useState(false);
   const [workspaceMcpCatalogLoadedSuccessfully, setWorkspaceMcpCatalogLoadedSuccessfully] =
     useState(false);
@@ -593,6 +595,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     setPersonalGitHubAuthorityCache(null);
     setWorkspaceMcpServers([]);
     setWorkspaceCapabilityCatalog([]);
+    setWorkspaceMemberIntegrationSetup(undefined);
     setWorkspaceMcpCatalogReady(false);
     setWorkspaceMcpCatalogLoadedSuccessfully(false);
   }, []);
@@ -1019,8 +1022,6 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     setLatencyMode("standard");
   }, [clientConfig, pathname, workspaces]);
 
-  const selectedInstalledRepositories = githubRepos.filter((repo) => selectedRepoIds.has(repo.id));
-  const selectedInstallationId = selectedInstalledRepositories[0]?.installationId ?? null;
   const repositoryGroups = useMemo(() => groupRepositories(githubRepos), [githubRepos]);
   const toolMcpServers = useMemo(
     () => mergeMcpServerOptions(selectableMcpServers(clientConfig), workspaceMcpServers),
@@ -1839,6 +1840,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           ),
         );
         setWorkspaceCapabilityCatalog(catalog.items);
+        setWorkspaceMemberIntegrationSetup(catalog.memberIntegrationSetup);
         setWorkspaceMcpCatalogLoadedSuccessfully(true);
         setWorkspaceMcpCatalogReady(true);
       } catch (error) {
@@ -2013,6 +2015,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           setCreditRequired({
             workspaceId,
             accountId: workspace?.accountId ?? null,
+            code: paymentRefusalCode(problem),
           });
         } else if (handled !== true) {
           toast.error("Failed to start session", {
@@ -2199,16 +2202,6 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   }
 
   function toggleGitHubRepository(repo: GitHubRepository) {
-    if (
-      selectedInstallationId !== null &&
-      selectedInstallationId !== repo.installationId &&
-      !selectedRepoIds.has(repo.id)
-    ) {
-      toast.info("This session uses one GitHub token", {
-        description: "Clear selected repositories to choose repositories from another account.",
-      });
-      return;
-    }
     setSelectedRepoIds((current) => {
       const next = new Set(current);
       if (next.has(repo.id)) {
@@ -2663,13 +2656,13 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           busy,
           repoBusy,
           githubAppBusy,
-          selectedInstallationId,
           repositoryGroups,
           toolMcpServers,
           workspaceDefaultToolIds,
           workspaceMcpCatalogReady,
           workspaceMcpCatalogLoadedSuccessfully,
           workspaceCapabilityCatalog,
+          workspaceMemberIntegrationSetup,
           currentResources,
           repositoryValidationError,
           workspaceStateOwnerId,
@@ -2783,7 +2776,6 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     resetSessionView,
     resetWorkspaceIntegrations,
     selectedCapabilityToolIds,
-    selectedInstallationId,
     selectedRepoIds,
     selectedRepoRefs,
     session,
@@ -2796,6 +2788,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     workspaceMcpCatalogReady,
     workspaceMcpCatalogLoadedSuccessfully,
     workspaceCapabilityCatalog,
+    workspaceMemberIntegrationSetup,
     workspaceStateOwnerId,
     workspaces,
   ]);

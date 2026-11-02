@@ -317,7 +317,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Windows computer use runs CUA's published native runtime in process.
+          # Every platform carries the same source-pinned private worker.
           bun packages/browserd/scripts/stage-cua-runtime.ts x64
           bun build --compile --target=bun-windows-x64 packages/browserd/src/main.ts \
             --define "process.env.OPENGENI_RUNTIME_BUILD_ID=\"${GITHUB_SHA}\"" \
@@ -345,6 +345,9 @@ jobs:
         run: |
           set -euo pipefail
           shipped=("${{ matrix.asset }}" "opengeni-computer-native-${{ matrix.target }}.exe")
+          if [ "${{ matrix.target }}" = x86_64-pc-windows-msvc ]; then
+            shipped+=(packages/browserd/dist/cua/x64/cua-driver.exe)
+          fi
           for helper in "opengeni-browserd-${{ matrix.target }}.exe"; do
             if [ -f "$helper" ]; then shipped+=("$helper"); fi
           done

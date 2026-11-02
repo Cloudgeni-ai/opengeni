@@ -21,6 +21,7 @@ import {
   createOrganizationApiKey,
   deleteWorkspace,
   listConnectionsMetadata,
+  listInstalledApiIntegrations,
   loadConnectionCredentialForBroker,
   type DbClient,
 } from "@opengeni/db";
@@ -1338,20 +1339,50 @@ describe("API Integration provider OAuth", () => {
     });
     expect(narrowShared.status).toBe(403);
 
-    // A workspace account is integration management.
+    // A member (connections:write) adds a workspace account integration too.
+    const instances = () =>
+      listInstalledApiIntegrations(client.db, workspace.workspaceId, workspace.subjectId);
+    const before = new Set((await instances()).map((instance) => instance.instanceKey));
     const workspaceOwned = await connectAndPreview({ ownership: "workspace" });
     const sharedInstall = await workspaceOwned.install();
-    expect(sharedInstall.status).toBe(403);
-    expect(await sharedInstall.text()).toContain("capabilities:manage");
-
-    // So is binding an instance this account is not already bound to.
-    const other = await connectAndPreview({
-      ownership: "personal",
-      installationTarget: { instanceKey: "account-someone-else", displayName: "OneDrive" },
+    expect(sharedInstall.status).toBe(200);
+    expect(await sharedInstall.json()).toMatchObject({
+      state: "complete",
+      integrationInstalled: true,
     });
+    // ...but a member's add is create only: binding an instance that is
+    // already set up (here the workspace one) stays integration management.
+    const sharedInstance = (await instances()).find(
+      (instance) => !before.has(instance.instanceKey),
+    );
+    expect(sharedInstance).toBeDefined();
+    const rebind = await connectAndPreview({
+      ownership: "personal",
+      installationTarget: {
+        instanceKey: sharedInstance!.instanceKey,
+        displayName: "OneDrive",
+      },
+    });
+    const rebound = await rebind.install();
+    expect(rebound.status).toBe(403);
+    expect(await rebound.text()).toContain("Only an admin can change it");
+    expect(
+      (await instances()).find((instance) => instance.instanceKey === sharedInstance!.instanceKey)
+        ?.connectionRef?.connectionId,
+    ).toBe(sharedInstance!.connectionRef?.connectionId);
+
+    // Binding an instance this account is not already bound to is adding an
+    // integration, which the narrow "connect my own account" permission is not.
+    const other = await connectAndPreview(
+      {
+        ownership: "personal",
+        installationTarget: { instanceKey: "account-someone-else", displayName: "OneDrive" },
+      },
+      narrowHeaders,
+    );
     const otherInstall = await other.install();
     expect(otherInstall.status).toBe(403);
-    expect(await otherInstall.text()).toContain("capabilities:manage");
+    expect(await otherInstall.text()).toContain("connections:write");
   }, 60_000);
 
   test("a non-human principal cannot request personal ownership", async () => {

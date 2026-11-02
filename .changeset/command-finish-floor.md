@@ -1,0 +1,5 @@
+---
+"@opengeni/runtime": patch
+---
+
+A shell command without a TTY now waits at least 60 seconds for its exit in the same `exec_command` call (up to the 30-second ceiling on a Connected Machine), even when the model asks for a shorter wait, and still returns the moment it finishes. Tests, builds and linters that used to be pushed to the background after a second, and then polled with `command_read`, now return their result in one call. Commands that should keep running in the background, such as servers, watchers and deliberate parallel runs, pass the new optional `background: true` argument (or use a TTY) to keep the requested short wait. Longer commands still continue in the background and wake the session when they finish. A requested wait above 30 seconds keeps its ordinary quiet-output return. On a Connected Machine, a Steer during a floored wait takes effect when the wait ends; Pause and cancel still stop it at once. The floor applies only where the `exec_command` schema offers `background`, so `OPENGENI_EXPERIMENT_CUT_POLLING=false` or `OPENGENI_EXPERIMENT_OUTPUT_COST=false` turns it off.

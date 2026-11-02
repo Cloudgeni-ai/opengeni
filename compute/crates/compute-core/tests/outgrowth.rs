@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use compute_core::{
     Action, At, Durability, HoldId, Host, HostPolicy, Input, Level, MemoryLevels, MemoryPolicy,
-    Outgrowth, Priority, SandboxId, ShrinkRequest, Size, SleepPolicy, SleepRules, State, Step,
+    Outgrowth, Priority, SandboxId, ShrinkCause, ShrinkRequest, Size, SleepPolicy, SleepRules,
+    State, Step,
 };
 
 const GIB: u64 = 1 << 30;
@@ -109,18 +110,46 @@ impl Rig {
         stall: u16,
         high: Option<u64>,
     ) {
+        self.read(id, resident, compressed, swapped, stall, high, false);
+    }
+
+    /// A reading as [`Self::uses`] of a VM `resident` bytes large that
+    /// the engine is still bringing down toward its bound, then what is
+    /// `available`: what the host does on both.
+    fn descending(&mut self, id: u128, resident: u64, available: u64) -> Vec<Action> {
+        let mut actions = self.read(id, resident, 0, 0, 0, None, true);
+        actions.extend(self.available(available));
+        actions
+    }
+
+    /// A reading as [`Self::held`], `bringing_down` saying whether the
+    /// engine is still bringing the VM down toward its bound; what the
+    /// host does on it.
+    #[allow(clippy::too_many_arguments)]
+    fn read(
+        &mut self,
+        id: u128,
+        resident: u64,
+        compressed: u64,
+        swapped: u64,
+        stall: u16,
+        high: Option<u64>,
+        bringing_down: bool,
+    ) -> Vec<Action> {
         let sandbox = SandboxId(id);
-        self.send(Input::Resident {
+        let mut actions = self.send(Input::Resident {
             sandbox,
             bytes: resident,
         });
-        self.send(Input::MemoryUse {
+        actions.extend(self.send(Input::MemoryUse {
             sandbox,
             compressed,
             swapped,
             stall,
             high,
-        });
+            bringing_down,
+        }));
+        actions
     }
 
     fn available(&mut self, bytes: u64) -> Vec<Action> {
@@ -164,6 +193,7 @@ fn shrinks(actions: &[Action]) -> Vec<(u128, u64, u64, ShrinkRequest)> {
                 free,
                 keep,
                 request,
+                ..
             } => Some((sandbox.0, *free, *keep, *request)),
             _ => None,
         })
@@ -174,7 +204,20 @@ fn ended(actions: &[Action]) -> Vec<u128> {
     actions
         .iter()
         .filter_map(|action| match action {
-            Action::EndForMemory { sandbox } => Some(sandbox.0),
+            Action::EndForMemory { sandbox, .. } => Some(sandbox.0),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Why `actions` shrink or end each sandbox they do.
+fn causes(actions: &[Action]) -> Vec<(u128, ShrinkCause)> {
+    actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::Shrink { sandbox, cause, .. } | Action::EndForMemory { sandbox, cause } => {
+                Some((sandbox.0, *cause))
+            }
             _ => None,
         })
         .collect()
@@ -346,6 +389,17 @@ fn a_short_host_holds_every_sandbox_to_its_request_then_shrinks_the_furthest_abo
         panic!("{actions:?}");
     };
     assert_eq!((free, keep), (2 * GIB + 512 * MIB, GIB));
+    // A shortage of the host's, not of one sandbox's memory.
+    assert_eq!(
+        causes(&actions),
+        [(
+            1,
+            ShrinkCause::Short {
+                shortfall: 2 * GIB + 512 * MIB,
+                available: 0
+            }
+        )]
+    );
     // One at a time.
     rig.at(11);
     assert_eq!(shrinks(&rig.available(0)), []);
@@ -691,6 +745,17 @@ fn a_sandbox_the_kernel_cannot_hold_to_its_bound_is_shrunk_by_what_it_holds_abov
         panic!("{actions:?}");
     };
     assert_eq!((free, keep), (2 * GIB, GIB));
+    // Not a shortage of the host's: the kernel could not hold it.
+    assert_eq!(
+        causes(&actions),
+        [(
+            1,
+            ShrinkCause::OverBound {
+                over: 2 * GIB,
+                available: 2 * GIB
+            }
+        )]
+    );
     assert!(!sleeps(&actions));
     // It had nothing left to end: its VM is ended while it still costs
     // the others, once what its guest did had time to show.
@@ -706,7 +771,12 @@ fn a_sandbox_the_kernel_cannot_hold_to_its_bound_is_shrunk_by_what_it_holds_abov
         "it settles first"
     );
     rig.at(22);
-    assert_eq!(ended(&rig.available(2 * GIB)), [1]);
+    let actions = rig.available(2 * GIB);
+    assert_eq!(ended(&actions), [1]);
+    assert!(
+        matches!(causes(&actions)[..], [(1, ShrinkCause::OverBound { .. })]),
+        "{actions:?}"
+    );
     assert_eq!(rig.level(2), Level::Running);
 }
 
@@ -824,4 +894,87 @@ fn a_vm_the_kernel_is_bringing_down_is_not_over_its_bound_until_it_stops() {
         panic!("{actions:?}");
     };
     assert_eq!((free, keep), (640 * MIB, GIB));
+}
+
+#[test]
+fn a_vm_the_engine_is_still_bringing_down_is_given_the_descent_before_it_counts_as_not_held() {
+    let mut rig = incompressible();
+    // The kernel ages its pages before it compresses any: for a minute
+    // it does not come down, while the engine is still at work on it.
+    // It is reported, never shrunk for it.
+    for second in 2..62 {
+        rig.at(second);
+        let actions = rig.descending(1, 6 * GIB, 2 * GIB);
+        assert_eq!(shrinks(&actions), [], "at {second} s");
+        assert_eq!(rig.levels().over_bound, 0, "at {second} s");
+        assert_eq!(rig.levels().bringing_down, 1, "at {second} s");
+        assert_eq!(
+            rig.host.next_deadline(),
+            Some(At::from_duration(Duration::from_secs(62))),
+            "at {second} s"
+        );
+    }
+    // A minute without coming down a step: the kernel cannot hold it, and
+    // its guest frees what it holds above its bound. Its own readings
+    // stay as they were: a reading of it would be what decides.
+    rig.at(62);
+    let actions = rig.available(2 * GIB);
+    assert_eq!(rig.levels().over_bound, 1);
+    assert_eq!(rig.levels().bringing_down, 0);
+    let [(1, free, keep, _)] = shrinks(&actions)[..] else {
+        panic!("{actions:?}");
+    };
+    assert_eq!((free, keep), (2 * GIB, GIB));
+    assert!(!sleeps(&actions));
+}
+
+#[test]
+fn a_vm_the_kernel_starts_to_compress_late_is_never_shrunk() {
+    let mut rig = incompressible();
+    // Twenty seconds of aging, twice the hold, then it comes down 256 MiB
+    // a reading to its 4 GiB bound, and what it gives back is available.
+    for second in 2..22 {
+        rig.at(second);
+        let actions = rig.descending(1, 6 * GIB, 2 * GIB);
+        assert_eq!(shrinks(&actions), [], "at {second} s");
+    }
+    let mut resident = 6 * GIB;
+    for second in 22..30 {
+        rig.at(second);
+        resident -= 256 * MIB;
+        let actions = rig.descending(1, resident, 2 * GIB + (6 * GIB - resident));
+        assert_eq!(shrinks(&actions), [], "at {second} s");
+        assert_eq!(rig.levels().over_bound, 0, "at {second} s");
+        assert_eq!(rig.levels().bringing_down, 0, "at {second} s");
+    }
+    // At its bound the engine is done, and nothing is asked of it.
+    for second in 30..50 {
+        rig.at(second);
+        rig.uses(1, 4 * GIB, 0, 0, 0);
+        let actions = rig.available(4 * GIB);
+        assert!(
+            shrinks(&actions).is_empty() && ended(&actions).is_empty(),
+            "at {second} s: {actions:?}"
+        );
+        assert_eq!(rig.levels().over_bound, 0, "at {second} s");
+    }
+}
+
+#[test]
+fn a_vm_the_engine_brought_down_as_far_as_the_kernel_takes_is_shrunk_once_the_hold_has_passed() {
+    let mut rig = incompressible();
+    for second in 2..20 {
+        rig.at(second);
+        let actions = rig.descending(1, 6 * GIB, 2 * GIB);
+        assert_eq!(shrinks(&actions), [], "at {second} s");
+    }
+    // The engine gives up above the bound: the kernel takes no more. It
+    // has not come down for longer than the hold, so its guest is asked
+    // at once.
+    rig.at(20);
+    let actions = rig.read(1, 6 * GIB, 0, 0, 0, None, false);
+    let [(1, free, keep, _)] = shrinks(&actions)[..] else {
+        panic!("{actions:?}");
+    };
+    assert_eq!((free, keep), (2 * GIB, GIB));
 }

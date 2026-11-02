@@ -9,7 +9,6 @@ import { createRecordingActivities } from "./activities/recordings";
 import { createBrowserRecordingActivities } from "./activities/browser-recordings";
 import { createGoalActivities } from "./activities/goals";
 import { createModelCallFactReconcilerActivities } from "./activities/model-call-fact-reconciler";
-import { createKnowledgeSourceSyncActivities } from "./activities/knowledge-source-sync";
 import { createRetainedScreenshotMaintenanceActivities } from "./activities/retained-screenshot-reaper";
 import { createRigVerificationActivities } from "./activities/rig-verification";
 import { createSandboxLeaseActivities } from "./activities/sandbox-lease";
@@ -35,7 +34,6 @@ export function createControlActivitiesFromServices(
   return {
     ...createDocumentActivities(services, resolveDocumentServices),
     ...createKnowledgeIndexingActivities(services, resolveDocumentServices),
-    ...createKnowledgeSourceSyncActivities(services, resolveDocumentServices),
     ...createSessionStateActivities(services),
     ...createSessionStorageActivities(services),
     ...createSessionArchiveActivities(services),

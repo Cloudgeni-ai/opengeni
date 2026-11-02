@@ -457,7 +457,7 @@ test("a deployment that turns Only me off refuses new Only me schedules", async 
   expect((await f.create(f.owner.headers, {})).status).toBe(201);
 });
 
-test("only its owner's Only me schedules can run on a personal machine", async () => {
+test("only its owner's schedules can run on a personal machine, Only me or shared", async () => {
   const f = await fixture({ sandboxOwnershipEnabled: true, sandboxSelfhostedEnabled: true });
   const machine = await shared.admin.begin(async (tx) => {
     await tx`select set_config('opengeni.account_id', ${f.accountId}, true)`;
@@ -479,13 +479,15 @@ test("only its owner's Only me schedules can run on a personal machine", async (
   };
 
   const forEveryone = await f.create(f.owner.headers, { agentConfig: onMachine });
-  expect(forEveryone.status).toBe(422);
-  expect(await forEveryone.text()).toContain("Only me");
+  expect(forEveryone.status).toBe(201);
+  expect(((await forEveryone.json()) as { visibility: string }).visibility).toBe("workspace");
   const notTheirs = await f.create(f.other.headers, {
     visibility: "private",
     agentConfig: onMachine,
   });
   expect(notTheirs.status).toBe(422);
+  const notTheirsShared = await f.create(f.other.headers, { agentConfig: onMachine });
+  expect(notTheirsShared.status).toBe(422);
 
   const created = await f.create(f.owner.headers, {
     visibility: "private",
@@ -494,13 +496,14 @@ test("only its owner's Only me schedules can run on a personal machine", async (
   expect(created.status).toBe(201);
   const task = (await created.json()) as { id: string; visibility: string };
   expect(task.visibility).toBe("private");
+  // Sharing it keeps it on the owner's machine: it still runs as its owner.
   const widened = await f.app.request(`${f.base}/${task.id}`, {
     method: "PATCH",
     headers: f.owner.headers,
     body: JSON.stringify({ visibility: "workspace" }),
   });
-  expect(widened.status).toBe(422);
-  expect(await widened.text()).toContain("Only me");
+  expect(widened.status).toBe(200);
+  expect(((await widened.json()) as { visibility: string }).visibility).toBe("workspace");
   const renamed = await f.app.request(`${f.base}/${task.id}`, {
     method: "PATCH",
     headers: f.owner.headers,

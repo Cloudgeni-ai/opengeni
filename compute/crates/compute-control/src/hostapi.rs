@@ -30,8 +30,8 @@ use bytes::Bytes;
 use compute_fleet::LeaseTerms;
 use compute_protocol::fleet::{
     CERTIFICATE_PATH, CertificateAsked, HostCertificate, LINK_TOKENS_PATH, LinkTokens,
-    LinkTokensAsked, METRICS_PATH, Proof, REGISTER_PATH, RENEW_PATH, REPORT_PATH, Register,
-    Registered, Renew, Renewed, Report, Ruling, Terms, Verdict,
+    LinkTokensAsked, METRICS_PATH, POINTER_READ_PATH, POINTER_WRITE_PATH, Proof, REGISTER_PATH,
+    RENEW_PATH, REPORT_PATH, Register, Registered, Renew, Renewed, Report, Ruling, Terms, Verdict,
 };
 use compute_protocol::host::Id;
 use compute_protocol::host_metrics::{self, Refused};
@@ -45,8 +45,11 @@ use crate::authority::{Authority, ISSUED_FOR, Proven, requested_key, verify};
 use crate::identity::GceIdentity;
 use crate::link::Links;
 use crate::metrics::{Metrics, Passed};
+use crate::pointers::Pointers;
 use crate::store::{Admission, Store};
 use crate::tls::names_of;
+
+mod pointers;
 
 /// How long a host may take to agree TLS.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -218,6 +221,8 @@ struct Inner<S> {
     links: Option<Arc<Links>>,
     certificates: Arc<Certificates>,
     host_metrics: Option<Arc<HostMetrics>>,
+    /// The fleet's pointers, if the service has an archive store.
+    pointers: Option<Arc<Pointers<S>>>,
 }
 
 /// The host API's state.
@@ -275,6 +280,19 @@ async fn register<S: Store>(
         Admission::StillLive => Registered::StillLive {
             retry_after_ms: wire_terms(terms).register_every_ms,
         },
+        Admission::Outdated => {
+            tracing::warn!(
+                host = %register.info.name,
+                "refused a host of an earlier release, which keeps its pointers in the \
+                 object store: this fleet keeps them in the service (ADR 25)"
+            );
+            return Err((
+                StatusCode::CONFLICT,
+                "this fleet keeps its pointers in the service, and this host's release \
+                 writes them to the object store: upgrade the host"
+                    .into(),
+            ));
+        }
     };
     Ok(Json(answer))
 }
@@ -497,19 +515,22 @@ fn renewed(
 }
 
 /// The host API's routes; with `host_metrics`, also the one hosts post
-/// their metrics to.
+/// their metrics to, and with `pointers` the fleet's pointers.
 pub fn router<S: Store>(
     store: Arc<S>,
     terms: LeaseTerms,
     links: Option<Arc<Links>>,
     certificates: Arc<Certificates>,
     host_metrics: Option<Arc<HostMetrics>>,
+    pointers: Option<Arc<Pointers<S>>>,
 ) -> Router {
     let mut router = Router::new()
         .route(REGISTER_PATH, post(register::<S>))
         .route(RENEW_PATH, post(renew::<S>))
         .route(REPORT_PATH, post(report::<S>))
         .route(LINK_TOKENS_PATH, post(link_tokens::<S>))
+        .route(POINTER_READ_PATH, post(pointers::read::<S>))
+        .route(POINTER_WRITE_PATH, post(pointers::write::<S>))
         .route(
             CERTIFICATE_PATH,
             post(certificate::<S>).layer(DefaultBodyLimit::max(MAX_CERTIFICATE_ASKED)),
@@ -526,6 +547,7 @@ pub fn router<S: Store>(
         links,
         certificates,
         host_metrics,
+        pointers,
     })))
 }
 
@@ -778,6 +800,7 @@ mod tests {
             LeaseTerms::RECOMMENDED,
             None,
             certificates,
+            None,
             None,
         );
         Api {

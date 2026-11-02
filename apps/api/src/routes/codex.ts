@@ -1238,6 +1238,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceId: startedIn,
       subjectId: grant.subjectId,
       ...(personal ? { personal: true } : {}),
+      ...(personal && startedIn !== workspaceId ? { addedFrom: workspaceId } : {}),
       credential: {
         credentialEncrypted: encryptEnvironmentValue(
           key,

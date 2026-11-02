@@ -572,7 +572,7 @@ describe("offline serial fresh enrollment and first-turn barrier", () => {
       );
     },
   );
-  test("actual database limiter refuses exactly 60000 ms idle but admits 61000 ms", async () => {
+  test("actual database limiter refuses 59999 ms idle but admits the 61000 ms reset cooldown", async () => {
     let virtualNow = now;
     await withProductionDatabaseLimiter(
       () => virtualNow,
@@ -583,7 +583,9 @@ describe("offline serial fresh enrollment and first-turn barrier", () => {
           expect(await limiter.check(url)).toBeUndefined();
         }
         const lastAdmission = virtualNow;
-        virtualNow = lastAdmission + 60_000;
+        // The window resets once a full 60000 ms has passed; the 61000 ms
+        // reset cooldown keeps a one-second margin above that boundary.
+        virtualNow = lastAdmission + 59_999;
         expect((await limiter.check(url))?.status).toBe(429);
         virtualNow = lastAdmission + 61_000;
         expect(await limiter.check(url)).toBeUndefined();

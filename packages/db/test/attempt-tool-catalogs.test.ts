@@ -40,6 +40,7 @@ import {
   markCodemodeOperationExecutionStarted,
   persistAttemptToolCatalog,
   submitCodemodeOperation,
+  getCodemodeCallExecutionSandboxId,
   createConnection,
   encryptEnvironmentValue,
 } from "../src";
@@ -350,6 +351,45 @@ describe("durable attempt tool catalogs", () => {
 
     expect(submissions.map(({ created }) => created).sort()).toEqual([false, true]);
     expect(submissions[0]!.operation).toEqual(submissions[1]!.operation);
+  });
+
+  test("records the machine a run_on exec's Codemode call came from, and only for its session", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const exactCatalog = catalog(scope);
+    await persistAttemptToolCatalog(client.db, exactCatalog);
+    const machine = crypto.randomUUID();
+    const remote = codemodeCall(exactCatalog.digest);
+    const local = codemodeCall(exactCatalog.digest);
+    await submitCodemodeOperation(client.db, {
+      ...scope,
+      call: remote,
+      executionSandboxId: machine,
+    });
+    await submitCodemodeOperation(client.db, { ...scope, call: local, executionSandboxId: null });
+    const lookup = (operationId: string, sessionId = scope.sessionId) =>
+      getCodemodeCallExecutionSandboxId(client.db, {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        sessionId,
+        operationId,
+      });
+    expect(await lookup(remote.operationId)).toBe(machine);
+    // Code on the session's own sandbox, and ids that name no Codemode call
+    // (a model call's operation), resolve paths on the active sandbox.
+    expect(await lookup(local.operationId)).toBeNull();
+    expect(await lookup(crypto.randomUUID())).toBeNull();
+    // Another session cannot borrow the call's machine.
+    expect(await lookup(remote.operationId, crypto.randomUUID())).toBeNull();
+    const other = await fixture();
+    expect(
+      await getCodemodeCallExecutionSandboxId(client.db, {
+        accountId: other.accountId,
+        workspaceId: other.workspaceId,
+        sessionId: scope.sessionId,
+        operationId: remote.operationId,
+      }),
+    ).toBeNull();
   });
 
   test("claims once and records one durable result under the owning claim fence", async () => {

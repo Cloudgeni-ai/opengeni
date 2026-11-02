@@ -15,6 +15,7 @@ import {
   type AttachedBrowserBridgeTransport,
 } from "../src/attached-cdp";
 import { CdpCommandTimeoutError } from "../src/cdp";
+import { protectedFieldsProbeAnswer } from "./fixtures/protected-fields-probe";
 
 type FixtureTab = { id: string; windowId: number; discarded?: boolean };
 
@@ -79,7 +80,11 @@ class UnansweredTabBridge implements AttachedBrowserBridgeTransport {
         return { events: [], cursor: 0, truncated: false } as T;
       case "debugger.command":
         if (tabId === "7" && this.blocked) await this.workEnds;
-        return { result: this.result(tabId, String(payload.method)) } as T;
+        return {
+          result:
+            protectedFieldsProbeAnswer(String(payload.method), payload.params) ??
+            this.result(tabId, String(payload.method)),
+        } as T;
       default:
         return {} as T;
     }
@@ -150,6 +155,7 @@ class UnansweredTabBridge implements AttachedBrowserBridgeTransport {
         cssContentSize: { x: 0, y: 0, width: 800, height: 600 },
       };
     if (method === "Accessibility.getFullAXTree") return { nodes: [] };
+    if (method === "DOMSnapshot.captureSnapshot") return { strings: [], documents: [] };
     if (method === "Runtime.evaluate") return { result: { value: 1 } };
     return {};
   }

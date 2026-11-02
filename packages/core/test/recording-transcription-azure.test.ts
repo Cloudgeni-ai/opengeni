@@ -6,6 +6,7 @@ import {
 } from "../src/recording-transcription-azure";
 import {
   mergeRecordingTranscriptionPieces,
+  planRecordingSoundPieces,
   planRecordingTranscriptionPieces,
   RecordingTranscriptionError,
   type RecordingTranscriptionResult,
@@ -177,10 +178,50 @@ describe("Azure Speech recordings", () => {
     expect((await attempt(400, '{"error":{"code":"AudioLengthLimitExceeded"}}')).code).toBe(
       "too_large",
     );
+    // The free tier's spent monthly quota, which comes back as 403 like a rejected key.
+    const spent = await attempt(
+      403,
+      '{"error":{"code":"403","message":"Out of call volume quota for SpeechServices F0 pricing tier. Please retry after 2 days. To increase your call volume switch to a paid tier."}}',
+    );
+    expect([spent.code, spent.retryable]).toEqual(["quota_exceeded", false]);
+    expect((await attempt(403, '{"error":{"code":"Forbidden"}}')).code).toBe("unauthorized");
   });
 });
 
 describe("pieces of long tracks", () => {
+  test("plans pieces over only the stretches with sound", () => {
+    expect(
+      planRecordingSoundPieces(600_000, null, [
+        { startMilliseconds: 10_000, endMilliseconds: 40_000 },
+        { startMilliseconds: 300_000, endMilliseconds: 700_000 },
+      ]),
+    ).toEqual([
+      {
+        startMilliseconds: 10_000,
+        endMilliseconds: 40_000,
+        keepFromMilliseconds: 10_000,
+        keepUntilMilliseconds: 40_000,
+      },
+      {
+        startMilliseconds: 300_000,
+        endMilliseconds: 600_000,
+        keepFromMilliseconds: 300_000,
+        keepUntilMilliseconds: Number.POSITIVE_INFINITY,
+      },
+    ]);
+    // A stretch longer than the model takes is split like a whole track.
+    const long = planRecordingSoundPieces(600_000, 100_000, [
+      { startMilliseconds: 100_000, endMilliseconds: 350_000 },
+    ]);
+    expect(long.map((piece) => [piece.startMilliseconds, piece.endMilliseconds])).toEqual([
+      [100_000, 190_000],
+      [170_000, 270_000],
+      [250_000, 350_000],
+      [330_000, 350_000],
+    ]);
+    expect(planRecordingSoundPieces(600_000, null, [])).toEqual([]);
+  });
+
   test("keeps a track that fits whole", () => {
     expect(planRecordingTranscriptionPieces(90_000, 120_000)).toEqual([
       {

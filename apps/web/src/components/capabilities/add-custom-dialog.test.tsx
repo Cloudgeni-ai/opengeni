@@ -38,8 +38,8 @@ test("a failed add says why inside the dialog that stays open", async () => {
   );
   try {
     const alert = document.body.querySelector('[role="dialog"] [role="alert"]');
-    expect(alert?.textContent).toContain("Only an admin can add connections");
-    expect(alert?.textContent).toContain("Ask a workspace admin to add this MCP server.");
+    expect(alert?.textContent).toContain("You can't add connections here");
+    expect(alert?.textContent).toContain("Ask a workspace admin to add this MCP server");
     expect(alert?.textContent).not.toContain("capabilities:manage");
   } finally {
     await act(async () => root.unmount());

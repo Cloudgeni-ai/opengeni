@@ -50,6 +50,7 @@ import { readPendingPrompt, forgetPendingPrompt } from "@/pending-prompt";
 import { ComposerPlusMenu } from "@/new-session-options";
 import { useSessionFullAccess, type SessionFullAccess } from "@/session-full-access";
 import { AppThemeProvider } from "@/theme";
+import { rememberSessionRow } from "@/session-list-cache";
 import { useComposerVoice } from "@/voice";
 import { openLinkFromApp } from "@/app-link-registry";
 import { appSessionPath } from "@/app-links";
@@ -250,6 +251,11 @@ function LiveSession(props: {
     workspaceId: props.workspaceId,
   });
   const session = controller.session.session;
+  // The lists underneath follow this chat's row while it is open, so going back
+  // shows them already in order rather than reordering under the next tap.
+  useEffect(() => {
+    if (session && session.workspaceId === props.workspaceId) rememberSessionRow(session);
+  }, [session, props.workspaceId]);
   const feedback = useMemo(
     () => ({ client: props.client, workspaceId: props.workspaceId, sessionId: props.sessionId }),
     [props.client, props.workspaceId, props.sessionId],

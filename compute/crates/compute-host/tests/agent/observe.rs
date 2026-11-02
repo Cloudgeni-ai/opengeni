@@ -18,7 +18,7 @@ use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-use super::{Delays, Fake, Lab, NEVER, SAVE_IN_PLACE, SAVE_QUICKLY, World, id};
+use super::{Delays, Fake, Lab, NEVER, SAVE_IN_PLACE, SAVE_QUICKLY, World, id, vm_name};
 
 const TRACE: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
 
@@ -272,6 +272,60 @@ async fn idle_sleeps_and_streams_tell_what_they_did() {
         int(save, "compute.phase.snapshot_us").is_some(),
         "{save:#?}"
     );
+    lab.assert_clean();
+}
+
+/// A VM that ends on its own leaves what its logs last said, read before
+/// its teardown, with how it ended, beside its alarm.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_vm_lost_on_its_own_leaves_its_last_words() {
+    let (lab, observer, mut events) = watched().await;
+    let sandbox = id(63);
+    lab.create(sandbox, NEVER).await;
+    assert_eq!(lab.run(sandbox, &["set hello"]).await, ["ok"]);
+
+    lab.world.crash(&vm_name(sandbox));
+    let alarm = |event: &Event| is(event, "compute.alarm", "compute.alarm", "programs_lost");
+    let mut seen = until(&mut events, |event| event.name == "compute.vm.lost").await;
+    if !seen.iter().any(alarm) {
+        seen.extend(until(&mut events, alarm).await);
+    }
+    let lost: Vec<&Event> = seen
+        .iter()
+        .filter(|event| event.name == "compute.vm.lost")
+        .collect();
+    assert_eq!(lost.len(), 1, "{seen:#?}");
+    let lost = lost[0];
+    assert_eq!(lost.severity, Severity::Warn);
+    assert_eq!(
+        text(lost, "compute.sandbox.id"),
+        Some(&*sandbox.to_string())
+    );
+    assert_eq!(text(lost, "compute.vm.end"), Some("vm_exited"));
+    assert_eq!(
+        text(lost, "compute.vm.guest_said"),
+        Some(&*format!(
+            "{}: Kernel panic - not syncing",
+            vm_name(sandbox)
+        ))
+    );
+    assert_eq!(text(lost, "compute.vm.vmm_said"), Some("Vmm is stopping."));
+    assert_eq!(text(lost, "compute.vm.pager_said"), Some(""));
+    assert_eq!(observer.metrics().alarms(Alarm::ProgramsLost), 1);
+
+    // It boots again from its disk, and a VM the agent ends itself, as
+    // for a sleep, says nothing.
+    assert_eq!(lab.run(sandbox, &["get"]).await, [""]);
+    let request = Request::Sleep {
+        id: sandbox,
+        generation: None,
+        level: LevelName::Saved,
+    };
+    let _ = lab.client.call(&request).await.unwrap();
+    lab.wait_level(sandbox, LevelName::Saved).await;
+    while let Ok(event) = events.try_recv() {
+        assert_ne!(event.name, "compute.vm.lost", "{event:#?}");
+    }
     lab.assert_clean();
 }
 

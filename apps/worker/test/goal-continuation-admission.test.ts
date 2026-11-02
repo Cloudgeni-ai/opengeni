@@ -9,6 +9,7 @@ import {
   type Settings,
 } from "@opengeni/config";
 import { testSettings } from "@opengeni/testing/settings";
+import { API_CREDITS_REQUIRED_MESSAGE } from "@opengeni/contracts";
 import { createGoalActivities } from "../src/activities/goals";
 import type { ControlActivityServices } from "../src/activities/types";
 import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";
@@ -181,6 +182,42 @@ for (const [model, settings, reason] of [
     expect(await value.activities.maybeContinueGoal(input)).toEqual({ action: "paused" });
     expect(value.materialize).toHaveBeenCalledTimes(1);
     expect(value.publish).toHaveBeenCalledWith(workspaceId, sessionId, [event]);
+  });
+}
+
+for (const origin of ["api", "app"] as const) {
+  test(`an ${origin} chat's goal continuation is funded like the chat`, async () => {
+    const settings = testSettings({ billingMode: "stripe" });
+    const value = fixture(settings.openaiModel, "completed", settings);
+    const spies = [
+      spyOn(db, "isCodexBilledTurn").mockResolvedValue(false),
+      spyOn(db, "readSubscriptionCoreFunding").mockResolvedValue(false),
+      spyOn(db, "checkWorkspaceAllowance").mockResolvedValue(null),
+    ];
+    const readOrigin = spyOn(db, "readSessionBillingOrigin").mockResolvedValue(origin);
+    const balance = spyOn(db, "getSpendableCreditBalance").mockResolvedValue({
+      accountId: workspaceId,
+      balanceMicros: 0,
+      currency: "usd",
+      updatedAt: new Date().toISOString(),
+    });
+    restores.push(...[...spies, readOrigin, balance].map((spy) => () => spy.mockRestore()));
+    value.materialize.mockImplementation(async (_db, candidate) => {
+      expect(await candidate.admission!({} as db.Database, null)).toMatchObject({
+        budgetBlocked:
+          origin === "api"
+            ? expect.stringContaining(API_CREDITS_REQUIRED_MESSAGE)
+            : expect.stringContaining("Insufficient workspace credits"),
+      });
+      return { action: "continue", events: [] } as never;
+    });
+    await value.activities.maybeContinueGoal(input);
+    expect(readOrigin).toHaveBeenCalledWith(expect.anything(), {
+      accountId: input.accountId,
+      workspaceId,
+      sessionId,
+    });
+    expect(balance.mock.calls.at(-1)?.[5]).toBe(origin);
   });
 }
 

@@ -58,3 +58,9 @@ export function useRail() {
     startNewSession: () => {},
   };
 }
+// The settings shell reads the rail where it may be absent; here it is present.
+// `?apprail=none`: a page with no app rail around it, as personal settings.
+export function useOptionalRail() {
+  const rail = useRail();
+  return new URLSearchParams(location.search).get("apprail") === "none" ? null : rail;
+}

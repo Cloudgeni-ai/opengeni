@@ -23,14 +23,12 @@ import { createHash } from "node:crypto";
 import {
   applyGitAuthPointerEnvironment,
   hasGitCredentialRepositorySelection,
-  hasGitHubRepositorySelection,
   resolveStreamTokenSecret,
   sandboxLifecycleTransitionWaitMs,
   sandboxWarmRateMicrosPerSecond,
   stableSandboxEnvironmentForRun,
 } from "@opengeni/config";
 import type { Settings } from "@opengeni/config";
-import { githubAppBotIdentity } from "@opengeni/github";
 import { type AccessGrant, type Session, type StreamUrlRotatedPayload } from "@opengeni/contracts";
 import {
   acquireLease,
@@ -173,12 +171,7 @@ export async function sessionAttachEnvironment(
       : services.settings;
   const environment = stableSandboxEnvironmentForRun(settingsForSession, { workspaceId });
   if (hasGitCredentialRepositorySelection(session.resources)) {
-    applyGitAuthPointerEnvironment(
-      environment,
-      hasGitHubRepositorySelection(session.resources)
-        ? githubAppBotIdentity(services.settings)
-        : null,
-    );
+    applyGitAuthPointerEnvironment(environment);
   }
   return environment;
 }

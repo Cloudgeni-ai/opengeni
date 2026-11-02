@@ -194,6 +194,7 @@ export async function startMeetingSummary(
       recordingId: recording.id,
       title: recording.title,
       replacesRevision: candidate.replacesRevision,
+      titleSource: recording.titleSource,
     }),
     surface: "system",
     metrics: service.observability,

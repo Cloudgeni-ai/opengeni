@@ -43,6 +43,9 @@ Rules:
    rechecks that the machine still belongs to the owner and is attachable.
    Shared schedules still cannot use personal machines, because other members
    would then be driving someone's own computer.
+   Superseded: a schedule runs as its owner and only its owner changes or
+   runs it, so the owner's shared schedules may use the owner's machine too
+   (`docs/design/ownership-and-reach.md`, rule 9).
 5. Schedule visibility is enforced in the one core gate that the HTTP API, the
    agent tools and the Slack integration all use, not in each route.
 

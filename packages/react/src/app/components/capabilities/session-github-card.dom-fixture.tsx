@@ -478,7 +478,7 @@ describe("GitHub conversation card", () => {
     }
   });
 
-  test("a second GitHub account is grouped and blocked once the chat uses another token", async () => {
+  test("a second GitHub account is grouped and usable alongside the chat's repositories", async () => {
     const api = repo(101, "acme/api");
     context.githubStatus = {
       ...boundStatus(),
@@ -487,10 +487,8 @@ describe("GitHub conversation card", () => {
     context.githubRepos = [api, repo(201, "northwind/notes", 77)];
     const h = await render([resourceFor(api)]);
     try {
-      expect(h.text()).toContain(
-        "This chat already uses acme's repositories. Start a new chat to use northwind's.",
-      );
-      expect(h.byLabel("Use northwind/notes in this chat")).toBeNull();
+      expect(h.text()).not.toContain("Start a new chat");
+      expect(h.byLabel("Use northwind/notes in this chat")).not.toBeNull();
       expect(h.text()).toContain("Choose acme repositories");
       expect(h.text()).toContain("Choose northwind repositories");
     } finally {

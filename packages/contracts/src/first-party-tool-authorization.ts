@@ -27,6 +27,7 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   notify_user: { sessionRequired: true, allOf: ["sessions:control"] },
   notification_withdraw: { sessionRequired: true, allOf: ["sessions:control"] },
   inbox_tidy: { sessionRequired: true, allOf: ["sessions:control"] },
+  call_user: { sessionRequired: true, allOf: ["sessions:control"] },
   goal_set: { sessionRequired: true, allOf: ["goals:manage"] },
   goal_update: { sessionRequired: true, allOf: ["goals:manage"] },
   goal_progress: { sessionRequired: true, allOf: ["goals:manage"] },
@@ -273,6 +274,11 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   slack_bot_prepare_message: { sessionRequired: true, allOf: ["connections:read"] },
   slack_bot_send_prepared_message: { sessionRequired: true, allOf: ["connections:read"] },
   slack_bot_delete_message: { allOf: ["connections:read"] },
+  // Slack-started chats only; the server finds the chat's own Slack thread.
+  slack_agent_handoff: { sessionRequired: true, allOf: ["sessions:read"] },
+  slack_agent_chats: { sessionRequired: true, allOf: ["sessions:read"] },
+  // Posts a card only; creating needs a current admin of the target to confirm.
+  slack_agent_propose: { sessionRequired: true, allOf: ["sessions:read"] },
   fiken_companies_list: { allOf: ["connections:read"] },
   fiken_contacts_list: { allOf: ["connections:read"] },
   fiken_products_list: { allOf: ["connections:read"] },

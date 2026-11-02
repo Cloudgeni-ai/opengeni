@@ -1,8 +1,4 @@
-import {
-  archiveActionLabel,
-  requestSessionArchive,
-  useArchiveConfirmation,
-} from "../archive-session";
+import { archiveActionLabel, requestSessionArchive } from "../archive-session";
 /**
  * The chat operations every surface shares: the command menu, chords, the
  * chat header and the sidebar's row menus all copy links, pin, archive and
@@ -18,7 +14,8 @@ import { toast } from "../toast";
 import { errorMessage } from "@opengeni/contracts/values";
 
 export type ChatOperations = {
-  archiveLabel?: (chat: SessionListRow) => string;
+  /** "Archive" where this person can archive the chat, otherwise null. */
+  archiveLabel?: (chat: SessionListRow) => string | null;
   /** The chat's shareable address. */
   linkTo(chat: Pick<SessionListRow, "id" | "workspaceId">): string;
   copyLink(chat: Pick<SessionListRow, "id" | "workspaceId">): Promise<void>;
@@ -51,7 +48,6 @@ async function writeClipboard(text: string): Promise<void> {
 
 export function useChatOperations(): ChatOperations {
   const context = useAppContext();
-  const confirmArchive = useArchiveConfirmation();
   const page = usePage();
   const archiving = useRef(new Set<string>());
   const linkTo = useCallback(
@@ -96,8 +92,8 @@ export function useChatOperations(): ChatOperations {
           context,
           chat,
           archived,
-          confirmArchive,
           sessionDisplayTitle(chat),
+          () => void setArchivedRef.current?.({ ...chat, archived: true }, false),
         );
         if (!updated) return;
         if (!context.ownsWorkspaceInvocation(chat.workspaceId, accepted)) return;
@@ -111,29 +107,16 @@ export function useChatOperations(): ChatOperations {
           sessionId: chat.id,
           archived: updated.archived,
         });
-        const after: SessionListRow = {
-          ...chat,
-          archived: updated.archived === true,
-          ...(updated.archiveVersion !== undefined
-            ? { archiveVersion: updated.archiveVersion }
-            : {}),
-        };
-        toast.success(updated.archived ? "Chat archived." : "Chat restored.", {
-          // Archiving is one key away, so taking it back is one click away.
-          action: updated.archived
-            ? { label: "Undo", onClick: () => void setArchivedRef.current?.(after, false) }
-            : undefined,
-        });
       } catch (error) {
         if (!context.ownsWorkspaceInvocation(chat.workspaceId, accepted)) return;
-        toast.error(archived ? "Couldn't archive the chat." : "Couldn't restore the chat.", {
+        toast.error(archived ? "Couldn't archive the chat." : "Couldn't undo the archive.", {
           description: errorMessage(error),
         });
       } finally {
         archiving.current.delete(chat.id);
       }
     },
-    [context, confirmArchive],
+    [context],
   );
   setArchivedRef.current = setArchived;
   const setUnread = useCallback(

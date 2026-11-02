@@ -17,7 +17,12 @@ import { and, eq, sql } from "drizzle-orm";
 import { SessionMessageSearchRequest } from "@opengeni/contracts";
 import { ContinueAfterCapabilitySetupRequest } from "@opengeni/contracts";
 import type { ContinueAfterCapabilitySetupResponse } from "@opengeni/contracts";
-import { enqueueCapabilitySetupContinuation } from "@opengeni/db";
+import {
+  enqueueCapabilitySetupContinuation,
+  getConnectionMetadata,
+  getProviderConnectionHomeWorkspace,
+  latestConnectionAuthNotice,
+} from "@opengeni/db";
 import { buildCapabilityCatalog, integrationDefinitionIdFromCapabilityId } from "@opengeni/core";
 import { integrationDefinitionSetupItem } from "../mcp/integration-definition-capabilities";
 import { capabilitySetupReadiness } from "../capability-setup-readiness";
@@ -143,6 +148,7 @@ import {
   UpdateSessionAttentionRequest,
   UpdateSessionArchiveRequest,
   UpdateSessionRetentionRequest,
+  UpdateSessionUnattendedRequest,
   SetSessionUsageLimitRequest,
   UpdateSessionPinRequest,
   UpdateSessionGoalRequest,
@@ -153,6 +159,7 @@ import {
   UpdateSessionToolPolicyRequest,
   UpdateSessionAgentRequest,
   UpdateSessionSkillsRequest,
+  RemoveSessionResourcesRequest,
   AgentConfigError,
   ViewerHeartbeatRequest,
   WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
@@ -230,12 +237,14 @@ import {
   requestSessionCompaction,
   setSessionChannel,
   ChannelNotFoundError,
+  ChannelAudienceMismatchError,
   setSessionAttention,
   setSessionPin,
   SessionAttentionVersionConflictError,
-  SessionArchiveVersionConflictError,
-  SessionArchiveConfirmationRequiredError,
+  SessionArchiveBlockedError,
+  SessionArchiveFinalError,
   SessionPinVersionConflictError,
+  SessionArchivedPinError,
   SessionPinAccessError,
   SessionListAccessError,
   SessionListCursorError,
@@ -397,8 +406,10 @@ import {
   updateSessionToolPolicy,
   updateSessionAgent,
   updateSessionSkills,
+  removeSessionResources,
   updateSessionProfile,
   setSessionRetention,
+  setSessionUnattended,
   workflowIdForSession,
   sessionWithEffectiveToolPolicy,
   workspaceSessionEffectiveToolsContext,
@@ -2442,6 +2453,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           409,
         );
       }
+      if (error instanceof SessionArchivedPinError) {
+        return c.json({ message: error.message, code: error.code }, 409);
+      }
       throw error;
     }
   });
@@ -2502,15 +2516,17 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
   });
 
-  // Personal chat organization: archived roots leave the ordinary rail only
-  // for this member and remain recoverable through the archived list view.
+  // Archive a chat for everyone (one-way once its short undo window ends), or
+  // undo that within the window with archived: false. mode, confirmPause,
+  // expectedVersion and clientEventId are accepted for older clients and
+  // ignored: every Archive is the same, and repeating one changes nothing.
   app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/archive", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(
       c,
       deps,
       workspaceId,
-      "sessions:read",
+      "sessions:control",
     );
     const grant = authorization.grant;
     const sessionId = c.req.param("sessionId");
@@ -2520,14 +2536,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       { status: 400, message: "invalid session archive request" },
     );
     try {
-      const pause = parsed.archived && parsed.mode !== "hide_for_me";
-      if (pause && !hasPermission(grant.permissions, "sessions:control")) {
-        throw new HTTPException(403, {
-          message:
-            "Pausing a chat requires sessions:control. Use Hide for me to change only personal visibility.",
-        });
-      }
-      const session = await archiveHumanSessionWorkstream(
+      const result = await archiveHumanSessionWorkstream(
         deps,
         {
           accountId: grant.accountId,
@@ -2537,10 +2546,17 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           authorizationSurface: "http",
         },
         {
-          ...parsed,
-          pause,
+          archived: parsed.archived,
           personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
         },
+      );
+      if (!result) throw new HTTPException(404, { message: "session not found" });
+      const session = await getSessionForSubject(
+        db,
+        workspaceId,
+        sessionId,
+        grant.subjectId,
+        relatedSessionAccessFor(c),
       );
       if (!session) throw new HTTPException(404, { message: "session not found" });
       return c.json(
@@ -2555,11 +2571,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       if (error instanceof SessionPinAccessError) {
         throw new HTTPException(403, { message: error.message });
       }
-      if (error instanceof SessionArchiveVersionConflictError) {
-        return c.json(
-          { message: "session archive changed in another client", current: error.current },
-          409,
-        );
+      if (error instanceof SessionArchiveBlockedError) {
+        return c.json({ code: error.code, message: error.message, blockers: error.blockers }, 409);
+      }
+      if (error instanceof SessionArchiveFinalError) {
+        return c.json({ code: error.code, message: error.message }, 409);
       }
       return commandConflictResponse(c, error);
     }
@@ -2724,7 +2740,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         throw new HTTPException(404, { message: "session not found" });
       }
     } catch (error) {
-      if (error instanceof ChannelNotFoundError) {
+      if (error instanceof ChannelNotFoundError || error instanceof ChannelAudienceMismatchError) {
         throw new HTTPException(422, { message: error.message });
       }
       throw error;
@@ -2804,6 +2820,42 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           code: "SESSION_ARCHIVED_READ_ONLY",
           message:
             "This session is already archived, so its keep-live setting can no longer change.",
+        },
+        409,
+      );
+    }
+    const session = await getSessionForSubject(
+      db,
+      workspaceId,
+      sessionId,
+      grant.subjectId,
+      relatedSessionAccess,
+    );
+    if (!session) throw new HTTPException(404, { message: "session not found" });
+    return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
+  });
+
+  // "Work without me": turn a chat's unattended mode on or off from its next
+  // turn. An explicit choice that a person's later message does not change.
+  app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/unattended", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    const payload = await parseRequestJson(c, UpdateSessionUnattendedRequest);
+    const { result, relatedSessionAccess } = await setSessionUnattended(
+      deps,
+      grant,
+      sessionId,
+      payload.unattended,
+    );
+    if (result.status === "not_found") {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    if (result.status === "archived") {
+      return c.json(
+        {
+          code: "SESSION_ARCHIVED_READ_ONLY",
+          message: "This session is archived, so whether it runs unattended can no longer change.",
         },
         409,
       );
@@ -2993,6 +3045,62 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   // the agent once per card so it continues the request that needed it,
   // unless the person already wrote since the card or the capability is not
   // usable in this chat yet. Every skip is a normal 200 outcome.
+  /**
+   * What a continuation for a reconnected account names, or null while the
+   * account is not active with the access its latest card asked for.
+   */
+  async function reconnectedAccountContinuationTarget(
+    workspaceId: string,
+    sessionId: string,
+    connectionId: string,
+    grant: { subjectId: string; accountId: string },
+  ): Promise<
+    | { capabilityId: string; capabilityName: string; toolsVerified: false; connectionId: string }
+    | "no_card"
+    | null
+  > {
+    const card = await latestConnectionAuthNotice(db, { workspaceId, sessionId, connectionId });
+    if (!card) return "no_card";
+    // A personal account may live in the workspace it was first added in.
+    const home =
+      (await getProviderConnectionHomeWorkspace(
+        db,
+        workspaceId,
+        connectionId,
+        grant.subjectId,
+      ).catch(() => null)) ?? workspaceId;
+    const connection = await getConnectionMetadata(db, home, connectionId, grant.subjectId);
+    if (!connection || connection.status !== "active") return null;
+    const asked = Array.isArray(card.payload.scopes)
+      ? card.payload.scopes.filter((scope): scope is string => typeof scope === "string")
+      : [];
+    if (
+      card.payload.reason === "insufficient_scope" &&
+      !asked.every((scope) => connection.grantedScopes.includes(scope))
+    )
+      return null;
+    const serverId =
+      typeof card.payload.canonicalServerId === "string"
+        ? card.payload.canonicalServerId
+        : typeof card.payload.serverId === "string"
+          ? card.payload.serverId
+          : connection.providerDomain;
+    const catalog = await buildCapabilityCatalog({
+      db,
+      workspaceId,
+      settings,
+      subjectId: grant.subjectId,
+      accountId: grant.accountId,
+    }).catch(() => null);
+    const item = catalog?.items.find((entry) => entry.tools.some((tool) => tool.id === serverId));
+    return {
+      capabilityId: item?.id ?? serverId,
+      capabilityName: item?.name ?? connection.providerDomain,
+      toolsVerified: false,
+      connectionId,
+    };
+  }
+
   app.post(
     "/v1/workspaces/:workspaceId/sessions/:sessionId/capability-continuations",
     async (c) => {
@@ -3024,47 +3132,81 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         relatedSessionAccessFor(c),
       );
       if (!session) throw new HTTPException(404, { message: "session not found" });
-      // A reviewed integration's card stands for the person's own connected
-      // instances of it, which the workspace catalog does not list.
-      const integration = integrationDefinitionIdFromCapabilityId(payload.capabilityId) !== null;
-      // A plugin's card stands for its installation in this workspace.
-      const plugin = payload.capabilityId.startsWith(PLUGIN_CAPABILITY_ID_PREFIX);
-      const [item, withPolicy] = await Promise.all([
-        integration
-          ? integrationDefinitionSetupItem(
-              db,
-              settings,
-              workspaceId,
-              grant.subjectId,
-              payload.capabilityId,
-            )
-          : plugin
-            ? marketplacePluginCapabilityItem(db, workspaceId, payload.capabilityId)
-            : buildCapabilityCatalog({
+      let target: {
+        capabilityId: string;
+        capabilityName: string;
+        toolsVerified: boolean;
+        connectionId?: string;
+      };
+      if ("connectionId" in payload) {
+        // A connected account's own card: the person reconnected it or gave it
+        // more access. Continue once the account is active and holds what the
+        // card asked for; otherwise the next tool call would only stop again.
+        const ready = await reconnectedAccountContinuationTarget(
+          workspaceId,
+          sessionId,
+          payload.connectionId,
+          grant,
+        );
+        if (!ready) {
+          return c.json({
+            outcome: "not_needed",
+            reason: "not_ready",
+          } satisfies ContinueAfterCapabilitySetupResponse);
+        }
+        if (ready === "no_card") {
+          return c.json({
+            outcome: "not_needed",
+            reason: "no_card",
+          } satisfies ContinueAfterCapabilitySetupResponse);
+        }
+        target = ready;
+      } else {
+        // A reviewed integration's card stands for the person's own connected
+        // instances of it, which the workspace catalog does not list.
+        const integration = integrationDefinitionIdFromCapabilityId(payload.capabilityId) !== null;
+        // A plugin's card stands for its installation in this workspace.
+        const plugin = payload.capabilityId.startsWith(PLUGIN_CAPABILITY_ID_PREFIX);
+        const [item, withPolicy] = await Promise.all([
+          integration
+            ? integrationDefinitionSetupItem(
                 db,
-                workspaceId,
                 settings,
-                subjectId: grant.subjectId,
-                accountId: grant.accountId,
-              }).then((catalog) =>
-                catalog.items.find((entry) => entry.id === payload.capabilityId),
-              ),
-        withEffectivePolicy(deps, workspaceId, grant.subjectId, session),
-      ]);
-      const readiness = capabilitySetupReadiness(payload.capabilityId, item, withPolicy);
-      if (!item || (readiness !== "ready" && readiness !== "assumed_ready")) {
-        return c.json({
-          outcome: "not_needed",
-          reason: readiness === "not_applicable" ? "not_applicable" : "not_ready",
-        } satisfies ContinueAfterCapabilitySetupResponse);
+                workspaceId,
+                grant.subjectId,
+                payload.capabilityId,
+              )
+            : plugin
+              ? marketplacePluginCapabilityItem(db, workspaceId, payload.capabilityId)
+              : buildCapabilityCatalog({
+                  db,
+                  workspaceId,
+                  settings,
+                  subjectId: grant.subjectId,
+                  accountId: grant.accountId,
+                }).then((catalog) =>
+                  catalog.items.find((entry) => entry.id === payload.capabilityId),
+                ),
+          withEffectivePolicy(deps, workspaceId, grant.subjectId, session),
+        ]);
+        const readiness = capabilitySetupReadiness(payload.capabilityId, item, withPolicy);
+        if (!item || (readiness !== "ready" && readiness !== "assumed_ready")) {
+          return c.json({
+            outcome: "not_needed",
+            reason: readiness === "not_applicable" ? "not_applicable" : "not_ready",
+          } satisfies ContinueAfterCapabilitySetupResponse);
+        }
+        target = {
+          capabilityId: item.id,
+          capabilityName: item.name,
+          toolsVerified: readiness === "ready",
+        };
       }
       const result = await enqueueCapabilitySetupContinuation(db, {
         accountId: grant.accountId,
         workspaceId,
         sessionId,
-        capabilityId: item.id,
-        capabilityName: item.name,
-        toolsVerified: readiness === "ready",
+        ...target,
         requesterSubjectId: grant.subjectId,
       });
       if (result.outcome === "not_needed") {
@@ -3147,6 +3289,21 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       }
       throw error;
     }
+  });
+
+  // Remove attached repositories from the session and its child sessions.
+  // Access ends on the next Git or GitHub call; the next turn removes the
+  // repository folders from the sandbox.
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/resources/remove", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    const payload = parseRequestBody(
+      RemoveSessionResourcesRequest,
+      await c.req.json().catch(() => null),
+    );
+    const session = await removeSessionResources(deps, grant, sessionId, payload);
+    return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/goal", async (c) => {
@@ -4450,9 +4607,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         throw error;
       }
       if (accepted.action === "conflict") {
-        throw new HTTPException(409, {
-          message: `session is ${accepted.sessionStatus}; no unhandled approval is pending`,
-        });
+        // A still-undecided approval is never refused while the session
+        // resumes; what is left is a decision that cannot change anything.
+        throw new HTTPException(409, { message: accepted.message });
       }
       await publishDurableSessionEvents(bus, workspaceId, sessionId, accepted.events);
       const workflowId = workflowIdForSession(sessionId);
@@ -5831,6 +5988,8 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/attention" && verb === "PUT") return "session.attention.write";
   if (suffix === "/archive" && verb === "PUT") return "session.archive.write";
   if (suffix === "/retention" && verb === "PUT") return "session.retention.write";
+  // Changes what the agent may ask and wait for, like its tools.
+  if (suffix === "/unattended" && verb === "PUT") return "session.tool_policy.write";
   // Task usage limit: read with the session; change as a control write
   // (the route additionally admits only a person or the host server key).
   if (suffix === "/usage-limit") {
@@ -5855,6 +6014,7 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/capability-continuations" && verb === "POST") return "session.append";
   if (suffix === "/agent" && verb === "PUT") return "session.tool_policy.write";
   if (suffix === "/skills" && verb === "PUT") return "session.tool_policy.write";
+  if (suffix === "/resources/remove" && verb === "POST") return "session.resources.write";
   if (suffix === "/admin-access") {
     if (verb === "GET") return "session.read";
     if (verb === "PUT" || verb === "DELETE") return "session.tool_policy.write";
@@ -6178,7 +6338,7 @@ export function sessionListQuery(
   contentArchivedOnly: boolean;
   mineOnly: boolean;
   archivedOnly: boolean;
-  sortBy: "updatedAt" | "createdAt" | "name" | undefined;
+  sortBy: "updatedAt" | "createdAt" | "name" | "archivedAt" | undefined;
   archiveStatus: "active" | "archived" | "all" | undefined;
   channelId: string | null | undefined;
   createdBy: { kind: "subject" | "service"; subjectId: string } | undefined;
@@ -6283,13 +6443,22 @@ export function sessionListQuery(
     throw new HTTPException(400, { message: 'archivedOnly must be the literal "true"' });
   }
   const archivedOnly = query.archivedOnly === "true";
-  const sortBy = z.enum(["updatedAt", "createdAt", "name"]).optional().safeParse(query.sortBy);
+  const sortBy = z
+    .enum(["updatedAt", "createdAt", "name", "archivedAt"])
+    .optional()
+    .safeParse(query.sortBy);
   const archiveStatus = z
     .enum(["active", "archived", "all"])
     .optional()
     .safeParse(query.archiveStatus);
   if (!sortBy.success || !archiveStatus.success) {
     throw new HTTPException(400, { message: "Invalid session sortBy or archiveStatus" });
+  }
+  // Only archived chats have an archive date to sort by.
+  if (sortBy.data === "archivedAt" && archiveStatus.data !== "archived" && !archivedOnly) {
+    throw new HTTPException(400, {
+      message: 'sortBy "archivedAt" requires archiveStatus "archived"',
+    });
   }
   if (archivedOnly && archiveStatus.data !== undefined && archiveStatus.data !== "archived") {
     throw new HTTPException(400, { message: "archivedOnly conflicts with archiveStatus" });
@@ -6975,9 +7144,6 @@ function zodErrorFields(error: ZodError): string {
 }
 
 function commandConflictResponse(c: Context, error: unknown): Response {
-  if (error instanceof SessionArchiveConfirmationRequiredError) {
-    return c.json({ code: error.code, message: error.message }, 409);
-  }
   if (error instanceof QueueCommandConflictError) {
     return c.json({ code: error.code, message: error.message, current: error.current }, 409);
   }

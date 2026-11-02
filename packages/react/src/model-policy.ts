@@ -6,6 +6,10 @@ import {
   type ModelLabelGeography,
 } from "@opengeni/sdk/model-picker-order";
 import { modelDisplayName } from "@opengeni/sdk/model-display";
+import {
+  isClaudeSubscriptionModelId,
+  isClaudeSubscriptionProviderId,
+} from "@opengeni/contracts/claude-subscription-model-ids";
 import type { ClientModel, ReasoningEffort, WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { type OpenGeniText } from "./messages/runtime";
 import { regionRestrictedText } from "./inference-region";
@@ -69,9 +73,12 @@ export function billingClassForModel(model: ClientModel): PickerBillingClass {
   ) {
     return "organization_byok";
   }
+  // Keep in step with DIRECT_MODEL_PROVIDER_ID_PREFIXES in @opengeni/contracts;
+  // the session entry must not import the zod-backed contracts barrel.
   if (
     model.provider?.startsWith("workspace-openai-") ||
-    model.provider?.startsWith("workspace-azure-openai-")
+    model.provider?.startsWith("workspace-azure-openai-") ||
+    model.provider?.startsWith("workspace-compatible-")
   )
     return "byok";
   if (
@@ -194,6 +201,24 @@ export function modelUsesCredits(model: ClientModel | undefined): boolean {
   return model?.billing?.metering === "opengeni_credits";
 }
 
+/**
+ * Which connected subscription serves a model (`codex`, `claude`, `xai`), or
+ * null. The workspace catalog leaves `credentialSource` out of its models, so
+ * the public provider id and rail decide when it is absent.
+ */
+export function connectedSubscriptionProvider(
+  model: Pick<ClientModel, "id" | "provider" | "source" | "credentialSource">,
+): "codex" | "claude" | "xai" | null {
+  const source = model.credentialSource;
+  if (source) return source.kind === "connected_subscription" ? source.provider : null;
+  if (isClaudeSubscriptionProviderId(model.provider) || isClaudeSubscriptionModelId(model.id)) {
+    return "claude";
+  }
+  if (model.source === "supergrok") return "xai";
+  if (model.source === "codex") return "codex";
+  return null;
+}
+
 export function payerSummaryForModel(t: OpenGeniText, model: ClientModel): string {
   if (model.cost === "free") {
     return t("modelPolicy.freeInThisDeployment");
@@ -202,8 +227,7 @@ export function payerSummaryForModel(t: OpenGeniText, model: ClientModel): strin
     return t("modelPolicy.opengeniCredits");
   }
   if (model.cost === "subscription") {
-    return model.credentialSource?.kind === "connected_subscription" &&
-      model.credentialSource.provider === "claude"
+    return connectedSubscriptionProvider(model) === "claude"
       ? t("modelPolicy.claudeSubscriptionExternalBilling")
       : model.source === "supergrok"
         ? t("modelPolicy.supergrokSubscriptionExternalBilling")
@@ -226,8 +250,7 @@ export function payerSummaryForModel(t: OpenGeniText, model: ClientModel): strin
     return t("modelPolicy.opengeniCreditsAutomaticManagedRoute");
   }
   if (billing.upstreamPayer === "connected_subscription") {
-    return model.credentialSource?.kind === "connected_subscription" &&
-      model.credentialSource.provider === "claude"
+    return connectedSubscriptionProvider(model) === "claude"
       ? t("modelPolicy.claudeSubscriptionExternalBilling")
       : model.source === "supergrok"
         ? t("modelPolicy.supergrokSubscriptionExternalBilling")
@@ -247,6 +270,10 @@ export function payerSummaryForModel(t: OpenGeniText, model: ClientModel): strin
 export function advancedSourceSummary(t: OpenGeniText, model: ClientModel): string | null {
   const source = model.credentialSource;
   if (!source) {
+    const subscription = connectedSubscriptionProvider(model);
+    if (subscription === "claude") return t("modelPolicy.connectedClaudeSubscription");
+    if (subscription === "xai") return t("modelPolicy.connectedSupergrokSubscription");
+    if (subscription === "codex") return t("modelPolicy.connectedCodexSubscription");
     return model.billing?.metering === "external" && model.billing.upstreamPayer === "deployment"
       ? t("modelPolicy.deploymentProvidedConnection")
       : null;
@@ -283,6 +310,8 @@ function workspaceProviderPayerSummary(t: OpenGeniText, model: ClientModel): str
     return t("modelPolicy.billedToTheWorkspaceAnthropic");
   if (model.provider === "workspace-claude-subscription")
     return t("modelPolicy.usesTheWorkspaceClaudeSubscription");
+  if (model.provider === "claude-subscription")
+    return t("modelPolicy.usesTheConnectedClaudeSubscription");
   if (model.provider === "workspace-openrouter") {
     return t("modelPolicy.billedToTheWorkspaceOpenrouter");
   }
@@ -298,7 +327,10 @@ function workspaceProviderPayerSummary(t: OpenGeniText, model: ClientModel): str
 function organizationProviderPayerSummary(t: OpenGeniText, model: ClientModel): string {
   if (model.provider === "organization-anthropic")
     return t("modelPolicy.billedToTheOrganizationAnthropic");
-  if (model.provider === "organization-claude-subscription")
+  if (
+    model.provider === "organization-claude-subscription" ||
+    model.provider === "claude-subscription"
+  )
     return t("modelPolicy.usesTheConnectedClaudeSubscription");
   if (model.provider === "organization-openrouter") {
     return t("modelPolicy.billedToTheOrganizationOpenrouter");

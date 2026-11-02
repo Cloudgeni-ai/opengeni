@@ -29,8 +29,12 @@
 use serde::{Deserialize, Serialize};
 
 /// How long a create may take, from recording the sandbox to envd taking
-/// its `/init`, before the sweeper gives it up and kills it.
+/// its `/init`, before the sweeper gives it up and kills it: the host's
+/// answer ([`crate::service::CREATE_WAIT`]), then the init.
 pub const CREATE_WITHIN_MS: u64 = 10 * 60 * 1000;
+
+// A create the host answers in time is never swept while its init runs.
+const _: () = assert!(crate::service::CREATE_WAIT.as_millis() < CREATE_WITHIN_MS as u128);
 
 /// The longest timeout a sandbox may have: a day, as on E2B.
 pub const MAX_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;

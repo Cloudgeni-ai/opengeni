@@ -1,6 +1,6 @@
 import type { Observability } from "@opengeni/observability";
 import { measureTurnStartupPhase, recordTurnStartupPhase } from "../../observability-metrics";
-import type { TurnEventPublisher } from "./model-usage";
+import type { TurnBackgroundEventPublisher, TurnEventPublisher } from "./model-usage";
 
 export type SandboxStartupPhase =
   | "credential_resolution"
@@ -20,6 +20,8 @@ export function sandboxStartupPhaseObserver(input: {
   provider: string;
   backend: string;
   publish?: TurnEventPublisher | null;
+  /** When set, receipts go out in the background lane and flush does not wait. */
+  publishInBackground?: TurnBackgroundEventPublisher | null;
 }) {
   const receipts: Parameters<TurnEventPublisher>[0] = [];
   const measure = async <T>(phase: SandboxStartupPhase, work: () => Promise<T>): Promise<T> => {
@@ -54,18 +56,26 @@ export function sandboxStartupPhaseObserver(input: {
     // Called by the owner after all observed operations settle, even on failure.
     // One append per preparation boundary, not one database round trip per hook.
     async flush(): Promise<void> {
-      if (!input.publish || receipts.length === 0) return;
+      if ((!input.publish && !input.publishInBackground) || receipts.length === 0) return;
       const events = receipts.splice(0);
-      try {
-        await measureTurnStartupPhase(
+      const measureDelivery = <T>(work: () => Promise<T>): Promise<T> =>
+        measureTurnStartupPhase(
           input.observability,
           {
             phase: "startup_phase_delivery",
             provider: input.provider,
             backend: input.backend,
           },
-          () => input.publish!(events),
+          work,
         );
+      if (input.publishInBackground) {
+        // Delivery failures never failed the operation; now they also never
+        // hold up the next startup step.
+        input.publishInBackground(events, { measureDelivery });
+        return;
+      }
+      try {
+        await measureDelivery(() => input.publish!(events));
       } catch {
         /* Preserve the original error, including cancellation provenance. */
       }

@@ -1334,6 +1334,69 @@ describe("child lifecycle notices", () => {
     ).toMatchObject({ kind: "child_terminal_result" });
   });
 
+  test("cancelling a chat with an undelivered update and an unanswered tool call writes events in order and ends its input wait", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { goal: true, message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "work" });
+    await freezeChild(grant, child);
+    const json = shared.admin.json;
+    const updateId = crypto.randomUUID();
+    const call = { type: "function_call", callId: "call-1", name: "exec_command", arguments: "{}" };
+    // Fixture only: an update still waiting for the chat and a tool call of
+    // the frozen turn that never got its result.
+    await shared.admin.begin(async (sql) => {
+      await sql`set local session_replication_role = replica`;
+      await sql`insert into session_system_updates
+        (id, account_id, workspace_id, session_id, kind, source_id, dedupe_key, summary, payload, state)
+        values (${updateId}, ${grant.accountId}, ${grant.workspaceId}, ${child.session.id},
+          'agent_message', ${updateId}, ${updateId}, 'update', ${json({ type: "agent_message" })},
+          'pending')`;
+      await sql`insert into session_pending_tool_calls
+        (account_id, workspace_id, session_id, turn_id, execution_generation, attempt_id, call_id,
+          call_type, call_item, call_item_ordered)
+        values (${grant.accountId}, ${grant.workspaceId}, ${child.session.id}, ${child.turn.id},
+          ${child.turn.executionGeneration}, ${child.attemptId}, 'call-1', 'function_call',
+          ${json(call)}, ${JSON.stringify(call)})`;
+      // An input wait an earlier turn set, which nothing will settle once
+      // the chat is cancelled.
+      await sql`update sessions set input_wait_turn_id = ${child.turn.id},
+          input_wait_until = now() - interval '1 day', input_wait_reason = 'Waiting for CI',
+          input_wait_set_at = now() - interval '2 days'
+        where id = ${child.session.id}`;
+    });
+    const [before] = await shared.admin<{ last: number }[]>`
+      select last_sequence as last from session_event_cursors where session_id = ${child.session.id}`;
+
+    await withWorkspaceSessionActivityRls(client.db, grant.workspaceId, (db) =>
+      db.transaction((tx) =>
+        mutateSessionControlInTransaction(tx as unknown as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: child.session.id,
+          actor: { type: "human", subjectId: grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          action: "cancel",
+        }),
+      ),
+    );
+
+    const written = await shared.admin<{ sequence: number; type: string }[]>`
+      select sequence, type from session_events
+      where session_id = ${child.session.id} and sequence > ${before!.last} order by sequence`;
+    expect(written.map((event) => event.sequence)).toEqual(
+      written.map((_, index) => before!.last + 1 + index),
+    );
+    const types = written.map((event) => event.type);
+    expect(types).toContain("system.update.cancelled");
+    expect(types).toContain("turn.cancelled");
+    expect(types.indexOf("agent.toolCall.output")).toBeGreaterThanOrEqual(0);
+    expect(types.indexOf("agent.toolCall.output")).toBeLessThan(types.indexOf("turn.cancelled"));
+    const [session] = await shared.admin<{ status: string; waiting: boolean }[]>`
+      select status, input_wait_until is not null as waiting from sessions
+      where id = ${child.session.id}`;
+    expect(session).toEqual({ status: "cancelled", waiting: false });
+  });
+
   test("direct human pause notifies the parent; the parent's own attempt or an ancestor pause does not", async () => {
     const grant = await workspace();
     const parent = await startSession(grant, { goal: true, message: "orchestrate" });

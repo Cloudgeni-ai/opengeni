@@ -165,6 +165,36 @@ describe("M5 enrollment route discipline", () => {
     );
   });
 
+  test("connecting asks the organization's own-machines switch first; declining never does", () => {
+    // Off, only owners and admins connect machines of their own. The switch
+    // is read before anything is approved or minted; saying no to a code is
+    // always allowed.
+    const approve = handlerBody(
+      routesSrc,
+      "post",
+      "/v1/workspaces/:workspaceId/enrollments/device/approve",
+    );
+    expect(approve).toContain(
+      'await requireOwnMachineConnectAllowed(deps, authorization, effectiveScope ?? "workspace")',
+    );
+    expect(approve.indexOf("requireOwnMachineConnectAllowed(")).toBeLessThan(
+      approve.indexOf("approveDeviceEnrollment("),
+    );
+    const token = handlerBody(routesSrc, "post", "/v1/workspaces/:workspaceId/enrollments/token");
+    expect(token).toContain(
+      'await requireOwnMachineConnectAllowed(deps, authorization, personal ? "user" : "workspace")',
+    );
+    expect(token.indexOf("requireOwnMachineConnectAllowed(")).toBeLessThan(
+      token.indexOf("mintEnrollToken("),
+    );
+    const deny = handlerBody(
+      routesSrc,
+      "post",
+      "/v1/workspaces/:workspaceId/enrollments/device/deny",
+    );
+    expect(deny).not.toContain("requireOwnMachineConnectAllowed(");
+  });
+
   test("a personal token is only for an authenticated person, who is always its owner", () => {
     const token = handlerBody(routesSrc, "post", "/v1/workspaces/:workspaceId/enrollments/token");
     const check = token.indexOf("isPersonalConnectionOwnerPrincipal(authorization)");

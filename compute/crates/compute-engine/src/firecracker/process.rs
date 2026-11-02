@@ -197,9 +197,21 @@ pub(crate) fn parse_pid(text: &str) -> Option<Pid> {
 /// `/proc/<pid>/stat`, `text`. The command name (field 2) is in
 /// parentheses and may hold spaces and parentheses itself, so fields are
 /// counted from the last closing one, after which field 3 comes.
-fn start_time(text: &str) -> Option<u64> {
+pub(crate) fn start_time(text: &str) -> Option<u64> {
     let (_, after_name) = text.rsplit_once(')')?;
     after_name.split_whitespace().nth(22 - 3)?.parse().ok()
+}
+
+/// When a process that has not ended started (see [`start_time`]), or
+/// `None` for one that has ended and is not yet reaped: its state (field
+/// 3) is zombie (`Z`) or dead (`X`).
+pub(crate) fn running_since(text: &str) -> Option<u64> {
+    let (_, after_name) = text.rsplit_once(')')?;
+    let state = after_name.split_whitespace().next()?;
+    if matches!(state, "Z" | "X" | "x") {
+        return None;
+    }
+    start_time(text)
 }
 
 #[cfg(test)]
@@ -256,6 +268,20 @@ mod tests {
         assert_eq!(start_time(&format!("42 (a) b (c)) {tail}")), Some(987_654));
         assert_eq!(start_time("42 (firecracker) S 1 2"), None);
         assert_eq!(start_time("garbage"), None);
+    }
+
+    #[test]
+    fn a_process_that_ended_has_no_start_time_while_it_runs() {
+        let tail = "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 987654 19 20";
+        assert_eq!(
+            running_since(&format!("42 (a) Z) S {tail}")),
+            Some(987_654),
+            "the state follows the last parenthesis"
+        );
+        assert_eq!(running_since(&format!("42 (a) D {tail}")), Some(987_654));
+        assert_eq!(running_since(&format!("42 (a) Z {tail}")), None);
+        assert_eq!(running_since(&format!("42 (a) X {tail}")), None);
+        assert_eq!(running_since("garbage"), None);
     }
 
     #[tokio::test]

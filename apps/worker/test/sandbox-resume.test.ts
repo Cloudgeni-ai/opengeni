@@ -38,10 +38,12 @@ import {
   markSandboxRestoreVerifying,
   markWarmLeaseInstanceLost,
   readLease,
+  reapStaleLeaseHolders,
   authorizeAutomaticSandboxCheckpointRecovery,
   getSandboxRecoveryDiscontinuity,
   SandboxImageConflictError,
   SandboxLeaseRecoveryBlockedError,
+  SandboxLeaseTransitionError,
   upsertSandboxSessionEnvelope,
   type Database,
   type DbClient,
@@ -64,7 +66,6 @@ import {
   sandboxLeaseHolderIdForAttempt,
   SandboxExecReadinessTimeoutError,
   SandboxLeaseInstanceLostError,
-  SandboxWarmingTimeoutError,
 } from "../src/sandbox-resume";
 
 let available = true;
@@ -1425,7 +1426,64 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     await dropSession(resumed.established);
   }, 60_000);
 
-  test("(3b) attached turn waiting on warming is bounded and releases its holder on timeout", async () => {
+  test("slow shared creator yields a recoverable wait and later attaches to the same box", async () => {
+    if (!available) return;
+    const settings = testSettings({ ...settingsFor(true), sandboxWarmingTimeoutMs: 25 });
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const ids = {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      sessionId: groupId,
+      backend: "local" as const,
+    };
+    let unblock!: () => void;
+    let ready!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      unblock = resolve;
+    });
+    const reached = new Promise<void>((resolve) => {
+      ready = resolve;
+    });
+    const creator = resumeBoxForTurn(
+      {
+        db,
+        settings,
+        verifySpawnedSandboxReadiness: async () => {
+          ready();
+          await gate;
+        },
+      },
+      ids,
+      "turn",
+      sandboxLeaseHolderIdForAttempt("slow-owner"),
+    );
+    await reached;
+    let attached: Awaited<ReturnType<typeof resumeBoxForTurn>> | undefined;
+    try {
+      const waiter = sandboxLeaseHolderIdForAttempt("slow-sibling");
+      await expect(resumeBoxForTurn({ db, settings }, ids, "turn", waiter)).rejects.toMatchObject({
+        name: "SandboxLeaseTransitionError",
+        reason: "provider_recovery_in_progress",
+        liveness: "warming",
+      });
+      expect(await holderCount(workspaceId, groupId, waiter)).toBe(0);
+      expect((await readRow(workspaceId, groupId))?.liveness).toBe("warming");
+      unblock();
+      const owner = await creator;
+      attached = await resumeBoxForTurn({ db, settings }, ids, "turn", waiter);
+      expect(attached.established.instanceId).toBe(owner.established.instanceId);
+      expect(attached.leaseEpoch).toBe(owner.leaseEpoch);
+    } finally {
+      unblock();
+      await attached?.release();
+      const owner = await creator;
+      await owner.release();
+      await dropSession(owner.established);
+    }
+  }, 60_000);
+
+  test("(3b) bounded warming wait releases its holder and cannot keep an abandoned owner alive", async () => {
     if (!available) return;
     const settings = testSettings({
       ...settingsFor(true),
@@ -1457,7 +1515,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
         "turn",
         sandboxLeaseHolderIdForAttempt("activity-timeout"),
       ),
-    ).rejects.toThrow(SandboxWarmingTimeoutError);
+    ).rejects.toThrow(SandboxLeaseTransitionError);
 
     await expect(
       resumeBoxForTurn(
@@ -1474,7 +1532,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
         sandboxLeaseHolderIdForAttempt("activity-timeout-message"),
       ),
     ).rejects.toThrow(
-      /Sandbox backend "local" \(group [^)]+\) did not finish warming within 1s while waiting for the elected sandbox creator/,
+      /Sandbox lifecycle transition still in progress.*provider_recovery_in_progress/,
     );
 
     expect(
@@ -1489,6 +1547,36 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     ).toBe(0);
     const row = await readRow(workspaceId, groupId);
     expect(row?.liveness).toBe("warming");
+    // A waiter has no authority to refresh a dead creator's warming expiry.
+    await admin`update sandbox_leases set expires_at = now() - interval '1 second'
+      where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+    const reaped = await reapStaleLeaseHolders(db, {
+      workspaceId,
+      viewerHolderTtlMs: 60_000,
+      turnHolderTtlMs: 60_000,
+      idleGraceMs: 0,
+    });
+    expect(reaped.warmingReset).toBe(1);
+    expect((await readRow(workspaceId, groupId))?.liveness).toBe("cold");
+    const successor = await resumeBoxForTurn(
+      { db, settings },
+      {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        sessionId: groupId,
+        backend: "local",
+      },
+      "turn",
+      sandboxLeaseHolderIdForAttempt("after-owner-loss"),
+    );
+    try {
+      expect(successor.leaseEpoch).toBeGreaterThan(3);
+      expect((await readRow(workspaceId, groupId))?.liveness).toBe("warm");
+    } finally {
+      await successor.release();
+      await dropSession(successor.established);
+    }
   }, 60_000);
 
   // FINDING 3: turn spawner must prefer the lease's resume_state archive.

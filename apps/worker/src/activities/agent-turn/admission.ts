@@ -1,6 +1,8 @@
 import {
   checkSessionUsageLimitAdmission,
   checkWorkspaceAllowance,
+  chargeBillingOrigin,
+  getByokFeeSpendableBalance,
   getSpendableCreditBalance,
   SessionUsageLimitUnavailableError,
   sumUsageQuantity,
@@ -11,10 +13,16 @@ import {
   type Settings,
 } from "@opengeni/config";
 import { selectCodexCredentialId } from "@opengeni/codex";
-import { directPersonalConnectionSubjectId } from "@opengeni/core";
+import {
+  byokPaidCreditRefusalMessage,
+  byokPlatformFeeActive,
+  directPersonalConnectionSubjectId,
+} from "@opengeni/core";
 import type { TurnActivityServices as ActivityServices } from "../types";
 import {
+  API_CREDITS_REQUIRED_MESSAGE,
   type AllowanceExhaustedRefusal,
+  type BillingOrigin,
   type SessionEvent,
   type SessionUsageLimitReachedRefusal,
   type SessionTurn,
@@ -350,6 +358,10 @@ export async function ensureRunAllowedBetweenModelCalls(input: {
   modelId?: string;
   /** The session whose task root usage limit gates this request. */
   sessionId?: string;
+  /** The turn's frozen funding origin; API work spends credits only. */
+  billingOrigin?: BillingOrigin;
+  /** Served by the person's own key or subscription: needs paid credit. */
+  byok?: boolean;
   serializedRunState?: () => string | null;
 }): Promise<number | undefined> {
   try {
@@ -365,6 +377,8 @@ export async function ensureRunAllowedBetweenModelCalls(input: {
       input.initiatingHumanSubjectId,
       input.modelId,
       input.sessionId,
+      input.billingOrigin,
+      input.byok,
     );
   } catch (limitError) {
     // An unreadable usage state blocks the request as an infrastructure
@@ -401,6 +415,8 @@ export async function ensureRunAllowed(
   initiatingHumanSubjectId: string | null = null,
   modelId?: string,
   sessionId?: string,
+  billingOrigin: BillingOrigin = "app",
+  byok = false,
 ): Promise<number | undefined> {
   let creditPolicyRevision: number | undefined;
   // Per-task usage limit: independent of funding, so it applies to
@@ -440,10 +456,26 @@ export async function ensureRunAllowed(
     chargesOpenGeniCredits &&
     (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed")
   ) {
-    const balance = await getSpendableCreditBalance(db, accountId, modelId);
+    const balance = await getSpendableCreditBalance(
+      db,
+      accountId,
+      modelId,
+      undefined,
+      undefined,
+      billingOrigin,
+    );
     creditPolicyRevision = balance.creditPolicyRevision;
     if (balance.balanceMicros <= 0) {
-      throw new Error("insufficient workspace credits");
+      // Plan credit never pays for API work: say which balance is empty.
+      throw new Error(
+        billingOrigin === "api" ? API_CREDITS_REQUIRED_MESSAGE : "insufficient workspace credits",
+      );
+    }
+  } else if (!chargesOpenGeniCredits && byok && byokPlatformFeeActive(settings, accountId)) {
+    // The person's own key pays a platform fee, payable only from paid credit.
+    const balance = await getByokFeeSpendableBalance(db, accountId, billingOrigin);
+    if (balance.balanceMicros <= 0) {
+      throw new Error(byokPaidCreditRefusalMessage(balance, chargeBillingOrigin(billingOrigin)));
     }
   }
   const refusal = await checkWorkspaceAllowance(db, {

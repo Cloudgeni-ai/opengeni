@@ -166,9 +166,10 @@ organization allows Only me chats.
   owner. The run rechecks that the owner is still an active member who may
   create Only me chats; if not, the run fails closed instead of creating a
   shared chat.
-- A schedule that posts into an Only me chat, saves to the owner's personal
-  knowledge, or runs on the owner's own (personal) Connected Machine is always
-  Only me. Widening it is refused while that holds. See
+- A schedule that posts into an Only me chat or saves to the owner's personal
+  knowledge is always Only me. Widening it is refused while that holds.
+- A schedule runs as its owner, so one on the owner's own (personal) Connected
+  Machine may be Only me or Workspace. See
   [Connected Machines](connected-machines.md) for how each run re-proves the
   owner's access to the machine.
 - Unless the organization turns it off under Security, workspace admins see
@@ -421,6 +422,18 @@ A proactive channel (email or a Slack message from the bot) would need its own
 durable delivery outbox and is not part of this change.
 
 ## Runs waiting on a person
+
+A chat that a scheduled task or event trigger starts is unattended by default
+(see [`http-api.md`](http-api.md)): the agent is told nobody answers during the
+run, it gets no tool that waits for a person, and a call that needs approval
+is refused at once instead of waiting, so such a run does not wait on a person
+at all. The rest of this section applies to runs that are attended: tasks that
+set `agentConfig.unattended: false`, tasks that set
+`agentConfig.approvalTimeoutSeconds` without `unattended`, runs posted into an
+existing chat, chats whose **Work without me** switch is off, and turns after a
+person wrote into a chat that was unattended only by default (those turns keep
+the instructions and tools the chat started with; only their approvals and
+questions now wait for a person).
 
 A dispatched run whose own turn stops for a tool approval or a structured
 question stays `dispatched` (its lifecycle settles only when the turn

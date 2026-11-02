@@ -16,6 +16,7 @@ export {
 } from "./identity";
 export { workspaceEnvironmentInstructions } from "./legacy-environment";
 export { rigInstructions } from "./modules/rig";
+export { UNATTENDED_SESSION_GUIDANCE } from "./modules/unattended";
 export {
   deriveAgentPromptToolAvailability,
   type AgentPromptToolAvailabilityInput,
@@ -24,6 +25,7 @@ export type {
   AgentPromptContext,
   AgentPromptExperiments,
   AgentPromptModule,
+  AgentPromptRepositoryIdentity,
   AgentPromptResources,
   AgentPromptToolAvailability,
   RigInstructionsContext,

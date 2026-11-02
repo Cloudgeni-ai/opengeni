@@ -152,6 +152,54 @@ test("a pending setup for a different installation target does not replace the r
   }
 });
 
+test("a reconnect that asks for more access sends it and never resumes a plain reconnect", async () => {
+  const compose = "https://www.googleapis.com/auth/gmail.compose";
+  const account = {
+    id: "gmail-account",
+    version: 1,
+    providerId: "gmail",
+    ownership: "personal" as const,
+    label: "Gmail",
+    status: "auth_needed" as const,
+  };
+  // An older plain reconnect of the same account is still pending.
+  const api = transport([{ ...attempt, providerId: "gmail", ownership: "personal", account }]);
+  const request = {
+    scope: { workspaceId: "workspace", transport: api },
+    providerId: "gmail",
+    ownership: "personal" as const,
+    returnUrl: "http://localhost/session",
+    idempotencyKey: "more-access",
+    reconnectAccountId: account.id,
+    requestedScopes: [compose],
+  };
+  expect(nativeConnectApiInput(request)).toMatchObject({
+    reconnectAccountId: account.id,
+    requestedScopes: [compose],
+  });
+  // Additional access only ever travels with a reconnect.
+  expect(nativeConnectApiInput({ ...request, reconnectAccountId: undefined })).not.toHaveProperty(
+    "requestedScopes",
+  );
+  const view = await renderComponent(
+    <NativeConnectSetup
+      transport={api}
+      workspaceId="workspace"
+      request={request}
+      onClose={() => {}}
+      onComplete={() => {}}
+    />,
+  );
+  try {
+    await flush(20);
+    expect(api.get).not.toHaveBeenCalled();
+    expect(api.begin).toHaveBeenCalledTimes(1);
+    expect(api.begin.mock.calls[0]).toContainEqual(nativeConnectApiInput(request));
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("resuming a single attempt retains the choice to start another account", async () => {
   const api = transport([attempt]);
   const request = {

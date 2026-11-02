@@ -9,6 +9,7 @@ import {
   type Settings,
 } from "@opengeni/config";
 import {
+  API_CREDITS_REQUIRED_MESSAGE,
   evaluateWorkspaceModelPolicy,
   type GoalAdmissionPausedReason,
   type Session,
@@ -16,6 +17,7 @@ import {
 import {
   checkSessionUsageLimitAdmission,
   getWorkspaceModelPolicy,
+  readSessionBillingOrigin,
   type Database,
 } from "@opengeni/db";
 import { resolveWorkspaceCatalogSettings } from "./model-catalog";
@@ -133,6 +135,18 @@ export async function goalRunBudgetBlocked(
           pausedReason: "credits",
           message: "Insufficient workspace credits. Add credits before resuming.",
         },
+    api_credits_required: {
+      pausedReason: "credits",
+      message: `${API_CREDITS_REQUIRED_MESSAGE} Add credits before resuming.`,
+    },
+    byok_paid_credit_required: {
+      pausedReason: "credits",
+      message: "Add credits to use your own key, then resume.",
+    },
+    byok_upgrade_required: {
+      pausedReason: "credits",
+      message: "Upgrade to Pro to use your own key, then resume.",
+    },
     allowance_exhausted: {
       pausedReason: "allowance",
       message: "Usage allowance exhausted. Resume when your allowance is available.",
@@ -182,6 +196,7 @@ export async function assertGoalResumeAllowed(
     Partial<Pick<Session, "latencyMode" | "id">>,
   causalTurn: { initiatingHumanSubjectId: string | null } | null,
 ): Promise<void> {
+  const sessionId = session.id;
   if (session.id) {
     const limit = await goalSessionUsageLimitBlocked(services.db, {
       accountId: session.accountId,
@@ -206,6 +221,17 @@ export async function assertGoalResumeAllowed(
       model: decision.model,
       // Resuming does not lend the clicking user's allowance or credentials.
       initiatingHumanSubjectId: causalTurn?.initiatingHumanSubjectId ?? null,
+      // The resumed turn is funded like the chat (an API chat spends credits).
+      ...(sessionId
+        ? {
+            billingOrigin: () =>
+              readSessionBillingOrigin(services.db, {
+                accountId: session.accountId,
+                workspaceId: session.workspaceId,
+                sessionId,
+              }),
+          }
+        : {}),
     },
   );
   if (block) throw new GoalResumeBlockedError(block.pausedReason, block.message);

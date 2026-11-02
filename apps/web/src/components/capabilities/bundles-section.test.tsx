@@ -208,13 +208,13 @@ describe("BundlesSection", () => {
     }
   });
 
-  test("a viewer without administrator authority is told so, not shown live buttons", async () => {
+  test("a viewer who can't add integrations is told who can, not shown live buttons", async () => {
     const rendered = await renderSection({ canManage: false });
     try {
       expect(rendered.container.textContent).toContain(
-        "Workspace administrators can install, update, and remove these items.",
+        "Ask a workspace admin to install or update these items.",
       );
-      // Every header action is a workspace-administrator action; none of them
+      // Every header action needs a member's permission; none of them
       // may sit live directly under the sentence that says so.
       for (const label of ["Import plugin"]) {
         const button = [...rendered.container.querySelectorAll("button")].find((candidate) =>
@@ -227,12 +227,10 @@ describe("BundlesSection", () => {
     }
   });
 
-  test("a member manages Skills while plugins stay with workspace administrators", async () => {
+  test("someone who manages Skills but can't add integrations is told who installs plugins", async () => {
     const rendered = await renderSection({ canManage: true, canManagePlugins: false });
     try {
-      expect(rendered.container.textContent).toContain(
-        "Workspace administrators can install, update, and remove plugins.",
-      );
+      expect(rendered.container.textContent).toContain("Ask a workspace admin to install plugins.");
       expect(rendered.container.textContent).not.toContain("these items");
       const button = [...rendered.container.querySelectorAll("button")].find((candidate) =>
         candidate.textContent?.includes("Import plugin"),

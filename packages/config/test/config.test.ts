@@ -7,6 +7,7 @@ import {
 } from "@opengeni/contracts";
 import {
   DEFAULT_MODAL_IMAGE_REF,
+  FIRST_PARTY_MCP_CALL_TIMEOUT_MS,
   FIRST_PARTY_MCP_SETUP_TIMEOUT_MS,
   DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS,
   DEFAULT_GOAL_IDLE_BACKOFF_MS,
@@ -580,6 +581,24 @@ describe("legal document links", () => {
     for (const value of ["mailto:support@opengeni.ai", "support", "javascript:alert(1)"]) {
       expect(() => withEnv({ OPENGENI_SUPPORT_EMAIL: value }, () => getSettings())).toThrow();
     }
+  });
+
+  test("parse the optional data hosting and subprocessor declarations", () => {
+    const unset = withEnv({}, () => getSettings());
+    expect(unset.dataHostingLocation).toBeUndefined();
+    expect(unset.legalSubprocessorsUrl).toBeUndefined();
+    const settings = withEnv(
+      {
+        OPENGENI_DATA_HOSTING_LOCATION: " Microsoft Azure, North Europe (Ireland) ",
+        OPENGENI_LEGAL_SUBPROCESSORS_URL: "https://opengeni.ai/privacy#sharing",
+      },
+      () => getSettings(),
+    );
+    expect(settings.dataHostingLocation).toBe("Microsoft Azure, North Europe (Ireland)");
+    expect(settings.legalSubprocessorsUrl).toBe("https://opengeni.ai/privacy#sharing");
+    expect(() =>
+      withEnv({ OPENGENI_LEGAL_SUBPROCESSORS_URL: "javascript:alert(1)" }, () => getSettings()),
+    ).toThrow();
   });
 
   test("parse configured http(s) links and reject anything a browser should not follow", () => {
@@ -1849,6 +1868,12 @@ describe("sandbox preparation profiles", () => {
       });
     }
     expect(FIRST_PARTY_MCP_SETUP_TIMEOUT_MS).toBeGreaterThanOrEqual(30_000);
+    // Opengeni's own tools may run for minutes (a large file publish); the
+    // client must not give up on a call the API goes on to finish.
+    expect(settings.mcpServers.find((server) => server.id === "opengeni")).toMatchObject({
+      timeoutMs: FIRST_PARTY_MCP_CALL_TIMEOUT_MS,
+    });
+    expect(FIRST_PARTY_MCP_CALL_TIMEOUT_MS).toBeGreaterThan(60_000);
   });
 
   test("derives built-in document MCP URL from OPENGENI_MCP_URL", () => {

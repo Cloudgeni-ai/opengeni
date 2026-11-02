@@ -100,10 +100,15 @@ async fn start(
         .iter()
         .map(|bytes| compute_storage::chunk::EncodedChunk::encode(bytes, 1).unwrap())
         .collect();
+    // Chunk 1 is never stored: only filled pages can bring it back.
+    let day = compute_storage::fresh::day_of(chunks.now());
+    let mut references = Vec::new();
     for (index, chunk) in encoded.iter().enumerate() {
-        if index != 1 {
-            chunks.put_chunk(chunk).await.unwrap();
-        }
+        references.push(Some(if index == 1 {
+            chunk.reference.on_day(day)
+        } else {
+            chunks.put_chunk(chunk).await.unwrap().reference
+        }));
     }
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("memory");
@@ -122,10 +127,7 @@ async fn start(
     let (hydration, _arrivals) = Hydration::start(
         Arc::new(Fetcher::new(chunks, Arc::default())),
         &path,
-        encoded
-            .iter()
-            .map(|chunk| Some(chunk.reference.clone()))
-            .collect(),
+        references,
         plain.iter().map(|bytes| chunk_hash(bytes)).collect(),
         PageSet::new(filled),
         &[],
@@ -313,8 +315,9 @@ async fn a_store_that_does_not_answer_stalls_hydration_without_losing_it() {
         .iter()
         .map(|bytes| compute_storage::chunk::EncodedChunk::encode(bytes, 1).unwrap())
         .collect();
+    let mut references = Vec::new();
     for chunk in &encoded {
-        chunks.put_chunk(chunk).await.unwrap();
+        references.push(Some(chunks.put_chunk(chunk).await.unwrap().reference));
     }
     backend.down.store(true, Ordering::Relaxed);
     let dir = tempfile::tempdir().unwrap();
@@ -330,10 +333,7 @@ async fn a_store_that_does_not_answer_stalls_hydration_without_losing_it() {
     let (hydration, _arrivals) = Hydration::start(
         Arc::clone(&fetcher),
         &path,
-        encoded
-            .iter()
-            .map(|chunk| Some(chunk.reference.clone()))
-            .collect(),
+        references,
         plain.iter().map(|bytes| chunk_hash(bytes)).collect(),
         PageSet::new(&[]),
         &[],

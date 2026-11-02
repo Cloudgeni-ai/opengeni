@@ -703,6 +703,51 @@ async fn an_adopt_leaves_an_unknown_directory_of_its_sandbox_alone() {
     two.assert_clean();
 }
 
+/// A sandbox the host never saves on its own, such as a CI runner's, books
+/// no save until one is asked of it, so a hand-off is the first to book
+/// it: on a disk that cannot take that save the hand-off is refused at
+/// once as host full, and its VM runs on, never paused for a save that
+/// would wait for room. With room it is handed off with its programs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hand_off_whose_save_the_disk_cannot_book_is_refused_and_its_vm_runs_on() {
+    const PLENTY: u64 = 1 << 50;
+    let a = Lab::root();
+    let shelf = a.join("shelf");
+    let gauge = DiskGauge::default();
+    let reading = gauge.clone();
+    let one =
+        Lab::start_stored_configured(a, Arc::default(), Directory::new(&shelf), move |config| {
+            config.policy.disk = Some(DiskPolicy {
+                reserve: 0,
+                reserve_inodes: 0,
+            });
+            config.disk_reading = Some(reading);
+        })
+        .await;
+    let two = Lab::start_stored(Lab::root(), Arc::default(), Directory::new(&shelf)).await;
+    let sandbox = id(4);
+    read_disk(&one, &gauge, PLENTY).await;
+    one.create(sandbox, NEVER).await;
+    one.run(sandbox, &["set kept"]).await;
+
+    // Room for what it books already, none for its save.
+    let booked = read_disk(&one, &gauge, PLENTY).await.booked;
+    assert_eq!(read_disk(&one, &gauge, booked).await.free, 0);
+    assert_eq!(
+        code(&hand_off_awake(&one, sandbox, 1).await),
+        Some(ErrorCode::HostFull)
+    );
+    one.wait_level(sandbox, LevelName::Running).await;
+    assert_eq!(one.run(sandbox, &["get"]).await, ["kept"]);
+
+    read_disk(&one, &gauge, PLENTY).await;
+    assert_eq!(hand_off_awake(&one, sandbox, 1).await, Reply::Done);
+    assert_eq!(adopt(&two, sandbox, 2).await, Reply::Done);
+    assert_eq!(two.run(sandbox, &["get"]).await, ["kept"]);
+    one.assert_clean();
+    two.assert_clean();
+}
+
 /// An adopt judges disk by the store's copy alone, never by the adopting
 /// host's base image: a host with room for the copy's first wake but not
 /// for one of a disk as long as its base image, far longer than the

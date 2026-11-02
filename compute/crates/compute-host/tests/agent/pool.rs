@@ -506,6 +506,43 @@ async fn a_build_waits_for_disk_its_snapshot_may_take() {
     assert_eq!(lab.world.boots.load(Ordering::Relaxed), 0, "nothing booted");
 }
 
+/// A create that finds no template asks for its build, which starts only
+/// once the create has booked its first wake, in the room left: on a host
+/// with room for the sandbox or the build but not both, the sandbox boots
+/// cold and the build waits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_create_keeps_the_room_its_template_build_would_take() {
+    let one = HostPolicy {
+        admission: Some(Admission {
+            budget: 384 * MIB,
+            buffer: 0,
+            busy_grace: Duration::from_millis(100),
+        }),
+        ..HostPolicy::default()
+    };
+    let lab = Lab::start_configured(
+        Lab::root(),
+        Arc::<World>::default(),
+        Delays::default(),
+        one,
+        warm(Vec::new()),
+    )
+    .await;
+    lab.create(id(1), NEVER).await;
+    assert_eq!(
+        template_state(&lab.status().await),
+        Some(TemplateState::Failed),
+        "no room left for the build"
+    );
+    assert_eq!(lab.run(id(1), &["sandbox?"]).await, [""], "booted cold");
+    assert_eq!(
+        lab.world.boots.load(Ordering::Relaxed),
+        1,
+        "the sandbox's boot alone"
+    );
+    lab.assert_clean();
+}
+
 /// Keeps templates of `shape`, with `ready` ready sandboxes.
 fn keeping(shape: Shape, ready: u32) -> impl FnOnce(&mut HostConfig) {
     move |config| {

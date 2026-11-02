@@ -1,4 +1,3 @@
-import { ArchiveConfirmationProvider } from "@opengeni/react/app/lib/archive-session";
 import { SiteToolConsentProvider } from "@opengeni/react/app/lib/site-tool-consent";
 import { AppContext } from "@opengeni/react/app/app-context";
 import {
@@ -476,19 +475,17 @@ export function RootRouteComponent() {
     </Suspense>
   ) : (
     <AppContext.Provider value={appContext}>
-      <ArchiveConfirmationProvider>
-        <SiteToolConsentProvider>
-          <Outlet />
-        </SiteToolConsentProvider>
-        <CreditRequiredGate
-          creditRequired={creditRequired}
-          setCreditRequired={setCreditRequired}
-          accessContext={accessContext}
-        />
-        {import.meta.env.DEV && import.meta.env.VITE_OPENGENI_ROUTER_DEVTOOLS === "true" ? (
-          <TanStackRouterDevtools position="bottom-right" />
-        ) : null}
-      </ArchiveConfirmationProvider>
+      <SiteToolConsentProvider>
+        <Outlet />
+      </SiteToolConsentProvider>
+      <CreditRequiredGate
+        creditRequired={creditRequired}
+        setCreditRequired={setCreditRequired}
+        accessContext={accessContext}
+      />
+      {import.meta.env.DEV && import.meta.env.VITE_OPENGENI_ROUTER_DEVTOOLS === "true" ? (
+        <TanStackRouterDevtools position="bottom-right" />
+      ) : null}
     </AppContext.Provider>
   );
 

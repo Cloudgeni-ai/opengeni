@@ -784,7 +784,9 @@ describe("P4.4 Channel-A route discipline", () => {
     const credentialAt = channelASeam.indexOf("withRunCredentialsSession(");
     const deriveAt = channelASeam.indexOf("codemodeTokenFileFromEnvironment(");
     const decorateAt = channelASeam.indexOf("withCodemodeTokenSession(");
-    const serviceAt = channelASeam.indexOf("new SandboxChannelAService(");
+    // The command seam's service, built from the credential session. Other
+    // seams (such as file operations on a run_on machine) run no commands.
+    const serviceAt = channelASeam.indexOf("new SandboxChannelAService(", credentialAt);
 
     expect(credentialAt).toBeGreaterThanOrEqual(0);
     expect(deriveAt).toBeGreaterThan(credentialAt);

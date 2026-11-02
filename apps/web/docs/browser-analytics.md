@@ -54,9 +54,10 @@ once that lookup has finished.
 `/workspaces/<id>/`: `sessions`, `agents`, `secrets`, `rigs`, `machines`,
 `computer-use`, `insights`, `priority`, `plugins`, `capabilities`,
 `schedules`, `automations`, `documents`, `memory`, `state`, `artifacts`,
-`settings`, `organization`, `files`, `playground`, `read-only-chats`, `inbox`,
-`sites`, and `meetings`; a session page also carries `session_id`.
-`capabilities`, `agents` and `priority` are redirects, so they appear only
+`settings`, `organization`, `files`, `playground`, `archived`,
+`read-only-chats`, `inbox`, `sites`, and `meetings`; a session page also
+carries `session_id`. `capabilities`, `agents`, `priority` and
+`read-only-chats` (the Archived page's old path) are redirects, so they appear only
 when an old link or bookmark opens them. Pages outside a workspace are matched by
 exact path and never carry an id: `home` (`/`, including the sign-in panel),
 `session-link`, `identity-link`, `checkout-return` (`/billing`),
@@ -85,6 +86,7 @@ as `action` only when it is one of the closed values in `analytics-actions.ts`:
 | `install_skill` | Install Skill (not Update Skill) |
 | `invite_member` | Send invitation in organization People |
 | `buy_credits` | Buy or add credits buttons and links |
+| `upgrade_plan` | Upgrade to Pro buttons and links on own-key refusals |
 | `connect_model` | Connect a model links |
 | `connect_codex`, `connect_supergrok`, `connect_ai_gateway`, `connect_openrouter`, `connect_opper` | Provider connect controls in settings and onboarding |
 
@@ -174,6 +176,7 @@ recorded failure code and closed markers, never from failure text:
 `pre_start`, `other`. The first next step is reported as
 `turn_failure_action{failure_class, action}` with `action` one of `retry`,
 `switch_model` (another model chosen in the composer), `buy_credits`,
+`upgrade_plan` (Upgrade to Pro),
 `connect_model`, `new_session` (a labelled New session control),
 `send_message` (a new message sent from the composer), or `left` (best effort:
 the banner went away without an action, the page was closed, or the tab stayed

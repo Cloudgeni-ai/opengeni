@@ -18,6 +18,8 @@ export type ComposerLaunchSearch = {
   skillCapabilityId?: string | undefined;
   /** Start the new chat from this bot template: its setup instructions fill the composer. */
   botTemplateId?: string | undefined;
+  /** Continue an archived chat's work: the composer starts with a link to it. */
+  continueSessionId?: string | undefined;
   /**
    * `?modelSource=default`: the model/effort/latency carry the resolved default
    * (a credit purchase return), not the person's choice.
@@ -58,6 +60,14 @@ export function parseComposerLaunchSearch(search: Record<string, unknown>): Comp
     )
   ) {
     out.botTemplateId = search.botTemplateId;
+  }
+  if (
+    typeof search.continueSessionId === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      search.continueSessionId,
+    )
+  ) {
+    out.continueSessionId = search.continueSessionId;
   }
   if (search.modelSource === "default") out.followDefault = true;
   if (typeof search.skillCapabilityId === "string") {
@@ -112,4 +122,20 @@ export function composerLaunchSearchAfterPolicyApply(
     ...(launch.realtime ? { realtime: launch.realtime } : {}),
     ...(launch.skillCapabilityId ? { skillCapabilityId: launch.skillCapabilityId } : {}),
   };
+}
+
+/**
+ * The first message of a chat that continues an archived one: a link to it,
+ * which people can open and agents read through their session tools.
+ */
+export function continueArchivedChatMessage(
+  origin: string,
+  workspaceId: string,
+  sessionId: string,
+): string {
+  const link = new URL(
+    `/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}`,
+    origin,
+  ).href;
+  return `Continue the work from this archived chat: ${link}\n\n`;
 }

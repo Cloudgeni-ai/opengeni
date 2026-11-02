@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 use crate::compute::{Compute, NewSandbox};
 use crate::github::wire::{Message, Session};
 use crate::github::{Github, Polled, Removed, SessionError};
+use crate::room::Room;
 
 /// The metadata keys a runner's sandbox carries: its pool's [`key`], and
 /// its runner's name, id and start.
@@ -48,7 +49,8 @@ pub struct Settings {
     pub name: String,
     /// Idle runners kept beyond the jobs assigned.
     pub min_idle: u32,
-    /// The most runners at once.
+    /// The most sandboxes at once: runners, and a warm template's builder
+    /// while it refreshes ([`Room`]).
     pub max: u32,
     /// The longest a runner's sandbox lives, in seconds.
     pub timeout_s: u64,
@@ -83,6 +85,10 @@ pub struct Pool {
     settings: Settings,
     /// The template new runners start from.
     template: watch::Receiver<String>,
+    /// The pool's places, which its warm template's builder shares.
+    room: Room,
+    /// Whether a builder held a place when the pool last scaled.
+    scaled_for_builder: bool,
     runners: BTreeMap<String, Runner>,
     /// The jobs GitHub has assigned the scale set, as it last said.
     assigned: u32,
@@ -141,17 +147,30 @@ impl Pool {
             github,
             compute,
             set,
+            room: Room::new(settings.max),
             settings,
             template,
+            scaled_for_builder: false,
             runners: BTreeMap::new(),
             assigned: 0,
         }
     }
 
-    /// How many runners the pool wants.
-    fn target(&self) -> usize {
+    /// The pool's places, for its warm template's builder to take one.
+    #[must_use]
+    pub fn room(&self) -> Room {
+        self.room.clone()
+    }
+
+    /// Says what the pool holds, and returns how many runners it wants:
+    /// the jobs assigned and the idle runners asked for, within the places
+    /// a builder leaves, and whether a builder held one. The runners it
+    /// lacks count as held from now on.
+    fn want(&self) -> (usize, bool) {
         let wanted = self.assigned.saturating_add(self.settings.min_idle);
-        usize::try_from(wanted.min(self.settings.max)).unwrap_or(usize::MAX)
+        self.room.hold(self.runners.len(), self.assigned, |places| {
+            usize::try_from(wanted.min(places)).unwrap_or(usize::MAX)
+        })
     }
 
     /// Handles a message: jobs started and completed, then the scale.
@@ -183,9 +202,12 @@ impl Pool {
     }
 
     /// Starts or removes runners until the pool has as many as it wants;
-    /// the runners missing start at once, side by side.
+    /// the runners missing start at once, side by side. A builder taking a
+    /// place or giving it back meanwhile is seen in [`Pool::hold`], which
+    /// scales again.
     pub async fn scale(&mut self) {
-        let target = self.target();
+        let (target, building) = self.want();
+        self.scaled_for_builder = building;
         let missing = target.saturating_sub(self.runners.len());
         if missing > 0 {
             let started = futures::future::join_all((0..missing).map(|_| self.start())).await;
@@ -229,6 +251,7 @@ impl Pool {
                 }
             }
         }
+        self.want();
     }
 
     /// Registers a runner and starts its sandbox.
@@ -443,6 +466,7 @@ pub async fn listen(
         leading.send_replace(true);
         pool.assigned = session.statistics.unwrap_or_default().total_assigned_jobs;
         let stopped = pool.hold(&mut session, stop).await;
+        pool.room.forget();
         leading.send_replace(false);
         if let Err(error) = github.close_session(set, &session).await {
             tracing::warn!(
@@ -461,9 +485,12 @@ pub async fn listen(
 
 impl Pool {
     /// Polls the session and handles its messages until `stop` (then
-    /// true) or until the session is lost (false).
+    /// true) or until the session is lost (false). A builder taking a
+    /// place or giving it back ends the poll: the pool scales at once,
+    /// and polls again saying how many jobs it now takes.
     async fn hold(&mut self, session: &mut Session, stop: &CancellationToken) -> bool {
         let github = Arc::clone(&self.github);
+        let room = self.room.clone();
         let mut reconciled: Option<Instant> = None;
         let mut last: Option<u64> = None;
         let mut failures = 0u32;
@@ -474,8 +501,14 @@ impl Pool {
                 }
                 reconciled = Some(Instant::now());
             }
+            let building = self.scaled_for_builder;
+            let capacity = self.settings.max.saturating_sub(u32::from(building));
             let polled = tokio::select! {
-                polled = github.poll(session, last, self.settings.max) => polled,
+                polled = github.poll(session, last, capacity) => polled,
+                () = room.moved(building) => {
+                    self.scale().await;
+                    continue;
+                }
                 () = stop.cancelled() => return true,
             };
             let message = match polled {

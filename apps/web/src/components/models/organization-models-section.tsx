@@ -13,6 +13,7 @@ import { useAppContext } from "@opengeni/react/app/app-context";
 import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
 import { organizationModelsSearch, type ModelsView } from "@opengeni/react/app/lib/models-route";
 import {
+  canContributeWorkspaceContent,
   canManageWorkspaceSettings,
   hasWorkspacePermission,
 } from "@opengeni/react/app/lib/permissions";
@@ -98,17 +99,27 @@ export function OrganizationModelsSection({
           ? canManageWorkspaceSettings(context.accessContext, workspace, context.managedSelfContext)
           : hasWorkspacePermission(context.accessContext, id, "workspace:admin")
         : false;
+      const member = !administrator && !personal && !canManage && Boolean(workspace);
+      const ownSubscriptions = hasWorkspacePermission(
+        context.accessContext,
+        id,
+        "connections:write",
+      );
+      const customModels = canContributeWorkspaceContent(
+        context.accessContext,
+        workspace ?? null,
+        context.managedSelfContext,
+      );
       return {
         id,
         name: workspace?.name ?? name,
         personal,
         canManage,
-        connectOwn:
-          !administrator &&
-          !personal &&
-          !canManage &&
-          Boolean(workspace) &&
-          hasWorkspacePermission(context.accessContext, id, "connections:write"),
+        // A member opens it to connect their own subscriptions or to add and
+        // remove its custom models.
+        connectOwn: member && (ownSubscriptions || customModels),
+        customModels: member && customModels,
+        ownSubscriptions,
         savedDefaultModel: resolveWorkspaceSessionDefaults(workspace?.settings)?.model ?? null,
       };
     };
@@ -118,7 +129,12 @@ export function OrganizationModelsSection({
           (each) =>
             administeredWorkspaceIds.includes(each.id) ||
             (!isPersonalWorkspace(each, context.managedSelfContext) &&
-              hasWorkspacePermission(context.accessContext, each.id, "connections:write")),
+              (hasWorkspacePermission(context.accessContext, each.id, "connections:write") ||
+                canContributeWorkspaceContent(
+                  context.accessContext,
+                  each,
+                  context.managedSelfContext,
+                ))),
         );
     const personal = own.filter((each) => isPersonalWorkspace(each, context.managedSelfContext));
     const seen = new Set<string>();
@@ -187,6 +203,11 @@ export function OrganizationModelsSection({
       organizationId={organizationId}
       organizationName={organizationName}
       canManageSettings={canManageWorkspaceSettings(
+        context.accessContext,
+        targetWorkspace,
+        context.managedSelfContext,
+      )}
+      canManageCustomModels={canContributeWorkspaceContent(
         context.accessContext,
         targetWorkspace,
         context.managedSelfContext,

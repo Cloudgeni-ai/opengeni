@@ -137,6 +137,9 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
   });
   try {
     monitor.enter("tool_writers");
+    // Startup progress receipts still in flight finish before cleanup, so no
+    // append of this attempt outlives it. They never reject.
+    await deps.eventing.backgroundEventsSettled?.();
     await finalizeTurnAttemptSteps(deps, monitor);
   } finally {
     monitor.stop();

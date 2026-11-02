@@ -260,6 +260,46 @@ export async function listSelfUserResourceAuthorities(
   });
 }
 
+/**
+ * Where a person turned their own logins on (D-54): for each of their personal
+ * connections that is turned on in `workspaceId`, the standing grant that does
+ * it. A turned-on login has an active `always` `connection.use` grant for this
+ * workspace. Their Personal workspace needs none; callers decide that.
+ */
+export async function listOwnLoginsTurnedOn(
+  db: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string },
+): Promise<Map<string, string>> {
+  const turnedOn = new Map<string, string>();
+  let cursor: string | undefined;
+  // Bounded: a person has few logins, and a broken cursor must not loop.
+  for (let page = 0; page < 50; page += 1) {
+    const listed = await listSelfUserResourceAuthorities(db, {
+      ...input,
+      resourceKind: "connection",
+      limit: 100,
+      ...(cursor ? { cursor } : {}),
+    });
+    const now = Date.now();
+    for (const authority of listed.authorities) {
+      if (authority.status !== "active") continue;
+      const grant = authority.grants.find(
+        (each) =>
+          each.targetWorkspaceId === input.workspaceId &&
+          each.action === "connection.use" &&
+          each.mode === "always" &&
+          each.context === "workspace_shared" &&
+          each.status === "active" &&
+          (each.expiresAt === null || Date.parse(each.expiresAt) > now),
+      );
+      if (grant) turnedOn.set(authority.resourceId, grant.grantId);
+    }
+    if (!listed.nextCursor) break;
+    cursor = listed.nextCursor;
+  }
+  return turnedOn;
+}
+
 export async function issueSelfUserResourceGrant(
   db: Database,
   input: {

@@ -127,6 +127,7 @@ export function isCodexPickerModel(model: ClientModel): boolean {
 
 /** The payment group a selection the catalog no longer lists most likely belonged to. */
 export function billingClassForMissingSelection(modelId: string): PickerBillingClass {
+  if (modelId.startsWith("claude/")) return "claude_subscription";
   if (modelId.startsWith("workspace-claude-subscription/")) return "claude_subscription";
   if (modelId.startsWith("workspace-anthropic/")) return "byok";
   if (modelId.startsWith("organization-claude-subscription/")) return "claude_subscription";

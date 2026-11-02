@@ -85,6 +85,8 @@ function harness(options: HarnessOptions = {}) {
   const markEpochs: number[] = [];
   const failEpochs: number[] = [];
   const releaseGrace: number[] = [];
+  const establishInputs: Array<Parameters<RigVerificationOwnershipDependencies["establish"]>[2]> =
+    [];
 
   const observability = {
     warn: (message: string, context: Record<string, unknown>) => {
@@ -123,6 +125,7 @@ function harness(options: HarnessOptions = {}) {
     },
     establish: async (_settings, _envelope, establishOptions) => {
       events.push("establish:start");
+      establishInputs.push(establishOptions);
       if (options.establishErrorBeforeCreate) throw options.establishErrorBeforeCreate;
       const created = established();
       created.session = {
@@ -220,10 +223,21 @@ function harness(options: HarnessOptions = {}) {
       dependencies,
     );
 
-  return { run, events, warnings, markEpochs, failEpochs, releaseGrace };
+  return { run, events, warnings, markEpochs, failEpochs, releaseGrace, establishInputs };
 }
 
 describe("rig verification canonical lease ownership", () => {
+  test("passes the exact lease scope to provider creation", async () => {
+    const state = harness();
+    await expect(state.run(async () => true)).resolves.toBe(true);
+    expect(state.establishInputs).toHaveLength(1);
+    expect(state.establishInputs[0]?.createIdentity).toEqual({
+      accountId: ACCOUNT_ID,
+      workspaceId: WORKSPACE_ID,
+      sandboxGroupId: GROUP_ID,
+    });
+  });
+
   test("the default-off rollout gate fails before lease acquire or provider create", async () => {
     const state = harness({ ownersEnabled: false });
     await expect(state.run(async () => true)).rejects.toThrow(

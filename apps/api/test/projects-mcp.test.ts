@@ -310,6 +310,99 @@ describe("project MCP tools", () => {
       expect(retained!.status).toBe(session.status);
     }
   });
+
+  test("a project an agent makes in an Only me chat is Only me, and holds only that kind of chat", async () => {
+    if (!available) return;
+    const team = crypto.randomUUID();
+    const owner = `user:${crypto.randomUUID()}`;
+    const personal = crypto.randomUUID();
+    await shared!
+      .admin`insert into workspaces(id,account_id,name) values(${team},${accountId},'Team'),
+      (${personal},${accountId},'Personal')`;
+    await shared!
+      .admin`insert into organization_memberships(account_id,subject_id,role,status,personal_workspace_id)
+      values(${accountId},${owner},'member','active',${personal})`;
+    await shared!
+      .admin`insert into workspace_memberships(account_id,workspace_id,subject_id,role,permissions)
+      values(${accountId},${team},${owner},'member',opengeni_private.workspace_member_role_permissions('member'))`;
+    await shared!.admin`insert into workspace_inference_controls (account_id, workspace_id)
+      values (${accountId}, ${team}) on conflict (workspace_id) do nothing`;
+    await shared!
+      .admin`insert into session_tenancy_activations (account_id, activation_version, inventory_digest, parity_digest, activated_by)
+      values (${accountId}, 1, ${"1".repeat(64)}, ${"2".repeat(64)}, 'projects-mcp-test') on conflict do nothing`;
+    await shared!
+      .admin`insert into organization_private_session_settings (account_id, enabled, version, updated_by_membership_id)
+      values (${accountId}, true, 1, null) on conflict (account_id) do update set enabled = true`;
+    const chat = (onlyMe: boolean) =>
+      withSessionRlsActorContext({ subjectId: owner }, () =>
+        createSession(client.db, {
+          accountId,
+          workspaceId: team,
+          initialMessage: onlyMe ? "Private work" : "Shared work",
+          resources: [],
+          metadata: {},
+          visibility: onlyMe ? "user_private" : "workspace_shared",
+          createdBy: { kind: "subject", subjectId: owner },
+          subjectId: owner,
+          model: "test-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+        }),
+      );
+    const privateChat = await chat(true);
+    const sharedChat = await chat(false);
+    const agentIn = (sessionId: string): AccessGrant => ({
+      accountId,
+      workspaceId: team,
+      subjectId: `agent:${crypto.randomUUID()}`,
+      principalKind: "agent_attempt",
+      permissions: ["sessions:read", "sessions:create", "sessions:control"],
+      metadata: { sessionId, firstPartyMcpTools: ["project_create"] },
+    });
+    type ProjectResult = { project: { id: string; visibility: string } };
+    const fromPrivate = buildOpenGeniMcpServer(
+      deps(new FakeWorkflowClient()),
+      agentIn(privateChat.id),
+    );
+    const fromShared = buildOpenGeniMcpServer(
+      deps(new FakeWorkflowClient()),
+      agentIn(sharedChat.id),
+    );
+
+    const mine = await callMcpTool<ProjectResult>(fromPrivate, "project_create", { name: "Mine" });
+    expect(mine.project.visibility).toBe("private");
+    const ours = await callMcpTool<ProjectResult>(fromShared, "project_create", { name: "Ours" });
+    expect(ours.project.visibility).toBe("workspace");
+
+    // The Only me chat files into it; a shared chat is refused and stays put.
+    const person = buildOpenGeniMcpServer(deps(new FakeWorkflowClient()), {
+      accountId,
+      workspaceId: team,
+      subjectId: owner,
+      principalKind: "human_session",
+      permissions: ["sessions:read", "sessions:create", "sessions:control"],
+      metadata: {},
+    });
+    const asOwner = <T>(run: () => Promise<T>) =>
+      withSessionRlsActorContext({ subjectId: owner }, run);
+    await asOwner(() =>
+      callMcpTool(person, "session_set_project", {
+        sessionId: privateChat.id,
+        projectId: mine.project.id,
+      }),
+    );
+    expect((await getSession(client.db, team, privateChat.id))!.channelId).toBe(mine.project.id);
+    await expect(
+      asOwner(() =>
+        callMcpTool(person, "session_set_project", {
+          sessionId: sharedChat.id,
+          projectId: mine.project.id,
+        }),
+      ),
+    ).rejects.toThrow(/Only me project holds only your own Only me chats/);
+    expect((await getSession(client.db, team, sharedChat.id))!.channelId).toBeNull();
+  });
 });
 
 function deps(workflowClient: SessionWorkflowClient): ApiRouteDeps {

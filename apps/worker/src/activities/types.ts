@@ -3,10 +3,10 @@ import type {
   ConnectionCredentialsPort,
   DocumentAuthorityKind,
   EntitlementsPort,
-  KnowledgeSourceSyncRunSummary,
   ScheduledTaskTriggerType,
   TurnInitiator,
 } from "@opengeni/contracts";
+import type { KnowledgeSourceSyncRetirementReason } from "@opengeni/contracts/knowledge-source-sync-retirement";
 import type {
   Database,
   SessionWorkflowWakeDeliveryResult,
@@ -546,10 +546,7 @@ export type DispatchScheduledTaskRunResult =
         | "machine_enrollment_inactive"
         | "rig_version_unavailable"
         | "scheduled_model_unavailable"
-        | "knowledge_source_paused"
-        | "legacy_source_schedule_requires_migration"
-        | "atlassian_native_retired"
-        | "google_drive_native_retired"
+        | KnowledgeSourceSyncRetirementReason
         | "incident_preflight_metadata_missing"
         | "incident_responder_under_capable"
         | "incident_data_source_unsuitable";
@@ -562,43 +559,7 @@ export type DispatchScheduledTaskRunResult =
       triggerEventId: string;
       workflowId: string;
       workflowWakeRevision: number | null;
-    }
-  | {
-      action: "knowledge_source_sync";
-      accountId: string;
-      workspaceId: string;
-      taskId: string;
-      scheduledTaskRunId: string;
-      sourceId: string;
-      overlapPolicy: "skip" | "buffer_one";
     };
-
-export type RunKnowledgeSourceSyncBatchInput = {
-  /** Host-bound attempt only. Legacy control workflow inputs have none and cannot fetch. */
-  agent?: Extract<import("@opengeni/db").KnowledgeActor, { kind: "agent" }>;
-
-  accountId: string;
-  workspaceId: string;
-  taskId: string;
-  scheduledTaskRunId: string;
-  sourceId: string;
-  overlapPolicy: "skip" | "buffer_one";
-};
-
-export type RunKnowledgeSourceSyncBatchResult = (
-  | { action: "continue" }
-  | {
-      action: "complete";
-      bufferedWake: boolean;
-      bufferedScheduledTaskRunId?: string | null;
-    }
-  | { action: "skipped" | "buffered" }
-  | {
-      action: "failed";
-      bufferedWake: boolean;
-      bufferedScheduledTaskRunId?: string | null;
-    }
-) & { summary?: KnowledgeSourceSyncRunSummary; errorCode?: string };
 
 type DocumentIndexIdentity = {
   accountId: string;

@@ -3,6 +3,7 @@ import {
   codeSearchDeploymentPolicy,
   resolveModelProviderForTurn,
   resolveFirstPartyDelegationSecret,
+  paidHostedToolsChargeCredits,
   webSearchToolPlan,
   hostedWebSearchAllowed,
   type Settings,
@@ -466,12 +467,17 @@ export function sessionEffectiveToolProjectionInput(
     model?.model.api === "responses" && model.model.capabilities.inputModalities.includes("image");
   const hostedToolNames: AgentFunctionToolName[] = [];
   // Same plan the worker applies: provider web_search/web_fetch where the
-  // model has no hosted search (or the operator chose `replace`).
+  // model has no hosted search (or the operator chose `replace`, or paid
+  // hosted tools would run on Opengeni's bill).
   const webSearchPlan = context
     ? webSearchToolPlan(context.settings, {
         hostedWebSearch: model?.model.hostedWebSearch ?? context.settings.webSearchEnabled,
         transportHostedSearch: model?.provider.kind === "xai-subscription",
         creditsDisabled: !workspaceSettingsAllowCreditModels(context.workspaceSettings),
+        hostedToolsBillCredits: paidHostedToolsChargeCredits(context.settings, {
+          accountId: session.accountId,
+          chargesOpenGeniCredits: model?.model.cost === "credits",
+        }),
       })
     : { hostedWebSearch: false, providerTools: [] };
   if (model?.provider.kind === "xai-subscription") {
@@ -502,6 +508,7 @@ export function sessionEffectiveToolProjectionInput(
     ? [
         "request_human_input",
         "list_models",
+        "privacy_facts",
         "skill_read",
         ...AGENT_SKILL_MANAGE_TOOL_NAMES,
         ...media.runtime,
@@ -607,6 +614,7 @@ export function sessionEffectiveToolProjectionInput(
     "skill_read",
     "request_human_input",
     "list_models",
+    "privacy_facts",
     ...webSearchPlan.providerTools,
     // Interaction entry tools stay visible even with progressive disclosure;
     // the remaining authorized family tools are disclosed after opening.

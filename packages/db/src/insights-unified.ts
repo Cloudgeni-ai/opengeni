@@ -1,11 +1,13 @@
 import { createHash } from "node:crypto";
-import type {
-  InsightsCall,
-  InsightsCallsQuery,
-  InsightsCallsResponse,
-  InsightsUsageQuery,
-  InsightsUsageRange,
-  InsightsUsageResponse,
+import {
+  resolveInsightsUsageWindow,
+  type InsightsCall,
+  type InsightsCallsQuery,
+  type InsightsCallsResponse,
+  type InsightsUsageBucket,
+  type InsightsUsageQuery,
+  type InsightsUsageRange,
+  type InsightsUsageResponse,
 } from "@opengeni/contracts/insights-usage";
 import { sql, type SQL } from "drizzle-orm";
 import { withDatabaseStatementTimeout, withRlsContext, type Database } from "./database";
@@ -94,27 +96,41 @@ async function cacheMetadataRead<T>(db: Database, read: (db: Database) => Promis
   });
 }
 
-/** UTC calendar windows; rolling ranges include today and the preceding N-1 days. */
-export function insightsUsageWindow(range: InsightsUsageRange, now: Date) {
-  if (!Number.isFinite(now.getTime())) throw new Error("Invalid Insights clock");
-  if (!["today", "week", "month", "30d", "90d", "ytd"].includes(range)) {
-    throw new Error("Raw Insights does not support this range");
-  }
-  const since = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-  if (range === "week") since.setUTCDate(since.getUTCDate() - 6);
-  if (range === "30d") since.setUTCDate(since.getUTCDate() - 29);
-  if (range === "90d") since.setUTCDate(since.getUTCDate() - 89);
-  if (range === "month") since.setUTCDate(1);
-  if (range === "ytd") since.setUTCMonth(0, 1);
-  const until = new Date(now);
-  const duration = until.getTime() - since.getTime();
-  return {
-    since,
-    until,
-    priorSince: new Date(since.getTime() - duration),
-    priorUntil: new Date(since),
-    bucket: range === "today" ? ("hour" as const) : ("day" as const),
-  };
+/** The ranges this reader answers, advertised on every usage response. */
+export const INSIGHTS_USAGE_SERVED_RANGES: readonly InsightsUsageRange[] = [
+  "1h",
+  "3h",
+  "24h",
+  "today",
+  "week",
+  "30d",
+  "month",
+  "90d",
+  "ytd",
+  "custom",
+];
+
+/** See resolveInsightsUsageWindow: one window rule for every Insights reader. */
+export function insightsUsageWindow(
+  selection: { range: InsightsUsageRange; from?: string | undefined; to?: string | undefined },
+  now: Date,
+) {
+  return resolveInsightsUsageWindow(selection, now);
+}
+
+/** Start of the bucket holding `value`, in SQL. Five-minute bins are absolute, not zone-relative. */
+function bucketStart(bucket: InsightsUsageBucket, value: SQL): SQL {
+  return bucket === "five_minutes"
+    ? sql`date_bin('5 minutes'::interval,${value},'2000-01-01 00:00:00+00'::timestamptz)`
+    : sql`date_trunc(${bucket},${value} at time zone 'UTC') at time zone 'UTC'`;
+}
+
+function bucketStep(bucket: InsightsUsageBucket): SQL {
+  return bucket === "five_minutes"
+    ? sql`interval '5 minutes'`
+    : bucket === "hour"
+      ? sql`interval '1 hour'`
+      : sql`interval '1 day'`;
 }
 
 function numericTree(value: unknown): void {
@@ -254,7 +270,7 @@ export async function readInsightsUsage(
   ) {
     throw new Error("Workspace Insights does not accept organization grouping or filters");
   }
-  const window = insightsUsageWindow(query.range, input.now);
+  const window = insightsUsageWindow(query, input.now);
   const group = grouping(query.groupBy);
   const queryJson = JSON.stringify(query);
   // The capability already masks hidden identities. Do not call a SQL function
@@ -281,7 +297,7 @@ export async function readInsightsUsage(
   const source = (
     since: Date,
     until: Date,
-    bucket: "day" | "hour",
+    bucket: InsightsUsageBucket,
   ) => sql`opengeni_private.insights_scoped_usage_rows(
     ${input.accountId}::uuid,${input.workspaceId}::uuid,${since.toISOString()}::timestamptz,
     ${until.toISOString()}::timestamptz,${bucket}::text,${details},${input.detailsSharedWorkspaces === true}::boolean)`;
@@ -310,7 +326,7 @@ export async function readInsightsUsage(
         case when payload->>'kind'='item' then payload->>'provider' end as provider,
         case when payload->>'kind'='item' then payload->>'model' end as model,
         payload->>'workspaceId' as workspace_id,coalesce((payload->>'you')::boolean,false) as you,
-        date_trunc(${window.bucket},(payload->>'occurredAt')::timestamptz at time zone 'UTC') at time zone 'UTC' as bucket
+        ${bucketStart(window.bucket, sql`(payload->>'occurredAt')::timestamptz`)} as bucket
         from filtered),
       group_rows as materialized(select key,max(kind) as kind,max(label) as label,${measures()} as measures,
         max(provider) as provider,max(model) as model,max(workspace_id) as workspace_id,bool_or(you) as you
@@ -328,9 +344,9 @@ export async function readInsightsUsage(
       mini_rows as (select bucket,case when key in(select key from top_series) then key else 'other' end as key,
         ${mini()} as measures from categorized group by bucket,case when key in(select key from top_series) then key else 'other' end),
       buckets as (select bucket,${measures()} as measures from categorized group by bucket),
-      points as (select generate_series(date_trunc(${window.bucket},${window.since.toISOString()}::timestamptz at time zone 'UTC') at time zone 'UTC',
+      points as (select generate_series(${bucketStart(window.bucket, sql`${window.since.toISOString()}::timestamptz`)},
         ${window.until.toISOString()}::timestamptz-interval '1 microsecond',
-        case when ${window.bucket}='hour' then interval '1 hour' else interval '1 day' end) as start),
+        ${bucketStep(window.bucket)}) as start),
       zero as(select ${measures()} as measures from categorized where false),
       visible as materialized(select distinct payload-array['m','occurredAt','recordedAt','rootSessionId','rootTitle'] as payload
         from current_rows where payload->>'kind'='item')
@@ -388,6 +404,7 @@ export async function readInsightsUsage(
     windowEnd: window.until.toISOString(),
     priorWindowStart: window.priorSince.toISOString(),
     priorWindowEnd: window.priorUntil.toISOString(),
+    availableRanges: [...INSIGHTS_USAGE_SERVED_RANGES],
     dataThrough:
       payload.dataThrough === null ? null : new Date(payload.dataThrough as string).toISOString(),
   } as InsightsUsageResponse;
@@ -442,7 +459,7 @@ export async function readInsightsCalls(
 ): Promise<InsightsCallsResponse> {
   if (input.workspaceId !== null && input.query.workspaceId !== undefined)
     throw new Error("Workspace calls do not accept workspace filters");
-  const window = insightsUsageWindow(input.query.range, input.now);
+  const window = insightsUsageWindow(input.query, input.now);
   const scope = cursorScope(input);
   const details = sql`array[${sql.join(
     (input.detailsWorkspaceIds ?? []).map((id) => sql`${id}::uuid`),

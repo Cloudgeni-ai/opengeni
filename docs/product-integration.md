@@ -213,6 +213,9 @@ never changes an existing membership. It also never runs for SDK per-user
 workspaces (external source `opengeni-sdk:user-isolation:*`): those stay
 single-user, and the SDK adds their owner explicitly with a stable onboarding
 key. It never runs when the request needs a permission outside the defaults.
+That includes renaming a workspace, its instructions and its custom model
+entries: those take people who can start chats there acting as themselves,
+which a product's user never is, so a refused request creates nothing.
 The identity is re-checked as active under the same lock, and the grant
 writes the same receipt and `organization_workspace_lifecycle_events` row as
 explicit onboarding, attributed to the key. A user removed from a shared
@@ -1087,10 +1090,12 @@ Integration lifecycle:
    stable instance key, Connection, and selected operations. Operations the
    preview marks `approvalMode: "ask"` pause for human approval on every call;
    for unattended or scheduled work, list the ones policy permits in
-   `autoApprovedTools` (`capabilities:manage`; curated definitions may keep specific operations human-approved;
-   re-checked against organization integration policy; declarative, so an
-   update that omits it restores approval). Connector Block, session approval
-   policy, and action policies still apply.
+   `autoApprovedTools` (`capabilities:manage`; members, who hold
+   `connections:write`, install without it; curated definitions may keep
+   specific operations human-approved; re-checked against organization
+   integration policy; an update that omits it keeps an earlier choice only for
+   the same account and unchanged operations, otherwise approval is restored).
+   Connector Block, session approval policy, and action policies still apply.
 6. Persist the returned non-secret instance/server identifiers and select that
    server in sessions.
 

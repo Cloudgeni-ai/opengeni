@@ -39,6 +39,8 @@ import { startSteerWatch, type SteerWatch } from "./steer-watch";
 import { recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
 import {
   AssistantMessagePhaseTracker,
+  HostedSearchEvidenceEchoGuard,
+  isHostedSearchEvidenceEchoText,
   normalizeModelCallUsage,
   normalizeSdkEvent,
   withMcpToolDisplayMetadata,
@@ -178,6 +180,7 @@ import {
   modelUsageSourceKey,
   recordCompletedModelCallBeforeOwnershipFences,
   TurnEventPublisher,
+  publishStartupProgress,
   createModelResponseEventState,
   createSessionTitleModelUsageEventState,
   modelResponseContextSignal,
@@ -219,6 +222,7 @@ import type {
 } from "@opengeni/contracts";
 import type { BoundRunCredentialResolver } from "../run-credentials";
 import type { ModelHistoryAttachmentProjector } from "../run-input";
+import type { TurnSearchRecords } from "../search-record-form";
 import type {
   AttemptIdentityState,
   BillingState,
@@ -314,6 +318,8 @@ export type TurnStreamAttemptDeps = {
   unavailableSandboxFilesNote: string | undefined;
   runCredentialsNote: string | undefined;
   mcpAvailabilityNote: string | undefined;
+  /** Turn-scoped note when the chat's attendance differs from how it started. */
+  attendanceNote?: string | undefined;
   knowledgeSourcePreparationNote?: string | undefined;
   fileAuthoritySubjectId: string | null;
   activeSandboxBackend: Settings["sandboxBackend"] | undefined;
@@ -345,6 +351,8 @@ export type TurnStreamAttemptDeps = {
     items: Array<Record<string, unknown>>,
   ) => Promise<Array<Record<string, unknown>>>;
   modelHistoryProjector: ModelHistoryAttachmentProjector;
+  /** The turn's hosted web-search record form; turn input settles it. */
+  searchRecords: TurnSearchRecords;
   compactionModeOptions: NonNullable<Parameters<typeof maybeCompactContext>[5]>;
   initialRunCredentialMaterial: NormalizedRunCredentialMaterial | null;
   initialGitCredentials: MintedRunGitCredentials | undefined;
@@ -469,6 +477,7 @@ export async function runTurnStreamAttempt(
     unavailableSandboxFilesNote,
     runCredentialsNote,
     mcpAvailabilityNote,
+    attendanceNote,
     knowledgeSourcePreparationNote,
     fileAuthoritySubjectId,
     activeSandboxBackend,
@@ -490,6 +499,7 @@ export async function runTurnStreamAttempt(
     compactionModelHistoryProjector,
     generatedImageHistoryProjector,
     modelHistoryProjector,
+    searchRecords,
     compactionModeOptions,
     initialRunCredentialMaterial,
     sandboxEnvironment,
@@ -577,6 +587,7 @@ export async function runTurnStreamAttempt(
         externallyBilled: billingState.isExternallyBilledTurn,
         chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
         countsTowardTokenCap: billingState.countsTowardTokenCap,
+        ...(billingState.isByokTurn !== undefined ? { byok: billingState.isByokTurn } : {}),
         servingCredentialId: providerTurn.effectiveCodexCredentialId,
         priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
         subscriptionConnectionId: subscriptionCoreTurnOf(providerTurn)?.connectionId ?? null,
@@ -656,6 +667,7 @@ export async function runTurnStreamAttempt(
         ...(unavailableSandboxFilesNote ? { unavailableSandboxFilesNote } : {}),
         ...(runCredentialsNote ? { runCredentialsNote } : {}),
         ...(mcpAvailabilityNote ? { mcpAvailabilityNote } : {}),
+        ...(attendanceNote ? { attendanceNote } : {}),
         ...(knowledgeSourcePreparationNote ? { knowledgeSourcePreparationNote } : {}),
         mountedFileResources: turn.resources.filter((resource) => resource.kind === "file"),
         providerApi,
@@ -670,6 +682,7 @@ export async function runTurnStreamAttempt(
         projectCanonicalHistory: generatedImageHistoryProjector,
         materializeModelHistory: media.materializeScreenshotHistory,
         projectModelHistory: modelHistoryProjector,
+        searchRecords,
         onPreparationPhase: (measurement) => {
           recordTurnStartupPhase(observability, {
             phase: `history_${measurement.phase}`,
@@ -876,6 +889,8 @@ export async function runTurnStreamAttempt(
         countsTowardTokenCap: billingState.countsTowardTokenCap,
         initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
         sessionId: input.sessionId,
+        ...(billingState.isByokTurn ? { byok: true } : {}),
+        ...(billingState.billingOrigin ? { billingOrigin: billingState.billingOrigin } : {}),
       }),
       checkSteer
         ? hasPendingSteerForTurn(db, {
@@ -909,6 +924,7 @@ export async function runTurnStreamAttempt(
       throw new Error("Run input was not prepared");
     }
     steerHandover = false;
+    let compactionHandover: Error | undefined;
     // Keep the fence in step with a Steer the watch already noticed.
     eventing.toolCancellationFenceRef.current?.setForegroundWaitYield(
       steerWatch?.signal().aborted === true,
@@ -951,6 +967,7 @@ export async function runTurnStreamAttempt(
     // undeclared messages the SDK runs past (same response asks for tools)
     // are commentary. Every SDK event of this stream is normalized once.
     const messagePhases = new AssistantMessagePhaseTracker();
+    const evidenceEchoGuard = new HostedSearchEvidenceEchoGuard();
     // Text of the newest assistant message this stream completed durably.
     let latestStreamedAssistantText: string | null = null;
     // Actual input tokens of the most recent model response this turn; the
@@ -1064,7 +1081,9 @@ export async function runTurnStreamAttempt(
       // before this line.
       recordCompanyBrainContributionReceiptOnce();
       if (!eventing.firstModelRequestPreparationRecorded) {
-        await eventing.publish!([
+        // The request audit below is an awaited append, so it commits after
+        // this receipt without the preparation waiting on it.
+        await publishStartupProgress(eventing, [
           {
             type: "turn.startup.phase.started",
             payload: { phase: "model_preparation" },
@@ -1093,6 +1112,9 @@ export async function runTurnStreamAttempt(
         }
         attempt.modelRequestStarted = true;
         return await runtime.runStream(agent, runInput!, eventing.modelRunSettings, {
+          onCompactionHandover: (error) => {
+            compactionHandover = error;
+          },
           beforeModelRequest: (point) => {
             streamTiming.onModelRequestEntry(point);
             return modelCallAdmission.beforeModelRequest(point);
@@ -1109,6 +1131,8 @@ export async function runTurnStreamAttempt(
           ...(attemptSecretValues
             ? { secretMaskingInputFilter: secretValueModelInputFilter(attemptSecretValues) }
             : {}),
+          // Settled by turn input above; the same for every model call of the run.
+          searchRecordForm: searchRecords.form,
           onModelVisibleContext: async (rawSnapshot) => {
             const snapshot = attemptSecretValues
               ? attemptSecretValues.mask(rawSnapshot, "model_context_snapshot")
@@ -1410,6 +1434,7 @@ export async function runTurnStreamAttempt(
           externallyBilled: billingState.isExternallyBilledTurn,
           chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
           countsTowardTokenCap: billingState.countsTowardTokenCap,
+          ...(billingState.isByokTurn !== undefined ? { byok: billingState.isByokTurn } : {}),
           servingCredentialId: providerTurn.effectiveCodexCredentialId,
           priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
           subscriptionConnectionId: subscriptionCoreTurnOf(providerTurn)?.connectionId ?? null,
@@ -1805,7 +1830,8 @@ export async function runTurnStreamAttempt(
                 }
               : { messagePhases },
           );
-        for (const event of normalized) {
+        // A model-written copy of a search record is never shown as chat text.
+        for (const event of evidenceEchoGuard.filter(normalized)) {
           if (event.type === "agent.toolCall.created") {
             const preparedServers = eventing.preparedTools?.mcpServers ?? [];
             // Display metadata and the content-free analytics family are
@@ -2032,6 +2058,9 @@ export async function runTurnStreamAttempt(
       temporalCancellationSignal: cancellationSignal,
       runtimeCancellationSignal,
     });
+    // SDK handover preserves queued events; only compact once their outputs
+    // and receipts have crossed the ordinary durable publication boundary.
+    if (compactionHandover) throw compactionHandover;
     // External Codemode stays reachable until finalization. Close wait
     // admission before any terminal output/history decision, and drain an
     // already-admitted wait before consulting the actual runner-yield latch.
@@ -2101,6 +2130,7 @@ export async function runTurnStreamAttempt(
               externallyBilled: billingState.isExternallyBilledTurn,
               chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
               countsTowardTokenCap: billingState.countsTowardTokenCap,
+              ...(billingState.isByokTurn !== undefined ? { byok: billingState.isByokTurn } : {}),
               usage: aggregateUsage,
               normalizedUsage: normalizedAggregateUsage,
               sourceKey: aggregateSourceKey,
@@ -2327,6 +2357,7 @@ export async function runTurnStreamAttempt(
                                 workspaceId: input.workspaceId,
                                 sessionId: input.sessionId,
                                 settings: eventing.modelRunSettings,
+                                cards: eventing.appActionApprovalCards,
                               },
                             ),
                           ),
@@ -2421,9 +2452,13 @@ export async function runTurnStreamAttempt(
       return claimedResult({ status: "idle" });
     }
     const inputWaitYielded = eventing.preparedTools?.inputWaitYield?.yielded === true;
-    const finalOutput = String(
+    const streamFinalOutput = String(
       requireAgentStreamFinalOutput(eventing.stream.finalOutput, inputWaitYielded),
     );
+    // A copied web-search record is not a reply: treat it as empty so the
+    // turn asks for a real answer instead of publishing the copy.
+    const suppressedEcho = isHostedSearchEvidenceEchoText(streamFinalOutput);
+    const finalOutput = suppressedEcho ? "" : streamFinalOutput;
     const durableReplyFacts =
       !inputWaitYielded && finalOutput.trim().length === 0
         ? await sessionTurnFinalReplyFacts(db, input.workspaceId, input.sessionId, activeTurnId)
@@ -2438,6 +2473,7 @@ export async function runTurnStreamAttempt(
         maintenance: turn.source === "compaction",
         toolsExecuted: toolsExecuted || finalReplyNudged || durableReplyFacts.toolsExecuted,
         completedGoal: durableReplyFacts.completedGoal,
+        suppressedEcho,
       })
     ) {
       await historySink.reconcileConversationTruth({ requireDurable: true });
@@ -2720,6 +2756,7 @@ export async function runTurnStreamAttempt(
             externallyBilled: billingState.isExternallyBilledTurn,
             chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
             countsTowardTokenCap: billingState.countsTowardTokenCap,
+            ...(billingState.isByokTurn !== undefined ? { byok: billingState.isByokTurn } : {}),
             ...(serviceTier ? { serviceTier } : {}),
           });
         })().catch((error) => {

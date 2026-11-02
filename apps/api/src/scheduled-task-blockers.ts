@@ -53,7 +53,9 @@ const RESUME = "then resume the schedule.";
  * workspace). Every run is refused until they save it again, which approves it
  * with the access they hold now.
  */
-const OWNER_ACCESS_CHANGED_TEXT = `The access it was saved with has changed, so every run is refused. Its owner can open it and save it to approve it with their current access, ${RESUME}`;
+// The same refusal covers an owner who left the workspace or organization, who
+// can never save it again: the people who can still act are told what is left.
+const OWNER_ACCESS_CHANGED_TEXT = `The access it was saved with has changed, so every run is refused. Its owner can open it and save it to approve it with their current access, ${RESUME} If its owner has left, it can't run as them again: someone else can set it up as theirs, or delete it.`;
 
 const NON_RETRYABLE_REFUSAL_TEXT: Record<string, string> = {
   scheduled_authority_unavailable: OWNER_ACCESS_CHANGED_TEXT,

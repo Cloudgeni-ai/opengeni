@@ -152,6 +152,7 @@ async fn restart_with<S: Store>(
         base_image: lab.join("base.ext4"),
         policy: HostPolicy::default(),
         sample_every: Duration::from_secs(1),
+        first_wake_within: HostConfig::FIRST_WAKE_WITHIN,
         disk_reading: None,
         stream_idle: HostConfig::STREAM_IDLE,
         guest_ports: Vec::new(),

@@ -349,6 +349,19 @@ function controlScript(namespace: string, id: number, body: string[]): string {
 
 const UNSUPPORTED = "{ printf '@@OG1 unsupported 0 0\\n'; exit 0; }";
 
+function cleanupScript(namespace: string): string {
+  return [
+    ...rootLines(namespace),
+    PRELUDE,
+    '[ -d "$r" ] || exit 0',
+    'og_take "$r/cleanup.lock" 1 || exit 0',
+    `trap 'rm -f "$r/cleanup.lock"' 0`,
+    // Settled runs are kept a day so every reader sees the same exit. Running
+    // and unreported commands are never eligible, regardless of their age.
+    'find "$r" -mindepth 2 -maxdepth 2 -name reported -mmin +1440 2>/dev/null | while IFS= read -r og_f; do rm -rf "${og_f%/reported}"; done',
+  ].join("\n");
+}
+
 function launchScript(input: {
   namespace: string;
   id: number;
@@ -373,8 +386,6 @@ function launchScript(input: {
     "mkdir \"$d\" 2>/dev/null || { printf '@@OG1 collision 0 0\\n'; exit 0; }",
     `{ mkfifo "$d/in" && cat > "$d/cmd" && : > "$d/out" && echo 0 > "$d/off"; } || { rm -rf "$d"; printf '@@OG1 unsupported 0 0\\n'; exit 0; }`,
     ...(input.tty ? [': > "$d/tty"'] : []),
-    // Settled runs are kept a day so every reader sees the same exit.
-    'find "$r" -mindepth 2 -maxdepth 2 -name reported -mmin +1440 2>/dev/null | while IFS= read -r og_f; do rm -rf "${og_f%/reported}"; done',
     `og_sp=${quote(input.shellPath)}`,
     `og_fl=${quote(input.flag)}`,
     "(",
@@ -391,6 +402,10 @@ function launchScript(input: {
     ") </dev/null >/dev/null 2>&1 &",
     "og_wrapper=$!",
     'printf \'%s %s\\n\' "$og_wrapper" "$(og_ident "$og_wrapper")" > "$d/wrapper.tmp" && mv "$d/wrapper.tmp" "$d/wrapper"',
+    // Retention must never hold up command launch or its first response. A
+    // separate shell has its own PID/start identity; concurrent launchers skip
+    // its live cleanup lock, and a later launcher can recover a dead owner.
+    `/bin/sh -c ${quote(cleanupScript(input.namespace))} </dev/null >/dev/null 2>&1 &`,
     `og_y=${Math.max(0, Math.floor(input.yieldMs))}`,
     `og_m=${MAX_READ_BYTES}`,
     "og_poll",

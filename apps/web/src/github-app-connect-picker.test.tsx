@@ -42,7 +42,6 @@ const pickerProps: Omit<RepositoryContextPickerProps, "onConnectWorkspaceApp"> =
   groups: [],
   selectedRepoIds: new Set<number>(),
   selectedRepoRefs: {},
-  selectedInstallationId: null,
   manualRepos: [],
   manualOpen: false,
   githubAppOpen: false,

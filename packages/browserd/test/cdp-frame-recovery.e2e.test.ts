@@ -160,3 +160,93 @@ e2e.each([4_000, 13_000])(
   },
   45_000,
 );
+
+e2e(
+  "a live stream opened while its page is already busy shows the page once it answers",
+  async () => {
+    const busyMs = 12_000;
+    let requested = false;
+    const entered = Promise.withResolvers<void>();
+    const recovered = Promise.withResolvers<void>();
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        const path = new URL(request.url).pathname;
+        if (path === "/step") {
+          const duration = requested ? busyMs : 0;
+          requested = false;
+          return Response.json(duration);
+        }
+        if (path === "/entered") entered.resolve();
+        if (path === "/recovered") recovered.resolve();
+        if (path !== "/") return new Response("ok");
+        return new Response(
+          `<!doctype html><title>Busy on open</title>
+          <style>body { margin: 0; background: #cc0000; }</style>
+          <script>
+          async function poll() {
+            const duration = await (await fetch('/step')).json();
+            if (duration) {
+              await fetch('/entered');
+              const until = performance.now() + duration;
+              while (performance.now() < until) {}
+              document.body.style.background = '#00cc00';
+              await fetch('/recovered');
+            }
+            setTimeout(poll, 50);
+          }
+          poll();
+          </script>`,
+          { headers: { "Content-Type": "text/html" } },
+        );
+      },
+    });
+    const directory = await mkdtemp("/tmp/ogb-frame-recovery-");
+    const runner = await ManagedBrowserRunner.create({
+      profileDirectory: join(directory, "profile"),
+      headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: randomUUID(),
+      runner,
+    });
+    let frames: BrowserFrameSubscription | undefined;
+    try {
+      const initial = await driver.start(server.url.href);
+      // Busy only once the page has loaded and the browser is started.
+      requested = true;
+      await bounded(entered.promise, 5_000);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      // Opening the view during the busy period used to fail after about 6 s.
+      frames = await bounded(driver.subscribeFrames(initial.target.id, { format: "jpeg" }), busyMs);
+      const iterator = frames[Symbol.asyncIterator]();
+      await bounded(recovered.promise, busyMs + 5_000);
+      await bounded(
+        (async () => {
+          for (;;) {
+            const frame = await iterator.next();
+            if (frame.done) throw new Error("live stream ended");
+            const pixel = await sharp(frame.value.data)
+              .extract({ left: 0, top: 0, width: 1, height: 1 })
+              .removeAlpha()
+              .raw()
+              .toBuffer();
+            if (pixel[1]! > 150 && pixel[0]! < 50) return;
+          }
+        })(),
+        5_000,
+      );
+    } finally {
+      await frames?.close();
+      await driver.close();
+      server.stop(true);
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  45_000,
+);
