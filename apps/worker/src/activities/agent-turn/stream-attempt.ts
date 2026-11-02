@@ -1732,7 +1732,7 @@ export async function runTurnStreamAttempt(
                     toolOutputTransform: (output) =>
                       retainedToolImagesEventOutput(output, retainedToolImages),
                   }
-                : eventing.commandCompletionNotices.size > 0
+                : eventing.commandCompletionNotices && eventing.commandCompletionNotices.size > 0
                   ? {
                       // The model reads finished commands after this tool's
                       // result; the timeline shows the tool's own output.
@@ -1740,7 +1740,7 @@ export async function runTurnStreamAttempt(
                       toolOutputTransform: (output) =>
                         withoutAppendedCommandCompletions(
                           output,
-                          eventing.commandCompletionNotices,
+                          eventing.commandCompletionNotices ?? new Set(),
                         ),
                     }
                   : { messagePhases },

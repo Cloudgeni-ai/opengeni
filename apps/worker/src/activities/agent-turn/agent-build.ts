@@ -928,7 +928,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
                 },
                 signal: cancellationSignal,
                 onDelivered: (appended) => {
-                  eventing.commandCompletionNotices.add(appended);
+                  (eventing.commandCompletionNotices ??= new Set()).add(appended);
                 },
                 onError: (error) =>
                   observability.warn("Finished background commands were not attached", {

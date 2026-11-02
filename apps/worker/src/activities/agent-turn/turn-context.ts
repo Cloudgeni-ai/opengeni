@@ -209,8 +209,9 @@ export type EventingState = {
   /**
    * Finished-command text appended to tool results for the model and not yet
    * matched to its result event; the timeline shows each tool's own output.
+   * Absent means nothing was appended.
    */
-  commandCompletionNotices: Set<string>;
+  commandCompletionNotices?: Set<string> | undefined;
 };
 
 /** Rig telemetry: set once the session loads; empty string for a rig-less
