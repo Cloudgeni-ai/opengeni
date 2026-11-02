@@ -525,7 +525,8 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     // Each field has its own rule, checked below once the body says which
     // fields change: anyone who works here renames a shared workspace and
-    // edits its instructions; only an admin changes its slug.
+    // edits its instructions; the verified owner renames their Personal
+    // workspace; only an admin changes its slug.
     const grant = await requireWorkspaceContributorGrant(c, deps, workspaceId);
     const body = await readRequestJson(c);
     if (workspaceUpdateRequestsSettings(body)) {
@@ -565,10 +566,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       !hasPermission(grant.permissions, "workspace:admin", grant.permissionMode) &&
       (await requireWorkspace(deps.db, workspaceId)).kind !== "shared"
     ) {
-      // A Personal workspace keeps its name; only a shared one is renamed by its members.
-      throw new MissingPermissionRefusal("workspace:admin", {
-        message: "A Personal workspace keeps its name.",
-      });
+      // A Personal workspace is renamed by whoever changes its settings: its
+      // verified owner, acting as themselves.
+      await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     }
     const workspace = await updateWorkspace(deps.db, workspaceId, {
       ...(payload.name !== undefined ? { name: payload.name.trim() } : {}),

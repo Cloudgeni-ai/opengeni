@@ -50,7 +50,10 @@ import {
   apiErrorTechnicalFacts,
   userErrorTextWithoutReference,
 } from "@opengeni/react/ui/api-error";
-import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import {
+  canManageWorkspaceSettings,
+  hasWorkspacePermission,
+} from "@opengeni/react/app/lib/permissions";
 import { canAdministerOrganization } from "@opengeni/react/app/lib/workspaces";
 import type { MachineView } from "@opengeni/react/machines";
 
@@ -69,14 +72,14 @@ export async function copyToClipboard(text: string, successMessage: string) {
 }
 
 export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
-  const { client, workspaces, accessContext, clientConfig } = useAppContext();
+  const { client, workspaces, accessContext, clientConfig, managedSelfContext } = useAppContext();
   const [enrollOpen, setEnrollOpen] = useState(false);
   const machines = useWorkspaceMachines({
     pollIntervalMs: enrollOpen ? CONNECT_WATCH_POLL_MS : MACHINES_DASHBOARD_POLL_MS,
   });
   const pageLive = usePageLiveActivity();
-  const personalWorkspace =
-    workspaces.find((workspace) => workspace.id === workspaceId)?.kind === "personal";
+  const activeWorkspace = workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
+  const personalWorkspace = activeWorkspace?.kind === "personal";
   const [removeTarget, setRemoveTarget] = useState<MachineView | null>(null);
   const [removeBlocked, setRemoveBlocked] = useState<RemoveEnrollmentResponse | null>(null);
   const [removeMoveError, setRemoveMoveError] = useState<Error | null>(null);
@@ -109,6 +112,12 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
   const canChangeSelected = selectedMachine ? machines.canManageMachine(selectedMachine) : false;
   const subjectId = accessContext?.subjectId ?? null;
   const workspaceAdmin = hasWorkspacePermission(accessContext, workspaceId, "workspace:admin");
+  // Sharing with the whole workspace: a workspace admin, or in a Personal
+  // workspace (still only them) its owner, as the server allows.
+  const canShareWithWorkspace =
+    workspaceAdmin ||
+    (personalWorkspace &&
+      canManageWorkspaceSettings(accessContext, activeWorkspace, managedSelfContext));
   const audienceMachine =
     audienceOpen && selectedMachine?.enrollmentId && selectedMachine.scope !== "organization"
       ? { ...selectedMachine, enrollmentId: selectedMachine.enrollmentId }
@@ -519,6 +528,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
           machine={audienceMachine}
           subjectId={subjectId}
           workspaceAdmin={workspaceAdmin}
+          canShareWithWorkspace={canShareWithWorkspace}
           personalWorkspace={personalWorkspace}
           open
           onOpenChange={setAudienceOpen}

@@ -58,6 +58,7 @@ import {
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
+  workspaceSettingsAuthorized,
 } from "@opengeni/core";
 import type { AccessGrantAuthorization, ApiRouteDeps } from "@opengeni/core";
 import { buildFleetContextForSession, swapActiveSandbox } from "@opengeni/core";
@@ -299,16 +300,23 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     requireFullAccessIfAgent(c, "Changing who can use a machine");
-    return grant;
+    // Sharing with the whole workspace is a workspace admin's call, or, in a
+    // Personal workspace (still only them), its verified owner's.
+    const mayShareWithWorkspace = await workspaceSettingsAuthorized(
+      deps,
+      authorization,
+      workspaceId,
+    );
+    return { grant, caller: { ...grant, mayShareWithWorkspace } };
   }
 
   app.post("/v1/workspaces/:workspaceId/machines/:enrollmentId/audience/preview", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAudienceCaller(c, workspaceId);
+    const { grant, caller } = await requireAudienceCaller(c, workspaceId);
     const enrollmentId = c.req.param("enrollmentId");
     const body = await parseRequestJson(c, MachineAudiencePreviewRequest);
     const machine = await requireScopedEnrollment(grant, enrollmentId);
-    const { ownerSubjectId } = machineAudienceRequestFor(grant, workspaceId, machine, body);
+    const { ownerSubjectId } = machineAudienceRequestFor(caller, workspaceId, machine, body);
     const preview = await previewMachineAudienceChange(db, {
       accountId: grant.accountId,
       workspaceId,
@@ -323,11 +331,11 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.put("/v1/workspaces/:workspaceId/machines/:enrollmentId/audience", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAudienceCaller(c, workspaceId);
+    const { grant, caller } = await requireAudienceCaller(c, workspaceId);
     const enrollmentId = c.req.param("enrollmentId");
     const body = await parseRequestJson(c, ChangeMachineAudienceRequest);
     const machine = await requireScopedEnrollment(grant, enrollmentId);
-    const { ownerSubjectId } = machineAudienceRequestFor(grant, workspaceId, machine, body);
+    const { ownerSubjectId } = machineAudienceRequestFor(caller, workspaceId, machine, body);
     const changed = await changeMachineAudience(db, {
       accountId: grant.accountId,
       workspaceId,

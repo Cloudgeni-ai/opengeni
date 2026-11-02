@@ -688,3 +688,75 @@ describe("an organization that keeps own machines to its owners and admins", () 
     expect(minted.status).toBe(201);
   }, 180_000);
 });
+
+describe("a Personal workspace's owner shares their machine with the workspace", () => {
+  async function machineGeneration(enrollmentId: string): Promise<number> {
+    const [row] = await shared!.admin<Array<{ generation: number }>>`
+      select generation::int as generation from enrollments where id = ${enrollmentId}`;
+    return row!.generation;
+  }
+
+  test("the verified owner may; a shared workspace's machine manager still needs admin", async () => {
+    if (!shared || !client || !app) return;
+    const team = await teamWithMachines();
+    const [ownerPersonal] = await shared.admin<Array<{ id: string }>>`
+      select personal_workspace_id as id from organization_memberships
+      where account_id = ${team.accountId} and subject_id = ${team.owner.subject}`;
+    const personalId = ownerPersonal!.id;
+    const own = await finalizeMachine(team.accountId, personalId, team.owner.subject, "user");
+    const audience = `/v1/workspaces/${personalId}/machines/${own.enrollmentId}/audience`;
+
+    // In Personal, This workspace is still only its owner, so the owner decides.
+    const preview = await call(team.owner.cookie, "POST", `${audience}/preview`, {
+      audience: "workspace",
+    });
+    expect(preview.status, await preview.clone().text()).toBe(200);
+    const changed = await call(team.owner.cookie, "PUT", audience, {
+      audience: "workspace",
+      expectedGeneration: await machineGeneration(own.enrollmentId),
+    });
+    expect(changed.status, await changed.clone().text()).toBe(200);
+    expect((await enrollmentRow(own.enrollmentId)).scope).toBe("workspace");
+    // And back to Only me, theirs again.
+    const narrowed = await call(team.owner.cookie, "PUT", audience, {
+      audience: "only_me",
+      expectedGeneration: await machineGeneration(own.enrollmentId),
+    });
+    expect(narrowed.status, await narrowed.clone().text()).toBe(200);
+    expect(await enrollmentRow(own.enrollmentId)).toMatchObject({
+      scope: "user",
+      owner: team.owner.subject,
+    });
+
+    // A colleague can't reach the owner's Personal machine at all.
+    const colleagueTry = await call(team.colleague.cookie, "POST", `${audience}/preview`, {
+      audience: "workspace",
+    });
+    expect([403, 404]).toContain(colleagueTry.status);
+
+    // In a shared workspace, a member who manages machines still can't share
+    // their own Only me machine with everyone.
+    const manager = await joinAsMember(team.accountId, team.workspaceId, "manager", [
+      ...MEMBER_PERMISSIONS,
+      "enrollments:manage",
+    ]);
+    const managed = await finalizeMachine(
+      team.accountId,
+      team.workspaceId,
+      manager.subject,
+      "user",
+    );
+    expect(
+      await refusal(
+        await call(
+          manager.cookie,
+          "POST",
+          `/v1/workspaces/${team.workspaceId}/machines/${managed.enrollmentId}/audience/preview`,
+          { audience: "workspace" },
+        ),
+        403,
+      ),
+    ).toContain("Only workspace admins can share a machine with the whole workspace.");
+    expect((await enrollmentRow(managed.enrollmentId)).scope).toBe("user");
+  }, 180_000);
+});

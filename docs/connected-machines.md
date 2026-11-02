@@ -1849,7 +1849,11 @@ workspaces they work in instead (see
   a workspace admin who picks that owner. The owner must be an active member who
   can use the workspace.
 - Widening to **This workspace** needs `workspace:admin`, and is done by the
-  machine's owner, so nobody exposes another person's Only me machine.
+  machine's owner, so nobody exposes another person's Only me machine. In a
+  Personal workspace, where This workspace is still only its owner, the verified
+  owner acting as themselves may widen it without `workspace:admin` (the same
+  check as the workspace's other settings). Making a machine Only me for
+  someone else still needs `workspace:admin`.
 - Both need `enrollments:manage`. An agent cannot change it.
 
 The dialog shows what one confirmation will do, as counts in plain sentences
