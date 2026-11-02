@@ -446,7 +446,9 @@ and the transaction declared `opengeni.personal_workspace_owner_settings` as tha
 same subject. The API declares it (`declarePersonalWorkspaceOwnerSettings`) only
 after `workspaceSettingsAuthorized` verified the owner acting as themselves, so a
 delegated bearer, agent or API key that merely names the owner's subject is
-refused by the database as well as by the route. Local (`dev`) and
+refused by the database as well as by the route (a delegated token whose
+verified ceiling includes `workspace:admin` is admitted, as on the owner's other
+Personal settings). Local (`dev`) and
 `external_user:` Personal workspaces have no owner row and keep refusing these
 settings with `personal_workspace`.
 

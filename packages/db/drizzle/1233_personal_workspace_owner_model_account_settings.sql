@@ -14,7 +14,9 @@
 -- - the transaction declared opengeni.personal_workspace_owner_settings as
 --   that same subject. The API declares it only after it verified the owner
 --   acting as themselves (workspaceSettingsAuthorized), never for a delegated
---   bearer, agent or API key that merely names the owner's subject.
+--   bearer, agent or API key that merely names the owner's subject (a delegated
+--   token whose verified ceiling includes workspace:admin counts as the owner,
+--   as on the owner's other Personal settings).
 --
 -- The organization administrator arm no longer reaches another person's
 -- Personal workspace row from inside a workspace context. With no workspace

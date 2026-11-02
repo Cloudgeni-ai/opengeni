@@ -6814,8 +6814,9 @@ Fail-closed choices (contract ambiguous; strictest option taken):
 - In a Personal workspace, the settings API writes overrides only for its
   verified owner acting as themselves (migration 1233,
   docs/organization-tenancy.md), who may change what the organization has not
-  locked as a shared workspace's admins can; anyone else, a delegated token
-  included, sees `canEdit: false`, and Personal workspaces without an owner
+  locked as a shared workspace's admins can; anyone else, including a delegated
+  token without `workspace:admin` in its verified ceiling, sees
+  `canEdit: false`, and Personal workspaces without an owner
   row (local and external-user ones) keep the 409 `personal_workspace`. A
   person's own primary may still set a rotation entry there (the existing
   personal-account route). A rotation lock binds Personal
