@@ -72,6 +72,11 @@ describe("brand-neutral error presentation", () => {
         { type: "upgrade_plan", href: "/billing" },
         "Upgrade to Pro to use your own key.",
       ],
+      [
+        "subscription_plan_required",
+        { type: "upgrade_plan", href: "/billing" },
+        "Upgrade to Pro to use your own subscription.",
+      ],
     ] as const) {
       const error = new OpenGeniApiError(
         402,

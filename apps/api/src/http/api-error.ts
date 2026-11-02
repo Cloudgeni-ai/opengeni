@@ -3,6 +3,8 @@ import {
   API_CREDITS_REQUIRED_CODE,
   AgentConfigError,
   BYOK_PAID_CREDIT_REQUIRED_CODE,
+  SUBSCRIPTION_PLAN_REQUIRED_CODE,
+  UPGRADE_PLAN_ACTION,
   byokRefusalAction,
   AllowanceExhaustedRefusal,
   ModelUnavailableError,
@@ -109,13 +111,14 @@ export function insufficientCreditsHttpError(error: unknown): ApiHttpError | nul
   if (
     cause.code !== "insufficient_credits" &&
     cause.code !== API_CREDITS_REQUIRED_CODE &&
-    cause.code !== BYOK_PAID_CREDIT_REQUIRED_CODE
+    cause.code !== BYOK_PAID_CREDIT_REQUIRED_CODE &&
+    cause.code !== SUBSCRIPTION_PLAN_REQUIRED_CODE
   ) {
     return null;
   }
-  // API work found no credits (plan credit never pays for it), or the
-  // person's own key found no paid credit for its fee: say so and offer the
-  // one action that fixes it.
+  // API work found no credits (plan credit never pays for it), the person's
+  // own key found no paid credit for its fee, or their own subscription found
+  // no paid plan: say so and offer the one action that fixes it.
   return new ApiHttpError(402, {
     code: "payment_required",
     message: error.message,
@@ -126,7 +129,9 @@ export function insufficientCreditsHttpError(error: unknown): ApiHttpError | nul
         ? { code: cause.code, action: { ...ADD_CREDITS_ACTION } }
         : cause.code === BYOK_PAID_CREDIT_REQUIRED_CODE
           ? { code: cause.code, action: { ...byokRefusalAction(error.message) } }
-          : { code: "insufficient_credits" },
+          : cause.code === SUBSCRIPTION_PLAN_REQUIRED_CODE
+            ? { code: cause.code, action: { ...UPGRADE_PLAN_ACTION } }
+            : { code: "insufficient_credits" },
   });
 }
 

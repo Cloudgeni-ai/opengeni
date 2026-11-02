@@ -1,6 +1,7 @@
 import { configuredStaticUsageLimits, type Settings } from "@opengeni/config";
 import {
   API_CREDITS_REQUIRED_MESSAGE,
+  SUBSCRIPTION_PLAN_REQUIRED_MESSAGE,
   type BillingOrigin,
   type EntitlementsPort,
 } from "@opengeni/contracts";
@@ -12,7 +13,11 @@ import {
   sumUsageQuantity,
   type Database,
 } from "@opengeni/db";
-import { byokPaidCreditRefusalMessage, byokPlatformFeeActive } from "./byok-platform-fee";
+import {
+  byokPaidCreditRefusalMessage,
+  byokPlatformFeeActive,
+  ownSubscriptionPlanAllows,
+} from "./byok-platform-fee";
 
 export type ModelCallAdmissionDenial =
   | "insufficient_credits"
@@ -30,6 +35,8 @@ export type ModelCallAdmission =
       apiCreditsRequired?: true;
       /** The person's own key needs paid credit for its platform fee. */
       byokPaidCreditRequired?: true;
+      /** The person's own subscription needs a paid plan (Pro or higher). */
+      subscriptionPlanRequired?: true;
     };
 
 /**
@@ -39,7 +46,8 @@ export type ModelCallAdmission =
  * static monthly caps apply. Admission is a read, never a reservation or an
  * estimate of the call's cost; settlement charges actual usage afterwards.
  * Externally funded calls (subscriptions, workspace or organization keys)
- * skip the credit gate and the token cap.
+ * skip the credit gate and the token cap; an own key needs paid credit for
+ * its platform fee, and an own subscription needs a paid plan.
  */
 export async function admitModelCall(
   services: { db: Database; settings: Settings; entitlements?: EntitlementsPort | null },
@@ -53,13 +61,27 @@ export async function admitModelCall(
     subjectId: string | null;
     /** Who pays: API work needs credits; plan credit never pays for it. */
     billingOrigin?: BillingOrigin | null;
-    /** Served by the person's own key or subscription (pays the platform fee). */
+    /** Served by the person's own API key (pays the platform fee). */
     byok?: boolean;
+    /** Served by the person's own subscription (needs a paid plan, no fee). */
+    ownSubscription?: boolean;
   },
 ): Promise<ModelCallAdmission> {
   const { settings, db } = services;
   const metered = settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
   let creditPolicyRevision: number | undefined;
+  if (
+    !input.chargesOpenGeniCredits &&
+    input.ownSubscription &&
+    !(await ownSubscriptionPlanAllows(db, settings, input.accountId))
+  ) {
+    return {
+      allowed: false,
+      denial: "insufficient_credits",
+      message: SUBSCRIPTION_PLAN_REQUIRED_MESSAGE,
+      subscriptionPlanRequired: true,
+    };
+  }
   if (
     !input.chargesOpenGeniCredits &&
     input.byok &&

@@ -70,6 +70,11 @@ mock.module("@opengeni/db", () => ({
   getByokFeeSpendableBalance: async () => {
     throw new Error("Unexpected own-key fee balance read in knowledge fixture");
   },
+  // Nor does it run on the person's own subscription, so the plan that
+  // subscriptions need is never read either.
+  getOrganizationPlanStanding: async () => {
+    throw new Error("Unexpected own-subscription plan read in knowledge fixture");
+  },
   getWorkspaceModelPolicy: async () => creditPolicy,
   sumUsageQuantity: async (_db: unknown, input: { eventType: string }) =>
     input.eventType === "document.query_embedding_bytes"

@@ -8,6 +8,7 @@ import { apiErrorFacts } from "../../../ui/api-error";
 import { modelListSummary } from "../../lib/credit-coverage";
 import type { FreeCreditGap } from "../../lib/free-credit-gap";
 import type { PaymentRefusalCode } from "../../lib/model-access";
+import { isUpgradeRefusal } from "../../../lib/format";
 import { useAppContext } from "../../app-context";
 import { useCreditBalance } from "./use-credit-balance";
 
@@ -75,7 +76,7 @@ export function CreditRefusalNotice({
   if (uncovered && !settled) return null;
   if (refusalCode) {
     // One action fixes this, whichever model is chosen.
-    const upgrade = refusalCode === "byok_upgrade_required";
+    const upgrade = isUpgradeRefusal(refusalCode);
     const askOwner = canBuyCredits
       ? null
       : upgrade
@@ -86,11 +87,13 @@ export function CreditRefusalNotice({
         tone="waiting"
         live="assertive"
         title={
-          upgrade
-            ? "Upgrade to Pro to use your own key"
-            : refusalCode === "byok_paid_credit_required"
-              ? "Add credits to use your own key"
-              : "API usage uses credits, not your plan credit"
+          refusalCode === "subscription_upgrade_required"
+            ? "Upgrade to Pro to use your own subscription"
+            : upgrade
+              ? "Upgrade to Pro to use your own key"
+              : refusalCode === "byok_paid_credit_required"
+                ? "Add credits to use your own key"
+                : "API usage uses credits, not your plan credit"
         }
         {...(onDismiss ? { onDismiss } : {})}
       >

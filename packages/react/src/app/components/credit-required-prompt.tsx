@@ -24,6 +24,7 @@ import { useAppContext } from "../app-context";
 import { useCreditBalance } from "./credits/use-credit-balance";
 import { userErrorText } from "../../ui/api-error";
 import { validTopupAmount } from "../lib/format";
+import { isUpgradeRefusal } from "../../lib/format";
 import { analyticsAction } from "../../ui/analytics-actions";
 import { checkoutPageReturnUrl, checkoutTabReturnUrl } from "../lib/credit-checkout";
 import { subscriptionAction } from "../lib/subscription-plans";
@@ -138,13 +139,17 @@ export function CreditRequiredPromptView({
     return <CreditsCelebrationDialog status={granted} open={open} onOpenChange={onOpenChange} />;
   }
 
-  if (refusalCode === "byok_upgrade_required") {
-    // On the Free plan, own keys need a paid plan: one action.
+  if (isUpgradeRefusal(refusalCode)) {
+    // On the Free plan, own keys and own subscriptions need a paid plan: one action.
     return (
       <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Upgrade to Pro to use your own key</DialogTitle>
+            <DialogTitle>
+              {refusalCode === "subscription_upgrade_required"
+                ? "Upgrade to Pro to use your own subscription"
+                : "Upgrade to Pro to use your own key"}
+            </DialogTitle>
             <DialogDescription className={canBuyCredits ? "sr-only" : undefined}>
               {canBuyCredits
                 ? "Upgrade to Pro on Billing."

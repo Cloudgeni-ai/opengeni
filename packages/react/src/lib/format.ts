@@ -127,18 +127,26 @@ export const CREDIT_EXHAUSTION_MESSAGE = (t: OpenGeniText) =>
 
 // The server's own refusals that one action fixes. Each gets its own sentence.
 const BYOK_UPGRADE_TEXT = /upgrade to pro to use your own key/i;
+const SUBSCRIPTION_UPGRADE_TEXT = /upgrade to pro to use your own subscription/i;
 const BYOK_PAID_CREDIT_TEXT = /add credits to use your own key/i;
 const API_CREDITS_TEXT = /api usage uses credits, not your plan credit/i;
 
 /**
  * A credit refusal more specific than "no credit": the own-key platform fee
- * (on the Free plan, Upgrade to Pro fixes it; otherwise Add credits), or API
+ * (on the Free plan, Upgrade to Pro fixes it; otherwise Add credits), the
+ * person's own subscription, which needs a paid plan (Upgrade to Pro), or API
  * use, which only credits pay for. No model choice fixes any of them.
  */
 export type CreditRefusalKind =
   | "byok_upgrade_required"
+  | "subscription_upgrade_required"
   | "byok_paid_credit_required"
   | "api_credits_required";
+
+/** Refusals a paid plan fixes: their one action is Upgrade to Pro. */
+export function isUpgradeRefusal(kind: CreditRefusalKind | null | undefined): boolean {
+  return kind === "byok_upgrade_required" || kind === "subscription_upgrade_required";
+}
 
 /** The refusal kind named in recorded failure text, if any. */
 export function creditRefusalKindFromText(
@@ -147,6 +155,7 @@ export function creditRefusalKindFromText(
   const matches = (pattern: RegExp) =>
     texts.some((text) => typeof text === "string" && pattern.test(text));
   if (matches(BYOK_UPGRADE_TEXT)) return "byok_upgrade_required";
+  if (matches(SUBSCRIPTION_UPGRADE_TEXT)) return "subscription_upgrade_required";
   if (matches(BYOK_PAID_CREDIT_TEXT)) return "byok_paid_credit_required";
   if (matches(API_CREDITS_TEXT)) return "api_credits_required";
   return null;
@@ -160,6 +169,7 @@ export function creditRefusalKind(error: unknown): CreditRefusalKind | null {
   if (!(error instanceof OpenGeniApiError) || error.status !== 402) return null;
   const details = error.details as { code?: unknown; action?: { type?: unknown } } | undefined;
   if (details?.code === "api_credits_required") return "api_credits_required";
+  if (details?.code === "subscription_plan_required") return "subscription_upgrade_required";
   if (details?.code === "byok_paid_credit_required") {
     return details.action?.type === "upgrade_plan" || BYOK_UPGRADE_TEXT.test(error.message)
       ? "byok_upgrade_required"
@@ -170,18 +180,21 @@ export function creditRefusalKind(error: unknown): CreditRefusalKind | null {
 
 const CREDIT_REFUSAL_KEYS = {
   byok_upgrade_required: "lib.format.byokUpgradeRequired",
+  subscription_upgrade_required: "lib.format.subscriptionUpgradeRequired",
   byok_paid_credit_required: "lib.format.byokPaidCreditRequired",
   api_credits_required: "lib.format.apiCreditsRequired",
 } as const;
 
 const CREDIT_REFUSAL_HEADLINE_KEYS = {
   byok_upgrade_required: "lib.format.byokUpgradeRequiredHeadline",
+  subscription_upgrade_required: "lib.format.subscriptionUpgradeRequiredHeadline",
   byok_paid_credit_required: "lib.format.byokPaidCreditRequiredHeadline",
   api_credits_required: "lib.format.apiCreditsRequiredHeadline",
 } as const;
 
 const CREDIT_REFUSAL_ASK_OWNER_KEYS = {
   byok_upgrade_required: "lib.format.byokUpgradeRequiredAskOwner",
+  subscription_upgrade_required: "lib.format.subscriptionUpgradeRequiredAskOwner",
   byok_paid_credit_required: "lib.format.byokPaidCreditRequiredAskOwner",
   api_credits_required: "lib.format.apiCreditsRequiredAskOwner",
 } as const;
@@ -224,12 +237,14 @@ export const COMPOSER_PAYMENT_REQUIRED_MESSAGE = (t: OpenGeniText) =>
 
 const COMPOSER_CREDIT_REFUSAL_KEYS = {
   byok_upgrade_required: "lib.format.composerByokUpgradeRequired",
+  subscription_upgrade_required: "lib.format.composerSubscriptionUpgradeRequired",
   byok_paid_credit_required: "lib.format.composerByokPaidCreditRequired",
   api_credits_required: "lib.format.composerApiCreditsRequired",
 } as const;
 
 const COMPOSER_CREDIT_REFUSAL_ASK_OWNER_KEYS = {
   byok_upgrade_required: "lib.format.composerByokUpgradeRequiredAskOwner",
+  subscription_upgrade_required: "lib.format.composerSubscriptionUpgradeRequiredAskOwner",
   byok_paid_credit_required: "lib.format.composerByokPaidCreditRequiredAskOwner",
   api_credits_required: "lib.format.composerApiCreditsRequiredAskOwner",
 } as const;
