@@ -49,6 +49,7 @@
     "db:sweep-organization-retention": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; bun scripts/sweep-organization-retention.ts",
     "catalog:refresh": "bun scripts/refresh-integrations-catalog.ts",
     "catalog:vendor-logos": "bun scripts/vendor-catalog-logos.ts",
+    "catalog:screen-logos": "bun scripts/screen-catalog-logos.ts",
     "catalog:import": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; bun scripts/import-integrations-catalog.ts",
     "slack:manifest": "bun scripts/generate-slack-bot-manifest.ts",
     "slack:icons": "bun scripts/generate-slack-bot-icons.ts",
