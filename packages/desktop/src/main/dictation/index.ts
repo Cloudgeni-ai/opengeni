@@ -151,6 +151,8 @@ export interface DictationMenu {
   mode: DesktopDictationSettings["mode"];
   /** A recent dictation has text to copy again. */
   canCopyLast: boolean;
+  /** The cancel shortcut, in Electron's accelerator syntax, when one is set. */
+  cancelKeys: string | null;
 }
 
 export type DictationMenuAction =
@@ -183,8 +185,8 @@ interface Active {
    * kept dictation's, and is typed only when the retry shortcut asked for it.
    */
   again: { entryId: string; type: boolean } | null;
-  /** Why it failed, while it has. */
-  failure: { message: string; retryable: boolean } | null;
+  /** Why it failed, when it has. */
+  failure?: { message: string; retryable: boolean };
 }
 
 export class Dictation {
@@ -267,10 +269,11 @@ export class Dictation {
       profiles: settings.profiles,
       mode: settings.mode,
       canCopyLast: this.deps.store.history().some((entry) => entry.text.trim() !== ""),
+      cancelKeys: settings.cancelShortcut?.accelerator ?? null,
     };
   }
 
-  /** What the menu bar's dictation items do. */
+  /** What the menu bar's dictation items do: the same as the window's buttons, and starting. */
   menuAction(action: DictationMenuAction): void {
     switch (action.kind) {
       case "start":
@@ -278,16 +281,14 @@ export class Dictation {
         if (!this.active && !this.waiting) this.begin(action.profileId, false);
         return;
       case "finish":
-        this.finishSpeaking();
+        this.onHudAction("stop");
         return;
       case "cancel":
-        this.cancelFromKeys();
-        return;
       case "retry":
-        this.retry();
+        this.onHudAction(action.kind);
         return;
       case "dismiss":
-        if (this.active?.phase === "failed") this.dismiss();
+        if (this.active?.phase === "failed") this.onHudAction("dismiss");
         return;
       case "copyLast":
         void this.copyLast();
@@ -519,7 +520,6 @@ export class Dictation {
       paste: null,
       throttled,
       again: null,
-      failure: null,
       watchdog: setTimeout(() => {
         if (this.active?.id === id && this.active.phase === "starting") {
           this.send({ kind: "cancel", dictationId: id });
@@ -578,7 +578,6 @@ export class Dictation {
       paste: null,
       throttled: null,
       again: { entryId, type },
-      failure: null,
       // A page that can't transcribe kept speech never answers.
       watchdog: setTimeout(() => {
         if (this.active?.id === id && this.active.watchdog) {
@@ -700,7 +699,6 @@ export class Dictation {
     const active = this.active;
     if (active?.phase !== "failed") return;
     active.phase = "transcribing";
-    active.failure = null;
     this.registerEscape();
     this.preparePaste();
     this.show({ kind: "transcribing", label: this.label(active.profile) });
@@ -852,7 +850,6 @@ export class Dictation {
     }
     this.active = null;
     this.unregisterEscape();
-    this.activityChanged();
   }
 
   private clearWaiting(): void {

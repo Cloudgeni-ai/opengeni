@@ -224,8 +224,7 @@ function dictationSection(
   const act = (action: DictationMenuAction) => () => actions.dictation?.(action);
   const cancel: MenuItemConstructorOptions = {
     label: "Cancel Dictation",
-    accelerator: "Escape",
-    registerAccelerator: false,
+    ...(menu.cancelKeys ? { accelerator: menu.cancelKeys, registerAccelerator: false } : {}),
     click: act({ kind: "cancel" }),
   };
   const activity = menu.activity;

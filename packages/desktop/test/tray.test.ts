@@ -101,6 +101,7 @@ describe("dictation in the menu bar", () => {
         profiles: [chord],
         mode: "toggle",
         canCopyLast: true,
+        cancelKeys: null,
         ...change,
       },
       platform,
@@ -156,9 +157,16 @@ describe("dictation in the menu bar", () => {
     ]);
     expect(listening.item("Dictation: listening")?.enabled).toBe(false);
     expect(listening.toolTip).toBe("Product: dictation is listening");
+    expect(listening.item("Cancel Dictation")?.accelerator).toBeUndefined();
     expect(listening.click("Finish Dictation")).toEqual([{ kind: "finish" }]);
     expect(listening.click("Cancel Dictation")).toEqual([{ kind: "finish" }, { kind: "cancel" }]);
 
+    // The cancel shortcut, when the person set one, shows beside Cancel.
+    expect(
+      dictationMenu({ activity: { phase: "recording" }, cancelKeys: "Control+Alt+X" }).item(
+        "Cancel Dictation",
+      ),
+    ).toMatchObject({ accelerator: "Control+Alt+X", registerAccelerator: false });
     const starting = dictationMenu({ activity: { phase: "starting" } });
     expect(starting.labels.slice(0, 2)).toEqual(["Dictation: starting…", "Cancel Dictation"]);
     const writing = dictationMenu({ activity: { phase: "transcribing" } });
