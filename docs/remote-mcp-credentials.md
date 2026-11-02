@@ -129,9 +129,12 @@ works for their messages only where they turned it on:
   login that is on can always be turned off.
 - When a chat asks for a connector whose login the person added elsewhere, the
   Connect card offers it with one click ("Use it here") instead of a new sign-in.
-- In a chat shared with the workspace, the owner sees a one-line note that their
-  logins work for their messages there and that people in the workspace see what
-  the agent does with them, with "Stop using it here". It never blocks a turn.
+- In a chat shared with the workspace, the owner sees one quiet line above the
+  composer naming the logins the chat uses ("Using your Gmail and Slack"). It
+  opens a menu saying they work for the owner's messages there and that people
+  in the workspace see what the agent does with them, with "Stop using … here"
+  per login. An account connected more than once is listed once, and Stop turns
+  off every connection of it. It never blocks a turn.
 
 Turning a login on is the owner's standing `connection.use` grant for that
 workspace (`always`, `workspace_shared`); it is not a per-chat approval. Other

@@ -3889,12 +3889,12 @@ export const englishMessages = {
   "openGeniLinks.fileIsTooLargeTo": "File is too large to download here.",
   "organizationModel.orgShortaccountid": "Org {shortAccountId}",
   "ownLogins.couldNotStop": "Couldn't stop it. Try again.",
-  "ownLogins.sharedHeadsUp_one":
-    "Your {logins} login works for your messages here. People in this workspace see what the agent does with it.",
-  "ownLogins.sharedHeadsUp_other":
-    "Your {logins} logins work for your messages here. People in this workspace see what the agent does with them.",
-  "ownLogins.stopUsingHere": "Stop using it here",
+  "ownLogins.sharedDetails_one":
+    "It works for your messages here. People in this workspace see what the agent does with it.",
+  "ownLogins.sharedDetails_other":
+    "They work for your messages here. People in this workspace see what the agent does with them.",
   "ownLogins.stopUsingLoginHere": "Stop using {login} here",
+  "ownLogins.usingYour": "Using your {logins}",
   "pierreDiff.diffForPath": "Diff for {path}",
   "pierreDiff.loadingDiff": "Loading diff…",
   "pierreDiff.noChanges": "No changes",

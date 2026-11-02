@@ -10,7 +10,7 @@ import { inertProps } from "../../lib/inert";
 import { retainedImageId } from "../../components/markdown";
 import { LazyPart } from "../../components/lazy-part";
 import { useConnectionAccounts } from "../components/capabilities/use-connection-accounts";
-import { stopOwnLoginHere } from "../components/capabilities/own-login-turned-on";
+import { stopOwnLoginsHere } from "../components/capabilities/own-login-turned-on";
 import {
   OwnLoginsSharedHeadsUp,
   ownLoginsInUse,
@@ -3661,8 +3661,8 @@ function SessionChatPane(props: {
   const modelSwitchHeadsUp = chosenModelHeadsUp ? (
     <ModelSwitchHeadsUp text={chosenModelHeadsUp} className="px-3.5 pt-2.5 md:px-4" />
   ) : null;
-  // Your own logins in a chat shared with the workspace (D-54): a one-line
-  // heads-up for you only, never a gate. A Personal workspace has nobody else.
+  // Your own logins in a chat shared with the workspace (D-54): one quiet line
+  // for you only, never a gate. A Personal workspace has nobody else.
   const ownLoginsHere =
     !terminal &&
     props.session.tenancy?.visibility === "workspace" &&
@@ -3678,9 +3678,13 @@ function SessionChatPane(props: {
       <OwnLoginsSharedHeadsUp
         logins={ownLoginsHere}
         className="px-3.5 pt-2.5 md:px-4"
-        onStop={async (account) => {
-          await stopOwnLoginHere(context.client, props.session.workspaceId, account);
-          await connectionAccounts.refresh();
+        onStop={async (accounts) => {
+          try {
+            await stopOwnLoginsHere(context.client, props.session.workspaceId, accounts);
+          } finally {
+            // Some may have stopped even when one failed.
+            await connectionAccounts.refresh();
+          }
         }}
       />
     ) : null;

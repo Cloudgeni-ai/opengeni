@@ -41,11 +41,28 @@ export async function turnOnOwnLoginHere(
   return issued.grant.grantId;
 }
 
-export async function stopOwnLoginHere(
+/**
+ * Turn your own logins off here: every standing grant behind them, once
+ * each. One account connected twice has two connections, and Stop leaves
+ * neither on. Tries every grant, then reports the first failure.
+ */
+export async function stopOwnLoginsHere(
   client: OwnLoginClient,
   workspaceId: string,
-  account: Pick<ConnectionMetadata, "turnedOnHereGrantId">,
+  accounts: readonly Pick<ConnectionMetadata, "turnedOnHereGrantId">[],
 ): Promise<void> {
-  if (!account.turnedOnHereGrantId) return;
-  await client.revokeUserResourceGrant(workspaceId, account.turnedOnHereGrantId);
+  const grantIds = new Set(
+    accounts.flatMap((account) =>
+      account.turnedOnHereGrantId ? [account.turnedOnHereGrantId] : [],
+    ),
+  );
+  const failures: unknown[] = [];
+  for (const grantId of grantIds) {
+    try {
+      await client.revokeUserResourceGrant(workspaceId, grantId);
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length > 0) throw failures[0];
 }
