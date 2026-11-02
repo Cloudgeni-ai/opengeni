@@ -6,8 +6,8 @@
 //!
 //! A sweep reads every pointer, keeping it again so no archive begun
 //! earlier can replace it, asks which objects each one names, and deletes
-//! the other chunks and manifests whose day ended a whole day before it
-//! began ([`crate::fresh::sweepable`]); one of the old layout once it was
+//! the other chunks and manifests whose period ended a clock disagreement
+//! before it began ([`crate::fresh::sweepable`]); one of the old layout once it was
 //! last stored more than [`LEGACY_SWEEP_AFTER`] before, and the pointers
 //! were kept where the sweep reads them for as long. Deletes carry no
 //! condition: nothing writes those names again. [`crate::fresh`] explains

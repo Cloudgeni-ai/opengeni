@@ -18,7 +18,7 @@
 //! Only a sweep (see [`crate::sweep`]) deletes chunks and manifests, once
 //! no pointer names them; the rules in [`crate::fresh`] keep it from
 //! deleting what an archive in flight is about to name. Chunks and
-//! manifests are written only under the current day's name, so a delete
+//! manifests are written only under the current period's name, so a delete
 //! never needs a condition. Pointers are kept by a [`PointerStore`]: the
 //! control service's in a fleet, the object store's own otherwise.
 use std::sync::Arc;
@@ -32,7 +32,7 @@ use object_store::{ClientOptions, ObjectStore, PutMode, PutOptions, path::Path};
 use crate::{
     Error, Result,
     chunk::{ChunkRef, EncodedChunk, decode},
-    fresh::{Clock, day_of},
+    fresh::{Clock, period_of},
     manifest::{DiskManifest, MAX_MANIFEST_BYTES},
     pointer_store::{ObjectPointers, PointerStore},
     upload::{Created, Gcs},
@@ -141,11 +141,11 @@ pub struct Listed {
 /// A chunk as [`ChunkStore::put_chunk`] stored it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Put {
-    /// What names it now: the reference it was given, under the day it was
-    /// stored on.
+    /// What names it now: the reference it was given, under the period it
+    /// was stored in.
     pub reference: ChunkRef,
     /// Whether this call wrote it; otherwise another write of the same
-    /// bytes did, the same day.
+    /// bytes did, the same period.
     pub new: bool,
 }
 
@@ -358,10 +358,10 @@ impl ChunkStore {
             .fold(self.prefix.clone(), |path, part| path.child(part))
     }
 
-    /// Stores `chunk` under today's name (see [`crate::fresh`]) unless
+    /// Stores `chunk` under this period's name (see [`crate::fresh`]) unless
     /// another write stored the same bytes under it already, and returns
     /// the reference naming it there. An object of the same bytes stored
-    /// on an earlier day is not looked for: what an archive reuses of an
+    /// in an earlier period is not looked for: what an archive reuses of an
     /// earlier copy it names by that copy's references.
     pub async fn put_chunk(&self, chunk: &EncodedChunk) -> Result<Put> {
         // Public structs may have been modified since encoding.
@@ -374,7 +374,7 @@ impl ChunkStore {
         {
             return Err(Error::Integrity);
         }
-        let reference = chunk.reference.on_day(day_of(self.clock.now()));
+        let reference = chunk.reference.on_day(period_of(self.clock.now()));
         let new = self
             .put_immutable(&reference.key(), Bytes::copy_from_slice(&chunk.bytes))
             .await?;
@@ -389,8 +389,8 @@ impl ChunkStore {
             return Ok(true);
         }
         if self.holds(&path, &bytes).await? {
-            // Stored today by another write of the same bytes: no sweep
-            // deletes it before the day after tomorrow (`crate::fresh`).
+            // Stored this period by another write of the same bytes: no
+            // sweep deletes it before the period has ended (`crate::fresh`).
             return Ok(false);
         }
         // Something else is stored under our name: the remains of a bad
@@ -602,19 +602,19 @@ impl ChunkStore {
 
     /// Publish only after every referenced chunk has completed uploading.
     /// This does NOT commit a control-plane checkpoint or permit local deletion.
-    /// Returns the manifest's name: `<day>/<digest>`, the day it is stored
-    /// under today's (see [`crate::fresh`]) and its digest.
+    /// Returns the manifest's name: `<period>/<digest>`, the period it is
+    /// stored under this one (see [`crate::fresh`]) and its digest.
     pub async fn put_manifest(&self, manifest: &DiskManifest) -> Result<String> {
         let bytes = manifest.encode()?;
         let digest = blake3::hash(&bytes).to_hex().to_string();
-        let name = format!("{}/{digest}", day_of(self.clock.now()));
+        let name = format!("{}/{digest}", period_of(self.clock.now()));
         self.put_immutable(&Self::manifest_key(&name)?, Bytes::from(bytes))
             .await?;
         Ok(name)
     }
 
-    /// The key of the manifest named `name`: `<day>/<digest>`, or a digest
-    /// alone for one stored in the old layout.
+    /// The key of the manifest named `name`: `<period>/<digest>`, or a
+    /// digest alone for one stored in the old layout.
     pub fn manifest_key(name: &str) -> Result<String> {
         Ok(match manifest_name(name)? {
             (Some(day), digest) => format!("manifests/v2/{day}/{digest}.json"),
@@ -731,8 +731,8 @@ impl ChunkStore {
     /// the chunk or manifest key `key` they were stored under there, as an
     /// archive stores them: verified in transit, and over other bytes found
     /// under the name only after keeping those in quarantine. Keys keep
-    /// their day, so a sweep of this store judges a copied object by when
-    /// it was first stored.
+    /// their period, so a sweep of this store judges a copied object by
+    /// when it was first stored.
     pub async fn put_stored(&self, key: &str, bytes: Bytes) -> Result<()> {
         if written(key).is_none() {
             return Err(Error::Invalid("only chunks and manifests are copied"));
@@ -813,7 +813,8 @@ impl ChunkStore {
 /// When a chunk or manifest was written, as its key says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Written {
-    /// On this UTC day ([`crate::fresh::day_of`]).
+    /// In this period ([`crate::fresh::period_of`]): an hour, or a day for
+    /// one written before periods were hours.
     On(u32),
     /// In the old layout, named by its content alone: its listing tells
     /// when it was last stored.

@@ -2,14 +2,16 @@
 //! archives that may name them are still in flight, on a store that does
 //! nothing on condition but replace a pointer (ADR 25).
 //!
-//! Chunks and manifests are named by their content and by the day they
-//! were written ([`day_of`], in UTC), and are written only under the
-//! writer's current day. An archive reuses what the pointers it reads after
-//! it began name, whatever their day, and an object of new bytes only if
-//! another archive wrote the same bytes today. The pointers it reads are
-//! its own sandbox's, which nothing but the sandbox's owner and a sweep's
-//! fence change, and its image's, which is written once and emptied only
-//! once no sandbox or template has used the image for a while: reusing
+//! Chunks and manifests are named by their content and by the period they
+//! were written in ([`period_of`], in UTC), and are written only under the
+//! writer's current period. A period is an hour; names written before
+//! hours were used carry a day instead, told apart by their number
+//! ([`FIRST_HOUR`]). An archive reuses what the pointers it reads after it
+//! began name, whatever their period, and an object of new bytes only if
+//! another archive wrote the same bytes this period. The pointers it reads
+//! are its own sandbox's, which nothing but the sandbox's owner and a
+//! sweep's fence change, and its image's, which is written once and emptied
+//! only once no sandbox or template has used the image for a while: reusing
 //! what a pointer names that may change while the archive is in flight
 //! would not be safe. Two rules then make a sweep safe:
 //!
@@ -20,18 +22,28 @@
 //!    deletes anything, a sweep keeps every pointer again as it read it, on
 //!    condition that it is still the version read: an archive that began
 //!    before then can no longer publish, and starts again.
-//! 2. A sweep deletes an object no pointer names only once its day ended a
-//!    whole day before the sweep began ([`sweepable`]).
+//! 2. A sweep deletes an object no pointer names only once its period
+//!    ended at least [`CLOCK_SKEW`] before the sweep began ([`sweepable`]).
 //!
 //! So every pointer after a sweep's fence names only objects named at the
-//! fence or written after it, and nothing written after it is two days
-//! old. Nothing writes a name of an earlier day either, so a delete held
-//! up in flight, however long, never takes a later write: no delete needs
-//! a condition. Only rule 2 rests on clocks, which may disagree by up to
-//! [`CLOCK_SKEW`], well within its day of margin. In a fleet every writer
-//! and sweep reads one clock, the database's ([`Clock::following`]), so a
-//! host whose own clock runs wrong, or is stepped while it runs, cannot
-//! break it.
+//! fence or written after it, by an archive that began after it. Such an
+//! archive writes, and reuses by its bytes, only names of its own current
+//! period, which by any clock within [`CLOCK_SKEW`] of the sweep's is no
+//! earlier than the period the sweep began in less that margin: never one
+//! the sweep deletes. Nothing writes a name of an earlier period either, so
+//! a delete held up in flight, however long, never takes a later write: no
+//! delete needs a condition. Only rule 2 rests on clocks. In a fleet every
+//! writer and sweep reads one clock, the database's
+//! ([`Clock::following`]), so a host whose own clock runs wrong, or is
+//! stepped while it runs, cannot break it, and the margin is left to the
+//! time a request takes.
+//!
+//! Periods are short so that what a replaced copy alone named, such as a
+//! sandbox's earlier checkpoint, goes within a few hours of an hourly sweep
+//! instead of staying a day or two: a store then holds about what its
+//! copies name, not what its busiest sandboxes wrote over two days. Only
+//! the same new bytes written in different periods are stored more than
+//! once.
 //!
 //! Objects in the old layout, named by content alone, are never written
 //! again. One no pointer names is deleted once it was last stored more
@@ -44,6 +56,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
 const DAY: Duration = Duration::from_secs(86_400);
+const HOUR: Duration = Duration::from_secs(3_600);
+
+/// The first period number that counts hours since 1970; those below count
+/// days, as every name written before periods were hours does. Days stay
+/// below it until the year 2243, and hours have been above it since 1981.
+pub const FIRST_HOUR: u32 = 100_000;
 
 /// How far the clock of any host or sweep may disagree with another's.
 pub const CLOCK_SKEW: Duration = Duration::from_secs(3_600);
@@ -54,21 +72,44 @@ pub const CLOCK_SKEW: Duration = Duration::from_secs(3_600);
 pub const LEGACY_SWEEP_AFTER: Duration =
     Duration::from_secs(7 * DAY.as_secs() + 2 * CLOCK_SKEW.as_secs());
 
-/// The day `at` falls on, in whole UTC days since 1970; 0 before then.
+/// The day `at` falls on, in whole UTC days since 1970; 0 before then. The
+/// period of names written before periods were hours.
 #[must_use]
 pub fn day_of(at: SystemTime) -> u32 {
+    whole(at, DAY)
+}
+
+/// The period `at` falls in, the one a writer names what it stores with:
+/// its hour, in whole UTC hours since 1970 ([`FIRST_HOUR`] at the least).
+#[must_use]
+pub fn period_of(at: SystemTime) -> u32 {
+    whole(at, HOUR).max(FIRST_HOUR)
+}
+
+/// Whole `unit`s from 1970 to `at`; 0 before then.
+fn whole(at: SystemTime, unit: Duration) -> u32 {
     at.duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |since| {
-            u32::try_from(since.as_secs() / DAY.as_secs()).unwrap_or(u32::MAX)
+            u32::try_from(since.as_secs() / unit.as_secs()).unwrap_or(u32::MAX)
         })
 }
 
-/// Whether an object of day `day` no pointer names may be deleted by a
-/// sweep that began at `began`: its day ended at least a whole day before.
+/// When period `period` ends: the end of its hour, or of its day for a
+/// number below [`FIRST_HOUR`]; `None` past what a time can hold.
+fn period_end(period: u32) -> Option<SystemTime> {
+    let unit = if period < FIRST_HOUR { DAY } else { HOUR };
+    let units = u64::from(period).checked_add(1)?;
+    SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(units.checked_mul(unit.as_secs())?))
+}
+
+/// Whether an object of period `period` no pointer names may be deleted by
+/// a sweep that began at `began`: its period ended at least [`CLOCK_SKEW`]
+/// before.
 #[must_use]
-pub fn sweepable(day: u32, began: SystemTime) -> bool {
-    day.checked_add(2)
-        .is_some_and(|after| after <= day_of(began))
+pub fn sweepable(period: u32, began: SystemTime) -> bool {
+    period_end(period)
+        .and_then(|end| end.checked_add(CLOCK_SKEW))
+        .is_some_and(|after| after <= began)
 }
 
 /// Where a store reads the time: the system clock, or a test's.
@@ -239,17 +280,50 @@ mod tests {
     }
 
     #[test]
-    fn an_object_is_swept_only_once_its_day_ended_a_whole_day_before() {
+    fn periods_are_utc_hours_since_1970() {
+        let at = SystemTime::UNIX_EPOCH + 20_390 * DAY;
+        assert_eq!(period_of(at), 20_390 * 24);
+        assert_eq!(period_of(at + HOUR - Duration::from_secs(1)), 20_390 * 24);
+        assert_eq!(period_of(at + HOUR), 20_390 * 24 + 1);
+        assert!(period_of(at) >= FIRST_HOUR, "an hour, not a day");
+        assert!(day_of(at) < FIRST_HOUR, "a day, not an hour");
+        assert_eq!(period_of(SystemTime::UNIX_EPOCH), FIRST_HOUR);
+    }
+
+    #[test]
+    fn an_hours_object_is_swept_once_the_hour_ended_the_skew_before() {
         let midnight = SystemTime::UNIX_EPOCH + 20_392 * DAY;
-        // Yesterday's ended less than a day ago.
-        assert!(!sweepable(20_391, midnight));
-        assert!(!sweepable(20_391, midnight + DAY - Duration::from_secs(1)));
-        assert!(sweepable(20_390, midnight));
-        assert!(!sweepable(20_392, midnight), "today's");
+        let hour = period_of(midnight);
+        // The hour before midnight ended just now.
+        assert!(!sweepable(hour - 1, midnight));
+        assert!(!sweepable(hour - 1, midnight + CLOCK_SKEW - Duration::from_secs(1)));
+        assert!(sweepable(hour - 1, midnight + CLOCK_SKEW));
+        assert!(sweepable(hour - 2, midnight + CLOCK_SKEW));
+        assert!(!sweepable(hour, midnight + CLOCK_SKEW), "this hour's");
         assert!(!sweepable(u32::MAX, midnight), "a later clock's");
         // A writer whose clock is behind by the skew, writing just after a
-        // sweep's fence, writes a day the sweep keeps.
-        let fence = midnight + Duration::from_secs(60);
-        assert!(!sweepable(day_of(fence - CLOCK_SKEW), fence));
+        // sweep's fence, writes an hour the sweep keeps, wherever in its
+        // hour the sweep begins.
+        for minute in 0..60 {
+            let began = midnight + Duration::from_secs(minute * 60 + 30);
+            let fence = began + Duration::from_secs(5);
+            assert!(!sweepable(period_of(fence - CLOCK_SKEW), began));
+            assert!(!sweepable(period_of(fence), began));
+        }
+    }
+
+    #[test]
+    fn a_days_object_is_swept_once_the_day_ended_the_skew_before() {
+        let midnight = SystemTime::UNIX_EPOCH + 20_392 * DAY;
+        assert!(!sweepable(20_391, midnight), "yesterday's ended just now");
+        assert!(!sweepable(20_391, midnight + CLOCK_SKEW - Duration::from_secs(1)));
+        assert!(sweepable(20_391, midnight + CLOCK_SKEW));
+        assert!(sweepable(20_390, midnight));
+        assert!(!sweepable(20_392, midnight + DAY - Duration::from_secs(1)), "today's");
+        // A host of an earlier release, which names days, writing just
+        // after a sweep's fence with its clock behind by the skew, writes
+        // a day the sweep keeps.
+        let began = midnight + Duration::from_secs(60);
+        assert!(!sweepable(day_of(began - CLOCK_SKEW), began));
     }
 }

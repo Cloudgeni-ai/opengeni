@@ -250,7 +250,7 @@ computeControl:
       iam.gke.io/gcp-service-account: opengeni-compute-control@example.iam.gserviceaccount.com
 ```
 
-The daily sweep of the store (ADR 17, 25) runs as a CronJob from the same
+The hourly sweep of the store (ADR 17, 25, 28) runs as a CronJob from the same
 image, identity and database (`computeControl.sweep`), as `compute-control
 sweep`: it reads the pointers the service keeps. It deletes on any archive,
 `gs://`, `az://` or `s3://`.
@@ -843,10 +843,12 @@ before users move to compute from Modal:
 - **Deleting a sandbox: its pointer goes last, its bytes later.** Removal
   records the intent, stops the VM, removes its network and then deletes
   its pointer; a step that fails is tried again, and the sandbox shows as
-  removing (or blocked) until all are done. A daily sweep then deletes the
-  chunks and manifests no pointer names whose day ended at least a whole
-  day before it began, two to three days after the last pointer naming
-  them went ([ADR 25](adr/0025-pointers-in-the-control-service-and-objects-by-day.md)).
+  removing (or blocked) until all are done. An hourly sweep then deletes
+  the chunks and manifests no pointer names whose hour ended at least an
+  hour before it began, two to three hours after the last pointer naming
+  them went ([ADR 25](adr/0025-pointers-in-the-control-service-and-objects-by-day.md),
+  [28](adr/0028-stored-objects-carry-their-hour.md)); one named with a day,
+  by a host of an earlier release, once its day ended an hour before.
   Objects in the old layout (`chunks/v1`, `manifests/v1`) go once they
   were last stored more than a week before the sweep. A chunk another
   sandbox still names stays: identical content is shared.

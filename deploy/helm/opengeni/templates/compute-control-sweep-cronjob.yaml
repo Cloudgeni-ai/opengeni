@@ -1,8 +1,8 @@
 {{- if and .Values.computeControl.enabled .Values.computeControl.sweep.enabled }}
 {{- $cc := .Values.computeControl }}
-# The store's daily sweep (ADR 17, 25): fences every pointer the service
-# keeps, then deletes chunks and manifests none names whose day ended a
-# whole day before. Safe while hosts archive, on any object store; one at a
+# The store's hourly sweep (ADR 17, 25, 28): fences every pointer the
+# service keeps, then deletes chunks and manifests none names whose period
+# ended an hour before. Safe while hosts archive, on any object store; one at a
 # time. It reads the pointers from the service's database, so it refuses to
 # start until the fleet's pointers are in it.
 apiVersion: batch/v1
