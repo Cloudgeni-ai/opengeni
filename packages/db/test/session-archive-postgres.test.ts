@@ -156,6 +156,9 @@ async function idleSession(options: { backdateDays?: number } = {}) {
     await sql`update sessions set created_at = created_at - make_interval(days => ${days}),
         updated_at = updated_at - make_interval(days => ${days})
       where workspace_id = ${scope.workspaceId} and id = ${scope.sessionId}`;
+    // Its workflow got every wake long ago.
+    await sql`update session_workflow_wake_outbox set delivered_revision = wake_revision
+      where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId}`;
   });
   return { scope, subjectId: grant.subjectId };
 }
