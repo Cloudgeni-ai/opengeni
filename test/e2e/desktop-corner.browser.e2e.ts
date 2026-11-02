@@ -112,6 +112,12 @@ describe("the desktop window bar", () => {
           const style = getComputedStyle(node);
           return `${style.backgroundColor} ${style.backgroundImage}`;
         };
+        const painted = (node: Element) => background(node) !== "rgba(0, 0, 0, 0) none";
+        const ancestors: Element[] = [];
+        for (let node = column.parentElement; node && node !== document.body;) {
+          ancestors.push(node);
+          node = node.parentElement;
+        }
         return {
           width: Math.round(column.getBoundingClientRect().width),
           hairline: getComputedStyle(column).borderRightColor,
@@ -119,32 +125,41 @@ describe("the desktop window bar", () => {
           // Between the surface and the rail's items nothing paints a background.
           fills: [...surface.querySelectorAll<HTMLElement>("*")]
             .filter((node) => node.contains(element) || node === element)
-            .map((node) => getComputedStyle(node).backgroundColor)
-            .filter((colour) => colour !== "rgba(0, 0, 0, 0)"),
+            .filter(painted)
+            .map(background),
+          // Nor do the column and the frame around it, up to the page.
+          frame: [column, ...ancestors].filter(painted).map(background),
           brandTop: Math.round(brand.getBoundingClientRect().top),
           brandDrag: getComputedStyle(brand).getPropertyValue("-webkit-app-region"),
         };
       });
     for (const platform of PLATFORMS) {
-      const sessions = await open(platform, "&view=content&railwidth=340", 1280, 600);
-      await sessions.page.getByRole("link", { name: "Opengeni home" }).waitFor({ timeout: 90_000 });
-      const main = await treatment(sessions.page, "[data-rail-scroll-viewport]");
-      const settings = await open(platform, "&railwidth=340", 1280, 600);
-      await settings.page.locator("[data-settings-rail]").waitFor({ timeout: 90_000 });
-      const rail = await treatment(settings.page, "[data-settings-rail]");
+      // One page for both views, so a cold dev server settles once.
+      const { page, errors } = await open(platform, "&view=content&railwidth=340", 1280, 600);
+      await page.getByRole("link", { name: "Opengeni home" }).waitFor({ timeout: 90_000 });
+      const main = await treatment(page, "[data-rail-scroll-viewport]");
+      await page.goto(`${url}?platform=${platform}&railwidth=340`);
+      await page.locator("[data-settings-rail]").waitFor({ timeout: 90_000 });
+      const rail = await treatment(page, "[data-settings-rail]");
       // As wide as the main rail, at the width the person dragged it to.
-      expect({ platform, ...rail, fills: [] }).toEqual({ platform, ...main, fills: [] });
+      expect({ platform, ...rail, fills: [], frame: [] }).toEqual({
+        platform,
+        ...main,
+        fills: [],
+        frame: [],
+      });
       expect({ platform, fills: rail.fills }).toEqual({ platform, fills: [] });
       expect(rail.width).toBe(340);
       expect(rail.brandDrag).toBe(platform === "browser" ? "none" : "drag");
       if (platform === "macos") {
         expect(rail.surface).toBe(`${transparent} none`);
         expect(rail.hairline).toBe(transparent);
+        expect({ frame: rail.frame }).toEqual({ frame: [] });
       } else {
         expect(rail.surface).toContain("radial-gradient");
       }
-      expect([...sessions.errors, ...settings.errors]).toEqual([]);
-      await Promise.all([sessions.page.close(), settings.page.close()]);
+      expect(errors).toEqual([]);
+      await page.close();
     }
     // Without the app's rail (personal settings), the main rail's default width.
     const personal = await open("macos", "&apprail=none", 1280, 600);

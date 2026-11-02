@@ -44,6 +44,7 @@ import {
   windowBarRowActive,
 } from "@opengeni/react/app/components/window-bar";
 import { applyDesktopWindowBar, desktopBridge } from "@opengeni/react/app/lib/desktop";
+import { ShellRail } from "@opengeni/react/app/components/rail/rail-surface";
 import { RailBody } from "../src/components/rail/rail-shell";
 import { WorkspaceSwitcherMenu } from "../src/components/rail/workspace-switcher";
 import {
@@ -134,14 +135,14 @@ function ContentPreview() {
       className="flex h-full min-h-0 w-full flex-1 overflow-hidden"
       data-rail-collapsed={rail.collapsed ? "true" : undefined}
     >
-      <nav
-        data-shell-rail
+      <ShellRail
+        as="nav"
         data-collapsed={rail.collapsed}
         style={{ width: rail.collapsed ? 56 : rail.width }}
-        className="h-full shrink-0 border-r border-border"
+        className="h-full"
       >
         <RailBody />
-      </nav>
+      </ShellRail>
       <div
         ref={canvasRef}
         data-canvas

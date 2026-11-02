@@ -250,7 +250,6 @@ test("the docked settings rail is the main rail's sidebar: same column, clear su
     expect(surface!.classList.contains("og-rail-glow")).toBe(true);
     // Nothing inside the surface paints over it: an opaque fill there is the
     // flat panel, and its edge under the clear window bar the line under the bar.
-    expect(nav.classList.contains("bg-transparent")).toBe(true);
     const filled = [nav, ...nav.querySelectorAll<HTMLElement>("*")]
       .filter((element) => !element.closest("[data-settings-search], [aria-haspopup]"))
       .flatMap((element) => [...element.classList].filter((name) => OPAQUE_FILL.test(name)));
@@ -265,9 +264,11 @@ test("the docked settings rail is the main rail's sidebar: same column, clear su
     expect(frame.style.getPropertyValue("--og-settings-rail-width")).toBe(
       `${RAIL_DEFAULT_WIDTH}px`,
     );
-    expect(frame.className).toContain("lg:grid-cols-[var(--og-settings-rail-width)_minmax(0,1fr)]");
     expect(frame.className).toContain(
-      "desktop-wide:grid-cols-[var(--og-settings-rail-width)_minmax(0,1fr)]",
+      "lg:grid-cols-[var(--og-settings-rail-width,15rem)_minmax(0,1fr)]",
+    );
+    expect(frame.className).toContain(
+      "desktop-wide:grid-cols-[var(--og-settings-rail-width,18rem)_minmax(0,1fr)]",
     );
   } finally {
     await act(async () => root.unmount());
@@ -289,7 +290,7 @@ test("the settings drawer shows the rail on the same surface", async () => {
     });
     const nav = document.querySelector<HTMLElement>('[role="dialog"] nav[aria-label="Settings"]')!;
     expect(nav.closest("[data-rail-surface]")?.classList.contains("og-rail-glow")).toBe(true);
-    expect(nav.classList.contains("bg-transparent")).toBe(true);
+    expect([...nav.classList].filter((name) => OPAQUE_FILL.test(name))).toEqual([]);
     // Not a docked column: the drawer keeps its own glow on macOS too.
     expect(nav.closest("[data-shell-rail]")).toBeNull();
   } finally {

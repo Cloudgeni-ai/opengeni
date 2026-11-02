@@ -7,8 +7,8 @@ import {
   useMemo,
   useRef,
   useState,
-  type KeyboardEvent,
   type CSSProperties,
+  type KeyboardEvent,
   type ReactElement,
   type ReactNode,
 } from "react";
@@ -73,12 +73,13 @@ import { searchSettings, settingsSearchEntries, type SettingsSearchEntry } from 
 
 /**
  * The rail beside the content, as wide as the main rail
- * (`--og-settings-rail-width`, set by the shell), so moving between sessions
- * and settings keeps the page edge still; one column with a header row below
- * 1024px. In the desktop app the rail stays down to 640px.
+ * (`--og-settings-rail-width`, set by `SettingsShell`; the old fixed widths
+ * without it), so moving between sessions and settings keeps the page edge
+ * still; one column with a header row below 1024px. In the desktop app the
+ * rail stays down to 640px.
  */
 export const SETTINGS_SHELL_CLASS =
-  "grid h-full min-h-0 w-full min-w-0 flex-1 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-bg text-fg lg:grid-cols-[var(--og-settings-rail-width)_minmax(0,1fr)] lg:grid-rows-1 desktop-wide:grid-cols-[var(--og-settings-rail-width)_minmax(0,1fr)] desktop-wide:grid-rows-1";
+  "grid h-full min-h-0 w-full min-w-0 flex-1 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-bg text-fg lg:grid-cols-[var(--og-settings-rail-width,15rem)_minmax(0,1fr)] lg:grid-rows-1 desktop-wide:grid-cols-[var(--og-settings-rail-width,18rem)_minmax(0,1fr)] desktop-wide:grid-rows-1";
 
 const NARROW_QUERY = desktopPlatform ? "(max-width: 639px)" : "(max-width: 1023px)";
 
@@ -309,8 +310,8 @@ function SettingsRail({
         variant="rail"
         aria-label={label}
         data-settings-rail
-        // The rail surface is the background: the navigation stays clear on it.
-        className="min-h-0 w-full flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain border-r-0 bg-transparent px-2"
+        // On the rail surface, in the shared column (which draws the hairline).
+        className="min-h-0 w-full flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain border-r-0 px-2"
         onClick={(event) => {
           if (event.target instanceof Element && event.target.closest("a[href]")) {
             if (event.target.closest("[data-settings-search-result]")) setQuery("");

@@ -6,6 +6,7 @@ import { useWindowBarRowLeft } from "@opengeni/react/app/lib/window-bar-row";
 import { applyDesktopWindowBar, desktopBridge } from "@opengeni/react/app/lib/desktop";
 import type { Session } from "@opengeni/react/app/types";
 import { createRootRoute, createRoute, createRouter, RouterProvider } from "@tanstack/react-router";
+import { ShellRail } from "@opengeni/react/app/components/rail/rail-surface";
 import { RailBody } from "../src/components/rail/rail-shell";
 import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import { client, useRail, workspaceId } from "./desktop-rail-context";
@@ -66,14 +67,14 @@ function Preview() {
           className="flex h-dvh overflow-hidden bg-canvas text-fg"
         >
           {withRail ? (
-            <nav
-              data-shell-rail
+            <ShellRail
+              as="nav"
               data-collapsed={rail.collapsed}
               style={{ width: rail.collapsed ? 56 : rail.width }}
-              className="h-full shrink-0 border-r border-border"
+              className="h-full"
             >
               <RailBody />
-            </nav>
+            </ShellRail>
           ) : null}
           <div
             ref={canvasRef}

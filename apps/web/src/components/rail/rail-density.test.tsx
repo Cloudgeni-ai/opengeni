@@ -79,11 +79,19 @@ const railHeader = await Bun.file(
     import.meta.url,
   ),
 ).text();
+const railSurface = await Bun.file(
+  new URL(
+    "../../../../../packages/react/src/app/components/rail/rail-surface.tsx",
+    import.meta.url,
+  ),
+).text();
 const webRailShell = await Bun.file(new URL("./rail-shell.tsx", import.meta.url)).text();
 
 describe("rail overflow boundaries", () => {
   test("contains scrolling session controls above a non-shrinking footer on the rail glow", () => {
-    expect(railShell).toContain(
+    // The rail body sits on the shared rail surface, the clipped glow column.
+    expect(railShell).toContain("<RailSurface data-rail>");
+    expect(railSurface).toContain(
       "og-rail-glow isolate flex h-full min-h-0 flex-col overflow-hidden",
     );
     expect(railShell).toMatch(

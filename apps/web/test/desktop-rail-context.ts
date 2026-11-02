@@ -44,7 +44,7 @@ const setCollapsed = (value: boolean) => {
   listeners.forEach((listener) => listener());
 };
 // `?railwidth=<px>`: the width the person dragged the main rail to.
-const railWidth = Number(new URLSearchParams(location.search).get("railwidth") ?? 288);
+const railWidth = Number(new URLSearchParams(location.search).get("railwidth")) || 288;
 export function useRail() {
   return {
     workspaceId,
