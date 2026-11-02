@@ -278,7 +278,11 @@ import { useActionShortcut } from "../../lib/actions/actions-provider";
 import { chordLabel, currentPlatform } from "../../lib/actions/chords";
 import { useHeldModifier } from "../../lib/actions/held-modifier";
 import { requestCommandMenu } from "../../lib/actions/events";
-import { rememberChats, setSidebarOrder } from "../../lib/actions/chat-directory";
+import {
+  readChatDirectory,
+  rememberChats,
+  setSidebarOrder,
+} from "../../lib/actions/chat-directory";
 import { rememberSidebarSites } from "../../lib/actions/site-directory";
 import { useChatOperations } from "../../lib/actions/chat-operations";
 import { TooltipWithKeys } from "../command-menu/keycaps";
@@ -2793,6 +2797,33 @@ export function SessionList() {
     () => new Map(pinnedChatNodes.slice(0, 9).map((node, index) => [node.session.id, index + 1])),
     [pinnedChatNodes],
   );
+  // A pinned sub-agent chat sits in Pinned away from its parent, so its row
+  // says which chat it belongs to, when that chat is known here.
+  const pinnedParentTitlesRef = useRef<ReadonlyMap<string, string>>(new Map());
+  const pinnedParentTitles = useMemo(() => {
+    const titles = new Map<string, string>();
+    const pinnedChildren = pinnedChatNodes.filter((node) => node.session.parentSessionId !== null);
+    if (pinnedChildren.length > 0) {
+      const loaded = new Map([...allSessions, ...pinned].map((session) => [session.id, session]));
+      const known = readChatDirectory(directorySubject, rail.workspaceId).rows;
+      for (const { session } of pinnedChildren) {
+        const parentId = session.parentSessionId!;
+        const parent = loaded.get(parentId);
+        const title = parent ? sessionDisplayTitle(parent) : known.get(parentId)?.title;
+        if (title) titles.set(session.id, title);
+      }
+    }
+    // The same titles keep the same map, so pinned rows don't re-render for nothing.
+    const previous = pinnedParentTitlesRef.current;
+    if (
+      previous.size === titles.size &&
+      [...titles].every(([id, title]) => previous.get(id) === title)
+    ) {
+      return previous;
+    }
+    pinnedParentTitlesRef.current = titles;
+    return titles;
+  }, [allSessions, directorySubject, pinned, pinnedChatNodes, rail.workspaceId]);
 
   useLayoutEffect(() => {
     const pending = pendingSessionFocus.current;
@@ -4035,26 +4066,28 @@ export function SessionList() {
                 {pinnedNodes.length > 0 ? (
                   <>
                     <PinnedJumpNumbers.Provider value={pinnedJumpNumbers}>
-                      <SessionGroup
-                        label="Pinned"
-                        nodes={pinnedNodes}
-                        localDeliveryAttention={localDeliveryAttention}
-                        flat={flat}
-                        activeSessionId={activeSessionId}
-                        focusIndex={focusIndex}
-                        onFocusSession={setFocusedSessionId}
-                        expanded={expanded}
-                        onToggleExpand={toggleExpand}
-                        childPages={childPages}
-                        onLoadMoreChildren={loadChildPage}
-                        onRename={context.updateSessionTitle}
-                        onPin={onPin}
-                        channels={channels}
-                        onMoveToChannel={onMoveToChannel}
-                        onUpdateAttention={onUpdateAttention}
-                        onArchive={onArchive}
-                        onRequestDelete={setSessionPendingDelete}
-                      />
+                      <PinnedParentTitles.Provider value={pinnedParentTitles}>
+                        <SessionGroup
+                          label="Pinned"
+                          nodes={pinnedNodes}
+                          localDeliveryAttention={localDeliveryAttention}
+                          flat={flat}
+                          activeSessionId={activeSessionId}
+                          focusIndex={focusIndex}
+                          onFocusSession={setFocusedSessionId}
+                          expanded={expanded}
+                          onToggleExpand={toggleExpand}
+                          childPages={childPages}
+                          onLoadMoreChildren={loadChildPage}
+                          onRename={context.updateSessionTitle}
+                          onPin={onPin}
+                          channels={channels}
+                          onMoveToChannel={onMoveToChannel}
+                          onUpdateAttention={onUpdateAttention}
+                          onArchive={onArchive}
+                          onRequestDelete={setSessionPendingDelete}
+                        />
+                      </PinnedParentTitles.Provider>
                     </PinnedJumpNumbers.Provider>
                     {pinnedTruncated ? (
                       <p className="px-2 pb-2 text-[11px] text-fg-subtle" role="status">
@@ -5093,6 +5126,8 @@ function TreeLoadRow({
 
 /** The ⌘1 to ⌘9 number of each top-level pinned row; absent outside the Pinned section. */
 const PinnedJumpNumbers = createContext<ReadonlyMap<string, number> | null>(null);
+/** The parent chat's title for each pinned sub-agent row; absent outside the Pinned section. */
+const PinnedParentTitles = createContext<ReadonlyMap<string, string> | null>(null);
 
 /** "⌘3" while ⌘ is held on a pinned row that ⌘3 opens; otherwise nothing. */
 function usePinnedJumpKey(sessionId: string, depth: number, mobile: boolean): string | undefined {
@@ -5149,6 +5184,9 @@ function SessionRow(props: {
   const focusEvents = useUiEventTarget("window");
   const creator = railRowCreator(props.session);
   const jumpKey = usePinnedJumpKey(props.session.id, props.depth, rail.isMobile);
+  const pinnedParentTitles = useContext(PinnedParentTitles);
+  const parentTitle =
+    props.depth === 0 ? (pinnedParentTitles?.get(props.session.id) ?? null) : null;
   // A key press puts the person's attention elsewhere (⌘K right after opening a
   // chat, with the pointer still on its row), so the hover card gives way, as
   // tooltips do.
@@ -5320,7 +5358,7 @@ function SessionRow(props: {
                 tabIndex={props.focused ? 0 : -1}
                 aria-current={props.active ? "page" : undefined}
                 aria-label={sessionRowAccessibleName({
-                  title,
+                  title: parentTitle ? `${title}, in ${parentTitle}` : title,
                   stateLabel,
                   pinned: Boolean(props.session.pinned),
                   statusLabel: props.aggregateStatus.label,
@@ -5409,6 +5447,7 @@ function SessionRow(props: {
                     ) : null
                   }
                   title={title}
+                  parentTitle={parentTitle}
                   stateLabel={stateLabel}
                   depthLabel={depthLabel}
                   descendantLabel={descendantLabel}

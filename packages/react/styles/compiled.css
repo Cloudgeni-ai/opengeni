@@ -2257,6 +2257,9 @@
 :where(.og-root).max-w-\[50\%\],:where(.og-root) .max-w-\[50\%\] {
     max-width: 50%;
   }
+:where(.og-root).max-w-\[55\%\],:where(.og-root) .max-w-\[55\%\] {
+    max-width: 55%;
+  }
 :where(.og-root).max-w-\[60\%\],:where(.og-root) .max-w-\[60\%\] {
     max-width: 60%;
   }
@@ -2481,6 +2484,9 @@
   }
 :where(.og-root).shrink-0,:where(.og-root) .shrink-0 {
     flex-shrink: 0;
+  }
+:where(.og-root).shrink-3,:where(.og-root) .shrink-3 {
+    flex-shrink: 3;
   }
 :where(.og-root).shrink-\[2\],:where(.og-root) .shrink-\[2\] {
     flex-shrink: 2;
