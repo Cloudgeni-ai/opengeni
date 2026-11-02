@@ -199,6 +199,32 @@ while the chat is its owner's Only me chat: shared chats with it (including
 chats of an agent later made Only me) continue as plain chats. An Only me
 agent needs Only me chats enabled in the organization to be used.
 
+### Memory
+
+One switch, "Remember across chats" (`memoryEnabled`). On: the agent has its
+own Knowledge collection and its chats may read its other shared chats
+(`slack_agent_chats`). Off: neither. The rules live in
+`packages/core/src/domain/agent-memory.ts` and are enforced by the tools:
+
+- Every chat of the agent reads its Memory, including entries still waiting
+  for review (`view: needs_review`), which it is told are unreviewed.
+- Only chats whose audience matches the collection write to it: a shared
+  agent's shared chats, or an Only me agent's owner in a private chat. Private
+  chats (Slack DMs included) of a shared agent, chats with Memory scope off and
+  open-use chats only read. `knowledge_save`, `knowledge_archive` and
+  `task_note_promote_knowledge` refuse such a write
+  (`agent_memory_read_only`) when it names the collection as a group, is the
+  collection, or changes an entry already in it. A worker a chat started is
+  checked as its root chat's.
+- With Memory off, nothing is saved into the collection and
+  `slack_agent_chats` lists nothing.
+- `slack_agent_chats` never lists private chats.
+- The chat is told its collection and whether it may save when it starts:
+  Slack agent chats in their Slack instructions, app chats in their own
+  instructions, which also get `slack_agent_chats`. Nobody is told to save
+  with workspace scope any more; a save follows the chat's own scope (this
+  was how DM content reached workspace Knowledge).
+
 ### Compatibility
 
 `/bot-templates`, `/integrations/slack/agents`, the MCP tools
@@ -210,6 +236,10 @@ agent needs Only me chats enabled in the organization to be used.
   the old gallery opens a template in a chat not bound to the agent, so other
   agents' Instructions would not apply. Get, change and delete by id work for
   every agent. A new template is an agent with empty Instructions.
+- `bot_template_save` ("Make this an agent") creates an agent from the chat
+  with standing `instructions` and an optional `firstMessage` (the older
+  `setupInstructions` argument is taken as the First message), shared like
+  the chat it was made from, with Memory off.
 - Slack agents are the agents available in that installation. Deleting one
   through the old endpoint deletes the agent.
 

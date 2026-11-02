@@ -129,10 +129,11 @@ template above the composer with its setup instructions filled in; closing that
 strip (or leaving the page) takes the untouched instructions out again, so they
 never become an ordinary chat's first message by accident.
 
-The agent saves a template of itself with `bot_template_save` (capability
+The agent makes an agent of itself with `bot_template_save` (capability
 `subagents`, needs `sessions:create`), usually when the person asks. It writes
-the setup instructions from what the chat has established and leaves out
-one-off tasks, history, personal details and secrets.
+standing Instructions from what the chat has established, puts one-time setup
+in an optional First message, and leaves out one-off tasks, history, personal
+details and secrets ([agents](agents.md#compatibility)).
 
 ### Sharing a template as a file
 

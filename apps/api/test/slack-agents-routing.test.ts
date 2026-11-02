@@ -519,6 +519,7 @@ describe("what people read", () => {
       avatar: { kind: "emoji" as const, emoji: "📊" },
       instructions: "",
       knowledgeCollectionId: id === "a" ? "11111111-1111-4111-8111-111111111111" : null,
+      memoryEnabled: id === "a",
       open: false,
       createdBySubjectId: "user:admin",
       version: 1,
@@ -549,6 +550,22 @@ describe("what people read", () => {
     // The server refuses a hand-back; the chat is only told who passed it on.
     expect(text).toContain("Ops passed this request on to you.");
     expect(text).not.toContain("- Analytics");
+    expect(text).toContain("groupIds [11111111-1111-4111-8111-111111111111]");
+    // Never told to save with workspace scope (DM content reached workspace Knowledge).
+    expect(text).not.toContain('scope "workspace"');
+    // A DM reads the Memory and never writes to it.
+    const dm = slackAgentSessionInstructions({
+      loaded,
+      agent: analytics,
+      handedOffBy: null,
+      privateChat: true,
+    });
+    expect(dm).toContain("groupId 11111111-1111-4111-8111-111111111111");
+    expect(dm).toContain("never save anything from it to your Memory");
+    expect(dm).not.toContain("knowledge_save");
+    // Memory off: no Memory, no other chats.
+    const forgetful = slackAgentSessionInstructions({ loaded, agent: ops, handedOffBy: null });
+    expect(forgetful).not.toContain("slack_agent_chats");
     const plain = slackAgentSessionInstructions({
       loaded,
       agent: null,

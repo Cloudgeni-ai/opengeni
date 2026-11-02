@@ -13,6 +13,8 @@ import {
   withLearningRefusalMeta,
 } from "@opengeni/contracts/learning-refusal";
 import {
+  agentMemoryAccess,
+  agentMemoryReadOnlyMessage,
   prepareKnowledgeFile,
   prepareKnowledgeSave,
   retainKnowledgeMessage,
@@ -27,6 +29,7 @@ import {
   confirmLegacyKnowledge,
   confirmLegacyInstruction,
   getKnowledgeEntry,
+  getSessionAgentMemoryState,
   listKnowledgeEntries,
   nestedAuthorityRefusalMessage,
   nestedPostgresSqlState,
@@ -93,6 +96,11 @@ function refusalAgentMessage(
   }
 }
 
+/** A write an agent's chat may not make into its agent's Memory (see agent-memory.ts). */
+class AgentMemoryReadOnlyError extends Error {
+  readonly code = "agent_memory_read_only";
+}
+
 /** One structured write and retrieval path, independent of the legacy Memory toggle. */
 export function registerKnowledgeEntryTools(
   server: McpServer,
@@ -130,7 +138,8 @@ export function registerKnowledgeEntryTools(
     } catch (error) {
       if (
         error instanceof KnowledgeEntryIdTakenError ||
-        error instanceof KnowledgeEntryIdRequiredError
+        error instanceof KnowledgeEntryIdRequiredError ||
+        error instanceof AgentMemoryReadOnlyError
       ) {
         return {
           isError: true,
@@ -182,6 +191,35 @@ export function registerKnowledgeEntryTools(
       // tells the person it was not saved.
       return refusal ? withLearningRefusalMeta(result, refusal) : result;
     }
+  }
+  /**
+   * Refuse a write into this chat's agent's Memory collection when the chat
+   * may only read it: a private chat of a shared agent (a Slack DM, say), a
+   * chat whose Memory scope is off, or an agent whose Memory is off. A write
+   * touches the collection when it names it as a group, is the collection, or
+   * corrects or archives an entry already in it.
+   */
+  async function requireAgentMemoryWrite(
+    context: KnowledgeContext,
+    target: { groupIds?: readonly string[] | undefined; entryId?: string | undefined },
+  ): Promise<void> {
+    const state = await getSessionAgentMemoryState(deps.db, {
+      workspaceId: grant.workspaceId,
+      sessionId,
+    });
+    if (!state?.agentChat || !state.agent) return;
+    const access = agentMemoryAccess(state.agent, state.chat);
+    const collection = access.collectionId;
+    if (!collection || access.write) return;
+    let touches = (target.groupIds ?? []).includes(collection) || target.entryId === collection;
+    for (const view of ["published", "needs_review"] as const) {
+      if (touches || !target.entryId) break;
+      const existing = await getKnowledgeEntry(deps.db, context, target.entryId, { view }).catch(
+        () => null,
+      );
+      touches = existing?.revision.entry.groupIds?.includes(collection) ?? false;
+    }
+    if (touches) throw new AgentMemoryReadOnlyError(agentMemoryReadOnlyMessage(access));
   }
   // Compatibility recovery for tool selections persisted before the cutover.
   // This name is absent from new defaults. No legacy proposal writer is registered.
@@ -355,7 +393,18 @@ export function registerKnowledgeEntryTools(
           ),
       },
     },
-    (input) => run((context) => saveKnowledgeEntry(deps.db, context, input), "knowledge", "write"),
+    (input) =>
+      run(
+        async (context) => {
+          await requireAgentMemoryWrite(context, {
+            groupIds: input.entry.groupIds,
+            entryId: input.entryId,
+          });
+          return saveKnowledgeEntry(deps.db, context, input);
+        },
+        "knowledge",
+        "write",
+      ),
   );
   server.registerTool(
     "knowledge_archive",
@@ -369,7 +418,14 @@ export function registerKnowledgeEntryTools(
       },
     },
     (input) =>
-      run((context) => archiveKnowledgeEntry(deps.db, context, input), "knowledge", "write"),
+      run(
+        async (context) => {
+          await requireAgentMemoryWrite(context, { entryId: input.entryId });
+          return archiveKnowledgeEntry(deps.db, context, input);
+        },
+        "knowledge",
+        "write",
+      ),
   );
   server.registerTool(
     "instruction_policy_get",
@@ -397,6 +453,16 @@ export function registerKnowledgeEntryTools(
       inputSchema: KnowledgeTaskNotePromotionRequest.shape,
     },
     (input) =>
-      run((context) => promoteTaskNoteToKnowledge(deps.db, context, input), "knowledge", "write"),
+      run(
+        async (context) => {
+          await requireAgentMemoryWrite(context, {
+            groupIds: input.groupIds,
+            entryId: input.entryId,
+          });
+          return promoteTaskNoteToKnowledge(deps.db, context, input);
+        },
+        "knowledge",
+        "write",
+      ),
   );
 }

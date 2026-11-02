@@ -1208,6 +1208,8 @@ export type SlackAgentProjection = {
   instructions: string;
   /** Null while Memory is off. */
   knowledgeCollectionId: string | null;
+  /** The Memory switch; on with no collection while one could not be made. */
+  memoryEnabled: boolean;
   open: boolean;
   createdBySubjectId: string;
   version: number;
@@ -1245,6 +1247,7 @@ function mapProjection(row: ProjectionRow, fallbackHome: string | null): SlackAg
     avatar: legacySlackAgentAvatar({ id: row.agent_id, name: row.name, avatar: row.avatar }),
     instructions: row.instructions ?? "",
     knowledgeCollectionId: row.memory_enabled ? row.memory_collection_id : null,
+    memoryEnabled: row.memory_enabled,
     open: row.open,
     createdBySubjectId: row.agent_created_by_subject_id ?? row.enabled_by_subject_id ?? "",
     version: Number(row.agent_version),
@@ -1405,5 +1408,58 @@ export async function getSessionAgent(
           ref.agentId,
         )
       : null,
+  };
+}
+
+/**
+ * A chat's agent for its Memory rules, with the chat's audience. A worker a
+ * chat started has no agent of its own, so it is checked as its root chat's:
+ * it may not write to a Memory its root chat could not. Privacy and Memory
+ * scope are the asking chat's own (a private chat's workers are private too).
+ */
+export async function getSessionAgentMemoryState(
+  db: Database,
+  input: { workspaceId: string; sessionId: string },
+): Promise<{
+  agentChat: boolean;
+  agent: AgentRecord | null;
+  chat: { private: boolean; ownerSubjectId: string | null; memoryOff: boolean };
+} | null> {
+  const row = await withWorkspaceRls(db, input.workspaceId, async (tx) => {
+    const [found] = await rawRows<{
+      account_id: string;
+      agent_id: string | null;
+      visibility: string;
+      owner_subject_id: string | null;
+      memory_scope: string;
+    }>(
+      tx,
+      sql`select s.account_id::text as account_id,
+          coalesce(s.agent_id::text, s.metadata -> 'slackAgent' ->> 'id',
+            r.agent_id::text, r.metadata -> 'slackAgent' ->> 'id') as agent_id,
+          s.visibility, s.owner_subject_id, s.memory_scope
+        from sessions s
+        left join sessions r on r.workspace_id = s.workspace_id
+          and r.id = s.root_session_id and r.id <> s.id
+        where s.workspace_id = ${input.workspaceId}::uuid and s.id = ${input.sessionId}::uuid`,
+    );
+    return found ?? null;
+  });
+  if (!row) return null;
+  const chat = {
+    private: row.visibility === "user_private",
+    ownerSubjectId: row.owner_subject_id,
+    memoryOff: row.memory_scope === "off",
+  };
+  const agentId = row.agent_id && /^[0-9a-f-]{36}$/iu.test(row.agent_id) ? row.agent_id : null;
+  if (!agentId) return { agentChat: false, agent: null, chat };
+  return {
+    agentChat: true,
+    agent: await getAgent(
+      db,
+      { accountId: row.account_id, workspaceId: input.workspaceId },
+      agentId,
+    ),
+    chat,
   };
 }

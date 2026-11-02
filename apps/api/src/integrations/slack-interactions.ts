@@ -99,7 +99,7 @@ import {
   getSlackInteractionInboxByProviderEvent,
   getSlackProviderEventIdForTurn,
   getSlackInteractionForSession,
-  getSessionAgentId,
+  getSessionAgent,
   SessionAgentNotFoundError,
   listSlackAgentChats,
   listSlackAgentsForConnection,
@@ -3488,6 +3488,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
                   loaded: slackAgents,
                   agent: routedAgent,
                   source: resolution.source,
+                  privateChat: interaction.visibility === "private",
                   handedOffBy:
                     slackAgents.records.find(
                       (agent) => agent.id === interaction.handoffFromSlackAgentId,
@@ -4219,17 +4220,31 @@ function boundedSlackInboxText(text: string): string {
   return bounded;
 }
 
-/** The same Slack agent's other recent chats, for the `slack_agent_chats` tool. */
+/**
+ * The same agent's other recent shared chats, for the `slack_agent_chats`
+ * tool (app and Slack chats alike). Reading other chats is part of Memory:
+ * with Memory off the agent reads none. Private chats are never listed.
+ */
 export async function listSlackAgentChatsForSession(
   deps: ApiRouteDeps,
   input: { grant: AccessGrant; sessionId: string; limit?: number | undefined },
 ) {
-  const agentId = await getSessionAgentId(deps.db, {
+  const state = await getSessionAgent(deps.db, {
     workspaceId: input.grant.workspaceId,
     sessionId: input.sessionId,
   });
-  if (!agentId) {
+  const agentId = state.agentChat ? (state.agent?.id ?? null) : null;
+  if (!state.agentChat) {
     return { chats: [], message: "This chat is not an agent's chat." };
+  }
+  if (!agentId) {
+    return { chats: [], message: "This chat's agent was deleted." };
+  }
+  if (!state.agent?.memoryEnabled) {
+    return {
+      chats: [],
+      message: "Memory is off for this agent, so it does not read its other chats.",
+    };
   }
   const chats = await listSlackAgentChats(deps.db, {
     accountId: input.grant.accountId,
