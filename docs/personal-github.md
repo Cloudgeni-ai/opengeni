@@ -192,13 +192,14 @@ URLs, or provider credential. Each stable, credential-free broker route is
 separately HMAC-bound to one repository snapshot and remains unchanged when the
 bearer renews. Git persists the canonical `https://github.com/<owner>/<repo>`
 remote; runtime `insteadOf` configuration redirects only the physical smart-Git
-request to the broker. Because Git matches `insteadOf` by prefix, the runtime
-also installs longer identity rules for every character that can continue the
-brokered URL other than `/`, so a repository whose URL only starts with the
-brokered one (for example `<repo>-demos`) is never sent to the broker. Initial delivery and renewal stage the bearer through a
-private sandbox editor/file ingress; the token-free lifecycle command only
-atomically moves those bytes into the stable binding file, so the bearer never
-enters command text or process arguments.
+request to the broker, for both the `<repo>` and `<repo>.git` spellings. Because
+Git matches `insteadOf` by prefix, the runtime also installs longer identity
+rules for every character that can continue a brokered URL other than `/`, so
+a repository whose URL only starts with the brokered one (for example
+`<repo>-demos`) is never sent to the broker. Initial delivery and renewal stage
+the bearer through a private sandbox editor/file ingress; the token-free
+lifecycle command only atomically moves those bytes into the stable binding
+file, so the bearer never enters command text or process arguments.
 
 The broker permits only smart-HTTP discovery, upload-pack, and receive-pack.
 Before every upstream request it revalidates the exact accepted attempt,

@@ -1328,12 +1328,18 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(effectiveUrl("https://github.com/acme/app")).toBe(appBroker);
       expect(effectiveUrl("https://github.com/acme/app/")).toBe(`${appBroker}/`);
       expect(effectiveUrl("https://github.com/acme/app-ops")).toBe(opsBroker);
+      // The `.git` clone URL GitHub shows is the same repository and reaches
+      // the same broker route.
+      expect(effectiveUrl("https://github.com/acme/app.git")).toBe(appBroker);
+      expect(effectiveUrl("https://github.com/acme/app.git/")).toBe(`${appBroker}/`);
+      expect(effectiveUrl("https://github.com/acme/app-ops.git")).toBe(opsBroker);
       // Repositories whose URL merely starts with a brokered one stay put,
       // whether attached through another binding or cloned by hand.
       for (const sibling of [
         "https://github.com/acme/app-demos.git",
         "https://github.com/acme/app-demos",
         "https://github.com/acme/app.github.io",
+        "https://github.com/acme/app.git-tools",
         "https://github.com/acme/app_tools",
         "https://github.com/acme/app2",
         "https://github.com/acme/app-ops-archive",

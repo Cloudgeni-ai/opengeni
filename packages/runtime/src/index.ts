@@ -13566,10 +13566,27 @@ function gitCredentialTokenWriterCommandLines(
  * an identity rule for every printable ASCII character that can continue its
  * URL other than `/`. Those longer rules leave sibling URLs untouched, while the
  * exact repository URL and paths below it (`<repository>/...`) still reach the
- * broker. A continuation that is itself another brokered repository keeps that
- * repository's own broker rule. The identity rules are expanded by a shell loop
- * so each repository adds a few hundred bytes to the setup command, not ~10 KB.
+ * broker. A continuation that is itself another brokered URL keeps that URL's
+ * own broker rule. The identity rules are expanded by a shell loop so each URL
+ * adds a few hundred bytes to the setup command, not ~10 KB.
+ *
+ * Every spelling the provider declares equivalent (`<repo>` and `<repo>.git`
+ * for GitHub and GitLab) is routed to the same broker URI, each with its own
+ * identity rules, so the clone URL a provider shows also uses the broker.
  */
+function gitHttpBrokerRewrites(
+  routes: RuntimeGitHttpBrokerRouteDescriptor[],
+): Array<{ repositoryUri: string; brokerUri: string }> {
+  const rewrites = new Map<string, string>();
+  for (const route of routes) rewrites.set(route.repositoryUri, route.brokerUri);
+  for (const route of routes) {
+    for (const alias of gitRemoteUriAliases(route.repositoryUri, route.provider)) {
+      if (!rewrites.has(alias)) rewrites.set(alias, route.brokerUri);
+    }
+  }
+  return [...rewrites].map(([repositoryUri, brokerUri]) => ({ repositoryUri, brokerUri }));
+}
+
 function gitHttpBrokerSiblingContinuations(
   repositoryUri: string,
   brokeredRepositoryUris: ReadonlySet<string>,
@@ -13592,7 +13609,8 @@ function gitConfigQuotedContent(value: string): string {
 }
 
 function gitHttpBrokerConfigCommandLines(routes: RuntimeGitHttpBrokerRouteDescriptor[]): string[] {
-  const brokeredRepositoryUris = new Set(routes.map((route) => route.repositoryUri));
+  const rewrites = gitHttpBrokerRewrites(routes);
+  const brokeredRepositoryUris = new Set(rewrites.map((rewrite) => rewrite.repositoryUri));
   return [
     'git_http_broker_config="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/http-broker.gitconfig"',
     'mkdir -p "$(dirname "$git_http_broker_config")"',
@@ -13606,11 +13624,11 @@ function gitHttpBrokerConfigCommandLines(routes: RuntimeGitHttpBrokerRouteDescri
     `    printf '[url "%s%s"]\\n\\tinsteadOf = "%s%s"\\n' "$opengeni_git_broker_repository" "$opengeni_git_broker_next" "$opengeni_git_broker_repository" "$opengeni_git_broker_next"`,
     "  done",
     "}",
-    ...routes.map(
+    ...rewrites.map(
       (route) =>
         `printf '[url "%s"]\\n\\tinsteadOf = "%s"\\n' ${shellQuote(gitConfigQuotedContent(route.brokerUri))} ${shellQuote(gitConfigQuotedContent(route.repositoryUri))} >> "$git_http_broker_config.tmp.$$"`,
     ),
-    ...routes.map(
+    ...rewrites.map(
       (route) =>
         `opengeni_git_broker_sibling_rules ${[
           route.repositoryUri,
