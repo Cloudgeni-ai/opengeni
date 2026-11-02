@@ -21,7 +21,7 @@ function megabytes(bytes: number): string {
 }
 
 const SUGGESTION =
-  "Shrink or move the media: resize and compress images to the size they are shown (WebP or JPEG), and link video or large images from where they are hosted instead of embedding them. For a Site only signed-in people open, Site files can hold them too (at most 10 MB each; anonymous visitors can't read them). Keep the page itself under 5 MB.";
+  "Shrink or move the media: resize and compress images to the size they are shown (WebP or JPEG), and link video or large images from where they are hosted instead of embedding them. Site files can hold them too (at most 10 MB each): upload them as shared files, which every visitor of the Site can open, signed-out guests of a public Site included. Keep the page itself under 5 MB.";
 
 /** The warnings for a published page of this size (empty for an ordinary page). */
 export function sitePageSizeWarnings(sizeBytes: number): SitePageSizeWarning[] {
