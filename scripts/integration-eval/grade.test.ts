@@ -3,7 +3,15 @@ import { CASES } from "./catalogue";
 import { gradeCase } from "./grade";
 import { INTEGRATIONS } from "./integrations";
 import { parseReceipts, type EventLike } from "./receipts";
-import { cellsFromConfig, countFlag, latestRecords, parseCells, selectCases, wilson } from "./run";
+import {
+  cellsFromConfig,
+  countFlag,
+  latestRecords,
+  parseCells,
+  selectCases,
+  stalledOnCapacity,
+  wilson,
+} from "./run";
 import type { EvalCase, RunRecord } from "./types";
 
 const linearRead: EvalCase = {
@@ -460,5 +468,19 @@ describe("grid", () => {
     const [low, high] = wilson(20, 24);
     expect(low).toBeLessThan(83);
     expect(high).toBeGreaterThan(83);
+  });
+
+  test("a chat stopped while waiting for model capacity is a capacity stall", () => {
+    const status = (value: string, reason?: string) => ({
+      type: "session.status.changed",
+      payload: reason ? { status: value, reason } : { status: value },
+    });
+    const stalled = events(
+      status("running"),
+      status("waiting_capacity", "codex_capacity"),
+      status("cancelled", "integration eval run deadline"),
+    );
+    expect(stalledOnCapacity(stalled)).toBe(true);
+    expect(stalledOnCapacity(events(status("waiting_capacity"), status("running")))).toBe(false);
   });
 });

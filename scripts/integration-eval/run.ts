@@ -45,6 +45,8 @@ type Job = { testCase: EvalCase; cell: Cell; repeat: number };
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const RUN_TIMEOUT_MS = Number(process.env.OPENGENI_EVAL_RUN_TIMEOUT_MS ?? 20 * 60_000);
 const POLL_MS = 4_000;
+/** A chat parked waiting for model capacity this long is abandoned as a harness error. */
+const CAPACITY_GIVE_UP_MS = Number(process.env.OPENGENI_EVAL_CAPACITY_GIVE_UP_MS ?? 5 * 60_000);
 const WAKE_GRACE_MS = 30_000;
 const SHORT_WAKE_MS = 5 * 60_000;
 
@@ -216,6 +218,7 @@ async function driveSession(
   const decided = new Set<string>();
   let cursor = 0;
   let stableIdlePolls = 0;
+  let capacitySince: number | null = null;
   const deadline = Date.now() + RUN_TIMEOUT_MS;
   while (Date.now() < deadline) {
     await sleep(POLL_MS);
@@ -242,6 +245,12 @@ async function driveSession(
     }
 
     const snapshot = await api.session(workspaceId, sessionId);
+    // The model provider has no capacity (for example a subscription quota):
+    // not the agent's fault, and waiting out the deadline only burns time.
+    if (snapshot.status === "waiting_capacity") {
+      capacitySince ??= Date.now();
+      if (Date.now() - capacitySince >= CAPACITY_GIVE_UP_MS) break;
+    } else capacitySince = null;
     if (snapshot.status === "requires_action") {
       try {
         for (const request of await api.pendingHumanInput(workspaceId, sessionId)) {
@@ -282,6 +291,15 @@ async function driveSession(
   return { events, timedOut: true, complete };
 }
 
+/** The chat's last status change before the harness stopped it was waiting for model capacity. */
+export function stalledOnCapacity(events: readonly SessionEvent[]): boolean {
+  const statuses = events
+    .filter((event) => event.type === "session.status.changed")
+    .map((event) => (event.payload as { status?: string; reason?: string } | null) ?? {})
+    .filter((payload) => payload.reason !== "integration eval run deadline");
+  return statuses.at(-1)?.status === "waiting_capacity";
+}
+
 type GradedFields = Pick<
   RunRecord,
   "grade" | "toolsUsed" | "cards" | "approvals" | "finalAnswerExcerpt" | "usage"
@@ -303,9 +321,15 @@ function gradeEvents(
   // stalled), not the harness's; an event history cut short is the harness's.
   let grade: Grade = !complete
     ? { pass: false, category: "harness_error", reasons: ["session events were cut short"] }
-    : timedOut
-      ? { pass: false, category: "timeout", reasons: ["agent still active at the run deadline"] }
-      : gradeCase(testCase, receipts, verification);
+    : timedOut && stalledOnCapacity(events)
+      ? {
+          pass: false,
+          category: "harness_error",
+          reasons: ["no model capacity (provider quota or capacity); not a product verdict"],
+        }
+      : timedOut
+        ? { pass: false, category: "timeout", reasons: ["agent still active at the run deadline"] }
+        : gradeCase(testCase, receipts, verification);
   if (
     !timedOut &&
     receipts.tools.length === 0 &&
@@ -582,9 +606,14 @@ async function regradeAll(flags: Map<string, string>) {
     try {
       const { events, complete } = await api.events(record.workspaceId, record.sessionId, 0);
       // A run that timed out may have finished since; grade it if a turn ended.
+      // A chat the harness stopped while it waited for model capacity stays a capacity stop.
+      const stopped = record.grade.reasons.some((reason) =>
+        /timed out|run deadline|no model capacity/.test(reason),
+      );
       const timedOut =
-        record.grade.reasons.some((reason) => /timed out|run deadline/.test(reason)) &&
-        !events.some((event) => /^turn\.(completed|failed|cancelled)$/.test(event.type));
+        stopped &&
+        (stalledOnCapacity(events) ||
+          !events.some((event) => /^turn\.(completed|failed|cancelled)$/.test(event.type)));
       const graded = gradeEvents(
         testCase,
         events,
