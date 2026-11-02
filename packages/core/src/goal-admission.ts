@@ -147,6 +147,10 @@ export async function goalRunBudgetBlocked(
       pausedReason: "credits",
       message: "Upgrade to Pro to use your own key, then resume.",
     },
+    subscription_plan_required: {
+      pausedReason: "credits",
+      message: "Upgrade to Pro to use your own subscription, then resume.",
+    },
     allowance_exhausted: {
       pausedReason: "allowance",
       message: "Usage allowance exhausted. Resume when your allowance is available.",

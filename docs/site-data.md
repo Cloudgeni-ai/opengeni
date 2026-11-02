@@ -115,7 +115,8 @@ On a Site [published](published-sites.md) to the public, anonymous guests
 rule: `none` (the default), `read` (what viewers read), `append` (create,
 and read their own) or `own` (create, read, update and delete their own).
 Members, invited people and signed-in users are viewers as above. Guest
-writes have their own rate limit.
+writes have their own rate limit. Guests can also list and open the Site's
+`shared` files (never `private` ones), and can't upload or delete files.
 
 Collection JSON Schemas use a strict keyword allowlist, walked over the whole
 schema when a collection is defined: `type`, `properties`, `required`,
@@ -262,8 +263,8 @@ HTTP (`apps/api/src/routes/site-data.ts`), under
 | `POST /data/collections/:name/import` | JSON or CSV, up to 1,000 records and (CSV) 1,000 columns, both checked while parsing; each CSV row is built in one pass; batches of 100 | managers |
 | `GET /data/collections/:name/export?format=json\|csv` | up to 10,000 records and 16 MB; CSV names at most 200 data columns, then puts each record's data in one JSON `$data` column | managers |
 | `POST /data/query`, `/data/get`, `/data/write` | records | access mode |
-| `GET /files`, `POST /files?name=&scope=` (raw body, read only after access, the rate window and the quota for a declared Content-Length pass, with the per-file cap enforced while streaming; the route skips the generic request-size middleware, which would buffer a body without Content-Length first) | list, upload | access to the Site |
-| `GET /files/:id` (signed URL, 5 minutes), `DELETE /files/:id` | download, delete | uploader or managers for private files and deletes |
+| `GET /files`, `POST /files?name=&scope=` (raw body, read only after access, the rate window and the quota for a declared Content-Length pass, with the per-file cap enforced while streaming; the route skips the generic request-size middleware, which would buffer a body without Content-Length first) | list, upload | access to the Site; guests of a public Site list `shared` files only and never upload |
+| `GET /files/:id` (signed URL, 5 minutes), `DELETE /files/:id` | download, delete | uploader or managers for private files and deletes; guests open `shared` files only and never delete |
 
 Errors use the public envelope; `error.details.code` is one of `validation`
 (422), `conflict` (409), `not_found` (404), `forbidden` (403),

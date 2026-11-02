@@ -29,6 +29,8 @@ export type SlackAgentUpdateSettingsRecord = {
   connectionId: string;
   updatesEnabled: boolean;
   channelPostsOnly: boolean;
+  /** Where new agents are introduced by default, or null. */
+  announcementChannelId: string | null;
   updatesEnabledAt: Date | null;
   updatedBySubjectId: string | null;
   updatedAt: Date | null;
@@ -42,6 +44,7 @@ export function defaultSlackAgentUpdateSettings(
     connectionId,
     updatesEnabled: false,
     channelPostsOnly: false,
+    announcementChannelId: null,
     updatesEnabledAt: null,
     updatedBySubjectId: null,
     updatedAt: null,
@@ -55,6 +58,7 @@ function mapSettings(
     connectionId: row.connectionId,
     updatesEnabled: row.updatesEnabled,
     channelPostsOnly: row.channelPostsOnly,
+    announcementChannelId: row.announcementChannelId,
     updatesEnabledAt: row.updatesEnabledAt,
     updatedBySubjectId: row.updatedBySubjectId,
     updatedAt: row.updatedAt,
@@ -93,6 +97,8 @@ export async function saveSlackAgentUpdateSettings(
     connectionId: string;
     updatesEnabled: boolean;
     channelPostsOnly: boolean;
+    /** Omitted keeps the current channel; null clears it. */
+    announcementChannelId?: string | null | undefined;
     subjectId: string;
   },
 ): Promise<SlackAgentUpdateSettingsRecord> {
@@ -105,6 +111,7 @@ export async function saveSlackAgentUpdateSettings(
         connectionId: input.connectionId,
         updatesEnabled: input.updatesEnabled,
         channelPostsOnly: input.channelPostsOnly,
+        announcementChannelId: input.announcementChannelId ?? null,
         updatesEnabledAt: input.updatesEnabled ? sql`now()` : null,
         updatedBySubjectId: input.subjectId,
       })
@@ -113,6 +120,9 @@ export async function saveSlackAgentUpdateSettings(
         set: {
           updatesEnabled: input.updatesEnabled,
           channelPostsOnly: input.channelPostsOnly,
+          ...(input.announcementChannelId !== undefined
+            ? { announcementChannelId: input.announcementChannelId }
+            : {}),
           updatesEnabledAt: input.updatesEnabled
             ? sql`coalesce(case when ${schema.slackAgentUpdateSettings.updatesEnabled} then ${schema.slackAgentUpdateSettings.updatesEnabledAt} end, now())`
             : null,

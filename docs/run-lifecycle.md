@@ -2742,11 +2742,21 @@ the arguments. The floor applies only where the schema offers `background`
 (`finishFloor`), so `OPENGENI_EXPERIMENT_OUTPUT_COST=false` or
 `OPENGENI_EXPERIMENT_CUT_POLLING=false` keeps the requested wait, and the
 latter also restores the 30-second cap. Connected Machine (op-stream) commands
-keep their own 30-second background yield ceiling; the floor is sent to them as
-the requested yield, so a tiny requested yield there waits up to 30 seconds.
-The machine waits that window in one block, so a Steer during such a wait takes
-effect when it ends (up to 30 seconds), while Pause and turn cancellation still
-cancel the operation at once.
+are sent the effective wait as their requested yield (the floor, or the
+30-second cap when cut polling is off) and cap it at 60 seconds
+(`SELFHOSTED_BACKGROUND_MAX_YIELD_MS`, equal to the floor), so a command that
+ends within a minute returns in the same call there too. The machine waits that
+window in one block; when a Steer is waiting, the turn ends the block early
+through the operation's `yieldExecCommand` control (an abort signal on the
+op-stream yield), so the command returns its background handle promptly and
+keeps running, exactly as when the window ends. The early yield waits out
+`OP_STREAM_EARLY_YIELD_GRACE_MS` (1 second) from when the operation is running,
+so a quick command started while a Steer waits still returns its result
+inline. Lifecycle commands and commands without background adoption keep their
+wait; Pause and turn cancellation still cancel the operation at once. Connected
+Machine commands receive an empty, closed stdin, so an input prompt reads
+end-of-file instead of waiting out the window. OpenSandbox remote
+operations have no early yield yet.
 Live output still streams to the command card while the call
 waits, and Pause/Steer cancellation is still checked between slices. The
 model-facing `exec_command` schema is non-strict and requires only `cmd` and

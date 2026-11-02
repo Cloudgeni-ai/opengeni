@@ -10,8 +10,8 @@ use crate::manifest::ExtentSource;
 use crate::store::ChunkStore;
 use crate::{Error, Result};
 
-/// The format copies are written in: manifests named with the day they
-/// were stored (`<day>/<digest>`, ADR 25).
+/// The format copies are written in: manifests named with the period they
+/// were stored in (`<period>/<digest>`, ADR 25 and 28).
 pub const VERSION: u32 = 4;
 
 /// The format before, whose manifests are named by their digest alone.
@@ -55,7 +55,7 @@ impl Head {
 /// One object a stored copy keeps.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Part {
-    /// A manifest, by its name: `<day>/<digest>`, or a digest alone in the
+    /// A manifest, by its name: `<period>/<digest>`, or a digest alone in the
     /// old layout.
     Manifest(String),
     Chunk(ChunkRef),

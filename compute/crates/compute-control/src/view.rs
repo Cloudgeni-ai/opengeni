@@ -225,6 +225,7 @@ fn capacity(info: &Described, reported: &Reported) -> Capacity {
         memory_mib: info.memory_mib,
         free_memory_mib: reported.memory_free_mib,
         reclaimable_memory_mib: reported.memory_reclaimable_mib,
+        cpu_millis: reported.cpu_millis,
         free_cpu_millis: reported.cpu_free_millis,
         free_disk_mib: reported.disk_free_mib,
         ready: reported

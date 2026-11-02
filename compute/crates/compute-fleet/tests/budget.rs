@@ -89,6 +89,7 @@ fn capacity(free_memory_mib: u64, sandboxes: u32, rng: &mut Rng) -> Capacity {
         memory_mib: HOST_MEMORY_MIB,
         free_memory_mib,
         reclaimable_memory_mib: 0,
+        cpu_millis: 1_000_000,
         free_cpu_millis: 1_000_000,
         free_disk_mib: 2_000_000,
         ready,

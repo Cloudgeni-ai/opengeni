@@ -478,7 +478,7 @@ export function OrganizationAccountRulesSection({
           />
           <SettingNavRow
             label="What workspaces can change"
-            description="Rules a workspace’s admins can set differently for their workspace."
+            description="Rules a workspace’s admins, and each person in their Personal workspace, can set differently."
             value={changeableRulesSummary(organization.locked)}
             onOpen={onEditLocks}
           />
@@ -515,7 +515,7 @@ export function AccountRuleLocksPage({
   return (
     <ModelsFormPage
       title="What workspaces can change"
-      description="Workspace admins can set these rules differently for their workspace. Anything you turn off uses the default, everywhere."
+      description="Workspace admins can set these rules differently for their workspace, and each person for their Personal workspace. Anything you turn off uses the default, everywhere."
       submitLabel="Save"
       pendingLabel="Saving…"
       loading={!organization && !state.error}
@@ -686,7 +686,9 @@ function workspaceRulesSummary(changes: number, workspaceName: string): string {
     return `${changes === 1 ? "1 rule" : `${changes} rules`} changed for ${workspaceName}. The rest use the defaults.`;
   }
   // The scope header already says a change here applies only to this workspace.
-  return `${workspaceName} uses the defaults for every rule.`;
+  // A Personal workspace is "your Personal workspace": the sentence starts it.
+  const named = `${workspaceName.charAt(0).toUpperCase()}${workspaceName.slice(1)}`;
+  return `${named} uses the defaults for every rule.`;
 }
 
 export function WorkspaceAccountRulesSection({

@@ -92,6 +92,7 @@ import { parseRequestJson } from "../http/request-body";
 import { userContentSignedGetUrlOptions } from "../http/user-content";
 import {
   createSpeechToTextDeployment,
+  dictationChoiceOf,
   dictationProviders,
   meetingModelFor,
   meetingModelWithoutCreditsFor,
@@ -403,7 +404,9 @@ export function registerRecordingRoutes(
    * language the dictation was started in (detected when none), listening for
    * the person's vocabulary when the model takes one. The version records the
    * provider and the model it runs; the worker may still fall over to another
-   * provider that refused before hearing it.
+   * provider that refused before hearing it. A dictation that named its
+   * provider and model (a desktop shortcut's own model) runs on exactly that
+   * one, or is refused when it isn't ready.
    */
   async function dictationChoice(
     actor: {
@@ -415,11 +418,34 @@ export function registerRecordingRoutes(
   ): Promise<{ providerId: string; model: string; options: RecordingTranscriptionOptions }> {
     const voiceInput = await dictationPolicy(actor.workspaceId);
     const service = deps.transcription!;
+    const language = recording.transcription?.language;
+    const keyterms = recording.transcription?.keyterms;
+    const heardWith = {
+      ...(language ? { language } : {}),
+      ...(keyterms && keyterms.length > 0 ? { keyterms } : {}),
+    };
+    const context = {
+      workspaceId: actor.workspaceId,
+      accountId: actor.accountId,
+      subjectId: actor.subjectId,
+    };
+    const asked = recording.transcription?.providerId;
+    if (asked) {
+      const named = dictationChoiceOf(deployment, asked, recording.transcription?.model);
+      const ready = named ? await service.availableProviderIds?.(context) : null;
+      if (!named || (ready && !ready.includes(named.id))) {
+        throw new ApiHttpError(503, {
+          code: "upstream_unavailable",
+          message: "This dictation's transcription model isn't available right now.",
+          retryable: true,
+          details: { code: "model_unavailable", providerId: asked },
+        });
+      }
+      return { providerId: named.id, model: named.model.model, options: heardWith };
+    }
     const providerId = service.selectProvider
       ? await service.selectProvider({
-          workspaceId: actor.workspaceId,
-          accountId: actor.accountId,
-          subjectId: actor.subjectId,
+          ...context,
           preferredProvider: voiceInput?.preferredProvider,
           fallbackEnabled: voiceInput?.fallbackEnabled,
         })
@@ -428,16 +454,7 @@ export function registerRecordingRoutes(
     const model =
       dictationProviders(deployment).find((provider) => provider.id === providerId)?.model.model ??
       "voice-input";
-    const language = recording.transcription?.language;
-    const keyterms = recording.transcription?.keyterms;
-    return {
-      providerId,
-      model,
-      options: {
-        ...(language ? { language } : {}),
-        ...(keyterms && keyterms.length > 0 ? { keyterms } : {}),
-      },
-    };
+    return { providerId, model, options: heardWith };
   }
 
   /** The workspace's voice input settings, refusing when voice input can't run. */
@@ -813,14 +830,23 @@ export function registerRecordingRoutes(
       if (body.tracks.length !== 1 || body.tracks[0]!.source !== "microphone") {
         throw invalid("A dictation has exactly one microphone track");
       }
-      // The workspace's voice input picks the model; the dictation names only
-      // the language it is spoken in (or none to detect it) and the words to
+      // The workspace's voice input picks the model unless the dictation
+      // names one (a desktop shortcut's own model); it also names the
+      // language it is spoken in (or none to detect it) and the words to
       // listen for.
-      const { language, keyterms, ...other } = body.transcription ?? {};
+      const { language, keyterms, providerId, model, ...other } = body.transcription ?? {};
       if (Object.keys(other).length > 0) {
-        throw invalid(
-          "A dictation uses the workspace's voice input model; only its language and keyterms can be set",
-        );
+        throw invalid("A dictation can set only its provider, model, language and keyterms");
+      }
+      if (model && !providerId) throw invalid("A dictation's model needs its provider");
+      const named = providerId ? dictationChoiceOf(deployment, providerId, model) : null;
+      if (providerId && !named) {
+        throw new ApiHttpError(400, {
+          code: "validation_failed",
+          message: "This transcription model is not offered for dictation here.",
+          retryable: false,
+          details: { code: "unknown_model", providerId, model: model ?? null },
+        });
       }
       const result = await guard(() =>
         createRecording(db, {
@@ -833,9 +859,10 @@ export function registerRecordingRoutes(
           externalRef: body.externalRef,
           metadata: body.metadata,
           tracks: body.tracks,
-          ...(language || keyterms?.length
+          ...(named || language || keyterms?.length
             ? {
                 transcription: {
+                  ...(named ? { providerId: named.id, model: named.model.model } : {}),
                   ...(language ? { language } : {}),
                   ...(keyterms?.length ? { keyterms } : {}),
                 },

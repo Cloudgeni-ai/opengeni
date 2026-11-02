@@ -106,7 +106,7 @@ describe("session-list-model", () => {
     ).toEqual(["Today", "Older"]);
   });
 
-  test("home leaves sub-agents to their parent, so they never crowd out conversations", () => {
+  test("home leaves sub-agents to their parent, unless pinned, so they never crowd out conversations", () => {
     const mine = session("mine", { updatedAt: "2026-10-03T10:00:00Z" });
     const agents = Array.from({ length: 8 }, (_, index) =>
       session(`agent-${index}`, {
@@ -120,7 +120,7 @@ describe("session-list-model", () => {
       recentSessionsForHome(englishText, [...agents, mine, pinnedAgent], [pinnedAgent], 6, now).map(
         (row) => row.id,
       ),
-    ).toEqual(["mine"]);
+    ).toEqual(["pinned-agent", "mine"]);
   });
 
   test("home leads with the chats opened here, so busy running sessions never hide them", () => {
@@ -165,7 +165,7 @@ describe("session-list-model", () => {
     );
   });
 
-  test("phone home sections: every pin, then recent work that pins never crowd out", () => {
+  test("phone home sections: every pin (pinned sub-agents too), then recent work that pins never crowd out", () => {
     const pins = Array.from({ length: 7 }, (_, index) =>
       session(`pin-${index}`, { pinned: true, updatedAt: "2026-10-03T11:40:00Z" }),
     );
@@ -181,7 +181,10 @@ describe("session-list-model", () => {
       15,
       now,
     );
-    expect(sections.pinned.map((row) => row.id)).toEqual(pins.map((pin) => pin.id));
+    expect(sections.pinned.map((row) => row.id)).toEqual([
+      ...pins.map((pin) => pin.id),
+      "pinned-agent",
+    ]);
     expect(sections.recent.map((row) => row.id)).toEqual(["r", "a", "b"]);
     expect(
       homeSessionSections(englishText, [older, recent, running], [], 2, now).recent.map(

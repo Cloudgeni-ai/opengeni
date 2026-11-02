@@ -393,6 +393,8 @@ export type SandboxChannelAServiceOptions = {
   session: ChannelASession;
   /** Worker lifecycle registration/cancellation, without model background adoption. */
   commandRunner?: SynchronousCommandRunner;
+  /** Stop admitting new Git reads; already-started reads retain collection/cleanup ownership. */
+  signal?: AbortSignal;
   // Canonical filesystem root advertised by the selected target. Relative paths
   // resolve beneath it; already-canonical absolute paths stay byte-for-byte paths
   // after validation against the operation's path scope.
@@ -744,6 +746,32 @@ async function settleConcurrentReads<const T extends readonly unknown[]>(reads: 
   return settled.map((result) => (result as PromiseFulfilledResult<unknown>).value) as unknown as T;
 }
 
+/** Large Git captures fall back to individual files. Admit those reads lazily:
+ * eager Promise construction dispatches one physical command per file before
+ * any cancellation or failure can be observed. Preserve every file and its
+ * ordering, but join dispatched reads and stop admitting work after failure. */
+async function readGitFiles<T, R>(
+  files: readonly T[],
+  read: (file: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(files.length);
+  let next = 0;
+  let failed = false;
+  const worker = async () => {
+    while (!failed && next < files.length) {
+      const index = next++;
+      try {
+        results[index] = await read(files[index]!);
+      } catch (error) {
+        failed = true;
+        throw error;
+      }
+    }
+  };
+  await settleConcurrentReads(Array.from({ length: Math.min(4, files.length) }, worker));
+  return results;
+}
+
 function isNonReplayableCommandFault(error: unknown): boolean {
   return (
     error instanceof SynchronousCommandOutcomeUnknownError ||
@@ -756,6 +784,7 @@ function isNonReplayableCommandFault(error: unknown): boolean {
 export class SandboxChannelAService {
   private readonly session: ChannelASession;
   private readonly commandRunner: SynchronousCommandRunner | undefined;
+  private readonly signal: AbortSignal | undefined;
   private readonly workspaceRoot: string;
   private readonly providerPathMode: "canonical" | "workspace-relative";
   private readonly fileReadScope: "workspace" | "machine";
@@ -767,6 +796,7 @@ export class SandboxChannelAService {
   constructor(opts: SandboxChannelAServiceOptions) {
     this.session = opts.session;
     this.commandRunner = opts.commandRunner;
+    this.signal = opts.signal;
     const workspaceRoot = opts.workspaceRoot ?? "";
     this.workspaceRoot = isConnectedMachineAbsolutePath(workspaceRoot)
       ? resolveConnectedMachinePath(workspaceRoot, undefined)
@@ -2427,6 +2457,10 @@ export class SandboxChannelAService {
     command: string,
     maxBytes: number,
   ): Promise<{ bytes: Buffer; sizeBytes: number; truncated: boolean }> {
+    // A cancelled review must not start the next queued file. Finish collection
+    // and exact spool cleanup for reads already dispatched; cancellation alone
+    // is neither provider exit proof nor permission to abandon their output.
+    if (this.signal?.aborted) throw new TurnSandboxCommandCancelledError(this.signal.reason);
     // A private, unpredictable spool belongs to this read only. Small results
     // are removed by the producer; multi-chunk results live until the finally.
     const name = `opengeni-git-capture-${crypto.randomUUID()}`;
@@ -2773,7 +2807,7 @@ export class SandboxChannelAService {
               };
             }),
           )
-        : settleConcurrentReads(stats.map(readTrackedFile));
+        : readGitFiles(stats, readTrackedFile);
 
     const shapeUntrackedSnapshot = (snapshot: CombinedUntrackedSnapshot): GitFileDiff => {
       let { sampled, sizeBytes, lineCount } = snapshot;
@@ -2905,8 +2939,9 @@ export class SandboxChannelAService {
               "Workspace Git metadata exceeded the safe capture limit. Retry with a narrower path.",
             );
           }
-          return settleConcurrentReads(
-            decodeGitMetadataUtf8(listing.bytes).split(NUL).filter(Boolean).map(readUntrackedFile),
+          return readGitFiles(
+            decodeGitMetadataUtf8(listing.bytes).split(NUL).filter(Boolean),
+            readUntrackedFile,
           );
         })();
       }

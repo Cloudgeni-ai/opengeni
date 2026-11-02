@@ -891,6 +891,7 @@ export async function runTurnStreamAttempt(
         initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
         sessionId: input.sessionId,
         ...(billingState.isByokTurn ? { byok: true } : {}),
+        ...(billingState.isOwnSubscriptionTurn ? { ownSubscription: true } : {}),
         ...(billingState.billingOrigin ? { billingOrigin: billingState.billingOrigin } : {}),
       }),
       checkSteer

@@ -2356,6 +2356,37 @@ describe("One Models page for the organization and the workspace", () => {
     }
   });
 
+  test("a Personal workspace shows its rules and Codex's switch exactly when its owner can change them", async () => {
+    personalWorkspace = true;
+    // The server says its owner, acting as themselves, can change them.
+    const owner = await render();
+    try {
+      const text = owner.container.textContent ?? "";
+      expect(text).toContain("Using subscriptions");
+      expect(text).toContain("Your Personal workspace uses the defaults for every rule.");
+      expect(text).toContain("Turn off Codex");
+    } finally {
+      await cleanup(owner);
+    }
+    // Otherwise (for example a local Personal workspace) it follows the organization.
+    const settings = client.getWorkspaceModelAccountSettings.getMockImplementation()!;
+    client.getWorkspaceModelAccountSettings.mockImplementation(async () => ({
+      ...(await settings()),
+      canEdit: false,
+    }));
+    const { clearSharedQueries } = await import("@opengeni/react/app/lib/shared-query");
+    clearSharedQueries(client);
+    const follower = await render();
+    try {
+      const text = follower.container.textContent ?? "";
+      expect(text).not.toContain("Using subscriptions");
+      expect(text).not.toContain("Turn off Codex");
+    } finally {
+      await cleanup(follower);
+      client.getWorkspaceModelAccountSettings.mockImplementation(settings);
+    }
+  });
+
   // A regular organization member owns their Personal workspace without
   // `workspace:admin` there; the API refuses the workspace's scope (403), so
   // their Claude subscription is connected as their own.

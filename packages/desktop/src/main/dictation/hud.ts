@@ -12,6 +12,14 @@ import {
 } from "./hud-state";
 import { DICTATION_HUD_HTML } from "./hud-page";
 import { ENGLISH_DICTATION_WORDS, type DictationWords } from "./words";
+import {
+  FLOATING_PAGE_ANSWER_MS,
+  pageAnswer,
+  showOrRebuild,
+  warnFloatingWindow,
+  watchFloatingPage,
+  type FloatingWindowLog,
+} from "../floating-window";
 
 const HEIGHT = 64;
 const MIN_WIDTH = 120;
@@ -26,6 +34,13 @@ export function hudAction(url: string): DictationHudAction | null {
   return DICTATION_HUD_ACTIONS.includes(name) ? name : null;
 }
 
+export interface DictationHudOptions {
+  /** Where the pill's failures go. The console by default. */
+  log?: FloatingWindowLog;
+  /** How long the pill's page has to load or answer before its window is built again. */
+  answerMs?: number;
+}
+
 export class DictationHud implements DictationHudView {
   private window: BrowserWindow | null = null;
   private loaded: Promise<void> | null = null;
@@ -35,11 +50,18 @@ export class DictationHud implements DictationHudView {
   /** The display the pill stays on while it is showing. */
   private displayId: number | null = null;
 
+  private readonly log: FloatingWindowLog;
+  private readonly answerMs: number;
+
   constructor(
     private readonly platform: NodeJS.Platform = process.platform,
     /** The pill's words, in the app's language. */
     private readonly words: () => DictationWords = () => ENGLISH_DICTATION_WORDS,
-  ) {}
+    options: DictationHudOptions = {},
+  ) {
+    this.log = options.log ?? warnFloatingWindow;
+    this.answerMs = options.answerMs ?? FLOATING_PAGE_ANSWER_MS;
+  }
 
   onAction(listener: (action: DictationHudAction) => void): void {
     this.listener = listener;
@@ -48,28 +70,59 @@ export class DictationHud implements DictationHudView {
   show(state: DictationHudState): void {
     this.state = state;
     if (state.kind === "hidden") {
-      if (this.window && !this.window.isDestroyed()) {
-        this.window.hide();
-        void this.clear(this.window, state).catch(() => undefined);
+      const window = this.window;
+      if (window && !window.isDestroyed()) {
+        window.hide();
+        void this.clear(window, state);
       }
       this.visible = false;
       this.displayId = null;
       return;
     }
-    void this.render(state).catch(() => undefined);
+    void this.render(state);
   }
 
   destroy(): void {
+    this.state = { kind: "hidden" };
+    this.visible = false;
     if (this.window && !this.window.isDestroyed()) this.window.destroy();
     this.window = null;
     this.loaded = null;
   }
 
+  /** Throw the window away, so the next state shows in a fresh one. */
+  private discard(window: BrowserWindow): void {
+    if (this.window === window) {
+      this.window = null;
+      this.loaded = null;
+      this.visible = false;
+    }
+    if (!window.isDestroyed()) window.destroy();
+  }
+
+  /** The page died or hung: build the pill again, showing what it showed. */
+  private lost(window: BrowserWindow, why: string): void {
+    if (this.window !== window) return;
+    const showing = this.visible;
+    this.discard(window);
+    this.log(`The dictation pill's window was thrown away: ${why}`);
+    if (showing && this.state.kind !== "hidden") void this.render(this.state);
+  }
+
   /** Empty the hidden page, so a recording's clock stops ticking out of sight. */
   private async clear(window: BrowserWindow, state: DictationHudState): Promise<void> {
-    await this.loaded;
-    if (this.state !== state || window.isDestroyed()) return;
-    await window.webContents.executeJavaScript(`render(${JSON.stringify(state)})`);
+    try {
+      await pageAnswer(this.loaded ?? Promise.resolve(), this.answerMs);
+      if (this.state !== state || window.isDestroyed()) return;
+      await pageAnswer(
+        window.webContents.executeJavaScript(`render(${JSON.stringify(state)})`),
+        this.answerMs,
+      );
+    } catch (error) {
+      // A page that can't be emptied can't tick either; the next state builds a fresh one.
+      this.discard(window);
+      this.log("The hidden dictation pill failed to clear; its window was thrown away", error);
+    }
   }
 
   private ensure(): BrowserWindow {
@@ -114,6 +167,7 @@ export class DictationHud implements DictationHudView {
       const action = hudAction(url);
       if (action) this.listener?.(action);
     });
+    watchFloatingPage(window, (why) => this.lost(window, why));
     window.on("closed", () => {
       if (this.window === window) {
         this.window = null;
@@ -125,13 +179,26 @@ export class DictationHud implements DictationHudView {
     this.loaded = window.loadURL(
       `data:text/html;charset=utf-8,${encodeURIComponent(DICTATION_HUD_HTML)}`,
     );
+    // A failed load is seen, and logged, by the render that waits for it.
+    this.loaded.catch(() => undefined);
     return window;
   }
 
   private async render(state: DictationHudState): Promise<void> {
-    const window = this.ensure();
-    await this.loaded;
-    if (this.state !== state || window.isDestroyed()) return;
+    await showOrRebuild({
+      what: "The dictation pill",
+      ensure: () => this.ensure(),
+      paint: (window) => this.paint(window, state),
+      discard: (window) => this.discard(window),
+      wanted: () => this.state === state,
+      log: this.log,
+    });
+  }
+
+  private async paint(window: BrowserWindow, state: DictationHudState): Promise<void> {
+    await pageAnswer(this.loaded ?? Promise.resolve(), this.answerMs);
+    if (this.state !== state) return;
+    if (window.isDestroyed()) throw new Error("The window was destroyed while its page loaded");
     const words = this.words();
     const labels = {
       starting: words.starting,
@@ -143,10 +210,14 @@ export class DictationHud implements DictationHudView {
       allow: words.allow,
       open: words.open,
     };
-    const measured = (await window.webContents.executeJavaScript(
-      `render(${JSON.stringify(state)}, ${JSON.stringify(labels)})`,
+    const measured = (await pageAnswer(
+      window.webContents.executeJavaScript(
+        `render(${JSON.stringify(state)}, ${JSON.stringify(labels)})`,
+      ),
+      this.answerMs,
     )) as unknown;
-    if (this.state !== state || window.isDestroyed()) return;
+    if (this.state !== state) return;
+    if (window.isDestroyed()) throw new Error("The window was destroyed while its page rendered");
     const width = Math.min(
       MAX_WIDTH,
       Math.max(MIN_WIDTH, typeof measured === "number" ? measured : 320),

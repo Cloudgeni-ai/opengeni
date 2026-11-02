@@ -102,7 +102,7 @@ export function createDesktopDictation(options: CreateDesktopDictationOptions): 
     store,
     globalShortcut,
     clipboard: electronClipboard(),
-    hud: new DictationHud(process.platform, words),
+    hud: new DictationHud(process.platform, words, options.log ? { log: options.log } : {}),
     productName: options.productName,
     words,
     reveal: options.reveal,

@@ -4,14 +4,16 @@ import { SITE_BROWSER_RUNTIME } from "@opengeni/sdk/site-document";
 import {
   SITE_CLIENT_TAG_MAX_CHARS,
   SITE_FRAME_HEAD_MAX_CHARS,
+  SITE_FRAME_PIECE_CHARS,
+  SITE_FRAME_READ_BYTES,
+  SITE_FRAME_REWRITE_CHARS,
   SiteBootstrapInjector,
   SiteClientScriptResolver,
+  SiteFrameRewriter,
   SiteFrameTooLargeError,
   bootstrapPlaceKnown,
-  byteLimit,
   lockstepTee,
   siteFrameStream,
-  siteFrameTextTransform,
 } from "../src/frame-stream";
 import { siteFrameDocument } from "../src/version";
 
@@ -223,43 +225,142 @@ describe("streamed frame document", () => {
   });
 
   test("a page larger than the limit errors the stream", async () => {
+    let cancelled: unknown = null;
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
         controller.enqueue(new Uint8Array(600).fill(0x61));
         controller.enqueue(new Uint8Array(600).fill(0x61));
-        controller.close();
+      },
+      cancel(reason) {
+        cancelled = reason;
       },
     });
-    await expect(readText(body.pipeThrough(byteLimit(1000)))).rejects.toBeInstanceOf(
+    await expect(readText(siteFrameStream(body, 1000))).rejects.toBeInstanceOf(
       SiteFrameTooLargeError,
     );
+    // The rest of the page is never read.
+    expect(cancelled).toBeInstanceOf(SiteFrameTooLargeError);
   });
 
-  test("the text transform is a TransformStream that keeps order", async () => {
-    const source = new ReadableStream<string>({
-      start(controller) {
-        for (const piece of [
-          "<!doc",
-          "type html><scr",
-          'ipt src="/__opengeni/site-tools/client.js"></scr',
-          "ipt><p>x</p>",
-        ])
-          controller.enqueue(piece);
-        controller.close();
-      },
-    });
+  test("the rewriter keeps order across pieces", () => {
+    const rewriter = new SiteFrameRewriter();
     let out = "";
-    const reader = source.pipeThrough(siteFrameTextTransform()).getReader();
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      out += value;
-    }
+    for (const piece of [
+      "<!doc",
+      "type html><scr",
+      'ipt src="/__opengeni/site-tools/client.js"></scr',
+      "ipt><p>x</p>",
+    ])
+      out += rewriter.push(piece);
+    out += rewriter.finish();
     expect(out).toBe(
       siteFrameDocument(
         '<!doctype html><script src="/__opengeni/site-tools/client.js"></script><p>x</p>',
       ),
     );
+  });
+
+  test("a byte stream is read in large pieces, not in the pieces it arrived in", async () => {
+    // Like a fetched body: one big inline script of base64 media, queued in 1 KB pieces.
+    const html = `<!doctype html><script>const media="${"QUJD".repeat(1024 * 1024)}";</script><p>x</p>`;
+    const bytes = new TextEncoder().encode(html);
+    const body = new ReadableStream({
+      type: "bytes",
+      start(controller) {
+        for (let index = 0; index < bytes.length; index += 1024)
+          controller.enqueue(bytes.slice(index, index + 1024));
+        controller.close();
+      },
+    });
+    const reader = siteFrameStream(body).getReader();
+    let pieces = 0;
+    let out = "";
+    const decoder = new TextDecoder();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      pieces += 1;
+      out += decoder.decode(value, { stream: true });
+    }
+    expect(out === siteFrameDocument(html)).toBe(true);
+    // About 4,100 pieces if each 1 KB piece were rewritten on its own.
+    expect(pieces).toBeLessThanOrEqual(Math.ceil(bytes.length / SITE_FRAME_READ_BYTES) + 1);
+  });
+
+  test("a page full of client tags is handed on in bounded pieces", async () => {
+    // Each client tag becomes the whole Site runtime. 200 tags in one read
+    // used to become a single string of about 67 MB.
+    const html = `<!doctype html>${CLIENT.repeat(200)}<p>end</p>`;
+    const bytes = new TextEncoder().encode(html);
+    const body = new ReadableStream({
+      type: "bytes",
+      start(controller) {
+        controller.enqueue(bytes.slice());
+        controller.close();
+      },
+    });
+    const reader = siteFrameStream(body).getReader();
+    let largest = 0;
+    let out = "";
+    const decoder = new TextDecoder();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      largest = Math.max(largest, value.byteLength);
+      out += decoder.decode(value, { stream: true });
+    }
+    expect(out === siteFrameDocument(html)).toBe(true);
+    const tagsPerSlice = Math.ceil(SITE_FRAME_REWRITE_CHARS / CLIENT.length) + 1;
+    expect(largest).toBeLessThanOrEqual(
+      SITE_FRAME_PIECE_CHARS +
+        tagsPerSlice * SITE_BROWSER_RUNTIME.length +
+        SITE_FRAME_REWRITE_CHARS,
+    );
+    expect(largest).toBeLessThan(30 * 1024 * 1024);
+  });
+
+  test("cancelling the document while a read waits cancels the page and stops reading it", async () => {
+    let pulls = 0;
+    let cancelled: unknown = null;
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          pulls += 1;
+          // The first pull answers; the second waits for the origin forever.
+          if (pulls === 1) controller.enqueue(new TextEncoder().encode("<p>first</p>"));
+          else return new Promise<void>(() => undefined);
+        },
+        cancel(reason) {
+          cancelled = reason;
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    const reader = siteFrameStream(body).getReader();
+    expect((await reader.read()).done).toBe(false);
+    const waiting = reader.read();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(pulls).toBe(2);
+    await reader.cancel("viewer left");
+    expect(await waiting).toEqual({ done: true, value: undefined });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(cancelled).toBe("viewer left");
+    expect(pulls).toBe(2);
+  });
+  test("an unexpected error while rewriting also cancels the page", async () => {
+    let cancelled: unknown = null;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        // Not bytes: decoding it throws inside the rewrite stage.
+        controller.enqueue({ byteLength: 3 } as unknown as Uint8Array);
+      },
+      cancel(reason) {
+        cancelled = reason;
+      },
+    });
+    await expect(readText(siteFrameStream(body))).rejects.toBeInstanceOf(TypeError);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(cancelled).toBeInstanceOf(TypeError);
   });
 });
 
