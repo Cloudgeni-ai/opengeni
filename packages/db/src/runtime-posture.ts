@@ -887,7 +887,7 @@ export const RETIRING_FEATURE_TABLES = {
     "workspace_variable_set_variables",
     "workspace_variable_sets",
   ],
-  // Migration 1233 removes the retired Knowledge-source sync rows and stops
+  // Migration 1234 removes the retired Knowledge-source sync rows and stops
   // every SQL routine from reading these tables; a later release drops them.
   knowledgeSourceSync: [
     "google_drive_object_acl_evidence",
