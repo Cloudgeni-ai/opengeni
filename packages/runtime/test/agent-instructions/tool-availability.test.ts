@@ -427,10 +427,9 @@ describe("buildAgent instructions: tool availability", () => {
     );
   });
 
-  test("the Codemode directive is a known exception: only it still names command tools", () => {
-    // The attempt directives are not pruned (see PROMPT_CHANGELOG). With every
-    // prompt-named tool absent, the only survivors are the Codemode directive's
-    // `command_wait`/`command_read` observation clause, never the contract.
+  test("with every prompt-named tool absent, no instruction layer names one", () => {
+    // The attempt directives are not pruned (see PROMPT_CHANGELOG); the
+    // Codemode directive names no prompt-named tool, so nothing survives.
     const inspection = inspectPersistentAgentInstructions(settings, {
       agentConfig,
       agentPromptResources: ALL_RESOURCES,
@@ -438,14 +437,10 @@ describe("buildAgent instructions: tool availability", () => {
       agentPromptToolAvailability: { unavailable: [...PROMPT_NAMED_TOOLS] },
     });
     const layer = (id: string) => inspection.layers.find((entry) => entry.id === id)?.content ?? "";
+    expect(layer("codemode")).not.toBe("");
     expect(PROMPT_NAMED_TOOLS.filter((tool) => names(layer("operational_contract"), tool))).toEqual(
       [],
     );
-    expect(PROMPT_NAMED_TOOLS.filter((tool) => names(layer("codemode"), tool))).toEqual([
-      "command_read",
-      "command_wait",
-    ]);
-    const survivors = PROMPT_NAMED_TOOLS.filter((tool) => names(inspection.composed, tool));
-    expect(survivors).toEqual(["command_read", "command_wait"]);
+    expect(PROMPT_NAMED_TOOLS.filter((tool) => names(inspection.composed, tool))).toEqual([]);
   });
 });

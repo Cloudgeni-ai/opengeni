@@ -115,6 +115,45 @@ describe("worker prompt tool availability", () => {
     expect(instructions({ agentPromptToolAvailability: below })).toBe(instructions());
   });
 
+  test("learning Off omits only that category's authoring clauses; other modes change nothing", () => {
+    const withLearning = (
+      learning: Parameters<typeof promptToolAvailabilityForTurn>[0]["learning"],
+    ) => {
+      const availability = promptToolAvailabilityForTurn({
+        agentConfig,
+        selectedFirstPartyMcpTools: selectionFor(null),
+        firstPartyPermissions: null,
+        learning,
+      })!;
+      return instructions({ agentPromptToolAvailability: availability });
+    };
+    const baseline = instructions();
+    for (const mode of ["automatic", "review_first"] as const)
+      expect(withLearning({ knowledge: mode, instructions: mode, skills: mode })).toBe(baseline);
+    expect(withLearning(undefined)).toBe(baseline);
+
+    const knowledgeOff = withLearning({
+      knowledge: "off",
+      instructions: "automatic",
+      skills: "automatic",
+    });
+    for (const tool of ["knowledge_save", "knowledge_prepare_save", "knowledge_retain_message"])
+      expect(knowledgeOff).not.toContain(tool);
+    // Retrieval, grounding, the learning-mode rule and instruction changes stay.
+    expect(knowledgeOff).toContain("Use knowledge_search and knowledge_get before work");
+    expect(knowledgeOff).toContain("Follow the accepted learning modes and scope:");
+    expect(knowledgeOff).toContain("instruction_policy_save");
+    expect(knowledgeOff).toContain("task_note_save");
+    expect(knowledgeOff.length).toBeLessThan(baseline.length);
+
+    const allOff = withLearning({ knowledge: "off", instructions: "off", skills: "off" });
+    expect(allOff).not.toContain("instruction_policy_save");
+    expect(allOff).not.toContain("knowledge_save");
+    expect(allOff).toContain("# Knowledge and durable storage");
+    // Skills learning Off does not disable installed Skills: reading guidance stays.
+    expect(allOff).toContain("# Using skills");
+  });
+
   test("a selection excluding goal and Knowledge functions stops naming them", () => {
     const stored = DEFAULT_FIRST_PARTY_MCP_TOOLS.filter(
       (tool) => !(GOAL_AND_KNOWLEDGE_TOOLS as readonly string[]).includes(tool),

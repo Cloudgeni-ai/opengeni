@@ -107,6 +107,7 @@ import {
   bundledSkillSelectionForAgentConfig,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   resolveAgentToolFamilies,
+  type AgentLearningDefaults,
   type ResourceRef,
   type Permission,
   type ToolAuthNeededPayload,
@@ -249,6 +250,8 @@ export type PrepareTurnToolRuntimeDeps = {
   /** Present when this turn resolves host-managed run credentials. */
   runCredentialRenewals?: RenewalState | undefined;
   runMcpCredentials?: RunMcpCredentials;
+  /** The accepted turn's frozen effective learning modes (instructions rendering only). */
+  learningModes?: AgentLearningDefaults | undefined;
 };
 
 export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
@@ -587,6 +590,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     firstPartyPermissions: effectiveFirstPartyPermissions,
     nestedAgentDepth: session.nestedAgentDepth,
     effectiveMaxNestedAgentDepth: session.effectiveMaxNestedAgentDepth,
+    learning: deps.learningModes,
   });
   const needsTitle = shouldRequestMissingSessionTitle({
     agentConfig: session.agent,
