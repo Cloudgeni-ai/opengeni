@@ -186,6 +186,26 @@ impl Ownership {
             },
         }
     }
+
+    /// Takes a sandbox nobody owns anew, leaving it without an owner under
+    /// a new epoch, as a give would: no host that still holds a copy of an
+    /// earlier epoch, such as one given up on, gets it back
+    /// ([`reconcile`]), and its next owner starts from the store's copy.
+    /// For a change of what the sandbox is, such as its shape, which no
+    /// host may then hold as it was.
+    #[must_use]
+    pub const fn retake(self) -> Change {
+        let epoch = self.epoch.next();
+        Change {
+            expect: self,
+            set: Self {
+                owner: None,
+                epoch,
+                taken: epoch,
+                whole: self.carried(epoch),
+            },
+        }
+    }
 }
 
 /// A sandbox a registering host still has, under the epoch it last ran it.
@@ -367,6 +387,11 @@ mod tests {
         assert_eq!(reconcile(A, e, Some(row(None, 8, 7))), Verdict::Drop);
         assert_eq!(reconcile(A, e, Some(row(None, 4, 1))), Verdict::Drop);
         assert_eq!(reconcile(A, e, None), Verdict::Drop);
+        // Lost, then taken anew while nobody owned it: its copy stays as
+        // whole as it was.
+        let retaken = row(None, 6, 5).retake().set;
+        assert_eq!(retaken, row(None, 7, 7));
+        assert_eq!(reconcile(A, e, Some(retaken)), Verdict::Drop);
         // A owns it again, but took it from the archive after its copy.
         assert_eq!(
             reconcile(A, e, Some(row(Some(A), 9, 9))),

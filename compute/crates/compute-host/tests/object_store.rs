@@ -85,6 +85,7 @@ async fn a_sandbox_survives_a_round_trip_through_object_storage() {
             memory: local.path().join("memory"),
             chunks: None,
             runtime: None,
+            vcpus: None,
         }),
         profile: None,
         image: None,
