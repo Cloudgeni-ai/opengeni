@@ -102,6 +102,25 @@ describe("public repository hygiene", () => {
     }
   });
 
+  test("SVG path data never reads as a retired label, but SVG text still does", () => {
+    const label = ["M", "12"].join("");
+    const file = "data/catalog/logos/example.svg";
+    const drawn = `<svg xmlns="http://www.w3.org/2000/svg"><path d="${label} 5.5h3"/><polygon points='${label} 1 2 3'/></svg>`;
+    expect(auditPublicText(file, drawn)).toEqual([]);
+    for (const text of [
+      `<svg><title>${label}</title></svg>`,
+      `<svg><path id="${label}" d="M1 2"/></svg>`,
+    ]) {
+      expect(auditPublicText(file, text).map((finding) => finding.reason)).toEqual([
+        "retired milestone label",
+      ]);
+    }
+    // Only SVG files: the same attribute in source text is still checked.
+    expect(auditPublicText("apps/web/src/icon.tsx", drawn).map((f) => f.reason)).toEqual(
+      Array(2).fill("retired milestone label"),
+    );
+  });
+
   test("only exempts the reviewed upstream Rust field primitive", () => {
     const file = "agent/vendor/async-nats/src/lib.rs";
     const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");

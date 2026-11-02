@@ -252,6 +252,7 @@ impl Host {
             memory_mib: HOST_MEMORY_MIB,
             free_memory_mib: HOST_MEMORY_MIB.saturating_sub(self.awake() * SANDBOX_MIB),
             reclaimable_memory_mib: 0,
+            cpu_millis: 1_000_000,
             free_cpu_millis: 1_000_000,
             free_disk_mib: 1_000_000,
             ready: Vec::new(),

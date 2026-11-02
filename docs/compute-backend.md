@@ -338,6 +338,7 @@ change to compute.
 | `OPENGENI_COMPUTE_LINK_URL` | The gateway's public `wss://` URL, also the JWT audience |
 | `OPENGENI_COMPUTE_IMAGE`, `OPENGENI_COMPUTE_DESKTOP_IMAGE` | Headless and desktop image refs (control service default when unset) |
 | `OPENGENI_COMPUTE_VCPUS`, `OPENGENI_COMPUTE_MEMORY_MIB` | Shape; optional `..._MEMORY_REQUEST_MIB` (all of the memory when unset) and `..._CPU_REQUEST_MILLIS` (a tenth of each vCPU when unset), what each sandbox is guaranteed while awake |
+| `OPENGENI_COMPUTE_DISK_MIB` | How long each new sandbox's disk is (its image's length when unset). Its host books the whole length while the sandbox runs; at rest the disk holds only what its files use. Sandboxes made before a change keep their length |
 | `OPENGENI_COMPUTE_AGENT_READY_TIMEOUT_MS` | How long create and wake wait for the agent |
 
 Defaults are unchanged. Boot fails with a list of the missing settings only
@@ -360,7 +361,8 @@ configured side by side and move new chats between them with one setting:
   their parent's. A schedule that starts a new chat on each run follows the
   setting as it is at that run, unless the schedule names a backend.
 - An API client can still pick a backend for one chat with `sandboxBackend`
-  on session create.
+  on session create, when the deployment serves it: its default or a backend
+  whose settings are configured. Any other value is refused with 422.
 
 Keep both backends' settings in place for as long as chats on either exist:
 removing compute's or Modal's settings stops those chats, not only new ones.

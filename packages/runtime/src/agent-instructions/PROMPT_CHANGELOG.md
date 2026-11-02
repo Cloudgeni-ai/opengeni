@@ -13,6 +13,29 @@ alone do not fit. An index that fits renders byte-for-byte as before.
 + 44 more repository skill folders are not listed here. They remain in the workspace; read their SKILL.md with filesystem tools.
 ```
 
+The sandbox preamble (`sandboxBaseInstructions`, the SDK default that every
+sandbox and Connected Machine agent receives ahead of the modular contract)
+extends two existing lines in place; nothing is added for sessions without a
+sandbox, and the legacy and modular locks are unchanged because they do not
+include the preamble. The "Make changes inside the workspace" line adds that
+the agent keeps its own scratch work (throwaway scripts and tests, and
+browsers, runtimes or libraries installed only for its checks) in a temporary
+directory outside the user's project and removes it when done, while tests the
+user asked for or the project expects stay in the project. The "Verify changes
+when practical" line adds that a change to something already running (a
+service, worker or scheduled job) is checked on the running instance: restart
+or reload the process that serves it, exercise the real entry point and check
+what the user asked about, asking first only when a restart could disrupt
+others or lose work in progress. The preamble grows from 349 to 471 tokens
+(o200k), +122 tokens per call in sandbox sessions, static so the cached prefix
+stays stable. The preamble is in neither the legacy nor the modular prompt, so
+the lines are shown as text, not as a sentence diff:
+
+```text
+- Make changes inside the workspace unless the user explicitly asks for another location. Keep your own scratch work out of the user's project: put throwaway scripts and tests, and browsers, runtimes or libraries installed only for your checks, in a temporary directory outside it, and remove them when done. Tests the user asked for or the project expects belong in it.
+- Verify changes when practical, especially after editing code, tests, build scripts, generated artifacts, or configuration. For a change to something already running, such as a service, worker or scheduled job, restart or reload the process that actually serves it, exercise the real entry point and check what the user asked about; unit tests alone do not show it works. Ask first only if a restart could disrupt others or lose work in progress.
+```
+
 The agent knows both GitHub identities. When personal GitHub sign-in is
 enabled on the deployment (new `personalGitHub` resource fact) and
 `github_connect_link` is available, the admin module adds one sentence (about

@@ -120,3 +120,51 @@ test("full-page close returns to the originating session without relying on brow
     standalone.remove();
   }
 });
+
+test("a full-page editor offers Copy link to its own address", async () => {
+  const workspaceId = "11111111-1111-4111-8111-111111111111";
+  const artifactId = "44444444-4444-4444-8444-444444444444";
+  const copied: string[] = [];
+  const clipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: async (text: string) => void copied.push(text) },
+  });
+  const route = createRootRoute({
+    component: () => (
+      <ArtifactSessionPage
+        workspaceId={workspaceId}
+        artifactId={artifactId}
+        showAllArtifacts
+        linkKind="spreadsheet"
+      >
+        <div>Native editor</div>
+      </ArtifactSessionPage>
+    ),
+  });
+  const router = createRouter({
+    routeTree: route,
+    history: createMemoryHistory({ initialEntries: ["/direct-editor"] }),
+  });
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      await router.load();
+      root.render(<RouterProvider router={router} />);
+    });
+    const copy = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Copy link",
+    )!;
+    await act(async () => copy.click());
+    expect(copied).toEqual([
+      `${window.location.origin}/workspaces/${workspaceId}/artifacts/editable/${artifactId}`,
+    ]);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    if (clipboard) Object.defineProperty(navigator, "clipboard", clipboard);
+    else Reflect.deleteProperty(navigator, "clipboard");
+  }
+});

@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { PauseIcon } from "lucide-react";
 import { Button } from "@opengeni/react/ui/button";
 import { Notice } from "@opengeni/react/ui/notice";
+import { ShellRail } from "@opengeni/react/app/components/rail/rail-surface";
 import { mountApiUpdateNotice, showApiUpdateNotice } from "../src/api";
 import { SignInCallbackNotice } from "../src/components/sign-in-callback-notice";
 import { clearSignInChangeFeedback, retainSignInChangeFeedback } from "../src/lib/sign-in-feedback";
@@ -46,12 +47,12 @@ function Preview() {
         className="flex min-h-0 flex-1 overflow-hidden"
         data-rail-collapsed={collapsed ? "true" : undefined}
       >
-        <nav
+        <ShellRail
+          as="nav"
           aria-label="Primary"
-          data-shell-rail
           data-collapsed={collapsed}
           style={{ width: collapsed ? 56 : 240 }}
-          className="shrink-0 border-r border-border bg-surface"
+          className="bg-surface"
         />
         <div data-canvas className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
           {params.has("paused") ? (

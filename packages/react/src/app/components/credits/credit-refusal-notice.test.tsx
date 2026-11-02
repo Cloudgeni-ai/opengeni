@@ -241,3 +241,20 @@ test("an own-key refusal on the Free plan offers one Upgrade to Pro action, even
   ]);
   expect(onAddCredits).not.toHaveBeenCalled();
 });
+
+test("an own-subscription refusal offers one Upgrade to Pro action and no model switch", async () => {
+  const onAddCredits = mock(() => undefined);
+  const container = await render({
+    refusalCode: "subscription_upgrade_required",
+    message: "Upgrade to Pro to use your own subscription.",
+    gap: { modelLabel: "GPT-6 Luna (Codex)", covered: [], selectionUsable: false },
+    onChooseModel: () => undefined,
+    onAddCredits,
+  });
+  expect(container.textContent).toBe("Upgrade to Pro to use your own subscriptionUpgrade to Pro");
+  expect(container.querySelectorAll("button")).toHaveLength(0);
+  expect([...container.querySelectorAll("a")].map((link) => link.getAttribute("href"))).toEqual([
+    "/workspaces/ws/organization?section=billing",
+  ]);
+  expect(onAddCredits).not.toHaveBeenCalled();
+});

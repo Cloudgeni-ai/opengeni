@@ -16,6 +16,7 @@ import { useWorkspacePanelOwnsExpand } from "../../../components/workspace-dock"
 import { useAppContext } from "../../app-context";
 import { EditableArtifactSurface, usePreloadAppSurface } from "../../lib/app-surfaces";
 import { ArtifactLibrary, type ArtifactPinAction } from "../artifacts/artifact-library";
+import { CopyArtifactLinkButton } from "../artifacts/copy-artifact-link";
 import { defaultArtifactFilters, filterArtifactCatalog } from "../../lib/artifact-catalog";
 import { hasWorkspacePermission } from "../../lib/permissions";
 import { cn } from "../../lib/utils";
@@ -238,6 +239,10 @@ export function SessionEditableArtifactsWorkspace({
                 <RefreshCwIcon className="size-4" />
               </Button>
             ) : null}
+            <CopyArtifactLinkButton
+              workspaceId={workspaceId}
+              item={{ kind: artifact.modality, id: artifact.id }}
+            />
             {artifact.modality === "site" && !settingsOpen ? (
               <>
                 <Button

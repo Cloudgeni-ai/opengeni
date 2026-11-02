@@ -370,12 +370,21 @@ function leafIssues(issues: readonly z.core.$ZodIssue[], base: PropertyKey[]): L
 }
 
 /** The union branch the arguments meant: one whose tag matched, else the
- * branch that reports the unknown tag, else the one with the fewest issues. */
+ * branch that reports the unknown tag, else the one with the fewest issues.
+ * Only a branch's own tag counts: a batch whose inner action has an unknown
+ * type still chose the batch branch. */
 function chosenUnionBranch(branches: z.core.$ZodIssue[][]): z.core.$ZodIssue[] {
+  const ownTag = (issue: z.core.$ZodIssue): boolean =>
+    issue.path.length === 0 ||
+    (issue.path.length === 1 && ["type", "kind", "operation"].includes(String(issue.path[0])));
   const tagMismatch = (issue: z.core.$ZodIssue): boolean =>
-    (issue.code === "invalid_union" && issue.errors.length === 0) ||
-    (issue.code === "invalid_value" &&
-      ["type", "kind", "operation"].includes(String(issue.path.at(-1))));
+    ownTag(issue) &&
+    // A nested union of tagged variants mismatches when each of its
+    // variants does.
+    ((issue.code === "invalid_union" &&
+      (issue.errors.length === 0 || issue.errors.every((branch) => branch.some(tagMismatch)))) ||
+      (issue.code === "invalid_value" &&
+        ["type", "kind", "operation"].includes(String(issue.path.at(-1)))));
   const matching = branches.filter((branch) => !branch.some(tagMismatch));
   if (matching.length > 0) {
     return matching.reduce((best, branch) => (branch.length < best.length ? branch : best));

@@ -113,6 +113,9 @@ collection) allows it:
 Guest records belong to the guest's visitor id, so a guest who clears
 cookies loses them. Guest writes have their own rate limit.
 
+Guests can also open the Site's shared files (for example its images or
+video), but not private ones, and they can't upload or delete files.
+
 ## Site SQL (optional)
 
 Where the deployment turns on Cloudflare storage, an owner can give a Site

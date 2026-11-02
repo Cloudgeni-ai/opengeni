@@ -5,6 +5,7 @@ import {
   catalogRowToDbInput,
   importIntegrationsCatalog,
   normalizeCatalogSnapshot,
+  readSnapshotFile,
 } from "../../../scripts/import-integrations-catalog";
 import {
   createDb,
@@ -224,6 +225,67 @@ describe("catalog import persistence", () => {
       provenance: "discovered",
       stale: false,
     });
+  }, 180_000);
+
+  test("a re-import clears a stored logo once the row has none by policy, but a failed fetch keeps it", async () => {
+    if (!available) return;
+    const batch = await createImportBatch(db, {
+      source: "integrations.sh",
+      snapshotDate: new Date("2026-07-03T23:41:44.132Z"),
+      snapshotRef: "logo-policy",
+      attributionNote: "MIT attribution",
+    });
+    const snapshotRow = (domain: string, logoSourceUrl: string | null) => ({
+      domain,
+      name: domain,
+      mcpUrl: `https://${domain}/mcp`,
+      transport: "streamable-http",
+      authKind: "none",
+      tier: "community",
+      provenance: "detected",
+      logoSourceUrl,
+      probe: { status: "real", reason: "mcp_json_rpc", httpStatus: 200 },
+    });
+    const normalized = normalizeCatalogSnapshot({
+      generatedAt: "2026-07-04T00:00:00.000Z",
+      importRows: [
+        snapshotRow("letter.example", `https://integrations.sh/logo/letter.example`),
+        snapshotRow("flaky.example", `https://integrations.sh/logo/flaky.example`),
+      ],
+    }).rows;
+    const letter = normalized.find((row) => row.domain === "letter.example")!;
+    const flaky = normalized.find((row) => row.domain === "flaky.example")!;
+    // An earlier import fetched and stored both logos.
+    for (const row of [letter, flaky]) {
+      await upsertRegistryCapabilityCatalogItem(
+        db,
+        catalogRowToDbInput(row, {
+          importBatchId: batch.id,
+          logoAssetPath: `catalog-assets/integrations-sh/logos/${row.domain}/logo.svg`,
+        }),
+      );
+    }
+    // The screened snapshot clears the letter's source; the other fetch fails.
+    await upsertRegistryCapabilityCatalogItem(
+      db,
+      catalogRowToDbInput({ ...letter, logoSourceUrl: null }, { importBatchId: batch.id }),
+    );
+    await upsertRegistryCapabilityCatalogItem(
+      db,
+      catalogRowToDbInput(flaky, { importBatchId: batch.id, logoAssetPath: null }),
+    );
+    const rows = await admin<{ provider_domain: string; logo_asset_path: string | null }[]>`
+      SELECT provider_domain, logo_asset_path
+      FROM capability_catalog_items
+      WHERE source = 'registry' AND provider_domain IN ('letter.example', 'flaky.example')
+      ORDER BY provider_domain`;
+    expect([...rows]).toEqual([
+      {
+        provider_domain: "flaky.example",
+        logo_asset_path: "catalog-assets/integrations-sh/logos/flaky.example/logo.svg",
+      },
+      { provider_domain: "letter.example", logo_asset_path: null },
+    ]);
   }, 180_000);
 
   test("importIntegrationsCatalog aborts empty snapshots before DB writes and leaves registry rows fresh", async () => {
@@ -633,6 +695,75 @@ describe("catalog import persistence", () => {
     expect(catalog.some((item) => item.providerDomain === "list-active.example")).toBe(true);
     expect(catalog.some((item) => item.providerDomain === "list-stale.example")).toBe(false);
   }, 180_000);
+});
+
+// Runs last: importing the whole committed snapshot marks every other registry
+// row in this database stale.
+describe("committed catalog snapshot import", () => {
+  test("well-known services persist their own names and self-hosted marks, never a hostname or letter", async () => {
+    if (!available) return;
+    const snapshot = await readSnapshotFile(
+      new URL("../../../data/catalog/integrations-snapshot.json", import.meta.url).pathname,
+    );
+    const stored = new Map<string, string>();
+    const result = await importIntegrationsCatalog({
+      db,
+      snapshot,
+      snapshotRef: "committed-snapshot",
+      storage: {
+        putObject: async ({ key, contentType }) => {
+          stored.set(key, contentType);
+        },
+      },
+      // The default deployment mode: no network fetches, vendored marks only.
+      storeLogos: false,
+    });
+    expect(result.logoFailureCount).toBe(0);
+
+    const rows = await admin<
+      {
+        provider_domain: string;
+        name: string;
+        logo_asset_path: string | null;
+        metadata: { logoSource?: string; originalLogoUrl?: string | null };
+      }[]
+    >`
+      SELECT provider_domain, name, logo_asset_path, metadata
+      FROM capability_catalog_items
+      WHERE source = 'registry' AND stale = false AND import_batch_id = ${result.batch.id}`;
+    expect(rows).toHaveLength(result.importedCount);
+
+    const searchConsole = rows.find(
+      (row) => row.provider_domain === "searchconsole.googleapis.com",
+    );
+    expect(searchConsole?.name).toBe("Google Search Console");
+    expect(searchConsole?.metadata.logoSource).toBe("vendored");
+    expect(stored.get(searchConsole!.logo_asset_path!)).toBe("image/svg+xml");
+
+    // Every Google API row is named for its product and shows a stored mark,
+    // except the reviewed rows whose overlay deliberately suppresses a logo.
+    const google = rows.filter((row) => row.provider_domain.endsWith(".googleapis.com"));
+    expect(google.length).toBeGreaterThan(30);
+    for (const row of google) {
+      expect(row.name).not.toBe(row.provider_domain);
+      expect(row.name).not.toMatch(/^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/);
+    }
+    const unmarked = google.filter((row) => !row.logo_asset_path).map((row) => row.name);
+    expect([...unmarked].sort()).toEqual(["Gmail", "Google Calendar", "Google Drive"]);
+
+    // No row hotlinks an integrations.sh letter placeholder any more.
+    const placeholders = new Set(
+      (
+        snapshot as { logoScreen?: { placeholderRows?: { domain: string }[] } }
+      ).logoScreen?.placeholderRows?.map((row) => row.domain) ?? [],
+    );
+    expect(placeholders.size).toBeGreaterThan(80);
+    for (const row of rows.filter((candidate) => placeholders.has(candidate.provider_domain))) {
+      expect(row.metadata.originalLogoUrl ?? null).not.toBe(
+        `https://integrations.sh/logo/${row.provider_domain}`,
+      );
+    }
+  }, 300_000);
 });
 
 async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {

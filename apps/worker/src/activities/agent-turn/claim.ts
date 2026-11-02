@@ -66,6 +66,7 @@ import { readProviderRecoveryStartedAt } from "./provider-recovery-policy";
 import {
   credentialSubjectIdForTurnInitiator,
   turnExecutionPolicyBillingIdentity,
+  turnExecutionPolicyOwnFunding,
   legacyTurnExecutionPolicyInput,
   ensureRunAllowed,
   AllowanceExhaustedError,
@@ -549,9 +550,14 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   billingState.chargesOpenGeniCredits = verifiedExecutionPolicy.model.cost === "credits";
   billingState.countsTowardTokenCap = billingIdentity.countsTowardTokenCap;
   billingState.billingOrigin = turn.billingOrigin;
-  billingState.isByokTurn =
-    !billingState.chargesOpenGeniCredits &&
-    turnExecutionPolicy.billing.upstreamPayer !== "deployment";
+  // The person's own API key pays the platform fee; their own subscription
+  // pays none and needs a paid plan instead.
+  const ownFunding = turnExecutionPolicyOwnFunding(turnExecutionPolicy, {
+    chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
+    providerKind: verifiedExecutionPolicy.provider.kind,
+  });
+  billingState.isByokTurn = ownFunding.isByokTurn;
+  billingState.isOwnSubscriptionTurn = ownFunding.isOwnSubscriptionTurn;
   billingState.isCodexTurn = billingIdentity.codexSubscription;
   billingState.isXaiTurn = billingIdentity.xaiSubscription;
   billingState.isClaudeTurn =
@@ -614,6 +620,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
         input.sessionId,
         turn.billingOrigin,
         billingState.isByokTurn,
+        billingState.isOwnSubscriptionTurn,
       ),
       cancellationSignal,
       undefined,

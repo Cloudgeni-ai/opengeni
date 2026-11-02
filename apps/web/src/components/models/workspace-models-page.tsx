@@ -1534,6 +1534,10 @@ export function WorkspaceModelsPageBody({
                   <Section title="Codex">
                     <CodexSettingRows
                       codex={codex}
+                      // A Personal workspace's settings are its owner's, as the server says.
+                      canChangeSettings={
+                        personal ? workspaceAccountRules.settings?.canEdit === true : undefined
+                      }
                       showRotation={Boolean(
                         workspaceAccountRules.settings &&
                         !workspaceAccountRules.settings.values.rotation.codex,
@@ -1797,7 +1801,7 @@ function ModelsList({
   /** The default subscription rules, when this person can read them. */
   defaultRules?: ModelAccountSettingValues | undefined;
   accountRules: WorkspaceModelAccountSettingsState;
-  /** A Personal workspace follows the organization's account rules and has none of its own. */
+  /** A Personal workspace: its account rules show only to its owner, who can change them. */
   personal: boolean;
   /** The organization whose defaults this workspace follows until it changes them. */
   organizationName: string;
@@ -1872,7 +1876,7 @@ function ModelsList({
         onEditAllowed={onEditAllowed}
         onEditCompaction={onEditCompaction}
       />
-      {personal ? null : (
+      {personal && accountRules.settings?.canEdit !== true ? null : (
         <WorkspaceAccountRulesSection
           organizationName={organizationName}
           workspaceName={workspaceName}

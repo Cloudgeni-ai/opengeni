@@ -764,6 +764,17 @@ pub struct HostAgent<E: Engine, S: Store> {
     /// Sandboxes on disk the host does not manage, with why: their ids are
     /// refused and their files and VMs left alone.
     blocked: BTreeMap<SandboxId, String>,
+    /// Blocked sandboxes an agent restart could not take back for a reason
+    /// that may pass, with when they are tried again (see
+    /// [`HostAgent::retry_recovery`]).
+    retrying: BTreeMap<SandboxId, recover::Retry>,
+    /// The first wait before trying a recovery again; see
+    /// [`HostConfig::recovery_retry`].
+    recovery_retry: Duration,
+    /// The tasks serving the pagers of VMs found running but not taken
+    /// back, by sandbox: until one ends, recovery does not connect to that
+    /// pager again.
+    detached: std::sync::Mutex<HashMap<SandboxId, JoinHandle<()>>>,
     destroying: HashMap<SandboxId, Vec<Reply<()>>>,
     /// Those of `destroying` that hand their sandbox off, keeping the
     /// store's copy for its next owner.
@@ -1050,6 +1061,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             owning: HashMap::new(),
             ordinals: BTreeSet::new(),
             blocked: BTreeMap::new(),
+            retrying: BTreeMap::new(),
+            // A zero wait would try again on every turn of the loop.
+            recovery_retry: config.recovery_retry.max(Duration::from_millis(1)),
+            detached: std::sync::Mutex::default(),
             destroying: HashMap::new(),
             handing_away: HashSet::new(),
             leftovers: HashMap::new(),
@@ -1260,6 +1275,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             // service's rulings can be carried out; the core decides
             // nothing of its own on them either (see `inputs`).
             let acting = self.may_act();
+            let retry_at = self.next_recovery_retry();
             tokio::select! {
                 biased;
                 // First, so a steady stream of events and requests cannot
@@ -1271,6 +1287,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     None => break,
                 },
                 () = sleep_until_some(deadline), if acting => self.input(Input::Tick),
+                // Also while the lease has run out, as at start: a VM the
+                // guard froze then fails again, but one it killed is found
+                // gone, and the host registers again only once nothing is
+                // blocked.
+                () = sleep_until_some(retry_at) => self.retry_recovery().await,
                 // Renewed, the core reconsiders every sandbox.
                 () = lease_changed(lease.as_ref()) => self.input(Input::Tick),
             }

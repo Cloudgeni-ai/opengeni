@@ -4,16 +4,97 @@ import {
   BYOK_UPGRADE_REQUIRED_MESSAGE,
   type BillingBalance,
   type BillingOrigin,
+  planIncludesOwnSubscriptions,
+  type BillingPlanBalance,
 } from "@opengeni/contracts";
+import { getOrganizationPlanStanding, type Database } from "@opengeni/db";
 
 /* ----------------------------------------------------------------------------
    Bring-your-own-key platform fee (docs/billing-origin.md).
 
-   A call served by the person's own provider key or their own Claude, Codex
-   or SuperGrok subscription costs Opengeni nothing upstream, so it pays a
-   platform fee instead: `byokPlatformFeeBps` (default 500 = 5%) of the
-   call's list-price equivalent. The fee is payable only from paid credit.
+   A call served by the person's own API key (a provider, gateway or custom
+   endpoint key) costs Opengeni nothing upstream, so it pays a platform fee
+   instead: `byokPlatformFeeBps` (default 500 = 5%) of the call's list-price
+   equivalent. The fee is payable only from paid credit.
+
+   A call served by the person's own subscription (Claude, Codex, SuperGrok)
+   pays no fee: using one needs a paid plan of at least $20 a month instead
+   (`ownSubscriptionPlanAllows`), which then covers unlimited use.
    -------------------------------------------------------------------------- */
+
+/**
+ * Who pays upstream for a call Opengeni does not: the person's own API key
+ * (pays the platform fee) or their own subscription (needs a paid plan).
+ */
+export type OwnModelFunding = "api_key" | "subscription";
+
+/**
+ * Classify a served route from its accounting labels: a connected
+ * subscription credential (or payer) is a subscription; any other route not
+ * paid by the deployment is the person's own API key. `providerKind`
+ * recognises accepted policies frozen before the Claude subscription routes
+ * were relabelled (they carry workspace or organization labels).
+ */
+export function ownModelFunding(
+  model:
+    | {
+        billing: { upstreamPayer: string };
+        credentialSource: { kind: string };
+      }
+    | null
+    | undefined,
+  providerKind?: string | null,
+): OwnModelFunding | null {
+  if (!model) return null;
+  if (
+    model.credentialSource.kind === "connected_subscription" ||
+    model.billing.upstreamPayer === "connected_subscription" ||
+    (providerKind != null && providerKind.includes("subscription"))
+  ) {
+    return "subscription";
+  }
+  return model.billing.upstreamPayer === "deployment" ? null : "api_key";
+}
+
+/**
+ * Does using the person's own subscription need a paid plan on this account?
+ * Only with Stripe billing and subscription plans (people can buy one), and
+ * never for an account on legacy billing terms (internal accounts).
+ */
+export function ownSubscriptionPlanRequired(
+  settings: Pick<Settings, "billingMode" | "subscriptionPlansEnabled" | "billingLegacyAccountIds">,
+  accountId: string | null | undefined,
+): boolean {
+  return (
+    settings.billingMode === "stripe" &&
+    settings.subscriptionPlansEnabled === true &&
+    !isLegacyBillingAccount(settings, accountId)
+  );
+}
+
+/**
+ * A plan that includes the person's own subscriptions: a paid plan of at
+ * least $20 a month (or custom-priced, like Enterprise) that is active or
+ * trialing. Free, no plan, and a plan whose payment lapsed do not.
+ */
+export function planAllowsOwnSubscriptions(standing: {
+  plan: Pick<BillingPlanBalance, "key" | "status"> | null;
+  monthlyPriceMicros: number | null;
+}): boolean {
+  const { plan, monthlyPriceMicros } = standing;
+  if (!plan || (plan.status !== "active" && plan.status !== "trialing")) return false;
+  return planIncludesOwnSubscriptions({ key: plan.key, monthlyPriceMicros });
+}
+
+/** Admission read: may this account use its own subscriptions? */
+export async function ownSubscriptionPlanAllows(
+  db: Database,
+  settings: Pick<Settings, "billingMode" | "subscriptionPlansEnabled" | "billingLegacyAccountIds">,
+  accountId: string,
+): Promise<boolean> {
+  if (!ownSubscriptionPlanRequired(settings, accountId)) return true;
+  return planAllowsOwnSubscriptions(await getOrganizationPlanStanding(db, accountId));
+}
 
 /**
  * List rate for a custom endpoint with no reviewed list price, in USD micros

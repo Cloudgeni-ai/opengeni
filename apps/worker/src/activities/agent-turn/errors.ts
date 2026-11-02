@@ -1752,7 +1752,31 @@ export function agentRunFailurePayload(
   error: unknown,
   options: { isCodexTurn?: boolean } = {},
 ): ReturnType<typeof baseAgentRunFailurePayload> {
-  return withProviderCondition(error, classifyAgentRunFailurePayload(error, options));
+  return withProviderCondition(
+    error,
+    withProviderWebPageExplained(classifyAgentRunFailurePayload(error, options)),
+  );
+}
+
+const PROVIDER_WEB_PAGE = /^(\d{3})\s+(?:<!doctype html|<html)/i;
+const PAGE_TITLE = /<title[^>]*>([^<]{1,120})<\/title>/i;
+
+/**
+ * A provider address that serves a web page (a wrong base URL, a proxy or a
+ * sign-in page) instead of its API surfaces as the SDK's `<status> <html…>`
+ * message. Say what happened instead of showing the page's markup.
+ */
+function withProviderWebPageExplained(
+  failure: ReturnType<typeof baseAgentRunFailurePayload>,
+): ReturnType<typeof baseAgentRunFailurePayload> {
+  const page = PROVIDER_WEB_PAGE.exec(failure.error);
+  if (!page) return failure;
+  const title = PAGE_TITLE.exec(failure.error)?.[1]?.trim();
+  return {
+    ...failure,
+    error: `The model provider's address answered with a web page (HTTP ${page[1]}) instead of an API response. Check the provider's base URL in its settings.`,
+    ...(title && !failure.detail ? { detail: `Page title: ${title}` } : {}),
+  };
 }
 
 /**
