@@ -81,6 +81,12 @@ export type EvalCase = {
   forbidAnswer?: readonly RegExp[];
   /** Routing: integrations whose tools must not be the only ones used. */
   forbidIntegrations?: readonly IntegrationId[];
+  /**
+   * Write: whether the deployment's default tool policy should ask for
+   * approval first. `optional` when the default policy lets the write run
+   * (for example personal Slack under the Recommended policy). Default required.
+   */
+  approval?: "required" | "optional";
   /** Write: name of the verifier in verify.ts that confirms the result in the service. */
   verify?: string;
   /** Included in the model × effort grid (the core set). */

@@ -290,6 +290,8 @@ export const CASES: readonly EvalCase[] = [
     prompt:
       'Post in #halcyon-launch on Slack: "Halcyon eval {RUN}: pricing page draft is ready for review".',
     verify: "slack_message_exists",
+    approval: "optional",
+    note: "Personal Slack writes run without approval under the default Recommended policy.",
   },
 
   // ── GitHub ────────────────────────────────────────────────────────────────
