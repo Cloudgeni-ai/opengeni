@@ -3,7 +3,7 @@ import { mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { electronStub } from "./electron-stub";
+import { electronStub, FakeBrowserWindow, FakeWebContents } from "./electron-stub";
 
 mock.module("electron", () => electronStub);
 
@@ -34,7 +34,7 @@ import { macKeyWatchArgument, parseKeyLine } from "../src/main/dictation/mac";
 import { ENGLISH_DICTATION_WORDS, type DictationWords } from "../src/main/dictation/words";
 
 // Imports are hoisted: the window module loads Electron, so it waits for the mock.
-const { hudAction } = await import("../src/main/dictation/hud");
+const { DictationHud, hudAction } = await import("../src/main/dictation/hud");
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -1116,5 +1116,103 @@ describe("dictation platforms", () => {
     expect(hudAction("data:text/html,x#retry/123")).toBe("retry");
     expect(hudAction("data:text/html,x#nothing/1")).toBeNull();
     expect(hudAction("data:text/html,x")).toBeNull();
+  });
+});
+
+describe("the dictation pill outlives its page", () => {
+  const recording: DictationHudState = {
+    kind: "recording",
+    startedAt: 1,
+    level: null,
+    label: null,
+    hold: false,
+  };
+  const transcribing: DictationHudState = { kind: "transcribing", label: null };
+  const never = () => new Promise<unknown>(() => undefined);
+
+  function pill() {
+    FakeBrowserWindow.made = [];
+    FakeWebContents.answer = async () => 200;
+    const logged: string[] = [];
+    const hud = new DictationHud("darwin", () => ENGLISH_DICTATION_WORDS, {
+      log: (message) => logged.push(message),
+      answerMs: 20,
+    });
+    const windows = () => FakeBrowserWindow.made;
+    const showing = () => windows().filter((window) => window.visible && !window.destroyed);
+    return { hud, logged, windows, showing };
+  }
+
+  test("a page that died while hidden: the next show builds a fresh window and shows it", async () => {
+    const p = pill();
+    p.hud.show(recording);
+    await wait(5);
+    p.hud.show({ kind: "hidden" });
+    await wait(5);
+    const first = p.windows()[0]!;
+    expect(first.visible).toBe(false);
+
+    first.webContents.emit("render-process-gone", {}, { reason: "killed", exitCode: 9 });
+    expect(first.destroyed).toBe(true);
+    p.hud.show(transcribing);
+    await wait(5);
+
+    expect(p.windows()).toHaveLength(2);
+    expect(p.showing()).toEqual([p.windows()[1]!]);
+    expect(p.windows()[1]!.webContents.scripts.at(-1)).toContain('"transcribing"');
+    // Still a panel that never takes the keyboard.
+    expect(p.windows()[1]!.options).toMatchObject({ type: "panel", focusable: false });
+    expect(p.logged.join("\n")).toContain("killed");
+    p.hud.destroy();
+  });
+
+  test("a page that dies while showing comes back with what it showed", async () => {
+    const p = pill();
+    p.hud.show(recording);
+    await wait(5);
+    p.windows()[0]!.webContents.emit("unresponsive");
+    await wait(5);
+
+    expect(p.windows()).toHaveLength(2);
+    expect(p.showing()).toEqual([p.windows()[1]!]);
+    expect(p.windows()[1]!.webContents.scripts.at(-1)).toContain('"recording"');
+    p.hud.destroy();
+  });
+
+  for (const [how, answer] of [
+    ["fails", () => Promise.reject(new Error("Render frame was disposed"))],
+    ["never answers", never],
+  ] as const) {
+    test(`a page that ${how}: its window is thrown away and the state shows in a fresh one`, async () => {
+      const p = pill();
+      p.hud.show(recording);
+      await wait(5);
+      p.hud.show({ kind: "hidden" });
+      await wait(5);
+      const first = p.windows()[0]!;
+      first.webContents.answer = answer;
+
+      p.hud.show(transcribing);
+      await wait(60);
+
+      expect(first.destroyed).toBe(true);
+      expect(p.windows()).toHaveLength(2);
+      expect(p.showing()).toEqual([p.windows()[1]!]);
+      expect(p.windows()[1]!.webContents.scripts.at(-1)).toContain('"transcribing"');
+      expect(p.logged.some((message) => message.includes("failed"))).toBe(true);
+      p.hud.destroy();
+    });
+  }
+
+  test("builds it again once, not in a loop", async () => {
+    const p = pill();
+    FakeWebContents.answer = () => Promise.reject(new Error("gone"));
+    p.hud.show(recording);
+    await wait(60);
+
+    expect(p.windows()).toHaveLength(2);
+    expect(p.windows().every((window) => window.destroyed)).toBe(true);
+    expect(p.logged).toHaveLength(2);
+    FakeWebContents.answer = async () => 200;
   });
 });
