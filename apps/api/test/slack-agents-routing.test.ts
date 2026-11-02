@@ -553,7 +553,7 @@ describe("what people read", () => {
     expect(text).toContain("groupIds [11111111-1111-4111-8111-111111111111]");
     // Never told to save with workspace scope (DM content reached workspace Knowledge).
     expect(text).not.toContain('scope "workspace"');
-    // A DM reads the Memory and never writes to it.
+    // A DM reads the Memory and saves no Knowledge at all.
     const dm = slackAgentSessionInstructions({
       loaded,
       agent: analytics,
@@ -561,7 +561,7 @@ describe("what people read", () => {
       privateChat: true,
     });
     expect(dm).toContain("groupId 11111111-1111-4111-8111-111111111111");
-    expect(dm).toContain("never save anything from it to your Memory");
+    expect(dm).toContain("never save anything from it to Knowledge");
     expect(dm).not.toContain("knowledge_save");
     // Memory off: no Memory, no other chats.
     const forgetful = slackAgentSessionInstructions({ loaded, agent: ops, handedOffBy: null });

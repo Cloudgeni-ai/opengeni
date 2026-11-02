@@ -206,24 +206,32 @@ own Knowledge collection and its chats may read its other shared chats
 (`slack_agent_chats`). Off: neither. The rules live in
 `packages/core/src/domain/agent-memory.ts` and are enforced by the tools:
 
-- Every chat of the agent reads its Memory, including entries still waiting
-  for review (`view: needs_review`), which it is told are unreviewed.
+- Every chat of the agent with Knowledge tools reads its Memory, including
+  entries still waiting for review (`view: needs_review`), which it is told are
+  unreviewed.
 - Only chats whose audience matches the collection write to it: a shared
   agent's shared chats, or an Only me agent's owner in a private chat. Private
   chats (Slack DMs included) of a shared agent, chats with Memory scope off and
   open-use chats only read. `knowledge_save`, `knowledge_archive` and
   `task_note_promote_knowledge` refuse such a write
-  (`agent_memory_read_only`) when it names the collection as a group, is the
-  collection, or changes an entry already in it. A worker a chat started is
-  checked as its root chat's.
-- With Memory off, nothing is saved into the collection and
-  `slack_agent_chats` lists nothing.
-- `slack_agent_chats` never lists private chats.
+  (`agent_memory_read_only`) when it names the collection or a collection
+  inside it as a group, is the collection, or changes an entry in either. A
+  worker a chat started is checked as its root chat's.
+- A Slack DM is private through its Slack interaction while its session row is
+  shared, so anything it saved would land in workspace Knowledge. An agent's
+  Slack DM therefore saves no Knowledge at all (`agent_memory_read_only`); it
+  may still archive outside the agent's Memory. This closes the old leak,
+  where Slack agents were told to save with workspace scope from DMs too.
+- With Memory off, nothing is saved into the collection, `knowledge_search`
+  and `knowledge_browse` on it and `knowledge_get` of it or its entries are
+  refused (`agent_memory_off`), and `slack_agent_chats` lists nothing.
+- `slack_agent_chats` never lists Only me chats or Slack DMs.
 - The chat is told its collection and whether it may save when it starts:
   Slack agent chats in their Slack instructions, app chats in their own
-  instructions, which also get `slack_agent_chats`. Nobody is told to save
-  with workspace scope any more; a save follows the chat's own scope (this
-  was how DM content reached workspace Knowledge).
+  instructions, which also get `slack_agent_chats`. The guidance is fixed when
+  the chat starts; the tools apply the agent's current switch. When an app
+  chat's own instructions leave no room, the guidance is left out rather than
+  cutting them.
 
 ### Compatibility
 

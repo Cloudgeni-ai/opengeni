@@ -34,6 +34,7 @@ describe("an agent's Memory", () => {
       write: true,
       listChats: true,
       readOnlyReason: null,
+      saveKnowledge: true,
     });
     expect(agentMemoryAccess(shared, chat({ private: true }))).toMatchObject({
       read: true,
@@ -51,12 +52,32 @@ describe("an agent's Memory", () => {
     ).toBe(false);
   });
 
-  test("a chat with Memory scope off only reads", () => {
-    expect(agentMemoryAccess(shared, chat({ memoryOff: true }))).toMatchObject({
-      read: true,
+  test("a chat with Memory scope off neither reads nor writes, and is not told to search", () => {
+    const access = agentMemoryAccess(shared, chat({ memoryOff: true }));
+    expect(access).toMatchObject({
+      read: false,
       write: false,
+      listChats: true,
       readOnlyReason: "memory_off_for_chat",
     });
+    const guidance = agentMemoryGuidance(access)!;
+    expect(guidance).toContain("slack_agent_chats");
+    expect(guidance).not.toContain("knowledge_search");
+  });
+
+  test("a Slack DM saves no Knowledge at all, whatever the agent's Memory", () => {
+    const dm = agentMemoryAccess(shared, chat({ private: true, slackDm: true }));
+    expect(dm).toMatchObject({ read: true, write: false, saveKnowledge: false });
+    const guidance = agentMemoryGuidance(dm)!;
+    expect(guidance).toContain(`groupId ${COLLECTION}`);
+    expect(guidance).toContain("never save anything from it to Knowledge");
+    expect(agentMemoryReadOnlyMessage(dm)).toContain("private Slack chat");
+    const off = agentMemoryAccess(
+      { ...shared, memoryEnabled: false },
+      chat({ private: true, slackDm: true }),
+    );
+    expect(off.saveKnowledge).toBe(false);
+    expect(agentMemoryGuidance(off)).toContain("never save anything from it to Knowledge");
   });
 
   test("Memory off: no reads, no writes, no other chats; the collection stays guarded", () => {
@@ -67,6 +88,7 @@ describe("an agent's Memory", () => {
       write: false,
       listChats: false,
       readOnlyReason: null,
+      saveKnowledge: true,
     });
     expect(agentMemoryGuidance(off)).toBeNull();
     expect(agentMemoryReadOnlyMessage(off)).toContain("Memory is off");

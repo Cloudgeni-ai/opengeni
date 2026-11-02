@@ -1423,7 +1423,12 @@ export async function getSessionAgentMemoryState(
 ): Promise<{
   agentChat: boolean;
   agent: AgentRecord | null;
-  chat: { private: boolean; ownerSubjectId: string | null; memoryOff: boolean };
+  chat: {
+    private: boolean;
+    ownerSubjectId: string | null;
+    memoryOff: boolean;
+    slackDm: boolean;
+  };
 } | null> {
   const row = await withWorkspaceRls(db, input.workspaceId, async (tx) => {
     const [found] = await rawRows<{
@@ -1432,12 +1437,20 @@ export async function getSessionAgentMemoryState(
       visibility: string;
       owner_subject_id: string | null;
       memory_scope: string;
+      dm_owner: string | null;
     }>(
       tx,
+      // A Slack DM is private through its interaction, not its session row
+      // (docs/slack-bot.md); its workers share the root's interaction.
       sql`select s.account_id::text as account_id,
           coalesce(s.agent_id::text, s.metadata -> 'slackAgent' ->> 'id',
             r.agent_id::text, r.metadata -> 'slackAgent' ->> 'id') as agent_id,
-          s.visibility, s.owner_subject_id, s.memory_scope
+          s.visibility, s.owner_subject_id, s.memory_scope,
+          (select p.owning_subject_id from slack_interactions p
+            where p.workspace_id = s.workspace_id
+              and p.session_reservation_id = s.root_session_id
+              and p.visibility = 'private'
+            order by p.created_at, p.id limit 1) as dm_owner
         from sessions s
         left join sessions r on r.workspace_id = s.workspace_id
           and r.id = s.root_session_id and r.id <> s.id
@@ -1446,10 +1459,13 @@ export async function getSessionAgentMemoryState(
     return found ?? null;
   });
   if (!row) return null;
+  const onlyMe = row.visibility === "user_private";
   const chat = {
-    private: row.visibility === "user_private",
-    ownerSubjectId: row.owner_subject_id,
+    private: onlyMe || row.dm_owner !== null,
+    ownerSubjectId: onlyMe ? row.owner_subject_id : (row.dm_owner ?? row.owner_subject_id),
     memoryOff: row.memory_scope === "off",
+    // Its saves land in workspace scope: neither Only me nor Memory scope user.
+    slackDm: row.dm_owner !== null && !onlyMe && row.memory_scope !== "user",
   };
   const agentId = row.agent_id && /^[0-9a-f-]{36}$/iu.test(row.agent_id) ? row.agent_id : null;
   if (!agentId) return { agentChat: false, agent: null, chat };

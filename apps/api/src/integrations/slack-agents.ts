@@ -146,7 +146,8 @@ export function slackAgentSessionInstructions(input: {
     // The agent's own Instructions are a prompt layer of their own (the chat
     // is bound to the agent), never copied here.
     // A Slack agent is always shared with its workspace, so a private chat
-    // (a DM) only reads its Memory; the knowledge tools enforce that too.
+    // (a DM) only reads its Memory and saves no Knowledge; the knowledge tools
+    // enforce that too.
     const memory = agentMemoryGuidance(
       agentMemoryAccess(
         {
@@ -155,7 +156,13 @@ export function slackAgentSessionInstructions(input: {
           visibility: "workspace",
           ownerSubjectId: null,
         },
-        { private: input.privateChat === true, ownerSubjectId: null, memoryOff: false },
+        {
+          private: input.privateChat === true,
+          ownerSubjectId: null,
+          memoryOff: false,
+          // A Slack DM's session row is shared, so its saves would be workspace scope.
+          slackDm: input.privateChat === true,
+        },
       ),
     );
     if (memory) lines.push(memory);

@@ -38,8 +38,10 @@ export async function prepareAgentChatCreate(
   const guidance = agentMemoryGuidance(access);
   if (guidance) {
     const own = typeof request["instructions"] === "string" ? request["instructions"].trim() : "";
-    const room = SESSION_INSTRUCTIONS_MAX_CHARACTERS - guidance.length - 2;
-    request["instructions"] = own ? `${own.slice(0, Math.max(0, room))}\n\n${guidance}` : guidance;
+    const combined = own ? `${own}\n\n${guidance}` : guidance;
+    // The person's own text is never cut: without room the guidance is left
+    // out, and the knowledge tools still enforce the rules.
+    if (combined.length <= SESSION_INSTRUCTIONS_MAX_CHARACTERS) request["instructions"] = combined;
   }
   return access.listChats ? { firstPartyMcpToolAdditions: ["slack_agent_chats"] } : undefined;
 }

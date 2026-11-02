@@ -165,12 +165,16 @@ export function registerBotTemplateTools(input: {
         avatar: exactAvatar,
         visibility,
         instructions: instructions ?? "",
-        firstMessage: firstMessage ?? setupInstructions ?? "",
+        firstMessage: firstMessage?.trim() ? firstMessage : (setupInstructions ?? ""),
         sourceSessionId: sessionId,
       });
       if (!parsed.success) {
         throw new HTTPException(422, {
-          message: parsed.error.issues.map((issue) => issue.message).join(" "),
+          message: parsed.error.issues
+            .map((issue) =>
+              issue.path.length > 0 ? `${issue.path.join(".")}: ${issue.message}` : issue.message,
+            )
+            .join(" "),
         });
       }
       const request = parsed.data;
