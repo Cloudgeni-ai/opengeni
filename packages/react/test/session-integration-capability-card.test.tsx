@@ -268,3 +268,19 @@ test("a setup left without its tools finishes when the card shows, and joins thi
     await view.unmount();
   }
 });
+
+test("the card never waits for leftovers to finish", async () => {
+  const fake = backend();
+  const transport = fake.client.connectTransport() as Record<string, unknown>;
+  // The server is slow to finish someone's earlier setup (or never can).
+  transport.finishUnfinished = () => new Promise(() => {});
+  const view = mountWithRealScheduling(card({ ...fake.client, connectTransport: () => transport }));
+  try {
+    await waitFor(() => {
+      const connect = button("Connect Outlook Mail");
+      return connect !== undefined && !connect.disabled;
+    }, "The card waited for the server to finish an earlier setup");
+  } finally {
+    await view.unmount();
+  }
+});

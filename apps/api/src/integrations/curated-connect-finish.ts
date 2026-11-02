@@ -169,6 +169,84 @@ class CuratedConnectFinishRefusedError extends Error {
   }
 }
 
+type CuratedConnectFinishAuthorityInput = {
+  settings: ApiRouteDeps["settings"];
+  owner: ConnectOwner;
+  origin: ExternalActorContinuation | null;
+  finishPermissions: readonly CuratedConnectFinishPermission[];
+  attempt: ConnectAttempt;
+  connectionId: string;
+};
+
+/**
+ * The checks the manual install step applies, against what the starting
+ * request held: the integration is still offered to this workspace, the
+ * owner's current permission (connections:personal for one's own account,
+ * otherwise connections:write) and, for a member who is not an integration
+ * admin, the organization's member setup policy. Throws when refused.
+ */
+async function curatedConnectFinishAuthority(
+  db: Database,
+  input: CuratedConnectFinishAuthorityInput,
+): Promise<{ memberSetup: boolean }> {
+  const { owner, origin, attempt, settings } = input;
+  if (
+    !CORE_INTEGRATION_DEFINITIONS.some((definition) => definition.id === attempt.providerId) ||
+    !integrationAvailable(settings, owner.workspaceId, attempt.providerId)
+  )
+    throw new CuratedConnectFinishRefusedError("the integration to be offered here");
+  const own = await isOwnAccountInstall(db, settings, owner, {
+    ...attempt,
+    account: { id: input.connectionId },
+  });
+  const permission = own ? "connections:personal" : "connections:write";
+  // connections:write includes connections:personal.
+  if (
+    !input.finishPermissions.includes(permission) &&
+    !(own && input.finishPermissions.includes("connections:write"))
+  )
+    throw new CuratedConnectFinishRefusedError(permission);
+  await requireConnectOwnerAuthority(db, owner, permission, origin);
+  const admin =
+    !own &&
+    input.finishPermissions.includes("capabilities:manage") &&
+    (await db
+      .transaction(async (check) => {
+        await requireConnectOwnerAuthority(
+          check as unknown as Database,
+          owner,
+          "capabilities:manage",
+          origin,
+        );
+        return true;
+      })
+      .catch(() => false));
+  const memberSetup = !own && !admin;
+  if (memberSetup) await requireMemberIntegrationSetupAllowed(db, owner);
+  return { memberSetup };
+}
+
+/**
+ * Whether finishing would be refused for who the person is now, checked
+ * before reading the provider's tools so a refused leftover costs no network
+ * read. Only a definite refusal says no; anything else is left to the commit,
+ * which checks again.
+ */
+async function curatedConnectFinishRefused(
+  db: Database,
+  input: CuratedConnectFinishAuthorityInput,
+): Promise<boolean> {
+  try {
+    await curatedConnectFinishAuthority(db, input);
+    return false;
+  } catch (error) {
+    return (
+      error instanceof CuratedConnectFinishRefusedError ||
+      (error as { status?: unknown }).status === 403
+    );
+  }
+}
+
 /**
  * Install every reviewed tool for the account the callback just saved, inside
  * the callback's own commit and with the same checks as the manual install
@@ -191,38 +269,11 @@ export async function installCuratedConnectTools(
     resolved: ResolvedApiIntegrationPreview;
   },
 ): Promise<boolean> {
-  const { owner, origin, attempt, settings } = input;
+  const { owner, attempt } = input;
   try {
     await tx.transaction(async (savepoint) => {
       const sp = savepoint as unknown as Database;
-      const own = await isOwnAccountInstall(sp, settings, owner, {
-        ...attempt,
-        account: { id: input.connectionId },
-      });
-      const permission = own ? "connections:personal" : "connections:write";
-      // connections:write includes connections:personal.
-      if (
-        !input.finishPermissions.includes(permission) &&
-        !(own && input.finishPermissions.includes("connections:write"))
-      )
-        throw new CuratedConnectFinishRefusedError(permission);
-      await requireConnectOwnerAuthority(sp, owner, permission, origin);
-      const admin =
-        !own &&
-        input.finishPermissions.includes("capabilities:manage") &&
-        (await sp
-          .transaction(async (check) => {
-            await requireConnectOwnerAuthority(
-              check as unknown as Database,
-              owner,
-              "capabilities:manage",
-              origin,
-            );
-            return true;
-          })
-          .catch(() => false));
-      const memberSetup = !own && !admin;
-      if (memberSetup) await requireMemberIntegrationSetupAllowed(sp, owner);
+      const { memberSetup } = await curatedConnectFinishAuthority(sp, input);
       const resolved: ResolvedApiIntegrationPreview = {
         ...input.resolved,
         preview: {
@@ -304,6 +355,18 @@ export async function finishUnfinishedCuratedSetup(
 > {
   const { owner, attempt } = input;
   if (!unfinishedCuratedSetup(attempt) || input.finishPermissions.length === 0)
+    return { outcome: "not_finished" };
+  if (
+    input.resolved === undefined &&
+    (await curatedConnectFinishRefused(deps.db, {
+      settings: deps.settings,
+      owner,
+      origin: null,
+      finishPermissions: input.finishPermissions,
+      attempt,
+      connectionId: attempt.account!.id,
+    }))
+  )
     return { outcome: "not_finished" };
   const resolved =
     input.resolved !== undefined
@@ -390,19 +453,31 @@ export async function finishUnfinishedCuratedSetups(
   const unfinished = (await listUnfinishedConnectSetups(deps.db, owner)).filter(
     unfinishedCuratedSetup,
   );
-  const tools = new Map<string, Promise<ResolvedApiIntegrationPreview | null>>();
-  const completed: ConnectAttempt[] = [];
+  // A leftover the person may not finish now costs no provider read; every
+  // other integration's tools are read once, all at the same time.
+  const finishable: ConnectAttempt[] = [];
   for (const attempt of unfinished) {
-    let resolving = tools.get(attempt.providerId);
-    if (!resolving) {
-      resolving = resolveCuratedConnectTools(deps, owner, attempt.providerId);
-      tools.set(attempt.providerId, resolving);
-    }
+    const refused = await curatedConnectFinishRefused(deps.db, {
+      settings: deps.settings,
+      owner,
+      origin: null,
+      finishPermissions,
+      attempt,
+      connectionId: attempt.account!.id,
+    });
+    if (!refused) finishable.push(attempt);
+  }
+  const tools = new Map<string, Promise<ResolvedApiIntegrationPreview | null>>();
+  for (const attempt of finishable)
+    if (!tools.has(attempt.providerId))
+      tools.set(attempt.providerId, resolveCuratedConnectTools(deps, owner, attempt.providerId));
+  const completed: ConnectAttempt[] = [];
+  for (const attempt of finishable) {
     const result = await finishUnfinishedCuratedSetup(deps, {
       owner,
       attempt,
       finishPermissions,
-      resolved: await resolving,
+      resolved: await tools.get(attempt.providerId)!,
     });
     if (result.outcome === "complete") completed.push(result.attempt);
   }

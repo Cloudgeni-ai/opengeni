@@ -294,6 +294,20 @@ export const UNFINISHED_CONNECT_SETUP_WINDOW_MS = 7 * 24 * 60 * 60_000;
  * (still open, or already marked expired): the saved account outlives the
  * attempt, and finishing needs no provider round trip.
  */
+/**
+ * A later setup by the same person of the same integration for the same saved
+ * account. It took over: whatever the person did with that account since
+ * (finished it, removed its tools) stands, so the older setup never finishes.
+ */
+function supersedingSetup(attempt: ReturnType<typeof sql>) {
+  return sql`select 1 from connect_attempts later
+    where later.workspace_id = ${attempt}.workspace_id and later.account_id = ${attempt}.account_id
+      and later.subject_id = ${attempt}.subject_id and later.id <> ${attempt}.id
+      and later.created_at > ${attempt}.created_at
+      and later.projection->>'providerId' = ${attempt}.projection->>'providerId'
+      and later.projection->'account'->>'id' = ${attempt}.projection->'account'->>'id'`;
+}
+
 export async function listUnfinishedConnectSetups(
   db: Database,
   scope: ConnectActorScope,
@@ -302,14 +316,16 @@ export async function listUnfinishedConnectSetups(
   return scoped(db, scope, async (tx) => {
     const rows = await rawRows<Row>(
       tx,
-      sql`select * from connect_attempts
-      where workspace_id = ${scope.workspaceId}::uuid and account_id = ${scope.accountId}::uuid
-        and subject_id = ${scope.subjectId} and operation_id is null
-        and created_at > now() - make_interval(secs => ${UNFINISHED_CONNECT_SETUP_WINDOW_MS / 1000})
-        and projection->>'state' in ('connected_but_incomplete','preview','expired')
-        and projection->>'credentialsCommitted' = 'true'
-        and coalesce(projection->>'integrationInstalled', 'false') <> 'true'
-      order by created_at desc, id desc limit ${limit}`,
+      sql`select * from connect_attempts attempt
+      where attempt.workspace_id = ${scope.workspaceId}::uuid
+        and attempt.account_id = ${scope.accountId}::uuid
+        and attempt.subject_id = ${scope.subjectId} and attempt.operation_id is null
+        and attempt.created_at > now() - make_interval(secs => ${UNFINISHED_CONNECT_SETUP_WINDOW_MS / 1000})
+        and attempt.projection->>'state' in ('connected_but_incomplete','preview','expired')
+        and attempt.projection->>'credentialsCommitted' = 'true'
+        and coalesce(attempt.projection->>'integrationInstalled', 'false') <> 'true'
+        and not exists (${supersedingSetup(sql`attempt`)})
+      order by attempt.created_at desc, attempt.id desc limit ${limit}`,
     );
     return rows.map((row) => projection(row, scope));
   });
@@ -345,9 +361,22 @@ export async function completeUnfinishedConnectSetup(
       current.revision !== input.expectedRevision ||
       !["connected_but_incomplete", "preview", "expired"].includes(current.state) ||
       !current.credentialsCommitted ||
-      current.integrationInstalled
+      current.integrationInstalled ||
+      !current.account
     )
       return null;
+    // One finish per saved account at a time (two tabs, a chat card and
+    // Capabilities, or a server retry): the second sees the first's tools.
+    await tx.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(
+        ${`connect-finish:${scope.workspaceId}:${scope.subjectId}:${current.account.id}`}, 0))`,
+    );
+    const superseded = await rawRows<{ found: number }>(
+      tx,
+      sql`select 1 as found from connect_attempts attempt
+        where attempt.id = ${row.id}::uuid and exists (${supersedingSetup(sql`attempt`)})`,
+    );
+    if (superseded.length > 0) return null;
     const committed = await input.commit(
       tx,
       structuredClone(current),

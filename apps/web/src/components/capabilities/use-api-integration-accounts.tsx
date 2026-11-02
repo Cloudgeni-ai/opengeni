@@ -254,19 +254,24 @@ export function useFinishUnfinishedConnectSetups({
   useEffect(() => {
     const transport = client.connectTransport();
     if (!transport.finishUnfinished) return;
-    const abort = new AbortController();
+    // Not cancelled on leaving: the server finishes either way, and the
+    // person still hears that it did. Only this page's refresh stops.
+    let shown = true;
     void transport
-      .finishUnfinished(workspaceId, { signal: abort.signal })
+      .finishUnfinished(workspaceId)
       .then(async (completed) => {
-        if (abort.signal.aborted || completed.length === 0) return;
+        if (completed.length === 0) return;
         for (const attempt of completed)
           toast.success(`${attempt.installationTarget?.displayName ?? "Account"} connected`);
+        if (!shown) return;
         latest.current.onRuntimeChanged();
         await latest.current.refresh();
       })
       // Nothing to tell: anything left stays saved for the next visit.
       .catch(() => undefined);
-    return () => abort.abort();
+    return () => {
+      shown = false;
+    };
   }, [client, workspaceId]);
 }
 

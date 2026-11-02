@@ -23,6 +23,7 @@ import {
   listConnectionsMetadata,
   listInstalledApiIntegrations,
   loadConnectionCredentialForBroker,
+  uninstallApiIntegration,
   type DbClient,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
@@ -181,6 +182,9 @@ function providerFixture() {
         paths: {
           "/me/drive/root/children": {
             get: { operationId: "listFiles", responses: { "200": { description: "Files" } } },
+          },
+          "/me/joinedTeams": {
+            get: { operationId: "listJoinedTeams", responses: { "200": { description: "Teams" } } },
           },
           "/me/drive/items/{itemId}": {
             get: {
@@ -1500,6 +1504,7 @@ describe("API Integration provider OAuth", () => {
     fixture: ReturnType<typeof providerFixture>,
     workspace: Awaited<ReturnType<typeof freshWorkspace>>,
     instanceKey: string,
+    definition: { id: string; name: string } = MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION,
   ) {
     const app = testApp(fixture);
     const headers = {
@@ -1513,11 +1518,17 @@ describe("API Integration provider OAuth", () => {
       method: "POST",
       headers,
       body: JSON.stringify({
-        providerId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
+        providerId: definition.id,
         ownership: "personal",
         returnUrl: "https://host.example/capabilities",
         idempotencyKey: crypto.randomUUID(),
-        installationTarget: { instanceKey, displayName: "OneDrive" },
+        installationTarget: {
+          instanceKey,
+          displayName:
+            definition.id === MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id
+              ? "OneDrive"
+              : definition.name,
+        },
       }),
     });
     expect(begun.status).toBe(200);
@@ -1684,6 +1695,125 @@ describe("API Integration provider OAuth", () => {
     });
     expect(await opened.json()).toEqual([]);
     expect(await setup.installedFor()).toBeUndefined();
+  }, 60_000);
+
+  test("a leftover for an integration since withdrawn from the workspace stays unfinished", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const fixture = providerFixture();
+    const previousEnabled = settings.microsoftTeamsToolsEnabled;
+    const previousWorkspaces = settings.microsoftTeamsAllowedWorkspaceIds;
+    try {
+      settings.microsoftTeamsToolsEnabled = true;
+      settings.microsoftTeamsAllowedWorkspaceIds = [workspace.workspaceId];
+      const setup = await beginBuiltIn(
+        fixture,
+        workspace,
+        "teams-withdrawn",
+        MICROSOFT_TEAMS_INTEGRATION_DEFINITION,
+      );
+      fixture.microsoftPlans.push({
+        scopes: [...MICROSOFT_TEAMS_INTEGRATION_DEFINITION.authentication.scopes],
+        refreshToken: "teams-refresh-token",
+      });
+      fixture.setSourceAvailable(false);
+      expect((await callback(fixture, setup.state)).status).toBe(302);
+      fixture.setSourceAvailable(true);
+      expect(await setup.read()).toMatchObject({ state: "connected_but_incomplete" });
+      const finish = () =>
+        setup.app.request(`${setup.base}/finish`, { method: "POST", headers: setup.headers });
+      // Teams is withdrawn from this workspace before Capabilities opens.
+      settings.microsoftTeamsAllowedWorkspaceIds = [];
+      const opened = await finish();
+      expect(opened.status).toBe(200);
+      expect(await opened.json()).toEqual([]);
+      expect(await setup.installedFor()).toBeUndefined();
+      // Offered here again, the same leftover finishes.
+      settings.microsoftTeamsAllowedWorkspaceIds = [workspace.workspaceId];
+      expect(await (await finish()).json()).toMatchObject([
+        { id: setup.attempt.id, state: "complete", integrationInstalled: true },
+      ]);
+      expect(await setup.installedFor()).toMatchObject({
+        definitionId: MICROSOFT_TEAMS_INTEGRATION_DEFINITION.id,
+      });
+    } finally {
+      settings.microsoftTeamsToolsEnabled = previousEnabled;
+      settings.microsoftTeamsAllowedWorkspaceIds = previousWorkspaces;
+    }
+  }, 60_000);
+
+  test("an older leftover never brings back tools the person removed after connecting the account again", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const fixture = providerFixture();
+    // The first setup saved the account but not its tools.
+    const first = await beginBuiltIn(fixture, workspace, "account-first");
+    fixture.setSourceAvailable(false);
+    expect((await callback(fixture, first.state)).status).toBe(302);
+    fixture.setSourceAvailable(true);
+    const left = await first.read();
+    expect(left).toMatchObject({ state: "connected_but_incomplete" });
+    // The person connects the same account again, which finishes...
+    const second = await beginBuiltIn(fixture, workspace, "account-second");
+    expect((await callback(fixture, second.state)).status).toBe(302);
+    const done = await second.read();
+    expect(done).toMatchObject({ state: "complete", integrationInstalled: true });
+    expect(done.account.id).toBe(left.account.id);
+    // ...and then removes its tools.
+    const installed = (await second.installedFor())!;
+    await uninstallApiIntegration(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      subjectId: workspace.subjectId,
+      capabilityId: installed.capabilityId,
+      instanceKey: installed.instanceKey,
+      expectedInstallationVersion: installed.installationVersion,
+      expectedInstanceVersion: installed.instanceVersion,
+    });
+    const opened = await first.app.request(`${first.base}/finish`, {
+      method: "POST",
+      headers: first.headers,
+    });
+    expect(await opened.json()).toEqual([]);
+    expect(await first.installedFor()).toBeUndefined();
+    expect(
+      (
+        await listInstalledApiIntegrations(client.db, workspace.workspaceId, workspace.subjectId)
+      ).filter((instance) => instance.connectionRef?.connectionId === left.account.id),
+    ).toEqual([]);
+  }, 60_000);
+
+  test("two finishes at once add one account's tools once", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const fixture = providerFixture();
+    // Two setups of the same account were each left without tools (say, a
+    // second sign-in from another tab whose callback also could not read them).
+    const first = await beginBuiltIn(fixture, workspace, "account-tab-one");
+    const second = await beginBuiltIn(fixture, workspace, "account-tab-two");
+    fixture.setSourceAvailable(false);
+    expect((await callback(fixture, first.state)).status).toBe(302);
+    expect((await callback(fixture, second.state)).status).toBe(302);
+    fixture.setSourceAvailable(true);
+    const connectionId = (await first.read()).account.id;
+    expect((await second.read()).account.id).toBe(connectionId);
+    // Capabilities and a chat card open together.
+    const results = await Promise.all(
+      [first, second].map(async (setup) =>
+        (
+          await setup.app.request(`${setup.base}/finish`, {
+            method: "POST",
+            headers: setup.headers,
+          })
+        ).json(),
+      ),
+    );
+    expect(results.flat()).toHaveLength(1);
+    const bound = (
+      await listInstalledApiIntegrations(client.db, workspace.workspaceId, workspace.subjectId)
+    ).filter((instance) => instance.connectionRef?.connectionId === connectionId);
+    expect(bound).toHaveLength(1);
+    expect(bound[0]!.instanceKey).toBe("account-tab-two");
   }, 60_000);
 
   test("a non-human principal cannot request personal ownership", async () => {

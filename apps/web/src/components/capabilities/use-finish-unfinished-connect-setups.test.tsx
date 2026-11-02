@@ -66,3 +66,32 @@ test("nothing left to finish shows nothing", async () => {
   expect(refresh).not.toHaveBeenCalled();
   await hook.unmount();
 });
+
+test("leaving Capabilities before it finishes still says it connected", async () => {
+  success.mockClear();
+  let release: (value: ConnectAttempt[]) => void = () => {};
+  const finishUnfinished = mock(
+    (_workspaceId: string, _options?: { signal?: AbortSignal }) =>
+      new Promise<ConnectAttempt[]>((resolve) => {
+        release = resolve;
+      }),
+  );
+  context.client = { connectTransport: () => ({ finishUnfinished }) };
+  const refresh = mock(async () => {});
+  const hook = await renderHook(
+    () =>
+      useFinishUnfinishedConnectSetups({
+        workspaceId: "workspace",
+        refresh,
+        onRuntimeChanged: () => {},
+      }),
+    {},
+  );
+  await flush();
+  await hook.unmount();
+  expect(finishUnfinished.mock.calls[0]![1]?.signal).toBeUndefined();
+  release([completed]);
+  await flush();
+  expect(success).toHaveBeenCalledWith("SharePoint connected");
+  expect(refresh).not.toHaveBeenCalled();
+});
