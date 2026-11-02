@@ -310,7 +310,7 @@ describe("nextBatch", () => {
     expect(action?.kind === "build" && action.members.map((p) => p.number)).toEqual([2]);
   });
 
-  test("a new priority PR goes unfilled while a failed batch is being split", () => {
+  test("a new priority PR is filled only with PRs a failed batch's split does not hold", () => {
     const action = nextBatch(
       [pull(1), pull(2), pull(3), pull(4), pull(5, { priority: true, queuedAt: NOW })],
       [[1, 2], [3]],
@@ -318,7 +318,7 @@ describe("nextBatch", () => {
       DEFAULT_SETTINGS,
     );
     expect(action).toMatchObject({ kind: "build", pending: [[1, 2], [3]] });
-    expect(action?.kind === "build" && action.members.map((p) => p.number)).toEqual([5]);
+    expect(action?.kind === "build" && action.members.map((p) => p.number)).toEqual([5, 4]);
   });
 
   test("a failed filled batch tests its priority PRs alone first, then lands them", () => {
@@ -476,6 +476,14 @@ describe("decide", () => {
     const kept = nextBatch([pull(1), pull(4), conflicting], [[3, 4]], NOW, DEFAULT_SETTINGS);
     expect(kept).toMatchObject({ kind: "build", pending: [] });
     expect(kept?.kind === "build" && kept.members.map((p) => p.number)).toEqual([4]);
+  });
+
+  test("a priority batch during a bisection is filled with the PRs the bisection does not hold", () => {
+    // PR 3 is a still-queued half of a failed batch.
+    const pulls = [pull(1), pull(2), pull(3), pull(5, { priority: true })];
+    const action = nextBatch(pulls, [[3]], NOW, DEFAULT_SETTINGS);
+    expect(action).toMatchObject({ kind: "build", pending: [[3]] });
+    expect(action?.kind === "build" && action.members.map((p) => p.number)).toEqual([5, 1, 2]);
   });
 
   test("a new priority PR goes before the halves of a failed priority batch", () => {

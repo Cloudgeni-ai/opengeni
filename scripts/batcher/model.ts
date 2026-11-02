@@ -373,8 +373,9 @@ export function nextBatch(
     const first = urgent[0]!;
     if (alone(first)) return { kind: "build", members: [first], pending };
     // The oldest ready PRs fill the rest without waiting for the batching
-    // window, after the priority PRs.
-    const fill = pending.length ? [] : ready.filter((p) => !p.priority);
+    // window, after the priority PRs. PRs a failed batch's bisection still
+    // holds stay out: their halves keep their own runs.
+    const fill = ready.filter((p) => !p.priority && !bisecting.has(p.number));
     const members = compatible(
       [...urgent, ...fill].filter((p) => !alone(p)),
       settings,
