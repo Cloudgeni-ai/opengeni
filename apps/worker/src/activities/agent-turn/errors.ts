@@ -1675,6 +1675,8 @@ type SandboxServiceFailure = {
     | typeof SANDBOX_SERVICE_REFUSED_CODE;
   retryable: boolean;
   message: string;
+  /** An uncertain mutation outcome in the same failure: it vetoes any retry. */
+  uncertain?: string;
 };
 
 /** Sibling or wrapper outcomes that forbid an automatic replay of the turn. */
@@ -1707,15 +1709,25 @@ function findSandboxServiceFailure(error: unknown): SandboxServiceFailure | null
   const providerCapacity = nodes.find(isSandboxProviderCapacityError);
   const found = computeCapacity ?? providerCapacity ?? compute[0];
   if (!found) return null;
-  const uncertain = !graph || nodes.some(isUncertainMutationOutcome);
   const message = found instanceof Error ? found.message : String(found);
-  if (found === computeCapacity || found === providerCapacity) {
-    const retryable = found instanceof ComputeControlError ? found.retryable : true;
-    return { code: SANDBOX_CAPACITY_UNAVAILABLE_CODE, retryable: retryable && !uncertain, message };
+  const capacity = found === computeCapacity || found === providerCapacity;
+  const retryable = found instanceof ComputeControlError ? found.retryable : true;
+  if (!capacity && !retryable) {
+    return { code: SANDBOX_SERVICE_REFUSED_CODE, retryable: false, message };
   }
-  const node = found as ComputeControlError;
-  if (!node.retryable) return { code: SANDBOX_SERVICE_REFUSED_CODE, retryable: false, message };
-  return { code: SANDBOX_SERVICE_UNAVAILABLE_CODE, retryable: !uncertain, message };
+  const code = capacity ? SANDBOX_CAPACITY_UNAVAILABLE_CODE : SANDBOX_SERVICE_UNAVAILABLE_CODE;
+  return { code, retryable, message, ...uncertainMutationOutcome(graph, nodes) };
+}
+
+/** The first uncertain mutation outcome in the graph; an unreadable graph is uncertain too. */
+function uncertainMutationOutcome(
+  graph: Map<object, Set<object>> | null,
+  nodes: unknown[],
+): { uncertain?: string } {
+  if (!graph) return { uncertain: "the failure's cause graph could not be read" };
+  const node = nodes.find(isUncertainMutationOutcome);
+  if (node === undefined) return {};
+  return { uncertain: node instanceof Error ? node.message : String(node) };
 }
 
 const SANDBOX_FAILURE_SUBJECT = {
@@ -1725,16 +1737,22 @@ const SANDBOX_FAILURE_SUBJECT = {
 } as const;
 
 function sandboxServiceFailurePayload(failure: SandboxServiceFailure) {
+  const retryable = failure.retryable && failure.uncertain === undefined;
   return {
     error: `${SANDBOX_FAILURE_SUBJECT[failure.code]}. ${
-      failure.retryable
+      retryable
         ? "The same turn will retry after a short delay."
-        : "This turn stopped without retrying."
+        : failure.uncertain !== undefined
+          ? "This turn stopped without retrying because an earlier sandbox action may already have taken effect."
+          : "This turn stopped without retrying."
     }`,
     code: failure.code,
-    retryable: failure.retryable,
+    retryable,
     // Diagnostic only: the person-facing text never appends sandbox service text.
-    detail: failure.message,
+    detail:
+      failure.uncertain !== undefined
+        ? `${failure.uncertain} (${failure.message})`
+        : failure.message,
   };
 }
 
@@ -1757,12 +1775,14 @@ function withSandboxProviderAttribution(
 ): ReturnType<typeof baseAgentRunFailurePayload> {
   if (!failure.code || !MODEL_PROVIDER_FAILURE_CODES.has(failure.code)) return failure;
   const graph = structuredRecoveryCauseGraph(error);
-  const provider = graph ? [...graph.keys()].find(isSandboxProviderError) : undefined;
+  const nodes = graph ? [...graph.keys()] : [];
+  const provider = nodes.find(isSandboxProviderError);
   if (!provider) return failure;
   return sandboxServiceFailurePayload({
     code: SANDBOX_SERVICE_UNAVAILABLE_CODE,
     retryable: failure.retryable === true,
     message: provider instanceof Error ? provider.message : String(provider),
+    ...uncertainMutationOutcome(graph, nodes),
   });
 }
 

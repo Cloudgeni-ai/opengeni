@@ -189,7 +189,11 @@ export {
   type ProviderSandboxFailure,
   type ProviderSandboxFailureKind,
 } from "./provider-errors";
-export { isSandboxProviderCapacityError, isSandboxProviderError } from "./provider-capacity";
+export {
+  isSandboxProviderCapacityError,
+  isSandboxProviderError,
+  loadE2BServiceBusyError,
+} from "./provider-capacity";
 export {
   WORKSPACE_ARCHIVE_DESCRIPTOR_VERSION,
   WorkspaceArchiveIntegrityError,

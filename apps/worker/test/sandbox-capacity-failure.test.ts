@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { ToolCallError } from "@opengeni/runtime";
-import { ComputeControlClient, ComputeControlError } from "@opengeni/runtime/sandbox";
+import {
+  ComputeControlClient,
+  ComputeControlError,
+  loadE2BServiceBusyError,
+} from "@opengeni/runtime/sandbox";
 import { APIError } from "openai";
 import {
   agentRunFailurePayload,
@@ -13,9 +17,6 @@ import {
 } from "../src/activities/agent-turn/errors";
 import { SandboxProviderError } from "@openai/agents-core/sandbox";
 import { RoutingMutationOutcomeUnknownError } from "../../../packages/runtime/src/sandbox/routing/routing-session";
-// The worker never depends on E2B itself; use the runtime's own copy so the
-// class is the one the E2B sandbox client throws.
-import { ServiceBusyError } from "../../../packages/runtime/node_modules/e2b";
 
 // The staging failure: compute-control answered a sandbox create with
 // 503 {code: "no_capacity"}. That is the sandbox fleet being full, never the
@@ -216,14 +217,22 @@ describe("a sandbox capacity failure is never the chat model's provider", () => 
       const failure = agentRunFailurePayload(error);
       expect(failure.code).toMatch(/^sandbox_(capacity|service)_unavailable$/);
       expect(failure.retryable).toBe(false);
-      expect(failure.error).toEndWith("This turn stopped without retrying.");
+      expect(failure.error).toEndWith(
+        "This turn stopped without retrying because an earlier sandbox action may already have taken effect.",
+      );
+      expect(failure.detail).toMatch(/launch did not return|release unresolved/);
       expect(blamesModel(failure.error)).toBe(false);
     }
   });
 
-  test("E2B's typed no-capacity error is sandbox capacity, through the SDK wrapper", () => {
+  test("E2B's typed no-capacity error is sandbox capacity, through the SDK wrapper", async () => {
+    // The E2B SDK loads only with an E2B sandbox; its provider registers the class.
+    const ServiceBusyError = await loadE2BServiceBusyError();
+    if (!ServiceBusyError) throw new Error("expected the E2B SDK");
     // The agents SDK E2B client wraps every provider failure this way.
-    const busy = new ServiceBusyError("no capacity to place a sandbox right now");
+    const busy = new (ServiceBusyError as unknown as new (message: string) => Error)(
+      "no capacity to place a sandbox right now",
+    );
     const wrapped = Object.assign(
       new SandboxProviderError("e2b failed to create sandbox", {
         provider: "e2b",
@@ -261,6 +270,22 @@ describe("a sandbox capacity failure is never the chat model's provider", () => 
       expect(failure).not.toHaveProperty("providerCondition");
       expect(blamesModel(failure.error)).toBe(false);
     }
+    // An uncertain mutation around it still forbids the replay.
+    const daytona = Object.assign(
+      new SandboxProviderError("daytona failed to exec", { provider: "daytona", status: 503 }),
+      { cause: Object.assign(new Error("daytona 503"), { status: 503 }) },
+    );
+    const uncertain = new RoutingMutationOutcomeUnknownError(
+      "execCommand",
+      "launch did not return",
+      {
+        cause: daytona,
+      },
+    );
+    expect(agentRunFailurePayload(uncertain)).toMatchObject({
+      code: "sandbox_service_unavailable",
+      retryable: false,
+    });
   });
 
   test("the chat model's own 503 is still the model provider", () => {
