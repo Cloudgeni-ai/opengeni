@@ -122,6 +122,8 @@ export function SlackAgentFormPage({
   workspaceName,
   connections,
   connectionsLoaded = true,
+  connectionsError = null,
+  onRetryConnections,
   onClose,
   onSaved,
 }: {
@@ -135,6 +137,9 @@ export function SlackAgentFormPage({
   connections: ConnectionMetadata[];
   /** False while the bots are still loading; the form can open before them. */
   connectionsLoaded?: boolean | undefined;
+  /** Why the bots couldn't all load; then a missing bot may only have failed to load. */
+  connectionsError?: string | null | undefined;
+  onRetryConnections?: (() => void) | undefined;
   onClose: () => void;
   /** After a create or an edit. */
   onSaved: (agent: SlackAgent, created: boolean) => void;
@@ -174,6 +179,7 @@ export function SlackAgentFormPage({
   const [pickerOpen, setPickerOpen] = useState(false);
   const avatar = sessionAvatarFromDraft(draft, name, null);
   const connection = connections.find((row) => row.id === connectionId) ?? connections[0] ?? null;
+  const loadFailed = !agent && connectionsLoaded && Boolean(connectionsError);
   const agentWorkspaceName = agent ? (agent.targetWorkspaceName ?? workspaceName) : workspaceName;
   const handle = name.trim() ? slackAgentHandle(name) : null;
   // Opening an agent to anyone in Slack is an organization admin's call; any
@@ -314,7 +320,7 @@ export function SlackAgentFormPage({
       // Until every bot is in, the bot shared with this workspace may still be missing.
       submitDisabled={!agent && (!connection || !connectionsLoaded)}
       disabledReason={
-        !agent && !connection && connectionsLoaded
+        !agent && !connection && connectionsLoaded && !loadFailed
           ? "Add a Slack workspace to create Slack agents."
           : undefined
       }
@@ -324,6 +330,21 @@ export function SlackAgentFormPage({
       }}
     >
       <FieldStack>
+        {loadFailed ? (
+          <Notice
+            tone="failed"
+            title="Couldn't load all Slack connections"
+            action={
+              onRetryConnections ? (
+                <Button type="button" variant="outline" size="sm" onClick={onRetryConnections}>
+                  Retry
+                </Button>
+              ) : undefined
+            }
+          >
+            {connectionsError}
+          </Notice>
+        ) : null}
         {unavailable ? (
           <Notice
             tone="waiting"

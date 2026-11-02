@@ -54,15 +54,21 @@ export function WindowBarTitleBoundary({
   );
 }
 
-export function useWindowBarTitle(title: ReactNode): boolean {
+/**
+ * Claims the window bar for `title`. With `fallback`, the claim yields to any
+ * other header with a title, as headers in a `WindowBarTitleBoundary fallback`
+ * do: a page that stays mounted under a page it opens keeps naming the bar
+ * only until that page names it.
+ */
+export function useWindowBarTitle(title: ReactNode, fallback = false): boolean {
   const windowBar = useContext(PageHeaderWindowBarContext);
   const id = useId();
   const text = typeof title === "string" ? title : null;
   const set = windowBar?.set;
   const release = windowBar?.release;
   useIsomorphicLayoutEffect(() => {
-    set?.(id, text || null);
-  }, [id, set, text]);
+    set?.(id, text || null, fallback);
+  }, [id, set, text, fallback]);
   useIsomorphicLayoutEffect(() => () => release?.(id), [id, release]);
   return windowBar?.owner === id;
 }

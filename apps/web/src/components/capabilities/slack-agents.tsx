@@ -41,8 +41,6 @@ export type SlackAgentsState = {
   /** Undefined while the first load runs. */
   agents: SlackAgent[] | undefined;
   routingEnabled: boolean;
-  /** This workspace saves new Knowledge for review first. */
-  memoryReviewFirst: boolean;
   error: unknown;
   reload: () => void;
   /** Apply a local change (a create, edit or delete) without reloading. */
@@ -54,7 +52,6 @@ export function useSlackAgents(workspaceId: string): SlackAgentsState {
   const { client } = useAppContext();
   const [agents, setAgents] = useState<SlackAgent[] | undefined>(undefined);
   const [routingEnabled, setRoutingEnabled] = useState(true);
-  const [memoryReviewFirst, setMemoryReviewFirst] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [revision, setRevision] = useState(0);
   useEffect(() => {
@@ -66,7 +63,6 @@ export function useSlackAgents(workspaceId: string): SlackAgentsState {
         if (!live) return;
         setAgents(result.agents);
         setRoutingEnabled(result.routingEnabled);
-        setMemoryReviewFirst(result.memoryReviewFirst);
       })
       .catch((failure: unknown) => {
         if (!live) return;
@@ -83,7 +79,7 @@ export function useSlackAgents(workspaceId: string): SlackAgentsState {
       setAgents((current) => update(current ?? [])),
     [],
   );
-  return { agents, routingEnabled, memoryReviewFirst, error, reload, replace };
+  return { agents, routingEnabled, error, reload, replace };
 }
 
 export function SlackAgentsSection({

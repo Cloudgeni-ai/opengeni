@@ -196,7 +196,6 @@ function state(agents: SlackAgent[] | undefined, routingEnabled = true) {
   return {
     agents,
     routingEnabled,
-    memoryReviewFirst: false,
     error: null,
     reload: () => undefined,
     replace: () => undefined,
@@ -544,6 +543,32 @@ describe("Slack agent form", () => {
     const view = await render(<SlackAgentFormPage {...form({ connections: [] })} />);
     expect(view.host.textContent).toContain("Add a Slack workspace to create Slack agents.");
     expect(buttonNamed(view.host, "Create agent").disabled).toBe(true);
+    await view.unmount();
+  });
+
+  test("shows why the Slack workspaces didn't load, with a retry, instead of asking to add one", async () => {
+    setContext({});
+    const onRetryConnections = mock(() => undefined);
+    const view = await render(
+      <SlackAgentFormPage
+        {...form({
+          connections: [],
+          connectionsError: "The server is unavailable.",
+          onRetryConnections,
+        })}
+      />,
+    );
+    const text = view.host.textContent ?? "";
+    expect(text).toContain("Couldn't load all Slack connections");
+    expect(text).toContain("The server is unavailable.");
+    expect(text).not.toContain("Add a Slack workspace");
+    expect(buttonNamed(view.host, "Create agent").disabled).toBe(true);
+    await act(async () => buttonNamed(view.host, "Retry").click());
+    expect(onRetryConnections).toHaveBeenCalledTimes(1);
+    // Retrying loads again; once a bot arrives, the error goes and creating works.
+    await view.rerender(<SlackAgentFormPage {...form({ connections: [bot()] })} />);
+    expect(view.host.textContent).not.toContain("Couldn't load");
+    expect(buttonNamed(view.host, "Create agent").disabled).toBe(false);
     await view.unmount();
   });
 
