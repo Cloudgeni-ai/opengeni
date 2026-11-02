@@ -8,7 +8,14 @@ import {
   matchesChord,
   type Chord,
 } from "./chords";
-import type { ChatRecord } from "./chat-directory";
+import {
+  chatParentTitle,
+  listsAsTopLevel,
+  readChatDirectory,
+  recordChatVisit,
+  rememberChats,
+  type ChatRecord,
+} from "./chat-directory";
 import {
   extendChatSwitcher,
   isSwitcherKey,
@@ -19,6 +26,7 @@ import {
 import { LOOSE_MATCH_BELOW, rankLabel, rankWithKeywords } from "./rank";
 import { actionTitle, appActions, stepWorkspace, type ActionEnv } from "./registry";
 import { englishMessages } from "../../../messages/en";
+import type { SessionListRow } from "../../../session-list-model";
 
 function key(
   code: string,
@@ -233,6 +241,8 @@ describe("chat switcher", () => {
     updatedAt: 1,
     pinned: false,
     archived: false,
+    parentId: null,
+    parentTitle: null,
     row: null,
     readAt: 0,
     ...extra,
@@ -278,14 +288,39 @@ describe("chat switcher", () => {
     expect(state.ids[state.index]).toBe("a");
   });
 
-  test("archived and subagent chats are left out, and nothing opens with nowhere to go", () => {
-    const rows = [
-      record("a"),
-      record("old", { archived: true }),
-      record("child", { row: { parentSessionId: "a" } as ChatRecord["row"] }),
-    ];
-    expect(openChatSwitcher(directory(["a", "old", "child"], rows), "a", false)).toBeNull();
+  test("archived chats are left out, and nothing opens with nowhere to go", () => {
+    const rows = [record("a"), record("old", { archived: true })];
+    expect(openChatSwitcher(directory(["a", "old"], rows), "a", false)).toBeNull();
     expect(openChatSwitcher(directory([]), null, false)).toBeNull();
+  });
+
+  test("a sub-agent chat the person opened is there to go back to", () => {
+    const rows = [record("a"), record("worker", { parentId: "a", parentTitle: "a" })];
+    // Working in the sub-agent chat, a press goes back to its parent...
+    const fromWorker = openChatSwitcher(directory(["worker", "a"], rows), "worker", false)!;
+    expect(fromWorker.ids[fromWorker.index]).toBe("a");
+    // ...and from the parent, straight back to the sub-agent chat.
+    const back = openChatSwitcher(directory(["a", "worker"], rows), "a", false)!;
+    expect(back.ids).toEqual(["a", "worker"]);
+    expect(back.ids[back.index]).toBe("worker");
+    expect(back.viewed).toBe(2);
+  });
+
+  test("sub-agent chats never opened stay out of the carry-on list, unless pinned", () => {
+    const rows = [
+      record("a", { updatedAt: 1 }),
+      record("b", { updatedAt: 2 }),
+      record("worker", { updatedAt: 9, parentId: "a" }),
+      record("pinned-worker", { updatedAt: 3, parentId: "a", pinned: true }),
+    ];
+    const state = openChatSwitcher(directory(["a"], rows), "a", false)!;
+    expect(state.ids).toEqual(["a", "pinned-worker", "b"]);
+    expect(state.viewed).toBe(1);
+    const grown = extendChatSwitcher(
+      state,
+      directory(["a"], [...rows, record("worker-2", { updatedAt: 10, parentId: "b" })]),
+    );
+    expect(grown).toBe(state);
   });
 
   test("chats in other workspaces join the list, unless that workspace is gone", () => {
@@ -311,7 +346,7 @@ describe("chat switcher", () => {
       record("older", { updatedAt: 5 }),
       record("newer", { updatedAt: 9, workspaceId: "other" }),
       record("gone", { updatedAt: 8, archived: true }),
-      record("child", { updatedAt: 7, row: { parentSessionId: "a" } as ChatRecord["row"] }),
+      record("child", { updatedAt: 7, parentId: "a" }),
     ];
     const state = openChatSwitcher(directory(["a", "b"], rows), "a", false)!;
     expect(state.ids).toEqual(["a", "b", "newer", "older"]);
@@ -365,6 +400,77 @@ describe("chat switcher", () => {
     expect(isSwitcherKey({ ...tab, altKey: true })).toBe(false);
     expect(isSwitcherKey({ ...tab, ctrlKey: false })).toBe(false);
     expect(isSwitcherKey({ ...tab, code: "KeyQ" })).toBe(false);
+  });
+});
+
+describe("sub-agent chats in the chat directory", () => {
+  const row = (id: string, extra: Partial<SessionListRow> = {}) =>
+    ({
+      id,
+      workspaceId: "w",
+      parentSessionId: null,
+      title: id,
+      titleSource: "user",
+      status: "idle",
+      createdAt: "2026-11-01T10:00:00.000Z",
+      updatedAt: "2026-11-01T10:00:00.000Z",
+      ...extra,
+    }) as SessionListRow;
+
+  test("a sub-agent chat names its parent, by the parent's latest title", () => {
+    const subject = `subagent-${crypto.randomUUID()}`;
+    rememberChats(subject, [row("worker", { parentSessionId: "lead", title: "Review PR" })]);
+    const rows = () => readChatDirectory(subject, "w").rows;
+    // Not known yet: nothing to say.
+    expect(chatParentTitle(rows(), rows().get("worker")!)).toBeNull();
+    rememberChats(subject, [row("lead", { title: "Release lead" })]);
+    expect(chatParentTitle(rows(), rows().get("worker")!)).toBe("Release lead");
+    rememberChats(subject, [row("lead", { title: "Release lead, v2" })]);
+    expect(chatParentTitle(rows(), rows().get("worker")!)).toBe("Release lead, v2");
+    expect(chatParentTitle(rows(), rows().get("lead")!)).toBeNull();
+  });
+
+  test("only top-level chats and pinned sub-agent chats list as the person's own", () => {
+    expect(listsAsTopLevel({ parentId: null, pinned: false })).toBe(true);
+    expect(listsAsTopLevel({ parentId: "lead", pinned: false })).toBe(false);
+    expect(listsAsTopLevel({ parentId: "lead", pinned: true })).toBe(true);
+  });
+
+  test("an opened sub-agent chat keeps its parent across reloads", () => {
+    const stored = new Map<string, string>();
+    const storage = {
+      getItem: (name: string) => stored.get(name) ?? null,
+      setItem: (name: string, value: string) => void stored.set(name, value),
+      removeItem: (name: string) => void stored.delete(name),
+      key: (index: number) => [...stored.keys()][index] ?? null,
+      get length() {
+        return stored.size;
+      },
+    };
+    const scope = globalThis as { window?: unknown };
+    const previous = scope.window;
+    scope.window = { localStorage: storage };
+    try {
+      const subject = `subagent-${crypto.randomUUID()}`;
+      rememberChats(subject, [row("lead", { title: "Release lead" })]);
+      recordChatVisit(subject, row("worker", { parentSessionId: "lead", title: "Review PR" }));
+      const saved = JSON.parse(stored.get(`opengeni.recentChats.${subject}`)!);
+      expect(saved[0]).toMatchObject({
+        id: "worker",
+        parentId: "lead",
+        parentTitle: "Release lead",
+      });
+      // A later load (another subject id stands in for a fresh page) reads it back.
+      const reloaded = `subagent-${crypto.randomUUID()}`;
+      stored.set(`opengeni.recentChats.${reloaded}`, JSON.stringify(saved));
+      const record = readChatDirectory(reloaded, "w").rows.get("worker")!;
+      expect(record.row).toBeNull();
+      expect(record.parentId).toBe("lead");
+      expect(listsAsTopLevel(record)).toBe(false);
+      expect(chatParentTitle(readChatDirectory(reloaded, "w").rows, record)).toBe("Release lead");
+    } finally {
+      scope.window = previous;
+    }
   });
 });
 

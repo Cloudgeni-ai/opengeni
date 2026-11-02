@@ -172,6 +172,7 @@ export function SubscriptionPlansPreview() {
                 <div className="space-y-4">
                   {(
                     [
+                      "subscription_upgrade_required",
                       "byok_upgrade_required",
                       "byok_paid_credit_required",
                       "api_credits_required",
@@ -190,6 +191,8 @@ export function SubscriptionPlansPreview() {
                   {/* A chat that stopped on a refusal, for an owner and for a member. */}
                   {(
                     [
+                      ["subscription_upgrade_required", true],
+                      ["subscription_upgrade_required", false],
                       ["byok_upgrade_required", true],
                       ["byok_upgrade_required", false],
                       ["byok_paid_credit_required", true],

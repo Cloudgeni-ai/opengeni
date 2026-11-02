@@ -4,8 +4,8 @@
 import { SquarePenIcon, XIcon } from "lucide-react";
 import { createContext, useContext, type ReactNode } from "react";
 
-import { BrandMark, Wordmark } from "../brand-mark";
 import { useRail } from "./rail-context";
+import { RAIL_BRAND_LINK_CLASS, RailBrandMark, RailBrandRow } from "./rail-surface";
 import { NewSessionLink } from "./session-list";
 import { Button } from "../../../ui/button";
 import { useActionShortcut } from "../../lib/actions/actions-provider";
@@ -83,23 +83,19 @@ export function RailHeader({ showSwitcher = true }: { showSwitcher?: boolean }) 
       {toggleInWindowBar && collapseToggle ? (
         <WindowBarControls>{collapseToggle}</WindowBarControls>
       ) : null}
-      <div
-        data-rail-brand
-        data-window-drag
-        className={cn(
-          "flex h-8 min-w-0 items-center gap-2 px-2",
-          rail.collapsed ? "justify-center" : brandless ? "justify-end" : "justify-between",
-        )}
+      <RailBrandRow
+        className={
+          rail.collapsed ? "justify-center" : brandless ? "justify-end" : "justify-between"
+        }
       >
         {brandless ? null : (
           <Link
             to="/workspaces/$workspaceId/sessions"
             params={{ workspaceId: rail.workspaceId }}
-            className="flex h-8 shrink-0 items-center gap-2 rounded-md px-1.5 text-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+            className={RAIL_BRAND_LINK_CLASS}
             aria-label="Opengeni home"
           >
-            <BrandMark className="w-5" />
-            {!rail.collapsed ? <Wordmark className="text-[18px]" /> : null}
+            <RailBrandMark collapsed={rail.collapsed} />
           </Link>
         )}
         {!rail.collapsed || brandless ? rowToggle : null}
@@ -115,7 +111,7 @@ export function RailHeader({ showSwitcher = true }: { showSwitcher?: boolean }) 
             <XIcon className="size-4" />
           </Button>
         ) : null}
-      </div>
+      </RailBrandRow>
       {rail.collapsed && rowToggle && !brandless ? (
         <div className="-mt-1 grid justify-items-center">{rowToggle}</div>
       ) : null}

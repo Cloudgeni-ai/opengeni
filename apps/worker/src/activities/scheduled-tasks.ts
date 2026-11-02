@@ -1258,12 +1258,14 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       if (admissionDenial) {
         // Credits and monthly limits clear on their own (top-up, new period):
         // skip this occurrence visibly; a later one is admitted normally.
-        // A run receipt records API work without credits, and an own key
-        // without paid credit for its fee, as out of credits.
+        // A run receipt records API work without credits, an own key
+        // without paid credit for its fee, and an own subscription without a
+        // paid plan, as out of credits.
         return await refuseAdmission(
           admissionDenial === "api_credits_required" ||
             admissionDenial === "byok_paid_credit_required" ||
-            admissionDenial === "byok_upgrade_required"
+            admissionDenial === "byok_upgrade_required" ||
+            admissionDenial === "subscription_plan_required"
             ? "insufficient_credits"
             : admissionDenial,
           true,

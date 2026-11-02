@@ -190,7 +190,8 @@ export function siteUnfundedReason(decision: LimitDecision): SiteAgentUnfundedRe
   if (
     decision.code === "insufficient_credits" ||
     decision.code === "api_credits_required" ||
-    decision.code === "byok_paid_credit_required"
+    decision.code === "byok_paid_credit_required" ||
+    decision.code === "subscription_plan_required"
   )
     return "no_credits";
   if (decision.code === "allowance_exhausted") return "allowance_exhausted";

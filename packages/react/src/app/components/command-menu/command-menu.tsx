@@ -9,6 +9,12 @@
  * chat's actions; the chords of chat actions work on the highlighted chat
  * while the menu is open. Meetings are found by title, by who spoke, by words
  * said in them and by when they happened.
+ *
+ * Sub-agent chats (ones another chat started) are far more numerous than the
+ * person's own, so they list only where they were asked for: the ones opened
+ * recently join Recent chats, pinned ones count as the person's own, and a
+ * search lists a few matching ones in a group of their own, after the chats.
+ * Each says which chat it belongs to.
  */
 import {
   useCallback,
@@ -41,6 +47,8 @@ import {
 import type { SessionListRow } from "../../../session-list-model";
 import { useAppContext } from "../../app-context";
 import {
+  chatParentTitle,
+  listsAsTopLevel,
   readChatDirectory,
   rememberChats,
   useChatDirectoryVersion,
@@ -87,6 +95,7 @@ import { cn } from "../../lib/utils";
 import { DialogOverlay, DialogPortal } from "../../../ui/dialog";
 import { formatRelativeTime } from "../../../ui/relative-time";
 import { Keycaps } from "./keycaps";
+import { ChatTitleInParent } from "./chat-title";
 import { WorkspaceTag } from "./workspace-tag";
 import { SessionAvatar } from "../session/session-avatar";
 import { ChatStatusMarks, useChatStatusRefresh } from "./chat-status";
@@ -105,6 +114,8 @@ type Item = {
   meta?: string | undefined;
   /** The workspace a chat lives in, when it is not the one on screen. */
   workspaceTag?: string | undefined;
+  /** The chat a sub-agent chat belongs to, said quietly after its title. */
+  parentTitle?: string | undefined;
   chord?: Chord | undefined;
   /** Present on chat rows: Tab opens their actions, chat chords act on them. */
   chat?: ChatRecord | undefined;
@@ -117,6 +128,10 @@ type Group = { label: string; items: Item[]; best: number };
 
 const RECENT_LIMIT = 6;
 const CHAT_RESULT_LIMIT = 8;
+/** Sub-agent chats a search lists, below the chats, so they never crowd them out. */
+const SUBAGENT_RESULT_LIMIT = 3;
+/** The server's matches among every chat in this workspace, sub-agent chats included. */
+const SERVER_SUBAGENT_LIMIT = 10;
 const ACTION_RESULT_LIMIT = 6;
 const WORKSPACE_RESULT_LIMIT = 4;
 const SITE_RESULT_LIMIT = 5;
@@ -153,11 +168,6 @@ function chatIcon(record: ChatRecord): LucideIcon {
   if (record.archived) return ArchiveIcon;
   if (record.pinned) return PinIcon;
   return MessageSquareIcon;
-}
-
-/** Rows the menu may list: top-level chats only (subagent chats live under their parent). */
-function listable(record: ChatRecord): boolean {
-  return !record.row || record.row.parentSessionId === null;
 }
 
 /** Marks the query's words in a title, case- and accent-insensitively. */
@@ -231,7 +241,9 @@ function Highlighted(props: { text: string; query: string | undefined }) {
 /**
  * The server's title search: this workspace, and the person's other workspaces
  * they use most, side by side. Each workspace's matches join the list as they
- * arrive.
+ * arrive. Those searches cover top-level chats, so a workspace full of
+ * sub-agent chats cannot push them out of the page; one more small search of
+ * this workspace finds the sub-agent chats that match.
  */
 function useServerTitleSearch(
   workspaceIds: readonly string[],
@@ -255,7 +267,17 @@ function useServerTitleSearch(
     setState((current) => ({ ...current, loading: true }));
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
-      const targets = searchKey.split(",");
+      const targets = searchKey.split(",").map((workspaceId, index) => ({
+        workspaceId,
+        // This workspace first and fullest; a few from each of the others.
+        limit: index === 0 ? 20 : 6,
+        topLevel: true,
+      }));
+      targets.splice(1, 0, {
+        workspaceId: targets[0]!.workspaceId,
+        limit: SERVER_SUBAGENT_LIMIT,
+        topLevel: false,
+      });
       let pending = targets.length;
       let first = true;
       const settle = (rows: SessionListRow[]) => {
@@ -269,16 +291,16 @@ function useServerTitleSearch(
           loading: pending > 0,
         }));
       };
-      targets.forEach((workspaceId, index) => {
+      for (const target of targets) {
         // The menu needs list rows, not each session's full tool/configuration payload.
         // Older embedded clients may not expose the optional summary method yet.
         const listPage = client.listSessionSummaryPage ?? client.listSessionPage;
         listPage
-          .call(client, workspaceId, {
+          .call(client, target.workspaceId, {
             search: trimmed,
             archiveStatus: "all",
-            // This workspace first and fullest; a few from each of the others.
-            limit: index === 0 ? 20 : 6,
+            limit: target.limit,
+            ...(target.topLevel ? { parentSessionId: null } : {}),
             signal: controller.signal,
           })
           .then((page) => {
@@ -291,7 +313,7 @@ function useServerTitleSearch(
             // Local results still show; the server search is an addition.
             settle([]);
           });
-      });
+      }
     }, SERVER_DEBOUNCE_MS);
     return () => {
       window.clearTimeout(timer);
@@ -725,6 +747,7 @@ function CommandMenuDialog(props: {
       meta: current?.id === record.id ? "Open now" : relativeMeta(record, now),
       workspaceTag:
         record.workspaceId === workspaceId ? undefined : workspaceNames.get(record.workspaceId),
+      parentTitle: chatParentTitle(directory.rows, record) ?? undefined,
       chat: record,
       status: currentChatStatus(record, sidebarIds, now),
       run: ({ newTab }) => openChat(record, newTab),
@@ -862,14 +885,21 @@ function CommandMenuDialog(props: {
     if (!trimmed) {
       const result: Group[] = [];
       // Chats opened recently come first; the top of the sidebar fills the
-      // rest, so a fresh window still offers somewhere to go.
+      // rest, so a fresh window still offers somewhere to go. A sub-agent
+      // chat comes in only by being opened here (or pinned).
+      const opened = new Set(directory.recent);
       const recentIds = [...new Set([...directory.recent, ...directory.sidebarOrder])].filter(
         (id) => id !== current?.id,
       );
       const recent = recentIds
         .map((id) => directory.rows.get(id))
         .filter((record): record is ChatRecord =>
-          Boolean(record && listable(record) && !record.archived && reachable(record.workspaceId)),
+          Boolean(
+            record &&
+            (opened.has(record.id) || listsAsTopLevel(record)) &&
+            !record.archived &&
+            reachable(record.workspaceId),
+          ),
         )
         .slice(0, RECENT_LIMIT);
       if (recent.length > 0) {
@@ -941,12 +971,14 @@ function CommandMenuDialog(props: {
       return result;
     }
 
-    // Chats: everything the app knows, ranked by title, plus the server's matches.
+    // Chats: everything the app knows, ranked by title, plus the server's
+    // matches. Sub-agent chats rank the same way but list on their own.
     const recentIndex = new Map(directory.recent.map((id, index) => [id, index]));
     const serverIds = new Set(server.query === trimmed ? server.rows.map((row) => row.id) : []);
     const scored: Array<{ record: ChatRecord; rank: number; loose: boolean }> = [];
+    const subagentScored: Array<{ record: ChatRecord; rank: number; loose: boolean }> = [];
     for (const record of directory.rows.values()) {
-      if (!listable(record) || !reachable(record.workspaceId)) continue;
+      if (!reachable(record.workspaceId)) continue;
       let rank = rankLabel(record.title, trimmed);
       const loose = rank !== null && rank < LOOSE_MATCH_BELOW;
       // The server matched every word in the title or first message.
@@ -957,7 +989,7 @@ function CommandMenuDialog(props: {
       if (record.pinned) rank += 5;
       if (record.archived) rank -= 300;
       if (record.workspaceId !== workspaceId) rank -= ELSEWHERE_PENALTY;
-      scored.push({ record, rank, loose });
+      (listsAsTopLevel(record) ? scored : subagentScored).push({ record, rank, loose });
     }
 
     const actionScores: Array<{ item: Item; rank: number; loose: boolean }> = [];
@@ -1017,6 +1049,11 @@ function CommandMenuDialog(props: {
       .filter((entry) => !hasRealMatch || !entry.loose)
       .sort((a, b) => b.rank - a.rank || b.record.updatedAt - a.record.updatedAt)
       .slice(0, CHAT_RESULT_LIMIT);
+    // Only real matches: a letters-in-order guess among that many chats is noise.
+    const subagentChats = subagentScored
+      .filter((entry) => !entry.loose)
+      .sort((a, b) => b.rank - a.rank || b.record.updatedAt - a.record.updatedAt)
+      .slice(0, SUBAGENT_RESULT_LIMIT);
     const sitesFound = siteScores
       .filter((entry) => !hasRealMatch || !entry.loose)
       .slice(0, SITE_RESULT_LIMIT);
@@ -1069,6 +1106,18 @@ function CommandMenuDialog(props: {
         chatsAt >= 0 ? chatsAt + 1 : result.findIndex((group) => group.best < sitesGroup.best);
       result.splice(at >= 0 ? at : result.length, 0, sitesGroup);
     }
+    if (subagentChats.length > 0) {
+      const subagentGroup: Group = {
+        label: "Sub-agent chats",
+        items: subagentChats.map((entry) => chatItem(entry.record, "Sub-agent chats", trimmed)),
+        best: subagentChats[0]!.rank,
+      };
+      // Right below the chats; with no chats, after anything that matches as well.
+      const chatsAt = result.findIndex((group) => group.label === "Chats");
+      const at =
+        chatsAt >= 0 ? chatsAt + 1 : result.findIndex((group) => group.best < subagentGroup.best);
+      result.splice(at >= 0 ? at : result.length, 0, subagentGroup);
+    }
     if (meetingsFound.length > 0) {
       const meetingsGroup: Group = {
         label: "Meetings",
@@ -1078,6 +1127,7 @@ function CommandMenuDialog(props: {
       // Like Sites: after the chats and Sites; with neither, placed by match.
       const lastFound = Math.max(
         result.findIndex((group) => group.label === "Chats"),
+        result.findIndex((group) => group.label === "Sub-agent chats"),
         result.findIndex((group) => group.label === "Sites"),
       );
       const at =
@@ -1462,9 +1512,16 @@ function CommandMenuDialog(props: {
                               )}
                             />
                           )}
-                          <span className="min-w-0 flex-1 truncate">
-                            <Highlighted text={item.title} query={item.highlight} />
-                          </span>
+                          {item.parentTitle ? (
+                            <ChatTitleInParent
+                              title={<Highlighted text={item.title} query={item.highlight} />}
+                              parentTitle={item.parentTitle}
+                            />
+                          ) : (
+                            <span className="min-w-0 flex-1 truncate">
+                              <Highlighted text={item.title} query={item.highlight} />
+                            </span>
+                          )}
                           {item.workspaceTag ? <WorkspaceTag name={item.workspaceTag} /> : null}
                           <ChatStatusMarks status={item.status ?? null} />
                           {item.meta ? (

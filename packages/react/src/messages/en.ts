@@ -2088,6 +2088,10 @@ export const englishMessages = {
     "Upgrade to Pro to use your own key. Your message and attachments are saved.",
   "lib.format.composerByokUpgradeRequiredAskOwner":
     "Ask an organization owner to upgrade to Pro to use your own key. Your message and attachments are saved.",
+  "lib.format.composerSubscriptionUpgradeRequired":
+    "Upgrade to Pro to use your own subscription. Your message and attachments are saved.",
+  "lib.format.composerSubscriptionUpgradeRequiredAskOwner":
+    "Ask an organization owner to upgrade to Pro to use your own subscription. Your message and attachments are saved.",
   "lib.format.days": "{count}d",
   "lib.format.hours": "{count}h",
   "lib.format.messageReferenceCorrelationid": "{message} Reference: {correlationId}.",
@@ -2106,6 +2110,11 @@ export const englishMessages = {
   "lib.format.seconds": "{count}s",
   "lib.format.sessionUsageLimitReached":
     "This task's usage limit is reached. Your message is saved.",
+  "lib.format.subscriptionUpgradeRequired":
+    "Upgrade to Pro to use your own subscription. The conversation is preserved.",
+  "lib.format.subscriptionUpgradeRequiredAskOwner":
+    "Ask an organization owner to upgrade to Pro to use your own subscription.",
+  "lib.format.subscriptionUpgradeRequiredHeadline": "Upgrade to Pro to use your own subscription.",
   "lib.format.theModelProviderRefusedThe":
     "The model provider refused the request: this deployment's provider quota is exhausted.",
   "lib.format.theModelProviderRejectedThis":

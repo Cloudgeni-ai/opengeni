@@ -2,6 +2,16 @@ const MAX_PROTOCOL_JSON_DEPTH = 512;
 
 type NormalizeResult = { value: unknown; changed: boolean };
 
+export type ProtocolJsonOptions = {
+  /**
+   * Leave symbol-keyed properties out of the result instead of rejecting them.
+   * Only for a value whose symbol keys are known to be request-local marks
+   * that no wire payload or storage carries, such as the identity of a turn's
+   * model input. Every other non-JSON value is still rejected.
+   */
+  omitSymbolKeys?: boolean;
+};
+
 /**
  * Raised when an SDK value cannot be represented by the JSON protocol without
  * changing its meaning. The path identifies the exact offending value.
@@ -26,8 +36,12 @@ export class UnsupportedProtocolJsonValueError extends TypeError {
  * its path instead of being silently stringified, coerced, or replaced.
  * Inputs are never mutated; already-valid graphs retain their references.
  */
-export function normalizeProtocolJsonValue<T>(value: T, rootPath = "$"): T {
-  const normalized = normalizeValue(value, new Set<object>(), 0, rootPath);
+export function normalizeProtocolJsonValue<T>(
+  value: T,
+  rootPath = "$",
+  options: ProtocolJsonOptions = {},
+): T {
+  const normalized = normalizeValue(value, new Set<object>(), 0, rootPath, options);
   return normalized.value as T;
 }
 
@@ -36,6 +50,7 @@ function normalizeValue(
   ancestors: Set<object>,
   depth: number,
   path: string,
+  options: ProtocolJsonOptions,
 ): NormalizeResult {
   if (depth > MAX_PROTOCOL_JSON_DEPTH) {
     throw new UnsupportedProtocolJsonValueError(
@@ -69,16 +84,18 @@ function normalizeValue(
   if (ancestors.has(value)) {
     throw new UnsupportedProtocolJsonValueError(path, "cannot contain a cyclic reference");
   }
-  if (Object.getOwnPropertySymbols(value).length > 0) {
+  const hasSymbolKeys = Object.getOwnPropertySymbols(value).length > 0;
+  if (hasSymbolKeys && !options.omitSymbolKeys) {
     throw new UnsupportedProtocolJsonValueError(path, "cannot contain symbol keys");
   }
 
   ancestors.add(value);
   try {
+    // An omitted symbol key makes the result the freshly built copy.
     if (Array.isArray(value)) {
-      return normalizeArray(value, ancestors, depth, path);
+      return normalizeArray(value, ancestors, depth, path, options, hasSymbolKeys);
     }
-    return normalizeObject(value, ancestors, depth, path);
+    return normalizeObject(value, ancestors, depth, path, options, hasSymbolKeys);
   } finally {
     ancestors.delete(value);
   }
@@ -89,6 +106,8 @@ function normalizeArray(
   ancestors: Set<object>,
   depth: number,
   path: string,
+  options: ProtocolJsonOptions,
+  omittedSymbolKeys: boolean,
 ): NormalizeResult {
   const descriptors = Object.getOwnPropertyDescriptors(value);
   const indexNames = Object.getOwnPropertyNames(descriptors).filter((name) => name !== "length");
@@ -108,7 +127,7 @@ function normalizeArray(
   }
 
   const output: unknown[] = [];
-  let changed = false;
+  let changed = omittedSymbolKeys;
   for (let index = 0; index < value.length; index += 1) {
     const descriptor = descriptors[String(index)];
     const itemPath = `${path}[${index}]`;
@@ -118,7 +137,7 @@ function normalizeArray(
         "cannot be a hole, accessor, or hidden element",
       );
     }
-    const normalized = normalizeValue(descriptor.value, ancestors, depth + 1, itemPath);
+    const normalized = normalizeValue(descriptor.value, ancestors, depth + 1, itemPath, options);
     output.push(normalized.value);
     changed ||= normalized.changed;
   }
@@ -130,6 +149,8 @@ function normalizeObject(
   ancestors: Set<object>,
   depth: number,
   path: string,
+  options: ProtocolJsonOptions,
+  omittedSymbolKeys: boolean,
 ): NormalizeResult {
   const descriptors = Object.getOwnPropertyDescriptors(value);
   const prototype = Object.getPrototypeOf(value);
@@ -138,7 +159,7 @@ function normalizeObject(
     string,
     unknown
   >;
-  let changed = hasForeignObjectPrototype;
+  let changed = hasForeignObjectPrototype || omittedSymbolKeys;
 
   for (const [key, descriptor] of Object.entries(descriptors)) {
     const propertyPath = `${path}[${JSON.stringify(key)}]`;
@@ -152,7 +173,13 @@ function normalizeObject(
       changed = true;
       continue;
     }
-    const normalized = normalizeValue(descriptor.value, ancestors, depth + 1, propertyPath);
+    const normalized = normalizeValue(
+      descriptor.value,
+      ancestors,
+      depth + 1,
+      propertyPath,
+      options,
+    );
     Object.defineProperty(output, key, {
       value: normalized.value,
       enumerable: true,

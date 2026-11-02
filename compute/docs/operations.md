@@ -357,7 +357,19 @@ installs three units:
 - `compute-host.service`, the agent, which checks before every start that
   the mounted state volume is the recorded one and that its certificate,
   Firecracker, kernel and base image are there (`check-host`), and runs
-  with `KillMode=process` so a restart leaves its VMs running.
+  with `KillMode=process` so a restart leaves its VMs running. Each start
+  records what it uses (`agent-inputs`: the release, `installed.env`,
+  `host.env`, `ca.pem`, the base image and the unit as systemd loaded it)
+  under `/run`, with the start's invocation id, and `install.sh` restarts
+  an agent only when that changed, when the running agent's start is not
+  the one recorded (a start by an earlier release's unit after a rollback
+  records nothing), or when the agent does not answer within a minute of
+  being left running; it logs why it restarts. So the startup script that
+  installs again at every boot on GCP leaves the agent systemd just
+  started running, rather than stopping its lease renewals and cutting
+  short the wakes it began. Files `host.env` names (such as credentials)
+  and `systemctl set-environment` are not part of what is recorded: after
+  changing only those, restart the agent yourself.
 
 #### A host that shares its machine
 
@@ -1010,7 +1022,15 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   - `compute.step.oldest_age` above the step's usual time, for example
     ten minutes for an archive.
   - `compute.sandbox.unhealthy` above zero: sandboxes broken, blocked or
-    unsavable need a person.
+    unsavable need a person. A sandbox blocked as `not recovered, tried
+    again later` after an agent restart is tried again on its own, about
+    every five minutes once earlier tries failed, for as long as it stays
+    blocked (log lines `sandbox still not recovered` and `recovered a
+    sandbox on a later try`); `not recovered` alone is not tried again.
+    While its VM may still run, a blocked sandbox holds its full size on
+    the host, and a host the service gave up does not register again
+    while anything is blocked. Each round of tries holds the agent up to
+    the two seconds a VMM is given to answer.
   - any increase of `compute.export.dropped`: the collector is slow, away
     or refusing; events are still in the journal.
   - `compute.memory.stalled` above zero in its `severe` bucket (40 % and
@@ -1143,7 +1163,8 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   `--config`, the installed
   configuration stays):
   it installs the release beside the old ones, points
-  `/opt/compute/current` at it and restarts the agent; VMs keep running.
+  `/opt/compute/current` at it and restarts the agent (unless it runs all
+  of that already); VMs keep running.
   A release whose binary does not run on the host is refused first, and
   the running release, guard and agent are left as they are: the guard
   handed over to a binary that cannot start would let the watchdog reset

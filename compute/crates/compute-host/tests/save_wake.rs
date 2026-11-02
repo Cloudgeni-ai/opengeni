@@ -173,6 +173,7 @@ async fn restart_with<S: Store>(
         guard_freezes: None,
         observer: setup.observer,
         summary_every: HostConfig::SUMMARY_EVERY,
+        recovery_retry: HostConfig::RECOVERY_RETRY,
         agent_link: None,
         processor_share: None,
         prepare: None,
@@ -621,6 +622,123 @@ async fn a_paged_guest_survives_its_agent_restarting() {
     if let Some((deepest, store)) = paged_wake("restart") {
         survive_restart(&lab, &name, deepest, store.as_deref()).await;
     }
+}
+
+/// A paged guest whose VMM does not answer when a new agent starts, as
+/// one the guard holds frozen does, is blocked while its pager is served
+/// in the background, then taken back by a later try once the VMM answers
+/// again: the guest reads its memory exactly as saved, and the pager is
+/// served by one connection at a time until it leaves.
+#[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "one scenario, step by step")]
+async fn a_paged_guest_frozen_at_restart_is_taken_back_later() {
+    const UID: u32 = (1 << 30) + 3000;
+    let Some(lab) = lab() else { return };
+    let Some((deepest, store)) = paged_wake("frozen") else {
+        return;
+    };
+    let store = store.as_deref();
+    let name = format!("f{}", short());
+    let id: Id = "00000000-0000-4000-8000-0000000000b4".parse().unwrap();
+    let _ = std::fs::remove_dir_all(lab.join("ht").join(&name));
+    let agent = Process::start(&lab, &name, UID, store, RECORD_FOR).await;
+    let config = SandboxConfig {
+        disk_mib: None,
+        reach: Vec::new(),
+        image: None,
+        vcpus: 2,
+        memory_mib: 512,
+        memory_request_mib: None,
+        cpu_request_millis: None,
+        sleep: ladder(deepest),
+        link: None,
+    };
+    let created = agent
+        .client
+        .call(&Request::Create { id, config })
+        .await
+        .unwrap();
+    assert!(matches!(created, Reply::Done), "{created:?}");
+    let setup = exec(&agent.client, id, SETUP).await;
+    let pid = field(&setup, "pid").to_owned();
+    let sum = field(&setup, "sum").to_owned();
+    wait_for(&agent.client, id, deepest).await;
+    let later = format!(
+        "\
+kill -0 {pid} && echo alive=yes
+setsid sh -c 'sleep 2; md5sum < /dev/shm/blob | cut -d\" \" -f1 > /dev/shm/later' \
+  </dev/null >/dev/null 2>&1 &
+echo started=yes"
+    );
+    let output = exec(&agent.client, id, &later).await;
+    assert_eq!(field(&output, "alive"), "yes", "{output}");
+    agent.kill();
+
+    let vmm = group_processes(id)
+        .into_iter()
+        .find(|pid| {
+            std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                .is_ok_and(|comm| comm.trim() == "firecracker")
+        })
+        .expect("the VMM runs on");
+    let signal = |name: &str| {
+        let status = std::process::Command::new("kill")
+            .arg(format!("-{name}"))
+            .arg(vmm.to_string())
+            .status()
+            .unwrap();
+        assert!(status.success(), "kill -{name} {vmm}");
+    };
+    signal("STOP");
+    let agent = Process::start(&lab, &name, UID, store, RECORD_FOR).await;
+    let blocked = loop {
+        let status = status(&agent.client).await;
+        if !status.blocked.is_empty() || status.sandboxes.iter().any(|s| s.id == id) {
+            break status;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    signal("CONT");
+    assert_eq!(blocked.blocked.len(), 1, "{blocked:?}");
+    assert!(pagers(id).len() <= 1, "one pager at most: {:?}", pagers(id));
+
+    let started = Instant::now();
+    loop {
+        let status = status(&agent.client).await;
+        if status.blocked.is_empty() && status.sandboxes.iter().any(|s| s.id == id) {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(240),
+            "never taken back: {status:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let read = "\
+for _ in $(seq 100); do [ -s /dev/shm/later ] && break; sleep 0.1; done
+echo later=$(cat /dev/shm/later)";
+    let output = exec(&agent.client, id, read).await;
+    assert_eq!(
+        field(&output, "later"),
+        sum,
+        "memory read while the VMM was frozen differs"
+    );
+    let output = exec(
+        &agent.client,
+        id,
+        &format!("kill -0 {pid} && echo alive=yes"),
+    )
+    .await;
+    assert_eq!(field(&output, "alive"), "yes", "{output}");
+    let removed = agent
+        .client
+        .call(&Request::Remove {
+            id,
+            generation: None,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(removed, Reply::Done), "{removed:?}");
 }
 
 /// The deepest level whose wake goes through a pager on this host, and the
