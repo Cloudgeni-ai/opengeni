@@ -35,6 +35,7 @@ import {
   sessionUsageLimitCapability,
 } from "../../lib/session-usage-limit";
 import { RAIL_DEFAULT_WIDTH, RAIL_MAX_WIDTH, RAIL_MIN_WIDTH, useRail } from "./rail-context";
+import { RailSurface, ShellRail } from "./rail-surface";
 import { CollapsedSessionsButton, SessionList } from "./session-list";
 import {
   PrimaryNav,
@@ -99,10 +100,7 @@ export function RailBody() {
     );
   };
   return (
-    <div
-      data-rail
-      className="og-rail-glow isolate flex h-full min-h-0 flex-col overflow-hidden pt-[env(safe-area-inset-top)]"
-    >
+    <RailSurface data-rail>
       <div
         data-rail-scroll-viewport
         className="relative z-0 min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain"
@@ -209,7 +207,7 @@ export function RailBody() {
           {railFooter}
         </div>
       ) : null}
-    </div>
+    </RailSurface>
   );
 }
 
@@ -363,13 +361,12 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
       >
         {/* Fixed desktop rail — user-resizable when expanded. */}
         {chatList && !rail.isMobile ? (
-          <nav
+          <ShellRail
+            as="nav"
             aria-label="Primary"
-            data-shell-rail
             data-collapsed={rail.collapsed}
             style={rail.collapsed ? undefined : { width: resizing ? liveWidth! : rail.width }}
             className={cn(
-              "relative shrink-0 border-r border-border",
               // Animate the collapse/expand toggle, but never while dragging — a
               // transition there would lag the handle behind the pointer.
               !resizing && "motion-safe:transition-[width] motion-safe:duration-150",
@@ -380,7 +377,7 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
             {/* The drag handle only exists on the expanded desktop rail; the
                 collapsed strip and the mobile drawer are fixed-width. */}
             {!rail.collapsed ? <RailResizeHandle onStart={startResize} active={resizing} /> : null}
-          </nav>
+          </ShellRail>
         ) : null}
 
         {/* Mobile overlay drawer. */}
