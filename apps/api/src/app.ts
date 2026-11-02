@@ -266,6 +266,7 @@ import {
   buildOpenGeniMcpProtocolServer,
   buildOpenGeniMcpServer,
   isOpenGeniMcpProtocolOnlyMessage,
+  resolveSlackBotToolAvailability,
 } from "./mcp/server";
 import {
   buildWorkspaceToolGatewayMcpServer,
@@ -2107,7 +2108,8 @@ export function createAppComposition(deps: AppDependencies): {
           typeof boundSessionId === "string"
             ? { accountId: grant.accountId, workspaceId, sessionId: boundSessionId }
             : null;
-        const [, [mcpDeps, startedByPerson, fullAccess]] = await alongsideAuthorization(
+        const [, [mcpDeps, startedByPerson, fullAccess, slackBotAvailable]] =
+          await alongsideAuthorization(
           authorizeBoundSession(),
           () =>
             Promise.all([
@@ -2120,11 +2122,14 @@ export function createAppComposition(deps: AppDependencies): {
                     (authority) => authority !== null,
                   )
                 : false,
+              // Live: the bot tools are listed only while a bot is available.
+              resolveSlackBotToolAvailability(routeDeps.db, grant),
             ]),
         );
         reads.handOffToToolDispatch();
         const mcp = buildOpenGeniMcpServer(mcpDeps, grant, {
           requestOrigin: new URL(c.req.url).origin,
+          slackBotAvailable,
           appActions: sessionScope
             ? {
                 access: {

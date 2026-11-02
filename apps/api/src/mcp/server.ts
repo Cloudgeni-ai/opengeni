@@ -443,6 +443,7 @@ import {
   prepareSlackBotPost,
   resolveSlackBotConnectionForTool,
   sendSlackBotPost,
+  slackBotToolsAvailable,
   type OpenGeniSlackBotClient,
 } from "../integrations/slack-bot";
 import { uploadSlackTaskFile } from "../integrations/slack-task-file-upload";
@@ -519,7 +520,45 @@ export type McpServerOptions = {
     | { access: SessionAdminAccessDispatch; startedByPerson: boolean; fullAccess: boolean }
     | null
     | undefined;
+  /**
+   * Whether the workspace has an Opengeni Slack bot available, resolved by the
+   * route with `resolveSlackBotToolAvailability`. `false` leaves every
+   * `slack_bot_*` tool unlisted; omitted keeps them listed.
+   */
+  slackBotAvailable?: boolean | undefined;
 };
+
+/**
+ * Whether this grant could list any `slack_bot_*` tool at all: they need
+ * `connections:read`, and a session lists only what its signed selection holds.
+ * Lets the route skip the availability read when its answer changes nothing.
+ */
+export function grantMayListSlackBotTools(grant: AccessGrant): boolean {
+  if (!hasPermission(grant.permissions, "connections:read")) return false;
+  if (typeof grant.metadata?.["sessionId"] !== "string") return true;
+  const selection = grant.metadata?.["firstPartyMcpTools"];
+  return (
+    Array.isArray(selection) &&
+    selection.some((name) => typeof name === "string" && name.startsWith("slack_bot_"))
+  );
+}
+
+/**
+ * The `slackBotAvailable` fact for one first-party MCP surface. The bot tools
+ * are offered only where a bot is installed or shared, like other tools that
+ * are listed only when what they act on exists; selection still decides which
+ * of them a session holds.
+ */
+export async function resolveSlackBotToolAvailability(
+  db: ApiRouteDeps["db"],
+  grant: AccessGrant,
+): Promise<boolean> {
+  if (!grantMayListSlackBotTools(grant)) return false;
+  return await slackBotToolsAvailable(db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+  });
+}
 
 const ORCHESTRATION_FAILURE_CODE_MAX_LENGTH = 128;
 // A person's message to a session on someone else's personal machine waits
@@ -1539,7 +1578,9 @@ export function buildOpenGeniMcpServer(
     registerConnectedMachineTools(server, deps, grant, sessionId, json);
   }
   registerRigTools(server, deps, grant, can, sessionId, json);
-  registerSlackBotTools(server, deps, grant, sessionId, json);
+  // Only where an Opengeni Slack bot is installed or shared: elsewhere the
+  // tools can only fail, and listing them hides the Slack Connect card.
+  if (options.slackBotAvailable !== false) registerSlackBotTools(server, deps, grant, sessionId, json);
   registerFikenTools(server, deps, grant, sessionId, json);
 
   // Orchestration, secret, and GitHub status tools are permission-gated

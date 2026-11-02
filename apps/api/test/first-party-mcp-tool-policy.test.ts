@@ -26,10 +26,16 @@ import {
 import { HTTPException } from "hono/http-exception";
 import * as z4 from "zod/v4";
 import { createAttemptToolEnvironment, generateCodemodeDeclarations } from "@opengeni/codemode";
-import { buildOpenGeniMcpServer, slackBotFileContentResult } from "../src/mcp/server";
+import {
+  buildOpenGeniMcpServer,
+  grantMayListSlackBotTools,
+  resolveSlackBotToolAvailability,
+  slackBotFileContentResult,
+} from "../src/mcp/server";
 import type { OpenGeniSlackBotClient } from "../src/integrations/slack-bot";
 import { buildFilesMcpServer } from "../src/mcp/files";
 import { ToolSearchIndex } from "../../../packages/runtime/src/tool-discovery-ranking";
+import { LazyToolRuntime } from "../../../packages/runtime/src/lazy-tool-transport";
 
 type SearchableTool = ConstructorParameters<typeof ToolSearchIndex>[0][number];
 
@@ -1758,5 +1764,154 @@ describe("agent-facing goal_set schema", () => {
       await client.close();
       await server.close();
     }
+  });
+});
+
+describe("workspace Slack bot tools follow bot availability", () => {
+  const SLACK_BOT_DEFAULT_TOOLS = DEFAULT_FIRST_PARTY_MCP_TOOLS.filter((name) =>
+    name.startsWith("slack_bot_"),
+  );
+  const defaultSession = () =>
+    grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS], [...DEFAULT_FIRST_PARTY_MCP_TOOLS]);
+  const botTools = (server: unknown) =>
+    registeredToolNames(server).filter((name) => name.startsWith("slack_bot_"));
+  const human = (): AccessGrant => ({
+    accountId,
+    workspaceId,
+    subjectId: "user:someone",
+    principalKind: "human_session",
+    permissions: [],
+  });
+
+  test("a workspace without a bot lists no slack_bot tools", () => {
+    expect(SLACK_BOT_DEFAULT_TOOLS.length).toBeGreaterThan(0);
+    expect(
+      botTools(buildOpenGeniMcpServer(deps(), defaultSession(), { slackBotAvailable: false })),
+    ).toEqual([]);
+    // Nor for a sessionless caller that would otherwise see every bot tool.
+    expect(
+      botTools(
+        buildOpenGeniMcpServer(
+          deps(),
+          { ...human(), permissions: ["connections:read"] },
+          { slackBotAvailable: false },
+        ),
+      ),
+    ).toEqual([]);
+  });
+
+  test("a workspace with a bot keeps every bot tool the session holds", () => {
+    expect(
+      botTools(buildOpenGeniMcpServer(deps(), defaultSession(), { slackBotAvailable: true })),
+    ).toEqual([...SLACK_BOT_DEFAULT_TOOLS].sort());
+    const everyBotTool = FIRST_PARTY_MCP_TOOL_NAMES.filter((name) =>
+      name.startsWith("slack_bot_"),
+    );
+    const explicit = botTools(
+      buildOpenGeniMcpServer(deps(), grant(["connections:read", "files:read"], everyBotTool), {
+        slackBotAvailable: true,
+      }),
+    );
+    // Search and plain posting are reserved names that are never registered.
+    expect(explicit).toEqual(
+      everyBotTool
+        .filter((name) => name !== "slack_bot_search" && name !== "slack_bot_post_message")
+        .sort(),
+    );
+    // Omitting the fact keeps the earlier behaviour: the tools stay listed.
+    expect(botTools(buildOpenGeniMcpServer(deps(), defaultSession()))).toEqual(
+      [...SLACK_BOT_DEFAULT_TOOLS].sort(),
+    );
+  });
+
+  test("the availability read runs only when a bot tool could be listed", async () => {
+    expect(grantMayListSlackBotTools(defaultSession())).toBe(true);
+    expect(grantMayListSlackBotTools(grant(["connections:read"], ["goal_set"]))).toBe(false);
+    expect(grantMayListSlackBotTools(grant(["sessions:read"], [...SLACK_BOT_DEFAULT_TOOLS]))).toBe(
+      false,
+    );
+    expect(grantMayListSlackBotTools(grant(["connections:read"]))).toBe(false);
+    expect(grantMayListSlackBotTools({ ...human(), permissions: ["connections:read"] })).toBe(
+      true,
+    );
+    // No read at all when nothing could list: a db that throws is never touched.
+    const untouched = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error("availability read must not run");
+        },
+      },
+    ) as ApiRouteDeps["db"];
+    expect(
+      await resolveSlackBotToolAvailability(untouched, grant(["connections:read"], ["goal_set"])),
+    ).toBe(false);
+  });
+
+  test("a Slack request without a bot reaches the Connect card; with one it finds the bot", async () => {
+    const SLACK = { capabilityId: "registry:slack", name: "Slack" };
+    const search = async (slackBotAvailable: boolean) => {
+      const server = buildOpenGeniMcpServer(deps(), defaultSession(), { slackBotAvailable });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      const client = new Client({ name: "slack-bot-search-test", version: "1" });
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      try {
+        const pool = (await client.listTools()).tools.map(
+          (tool) =>
+            ({
+              type: "function",
+              name: `opengeni__${tool.name}`,
+              description: tool.description ?? "",
+              parameters: tool.inputSchema,
+              strict: false,
+              needsApproval: async () => false,
+              invoke: async () => "",
+            }) as unknown as SearchableTool,
+        );
+        const lookups: string[] = [];
+        const runtime = new LazyToolRuntime(
+          "generic_dispatch",
+          new Set(),
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          false,
+          false,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          async (query: string) => {
+            lookups.push(query);
+            return /\bslack\b/i.test(query) ? [SLACK] : [];
+          },
+        );
+        runtime.refresh(pool as never);
+        const result = await runtime.prepareSearch({ query: "read posts in a Slack channel" });
+        return {
+          pool: pool.map((tool) => tool.name),
+          lookups,
+          loaded: result.tools?.map((tool) => tool.name) ?? [],
+          notConnected: JSON.parse(result.output).notConnected as string | undefined,
+        };
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    };
+    const withBot = await search(true);
+    expect(withBot.pool).toContain("opengeni__slack_bot_list_channels");
+    // The bot clearly matches, so search loads it and looks nothing up.
+    expect(withBot.loaded).toContain("opengeni__slack_bot_list_channels");
+    expect(withBot.lookups).toEqual([]);
+    const withoutBot = await search(false);
+    expect(withoutBot.pool.filter((name) => name.includes("slack_bot_"))).toEqual([]);
+    // Nothing installed matches: search names Slack and loads its Connect card.
+    expect(withoutBot.lookups).toHaveLength(1);
+    expect(withoutBot.notConnected).toContain('Slack (capabilityId "registry:slack")');
+    expect(withoutBot.loaded).toContain("opengeni__capability_authorization_request");
   });
 });

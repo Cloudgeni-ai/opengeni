@@ -31404,6 +31404,37 @@ export async function previewConnectorActionApproval(
   );
 }
 
+/**
+ * The decision this attempt's frozen tool permissions give one connector tool
+ * on one connection, as a call of it would resolve: an explicit choice, else
+ * `defaultDecision`. Reads only the snapshot; creates no request or audit row.
+ * Lets one tool follow the choice a person made for another, such as a bot
+ * send following the person's own Slack send permission.
+ */
+export async function resolveAttemptConnectorToolDecision(
+  db: Database,
+  identity: ConnectorActionAttemptIdentity,
+  input: {
+    connectionId: string;
+    serverId: string;
+    toolName: string;
+    defaultDecision: "allow" | "ask";
+  },
+): Promise<"allow" | "ask" | "block"> {
+  return await withRlsContext(
+    db,
+    { accountId: identity.accountId, workspaceId: identity.workspaceId },
+    async (scopedDb) => {
+      const snapshot = await connectorActionAttemptSnapshot(scopedDb, identity);
+      const resolved = resolveConnectorActionPolicy(snapshot, {
+        ...input,
+        actionName: input.toolName,
+      });
+      return resolved.managed ? connectorActionPolicyDecision(resolved) : input.defaultDecision;
+    },
+  );
+}
+
 export async function beginConnectorActionExecution(
   db: Database,
   identity: ConnectorActionAttemptIdentity,

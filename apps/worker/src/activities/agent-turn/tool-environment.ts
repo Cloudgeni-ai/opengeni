@@ -2,6 +2,12 @@ import { publishStartupProgress } from "./model-usage";
 import { userSetupCardPoster } from "./user-setup-card";
 import { withAppActionConfirmation } from "./app-action-confirmation";
 import {
+  PERSONAL_SLACK_SEND_TOOL_NAME,
+  personalSlackSendTargets,
+  strictestDecision,
+  withSlackBotSendApproval,
+} from "./slack-bot-send-approval";
+import {
   firstPartyToolsForAttendance,
   sessionStartedUnattended,
   sessionUnattendedNow,
@@ -24,6 +30,8 @@ import {
   prepareConnectorActionApproval,
   recordUsageEvent,
   previewConnectorActionApproval,
+  readPreparedBotMessage,
+  resolveAttemptConnectorToolDecision,
   resolveSessionAppActionAuthority,
   namedSubjectHasLiveWorkspaceAuthority,
   updateSessionTitleWithEvent,
@@ -610,7 +618,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     routeAllowsTitleRequests: routeAllowsSessionTitleRequests(resolvedModel),
   });
   const attemptConnectorActionBindings = [...githubRestMcp.connectorBindings];
-  const connectorActionPolicy: ConnectorActionPolicyHooks = withAppActionConfirmation(
+  const appActionPolicy: ConnectorActionPolicyHooks = withAppActionConfirmation(
     {
       preview: async (call) =>
         await previewConnectorActionApproval(db, connectorActionIdentity, call),
@@ -675,6 +683,33 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           approvalId,
         }),
       cards: eventing.appActionApprovalCards,
+    },
+  );
+  // A bot send in an interactive chat follows the person's own Slack send
+  // permission; scheduled and unattended runs keep sending at once.
+  const connectorActionPolicy: ConnectorActionPolicyHooks = withSlackBotSendApproval(
+    appActionPolicy,
+    {
+      interactive: scheduledTurnMcpServerIds(turn) === null && !unattended,
+      personalSlackSendDecision: async () =>
+        strictestDecision(
+          await Promise.all(
+            personalSlackSendTargets(turn.personalConnectionDelegations, runSettings).map(
+              async (target) =>
+                await resolveAttemptConnectorToolDecision(db, connectorActionIdentity, {
+                  ...target,
+                  toolName: PERSONAL_SLACK_SEND_TOOL_NAME,
+                }),
+            ),
+          ),
+        ),
+      preparedMessage: async (messageId) =>
+        await readPreparedBotMessage(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          id: messageId,
+        }),
     },
   );
   const bundledSkills =
