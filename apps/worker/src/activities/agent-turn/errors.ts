@@ -60,6 +60,7 @@ import {
   mcpTransportRequestFailureDiagnostic,
   type McpTransportRequestFailureDiagnostic,
 } from "@opengeni/runtime/mcp-network";
+import { ComputeControlError } from "@opengeni/runtime/sandbox";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import type { ProviderErrorOutcome } from "@opengeni/subscriptions";
 import { CODEX_USAGE_EXHAUSTED_PCT } from "./codex-usage-policy";
@@ -171,6 +172,10 @@ export function providerRecoveryJitterMs(delayMs: number, sample: number): numbe
 }
 export const POST_COMPACTION_CONTINUATION_EMPTY_CODE = "post_compaction_continuation_empty";
 export const RETAINED_ATTACHMENT_UNAVAILABLE_CODE = "retained_attachment_unavailable";
+/** No sandbox host can take a new or woken sandbox right now. */
+export const SANDBOX_CAPACITY_UNAVAILABLE_CODE = "sandbox_capacity_unavailable";
+/** Any other failure answered by (or reaching) the sandbox control service. */
+export const SANDBOX_SERVICE_UNAVAILABLE_CODE = "sandbox_service_unavailable";
 
 function findRetainedAttachmentUnavailableError(
   error: unknown,
@@ -291,6 +296,7 @@ export function providerRecoveryResult(input: {
               input.failureCode === "provider_unavailable" ||
               input.failureCode === "upstream_connectivity_unavailable" ||
               input.failureCode === "sandbox_command_start_unavailable" ||
+              input.failureCode === SANDBOX_SERVICE_UNAVAILABLE_CODE ||
               input.failureCode === RETAINED_ATTACHMENT_UNAVAILABLE_CODE ||
               input.failureCode === "mcp_transport_timeout" ||
               input.failureCode === "mcp_transport_unavailable" ||
@@ -305,14 +311,18 @@ export function providerRecoveryResult(input: {
                   )
                 ]!,
               )
-            : PROVIDER_BACKPRESSURE_DELAY_MS;
+            : // Includes sandbox_capacity_unavailable: a full sandbox fleet
+              // frees up as other boxes sleep or end, not within seconds.
+              PROVIDER_BACKPRESSURE_DELAY_MS;
   const delayMs =
     continueDelayMs +
     (overload ||
     input.failureCode === "provider_rate_limited" ||
     input.failureCode === "provider_unavailable" ||
     input.failureCode === "upstream_connectivity_unavailable" ||
-    input.failureCode === PROVIDER_UNREACHABLE_RECOVERY_CODE
+    input.failureCode === PROVIDER_UNREACHABLE_RECOVERY_CODE ||
+    input.failureCode === SANDBOX_CAPACITY_UNAVAILABLE_CODE ||
+    input.failureCode === SANDBOX_SERVICE_UNAVAILABLE_CODE
       ? providerRecoveryJitterMs(continueDelayMs, input.jitterSample ?? 0)
       : 0);
   // Do not shorten Retry-After, or schedule a replacement outside the window.
@@ -1652,6 +1662,21 @@ export function isFunctionToolProviderFailure(error: unknown): boolean {
 
 export const TOOL_PROVIDER_REFUSED_CODE = "tool_provider_refused";
 
+/**
+ * The sandbox control service's typed failure at any wrapper depth: `cause`
+ * chains, the agents SDK's ToolCallError (`.error`) when a lazily provisioned
+ * sandbox fails inside a tool call, and AggregateError members. A capacity
+ * refusal wins over any other control service failure in the same graph.
+ */
+function findSandboxServiceError(error: unknown): ComputeControlError | null {
+  const graph = structuredRecoveryCauseGraph(error);
+  const nodes = graph ? [...graph.keys()] : [error];
+  const found = nodes.filter((node): node is ComputeControlError => {
+    return node instanceof ComputeControlError;
+  });
+  return found.find((node) => node.kind === "no_capacity") ?? found[0] ?? null;
+}
+
 /** A refusal raised by a Claude subscription (OAuth) transport, at any wrapper depth. */
 export function isClaudeSubscriptionTransportError(error: unknown): boolean {
   let current: unknown = error;
@@ -2045,6 +2070,24 @@ function baseAgentRunFailurePayload(
       code: databaseFailureCode(sqlState),
       sqlState,
       ...(Object.keys(database).length > 0 ? { database } : {}),
+    };
+  }
+  // The sandbox control service's own typed failure (for example compute's
+  // 503 no_capacity while creating or waking a box) concerns the sandbox,
+  // never the chat model. Its HTTP status would otherwise read as a model
+  // provider 5xx below. Retry authority follows the error's own kind.
+  const sandboxService = findSandboxServiceError(error);
+  if (sandboxService) {
+    const capacity = sandboxService.kind === "no_capacity";
+    return {
+      error: !sandboxService.retryable
+        ? "This turn couldn't get a sandbox. Automatic retries stopped."
+        : capacity
+          ? "No sandbox capacity is available right now. The same turn will retry after a short delay."
+          : "The sandbox service is temporarily unavailable. The same turn will retry after a short delay.",
+      code: capacity ? SANDBOX_CAPACITY_UNAVAILABLE_CODE : SANDBOX_SERVICE_UNAVAILABLE_CODE,
+      retryable: sandboxService.retryable,
+      detail: sandboxService.message,
     };
   }
   if (error instanceof AnthropicSizeRecoveryExhaustedError) {

@@ -1763,6 +1763,22 @@ misconfigured local endpoint that refuses connections also waits up to six
 hours instead of failing within two minutes. Workers older than this policy
 treat the reason as an ordinary recovery and exhaust at five.
 
+**A full sandbox fleet is not a model outage.** The compute control service's
+typed `ComputeControlError` (for example `503 no_capacity`, "no host can take
+it now", while creating or waking a sandbox) is classified before any model
+provider rule, at any wrapper depth: `cause` chains, the agents SDK's
+`ToolCallError.error` when a lazily provisioned sandbox fails inside a tool
+call, and `AggregateError` members. `no_capacity` records
+`sandbox_capacity_unavailable`; every other control service kind records
+`sandbox_service_unavailable`. Retry authority is the error's own `retryable`
+flag (its kind). Capacity retries wait the 60 s backpressure delay plus
+positive jitter; service failures use the connectivity backoff. Both use the
+ordinary five-retry budget, carry no model route or provider condition, and
+their live and exhausted copy name the sandbox, never the model or provider.
+Before, the 503 read as a model provider 5xx (`provider_unavailable`, "<model>
+is temporarily unavailable at the provider"), and the tool-wrapped form failed
+the turn with no code.
+
 The DB-only checkpoint-outage wire preserves the exact next overload count and
 bounded delay (including Retry-After); it cannot promote another cause to the
 larger budget. Legacy wire results without a delay preserve their prior workflow

@@ -13,6 +13,9 @@ import { buildTimeline } from "../src/timeline";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { flush, registerDom, renderComponent } from "./render-hook";
 import { createOpenGeniText } from "../src/messages/runtime";
+import { summarizeSessionFailure } from "../src/app/lib/events";
+import { failedSessionCopy } from "../src/app/lib/failed-session-copy";
+import { turnFailureClass } from "../src/app/lib/turn-failure-analytics";
 
 const englishText = createOpenGeniText();
 
@@ -285,5 +288,62 @@ test("internal MCP outage notice waits automatically without a finite attempt bu
     expect(view.container.textContent).toContain("retrying automatically");
     expect(view.container.textContent).not.toContain("of 5");
     await view.unmount();
+  }
+});
+
+test("a sandbox capacity wait and its spent budget name the sandbox, never the model", () => {
+  const blamesModel = (text: string) => /\bmodel\b|\bprovider\b|claude/i.test(text);
+  const cases = [
+    {
+      code: "sandbox_capacity_unavailable",
+      error:
+        "No sandbox capacity is available right now. The same turn will retry after a short delay.",
+      subject: "No sandbox capacity is available right now",
+    },
+    {
+      code: "sandbox_service_unavailable",
+      error:
+        "The sandbox service is temporarily unavailable. The same turn will retry after a short delay.",
+      subject: "The sandbox service is temporarily unavailable",
+    },
+  ];
+  for (const { code, error, subject } of cases) {
+    const detail = "compute control service POST /v1/sandboxes: no host can take it now";
+    const live = parseProviderRecovery({
+      reason: code,
+      code,
+      error,
+      detail,
+      retryable: true,
+      continueDelayMs: 60_000,
+      providerRecoveryCount: 2,
+      maxProviderRecoveryCount: 5,
+    });
+    expect(live).toMatchObject({ code, attempt: 2, maxAttempts: 5, modelRoute: false });
+    expect(providerRecoveryRetryingText(englishText, live!)).toBe(
+      `${subject} — retrying (attempt 2 of 5)…`,
+    );
+
+    const exhausted = {
+      error: `${subject}. Retried 5 times without success. Try again in a few minutes.`,
+      code,
+      detail,
+      retryable: false,
+      recoveryExhausted: true,
+      providerRecoveryCount: 5,
+      maxProviderRecoveryCount: 5,
+      lastRetryableError: error,
+    };
+    const terminal = `${subject}. Opengeni retried 5 times without success. Try again in a few minutes.`;
+    expect(presentFailure(englishText, exhausted).reason).toBe(terminal);
+    const timeline = buildTimeline(englishText, [event("turn.failed", exhausted)]);
+    expect(timeline.find((item) => item.kind === "notice")).toMatchObject({ text: terminal });
+
+    const summary = summarizeSessionFailure([event("turn.failed", exhausted)], "failed");
+    const banner = failedSessionCopy(summary, false, false, true);
+    expect(banner.reason).toStartWith(subject);
+    expect(blamesModel(banner.reason)).toBe(false);
+    expect(banner.unavailableModel).toBe(false);
+    expect(turnFailureClass(summary)).toBe("sandbox");
   }
 });
