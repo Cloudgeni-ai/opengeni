@@ -301,14 +301,15 @@ describe("streamed frame document", () => {
     });
     const reader = siteFrameStream(body).getReader();
     let largest = 0;
-    let length = 0;
+    let out = "";
+    const decoder = new TextDecoder();
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
       largest = Math.max(largest, value.byteLength);
-      length += value.byteLength;
+      out += decoder.decode(value, { stream: true });
     }
-    expect(length).toBe(new TextEncoder().encode(siteFrameDocument(html)).byteLength);
+    expect(out === siteFrameDocument(html)).toBe(true);
     const tagsPerSlice = Math.ceil(SITE_FRAME_REWRITE_CHARS / CLIENT.length) + 1;
     expect(largest).toBeLessThanOrEqual(
       SITE_FRAME_PIECE_CHARS +
@@ -318,25 +319,48 @@ describe("streamed frame document", () => {
     expect(largest).toBeLessThan(30 * 1024 * 1024);
   });
 
-  test("cancelling the document cancels the page and stops reading it", async () => {
-    let reads = 0;
+  test("cancelling the document while a read waits cancels the page and stops reading it", async () => {
+    let pulls = 0;
+    let cancelled: unknown = null;
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          pulls += 1;
+          // The first pull answers; the second waits for the origin forever.
+          if (pulls === 1) controller.enqueue(new TextEncoder().encode("<p>first</p>"));
+          else return new Promise<void>(() => undefined);
+        },
+        cancel(reason) {
+          cancelled = reason;
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    const reader = siteFrameStream(body).getReader();
+    expect((await reader.read()).done).toBe(false);
+    const waiting = reader.read();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(pulls).toBe(2);
+    await reader.cancel("viewer left");
+    expect(await waiting).toEqual({ done: true, value: undefined });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(cancelled).toBe("viewer left");
+    expect(pulls).toBe(2);
+  });
+  test("an unexpected error while rewriting also cancels the page", async () => {
     let cancelled: unknown = null;
     const body = new ReadableStream<Uint8Array>({
-      pull(controller) {
-        reads += 1;
-        controller.enqueue(new TextEncoder().encode("<p>more</p>"));
+      start(controller) {
+        // Not bytes: decoding it throws inside the rewrite stage.
+        controller.enqueue({ byteLength: 3 } as unknown as Uint8Array);
       },
       cancel(reason) {
         cancelled = reason;
       },
     });
-    const reader = siteFrameStream(body).getReader();
-    await reader.read();
-    await reader.cancel("viewer left");
-    const after = reads;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(cancelled).toBe("viewer left");
-    expect(reads).toBeLessThanOrEqual(after + 1);
+    await expect(readText(siteFrameStream(body))).rejects.toBeInstanceOf(TypeError);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(cancelled).toBeInstanceOf(TypeError);
   });
 });
 

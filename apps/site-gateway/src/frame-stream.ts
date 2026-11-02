@@ -9,7 +9,8 @@
  * 128 MB and Cloudflare's raw "Error 1102". This module produces the same
  * document while the page streams through. Beyond the read in hand (at most
  * SITE_FRAME_READ_BYTES) and the piece being handed on (about
- * SITE_FRAME_PIECE_CHARS) it holds a few kilobytes (a partial token or a
+ * SITE_FRAME_PIECE_CHARS, plus at most one SITE_FRAME_REWRITE_CHARS slice's
+ * output) it holds a few kilobytes (a partial token or a
  * candidate client tag) or, until the bootstrap's place is known, the leading
  * head (at most about SITE_FRAME_HEAD_MAX_CHARS). It hands those bounded
  * pieces to the SDK functions so the rewriting rules stay in one place. It
@@ -417,56 +418,62 @@ export function siteFrameStream(
   return new ReadableStream<Uint8Array>(
     {
       async pull(controller) {
-        for (;;) {
-          if (offset < pending.length) {
-            const out: string[] = [];
-            let size = 0;
-            while (offset < pending.length && size < SITE_FRAME_PIECE_CHARS) {
-              const end = sliceEnd(pending, offset, SITE_FRAME_REWRITE_CHARS);
-              const text = rewriter.push(pending.slice(offset, end));
-              offset = end;
-              if (text) {
-                out.push(text);
-                size += text.length;
+        try {
+          for (;;) {
+            if (offset < pending.length) {
+              const out: string[] = [];
+              let size = 0;
+              while (offset < pending.length && size < SITE_FRAME_PIECE_CHARS) {
+                const end = sliceEnd(pending, offset, SITE_FRAME_REWRITE_CHARS);
+                const text = rewriter.push(pending.slice(offset, end));
+                offset = end;
+                if (text) {
+                  out.push(text);
+                  size += text.length;
+                }
               }
+              if (offset >= pending.length) {
+                pending = "";
+                offset = 0;
+              }
+              // The decoder never splits a character, slices never split a
+              // surrogate pair, and the rewriter only holds back from ASCII
+              // positions, so each piece encodes on its own.
+              if (size) {
+                controller.enqueue(encoder.encode(out.join("")));
+                started = true;
+                return;
+              }
+              continue;
             }
-            if (offset >= pending.length) {
-              pending = "";
-              offset = 0;
-            }
-            // The decoder never splits a character, slices never split a
-            // surrogate pair, and the rewriter only holds back from ASCII
-            // positions, so each piece encodes on its own.
-            if (size) {
-              controller.enqueue(encoder.encode(out.join("")));
-              started = true;
+            if (ended) {
+              const text = rewriter.finish();
+              if (text) controller.enqueue(encoder.encode(text));
+              controller.close();
               return;
             }
-            continue;
-          }
-          if (ended) {
-            const text = rewriter.finish();
-            if (text) controller.enqueue(encoder.encode(text));
-            controller.close();
-            return;
-          }
-          const chunk = await reader.read(!started);
-          if (cancelled) return;
-          if (chunk === null) {
-            ended = true;
-            pending = decoder.decode();
+            const chunk = await reader.read(!started);
+            if (cancelled) return;
+            if (chunk === null) {
+              ended = true;
+              pending = decoder.decode();
+              offset = 0;
+              continue;
+            }
+            total += chunk.byteLength;
+            if (total > limit) {
+              const error = new SiteFrameTooLargeError();
+              controller.error(error);
+              reader.cancel(error).catch(() => undefined);
+              return;
+            }
+            pending = decoder.decode(chunk, { stream: true });
             offset = 0;
-            continue;
           }
-          total += chunk.byteLength;
-          if (total > limit) {
-            const error = new SiteFrameTooLargeError();
-            controller.error(error);
-            reader.cancel(error).catch(() => undefined);
-            return;
-          }
-          pending = decoder.decode(chunk, { stream: true });
-          offset = 0;
+        } catch (error) {
+          // Something unexpected (the rewrite threw): stop the page too.
+          reader.cancel(error).catch(() => undefined);
+          throw error;
         }
       },
       cancel(reason) {
