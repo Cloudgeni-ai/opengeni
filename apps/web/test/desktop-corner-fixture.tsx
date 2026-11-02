@@ -137,7 +137,7 @@ function ContentPreview() {
       <nav
         data-shell-rail
         data-collapsed={rail.collapsed}
-        style={{ width: rail.collapsed ? 56 : 288 }}
+        style={{ width: rail.collapsed ? 56 : rail.width }}
         className="h-full shrink-0 border-r border-border"
       >
         <RailBody />

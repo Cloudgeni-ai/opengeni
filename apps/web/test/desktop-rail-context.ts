@@ -43,13 +43,15 @@ const setCollapsed = (value: boolean) => {
   collapsed = value;
   listeners.forEach((listener) => listener());
 };
+// `?railwidth=<px>`: the width the person dragged the main rail to.
+const railWidth = Number(new URLSearchParams(location.search).get("railwidth") ?? 288);
 export function useRail() {
   return {
     workspaceId,
     collapsed: useSyncExternalStore(subscribe, () => collapsed),
     isMobile: false,
     drawerOpen: false,
-    width: 288,
+    width: railWidth,
     setCollapsed,
     toggleCollapsed: () => setCollapsed(!collapsed),
     setDrawerOpen: () => {},
