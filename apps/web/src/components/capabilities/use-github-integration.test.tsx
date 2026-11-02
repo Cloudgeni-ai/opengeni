@@ -368,7 +368,7 @@ for (const count of [1, 2])
       location: { replace: (url: string) => visited.push(url) },
       close: () => {},
     }));
-    window.open = open;
+    window.open = open as unknown as typeof window.open;
     try {
       await act(async () => {
         if (count === 1) rendered.model().access!.onEdit!();
@@ -404,11 +404,13 @@ test("several installations each unlink on their own, after a confirm", async ()
     { ...context.githubStatus.installations[0]!, installationId: 81, accountLogin: "benyhh" },
   ];
   const unlinked: number[] = [];
-  context.disconnectGitHubInstallation = async (_workspaceId: string, installationId: number) => {
-    unlinked.push(installationId);
-    return true;
-  };
-  const rendered = await renderAdapter(context);
+  const rendered = await renderAdapter({
+    ...context,
+    disconnectGitHubInstallation: async (_workspaceId: string, installationId: number) => {
+      unlinked.push(installationId);
+      return true;
+    },
+  });
   try {
     const rows = rendered
       .model()
