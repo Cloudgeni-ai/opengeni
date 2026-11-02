@@ -29,6 +29,7 @@ import { createAttemptToolEnvironment, generateCodemodeDeclarations } from "@ope
 import {
   buildOpenGeniMcpServer,
   grantMayListSlackBotTools,
+  mcpMessageNeedsSlackBotAvailability,
   resolveSlackBotToolAvailability,
   slackBotFileContentResult,
 } from "../src/mcp/server";
@@ -1768,6 +1769,26 @@ describe("agent-facing goal_set schema", () => {
 });
 
 describe("workspace Slack bot tools follow bot availability", () => {
+  test("availability is read only for a tool listing or a bot tool call", () => {
+    const call = (name: unknown) => ({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name },
+    });
+    expect(
+      mcpMessageNeedsSlackBotAvailability({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    ).toBe(true);
+    expect(mcpMessageNeedsSlackBotAvailability(call("slack_bot_send_prepared_message"))).toBe(true);
+    expect(mcpMessageNeedsSlackBotAvailability(call("knowledge_search"))).toBe(false);
+    expect(mcpMessageNeedsSlackBotAvailability(call(undefined))).toBe(false);
+    expect(mcpMessageNeedsSlackBotAvailability({ jsonrpc: "2.0", method: "initialize" })).toBe(
+      false,
+    );
+    for (const malformed of [null, "tools/list", [{ method: "tools/list" }]])
+      expect(mcpMessageNeedsSlackBotAvailability(malformed)).toBe(false);
+  });
+
   const SLACK_BOT_DEFAULT_TOOLS = DEFAULT_FIRST_PARTY_MCP_TOOLS.filter((name) =>
     name.startsWith("slack_bot_"),
   );

@@ -685,12 +685,16 @@ each listing request. In a workspace without one, a Slack request falls through 
 tool discovery's connect offer instead of matching a bot tool that cannot work. If
 that check itself fails, the tools stay listed.
 
-In an interactive chat, `slack_bot_send_prepared_message` follows the person's own
-Slack send permission: when their Slack connection's `slack_send_message` is set
-to Ask first (or blocked), the bot send opens the ordinary tool approval request
-showing the channel and message text. With no chosen permission the send runs at
-once, as before. Scheduled and unattended runs keep sending without a prompt. An
-unreadable permission falls back to that default rather than failing the send.
+Where a person can answer, `slack_bot_send_prepared_message` follows the person's
+own Slack send permission: when their Slack connection's `slack_send_message` is
+set to Ask first, the bot send opens the ordinary tool approval request showing
+the channel ID, the thread for a reply, and the message text; when it is blocked,
+the bot send is blocked too. If that permission cannot be read, the send asks.
+With no chosen permission, or no personal Slack account on the turn, the send
+runs at once, as before. Scheduled and unattended runs keep sending without a
+prompt, and so do workers whose chain was started by a scheduled turn or runs
+under an unattended root chat. A worker of an attended chat asks like the chat
+itself.
 
 Legacy schedules retain their saved `agentConfig.slackBotConnectionId` and
 `slackBotChannelId` as defaults. Omitting both destination arguments uses the

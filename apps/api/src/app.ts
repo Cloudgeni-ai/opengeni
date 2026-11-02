@@ -266,6 +266,7 @@ import {
   buildOpenGeniMcpProtocolServer,
   buildOpenGeniMcpServer,
   isOpenGeniMcpProtocolOnlyMessage,
+  mcpMessageNeedsSlackBotAvailability,
   resolveSlackBotToolAvailability,
 } from "./mcp/server";
 import {
@@ -2121,7 +2122,10 @@ export function createAppComposition(deps: AppDependencies): {
                   )
                 : false,
               // Live: the bot tools are listed only while a bot is available.
-              resolveSlackBotToolAvailability(routeDeps.db, grant),
+              // Read only for a tool listing or a bot tool call.
+              mcpRequestNeedsSlackBotAvailability(boundedRequest).then((needed) =>
+                needed ? resolveSlackBotToolAvailability(routeDeps.db, grant) : undefined,
+              ),
             ]),
           );
         reads.handOffToToolDispatch();
@@ -2809,6 +2813,17 @@ async function isProtocolOnlyMcpRequest(request: Request): Promise<boolean> {
   }
   const messages = Array.isArray(body) ? body : [body];
   return messages.length > 0 && messages.every(isOpenGeniMcpProtocolOnlyMessage);
+}
+
+async function mcpRequestNeedsSlackBotAvailability(request: Request): Promise<boolean> {
+  let body: unknown;
+  try {
+    body = await request.clone().json();
+  } catch {
+    // The transport answers malformed bodies itself; nothing is listed.
+    return false;
+  }
+  return (Array.isArray(body) ? body : [body]).some(mcpMessageNeedsSlackBotAvailability);
 }
 
 async function requireMcpAccessGrantAuthorization(

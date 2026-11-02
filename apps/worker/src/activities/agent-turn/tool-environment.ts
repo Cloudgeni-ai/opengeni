@@ -4,6 +4,7 @@ import { withAppActionConfirmation } from "./app-action-confirmation";
 import {
   PERSONAL_SLACK_SEND_TOOL_NAME,
   personalSlackSendTargets,
+  slackBotSendHasPerson,
   strictestDecision,
   withSlackBotSendApproval,
 } from "./slack-bot-send-approval";
@@ -32,6 +33,7 @@ import {
   previewConnectorActionApproval,
   readPreparedBotMessage,
   resolveAttemptConnectorToolDecision,
+  getSessionChainRoot,
   resolveSessionAppActionAuthority,
   namedSubjectHasLiveWorkspaceAuthority,
   updateSessionTitleWithEvent,
@@ -685,12 +687,28 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       cards: eventing.appActionApprovalCards,
     },
   );
-  // A bot send in an interactive chat follows the person's own Slack send
-  // permission; scheduled and unattended runs keep sending at once.
+  // A bot send where a person can answer follows the person's own Slack send
+  // permission; scheduled and unattended runs, and workers of them, keep
+  // sending at once.
   const connectorActionPolicy: ConnectorActionPolicyHooks = withSlackBotSendApproval(
     appActionPolicy,
     {
-      interactive: scheduledTurnMcpServerIds(turn) === null && !unattended,
+      interactive: async () =>
+        await slackBotSendHasPerson({
+          scheduled: scheduledTurnMcpServerIds(turn) !== null,
+          unattended,
+          chainRoot: async () => {
+            const root = await getSessionChainRoot(db, input.workspaceId, input.sessionId);
+            return root
+              ? {
+                  rootUnattended: root.rootUnattended,
+                  rootTurnScheduled:
+                    root.rootTurnMetadata !== null &&
+                    scheduledTurnMcpServerIds({ metadata: root.rootTurnMetadata }) !== null,
+                }
+              : null;
+          },
+        }),
       personalSlackSendDecision: async () =>
         strictestDecision(
           await Promise.all(

@@ -942,11 +942,12 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
   const firstPartyServers = await Promise.all([
     ...(gatewayServerIds.has("opengeni")
       ? [
-          inMemoryMcpRegistration(
-            "opengeni",
-            buildOpenGeniMcpServer(deps, grant, {
-              slackBotAvailable: await resolveSlackBotToolAvailability(routeDeps.db, grant),
-            }),
+          // Read alongside the other first-party servers, not before them.
+          resolveSlackBotToolAvailability(routeDeps.db, grant).then((slackBotAvailable) =>
+            inMemoryMcpRegistration(
+              "opengeni",
+              buildOpenGeniMcpServer(deps, grant, { slackBotAvailable }),
+            ),
           ),
         ]
       : []),

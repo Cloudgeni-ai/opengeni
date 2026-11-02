@@ -1452,8 +1452,8 @@ export const SESSION_ADMIN_ACCESS_TOOL_NAME_SET = SESSION_APP_ACTION_TOOL_NAME_S
  * chats may select the bot's explicit channel without borrowing a personal
  * account; accepted turn/task policies and permission ceilings remain fixed.
  * The first-party MCP lists the selected bot tools only while the workspace has
- * a Slack bot available, and an interactive bot send asks first whenever the
- * person's own Slack sends would.
+ * a Slack bot available, and an attended bot send follows the person's own
+ * Slack send permission.
  */
 export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
   (name) =>

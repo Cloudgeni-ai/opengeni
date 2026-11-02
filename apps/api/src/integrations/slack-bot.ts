@@ -38,6 +38,7 @@ import {
   getSlackAgentForSession,
   getSlackBotPostOperation,
   availableSlackBotConnectionMetadata,
+  hasAvailableSlackBot,
   sharedOrganizationSlackBots,
   prepareBotMessage,
   readPreparedBotMessage,
@@ -534,18 +535,17 @@ export async function verifyOpenGeniSlackBotCredential(
  * installed here, or one an organization administrator shared with it. The
  * first-party MCP lists the `slack_bot_*` tools only when it does, so a chat
  * in a workspace without a bot is offered the Slack Connect card instead of
- * tools that can only fail. The same metadata selection as the tools' own
- * connection resolver; it never reads credentials. A failed read keeps the
- * tools listed, as they were before this check existed.
+ * tools that can only fail. The same installs the tools' own connection
+ * resolver selects, read in one statement on each tool listing; it never
+ * reads credentials. A failed read keeps the tools listed, as they were
+ * before this check existed.
  */
 export async function slackBotToolsAvailable(
   db: Database,
   scope: { accountId: string; workspaceId: string },
 ): Promise<boolean> {
   try {
-    return (await availableSlackBotConnectionMetadata(db, scope)).some(
-      (connection) => connection.status === "active" && isOpenGeniSlackBotConnection(connection),
-    );
+    return await hasAvailableSlackBot(db, scope);
   } catch (error) {
     console.warn("[slack-bot] bot availability unavailable; listing bot tools", {
       error: error instanceof Error ? error.message : String(error),

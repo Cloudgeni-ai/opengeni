@@ -560,6 +560,21 @@ export async function resolveSlackBotToolAvailability(
   });
 }
 
+/**
+ * Whether one JSON-RPC message's answer depends on the bot tools being
+ * registered: a tool listing, or a call of a `slack_bot_*` tool. Other calls
+ * answer the same either way, so the route skips the availability read.
+ */
+export function mcpMessageNeedsSlackBotAvailability(message: unknown): boolean {
+  if (!message || typeof message !== "object" || Array.isArray(message)) return false;
+  const { method, params } = message as { method?: unknown; params?: unknown };
+  if (method === "tools/list") return true;
+  if (method !== "tools/call") return false;
+  const name =
+    params && typeof params === "object" ? (params as { name?: unknown }).name : undefined;
+  return typeof name === "string" && name.startsWith("slack_bot_");
+}
+
 const ORCHESTRATION_FAILURE_CODE_MAX_LENGTH = 128;
 // A person's message to a session on someone else's personal machine waits
 // for that machine's owner; said on the receipt of a sent or steered message.
