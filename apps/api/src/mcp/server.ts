@@ -1580,7 +1580,8 @@ export function buildOpenGeniMcpServer(
   registerRigTools(server, deps, grant, can, sessionId, json);
   // Only where an Opengeni Slack bot is installed or shared: elsewhere the
   // tools can only fail, and listing them hides the Slack Connect card.
-  if (options.slackBotAvailable !== false) registerSlackBotTools(server, deps, grant, sessionId, json);
+  if (options.slackBotAvailable !== false)
+    registerSlackBotTools(server, deps, grant, sessionId, json);
   registerFikenTools(server, deps, grant, sessionId, json);
 
   // Orchestration, secret, and GitHub status tools are permission-gated

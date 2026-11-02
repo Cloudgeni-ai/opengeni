@@ -679,6 +679,19 @@ must be active, unshared and already include the bot. Older chats with a smaller
 frozen tool selection still need the tools enabled through normal configuration;
 an accepted turn is never widened.
 
+The first-party MCP lists `slack_bot_*` tools only while the workspace has an
+eligible bot (a local or explicitly organization-shared installation), checked on
+each listing request. In a workspace without one, a Slack request falls through to
+tool discovery's connect offer instead of matching a bot tool that cannot work. If
+that check itself fails, the tools stay listed.
+
+In an interactive chat, `slack_bot_send_prepared_message` follows the person's own
+Slack send permission: when their Slack connection's `slack_send_message` is set
+to Ask first (or blocked), the bot send opens the ordinary tool approval request
+showing the channel and message text. With no chosen permission the send runs at
+once, as before. Scheduled and unattended runs keep sending without a prompt. An
+unreadable permission falls back to that default rather than failing the send.
+
 Legacy schedules retain their saved `agentConfig.slackBotConnectionId` and
 `slackBotChannelId` as defaults. Omitting both destination arguments uses the
 legacy task-bound prepare/send path. Explicit destinations use ordinary bot

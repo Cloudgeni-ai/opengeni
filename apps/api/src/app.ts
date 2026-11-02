@@ -2109,9 +2109,7 @@ export function createAppComposition(deps: AppDependencies): {
             ? { accountId: grant.accountId, workspaceId, sessionId: boundSessionId }
             : null;
         const [, [mcpDeps, startedByPerson, fullAccess, slackBotAvailable]] =
-          await alongsideAuthorization(
-          authorizeBoundSession(),
-          () =>
+          await alongsideAuthorization(authorizeBoundSession(), () =>
             Promise.all([
               resolveWorkspaceMcpRouteDeps(routeDeps, grant),
               // Fixed for the session's life: a person started it themselves.
@@ -2125,7 +2123,7 @@ export function createAppComposition(deps: AppDependencies): {
               // Live: the bot tools are listed only while a bot is available.
               resolveSlackBotToolAvailability(routeDeps.db, grant),
             ]),
-        );
+          );
         reads.handOffToToolDispatch();
         const mcp = buildOpenGeniMcpServer(mcpDeps, grant, {
           requestOrigin: new URL(c.req.url).origin,

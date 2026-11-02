@@ -1804,9 +1804,7 @@ describe("workspace Slack bot tools follow bot availability", () => {
     expect(
       botTools(buildOpenGeniMcpServer(deps(), defaultSession(), { slackBotAvailable: true })),
     ).toEqual([...SLACK_BOT_DEFAULT_TOOLS].sort());
-    const everyBotTool = FIRST_PARTY_MCP_TOOL_NAMES.filter((name) =>
-      name.startsWith("slack_bot_"),
-    );
+    const everyBotTool = FIRST_PARTY_MCP_TOOL_NAMES.filter((name) => name.startsWith("slack_bot_"));
     const explicit = botTools(
       buildOpenGeniMcpServer(deps(), grant(["connections:read", "files:read"], everyBotTool), {
         slackBotAvailable: true,
@@ -1831,9 +1829,7 @@ describe("workspace Slack bot tools follow bot availability", () => {
       false,
     );
     expect(grantMayListSlackBotTools(grant(["connections:read"]))).toBe(false);
-    expect(grantMayListSlackBotTools({ ...human(), permissions: ["connections:read"] })).toBe(
-      true,
-    );
+    expect(grantMayListSlackBotTools({ ...human(), permissions: ["connections:read"] })).toBe(true);
     // No read at all when nothing could list: a db that throws is never touched.
     const untouched = new Proxy(
       {},

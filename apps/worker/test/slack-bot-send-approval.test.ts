@@ -184,10 +184,7 @@ test("personal Slack sends are found on the turn's frozen Slack accounts only", 
       },
     ],
   } as never);
-  const delegation = (
-    serverId: string,
-    providerDomain: string,
-  ): McpPersonalConnectionDelegation =>
+  const delegation = (serverId: string, providerDomain: string): McpPersonalConnectionDelegation =>
     ({
       serverId,
       connectionId: crypto.randomUUID(),
