@@ -585,6 +585,8 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     agentConfig: session.agent,
     selectedFirstPartyMcpTools,
     firstPartyPermissions: effectiveFirstPartyPermissions,
+    nestedAgentDepth: session.nestedAgentDepth,
+    effectiveMaxNestedAgentDepth: session.effectiveMaxNestedAgentDepth,
   });
   const needsTitle = shouldRequestMissingSessionTitle({
     agentConfig: session.agent,

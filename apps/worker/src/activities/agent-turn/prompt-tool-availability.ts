@@ -18,10 +18,15 @@ export function promptToolAvailabilityForTurn(input: {
   agentConfig: ResolvedAgentConfig | null | undefined;
   selectedFirstPartyMcpTools: readonly FirstPartyMcpToolName[];
   firstPartyPermissions: readonly Permission[] | null | undefined;
+  /** Frozen on the session; an exhausted depth hides `session_create`. */
+  nestedAgentDepth?: number | undefined;
+  effectiveMaxNestedAgentDepth?: number | undefined;
 }): AgentPromptToolAvailability | undefined {
   if (!input.agentConfig) return undefined;
   return deriveAgentPromptToolAvailability({
     selectedFirstPartyTools: input.selectedFirstPartyMcpTools,
     firstPartyPermissions: input.firstPartyPermissions,
+    nestedAgentDepth: input.nestedAgentDepth,
+    effectiveMaxNestedAgentDepth: input.effectiveMaxNestedAgentDepth,
   });
 }

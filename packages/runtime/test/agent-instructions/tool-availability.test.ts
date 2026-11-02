@@ -172,6 +172,34 @@ describe("deriveAgentPromptToolAvailability", () => {
     expect(composed).toContain("Use `command_input` only to send input where supported");
   });
 
+  test("an exhausted nesting depth proves session_create absent, as the MCP server hides it", () => {
+    const selection = { selectedFirstPartyTools: [...DEFAULT_FIRST_PARTY_MCP_TOOLS] };
+    const baseline = deriveAgentPromptToolAvailability(selection).unavailable;
+    expect(baseline).not.toContain("session_create");
+    for (const [depth, max] of [
+      [0, 0],
+      [2, 2],
+      [3, 2],
+    ] as const) {
+      const view = deriveAgentPromptToolAvailability({
+        ...selection,
+        nestedAgentDepth: depth,
+        effectiveMaxNestedAgentDepth: max,
+      });
+      expect(view.unavailable).toEqual([...baseline, "session_create"].sort());
+    }
+    for (const depths of [
+      { nestedAgentDepth: 0, effectiveMaxNestedAgentDepth: 1 },
+      { nestedAgentDepth: 1, effectiveMaxNestedAgentDepth: 2 },
+      { nestedAgentDepth: 5 },
+      { effectiveMaxNestedAgentDepth: 0 },
+      {},
+    ]) {
+      const view = deriveAgentPromptToolAvailability({ ...selection, ...depths });
+      expect(view.unavailable).not.toContain("session_create");
+    }
+  });
+
   test("the view is sorted and deterministic, so an unchanged selection keeps the prefix", () => {
     const input = {
       selectedFirstPartyTools: without("session_events", "knowledge_save"),
@@ -234,6 +262,33 @@ describe("modular prompt: tool-specific clauses", () => {
     );
     expect(composed).toContain("Goal completion records short ledger proof");
     expect(composed).toContain("A definitive missing permission or required human decision");
+  });
+
+  test("without session_create, spawning guidance drops and session coordination remains", () => {
+    const baseline = compose();
+    const composed = compose({ unavailable: ["session_create"] });
+    for (const removed of [
+      "Create a child worker only for a concrete, bounded subtask",
+      "Before spawning, decide what output you need",
+      "After spawning, keep each child id and event cursor.",
+      "call `wait_for_input` right after spawning",
+      "`child_requires_action`",
+    ]) {
+      expect(baseline).toContain(removed);
+      expect(composed).not.toContain(removed);
+    }
+    for (const kept of [
+      "# Session coordination",
+      "When you are a child session, your final answer is delivered automatically to your parent session.",
+      "If the user asks to create, inspect, continue, pause, resume, steer, rename, or otherwise manage a session",
+      "Do not repurpose or direct an unrelated existing session unless the user explicitly asks. If no matching session tool is available on this turn, handle what you can in this session and report any required delegation that is unavailable instead of inventing an API.",
+      "When supervising work, an accepted message, queued status, or changing timestamp is not proof of execution.",
+      "After Send or Steer, use session_message_status",
+      "For a short wait on a child or peer session inside the current turn",
+    ]) {
+      expect(composed).toContain(kept);
+    }
+    expect(composed.length).toBeLessThan(baseline.length);
   });
 
   test("knowledge_search allowed but knowledge_save absent keeps retrieval and policy", () => {
