@@ -64,14 +64,32 @@ export class AnthropicProtocolError extends Error {
  * readable summary and is shown as a thought. That text is not the words the
  * model wrote (those stay inside the signed block) and it can claim things the
  * model never said. It is therefore reasoning: never the agent's message or
- * reply, and it never counts as a visible reply. Because a progress update
- * cannot be told apart from a reasoning summary, readable thinking from these
- * models is marked as a possible progress update so the wait_for_input guard
- * asks for the verbatim `reply` argument. Its signed block is replayed
- * unchanged in place like any other thinking block.
+ * reply, and it never counts as a visible reply. A progress update is told
+ * apart from reasoning by its signature (`anthropicThinkingIsProgressUpdate`)
+ * and marked, so the wait_for_input guard asks for the verbatim `reply`
+ * argument. Its signed block is replayed unchanged in place like any other
+ * thinking block.
  */
 export function anthropicWritesProgressUpdates(model: string): boolean {
   return claudeNativeModelProfile(model)?.progressUpdates === true;
+}
+
+const PROGRESS_UPDATE_SIGNATURE_MARKER = "narration";
+
+/**
+ * Whether a thinking block is a progress update (a note the model wrote for
+ * the person) rather than reasoning. Anthropic documents no field for this
+ * under `display: "summarized"`, but a progress update's signature carries
+ * the marker "narration" and a reasoning block's never does; Claude Code
+ * relies on the same marker. Checked against every thinking block of a
+ * long-running production chat: all 176 blocks that `display: "updates"`
+ * returned with text (the progress updates) carry it, and none of the 3,460
+ * empty (reasoning) blocks do. A signature that cannot be read counts as
+ * reasoning.
+ */
+export function anthropicThinkingIsProgressUpdate(signature: string): boolean {
+  if (!signature) return false;
+  return Buffer.from(signature, "base64").includes(PROGRESS_UPDATE_SIGNATURE_MARKER);
 }
 
 /**
@@ -1068,10 +1086,10 @@ export function anthropicResponse(
         // Readable thinking text is always Anthropic's summary (of reasoning
         // or of a progress update), never words the model wrote for the
         // person. It stays reasoning so it is never shown or recorded as the
-        // agent's message (anthropicWritesProgressUpdates). From a model that
-        // writes progress updates it is marked, because it may hold a note for
-        // the person that was not shown as written: the wait_for_input guard
-        // then asks for the verbatim `reply` argument instead.
+        // agent's message (anthropicWritesProgressUpdates). A progress update
+        // (anthropicThinkingIsProgressUpdate) is marked, because it holds a
+        // note for the person that was not shown as written: the
+        // wait_for_input guard then asks for the verbatim `reply` argument.
         output.push({
           type: "reasoning",
           id,
@@ -1079,7 +1097,10 @@ export function anthropicResponse(
           providerData: {
             anthropic: {
               block: structuredClone(block),
-              ...(options.progressUpdates && block.type === "thinking" && block.thinking
+              ...(options.progressUpdates &&
+              block.type === "thinking" &&
+              block.thinking &&
+              anthropicThinkingIsProgressUpdate(String(block.signature ?? ""))
                 ? { progressUpdate: true }
                 : {}),
             },

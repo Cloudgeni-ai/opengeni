@@ -13437,8 +13437,7 @@ const CLAUDE_NATIVE_MODEL_PROFILES: Readonly<
        * The model may write its notes for the person between tool calls as
        * progress-update `thinking` blocks instead of `text` blocks. Requests
        * ask for summarized thinking, so such a note comes back only as a
-       * summary that cannot be told apart from reasoning; its readable
-       * thinking is treated as a possible progress update.
+       * summary; its signature tells it apart from reasoning.
        */
       progressUpdates?: boolean;
     }>
