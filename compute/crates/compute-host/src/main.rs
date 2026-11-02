@@ -879,6 +879,7 @@ async fn run_serve(mut args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         about,
         observer: observer.clone(),
         summary_every: HostConfig::SUMMARY_EVERY,
+        recovery_retry: HostConfig::RECOVERY_RETRY,
         lease: prepared.as_ref().map(|prepared| prepared.gate.clone()),
         guard_freezes: fleet
             .as_ref()

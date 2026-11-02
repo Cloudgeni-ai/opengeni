@@ -956,6 +956,7 @@ export type {
   CapabilityUnavailableReason,
   ClientConfig,
   ClientVoiceInputConfig,
+  DictationModelOption,
   ClientModel,
   CodexRealtimeVoice,
   CodexRealtimeWebrtcRequest,

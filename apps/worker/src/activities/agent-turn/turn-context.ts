@@ -119,8 +119,10 @@ export type BillingState = {
   countsTowardTokenCap: boolean;
   /** The turn's frozen funding origin: API work spends credits only. */
   billingOrigin?: BillingOrigin;
-  /** Served by the person's own key or subscription: pays the platform fee. */
+  /** Served by the person's own API key: pays the platform fee. */
   isByokTurn?: boolean;
+  /** Served by the person's own subscription: no fee, needs a paid plan. */
+  isOwnSubscriptionTurn?: boolean;
 };
 
 export type SandboxRuntimeState = {

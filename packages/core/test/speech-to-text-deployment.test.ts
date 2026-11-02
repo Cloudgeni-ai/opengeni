@@ -5,6 +5,7 @@ import {
   asTranscriptionServiceError,
   createSpeechToTextDeployment,
   createTranscriptionService,
+  dictationChoiceOf,
   dictationProviders,
   meetingModelFor,
   meetingModelWithoutCreditsFor,
@@ -606,6 +607,64 @@ describe("dictation over the shared providers", () => {
     await expect(service.transcribe({ ...request, providerId: "openai" })).rejects.toMatchObject({
       code: "unavailable",
     });
+  });
+
+  test("a dictation that names its model is heard by exactly that model, never another", async () => {
+    const heard: string[] = [];
+    const settings = testSettings({ voiceInputProviderOrder: "openai" });
+    const hear: RecordingTranscriptionProvider["transcribe"] = async (input) => {
+      heard.push(input.model);
+      return { languages: [], audioMilliseconds: null, diarized: false, words: [], text: "hi" };
+    };
+    const two = fakeTextProvider("first", "workspace_subscription", hear);
+    two.models = [
+      ...two.models,
+      { ...two.models[0]!, model: "first-english", name: "First English" },
+      // Only live: never a dictation's model.
+      {
+        ...two.models[0]!,
+        model: "first-live",
+        name: "First live",
+        capabilities: { ...two.models[0]!.capabilities, batch: false, live: true },
+      },
+    ];
+    const refusing = fakeTextProvider("second", "workspace_subscription", async () => {
+      throw new RecordingTranscriptionError("signed out", "unauthorized", false);
+    });
+    const deployment = createSpeechToTextDeployment(
+      { settings },
+      { isEuOnly: async () => false, providers: [refusing, two] },
+    );
+    const service = createTranscriptionService({ settings, db: {} as never, deployment });
+    // The models a shortcut can pick, of each ready provider.
+    const offered = await service.availableModels!({ workspaceId: "w" });
+    expect(offered.filter((entry) => entry.providerId !== "openai")).toEqual([
+      { providerId: "second", providerName: "second", model: "second-model", name: "second-model" },
+      { providerId: "first", providerName: "first", model: "first-model", name: "first-model" },
+      { providerId: "first", providerName: "first", model: "first-english", name: "First English" },
+    ]);
+    const result = await service.transcribe({
+      ...request,
+      providerId: "first",
+      model: "first-english",
+    });
+    expect(result).toMatchObject({ text: "hi", providerId: "first" });
+    expect(heard).toEqual(["first-english"]);
+    // A model the provider doesn't offer for dictation is refused, not swapped.
+    await expect(
+      service.transcribe({ ...request, providerId: "first", model: "first-live" }),
+    ).rejects.toMatchObject({ code: "unavailable", fallbackSafe: false });
+    // A named model that refuses doesn't move to another provider.
+    await expect(
+      service.transcribe({ ...request, providerId: "second", model: "second-model" }),
+    ).rejects.toBeInstanceOf(TranscriptionServiceError);
+    expect(heard).toEqual(["first-english"]);
+    expect(dictationChoiceOf(deployment, "first", "first-english")?.model.name).toBe(
+      "First English",
+    );
+    expect(dictationChoiceOf(deployment, "first")?.model.model).toBe("first-model");
+    expect(dictationChoiceOf(deployment, "first", "first-live")).toBeNull();
+    expect(dictationChoiceOf(deployment, "nobody")).toBeNull();
   });
 });
 

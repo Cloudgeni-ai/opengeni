@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { canonicalMcpUrl } from "./catalog-curation";
 import { probeCatalogSnapshot, type ProbedCatalogSnapshot } from "./integrations-catalog-probe";
+import { screenCatalogRowLogos, type LogoScreenSummary } from "./screen-catalog-logos";
 import {
   catalogCandidateRows,
   normalizeCatalogSnapshot,
@@ -368,6 +369,8 @@ export type RefreshedSnapshotDocument = {
     googleapisDropped: number;
   };
   retention: RetentionSummary;
+  /** Rows whose logo host served a generated letter; their logo source is null. */
+  logoScreen?: LogoScreenSummary;
   importRows: ProbedCatalogSnapshot["rows"];
   skipped: ProbedCatalogSnapshot["skipped"];
   quarantined: Array<{ row: unknown; reason: string }>;
@@ -528,9 +531,19 @@ if (import.meta.main) {
     allowShrink: args.allowShrink,
     outputPath: args.outputPath,
   });
+  // A generated letter is not the provider's logo; record "no logo" instead.
+  const screen = await screenCatalogRowLogos(result.document.importRows);
+  const { importRows: _unscreened, skipped, quarantined, ...header } = result.document;
+  const document: RefreshedSnapshotDocument = {
+    ...header,
+    logoScreen: screen.summary,
+    importRows: screen.rows,
+    skipped,
+    quarantined,
+  };
   await mkdir(dirname(args.outputPath), { recursive: true });
-  await writeFile(args.outputPath, serializeRefreshedSnapshot(result.document));
-  const { document, hydration, normalized, probed } = result;
+  await writeFile(args.outputPath, serializeRefreshedSnapshot(document));
+  const { hydration, normalized, probed } = result;
   console.log(
     JSON.stringify(
       {
@@ -550,6 +563,8 @@ if (import.meta.main) {
         dropped: probed.probe.dropped,
         unverified: probed.probe.unverified,
         googleapisDropped: probed.probe.googleapisDropped,
+        logoPlaceholders: screen.summary.placeholderRows.length,
+        logoUnreachable: screen.summary.unreachable,
         skipped: probed.skipped.length,
         quarantined: probed.quarantined.length,
         cleaning: probed.cleaning,

@@ -18,6 +18,7 @@ import { Link, useNavigate, useSearch } from "../lib/navigation";
 import {
   ArchiveIcon,
   ArchiveRestoreIcon,
+  LinkIcon,
   PanelsTopLeftIcon,
   PlusIcon,
   RotateCcwIcon,
@@ -27,6 +28,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "../lib/toast";
 
 import { ArtifactLibrary } from "../components/artifacts/artifact-library";
+import { useCopyArtifactLink } from "../components/artifacts/copy-artifact-link";
 import {
   ARTIFACT_DETAIL_FRAME,
   ArtifactKindTile,
@@ -479,6 +481,7 @@ function ArtifactDetailPage({
   );
   const navigate = useNavigate();
   const back = useArtifactsBackLink(workspaceId, fromSession);
+  const copyLink = useCopyArtifactLink(workspaceId);
   const search = useSearch({ strict: false }) as ArtifactReturnSearch;
   // The tab is in the address, so Settings (from the workbench or the old
   // Publish link) and the other tabs can be linked to and survive a reload.
@@ -651,37 +654,46 @@ function ArtifactDetailPage({
               <RelativeTime key="updated" date={artifact.updatedAt} prefix="Updated" inSentence />,
             ]}
             actions={
-              canPublish ? (
-                <>
-                  {audience.shareButton}
-                  {manageData && !archived ? (
-                    <SitePublishButton load={publication.load} onOpen={() => setTab("settings")} />
-                  ) : null}
-                  {archived ? (
-                    <Button
-                      type="button"
-                      size="sm"
-                      onClick={() => void setSiteStatus("active")}
-                      disabled={statusBusy}
-                      className="rounded-[10px] pointer-coarse:h-11"
-                    >
-                      <ArchiveRestoreIcon aria-hidden="true" />
-                      {statusBusy ? "Restoring…" : "Restore Site"}
-                    </Button>
-                  ) : (
-                    <Button
-                      type="button"
-                      size="sm"
-                      onClick={startEditSession}
-                      disabled={context.busy}
-                      className="rounded-[10px] pointer-coarse:h-11"
-                    >
-                      <SparklesIcon aria-hidden="true" />
-                      Edit with Opengeni
-                    </Button>
-                  )}
-                </>
-              ) : null
+              <>
+                {canPublish ? audience.shareButton : null}
+                <RowButton onClick={() => void copyLink({ kind: "site", id: artifactId })}>
+                  <LinkIcon aria-hidden="true" />
+                  Copy link
+                </RowButton>
+                {canPublish ? (
+                  <>
+                    {manageData && !archived ? (
+                      <SitePublishButton
+                        load={publication.load}
+                        onOpen={() => setTab("settings")}
+                      />
+                    ) : null}
+                    {archived ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        onClick={() => void setSiteStatus("active")}
+                        disabled={statusBusy}
+                        className="rounded-[10px] pointer-coarse:h-11"
+                      >
+                        <ArchiveRestoreIcon aria-hidden="true" />
+                        {statusBusy ? "Restoring…" : "Restore Site"}
+                      </Button>
+                    ) : (
+                      <Button
+                        type="button"
+                        size="sm"
+                        onClick={startEditSession}
+                        disabled={context.busy}
+                        className="rounded-[10px] pointer-coarse:h-11"
+                      >
+                        <SparklesIcon aria-hidden="true" />
+                        Edit with Opengeni
+                      </Button>
+                    )}
+                  </>
+                ) : null}
+              </>
             }
             tabs={
               <LineTabsList aria-label="Site">

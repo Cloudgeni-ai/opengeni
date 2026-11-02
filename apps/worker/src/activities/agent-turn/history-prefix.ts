@@ -32,22 +32,23 @@ export class HistoryPrefixGuard {
   private keys(items: Array<Record<string, unknown>>, truncationTokens?: number): string[] {
     return sanitizeHistoryItemsForModel(items, truncationTokens).map((item) =>
       createHash("sha256")
-        .update(JSON.stringify(sorted(normalizeProtocolJsonValue(withoutRequestMarks(item)))))
+        .update(
+          JSON.stringify(sorted(normalizeProtocolJsonValue(item, "$", REQUEST_MARKS_OMITTED))),
+        )
         .digest("hex"),
     );
   }
 }
 
 /**
- * The item without symbol-keyed properties. Provider projection marks some
+ * An item's identity is its stored JSON form. Provider projection marks some
  * turn-input items with request-local symbol keys (for example how a Claude
- * web search is projected for another transport). They are never stored or
- * sent, so they are not part of the item's durable identity.
+ * web search is projected for another transport); they are never stored or
+ * sent, so they are not part of the item's durable identity. Any other value
+ * JSON cannot carry is converted exactly as history persistence converts and
+ * logs it, so the identity matches the stored row without a second log line.
  */
-function withoutRequestMarks(item: Record<string, unknown>): Record<string, unknown> {
-  if (Object.getOwnPropertySymbols(item).length === 0) return item;
-  return Object.fromEntries(Object.entries(item));
-}
+const REQUEST_MARKS_OMITTED = { onAdjustment: () => undefined } as const;
 
 function sorted(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sorted);

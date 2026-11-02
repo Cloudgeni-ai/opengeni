@@ -34,6 +34,7 @@ import {
 import { SiteView } from "../../artifacts";
 import { SiteVersionMenu } from "../components/artifacts/site-version-menu";
 import { useArtifactsBackLink } from "../components/artifacts/artifact-page-chrome";
+import { CopyArtifactLinkButton } from "../components/artifacts/copy-artifact-link";
 import type {
   CreatedConversation,
   NewConversationCreateOptions,
@@ -305,11 +306,18 @@ export function SiteViewRoute({
               // The one publication control. The Site view never says "Live":
               // it stays current, and says so only while Updating or Reconnecting.
               liveStatus={
-                <SitePublicationControl
-                  load={publication.load}
-                  canPublish={canPublish}
-                  onOpenPublishing={openPublishing}
-                />
+                <>
+                  <SitePublicationControl
+                    load={publication.load}
+                    canPublish={canPublish}
+                    onOpenPublishing={openPublishing}
+                  />
+                  <CopyArtifactLinkButton
+                    workspaceId={workspaceId}
+                    item={{ kind: "site", id: siteId }}
+                    className="size-8 rounded-md text-fg-muted hover:text-fg"
+                  />
+                </>
               }
               versionId={artifact ? (artifact.currentVersion?.id ?? null) : undefined}
               watch={live.watch}

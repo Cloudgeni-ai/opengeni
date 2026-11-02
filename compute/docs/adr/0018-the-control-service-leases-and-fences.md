@@ -405,8 +405,11 @@ can be built and tested.
   A host with sandboxes it cannot read (blocked) does not register until
   they are readable or removed, since it cannot rule on them.
 - **Requests.** A create is placed (two random hosts that fit, preferring
-  one with a ready clone of the shape, then the most free memory, spread
-  over zones) and recorded with owner epoch 1 while the host creates it.
+  one with a ready clone of the shape, then the larger share of its room
+  free (the smaller of the shares of its memory and processor time it can
+  still promise, so hosts of different sizes fill evenly), then the most
+  free memory, spread over zones) and recorded with owner epoch 1 while
+  the host creates it.
   An adopt prefers a host whose memory profile and CPU template match the
   archived memory image, ahead of ready clones and free memory, since
   anywhere else the sandbox boots afresh and loses its programs. A

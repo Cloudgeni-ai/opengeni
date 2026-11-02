@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { ComponentType, RefObject } from "react";
 import type { Root } from "react-dom/client";
@@ -33,6 +33,7 @@ type SearchOptions = {
   search?: string;
   archiveStatus?: string;
   limit?: number;
+  parentSessionId?: string | null;
   signal?: AbortSignal;
 };
 const sessionCalls: Array<{ projection: string; workspaceId: string; options: SearchOptions }> = [];
@@ -139,6 +140,9 @@ let CommandMenu: ComponentType<{
   returnFocus: RefObject<HTMLElement | null>;
 }>;
 let rememberSidebarSites: typeof import("../../lib/actions/site-directory").rememberSidebarSites;
+let rememberChats: typeof import("../../lib/actions/chat-directory").rememberChats;
+let recordChatVisit: typeof import("../../lib/actions/chat-directory").recordChatVisit;
+let setSidebarOrder: typeof import("../../lib/actions/chat-directory").setSidebarOrder;
 let root: Root | null = null;
 let host: HTMLElement | null = null;
 
@@ -153,6 +157,8 @@ beforeAll(async () => {
   }));
   CommandMenu = (await import("./command-menu")).default;
   ({ rememberSidebarSites } = await import("../../lib/actions/site-directory"));
+  ({ rememberChats, recordChatVisit, setSidebarOrder } =
+    await import("../../lib/actions/chat-directory"));
   // The sidebar has loaded these Site rows, most recent activity first.
   rememberSidebarSites(subjectId, workspaceId, [
     { siteId: sites.usage, title: "Usage dashboard", updatedAt: "2026-10-23T09:00:00.000Z" },
@@ -245,17 +251,30 @@ test("chat title search uses summaries without requesting full session configura
   currentEnv = env({ openChat: (id) => chats.push(id) });
   await openMenu();
   await type("usage");
-  expect(sessionCalls).toHaveLength(1);
-  expect(sessionCalls[0]).toEqual({
-    projection: "summary",
-    workspaceId,
-    options: {
-      search: "usage",
-      archiveStatus: "all",
-      limit: 20,
-      signal: expect.objectContaining({ aborted: false }),
+  // Top-level chats, then a small search of every chat here for sub-agent ones.
+  expect(sessionCalls).toEqual([
+    {
+      projection: "summary",
+      workspaceId,
+      options: {
+        search: "usage",
+        archiveStatus: "all",
+        limit: 20,
+        parentSessionId: null,
+        signal: expect.objectContaining({ aborted: false }),
+      },
     },
-  });
+    {
+      projection: "summary",
+      workspaceId,
+      options: {
+        search: "usage",
+        archiveStatus: "all",
+        limit: 10,
+        signal: expect.objectContaining({ aborted: false }),
+      },
+    },
+  ]);
   await act(async () => {
     option("Usage report follow-up").dispatchEvent(new MouseEvent("click", { bubbles: true }));
   });
@@ -267,7 +286,7 @@ test("older clients without the optional summary method retain full-page title s
   client.listSessionSummaryPage = undefined;
   await openMenu();
   await type("usage");
-  expect(sessionCalls.map((call) => call.projection)).toEqual(["full"]);
+  expect(sessionCalls.map((call) => call.projection)).toEqual(["full", "full"]);
   expect(option("Usage report follow-up")).toBeTruthy();
 });
 
@@ -277,7 +296,7 @@ test("summary errors do not retry the expensive full-page route", async () => {
   };
   await openMenu();
   await type("unavailable");
-  expect(sessionCalls.map((call) => call.projection)).toEqual(["summary"]);
+  expect(sessionCalls.map((call) => call.projection)).toEqual(["summary", "summary"]);
   expect(input()).toBeTruthy();
 });
 
@@ -289,9 +308,15 @@ test("replacing a title query and unmounting abort their summary requests", asyn
   expect(first.aborted).toBe(false);
   await type("second");
   expect(first.aborted).toBe(true);
-  expect(sessionCalls.map((call) => call.options.search)).toEqual(["first", "second"]);
-  expect(sessionCalls.map((call) => call.projection)).toEqual(["summary", "summary"]);
-  const second = sessionCalls[1]!.options.signal!;
+  expect(sessionCalls[1]!.options.signal!.aborted).toBe(true);
+  expect(sessionCalls.map((call) => call.options.search)).toEqual([
+    "first",
+    "first",
+    "second",
+    "second",
+  ]);
+  expect(new Set(sessionCalls.map((call) => call.projection))).toEqual(new Set(["summary"]));
+  const second = sessionCalls[2]!.options.signal!;
   await act(async () => root!.unmount());
   root = null;
   expect(second.aborted).toBe(true);
@@ -338,10 +363,12 @@ test("summary search preserves per-workspace limits and combines pinned and unpi
       projection,
       options.limit,
       options.archiveStatus,
+      options.parentSessionId,
     ]),
   ).toEqual([
-    [workspaceId, "summary", 20, "all"],
-    [otherWorkspace, "summary", 6, "all"],
+    [workspaceId, "summary", 20, "all", null],
+    [workspaceId, "summary", 10, "all", undefined],
+    [otherWorkspace, "summary", 6, "all", null],
   ]);
   expect(option("Usage pinned support")).toBeTruthy();
   expect(option("Usage support")).toBeTruthy();
@@ -614,4 +641,134 @@ test("without meetings, neither recording action is listed", async () => {
   const options = groups().flatMap((group) => group.options);
   expect(options).not.toContain("Start recording");
   expect(options).not.toContain("Stop recording");
+});
+
+describe("sub-agent chats", () => {
+  const leadId = "44444444-4444-4444-8444-444444444441";
+  const chatRow = (id: string, title: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    workspaceId,
+    parentSessionId: null as string | null,
+    title,
+    titleSource: "user",
+    status: "idle",
+    pinned: false,
+    archived: false,
+    createdAt: "2026-11-01T10:00:00.000Z",
+    updatedAt: "2026-11-01T10:00:00.000Z",
+    ...extra,
+  });
+  const lead = chatRow(leadId, "Release lead");
+  const worker = (index: number, title: string, parentSessionId = leadId) =>
+    chatRow(`44444444-4444-4444-8444-44444444445${index}`, title, {
+      parentSessionId,
+      updatedAt: `2026-11-01T1${index}:00:00.000Z`,
+    });
+  const parentOf = (title: string) =>
+    option(title).querySelector("[data-chat-parent]")?.textContent ?? null;
+
+  test("one opened here joins Recent chats and says which chat it belongs to", async () => {
+    const subject = `reader-${crypto.randomUUID()}`;
+    currentEnv = env({ subjectId: subject });
+    const visited = worker(1, "Fix flaky test");
+    const unopened = worker(2, "Bump dependencies");
+    rememberChats(subject, [lead, unopened] as never);
+    recordChatVisit(subject, visited as never);
+    // The sidebar shows the lead with its worker expanded under it.
+    setSidebarOrder(subject, workspaceId, [leadId, unopened.id], []);
+    await openMenu();
+    expect(groups().find((group) => group.label === "Recent chats")?.options).toEqual([
+      "Fix flaky test",
+      "Release lead",
+    ]);
+    expect(parentOf("Fix flaky test")).toBe("in Release lead");
+    expect(parentOf("Release lead")).toBeNull();
+  });
+
+  test("a search lists top-level chats first, then a few matching sub-agent chats, server ones included", async () => {
+    const subject = `reader-${crypto.randomUUID()}`;
+    currentEnv = env({ subjectId: subject });
+    rememberChats(subject, [lead] as never);
+    const workers = [1, 2, 3, 4].map((index) => worker(index, `Deploy worker ${index}`));
+    summarySearch = async (_id, options) => ({
+      pinned: [],
+      sessions: (options.parentSessionId === null
+        ? [chatRow("44444444-4444-4444-8444-444444444442", "Deploy checklist")]
+        : workers) as never,
+      nextCursor: null,
+    });
+    await openMenu();
+    await type("deploy");
+    const listed = groups();
+    expect(listed.map((group) => group.label).slice(0, 2)).toEqual(["Chats", "Sub-agent chats"]);
+    expect(listed.find((group) => group.label === "Chats")?.options).toEqual(["Deploy checklist"]);
+    // At most three, most recently active first.
+    expect(listed.find((group) => group.label === "Sub-agent chats")?.options).toEqual([
+      "Deploy worker 4",
+      "Deploy worker 3",
+      "Deploy worker 2",
+    ]);
+    expect(parentOf("Deploy worker 4")).toBe("in Release lead");
+  });
+
+  test("a sub-agent chat whose parent isn't loaded gets its parent read, once", async () => {
+    const subject = `reader-${crypto.randomUUID()}`;
+    currentEnv = env({ subjectId: subject });
+    const otherLead = "44444444-4444-4444-8444-444444444443";
+    summarySearch = async (_id, options) => {
+      const ids = (options as { sessionIds?: string[] }).sessionIds;
+      if (ids) {
+        return {
+          pinned: [],
+          sessions: ids.includes(otherLead) ? [chatRow(otherLead, "Billing lead")] : [],
+          nextCursor: null,
+        } as never;
+      }
+      return {
+        pinned: [],
+        sessions: (options.parentSessionId === null
+          ? []
+          : [worker(5, "Invoice export", otherLead)]) as never,
+        nextCursor: null,
+      };
+    };
+    await openMenu();
+    await type("invoice");
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    const parentReads = sessionCalls.filter(
+      (call) => (call.options as { sessionIds?: string[] }).sessionIds,
+    );
+    expect(parentReads).toHaveLength(1);
+    expect(parentReads[0]!.options).toMatchObject({
+      sessionIds: [otherLead],
+      archiveStatus: "all",
+    });
+    expect(parentOf("Invoice export")).toBe("in Billing lead");
+  });
+
+  test("a pinned sub-agent chat lists with the chats, as one of the person's own", async () => {
+    const subject = `reader-${crypto.randomUUID()}`;
+    currentEnv = env({ subjectId: subject });
+    const triage = {
+      ...worker(6, "Triage bot"),
+      pinned: true,
+      pinnedAt: "2026-11-01T12:00:00.000Z",
+    };
+    rememberChats(subject, [lead, triage] as never);
+    // The sidebar's Pinned section lists it above the lead.
+    setSidebarOrder(subject, workspaceId, [triage.id, leadId], [triage.id]);
+    await openMenu();
+    expect(groups().find((group) => group.label === "Recent chats")?.options).toEqual([
+      "Triage bot",
+      "Release lead",
+    ]);
+    await type("triage");
+    const listed = groups();
+    expect(listed.find((group) => group.label === "Chats")?.options).toEqual(["Triage bot"]);
+    expect(listed.map((group) => group.label)).not.toContain("Sub-agent chats");
+    expect(parentOf("Triage bot")).toBe("in Release lead");
+    expect(option("Triage bot").querySelector("svg.lucide-pin")).toBeTruthy();
+  });
 });

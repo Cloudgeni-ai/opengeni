@@ -32,6 +32,8 @@ import {
   type ForkSessionContentResult,
   type TransitionSessionVisibilityResult,
 } from "@opengeni/db";
+import { sandboxBackendServed, unservedSandboxBackendMessage } from "@opengeni/config";
+import { HTTPException } from "hono/http-exception";
 import { publishDurableSessionEvents, type EventBus } from "@opengeni/events";
 import {
   privacyDeploymentLimits,
@@ -626,6 +628,20 @@ export async function forkManagedHumanSession(
     authorization.grant.subjectId,
   );
   if (source) assertSessionIsNotImported(source);
+  // A fork copies the source row, including its sandbox backend, into a new
+  // session with its own box. Apply the create-time backend gate so a row on a
+  // backend this deployment does not serve (for example `local` on a cloud
+  // deployment) cannot be copied into a fresh host box. Applied receipts were
+  // replayed above; Connected Machine homes are bound to their machine.
+  if (
+    source &&
+    source.sandboxBackend !== "selfhosted" &&
+    !sandboxBackendServed(deps.settings, source.sandboxBackend)
+  ) {
+    throw new HTTPException(422, {
+      message: `This session cannot be forked here: ${unservedSandboxBackendMessage(deps.settings, source.sandboxBackend)}`,
+    });
+  }
   const runtimeConfiguration = runtimeSetupRequested ? await resolveRuntimeConfiguration() : null;
   const result = await runTenancyMutation(
     async () =>

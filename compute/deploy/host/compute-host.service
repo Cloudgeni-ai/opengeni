@@ -22,6 +22,9 @@ AssertPathIsMountPoint=/var/lib/compute
 EnvironmentFile=/etc/compute/installed.env
 EnvironmentFile=/etc/compute/host.env
 ExecStartPre=/opt/compute/current/check-host
+# What this start uses, so install.sh restarts the agent only when that
+# changes (agent-inputs); never in the way of the start.
+ExecStartPre=-/opt/compute/current/agent-inputs started
 ExecStart=/opt/compute/current/compute-host --socket /run/compute-host.sock serve \
   --root /var/lib/compute/state \
   --firecracker ${COMPUTE_FIRECRACKER} --jailer ${COMPUTE_JAILER} $COMPUTE_RETAINED_FIRECRACKER \
