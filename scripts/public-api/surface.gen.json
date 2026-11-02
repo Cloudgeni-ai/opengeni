@@ -25090,7 +25090,8 @@
         "$.language": "string?",
         "$.maxSpeakers": "integer?",
         "$.model": "string?",
-        "$.providerId": "string?"
+        "$.providerId": "string?",
+        "$.speakers": "integer?"
       }
     },
     "RecordingTranscriptionRequest": {
@@ -25105,7 +25106,8 @@
         "$.language": "string? null",
         "$.maxSpeakers": "integer?",
         "$.model": "string?",
-        "$.providerId": "string?"
+        "$.providerId": "string?",
+        "$.speakers": "integer?"
       }
     },
     "RecordingTranscriptionUnavailableReason": {

@@ -19,6 +19,8 @@ const FAKE_SPEAKERS = [
   `case "$*" in *"--max-speakers 2"*) kill -TERM $$;; esac`,
   "bytes=$(wc -c | tr -d ' ')",
   `case "$*" in *"--max-speakers 1"*) echo '{"error":"no voices"}' >&2; exit 1;; esac`,
+  // A known head count asks for exactly that many.
+  `case "$*" in *"--min-speakers 4 --max-speakers 4"*) echo '{"error":"exactly four"}' >&2; exit 1;; esac`,
   `printf '{"turns":[{"startMs":0,"endMs":%d,"speaker":0}],"speakers":[{"speaker":0,"speechMs":5,"embedding":[1,0]}]}\\n' $((bytes / 64))`,
   "",
 ].join("\n");
@@ -87,6 +89,9 @@ describe("recording speaker models", () => {
     expect(result.voiceModel).toMatch(/^opengeni-cpu:[0-9a-f]{16}$/u);
     await expect(diarizer.diarize(audio, { maxSpeakers: 1 })).rejects.toThrow(
       "speaker models failed: no voices",
+    );
+    await expect(diarizer.diarize(audio, { speakers: 4, maxSpeakers: 8 })).rejects.toThrow(
+      "speaker models failed: exactly four",
     );
     // Stopped from outside: an interruption the attempt retries, not a model failure.
     await expect(diarizer.diarize(audio, { maxSpeakers: 2 })).rejects.toMatchObject({

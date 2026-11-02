@@ -412,7 +412,8 @@ function TranscribeAgainDialog({
     model: string;
     /** Null detects it, even when the workspace names a meeting language. */
     language: string | null;
-    maxSpeakers?: number;
+    /** How many people speak; speaker detection finds that many. */
+    speakers?: number;
   }) => Promise<void>;
 }) {
   const msg = useOpenGeniText();
@@ -426,9 +427,8 @@ function TranscribeAgainDialog({
   const [language, setLanguage] = useState<string>(
     recording.transcription.language ?? DETECT_LANGUAGE,
   );
-  const [speakers, setSpeakers] = useState(
-    recording.transcription.maxSpeakers ? String(recording.transcription.maxSpeakers) : "",
-  );
+  const initialSpeakers = recording.transcription.speakers ?? recording.transcription.maxSpeakers;
+  const [speakers, setSpeakers] = useState(initialSpeakers ? String(initialSpeakers) : "");
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     if (open) {
@@ -445,6 +445,10 @@ function TranscribeAgainDialog({
   const speakersInvalid =
     speakerCount !== undefined &&
     (!Number.isInteger(speakerCount) || speakerCount < 1 || speakerCount > 32);
+  // Speakers come from the model, or from Opengeni's own speaker detection
+  // when this deployment has it (it made the current transcript's).
+  const tellsSpeakersApart =
+    selected?.capabilities.diarization === true || current?.diarization === "ours";
   return (
     <FormDialog
       open={open}
@@ -464,7 +468,7 @@ function TranscribeAgainDialog({
             providerId: selected.providerId,
             model: selected.model,
             language: language === DETECT_LANGUAGE ? null : language,
-            ...(speakerCount !== undefined ? { maxSpeakers: speakerCount } : {}),
+            ...(speakerCount !== undefined && tellsSpeakersApart ? { speakers: speakerCount } : {}),
           });
         } catch (cause) {
           setError(errorText(cause) ?? msg("meetings.detailPage.couldnTStartTranscribing"));
@@ -501,9 +505,9 @@ function TranscribeAgainDialog({
         >
           <NativeSelect options={languageOptions} value={language} onValueChange={setLanguage} />
         </Field>
-        {selected?.capabilities.diarization ? (
+        {tellsSpeakersApart ? (
           <Field
-            label={msg("meetings.detailPage.maximumNumberOfSpeakers")}
+            label={msg("meetings.detailPage.numberOfSpeakers")}
             optional
             hint={msg("meetings.detailPage.leaveEmptyToLetThe")}
             error={speakersInvalid ? msg("meetings.detailPage.enterAWholeNumberFrom") : undefined}
@@ -1638,7 +1642,20 @@ function MeetingDetailPageForRecording({
         ))}
         {speakerLabels.length > 0 ? (
           <DetailAsideItem label={msg("meetings.detailPage.speakers")}>
-            <ul className="grid w-full min-w-0 gap-1">{speakerButtons("list")}</ul>
+            <div className="grid w-full min-w-0 gap-1">
+              <ul className="grid w-full min-w-0 gap-1">{speakerButtons("list")}</ul>
+              {canRerun ? (
+                <Button
+                  type="button"
+                  variant="link"
+                  size="xs"
+                  onClick={() => setRerunning(true)}
+                  className="h-auto w-fit px-0 text-fg-muted pointer-coarse:h-11"
+                >
+                  {msg("meetings.detailPage.wrongNumberOfSpeakers")}
+                </Button>
+              ) : null}
+            </div>
           </DetailAsideItem>
         ) : null}
         {meeting.versions.length > 0 ? (

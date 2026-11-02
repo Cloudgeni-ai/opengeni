@@ -1023,7 +1023,7 @@ export function createRecordingActivities(
             model: found.spec.model,
             language: requested.language,
             diarize,
-            maxSpeakers: requested.maxSpeakers,
+            maxSpeakers: requested.speakers ?? requested.maxSpeakers,
             keyterms: capabilities.keyterms ? requested.keyterms : undefined,
             signal,
             scope: {
@@ -1068,7 +1068,15 @@ export function createRecordingActivities(
           const runOurs = () =>
             useOurs && !silent
               ? measureRecordingStage("diarize", () =>
-                  ourDiarizer.diarize(trackAudio, { maxSpeakers: requested.maxSpeakers, signal }),
+                  ourDiarizer.diarize(trackAudio, {
+                    // A known head count is exact only when everyone is on
+                    // this one track; split across tracks, it is each one's
+                    // upper bound.
+                    ...(requested.speakers !== undefined && prepared.length === 1
+                      ? { speakers: requested.speakers }
+                      : { maxSpeakers: requested.speakers ?? requested.maxSpeakers }),
+                    signal,
+                  }),
                 ).catch((error: unknown) => {
                   // Stopped with the worker: the retry runs it again, so the
                   // transcript never silently loses our speakers.
