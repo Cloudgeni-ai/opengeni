@@ -51,7 +51,11 @@ async function render(
   await act(async () =>
     root.render(
       <AgentsTestHost context={appContext(client)}>
-        <AgentSlackSection agent={agent} onAgentChange={() => undefined} onIntroduce={onIntroduce} />
+        <AgentSlackSection
+          agent={agent}
+          onAgentChange={() => undefined}
+          onIntroduce={onIntroduce}
+        />
       </AgentsTestHost>,
     ),
   );
@@ -69,7 +73,14 @@ test("turning Slack on shows the handle people ask it with", async () => {
   const calls: unknown[][] = [];
   const client = {
     listAgentSlackInstalls: async () => ({
-      installs: [{ connectionId: CONNECTION_ID, slackTeamId: "T1", slackTeamName: "Acme", availability: null }],
+      installs: [
+        {
+          connectionId: CONNECTION_ID,
+          slackTeamId: "T1",
+          slackTeamName: "Acme",
+          availability: null,
+        },
+      ],
       routingEnabled: true,
     }),
     putAgentSlackAvailability: async (...args: unknown[]) => {
@@ -94,7 +105,14 @@ test("a name Slack can't take says why, next to the switch", async () => {
   const agent = makeAgent({ name: "Data team" });
   const client = {
     listAgentSlackInstalls: async () => ({
-      installs: [{ connectionId: CONNECTION_ID, slackTeamId: "T1", slackTeamName: "Acme", availability: null }],
+      installs: [
+        {
+          connectionId: CONNECTION_ID,
+          slackTeamId: "T1",
+          slackTeamName: "Acme",
+          availability: null,
+        },
+      ],
       routingEnabled: true,
     }),
     putAgentSlackAvailability: async () => {
@@ -123,7 +141,12 @@ test("open use needs an organization admin; Only me agents can't be turned on", 
   const client = {
     listAgentSlackInstalls: async () => ({
       installs: [
-        { connectionId: CONNECTION_ID, slackTeamId: "T1", slackTeamName: "Acme", availability: availability() },
+        {
+          connectionId: CONNECTION_ID,
+          slackTeamId: "T1",
+          slackTeamName: "Acme",
+          availability: availability(),
+        },
       ],
       routingEnabled: true,
     }),
@@ -143,7 +166,14 @@ test("open use needs an organization admin; Only me agents can't be turned on", 
   const privateAgent = makeAgent({ visibility: "private" });
   const offClient = {
     listAgentSlackInstalls: async () => ({
-      installs: [{ connectionId: CONNECTION_ID, slackTeamId: "T1", slackTeamName: "Acme", availability: null }],
+      installs: [
+        {
+          connectionId: CONNECTION_ID,
+          slackTeamId: "T1",
+          slackTeamName: "Acme",
+          availability: null,
+        },
+      ],
       routingEnabled: true,
     }),
   };

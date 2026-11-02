@@ -266,6 +266,29 @@ own Knowledge collection and its chats may read its other shared chats
 - Make the old Slack agent `DELETE` turn Slack off instead of deleting the
   agent, once nothing older depends on it.
 
+## App
+
+The sidebar's **Agents** page (`/workspaces/:id/agents`) replaces **Bot
+templates** and the Slack agents list; `/bot-templates` redirects there.
+
+- Agents page: All / Yours, one row per agent (icon, name, what it helps with,
+  an Only me or Slack badge), **New agent** and **Import** (`.bot.json`, its
+  setup instructions become the First message). Banners say that templates and
+  Slack agents became agents (shown when such agents exist, dismissible per
+  browser), and a notice suggests renaming when names repeat.
+- Agent page: **Chat** (`/sessions?agent=<id>`), its chats (Yours / Everyone's,
+  each marked with where it started), Instructions, First message, **Remember
+  across chats**, who can use it, and **Available in**: the app always, and one
+  row per connected Slack workspace (`@Opengeni +handle`, open use, **Introduce
+  in channels**). Controls follow the agent's `viewer` access.
+- Composer: an agent chip ("Opengeni ▾" with a **Chat with** list and
+  **Browse agents**) sets `?agent=<id>`; `?botTemplateId=` still works. A
+  chosen agent's First message fills the composer; the chat starts with
+  `agentId`.
+- Agent chats show the agent's icon and name beside the title and a source
+  line such as "Started in Slack by Kari". **Make this an agent** in the chat
+  header's ⋯ menu opens a new agent prefilled from the chat.
+
 ## Release plan
 
 1. Expand: tables, session columns, backfill, sync triggers,

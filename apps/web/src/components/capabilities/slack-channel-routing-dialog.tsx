@@ -342,7 +342,7 @@ export function SlackChannelRoutingDialogBody({
         title="Slack channels"
         description={
           hasAgents
-            ? "Choose who answers in each channel: a Slack agent, or Opengeni in a workspace."
+            ? "Choose who answers in each channel: an agent, or Opengeni in a workspace."
             : "Choose the Opengeni workspace where each channel starts work."
         }
         back={{ label: "Slack", onClick: onClose }}
@@ -364,7 +364,7 @@ export function SlackChannelRoutingDialogBody({
         <DialogTitle>Where Slack channels start work</DialogTitle>
         <DialogDescription>
           {hasAgents
-            ? "Pick who answers in each channel: a Slack agent, or Opengeni in a workspace."
+            ? "Pick who answers in each channel: an agent, or Opengeni in a workspace."
             : "Pick the Opengeni workspace each channel uses."}{" "}
           A channel with no choice asks the person once and remembers the answer. Direct messages
           always use each person's own workspace.

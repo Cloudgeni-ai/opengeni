@@ -1,5 +1,5 @@
 /**
- * The avatar picker used by a chat's profile, bot templates and Slack agents:
+ * The avatar picker used by a chat's profile and agents:
  * an emoji, an icon or letters on one of twelve colours, or an image the agent
  * set. The caller owns the draft; `sessionAvatarFromDraft` turns it into the
  * saved avatar (null while the draft is incomplete or "none").

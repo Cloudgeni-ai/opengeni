@@ -1,7 +1,7 @@
 /**
  * One agent: chat with it, its chats, what it follows (Instructions and First
  * message), Memory, who can use it and where it is available. The app is
- * always on; the host renders the Slack part (`slack`), which needs the
+ * always on; the host renders the Slack part (`renderSlack`), which needs the
  * Slack integration's own pieces.
  */
 import { useState, type ReactNode } from "react";
@@ -229,12 +229,12 @@ function MemoryRow({
 export function AgentPage({
   workspaceId,
   agentId,
-  slack,
+  renderSlack,
 }: {
   workspaceId: string;
   agentId: string;
-  /** Where it is available in Slack, rendered under "The app". */
-  slack?: AgentSlackSlot | undefined;
+  /** Where it is available in Slack, rendered under the app row. */
+  renderSlack?: AgentSlackSlot | undefined;
 }) {
   const { client, workspaces } = useAppContext();
   const navigate = useNavigate();
@@ -242,7 +242,8 @@ export function AgentPage({
   const [deleting, setDeleting] = useState(false);
   const back = {
     label: "Agents",
-    onClick: () => void navigate({ to: "/workspaces/$workspaceId/agents", params: { workspaceId } }),
+    onClick: () =>
+      void navigate({ to: "/workspaces/$workspaceId/agents", params: { workspaceId } }),
   };
   const agent = state.agent;
   if (agent === undefined) {
@@ -352,7 +353,7 @@ export function AgentPage({
             label="Opengeni app"
             description="Always on. Start a chat with it from the composer."
           />
-          {slack ? slack({ agent, onAgentChange: saved }) : null}
+          {renderSlack ? renderSlack({ agent, onAgentChange: saved }) : null}
         </DetailSection>
         {agent.viewer.canEdit ? (
           <SettingDangerRow

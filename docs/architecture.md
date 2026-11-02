@@ -1877,7 +1877,7 @@ navigation, including old Files, Skills, Memory and Documents links (a Documents
 home per scope in the web app: workspace and private-chat defaults (plus the
 owner-only organization identity row) on Settings > Agent learning (also opened
 from Knowledge's ⋯ menu), and one
-chat's override in the session dock's Agent tab beside its identity and
+chat's override in the session dock's Settings tab beside its identity and
 capabilities (`packages/react/src/app/components/session/agent-configuration-panel.tsx`);
 the composer's Chat settings opens that tab. Groups appear
 as collections; detailed finding types are optional browsing metadata. File previews, revision-pinned

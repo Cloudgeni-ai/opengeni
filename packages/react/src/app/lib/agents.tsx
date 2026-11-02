@@ -227,7 +227,7 @@ export function useAgentSlackInstalls(
       live = false;
     };
   }, [agentId, attempt, client, enabled, workspaceId]);
-  const reload = useCallback(() => setAttempt((value) => value + 1), []);
+  const reload = useCallback(() => setAttempt((count) => count + 1), []);
   return { value, error, reload, set: setValue };
 }
 

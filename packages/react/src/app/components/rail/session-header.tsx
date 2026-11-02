@@ -25,11 +25,7 @@ import type { SessionEventsConnectionState } from "../../../hooks/use-session-ev
 import type { SessionSummary } from "@opengeni/sdk";
 import { SiteOriginLink, SiteOriginMenuItem } from "../session/site-origin-link";
 import { sessionSiteOrigin } from "../../lib/session-site-origin";
-import {
-  sessionAgentRef,
-  sessionAgentSourceLine,
-  useSessionAgent,
-} from "../../lib/session-agent";
+import { sessionAgentRef, sessionAgentSourceLine, useSessionAgent } from "../../lib/session-agent";
 import { SessionAgentChip } from "../agents/session-agent-chip";
 import {
   ArchiveIcon,

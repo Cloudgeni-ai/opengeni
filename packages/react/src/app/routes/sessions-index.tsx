@@ -384,9 +384,9 @@ function SessionsIndexRouteContent({
       },
       (error: unknown) => {
         if (!live) return;
-        const message = userErrorText(error);
-        setAgentLaunch({ id: launchAgentId, state: { kind: "error", message } });
-        toast.error("Couldn't open the agent", { description: message });
+        const reason = userErrorText(error);
+        setAgentLaunch({ id: launchAgentId, state: { kind: "error", message: reason } });
+        toast.error("Couldn't open the agent", { description: reason });
       },
     );
     return () => {

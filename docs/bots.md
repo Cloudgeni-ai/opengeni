@@ -120,12 +120,9 @@ person who saved it. Routes:
 
 A workspace keeps at most 500 agents, templates included (they share the limit with app and Slack agents).
 
-In the web app, **Bot templates** sits in the sidebar's More section, next to
-Automations; once a workspace has templates, the new-chat page also shows them
-under the composer as one-tap "Start a bot" shortcuts. Starting one shows the
-template above the composer with its setup instructions filled in; closing that
-strip (or leaving the page) takes the untouched instructions out again, so they
-never become an ordinary chat's first message by accident.
+In the web app, templates are agents: the sidebar's **Agents** page replaces
+**Bot templates** (the old `/bot-templates` URL opens it), and a template's
+setup instructions are its First message. See [agents, "App"](agents.md#app).
 
 The agent makes an agent of itself with `bot_template_save` (capability
 `subagents`, needs `sessions:create`), usually when the person asks. It writes

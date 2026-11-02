@@ -391,7 +391,7 @@ All finding types share retrieval, review, permissions and revision history.
 ## Agent learning settings
 
 **Settings → Agent learning** (`/settings?section=learning`) groups three
-destinations together. Knowledge's ⋯ menu, an empty Review and the chat Agent tab
+destinations together. Knowledge's ⋯ menu, an empty Review and the chat Settings tab
 link to it, and old `/state?page=learning` links redirect there. The page also
 links to Knowledge → Review, where Review first changes wait:
 

@@ -595,34 +595,37 @@ function MemoryHost({ children }: { children: ReactNode }) {
   return <AppHostProvider host={{ navigation } as unknown as AppHost}>{children}</AppHostProvider>;
 }
 
+const agentReads: string[] = [];
+const agentContext = {
+  accessContext: { subjectId: "user-me" },
+  client: {
+    getAgent: async (_workspaceId: string, agentId: string) => {
+      agentReads.push(agentId);
+      return { name: "Data desk", avatar: null };
+    },
+  },
+} as unknown as AppContextValue;
+
 test("a chat with an agent names it beside its title, says where it started, and links to it", async () => {
   const container = document.createElement("div");
   document.body.append(container);
-  const reads: string[] = [];
-  const context = {
-    accessContext: { subjectId: "user-me" },
-    client: {
-      getAgent: async (_workspaceId: string, agentId: string) => {
-        reads.push(agentId);
-        return { name: "Data desk", avatar: null };
-      },
-    },
-  } as unknown as AppContextValue;
+  const reads = agentReads;
+  const context = agentContext;
   const root = createReactRoot(container);
   const agentId = "11111111-1111-4111-8111-111111111111";
   const render = (patch: Partial<Session> & { agentId?: string | null }) => (
     <MemoryHost>
       <AppContext.Provider value={context}>
         <SessionHeader
-        session={{ ...session, ...patch } as Session}
-        ancestors={[]}
-        connectionState="live"
-        status="idle"
-        keyAuthRequired={false}
-        onForgetAccessKey={() => undefined}
-        inspectorOpen={false}
-        onRename={async () => null}
-        onPin={async () => null}
+          session={{ ...session, ...patch } as Session}
+          ancestors={[]}
+          connectionState="live"
+          status="idle"
+          keyAuthRequired={false}
+          onForgetAccessKey={() => undefined}
+          inspectorOpen={false}
+          onRename={async () => null}
+          onPin={async () => null}
         />
       </AppContext.Provider>
     </MemoryHost>

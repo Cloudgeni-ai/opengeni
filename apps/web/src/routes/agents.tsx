@@ -48,7 +48,7 @@ export function AgentRoute({ workspaceId, agentId }: { workspaceId: string; agen
         key={agentId}
         workspaceId={workspaceId}
         agentId={agentId}
-        slack={
+        renderSlack={
           slackPossible
             ? ({ agent, onAgentChange }) => (
                 <AgentSlackSection

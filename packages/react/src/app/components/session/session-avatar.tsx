@@ -1,6 +1,6 @@
 /**
- * A chat's avatar: what a bot looks like in the sidebar, its header and the
- * bot templates. A rounded square, so it never reads as a person's round
+ * A chat's avatar: how a chat or agent looks in the sidebar, its header and the
+ * Agents page. A rounded square, so it never reads as a person's round
  * monogram. Emoji sit on a soft tint of their hue; icons and letters are
  * white on it. An image avatar is a workspace image each viewer opens with
  * their own access; until it loads, or when they cannot open it, the chat's

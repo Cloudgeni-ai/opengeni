@@ -61,8 +61,6 @@ export function SlackConnectionsPage(props: {
   const [available, setAvailable] = useState<ConnectionMetadata[]>([]);
   const [sharedIds, setSharedIds] = useState<string[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
-  // The bots shared with this workspace by the organization arrive separately.
-  const [availableLoaded, setAvailableLoaded] = useState(false);
   const [revision, setRevision] = useState(0);
   const [installFailure, setInstallFailure] = useState(() => {
     const params = new URLSearchParams(window.location.search);
@@ -82,7 +80,6 @@ export function SlackConnectionsPage(props: {
     setAvailable([]);
     setSharedIds([]);
     setLoadError(null);
-    setAvailableLoaded(false);
     void client
       .listAvailableOpenGeniSlackBots(props.workspaceId)
       .then((result) => {
@@ -92,9 +89,6 @@ export function SlackConnectionsPage(props: {
       })
       .catch((error) => {
         if (live) setLoadError(userErrorText(error));
-      })
-      .finally(() => {
-        if (live) setAvailableLoaded(true);
       });
     return () => {
       live = false;

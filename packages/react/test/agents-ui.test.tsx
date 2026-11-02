@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { ReactNode } from "react";
 import { agentInitialsAvatar } from "@opengeni/contracts";
@@ -39,21 +39,17 @@ mock.module("../src/ui/dropdown-menu", () => {
 const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
 const kit = await import("./agents-test-kit");
-const { AgentsPage, BOT_TEMPLATES_MOVED, SLACK_AGENTS_MOVED, duplicateNamesText } = await import(
-  "../src/app/components/agents/agents-page"
-);
+const { AgentsPage, BOT_TEMPLATES_MOVED, SLACK_AGENTS_MOVED, duplicateNamesText } =
+  await import("../src/app/components/agents/agents-page");
 const { AgentPage } = await import("../src/app/components/agents/agent-page");
-const { NewAgentPage, EditAgentPage, INSTRUCTIONS_LONG_HINT, agentChanges } = await import(
-  "../src/app/components/agents/agent-form-page"
-);
+const { NewAgentPage, EditAgentPage, INSTRUCTIONS_LONG_HINT, agentChanges } =
+  await import("../src/app/components/agents/agent-form-page");
 const { ComposerAgentChip } = await import("../src/app/components/agents/composer-agent-chip");
 const { agentInitialsAvatarLite } = await import("../src/app/lib/agent-avatar");
-const { duplicateAgentNames, parseAgentFile, agentErrorCode } = await import(
-  "../src/app/lib/agents"
-);
-const { composerLaunchAgentId, parseComposerLaunchSearch } = await import(
-  "../src/app/lib/composer-launch"
-);
+const { duplicateAgentNames, parseAgentFile, agentErrorCode } =
+  await import("../src/app/lib/agents");
+const { composerLaunchAgentId, parseComposerLaunchSearch } =
+  await import("../src/app/lib/composer-launch");
 const { sessionAgentRef, sessionAgentSourceLine } = await import("../src/app/lib/session-agent");
 
 const { WORKSPACE_ID, makeAgent, fakeAgentsClient, appContext, AgentsTestHost } = kit;
@@ -237,9 +233,7 @@ test("the Agents page lists agents with their Slack badge and the moved-here not
   expect(dismiss).toHaveLength(2);
   await act(async () => dismiss[0]!.click());
   expect(container.textContent).not.toContain(BOT_TEMPLATES_MOVED);
-  expect(window.localStorage.getItem("opengeni.notice.agents.botTemplatesMoved")).toBe(
-    "dismissed",
-  );
+  expect(window.localStorage.getItem("opengeni.notice.agents.botTemplatesMoved")).toBe("dismissed");
 });
 
 test("Yours asks for the reader's own agents and New agent opens the form", async () => {
@@ -309,7 +303,7 @@ test("the agent page shows its chats, what it follows, Memory and where it is av
       <AgentPage
         workspaceId={WORKSPACE_ID}
         agentId={agent.id}
-        slack={(props) => {
+        renderSlack={(props) => {
           slot = props;
           return <p>Slack part</p>;
         }}

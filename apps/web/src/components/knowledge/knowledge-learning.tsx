@@ -488,8 +488,8 @@ export function LearningSettings({
         </Section>
       ) : null}
       <InlineHelp icon>
-        A chat or schedule can use its own settings. Change them in the chat's Settings tab or on the
-        schedule.
+        A chat or schedule can use its own settings. Change them in the chat's Settings tab or on
+        the schedule.
       </InlineHelp>
     </SectionStack>
   );

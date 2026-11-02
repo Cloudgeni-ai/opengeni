@@ -81,7 +81,10 @@ function InstallRow({
   const canManage = agent.viewer.canManageSlack;
   const shared = agent.visibility === "workspace";
 
-  async function run(kind: "availability" | "open", action: () => Promise<{ agent: Agent; availability: AgentSlackInstall["availability"] }>) {
+  async function run(
+    kind: "availability" | "open",
+    action: () => Promise<{ agent: Agent; availability: AgentSlackInstall["availability"] }>,
+  ) {
     setPending(kind);
     setError(null);
     try {
@@ -124,7 +127,12 @@ function InstallRow({
           onCheckedChange={(next) =>
             void run("availability", () =>
               next
-                ? client.putAgentSlackAvailability(agent.workspaceId, agent.id, install.connectionId, {})
+                ? client.putAgentSlackAvailability(
+                    agent.workspaceId,
+                    agent.id,
+                    install.connectionId,
+                    {},
+                  )
                 : client.deleteAgentSlackAvailability(
                     agent.workspaceId,
                     agent.id,
@@ -222,9 +230,7 @@ export function AgentSlackSection({
         description="No Slack workspace is connected here."
         hint={
           agent.viewer.canManageSlack ? (
-            <SettingRowLink onClick={() => void navigate({ href })}>
-              Connect Slack
-            </SettingRowLink>
+            <SettingRowLink onClick={() => void navigate({ href })}>Connect Slack</SettingRowLink>
           ) : undefined
         }
       />
