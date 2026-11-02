@@ -72,9 +72,35 @@ async fn a_resize_hands_its_sandbox_off_and_its_next_wake_takes_it_up_at_the_new
         (config.vcpus, config.memory_mib, config.disk_mib),
         (2, 512, Some(4096))
     );
-    // Handed off, its copy is its latest state, memory and all: the host
-    // decides what of it fits the new shape.
-    assert_eq!(a.adopts(id(&sandbox)), [false]);
+    // On another machine, its copy is taken up from its files alone.
+    assert_eq!(a.adopts(id(&sandbox)), [true]);
+}
+
+/// A resize to other processors or memory leaves the stored copy files
+/// only, whatever its memory image records, so its next owner boots it
+/// from its disk; new requests or a longer disk leave the copy whole.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn only_a_resize_to_another_machine_leaves_the_copy_files_only() {
+    for (body, files_only) in [
+        (json!({ "vcpus": 2 }), true),
+        (json!({ "memory_mib": 512 }), true),
+        (
+            json!({ "memory_request_mib": 128, "cpu_request_millis": 500 }),
+            false,
+        ),
+        (json!({ "disk_mib": 4096 }), false),
+    ] {
+        let fleet = Fleet::start().await;
+        let a = fleet.host("host-a.example").await;
+        let sandbox = fleet.create(json!({})).await;
+        let (status, resized) = resize(&fleet, &sandbox, body.clone()).await;
+        assert_eq!(status, 200, "{body}: {resized}");
+        let (status, woken) = fleet
+            .post(&format!("/v1/sandboxes/{sandbox}/wake"), json!({}))
+            .await;
+        assert_eq!(status, 200, "{body}: {woken}");
+        assert_eq!(a.adopts(id(&sandbox)), [files_only], "{body}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

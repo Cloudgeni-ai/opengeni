@@ -809,7 +809,7 @@ async fn respec<S: Store>(store: S) {
     assert_eq!(lost.ownership.owner, None);
     let mut resized = lost.clone();
     resized.spec.config.vcpus = 2;
-    resized.ownership = lost.ownership.retake().set;
+    resized.ownership = lost.ownership.retake(false).set;
     let stale = SandboxRow {
         version: lost.version - 1,
         ..resized.clone()

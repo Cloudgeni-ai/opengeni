@@ -225,8 +225,12 @@ impl<S: Store> Service<S> {
                 continue;
             }
             // Taken anew, so a host given up on that still holds it at its
-            // old shape drops its copy when it comes back.
-            row.ownership = row.ownership.retake().set;
+            // old shape drops its copy when it comes back. Another machine
+            // leaves the copy files only, so its next owner boots it from
+            // its disk whatever its memory image says it was saved at.
+            let machine = config.vcpus == row.spec.config.vcpus
+                && config.memory_mib == row.spec.config.memory_mib;
+            row.ownership = row.ownership.retake(machine).set;
             row.spec.config = config;
             if self.store.respec(&row).await? {
                 tracing::info!(%id, "sandbox resized");

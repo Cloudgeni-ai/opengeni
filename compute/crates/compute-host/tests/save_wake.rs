@@ -1205,15 +1205,22 @@ async fn saved_and_handed_off(agent: &Agent, id: Id, owner_epoch: u64) {
 }
 
 /// Has `agent` take `id` up under `owner_epoch` at the shape `config`
-/// gives, as after a resize.
-async fn adopt_resized(agent: &Agent, id: Id, owner_epoch: u64, config: SandboxConfig) {
+/// gives, as after a resize: `whole` as the service sends it, only while
+/// the machine stays the same.
+async fn adopt_resized(
+    agent: &Agent,
+    id: Id,
+    owner_epoch: u64,
+    config: SandboxConfig,
+    whole: bool,
+) {
     let adopted = agent
         .client
         .call(&Request::Adopt {
             id,
             config,
             owner_epoch,
-            whole: true,
+            whole,
         })
         .await
         .unwrap();
@@ -1296,7 +1303,7 @@ async fn a_resized_sandbox_keeps_its_files_and_its_programs_only_on_the_same_mac
     let base = std::fs::metadata(lab.join("base.ext4")).unwrap().len() >> 20;
     config.disk_mib = Some(u32::try_from(base + 512).unwrap());
     config.memory_request_mib = Some(256);
-    adopt_resized(&two, id, 2, config.clone()).await;
+    adopt_resized(&two, id, 2, config.clone(), true).await;
     let output = exec(
         &two.client,
         id,
@@ -1321,7 +1328,7 @@ async fn a_resized_sandbox_keeps_its_files_and_its_programs_only_on_the_same_mac
     saved_and_handed_off(&two, id, 2).await;
     config.vcpus = 2;
     config.memory_mib = 1024;
-    adopt_resized(&one, id, 3, config).await;
+    adopt_resized(&one, id, 3, config, false).await;
     let output = exec(
         &one.client,
         id,

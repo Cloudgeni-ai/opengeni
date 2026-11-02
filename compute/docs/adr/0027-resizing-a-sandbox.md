@@ -34,13 +34,16 @@ not shrink.
   other than its row's, and there is no second way to change a running
   VM. Its next wake places and books it at the new shape; a host without
   room refuses it as for any adopt.
-- **The memory image goes when the machine changes.** Memory images and
-  the stored copy record the processors they were saved with (their
-  memory is the image's length). A host that adopts a copy saved at
-  other `vcpus` or `memory_mib` than it is given deletes the image from
-  the copy as it claims it, as for a copy whose last owner was lost, and
-  the sandbox boots from its disk at the new shape. New requests or a
-  longer disk keep the image: requests are bookings, not the machine.
+- **The memory image goes when the machine changes.** A resize of `vcpus`
+  or `memory_mib` takes the sandbox anew with its stored copy no longer
+  vouched for as whole, as after a lost owner, so the host that adopts it
+  deletes the image from the copy as it claims it and boots it from its
+  disk at the new shape, whatever the image records. As a backstop,
+  memory images and the stored copy also record the processors they were
+  saved with (their memory is the image's length), and a host gives up
+  an image saved at another shape than the sandbox is given, even from a
+  copy vouched for. New requests or a longer disk keep the image:
+  requests are bookings, not the machine.
 - **A longer disk** is made that long as the adopting host fetches the
   copy. Images record how long the disk was when they were saved; a
   restore whose disk is longer tells the VM its drive grew, and the
@@ -52,9 +55,10 @@ not shrink.
 - A resize of `vcpus` or `memory_mib` ends the sandbox's running
   programs, as a crash would; its files stay. Requests and a longer disk
   keep them, after a pause like a move's. Open connections end either way.
-- Copies stored before this release do not say how many processors their
-  image was saved with: one resized only in `vcpus` restores at its old
-  processors until it next boots. Memory is always known.
+- A copy stored before this release does not say how many processors its
+  image was saved with, so its adopting host cannot tell a resize of
+  `vcpus` alone from a lost owner, and raises the programs-lost alarm for
+  it as for one.
 - A host of an earlier release reads an image recording its processors
   or disk as damaged, and gives it up; rolling hosts back costs the
   programs of sandboxes saved since.
