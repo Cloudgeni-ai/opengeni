@@ -101,7 +101,9 @@ import {
   SKILL_MAX_FILES,
   SKILL_MAX_FILE_BYTES,
   SKILL_MAX_TOTAL_BYTES,
+  INLINE_SKILLS_MAX,
 } from "./skill-files";
+export { INLINE_SKILLS_MAX } from "./skill-files";
 export * from "./model-connection-access";
 export * from "./subscription-account-actions";
 export * from "./sandbox-provider-command";
@@ -13012,7 +13014,7 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
     // Validated on save like session create Skills (SessionSkills) and stored
     // normalized; only the shape is declared here so Skill YAML validation
     // stays out of browser bundles, like UpdateSessionSkillsRequest.
-    skills: z.array(ScheduledTaskSkill).max(32).optional(),
+    skills: z.array(ScheduledTaskSkill).max(INLINE_SKILLS_MAX).optional(),
   };
 }
 
@@ -14395,7 +14397,7 @@ export type SessionSkillInput = z.input<typeof SessionSkill>;
 export const SessionSkills = /* @__PURE__ */ defineSkillContractSchema(() =>
   z
     .array(SessionSkill)
-    .max(32)
+    .max(INLINE_SKILLS_MAX)
     .transform((skills, ctx) => {
       const selected = new Map<string, { fingerprint: string; skill: SessionSkill }>();
       for (const skill of skills) {
@@ -14436,7 +14438,7 @@ export const StoredSessionSkills = /* @__PURE__ */ defineSkillContractSchema(() 
 export const UpdateSessionSkillsRequest = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      skills: z.array(z.unknown()).max(32),
+      skills: z.array(z.unknown()).max(INLINE_SKILLS_MAX),
       expectedVersion: primitives.positiveInteger,
     })
     .strict(),
