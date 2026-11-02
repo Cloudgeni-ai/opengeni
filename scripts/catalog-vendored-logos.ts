@@ -264,7 +264,11 @@ export async function fetchLogoAsset(
     return { ok: false, reason: "image_too_large" };
   }
   const bytes = new Uint8Array(await response.arrayBuffer());
-  return validateLogoAsset({ contentType: contentType.contentType, bytes });
+  return validateLogoAsset({
+    contentType: contentType.contentType,
+    bytes,
+    rejectGeneratedPlaceholder: true,
+  });
 }
 
 /**
@@ -284,7 +288,11 @@ export async function readVendoredLogoAsset(
       reason: `vendored_logo_unreadable:${errorMessage(error)}`,
     };
   }
-  const validated = validateLogoAsset({ contentType: entry.contentType, bytes });
+  const validated = validateLogoAsset({
+    contentType: entry.contentType,
+    bytes,
+    rejectGeneratedPlaceholder: true,
+  });
   if (!validated.ok) return validated;
   if (validated.sha256 !== entry.sha256 || bytes.byteLength !== entry.sizeBytes) {
     return { ok: false, reason: "vendored_logo_digest_mismatch" };

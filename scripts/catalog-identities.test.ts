@@ -62,6 +62,7 @@ describe("catalog identities: Google Search Console and well-known services", ()
     ["run.googleapis.com", "Google Cloud Run", "googlecloud"],
     ["pubsub.googleapis.com", "Google Cloud Pub/Sub", "googlepubsub"],
     ["playdeveloperreporting.googleapis.com", "Google Play Developer Reporting", "googleplay"],
+    ["facebook.com", "Meta Social Technologies MCP", "meta"],
   ])("%s is %s with the %s mark", async (domain, name, slug) => {
     const row = await rowByDomain(domain);
     expect(row.name).toBe(name);
@@ -73,7 +74,8 @@ describe("catalog identities: Google Search Console and well-known services", ()
     ["newrelic.com", "New Relic"],
     ["cal.com", "Cal.com"],
     ["incident.io", "incident.io"],
-    ["x.com", "X"],
+    ["x.com", "X MCP"],
+    ["leadconnectorhq.com", "HighLevel (ChatGPT endpoint)"],
     ["smartbear.com", "BugSnag"],
   ])("%s shows its own name, %s, and keeps a vendored mark", async (domain, name) => {
     const row = await rowByDomain(domain);

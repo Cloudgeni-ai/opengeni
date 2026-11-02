@@ -227,6 +227,67 @@ describe("catalog import persistence", () => {
     });
   }, 180_000);
 
+  test("a re-import clears a stored logo once the row has none by policy, but a failed fetch keeps it", async () => {
+    if (!available) return;
+    const batch = await createImportBatch(db, {
+      source: "integrations.sh",
+      snapshotDate: new Date("2026-07-03T23:41:44.132Z"),
+      snapshotRef: "logo-policy",
+      attributionNote: "MIT attribution",
+    });
+    const snapshotRow = (domain: string, logoSourceUrl: string | null) => ({
+      domain,
+      name: domain,
+      mcpUrl: `https://${domain}/mcp`,
+      transport: "streamable-http",
+      authKind: "none",
+      tier: "community",
+      provenance: "detected",
+      logoSourceUrl,
+      probe: { status: "real", reason: "mcp_json_rpc", httpStatus: 200 },
+    });
+    const normalized = normalizeCatalogSnapshot({
+      generatedAt: "2026-07-04T00:00:00.000Z",
+      importRows: [
+        snapshotRow("letter.example", `https://integrations.sh/logo/letter.example`),
+        snapshotRow("flaky.example", `https://integrations.sh/logo/flaky.example`),
+      ],
+    }).rows;
+    const letter = normalized.find((row) => row.domain === "letter.example")!;
+    const flaky = normalized.find((row) => row.domain === "flaky.example")!;
+    // An earlier import fetched and stored both logos.
+    for (const row of [letter, flaky]) {
+      await upsertRegistryCapabilityCatalogItem(
+        db,
+        catalogRowToDbInput(row, {
+          importBatchId: batch.id,
+          logoAssetPath: `catalog-assets/integrations-sh/logos/${row.domain}/logo.svg`,
+        }),
+      );
+    }
+    // The screened snapshot clears the letter's source; the other fetch fails.
+    await upsertRegistryCapabilityCatalogItem(
+      db,
+      catalogRowToDbInput({ ...letter, logoSourceUrl: null }, { importBatchId: batch.id }),
+    );
+    await upsertRegistryCapabilityCatalogItem(
+      db,
+      catalogRowToDbInput(flaky, { importBatchId: batch.id, logoAssetPath: null }),
+    );
+    const rows = await admin<{ provider_domain: string; logo_asset_path: string | null }[]>`
+      SELECT provider_domain, logo_asset_path
+      FROM capability_catalog_items
+      WHERE source = 'registry' AND provider_domain IN ('letter.example', 'flaky.example')
+      ORDER BY provider_domain`;
+    expect([...rows]).toEqual([
+      {
+        provider_domain: "flaky.example",
+        logo_asset_path: "catalog-assets/integrations-sh/logos/flaky.example/logo.svg",
+      },
+      { provider_domain: "letter.example", logo_asset_path: null },
+    ]);
+  }, 180_000);
+
   test("importIntegrationsCatalog aborts empty snapshots before DB writes and leaves registry rows fresh", async () => {
     if (!available) return;
     const batch = await createImportBatch(db, {
@@ -688,7 +749,7 @@ describe("committed catalog snapshot import", () => {
       expect(row.name).not.toMatch(/^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/);
     }
     const unmarked = google.filter((row) => !row.logo_asset_path).map((row) => row.name);
-    expect(unmarked.toSorted()).toEqual(["Gmail", "Google Calendar", "Google Drive"]);
+    expect([...unmarked].sort()).toEqual(["Gmail", "Google Calendar", "Google Drive"]);
 
     // No row hotlinks an integrations.sh letter placeholder any more.
     const placeholders = new Set(

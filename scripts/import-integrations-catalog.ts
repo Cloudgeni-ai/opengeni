@@ -682,6 +682,8 @@ export function catalogRowToDbInput(
     tier: row.tier,
     provenance: row.provenance,
     logoAssetPath: input.logoAssetPath ?? null,
+    // No logo source means no logo by policy: clear an asset a past import stored.
+    ...(row.logoSourceUrl ? {} : { clearLogoAsset: true }),
     importBatchId: input.importBatchId,
     scopesHint: row.scopesHint,
     homepageUrl: row.homepageUrl ?? `https://${row.domain}`,

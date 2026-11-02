@@ -706,6 +706,17 @@
       "fetchedAt": "2026-11-02T12:26:45.168Z"
     },
     {
+      "capabilityId": "mcp:integrations-sh:facebook-com-da36e326b17e",
+      "domain": "facebook.com",
+      "mcpUrl": "https://mcp.facebook.com/devtools",
+      "file": "facebook-com-da36e326b17e.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/meta",
+      "sha256": "18e15e0cd6ef858aa8b054db472f83870e5e2ef15f9b19554480c89c93c264e1",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 1339,
+      "fetchedAt": "2026-11-02T14:50:29.091Z"
+    },
+    {
       "capabilityId": "mcp:integrations-sh:faces-app-c39c48a2fbc3",
       "domain": "faces.app",
       "mcpUrl": "https://mcp.faces.app/mcp",
@@ -1067,6 +1078,17 @@
       "contentType": "image/jpeg",
       "sizeBytes": 1837,
       "fetchedAt": "2026-11-02T12:26:45.997Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:leadconnectorhq-com-43a9c63dbab1",
+      "domain": "leadconnectorhq.com",
+      "mcpUrl": "https://services.leadconnectorhq.com/mcp/chatgpt",
+      "file": "leadconnectorhq-com-43a9c63dbab1.jpg",
+      "sourceUrl": "https://integrations.sh/logo/leadconnectorhq.com",
+      "sha256": "d4bc38cf692260ccb8e9eb0aa2223dbbbcd319794461f6934bb2455c6238b725",
+      "contentType": "image/jpeg",
+      "sizeBytes": 2228,
+      "fetchedAt": "2026-11-02T14:50:30.171Z"
     },
     {
       "capabilityId": "mcp:integrations-sh:lemlist-com-6356e5a20822",

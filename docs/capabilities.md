@@ -1275,10 +1275,10 @@ malformed committed snapshot or committed row fails the refresh loudly instead
 of silently disabling retention. `--input <raw.json>` accepts either an
 already-hydrated upstream document or a precomputed `importRows` snapshot for
 offline reruns.
-Every refresh also screens logos: it fetches each row's integrations.sh logo
-and clears `logoSourceUrl` for one that is only a generated letter placeholder
-(an SVG of shapes and three or fewer text characters), so the product's own
-monogram shows instead of a hotlinked letter. The header's `logoScreen` lists
+Every refresh also screens logos: it fetches each row's `logoSourceUrl` and
+clears it when the image is only a generated letter placeholder (an SVG of
+rectangles and one or two text characters), so the product's own monogram
+shows instead of a hotlinked letter. The header's `logoScreen` lists
 the cleared rows and counts unreachable logos, which are left unchanged.
 `bun run catalog:screen-logos` reruns the screen on the committed snapshot;
 run `bun run format` on the snapshot afterwards. The importer and the vendoring
@@ -1340,8 +1340,9 @@ the snapshot names only by hostname or marks only with a generated letter
 (integrations.sh serves a letter-on-a-square SVG for every domain it has no
 mark for). An identity, keyed by canonical MCP URL like an entry, sets just the
 display `name`, an optional `logoSourceUrl` from a licensed source (Simple
-Icons, CC0-1.0, for the Google API rows) and an optional `homepageUrl`, with
-`notes` recording the evidence. It never curates, features, marks official or
+Icons, CC0-1.0, for the Google API rows, komoot, Netlify and Meta) and an
+optional `homepageUrl`, with `notes` recording the evidence. It never curates,
+features, marks official or
 changes tier, auth, scopes or tools, so the row keeps its Community label and
 long-tail ordering; an mcpUrl may not be both an entry and an identity. The
 importer resolves a row's name as official, then identity, then snapshot, and
@@ -1429,7 +1430,7 @@ Regenerate the directory with `bun run catalog:vendor-logos` (add `--dry-run`
 to preview). It fetches each curated or identity row's logo once, applies the same
 image-content-type and size validation the importer applies, refuses to write
 an invalid response, keeps a still-valid prior asset when a refetch fails, and
-removes files no curated row references. Review the diff and commit it like a
+removes files no curated or identity row references. Review the diff and commit it like a
 snapshot or overlay change; the committed manifest is checked in tests to cover
 exactly the curated and identity rows that permit a logo, byte for byte.
 

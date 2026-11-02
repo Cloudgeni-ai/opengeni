@@ -773,9 +773,9 @@
     },
     {
       "mcpUrl": "https://api.x.com/mcp",
-      "name": "X",
+      "name": "X MCP",
       "notes": [
-        "Name: as the provider presents the service on https://x.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Name: X's documentation at https://docs.x.com/tools/mcp calls this hosted server \"X MCP\" (checked 2026-11-02); integrations.sh lists it only as its domain. The MCP suffix keeps it apart from the built-in X provider (api:x), which shares the x.com domain.",
         "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
       ]
     },
@@ -999,11 +999,11 @@
     },
     {
       "mcpUrl": "https://contactcenterinsights.googleapis.com/mcp",
-      "name": "Contact Center AI Insights",
+      "name": "Google Cloud Conversational Insights",
       "logoSourceUrl": "https://cdn.simpleicons.org/googlecloud",
       "homepageUrl": "https://cloud.google.com/contact-center/insights/docs",
       "notes": [
-        "Name: Google's API Discovery directory lists contactcenterinsights.googleapis.com as \"Contact Center AI Insights API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Name: Google's API Discovery directory still lists contactcenterinsights.googleapis.com as \"Contact Center AI Insights API\", but Google's documentation at the homepage URL now titles the product Conversational Insights, formerly Contact Center AI Insights (checked 2026-11-02).",
         "Logo: Simple Icons \"googlecloud\" (Google Cloud), the Google Cloud mark, because Simple Icons has no separate mark for this product. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
       ]
     },
@@ -1037,11 +1037,11 @@
     },
     {
       "mcpUrl": "https://dataplex.googleapis.com/mcp",
-      "name": "Google Cloud Dataplex",
+      "name": "Google Cloud Knowledge Catalog",
       "logoSourceUrl": "https://cdn.simpleicons.org/googlecloud",
-      "homepageUrl": "https://cloud.google.com/dataplex/docs",
+      "homepageUrl": "https://docs.cloud.google.com/dataplex/docs/catalog-overview",
       "notes": [
-        "Name: Google's API Discovery directory lists dataplex.googleapis.com as \"Cloud Dataplex API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Name: Google's API Discovery directory still lists dataplex.googleapis.com as \"Cloud Dataplex API\", but Google renamed Dataplex Universal Catalog to Knowledge Catalog on April 10, 2026, as its documentation at the homepage URL writes it; the API host is unchanged (checked 2026-11-02).",
         "Logo: Simple Icons \"googlecloud\" (Google Cloud), the Google Cloud mark, because Simple Icons has no separate mark for this product. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
       ]
     },
@@ -1401,6 +1401,16 @@
       "notes": [
         "Name: as the provider presents the service on https://eodhd.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
         "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.facebook.com/devtools",
+      "name": "Meta Social Technologies MCP",
+      "logoSourceUrl": "https://cdn.simpleicons.org/meta",
+      "homepageUrl": "https://developers.facebook.com/documentation/mcp/devtools-mcp",
+      "notes": [
+        "Name: Meta's documentation at the homepage URL calls this server Meta Social Technologies MCP, formerly Meta Developer Tools MCP (checked 2026-11-02); integrations.sh lists it only as its domain, facebook.com.",
+        "Logo: Simple Icons \"meta\" (Meta), the mark of the company that publishes the server; integrations.sh serves the Facebook app icon. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
       ]
     },
     {
@@ -1783,9 +1793,9 @@
       "mcpUrl": "https://networkmanagement.googleapis.com/mcp",
       "name": "Google Cloud Network Management",
       "logoSourceUrl": "https://cdn.simpleicons.org/googlecloud",
-      "homepageUrl": "https://cloud.google.com/",
+      "homepageUrl": "https://cloud.google.com/network-intelligence-center/docs",
       "notes": [
-        "Name: Google's API Discovery directory lists networkmanagement.googleapis.com as \"Network Management API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Name: Google's API Discovery directory lists networkmanagement.googleapis.com as \"Network Management API\", the API behind Network Intelligence Center, whose documentation is the homepage URL; the name is Google's product name without the API suffix (checked 2026-11-02).",
         "Logo: Simple Icons \"googlecloud\" (Google Cloud), the Google Cloud mark, because Simple Icons has no separate mark for this product. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
       ]
     },
@@ -1834,11 +1844,11 @@
     },
     {
       "mcpUrl": "https://people.googleapis.com/mcp/v1",
-      "name": "Google People",
+      "name": "Google People API",
       "logoSourceUrl": "https://cdn.simpleicons.org/google",
       "homepageUrl": "https://developers.google.com/people/",
       "notes": [
-        "Name: Google's API Discovery directory lists people.googleapis.com as \"People API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Name: Google's API Discovery directory lists people.googleapis.com as \"People API\", and Google's documentation at the homepage URL writes it the same way; the API suffix stays because the product is the API itself (checked 2026-11-02).",
         "Logo: Simple Icons \"google\" (Google), the Google mark. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
       ]
     },
@@ -1934,6 +1944,14 @@
       "notes": [
         "Name: as the provider presents the service on https://gohighlevel.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
         "The endpoint is on leadconnectorhq.com, the HighLevel API host.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://services.leadconnectorhq.com/mcp/chatgpt",
+      "name": "HighLevel (ChatGPT endpoint)",
+      "notes": [
+        "Name: integrations.sh already names this row HighLevel, the same as the main https://services.leadconnectorhq.com/mcp server; the qualifier, taken from the endpoint path, keeps the two rows apart in lists and search (checked 2026-11-02).",
         "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
       ]
     },

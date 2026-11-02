@@ -131,9 +131,11 @@ const GENERATED_PLACEHOLDER_ELEMENTS: ReadonlySet<string> = new Set([
  * Detects a generated letter avatar served in place of a logo.
  *
  * Logo hosts such as integrations.sh answer an unknown domain with HTTP 200
- * and an SVG that is only a coloured square and one or two letters. Accepting
- * it would show a fake logo, and because it is a real image, the UI's own
- * monogram would never take over. Treat it as "no logo" instead.
+ * and an SVG that is only a coloured square and one letter. Accepting it would
+ * show a fake logo, and because it is a real image, the UI's own monogram would
+ * never take over. Treat it as "no logo" instead. The shape is deliberately
+ * narrow: only rectangles, grouping and text, at least one rectangle, and one
+ * or two visible characters, so a real wordmark or an empty text node is kept.
  */
 export function generatedPlaceholderReason(contentType: string, bytes: Uint8Array): string | null {
   if (contentType !== "image/svg+xml") {
@@ -146,25 +148,42 @@ export function generatedPlaceholderReason(contentType: string, bytes: Uint8Arra
   const elements = [...text.matchAll(/<\s*([a-zA-Z][\w:-]*)/g)].map((match) =>
     match[1]!.toLowerCase(),
   );
-  if (!elements.includes("text")) {
+  if (!elements.includes("text") || !elements.includes("rect")) {
     return null;
   }
   if (elements.some((element) => !GENERATED_PLACEHOLDER_ELEMENTS.has(element))) {
     return null;
   }
   const letters = [...text.matchAll(/<\s*(?:text|tspan)\b[^>]*>([^<]*)/gi)]
-    .map((match) => match[1]!.trim())
+    .map((match) => decodeXmlEntities(match[1]!).replace(/\s+/g, ""))
     .join("");
-  return [...letters].length <= 3 ? "generated_letter_placeholder" : null;
+  const count = [...letters].length;
+  return count >= 1 && count <= 2 ? "generated_letter_placeholder" : null;
+}
+
+function decodeXmlEntities(value: string): string {
+  return value.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (entity, body: string) => {
+    const lower = body.toLowerCase();
+    if (lower.startsWith("#")) {
+      const code = lower.startsWith("#x")
+        ? Number.parseInt(lower.slice(2), 16)
+        : Number.parseInt(lower.slice(1), 10);
+      return code <= 0x10ffff ? String.fromCodePoint(code) : entity;
+    }
+    return { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" }[lower] ?? entity;
+  });
 }
 
 /**
  * A servable image content type, at most `MAX_LOGO_BYTES`, and no active
- * content inside an SVG. A generated letter avatar is not a logo.
+ * content inside an SVG. With `rejectGeneratedPlaceholder` (the registry
+ * catalog's import and vendoring paths), a generated letter avatar is not a
+ * logo either; a server's own declared icon is accepted as published.
  */
 export function validateLogoAsset(input: {
   contentType: string | null | undefined;
   bytes: Uint8Array;
+  rejectGeneratedPlaceholder?: boolean;
 }): LogoAssetValidation {
   const contentType = validateLogoContentType(input.contentType);
   if (!contentType.ok) return contentType;
@@ -178,7 +197,9 @@ export function validateLogoAsset(input: {
   if (activeContent) {
     return { ok: false, reason: activeContent };
   }
-  const placeholder = generatedPlaceholderReason(contentType.contentType, input.bytes);
+  const placeholder = input.rejectGeneratedPlaceholder
+    ? generatedPlaceholderReason(contentType.contentType, input.bytes)
+    : null;
   if (placeholder) {
     return { ok: false, reason: placeholder };
   }

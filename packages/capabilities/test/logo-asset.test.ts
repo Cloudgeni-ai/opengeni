@@ -23,6 +23,21 @@ const WORDMARK_WITH_TEXT = svg(
 const TEXT_ONLY_WORDMARK = svg(
   `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 24"><text x="0" y="18">Acme Cloud</text></svg>`,
 );
+const RECT_THREE_LETTER_WORDMARK = svg(
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 24"><rect width="64" height="24" fill="#1f70c1"/><text x="4" y="18">IBM</text></svg>`,
+);
+const RECT_EMPTY_TEXT = svg(
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64"/><text x="32" y="32"> </text></svg>`,
+);
+const RECT_ENTITY_LETTERS = svg(
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64"/><text x="32" y="32">A&amp;T</text></svg>`,
+);
+const RECT_ENTITY_LETTER = svg(
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64"/><text x="32" y="32">&#x26;</text></svg>`,
+);
+const LETTER_WITHOUT_BACKGROUND = svg(
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><text x="32" y="32">S</text></svg>`,
+);
 
 describe("generated letter placeholders", () => {
   test("recognizes both integrations.sh letter avatars", () => {
@@ -41,13 +56,38 @@ describe("generated letter placeholders", () => {
     expect(generatedPlaceholderReason("image/png", INTEGRATIONS_SH_LETTER)).toBeNull();
   });
 
-  test("the shared acceptance rule refuses a placeholder so the UI monogram takes over", () => {
+  test("only a background rectangle with one or two visible characters is a placeholder", () => {
+    // A real three-letter wordmark on a block, or an empty text node, is kept.
+    expect(generatedPlaceholderReason("image/svg+xml", RECT_THREE_LETTER_WORDMARK)).toBeNull();
+    expect(generatedPlaceholderReason("image/svg+xml", RECT_EMPTY_TEXT)).toBeNull();
+    expect(generatedPlaceholderReason("image/svg+xml", LETTER_WITHOUT_BACKGROUND)).toBeNull();
+    // Entities count as the character they render.
+    expect(generatedPlaceholderReason("image/svg+xml", RECT_ENTITY_LETTERS)).toBeNull();
+    expect(generatedPlaceholderReason("image/svg+xml", RECT_ENTITY_LETTER)).toBe(
+      "generated_letter_placeholder",
+    );
+  });
+
+  test("the catalog's acceptance rule refuses a placeholder so the UI monogram takes over", () => {
     expect(
-      validateLogoAsset({ contentType: "image/svg+xml", bytes: INTEGRATIONS_SH_LETTER }),
+      validateLogoAsset({
+        contentType: "image/svg+xml",
+        bytes: INTEGRATIONS_SH_LETTER,
+        rejectGeneratedPlaceholder: true,
+      }),
     ).toEqual({ ok: false, reason: "generated_letter_placeholder" });
     expect(
-      validateLogoAsset({ contentType: "image/svg+xml; charset=utf-8", bytes: SIMPLE_ICONS_MARK })
-        .ok,
+      validateLogoAsset({
+        contentType: "image/svg+xml; charset=utf-8",
+        bytes: SIMPLE_ICONS_MARK,
+        rejectGeneratedPlaceholder: true,
+      }).ok,
+    ).toBe(true);
+  });
+
+  test("a server's own declared letter icon is still accepted outside the catalog", () => {
+    expect(
+      validateLogoAsset({ contentType: "image/svg+xml", bytes: INTEGRATIONS_SH_LETTER }).ok,
     ).toBe(true);
   });
 });
