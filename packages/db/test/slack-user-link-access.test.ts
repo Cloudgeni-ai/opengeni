@@ -911,14 +911,16 @@ describe("linking Slack as an organization member, without workspace access", ()
     membership: Parameters<typeof organizationMember>[2] | null = {},
   ) {
     const fixture = await preparedFixture(label);
-    if (membership) await organizationMember(fixture.target.accountId, fixture.subjectId, membership);
+    if (membership)
+      await organizationMember(fixture.target.accountId, fixture.subjectId, membership);
     return fixture;
   }
 
   async function workspaceMemberships(workspaceId: string, subjectId: string) {
-    return await admin<{ id: string }[]>`
+    const rows = await admin<{ id: string }[]>`
       select id from workspace_memberships
       where workspace_id = ${workspaceId} and subject_id = ${subjectId}`;
+    return rows.map((row) => row.id);
   }
 
   test("an active member links from the installation's own link, and gains no workspace access", async () => {
@@ -933,7 +935,12 @@ describe("linking Slack as an organization member, without workspace access", ()
     });
     expect(completed).toMatchObject({ status: "completed", version: 2 });
     expect(
-      await getSlackBotUserLink(db, fixture.target.workspaceId, fixture.connection.id, `U_${label}`),
+      await getSlackBotUserLink(
+        db,
+        fixture.target.workspaceId,
+        fixture.connection.id,
+        `U_${label}`,
+      ),
     ).toMatchObject({ subjectId: fixture.subjectId });
     // Linking grants nothing else.
     expect(await workspaceMemberships(fixture.target.workspaceId, fixture.subjectId)).toEqual([]);

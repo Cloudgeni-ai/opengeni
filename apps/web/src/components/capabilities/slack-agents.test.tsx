@@ -218,6 +218,7 @@ describe("Slack agents section", () => {
             targetWorkspaceId: OTHER_WORKSPACE_ID,
             targetWorkspaceName: "Sales",
             viewerCanManage: false,
+            open: true,
           }),
         ])}
         canCreate
@@ -233,6 +234,8 @@ describe("Slack agents section", () => {
     expect(text).toContain("Deal desk");
     expect(text).toContain("Sales");
     expect(text).toContain("@Opengeni Deal desk");
+    // An open agent says who can use it; the other doesn't.
+    expect(text.match(/Organization members/gu)).toHaveLength(1);
     expect(buttonNamed(view.host, "Create agent")).toBeTruthy();
     // Only the manageable agent has Edit and Delete.
     const items = [...view.host.querySelectorAll('[role="menuitem"]')].map(

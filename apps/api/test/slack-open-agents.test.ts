@@ -92,12 +92,12 @@ describe("who Opengeni lets ask an open agent", () => {
   });
 
   test("an unlinked Slack account is asked to link, whatever else is true", () => {
-    expect(
-      openSlackAgentPersonRefusal({ linkedSubjectId: null, organizationMember: true }),
-    ).toBe("not_linked");
-    expect(
-      openSlackAgentPersonRefusal({ linkedSubjectId: null, organizationMember: false }),
-    ).toBe("not_linked");
+    expect(openSlackAgentPersonRefusal({ linkedSubjectId: null, organizationMember: true })).toBe(
+      "not_linked",
+    );
+    expect(openSlackAgentPersonRefusal({ linkedSubjectId: null, organizationMember: false })).toBe(
+      "not_linked",
+    );
   });
 
   test("a linked person who isn't an active, full member is refused", () => {
