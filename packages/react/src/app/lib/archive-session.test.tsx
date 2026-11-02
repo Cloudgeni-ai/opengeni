@@ -2,7 +2,7 @@ import { beforeEach, expect, mock, test } from "bun:test";
 import { OpenGeniApiError } from "@opengeni/sdk";
 
 type Shown = {
-  kind: "plain" | "success" | "error";
+  kind: "plain" | "success" | "error" | "warning";
   title: string;
   options?:
     | {
@@ -28,6 +28,10 @@ mock.module("sonner", () => ({
       },
       error: (title: string, options: Shown["options"]) => {
         shown.push({ kind: "error", title, options });
+        return shown.length;
+      },
+      warning: (title: string, options: Shown["options"]) => {
+        shown.push({ kind: "warning", title, options });
         return shown.length;
       },
       dismiss: () => {},
@@ -343,15 +347,17 @@ test("Undo says so when Keep this chat active can't be turned back on", async ()
   expect(await runs[0]).toMatchObject({ archived: true });
   retentionFailures.add("chat");
   shown.at(-1)!.options!.action!.onClick();
-  await runs[1];
+  // The chat comes back without waiting for the setting.
+  expect(await runs[1]).toMatchObject({ archived: false });
+  await flush();
   expect(
-    shown.slice(-2).map((notice) => [notice.kind, notice.title, notice.options?.description]),
+    shown.slice(1).map((notice) => [notice.kind, notice.title, notice.options?.description]),
   ).toEqual([
+    ["plain", "Archived “Plan”", expect.any(String)],
     [
-      "error",
-      "Couldn't turn “Keep this chat active” back on.",
+      "warning",
+      "Archive undone, but “Keep this chat active” is still off.",
       "Turn it on in the chat's Agent tab.",
     ],
-    ["success", "Archive undone.", undefined],
   ]);
 });

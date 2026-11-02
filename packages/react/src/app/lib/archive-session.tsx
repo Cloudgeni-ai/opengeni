@@ -216,13 +216,20 @@ export async function requestSessionArchive(
       ...(rerun ? { action: { label: "Undo", onClick: () => rerun(false) } } : {}),
     });
   } else {
-    // Undo returns the chat as it was, "Keep this chat active" included.
-    if (!(await restoreKeepLive(context, chat.workspaceId, takeKeptActive(chat)))) {
-      toast.error("Couldn't turn “Keep this chat active” back on.", {
-        description: "Turn it on in the chat's Agent tab.",
+    // Undo returns the chat as it was, "Keep this chat active" included. The
+    // chat comes back at once; the setting follows, and only a failure says so.
+    const kept = takeKeptActive(chat);
+    if (!kept?.length) toast.success("Archive undone.");
+    else {
+      void restoreKeepLive(context, chat.workspaceId, kept).then((restored) => {
+        if (restored) toast.success("Archive undone.");
+        else {
+          toast.warning("Archive undone, but “Keep this chat active” is still off.", {
+            description: "Turn it on in the chat's Agent tab.",
+          });
+        }
       });
     }
-    toast.success("Archive undone.");
   }
   return updated;
 }
