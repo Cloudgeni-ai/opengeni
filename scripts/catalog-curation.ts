@@ -88,6 +88,26 @@ export type CuratedPresentation = {
 export type CuratedCatalog = {
   readonly version: number;
   readonly entries: readonly CuratedCatalogEntry[];
+  /**
+   * Reviewed display identities: the service's human name and logo source,
+   * nothing else. An identity never marks a row curated, featured or
+   * official, never changes its tier, auth or tools, and never removes the
+   * Community label; it only stops a well-known service from showing a raw
+   * hostname or a generated letter instead of its own name and mark.
+   */
+  readonly identities: readonly CatalogIdentityEntry[];
+};
+
+export type CatalogIdentityEntry = {
+  /** Exact canonical MCP URL. The overlay key. */
+  readonly mcpUrl: string;
+  /** The name the provider uses for the service. */
+  readonly name?: string;
+  /** HTTPS source of a reusable mark; `null` suppresses the snapshot's logo. */
+  readonly logoSourceUrl?: string | null;
+  readonly homepageUrl?: string;
+  /** Reviewer-facing evidence for the name and the mark's source and licence. */
+  readonly notes: readonly string[];
 };
 
 class CuratedCatalogError extends Error {
@@ -444,6 +464,74 @@ export function canonicalMcpUrl(value: string): string {
 const AUTH_KINDS: ReadonlySet<string> = new Set(["oauth2", "api_key", "none", "unknown"]);
 const TIERS: ReadonlySet<string> = new Set(["verified", "community"]);
 
+const IDENTITY_KEYS: ReadonlySet<string> = new Set([
+  "mcpUrl",
+  "name",
+  "logoSourceUrl",
+  "homepageUrl",
+  "notes",
+]);
+
+function httpsUrl(value: string): boolean {
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function parseIdentity(value: unknown, index: number): CatalogIdentityEntry {
+  const record = asRecord(value);
+  if (!record) throw new CuratedCatalogError(`identities[${index}] must be an object`);
+  const mcpUrl = record.mcpUrl;
+  if (typeof mcpUrl !== "string" || mcpUrl.trim().length === 0) {
+    throw new CuratedCatalogError(`identities[${index}]: mcpUrl is required`);
+  }
+  const where = `identities ${mcpUrl}`;
+  const canonical = canonicalMcpUrl(mcpUrl);
+  if (canonical !== mcpUrl) {
+    throw new CuratedCatalogError(
+      `${where}: mcpUrl must be written in canonical form "${canonical}"`,
+    );
+  }
+  for (const key of Object.keys(record)) {
+    if (!IDENTITY_KEYS.has(key)) {
+      throw new CuratedCatalogError(`${where}: unknown key "${key}"`);
+    }
+  }
+  const entry: Mutable<CatalogIdentityEntry> = { mcpUrl, notes: [] };
+  const name = optionalString(record, "name", where);
+  if (name !== undefined) {
+    if (name !== name.trim() || name.length > 120) {
+      throw new CuratedCatalogError(`${where}: name must be trimmed and at most 120 characters`);
+    }
+    entry.name = name;
+  }
+  if ("logoSourceUrl" in record) {
+    const raw = record.logoSourceUrl;
+    if (raw !== null && (typeof raw !== "string" || !httpsUrl(raw))) {
+      throw new CuratedCatalogError(`${where}: logoSourceUrl must be an https URL or null`);
+    }
+    entry.logoSourceUrl = raw as string | null;
+  }
+  const homepageUrl = optionalString(record, "homepageUrl", where);
+  if (homepageUrl !== undefined) {
+    if (!httpsUrl(homepageUrl)) {
+      throw new CuratedCatalogError(`${where}: homepageUrl must be an https URL`);
+    }
+    entry.homepageUrl = homepageUrl;
+  }
+  const notes = optionalStringArray(record, "notes", where);
+  if (!notes || notes.length === 0 || notes.some((note) => !note.trim())) {
+    throw new CuratedCatalogError(`${where}: notes must record where the name and mark come from`);
+  }
+  entry.notes = notes;
+  if (entry.name === undefined && entry.logoSourceUrl === undefined) {
+    throw new CuratedCatalogError(`${where}: an identity must set name or logoSourceUrl`);
+  }
+  return entry;
+}
+
 function parseEntry(value: unknown, index: number): CuratedCatalogEntry {
   const record = asRecord(value);
   if (!record) throw new CuratedCatalogError(`entries[${index}] must be an object`);
@@ -575,7 +663,30 @@ export function parseCuratedCatalog(document: unknown): CuratedCatalog {
     }
     seen.add(entry.mcpUrl);
   }
-  return { version: root.version, entries };
+  if (root.identities !== undefined && !Array.isArray(root.identities)) {
+    throw new CuratedCatalogError("identities must be an array");
+  }
+  const identities = (root.identities ?? []).map(parseIdentity);
+  const seenIdentities = new Set<string>();
+  for (const identity of identities) {
+    if (seen.has(identity.mcpUrl)) {
+      // A curated entry already owns the row's name and logo; two sources of
+      // truth for one row would make the effective value order-dependent.
+      throw new CuratedCatalogError(
+        `identities ${identity.mcpUrl}: already curated in entries; set name and logo there`,
+      );
+    }
+    if (seenIdentities.has(identity.mcpUrl)) {
+      throw new CuratedCatalogError(`duplicate identity for ${identity.mcpUrl}`);
+    }
+    seenIdentities.add(identity.mcpUrl);
+  }
+  for (const key of Object.keys(root)) {
+    if (!["version", "readme", "entries", "identities"].includes(key)) {
+      throw new CuratedCatalogError(`unknown top-level key "${key}"`);
+    }
+  }
+  return { version: root.version, entries, identities };
 }
 
 export function curatedCatalogByMcpUrl(
@@ -584,11 +695,20 @@ export function curatedCatalogByMcpUrl(
   return new Map(catalog.entries.map((entry) => [entry.mcpUrl, entry]));
 }
 
+export function catalogIdentitiesByMcpUrl(
+  catalog: CuratedCatalog,
+): ReadonlyMap<string, CatalogIdentityEntry> {
+  return new Map(catalog.identities.map((entry) => [entry.mcpUrl, entry]));
+}
+
 /** The committed overlay, validated at module load so a bad edit fails loudly. */
 export const CURATED_CATALOG: CuratedCatalog = parseCuratedCatalog(curatedDocument);
 
 export const curatedCatalogEntriesByMcpUrl: ReadonlyMap<string, CuratedCatalogEntry> =
   curatedCatalogByMcpUrl(CURATED_CATALOG);
+
+export const catalogIdentityEntriesByMcpUrl: ReadonlyMap<string, CatalogIdentityEntry> =
+  catalogIdentitiesByMcpUrl(CURATED_CATALOG);
 
 /**
  * Canonical serialization used by the import fingerprint. Whitespace and key
@@ -596,10 +716,16 @@ export const curatedCatalogEntriesByMcpUrl: ReadonlyMap<string, CuratedCatalogEn
  */
 export function curatedCatalogFingerprintInput(catalog: CuratedCatalog): string {
   const sorted = [...catalog.entries].sort((a, b) => a.mcpUrl.localeCompare(b.mcpUrl));
-  return JSON.stringify({ version: catalog.version, entries: sorted.map(sortKeys) });
+  const identities = [...catalog.identities].sort((a, b) => a.mcpUrl.localeCompare(b.mcpUrl));
+  return JSON.stringify({
+    version: catalog.version,
+    entries: sorted.map(sortKeys),
+    // Omitted when empty so an overlay without identities keeps its fingerprint.
+    ...(identities.length > 0 ? { identities: identities.map(sortKeys) } : {}),
+  });
 }
 
-function sortKeys(entry: CuratedCatalogEntry): Record<string, unknown> {
+function sortKeys(entry: CuratedCatalogEntry | CatalogIdentityEntry): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const key of Object.keys(entry).sort()) {
     out[key] = (entry as Record<string, unknown>)[key];

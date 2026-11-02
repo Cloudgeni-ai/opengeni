@@ -67,6 +67,7 @@ import {
   type CapabilityCatalogItem,
   type GitHubRepository,
   type FirstPartyMcpToolName,
+  type SandboxBackend,
   Permission,
   type SessionAuthorizationOperation,
   type SessionAuthorizationActor,
@@ -180,6 +181,7 @@ import {
   allowedFirstPartyMcpToolsForSession,
   canonicalPublicOrigin,
   codemodeWorkspaceUrl,
+  servedSandboxBackends,
 } from "@opengeni/config";
 import {
   createSignedState,
@@ -817,18 +819,24 @@ const scheduledTaskUpdateToolInput = (events: boolean) =>
 const sessionCreateToolInputs = new Map<string, ReturnType<typeof buildSessionCreateToolInput>>();
 
 /** Distinct selections are few; cache each built contract for reuse. */
-function sessionCreateToolInput(allowedTools: readonly FirstPartyMcpToolName[]) {
-  const key = allowedTools.join(",");
+function sessionCreateToolInput(
+  allowedTools: readonly FirstPartyMcpToolName[],
+  servedBackends: readonly SandboxBackend[],
+) {
+  const key = `${allowedTools.join(",")}|${servedBackends.join(",")}`;
   let input = sessionCreateToolInputs.get(key);
   if (!input) {
     if (sessionCreateToolInputs.size >= 256) sessionCreateToolInputs.clear();
-    input = buildSessionCreateToolInput(allowedTools);
+    input = buildSessionCreateToolInput(allowedTools, servedBackends);
     sessionCreateToolInputs.set(key, input);
   }
   return input;
 }
 
-function buildSessionCreateToolInput(allowedTools: readonly FirstPartyMcpToolName[]) {
+function buildSessionCreateToolInput(
+  allowedTools: readonly FirstPartyMcpToolName[],
+  servedBackends: readonly SandboxBackend[],
+) {
   const capabilityToggle = z4.boolean().optional();
   const sessionCreateAgentInput = z4
     .object({
@@ -912,7 +920,9 @@ function buildSessionCreateToolInput(allowedTools: readonly FirstPartyMcpToolNam
         .describe(
           "Omit for standard latency, even when model and reasoning are inherited. Fast or priority must be selected explicitly and supported by the model.",
         ),
-      sandboxBackend: CreateSessionRequest.out.shape.sandboxBackend,
+      // Advertise only the backends this deployment serves; core rejects any
+      // other value at create (sandboxBackendServed).
+      sandboxBackend: z4.enum(servedBackends as [SandboxBackend, ...SandboxBackend[]]).optional(),
       // Model-only structural coupling: workingDir cannot exist without a
       // targetSandboxId because both live inside one optional object. The
       // handler maps this back to the stable public REST/SDK request fields.
@@ -6579,7 +6589,12 @@ function registerWorkspaceOrchestrationTools(
       {
         description:
           "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Delegation has setup and coordination overhead: by default, answer directly when the work takes only a few steps, and send a related follow-up to a worker you already spawned with session_send_message instead of spawning another. Explicit user requests and applicable Skill guidance for delegation, independent review, or fresh workers override that default within existing authority. After spawning work that needs minutes, once nothing else can advance, call wait_for_input and end the turn instead of alternating session_wait and session_get; no preliminary short wait or status recheck is required. The worker's terminal result wakes you and carries its final answer (payload.finalAnswer). Do not duplicate a child's implementation; independent review or comparison may intentionally examine the same subject with a distinct deliverable. Track the child and join its actual result before completing dependent work. Give the child a concise semantic title; if omitted, one is derived from its delegated goal or initial message. The child inherits this session's visibility, agent-access scope and end-user label; a private session can only create a same-owner private child, and memoryScope may only narrow this session's selector. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Sandbox Environment or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. Normally omit tools, mcpServers, and firstPartyMcpTools so the worker inherits this session's exact selections; specialize its task through initialMessage rather than a hand-written partial tool list. To create a worker that cannot start, message, or follow other sessions, use agent: { capabilities: { from: 'all', subagents: false } } and keep tool lists omitted; its final answer still reaches you automatically. Explicit tool arrays replace the inherited selection and are only for deliberate restrictions. Do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
-        inputSchema: sessionCreateToolInput(childSelectableTools),
+        // `selfhosted` is reached through machineTarget, so it is not offered
+        // as a bare backend choice.
+        inputSchema: sessionCreateToolInput(
+          childSelectableTools,
+          servedSandboxBackends(deps.settings).filter((backend) => backend !== "selfhosted"),
+        ),
       },
       async (args) => {
         try {

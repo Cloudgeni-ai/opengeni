@@ -1,6 +1,8 @@
 import type { ConnectAccount, ConnectProvider } from "@opengeni/connect";
 import type { CapabilityCatalogItem } from "@opengeni/sdk";
 import teamsLogo from "./assets/microsoft-teams.svg";
+import oneDriveLogo from "./assets/onedrive.svg";
+import sharePointLogo from "./assets/sharepoint.svg";
 import gmailLogo from "./assets/gmail.ico";
 import outlookLogo from "./assets/outlook.ico";
 
@@ -21,6 +23,8 @@ const services: Record<string, { name: string; logo: string | null; mcpUrl?: str
   "microsoft-outlook-mail": { name: "Outlook Mail", logo: outlookLogo },
   "microsoft-outlook-calendar": { name: "Outlook Calendar", logo: outlookLogo },
   "microsoft-outlook-contacts": { name: "Outlook Contacts", logo: outlookLogo },
+  "microsoft-onedrive": { name: "OneDrive", logo: oneDriveLogo },
+  "microsoft-sharepoint": { name: "SharePoint", logo: sharePointLogo },
 };
 
 export function connectionServicePresentation(provider: Pick<ConnectProvider, "id" | "label">) {

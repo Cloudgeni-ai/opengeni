@@ -11,10 +11,10 @@ use crate::image::overlaps;
 use crate::protocol::Id;
 use futures::TryStreamExt as _;
 
-/// The key `chunk` is stored under by an archive of `store` today.
+/// The key `chunk` is stored under by an archive of `store` this hour.
 fn stored_key(store: &Chunked, chunk: &EncodedChunk) -> String {
-    let today = compute_storage::fresh::day_of(store.chunks.now());
-    chunk.reference.on_day(today).key()
+    let period = compute_storage::fresh::period_of(store.chunks.now());
+    chunk.reference.on_day(period).key()
 }
 
 fn id(value: &str) -> Id {
@@ -1291,13 +1291,13 @@ async fn reused_chunks_are_asked_about_again_after_a_day_or_a_failed_verificatio
         ZSTD_LEVEL,
     )
     .unwrap();
-    // Stored by the first archive, on the first day.
-    let first_day = compute_storage::fresh::day_of(start);
+    // Stored by the first archive, in the first hour.
+    let first_hour = compute_storage::fresh::period_of(start);
     backend
         .inner
         .delete(&ObjectPath::from(format!(
             "t/{}",
-            lost.reference.on_day(first_day).key()
+            lost.reference.on_day(first_hour).key()
         )))
         .await
         .unwrap();

@@ -499,6 +499,16 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
     return this.requestJson("GET", `/v1/workspaces/${workspaceId}/connect/attempts`);
   }
 
+  /**
+   * Finishes the caller's built-in integration setups that saved an account
+   * but never added its tools, and returns the ones it completed.
+   */
+  async finishUnfinishedConnectSetups(
+    workspaceId: string,
+  ): Promise<import("@opengeni/contracts/connect").ConnectAttempt[]> {
+    return this.requestJson("POST", `/v1/workspaces/${workspaceId}/connect/attempts/finish`);
+  }
+
   async advanceConnectAttempt(
     workspaceId: string,
     attemptId: string,

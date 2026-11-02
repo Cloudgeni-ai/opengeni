@@ -7960,6 +7960,13 @@ export type RegistryCapabilityCatalogItemInput = {
   tier: "verified" | "community";
   provenance: string;
   logoAssetPath?: string | null;
+  /**
+   * The row has no logo by policy (an overlay `logoSourceUrl: null`, or a
+   * screened letter placeholder): clear any asset an earlier import stored.
+   * Without it a null `logoAssetPath` keeps the existing asset, because a
+   * skipped or failed fetch must not erase a good logo.
+   */
+  clearLogoAsset?: boolean;
   importBatchId: string;
   scopesHint?: string[];
   homepageUrl?: string | null;
@@ -10569,7 +10576,9 @@ export async function upsertRegistryCapabilityCatalogItem(
     credentialFacts: values.credentialFacts,
     tier: values.tier,
     provenance: values.provenance,
-    logoAssetPath: sql`coalesce(excluded.logo_asset_path, ${schema.capabilityCatalogItems.logoAssetPath})`,
+    logoAssetPath: input.clearLogoAsset
+      ? null
+      : sql`coalesce(excluded.logo_asset_path, ${schema.capabilityCatalogItems.logoAssetPath})`,
     importBatchId: values.importBatchId,
     stale: false,
     staleAt: null,
@@ -91111,10 +91120,14 @@ function backgroundCommandTerminalMutation(input: {
           `Session ${input.sessionId} does not belong to account ${input.accountId}`,
         );
       }
+      // Terminal settlement only needs pause/admission state. Recounting all
+      // stopping commands here makes draining a backlog quadratic, while each
+      // count holds the session write lock and blocks unrelated lifecycle work.
       controlActive =
         (
-          await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
+          await evaluateSessionWriteAdmissionControl(tx, input.workspaceId, input.sessionId, {
             workspaceControl: locks.control,
+            lockedSession: session,
           })
         ).state === "active";
     },
