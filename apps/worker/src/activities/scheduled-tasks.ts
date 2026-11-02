@@ -5,6 +5,7 @@ import {
 import {
   getScheduledTaskClaudeProviderAccountAuthoritySnapshot,
   readScheduledTaskBillingOrigin,
+  canonicalSecretPermissions,
 } from "@opengeni/db";
 import { retryScheduledTaskAdmission } from "./scheduled-task-admission";
 import { scheduledTaskSessionTitle } from "./scheduled-task-title";
@@ -745,8 +746,12 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           );
         }
       }
+      // A task saved before the secret permission names were unified may still
+      // hold their retired aliases. The chat a run creates stores the canonical
+      // names, so the accepted run must name the same set or the database
+      // refuses the chat as an authority change.
       const firstPartyMcpPermissions = creatorPolicy?.firstPartyMcpPermissions
-        ? [...creatorPolicy.firstPartyMcpPermissions]
+        ? canonicalSecretPermissions(creatorPolicy.firstPartyMcpPermissions)
         : [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS];
       // A fresh occurrence resolves the immutable owner's current accounts.
       // Retry/recovery above uses the already accepted occurrence snapshot.
