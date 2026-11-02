@@ -57,6 +57,7 @@ import {
   curatedConnectFinishPermissions,
   installCuratedConnectTools,
   resolveCuratedConnectTools,
+  retryUnfinishedCuratedSetup,
   type CuratedConnectFinishPermission,
 } from "./curated-connect-finish";
 
@@ -525,7 +526,7 @@ export async function completeApiIntegrationProviderOAuth(
           ? await resolveCuratedConnectTools(deps, owner, definition.id)
           : null;
       let origin: ExternalActorContinuation | null = null;
-      await finishOAuthAcquisition(
+      const settled = await finishOAuthAcquisition(
         deps.db,
         state,
         {
@@ -580,6 +581,27 @@ export async function completeApiIntegrationProviderOAuth(
         },
         definition.id,
       );
+      // The tools could not be read in time: keep trying here, so setup
+      // still finishes with nobody waiting in the app.
+      if (
+        curatedAttempt &&
+        finishPermissions.length > 0 &&
+        !tools &&
+        settled.state === "connected_but_incomplete"
+      )
+        retryUnfinishedCuratedSetup(deps, {
+          owner: {
+            accountId: owner.accountId,
+            workspaceId: owner.workspaceId,
+            subjectId: owner.subjectId,
+            personalOwnerVerified: owner.personalOwnerVerified,
+            ...(owner.externalContinuation
+              ? { externalContinuation: owner.externalContinuation }
+              : {}),
+          },
+          attemptId: settled.id,
+          finishPermissions,
+        });
       return { redirectTo: exactReturnUrl!, exactReturn: true };
     }
     const connection = await withOrganizationIntegrationAcquisition(

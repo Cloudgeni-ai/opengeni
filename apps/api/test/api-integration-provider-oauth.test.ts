@@ -34,6 +34,10 @@ import postgres from "postgres";
 import { createApp } from "../src/app";
 import { requireAccessGrantAuthorization } from "@opengeni/core";
 import { requireWorkspaceToolGatewayAuthorization } from "../src/workspace-tool-gateway";
+import {
+  setCuratedConnectFinishRetryDelays,
+  stopCuratedConnectFinishRetries,
+} from "../src/integrations/curated-connect-finish";
 
 const DELEGATION_SECRET = "api-integration-provider-oauth-delegation";
 const STATE_SECRET = "api-integration-provider-oauth-state";
@@ -48,6 +52,9 @@ let settings: Settings;
 const workspaceIds: string[] = [];
 
 beforeAll(async () => {
+  // Callbacks that fall back keep trying in the background; tests that rely
+  // on the fallback state turn that on only where they exercise it.
+  setCuratedConnectFinishRetryDelays([]);
   const adminUrl = process.env.OPENGENI_API_INTEGRATION_PROVIDER_OAUTH_TEST_POSTGRES_ADMIN_URL;
   const appUrl = process.env.OPENGENI_API_INTEGRATION_PROVIDER_OAUTH_TEST_POSTGRES_APP_URL;
   if ((adminUrl && !appUrl) || (!adminUrl && appUrl)) {
@@ -94,6 +101,8 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
+  stopCuratedConnectFinishRetries();
+  setCuratedConnectFinishRetryDelays(null);
   for (const workspaceId of workspaceIds) {
     await deleteWorkspace(client.db, workspaceId).catch(() => undefined);
   }
@@ -140,6 +149,7 @@ type TokenPlan = {
 function providerFixture() {
   let sourceTitle = "OneDrive fixture";
   let sourceAvailable = true;
+  let onSourceRead: (() => Promise<void>) | undefined;
   let beforeTokenReply: (() => Promise<void>) | undefined;
   const microsoftPlans: TokenPlan[] = [];
   const tokenRequests: Array<{
@@ -162,6 +172,7 @@ function providerFixture() {
         },
       });
     if (url.href === MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.source.url) {
+      await onSourceRead?.();
       if (!sourceAvailable) return new Response("unavailable", { status: 503 });
       return Response.json({
         openapi: "3.0.3",
@@ -224,6 +235,10 @@ function providerFixture() {
     /** The provider's API description cannot be read (the callback then saves only the account). */
     setSourceAvailable(value: boolean) {
       sourceAvailable = value;
+    },
+    /** Runs whenever the provider's API description is read. */
+    setOnSourceRead(hook: (() => Promise<void>) | undefined) {
+      onSourceRead = hook;
     },
     setBeforeTokenReply(hook: (() => Promise<void>) | undefined) {
       beforeTokenReply = hook;
@@ -1479,6 +1494,181 @@ describe("API Integration provider OAuth", () => {
     function instances() {
       return listInstalledApiIntegrations(client.db, workspace.workspaceId, workspace.subjectId);
     }
+  }, 60_000);
+
+  async function beginBuiltIn(
+    fixture: ReturnType<typeof providerFixture>,
+    workspace: Awaited<ReturnType<typeof freshWorkspace>>,
+    instanceKey: string,
+  ) {
+    const app = testApp(fixture);
+    const headers = {
+      authorization: await bearer(workspace),
+      "content-type": "application/json",
+      "x-opengeni-access-key": EDGE_ACCESS_KEY,
+      [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+    };
+    const base = `/v1/workspaces/${workspace.workspaceId}/connect/attempts`;
+    const begun = await app.request(base, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
+        ownership: "personal",
+        returnUrl: "https://host.example/capabilities",
+        idempotencyKey: crypto.randomUUID(),
+        installationTarget: { instanceKey, displayName: "OneDrive" },
+      }),
+    });
+    expect(begun.status).toBe(200);
+    const attempt = await begun.json();
+    const state = new URL(attempt.nextAction.url).searchParams.get("state")!;
+    const read = async (id = attempt.id) =>
+      await (await app.request(`${base}/${id}`, { headers })).json();
+    const installedFor = async () =>
+      (
+        await listInstalledApiIntegrations(client.db, workspace.workspaceId, workspace.subjectId)
+      ).find((instance) => instance.instanceKey === instanceKey);
+    return { app, headers, base, attempt, state, read, installedFor };
+  }
+
+  test("the callback reads the reviewed tools before its commit, holding no lock", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const fixture = providerFixture();
+    const setup = await beginBuiltIn(fixture, workspace, "account-before-commit");
+    // While the provider's API description is read (a network call that can
+    // take seconds), nothing may hold the attempt row or any other lock the
+    // commit takes: another transaction locks it without waiting.
+    const lockedDuringRead: boolean[] = [];
+    fixture.setOnSourceRead(async () => {
+      const locked = await shared!.admin
+        .begin(async (sql) => {
+          await sql`select id from connect_attempts where id = ${setup.attempt.id}::uuid for update nowait`;
+          const open = await sql`select count(*)::int as count from pg_stat_activity
+            where datname = current_database() and pid <> pg_backend_pid()
+              and state like 'idle in transaction%'`;
+          return open[0]!.count > 0;
+        })
+        .catch(() => true);
+      lockedDuringRead.push(locked);
+    });
+    expect((await callback(fixture, setup.state)).status).toBe(302);
+    fixture.setOnSourceRead(undefined);
+    expect(lockedDuringRead).toEqual([false]);
+    expect(await setup.read()).toMatchObject({ state: "complete", integrationInstalled: true });
+  }, 60_000);
+
+  test("when the callback cannot read the tools, the server keeps trying and finishes alone", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const fixture = providerFixture();
+    const setup = await beginBuiltIn(fixture, workspace, "account-retried");
+    setCuratedConnectFinishRetryDelays([25, 25, 25, 25, 25, 25, 25, 25]);
+    try {
+      // The provider's description is down while the person signs in.
+      fixture.setSourceAvailable(false);
+      expect((await callback(fixture, setup.state)).status).toBe(302);
+      expect(await setup.read()).toMatchObject({ state: "connected_but_incomplete" });
+      expect(await setup.installedFor()).toBeUndefined();
+      // It comes back. Nobody opens the app; the server finishes on its own.
+      fixture.setSourceAvailable(true);
+      let current = await setup.read();
+      for (let wait = 0; wait < 100 && current.state !== "complete"; wait += 1) {
+        await Bun.sleep(50);
+        current = await setup.read();
+      }
+      expect(current).toMatchObject({
+        revision: 3,
+        state: "complete",
+        credentialsCommitted: true,
+        integrationInstalled: true,
+        nextAction: { type: "none" },
+      });
+      expect(await setup.installedFor()).toMatchObject({
+        definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
+        connectionRef: { connectionId: current.account.id },
+      });
+    } finally {
+      fixture.setSourceAvailable(true);
+      stopCuratedConnectFinishRetries();
+      setCuratedConnectFinishRetryDelays([]);
+    }
+  }, 60_000);
+
+  test("a setup left with a saved account and no tools finishes when Capabilities opens, even after it expired", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const fixture = providerFixture();
+    const setup = await beginBuiltIn(fixture, workspace, "account-left-behind");
+    // Before this release: the account was saved and the person closed the
+    // dialog on "Finishing setup…", so its tools were never added. Its
+    // attempt has since passed its short expiry.
+    fixture.setSourceAvailable(false);
+    expect((await callback(fixture, setup.state)).status).toBe(302);
+    fixture.setSourceAvailable(true);
+    expect(await setup.read()).toMatchObject({ state: "connected_but_incomplete" });
+    const expiresAt = new Date(Date.now() - 60_000).toISOString();
+    await shared!.admin`update connect_attempts set expires_at = ${expiresAt}::timestamptz,
+      projection = jsonb_set(projection, '{expiresAt}', to_jsonb(${expiresAt}::text))
+      where id = ${setup.attempt.id}::uuid`;
+    expect(await setup.installedFor()).toBeUndefined();
+    const finish = (authorization = setup.headers.authorization) =>
+      setup.app.request(`${setup.base}/finish`, {
+        method: "POST",
+        headers: { ...setup.headers, authorization },
+      });
+
+    // Someone without the right to add their own accounts finishes nothing.
+    const readOnly = await finish(
+      await bearer(workspace, "human_session", ["connections:read", "workspace:read"]),
+    );
+    expect(readOnly.status).toBe(200);
+    expect(await readOnly.json()).toEqual([]);
+    expect(await setup.installedFor()).toBeUndefined();
+
+    // The person opens Capabilities: the setup finishes with no dialog.
+    const opened = await finish();
+    expect(opened.status).toBe(200);
+    const completed = await opened.json();
+    expect(completed).toHaveLength(1);
+    expect(completed[0]).toMatchObject({
+      id: setup.attempt.id,
+      revision: 3,
+      state: "complete",
+      integrationInstalled: true,
+      installationTarget: { instanceKey: "account-left-behind", displayName: "OneDrive" },
+    });
+    const installed = await setup.installedFor();
+    expect(installed).toMatchObject({
+      definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
+      connectionRef: { connectionId: completed[0].account.id },
+    });
+    expect(installed!.allowedTools).toHaveLength(2);
+    // Opening it again finds nothing left to do.
+    expect(await (await finish()).json()).toEqual([]);
+  }, 60_000);
+
+  test("finishing later never brings back an account the person removed", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const fixture = providerFixture();
+    const setup = await beginBuiltIn(fixture, workspace, "account-removed");
+    fixture.setSourceAvailable(false);
+    expect((await callback(fixture, setup.state)).status).toBe(302);
+    fixture.setSourceAvailable(true);
+    const left = await setup.read();
+    const removed = await setup.app.request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/${left.account.id}`,
+      { method: "DELETE", headers: setup.headers },
+    );
+    expect(removed.status).toBeLessThan(300);
+    const opened = await setup.app.request(`${setup.base}/finish`, {
+      method: "POST",
+      headers: setup.headers,
+    });
+    expect(await opened.json()).toEqual([]);
+    expect(await setup.installedFor()).toBeUndefined();
   }, 60_000);
 
   test("a non-human principal cannot request personal ownership", async () => {

@@ -104,6 +104,12 @@ export interface ConnectTransport {
   catalog(workspaceId: string, options?: ConnectCallOptions): Promise<ConnectProvider[]>;
   accounts(workspaceId: string, options?: ConnectCallOptions): Promise<ConnectAccount[]>;
   pending(workspaceId: string, options?: ConnectCallOptions): Promise<ConnectAttempt[]>;
+  /**
+   * Finish the caller's built-in integration setups that saved an account but
+   * never added its tools (the app closed before the last step). Returns the
+   * setups it completed. Optional for hosts without this route.
+   */
+  finishUnfinished?(workspaceId: string, options?: ConnectCallOptions): Promise<ConnectAttempt[]>;
   begin(
     workspaceId: string,
     input: {

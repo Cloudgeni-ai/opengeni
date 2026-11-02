@@ -88,6 +88,7 @@ import {
 import { resolveForRoute, validatedIntegrationInstallInput } from "./api-integrations";
 import {
   curatedConnectFinishPermissions,
+  finishUnfinishedCuratedSetups,
   isOwnAccountInstall,
 } from "../integrations/curated-connect-finish";
 import { assertMcpCredentialContentFlowAllowed, executeConnectOperation } from "@opengeni/core";
@@ -2186,6 +2187,22 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           (!actor.preparedOnly || (attempt.providerId === "mcp-headers" && attempt.mcpSetup)),
       ),
     );
+  });
+  // Finishes the caller's built-in integration setups that saved an account
+  // but never added its tools (the app was closed before the last step),
+  // with exactly the caller's own rights. The app calls it when Capabilities
+  // opens; it returns the setups it completed.
+  app.post("/v1/workspaces/:workspaceId/connect/attempts/finish", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+    const actor = await connectRequestActor(deps, authorization);
+    if (actor.preparedOnly) return c.json([]);
+    const finishPermissions = curatedConnectFinishPermissions((permission) =>
+      permission === "capabilities:manage"
+        ? hasIntegrationAdminPermission(authorization.grant)
+        : hasPermission(authorization.grant.permissions, permission),
+    );
+    return c.json(await finishUnfinishedCuratedSetups(deps, actor.scope, finishPermissions));
   });
   app.get("/v1/workspaces/:workspaceId/connect/attempts/:attemptId", async (c) => {
     const workspaceId = c.req.param("workspaceId");

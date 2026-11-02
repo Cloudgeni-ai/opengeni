@@ -234,6 +234,42 @@ export function useApiIntegrationOAuthCallback({
   }, [workspaceId]);
 }
 
+/**
+ * Finishes, in the background, any built-in integration setup the person
+ * left with a saved account but no tools (the app closed before the last
+ * step), then says so. Mount once in the Capabilities route.
+ */
+export function useFinishUnfinishedConnectSetups({
+  workspaceId,
+  refresh,
+  onRuntimeChanged,
+}: {
+  workspaceId: string;
+  refresh: () => Promise<void>;
+  onRuntimeChanged: () => void;
+}) {
+  const client = useAppContext().client;
+  const latest = useRef({ refresh, onRuntimeChanged });
+  latest.current = { refresh, onRuntimeChanged };
+  useEffect(() => {
+    const transport = client.connectTransport();
+    if (!transport.finishUnfinished) return;
+    const abort = new AbortController();
+    void transport
+      .finishUnfinished(workspaceId, { signal: abort.signal })
+      .then(async (completed) => {
+        if (abort.signal.aborted || completed.length === 0) return;
+        for (const attempt of completed)
+          toast.success(`${attempt.installationTarget?.displayName ?? "Account"} connected`);
+        latest.current.onRuntimeChanged();
+        await latest.current.refresh();
+      })
+      // Nothing to tell: anything left stays saved for the next visit.
+      .catch(() => undefined);
+    return () => abort.abort();
+  }, [client, workspaceId]);
+}
+
 export type ApiIntegrationAccountsController = {
   accounts: ApiIntegrationInstallationSummary[];
   accessItems: IntegrationAccessItem[];

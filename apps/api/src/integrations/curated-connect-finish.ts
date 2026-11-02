@@ -17,12 +17,18 @@ import {
   type ConnectOwner,
 } from "@opengeni/core";
 import {
+  completeUnfinishedConnectSetup,
   getConnectionMetadata,
   installApiIntegration,
   listInstalledApiIntegrations,
+  listUnfinishedConnectSetups,
   type Database,
 } from "@opengeni/db";
-import { InstallApiIntegrationRequest } from "@opengeni/contracts";
+import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
+import {
+  assertOrganizationIntegrationAllowed,
+  InstallApiIntegrationRequest,
+} from "@opengeni/contracts";
 import { validatedIntegrationInstallInput } from "../routes/api-integrations";
 import {
   resolveApiIntegrationPreview,
@@ -251,4 +257,204 @@ export async function installCuratedConnectTools(
     });
     return false;
   }
+}
+
+/** A built-in integration's setup that saved the account but not its tools. */
+export function unfinishedCuratedSetup(attempt: ConnectAttempt): boolean {
+  return (
+    curatedConnectFinishEligible(attempt) &&
+    attempt.credentialsCommitted &&
+    attempt.account !== undefined &&
+    (attempt.state === "connected_but_incomplete" || attempt.state === "preview")
+  );
+}
+
+type FinishDeps = Pick<ApiRouteDeps, "db" | "settings" | "apiIntegrationSourceFetch">;
+
+/**
+ * Finish one built-in integration setup whose account is saved but whose
+ * tools are not: read the reviewed tools (outside any transaction), then
+ * install them and complete the attempt in one short commit, with exactly
+ * the checks the callback applies. `unavailable` means the tools could not
+ * be read and a later try may succeed; `not_finished` means it was refused,
+ * already moved on, or its account is gone.
+ */
+export async function finishUnfinishedCuratedSetup(
+  deps: FinishDeps,
+  input: {
+    owner: ConnectOwner;
+    attempt: ConnectAttempt;
+    finishPermissions: readonly CuratedConnectFinishPermission[];
+    resolved?: ResolvedApiIntegrationPreview | null;
+  },
+): Promise<
+  { outcome: "complete"; attempt: ConnectAttempt } | { outcome: "unavailable" | "not_finished" }
+> {
+  const { owner, attempt } = input;
+  if (!unfinishedCuratedSetup(attempt) || input.finishPermissions.length === 0)
+    return { outcome: "not_finished" };
+  const resolved =
+    input.resolved !== undefined
+      ? input.resolved
+      : await resolveCuratedConnectTools(deps, owner, attempt.providerId);
+  if (!resolved) return { outcome: "unavailable" };
+  const accountId = attempt.account!.id;
+  try {
+    const completed = await withOrganizationIntegrationPolicyFence(
+      deps.db,
+      owner,
+      (fenced, policy) =>
+        completeUnfinishedConnectSetup(fenced, owner, {
+          attemptId: attempt.id,
+          expectedRevision: attempt.revision,
+          commit: async (tx, current, origin) => {
+            assertOrganizationIntegrationAllowed(policy, current.providerId);
+            // A person who removed the account since keeps it removed.
+            const connection = await getConnectionMetadata(
+              tx,
+              owner.workspaceId,
+              accountId,
+              owner.subjectId,
+            );
+            if (!connection) return null;
+            // Someone (or another tab) already added this account's tools.
+            const installed = await listInstalledApiIntegrations(
+              tx,
+              owner.workspaceId,
+              owner.subjectId,
+            );
+            const present = installed.some(
+              (instance) =>
+                instance.definitionId === current.providerId &&
+                instance.connectionRef?.connectionId === accountId,
+            );
+            if (
+              !present &&
+              !(await installCuratedConnectTools(tx, {
+                settings: deps.settings,
+                owner,
+                origin,
+                finishPermissions: input.finishPermissions,
+                attempt: current,
+                connectionId: accountId,
+                resolved,
+              }))
+            )
+              return null;
+            return {
+              ...current,
+              revision: current.revision + 1,
+              state: "complete",
+              integrationInstalled: true,
+              nextAction: { type: "none" },
+              error: undefined,
+            };
+          },
+        }),
+    );
+    return completed ? { outcome: "complete", attempt: completed } : { outcome: "not_finished" };
+  } catch (error) {
+    console.warn("[connect] could not finish an unfinished built-in integration setup", {
+      attemptId: attempt.id,
+      providerId: attempt.providerId,
+      error: error instanceof Error ? error.name : "unknown",
+    });
+    return { outcome: "not_finished" };
+  }
+}
+
+/**
+ * Finish every built-in integration setup the actor left with a saved
+ * account but no tools, under the requesting grant's own rights. The app
+ * calls this when Capabilities opens, so a setup interrupted by a closed
+ * dialog, reload or closed app finishes without anyone reopening it.
+ */
+export async function finishUnfinishedCuratedSetups(
+  deps: FinishDeps,
+  owner: ConnectOwner,
+  finishPermissions: readonly CuratedConnectFinishPermission[],
+): Promise<ConnectAttempt[]> {
+  if (finishPermissions.length === 0) return [];
+  const unfinished = (await listUnfinishedConnectSetups(deps.db, owner)).filter(
+    unfinishedCuratedSetup,
+  );
+  const tools = new Map<string, Promise<ResolvedApiIntegrationPreview | null>>();
+  const completed: ConnectAttempt[] = [];
+  for (const attempt of unfinished) {
+    let resolving = tools.get(attempt.providerId);
+    if (!resolving) {
+      resolving = resolveCuratedConnectTools(deps, owner, attempt.providerId);
+      tools.set(attempt.providerId, resolving);
+    }
+    const result = await finishUnfinishedCuratedSetup(deps, {
+      owner,
+      attempt,
+      finishPermissions,
+      resolved: await resolving,
+    });
+    if (result.outcome === "complete") completed.push(result.attempt);
+  }
+  return completed;
+}
+
+const DEFAULT_RETRY_DELAYS_MS: readonly number[] = [15_000, 60_000, 5 * 60_000, 15 * 60_000];
+let retryDelaysMs = DEFAULT_RETRY_DELAYS_MS;
+const retryTimers = new Set<ReturnType<typeof setTimeout>>();
+
+/** Test seam: the waits between a callback's later tries (null restores them). */
+export function setCuratedConnectFinishRetryDelays(delays: readonly number[] | null): void {
+  retryDelaysMs = delays ?? DEFAULT_RETRY_DELAYS_MS;
+}
+
+/** Stop pending later tries (process shutdown and tests). */
+export function stopCuratedConnectFinishRetries(): void {
+  for (const timer of retryTimers) clearTimeout(timer);
+  retryTimers.clear();
+}
+
+/**
+ * When a callback saved the account but could not read the reviewed tools in
+ * time, keep trying here with the starter's signed rights, so setup still
+ * finishes with nobody in the app. The saved state is durable: if this
+ * process stops first, the app finishes it the next time Capabilities opens.
+ * A refusal is final and is not retried.
+ */
+export function retryUnfinishedCuratedSetup(
+  deps: FinishDeps,
+  input: {
+    owner: ConnectOwner;
+    attemptId: string;
+    finishPermissions: readonly CuratedConnectFinishPermission[];
+  },
+): void {
+  const schedule = (index: number) => {
+    const delay = retryDelaysMs[index];
+    if (delay === undefined) return;
+    const timer = setTimeout(() => {
+      retryTimers.delete(timer);
+      void run(index);
+    }, delay);
+    (timer as { unref?: () => void }).unref?.();
+    retryTimers.add(timer);
+  };
+  const run = async (index: number) => {
+    let again = true;
+    try {
+      const attempt = (await listUnfinishedConnectSetups(deps.db, input.owner)).find(
+        (candidate) => candidate.id === input.attemptId,
+      );
+      // Finished, cancelled or being advanced by the app: nothing left here.
+      if (!attempt || !unfinishedCuratedSetup(attempt)) return;
+      const result = await finishUnfinishedCuratedSetup(deps, {
+        owner: input.owner,
+        attempt,
+        finishPermissions: input.finishPermissions,
+      });
+      again = result.outcome === "unavailable";
+    } catch {
+      // A transient database failure: try again later.
+    }
+    if (again) schedule(index + 1);
+  };
+  schedule(0);
 }
