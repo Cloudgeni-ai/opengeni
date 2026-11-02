@@ -17,13 +17,23 @@ died with it, every upgrade would interrupt every sandbox on the host.
   newer state.
 - On start, the agent first settles every record on disk, then takes each VM
   back from its record. A VM it cannot prove healthy is kept and reported as
-  blocked, not killed on a guess. A blocked VM is booked at its full size
-  (memory and all its processors) while the agent does not manage it, so a
-  failure that may pass, such as a VMM that does not answer in time while
-  it restores or while the guard holds it frozen, is tried again while the
-  lease holds, after a wait that doubles up to a cap; taken back, the
-  sandbox is managed again and its booking returns. A record this host
-  refuses stays blocked until it is removed.
+  blocked, not killed on a guess. While a VM that may still run is not
+  managed, it is booked at its full size (memory and all its processors);
+  one known to be gone books nothing. A recovery that failed in a way that
+  may pass, such as a VMM that does not answer in time while it restores
+  or while the guard holds it frozen, is tried again as a restart would,
+  lease or not, after a wait that doubles up to a cap, for as long as the
+  sandbox stays blocked for it; taken back, the sandbox is managed again
+  in the same step that ends its booking, and a VM found gone by then
+  leaves it asleep. A VM's pager that a failed try left served in the
+  background is not connected to again until that ends, since a pager
+  serves one connection at a time. A record this host refuses stays
+  blocked until it is removed, as does a sandbox blocked for anything but
+  a failed recovery (a twice-taken ordinal, a record not known to be
+  durable or unreadable, files a failed create left, a failed removal).
+  A host whose lease the service gave up registers again only once
+  nothing is blocked (ADR 18), so these retries are also what lets it
+  rejoin once its VMs answer or are gone.
 - A small holder process per VM keeps a descriptor to its disk open, so a disk
   write error that happens while the agent is down is still seen.
 - One agent per host, enforced by a lock file.

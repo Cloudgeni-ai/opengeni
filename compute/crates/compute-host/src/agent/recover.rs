@@ -27,10 +27,6 @@ use super::{HostAgent, HostConfig, HostError, Leftover, unix_ms_now};
 /// and, if its memory is paged, the agent's side of its pager.
 type FoundVm<E> = (<E as Engine>::Vm, Found, Option<Reconnected>);
 
-/// How a blocked sandbox's problem starts when recovery could not take it
-/// back but may on a later try.
-const NOT_RECOVERED: &str = "not recovered: ";
-
 /// When a sandbox whose recovery failed is tried again, and how many
 /// tries have failed.
 #[derive(Clone, Copy, Debug)]
@@ -39,13 +35,20 @@ pub(super) struct Retry {
     failures: u32,
 }
 
-/// For a VM found running that recovery leaves as it is, blocked: the
-/// memory its pager still misses keeps coming, so its guest never waits
-/// forever on a page.
-fn keep_serving<E: Engine>(found: Result<Option<FoundVm<E>>, HostError>) {
-    if let Ok(Some((_, _, Some(memory)))) = found {
-        memory.serve_detached();
-    }
+/// What stops booking sandbox `id`'s VM as one the agent does not manage
+/// ([`HostAgent::unmanaged`]).
+fn managed_again(id: Id) -> [Input; 2] {
+    [
+        Input::Unmanaged {
+            sandbox: id.0,
+            bytes: 0,
+            cpu: 0,
+        },
+        Input::Writes {
+            key: id.0,
+            disk: DiskSpace::default(),
+        },
+    ]
 }
 
 /// The size of a sandbox whose record cannot be read whole, from the
@@ -207,15 +210,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 .remove(&id.0)
                 .unwrap_or_else(|| Err(HostError::Io("no result from looking for the VM".into())));
             let broken = broken_networks.get(&id.0).cloned();
-            match self.recover_found(record, vm, broken, false).await {
-                Ok(true) => adopted += 1,
-                Ok(false) => {}
-                Err(retry) => {
-                    if retry {
-                        let at = tokio::time::Instant::now() + self.recovery_retry;
-                        self.retrying.insert(id.0, Retry { at, failures: 1 });
-                    }
-                }
+            if let Ok(true) = self.recover_found(record, vm, broken, 0).await {
+                adopted += 1;
             }
         }
         tracing::info!(
@@ -232,15 +228,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     /// Takes back the sandbox `record` describes, whose VM was looked for
     /// as `vm`, and whose network could not be repaired if `broken` says
-    /// why; `again` if an earlier try failed. Returns whether its VM still
-    /// ran; or, once it is blocked, whether trying again may take it back.
+    /// why, after `failures` earlier tries failed. Returns whether its VM
+    /// still ran. One it cannot take back is blocked, its VM, unless known
+    /// to be gone, booked at its full size; and, unless this host refuses
+    /// its record, it is tried again later (see [`Self::retry_recovery`]).
     async fn recover_found(
         &mut self,
         record: Record,
         vm: Result<Option<FoundVm<E>>, HostError>,
         broken: Option<String>,
-        again: bool,
-    ) -> Result<bool, bool> {
+        failures: u32,
+    ) -> Result<bool, HostError> {
         let id = record.id;
         // A VM found, or not known to be gone, keeps its memory even if
         // the sandbox cannot be taken back.
@@ -251,24 +249,58 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             // A VM found running is left as it is: its guest's programs
             // matter more than its network, and its memory keeps coming.
             Some(error) => {
-                keep_serving::<E>(vm);
+                self.keep_serving(id, vm);
                 Err(HostError::Io(format!("network not repaired: {error}")))
             }
-            None => self.recover_one(record, vm).await,
+            None => self.recover_one(record, vm, failures > 0).await,
         };
-        result.map_err(|error| {
-            tracing::error!(%id, %error, "could not recover sandbox; blocking it and leaving it on disk");
+        result.inspect_err(|error| {
+            let failures = failures.saturating_add(1);
             // A record whose settings this host refuses stays refused.
             let retry = !matches!(error, HostError::Invalid(_));
-            self.block(id, format!("{NOT_RECOVERED}{error}"));
+            if failures == 1 {
+                tracing::error!(%id, %error, retry, "could not recover sandbox; blocking it and leaving it on disk");
+            } else {
+                tracing::info!(%id, %error, failures, "sandbox still not recovered");
+            }
+            let problem = if retry {
+                format!("not recovered, tried again later: {error}")
+            } else {
+                format!("not recovered: {error}")
+            };
+            self.block(id, problem);
             match size {
                 Some(size) => self.unmanaged(id, size, vcpus),
-                // Its VM, which a try before booked, is known to be gone.
-                None if again => self.managed_again(id),
+                // Its VM, which an earlier try booked, is known to be gone.
+                None if failures > 1 => self.managed_again(id),
                 None => {}
             }
-            retry
+            if retry {
+                let at = self.retry_after(failures);
+                self.retrying.insert(id.0, Retry { at, failures });
+            }
         })
+    }
+
+    /// When a sandbox whose recovery failed `failures` times in a row is
+    /// tried again: after [`HostConfig::recovery_retry`], twice as long
+    /// after each further failure, and never more than
+    /// [`HostConfig::RECOVERY_RETRY_SPAN`] times it.
+    fn retry_after(&self, failures: u32) -> tokio::time::Instant {
+        /// However long the configured wait, it fits an [`Instant`].
+        ///
+        /// [`Instant`]: tokio::time::Instant
+        const LONGEST: Duration = Duration::from_secs(24 * 3600);
+        let doublings = failures.saturating_sub(1).min(16);
+        let wait = self
+            .recovery_retry
+            .saturating_mul(1_u32 << doublings)
+            .min(
+                self.recovery_retry
+                    .saturating_mul(HostConfig::RECOVERY_RETRY_SPAN),
+            )
+            .min(LONGEST);
+        tokio::time::Instant::now() + wait
     }
 
     /// When the next sandbox whose recovery failed is tried again.
@@ -280,31 +312,43 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// whose time has come, as a restart of the agent would: a VMM that
     /// did not answer in time, such as one the guard held frozen while the
     /// lease had run out, or a network that could not be repaired, may
-    /// since have recovered. Until then the sandbox stays blocked, its VM
-    /// left as it is and booked at its full size, and it is tried again
-    /// later, each wait twice the one before. One removed meanwhile is not
-    /// tried again. Looking for the VMs holds the agent up to the time a
-    /// VMM is given to answer.
+    /// since have recovered, and a VM the guard killed is now known to be
+    /// gone. Until then the sandbox stays blocked, its VM left as it is and
+    /// booked at its full size, and it is tried again later (see
+    /// [`Self::retry_after`]). One removed or blocked for another reason
+    /// meanwhile is not tried again. One whose pager an earlier try left
+    /// serving in the background waits until that ends, since a second
+    /// connection would take the pager from it.
+    ///
+    /// It runs whether or not the lease holds, as recovery at start does:
+    /// while the lease has run out the core plans nothing, and a host the
+    /// service gave up registers again only once nothing is blocked.
+    /// Looking for the VMs holds the agent up to the time a VMM is given
+    /// to answer, once per round however many are tried.
     pub(super) async fn retry_recovery(&mut self) {
         let now = tokio::time::Instant::now();
-        let due: Vec<SandboxId> = self
+        let due: Vec<(SandboxId, u32)> = self
             .retrying
             .iter()
             .filter(|(_, retry)| retry.at <= now)
-            .map(|(id, _)| *id)
+            .map(|(id, retry)| (*id, retry.failures))
             .collect();
         let mut records = Vec::new();
-        for id in due {
-            let blocked_by_recovery = self
-                .blocked
-                .get(&id)
-                .is_some_and(|problem| problem.starts_with(NOT_RECOVERED));
+        let mut failed = HashMap::new();
+        for (id, failures) in due {
             match self.records.get(Id(id)) {
                 Some(record)
-                    if blocked_by_recovery
+                    if self.blocked.contains_key(&id)
                         && !self.slots.contains_key(&id)
                         && !self.destroying.contains_key(&id) =>
                 {
+                    if self.still_serving(id) {
+                        tracing::debug!(id = %Id(id), "the VM's pager is still served in the background; trying again later");
+                        let at = self.retry_after(failures);
+                        self.retrying.insert(id, Retry { at, failures });
+                        continue;
+                    }
+                    failed.insert(id, failures);
                     records.push(record);
                 }
                 _ => {
@@ -323,56 +367,48 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 .remove(&id.0)
                 .unwrap_or_else(|| Err(HostError::Io("no result from looking for the VM".into())));
             let broken = broken_networks.get(&id.0).cloned();
+            let failures = failed.get(&id.0).copied().unwrap_or(1);
             // Taken back, nothing may refuse it for its old problem.
             let problem = self.blocked.remove(&id.0);
-            match self.recover_found(record, vm, broken, true).await {
-                Ok(adopted) => {
-                    self.retrying.remove(&id.0);
-                    self.managed_again(id);
-                    tracing::info!(%id, adopted, was = problem.as_deref().unwrap_or_default(), "recovered a sandbox on a later try");
-                }
-                Err(true) => {
-                    let failures = self
-                        .retrying
-                        .get(&id.0)
-                        .map_or(1, |retry| retry.failures.saturating_add(1));
-                    let wait = self
-                        .recovery_retry
-                        .saturating_mul(1_u32 << failures.min(16).saturating_sub(1))
-                        .min(
-                            self.recovery_retry
-                                .saturating_mul(HostConfig::RECOVERY_RETRY_SPAN),
-                        );
-                    tracing::warn!(%id, failures, wait_ms = wait.as_millis(), "sandbox still not recovered; trying again later");
-                    self.retrying.insert(
-                        id.0,
-                        Retry {
-                            at: tokio::time::Instant::now() + wait,
-                            failures,
-                        },
-                    );
-                }
-                Err(false) => {
-                    self.retrying.remove(&id.0);
-                }
+            self.retrying.remove(&id.0);
+            if let Ok(adopted) = self.recover_found(record, vm, broken, failures).await {
+                tracing::info!(%id, adopted, failures, was = problem.as_deref().unwrap_or_default(), "recovered a sandbox on a later try");
             }
         }
     }
 
+    /// For a VM found running that recovery leaves as it is, blocked: the
+    /// memory its pager still misses keeps coming, so its guest never
+    /// waits forever on a page (see [`Reconnected::serve_detached`]).
+    fn keep_serving(&self, id: Id, found: Result<Option<FoundVm<E>>, HostError>) {
+        if let Ok(Some((_, _, Some(memory)))) = found {
+            self.detach(id, memory.serve_detached());
+        }
+    }
+
+    /// Remembers `task`, serving sandbox `id`'s pager in the background,
+    /// so nothing connects to the pager again until it ends.
+    fn detach(&self, id: Id, task: tokio::task::JoinHandle<()>) {
+        self.detached
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id.0, task);
+    }
+
+    /// Whether sandbox `id`'s pager is still served in the background.
+    fn still_serving(&self, id: SandboxId) -> bool {
+        let mut detached = self
+            .detached
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        detached.retain(|_, task| !task.is_finished());
+        detached.contains_key(&id)
+    }
+
     /// Stops booking sandbox `id`'s VM as one this agent does not manage
-    /// ([`Self::unmanaged`]): it is managed now, or known to have ended.
+    /// ([`Self::unmanaged`]): it is known to have ended.
     fn managed_again(&mut self, id: Id) {
-        self.inputs([
-            Input::Unmanaged {
-                sandbox: id.0,
-                bytes: 0,
-                cpu: 0,
-            },
-            Input::Writes {
-                key: id.0,
-                disk: DiskSpace::default(),
-            },
-        ]);
+        self.inputs(managed_again(id));
     }
 
     /// Every record as found, with what its file durably holds or why that
@@ -395,6 +431,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// files and any VM stay as they are; a recorded sandbox can still be
     /// removed.
     pub(super) fn block(&mut self, id: Id, problem: String) {
+        // Blocked for another reason, recovery is not tried again.
+        self.retrying.remove(&id.0);
         self.blocked.insert(id.0, problem);
     }
 
@@ -561,7 +599,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             // pager holds all of it.
             Err(error) => {
                 if let Some(memory) = memory {
-                    memory.serve_detached();
+                    self.detach(id, memory.serve_detached());
                 }
                 Err(error)
             }
@@ -629,17 +667,20 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// Brings one recorded sandbox back under management. Returns whether
-    /// a VM was still running it.
+    /// a VM was still running it. If an earlier try `booked` its VM as one
+    /// the agent does not manage, that booking ends as the sandbox is
+    /// added, so the core never counts it twice.
     pub(super) async fn recover_one(
         &mut self,
         record: Record,
         found: Result<Option<FoundVm<E>>, HostError>,
+        booked: bool,
     ) -> Result<bool, HostError> {
         let id = record.id;
         let policy = match self.sleep_policy(&record.config) {
             Ok(policy) => policy,
             Err(error) => {
-                keep_serving::<E>(found);
+                self.keep_serving(id, found);
                 return Err(HostError::Invalid(error));
             }
         };
@@ -671,7 +712,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }
                 if let Err(error) = self.engine.stop(vm).await {
                     if let Some(memory) = memory {
-                        memory.serve_detached();
+                        self.detach(id, memory.serve_detached());
                     }
                     return Err(HostError::Io(error.to_string()));
                 }
@@ -686,7 +727,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             match self.adopted_state(&record, found).await {
                 Ok(state) => (state, Some((vm, memory))),
                 Err(error) => {
-                    keep_serving::<E>(Ok(Some((vm, found, memory))));
+                    self.keep_serving(id, Ok(Some((vm, found, memory))));
                     return Err(error);
                 }
             }
@@ -721,6 +762,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // could start a step its holds or an unsavable VM rule out, such
         // as forgetting the memory of one a caller holds awake.
         let mut inputs = Vec::new();
+        if booked {
+            inputs.extend(managed_again(id));
+        }
         // A new sandbox whose first wake the agent before booked and that
         // has not woken since keeps that room booked until its deadline,
         // so what this agent admits first cannot take it, even after a

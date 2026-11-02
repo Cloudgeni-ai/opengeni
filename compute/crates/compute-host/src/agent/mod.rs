@@ -771,6 +771,10 @@ pub struct HostAgent<E: Engine, S: Store> {
     /// The first wait before trying a recovery again; see
     /// [`HostConfig::recovery_retry`].
     recovery_retry: Duration,
+    /// The tasks serving the pagers of VMs found running but not taken
+    /// back, by sandbox: until one ends, recovery does not connect to that
+    /// pager again.
+    detached: std::sync::Mutex<HashMap<SandboxId, JoinHandle<()>>>,
     destroying: HashMap<SandboxId, Vec<Reply<()>>>,
     /// Those of `destroying` that hand their sandbox off, keeping the
     /// store's copy for its next owner.
@@ -1058,7 +1062,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             ordinals: BTreeSet::new(),
             blocked: BTreeMap::new(),
             retrying: BTreeMap::new(),
-            recovery_retry: config.recovery_retry,
+            // A zero wait would try again on every turn of the loop.
+            recovery_retry: config.recovery_retry.max(Duration::from_millis(1)),
+            detached: std::sync::Mutex::default(),
             destroying: HashMap::new(),
             handing_away: HashSet::new(),
             leftovers: HashMap::new(),
@@ -1281,11 +1287,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     None => break,
                 },
                 () = sleep_until_some(deadline), if acting => self.input(Input::Tick),
-                // Only while the lease holds: a VM the guard froze answers
-                // nothing until it is renewed.
-                () = sleep_until_some(retry_at), if acting => {
-                    self.retry_recovery().await;
-                }
+                // Also while the lease has run out, as at start: a VM the
+                // guard froze then fails again, but one it killed is found
+                // gone, and the host registers again only once nothing is
+                // blocked.
+                () = sleep_until_some(retry_at) => self.retry_recovery().await,
                 // Renewed, the core reconsiders every sandbox.
                 () = lease_changed(lease.as_ref()) => self.input(Input::Tick),
             }
