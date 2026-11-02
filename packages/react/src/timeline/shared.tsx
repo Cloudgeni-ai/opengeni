@@ -364,7 +364,7 @@ export function ActivityDisclosure({
         {inner}
       </div>
       {expanded ? (
-        <span className="absolute right-1.5 top-1.5 pointer-coarse:top-0">
+        <span className="absolute right-1.5 top-1.5 pointer-coarse:top-2.5">
           <StepCopyButton titleRef={titleRef} bodyRef={bodyRef} />
         </span>
       ) : null}
@@ -435,7 +435,7 @@ function useClippedLine(
       if (element) observer.observe(element);
     }
     return () => observer.disconnect();
-  }, [enabled, holding, contentKey, titleRef, previewRef]);
+  }, [enabled, holding, open, contentKey, titleRef, previewRef]);
   return enabled && clipped;
 }
 
