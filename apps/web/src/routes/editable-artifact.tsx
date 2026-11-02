@@ -48,6 +48,8 @@ export function EditableArtifactRoute({
       artifactId={params.artifactId}
       fromSession={fromSession}
       showAllArtifacts
+      // Documents, spreadsheets and presentations share one address.
+      linkKind="document"
     >
       <EditableArtifactContent {...params} />
     </ArtifactSessionPage>

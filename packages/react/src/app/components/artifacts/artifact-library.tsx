@@ -1,4 +1,4 @@
-import { useNavigate, usePage, useStringifySearch } from "../../lib/navigation";
+import { useNavigate, useStringifySearch } from "../../lib/navigation";
 import type { ArtifactCatalogItem } from "@opengeni/sdk";
 import {
   CopyIcon,
@@ -83,6 +83,7 @@ import {
 import { cn } from "../../lib/utils";
 import { siteViewArtifactsReturn, type ArtifactReturnSearch } from "../../lib/routes";
 import { ArtifactKindTile, ArtifactTypeIcon } from "./artifact-page-chrome";
+import { useCopyArtifactLink } from "./copy-artifact-link";
 
 const InlineChatImage = lazy(() =>
   import("./inline-chat-image").then((module) => ({
@@ -311,12 +312,12 @@ function useArtifactOpen({
   loading = false,
   browseSearch,
 }: ArtifactOpenOptions) {
-  const page = usePage();
   const navigate = useNavigate();
   const stringifySearch = useStringifySearch();
   const audience = useLibraryFileAudience(workspaceId, item);
   const { accessContext } = useAppContext();
   const copies = useDuplicateSite(workspaceId);
+  const copyArtifactLink = useCopyArtifactLink(workspaceId);
   const canDuplicate =
     item.kind === "site" &&
     Boolean(item.versionId) &&
@@ -394,14 +395,7 @@ function useArtifactOpen({
         </DropdownMenuItem>
       ) : null}
       <DropdownMenuSeparator />
-      <DropdownMenuItem
-        onSelect={() => {
-          void navigator.clipboard
-            ?.writeText(new URL(artifactPath(workspaceId, item), page.origin()).href)
-            .then(() => toast("Copied a link to this artifact"))
-            .catch(() => toast.error("Couldn't copy the link"));
-        }}
-      >
+      <DropdownMenuItem onSelect={() => void copyArtifactLink(item)}>
         <LinkIcon />
         Copy link
       </DropdownMenuItem>
