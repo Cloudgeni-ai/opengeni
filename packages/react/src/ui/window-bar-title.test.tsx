@@ -124,6 +124,30 @@ test("a boundary without `fallback` always keeps headers out of the bar", async 
   );
 });
 
+test("a page's own fallback claim yields to a page it opens in front of itself", async () => {
+  // The Site view names the bar itself (a hook, not a header) and stays
+  // mounted, hidden, behind its publish form; its claim mounted first.
+  function Site({ title, formOpen }: { title: string; formOpen: string | null }) {
+    titles.useWindowBarTitle(title, formOpen !== null);
+    return formOpen ? <Header title={formOpen} /> : null;
+  }
+  const tree = (formOpen: string | null) => (
+    <windowBar.WindowBarPageTitle enabled>
+      <Site title="Opengeni usage" formOpen={formOpen} />
+    </windowBar.WindowBarPageTitle>
+  );
+  await mount(tree(null), async (view) => {
+    expect(view.bar()).toBe("Opengeni usage");
+    await view.render(tree("Publish to web"));
+    expect(view.bar()).toBe("Publish to web");
+    await view.render(tree(null));
+    expect(view.bar()).toBe("Opengeni usage");
+    // While the form has no header yet (its code loading), the Site keeps the bar.
+    await view.render(tree(""));
+    expect(view.bar()).toBe("Opengeni usage");
+  });
+});
+
 test("inside the hidden page, dialogs never take the bar and pages outside the boundary do", async () => {
   // Skill, plugin and bundle pages render inside the catalog's tree (portaled
   // out), outside the header's boundary; its dialogs have a boundary of their

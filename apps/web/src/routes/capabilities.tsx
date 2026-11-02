@@ -1790,6 +1790,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
           workspaceId={workspaceId}
           items={items}
           connections={connections}
+          connectionsLoadFailed={connectionsRetryable}
           bindings={slackInstallationBindings}
           refresh={refresh}
           onRuntimeChanged={onRuntimeChanged}

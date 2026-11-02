@@ -54,6 +54,8 @@ export function SlackConnectionsPage(props: {
   workspaceId: string;
   items: CapabilityCatalogItem[];
   connections: ConnectionMetadata[] | null;
+  /** This workspace's connections couldn't load; `connections` may stay null. */
+  connectionsLoadFailed?: boolean | undefined;
   bindings: SlackInstallationBinding[];
   refresh: () => Promise<void>;
   onRuntimeChanged: () => void;
@@ -136,7 +138,17 @@ export function SlackConnectionsPage(props: {
   // With none available here, creating still tries the organization's bot and
   // offers to turn it on for this workspace when the API says it is off.
   const agentConnections = botsHere.length > 0 ? botsHere : activeBots;
-  const botsLoaded = props.connections !== null && !discovery.loading && availableLoaded;
+  const connectionsLoadFailed = props.connectionsLoadFailed === true;
+  const botsLoaded =
+    (props.connections !== null || connectionsLoadFailed) && !discovery.loading && availableLoaded;
+  const connectionsError =
+    loadError ??
+    (discovery.failed || connectionsLoadFailed ? "Some connections could not be checked." : null);
+  function retryConnections() {
+    if (connectionsLoadFailed) void props.refresh();
+    discovery.retry();
+    setRevision((value) => value + 1);
+  }
   // "Use in Slack" on a bot template lands here with the template to copy.
   const templateParamHandled = useRef(false);
   useEffect(() => {
@@ -224,6 +236,8 @@ export function SlackConnectionsPage(props: {
         workspaceName={workspaceName}
         connections={agentConnections}
         connectionsLoaded={botsLoaded}
+        connectionsError={connectionsError}
+        onRetryConnections={retryConnections}
         onClose={() => setAgentPage(null)}
         onSaved={(saved, created) => {
           slackAgents.replace((current) =>
@@ -317,24 +331,17 @@ export function SlackConnectionsPage(props: {
               {installFailure.description}
             </Notice>
           ) : null}
-          {loadError || discovery.failed ? (
+          {connectionsError ? (
             <Notice
               tone="failed"
               title="Couldn't load all Slack connections"
               action={
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    discovery.retry();
-                    setRevision((value) => value + 1);
-                  }}
-                >
+                <Button variant="outline" size="sm" onClick={retryConnections}>
                   Retry
                 </Button>
               }
             >
-              {loadError ?? "Some connections could not be checked."}
+              {connectionsError}
             </Notice>
           ) : null}
           <DetailSection
@@ -351,7 +358,7 @@ export function SlackConnectionsPage(props: {
             <RowList
               label="Slack bot workspaces"
               flush
-              busy={props.connections === null || discovery.loading}
+              busy={(props.connections === null && !connectionsLoadFailed) || discovery.loading}
             >
               {bots.map((bot) => {
                 const metadata = openGeniSlackBotUiMetadata(bot)!;
@@ -403,7 +410,7 @@ export function SlackConnectionsPage(props: {
             state={slackAgents}
             canCreate={canCreateAgent}
             createUnavailable={
-              botsLoaded && activeBots.length === 0
+              botsLoaded && activeBots.length === 0 && !connectionsError
                 ? "Add a Slack workspace to create Slack agents."
                 : null
             }

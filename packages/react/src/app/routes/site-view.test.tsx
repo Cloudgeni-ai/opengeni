@@ -102,6 +102,10 @@ mock.module("../lib/navigation", () => ({
   useNavigate: () => async (options: unknown) => void navigations.push(options),
   useSearch: () => ({}),
   useStringifySearch: () => () => "",
+  // The window bar's module imports these; its title never calls them.
+  usePage: () => null,
+  useRouter: () => ({ state: { location: { pathname: "/" } } }),
+  useRouterState: () => undefined,
   Link: ({
     children,
     to,
@@ -188,6 +192,8 @@ mock.module("../components/artifacts/site-settings", () => ({
 mock.module("../components/artifacts/site-publishing", () => ({
   SitePublishPage: (props: Record<string, unknown>) => {
     publishPageProps.push(props);
+    // As FormPage does on a page: its title claims the macOS window bar.
+    windowBarTitles.useWindowBarTitle(props.layout === "page" ? "Publish to web" : null);
     const publish = () => {
       (props.onPublication as (next: unknown) => void)({ ...published, access: "members" });
       (props.onSubmitted as () => void)();
@@ -321,12 +327,17 @@ mock.module("./artifacts", () => ({
 }));
 
 let module: typeof import("./site-view");
+let windowBarTitles: typeof import("../../ui/window-bar-title");
+let windowBar: typeof import("../components/window-bar");
 let ChatViewportFileDropTarget: typeof import("../components/session/chat-viewport-file-drop-target").ChatViewportFileDropTarget;
 let ownsDom = false;
 beforeAll(async () => {
   ownsDom = !GlobalRegistrator.isRegistered;
   if (ownsDom) GlobalRegistrator.register({ url: "https://example.test" });
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  // After the DOM exists: the window bar's claims are layout effects.
+  windowBarTitles = await import("../../ui/window-bar-title");
+  windowBar = await import("../components/window-bar");
   publishingPage = await import("../components/artifacts/site-publishing-page");
   ({ ChatViewportFileDropTarget } =
     await import("../components/session/chat-viewport-file-drop-target"));
@@ -1041,6 +1052,38 @@ test("an unpublished Site offers Publish, which opens its publish form beside th
   expect(publicationSlot(container).textContent).toContain("usage-4k9x.sites.example");
   // Focus goes back to the control that opened the form.
   expect(document.activeElement?.getAttribute("data-site-publication")).toBe("published");
+});
+
+test("in the macOS app the publish form names the window bar, and the Site takes it back", async () => {
+  conversations = [];
+  permissions = ["sessions:create", "artifacts:publish"];
+  publicationLink = notPublished;
+  const container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  // As the session shell wraps every page but a chat in the macOS app.
+  await act(async () => {
+    root!.render(
+      <windowBar.WindowBarPageTitle enabled>
+        <module.SiteViewRoute workspaceId={workspaceId} siteId={siteId} />
+      </windowBar.WindowBarPageTitle>,
+    );
+  });
+  await settle();
+  const bar = () => container.querySelector("[data-window-bar-title]")?.textContent ?? null;
+  expect(bar()).toBe("Opengeni usage");
+  // The Site's name is in the bar, so its toolbar doesn't repeat it.
+  expect(siteViewProps.at(-1)!.showTitle).toBe(false);
+
+  await act(async () => button(container, "Publish")!.click());
+  await settle();
+  expect(container.querySelector("[data-publish-page]")).not.toBeNull();
+  expect(bar()).toBe("Publish to web");
+
+  await act(async () => button(container, "Back to the Site")!.click());
+  expect(container.querySelector("[data-publish-page]")).toBeNull();
+  expect(bar()).toBe("Opengeni usage");
+  expect(siteViewProps.at(-1)!.showTitle).toBe(false);
 });
 
 test("a published Site's settings open the same form; its back link returns to the Site", async () => {
