@@ -91111,10 +91111,14 @@ function backgroundCommandTerminalMutation(input: {
           `Session ${input.sessionId} does not belong to account ${input.accountId}`,
         );
       }
+      // Terminal settlement only needs pause/admission state. Recounting all
+      // stopping commands here makes draining a backlog quadratic, while each
+      // count holds the session write lock and blocks unrelated lifecycle work.
       controlActive =
         (
-          await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
+          await evaluateSessionWriteAdmissionControl(tx, input.workspaceId, input.sessionId, {
             workspaceControl: locks.control,
+            lockedSession: session,
           })
         ).state === "active";
     },

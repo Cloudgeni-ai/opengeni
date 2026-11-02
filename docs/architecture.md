@@ -2915,7 +2915,7 @@ Canonical: `packages/runtime/src/sandbox/`,
 
 ---
 
-Turn-end review capture yields to queued turns and fences late commits. Single-read files and unique storage keys isolate cleanup. Recovery snapshots retain their separate fifteen-minute cadence.
+Turn-end review capture yields to queued turns and fences late commits. Its cancellation signal also fences admission of queued per-file Git reads; already-started reads retain output collection and exact spool cleanup. Single-read files and unique storage keys isolate cleanup. Recovery snapshots retain their separate fifteen-minute cadence.
 
 ## 9. Data and storage
 
