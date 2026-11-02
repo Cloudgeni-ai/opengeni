@@ -2382,8 +2382,9 @@ const SettingsSchema = z.object({
     z.array(z.string().uuid()).default([...DEFAULT_BILLING_LEGACY_ACCOUNT_IDS]),
   ),
   /**
-   * Platform fee on bring-your-own-key use (own provider keys and connected
-   * subscriptions), in basis points of each call's list-price equivalent.
+   * Platform fee on bring-your-own-key use (own API keys; connected
+   * subscriptions pay no fee and need a paid plan of at least $20/month
+   * instead), in basis points of each call's list-price equivalent.
    * Charged only while credit billing is active, and payable only from paid
    * credit. 0 turns the fee off.
    */

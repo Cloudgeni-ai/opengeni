@@ -31,6 +31,7 @@ import {
 import { settingsWithEnabledCapabilityMcpServers } from "../capabilities";
 import { validateIncidentTelemetrySystemUpdateAuthority } from "../incident-telemetry-authority";
 import {
+  ownModelFunding,
   resolveCatalogSettings,
   resolveCodexAppsDesignationForRun,
   resolveContinuedConnectionAccounts,
@@ -549,9 +550,13 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   billingState.chargesOpenGeniCredits = verifiedExecutionPolicy.model.cost === "credits";
   billingState.countsTowardTokenCap = billingIdentity.countsTowardTokenCap;
   billingState.billingOrigin = turn.billingOrigin;
-  billingState.isByokTurn =
-    !billingState.chargesOpenGeniCredits &&
-    turnExecutionPolicy.billing.upstreamPayer !== "deployment";
+  // The person's own API key pays the platform fee; their own subscription
+  // pays none and needs a paid plan instead.
+  const ownFunding = billingState.chargesOpenGeniCredits
+    ? null
+    : ownModelFunding(turnExecutionPolicy, verifiedExecutionPolicy.provider.kind);
+  billingState.isByokTurn = ownFunding === "api_key";
+  billingState.isOwnSubscriptionTurn = ownFunding === "subscription";
   billingState.isCodexTurn = billingIdentity.codexSubscription;
   billingState.isXaiTurn = billingIdentity.xaiSubscription;
   billingState.isClaudeTurn =
@@ -614,6 +619,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
         input.sessionId,
         turn.billingOrigin,
         billingState.isByokTurn,
+        billingState.isOwnSubscriptionTurn,
       ),
       cancellationSignal,
       undefined,

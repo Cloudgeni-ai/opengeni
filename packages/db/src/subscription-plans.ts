@@ -147,3 +147,22 @@ export async function getOrganizationPlanBalance(
     return row!.plan;
   });
 }
+
+/**
+ * The organization's plan and its catalog monthly price: `null` for a
+ * custom-priced plan (Enterprise) or a plan the catalog no longer lists.
+ * Admission of the person's own subscriptions reads it.
+ */
+export async function getOrganizationPlanStanding(
+  db: Database,
+  accountId: string,
+): Promise<{ plan: BillingPlanBalance | null; monthlyPriceMicros: number | null }> {
+  const plan = await getOrganizationPlanBalance(db, accountId);
+  if (!plan) return { plan: null, monthlyPriceMicros: null };
+  const catalog = await readSubscriptionPlanCatalog(db);
+  return {
+    plan,
+    monthlyPriceMicros:
+      catalog.plans.find((entry) => entry.key === plan.key)?.monthlyPriceMicros ?? null,
+  };
+}

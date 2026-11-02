@@ -368,7 +368,7 @@ test("balance splits monthly, promotional and other general credit without doubl
   expect(document.body.textContent).toContain("For app use. Resets monthly.");
   expect(document.body.textContent).toContain("Credits");
   expect(document.body.textContent).toContain("For API use, and app use beyond plan credit.");
-  expect(document.body.textContent).not.toContain("Platform fee on your own keys");
+  expect(document.body.textContent).not.toContain("Platform fee on your own API keys");
 });
 
 test("plan credit and credits are separate balances, and own-key fees have their own line", async () => {
@@ -408,7 +408,7 @@ test("plan credit and credits are separate balances, and own-key fees have their
   expect(document.body.textContent).not.toContain("Total balance");
   // A charge, set apart from the balances.
   expect(document.body.querySelector('[data-testid="byok-platform-fee"]')!.textContent).toBe(
-    "Platform fee on your own keysCharged this month$1.25",
+    "Platform fee on your own API keysCharged this month$1.25",
   );
 });
 
@@ -495,6 +495,28 @@ test("the Plans section states the two pricing lines", async () => {
   expect(document.body.textContent).toContain(
     "API use in your own product is pay-as-you-go at cost plus 5%, own keys welcome.",
   );
+});
+
+test("plans of at least $20 a month include own subscriptions with no fee, Free does not", async () => {
+  await mount(
+    <SubscriptionPlans
+      client={clientFixture() as unknown as OpenGeniBrowserClient}
+      accountId="org-a"
+      returnUrl="https://console.example.test/workspaces/a/organization?section=billing"
+      catalog={{ accountId: "org-a", revision: 1, plans: previewPlans, plan: previewPlan("free") }}
+      plan={previewPlan("free")}
+      canManage
+      supportEmail="support@example.test"
+      onChanged={() => {}}
+    />,
+  );
+  const cards = [...document.body.querySelectorAll("li, article, [data-plan-key]")];
+  const lines = document.body.textContent?.match(/Your own AI subscriptions, no fee/g) ?? [];
+  const qualifying = previewPlans.filter((item) => item.key !== "free").length;
+  expect(qualifying).toBeGreaterThan(0);
+  expect(lines).toHaveLength(qualifying);
+  const freeCard = cards.find((card) => /^\s*Free/.test(card.textContent ?? ""));
+  if (freeCard) expect(freeCard.textContent).not.toContain("Your own AI subscriptions");
 });
 
 test("an organization without a monthly grant shows no empty plan credit meter or row", async () => {
