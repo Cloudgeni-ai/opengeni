@@ -10,7 +10,10 @@ import { inertProps } from "../../lib/inert";
 import { retainedImageId } from "../../components/markdown";
 import { LazyPart } from "../../components/lazy-part";
 import { useConnectionAccounts } from "../components/capabilities/use-connection-accounts";
-import { stopOwnLoginsHere } from "../components/capabilities/own-login-turned-on";
+import {
+  stopOwnLoginsHere,
+  turnOnOwnLoginsHere,
+} from "../components/capabilities/own-login-turned-on";
 import {
   OwnLoginsSharedHeadsUp,
   ownLoginsInUse,
@@ -3662,32 +3665,34 @@ function SessionChatPane(props: {
     <ModelSwitchHeadsUp text={chosenModelHeadsUp} className="px-3.5 pt-2.5 md:px-4" />
   ) : null;
   // Your own logins in a chat shared with the workspace (D-54): one quiet line
-  // for you only, never a gate. A Personal workspace has nobody else.
-  const ownLoginsHere =
+  // for you only, never a gate. A Personal workspace has nobody else. It stays
+  // mounted while none are on, so one turned off here can go back on.
+  const ownLoginsApply =
     !terminal &&
     props.session.tenancy?.visibility === "workspace" &&
-    !isPersonalWorkspace(workspace, context.managedSelfContext)
-      ? ownLoginsInUse(
-          connectionAccounts.availableAccountGroups,
-          connectionAccounts.accountChoices,
-          context.accessContext.subjectId,
-        )
-      : [];
-  const ownLoginsHeadsUp =
-    ownLoginsHere.length > 0 ? (
-      <OwnLoginsSharedHeadsUp
-        logins={ownLoginsHere}
-        className="px-3.5 pt-2.5 md:px-4"
-        onStop={async (accounts) => {
-          try {
-            await stopOwnLoginsHere(context.client, props.session.workspaceId, accounts);
-          } finally {
-            // Some may have stopped even when one failed.
-            await connectionAccounts.refresh();
-          }
-        }}
-      />
-    ) : null;
+    !isPersonalWorkspace(workspace, context.managedSelfContext);
+  const ownLoginsHeadsUp = ownLoginsApply ? (
+    <OwnLoginsSharedHeadsUp
+      key={props.session.id}
+      logins={ownLoginsInUse(
+        connectionAccounts.availableAccountGroups,
+        connectionAccounts.accountChoices,
+        context.accessContext.subjectId,
+      )}
+      className="px-3.5 pt-2.5 md:px-4"
+      logoFor={(login) => props.resolveProviderLogo(login.accounts[0]!.providerDomain)}
+      onChange={async (login, on) => {
+        try {
+          if (on)
+            await turnOnOwnLoginsHere(context.client, props.session.workspaceId, login.accounts);
+          else await stopOwnLoginsHere(context.client, props.session.workspaceId, login.accounts);
+        } finally {
+          // Some connections may have changed even when one failed.
+          await connectionAccounts.refresh();
+        }
+      }}
+    />
+  ) : null;
   // The chat's Secrets row: hidden when its agent can't use secrets.
   const sessionSecrets = useSessionSecrets(props.session.id, {
     enabled: workspacePermissions.includes("secrets:list"),

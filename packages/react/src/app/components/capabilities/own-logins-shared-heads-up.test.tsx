@@ -10,7 +10,8 @@ afterAll(() => GlobalRegistrator.unregister());
 const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
 const { OwnLoginsSharedHeadsUp, ownLoginsInUse } = await import("./own-logins-shared-heads-up");
-const { stopOwnLoginsHere } = await import("./own-login-turned-on");
+const { stopOwnLoginsHere, turnOnOwnLoginsHere } = await import("./own-login-turned-on");
+type OwnLoginInUse = import("./own-logins-shared-heads-up").OwnLoginInUse;
 
 function login(overrides: Partial<ConnectionMetadata> = {}): ConnectionMetadata {
   return {
@@ -59,6 +60,18 @@ function trigger(container: HTMLElement): HTMLButtonElement {
   return button;
 }
 
+function used(accounts: ConnectionMetadata[], label: string, key = `key-${label}`): OwnLoginInUse {
+  return { key, serverId: `server-${label}`, accounts, label };
+}
+
+function switches(menu: HTMLElement): HTMLElement[] {
+  return [...menu.querySelectorAll<HTMLElement>("[role=menuitemcheckbox]")];
+}
+
+function states(menu: HTMLElement): string[] {
+  return switches(menu).map((row) => `${row.title} ${row.getAttribute("aria-checked")}`);
+}
+
 async function openMenu(container: HTMLElement): Promise<HTMLElement> {
   await act(async () => {
     trigger(container).dispatchEvent(
@@ -81,9 +94,15 @@ test("only the viewer's own logins that this chat will use count", () => {
     { serverId: "tracker", name: "Tracker", accounts: [tracker] },
   ];
   // An explicit choice narrows Mail to one account; no choice uses every eligible one.
-  expect(ownLoginsInUse(groups, { mail: [mine.id, teammate.id] }, "user:me")).toEqual([
-    { accounts: [mine], label: "Mail", connector: "Mail" },
-    { accounts: [tracker], label: "Tracker", connector: "Tracker" },
+  expect(
+    ownLoginsInUse(groups, { mail: [mine.id, teammate.id] }, "user:me").map((entry) => [
+      entry.serverId,
+      entry.label,
+      entry.accounts,
+    ]),
+  ).toEqual([
+    ["mail", "Mail", [mine]],
+    ["tracker", "Tracker", [tracker]],
   ]);
   // Two of your own accounts for one connector are told apart.
   expect(ownLoginsInUse(groups, {}, "user:me").map((entry) => entry.label)).toEqual([
@@ -101,7 +120,7 @@ test("one account connected twice is one login that holds both connections", () 
   // Connections that name no account never merge: they may be different accounts.
   const unnamedA = login({ metadata: {} });
   const unnamedB = login({ metadata: {} });
-  const used = ownLoginsInUse(
+  const logins = ownLoginsInUse(
     [
       { serverId: "mail", name: "Mail", accounts: [first, again] },
       // The same connection reached through a second server counts once.
@@ -112,48 +131,46 @@ test("one account connected twice is one login that holds both connections", () 
     {},
     "user:me",
   );
-  expect(used.map((entry) => entry.label)).toEqual(["Mail", "Tracker", "Notes", "Notes"]);
-  expect(used[0]!.accounts).toEqual([first, again]);
-  expect(used.slice(2).map((entry) => entry.accounts)).toEqual([[unnamedA], [unnamedB]]);
+  expect(logins.map((entry) => entry.label)).toEqual(["Mail", "Tracker", "Notes", "Notes"]);
+  expect(logins[0]!.accounts).toEqual([first, again]);
+  expect(logins.slice(2).map((entry) => entry.accounts)).toEqual([[unnamedA], [unnamedB]]);
+  expect(new Set(logins.map((entry) => entry.key)).size).toBe(4);
 });
 
-test("the heads-up is one quiet line; the details and Stop wait in its menu", async () => {
+test("the line only counts the personal connections; the menu has one switch per account", async () => {
   const view = await mount();
-  const onStop = mock(async () => {});
-  const mail = login();
-  const tracker = login({ metadata: { email: "me@tracker.example" } });
+  const onChange = mock(async () => {});
   await view.render(
     <OwnLoginsSharedHeadsUp
-      logins={[
-        { accounts: [mail], label: "Mail", connector: "Mail" },
-        { accounts: [tracker], label: "Tracker", connector: "Tracker" },
-      ]}
-      onStop={onStop}
+      logins={[used([login()], "Mail"), used([login()], "Tracker")]}
+      onChange={onChange}
     />,
   );
   const line = view.container.querySelector<HTMLElement>(
     "[data-testid=own-logins-shared-heads-up]",
   )!;
-  expect(line.textContent).toBe("Using your Mail and Tracker");
-  // One action on the line: the menu button. No inline Stop links.
+  // It never names them, and holds one action: the menu button.
+  expect(line.textContent).toBe("2 personal connections in this chat");
   expect(line.querySelectorAll("button")).toHaveLength(1);
   expect(trigger(line).querySelector(".truncate")).not.toBeNull();
 
   const menu = await openMenu(view.container);
   expect(menu.textContent).toContain(
-    "They work for your messages here. People in this workspace see what the agent does with them.",
+    "People in this workspace see what the agent does with these.",
   );
-  expect([...menu.querySelectorAll("[role=menuitem]")].map((item) => item.textContent)).toEqual([
-    "Stop using Mail here",
-    "Stop using Tracker here",
-  ]);
-  expect(onStop).not.toHaveBeenCalled();
+  expect(menu.textContent).not.toContain("Stop");
+  expect(states(menu)).toEqual(["Mail true", "Tracker true"]);
+  expect(onChange).not.toHaveBeenCalled();
+
+  await view.render(
+    <OwnLoginsSharedHeadsUp logins={[used([login()], "Mail")]} onChange={onChange} />,
+  );
+  expect(trigger(view.container).textContent).toBe("1 personal connection in this chat");
   await view.unmount();
 });
 
-test("Stop on an account connected twice stops both of its connections", async () => {
+test("an account connected twice is one switch, and turning it off stops both connections", async () => {
   const view = await mount();
-  const onStop = mock(async (_accounts: readonly ConnectionMetadata[]) => {});
   const first = login();
   const again = login();
   const logins = ownLoginsInUse(
@@ -161,44 +178,131 @@ test("Stop on an account connected twice stops both of its connections", async (
     {},
     "user:me",
   );
-  await view.render(<OwnLoginsSharedHeadsUp logins={logins} onStop={onStop} />);
-  expect(view.container.textContent).toBe("Using your Mail");
+  const onChange = mock(async (_login: OwnLoginInUse, _on: boolean) => {});
+  await view.render(<OwnLoginsSharedHeadsUp logins={logins} onChange={onChange} />);
+  expect(trigger(view.container).textContent).toBe("1 personal connection in this chat");
   const menu = await openMenu(view.container);
-  expect(menu.textContent).toContain(
-    "It works for your messages here. People in this workspace see what the agent does with it.",
-  );
-  const items = [...menu.querySelectorAll<HTMLElement>("[role=menuitem]")];
-  expect(items.map((item) => item.textContent)).toEqual(["Stop using Mail here"]);
-  await act(async () => items[0]!.click());
-  expect(onStop).toHaveBeenCalledTimes(1);
-  expect(onStop.mock.calls[0]![0]).toEqual([first, again]);
+  expect(switches(menu)).toHaveLength(1);
+  await act(async () => switches(menu)[0]!.click());
+  expect(onChange).toHaveBeenCalledTimes(1);
+  expect(onChange.mock.calls[0]![0].accounts).toEqual([first, again]);
+  expect(onChange.mock.calls[0]![1]).toBe(false);
   await view.unmount();
 });
 
-test("a failed Stop says so on the line", async () => {
+test("a login turned off stays in the open menu, off, and can go back on", async () => {
   const view = await mount();
+  const mail = used([login()], "Mail");
+  const tracker = used([login()], "Tracker");
+  let on = new Set(["key-Mail", "key-Tracker"]);
+  const calls: [string, boolean][] = [];
+  const render = () =>
+    view.render(
+      <OwnLoginsSharedHeadsUp
+        logins={[mail, tracker].filter((entry) => on.has(entry.key))}
+        onChange={async (entry, next) => {
+          calls.push([entry.label, next]);
+          on = new Set(on);
+          if (next) on.add(entry.key);
+          else on.delete(entry.key);
+        }}
+      />,
+    );
+  await render();
+  const menu = await openMenu(view.container);
+  await act(async () => switches(menu)[0]!.click());
+  // The inventory no longer lists Mail; it stays in place, off.
+  await render();
+  expect(states(menu)).toEqual(["Mail false", "Tracker true"]);
+  expect(trigger(view.container).textContent).toBe("1 personal connection in this chat");
+  // Both off: the line stays, so they can go back on.
+  await act(async () => switches(menu)[1]!.click());
+  await render();
+  expect(trigger(view.container).textContent).toBe("No personal connections in this chat");
+  expect(states(menu)).toEqual(["Mail false", "Tracker false"]);
+  await act(async () => switches(menu)[0]!.click());
+  await render();
+  expect(states(menu)).toEqual(["Mail true", "Tracker false"]);
+  expect(calls).toEqual([
+    ["Mail", false],
+    ["Tracker", false],
+    ["Mail", true],
+  ]);
+  await view.unmount();
+});
+
+test("a switch changes at once and goes back with a plain error when the change fails", async () => {
+  const view = await mount();
+  let fail!: () => void;
   await view.render(
     <OwnLoginsSharedHeadsUp
-      logins={[{ accounts: [login()], label: "Mail", connector: "Mail" }]}
-      onStop={async () => {
-        throw new Error("offline");
-      }}
+      logins={[used([login()], "Mail")]}
+      onChange={() =>
+        new Promise<void>((_resolve, reject) => {
+          fail = () => reject(new Error("offline"));
+        })
+      }
     />,
   );
   const menu = await openMenu(view.container);
-  await act(async () => menu.querySelector<HTMLElement>("[role=menuitem]")!.click());
-  expect(view.container.querySelector("[role=alert]")?.textContent).toBe(
-    "Couldn't stop it. Try again.",
-  );
+  await act(async () => switches(menu)[0]!.click());
+  // Optimistic: off while the change runs, and not clickable again meanwhile.
+  expect(states(menu)).toEqual(["Mail false"]);
+  expect(switches(menu)[0]!.getAttribute("aria-disabled")).toBe("true");
+  await act(async () => fail());
+  expect(states(menu)).toEqual(["Mail true"]);
+  expect(menu.querySelector("[role=alert]")?.textContent).toBe("Couldn't change it. Try again.");
   await view.unmount();
 });
 
-test("stopping here revokes every grant behind the account once, even after a failure", async () => {
+test("many logins stay one line and scroll in the menu under the sentence", async () => {
+  const view = await mount();
+  const logins = Array.from({ length: 12 }, (_, index) =>
+    used(
+      [login({ metadata: { email: `person-${index}@example.com` } })],
+      `Connector ${index} with a very long descriptive name (person-${index}@example.com)`,
+    ),
+  );
+  await view.render(<OwnLoginsSharedHeadsUp logins={logins} onChange={async () => {}} />);
+  expect(view.container.textContent).toBe("12 personal connections in this chat");
+  const menu = await openMenu(view.container);
+  const list = menu.querySelector<HTMLElement>("[data-testid=own-logins-list]")!;
+  expect(list.className).toContain("overflow-y-auto");
+  expect(list.textContent).not.toContain("People in this workspace");
+  const rows = switches(list);
+  expect(rows).toHaveLength(12);
+  expect(rows[11]!.title).toBe(
+    "Connector 11 with a very long descriptive name (person-11@example.com)",
+  );
+  expect(rows[11]!.querySelector(".truncate")).not.toBeNull();
+  await view.unmount();
+});
+
+test("a login on where it was added has no grant here, so its switch is locked on", async () => {
+  const view = await mount();
+  await view.render(
+    <OwnLoginsSharedHeadsUp
+      logins={[used([login({ turnedOnHereGrantId: null })], "Mail")]}
+      onChange={async () => {}}
+    />,
+  );
+  const menu = await openMenu(view.container);
+  expect(states(menu)).toEqual(["Mail true"]);
+  expect(switches(menu)[0]!.getAttribute("aria-disabled")).toBe("true");
+  await view.unmount();
+});
+
+test("turning an account off or on here covers each of its connections once", async () => {
   const revoked: string[] = [];
+  const issued: string[] = [];
   const client = {
-    issueUserResourceGrant: mock(async () => {
-      throw new Error("unused");
-    }),
+    issueUserResourceGrant: mock(
+      async (_workspaceId: string, authorityId: string, _body: unknown) => {
+        issued.push(authorityId);
+        if (authorityId === "a1") throw new Error("offline");
+        return { scope: "user", grant: { grantId: `grant-${authorityId}` } } as never;
+      },
+    ),
     revokeUserResourceGrant: mock(async (_workspaceId: string, grantId: string) => {
       revoked.push(grantId);
       if (grantId === "g1") throw new Error("offline");
@@ -214,4 +318,24 @@ test("stopping here revokes every grant behind the account once, even after a fa
     ]),
   ).rejects.toThrow("offline");
   expect(revoked).toEqual(["g1", "g2"]);
+  await expect(
+    turnOnOwnLoginsHere(client as never, "ws", [
+      { authorityId: "a1" },
+      { authorityId: "a2" },
+      { authorityId: "a1" },
+      { authorityId: undefined },
+    ]),
+  ).rejects.toThrow("offline");
+  expect(issued).toEqual(["a1", "a2"]);
+  expect(client.issueUserResourceGrant.mock.calls[1]).toEqual([
+    "ws",
+    "a2",
+    {
+      scope: "user",
+      resourceKind: "connection",
+      mode: "always",
+      context: "workspace_shared",
+      workspaceSharedAcknowledged: true,
+    },
+  ]);
 });

@@ -42,6 +42,33 @@ export async function turnOnOwnLoginHere(
 }
 
 /**
+ * Turn your own logins on here: one account's connections, each once. The
+ * same standing grant as `turnOnOwnLoginHere`. Tries every connection, then
+ * reports the first failure.
+ */
+export async function turnOnOwnLoginsHere(
+  client: OwnLoginClient,
+  workspaceId: string,
+  accounts: readonly Pick<ConnectionMetadata, "authorityId">[],
+): Promise<void> {
+  const authorities = new Map(
+    accounts.flatMap((account) =>
+      account.authorityId ? [[account.authorityId, account] as const] : [],
+    ),
+  );
+  if (authorities.size === 0) throw new Error("This login isn't listed as yours yet. Try again.");
+  const failures: unknown[] = [];
+  for (const account of authorities.values()) {
+    try {
+      await turnOnOwnLoginHere(client, workspaceId, account);
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length > 0) throw failures[0];
+}
+
+/**
  * Turn your own logins off here: every standing grant behind them, once
  * each. One account connected twice has two connections, and Stop leaves
  * neither on. Tries every grant, then reports the first failure.

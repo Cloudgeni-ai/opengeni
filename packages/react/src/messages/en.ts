@@ -3888,13 +3888,11 @@ export const englishMessages = {
   "openGeniChat.send": "Send",
   "openGeniLinks.fileIsTooLargeTo": "File is too large to download here.",
   "organizationModel.orgShortaccountid": "Org {shortAccountId}",
-  "ownLogins.couldNotStop": "Couldn't stop it. Try again.",
-  "ownLogins.sharedDetails_one":
-    "It works for your messages here. People in this workspace see what the agent does with it.",
-  "ownLogins.sharedDetails_other":
-    "They work for your messages here. People in this workspace see what the agent does with them.",
-  "ownLogins.stopUsingLoginHere": "Stop using {login} here",
-  "ownLogins.usingYour": "Using your {logins}",
+  "ownLogins.couldNotChange": "Couldn't change it. Try again.",
+  "ownLogins.inThisChat_one": "1 personal connection in this chat",
+  "ownLogins.inThisChat_other": "{count} personal connections in this chat",
+  "ownLogins.noneInThisChat": "No personal connections in this chat",
+  "ownLogins.workspaceSees": "People in this workspace see what the agent does with these.",
   "pierreDiff.diffForPath": "Diff for {path}",
   "pierreDiff.loadingDiff": "Loading diff…",
   "pierreDiff.noChanges": "No changes",
