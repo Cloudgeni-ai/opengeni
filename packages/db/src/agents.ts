@@ -1117,6 +1117,14 @@ export async function getSessionAgentId(
   return (await readSessionAgentRef(db, input))?.agentId ?? null;
 }
 
+/** A chat bound to an Only me agent stays Only me. */
+export class SessionAgentRequiresPrivateChatError extends Error {
+  readonly name = "SessionAgentRequiresPrivateChatError";
+  constructor() {
+    super("This chat's agent is Only me, so the chat stays Only me.");
+  }
+}
+
 /**
  * Whether a chat is bound to an Only me agent, whose chats stay Only me
  * (making one shared would hand its private Instructions to others).

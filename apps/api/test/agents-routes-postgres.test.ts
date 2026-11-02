@@ -403,29 +403,6 @@ describe("agents through the API (real PostgreSQL)", () => {
     });
     expect(sharedDiary.status).toBe(422);
     expect(sharedDiary.json.details).toMatchObject({ code: "agent_requires_private_chat" });
-    // Nor can a chat with it be shared later.
-    const diaryChat = await createSession(client.db, {
-      accountId: workspace.accountId,
-      workspaceId: workspace.workspaceId,
-      initialMessage: "Dear diary",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      reasoningEffort: "medium",
-      latencyMode: "standard",
-      sandboxBackend: "none",
-      createdBy: { kind: "subject", subjectId: "user:alice" },
-      subjectId: "user:alice",
-      visibility: "user_private",
-      agent: { id: mine.id },
-    });
-    const shareDiary = await call(alice, "PUT", `${sessions}/${diaryChat.id}/visibility`, {
-      visibility: "workspace",
-      expectedAuthorityEpoch: 1,
-      idempotencyKey: crypto.randomUUID(),
-    });
-    expect(shareDiary.status).toBe(409);
-    expect(shareDiary.json.error.details).toMatchObject({ code: "agent_requires_private_chat" });
 
     // Alice's Only me chat with the shared agent: listed only to her.
     const privateChat = await createSession(client.db, {

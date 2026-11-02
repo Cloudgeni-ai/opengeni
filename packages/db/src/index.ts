@@ -44056,11 +44056,6 @@ export type SessionAgentPrompt = {
 const AGENT_PROMPT_REVISION_METADATA_KEY = "opengeniAgentPromptRevision";
 
 /**
- * The bound agent's rows, read as the system: the session's binding to its
- * agent, with {@link boundAgentServesChatSql} for prompt reads, is the
- * authorization, whoever the turn acts for.
- */
-/**
  * An Only me agent serves only its owner's Only me chats. A chat shared
  * later, or one whose agent became Only me, continues as a plain chat.
  * `a` is the agent; the session is read by id.
@@ -44074,6 +44069,11 @@ function boundAgentServesChatSql(input: { workspaceId: string; sessionId: string
       and chat.owner_subject_id = a.owner_subject_id))`;
 }
 
+/**
+ * The bound agent's rows, read as the system: the session's binding to its
+ * agent, with {@link boundAgentServesChatSql} for prompt reads, is the
+ * authorization, whoever the turn acts for.
+ */
 async function readBoundAgentRows<T extends Record<string, unknown>>(
   db: Database,
   input: { accountId: string; workspaceId: string },
