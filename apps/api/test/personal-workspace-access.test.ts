@@ -226,11 +226,12 @@ describe("managed personal workspace access", () => {
       name: "Personal workspace",
     });
 
-    const [personalMembershipCount] = await shared.admin<Array<{ count: number }>>`
-      select count(*)::int as count
+    // The only row in Personal is the owner's own (migration 1231).
+    const personalMembers = await shared.admin<Array<{ subjectId: string }>>`
+      select subject_id as "subjectId"
       from workspace_memberships
       where workspace_id = ${personalWorkspaceId}`;
-    expect(personalMembershipCount).toEqual({ count: 0 });
+    expect([...personalMembers]).toEqual([{ subjectId: access.subjectId }]);
 
     accountAdminToken = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
     const legacyAccountKey = await createApiKey(client.db, {
@@ -364,9 +365,9 @@ describe("managed personal workspace access", () => {
       });
       expect(denied.status).toBe(403);
     }
-    const [count] = await shared.admin<Array<{ count: number }>>`
-      select count(*)::int as count from workspace_memberships where workspace_id = ${personalWorkspaceId}`;
-    expect(count?.count).toBe(0);
+    const members = await shared.admin<Array<{ subjectId: string }>>`
+      select subject_id as "subjectId" from workspace_memberships where workspace_id = ${personalWorkspaceId}`;
+    expect([...members]).toEqual([{ subjectId: `user:${userId}` }]);
   });
 
   test("Personal owners read Insights and change instructions; lookalikes do not", async () => {

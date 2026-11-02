@@ -1822,15 +1822,12 @@ async function accessGrantAuthorization(
 /**
  * Did the managed cookie authenticate this exact native person?
  *
- * A managed human's personal workspace carries no `workspace_memberships` row,
- * so seams that fence on one must consult the
- * `organization_memberships.personal_workspace_id` pointer instead. That is a
- * runtime property, not a schema one: migration 0219's `42501` is a
- * precondition inside the provisioning function rather than a constraint, and
- * the parity report records `personal_workspace_has_no_membership_row` as
- * `basis: "runtime"` - its own term for something nothing in the schema
- * prevents. It holds because every membership writer requires `members:manage`
- * on the target, which a personal-workspace grant deliberately omits. `AGENTS.md`
+ * A managed human's personal workspace holds only its owner's own
+ * `workspace_memberships` row (migrations 1159 and 1231), and the runtime's
+ * membership readers never count it, so seams that fence on a row must consult
+ * the `organization_memberships.personal_workspace_id` pointer instead. A row
+ * admits whoever names its subject; the pointer plus this provenance check
+ * admits only the verified owner. `AGENTS.md`
  * scopes that exception tightly: it "derives an owner-only personal-workspace
  * grant only for the canonical managed-cookie (Better Auth) session", and
  * "Bearer/delegated principals, API keys, and account or organization

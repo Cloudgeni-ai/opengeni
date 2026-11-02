@@ -35,6 +35,17 @@ const MIGRATION_APPLICATION_ROLES_SETTING = "opengeni.migration_application_role
 const MAX_MIGRATION_APPLICATION_ROLES = 16;
 const batchedBackfillDirective =
   /^-- opengeni:batched-backfill batch-size=(\d+) lock-timeout=(\d+(?:ms|s|min)) statement-timeout=(\d+(?:ms|s|min))$/;
+/**
+ * Transaction-local settings a batched backfill over a FORCE-RLS table needs
+ * to see its rows as the migration owner (docs/force-rls-migration-backfills.md).
+ * Closed per file: each value opens only that file's own owner policy arm.
+ */
+const BATCHED_BACKFILL_SETTINGS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  // organization_memberships' organization_tenancy_lifecycle policy arm.
+  "1232_personal_workspace_owner_membership_backfill.sql": {
+    "opengeni.organization_tenancy_lifecycle": "organization_membership_lifecycle",
+  },
+};
 const concurrentIndexDirective = /^-- opengeni:concurrent-index lock-timeout=(\d+(?:ms|s|min))$/;
 const concurrentIndexStatement =
   /^CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\s+(?:(IF\s+NOT\s+EXISTS)\s+)?(?:"((?:[^"]|"")+)"|([A-Za-z_][A-Za-z0-9_]*))\s+ON\b/is;
@@ -250,6 +261,9 @@ export async function executeMigrationFile(
               '1',
               true
             )`;
+          for (const [setting, value] of Object.entries(BATCHED_BACKFILL_SETTINGS[file] ?? {})) {
+            await transaction`select pg_catalog.set_config(${setting}, ${value}, true)`;
+          }
           return await transaction.unsafe(batchedBackfill.statement);
         });
         if (result.length === 0) break;

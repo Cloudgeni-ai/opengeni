@@ -310,9 +310,10 @@ workspace access. The legacy Better Auth workspace remains
 grant order.
 
 This runtime projection does not create user-resource authority or grant rows.
-The personal workspace still receives no `workspace_memberships` row, so
-membership CRUD and subject-membership fallback cannot discover or widen the
-owner-only projection.
+Since migration 1231 the owner also has one `workspace_memberships` row there
+(see below), but the runtime never reads it as membership, so membership CRUD
+and subject-membership fallback still cannot discover or widen the owner-only
+projection.
 
 ### One member, enforced by the database (migration 1159)
 
@@ -351,6 +352,81 @@ whoever names its subject, so the owner keeps reaching Personal only through
 the pointer with verified owning-user proof. The previous release reads rows
 without that exclusion. The owner's row can therefore be created and backfilled
 only in a release after this one is in production.
+
+### The owner's own row (migrations 1231 and 1232)
+
+Every managed human's (`user:`) Personal workspace now has exactly one
+`workspace_memberships` row, its owner's. Migration
+`1231_personal_workspace_owner_membership.sql` keeps it in step with the
+owner's organization membership through a trigger on
+`organization_memberships`: the row exists exactly while that membership is
+active, not revoked, and points at a workspace carrying the person's Personal
+identity in the same organization.
+
+- Provisioning (`ensure_managed_human_personal_workspace`, self-service and
+  additional-organization setup), invitation acceptance and reactivation
+  create it.
+- Suspension, offboarding (whether or not the Personal workspace is retained),
+  moving the pointer and deleting the membership remove it. A retained
+  workspace keeps its data but has no member until the person comes back.
+- Each organization is separate: a person in two organizations has two
+  Personal workspaces and one row in each, and neither row says anything about
+  the other organization.
+
+The row is role `member` with exactly
+`personal_workspace_owner_permissions()`, the same list as
+`managedPersonalWorkspacePermissions`: the owner's runtime capabilities, which
+are workspace administration minus member management, workspace API keys and
+usage allowances. It deliberately does not carry `workspace:admin`, because
+that is a wildcard over member and API key management; workspace settings use
+`requireWorkspaceSettingsGrant`, as before. The 1159 guard now refuses any other
+role or permission set for the owner's row, and still refuses every other
+subject's row.
+
+Migration `1232_personal_workspace_owner_membership_backfill.sql` is a
+post-release batched backfill for existing owners. It writes a row only where
+the membership's `personal_workspace_id` and the workspace's Personal identity
+agree, sets an owner row that already exists to the canonical role and
+permissions, and leaves every other subject's row alone. The tenancy parity gate
+`personal_workspace_has_no_membership_row` keeps its id but now reports exactly
+those rows: anyone else's row in a Personal workspace, an owner row with other
+permissions, and a row whose owner is no longer active. The SQL paths that
+assumed no row at all (repeated provisioning and the greenfield and
+additional-organization activation graph checks) accept exactly the owner's row
+and nothing else.
+
+TypeScript readers keep excluding the row and keep reaching Personal through
+the pointer with verified owning-user proof. That stays the intended end state
+for access: the row is a fact about membership, not a credential, and a
+membership row admits whoever names its subject. Every SQL function that reads
+`workspace_memberships` (about 100, including 1113's inbox projection, 1120's
+subscription readers and 1127's insights rows) was checked against the row:
+each accepts it only where it already accepts the owner's pointer under the
+same active-membership conditions, needs an administering role or
+`workspace:admin` that the row never has, or only reads a display name the
+viewer can already see. One reader is newly satisfied without a pointer arm:
+1120's `recover_subscription_core_connection_health` checks that a
+shared-session choice's participant holds a row in the workspace. The owner's
+row passes it only for the owner's own entry in their own Personal workspace,
+the only place that row exists, so nothing new is exposed.
+
+The parity gate compares the owner's permissions as a set, as the guard does.
+A row whose owner stopped being active before 1231 (so the trigger never saw
+the change) is reported until that membership changes again or an operator
+removes the row; such a report is expected and is not new access, because the
+runtime never reads the row.
+
+Local single-user (`dev`) and `external_user:` Personal workspaces keep
+pointer-only access: 0302's session fence admits only `user:` owners through
+the pointer, so a row there would widen it.
+
+Nothing in the database stops the runtime role from inserting a new workspace
+with a Personal identity: provisioning itself inserts the workspace as the
+runtime role before the lifecycle function adopts it, so a database rule could
+not tell the two apart without a new provisioning seam that the previous
+release would not use. Such a workspace reaches nobody: the 1159 guard refuses
+every row but the named owner's, and provisioning refuses a Personal workspace
+that already holds any other row.
 
 ### Session ownership at the mint (migration 0302)
 

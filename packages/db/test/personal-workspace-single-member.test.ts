@@ -1,7 +1,8 @@
 // Migration 1159: a Personal workspace has exactly one member, its owner. The
 // database refuses every other row, and the runtime's membership readers never
 // count a row in a Personal workspace as membership (only the verified owner
-// reaches it, through the organization membership's pointer).
+// reaches it, through the organization membership's pointer). Since migration
+// 1231 the owner's row exists from the moment the Personal workspace does.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
@@ -146,6 +147,12 @@ async function insertMembership(input: {
   );
 }
 
+async function ownerRows(workspaceId: string): Promise<string[]> {
+  const rows = await shared!.admin<Array<{ subjectId: string }>>`
+    select subject_id as "subjectId" from workspace_memberships where workspace_id = ${workspaceId}`;
+  return rows.map((row) => row.subjectId);
+}
+
 async function rowCount(workspaceId: string): Promise<number> {
   const [row] = await shared!.admin<Array<{ count: number }>>`
     select count(*)::int as count from workspace_memberships where workspace_id = ${workspaceId}`;
@@ -157,6 +164,10 @@ describe("a Personal workspace has exactly one member, its owner", () => {
     if (!client) return;
     const org = await organization();
     const member = await join(org, "member");
+    // The owner's row came with the workspace; take it away to insert it again.
+    expect(await ownerRows(org.personalWorkspaceId)).toEqual([org.owner]);
+    await shared!
+      .admin`delete from workspace_memberships where workspace_id = ${org.personalWorkspaceId}`;
 
     // Another member of the same organization.
     expect(
@@ -227,7 +238,7 @@ describe("a Personal workspace has exactly one member, its owner", () => {
       );
       expect(error).not.toBeNull();
     }
-    expect(await rowCount(member.personalWorkspaceId)).toBe(0);
+    expect(await ownerRows(member.personalWorkspaceId)).toEqual([member.subjectId]);
   });
 
   test("the owner's row can never administer members, workspace API keys or usage allowances", async () => {
@@ -258,13 +269,14 @@ describe("a Personal workspace has exactly one member, its owner", () => {
         }),
       ).toBe("42501");
     }
+    // The canonical row already exists, so a second copy is only a duplicate.
     expect(
       await insertMembership({
         accountId: org.organizationId,
         workspaceId: org.personalWorkspaceId,
         subjectId: org.owner,
       }),
-    ).toBeNull();
+    ).toBe("23505");
     // Nor can it be widened afterwards.
     expect(
       await sqlState(runtime!`
@@ -283,13 +295,7 @@ describe("a Personal workspace has exactly one member, its owner", () => {
     if (!client) return;
     const org = await organization();
     const member = await join(org, "member");
-    expect(
-      await insertMembership({
-        accountId: org.organizationId,
-        workspaceId: org.personalWorkspaceId,
-        subjectId: org.owner,
-      }),
-    ).toBeNull();
+    expect(await ownerRows(org.personalWorkspaceId)).toEqual([org.owner]);
 
     // The owner's row handed to someone else.
     expect(
@@ -323,7 +329,7 @@ describe("a Personal workspace has exactly one member, its owner", () => {
           update workspace_memberships set workspace_id = ${target} where id = ${sharedRowId}`),
       ).toBe("42501");
     }
-    expect(await rowCount(member.personalWorkspaceId)).toBe(0);
+    expect(await ownerRows(member.personalWorkspaceId)).toEqual([member.subjectId]);
     const [owned] = await shared!.admin<Array<{ subjectId: string }>>`
       select subject_id as "subjectId" from workspace_memberships
       where workspace_id = ${org.personalWorkspaceId}`;
@@ -344,21 +350,7 @@ describe("a Personal workspace has exactly one member, its owner", () => {
     const inSecond = await join(second, "member", first.owner);
     expect(inSecond.personalWorkspaceId).not.toBe(first.personalWorkspaceId);
 
-    // Each Personal workspace accepts its owner's row under its own organization.
-    expect(
-      await insertMembership({
-        accountId: first.organizationId,
-        workspaceId: first.personalWorkspaceId,
-        subjectId: first.owner,
-      }),
-    ).toBeNull();
-    expect(
-      await insertMembership({
-        accountId: second.organizationId,
-        workspaceId: inSecond.personalWorkspaceId,
-        subjectId: first.owner,
-      }),
-    ).toBeNull();
+    // Each Personal workspace has its owner's row under its own organization.
     const rows = await shared!.admin<Array<{ accountId: string; workspaceId: string }>>`
       select account_id as "accountId", workspace_id as "workspaceId"
       from workspace_memberships
@@ -440,13 +432,7 @@ describe("a row in a Personal workspace is never membership to the runtime", () 
   test("bare membership readers ignore the owner's row; the pointer stays the only way in", async () => {
     if (!client) return;
     const org = await organization();
-    expect(
-      await insertMembership({
-        accountId: org.organizationId,
-        workspaceId: org.personalWorkspaceId,
-        subjectId: org.owner,
-      }),
-    ).toBeNull();
+    expect(await ownerRows(org.personalWorkspaceId)).toEqual([org.owner]);
 
     // Whoever names the owner's subject gets no grant from the row.
     expect(await getWorkspaceGrant(client.db, org.owner, org.personalWorkspaceId)).toBeNull();
