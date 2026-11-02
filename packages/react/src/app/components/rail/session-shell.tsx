@@ -73,7 +73,7 @@ import type { Session } from "../../types";
 import { cn } from "../../lib/utils";
 import { useSessionUiFeature } from "../../lib/session-ui-features";
 import { useUiEventTarget } from "../../lib/ui-events";
-import { errorMessage } from "@opengeni/contracts/values";
+import { userErrorText } from "../../../ui/api-error";
 
 const LazySessionTenancyRouteControl = lazy(() =>
   import("../session/session-tenancy-control").then(({ SessionTenancyRouteControl }) => ({
@@ -571,7 +571,7 @@ function SessionRouteHeader({
           target,
           archived,
           sessionDisplayTitle(target),
-          () => void onArchiveRef.current?.(target, false),
+          (next) => void onArchiveRef.current?.(target, next),
         );
         if (!updated) return;
         if (!context.ownsWorkspaceInvocation(target.workspaceId, accepted)) return;
@@ -588,7 +588,7 @@ function SessionRouteHeader({
       } catch (error) {
         if (!context.ownsWorkspaceInvocation(target.workspaceId, accepted)) return;
         toast.error(archived ? "Couldn't archive the chat." : "Couldn't undo the archive.", {
-          description: errorMessage(error),
+          description: userErrorText(error),
         });
       } finally {
         archiveInFlight.current = false;

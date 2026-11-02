@@ -355,9 +355,10 @@ test("an API install failure says what to do instead of the raw API string", asy
     await openDiscovery(rendered.container);
     await act(async () => button("Install plugin")!.click());
     expect(document.querySelector('[data-capability-page] [role="alert"]')?.textContent).toBe(
-      "It changed since this page loaded. Reload the page and try again. Reference: req-plugin-install.",
+      "It changed since this page loaded. Reload the page and try again.",
     );
     expect(document.body.textContent).not.toContain("Opengeni API");
+    expect(document.body.textContent).not.toContain("req-plugin-install");
   } finally {
     await rendered.unmount();
   }

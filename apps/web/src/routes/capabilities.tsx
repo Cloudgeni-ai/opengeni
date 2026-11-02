@@ -1450,10 +1450,10 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       })
       .catch((error: unknown) => {
         if (!active) return;
-        const message =
-          error instanceof Error
-            ? error.message
-            : "Google Drive setup could not be checked. Reload to try again.";
+        const message = userErrorText(
+          error,
+          "Google Drive setup could not be checked. Reload to try again.",
+        );
         setCallbackNotice(message);
         toast.error("Google Drive setup needs attention", { description: message });
       });

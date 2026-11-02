@@ -301,7 +301,7 @@ test("save errors stay accessible inside the page without dropping the folder", 
     await view.click("Save skill");
     const page = view.container.querySelector("[data-capability-page]")!;
     expect(page.querySelector('[role="alert"]')?.textContent).toBe(
-      "Couldn't save this skill. You don't have permission to do this. Ask an admin for access. Reference: 0f0e0d0c-0b0a-4908-8706-050403020100.",
+      "Couldn't save this skill. You don't have permission to do this. Ask an admin for access.",
     );
     expect(page.textContent).not.toContain("Opengeni API");
     expect(view.container.querySelector("section > [role='alert']")).toBeNull();
