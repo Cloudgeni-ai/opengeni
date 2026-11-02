@@ -37,6 +37,10 @@ describe("sandbox base instructions", () => {
     expect(base).toContain("restart or reload the process that actually serves it");
     expect(base).toContain("exercise the real entry point");
     expect(base).toContain("unit tests alone do not show it works");
+    // A restart that could hurt others or lose work still needs a yes first.
+    expect(base).toContain(
+      "Ask first only if a restart could disrupt others or lose work in progress.",
+    );
   });
 
   test("are the same text on every call, so the prompt prefix stays cacheable", () => {

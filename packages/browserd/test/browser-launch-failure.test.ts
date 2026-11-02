@@ -18,9 +18,23 @@ describe("browser launch failures", () => {
     expect((failure as Error).message).toContain("No Google Chrome or Chromium is installed");
     // The fix it names is one the built-in browser then finds, never a
     // browser unpacked into the user's project.
-    expect((failure as Error).message).toContain("system-wide");
+    expect((failure as Error).message).toContain("system-wide in its standard location");
     expect((failure as Error).message).toContain(
       "Do not install a browser or its libraries inside a project folder.",
+    );
+  });
+
+  test("a vanished browser executable is named, and still never goes into a project", () => {
+    const failure = browserLaunchFailure(
+      new AgentBrowserCommandError(
+        "driver_rejected",
+        "browser executable is missing",
+        "Chrome not found at /opt/browsers/chrome.",
+      ),
+    );
+    expect(failure).toMatchObject({ code: "unsupported", retryable: false });
+    expect((failure as Error).message).toBe(
+      "The browser this machine is set up to use (/opt/browsers/chrome) is missing, so a browser cannot start here. Reinstall it there, or open the browser on another placement. Do not install a browser or its libraries inside a project folder.",
     );
   });
 

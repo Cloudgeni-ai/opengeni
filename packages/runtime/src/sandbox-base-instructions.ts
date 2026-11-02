@@ -19,11 +19,11 @@ const SDK_REPOSITORY_INSTRUCTION =
 const SDK_LINE_EXTENSIONS: ReadonlyArray<readonly [line: string, addition: string]> = [
   [
     "- Make changes inside the workspace unless the user explicitly asks for another location.",
-    " Keep your own scratch work out of the user's project: put throwaway scripts and tests, caches, and browsers, runtimes or libraries installed only for your checks in a temporary directory outside it, and remove them when done. Tests the user asked for or the project expects belong in it.",
+    " Keep your own scratch work out of the user's project: put throwaway scripts and tests, and browsers, runtimes or libraries installed only for your checks, in a temporary directory outside it, and remove them when done. Tests the user asked for or the project expects belong in it.",
   ],
   [
     "- Verify changes when practical, especially after editing code, tests, build scripts, generated artifacts, or configuration.",
-    " For a change to something already running, such as a service, worker or scheduled job, restart or reload the process that actually serves it, exercise the real entry point and check what the user asked about; unit tests alone do not show it works. Ask first only if a restart could disrupt others.",
+    " For a change to something already running, such as a service, worker or scheduled job, restart or reload the process that actually serves it, exercise the real entry point and check what the user asked about; unit tests alone do not show it works. Ask first only if a restart could disrupt others or lose work in progress.",
   ],
 ];
 
