@@ -1010,7 +1010,15 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   - `compute.step.oldest_age` above the step's usual time, for example
     ten minutes for an archive.
   - `compute.sandbox.unhealthy` above zero: sandboxes broken, blocked or
-    unsavable need a person.
+    unsavable need a person. A sandbox blocked as `not recovered, tried
+    again later` after an agent restart is tried again on its own, about
+    every five minutes once earlier tries failed, for as long as it stays
+    blocked (log lines `sandbox still not recovered` and `recovered a
+    sandbox on a later try`); `not recovered` alone is not tried again.
+    While its VM may still run, a blocked sandbox holds its full size on
+    the host, and a host the service gave up does not register again
+    while anything is blocked. Each round of tries holds the agent up to
+    the two seconds a VMM is given to answer.
   - any increase of `compute.export.dropped`: the collector is slow, away
     or refusing; events are still in the journal.
   - `compute.memory.stalled` above zero in its `severe` bucket (40 % and
