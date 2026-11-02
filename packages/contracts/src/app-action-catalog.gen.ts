@@ -2570,14 +2570,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
-    "id": "GET /v1/workspaces/:workspaceId/connections/google-drive/:connectionId/browse",
-    "method": "GET",
-    "path": "/v1/workspaces/:workspaceId/connections/google-drive/:connectionId/browse",
-    "request": [],
-    "response": [],
-    "permission": "connections:read"
-  },
-  {
     "id": "GET /v1/workspaces/:workspaceId/credential-profile",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/credential-profile",
@@ -6837,32 +6829,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "secretFields": [
       "request.token"
     ]
-  },
-  {
-    "id": "POST /v1/workspaces/:workspaceId/connections/atlassian/install",
-    "method": "POST",
-    "path": "/v1/workspaces/:workspaceId/connections/atlassian/install",
-    "request": [
-      "AtlassianOAuthStartRequest"
-    ],
-    "response": [],
-    "permission": "connections:write"
-  },
-  {
-    "id": "POST /v1/workspaces/:workspaceId/connections/google-drive/:connectionId/source",
-    "method": "POST",
-    "path": "/v1/workspaces/:workspaceId/connections/google-drive/:connectionId/source",
-    "request": [],
-    "response": [],
-    "permission": "connections:write"
-  },
-  {
-    "id": "POST /v1/workspaces/:workspaceId/connections/google-drive/install",
-    "method": "POST",
-    "path": "/v1/workspaces/:workspaceId/connections/google-drive/install",
-    "request": [],
-    "response": [],
-    "permission": "connections:write"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/github/installations",

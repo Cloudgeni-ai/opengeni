@@ -1,5 +1,4 @@
 import { integrationAvailable, requireIntegrationAvailable } from "./teams-rollout";
-import { GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE } from "@opengeni/contracts/google-drive-native-retirement";
 import { withOrganizationIntegrationAcquisition } from "@opengeni/db/organization-integration-policy";
 import { claimOAuthAcquisition, finishOAuthAcquisition } from "./oauth-client";
 import { Buffer } from "node:buffer";
@@ -586,8 +585,9 @@ function providerClientForDefinition(
   settings: Settings,
   definition: IntegrationDefinition,
 ): ProviderOAuthClient {
+  // Google Drive connects through its MCP connection, never provider OAuth.
   if (definition.id === "google-drive")
-    throw new HTTPException(410, { message: GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE });
+    throw new HTTPException(410, { message: "Google Drive connects through its MCP connection." });
   const configured = parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson);
   const candidates = providerClientKeys(definition);
   let entry: IntegrationOAuthClientConfig | undefined;

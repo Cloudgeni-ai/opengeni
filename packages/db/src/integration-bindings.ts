@@ -92,12 +92,7 @@ export async function ensureIntegrationFacetDefinition(
   input: {
     integrationFacetId: string;
     facetKey: string;
-    kind:
-      | "tools"
-      | "knowledge_source"
-      | "inbound_trigger"
-      | "delivery_destination"
-      | "identity_link";
+    kind: "tools" | "inbound_trigger" | "delivery_destination" | "identity_link";
     configSchema?: Record<string, unknown>;
     capabilities?: Record<string, unknown>;
   },

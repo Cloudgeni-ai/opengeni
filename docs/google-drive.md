@@ -74,13 +74,15 @@ is created. A change-feed task should process all pages before saving the return
 
 ## Previous native connections
 
-The separate knowledge-source setup, folder sync configuration and artifact-only
-publishing setup are retired, as is integration Knowledge sync in general (see
-[Knowledge](knowledge.md)). No new native source task, native reconnect or
-publishing grant is admitted. Previously scheduled source runs are blocked
-before model/session creation, and the worker no longer contains a source fetch
-adapter. Imported documents, connection records and run history are preserved.
-The console retains a removal surface for previous connections.
+The separate native knowledge-source setup, folder sync configuration and
+artifact-only publishing setup were removed with integration Knowledge sync (see
+[Knowledge](knowledge.md)). Their OAuth start, callback and source routes are
+gone, and the native client settings (`OPENGENI_GOOGLE_DRIVE_CLIENT_ID`,
+`OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET`, `OPENGENI_GOOGLE_DRIVE_SYNC_*`) are no
+longer read. The lifecycle route the public SDK still calls
+(`transitionGoogleDriveLifecycle`) and the facet browse/source routes answer 410
+until the next SDK major. Saved native connection rows are inert, are not shown,
+and can still be revoked through the generic connection DELETE route.
 
 Connect Drive MCP explicitly, then create a replacement ordinary schedule. Old
 source selections, tokens, permissions and execution snapshots are never converted

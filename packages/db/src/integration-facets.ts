@@ -21,11 +21,7 @@ import {
 } from "./integration-bindings";
 import * as schema from "./schema";
 
-export type IntegrationFacetKind =
-  | "knowledge_source"
-  | "inbound_trigger"
-  | "delivery_destination"
-  | "identity_link";
+export type IntegrationFacetKind = "inbound_trigger" | "delivery_destination" | "identity_link";
 
 export type IntegrationFacetBindingSummary = {
   id: string;
@@ -1017,7 +1013,6 @@ function bindingSummary(
 
 function facetKind(value: string): IntegrationFacetKind {
   if (
-    value !== "knowledge_source" &&
     value !== "inbound_trigger" &&
     value !== "delivery_destination" &&
     value !== "identity_link"

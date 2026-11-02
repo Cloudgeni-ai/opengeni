@@ -1343,35 +1343,6 @@ describe("connections routes", () => {
     }
   });
 
-  test("the Atlassian callback refuses a legacy in-flight state", async () => {
-    if (!available) return;
-    const workspace = await freshWorkspace();
-    // Atlassian is personal-only and its callback fence runs before the OAuth
-    // client settings are needed, so no Atlassian client config is required to
-    // reach it. `subject-a` is host-opaque and passes the subject-shape check,
-    // so only the missing claim can produce the refusal.
-    const legacyState = createSignedState(STATE_SECRET, {
-      kind: "atlassian_oauth",
-      accountId: workspace.accountId,
-      workspaceId: workspace.workspaceId,
-      subjectId: "subject-a",
-      returnPath: `/workspaces/${workspace.workspaceId}/capabilities`,
-    });
-    const refused = await publicApp(client.db, {
-      webBaseUrl: "http://127.0.0.1:3000",
-    }).request(
-      `/v1/integrations/atlassian/callback?code=abc&state=${encodeURIComponent(legacyState)}`,
-      // This callback path is not on the deployment perimeter's exempt list.
-      { headers: { "x-opengeni-access-key": "deployment-key" } },
-    );
-    expect(refused.status).toBe(302);
-    expect(refused.headers.get("location")).toContain("atlassian=error");
-    expect(refused.headers.get("location")).toContain("reason=http_422");
-    expect(await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a")).toEqual(
-      [],
-    );
-  });
-
   test("the social start stamps the claim from the live principal, not a constant", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -1408,88 +1379,6 @@ describe("connections routes", () => {
     // A constant `true` here would silently pre-authorize personal ownership on
     // any future state this machine principal mints.
     expect((await start("service")).personalOwnerVerified).toBe(false);
-  });
-
-  test("an MCP state cannot be presented to the Atlassian callback", async () => {
-    if (!available) return;
-    const workspace = await freshWorkspace();
-    // The Atlassian and Google Drive states carry no ownership field and no
-    // provider identity, and their return path is byte-identical to one the MCP
-    // start signs from caller input - so before the flow-kind discriminator, a
-    // caller's own MCP state reached the Atlassian callback and got past its
-    // personal-owner fence. Same subject and the callback rechecks
-    // connections:write, so it was never an escalation, but the state was not
-    // bound to the flow that minted it.
-    const mcpShapedState = createSignedState(STATE_SECRET, {
-      accountId: workspace.accountId,
-      workspaceId: workspace.workspaceId,
-      subjectId: "subject-a",
-      ownership: "workspace",
-      personalOwnerVerified: true,
-      providerDomain: "mcp.example.com",
-      mcpUrl: "https://mcp.example.com/mcp",
-      resource: "https://mcp.example.com/mcp",
-      // The MCP start accepts any relative returnPath from the caller.
-      returnPath: `/workspaces/${workspace.workspaceId}/capabilities`,
-    });
-    const refused = await publicApp(client.db, {
-      webBaseUrl: "http://127.0.0.1:3000",
-    }).request(
-      `/v1/integrations/atlassian/callback?code=abc&state=${encodeURIComponent(mcpShapedState)}`,
-      { headers: { "x-opengeni-access-key": "deployment-key" } },
-    );
-    expect(refused.status).toBe(302);
-    // state_invalid is the state parser refusing a foreign flow kind, before any
-    // provider settings are consulted (which previously surfaced as http_503).
-    // The state is correctly signed, so it may name its own workspace page.
-    expect(refused.headers.get("location")).toBe(
-      `http://127.0.0.1:3000/workspaces/${workspace.workspaceId}/plugins?atlassian=error&reason=state_invalid`,
-    );
-    expect(await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a")).toEqual(
-      [],
-    );
-  });
-
-  test("the Atlassian callback explains an expired or tampered link", async () => {
-    if (!available) return;
-    const workspace = await freshWorkspace();
-    const payload = {
-      kind: "atlassian_oauth",
-      accountId: workspace.accountId,
-      workspaceId: workspace.workspaceId,
-      subjectId: "subject-a",
-      personalOwnerVerified: true,
-      returnPath: `/workspaces/${workspace.workspaceId}/capabilities`,
-      encryptedPkceVerifier: "unused",
-    };
-    const callback = (state: string) =>
-      publicApp(client.db, { webBaseUrl: "http://127.0.0.1:3000" }).request(
-        `/v1/integrations/atlassian/callback?code=abc&state=${encodeURIComponent(state)}`,
-        { headers: { "x-opengeni-access-key": "deployment-key" } },
-      );
-    // Authentic but aged: back to its own workspace, reported as expired rather
-    // than as an OAuth configuration fault.
-    const expired = await callback(
-      createSignedState(STATE_SECRET, payload, Math.floor(Date.now() / 1000) - 601),
-    );
-    expect(expired.status).toBe(302);
-    expect(expired.headers.get("location")).toBe(
-      `http://127.0.0.1:3000/workspaces/${workspace.workspaceId}/plugins?atlassian=error&reason=state_expired`,
-    );
-    // Tampered or signed elsewhere: it names no trustworthy workspace.
-    const signed = createSignedState(STATE_SECRET, payload);
-    for (const state of [
-      `${signed.slice(0, -1)}${signed.endsWith("a") ? "b" : "a"}`,
-      createSignedState("another-deployment-secret", payload),
-    ]) {
-      const refused = await callback(state);
-      expect(refused.headers.get("location")).toBe(
-        "http://127.0.0.1:3000/integrations?atlassian=error&reason=state_invalid",
-      );
-    }
-    expect(await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a")).toEqual(
-      [],
-    );
   });
 
   test("social OAuth start and callback both refuse a machine personal owner", async () => {
@@ -1590,17 +1479,6 @@ describe("connections routes", () => {
     );
     expect(gmail.status).toBe(422);
     expect(await gmail.text()).toContain("requires an authenticated human");
-
-    // The two personal-only first-party connectors carry no ownership field at
-    // all, so their start routes fence the principal directly.
-    for (const path of ["google-drive", "atlassian"]) {
-      const response = await app().request(
-        `/v1/workspaces/${workspace.workspaceId}/connections/${path}/install`,
-        { method: "POST", headers, body: JSON.stringify({}) },
-      );
-      expect(response.status).toBe(422);
-      expect(await response.text()).toContain("requires an authenticated human");
-    }
   });
 
   test("manual api_key create/list/get/revoke is permission-gated and never returns secret material", async () => {

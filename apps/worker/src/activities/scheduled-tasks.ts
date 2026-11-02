@@ -1,8 +1,4 @@
 import {
-  isKnowledgeSourceSyncRetirementReason,
-  retiredKnowledgeSourceSyncTask,
-} from "@opengeni/contracts/knowledge-source-sync-retirement";
-import {
   getScheduledTaskClaudeProviderAccountAuthoritySnapshot,
   readScheduledTaskBillingOrigin,
 } from "@opengeni/db";
@@ -446,21 +442,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           }
           throw new Error("scheduled agent run is missing accepted execution truth");
         }
-        // A queued run accepted before Knowledge-source sync was retired
-        // settles failed once instead of recovering a new session.
-        const retiredSource =
-          priorRun.status === "queued"
-            ? retiredKnowledgeSourceSyncTask(acceptedExecution.task)
-            : null;
-        if (retiredSource) {
-          await markScheduledTaskRunFailedIfQueued(
-            db,
-            priorRun.workspaceId,
-            priorRun.id,
-            retiredSource.reason,
-          );
-          return scheduledRunTerminalResult(retiredSource.reason);
-        }
         await recordScheduledTaskFiredUsage(db, acceptedExecution, priorRun);
         if (priorRun.status === "dispatched") {
           return await replayScheduledTaskDispatch({
@@ -529,11 +510,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       if (!task) {
         return { action: "deleted" };
       }
-      // Saved Knowledge-source tasks (frozen sync actions and source-bound
-      // agent tasks) never fetch provider content again; they fail closed
-      // before run admission, model selection or session creation.
-      const retiredSource = retiredKnowledgeSourceSyncTask(task);
-      if (retiredSource) return { action: "blocked", reason: retiredSource.reason };
       if (task.status !== "active") {
         return { action: "blocked", reason: "scheduled_task_paused" };
       }
@@ -1203,16 +1179,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           false,
           "scheduled subscription pools have different causal humans",
         );
-      if (
-        task.agentConfig.knowledgeSource &&
-        causalHumanSubjectId !== task.agentConfig.knowledgeSource.initiatingSubjectId
-      ) {
-        return await refuseAdmission(
-          "scheduled_authority_unavailable",
-          false,
-          "Source schedule requires its connection owner's current human authorization; update the source schedule to authorize it",
-        );
-      }
       // Workspace/organization Rigs run through ordinary
       // workspace authority; only a user-owned resource needs the exact frozen
       // human, and the database admission fence re-proves the same rule for
@@ -1668,8 +1634,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                   ? { instructions: resolvedAgentInstructions }
                   : {}),
                 ...scheduledGeneratedChatSettings(task.agentConfig, creatorSessionPolicy),
-                ...(task.agentConfig.knowledgeSource?.destination.kind === "personal" ||
-                task.visibility === "private"
+                ...(task.visibility === "private"
                   ? {
                       visibility: "user_private" as const,
                       scheduledSourceRunId: run.id,
@@ -2470,7 +2435,6 @@ function scheduledAdmissionRefusalResult(
 function scheduledRunTerminalResult(
   error: string | null,
 ): Extract<DispatchScheduledTaskRunResult, { action: "blocked" }> {
-  if (isKnowledgeSourceSyncRetirementReason(error)) return { action: "blocked", reason: error };
   if (error === "scheduled_authority_exhausted") {
     return { action: "blocked", reason: "scheduled_authority_exhausted" };
   }
@@ -2895,8 +2859,7 @@ async function recoverBoundScheduledTaskDispatch(input: {
         scheduledCreatorSessionPolicyInput(recoveredCreatorPolicy?.sessionPolicy ?? null),
       ),
       ...(task.vaultPolicy ? { vaultPolicy: task.vaultPolicy } : {}),
-      ...(task.agentConfig.knowledgeSource?.destination.kind === "personal" ||
-      task.visibility === "private"
+      ...(task.visibility === "private"
         ? {
             visibility: "user_private" as const,
             scheduledSourceRunId: input.run.id,

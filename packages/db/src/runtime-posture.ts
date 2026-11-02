@@ -575,13 +575,9 @@ const GOOGLE_DRIVE_DOCUMENT_CITATION_ROUTINE =
 const GOOGLE_DRIVE_AUTHORITY_TABLES = [
   "connections",
   "files",
-  "google_drive_object_acl_evidence",
-  "google_drive_object_acl_principals",
   "knowledge_document_versions",
   "knowledge_providers",
   "knowledge_source_objects",
-  "knowledge_source_sync_index_obligations",
-  "knowledge_source_sync_states",
   "knowledge_sources",
 ] as const;
 const KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES = [
@@ -890,6 +886,17 @@ export const RETIRING_FEATURE_TABLES = {
     "session_variable_set_attachments",
     "workspace_variable_set_variables",
     "workspace_variable_sets",
+  ],
+  // Migration 1230 removes the retired Knowledge-source sync rows and stops
+  // every SQL routine from reading these tables; a later release drops them.
+  knowledgeSourceSync: [
+    "google_drive_object_acl_evidence",
+    "google_drive_object_acl_principals",
+    "knowledge_source_sync_index_obligations",
+    "knowledge_source_sync_item_outcomes",
+    "knowledge_source_sync_object_observations",
+    "knowledge_source_sync_states",
+    "knowledge_source_sync_wakes",
   ],
 } as const;
 const RETIRING_FEATURE_TABLE_NAMES: ReadonlySet<string> = new Set(

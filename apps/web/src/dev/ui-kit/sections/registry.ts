@@ -834,7 +834,7 @@ export const SECTIONS: readonly SectionMeta[] = [
     group: "Forms",
     title: "Cadence picker",
     purpose: "Say when something runs, as a sentence, with a preview.",
-    usedOn: "Schedules, knowledge source sync",
+    usedOn: "Schedules",
     recommended: "a",
     whyRecommended:
       "The rule reads the way people think about it, and the time zone is part of the sentence.",

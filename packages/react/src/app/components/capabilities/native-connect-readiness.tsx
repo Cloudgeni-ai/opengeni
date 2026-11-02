@@ -173,7 +173,7 @@ function hasManagedConnection(model: IntegrationViewModel): boolean {
     model.access !== undefined ||
     model.footer.kind === "connected" ||
     model.footer.kind === "repair" ||
-    ["Connected", "Needs attention", "Retired"].includes(model.chip.label)
+    ["Connected", "Needs attention"].includes(model.chip.label)
   );
 }
 
@@ -183,8 +183,6 @@ function primaryProviderId(modelId: string, slackBotMode: boolean): string | nul
       return slackBotMode ? "slack-bot" : "slack-personal";
     case "github":
       return "github-app";
-    case "google-drive":
-      return "google-drive-knowledge";
     case "microsoft-teams":
       return "microsoft-teams";
     case "outlook-mail":
@@ -257,21 +255,8 @@ export function nativeIntegrationModel(
         "Setting this up isn't available with your access here.",
     };
   });
-  const options = model.options.filter((option) => {
-    if (
-      model.id === "google-drive" &&
-      option.id === "google-drive-publish" &&
-      option.kind === "toggle" &&
-      !option.checked
-    ) {
-      return nativeProviderAvailable(catalog, "google-drive-publish");
-    }
-    return true;
-  });
-  const accountProviderId = model.id === "google-drive" ? "google-drive" : providerId;
   const access =
-    model.access?.editLabel === "Add account" &&
-    !nativeProviderAvailable(catalog, accountProviderId)
+    model.access?.editLabel === "Add account" && !nativeProviderAvailable(catalog, providerId)
       ? { ...model.access, editLabel: undefined, onEdit: undefined }
       : model.access;
   let footer = model.footer;
@@ -283,7 +268,6 @@ export function nativeIntegrationModel(
   const blockedFresh = !available && !managed;
   return {
     ...model,
-    options,
     ...(access ? { access } : {}),
     ...(sections ? { sections } : {}),
     footer,

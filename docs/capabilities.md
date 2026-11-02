@@ -506,17 +506,14 @@ The projection reports only whether a provider cursor exists; page tokens,
 delta links, and other cursor contents remain private durable state.
 Integration definition upgrades migrate same-key facets without losing
 configuration, cursor, lifecycle status, evidence timestamps, or owner edges,
-and reject an upgrade that would silently remove a configured facet. The one
-exception is a retired Knowledge Source facet: a configured binding keeps its
-historical definition when a new revision no longer publishes it.
+and reject an upgrade that would silently remove a configured facet.
 
 The Knowledge Source facet kind (`knowledge_source`, for example the former
-Drive and OneDrive `drive-content` facets) is retired. No integration publishes
-it, configuring one returns 410, and its browse and source routes return 410.
-Existing bindings stay listed as retired with Remove only; unconfigured ones are
-hidden. Stored selections, imported records and run history remain available
-as evidence. New recurring Drive or OneDrive work uses an ordinary agent
-schedule with the account's tools. See [Google Drive](google-drive.md) for the
+Drive and OneDrive `drive-content` facets) was removed with integration
+Knowledge sync; migration 1230 deleted its stored definitions and bindings. The
+kind stays in the public SDK enum until the next major, and the facet browse
+and source routes answer 410. Recurring Drive or OneDrive work uses an ordinary
+agent schedule with the account's tools. See [Google Drive](google-drive.md) for the
 Drive MCP connection and its access limits.
 Generic browser editing refuses required object or array fields unless a
 provider-specific flow owns them, so OneDrive and future rich schemas cannot be

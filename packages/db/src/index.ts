@@ -669,10 +669,6 @@ import { grantWorkspaceAccess } from "./workspace-membership-access";
 export { grantWorkspaceAccess, listWorkspaceMembers } from "./workspace-membership-access";
 import { codexSelectionDiagnostics } from "./codex-selection-diagnostics";
 export { codexSelectionDiagnostics } from "./codex-selection-diagnostics";
-import {
-  scheduledTaskKnowledgeSource,
-  requireScheduledTaskKnowledgeSource,
-} from "@opengeni/contracts";
 import { z } from "zod";
 import {
   latestStartedSessionTurnQuery,
@@ -1350,7 +1346,6 @@ export * from "./scoped-knowledge";
 export * from "./company-brain";
 export * from "./company-brain-governed-writes";
 export * from "./company-brain-context-selection";
-export * from "./knowledge-source-sync";
 export * from "./task-notes";
 export * from "./session-share-links";
 export * from "./work-claims";
@@ -4977,22 +4972,6 @@ export async function settleTemporalScheduleCleanup(
     `,
   );
   return row?.settled === true;
-}
-
-/** Persist the connector half of a combined cleanup before attempting Temporal. */
-export async function completeTemporalScheduleConnectorCleanup(
-  db: Database,
-  input: { id: string; claimId: string },
-): Promise<boolean> {
-  const [row] = await rawRows<{ completed: boolean }>(
-    db,
-    sql`
-      select opengeni_private.complete_temporal_schedule_connector_cleanup(
-        ${input.id}, ${input.claimId}
-      ) as completed
-    `,
-  );
-  return row?.completed === true;
 }
 
 export async function createApiKey(
@@ -21560,85 +21539,10 @@ export async function listActiveScheduledTasksWithPinnedAccounts(
   });
 }
 
-/**
- * Internal connector-control traversal. Keep the whole keyset walk on one
- * repeatable-read snapshot so task creation/update performed after discovery
- * cannot make an older row move between offset pages or hide a matching task.
- */
-export async function listKnowledgeSourceSyncTasksForConnection(
-  db: Database,
-  workspaceId: string,
-  connectionId: string,
-  pageSize = 500,
-): Promise<Array<ScheduledTask>> {
-  const boundedPageSize = Math.max(1, Math.min(1_000, Math.trunc(pageSize)));
-  return await withWorkspaceRls(
-    db,
-    workspaceId,
-    async (scopedDb) => {
-      const tasks: Array<ScheduledTask> = [];
-      let cursor: { createdAt: Date; id: string } | null = null;
-      for (;;) {
-        const rows: Array<typeof schema.scheduledTasks.$inferSelect> = await scopedDb
-          .select()
-          .from(schema.scheduledTasks)
-          .where(
-            and(
-              eq(schema.scheduledTasks.workspaceId, workspaceId),
-              isNull(schema.scheduledTasks.deletedAt),
-              sql`coalesce(${schema.scheduledTasks.agentConfig}->'knowledgeSource',
-                CASE WHEN ${schema.scheduledTasks.action}->>'kind'='knowledge_source_sync' THEN ${schema.scheduledTasks.action} END)->'connection'->>'connectionId' = ${connectionId}`,
-              cursor
-                ? or(
-                    gt(schema.scheduledTasks.createdAt, cursor.createdAt),
-                    and(
-                      eq(schema.scheduledTasks.createdAt, cursor.createdAt),
-                      gt(schema.scheduledTasks.id, cursor.id),
-                    ),
-                  )
-                : undefined,
-            ),
-          )
-          .orderBy(asc(schema.scheduledTasks.createdAt), asc(schema.scheduledTasks.id))
-          .limit(boundedPageSize);
-        for (const row of rows) {
-          const task = mapScheduledTask(row);
-          if (!scheduledTaskKnowledgeSource(task)) {
-            throw new Error("Knowledge source task query returned a non-sync action");
-          }
-          tasks.push(task);
-        }
-        const last: typeof schema.scheduledTasks.$inferSelect | undefined = rows.at(-1);
-        if (!last || rows.length < boundedPageSize) return tasks;
-        const nextCursor: { createdAt: Date; id: string } = {
-          createdAt: last.createdAt,
-          id: last.id,
-        };
-        if (
-          cursor &&
-          (nextCursor.createdAt < cursor.createdAt ||
-            (nextCursor.createdAt.getTime() === cursor.createdAt.getTime() &&
-              nextCursor.id <= cursor.id))
-        ) {
-          throw new Error("Knowledge source scheduled-task keyset did not advance");
-        }
-        cursor = nextCursor;
-      }
-    },
-    { isolationLevel: "repeatable read", accessMode: "read only" },
-  );
-}
-
 export async function deleteScheduledTask(
   db: Database,
   workspaceId: string,
   taskId: string,
-  options: {
-    connectorCleanupSubjectId?: string;
-    connectorCleanupCompleted?: boolean;
-    expectedAuthorityRevision?: number;
-    expectedExecutionDigest?: string;
-  } = {},
 ): Promise<{ cleanup: TemporalScheduleCleanupClaim | null; changed: boolean }> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     return await scopedDb.transaction(async (txRaw) => {
@@ -21655,26 +21559,7 @@ export async function deleteScheduledTask(
         .for("update")
         .limit(1);
       if (!task) return { cleanup: null, changed: false };
-      const mappedTask = mapScheduledTask(task);
       const changed = task.deletedAt === null;
-      const connectorCleanupSubjectId = options.connectorCleanupSubjectId ?? null;
-      if (connectorCleanupSubjectId) {
-        if (
-          task.authorityRevision !== options.expectedAuthorityRevision ||
-          task.executionDigest !== options.expectedExecutionDigest
-        ) {
-          throw new Error("scheduled task changed after connector cleanup preflight");
-        }
-        if (
-          !scheduledTaskKnowledgeSource(mappedTask) ||
-          requireScheduledTaskKnowledgeSource(mappedTask).initiatingSubjectId !==
-            connectorCleanupSubjectId ||
-          requireScheduledTaskKnowledgeSource(mappedTask).connection.ownerSubjectId !==
-            connectorCleanupSubjectId
-        ) {
-          throw new Error("scheduled task connector cleanup requires the exact causal subject");
-        }
-      }
       if (!task.deletedAt) {
         await tx
           .update(schema.scheduledTasks)
@@ -21693,37 +21578,16 @@ export async function deleteScheduledTask(
           );
       }
       const claimId = randomUUID();
-      let [cleanup] = await tx
+      const [cleanup] = await tx
         .insert(schema.temporalScheduleCleanupOutbox)
         .values({
           accountId: task.accountId,
           workspaceId: task.workspaceId,
           temporalScheduleId: task.temporalScheduleId,
-          scheduledTaskId: connectorCleanupSubjectId ? task.id : null,
-          connectorCleanupSubjectId,
-          connectorCleanupSnapshot:
-            connectorCleanupSubjectId && Boolean(scheduledTaskKnowledgeSource(mappedTask))
-              ? {
-                  version: 1,
-                  taskId: mappedTask.id,
-                  accountId: mappedTask.accountId,
-                  workspaceId: mappedTask.workspaceId,
-                  connectorKind: mappedTask.metadata.connectorKind,
-                  connectionId:
-                    requireScheduledTaskKnowledgeSource(mappedTask).connection.connectionId,
-                  connectionVersion:
-                    requireScheduledTaskKnowledgeSource(mappedTask).connection.connectionVersion,
-                  sourceId: requireScheduledTaskKnowledgeSource(mappedTask).sourceId,
-                  sourceLifecycleGeneration:
-                    requireScheduledTaskKnowledgeSource(mappedTask).sourceLifecycleGeneration,
-                  sourceConfigGeneration:
-                    requireScheduledTaskKnowledgeSource(mappedTask).sourceConfigGeneration,
-                  externalSourceId: mappedTask.metadata.externalSourceId,
-                  subjectId: connectorCleanupSubjectId,
-                }
-              : null,
-          connectorCleanupCompletedAt:
-            connectorCleanupSubjectId && options.connectorCleanupCompleted ? new Date() : null,
+          scheduledTaskId: null,
+          connectorCleanupSubjectId: null,
+          connectorCleanupSnapshot: null,
+          connectorCleanupCompletedAt: null,
           claimId,
           claimUntil: sql<Date>`now() + interval '15 seconds'`,
           attemptCount: 1,
@@ -21743,65 +21607,6 @@ export async function deleteScheduledTask(
             schema.temporalScheduleCleanupOutbox.connectorCleanupCompletedAt,
           attemptCount: schema.temporalScheduleCleanupOutbox.attemptCount,
         });
-      if (
-        !cleanup &&
-        connectorCleanupSubjectId &&
-        Boolean(scheduledTaskKnowledgeSource(mappedTask))
-      ) {
-        const connectorCleanupSnapshot = {
-          version: 1,
-          taskId: mappedTask.id,
-          accountId: mappedTask.accountId,
-          workspaceId: mappedTask.workspaceId,
-          connectorKind: mappedTask.metadata.connectorKind,
-          connectionId: requireScheduledTaskKnowledgeSource(mappedTask).connection.connectionId,
-          connectionVersion:
-            requireScheduledTaskKnowledgeSource(mappedTask).connection.connectionVersion,
-          sourceId: requireScheduledTaskKnowledgeSource(mappedTask).sourceId,
-          sourceLifecycleGeneration:
-            requireScheduledTaskKnowledgeSource(mappedTask).sourceLifecycleGeneration,
-          sourceConfigGeneration:
-            requireScheduledTaskKnowledgeSource(mappedTask).sourceConfigGeneration,
-          externalSourceId: mappedTask.metadata.externalSourceId,
-          subjectId: connectorCleanupSubjectId,
-        };
-        const [upgraded] = await rawRows<{ upgraded: boolean }>(
-          tx,
-          sql`
-            select opengeni_private.upgrade_temporal_schedule_connector_cleanup(
-              ${task.accountId}::uuid,
-              ${task.workspaceId}::uuid,
-              ${task.temporalScheduleId},
-              ${task.id}::uuid,
-              ${connectorCleanupSubjectId},
-              ${JSON.stringify(connectorCleanupSnapshot)}::jsonb,
-              ${claimId}::uuid
-            ) as upgraded
-          `,
-        );
-        if (upgraded?.upgraded) {
-          [cleanup] = await tx
-            .select({
-              id: schema.temporalScheduleCleanupOutbox.id,
-              accountId: schema.temporalScheduleCleanupOutbox.accountId,
-              workspaceId: schema.temporalScheduleCleanupOutbox.workspaceId,
-              temporalScheduleId: schema.temporalScheduleCleanupOutbox.temporalScheduleId,
-              scheduledTaskId: schema.temporalScheduleCleanupOutbox.scheduledTaskId,
-              connectorCleanupSubjectId:
-                schema.temporalScheduleCleanupOutbox.connectorCleanupSubjectId,
-              connectorCleanupSnapshot:
-                schema.temporalScheduleCleanupOutbox.connectorCleanupSnapshot,
-              connectorCleanupCompletedAt:
-                schema.temporalScheduleCleanupOutbox.connectorCleanupCompletedAt,
-              attemptCount: schema.temporalScheduleCleanupOutbox.attemptCount,
-            })
-            .from(schema.temporalScheduleCleanupOutbox)
-            .where(
-              eq(schema.temporalScheduleCleanupOutbox.temporalScheduleId, task.temporalScheduleId),
-            )
-            .limit(1);
-        }
-      }
       return {
         cleanup: cleanup ? { ...cleanup, claimId } : null,
         changed,
