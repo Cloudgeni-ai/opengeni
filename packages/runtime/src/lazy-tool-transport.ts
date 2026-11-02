@@ -12,6 +12,7 @@ import {
   type Tool,
 } from "@openai/agents";
 import {
+  HARNESS_CONTROL_MCP_SERVER_ID,
   isHarnessControlMcpFunctionTool,
   interactionEntryCompanions,
   INTEGRATION_CARD_TOOL_NAME,
@@ -229,8 +230,15 @@ type GenericSearchMarker = {
   notice?: string;
 };
 
-/** A catalog integration the person can connect from a card in this chat. */
-export type ConnectableIntegration = { capabilityId: string; name: string };
+/**
+ * A catalog integration the person can connect from a card in this chat, and
+ * its vendor domain when the catalog names one.
+ */
+export type ConnectableIntegration = {
+  capabilityId: string;
+  name: string;
+  providerDomain?: string;
+};
 
 /**
  * Reads catalog integrations matching a search query that the person can
@@ -242,34 +250,139 @@ export type ConnectableIntegrationLookup = (
   signal?: AbortSignal,
 ) => Promise<readonly ConnectableIntegration[]>;
 
-function normalizedWords(text: string): string {
-  return ` ${text
+function searchWords(text: string): string[] {
+  return text
     .normalize("NFKC")
     .toLowerCase()
     .split(/[^\p{L}\p{N}]+/u)
-    .filter(Boolean)
-    .join(" ")} `;
+    .filter(Boolean);
+}
+
+/** Whether every letter of `short` appears in `long`, in order. */
+function isSubsequence(short: readonly string[], long: readonly string[]): boolean {
+  let index = 0;
+  for (const letter of long) if (letter === short[index]) index += 1;
+  return index === short.length;
 }
 
 /**
- * The catalog matches the query actually names: the whole integration name as
- * words of the query ("Gmail", "Google Calendar"), never a description or
- * spelling-similarity hit. A one-word name the ranker reads as an operation
- * ("Send", "Make") names nothing: the query means the verb. At most three, in
+ * Whether a query word is a near miss of a name of eight or more letters
+ * (both without spaces): it starts with the same letter, and either adds up to
+ * one letter (two from nine letters: "whisperflow" for "wisprflow"), drops one
+ * letter from inside the name, or swaps two neighbouring letters. A replaced
+ * letter is never a near miss ("automation" is not AutoMotion, "conference"
+ * not Confluence), nor is the name's start or end alone ("context" is not
+ * Context7, "grammar" not Grammarly). Shorter names must be spelled exactly
+ * (spacing and case aside): most sit one letter from a common word ("Gmail"
+ * and "email", "Stripe" and "strike", "Discord" and "discard").
+ */
+function isNearMiss(word: string, name: string): boolean {
+  const w = Array.from(word);
+  const n = Array.from(name);
+  const extra = n.length >= 9 ? 2 : n.length === 8 ? 1 : 0;
+  if (!extra || w[0] !== n[0]) return false;
+  if (w.length > n.length) return w.length - n.length <= extra && isSubsequence(n, w);
+  if (w.length < n.length)
+    return (
+      n.length - w.length === 1 &&
+      !name.startsWith(word) &&
+      !name.endsWith(word) &&
+      isSubsequence(w, n)
+    );
+  const differ = w.flatMap((letter, index) => (letter === n[index] ? [] : [index]));
+  return (
+    differ.length === 2 &&
+    differ[1] === differ[0]! + 1 &&
+    w[differ[0]!] === n[differ[1]!] &&
+    w[differ[1]!] === n[differ[0]!]
+  );
+}
+
+/** Vendor-domain labels that say nothing about the vendor. */
+const GENERIC_DOMAIN_LABELS = new Set(["www", "api", "mcp", "app"]);
+
+/**
+ * The vendor's own word in a provider domain ("jira" in jira.com, "wisprflow"
+ * in api.wisprflow.ai), when it is one word of four or more letters.
+ */
+function providerDomainWord(providerDomain: string | undefined): string | undefined {
+  const labels = (providerDomain ?? "").toLowerCase().split(".").filter(Boolean);
+  if (labels.length < 2) return undefined;
+  const label = labels.slice(0, -1).find((part) => !GENERIC_DOMAIN_LABELS.has(part));
+  const words = label ? searchWords(label) : [];
+  return words.length === 1 && words[0]!.length >= 4 ? words[0] : undefined;
+}
+
+/**
+ * Whether the query words name an integration: its whole name as words
+ * ("Gmail", "Google Calendar"); its name with different spacing or case
+ * ("hub spot", "wisprflow" for "Wispr Flow"); a near miss of a long name
+ * (see isNearMiss: "whisperflow", "whisper flow"); or the vendor's own word
+ * in its provider domain ("jira" for Atlassian at jira.com). A one-word name
+ * the ranker reads as an operation ("Send", "Make") names nothing: the query
+ * means the verb.
+ */
+function integrationNamedIn(
+  queryWords: readonly string[],
+  integration: { name: string; providerDomain?: string | undefined },
+): boolean {
+  const nameWords = searchWords(integration.name);
+  if (!nameWords.length || isOperationWord(integration.name)) return false;
+  if (` ${queryWords.join(" ")} `.includes(` ${nameWords.join(" ")} `)) return true;
+  const compact = nameWords.join("");
+  const domainWord = providerDomainWord(integration.providerDomain);
+  if (
+    domainWord &&
+    domainWord !== compact &&
+    !nameWords.includes(domainWord) &&
+    !isOperationWord(domainWord) &&
+    queryWords.includes(domainWord)
+  )
+    return true;
+  if (Array.from(compact).length < 4) return false;
+  const widest = Math.min(nameWords.length + 1, 4);
+  for (let start = 0; start < queryWords.length; start += 1) {
+    for (let width = 1; width <= widest && start + width <= queryWords.length; width += 1) {
+      const window = queryWords.slice(start, start + width).join("");
+      if (window === compact || isNearMiss(window, compact)) return true;
+    }
+  }
+  return false;
+}
+
+/** The integration an installed tool belongs to, as far as the tool says. */
+type IntegrationOwner = { serverId?: string; name: string; providerDomain?: string };
+
+/**
+ * Whether a catalog integration is the one an installed tool belongs to: the
+ * same capability as its server, the same name (spacing and case aside), or
+ * the same vendor domain.
+ */
+function ownsIntegration(owner: IntegrationOwner, integration: ConnectableIntegration): boolean {
+  if (owner.serverId === integration.capabilityId) return true;
+  const compact = (text: string) => searchWords(text).join("");
+  if (compact(owner.name) && compact(owner.name) === compact(integration.name)) return true;
+  const domain = (text: string | undefined) => (text ?? "").toLowerCase().replace(/^www\./, "");
+  return (
+    Boolean(owner.providerDomain) &&
+    domain(owner.providerDomain) === domain(integration.providerDomain)
+  );
+}
+
+/**
+ * The catalog matches the query actually names (see integrationNamedIn),
+ * never a description hit or a loose spelling resemblance. At most three, in
  * catalog order.
  */
 export function connectableIntegrationsNamedIn(
   query: string,
   matches: readonly ConnectableIntegration[],
 ): ConnectableIntegration[] {
-  const words = normalizedWords(query);
+  const words = searchWords(query);
   const named: ConnectableIntegration[] = [];
   for (const match of matches) {
-    const name = normalizedWords(match.name);
     if (
-      name.trim() &&
-      !isOperationWord(match.name) &&
-      words.includes(name) &&
+      integrationNamedIn(words, match) &&
       !named.some((n) => n.capabilityId === match.capabilityId)
     )
       named.push(match);
@@ -304,6 +417,8 @@ export type ConnectedToolAccount = {
   label: string;
   connector: string;
   kind?: string;
+  /** The connector's vendor domain, when known. */
+  providerDomain?: string;
 };
 
 /** At most this many other accounts are named; the rest are counted. */
@@ -362,10 +477,11 @@ export function alreadyAvailableNotice(names: readonly string[]): string {
 }
 
 /**
- * The exact (not spelling-approximate) capability_catalog_search matches whose
- * next step is a Connect card the person completes themselves (connect or add
- * credentials), not one a workspace admin must enable. Accepts the MCP content
- * array or a full result.
+ * The capability_catalog_search matches whose next step is a Connect card the
+ * person completes themselves (connect or add credentials), not one a
+ * workspace admin must enable. Spelling-approximate matches are kept: whether
+ * the query names one is decided by connectableIntegrationsNamedIn. Accepts
+ * the MCP content array or a full result.
  */
 export function connectableIntegrationsFromCatalogResult(
   result: unknown,
@@ -387,13 +503,19 @@ export function connectableIntegrationsFromCatalogResult(
     }
     if (!isRecord(parsed) || !Array.isArray(parsed.matches)) continue;
     for (const match of parsed.matches) {
-      if (!isRecord(match) || match.approximate === true) continue;
+      if (!isRecord(match)) continue;
       const setup = isRecord(match.setup) ? match.setup : null;
       const next = setup && isRecord(setup.nextAction) ? setup.nextAction : null;
       if (next?.toolName !== "capability_authorization_request") continue;
       if (setup!.action === "enable") continue;
       if (typeof match.capabilityId !== "string" || typeof match.name !== "string") continue;
-      found.push({ capabilityId: match.capabilityId, name: match.name });
+      found.push({
+        capabilityId: match.capabilityId,
+        name: match.name,
+        ...(typeof match.providerDomain === "string" && match.providerDomain
+          ? { providerDomain: match.providerDomain }
+          : {}),
+      });
     }
   }
   return found;
@@ -402,10 +524,12 @@ export function connectableIntegrationsFromCatalogResult(
 /** Bounded so a slow catalog read never holds a search result back for long. */
 const CONNECTABLE_LOOKUP_TIMEOUT_MS = 2_000;
 /**
- * Only the catalog's best matches may be named: a common word that is also an
- * integration's name ("Send") ranks below the integration the query is about.
+ * Only the catalog's best matches may be named. A search query is a sentence,
+ * and catalog ranking counts its ordinary words too, so a near spelling
+ * ("whisperflow") or a vendor-domain word ("jira") can rank below several
+ * description hits; whether the query names a match is decided by its words.
  */
-const CONNECTABLE_LOOKUP_LIMIT = 3;
+const CONNECTABLE_LOOKUP_LIMIT = 10;
 
 /**
  * Looks a search query up with the harness control server's catalog search,
@@ -1078,16 +1202,23 @@ export class LazyToolRuntime {
       .bestMatches(query)
       .filter(isFunctionTool)
       .map((t) => t.name);
-    // Either integration setup tool brings the other. A search no installed
-    // tool clearly matches, which names an integration the person can connect,
-    // also loads the Connect card tool and names that integration plainly, so
-    // the card is the next call. The catalog read runs alongside ranking and
-    // any decision model; only the companions wait for it.
+    // Either integration setup tool brings the other. A search that names an
+    // integration the person can connect also loads the Connect card tool and
+    // names that integration plainly, so the card is the next call. Tools that
+    // strongly match without belonging to the named integration (a Slack bot
+    // tool for "posts on Slack", meetings_search for "Linear issues") do not
+    // stop the lookup; a strong match that is the named integration's own
+    // tool does. The catalog read runs alongside ranking and any decision
+    // model; only the companions wait for it.
     const setup = integrationSetupToolNames(pool);
+    const owners = this.integrationOwners(strong);
+    const queryWords = searchWords(query);
     const lookup: Promise<ConnectableIntegration[]> =
-      named.length || strong.length || setup.length < 2
+      named.length ||
+      setup.length < 2 ||
+      owners.some((owner) => integrationNamedIn(queryWords, owner))
         ? Promise.resolve([])
-        : this.connectableIntegrations(query, signal);
+        : this.connectableIntegrations(query, owners, signal);
     // Rejects only on cancellation, which the search itself observes.
     lookup.catch(() => undefined);
     const setupFor = async (chosen: readonly string[]) =>
@@ -1296,17 +1427,48 @@ export class LazyToolRuntime {
 
   private async connectableIntegrations(
     query: string,
+    owners: readonly IntegrationOwner[],
     signal?: AbortSignal,
   ): Promise<ConnectableIntegration[]> {
     if (!this.connectableLookup) return [];
     try {
-      return connectableIntegrationsNamedIn(query, await this.connectableLookup(query, signal));
+      return connectableIntegrationsNamedIn(
+        query,
+        (await this.connectableLookup(query, signal)).filter(
+          (integration) => !owners.some((owner) => ownsIntegration(owner, integration)),
+        ),
+      );
     } catch {
       // Cancellation belongs to the owning turn; any other failure only means
       // this result names no connectable integration.
       signal?.throwIfAborted();
       return [];
     }
+  }
+
+  /**
+   * The integrations the given tools belong to: each MCP tool's server, and
+   * for a connected account route its connector's name and vendor domain.
+   * First-party tools (a Slack bot, meeting search) belong to none.
+   */
+  private integrationOwners(toolNames: readonly string[]): IntegrationOwner[] {
+    if (!toolNames.length) return [];
+    const servers = this.modelMcpServerIds();
+    const accounts = this.connectedAccounts?.() ?? new Map<string, ConnectedToolAccount>();
+    const owners: IntegrationOwner[] = [];
+    for (const name of toolNames) {
+      const account = accounts.get(name);
+      const serverId = servers.get(name);
+      if (!account && (!serverId || serverId === HARNESS_CONTROL_MCP_SERVER_ID)) continue;
+      owners.push({
+        ...(serverId ? { serverId } : {}),
+        // Without a connected account route, the server's own id ("github")
+        // is the only name it carries.
+        name: account?.connector ?? serverId!,
+        ...(account?.providerDomain ? { providerDomain: account.providerDomain } : {}),
+      });
+    }
+    return owners;
   }
 
   /**
