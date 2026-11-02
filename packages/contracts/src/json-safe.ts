@@ -30,7 +30,8 @@
  * A shared reference is converted once and shared in the result, so the work
  * is linear in the number of distinct objects. Inputs are never mutated. The
  * result is stable: converting it again returns it unchanged and reports
- * nothing.
+ * nothing. Where shared objects also form a cycle, the cycle is broken at the
+ * first reference visited, so the result follows property order.
  */
 export type JsonSafeAdjustmentKind =
   | "symbol_key"
@@ -474,18 +475,22 @@ export function createJsonSafeSummary(maxPaths = 5): {
   result: () => JsonSafeSummary | null;
 } {
   const kinds: Record<string, number> = {};
-  const paths: string[] = [];
+  // Real losses take the path slots first; lossless changes fill what is left.
+  const loudPaths: string[] = [];
+  const quietPaths: string[] = [];
   let count = 0;
-  let loud = false;
   return {
     onAdjustment: (adjustment) => {
       count += 1;
-      loud ||= !QUIET_KINDS.has(adjustment.kind);
       const key = adjustment.type ? `${adjustment.kind}:${adjustment.type}` : adjustment.kind;
       kinds[key] = (kinds[key] ?? 0) + 1;
+      const paths = QUIET_KINDS.has(adjustment.kind) ? quietPaths : loudPaths;
       if (paths.length < maxPaths) paths.push(redactPath(adjustment.path));
     },
-    result: () => (loud ? { count, kinds: { ...kinds }, paths: [...paths] } : null),
+    result: () =>
+      loudPaths.length > 0
+        ? { count, kinds: { ...kinds }, paths: [...loudPaths, ...quietPaths].slice(0, maxPaths) }
+        : null,
   };
 }
 
@@ -508,6 +513,8 @@ export function summarizeJsonSafeAdjustments(
 
 const PATH_SEGMENT = /\[(\d+)\]|\[("(?:[^"\\]|\\.)*")\]/g;
 const IDENTIFIER_KEY = /^[A-Za-z_$][\w$-]{0,40}$/;
+/** Identifier-shaped keys that are still data: UUIDs and long hex IDs. */
+const ID_LIKE_KEY = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-|[0-9a-f]{16,}$)/i;
 
 /**
  * A path for a log line. Object keys are often data (an email address, a
@@ -529,7 +536,10 @@ export function redactPath(path: string): string {
     } catch {
       key = undefined;
     }
-    redacted += typeof key === "string" && IDENTIFIER_KEY.test(key) ? `[${match[2]}]` : "[*]";
+    redacted +=
+      typeof key === "string" && IDENTIFIER_KEY.test(key) && !ID_LIKE_KEY.test(key)
+        ? `[${match[2]}]`
+        : "[*]";
     if (redacted.length > 160) return `${redacted.slice(0, 157)}...`;
   }
   return redacted;
@@ -547,7 +557,11 @@ export function createJsonSafeWarning(
   const intervalMs = options.intervalMs ?? 60_000;
   const recent = new Map<string, { at: number; suppressed: number }>();
   return (context, summary) => {
-    const key = `${Object.values(context).join("|")}|${Object.keys(summary.kinds).sort().join(",")}`;
+    // History rows differ only by index (`$[12]`); they share one key.
+    const where = Object.values(context)
+      .map((value) => value.replace(/\[\d+\]/g, "[n]"))
+      .join("|");
+    const key = `${where}|${Object.keys(summary.kinds).sort().join(",")}`;
     const now = Date.now();
     const last = recent.get(key);
     if (last && now - last.at < intervalMs) {

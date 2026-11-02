@@ -417,7 +417,9 @@ const warnModelRequestAdjusted = createJsonSafeWarning("Model request value adju
 /** A value the native serializer refused, converted as `toJsonSafeValue` does and logged. */
 function convertedRequestValue(value: unknown, key: string): unknown {
   const summary = createJsonSafeSummary();
-  const converted = toJsonSafeValue(value, { onAdjustment: summary.onAdjustment });
+  // A fresh copy, so a proxy whose answers change between reads cannot make
+  // the second serialization throw.
+  const converted = toJsonSafeValue(value, { copy: true, onAdjustment: summary.onAdjustment });
   const adjusted = summary.result();
   if (adjusted) warnModelRequestAdjusted({ key: /^\d+$/.test(key) ? "[n]" : "[*]" }, adjusted);
   return converted;

@@ -1041,7 +1041,7 @@ function materializedJson(value: unknown): string {
   try {
     serialized = JSON.stringify(value);
   } catch {
-    serialized = JSON.stringify(toJsonSafeValue(value));
+    serialized = JSON.stringify(toJsonSafeValue(value, { copy: true }));
   }
   return serialized ?? "null";
 }

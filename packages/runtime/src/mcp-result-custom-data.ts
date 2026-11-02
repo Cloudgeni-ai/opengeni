@@ -162,7 +162,13 @@ function normalizeMcpResult(value: unknown): AttemptToolResultValue {
     reason: "schema_mismatch",
     issues: String(parsed.error.issues.length),
   });
-  return { content: [{ type: "text", text: JSON.stringify(safe) ?? "null" }] };
+  // `_meta` stays out of the model's view here too, and an error result stays one.
+  const record = isPlainRecord(safe) ? safe : null;
+  const { _meta: _resultMeta, ...visible } = record ?? {};
+  return {
+    content: [{ type: "text", text: JSON.stringify(record ? visible : safe) ?? "null" }],
+    ...(record?.isError === true ? { isError: true } : {}),
+  };
 }
 
 function typeName(value: unknown): string {

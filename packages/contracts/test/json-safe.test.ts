@@ -261,6 +261,9 @@ describe("toJsonSafeValue", () => {
 
   test("logged paths keep identifier keys and indices and hide other keys", () => {
     expect(redactPath('$["alice@example.com"]["ssn"][3]')).toBe('$[*]["ssn"][3]');
+    expect(redactPath('$["d2fc3220-9511-41ab-9b18-d825aac3f161"]["deadbeefdeadbeef"]["id"]')).toBe(
+      '$[*][*]["id"]',
+    );
     const summary = createJsonSafeSummary();
     toJsonSafeValue({ "file name.txt": { size: 1n } }, { onAdjustment: summary.onAdjustment });
     expect(summary.result()).toEqual({
@@ -268,6 +271,13 @@ describe("toJsonSafeValue", () => {
       kinds: { bigint: 1 },
       paths: ['$[*]["size"]'],
     });
+  });
+
+  test("real losses take the logged path slots before lossless changes", () => {
+    const summary = createJsonSafeSummary();
+    toJsonSafeValue([-0, -0, -0, -0, -0, -0, () => 1], { onAdjustment: summary.onAdjustment });
+    expect(summary.result()?.paths[0]).toBe("$[6]");
+    expect(summary.result()?.paths).toHaveLength(5);
   });
 
   test("quiet adjustments alone produce no summary", () => {
@@ -288,7 +298,10 @@ describe("toJsonSafeValue", () => {
     warn({ rootPath: "$" }, summary);
     warn({ rootPath: "$" }, summary);
     warn({ rootPath: "$.other" }, summary);
-    expect(lines.length).toBe(2);
+    // History rows that differ only by index share one line.
+    warn({ rootPath: "$[1]" }, summary);
+    warn({ rootPath: "$[2]" }, summary);
+    expect(lines.length).toBe(3);
   });
 });
 

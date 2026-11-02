@@ -141,6 +141,15 @@ describe("runtime protocol JSON boundaries with hostile values", () => {
         },
       ],
     });
+    // The fallback keeps an error result an error and `_meta` out of the model's view.
+    const failed = await new McpResultCustomDataBridge().captureResult(null, async () => ({
+      content: [{ type: "text", text: "permission denied" }],
+      structuredContent: new Stringly(),
+      isError: true,
+      _meta: { "io.example/trace": "trace-token" },
+    }));
+    expect((failed as { isError?: boolean }).isError).toBe(true);
+    expect(JSON.stringify(failed)).not.toContain("trace-token");
   });
 
   test("the adjustment log names paths and kinds, never values", () => {
