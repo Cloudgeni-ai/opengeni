@@ -473,9 +473,9 @@ Agents need workspace routing (`OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED`). With
 
 - `slack_channel_routes.slack_agent_id`: the channel's "who answers" setting may name an agent. Deleting the agent deletes that setting.
 - `slack_interactions.slack_agent_id` is frozen when a thread binds. `handoff_from_slack_agent_id` records who passed it on, and `last_inbound_*` says which message the chat is answering.
-- `slack_agent_update_settings.announcement_channel_id` is the channel new agents are introduced in by default (migration 1233).
-- `slack_agent_intro_posts` records, per agent and channel, that its intro was posted there, so the intro page marks those channels (home tenancy, migration 1233).
-- `slack_agent_suggestions` holds a chat's suggestion of another agent, one per answered turn: the agent, the interaction and turn, the Slack message it answered and its sender, channel and thread (home tenancy, migration 1233).
+- `slack_agent_update_settings.announcement_channel_id` is the channel new agents are introduced in by default (migration 1235).
+- `slack_agent_intro_posts` records, per agent and channel, that its intro was posted there, so the intro page marks those channels (home tenancy, migration 1235).
+- `slack_agent_suggestions` holds a chat's suggestion of another agent, one per answered turn: the agent, the interaction and turn, the Slack message it answered and its sender, channel and thread (home tenancy, migration 1235).
 - `slack_agent_user_states` holds the one-time "next time" hint, the one-time open-agent notice (`open_notice_interaction_id`) and first use per person and agent.
 - `slack_bot_user_links.updates_muted_at` is the per-person mute for update messages.
 - `slack_agent_proposals` holds agents proposed from Slack (see [Creating agents from Slack](#creating-agents-from-slack)): the proposed name, description, avatar, instructions and target workspace, the card's channel, thread and message, and the status (`pending`, `creating`, `created`, `cancelled`) with who decided. Home tenancy, like `slack_agents`.

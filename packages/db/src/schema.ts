@@ -2645,7 +2645,7 @@ export const slackAgentUpdateSettings = pgTable(
       .references(() => connections.id, { onDelete: "cascade" }),
     updatesEnabled: boolean("updates_enabled").notNull().default(false),
     channelPostsOnly: boolean("channel_posts_only").notNull().default(false),
-    /** Where new agents are introduced by default (1233). */
+    /** Where new agents are introduced by default (1235). */
     announcementChannelId: text("announcement_channel_id"),
     updatesEnabledAt: timestamp("updates_enabled_at", { withTimezone: true }),
     updatedBySubjectId: text("updated_by_subject_id"),
@@ -2671,7 +2671,7 @@ export const slackAgentUpdateSettings = pgTable(
   }),
 );
 
-/** Channels a Slack agent's intro was posted in (1233). HOME-owned. */
+/** Channels a Slack agent's intro was posted in (1235). HOME-owned. */
 export const slackAgentIntroPosts = pgTable(
   "slack_agent_intro_posts",
   {
@@ -2715,7 +2715,7 @@ export const slackAgentIntroPosts = pgTable(
 
 /**
  * A Slack chat suggested asking an agent after answering one Slack message
- * (1233). HOME-owned. Delivery posts it after the answer; its button re-sends
+ * (1235). HOME-owned. Delivery posts it after the answer; its button re-sends
  * that message to the agent for whoever clicks it.
  */
 export const slackAgentSuggestions = pgTable(
