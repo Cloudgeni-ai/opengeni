@@ -4,7 +4,9 @@ import { SITE_BROWSER_RUNTIME } from "@opengeni/sdk/site-document";
 import {
   SITE_CLIENT_TAG_MAX_CHARS,
   SITE_FRAME_HEAD_MAX_CHARS,
+  SITE_FRAME_PIECE_CHARS,
   SITE_FRAME_READ_BYTES,
+  SITE_FRAME_REWRITE_CHARS,
   SiteBootstrapInjector,
   SiteClientScriptResolver,
   SiteFrameRewriter,
@@ -283,6 +285,58 @@ describe("streamed frame document", () => {
     expect(out === siteFrameDocument(html)).toBe(true);
     // About 4,100 pieces if each 1 KB piece were rewritten on its own.
     expect(pieces).toBeLessThanOrEqual(Math.ceil(bytes.length / SITE_FRAME_READ_BYTES) + 1);
+  });
+
+  test("a page full of client tags is handed on in bounded pieces", async () => {
+    // Each client tag becomes the whole Site runtime. 200 tags in one read
+    // used to become a single string of about 67 MB.
+    const html = `<!doctype html>${CLIENT.repeat(200)}<p>end</p>`;
+    const bytes = new TextEncoder().encode(html);
+    const body = new ReadableStream({
+      type: "bytes",
+      start(controller) {
+        controller.enqueue(bytes.slice());
+        controller.close();
+      },
+    });
+    const reader = siteFrameStream(body).getReader();
+    let largest = 0;
+    let length = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      largest = Math.max(largest, value.byteLength);
+      length += value.byteLength;
+    }
+    expect(length).toBe(new TextEncoder().encode(siteFrameDocument(html)).byteLength);
+    const tagsPerSlice = Math.ceil(SITE_FRAME_REWRITE_CHARS / CLIENT.length) + 1;
+    expect(largest).toBeLessThanOrEqual(
+      SITE_FRAME_PIECE_CHARS +
+        tagsPerSlice * SITE_BROWSER_RUNTIME.length +
+        SITE_FRAME_REWRITE_CHARS,
+    );
+    expect(largest).toBeLessThan(30 * 1024 * 1024);
+  });
+
+  test("cancelling the document cancels the page and stops reading it", async () => {
+    let reads = 0;
+    let cancelled: unknown = null;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        reads += 1;
+        controller.enqueue(new TextEncoder().encode("<p>more</p>"));
+      },
+      cancel(reason) {
+        cancelled = reason;
+      },
+    });
+    const reader = siteFrameStream(body).getReader();
+    await reader.read();
+    await reader.cancel("viewer left");
+    const after = reads;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(cancelled).toBe("viewer left");
+    expect(reads).toBeLessThanOrEqual(after + 1);
   });
 });
 
