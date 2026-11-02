@@ -204,11 +204,13 @@ export function OwnLoginsSharedHeadsUp({
       // As the list has it now; an account off here keeps its last copy.
       login,
       on,
-      // Done but not yet in the list: nothing up to date to act on, unless
-      // the list can't be read now, which may not change soon.
+      // Done but not yet in the list: nothing up to date to act on. A row
+      // turned off may go back on while the list can't be read (that needs no
+      // grant); one turned on waits for the list to name its new grant.
       busy:
         override !== undefined &&
-        (override.pending || (incoming !== null && override.on !== Boolean(listed))),
+        (override.pending ||
+          (override.on !== Boolean(listed) && (incoming !== null || override.on))),
       // On without a standing grant here for every connection, so it can't
       // be turned off from here (only from where it was added).
       locked: on && !override && !!listed && !listed.accounts.every(ownLoginCanStopHere),

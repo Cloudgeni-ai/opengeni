@@ -387,6 +387,27 @@ test("a change that finishes before its list arrives waits for a newer list", as
   await view.unmount();
 });
 
+test("a row turned back on waits for its new grant, even while the list can't be read", async () => {
+  const view = await mount();
+  const mail = used([login()], "Mail");
+  const render = (logins: OwnLoginInUse[] | null) =>
+    view.render(<OwnLoginsSharedHeadsUp logins={logins} onChange={async () => {}} />);
+  await render([mail]);
+  const menu = await openMenu(view.container);
+  await act(async () => switches(menu)[0]!.click());
+  await render([]);
+  // Off, and the list can't be read: it can still go back on.
+  await render(null);
+  expect(switches(menu)[0]!.getAttribute("aria-disabled")).toBeNull();
+  await act(async () => switches(menu)[0]!.click());
+  // On, but its new grant isn't listed yet: turning it off would revoke the old one.
+  expect(states(menu)).toEqual(["Mail true"]);
+  expect(switches(menu)[0]!.getAttribute("aria-disabled")).toBe("true");
+  await render([mail]);
+  expect(switches(menu)[0]!.getAttribute("aria-disabled")).toBeNull();
+  await view.unmount();
+});
+
 test("a failed change leaves the switch as the list has it", async () => {
   const view = await mount();
   const mail = used([login()], "Mail");
