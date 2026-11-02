@@ -30,6 +30,7 @@ import { PersonalGitHubDialog } from "@/components/capabilities/personal-github-
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { openGitHubInstallationSettings } from "@opengeni/react/app/lib/github-app-connect";
 import { openBlankTab } from "@opengeni/react/app/lib/navigation";
+import { markGitHubAccessChanged } from "@opengeni/react/app/lib/github-access-return";
 import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import type { GitHubAppInfo } from "@opengeni/react/app/types";
 
@@ -95,7 +96,12 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   const status = context.githubStatus;
   const repositories = context.githubRepos;
   const [disconnectOpen, setDisconnectOpen] = useState(false);
-  const [unlinkInstallationId, setUnlinkInstallationId] = useState<number | null>(null);
+  // The account name is kept from the click, so the title stays right even if
+  // the installation drops out of the status while the dialog is open.
+  const [unlinkTarget, setUnlinkTarget] = useState<{
+    installationId: number;
+    account: string;
+  } | null>(null);
   const [openingInstallationId, setOpeningInstallationId] = useState<number | null>(null);
   const openingInstallation = useRef<number | null>(null);
   const [disconnecting, setDisconnecting] = useState(false);
@@ -107,9 +113,6 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   const actionPolicyRequest = useRef(0);
   const actionPolicyMutation = useRef<number | null>(null);
   const installations = status?.installations ?? [];
-  const unlinkInstallation =
-    installations.find((installation) => installation.installationId === unlinkInstallationId) ??
-    null;
   const busy = context.githubAppBusy || disconnecting;
 
   // A failed status fetch with no prior snapshot is unknown, not unbound: show a
@@ -359,6 +362,8 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   function openInstallationRepositories(installationId: number) {
     if (openingInstallation.current !== null) return;
     const tab = openBlankTab();
+    // Back from GitHub, the composer's repository menu refreshes and syncs.
+    markGitHubAccessChanged(workspaceId);
     openingInstallation.current = installationId;
     setOpeningInstallationId(installationId);
     openGitHubInstallationSettings(context.client, workspaceId, installationId, (url) => {
@@ -388,7 +393,8 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
           const unlink = {
             label: "Unlink",
             ariaLabel: `Unlink ${account}`,
-            onClick: () => setUnlinkInstallationId(installation.installationId),
+            onClick: () =>
+              setUnlinkTarget({ installationId: installation.installationId, account }),
             destructive: true,
           };
           return {
@@ -624,19 +630,22 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
         onConfirm={disconnectAll}
       />
       <ConfirmDialog
-        open={unlinkInstallationId !== null}
+        open={unlinkTarget !== null}
         onOpenChange={(open) => {
-          if (!open) setUnlinkInstallationId(null);
+          if (!open) setUnlinkTarget(null);
         }}
-        title={`Unlink ${unlinkInstallation?.accountLogin ?? "this installation"}?`}
+        title={`Unlink ${unlinkTarget?.account ?? "this installation"}?`}
         description="Sessions lose access to its repositories. The app stays installed on GitHub until you remove it there."
         confirmLabel="Unlink"
         cancelAutoFocus
         onConfirm={async () => {
-          if (unlinkInstallationId === null) return true;
+          if (unlinkTarget === null) return true;
           setDisconnecting(true);
           try {
-            return await context.disconnectGitHubInstallation(workspaceId, unlinkInstallationId);
+            return await context.disconnectGitHubInstallation(
+              workspaceId,
+              unlinkTarget.installationId,
+            );
           } finally {
             setDisconnecting(false);
           }

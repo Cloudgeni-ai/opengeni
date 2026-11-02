@@ -1,10 +1,24 @@
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
-import { registerDom, renderHook } from "../../../../packages/react/test/render-hook";
+import {
+  registerDom,
+  renderComponent,
+  renderHook,
+} from "../../../../packages/react/test/render-hook";
 import type { AccessContext } from "@opengeni/react/app/types";
+import { createElement, StrictMode } from "react";
 import { useRepositoryCatalogRefresh } from "@opengeni/react/app/lib/use-follow-up-repositories";
+import {
+  clearGitHubAccessChanges,
+  markGitHubAccessChanged,
+} from "@opengeni/react/app/lib/github-access-return";
 
 registerDom();
-afterEach(() => mock.restore());
+/** Lets a refresh started by an event finish. */
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+afterEach(() => {
+  mock.restore();
+  clearGitHubAccessChanges();
+});
 
 function fixture(permissions: AccessContext["workspaceGrants"][number]["permissions"]) {
   return {
@@ -130,7 +144,7 @@ describe("repository catalog refresh", () => {
     await hook.unmount();
   });
 
-  test("refreshes and syncs once the person is back from a GitHub flow, skipping the cooldown", async () => {
+  test("refreshes and syncs whenever the person is back from a GitHub flow, skipping the cooldown", async () => {
     let now = 200_000;
     spyOn(Date, "now").mockImplementation(() => now);
     const context = fixture(["github:use", "github:manage", "connections:read"]);
@@ -142,46 +156,109 @@ describe("repository catalog refresh", () => {
     expect(context.refreshGitHub).toHaveBeenCalledTimes(1);
     // Focus without having left for GitHub changes nothing.
     window.dispatchEvent(new Event("focus"));
-    await Promise.resolve();
+    await settle();
     expect(context.refreshGitHub).toHaveBeenCalledTimes(1);
 
     hook.result.current.onLeaveForGitHub();
-    now += 5_000;
+    now += 15_000;
     window.dispatchEvent(new Event("focus"));
-    await Promise.resolve();
+    await settle();
     expect(context.refreshGitHub).toHaveBeenCalledTimes(2);
     expect(context.refreshGitHub).toHaveBeenLastCalledWith("workspace-1", undefined, {
       sync: true,
       userInitiated: false,
     });
     expect(context.refreshPersonalGitHub).toHaveBeenCalledTimes(2);
-    // One refresh per return: the next focus and opening the menu are throttled again.
+    // Alt-tabbing right back is throttled briefly...
+    now += 2_000;
     window.dispatchEvent(new Event("focus"));
     await hook.result.current.onOpenRefresh();
     expect(context.refreshGitHub).toHaveBeenCalledTimes(2);
+    // ...but a glance back doesn't use up the return: the next one still syncs.
+    now += 20_000;
+    window.dispatchEvent(new Event("focus"));
+    await settle();
+    expect(context.refreshGitHub).toHaveBeenCalledTimes(3);
+    expect(context.refreshGitHub).toHaveBeenLastCalledWith("workspace-1", undefined, {
+      sync: true,
+      userInitiated: false,
+    });
+    // Ten minutes on, a focus is an ordinary focus and opening is throttled again.
+    now += 10 * 60_000;
+    window.dispatchEvent(new Event("focus"));
+    await settle();
+    expect(context.refreshGitHub).toHaveBeenCalledTimes(3);
+    await hook.result.current.onOpenRefresh();
+    expect(context.refreshGitHub).toHaveBeenLastCalledWith("workspace-1", undefined, {
+      sync: false,
+      userInitiated: false,
+    });
     await hook.unmount();
   });
 
-  test("a composer mounted after the GitHub settings page refreshes at once", async () => {
+  test("a hidden tab waits until it is visible again", async () => {
     const context = fixture(["github:use"]);
-    const first = await renderHook(
+    const hook = await renderHook(
       () => useRepositoryCatalogRefresh("workspace-1", context),
       undefined,
     );
-    first.result.current.onLeaveForGitHub();
-    await first.unmount();
+    markGitHubAccessChanged("workspace-1");
+    let visibility: DocumentVisibilityState = "hidden";
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => visibility,
+    });
+    try {
+      document.dispatchEvent(new Event("visibilitychange"));
+      await settle();
+      expect(context.refreshGitHub).not.toHaveBeenCalled();
+      visibility = "visible";
+      document.dispatchEvent(new Event("visibilitychange"));
+      await settle();
+      expect(context.refreshGitHub).toHaveBeenCalledTimes(1);
+    } finally {
+      delete (document as { visibilityState?: unknown }).visibilityState;
+      await hook.unmount();
+    }
+  });
+
+  test("a return while the list is loading keeps the mark for the next one", async () => {
+    const context = fixture(["github:use", "github:manage"]);
+    const hook = await renderHook(
+      (current: typeof context) => useRepositoryCatalogRefresh("workspace-1", current),
+      { ...context, repoBusy: true },
+    );
+    hook.result.current.onLeaveForGitHub();
+    window.dispatchEvent(new Event("focus"));
+    await settle();
     expect(context.refreshGitHub).not.toHaveBeenCalled();
-    const second = await renderHook(
-      () => useRepositoryCatalogRefresh("workspace-1", context),
-      undefined,
+    await hook.rerender(context);
+    window.dispatchEvent(new Event("focus"));
+    await settle();
+    expect(context.refreshGitHub).toHaveBeenLastCalledWith("workspace-1", undefined, {
+      sync: true,
+      userInitiated: false,
+    });
+    await hook.unmount();
+  });
+
+  test("a composer mounted after the GitHub settings page refreshes once, also in StrictMode", async () => {
+    const context = fixture(["github:use"]);
+    markGitHubAccessChanged("workspace-1");
+    function Composer() {
+      useRepositoryCatalogRefresh("workspace-1", context);
+      return null;
+    }
+    const rendered = await renderComponent(
+      createElement(StrictMode, null, createElement(Composer)),
     );
-    await Promise.resolve();
+    await settle();
     expect(context.refreshGitHub).toHaveBeenCalledTimes(1);
     // Readers keep catalog reads: no sync without github:manage.
     expect(context.refreshGitHub).toHaveBeenLastCalledWith("workspace-1", undefined, {
       sync: false,
       userInitiated: false,
     });
-    await second.unmount();
+    await rendered.unmount();
   });
 });

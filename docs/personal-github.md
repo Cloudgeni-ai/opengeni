@@ -115,7 +115,8 @@ and grants this workspace reusable access to the connection for that user; the
 OAuth token is not copied into the session. A repository already mounted
 through one identity cannot also be mounted through the other at the same path.
 Existing-session pickers keep repositories already in the chat visible as
-**In chat**: they can be switched off, and a new chat changes their branch.
+**In chat**: people who may change the chat can switch them off, and a new
+chat changes their branch.
 
 ## Authority contract
 

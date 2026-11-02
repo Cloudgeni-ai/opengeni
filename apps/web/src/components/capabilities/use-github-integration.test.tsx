@@ -42,6 +42,7 @@ mock.module("./personal-github-dialog", () => ({
 GlobalRegistrator.register();
 const { useGitHubIntegration } = await import("./use-github-integration");
 const { markPersonalGitHubRepositoryChooser } = await import("@/lib/personal-github-oauth");
+const { returningFromGitHub } = await import("@opengeni/react/app/lib/github-access-return");
 
 beforeAll(() => {
   (
@@ -397,6 +398,8 @@ for (const count of [1, 2])
         }
       }
       expect(open).toHaveBeenCalledTimes(count);
+      // Back from GitHub, the composer's repository menu refreshes and syncs.
+      expect(returningFromGitHub(WORKSPACE_ID)).toBe(true);
       expect(getGitHubApp).toHaveBeenCalledTimes(count);
       // Never the copy captured when the page loaded.
       expect(visited).toEqual(

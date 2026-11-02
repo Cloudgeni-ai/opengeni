@@ -7,6 +7,12 @@ import {
   stableJson,
 } from "@opengeni/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  GITHUB_RETURN_REFRESH_INTERVAL_MS,
+  REPOSITORY_OPEN_REFRESH_COOLDOWN_MS,
+  markGitHubAccessChanged,
+  returningFromGitHub,
+} from "./github-access-return";
 import { toast } from "./toast";
 
 import type {
@@ -106,16 +112,6 @@ type RepositoryRefreshContext = Pick<
 >;
 
 /**
- * Workspaces whose GitHub access the person left to change (on GitHub or the
- * GitHub settings page). Module scope, so the mark outlives a composer that
- * unmounted while they were on the settings page.
- */
-const githubAccessChanges = new Set<string>();
-
-/** Opening the menu refreshes at most this often; returning from a GitHub flow skips it. */
-export const REPOSITORY_OPEN_REFRESH_COOLDOWN_MS = 30_000;
-
-/**
  * Keep this above the lazily mounted menu so rapid reopenings share one cooldown.
  * There is no Refresh action: the menu refreshes on open (throttled), and once
  * the person is back from changing GitHub access (window focus, or the composer
@@ -155,19 +151,16 @@ export function useRepositoryCatalogRefresh(
       ]);
       const previous = gate.current;
       // Back from changing GitHub access: skip the cooldown and pick up the change.
-      const returning = !explicit && githubAccessChanges.has(workspaceId);
+      const returning = !explicit && returningFromGitHub(workspaceId);
       if (previous?.key === key) {
         if (previous.inFlight) return previous.inFlight;
-        if (
-          !explicit &&
-          !returning &&
-          Date.now() - previous.attemptedAt < REPOSITORY_OPEN_REFRESH_COOLDOWN_MS
-        )
-          return;
+        const cooldown = returning
+          ? GITHUB_RETURN_REFRESH_INTERVAL_MS
+          : REPOSITORY_OPEN_REFRESH_COOLDOWN_MS;
+        if (!explicit && Date.now() - previous.attemptedAt < cooldown) return;
       }
       if ((canUseGitHub && context.repoBusy) || (canReadPersonal && context.personalGitHubBusy))
         return;
-      githubAccessChanges.delete(workspaceId);
       const accepted = { key, attemptedAt: Date.now(), inFlight: null as Promise<void> | null };
       gate.current = accepted;
       // Opening is read-only. A retry, or coming back from a GitHub flow, may
@@ -202,7 +195,7 @@ export function useRepositoryCatalogRefresh(
   // before they reopen the menu.
   useEffect(() => {
     const onReturn = () => {
-      if (document.visibilityState === "hidden" || !githubAccessChanges.has(workspaceId)) return;
+      if (document.visibilityState === "hidden" || !returningFromGitHub(workspaceId)) return;
       void passiveRefresh.current().catch(() => undefined);
     };
     onReturn();
@@ -217,9 +210,7 @@ export function useRepositoryCatalogRefresh(
     refreshAllowed: canUseGitHub || canReadPersonal,
     onOpenRefresh: useCallback(() => refresh(false), [refresh]),
     onRefresh: useCallback(() => refresh(true), [refresh]),
-    onLeaveForGitHub: useCallback(() => {
-      githubAccessChanges.add(workspaceId);
-    }, [workspaceId]),
+    onLeaveForGitHub: useCallback(() => markGitHubAccessChanged(workspaceId), [workspaceId]),
   };
 }
 
@@ -678,6 +669,7 @@ export function useFollowUpRepositories(
       pending: disabled || context.busy,
       repoBusy: context.repoBusy,
       githubLoadFailed: context.githubStatusFailed && !context.githubCatalogReady,
+      githubUpdateFailed: context.githubStatusFailed && context.githubCatalogReady,
       githubAppBusy: context.githubAppBusy,
       lockedRepoIds: mountedRepositorySelection.selectedRepoIds,
       lockedPersonalGitHubRepoIds: mountedPersonalRepoIds,

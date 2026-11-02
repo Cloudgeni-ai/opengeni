@@ -229,6 +229,26 @@ describe("repository picker GitHub load failure", () => {
     await rendered.unmount();
   });
 
+  test("a refresh that failed while the list is shown says so and offers Try again", async () => {
+    let retries = 0;
+    const rendered = await renderComponent(
+      createElement(RepositoryContextMenuBody, {
+        ...failedLoadProps(async () => {
+          retries += 1;
+        }),
+        status: "bound" as const,
+        githubLoadFailed: false,
+        githubUpdateFailed: true,
+      }),
+    );
+    const alert = rendered.container.querySelector('[role="alert"]');
+    expect(alert?.textContent).toBe("Couldn't update the list. Try again");
+    await actRun(() => alert!.querySelector("button")!.click());
+    await actRun(() => Promise.resolve());
+    expect(retries).toBe(1);
+    await rendered.unmount();
+  });
+
   test("a failed background update says so and offers Try again", async () => {
     let retries = 0;
     const rendered = await renderComponent(
@@ -900,8 +920,9 @@ describe("repositories from several GitHub accounts and your GitHub", () => {
       );
     await actRun(() => button("Connect")!.click());
     await actRun(() => button("Install")!.click());
-    // Both leave for GitHub, so the list refreshes once the person is back.
-    expect(first.calls).toEqual(["leave", "connect-personal", "leave", "install-app"]);
+    // Connecting your GitHub leaves for GitHub, so the list refreshes once the
+    // person is back; the app's connect dialog syncs the list itself.
+    expect(first.calls).toEqual(["leave", "connect-personal", "install-app"]);
     await rendered.unmount();
 
     // Your GitHub connected without chosen repositories: choose them next.

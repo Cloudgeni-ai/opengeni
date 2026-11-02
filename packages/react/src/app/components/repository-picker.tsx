@@ -140,6 +140,11 @@ export type RepositoryContextPickerProps = {
    * earlier list is shown. The menu says so instead of offering setup.
    */
   githubLoadFailed?: boolean | undefined;
+  /**
+   * A later refresh failed while the earlier list is still shown. The menu
+   * keeps the list and says it couldn't update it, with "Try again".
+   */
+  githubUpdateFailed?: boolean | undefined;
   githubAppBusy: boolean;
   /**
    * Reloads both catalogs now (a manager's reload also syncs from GitHub). The
@@ -251,6 +256,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
     props.setupMode,
   );
   const loadFailed = props.githubLoadFailed === true && !hasRepos && !props.repoBusy;
+  const updateFailed = props.githubUpdateFailed === true && !props.repoBusy && !refreshBusy;
   const canRefresh =
     props.refreshAllowed !== false &&
     (bindingPresentation.canRefresh || loadFailed || props.personalGitHubStatus?.enabled === true);
@@ -351,10 +357,8 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
               type="button"
               size="xs"
               className="shrink-0"
-              onClick={() => {
-                props.onLeaveForGitHub?.();
-                props.onConnectWorkspaceApp();
-              }}
+              // The connect dialog syncs the list itself when it completes.
+              onClick={props.onConnectWorkspaceApp}
               disabled={props.pending}
             >
               {bindingPresentation.connectLabel}
@@ -483,7 +487,14 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
                   {repo.uri}
                 </div>
                 <div className="truncate text-xs text-fg-subtle">
-                  {repo.ref} · {personalActive ? "No longer shared" : "Reconnect your GitHub"}
+                  {repo.ref} ·{" "}
+                  {personalActive
+                    ? "No longer shared"
+                    : personalEnabled &&
+                        props.personalGitHubStatus?.connection &&
+                        !props.personalGitHubBusy
+                      ? "Reconnect your GitHub"
+                      : "Unavailable"}
                 </div>
               </div>
               <MetaChip dot="idle" rounded="full">
@@ -611,9 +622,9 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
             </Collapsible>
           )}
           {/* The list refreshes itself on open and after GitHub flows; only a failure offers a retry. */}
-          {refreshError && !loadFailed ? (
+          {(refreshError || updateFailed) && !loadFailed ? (
             <p className="px-2.5 text-xs text-status-failed" role="alert">
-              Couldn't update the list. {refreshError}
+              Couldn't update the list.{refreshError ? ` ${refreshError}` : ""}
               {canRefresh ? (
                 <>
                   {" "}
