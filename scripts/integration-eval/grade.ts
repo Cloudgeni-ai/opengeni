@@ -28,7 +28,14 @@ function matchesAny(answer: string, patterns: readonly RegExp[] | undefined): Re
 }
 
 function integrationTools(receipts: Receipts, testCase: EvalCase): ToolReceipt[] {
-  return receipts.tools.filter((tool) => tool.integration === testCase.integration);
+  return receipts.tools.filter((tool) => ownIntegration(testCase, tool.integration));
+}
+
+function ownIntegration(testCase: EvalCase, integration: string | null): boolean {
+  if (integration === null) return false;
+  return (
+    integration === testCase.integration || (testCase.servedBy ?? []).includes(integration as never)
+  );
 }
 
 /** Some call to the row's integration was rate-limited by the service. */
@@ -53,7 +60,7 @@ function otherIntegrations(receipts: Receipts, testCase: EvalCase): string[] {
     ...new Set(
       receipts.tools
         .map((tool) => tool.integration)
-        .filter((id): id is NonNullable<typeof id> => id !== null && id !== testCase.integration),
+        .filter((id): id is NonNullable<typeof id> => id !== null && !ownIntegration(testCase, id)),
     ),
   ];
 }

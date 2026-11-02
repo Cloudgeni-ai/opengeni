@@ -86,6 +86,12 @@ export type EvalCase = {
   /** Routing: integrations whose tools must not be the only ones used. */
   forbidIntegrations?: readonly IntegrationId[];
   /**
+   * Integrations whose tools reach the same data through the same account,
+   * e.g. a OneDrive file read through SharePoint's drive or search tools on
+   * one Microsoft Graph connection. Their calls count as the row's own.
+   */
+  servedBy?: readonly IntegrationId[];
+  /**
    * Write: whether the deployment's default tool policy should ask for
    * approval first. `optional` when the default policy lets the write run
    * (for example personal Slack under the Recommended policy). Default required.

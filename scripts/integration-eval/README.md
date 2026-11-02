@@ -68,7 +68,7 @@ the expected answers in `catalogue.ts` name these facts.
 | Slack | Channels `#halcyon-launch` ("Launch moved to 1 December, pricing page owner is Ada") and `#halcyon-support` ("Bluefin reports checkout timeouts since Friday"). Write rows post to the channel in `VERIFY_SLACK_CHANNEL_ID`. |
 | Gmail | An email from Ada Quill about the "Halcyon launch checklist". |
 | Apollo | Contact Mina Sorrel, Head of Platform at Halcyon Labs (`mina.sorrel@halcyon-labs.example`). No enrichment rows; enrichment uses credits. |
-| Microsoft 365 | Email "Kestrel failover drill moved" (drill moves to Thursday 14:00); OneDrive file "Kestrel runbook" ("Recovery time objective: 15 minutes"); SharePoint document "Kestrel vendor contacts" naming Marlow & Finch as the backup vendor. |
+| Microsoft 365 | Email "Kestrel failover drill moved" (drill moves to Thursday 14:00); OneDrive file "Kestrel runbook" ("Recovery time objective: 15 minutes"); SharePoint list "Kestrel vendor contacts" on a team site, with one item titled "Marlow & Finch". |
 | Google Drive | Document "Halcyon pricing 2026" listing Pro at 49 USD a month. |
 | Others (Notion, Asana, Stripe test mode, GitHub, HubSpot, Sentry, Airtable) | The object each row's prompt names, with the facts its expected answer checks (see `catalogue.ts`). |
 

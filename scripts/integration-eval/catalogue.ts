@@ -630,6 +630,7 @@ export const CASES: readonly EvalCase[] = [
     core: true,
     prompt: "Open the Kestrel runbook in my OneDrive. What recovery time objective does it set?",
     expectAnswer: [i("15 ?min")],
+    servedBy: ["sharepoint"],
   },
   ...notConnected("sharepoint", [
     { slug: "sites", prompt: "Search our SharePoint for the Kestrel vendor contacts.", core: true },
@@ -639,8 +640,9 @@ export const CASES: readonly EvalCase[] = [
     integration: "sharepoint",
     kind: "read",
     core: true,
-    prompt: "On our SharePoint, who is the backup vendor in the Kestrel vendor contacts document?",
+    prompt: "On our SharePoint, which vendor is listed in the Kestrel vendor contacts list?",
     expectAnswer: [i("marlow")],
+    servedBy: ["onedrive"],
   },
 
   // ── Choosing between integrations ─────────────────────────────────────────
@@ -689,15 +691,17 @@ export const CASES: readonly EvalCase[] = [
     prompt: "What recovery time objective does my Kestrel runbook file set?",
     expectAnswer: [i("15 ?min")],
     forbidIntegrations: ["atlassian"],
+    servedBy: ["sharepoint"],
   },
   {
     id: "routing.sharepoint-vs-confluence.vendor",
     integration: "sharepoint",
     kind: "routing",
     core: true,
-    prompt: "Who do we list as the Kestrel backup vendor in our shared documents?",
+    prompt: "Which vendor is on our shared Kestrel vendor contacts list?",
     expectAnswer: [i("marlow")],
     forbidIntegrations: ["atlassian"],
+    servedBy: ["onedrive"],
   },
   {
     id: "routing.notion-vs-confluence.rota",

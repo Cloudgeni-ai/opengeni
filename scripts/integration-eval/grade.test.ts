@@ -164,6 +164,39 @@ describe("gradeCase", () => {
     expect(receipts.tools[0]?.integration).toBe("linear");
   });
 
+  test("a sibling integration that serves the same data counts as the row's own", () => {
+    const receipts = parseReceipts(
+      events(
+        {
+          type: "agent.toolCall.created",
+          payload: {
+            id: "c1",
+            name: "mcp_f00__drives_getitems",
+            arguments: "{}",
+            display: { connector: "SharePoint", providerDomain: "graph.microsoft.com" },
+          },
+        },
+        { type: "agent.toolCall.output", payload: { id: "c1", output: '{"ok":true}' } },
+        {
+          type: "agent.message.completed",
+          payload: { text: "The Kestrel runbook sets an RTO of 15 minutes." },
+        },
+      ),
+    );
+    expect(receipts.tools[0]?.integration).toBe("sharepoint");
+    const oneDriveRead: EvalCase = {
+      id: "onedrive.read.test",
+      integration: "onedrive",
+      kind: "read",
+      prompt: "What RTO does my Kestrel runbook set?",
+      expectAnswer: [/15 ?min/i],
+    };
+    expect(gradeCase(oneDriveRead, receipts, null)).toMatchObject({ category: "wrong_tool" });
+    expect(gradeCase({ ...oneDriveRead, servedBy: ["sharepoint"] }, receipts, null).pass).toBe(
+      true,
+    );
+  });
+
   test("a service rate limit that keeps facts out of the answer is excluded as rate_limited", () => {
     const receipts = parseReceipts(
       events(...linearCall("c1", '{"isError":true,"structuredContent":{"error":"rate_limited"}}'), {
