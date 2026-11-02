@@ -9,6 +9,7 @@ import { Input } from "../../../ui/input";
 import { ScrollArea } from "../../../ui/scroll-area";
 import { useAppContext } from "../../app-context";
 import { userErrorText } from "../../../ui/api-error";
+import { ErrorText } from "../../../ui/error-text";
 import type { SessionEvent } from "../../types";
 
 const PAGE_SIZE = 30;
@@ -362,7 +363,7 @@ export function ModelContextInspectorPane(props: {
         <div className="min-w-0 p-3">
           {error ? (
             <p role="alert" className="text-xs text-status-waiting">
-              Could not refresh context. {error}
+              Could not refresh context. <ErrorText>{error}</ErrorText>
             </p>
           ) : null}
           {loading && !snapshot ? <p className="text-xs text-fg-subtle">Loading context…</p> : null}

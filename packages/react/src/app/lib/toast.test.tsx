@@ -95,6 +95,44 @@ describe("error toasts", () => {
     expect(shown[0]!.options?.classNames).toEqual({ cancelButton: "og-toast-details" });
   });
 
+  test("with both buttons taken, the reference stays in the text", () => {
+    const retry = { label: "Retry", onClick: () => {} };
+    const dismiss = { label: "Dismiss", onClick: () => {} };
+    toast.error("Couldn't load.", {
+      description: `API 500: Opengeni couldn't finish the request. Reference: ${REFERENCE}.`,
+      action: retry,
+      cancel: dismiss,
+    });
+    expect(shown[0]!.options).toEqual({
+      description: `Opengeni couldn't finish the request. Reference: ${REFERENCE}.`,
+      action: retry,
+      cancel: dismiss,
+    });
+  });
+
+  test("when copying fails, the details show as text instead", async () => {
+    const clipboard = { writeText: async () => Promise.reject(new Error("denied")) };
+    const previous = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+    Object.defineProperty(globalThis, "navigator", { value: { clipboard }, configurable: true });
+    try {
+      toast.error("Couldn't load.", {
+        description: `Opengeni couldn't finish the request. Reference: ${REFERENCE}.`,
+      });
+      shown[0]!.options!.action!.onClick();
+      for (let tick = 0; tick < 4; tick += 1) await Promise.resolve();
+      expect(shown.at(-1)).toEqual({
+        kind: "error",
+        title: "Couldn't copy the details.",
+        options: {
+          description: `Couldn't load.\nOpengeni couldn't finish the request.\nReference: ${REFERENCE}`,
+        },
+      });
+    } finally {
+      if (previous) Object.defineProperty(globalThis, "navigator", previous);
+      else delete (globalThis as { navigator?: unknown }).navigator;
+    }
+  });
+
   test("a message used as the title is cleaned the same way", () => {
     toast.error(`API 403: You don't have permission to do that. Reference: ${REFERENCE}.`);
     expect(shown[0]).toMatchObject({ title: "You don't have permission to do that." });
@@ -115,6 +153,8 @@ describe("error toasts", () => {
 // A toast's text comes from userErrorText (or another product sentence), never
 // from an error's raw message: that is "API 409: ... Reference: <id>." for an
 // API error.
+// This source guard only catches direct use inside a toast call; raw text
+// passed through a variable or helper gets past it.
 const RAW_ERROR_TEXT =
   /\berrorMessage\(|\b(?:error|err|e|cause|caught|reason|failure|\w+Error)\.message\b|String\((?:error|err|e|cause|caught|reason|\w+Error)\)|\$\{(?:error|err|e|cause|caught|\w+Error)\}|\bAPI \d{3}:/u;
 

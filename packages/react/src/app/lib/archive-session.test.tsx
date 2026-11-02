@@ -43,13 +43,15 @@ const retention: Array<{ sessionId: string; keepLive: boolean }> = [];
 // Archive answers queued by a test; an empty queue archives.
 const archiveAnswers: Array<Error> = [];
 const retentionFailures = new Set<string>();
+// False once the person has moved to another workspace.
+let ownsWorkspace = true;
 function appContext(permissions: string[] = ["sessions:control"]) {
   return {
     accessContext: {
       workspaceGrants: [{ workspaceId: "ws", permissions, permissionMode: "explicit" }],
     },
     captureWorkspaceInvocation: () => 1,
-    ownsWorkspaceInvocation: () => true,
+    ownsWorkspaceInvocation: () => ownsWorkspace,
     client: {
       updateSessionArchive: async (_workspaceId: string, sessionId: string, body: unknown) => {
         requests.push({ sessionId, body });
@@ -106,7 +108,28 @@ beforeEach(() => {
   retention.length = 0;
   archiveAnswers.length = 0;
   retentionFailures.clear();
+  ownsWorkspace = true;
 });
+
+/**
+ * A caller like the app's: its rerun archives again straight away. Each
+ * rerun's outcome (the updated chat, or what it threw) lands in `runs`.
+ */
+let workspaces = 0;
+function caller(
+  // A fresh workspace each time: what an earlier test's archive remembers
+  // stays with that test.
+  chat = { id: "chat", workspaceId: `ws-${++workspaces}` },
+) {
+  const reruns: boolean[] = [];
+  const runs: Array<Promise<unknown>> = [];
+  const archive = (archived: boolean): Promise<unknown> =>
+    requestSessionArchive(appContext(), chat, archived, "Plan", (next) => {
+      reruns.push(next);
+      runs.push(archive(next).catch((error: unknown) => error));
+    });
+  return { reruns, runs, archive };
+}
 
 test("Archive is offered only to people who can control a chat that is not archived yet", () => {
   const chat = { workspaceId: "ws", archived: false };
@@ -149,10 +172,7 @@ test("a long chat name is shortened without breaking a character", () => {
 });
 
 test("Keep this chat active offers one action: turn it off and archive, with Undo restoring it", async () => {
-  const reruns: boolean[] = [];
-  const chat = { id: "chat", workspaceId: "ws" };
-  const archive = (archived: boolean) =>
-    requestSessionArchive(appContext(), chat, archived, "Plan", (next) => reruns.push(next));
+  const { reruns, runs, archive } = caller();
   archiveAnswers.push(blocked([{ kind: "keep_live", sessionId: "chat" }]));
   expect(await archive(true)).toBeNull();
   expect(shown).toHaveLength(1);
@@ -168,12 +188,12 @@ test("Keep this chat active offers one action: turn it off and archive, with Und
   expect(reruns).toEqual([true]);
 
   // The caller's own archive runs again and succeeds, with the usual Undo.
-  expect(await archive(true)).toMatchObject({ archived: true });
+  expect(await runs[0]).toMatchObject({ archived: true });
   expect(shown.at(-1)!.title).toBe("Archived “Plan”");
   shown.at(-1)!.options!.action!.onClick();
   expect(reruns).toEqual([true, false]);
   // Undo returns the chat as it was, the setting included.
-  await archive(false);
+  await runs[1];
   await flush();
   expect(retention).toEqual([
     { sessionId: "chat", keepLive: false },
@@ -183,22 +203,17 @@ test("Keep this chat active offers one action: turn it off and archive, with Und
 });
 
 test("a sub-chat kept active is named, and a failed archive turns the setting back on", async () => {
-  const reruns: boolean[] = [];
-  const chat = { id: "chat", workspaceId: "ws" };
-  const archive = (archived: boolean) =>
-    requestSessionArchive(appContext(), chat, archived, "Plan", (next) => reruns.push(next));
+  const { runs, archive } = caller();
   archiveAnswers.push(blocked([{ kind: "keep_live", sessionId: "sub-chat" }]));
   await archive(true);
   expect(shown[0]!.options?.description).toBe("A chat it started has “Keep this chat active” on.");
-  shown[0]!.options!.action!.onClick();
-  await flush();
-  expect(retention).toEqual([{ sessionId: "sub-chat", keepLive: false }]);
-
   const failure = new OpenGeniApiError(500, JSON.stringify({ message: "boom" }), {
     mutation: true,
   });
   archiveAnswers.push(failure);
-  await expect(archive(true)).rejects.toBe(failure);
+  shown[0]!.options!.action!.onClick();
+  await flush();
+  expect(await runs[0]).toBe(failure);
   await flush();
   expect(retention).toEqual([
     { sessionId: "sub-chat", keepLive: false },
@@ -207,17 +222,13 @@ test("a sub-chat kept active is named, and a failed archive turns the setting ba
 });
 
 test("a chat still kept active after turning it off gets the plain sentence, not a second offer", async () => {
-  const reruns: boolean[] = [];
-  const chat = { id: "chat", workspaceId: "ws" };
-  const archive = () =>
-    requestSessionArchive(appContext(), chat, true, "Plan", (next) => reruns.push(next));
+  const { runs, archive } = caller();
   archiveAnswers.push(blocked([{ kind: "keep_live", sessionId: "chat" }]));
-  await archive();
+  await archive(true);
+  archiveAnswers.push(blocked([{ kind: "keep_live", sessionId: "chat" }]));
   shown[0]!.options!.action!.onClick();
   await flush();
-  archiveAnswers.push(blocked([{ kind: "keep_live", sessionId: "chat" }]));
-  const refusal = await archive().catch((error: unknown) => error);
-  expect((refusal as Error).message).toBe(KEPT_ACTIVE_SENTENCE);
+  expect(((await runs[0]) as Error).message).toBe(KEPT_ACTIVE_SENTENCE);
   await flush();
   expect(shown).toHaveLength(1);
   expect(retention).toEqual([
@@ -227,10 +238,8 @@ test("a chat still kept active after turning it off gets the plain sentence, not
 });
 
 test("other refusals are the server's plain sentence, and a failed turn-off archives nothing", async () => {
-  const reruns: boolean[] = [];
-  const chat = { id: "chat", workspaceId: "ws" };
-  const archive = () =>
-    requestSessionArchive(appContext(), chat, true, "Plan", (next) => reruns.push(next));
+  const { reruns, archive: archiveAs } = caller();
+  const archive = () => archiveAs(true);
   const sentence =
     "This chat can't be archived. A scheduled task runs in this chat. Delete the task or let it start new chats first. Imported chats are already stored read-only.";
   const mixed = blocked(
@@ -260,4 +269,89 @@ test("other refusals are the server's plain sentence, and a failed turn-off arch
       description: "You don't have permission to do this. Ask an admin for access.",
     },
   });
+});
+
+test("a mix of Keep this chat active and another reason gets the plain sentence, no offer", async () => {
+  const { archive } = caller();
+  const sentence =
+    'This chat can\'t be archived. "Keep this chat active" is on, and a scheduled task runs in this chat.';
+  archiveAnswers.push(
+    blocked(
+      [
+        { kind: "keep_live", sessionId: "chat" },
+        { kind: "scheduled_task", sessionId: "chat" },
+      ],
+      sentence,
+    ),
+  );
+  const refusal = await archive(true).catch((error: unknown) => error);
+  expect((refusal as Error).message).toBe(sentence);
+  expect(shown).toEqual([]);
+  expect(retention).toEqual([]);
+});
+
+test("Turn off and archive runs once, however quickly it is clicked again", async () => {
+  const { reruns, runs, archive } = caller();
+  archiveAnswers.push(blocked([{ kind: "keep_live", sessionId: "chat" }]));
+  await archive(true);
+  shown[0]!.options!.action!.onClick();
+  shown[0]!.options!.action!.onClick();
+  await flush();
+  expect(retention).toEqual([{ sessionId: "chat", keepLive: false }]);
+  expect(reruns).toEqual([true]);
+  expect(await runs[0]).toMatchObject({ archived: true });
+});
+
+test("when the archive doesn't start again, the setting goes back on", async () => {
+  // The caller's rerun does nothing: an archive already in flight, say.
+  const reruns: boolean[] = [];
+  const chat = { id: "chat", workspaceId: `ws-${++workspaces}` };
+  const archive = () =>
+    requestSessionArchive(appContext(), chat, true, "Plan", (next) => reruns.push(next));
+  archiveAnswers.push(blocked([{ kind: "keep_live", sessionId: "chat" }]));
+  await archive();
+  shown[0]!.options!.action!.onClick();
+  await flush();
+  expect(reruns).toEqual([true]);
+  expect(retention).toEqual([
+    { sessionId: "chat", keepLive: false },
+    { sessionId: "chat", keepLive: true },
+  ]);
+  // Nothing remembered: a later refusal offers the action again.
+  archiveAnswers.push(blocked([{ kind: "keep_live", sessionId: "chat" }]));
+  await archive();
+  expect(shown.at(-1)!.options?.action?.label).toBe("Turn off and archive");
+});
+
+test("after moving to another workspace, Turn off and archive changes nothing", async () => {
+  const { reruns, archive } = caller();
+  archiveAnswers.push(blocked([{ kind: "keep_live", sessionId: "chat" }]));
+  await archive(true);
+  ownsWorkspace = false;
+  shown[0]!.options!.action!.onClick();
+  await flush();
+  expect(retention).toEqual([]);
+  expect(reruns).toEqual([]);
+});
+
+test("Undo says so when Keep this chat active can't be turned back on", async () => {
+  const { runs, archive } = caller();
+  archiveAnswers.push(blocked([{ kind: "keep_live", sessionId: "chat" }]));
+  await archive(true);
+  shown[0]!.options!.action!.onClick();
+  await flush();
+  expect(await runs[0]).toMatchObject({ archived: true });
+  retentionFailures.add("chat");
+  shown.at(-1)!.options!.action!.onClick();
+  await runs[1];
+  expect(
+    shown.slice(-2).map((notice) => [notice.kind, notice.title, notice.options?.description]),
+  ).toEqual([
+    [
+      "error",
+      "Couldn't turn “Keep this chat active” back on.",
+      "Turn it on in the chat's Agent tab.",
+    ],
+    ["success", "Archive undone.", undefined],
+  ]);
 });

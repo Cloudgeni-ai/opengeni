@@ -56,7 +56,7 @@ function withErrorDetails<A extends unknown[]>(args: A): A {
   const titleChanged = !!title && title.text !== message;
   const descriptionChanged = !!description && description.text !== data?.description;
   if (!titleChanged && !descriptionChanged && !reference) return args;
-  const shownTitle = title ? title.text : message;
+  let shownTitle = title ? title.text : message;
   const next: Sonner.ExternalToast = { ...data };
   if (description) next.description = description.text || undefined;
   if (reference) {
@@ -75,15 +75,31 @@ function withErrorDetails<A extends unknown[]>(args: A): A {
         ...next.classNames,
         [slot === "action" ? "actionButton" : "cancelButton"]: "og-toast-details",
       };
+    } else if (description?.reference) {
+      // Both buttons are the caller's: keep the reference in the text.
+      next.description = `${description.text} Reference: ${reference}.`.trim();
+    } else if (title) {
+      shownTitle = `${title.text} Reference: ${reference}.`.trim();
     }
   }
   return [shownTitle, next, ...args.slice(2)] as unknown as A;
 }
 
 function copyDetails(details: string) {
-  void globalThis.navigator?.clipboard?.writeText(details).then(
+  const clipboard = globalThis.navigator?.clipboard;
+  const copied = clipboard
+    ? clipboard.writeText(details)
+    : Promise.reject(new Error("no clipboard"));
+  void copied.then(
     () => toast.success("Details copied."),
-    () => undefined,
+    // Shown as text to select by hand, so not through withErrorDetails.
+    () =>
+      Sonner.toast.error(
+        ...withToaster<[string, Sonner.ExternalToast]>([
+          "Couldn't copy the details.",
+          { description: details },
+        ]),
+      ),
   );
 }
 
