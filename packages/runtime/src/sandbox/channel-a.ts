@@ -744,6 +744,32 @@ async function settleConcurrentReads<const T extends readonly unknown[]>(reads: 
   return settled.map((result) => (result as PromiseFulfilledResult<unknown>).value) as unknown as T;
 }
 
+/** Large Git captures fall back to individual files. Admit those reads lazily:
+ * eager Promise construction dispatches one physical command per file before
+ * any cancellation or failure can be observed. Preserve every file and its
+ * ordering, but join dispatched reads and stop admitting work after failure. */
+async function readGitFiles<T, R>(
+  files: readonly T[],
+  read: (file: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(files.length);
+  let next = 0;
+  let failed = false;
+  const worker = async () => {
+    while (!failed && next < files.length) {
+      const index = next++;
+      try {
+        results[index] = await read(files[index]!);
+      } catch (error) {
+        failed = true;
+        throw error;
+      }
+    }
+  };
+  await settleConcurrentReads(Array.from({ length: Math.min(4, files.length) }, worker));
+  return results;
+}
+
 function isNonReplayableCommandFault(error: unknown): boolean {
   return (
     error instanceof SynchronousCommandOutcomeUnknownError ||
@@ -2773,7 +2799,7 @@ export class SandboxChannelAService {
               };
             }),
           )
-        : settleConcurrentReads(stats.map(readTrackedFile));
+        : readGitFiles(stats, readTrackedFile);
 
     const shapeUntrackedSnapshot = (snapshot: CombinedUntrackedSnapshot): GitFileDiff => {
       let { sampled, sizeBytes, lineCount } = snapshot;
@@ -2905,8 +2931,9 @@ export class SandboxChannelAService {
               "Workspace Git metadata exceeded the safe capture limit. Retry with a narrower path.",
             );
           }
-          return settleConcurrentReads(
-            decodeGitMetadataUtf8(listing.bytes).split(NUL).filter(Boolean).map(readUntrackedFile),
+          return readGitFiles(
+            decodeGitMetadataUtf8(listing.bytes).split(NUL).filter(Boolean),
+            readUntrackedFile,
           );
         })();
       }
