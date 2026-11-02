@@ -63,7 +63,6 @@ export const DICTATION_START_TIMEOUT_MS = 15_000;
 export const DICTATION_CLIPBOARD_RESTORE_MS = 1_000;
 const NOTICE_MS = 2_500;
 const ERROR_NOTICE_MS = 8_000;
-const ESCAPE = "Escape";
 /** How long a cancelled dictation's page may take to send back its speech. */
 const CANCELLED_SPEECH_WAIT_MS = 60_000;
 
@@ -167,7 +166,6 @@ export class Dictation {
   private generation = 0;
   private readonly targets: DictationTarget[] = [];
   private active: Active | null = null;
-  private escape = false;
   private holdTimer: ReturnType<typeof setTimeout> | null = null;
   private noticeTimer: ReturnType<typeof setTimeout> | null = null;
   /** A shortcut pressed while no page could record: it starts once one listens. */
@@ -437,13 +435,13 @@ export class Dictation {
         }
       }, DICTATION_START_TIMEOUT_MS),
     };
-    this.registerEscape();
     this.show({ kind: "starting", label: this.label(profile) });
     this.send({
       kind: "start",
       dictationId: id,
       profileId: profile.id,
       language: profile.language,
+      model: profile.model ?? null,
       vocabulary: this.settings.vocabulary ?? [],
     });
   }
@@ -466,7 +464,7 @@ export class Dictation {
       this.notice("info", this.fill(this.words().signIn), ["open"]);
       return;
     }
-    // The shortcut it was dictated with, when it is still there, for its language now.
+    // The shortcut it was dictated with, when it is still there, for its language and model now.
     const shortcut =
       this.settings.profiles.find((profile) => profile.name === entry.profileName) ??
       this.settings.profiles.find((profile) => profile.language === entry.language);
@@ -474,6 +472,7 @@ export class Dictation {
       ...this.settings.profiles[0]!,
       name: entry.profileName,
       language: entry.language,
+      model: null,
     };
     const id = (this.deps.createId ?? randomUUID)();
     this.active = {
@@ -496,7 +495,6 @@ export class Dictation {
         }
       }, DICTATION_START_TIMEOUT_MS),
     };
-    this.registerEscape();
     this.preparePaste();
     this.show({ kind: "transcribing", label: this.label(profile) });
     this.send({
@@ -504,6 +502,7 @@ export class Dictation {
       dictationId: id,
       profileId: profile.id,
       language: profile.language,
+      model: profile.model ?? null,
       vocabulary: this.settings.vocabulary ?? [],
       audio,
     });
@@ -525,8 +524,8 @@ export class Dictation {
     this.again(newest.id, true);
   }
 
-  /** Escape and the cancel shortcut: throw the dictation away, or let a failed one go. */
-  private cancelFromKeys(): void {
+  /** The Cancel button and the cancel shortcut: throw the dictation away, or let a failed one go. */
+  private cancelOrDismiss(): void {
     if (this.waiting) {
       this.clearWaiting();
       this.show({ kind: "hidden" });
@@ -609,7 +608,6 @@ export class Dictation {
     const active = this.active;
     if (active?.phase !== "failed") return;
     active.phase = "transcribing";
-    this.registerEscape();
     this.preparePaste();
     this.show({ kind: "transcribing", label: this.label(active.profile) });
     this.send({ kind: "retry", dictationId: active.id });
@@ -721,7 +719,7 @@ export class Dictation {
         this.finishSpeaking();
         return;
       case "cancel":
-        this.cancelFromKeys();
+        this.cancelOrDismiss();
         return;
       case "retry":
         this.retry();
@@ -755,7 +753,6 @@ export class Dictation {
       }
     }
     this.active = null;
-    this.unregisterEscape();
   }
 
   private clearWaiting(): void {
@@ -845,21 +842,6 @@ export class Dictation {
     return [...this.targets];
   }
 
-  private registerEscape(): void {
-    if (this.escape) return;
-    try {
-      this.escape = this.deps.globalShortcut.register(ESCAPE, () => this.cancelFromKeys());
-    } catch (caught) {
-      this.deps.log?.("dictation escape shortcut rejected", caught);
-    }
-  }
-
-  private unregisterEscape(): void {
-    if (!this.escape) return;
-    this.escape = false;
-    this.deps.globalShortcut.unregister(ESCAPE);
-  }
-
   private clearWatchdog(): void {
     if (this.active?.watchdog) clearTimeout(this.active.watchdog);
     if (this.active) this.active.watchdog = null;
@@ -903,7 +885,7 @@ export class Dictation {
     if (!this.settings.enabled || !platform) return;
     const actions: [DesktopDictationAction, string | undefined, () => void][] = [
       ["retry", this.settings.retryShortcut?.accelerator, () => this.retryLast()],
-      ["cancel", this.settings.cancelShortcut?.accelerator, () => this.cancelFromKeys()],
+      ["cancel", this.settings.cancelShortcut?.accelerator, () => this.cancelOrDismiss()],
     ];
     for (const [action, accelerator, run] of actions) {
       if (!accelerator) continue;

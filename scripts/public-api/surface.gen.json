@@ -13805,6 +13805,8 @@
         "$.voiceInput.available": "boolean!",
         "$.voiceInput.maxDurationSeconds": "integer!",
         "$.voiceInput.maxSizeBytes": "integer!",
+        "$.voiceInput.models": "array?",
+        "$.voiceInput.models[]": "ref(DictationModelOption)",
         "$.voiceInput.providers": "array?",
         "$.voiceInput.providers[]": "ref(VoiceInputProviderId)",
         "$.voiceInput.resumable": "ref(ClientResumableVoiceInputConfig)?"
@@ -16436,6 +16438,18 @@
         "$.machine": "ref(DeviceEnrollmentLookupMachine)!",
         "$.userCode": "string!",
         "$.workspaceId": "string!"
+      }
+    },
+    "DictationModelOption": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.model": "string!",
+        "$.name": "string!",
+        "$.providerId": "ref(VoiceInputProviderId)!",
+        "$.providerName": "string!"
       }
     },
     "DisableOrganizationRecoveryPolicyRequest": {
@@ -34686,6 +34700,7 @@
       "DeviceEnrollmentLookupMachine": "type",
       "DeviceEnrollmentLookupRequest": "type",
       "DeviceEnrollmentLookupResponse": "type",
+      "DictationModelOption": "type",
       "DisableOrganizationRecoveryPolicyRequest": "type",
       "DisconnectOnePasswordResponse": "type",
       "DisconnectVaultProviderResponse": "type",
@@ -38954,6 +38969,7 @@
       "DesktopDictationSettingsProps": "type",
       "desktopShortcutLabel": "value",
       "dictationErrorMessage": "value",
+      "DictationModelChoice": "type",
       "modifierName": "value",
       "profileName": "value",
       "sameDesktopShortcut": "value",

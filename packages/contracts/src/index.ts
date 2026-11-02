@@ -2714,12 +2714,27 @@ export const WorkspaceSessionToolDefaultsPatch = /* @__PURE__ */ defineSchema(()
     .strict(),
 );
 
+/** A model a dictation can name, such as for one desktop dictation shortcut. */
+export const DictationModelOption = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      providerId: VoiceInputProviderId,
+      providerName: primitives.string.trim().min(1).max(128),
+      model: primitives.string.trim().min(1).max(128),
+      name: primitives.string.trim().min(1).max(128),
+    })
+    .strict(),
+);
+export type DictationModelOption = z.infer<typeof DictationModelOption>;
+
 /** Client-safe voice-input capability projection. Never includes provider secrets. */
 export const ClientVoiceInputConfig = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       available: primitives.boolean,
       providers: z.array(VoiceInputProviderId).optional(),
+      /** Every model a dictation may name, of each ready provider. */
+      models: z.array(DictationModelOption).max(64).optional(),
       maxDurationSeconds: z.number().int().positive().max(600),
       maxSizeBytes: primitives.positiveInteger.max(25 * 1024 * 1024),
       acceptedMimeTypes: z.array(primitives.string.trim().min(1).max(128)).min(1).max(32),

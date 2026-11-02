@@ -1245,8 +1245,7 @@ export const englishMessages = {
   "composerTranscriptionControl.pauseAutomaticRetry": "Pause automatic retry",
   "composerTranscriptionControl.recordingIsTooLargeTry":
     "Recording is too large. Try a shorter message.",
-  "composerTranscriptionControl.recordingPressEscapeToDiscard":
-    "Recording. Press Escape to discard.",
+  "composerTranscriptionControl.recordingPressEscapeToDiscard": "Recording.",
   "composerTranscriptionControl.recordingSavedOnThisDevice": "Recording saved.",
   "composerTranscriptionControl.requestingMicrophone": "Requesting microphone…",
   "composerTranscriptionControl.retryVoiceInput": "Retry voice input",
@@ -1603,7 +1602,7 @@ export const englishMessages = {
   "desktopDictation.settings.anyLanguage": "Any language",
   "desktopDictation.settings.cancelRecording": "Cancel",
   "desktopDictation.settings.cancelShortcutDescription":
-    "Throws away the dictation you're speaking; its speech stays in Recent dictations. Esc does this too.",
+    "Throws away the dictation you're speaking; its speech stays in Recent dictations.",
   "desktopDictation.settings.cancelShortcutLabel": "Cancel shortcut",
   "desktopDictation.settings.cancelledDictation": "Cancelled, not transcribed",
   "desktopDictation.settings.chordHold": "Hold the keys while you speak, and let go to finish.",
@@ -1621,6 +1620,11 @@ export const englishMessages = {
   "desktopDictation.settings.keyCombinationDescription": "Press the keys you want to use.",
   "desktopDictation.settings.languageDescription": "The language you speak with this shortcut.",
   "desktopDictation.settings.languageLabel": "Language",
+  "desktopDictation.settings.modelDescription":
+    "The speech-to-text model that hears this shortcut.",
+  "desktopDictation.settings.modelLabel": "Model",
+  "desktopDictation.settings.modelUnavailable": "Not available in this workspace now.",
+  "desktopDictation.settings.workspaceModel": "Workspace default",
   "desktopDictation.settings.modeHold": "Hold while speaking",
   "desktopDictation.settings.modeHoldDescription": "Dictates while you hold the keys down.",
   "desktopDictation.settings.modeLabel": "How the keys work",
