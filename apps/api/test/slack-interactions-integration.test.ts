@@ -11697,7 +11697,8 @@ describe("Slack agents", () => {
     expect(analyticsChat).toMatchObject({ slack_agent_id: analytics.id });
     const [session] = await shared!.admin<{ initial_message: string }[]>`
       select initial_message from sessions where id = ${analyticsChat!.session_id}`;
-    expect(session!.initial_message).toContain("how did revenue do?");
+    expect(session!.initial_message).toContain("how did revenue do? Ask Analytics.");
+    expect(session!.initial_message).not.toContain("+ops-desk");
     expect(session!.initial_message).not.toContain("churn");
   }, 90_000);
 
@@ -11876,7 +11877,13 @@ describe("Slack agents", () => {
       text: { text: "Ask Analytics" },
     });
 
-    // Someone who can't use Analytics clicks: nothing starts for them.
+    const suggestionUpdates = () =>
+      value.slack.calls.filter(
+        (call) => call.method === "chat.update" && call.timestamp === suggestion!.timestamp,
+      ).length;
+
+    // Someone who can't use Analytics clicks: nothing starts for them, and the
+    // button stays for the person who asked.
     await pressSlackButton(value, {
       post: { channel: suggestion!.channel, timestamp: suggestion!.timestamp },
       rootTimestamp: "1765000030.000100",
@@ -11885,7 +11892,9 @@ describe("Slack agents", () => {
       actionTs: "1765000030.000300",
       userId: value.otherSlackUserId,
     });
+    await drainAll(value.deps);
     expect(await agentInteractions(value.routed!.workspaceId)).toHaveLength(0);
+    expect(suggestionUpdates()).toBe(0);
 
     // The person who asked clicks: the same message goes to Analytics in the thread.
     await pressSlackButton(value, {
@@ -11903,8 +11912,13 @@ describe("Slack agents", () => {
     const [session] = await shared!.admin<{ initial_message: string }[]>`
       select initial_message from sessions where id = ${analyticsChat!.session_id}`;
     expect(session!.initial_message).toContain("how did revenue do?");
+    // The first agent's address is not sent on, so Analytics can't pass it straight back.
+    expect(session!.initial_message).not.toContain("+ops-desk");
+    // Once Analytics' chat has started, the line says who asked and loses its button.
+    await drainAll(value.deps);
+    expect(suggestionUpdates()).toBe(1);
 
-    // A button pressed on any other message does nothing.
+    // A button pressed on any other message starts nothing and says so privately.
     await pressSlackButton(value, {
       post: { channel: suggestion!.channel, timestamp: "1765000030.999999" },
       rootTimestamp: "1765000030.000100",
@@ -11913,7 +11927,13 @@ describe("Slack agents", () => {
       actionTs: "1765000030.000500",
       userId: value.otherSlackUserId,
     });
+    await drainAll(value.deps);
     expect(await agentInteractions(value.routed!.workspaceId)).toHaveLength(1);
+    expect(
+      value.slack.posts.some(
+        (post) => post.text === "This suggestion is no longer available. No chat was started.",
+      ),
+    ).toBe(true);
   }, 120_000);
 
   test("a chat never suggests an agent the person who asked can't use", async () => {

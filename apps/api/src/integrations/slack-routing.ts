@@ -498,6 +498,24 @@ export function resolveSlackWorkspaceRoute(input: SlackRouteInputs): SlackRouteR
 }
 
 /**
+ * The text a request is passed on with, to another agent: a `+name` address
+ * (after any leading mention of Opengeni) is removed, so the next agent is not
+ * sent the first one's address. A bare name is kept, because it may be part
+ * of the request ("Ops desk, Analytics should check revenue"). Text without a
+ * `+name` address is returned unchanged.
+ */
+export function slackRequestTextForAnotherAgent(
+  entry: Pick<SlackInteractionInboxEntry, "triggerKind" | "slackChannelId" | "text">,
+  agents: readonly SlackRoutingAgent[],
+  botUserId: string | null,
+): string {
+  const address = slackAgentAddressForEntry(entry, agents, botUserId);
+  if (address?.kind !== "agent" || address.via !== "plus") return entry.text;
+  const { lead } = splitSlackLeadingMention(entry.text, botUserId);
+  return `${lead}${address.remainder ?? ""}`.trim() || entry.text;
+}
+
+/**
  * The message text the model actually sees.
  *
  * A prefix override and `+name` are addressing information, not part of the

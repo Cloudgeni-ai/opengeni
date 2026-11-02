@@ -2926,7 +2926,7 @@ function registerSlackBotTools(
     "slack_agent_handoff",
     {
       description:
-        "Pass the Slack request this chat is answering on to another Slack agent the person asked for by name, team or role. Name the agent; the chat's own Slack thread and requester are used, never a destination you choose. Only works when the message names that agent (one typo allowed); otherwise answer yourself and use slack_agent_suggest. The receiving agent starts a new chat in its own workspace and answers in the same thread. At most one hand-off per message, never to yourself and never back to the agent that passed it to you. If the requester cannot use that agent they are told privately and nothing is passed on. After status passed_on, make your entire final response exactly NO_REPLY.",
+        "Pass the Slack request this chat is answering on to another Slack agent the person asked for by name. Name the agent; the chat's own Slack thread and requester are used, never a destination you choose. Only works when the message names that agent (one typo allowed for longer names; a last word like team may be left out); otherwise answer yourself and use slack_agent_suggest. The receiving agent starts a new chat in its own workspace and answers in the same thread. At most one hand-off per message, never to yourself and never back to the agent that passed it to you. If the requester cannot use that agent they are told privately and nothing is passed on. After status passed_on, make your entire final response exactly NO_REPLY.",
       inputSchema: {
         agent: z4.string().min(1).max(120),
         note: z4.string().max(1000).optional(),

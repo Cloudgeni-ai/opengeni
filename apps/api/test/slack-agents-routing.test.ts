@@ -22,6 +22,7 @@ import {
   resolveSlackWorkspaceRoute,
   slackAgentAddressForEntry,
   slackAgentAddressMayMoveThread,
+  slackRequestTextForAnotherAgent,
   slackRoutedRequestText,
   type SlackRouteInputs,
 } from "../src/integrations/slack-routing";
@@ -632,6 +633,22 @@ describe("bare names are safe", () => {
     ).toBe("<@U0BOT> is it wrong?");
   });
 
+  test("a request passed to another agent loses only a +name address", () => {
+    expect(
+      slackRequestTextForAnotherAgent(
+        mention("Data, Analytics should check revenue"),
+        AGENTS,
+        "U0BOT",
+      ),
+    ).toBe("<@U0BOT> Data, Analytics should check revenue");
+    expect(
+      slackRequestTextForAnotherAgent(mention("+data how did revenue do?"), AGENTS, "U0BOT"),
+    ).toBe("<@U0BOT> how did revenue do?");
+    expect(slackRequestTextForAnotherAgent(mention("how did revenue do?"), AGENTS, "U0BOT")).toBe(
+      "<@U0BOT> how did revenue do?",
+    );
+  });
+
   test("the address reports the punctuation after the name", () => {
     const options = { allowBare: true, allowPlus: true };
     expect(matchSlackAgentAddress("Data, take this", AGENTS, options)).toMatchObject({
@@ -661,6 +678,12 @@ describe("a hand-off needs the person to ask for the agent", () => {
     ["+data-team churn?", DATA_TEAM, true],
     // Mentions and links are not words of the message.
     ["<@UANALYTICS> hi", ANALYTICS, false],
+    // Short names take no typo, so ordinary words don't count as asking.
+    ["what date is it?", agent("agent-data", "Data", ACME), false],
+    ["data looks fine now", agent("agent-data", "Data", ACME), true],
+    // A generic last word may be left out when the rest is a real name.
+    ["ask the analytics folks", agent("agent-at", "Analytics team", ACME), true],
+    ["the data looks off", DATA_TEAM, false],
   ];
   for (const [text, target, expected] of cases) {
     test(`${JSON.stringify(text)} ${expected ? "names" : "doesn't name"} ${target.name}`, () => {

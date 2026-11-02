@@ -2703,6 +2703,9 @@ export const slackAgentIntroPosts = pgTable(
       columns: [table.workspaceId, table.accountId],
       foreignColumns: [workspaces.id, workspaces.accountId],
     }).onDelete("cascade"),
+    account: index("slack_agent_intro_posts_account_idx").on(table.accountId),
+    workspace: index("slack_agent_intro_posts_workspace_idx").on(table.workspaceId),
+    connection: index("slack_agent_intro_posts_connection_idx").on(table.connectionId),
     bounded: check(
       "slack_agent_intro_posts_bounds_check",
       sql`octet_length(${table.slackChannelId}) between 1 and 64 and octet_length(${table.postedBySubjectId}) between 1 and 1024`,
@@ -2748,6 +2751,9 @@ export const slackAgentSuggestions = pgTable(
       foreignColumns: [workspaces.id, workspaces.accountId],
     }).onDelete("cascade"),
     agent: index("slack_agent_suggestions_agent_idx").on(table.slackAgentId),
+    account: index("slack_agent_suggestions_account_idx").on(table.accountId),
+    workspace: index("slack_agent_suggestions_workspace_idx").on(table.workspaceId),
+    connection: index("slack_agent_suggestions_connection_idx").on(table.connectionId),
     bounded: check(
       "slack_agent_suggestions_bounds_check",
       sql`octet_length(${table.providerEventId}) between 1 and 512 and octet_length(${table.slackTeamId}) between 1 and 64 and octet_length(${table.slackUserId}) between 1 and 64 and octet_length(${table.slackChannelId}) between 1 and 64 and octet_length(${table.slackThreadTs}) between 1 and 64`,

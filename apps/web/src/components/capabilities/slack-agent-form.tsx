@@ -578,7 +578,8 @@ export function SlackAgentIntroPage({
   }, [client, agent.targetWorkspaceId, agent.connectionId]);
   useEffect(() => {
     if (touched || !channels || !announcementChannelId) return;
-    if (channels.some((channel) => channel.id === announcementChannelId)) {
+    // A channel that already has this intro is not picked again.
+    if (channels.some((channel) => channel.id === announcementChannelId && !channel.introduced)) {
       setSelected([announcementChannelId]);
     }
   }, [touched, channels, announcementChannelId]);

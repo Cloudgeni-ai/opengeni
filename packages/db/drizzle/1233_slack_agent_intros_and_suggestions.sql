@@ -35,6 +35,10 @@ CREATE TABLE slack_agent_intro_posts (
   )
 );
 
+CREATE INDEX slack_agent_intro_posts_account_idx ON slack_agent_intro_posts (account_id);
+CREATE INDEX slack_agent_intro_posts_workspace_idx ON slack_agent_intro_posts (workspace_id);
+CREATE INDEX slack_agent_intro_posts_connection_idx ON slack_agent_intro_posts (connection_id);
+
 ALTER TABLE slack_agent_intro_posts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slack_agent_intro_posts FORCE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE slack_agent_intro_posts FROM PUBLIC;
@@ -70,6 +74,9 @@ CREATE TABLE slack_agent_suggestions (
   )
 );
 CREATE INDEX slack_agent_suggestions_agent_idx ON slack_agent_suggestions (slack_agent_id);
+CREATE INDEX slack_agent_suggestions_account_idx ON slack_agent_suggestions (account_id);
+CREATE INDEX slack_agent_suggestions_workspace_idx ON slack_agent_suggestions (workspace_id);
+CREATE INDEX slack_agent_suggestions_connection_idx ON slack_agent_suggestions (connection_id);
 
 ALTER TABLE slack_agent_suggestions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slack_agent_suggestions FORCE ROW LEVEL SECURITY;
