@@ -9,7 +9,6 @@ import {
 import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "./toast";
 
-import { openGitHubInstallationSettings } from "./github-app-connect";
 import type {
   MountedRepositoryTarget,
   RepositoryContextPickerProps,
@@ -24,7 +23,6 @@ import {
 } from "./session-tools";
 import type { GitStatusResponse } from "@opengeni/contracts";
 import type { GitHubRepository, ResourceRef, Session } from "../types";
-import { usePage } from "./navigation";
 import { errorMessage } from "@opengeni/contracts/values";
 import { ConfirmDialog } from "../../ui/confirm-dialog";
 import { userErrorText } from "../../ui/api-error";
@@ -220,7 +218,6 @@ export function useFollowUpRepositories(
 } {
   const context = useAppContext();
   const catalogRefresh = useRepositoryCatalogRefresh(session.workspaceId, context);
-  const page = usePage();
   const [pendingRepoIds, setPendingRepoIds] = useState<Set<number>>(() => new Set());
   const [pendingRepoRefs, setPendingRepoRefs] = useState<Record<number, string>>({});
   const [pendingPersonalRepoIds, setPendingPersonalRepoIds] = useState<Set<string>>(
@@ -418,26 +415,6 @@ export function useFollowUpRepositories(
       mountedPersonalRepoIds,
       mountedRepositorySelection.selectedRepoIds,
     ],
-  );
-
-  const disconnectRepositoryInstallation = useCallback(
-    async (installationId: number) => {
-      const removedIds = new Set(
-        context.githubRepos
-          .filter((repository) => repository.installationId === installationId)
-          .map((repository) => repository.id),
-      );
-      setPendingRepoIds(
-        (current) => new Set([...current].filter((repositoryId) => !removedIds.has(repositoryId))),
-      );
-      setPendingRepoRefs((current) =>
-        Object.fromEntries(
-          Object.entries(current).filter(([repositoryId]) => !removedIds.has(Number(repositoryId))),
-        ),
-      );
-      await context.disconnectGitHubInstallation(session.workspaceId, installationId);
-    },
-    [context, session.workspaceId],
   );
 
   const togglePendingPersonalRepository = useCallback(
@@ -644,13 +621,13 @@ export function useFollowUpRepositories(
       selectedPersonalGitHubRepoIds: selectedPersonalRepoIds,
       selectedPersonalGitHubRepoRefs: selectedPersonalRepoRefs,
       personalGitHubBusy: context.personalGitHubBusy,
-      personalGitHubManageUrl: `/workspaces/${encodeURIComponent(session.workspaceId)}/plugins?open=integration:github`,
+      personalGitHubManageUrl: `/workspaces/${encodeURIComponent(session.workspaceId)}/plugins?open=integration:github&github=personal`,
+      githubSettingsUrl: `/workspaces/${encodeURIComponent(session.workspaceId)}/plugins?open=integration:github`,
       groups: context.repositoryGroups,
       selectedRepoIds,
       selectedRepoRefs,
       manualRepos: [...mountedManualRepos, ...pendingManualRepos],
       manualOpen: manualReposOpen,
-      githubAppOpen: context.githubAppOpen,
       org: context.githubOrg,
       pending: disabled || context.busy,
       repoBusy: context.repoBusy,
@@ -832,25 +809,14 @@ export function useFollowUpRepositories(
         });
       },
       newChatUrl: `/workspaces/${session.workspaceId}`,
-      onGitHubAppOpenChange: context.setGithubAppOpen,
       onOrgChange: context.setGithubOrg,
       onStartGitHubApp: () => void context.startGitHubAppManifestFlow(session.workspaceId),
       onConnectWorkspaceApp,
-      onConfigureInstallation: (installationId: number) =>
-        openGitHubInstallationSettings(
-          context.client,
-          session.workspaceId,
-          installationId,
-          page.assign,
-        ),
-      onDisconnectInstallation: disconnectRepositoryInstallation,
     }),
     [
-      page,
       catalogRefresh,
       canRemoveRepositories,
       context,
-      disconnectRepositoryInstallation,
       onConnectWorkspaceApp,
       lockedManualRepoIds,
       manualReposOpen,

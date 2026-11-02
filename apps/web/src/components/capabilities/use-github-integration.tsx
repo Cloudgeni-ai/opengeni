@@ -28,6 +28,8 @@ import type { IntegrationAdapter } from "@/components/capabilities/use-api-integ
 import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { PersonalGitHubDialog } from "@/components/capabilities/personal-github-dialog";
 import { useAppContext } from "@opengeni/react/app/app-context";
+import { openGitHubInstallationSettings } from "@opengeni/react/app/lib/github-app-connect";
+import { openBlankTab } from "@opengeni/react/app/lib/navigation";
 import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import type { GitHubAppInfo } from "@opengeni/react/app/types";
 
@@ -93,6 +95,7 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   const status = context.githubStatus;
   const repositories = context.githubRepos;
   const [disconnectOpen, setDisconnectOpen] = useState(false);
+  const [unlinkInstallationId, setUnlinkInstallationId] = useState<number | null>(null);
   const [disconnecting, setDisconnecting] = useState(false);
   const [personalOpen, setPersonalOpen] = useState(false);
   const [personalDisconnectOpen, setPersonalDisconnectOpen] = useState(false);
@@ -102,6 +105,9 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   const actionPolicyRequest = useRef(0);
   const actionPolicyMutation = useRef<number | null>(null);
   const installations = status?.installations ?? [];
+  const unlinkInstallation =
+    installations.find((installation) => installation.installationId === unlinkInstallationId) ??
+    null;
   const busy = context.githubAppBusy || disconnecting;
 
   // A failed status fetch with no prior snapshot is unknown, not unbound: show a
@@ -342,22 +348,50 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
     (installation) => installation.configureUrl,
   );
   const configureUrl = configurableInstallations[0]?.configureUrl ?? null;
+  // Installation settings links carry ten-minute signed state, so the copy in
+  // the loaded status may be stale: open the tab inside the click, then mint a
+  // fresh link for it.
+  function openInstallationRepositories(installationId: number) {
+    const tab = openBlankTab();
+    openGitHubInstallationSettings(context.client, workspaceId, installationId, (url) => {
+      if (tab) tab.location.replace(url);
+      else window.location.assign(url);
+    }).catch((error: unknown) => {
+      tab?.close();
+      toast.error("Couldn't open GitHub", { description: userErrorText(error, "Try again.") });
+    });
+  }
 
   // With several installations, one shared "Change repositories" link would
   // silently open only the first installation's GitHub settings; emit one
-  // action per installation instead.
+  // action per installation instead, each with its own Unlink. (One
+  // installation unlinks with "Disconnect Opengeni app".)
   const installationOptions: IntegrationOption[] =
-    bound && canManage && configurableInstallations.length > 1
-      ? configurableInstallations.map((installation) => ({
-          kind: "link" as const,
-          id: `github-repositories-${installation.installationId}`,
-          label: installation.accountLogin ?? `GitHub installation ${installation.installationId}`,
-          description: "Choose which repositories this installation shares.",
-          action: {
-            label: "Change repositories",
-            onClick: () => window.open(installation.configureUrl!, "_blank", "noopener,noreferrer"),
-          },
-        }))
+    bound && canManage && installations.length > 1
+      ? installations.map((installation) => {
+          const unlink = {
+            label: "Unlink",
+            onClick: () => setUnlinkInstallationId(installation.installationId),
+            destructive: true,
+          };
+          return {
+            kind: "link" as const,
+            id: `github-repositories-${installation.installationId}`,
+            label:
+              installation.accountLogin ?? `GitHub installation ${installation.installationId}`,
+            disabled: busy,
+            ...(installation.configureUrl
+              ? {
+                  description: "Choose which repositories this installation shares.",
+                  action: {
+                    label: "Change repositories",
+                    onClick: () => openInstallationRepositories(installation.installationId),
+                  },
+                  secondaryAction: unlink,
+                }
+              : { action: { label: unlink.label, onClick: unlink.onClick } }),
+          };
+        })
       : [];
   const personalLogin = personalConnection
     ? String(personalConnection.metadata.githubLogin ?? "connected")
@@ -501,7 +535,8 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
             ...(canManage && configureUrl && configurableInstallations.length === 1
               ? {
                   editLabel: "Change repositories",
-                  onEdit: () => window.open(configureUrl, "_blank", "noopener,noreferrer"),
+                  onEdit: () =>
+                    openInstallationRepositories(configurableInstallations[0]!.installationId),
                 }
               : {}),
           },
@@ -559,6 +594,25 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
         confirmLabel={sectioned ? "Disconnect" : "Disconnect GitHub"}
         cancelAutoFocus
         onConfirm={disconnectAll}
+      />
+      <ConfirmDialog
+        open={unlinkInstallationId !== null}
+        onOpenChange={(open) => {
+          if (!open) setUnlinkInstallationId(null);
+        }}
+        title={`Unlink ${unlinkInstallation?.accountLogin ?? "this installation"}?`}
+        description="Sessions lose access to its repositories. The app stays installed on GitHub until you remove it there."
+        confirmLabel="Unlink"
+        cancelAutoFocus
+        onConfirm={async () => {
+          if (unlinkInstallationId === null) return true;
+          setDisconnecting(true);
+          try {
+            return await context.disconnectGitHubInstallation(workspaceId, unlinkInstallationId);
+          } finally {
+            setDisconnecting(false);
+          }
+        }}
       />
       {personalConnection ? (
         <PersonalGitHubDialog

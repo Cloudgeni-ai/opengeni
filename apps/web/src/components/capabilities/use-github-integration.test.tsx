@@ -343,39 +343,98 @@ describe("GitHub action approval controls", () => {
 });
 
 for (const count of [1, 2])
-  test(`repository configuration opens each of ${count} installations in a separate tab`, async () => {
+  test(`repository configuration opens each of ${count} installations in a separate tab through a fresh link`, async () => {
     const context = appContext(
       ["github:manage"],
       mock(async () => ({})),
     );
-    context.githubStatus.installations = Array.from({ length: count }, (_, index) => ({
-      ...context.githubStatus.installations[0]!,
-      installationId: 71 + index,
-      configureUrl: `https://api.example.test/github/configure/${71 + index}`,
+    const installations = (suffix: string) =>
+      Array.from({ length: count }, (_, index) => ({
+        ...context.githubStatus.installations[0]!,
+        installationId: 71 + index,
+        configureUrl: `https://api.example.test/github/configure/${71 + index}?state=${suffix}`,
+      }));
+    context.githubStatus.installations = installations("loaded");
+    const getGitHubApp = mock(async () => ({
+      ...githubStatus(),
+      installations: installations("fresh"),
     }));
+    (context.client as Record<string, unknown>).getGitHubApp = getGitHubApp;
     const rendered = await renderAdapter(context);
     const originalOpen = window.open;
-    const open = mock(() => null);
+    const visited: string[] = [];
+    const open = mock(() => ({
+      opener: {},
+      location: { replace: (url: string) => visited.push(url) },
+      close: () => {},
+    }));
     window.open = open;
     try {
-      if (count === 1) rendered.model().access!.onEdit!();
-      else
-        for (const option of rendered.model().options) {
-          if (option.kind === "link" && option.id.startsWith("github-repositories-"))
-            option.action.onClick();
-        }
+      await act(async () => {
+        if (count === 1) rendered.model().access!.onEdit!();
+        else
+          for (const option of rendered.model().options) {
+            if (option.kind === "link" && option.id.startsWith("github-repositories-"))
+              option.action.onClick();
+          }
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
       expect(open).toHaveBeenCalledTimes(count);
-      for (let index = 0; index < count; index++)
-        expect(open).toHaveBeenCalledWith(
-          `https://api.example.test/github/configure/${71 + index}`,
-          "_blank",
-          "noopener,noreferrer",
-        );
+      expect(getGitHubApp).toHaveBeenCalledTimes(count);
+      // Never the copy captured when the page loaded.
+      expect(visited).toEqual(
+        Array.from(
+          { length: count },
+          (_, index) => `https://api.example.test/github/configure/${71 + index}?state=fresh`,
+        ),
+      );
     } finally {
       window.open = originalOpen;
       await rendered.unmount();
     }
   });
+
+test("several installations each unlink on their own, after a confirm", async () => {
+  const context = appContext(
+    ["github:manage"],
+    mock(async () => ({})),
+  );
+  context.githubStatus.installations = [
+    { ...context.githubStatus.installations[0]!, installationId: 71, accountLogin: "Cloudgeni-ai" },
+    { ...context.githubStatus.installations[0]!, installationId: 81, accountLogin: "benyhh" },
+  ];
+  const unlinked: number[] = [];
+  context.disconnectGitHubInstallation = async (_workspaceId: string, installationId: number) => {
+    unlinked.push(installationId);
+    return true;
+  };
+  const rendered = await renderAdapter(context);
+  try {
+    const rows = rendered
+      .model()
+      .options.filter(
+        (option) => option.kind === "link" && option.id.startsWith("github-repositories-"),
+      );
+    expect(rows.map((row) => row.label)).toEqual(["Cloudgeni-ai", "benyhh"]);
+    const benyhh = rows[1]!;
+    if (benyhh.kind !== "link") throw new Error("expected a link row");
+    expect(benyhh.secondaryAction).toMatchObject({ label: "Unlink", destructive: true });
+    await act(async () => benyhh.secondaryAction!.onClick());
+    // Nothing is unlinked until the confirm.
+    expect(unlinked).toEqual([]);
+    expect(document.body.textContent).toContain("Unlink benyhh?");
+    const confirm = [...document.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent === "Unlink",
+    );
+    await act(async () => {
+      confirm!.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(unlinked).toEqual([81]);
+  } finally {
+    await rendered.unmount();
+  }
+});
 
 describe("GitHub load failures", () => {
   test("a repository list that never loaded says so, with a retry the person started", async () => {

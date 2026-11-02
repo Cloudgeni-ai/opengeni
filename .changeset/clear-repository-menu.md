@@ -1,0 +1,5 @@
+---
+"@opengeni/react": patch
+---
+
+The composer's repository menu is clearer for someone opening it for the first time. It is for picking repositories: the "GitHub access" section with installs, per-installation links and unlink buttons is replaced by one "Manage GitHub access" row that opens the GitHub settings page, where every installation now also has its own Unlink. A switched-on repository says who it acts as ("Acts as You (@login)" or "Acts as Opengeni app") when your GitHub is connected, instead of an unexplained "As you" pill, and shows its branch once. With nothing connected, the menu offers Your GitHub (Connect) and the Opengeni app (Install), each with one plain line about what it means. Repositories already in a chat show "In chat", with "To change the branch of a repository already in this chat, start a new chat." Change repositories on the GitHub settings page opens GitHub through a fresh link. `RepositoryContextPickerProps` gains `githubSettingsUrl` and drops `githubAppOpen`, `onGitHubAppOpenChange`, `onConfigureInstallation` and `onDisconnectInstallation`; the app context drops `githubAppOpen` and `setGithubAppOpen`.

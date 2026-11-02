@@ -135,6 +135,15 @@ export type IntegrationLinkOption = {
   description?: string | undefined;
   disabled?: boolean | undefined;
   action: { label: string; onClick: () => void };
+  /** A second, usually destructive, action for the same row (e.g. "Unlink"). */
+  secondaryAction?:
+    | {
+        label: string;
+        onClick: () => void;
+        /** Renders in the destructive tone (still confirm before destroying). */
+        destructive?: boolean | undefined;
+      }
+    | undefined;
   disclosureId?: string | undefined;
 };
 
