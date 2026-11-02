@@ -15,6 +15,7 @@ import {
   revokeOrganizationApiKey,
   ensureExternalIdentity,
   getExternalLinkTurnAuthorization,
+  getWorkspaceGrant,
   createDb,
   createOrganizationInvitation,
   createSession,
@@ -187,8 +188,9 @@ async function createAuthHuman(bootstrapOwnOrganization = true): Promise<AuthHum
 
 /**
  * Resolve the human's access context through the real managed provisioning
- * lifecycle. Their personal workspace deliberately has NO `workspace_memberships`
- * row (migration 0219 raises on one).
+ * lifecycle. Their personal workspace has only the owner's own
+ * `workspace_memberships` row (migration 1231), which the runtime never counts
+ * as membership: access comes from the organization membership's pointer.
  */
 async function resolveManagedHuman(
   auth: AuthHuman,
@@ -1258,13 +1260,16 @@ describe("managed-human session surface inside their own personal workspace", ()
     expect(hostOperations).toEqual(["session.fork.create"]);
   }, 180_000);
 
-  test("the premise: the personal workspace has no workspace_memberships row", async () => {
+  test("the premise: the personal workspace's only workspace_memberships row is its owner's", async () => {
     if (!shared || !client) return;
     const human = await provisionManagedHuman();
-    const [count] = await shared.admin<Array<{ count: number }>>`
-      select count(*)::int as count from workspace_memberships
+    const rows = await shared.admin<Array<{ subjectId: string }>>`
+      select subject_id as "subjectId" from workspace_memberships
       where workspace_id = ${human.personalWorkspaceId}`;
-    expect(count).toEqual({ count: 0 });
+    expect([...rows]).toEqual([{ subjectId: human.subjectId }]);
+    expect(
+      await getWorkspaceGrant(client.db, human.subjectId, human.personalWorkspaceId),
+    ).toBeNull();
     const [legacyCount] = await shared.admin<Array<{ count: number }>>`
       select count(*)::int as count from workspace_memberships
       where workspace_id = ${human.legacyWorkspaceId} and subject_id = ${human.subjectId}`;
@@ -1729,10 +1734,10 @@ describe("the personal-workspace exception stays owner-only", () => {
   test("the owner's own membership row gives a delegated bearer naming the owner nothing", async () => {
     if (!shared || !client) return;
     const owner = await provisionManagedHuman();
-    await shared.admin`
-      insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
-      values (${owner.accountId}, ${owner.personalWorkspaceId}, ${owner.subjectId}, 'member',
-        ${JSON.stringify(managedPersonalWorkspacePermissions)}::text::jsonb)`;
+    const [ownerRow] = await shared.admin<Array<{ permissions: string[] }>>`
+      select permissions from workspace_memberships
+      where workspace_id = ${owner.personalWorkspaceId} and subject_id = ${owner.subjectId}`;
+    expect(ownerRow?.permissions).toEqual([...managedPersonalWorkspacePermissions]);
 
     // A token for the Personal workspace itself, and one for the owner's
     // shared workspace that then asks for Personal.

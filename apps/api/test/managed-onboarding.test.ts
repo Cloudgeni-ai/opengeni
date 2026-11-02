@@ -402,12 +402,17 @@ describe("managed organization onboarding", () => {
         organizationName: string;
         workspaces: number;
         sharedWorkspaceMemberships: number;
+        personalWorkspaceMembers: string[];
       }>
     >`
       select account.name as "organizationName",
         (select count(*)::int from workspaces where account_id = account.id) as workspaces,
-        (select count(*)::int from workspace_memberships where account_id = account.id)
-          as "sharedWorkspaceMemberships"
+        (select count(*)::int from workspace_memberships
+          where account_id = account.id and workspace_id <> ${completion.personalWorkspaceId})
+          as "sharedWorkspaceMemberships",
+        (select coalesce(array_agg(subject_id), '{}') from workspace_memberships
+          where account_id = account.id and workspace_id = ${completion.personalWorkspaceId})
+          as "personalWorkspaceMembers"
       from managed_accounts account where account.id = ${completion.organizationId}`;
     expect(provisioned?.organizationName).toBe("Orbital Mechanics");
     // The signup answer is kept once, for this person in this organization.
@@ -484,6 +489,9 @@ describe("managed organization onboarding", () => {
     expect(await membershipsUseCase()).toBe("everyday");
     expect(provisioned?.workspaces).toBe(1);
     expect(provisioned?.sharedWorkspaceMemberships).toBe(0);
+    // Only the owner's own row sits in their Personal workspace (migration 1231).
+    expect(provisioned?.personalWorkspaceMembers).toHaveLength(1);
+    expect(provisioned?.personalWorkspaceMembers[0]).toStartWith("user:");
     expect(completion.personalWorkspaceId).toBeTruthy();
 
     const compatibilityReplay = await app.request("/v1/organizations", {

@@ -25929,12 +25929,13 @@ export const TENANCY_PARITY_GATES: readonly TenancyParityGateDefinition[] = [
   },
   {
     id: "personal_workspace_has_no_membership_row",
-    title: "A managed personal workspace carries no workspace_memberships row",
+    title: "A managed personal workspace's only workspace_memberships row is its active owner's",
     basis: "runtime",
     rule:
-      "The owner-only personal-workspace grant is a derived access projection, not a " +
-      "delegable membership. A persisted row there is exactly how membership CRUD and " +
-      "the subject-membership fallback would widen it into shared access.",
+      "Migration 1231 keeps exactly one row there: the active owner's, role member with " +
+      "personal_workspace_owner_permissions(). Any other row (another subject's, an " +
+      "administering one, or one whose owner is no longer active) is exactly how " +
+      "membership CRUD and the subject-membership fallback would widen it into shared access.",
   },
   {
     id: "authority_resource_single_owner",

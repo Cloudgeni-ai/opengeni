@@ -1280,14 +1280,8 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
     // personal-workspace pointer. There is no account-admin union, so an
     // administrator does not thereby reach anyone else's personal workspace.
     //
-    // Deliberately NOT justified by "the schema forbids a membership row on a
-    // personal workspace". It does not. Migration 0219's `42501` is a
-    // precondition inside the provisioning function, checked at provisioning
-    // time only, and `personal_workspace_has_no_membership_row` is recorded as
-    // `basis: "runtime"` - the parity report's own term for a property nothing
-    // in the schema prevents. It holds because every membership writer either
-    // requires `members:manage` on the target (which a personal-workspace grant
-    // deliberately omits) or excludes personal workspaces outright.
+    // A personal workspace's only membership row is its owner's (migrations
+    // 1159 and 1231 refuse every other one), and that owner is this caller.
     const callerPersonalWorkspaceId = await namedSubjectPersonalWorkspaceId(deps.db, {
       accountId: grant.accountId,
       subjectId: grant.subjectId,
