@@ -333,7 +333,7 @@ export function readyAt(pull: QueuedPull): number {
  */
 export function nextBatch(
   pulls: QueuedPull[],
-  pending: number[][],
+  carriedPending: number[][],
   now: number,
   settings: Settings,
   blame: string[] = [],
@@ -342,7 +342,7 @@ export function nextBatch(
   // The batcher never renumbers a Version PR, so green and current is enough.
   if (version)
     return version.greenAt !== null && !version.behind
-      ? { kind: "build", members: [version], pending }
+      ? { kind: "build", members: [version], pending: carriedPending }
       : {
           kind: "hold",
           number: version.number,
@@ -356,6 +356,16 @@ export function nextBatch(
     .sort(fifo);
   if (!ready.length) return null;
   const alone = (p: QueuedPull) => p.controlPlane;
+
+  // A failed batch's halves only count while their PRs are still queued and
+  // ready. A PR that left the queue, conflicts or was pushed again drops out of
+  // its half; it comes back through the ordinary queue. Otherwise a half whose
+  // PRs all left would be carried forever and keep every priority batch from
+  // being filled.
+  const readyNumbers = new Set(ready.map((p) => p.number));
+  const pending = carriedPending
+    .map((group) => group.filter((n) => readyNumbers.has(n)))
+    .filter((group) => group.length);
 
   const bisecting = new Set(pending.flat());
   const urgent = ready.filter((p) => p.priority && !bisecting.has(p.number));
