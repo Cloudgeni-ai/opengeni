@@ -192,6 +192,13 @@ falling back to the chat's Slack interaction (`slack_interactions.slack_agent_id
 for older chats; caller-set metadata never names the agent. A chat list never
 includes Site viewers' chats.
 
+An Only me agent serves only its owner's Only me chats. Such a chat cannot be
+made shared (`PUT /sessions/:id/visibility` refuses with
+`agent_requires_private_chat`), and the worker reads its Instructions only
+while the chat is its owner's Only me chat: shared chats with it (including
+chats of an agent later made Only me) continue as plain chats. An Only me
+agent needs Only me chats enabled in the organization to be used.
+
 ### Compatibility
 
 `/bot-templates`, `/integrations/slack/agents`, the MCP tools

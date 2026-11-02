@@ -44057,9 +44057,23 @@ const AGENT_PROMPT_REVISION_METADATA_KEY = "opengeniAgentPromptRevision";
 
 /**
  * The bound agent's rows, read as the system: the session's binding to its
- * agent is the authorization, so an Only me agent stays visible to turns
- * that act for no person or for someone other than its owner.
+ * agent, with {@link boundAgentServesChatSql} for prompt reads, is the
+ * authorization, whoever the turn acts for.
  */
+/**
+ * An Only me agent serves only its owner's Only me chats. A chat shared
+ * later, or one whose agent became Only me, continues as a plain chat.
+ * `a` is the agent; the session is read by id.
+ */
+function boundAgentServesChatSql(input: { workspaceId: string; sessionId: string }): SQL {
+  return sql`(a.visibility = 'workspace' or exists (
+    select 1 from sessions chat
+    where chat.workspace_id = ${input.workspaceId}::uuid
+      and chat.id = ${input.sessionId}::uuid
+      and chat.visibility = 'user_private'
+      and chat.owner_subject_id = a.owner_subject_id))`;
+}
+
 async function readBoundAgentRows<T extends Record<string, unknown>>(
   db: Database,
   input: { accountId: string; workspaceId: string },
@@ -44142,9 +44156,11 @@ export async function readSessionAgentPrompt(
         scope,
         sql`select r.instructions
           from agent_revisions r
+          join agents a on a.workspace_id = r.workspace_id and a.id = r.agent_id
           where r.workspace_id = ${input.workspaceId}::uuid
             and r.agent_id = ${agentId}::uuid
-            and r.revision = ${revision}::integer`,
+            and r.revision = ${revision}::integer
+            and ${boundAgentServesChatSql(input)}`,
       )
     : undefined;
   return { agentId, revision, instructions: row?.instructions ?? null };
@@ -44185,7 +44201,8 @@ export async function ensureSessionAgentInstructions(
             and r.agent_id = a.id
             and r.revision = a.current_revision
           where a.workspace_id = ${input.workspaceId}::uuid
-            and a.id = ${prompt.agentId}::uuid`,
+            and a.id = ${prompt.agentId}::uuid
+            and ${boundAgentServesChatSql(input)}`,
       )
     : undefined;
   return await ensureSessionContextSnapshot(

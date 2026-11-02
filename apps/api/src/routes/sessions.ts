@@ -240,6 +240,7 @@ import {
   ChannelNotFoundError,
   SessionAgentNotFoundError,
   getAgent,
+  sessionAgentRequiresPrivateChat,
   ChannelAudienceMismatchError,
   setSessionAttention,
   setSessionPin,
@@ -1645,6 +1646,17 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         message: "Invalid session visibility request.",
         retryable: false,
         details: { fields: zodErrorFields(parsed.error) },
+      });
+    }
+    if (
+      parsed.data.visibility === "workspace" &&
+      (await sessionAgentRequiresPrivateChat(deps.db, { workspaceId, sessionId }))
+    ) {
+      throw new ApiHttpError(409, {
+        code: "conflict",
+        message: "This chat's agent is Only me, so the chat stays Only me.",
+        retryable: false,
+        details: { code: "agent_requires_private_chat" },
       });
     }
     try {

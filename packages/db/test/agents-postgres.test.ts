@@ -22,6 +22,8 @@ import {
   listAgentSlackInstalls,
   listSlackAgentsForConnection,
   putAgentSlackInstall,
+  readSessionAgentPrompt,
+  sessionAgentRequiresPrivateChat,
   updateAgent,
   updateSlackAgent,
   withWorkspaceSessionActivityRls,
@@ -411,6 +413,104 @@ describe("agents data layer (restricted runtime role)", () => {
       agentChat: true,
       agent: null,
     });
+  }, 120_000);
+
+  test("an Only me agent serves only its owner's Only me chats", async () => {
+    const org = await organization();
+    const personal = crypto.randomUUID();
+    await shared.admin`insert into workspaces (id, account_id, name) values (${personal}, ${org.accountId}, 'Personal')`;
+    const [membership] = await shared.admin<{ id: string }[]>`
+      insert into organization_memberships (account_id, subject_id, role, status, personal_workspace_id)
+      values (${org.accountId}, ${org.owner}, 'member', 'active', ${personal}) returning id::text`;
+    const { agent } = await createAgent(
+      app.db,
+      org.homeScope,
+      agentInput(org, { visibility: "private", ownerSubjectId: org.owner }),
+    );
+    const { agent: sharedAgent } = await createAgent(
+      app.db,
+      org.homeScope,
+      agentInput(org, { name: "Shared helper" }),
+    );
+    const mine = crypto.randomUUID();
+    const sharedLater = crypto.randomUUID();
+    const onShared = crypto.randomUUID();
+    for (const id of [mine, sharedLater, onShared]) {
+      await withWorkspaceSessionActivityRls(app.db, org.home, (tx) =>
+        tx.execute(sql`insert into sessions (id, account_id, workspace_id, status, initial_message,
+            metadata, model, reasoning_effort, latency_mode, sandbox_backend, sandbox_group_id, tool_policy)
+          values (${id}, ${org.accountId}, ${org.home}, 'idle', 'hello', '{}'::jsonb,
+            'scripted-model', 'medium', 'standard', 'modal', ${id},
+            jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null))`),
+      );
+    }
+    // Visibility set directly: the tenancy transition itself is not under test here.
+    const setChat = (id: string, agentId: string, onlyMe: boolean) =>
+      shared.admin.begin(async (tx) => {
+        await tx`set local session_replication_role = replica`;
+        await tx`update sessions set agent_id = ${agentId}, agent_prompt_revision = 1,
+            visibility = ${onlyMe ? "user_private" : "workspace_shared"},
+            owner_subject_id = ${onlyMe ? org.owner : null},
+            owner_organization_membership_id = ${onlyMe ? membership!.id : null}::uuid
+          where id = ${id}`;
+      });
+    await setChat(mine, agent.id, true);
+    await setChat(sharedLater, agent.id, true);
+    await setChat(onShared, sharedAgent.id, false);
+    const prompt = (sessionId: string) =>
+      readSessionAgentPrompt(app.db, { ...org.homeScope, sessionId });
+    expect(await prompt(mine)).toEqual({
+      agentId: agent.id,
+      revision: 1,
+      instructions: "Be brief.",
+    });
+    expect(
+      await sessionAgentRequiresPrivateChat(app.db, { workspaceId: org.home, sessionId: mine }),
+    ).toBe(true);
+    expect(
+      await sessionAgentRequiresPrivateChat(app.db, { workspaceId: org.home, sessionId: onShared }),
+    ).toBe(false);
+    // Shared after it started: it continues as a plain chat.
+    await setChat(sharedLater, agent.id, false);
+    expect(await prompt(sharedLater)).toEqual({
+      agentId: agent.id,
+      revision: 1,
+      instructions: null,
+    });
+    // A shared agent made Only me: its shared chats continue as plain chats.
+    expect((await prompt(onShared))?.instructions).toBe("Be brief.");
+    const madePrivate = await updateAgent(app.db, org.homeScope, {
+      agentId: sharedAgent.id,
+      expectedVersion: null,
+      actorSubjectId: org.owner,
+      patch: { visibility: "private", ownerSubjectId: org.owner },
+    });
+    expect(madePrivate.kind).toBe("updated");
+    expect((await prompt(onShared))?.instructions).toBeNull();
+  }, 120_000);
+
+  test("the legacy Slack row's version never goes backwards", async () => {
+    const org = await organization();
+    const { agent } = await createAgent(app.db, org.homeScope, agentInput(org));
+    await putAgentSlackInstall(app.db, org.homeScope, {
+      agentId: agent.id,
+      connectionId: org.connectionId,
+      slackTeamId: "T0AGENTS",
+      installWorkspaceId: org.install,
+      actorSubjectId: org.owner,
+    });
+    await shared.admin`update slack_agents set version = 7 where id = ${agent.id}`;
+    const revised = await updateAgent(app.db, org.homeScope, {
+      agentId: agent.id,
+      expectedVersion: null,
+      actorSubjectId: org.owner,
+      patch: { description: "Newer" },
+    });
+    expect(revised.kind).toBe("updated");
+    expect(await legacySlackRow(agent.id)).toMatchObject({ version: 8 });
+    expect(
+      (await getSlackAgent(app.db, { accountId: org.accountId, agentId: agent.id }))?.version,
+    ).toBe(8);
   }, 120_000);
 
   test("an agent in Slack stays shared, checked under its row lock", async () => {

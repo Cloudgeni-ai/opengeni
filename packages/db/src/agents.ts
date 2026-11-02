@@ -577,7 +577,9 @@ async function syncLegacySlackRows(
   tx: Database,
   agent: AgentRecord,
   installs: readonly AgentSlackInstallRecord[],
+  options: { bump?: boolean } = {},
 ): Promise<void> {
+  const bump = options.bump ?? true;
   for (const install of installs) {
     if (!install.installWorkspaceId) continue;
     await withRlsContext(
@@ -592,9 +594,10 @@ async function syncLegacySlackRows(
             instructions = ${agent.content?.instructions ?? ""},
             knowledge_collection_id = ${agent.memoryEnabled ? agent.memoryCollectionId : null}::uuid,
             open = ${install.open},
-            -- The legacy version mirrors the agent's, so a version read from
+            -- Never backwards: the legacy API shows the greater of the two
+            -- versions (lockAgentLegacySlackVersion), so a version read from
             -- either API is accepted by the other during the rollout.
-            version = ${agent.version}::integer,
+            version = greatest(${bump ? sql`version + 1` : sql`version`}, ${agent.version}::integer),
             updated_at = now()
           where id = ${agent.id}::uuid
             and workspace_id = ${install.installWorkspaceId}::uuid
@@ -774,7 +777,9 @@ export async function setAgentMemoryCollection(
       where id = ${current.id}::uuid and workspace_id = ${home.workspaceId}::uuid`);
     const updated = await getAgent(tx, home, current.id);
     if (!updated) return null;
-    await syncLegacySlackRows(tx, updated, await installsOf(tx, home, current.id));
+    await syncLegacySlackRows(tx, updated, await installsOf(tx, home, current.id), {
+      bump: false,
+    });
     return updated;
   });
 }
@@ -1110,6 +1115,27 @@ export async function getSessionAgentId(
   input: { workspaceId: string; sessionId: string },
 ): Promise<string | null> {
   return (await readSessionAgentRef(db, input))?.agentId ?? null;
+}
+
+/**
+ * Whether a chat is bound to an Only me agent, whose chats stay Only me
+ * (making one shared would hand its private Instructions to others).
+ */
+export async function sessionAgentRequiresPrivateChat(
+  db: Database,
+  input: { workspaceId: string; sessionId: string },
+): Promise<boolean> {
+  return await withWorkspaceRls(db, input.workspaceId, async (tx) => {
+    const [row] = await rawRows<{ found: number }>(
+      tx,
+      sql`select 1 as found
+        from sessions s
+        join agents a on a.workspace_id = s.workspace_id and a.id = s.agent_id
+        where s.workspace_id = ${input.workspaceId}::uuid and s.id = ${input.sessionId}::uuid
+          and a.visibility = 'private'`,
+    );
+    return row !== undefined;
+  });
 }
 
 /**
