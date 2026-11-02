@@ -3183,7 +3183,10 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     preparedAttachments = prepared.attachments;
   }
   // The chat shows the request as the person wrote it to Opengeni: without
-  // the leading mention, and with the people it mentions by name.
+  // the leading mention, and with the people it mentions by name. An answer
+  // to a pending question keeps the Slack ids, so the chat can still mention
+  // the people it names.
+  const answerText = preparedEntry.text;
   const readable = slackReadableRequestText(
     preparedEntry.text,
     installation.botUserId,
@@ -3219,6 +3222,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     await continueSlackSession(deps, grant, existing, prepared.entry, remounted.resources, {
       modelContext: prepared.modelContext,
       botUserId: installation.botUserId,
+      answerText,
       ...(openAgent ? { open: true } : {}),
     });
     return;
@@ -3269,6 +3273,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     await continueSlackSession(deps, grant, interaction, prepared.entry, remounted.resources, {
       modelContext: prepared.modelContext,
       botUserId: installation.botUserId,
+      answerText,
       ...(openAgent ? { open: true } : {}),
     });
     return;
@@ -5481,7 +5486,13 @@ async function continueSlackSession(
   interaction: SlackInteraction,
   entry: SlackInteractionInboxEntry,
   resources: FileResourceRef[] = [],
-  options: { modelContext?: string | null; botUserId?: string | null; open?: boolean } = {},
+  options: {
+    modelContext?: string | null;
+    botUserId?: string | null;
+    open?: boolean;
+    /** The text to read an answer to a pending question from; defaults to the message text. */
+    answerText?: string;
+  } = {},
 ) {
   if (
     !interaction.sessionId ||
@@ -5569,7 +5580,12 @@ async function continueSlackSession(
     return;
   }
   if (pending.length === 1) {
-    const response = humanInputResponse(pending[0]!.questions, addressedText);
+    const response = humanInputResponse(
+      pending[0]!.questions,
+      options.answerText === undefined
+        ? addressedText
+        : slackTextAfterBotMention(options.answerText, options.botUserId ?? null),
+    );
     if (response) {
       const accepted = await acceptSessionHumanInputResponse(deps.db, {
         accountId: grant.accountId,

@@ -40,12 +40,22 @@ export function slackReadableRequestText(
 ): SlackReadableRequest {
   const withoutLead = withoutLeadingMention(text, botUserId);
   const replaced = new Map<string, string>();
+  // Two people with the same name keep their raw mentions, so they stay apart.
+  const nameOf = (id: string, label: string | undefined) =>
+    names.get(id)?.trim() || label?.trim() || null;
+  const owners = new Map<string, Set<string>>();
+  for (const match of withoutLead.matchAll(SLACK_USER_MENTION)) {
+    const name = nameOf(match[1]!, match[2]);
+    if (name && match[1] !== botUserId) {
+      owners.set(name, (owners.get(name) ?? new Set()).add(match[1]!));
+    }
+  }
   const readable = withoutLead.replace(
     SLACK_USER_MENTION,
     (whole, id: string, label: string | undefined) => {
       if (id === botUserId) return "@Opengeni";
-      const name = names.get(id)?.trim() || label?.trim();
-      if (!name) return whole;
+      const name = nameOf(id, label);
+      if (!name || (owners.get(name)?.size ?? 0) > 1) return whole;
       replaced.set(id, name);
       return `@${name}`;
     },

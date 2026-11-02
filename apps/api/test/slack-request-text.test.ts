@@ -33,6 +33,17 @@ describe("the request text a Slack chat shows", () => {
     ).toMatchObject({ text: "ping @ana and <@U0X>; @Opengeni help" });
   });
 
+  test("keeps people with the same name apart", () => {
+    const names = new Map([
+      ["U0SAM", "Sam"],
+      ["U0SAM2", "Sam"],
+    ]);
+    expect(slackReadableRequestText("ask <@U0SAM> and <@U0SAM2>", BOT, names)).toEqual({
+      text: "ask <@U0SAM> and <@U0SAM2>",
+      modelContext: null,
+    });
+  });
+
   test("keeps text that would otherwise be empty", () => {
     expect(slackReadableRequestText(`<@${BOT}>`, BOT, new Map()).text).toBe(`<@${BOT}>`);
     expect(slackReadableRequestText("plain text", null, new Map()).text).toBe("plain text");

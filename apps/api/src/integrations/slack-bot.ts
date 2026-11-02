@@ -1333,18 +1333,20 @@ export class OpenGeniSlackBotClient {
    */
   async userDisplayNames(userIds: readonly string[]) {
     return await this.withAudit("users.list", async (headers) => {
-      const names: { id: string; name: string }[] = [];
-      for (const userId of userIds) {
-        try {
-          const payload = await this.call(headers, "users.info", { user: userId });
-          const user = projectUser(payload.user);
-          const name = user?.displayName || user?.realName || user?.name;
-          if (user?.id === userId && name) names.push({ id: userId, name });
-        } catch {
-          // Shown as written.
-        }
-      }
-      return { names };
+      const looked = await Promise.all(
+        userIds.map(async (userId) => {
+          try {
+            const payload = await this.call(headers, "users.info", { user: userId });
+            const user = projectUser(payload.user);
+            const name = user?.displayName || user?.realName || user?.name;
+            return user?.id === userId && name ? { id: userId, name } : null;
+          } catch {
+            // Shown as written.
+            return null;
+          }
+        }),
+      );
+      return { names: looked.filter((entry) => entry !== null) };
     });
   }
 
