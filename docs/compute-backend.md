@@ -338,6 +338,7 @@ change to compute.
 | `OPENGENI_COMPUTE_LINK_URL` | The gateway's public `wss://` URL, also the JWT audience |
 | `OPENGENI_COMPUTE_IMAGE`, `OPENGENI_COMPUTE_DESKTOP_IMAGE` | Headless and desktop image refs (control service default when unset) |
 | `OPENGENI_COMPUTE_VCPUS`, `OPENGENI_COMPUTE_MEMORY_MIB` | Shape; optional `..._MEMORY_REQUEST_MIB` (all of the memory when unset) and `..._CPU_REQUEST_MILLIS` (a tenth of each vCPU when unset), what each sandbox is guaranteed while awake |
+| `OPENGENI_COMPUTE_DISK_MIB` | How long each new sandbox's disk is (its image's length when unset). Its host books the whole length while the sandbox runs; at rest the disk holds only what its files use. Sandboxes made before a change keep their length |
 | `OPENGENI_COMPUTE_AGENT_READY_TIMEOUT_MS` | How long create and wake wait for the agent |
 
 Defaults are unchanged. Boot fails with a list of the missing settings only

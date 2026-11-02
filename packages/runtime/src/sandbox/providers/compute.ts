@@ -52,6 +52,7 @@ export const computeProvider: ProviderRegistration = {
       ...(settings.computeCpuRequestMillis !== undefined
         ? { cpuRequestMillis: settings.computeCpuRequestMillis }
         : {}),
+      ...(settings.computeDiskMib !== undefined ? { diskMib: settings.computeDiskMib } : {}),
       readyTimeoutMs: settings.computeAgentReadyTimeoutMs,
       // The first request after idle takes the sandbox's wake: its host holds
       // the message for up to 120 s while the sandbox wakes and its agent
