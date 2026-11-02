@@ -11,7 +11,7 @@ import type { Agent, AgentChat, AgentChatsFilter } from "@opengeni/contracts";
 import { apiErrorDetails, userErrorText } from "../../../ui/api-error";
 import { Button } from "../../../ui/button";
 import { DetailPage, DetailPageBody, DetailPageHeader } from "../../../ui/detail-page";
-import { DetailFact, DetailFacts, DetailSection, DetailSkeleton } from "../../../ui/detail-sheet";
+import { DetailSection, DetailSkeleton } from "../../../ui/detail-sheet";
 import { ErrorMessage } from "../../../ui/error-message";
 import { inAppClick } from "../../../ui/in-app-click";
 import { ListRow, ListRowSkeleton, RowList } from "../../../ui/list-row";
@@ -342,11 +342,9 @@ export function AgentPage({
           <MemoryRow agent={agent} workspaceId={workspaceId} onSaved={saved} />
         </DetailSection>
         <DetailSection title="Who can use it">
-          <DetailFacts>
-            <DetailFact label="Who">
-              {agent.visibility === "private" ? "Only me" : workspacePeopleLabel(workspaceName)}
-            </DetailFact>
-          </DetailFacts>
+          <p className="m-0 text-sm text-fg">
+            {agent.visibility === "private" ? "Only me" : workspacePeopleLabel(workspaceName)}
+          </p>
         </DetailSection>
         <DetailSection title="Available in">
           <SettingRow

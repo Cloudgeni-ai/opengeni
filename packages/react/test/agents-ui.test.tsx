@@ -176,12 +176,14 @@ test("?agent= starts a chat with an agent and ?botTemplateId= links still do", (
 
 test("a chat knows its agent and where it started", () => {
   const id = "aaaaaaaa-aaaa-4aaa-8aaa-000000000001";
+  const other = "aaaaaaaa-aaaa-4aaa-8aaa-000000000002";
   expect(sessionAgentRef({ agentId: id, metadata: {} })).toEqual({ id, name: null });
-  expect(
-    sessionAgentRef({ agentId: null, metadata: { slackAgent: { id, name: "Data team" } } }),
-  ).toEqual({ id, name: "Data team" });
+  const slack = { agentId: id, metadata: { slackAgent: { id, name: "Data team" } } };
+  expect(sessionAgentRef(slack)).toEqual({ id, name: "Data team" });
+  // Only agentId names the agent: metadata alone, or about another agent, does not.
+  expect(sessionAgentRef({ ...slack, agentId: null })).toBeNull();
+  expect(sessionAgentRef({ ...slack, agentId: other })).toEqual({ id: other, name: null });
   expect(sessionAgentRef({ metadata: {} })).toBeNull();
-  const slack = { metadata: { slackAgent: { id, name: "Data team" } } };
   expect(
     sessionAgentSourceLine({
       ...slack,
@@ -189,6 +191,7 @@ test("a chat knows its agent and where it started", () => {
     } as never),
   ).toBe("Started in Slack by Kari");
   expect(sessionAgentSourceLine({ ...slack, createdBy: null } as never)).toBe("Started in Slack");
+  expect(sessionAgentSourceLine({ ...slack, agentId: null, createdBy: null } as never)).toBeNull();
   expect(sessionAgentSourceLine({ metadata: {}, createdBy: null } as never)).toBeNull();
 });
 

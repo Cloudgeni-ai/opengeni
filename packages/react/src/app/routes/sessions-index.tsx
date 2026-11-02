@@ -829,6 +829,16 @@ function SessionsIndexRouteContent({
     );
   }, [canCreatePrivateChat, selectProject, selectedProjectOnlyMe, tenancyCapabilities]);
 
+  // An Only me agent's chats are Only me, so choosing one makes the new chat
+  // Only me (the server refuses a shared one).
+  const launchedAgentOnlyMe = launchedAgent?.visibility === "private";
+  useEffect(() => {
+    if (!launchedAgentOnlyMe || !canCreatePrivateChat) return;
+    setDraft((current) =>
+      current.visibility === "private" ? current : { ...current, visibility: "private" },
+    );
+  }, [canCreatePrivateChat, launchedAgentOnlyMe]);
+
   useEffect(() => {
     const onRequest = (event: Event) => {
       const requestedChannelId = (event as CustomEvent<CreateComposerFocusIntent>).detail
@@ -1932,6 +1942,8 @@ function SessionsIndexRouteContent({
               visibilityChosenRef.current = true;
               // A shared chat can't go in an Only me project.
               if (visibility === "workspace" && selectedProjectOnlyMe) selectProject(null);
+              // Nor can an Only me agent's chat.
+              if (visibility === "workspace" && launchedAgentOnlyMe) selectComposerAgent(null);
               setDraft((current) => ({ ...current, visibility }));
               close();
             }}

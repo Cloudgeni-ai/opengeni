@@ -191,7 +191,7 @@ function AgentForm({
         agent
           ? undefined
           : sourceSessionId
-            ? "New chats with it start like this one. This chat's history isn't included."
+            ? "Starts from this chat's name, icon and description. Its history isn't included."
             : undefined
       }
       back={{ label: agent ? agent.name : "Agents", onClick: onClose }}

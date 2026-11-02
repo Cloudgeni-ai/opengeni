@@ -1,8 +1,7 @@
 /**
  * The agent a chat was started with, for the chat header: its id from
- * `session.agentId` (or, for older Slack chats, the Slack agent in the chat's
- * metadata), then its current name and icon read once and shared by every
- * header that shows it.
+ * `session.agentId`, then its current name and icon read once and shared by
+ * every header that shows it.
  *
  * No zod here: the chat header is an eager module.
  */
@@ -24,20 +23,25 @@ export type SessionAgentInfo = {
   live: boolean;
 };
 
-/** The agent this chat belongs to, or null for an ordinary chat. */
+/**
+ * The agent this chat belongs to, or null for an ordinary chat. Only
+ * `session.agentId` names it (the server fills it in for older Slack chats);
+ * the chat's metadata only supplies the name it had, until the agent loads.
+ */
 export function sessionAgentRef(
   session: Pick<Session, "metadata"> & { agentId?: string | null | undefined },
 ): SessionAgentRef | null {
+  if (!session.agentId) return null;
   const slack = sessionSlackAgentInfo(session.metadata);
-  if (session.agentId) {
-    return { id: session.agentId, name: slack?.id === session.agentId ? slack.name : null };
-  }
-  return slack ? { id: slack.id, name: slack.name } : null;
+  return { id: session.agentId, name: slack?.id === session.agentId ? slack.name : null };
 }
 
-/** True for a chat someone started in Slack. */
-export function sessionStartedInSlack(session: Pick<Session, "metadata">): boolean {
-  return sessionSlackAgentInfo(session.metadata) !== null;
+/** True for an agent chat someone started in Slack. */
+export function sessionStartedInSlack(
+  session: Pick<Session, "metadata"> & { agentId?: string | null | undefined },
+): boolean {
+  const slack = sessionSlackAgentInfo(session.metadata);
+  return slack !== null && slack.id === session.agentId;
 }
 
 /**
@@ -45,7 +49,7 @@ export function sessionStartedInSlack(session: Pick<Session, "metadata">): boole
  * "Started in Slack by Kari". Null for chats started in the app.
  */
 export function sessionAgentSourceLine(
-  session: Pick<Session, "metadata" | "createdBy">,
+  session: Pick<Session, "metadata" | "createdBy"> & { agentId?: string | null | undefined },
 ): string | null {
   if (!sessionStartedInSlack(session)) return null;
   const by =

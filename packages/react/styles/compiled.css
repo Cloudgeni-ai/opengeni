@@ -2253,6 +2253,9 @@
 :where(.og-root).max-w-\[13rem\],:where(.og-root) .max-w-\[13rem\] {
     max-width: 13rem;
   }
+:where(.og-root).max-w-\[14rem\],:where(.og-root) .max-w-\[14rem\] {
+    max-width: 14rem;
+  }
 :where(.og-root).max-w-\[18em\],:where(.og-root) .max-w-\[18em\] {
     max-width: 18em;
   }
@@ -5565,6 +5568,12 @@
       text-decoration-color: color-mix(in oklab, var(--color-danger) 60%, transparent);
     }
   }
+:where(.og-root).decoration-fg\/25,:where(.og-root) .decoration-fg\/25 {
+    text-decoration-color: var(--color-fg);
+    @supports (color: color-mix(in lab, red, red)) {
+      text-decoration-color: color-mix(in oklab, var(--color-fg) 25%, transparent);
+    }
+  }
 :where(.og-root).decoration-og-border,:where(.og-root) .decoration-og-border {
     text-decoration-color: var(--og-color-border);
   }
@@ -7933,6 +7942,13 @@
     &:hover {
       @media (hover: hover) {
         text-decoration-color: currentcolor;
+      }
+    }
+  }
+:where(.og-root).hover\:decoration-fg,:where(.og-root) .hover\:decoration-fg {
+    &:hover {
+      @media (hover: hover) {
+        text-decoration-color: var(--color-fg);
       }
     }
   }

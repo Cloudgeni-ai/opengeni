@@ -13,6 +13,7 @@ import {
 import type { Agent, AgentSlackInstall } from "@opengeni/sdk";
 
 import { useAppContext } from "@opengeni/react/app/app-context";
+import { workspacePeopleLabel } from "@opengeni/react/app/components/agents/agent-page";
 import { agentErrorCode, useAgentSlackInstalls } from "@opengeni/react/app/lib/agents";
 import { useNavigate } from "@opengeni/react/app/lib/navigation";
 import { apiErrorDetails, userErrorText } from "@opengeni/react/ui/api-error";
@@ -80,6 +81,7 @@ function InstallRow({
   const teamName = install.slackTeamName ?? "Slack workspace";
   const canManage = agent.viewer.canManageSlack;
   const shared = agent.visibility === "workspace";
+  const privateReason = `Needs ${workspacePeopleLabel(workspaceName)} under Who can use it.`;
 
   async function run(
     kind: "availability" | "open",
@@ -108,8 +110,10 @@ function InstallRow({
               {agentSlackCall(availability.handle)}
             </span>
           </>
-        ) : (
+        ) : shared ? (
           "Off"
+        ) : (
+          privateReason
         )
       }
       error={error ?? undefined}
@@ -119,11 +123,7 @@ function InstallRow({
           checked={on}
           pending={pending === "availability"}
           disabled={!canManage || (!on && !shared)}
-          disabledReason={
-            !canManage
-              ? ADMIN_ONLY
-              : "Only agents everyone in the workspace can use can be in Slack."
-          }
+          disabledReason={!canManage ? ADMIN_ONLY : privateReason}
           onCheckedChange={(next) =>
             void run("availability", () =>
               next
