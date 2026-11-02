@@ -2368,9 +2368,17 @@ async function waitForWarm(
     // cold->warming and run the full spawner branch.
     throw new SandboxLeaseSupersededError(ids.sandboxGroupId, lease.leaseEpoch);
   }
-  // Still warming once the warming budget is spent.
-  throw new SandboxSiblingWarmingTimeoutError(ids.backend, settings.sandboxWarmingTimeoutMs, {
-    sandboxGroupId: ids.sandboxGroupId,
-    instanceId: lease.instanceId,
-  });
+  // The wait budget bounds this activity, not the elected creator's work.
+  // Large verified restores can exceed it while the creator keeps its warming
+  // lease alive. Yield to same-turn lifecycle recovery without replacing that
+  // box. Only the creator renews warming expiry; an abandoned owner still goes
+  // through the normal reaper and epoch fence on the next admission.
+  throw new SandboxLeaseTransitionError(
+    ids.sandboxGroupId,
+    lease.leaseEpoch,
+    "provider_recovery_in_progress",
+    lease.backend,
+    lease.instanceId,
+    lease.liveness,
+  );
 }

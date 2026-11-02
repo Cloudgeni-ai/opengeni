@@ -1051,6 +1051,9 @@ Archive capture/restore: [storage](workspace-archive-storage.md).
 
 Lease liveness, provider existence, route attachment, archives, workspace readiness,
 and operation availability are independent; a warm row does not prove executability.
+An attached sibling whose bounded warming wait expires yields to same-turn
+lifecycle recovery rather than failing the turn or replacing the elected creator.
+Only that creator renews the warming lease; the reaper still fences abandoned owners.
 
 Resolve synthetic groups' effective backend once from session policy and deployment
 configuration. Fleet, swaps, viewers, API operations and worker turns share that answer.
