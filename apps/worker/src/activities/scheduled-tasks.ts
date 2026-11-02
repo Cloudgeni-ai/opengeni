@@ -131,6 +131,8 @@ import {
   resolveFirstPartyMcpToolPolicy,
   resolveTurnExecutionPolicyV1,
   TurnExecutionPolicyModelUnavailableError,
+  sandboxBackendServed,
+  unservedSandboxBackendMessage,
 } from "@opengeni/config";
 import { Context } from "@temporalio/activity";
 import { createHash } from "node:crypto";
@@ -708,6 +710,21 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       const generatedTarget =
         task.runMode === "new_session_per_run" ||
         (task.runMode === "reusable_session" && task.reusableSessionId === null);
+      // A generated run creates its session on the task's explicit backend.
+      // Refuse one this deployment does not serve (a schedule saved before the
+      // create-time check, or a deployment whose configuration changed) instead
+      // of building that provider on the worker; the task must be edited.
+      if (
+        generatedTarget &&
+        task.agentConfig.sandboxBackend !== undefined &&
+        !sandboxBackendServed(settings, task.agentConfig.sandboxBackend)
+      ) {
+        return await refuseAdmission(
+          "machine_target_unavailable",
+          false,
+          unservedSandboxBackendMessage(settings, task.agentConfig.sandboxBackend),
+        );
+      }
       if (generatedTarget) {
         try {
           const agentResolution = resolveSessionAgentConfigForCreate({

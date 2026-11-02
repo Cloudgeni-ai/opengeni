@@ -294,3 +294,52 @@ describe("scheduled Connected Machine targeting", () => {
     ).rejects.toMatchObject({ status: 422 });
   });
 });
+
+describe("scheduled sandbox backend", () => {
+  const cloud = testSettings({
+    sandboxBackend: "modal",
+    modalTokenId: "test-modal-token-id",
+    modalTokenSecret: "test-modal-token-secret",
+  });
+
+  test("refuses a backend the deployment does not serve before any lookup", async () => {
+    const lookup = spyOn(db, "getSandbox");
+    for (const runMode of ["new_session_per_run", "reusable_session"] as const) {
+      for (const sandboxBackend of ["local", "docker", "compute"] as const) {
+        await expect(
+          validateScheduledTaskMachineTarget({
+            settings: cloud,
+            db: {} as never,
+            grant: manageOnly,
+            runMode,
+            agentConfig: { ...baseConfig, sandboxBackend },
+          }),
+        ).rejects.toMatchObject({
+          status: 422,
+          message: expect.stringContaining(
+            `sandboxBackend "${sandboxBackend}" is not available in this deployment`,
+          ),
+        });
+      }
+    }
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  test("keeps served backends and the omitted default", async () => {
+    for (const agentConfig of [
+      baseConfig,
+      { ...baseConfig, sandboxBackend: "modal" as const },
+      { ...baseConfig, sandboxBackend: "none" as const },
+    ]) {
+      await expect(
+        validateScheduledTaskMachineTarget({
+          settings: cloud,
+          db: {} as never,
+          grant: manageOnly,
+          runMode: "new_session_per_run",
+          agentConfig,
+        }),
+      ).resolves.toBeNull();
+    }
+  });
+});

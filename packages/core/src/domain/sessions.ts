@@ -75,6 +75,8 @@ import {
   allowedFirstPartyMcpToolsForSession,
   resolveSessionFirstPartyMcpTools,
   deploymentUnavailableFirstPartyMcpTools,
+  sandboxBackendServed,
+  unservedSandboxBackendMessage,
   resolveFirstPartyMcpToolPolicy,
   policyChargesCreditsForModel,
   policyProviderIdForModel,
@@ -2646,6 +2648,20 @@ async function createSessionForRequestInFileScope(
   requestOptions: SessionCreateRequestOptions = {},
 ): Promise<CreateSessionRequestOutcome> {
   const payload = CreateSessionRequest.parse(rawPayload);
+
+  // An explicitly requested backend must be one this deployment serves. The
+  // worker builds whatever provider the session row names, so accepting an
+  // unserved value (for example `local` on a cloud deployment) would run the
+  // box as processes on the worker host. Inherited/shared placements and the
+  // server-chosen defaults below never read the caller's value unchecked.
+  if (
+    payload.sandboxBackend !== undefined &&
+    !sandboxBackendServed(unresolvedDeps.settings, payload.sandboxBackend)
+  ) {
+    throw new HTTPException(422, {
+      message: unservedSandboxBackendMessage(unresolvedDeps.settings, payload.sandboxBackend),
+    });
+  }
 
   // A tool whose backing workload this deployment does not run is dropped, not
   // rejected: a client echoing a full catalog must not fail on a deployment fact.

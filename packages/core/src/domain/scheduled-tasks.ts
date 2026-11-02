@@ -19,6 +19,8 @@ import {
 import {
   resolveSessionFirstPartyMcpTools,
   resolveFirstPartyMcpToolPolicy,
+  sandboxBackendServed,
+  unservedSandboxBackendMessage,
   type FirstPartyMcpToolPolicySettings,
   type Settings,
 } from "@opengeni/config";
@@ -1185,6 +1187,14 @@ export async function validateScheduledTaskMachineTarget(input: {
   enrollmentId: string;
   sandboxOs: Session["sandboxOs"];
 } | null> {
+  // Generated runs create their session with this backend, so refuse at save
+  // time what the deployment does not serve (see sandboxBackendServed).
+  const requestedBackend = input.agentConfig.sandboxBackend;
+  if (requestedBackend !== undefined && !sandboxBackendServed(input.settings, requestedBackend)) {
+    throw new HTTPException(422, {
+      message: unservedSandboxBackendMessage(input.settings, requestedBackend),
+    });
+  }
   if (input.runMode === "reusable_session" && input.reusableSessionId) return null;
   let machineTarget = input.agentConfig.machineTarget;
   const followsWorkspace = input.agentConfig.executionTarget === "workspace_default";

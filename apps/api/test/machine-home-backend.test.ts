@@ -1287,3 +1287,125 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
     });
   }, 60_000);
 });
+
+describe("create-time sandbox backend gate", () => {
+  async function sessionCount(workspaceId: string): Promise<number> {
+    const [row] = await admin<{ count: number }[]>`
+      select count(*)::int as count from sessions where workspace_id = ${workspaceId}`;
+    return row?.count ?? 0;
+  }
+
+  test("a cloud deployment refuses host and unconfigured backends before persisting anything", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, bus } = await seedMachine();
+    const parent = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "manager on the cloud box",
+      },
+    );
+    const before = await sessionCount(workspaceId);
+    for (const sandboxBackend of ["local", "docker", "compute", "daytona"] as const) {
+      // Top-level create.
+      await expect(
+        createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
+          initialMessage: "run on the host",
+          sandboxBackend,
+        }),
+      ).rejects.toMatchObject({
+        status: 422,
+        message: `sandboxBackend "${sandboxBackend}" is not available in this deployment. Available: modal, none, selfhosted. Omit sandboxBackend to use the deployment default ("modal").`,
+      });
+      // An agent-spawned child asking for its own box, with or without 'new'.
+      for (const sandbox of [undefined, "new"] as const) {
+        await expect(
+          createSessionForRequest(
+            deps(bus),
+            grant(accountId, workspaceId, parent.id),
+            workspaceId,
+            {
+              initialMessage: "run the worker on the host",
+              sandboxBackend,
+              ...(sandbox ? { sandbox } : {}),
+            },
+          ),
+        ).rejects.toMatchObject({ status: 422 });
+      }
+    }
+    expect(await sessionCount(workspaceId)).toBe(before);
+  }, 60_000);
+
+  test("served backends, shared children, 'new' children and machine targets are unchanged", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, sandboxId, bus } = await seedMachine();
+    const parent = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "manager on the cloud box",
+        sandboxBackend: "modal",
+      },
+    );
+    expect(parent.sandboxBackend).toBe("modal");
+    const boxless = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "no box needed",
+        sandboxBackend: "none",
+      },
+    );
+    expect(boxless.sandboxBackend).toBe("none");
+    const sharedChild = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId, parent.id),
+      workspaceId,
+      { initialMessage: "share the parent's box" },
+    );
+    expect(sharedChild.sandboxGroupId).toBe(parent.sandboxGroupId);
+    expect(sharedChild.sandboxBackend).toBe("modal");
+    const own = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId, parent.id),
+      workspaceId,
+      { initialMessage: "isolated worker", sandbox: "new" },
+    );
+    expect(own.sandboxGroupId).toBe(own.id);
+    expect(own.sandboxBackend).toBe("modal");
+    const machine = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId, parent.id),
+      workspaceId,
+      { initialMessage: "worker on the machine", targetSandboxId: sandboxId },
+    );
+    expect(machine.sandboxBackend).toBe("selfhosted");
+    expect(machine.activeSandboxId).toBe(sandboxId);
+  }, 60_000);
+
+  test("a provider with configured credentials is served beside the default", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, bus } = await seedMachine();
+    const withCompute = testSettings({
+      ...settings,
+      computeApiUrl: "https://compute.example",
+      computeApiKey: "test-compute-key",
+    });
+    const session = await createSessionForRequest(
+      deps(bus, withCompute),
+      grant(accountId, workspaceId),
+      workspaceId,
+      { initialMessage: "use compute", sandboxBackend: "compute" },
+    );
+    expect(session.sandboxBackend).toBe("compute");
+    await expect(
+      createSessionForRequest(deps(bus, withCompute), grant(accountId, workspaceId), workspaceId, {
+        initialMessage: "still not the host",
+        sandboxBackend: "local",
+      }),
+    ).rejects.toMatchObject({ status: 422 });
+  }, 60_000);
+});
