@@ -86,6 +86,7 @@ import {
 } from "./organization-codex-usage";
 export * from "./organization-slack-bots";
 export * from "./slack-agents";
+export * from "./agents";
 export * from "./slack-agent-proposals";
 export * from "./slack-agent-updates";
 export * from "./voice-transcription-settlement";

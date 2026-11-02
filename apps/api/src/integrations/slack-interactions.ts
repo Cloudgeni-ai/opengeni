@@ -99,6 +99,7 @@ import {
   getSlackInteractionInboxByProviderEvent,
   getSlackProviderEventIdForTurn,
   getSlackInteractionForSession,
+  getSessionAgentId,
   listSlackAgentChats,
   listSlackAgentsForConnection,
   recordSlackInteractionInbound,
@@ -4201,17 +4202,17 @@ export async function listSlackAgentChatsForSession(
   deps: ApiRouteDeps,
   input: { grant: AccessGrant; sessionId: string; limit?: number | undefined },
 ) {
-  const interaction = await getSlackInteractionForSession(deps.db, {
-    accountId: input.grant.accountId,
+  const agentId = await getSessionAgentId(deps.db, {
     workspaceId: input.grant.workspaceId,
     sessionId: input.sessionId,
   });
-  if (!interaction?.slackAgentId) {
-    return { chats: [], message: "This chat is not a Slack agent's chat." };
+  if (!agentId) {
+    return { chats: [], message: "This chat is not an agent's chat." };
   }
   const chats = await listSlackAgentChats(deps.db, {
+    accountId: input.grant.accountId,
     workspaceId: input.grant.workspaceId,
-    slackAgentId: interaction.slackAgentId,
+    slackAgentId: agentId,
     excludeSessionId: input.sessionId,
     limit: input.limit ?? 10,
   });

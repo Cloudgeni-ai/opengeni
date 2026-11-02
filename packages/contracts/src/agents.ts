@@ -34,6 +34,28 @@ export const AGENT_INSTRUCTIONS_SOFT_LIMIT = 8_000;
 /** Agents one workspace keeps; creating another past this is refused. */
 export const AGENTS_PER_WORKSPACE_MAX = 500;
 
+/**
+ * The avatar an agent without its own icon shows: the first letter or digit
+ * of up to two words of its name, on a hue derived from its id. A name with
+ * no letters or digits gets the bot icon.
+ */
+export function agentInitialsAvatar(name: string, id: string): SessionAvatar {
+  let hash = 0;
+  for (const char of id) hash = (hash * 31 + char.codePointAt(0)!) >>> 0;
+  const hue = hash % 360;
+  const letters = name
+    .trim()
+    .split(/\s+/u)
+    .map((word) => [...word].find((char) => /[\p{L}\p{N}]/u.test(char)))
+    .filter((char): char is string => typeof char === "string")
+    .slice(0, 2)
+    .join("")
+    .toUpperCase();
+  return /^[\p{L}\p{N}]{1,2}$/u.test(letters)
+    ? { kind: "letters", letters, hue }
+    : { kind: "icon", icon: "bot", hue };
+}
+
 const Uuid = /* @__PURE__ */ defineSchema(() => z.string().uuid());
 
 const AgentName = /* @__PURE__ */ defineSchema(() =>
@@ -92,7 +114,7 @@ export const AgentMemory = /* @__PURE__ */ defineSchema(() =>
     enabled: z.boolean(),
     /**
      * The Knowledge collection (a `group` entry). Null until Memory is first
-     * switched on, and while creating it waits for review.
+     * switched on; set even while the collection itself waits for review.
      */
     collectionId: Uuid.nullable(),
     /** `workspace` for a shared agent, `personal` for an Only me one. */
