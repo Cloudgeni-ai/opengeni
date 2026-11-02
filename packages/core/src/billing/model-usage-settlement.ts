@@ -36,6 +36,7 @@ import {
   byokListEquivalent,
   byokPlatformFeeActive,
   byokPlatformFeeMicros,
+  ownModelFunding,
 } from "./byok-platform-fee";
 import {
   recordSessionUsageLimitEvent,
@@ -114,8 +115,9 @@ export type ModelUsageSettlementInput = {
    */
   billingOrigin?: BillingOrigin;
   /**
-   * Served by the person's own provider key or subscription. While credit
-   * billing is active it pays the platform fee from paid credit.
+   * Served by the person's own API key (provider, gateway or custom
+   * endpoint). While credit billing is active it pays the platform fee from
+   * paid credit. The person's own subscription pays no fee.
    */
   byok?: boolean;
   /** Best-effort metrics hook after a committed debit. */
@@ -430,13 +432,13 @@ export async function settleModelUsage(
       ...usageContext,
       idempotencyKey: `usage:model.cost:${input.sourceId}`,
     });
-    // Explicit from the caller, else the served route's payer: the person's
-    // own key or subscription, never a deployment-funded free model.
+    // Explicit from the caller, else the served route: the person's own API
+    // key, never their own subscription (no fee) or a deployment-funded free
+    // model.
     const byok =
       byokPlatformFeeActive(settings, input.accountId) &&
       (input.byok ??
-        (resolveModelProviderForTurn(settings, input.model)?.model.billing.upstreamPayer ??
-          "deployment") !== "deployment");
+        ownModelFunding(resolveModelProviderForTurn(settings, input.model)?.model) === "api_key");
     const byokFee = byok
       ? await chargeByokPlatformFee(settings, db, input, {
           // The list price, even on a gateway route, then a reported cost.

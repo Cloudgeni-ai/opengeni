@@ -74,6 +74,10 @@
       "types": "./src/values.ts",
       "default": "./src/values.ts"
     },
+    "./json-safe": {
+      "types": "./src/json-safe.ts",
+      "default": "./src/json-safe.ts"
+    },
     "./claude-cite-tags": {
       "types": "./src/claude-cite-tags.ts",
       "default": "./src/claude-cite-tags.ts"

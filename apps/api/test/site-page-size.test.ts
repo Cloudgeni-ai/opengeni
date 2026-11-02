@@ -24,8 +24,10 @@ describe("Site page size warnings", () => {
     expect(warning?.message).toContain("62 MB");
     expect(warning?.suggestion).toContain("compress images");
     expect(warning?.suggestion).toContain("link video");
-    // Site files are not for anonymous visitors: the advice says so.
-    expect(warning?.suggestion).toContain("anonymous visitors can't read them");
+    // Shared Site files reach every visitor, guests of a public Site included: the advice says so.
+    expect(warning?.suggestion).toContain("upload them as shared files");
+    expect(warning?.suggestion).toContain("signed-out guests of a public Site included");
+    expect(warning?.suggestion).not.toContain("can't read");
     expect(sitePageSizeWarnings(SITE_PAGE_HEAVY_BYTES + 1)[0]?.message).toContain("5.0 MB");
   });
 

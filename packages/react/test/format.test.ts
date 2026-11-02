@@ -313,6 +313,15 @@ describe("composer own-key and API refusals", () => {
         }),
       ),
     ).toBe("Upgrade to Pro to use your own key. Your message and attachments are saved.");
+    expect(
+      composerSubmissionErrorMessage(
+        englishText,
+        refusal("Upgrade to Pro to use your own subscription.", {
+          code: "subscription_plan_required",
+          action: { type: "upgrade_plan", href: "/billing" },
+        }),
+      ),
+    ).toBe("Upgrade to Pro to use your own subscription. Your message and attachments are saved.");
     const api = composerSubmissionErrorMessage(
       englishText,
       refusal("API usage uses credits, not your plan credit.", {
@@ -344,6 +353,14 @@ describe("composer own-key and API refusals", () => {
       }),
     ).toBe(
       "Ask an organization owner to upgrade to Pro to use your own key. Your message and attachments are saved.",
+    );
+    expect(
+      member("Upgrade to Pro to use your own subscription.", {
+        code: "subscription_plan_required",
+        action: { type: "upgrade_plan", href: "/billing" },
+      }),
+    ).toBe(
+      "Ask an organization owner to upgrade to Pro to use your own subscription. Your message and attachments are saved.",
     );
     expect(
       member("API usage uses credits, not your plan credit.", {

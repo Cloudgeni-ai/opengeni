@@ -270,10 +270,13 @@ export function SessionRowContent({
   creator,
   quickActionSlots = 0,
   leading,
+  parentTitle,
 }: {
   /** Before the title: a bot's avatar. */
   leading?: ReactNode | undefined;
   title: string;
+  /** For a pinned sub-agent chat, the chat it belongs to, said quietly after the title. */
+  parentTitle?: string | null | undefined;
   stateLabel: string;
   depthLabel?: string | null | undefined;
   descendantLabel?: string | null | undefined;
@@ -297,9 +300,26 @@ export function SessionRowContent({
       <span className="sr-only">{stateLabel}. </span>
       {leading}
       <span className="flex min-w-0 flex-1 flex-col leading-tight">
-        <span data-session-row-title className="block min-w-0 overflow-hidden whitespace-nowrap">
-          {title}
-        </span>
+        {parentTitle ? (
+          // The title keeps its room; the parent's name gives way first. The
+          // line as a whole fades at the column's edge, as a title does.
+          <span
+            data-session-row-title
+            className="flex min-w-0 items-baseline gap-1.5 overflow-hidden whitespace-nowrap"
+          >
+            <span className="min-w-0 truncate">{title}</span>
+            <span
+              data-session-row-parent
+              className="min-w-10 max-w-[55%] shrink-3 truncate text-2xs text-fg-muted"
+            >
+              in {parentTitle}
+            </span>
+          </span>
+        ) : (
+          <span data-session-row-title className="block min-w-0 overflow-hidden whitespace-nowrap">
+            {title}
+          </span>
+        )}
         {mobile ? (
           <span
             data-session-row-state

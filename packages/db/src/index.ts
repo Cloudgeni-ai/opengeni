@@ -3,6 +3,7 @@ import {
   PROVIDER_RECOVERY_SUSPENDED_AT,
 } from "./provider-recovery-clock";
 export { continueSessionWaitingWork, getSessionMachineAccess } from "./session-machine-access";
+export { canonicalSecretPermissions } from "./canonical-secret-permissions";
 import { listWorkspaceBackgroundCommandsInScope } from "./session-background-commands";
 import { resolveSessionAppActionAuthority } from "./session-admin-access";
 export * from "./site-session-access";
@@ -90903,10 +90904,14 @@ function backgroundCommandTerminalMutation(input: {
           `Session ${input.sessionId} does not belong to account ${input.accountId}`,
         );
       }
+      // Terminal settlement only needs pause/admission state. Recounting all
+      // stopping commands here makes draining a backlog quadratic, while each
+      // count holds the session write lock and blocks unrelated lifecycle work.
       controlActive =
         (
-          await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
+          await evaluateSessionWriteAdmissionControl(tx, input.workspaceId, input.sessionId, {
             workspaceControl: locks.control,
+            lockedSession: session,
           })
         ).state === "active";
     },

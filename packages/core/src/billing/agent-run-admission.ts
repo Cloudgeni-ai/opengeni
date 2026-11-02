@@ -8,7 +8,11 @@ import {
   type BillingOrigin,
   type EntitlementsPort,
 } from "@opengeni/contracts";
-import { byokPaidCreditRefusalMessage, byokPlatformFeeActive } from "./byok-platform-fee";
+import {
+  byokPaidCreditRefusalMessage,
+  byokPlatformFeeActive,
+  ownSubscriptionPlanAllows,
+} from "./byok-platform-fee";
 import { coreRoutedSubscriptionFunding, modelFundingForAdmission } from "./limits";
 import {
   chargeBillingOrigin,
@@ -28,6 +32,8 @@ export type AgentRunAdmissionDenial =
   | "byok_paid_credit_required"
   /** The same on the Free plan, where upgrading is the fix. */
   | "byok_upgrade_required"
+  /** The person's own subscription needs a paid plan (Pro or higher). */
+  | "subscription_plan_required"
   | "allowance_exhausted"
   | "monthly_model_cost_limit"
   | "monthly_agent_run_limit";
@@ -72,6 +78,13 @@ export async function agentRunAdmissionDenial(
     }),
   );
   const externallyBilled = funding.fundedWithoutCredits;
+  // The person's own subscription pays no fee; it needs a paid plan.
+  if (
+    funding.ownSubscription &&
+    !(await ownSubscriptionPlanAllows(services.db, services.settings, input.accountId))
+  ) {
+    return "subscription_plan_required";
+  }
   // The person's own key pays the platform fee, payable only from paid credit.
   if (funding.byok && byokPlatformFeeActive(services.settings, input.accountId)) {
     const billingOrigin = chargeBillingOrigin(

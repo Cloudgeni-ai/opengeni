@@ -17,10 +17,13 @@ import {
   byokPaidCreditRefusalMessage,
   byokPlatformFeeActive,
   directPersonalConnectionSubjectId,
+  ownModelFunding,
+  ownSubscriptionPlanAllows,
 } from "@opengeni/core";
 import type { TurnActivityServices as ActivityServices } from "../types";
 import {
   API_CREDITS_REQUIRED_MESSAGE,
+  SUBSCRIPTION_PLAN_REQUIRED_MESSAGE,
   type AllowanceExhaustedRefusal,
   type BillingOrigin,
   type SessionEvent,
@@ -138,6 +141,23 @@ export function turnExecutionPolicyBillingIdentity(policy: TurnExecutionPolicyV1
       policy.credentialSource.kind === "connected_subscription" &&
       policy.credentialSource.provider === "xai",
   };
+}
+
+/**
+ * Who funds the turn's model when Opengeni does not: the person's own API key
+ * pays the platform fee from paid credit; their own subscription pays none
+ * and needs a paid plan instead. A credits-billed or deployment-funded turn is
+ * neither. `providerKind` is the verified provider's kind, so an older frozen
+ * Claude policy still counts as a subscription.
+ */
+export function turnExecutionPolicyOwnFunding(
+  policy: TurnExecutionPolicyV1,
+  input: { chargesOpenGeniCredits: boolean; providerKind?: string | null },
+): { isByokTurn: boolean; isOwnSubscriptionTurn: boolean } {
+  const funding = input.chargesOpenGeniCredits
+    ? null
+    : ownModelFunding(policy, input.providerKind ?? null);
+  return { isByokTurn: funding === "api_key", isOwnSubscriptionTurn: funding === "subscription" };
 }
 
 export function legacyTurnExecutionPolicyInput(
@@ -360,8 +380,10 @@ export async function ensureRunAllowedBetweenModelCalls(input: {
   sessionId?: string;
   /** The turn's frozen funding origin; API work spends credits only. */
   billingOrigin?: BillingOrigin;
-  /** Served by the person's own key or subscription: needs paid credit. */
+  /** Served by the person's own API key: needs paid credit for its fee. */
   byok?: boolean;
+  /** Served by the person's own subscription: needs a paid plan, no fee. */
+  ownSubscription?: boolean;
   serializedRunState?: () => string | null;
 }): Promise<number | undefined> {
   try {
@@ -379,6 +401,7 @@ export async function ensureRunAllowedBetweenModelCalls(input: {
       input.sessionId,
       input.billingOrigin,
       input.byok,
+      input.ownSubscription,
     );
   } catch (limitError) {
     // An unreadable usage state blocks the request as an infrastructure
@@ -417,6 +440,7 @@ export async function ensureRunAllowed(
   sessionId?: string,
   billingOrigin: BillingOrigin = "app",
   byok = false,
+  ownSubscription = false,
 ): Promise<number | undefined> {
   let creditPolicyRevision: number | undefined;
   // Per-task usage limit: independent of funding, so it applies to
@@ -471,8 +495,13 @@ export async function ensureRunAllowed(
         billingOrigin === "api" ? API_CREDITS_REQUIRED_MESSAGE : "insufficient workspace credits",
       );
     }
+  } else if (!chargesOpenGeniCredits && ownSubscription) {
+    // The person's own subscription pays no fee; it needs a paid plan.
+    if (!(await ownSubscriptionPlanAllows(db, settings, accountId))) {
+      throw new Error(SUBSCRIPTION_PLAN_REQUIRED_MESSAGE);
+    }
   } else if (!chargesOpenGeniCredits && byok && byokPlatformFeeActive(settings, accountId)) {
-    // The person's own key pays a platform fee, payable only from paid credit.
+    // The person's own API key pays a platform fee, payable only from paid credit.
     const balance = await getByokFeeSpendableBalance(db, accountId, billingOrigin);
     if (balance.balanceMicros <= 0) {
       throw new Error(byokPaidCreditRefusalMessage(balance, chargeBillingOrigin(billingOrigin)));

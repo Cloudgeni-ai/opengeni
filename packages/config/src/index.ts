@@ -1719,6 +1719,10 @@ const SettingsSchema = z.object({
   // Guaranteed shares below the ceilings above; omitted, the whole ceiling.
   computeMemoryRequestMib: z.coerce.number().int().min(128).max(262_144).optional(),
   computeCpuRequestMillis: z.coerce.number().int().min(10).max(64_000).optional(),
+  // How long each new sandbox's disk is, in MiB; omitted, its image's own
+  // length. Its host books the whole length while it runs, and a disk at rest
+  // holds only what its files use. The control service accepts up to 1 TiB.
+  computeDiskMib: z.coerce.number().int().min(1).max(1_048_576).optional(),
   // The agent gateway's public WebSocket URL (wss://). Compute hosts dial it,
   // and it is the exact audience of their host tokens and sandbox tickets, so
   // it must equal the URL the control service is configured with for Opengeni's team.
@@ -2339,8 +2343,9 @@ const SettingsSchema = z.object({
     z.array(z.string().uuid()).default([...DEFAULT_BILLING_LEGACY_ACCOUNT_IDS]),
   ),
   /**
-   * Platform fee on bring-your-own-key use (own provider keys and connected
-   * subscriptions), in basis points of each call's list-price equivalent.
+   * Platform fee on bring-your-own-key use (own API keys; connected
+   * subscriptions pay no fee and need a paid plan of at least $20/month
+   * instead), in basis points of each call's list-price equivalent.
    * Charged only while credit billing is active, and payable only from paid
    * credit. 0 turns the fee off.
    */
@@ -6087,6 +6092,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     computeMemoryMib: optional("OPENGENI_COMPUTE_MEMORY_MIB"),
     computeMemoryRequestMib: optional("OPENGENI_COMPUTE_MEMORY_REQUEST_MIB"),
     computeCpuRequestMillis: optional("OPENGENI_COMPUTE_CPU_REQUEST_MILLIS"),
+    computeDiskMib: optional("OPENGENI_COMPUTE_DISK_MIB"),
     computeLinkUrl: optional("OPENGENI_COMPUTE_LINK_URL"),
     computeAgentReadyTimeoutMs: optional("OPENGENI_COMPUTE_AGENT_READY_TIMEOUT_MS"),
     sandboxOwnershipEnabled: optional("OPENGENI_SANDBOX_OWNERSHIP_ENABLED"),

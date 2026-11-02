@@ -2697,6 +2697,13 @@ describe("backend-gated sandbox required-credential validation", () => {
     expect(computeGatewayConfigured(settings)).toBe(true);
     expect(settings.computeVcpus).toBe(2);
     expect(settings.computeMemoryMib).toBe(4096);
+    expect(settings.computeDiskMib).toBeUndefined();
+    expect(
+      withEnv({ ...ready, OPENGENI_COMPUTE_DISK_MIB: "32768" }, () => getSettings()).computeDiskMib,
+    ).toBe(32_768);
+    expect(() =>
+      withEnv({ ...ready, OPENGENI_COMPUTE_DISK_MIB: "0" }, () => getSettings()),
+    ).toThrow();
     expect(() =>
       withEnv({ ...ready, OPENGENI_COMPUTE_LINK_URL: undefined }, () => getSettings()),
     ).toThrow("OPENGENI_COMPUTE_LINK_URL is required");
