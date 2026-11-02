@@ -15904,7 +15904,7 @@
         "$.firstPartyMcpPermissions[]": "ref(Permission)",
         "$.firstPartyMcpTools": "array?",
         "$.firstPartyMcpTools[]": "ref(FirstPartyMcpToolName)",
-        "$.goal": "ref(GoalSpec)?",
+        "$.goal": "ref(GoalSpec)? null",
         "$.idempotencyKey": "string?",
         "$.initialMessage": "string?",
         "$.installedSkillIds": "array?",
