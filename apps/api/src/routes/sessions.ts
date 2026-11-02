@@ -238,6 +238,7 @@ import {
   requestSessionCompaction,
   setSessionChannel,
   ChannelNotFoundError,
+  SessionAgentNotFoundError,
   ChannelAudienceMismatchError,
   setSessionAttention,
   setSessionPin,
@@ -7084,6 +7085,12 @@ export function sessionCreateErrorResponse(c: Context, error: unknown): Response
         message: "Private sessions are not enabled for this organization.",
       },
       409,
+    );
+  }
+  if (error instanceof SessionAgentNotFoundError) {
+    return c.json(
+      { code: "SESSION_CREATE_REJECTED", message: error.message, details: { code: "agent_not_found" } },
+      422,
     );
   }
   if (error instanceof ChannelNotFoundError) {

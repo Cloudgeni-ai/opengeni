@@ -31922,6 +31922,12 @@ export type SessionCreateInput = {
   firstPartyMcpTools?: FirstPartyMcpToolName[];
   instructions?: string | null;
   /**
+   * The agent the chat is started with. It runs on the agent's current
+   * revision (`agent_prompt_revision`); the agent must be one of this
+   * workspace's that the creating person can see.
+   */
+  agent?: { id: string } | null;
+  /**
    * No person will see or answer a question until the task ends. Recorded only
    * under the reserved metadata key, which a caller-supplied value never sets.
    */
@@ -32617,6 +32623,37 @@ async function siteHomeChannelId(
   return home?.channelId ?? null;
 }
 
+/** The agent a new chat starts with is gone, or not one its creator can see. */
+export class SessionAgentNotFoundError extends Error {
+  readonly name = "SessionAgentNotFoundError";
+  constructor(readonly agentId: string) {
+    super("That agent is not available in this workspace.");
+  }
+}
+
+/**
+ * The agent and revision a new chat binds to, read in the chat's workspace.
+ * Only me agents count only for their owner; a child session never binds.
+ */
+async function sessionAgentBinding(
+  tx: Database,
+  input: Pick<SessionCreateInput, "workspaceId" | "parentSessionId" | "subjectId">,
+  agentId: string,
+): Promise<{ agentId: string; revision: number }> {
+  if (input.parentSessionId) throw new SessionAgentNotFoundError(agentId);
+  const subjectId = input.subjectId ?? null;
+  const [row] = await rawRows<{ id: string; current_revision: number }>(
+    tx,
+    sql`select a.id::text as id, a.current_revision
+      from agents a
+      where a.workspace_id = ${input.workspaceId}::uuid and a.id = ${agentId}::uuid
+        and (a.visibility = 'workspace'
+          ${subjectId ? sql`or a.owner_subject_id = ${subjectId}` : sql``})`,
+  );
+  if (!row) throw new SessionAgentNotFoundError(agentId);
+  return { agentId: row.id, revision: Number(row.current_revision) };
+}
+
 async function createSessionInTransaction(
   tx: SessionActivityDatabase,
   input: SessionCreateInput,
@@ -32906,12 +32943,18 @@ async function createSessionInTransaction(
   const removedRepositories = input.parentSessionId
     ? await childSessionRemovedRepositories(tx as unknown as Database, input, input.parentSessionId)
     : [];
+  const agentBinding = input.agent
+    ? await sessionAgentBinding(tx as unknown as Database, input, input.agent.id)
+    : null;
   try {
     const insertValues: typeof schema.sessions.$inferInsert = withLosslessContentWriteVersion(
       {
         id,
         accountId: input.accountId,
         workspaceId: input.workspaceId,
+        ...(agentBinding
+          ? { agentId: agentBinding.agentId, agentPromptRevision: agentBinding.revision }
+          : {}),
         initialMessage: input.initialMessage,
         initialModelContext: input.initialModelContext ?? null,
         title: AUTOMATIC_SESSION_TITLE_FALLBACK,
@@ -95804,6 +95847,7 @@ function mapSession(
     titleSource: (row.titleSource as "user" | "agent" | null) ?? null,
     description: row.description ?? null,
     avatar: storedSessionAvatar(row.avatar),
+    agentId: row.agentId ?? null,
     instructions: row.instructions ?? null,
     policyRole: row.policyRole ?? null,
     agentAccess: sessionAgentAccessFromRow(row),

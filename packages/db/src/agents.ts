@@ -265,13 +265,25 @@ function viewerFilter(viewerSubjectId: string | null): SQL {
 export async function listAgents(
   db: Database,
   home: AgentHome,
-  input: { viewerSubjectId: string | null; filter?: "all" | "yours" },
+  input: {
+    viewerSubjectId: string | null;
+    filter?: "all" | "yours";
+    /** Also read each current revision's content. */
+    withContent?: boolean;
+  },
 ): Promise<AgentRecord[]> {
   if (input.filter === "yours" && input.viewerSubjectId === null) return [];
   return await withRlsContext(db, home, async (tx) => {
     const rows = await rawRows<AgentRow>(
       tx,
       sql`select ${AGENT_COLUMNS}, coalesce(r.first_message <> '', false) as has_first_message
+          ${
+            input.withContent
+              ? sql`, r.instructions, r.first_message,
+                  r.created_by_subject_id as revision_created_by_subject_id,
+                  r.created_at as revision_created_at`
+              : sql``
+          }
         from agents a
         left join agent_revisions r on r.agent_id = a.id and r.revision = a.current_revision
         where a.account_id = ${home.accountId}::uuid
@@ -285,7 +297,7 @@ export async function listAgents(
           }
         order by a.created_at, a.id`,
     );
-    return rows.map((row) => mapAgent(row, false));
+    return rows.map((row) => mapAgent(row, input.withContent === true));
   });
 }
 

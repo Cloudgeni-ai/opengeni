@@ -100,6 +100,7 @@ import {
   getSlackProviderEventIdForTurn,
   getSlackInteractionForSession,
   getSessionAgentId,
+  SessionAgentNotFoundError,
   listSlackAgentChats,
   listSlackAgentsForConnection,
   recordSlackInteractionInbound,
@@ -3463,13 +3464,18 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
       preparedAttachments,
       preparedModelContext,
     );
-    session = await createSessionForRequest(
+    // The chat runs on the agent's own Instructions (a prompt layer of its
+    // own); a chat for an agent deleted meanwhile starts as a plain chat.
+    const boundAgent = openAgent ?? routedAgent;
+    const createSlackSession = async (agentId: string | null) =>
+      createSessionForRequest(
       await withCatalogSettings(deps, grant),
       grant,
       interaction.workspaceId,
       {
         ...defaults,
         requestedSessionId: interaction.sessionReservationId,
+        ...(agentId ? { agentId } : {}),
         initialMessage: prepared.entry.text,
         ...(prepared.modelContext ? { modelContext: prepared.modelContext } : {}),
         instructions: openAgent
@@ -3531,6 +3537,12 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
           : {}),
       },
     );
+    session = await createSlackSession(boundAgent?.id ?? null).catch(async (error: unknown) => {
+      if (boundAgent && error instanceof SessionAgentNotFoundError) {
+        return await createSlackSession(null);
+      }
+      throw error;
+    });
   } catch (error) {
     if (error instanceof HTTPException) {
       await withSlackPreviousContinuationCopy(
