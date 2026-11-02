@@ -3889,7 +3889,7 @@ export const englishMessages = {
   "openGeniLinks.fileIsTooLargeTo": "File is too large to download here.",
   "organizationModel.orgShortaccountid": "Org {shortAccountId}",
   "ownLogins.couldNotChange": "Couldn't change it. Try again.",
-  "ownLogins.inThisChat_one": "1 personal connection in this chat",
+  "ownLogins.inThisChat_one": "{count} personal connection in this chat",
   "ownLogins.inThisChat_other": "{count} personal connections in this chat",
   "ownLogins.noneInThisChat": "No personal connections in this chat",
   "ownLogins.workspaceSees": "People in this workspace see what the agent does with these.",

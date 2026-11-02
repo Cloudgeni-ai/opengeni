@@ -70,7 +70,7 @@ export async function turnOnOwnLoginsHere(
 
 /**
  * Turn your own logins off here: every standing grant behind them, once
- * each. One account connected twice has two connections, and Stop leaves
+ * each. One account connected twice has two connections, and turning it off leaves
  * neither on. Tries every grant, then reports the first failure.
  */
 export async function stopOwnLoginsHere(
@@ -83,6 +83,8 @@ export async function stopOwnLoginsHere(
       account.turnedOnHereGrantId ? [account.turnedOnHereGrantId] : [],
     ),
   );
+  // Nothing to take back: it is on from where it was added, not by a grant here.
+  if (grantIds.size === 0) throw new Error("This login can't be turned off here.");
   const failures: unknown[] = [];
   for (const grantId of grantIds) {
     try {

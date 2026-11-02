@@ -3674,11 +3674,16 @@ function SessionChatPane(props: {
   const ownLoginsHeadsUp = ownLoginsApply ? (
     <OwnLoginsSharedHeadsUp
       key={props.session.id}
-      logins={ownLoginsInUse(
-        connectionAccounts.availableAccountGroups,
-        connectionAccounts.accountChoices,
-        context.accessContext.subjectId,
-      )}
+      // While the accounts can't be read, the line keeps what it last knew.
+      logins={
+        connectionAccounts.loading || connectionAccounts.error
+          ? null
+          : ownLoginsInUse(
+              connectionAccounts.availableAccountGroups,
+              connectionAccounts.accountChoices,
+              context.accessContext.subjectId,
+            )
+      }
       className="px-3.5 pt-2.5 md:px-4"
       logoFor={(login) => props.resolveProviderLogo(login.accounts[0]!.providerDomain)}
       onChange={async (login, on) => {

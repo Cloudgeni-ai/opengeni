@@ -1,7 +1,7 @@
 import type { ConnectionMetadata } from "@opengeni/sdk";
 import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
 import { ChevronDownIcon, InfoIcon } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { ComposerMenuSwitchIndicator } from "../../../ui/composer-menu";
 import {
   DropdownMenu,
@@ -22,29 +22,77 @@ import type {
 
 /** One of your own accounts this chat uses, however many times it is connected. */
 export type OwnLoginInUse = {
-  /** Stable for the account: its connector and who it signs in as (or its connection). */
+  /** Stable for the account: its connector and its email (or its connection). */
   key: string;
   /** The connector it is used through. */
   serverId: string;
+  /** The connector's name. */
+  connector: string;
+  /** Who it signs in as, when the service says; empty otherwise. */
+  identity: string;
   /** Every connection of this account the chat would use (an account can be connected twice). */
   accounts: ConnectionMetadata[];
   /** The connector's name, plus the account when you use more than one account of it. */
   label: string;
 };
 
+const EMAIL_KEYS = [
+  "email",
+  "providerEmail",
+  "googleEmail",
+  "gmailEmail",
+  "googleCalendarEmail",
+  "googleDriveEmail",
+  "atlassianEmail",
+  "linearEmail",
+  "notionEmail",
+  "asanaEmail",
+  "stripeEmail",
+  "oidcEmail",
+] as const;
+
+/** The account's email, when the service gives one: the only name precise
+ * enough to treat two connections as one account. Display names are not. */
+function accountEmail(metadata: Record<string, unknown>): string | null {
+  for (const key of EMAIL_KEYS) {
+    const value = metadata[key];
+    if (typeof value === "string" && /^[^\s@]+@[^\s@]+$/u.test(value.trim()))
+      return value.trim().toLowerCase();
+  }
+  return null;
+}
+
+/** Name each login by its connector, plus the account when one connector has
+ * several here; accounts that can't be told apart by name are numbered. */
+export function labelOwnLogins<T extends Pick<OwnLoginInUse, "connector" | "identity">>(
+  logins: readonly T[],
+): (T & { label: string })[] {
+  const named = (login: T, same: readonly T[]) =>
+    !!login.identity &&
+    same.filter((other) => other.identity.toLowerCase() === login.identity.toLowerCase()).length ===
+      1;
+  return logins.map((login) => {
+    const same = logins.filter((other) => other.connector === login.connector);
+    if (same.length < 2) return { ...login, label: login.connector };
+    if (named(login, same)) return { ...login, label: `${login.connector} (${login.identity})` };
+    const unnamed = same.filter((other) => !named(other, same));
+    return { ...login, label: `${login.connector} ${unnamed.indexOf(login) + 1}` };
+  });
+}
+
 /**
  * The viewer's own logins this chat's next message would use: their accounts
  * among the chat's connectors, as chosen (no choice means every eligible
  * account). Each account counts once: connections of one connector that sign
- * in as the same account are one login. A connection that names no account
- * stays on its own, so different accounts never merge.
+ * in as the same email are one login. Any other connection stays on its own,
+ * so different accounts never merge.
  */
 export function ownLoginsInUse(
   groups: readonly ConnectedAccountGroup[],
   choices: ConnectionAccountChoices,
   subjectId: string,
 ): OwnLoginInUse[] {
-  const used: (OwnLoginInUse & { identity: string; connector: string })[] = [];
+  const used: Omit<OwnLoginInUse, "label">[] = [];
   const seen = new Set<string>();
   for (const group of groups) {
     const chosen = choices[group.serverId];
@@ -58,8 +106,10 @@ export function ownLoginsInUse(
         continue;
       seen.add(account.id);
       const identity = connectionAccountIdentityLabel(account.metadata ?? {}, "");
-      const key = identity
-        ? `account\u0000${group.name}\u0000${identity.toLowerCase()}`
+      const email = accountEmail(account.metadata ?? {});
+      // The team stays part of the account: one email in two Slack teams is two.
+      const key = email
+        ? `account\u0000${group.name}\u0000${identity.toLowerCase() || email}`
         : `connection\u0000${account.id}`;
       const existing = used.find((entry) => entry.key === key);
       if (existing) existing.accounts.push(account);
@@ -67,25 +117,27 @@ export function ownLoginsInUse(
         used.push({
           key,
           serverId: group.serverId,
-          identity,
           connector: group.name,
-          label: group.name,
+          identity,
           accounts: [account],
         });
     }
   }
-  return used.map(({ key, serverId, accounts, identity, connector }) => ({
-    key,
-    serverId,
-    accounts,
-    label:
-      identity && used.filter((entry) => entry.connector === connector).length > 1
-        ? `${connector} (${identity})`
-        : connector,
-  }));
+  return labelOwnLogins(used);
 }
 
-type Override = { on: boolean; pending: boolean };
+/** A change in flight (`pending`), or done and waiting for the account list
+ * to show it: until that list changes (`inventory`), the switch keeps `on`. */
+type Override = { on: boolean; pending: boolean; inventory: string };
+
+function inventoryOf(logins: readonly OwnLoginInUse[]): string {
+  return JSON.stringify(
+    logins.map((login) => [
+      login.key,
+      login.accounts.map((account) => [account.id, account.turnedOnHereGrantId ?? null]),
+    ]),
+  );
+}
 
 /**
  * The owner's quiet line in a chat shared with the workspace (D-54): how many
@@ -93,73 +145,91 @@ type Override = { on: boolean; pending: boolean };
  * in this chat"), never which. It opens a menu with one switch per account,
  * the same turn-on and turn-off as the connector's own "Use for my messages
  * here", under one sentence: people here see what the agent does with them.
- * A login turned off stays in the menu while it is open in this chat, so it
- * can go back on. Switches change at once and go back if the change fails.
- * It never blocks anything.
+ * Whether a switch is on comes from the account list; a change shows at once
+ * and the list decides again once it is done or fails. A login turned off in
+ * this view stays in the menu, so it can go back on. It never blocks anything.
  */
 export function OwnLoginsSharedHeadsUp({
-  logins,
+  logins: incoming,
   onChange,
   logoFor,
   className,
 }: {
-  /** Your own logins that work for your messages here now (see `ownLoginsInUse`). */
-  logins: readonly OwnLoginInUse[];
-  /** Turn one account on or off here; reject when it could not. */
+  /** Your own logins that work for your messages here now (see `ownLoginsInUse`);
+   * `null` while the list can't be read, which keeps the last one. */
+  logins: readonly OwnLoginInUse[] | null;
+  /** Turn one account on or off here, and refresh the list; reject when it could not. */
   onChange: (login: OwnLoginInUse, on: boolean) => Promise<void>;
   /** The connector's logo, when known. */
   logoFor?: ((login: OwnLoginInUse) => string | null) | undefined;
   className?: string | undefined;
 }) {
   const [overrides, setOverrides] = useState<ReadonlyMap<string, Override>>(() => new Map());
+  const [turnedOff, setTurnedOff] = useState<ReadonlySet<string>>(() => new Set());
   const [error, setError] = useState<string | null>(null);
-  // Every account seen in this view, in the order first seen, with its first
-  // label, so a row keeps its place and name while it is off.
+  const [open, setOpen] = useState(false);
+  // The last list read, and every account seen in this view in the order
+  // first seen, so a row keeps its place while it is off. Both only grow or
+  // follow `incoming`, so writing them while rendering repeats cleanly.
+  const lastRead = useRef<readonly OwnLoginInUse[]>([]);
+  if (incoming) lastRead.current = incoming;
+  const logins = lastRead.current;
   const seen = useRef(new Map<string, OwnLoginInUse>());
+  for (const login of logins) seen.current.set(login.key, login);
   const current = new Map(logins.map((login) => [login.key, login] as const));
-  for (const login of logins) {
-    const known = seen.current.get(login.key);
-    seen.current.set(login.key, known ? { ...login, label: known.label } : login);
+  const inventory = inventoryOf(logins);
+  // A new list settles every change that is done: from here on it decides.
+  const [lastInventory, setLastInventory] = useState(inventory);
+  if (lastInventory !== inventory) {
+    setLastInventory(inventory);
+    setOverrides((previous) => new Map([...previous].filter(([, override]) => override.pending)));
   }
-  // A switch turned on settles once the inventory says so too.
-  const settled = [...overrides]
-    .filter(([key, override]) => !override.pending && override.on && current.has(key))
-    .map(([key]) => key)
-    .join("\u0000");
-  useEffect(() => {
-    if (!settled) return;
-    setOverrides((previous) => {
-      const next = new Map(previous);
-      for (const key of settled.split("\u0000")) {
-        const override = next.get(key);
-        if (override && !override.pending && override.on) next.delete(key);
-      }
-      return next;
-    });
-  }, [settled]);
-  const rows = [...seen.current.values()].flatMap((login) => {
-    const override = overrides.get(login.key);
-    if (!current.has(login.key) && !override) return [];
-    const on = override ? override.on : true;
-    // A login that started on where it was added has no grant to take back here.
-    const locked = on && !override && !login.accounts.some(ownLoginCanStopHere);
-    return [{ login, on, pending: override?.pending === true, locked }];
+  const effective = (key: string): Override | undefined => {
+    const override = overrides.get(key);
+    return override && (override.pending || override.inventory === inventory)
+      ? override
+      : undefined;
+  };
+  const visible = [...seen.current.values()].filter(
+    (login) => current.has(login.key) || turnedOff.has(login.key) || effective(login.key),
+  );
+  const rows = labelOwnLogins(visible).map((login) => {
+    const override = effective(login.key);
+    const on = override ? override.on : current.has(login.key);
+    const listed = current.get(login.key);
+    return {
+      // As the list has it now; an account off here keeps its last copy.
+      login,
+      on,
+      // Done but not yet in the list: nothing up to date to act on.
+      busy: override !== undefined && (override.pending || override.on !== Boolean(listed)),
+      // On without a standing grant here for every connection, so it can't
+      // be turned off from here (only from where it was added).
+      locked: on && !override && !!listed && !listed.accounts.every(ownLoginCanStopHere),
+    };
   });
   if (rows.length === 0) return null;
   const onCount = rows.filter((row) => row.on).length;
   const toggle = async (login: OwnLoginInUse, on: boolean) => {
     setError(null);
-    setOverrides((previous) => new Map(previous).set(login.key, { on, pending: true }));
+    if (!on) setTurnedOff((previous) => new Set(previous).add(login.key));
+    setOverrides((previous) =>
+      new Map(previous).set(login.key, { on, pending: true, inventory: "" }),
+    );
     try {
       await onChange(login, on);
-      setOverrides((previous) => new Map(previous).set(login.key, { on, pending: false }));
-    } catch {
-      setError(t("ownLogins.couldNotChange"));
       setOverrides((previous) => {
         const next = new Map(previous);
-        // Back to where it was: on (from the inventory), or still off in this view.
-        if (on) next.set(login.key, { on: false, pending: false });
-        else next.delete(login.key);
+        const override = next.get(login.key);
+        if (override?.pending) next.set(login.key, { ...override, pending: false, inventory });
+        return next;
+      });
+    } catch {
+      setError(t("ownLogins.couldNotChange"));
+      // The list decides again: on stays on, partly on shows on, off stays off.
+      setOverrides((previous) => {
+        const next = new Map(previous);
+        next.delete(login.key);
         return next;
       });
     }
@@ -167,9 +237,16 @@ export function OwnLoginsSharedHeadsUp({
   return (
     <div
       data-testid="own-logins-shared-heads-up"
-      className={`flex min-w-0 items-center text-xs text-fg-muted ${className ?? ""}`}
+      className={`flex min-w-0 items-center gap-2 text-xs text-fg-muted ${className ?? ""}`}
     >
-      <DropdownMenu onOpenChange={() => setError(null)}>
+      <DropdownMenu
+        open={open}
+        onOpenChange={(next) => {
+          setOpen(next);
+          // Read in the menu: closing it puts the line back to just the count.
+          if (!next) setError(null);
+        }}
+      >
         <DropdownMenuTrigger asChild>
           <button
             type="button"
@@ -201,13 +278,13 @@ export function OwnLoginsSharedHeadsUp({
             data-testid="own-logins-list"
             className="min-h-0 overflow-y-auto overscroll-contain"
           >
-            {rows.map(({ login, on, pending, locked }) => (
+            {rows.map(({ login, on, busy, locked }) => (
               <DropdownMenuItem
                 key={login.key}
                 role="menuitemcheckbox"
                 aria-checked={on}
                 title={login.label}
-                disabled={pending || locked}
+                disabled={busy || locked}
                 onSelect={(event) => {
                   event.preventDefault();
                   void toggle(login, !on);
@@ -226,6 +303,11 @@ export function OwnLoginsSharedHeadsUp({
           </DropdownMenuGroup>
         </DropdownMenuContent>
       </DropdownMenu>
+      {error && !open ? (
+        <span role="alert" className="min-w-0 shrink truncate text-danger">
+          {error}
+        </span>
+      ) : null}
     </div>
   );
 }
