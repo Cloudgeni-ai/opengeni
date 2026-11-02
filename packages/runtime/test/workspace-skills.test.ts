@@ -121,6 +121,67 @@ describe("workspace repository skills", () => {
     expect(active).toBe(0);
   });
 
+  test("more skill folders than the discovery bound index the first ones instead of failing", async () => {
+    const files = Object.fromEntries(
+      Array.from({ length: 300 }, (_, index) => {
+        const name = `skill${String(index).padStart(3, "0")}`;
+        return [
+          `.agents/skills/${name}/SKILL.md`,
+          `---\nname: ${name}\ndescription: Step ${index}.\n---\n`,
+        ];
+      }),
+    );
+    const capability = workspaceSkills([{ path: ".agents/skills", source: "repository" }]).bind(
+      fakeSession(files),
+    );
+    const instructions = (await capability.instructions())!;
+    const listed = instructions.split("\n").filter((line) => line.startsWith("- {"));
+    expect(listed).toHaveLength(256);
+    expect(JSON.parse(listed[0]!.slice(2)).name).toBe("skill000");
+    expect(JSON.parse(listed[255]!.slice(2)).name).toBe("skill255");
+    expect(instructions).toContain(
+      "44 more repository skill folders are not listed here. They remain in the workspace; read their SKILL.md with filesystem tools.",
+    );
+  });
+
+  test("an index within its bound is rendered in full, a larger one is shortened and says so", async () => {
+    const skills = (count: number, length: number) =>
+      Object.fromEntries(
+        Array.from({ length: count }, (_, index) => {
+          const name = `skill${String(index).padStart(3, "0")}`;
+          return [
+            `.agents/skills/${name}/SKILL.md`,
+            `---\nname: ${name}\ndescription: ${"d".repeat(length)}\n---\n`,
+          ];
+        }),
+      );
+    const render = async (files: Record<string, string>) =>
+      (await workspaceSkills([{ path: ".agents/skills", source: "repository" }])
+        .bind(fakeSession(files))
+        .instructions())!;
+    const descriptions = (text: string) =>
+      text
+        .split("\n")
+        .filter((line) => line.startsWith("- {"))
+        .map((line) => JSON.parse(line.slice(2)).description as string);
+
+    const small = await render(skills(20, 500));
+    expect(descriptions(small)).toEqual(Array.from({ length: 20 }, () => "d".repeat(500)));
+    expect(small).not.toContain("shortened");
+    expect(small).not.toContain("not listed here");
+
+    const large = await render(skills(200, 2_000));
+    const shown = descriptions(large);
+    expect(shown).toHaveLength(200);
+    expect(shown[0]!.endsWith("…")).toBe(true);
+    expect(shown[0]!.length).toBeLessThan(2_000);
+    expect(large).toContain(
+      "Some descriptions above are shortened to fit; read the SKILL.md for the full text.",
+    );
+    expect(large).not.toContain("not listed here");
+    expect(Buffer.byteLength(large, "utf8")).toBeLessThan(64 * 1024 + 4 * 1024);
+  });
+
   for (const [description, expected] of [
     ["|-\n  First line.\n  Second line.", "First line.\nSecond line."],
     [">-\n  First paragraph.\n\n  Second paragraph.", "First paragraph.\nSecond paragraph."],

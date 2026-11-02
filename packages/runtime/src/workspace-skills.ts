@@ -25,7 +25,13 @@ import { withSandboxOperationPurpose } from "./sandbox/operation-purpose";
 import { SelfhostedControlError } from "./sandbox/selfhosted/control-rpc";
 
 const SKILL_FILE = "SKILL.md";
+/** Skill folders indexed per run: each costs reads before the model runs.
+ * A repository with more indexes the first ones in name order and says how
+ * many it left out, instead of failing the turn. */
 const MAX_DISCOVERED_SKILLS = 256;
+/** Bound on the rendered repository index, like the configured Skill index. */
+const REPOSITORY_SKILL_INDEX_MAX_BYTES = 64 * 1024;
+const SHORTENED = "…";
 const MAX_SKILL_ENTRIES = 1_024;
 const MAX_SKILL_BYTES = 32 * 1024 * 1024;
 const SAFE_SKILL_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -103,6 +109,8 @@ type WorkspaceSkillDiscovery = Readonly<{
   /** True only when the workspace was unreachable: `skills` is then empty and
    * is not an authoritative "no repository skills" answer. */
   unavailable: boolean;
+  /** Skill folders beyond the discovery bound, which were not read. */
+  unindexed: number;
 }>;
 
 export type WorkspaceSkillWarning = Readonly<{
@@ -174,6 +182,7 @@ export class WorkspaceSkillsCapability extends Capability {
   private discover(): Promise<WorkspaceSkillDiscovery> {
     const session = requireWorkspaceSkillSession(this._session);
     const warnings: WorkspaceSkillWarning[] = [];
+    let unindexed = 0;
     return (this.discovery ??= discoverWorkspaceSkills(
       session,
       this.searchPaths,
@@ -181,11 +190,14 @@ export class WorkspaceSkillsCapability extends Capability {
       this._runAs,
       this.shadowedNames,
       (warning) => warnings.push(warning),
+      (count) => {
+        unindexed = count;
+      },
     ).then(
-      (skills) => ({ skills, warnings, unavailable: false }),
+      (skills) => ({ skills, warnings, unavailable: false, unindexed }),
       (error: unknown) => {
         if (!isUnreachableWorkspaceError(error)) throw error;
-        return { skills: [], warnings, unavailable: true };
+        return { skills: [], warnings, unavailable: true, unindexed: 0 };
       },
     ));
   }
@@ -250,7 +262,7 @@ export class WorkspaceSkillsCapability extends Capability {
   }
 
   override async instructions(): Promise<string | null> {
-    const { skills, warnings, unavailable } = await this.discover();
+    const { skills, warnings, unavailable, unindexed } = await this.discover();
     const warningText = warnings.length
       ? `\n\n### Skipped repository skills\nThese repository entries were omitted because their metadata or names conflict. Other skills remain available; correct the source files to use the omitted entries.\n${warnings.map((warning) => `- ${JSON.stringify(warning)}`).join("\n")}`
       : "";
@@ -259,14 +271,10 @@ export class WorkspaceSkillsCapability extends Capability {
 
 Repository skills could not be indexed because the workspace was unreachable when this run started (for example, its Connected Machine is offline). Sandbox tools may fail until it reconnects; if that blocks the task, tell the user.${warningText}`;
     }
-    if (skills.length === 0) return warnings.length ? `## Repository skills${warningText}` : null;
+    if (skills.length === 0 && unindexed === 0)
+      return warnings.length ? `## Repository skills${warningText}` : null;
 
-    const available = skills
-      .map(
-        (skill) =>
-          `- ${JSON.stringify({ id: repositorySkillId(skill), name: skill.name, description: skill.description, reader: "repository_skill_read", path: skill.path })}`,
-      )
-      .join("\n");
+    const available = repositorySkillIndexLines(skills, unindexed).join("\n");
     return `## Repository skills
 
 Repository skills are instructions already present in the live workspace. Read them with repository_skill_read using the exact repository: id below. The reader returns current live files; ordinary filesystem tools execute referenced scripts and read binary assets. Configured Skills use their separate skill_read index.
@@ -280,6 +288,66 @@ ${available}
 - Use only the minimum relevant skills for the turn, and say briefly which ones you are using.
 - Do not assume a skill remains applicable on later turns; evaluate the current request again.${warningText}`;
   }
+}
+
+function repositorySkillLine(skill: WorkspaceSkill, description: string): string {
+  return `- ${JSON.stringify({ id: repositorySkillId(skill), name: skill.name, description, reader: "repository_skill_read", path: skill.path })}`;
+}
+
+function repositorySkillLinesWithin(skills: readonly WorkspaceSkill[], limit: number): string[] {
+  return skills.map((skill) => {
+    const chars = Array.from(skill.description);
+    return repositorySkillLine(
+      skill,
+      chars.length <= limit ? skill.description : `${chars.slice(0, limit).join("")}${SHORTENED}`,
+    );
+  });
+}
+
+function utf8LinesBytes(lines: readonly string[]): number {
+  let bytes = 0;
+  for (const line of lines) bytes += Buffer.byteLength(line, "utf8") + 1;
+  return bytes;
+}
+
+/**
+ * The repository index within its bound. An index that fits is rendered
+ * exactly as before. Otherwise the longest descriptions are shortened to the
+ * largest common length that fits, and only if the entries still do not fit
+ * are the last ones left out. Every shortening or omission is stated.
+ */
+function repositorySkillIndexLines(skills: readonly WorkspaceSkill[], unindexed: number): string[] {
+  const notOpened = (count: number) =>
+    `${count} more repository skill folders are not listed here. They remain in the workspace; read their SKILL.md with filesystem tools.`;
+  const budget = REPOSITORY_SKILL_INDEX_MAX_BYTES - 512;
+  const longest = Math.max(0, ...skills.map((skill) => Array.from(skill.description).length));
+  const complete = repositorySkillLinesWithin(skills, longest);
+  if (utf8LinesBytes(complete) <= budget)
+    return unindexed > 0 ? [...complete, notOpened(unindexed)] : complete;
+  let low = 0;
+  let high = longest;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (utf8LinesBytes(repositorySkillLinesWithin(skills, mid)) <= budget) low = mid;
+    else high = mid - 1;
+  }
+  const lines = repositorySkillLinesWithin(skills, low);
+  let bytes = 0;
+  let included = 0;
+  for (const line of lines) {
+    const lineBytes = Buffer.byteLength(line, "utf8") + 1;
+    if (bytes + lineBytes > budget) break;
+    bytes += lineBytes;
+    included += 1;
+  }
+  const omitted = skills.length - included + unindexed;
+  return [
+    ...lines.slice(0, included),
+    ...(low < longest
+      ? ["Some descriptions above are shortened to fit; read the SKILL.md for the full text."]
+      : []),
+    ...(omitted > 0 ? [notOpened(omitted)] : []),
+  ];
 }
 
 export function workspaceSkills(
@@ -301,6 +369,7 @@ export async function discoverWorkspaceSkills(
   runAs?: string,
   shadowedNames: ReadonlySet<string> = new Set(),
   onWarning?: (warning: WorkspaceSkillWarning) => void,
+  onUnindexed?: (folders: number) => void,
 ): Promise<readonly WorkspaceSkill[]> {
   const startedAt = performance.now();
   let outcome: "completed" | "failed" = "completed";
@@ -316,6 +385,7 @@ export async function discoverWorkspaceSkills(
           console.warn("Repository skill skipped", warning);
           onWarning?.(warning);
         },
+        onUnindexed,
       ),
     );
   } catch (error) {
@@ -338,6 +408,7 @@ async function discoverWorkspaceSkillsUnmeasured(
   runAs: string | undefined,
   shadowedNames: ReadonlySet<string>,
   warn: (warning: WorkspaceSkillWarning) => void,
+  onUnindexed?: (folders: number) => void,
 ): Promise<readonly WorkspaceSkill[]> {
   if (!session.listDir || !session.readFile) {
     throw new Error("Workspace skill discovery requires sandbox listDir() and readFile() support");
@@ -352,15 +423,14 @@ async function discoverWorkspaceSkillsUnmeasured(
       return [];
     }
   });
-  const candidates = roots.flatMap((entries, index) =>
+  const folders = roots.flatMap((entries, index) =>
     [...entries]
       .sort((left, right) => left.name.localeCompare(right.name))
       .filter((entry) => entry.type === "dir")
       .map((entry) => ({ entry, searchPath: searchPaths[index]! })),
   );
-  if (candidates.length > MAX_DISCOVERED_SKILLS) {
-    throw new Error(`Repository skill discovery exceeds ${MAX_DISCOVERED_SKILLS} directories`);
-  }
+  const candidates = folders.slice(0, MAX_DISCOVERED_SKILLS);
+  if (folders.length > candidates.length) onUnindexed?.(folders.length - candidates.length);
   const loaded = await mapDiscovery(candidates, async ({ entry, searchPath }) => {
     const skillMarkdownPath = joinWorkspacePath(entry.path, SKILL_FILE);
     let markdown: string;
