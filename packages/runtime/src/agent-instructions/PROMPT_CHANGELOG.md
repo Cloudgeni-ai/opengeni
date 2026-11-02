@@ -2,7 +2,7 @@
 
 Fixed guidance that rides on every request is shorter where it cannot help:
 
-- The Codemode directive (legacy and modular, about 630 to 500 o200k tokens)
+- The Codemode directive (legacy and modular, about 630 to 520 o200k tokens)
   says the same things more compactly: catalog scope, when to prefer Codemode,
   which client to run (native client, a compatible `ogtool` from PATH, or
   the pinned package), the list/show/call/declarations commands, the Bun module import,

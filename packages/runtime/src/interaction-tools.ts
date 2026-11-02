@@ -160,11 +160,12 @@ class InteractionExecutionResult<T> {
 
 const BROWSER_AGENT_MAX_NODES = 60;
 /**
- * How to work with an open BrowserSession. It follows each browser_open result
- * the model reads, so it arrives when a browser is in use instead of riding in
- * the entry tool's description on every request of every session. What the
- * model must know before opening (placement, headed or headless, storage,
- * Code Mode for bulk work) stays in the description.
+ * How to work with an open BrowserSession. It follows the first browser_open
+ * result the model reads in an attempt, so it arrives when a browser is in use
+ * instead of riding in the entry tool's description on every request of every
+ * session. What the model must know before opening (placement, headed or
+ * headless, storage, Code Mode for bulk work, CAPTCHAs) stays in the
+ * description.
  */
 export const BROWSER_OPEN_RESULT_GUIDANCE =
   "Act on the outline's elements directly instead of observing again; browser_observe, browser_act, browser_screenshot and browser_tabs work on this session. A new attached session opens a dedicated tab.";
