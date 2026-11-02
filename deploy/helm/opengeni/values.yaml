@@ -1,5 +1,6 @@
 # Optional independent operator job; never uses application/runtime credentials.
-# Retains latest nightly + a Sunday weekly checkpoint. See docs/backups.md.
+# Stores nightly recovery points in a restic repository (7 daily and 4 weekly
+# by default). See docs/backups.md.
 backup:
   enabled: false
   schedule: "15 3 * * *"
