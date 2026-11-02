@@ -8720,9 +8720,7 @@
       "mcpUrl": "https://api.mobbin.com/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
-      "scopesHint": [
-        "openid"
-      ],
+      "scopesHint": ["openid"],
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "official:mcp-registry:com.mobbin/mobbin@1.0.1",
@@ -15036,11 +15034,7 @@
         "update_event",
         "delete_event"
       ],
-      "requireApproval": [
-        "create_event",
-        "update_event",
-        "delete_event"
-      ],
+      "requireApproval": ["create_event", "update_event", "delete_event"],
       "connectionOwnership": "personal_only",
       "credentialFacts": [
         {

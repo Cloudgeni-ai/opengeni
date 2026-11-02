@@ -326,7 +326,7 @@ describe("conversation connection card", () => {
     expect(searchConsoleIdentity?.name).toBe("Google Search Console");
     const name = searchConsoleIdentity!.name!;
     const logoPath = "catalog-assets/searchconsole.googleapis.com/3e3dfe26964c.svg";
-    const row = registryRow(name, logoPath);
+    const catalogRow = registryRow(name, logoPath);
     // Served through the API's catalog-asset route; a data URL keeps the test DOM from fetching.
     const assetUrl = context.client.catalogAssetUrl;
     const served =
@@ -335,8 +335,8 @@ describe("conversation connection card", () => {
     // The agent's request may still carry the raw domain; the live catalog wins.
     const h = await render(
       false,
-      row,
-      row,
+      catalogRow,
+      catalogRow,
       false,
       "workspace",
       registryNotice("searchconsole.googleapis.com"),
@@ -357,8 +357,15 @@ describe("conversation connection card", () => {
   });
 
   test("a row still titled by its domain says it once and falls back to the monogram", async () => {
-    const row = registryRow("searchconsole.googleapis.com", null);
-    const h = await render(false, row, row, false, "workspace", registryNotice(row.name));
+    const catalogRow = registryRow("searchconsole.googleapis.com", null);
+    const h = await render(
+      false,
+      catalogRow,
+      catalogRow,
+      false,
+      "workspace",
+      registryNotice(catalogRow.name),
+    );
     try {
       const card = h.host.querySelector(".og-session-capability-identity");
       expect(card?.querySelector("h3")?.textContent).toBe("searchconsole.googleapis.com");

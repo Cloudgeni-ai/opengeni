@@ -1275,6 +1275,14 @@ malformed committed snapshot or committed row fails the refresh loudly instead
 of silently disabling retention. `--input <raw.json>` accepts either an
 already-hydrated upstream document or a precomputed `importRows` snapshot for
 offline reruns.
+Every refresh also screens logos: it fetches each row's integrations.sh logo
+and clears `logoSourceUrl` for one that is only a generated letter placeholder
+(an SVG of shapes and three or fewer text characters), so the product's own
+monogram shows instead of a hotlinked letter. The header's `logoScreen` lists
+the cleared rows and counts unreachable logos, which are left unchanged.
+`bun run catalog:screen-logos` reruns the screen on the committed snapshot;
+run `bun run format` on the snapshot afterwards. The importer and the vendoring
+script reject such a placeholder too (`generated_letter_placeholder`).
 Standard Helm installs and upgrades import that committed snapshot by
 default through the `catalogImport` hook Job; set `catalogImport.enabled=false`
 to opt out. The default `catalogImport.skipLogos=true` keeps deployment success
@@ -1326,6 +1334,21 @@ written in canonical MCP URL form and must match an importable snapshot row;
 the import fails loudly on an unknown key, a non-canonical URL, or a curated
 entry that matches nothing, because each of those would otherwise silently
 ship the raw aggregator row.
+
+The overlay's `identities` list is a narrower fix for well-known services
+the snapshot names only by hostname or marks only with a generated letter
+(integrations.sh serves a letter-on-a-square SVG for every domain it has no
+mark for). An identity, keyed by canonical MCP URL like an entry, sets just the
+display `name`, an optional `logoSourceUrl` from a licensed source (Simple
+Icons, CC0-1.0, for the Google API rows) and an optional `homepageUrl`, with
+`notes` recording the evidence. It never curates, features, marks official or
+changes tier, auth, scopes or tools, so the row keeps its Community label and
+long-tail ordering; an mcpUrl may not be both an entry and an identity. The
+importer resolves a row's name as official, then identity, then snapshot, and
+its logo source the same way. Identity rows are vendored like curated ones, so
+their marks render under the default `--skip-logos` install. The setup card,
+the connector browser and every other surface read the same catalog row, so a
+fixed name also fixes the "Connect <name>" button.
 
 Every overlay match also records `metadata.curation.curated: true`. That fact
 is presentation provenance, not a badge or a security review. The web browser
@@ -1386,7 +1409,7 @@ so record those from a reviewed attempt.
 A default deployment must not depend on integrations.sh or any other logo host
 being reachable at deploy time, yet the curated connectors should still render
 their logos rather than monograms. `data/catalog/logos/` therefore holds one
-committed asset per curated row whose effective logo source is published,
+committed asset per curated or identity row whose effective logo source is published,
 plus `manifest.json` recording provenance for each (capability id, domain,
 canonical MCP URL, source URL, SHA-256, content type, byte size, fetch time).
 The importer copies a vendored asset into object storage under the same
@@ -1403,12 +1426,12 @@ part of the `--if-changed` import fingerprint, so adding or replacing a
 vendored asset lands on the next deploy.
 
 Regenerate the directory with `bun run catalog:vendor-logos` (add `--dry-run`
-to preview). It fetches each curated row's logo once, applies the same
+to preview). It fetches each curated or identity row's logo once, applies the same
 image-content-type and size validation the importer applies, refuses to write
 an invalid response, keeps a still-valid prior asset when a refetch fails, and
 removes files no curated row references. Review the diff and commit it like a
 snapshot or overlay change; the committed manifest is checked in tests to cover
-exactly the curated rows that permit a logo, byte for byte.
+exactly the curated and identity rows that permit a logo, byte for byte.
 
 Fiken, X, and Reddit are synthesized first-party catalog rows rather than
 integrations.sh imports, so they cannot receive an importer-owned
