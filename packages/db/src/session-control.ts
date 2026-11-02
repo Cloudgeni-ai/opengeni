@@ -3791,6 +3791,12 @@ async function cancelSessionSubtreeInTransaction(
         queueVersion: sql`${schema.sessions.queueVersion} + 1`,
         queueHeadPosition: 0,
         queueTailPosition: 0,
+        // A cancelled chat has no turn left to wake: its input wait ends with
+        // it, so it no longer counts as waiting (nor keeps it from storage).
+        inputWaitTurnId: null,
+        inputWaitUntil: null,
+        inputWaitReason: null,
+        inputWaitSetAt: null,
         lastSequence: sequence,
         updatedAt: now,
       })

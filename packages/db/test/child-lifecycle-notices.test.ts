@@ -1334,7 +1334,7 @@ describe("child lifecycle notices", () => {
     ).toMatchObject({ kind: "child_terminal_result" });
   });
 
-  test("cancelling a chat with an undelivered update and an unanswered tool call writes events in order", async () => {
+  test("cancelling a chat with an undelivered update and an unanswered tool call writes events in order and ends its input wait", async () => {
     const grant = await workspace();
     const parent = await startSession(grant, { goal: true, message: "orchestrate" });
     const child = await startSession(grant, { parent, message: "work" });
@@ -1357,6 +1357,12 @@ describe("child lifecycle notices", () => {
         values (${grant.accountId}, ${grant.workspaceId}, ${child.session.id}, ${child.turn.id},
           ${child.turn.executionGeneration}, ${child.attemptId}, 'call-1', 'function_call',
           ${json(call)}, ${JSON.stringify(call)})`;
+      // An input wait an earlier turn set, which nothing will settle once
+      // the chat is cancelled.
+      await sql`update sessions set input_wait_turn_id = ${child.turn.id},
+          input_wait_until = now() - interval '1 day', input_wait_reason = 'Waiting for CI',
+          input_wait_set_at = now() - interval '2 days'
+        where id = ${child.session.id}`;
     });
     const [before] = await shared.admin<{ last: number }[]>`
       select last_sequence as last from session_event_cursors where session_id = ${child.session.id}`;
@@ -1385,9 +1391,10 @@ describe("child lifecycle notices", () => {
     expect(types).toContain("turn.cancelled");
     expect(types.indexOf("agent.toolCall.output")).toBeGreaterThanOrEqual(0);
     expect(types.indexOf("agent.toolCall.output")).toBeLessThan(types.indexOf("turn.cancelled"));
-    const [session] = await shared.admin<{ status: string }[]>`
-      select status from sessions where id = ${child.session.id}`;
-    expect(session!.status).toBe("cancelled");
+    const [session] = await shared.admin<{ status: string; waiting: boolean }[]>`
+      select status, input_wait_until is not null as waiting from sessions
+      where id = ${child.session.id}`;
+    expect(session).toEqual({ status: "cancelled", waiting: false });
   });
 
   test("direct human pause notifies the parent; the parent's own attempt or an ancestor pause does not", async () => {
