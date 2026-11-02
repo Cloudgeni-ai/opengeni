@@ -1539,18 +1539,27 @@ describe("API Integration provider OAuth", () => {
     const setup = await beginBuiltIn(fixture, workspace, "account-before-commit");
     // While the provider's API description is read (a network call that can
     // take seconds), nothing may hold the attempt row or any other lock the
-    // commit takes: another transaction locks it without waiting.
+    // commit takes: another transaction locks it without waiting. The read
+    // runs alongside the code exchange, whose own short transactions may
+    // still be settling, so the read waits until they are done; a transaction
+    // held across the read would never be done while the read is pending.
     const lockedDuringRead: boolean[] = [];
     fixture.setOnSourceRead(async () => {
-      const locked = await shared!.admin
-        .begin(async (sql) => {
-          await sql`select id from connect_attempts where id = ${setup.attempt.id}::uuid for update nowait`;
-          const open = await sql`select count(*)::int as count from pg_stat_activity
-            where datname = current_database() and pid <> pg_backend_pid()
-              and state like 'idle in transaction%'`;
-          return open[0]!.count > 0;
-        })
-        .catch(() => true);
+      const lockedNow = () =>
+        shared!.admin
+          .begin(async (sql) => {
+            await sql`select id from connect_attempts where id = ${setup.attempt.id}::uuid for update nowait`;
+            const open = await sql`select count(*)::int as count from pg_stat_activity
+              where datname = current_database() and pid <> pg_backend_pid()
+                and state like 'idle in transaction%'`;
+            return open[0]!.count > 0;
+          })
+          .catch(() => true);
+      let locked = await lockedNow();
+      for (let check = 0; locked && check < 60; check += 1) {
+        await Bun.sleep(50);
+        locked = await lockedNow();
+      }
       lockedDuringRead.push(locked);
     });
     expect((await callback(fixture, setup.state)).status).toBe(302);
