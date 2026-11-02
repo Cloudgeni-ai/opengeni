@@ -904,7 +904,11 @@ export {
   protocolItemsFromGeneratedItems,
   type OpenSuffixInterruptionKind,
 } from "./open-suffix";
-export { normalizeProtocolJsonValue, UnsupportedProtocolJsonValueError } from "./protocol-json";
+export {
+  normalizeProtocolJsonValue,
+  UnsupportedProtocolJsonValueError,
+  type ProtocolJsonOptions,
+} from "./protocol-json";
 export {
   projectHistoryForProvider,
   ProviderHistoryIncompatibleError,

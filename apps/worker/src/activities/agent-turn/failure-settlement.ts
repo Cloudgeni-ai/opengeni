@@ -1,4 +1,5 @@
 import { FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE } from "./provider-recovery-policy";
+import { unsupportedProtocolValueFailure } from "./protocol-value-failure";
 import { recordSessionUsageLimitEvent } from "@opengeni/core";
 import { reportSessionPersistenceFailure } from "./persistence-diagnostic";
 import { shouldFallbackModelSocket } from "./persistent-transport-recovery";
@@ -1096,6 +1097,40 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     control.turnMetricOutcome = "failed";
     control.activityStatus = "idle";
     control.activityError = error;
+    return claimedResult({ status: "idle" });
+  }
+  // A protocol JSON boundary refused a value this turn prepared. Retrying the
+  // same turn refuses it again, so end the turn with a typed failure and keep
+  // the session usable for the next message instead of failing it.
+  const protocolValueFailure = unsupportedProtocolValueFailure(error);
+  if (protocolValueFailure && eventing.publish && attempt.turnId && eventing.turnStartedPublished) {
+    await flushRuntimeBatcher();
+    await historySink.reconcileConversationTruth();
+    if (
+      !(await eventing.settle!({
+        events: [
+          {
+            type: "turn.failed",
+            payload: { ...protocolValueFailure, recovery: "user_message" },
+          },
+          { type: "session.status.changed", payload: { status: "idle" } },
+        ],
+        turnStatus: "failed",
+        sessionStatus: "idle",
+        activeTurnId: null,
+      }))
+    ) {
+      return claimedResult({ status: "cancelled" });
+    }
+    control.turnMetricOutcome = "failed";
+    control.activityStatus = "idle";
+    control.activityError = error;
+    await deliverFailedChildTurnToParent(
+      { db, bus, settings, observability, wakeSessionWorkflow },
+      input.workspaceId,
+      input.sessionId,
+      attempt.turnId,
+    );
     return claimedResult({ status: "idle" });
   }
   // Budget/limit exhaustion between model calls is account state, not an
