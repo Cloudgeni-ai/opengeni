@@ -703,7 +703,7 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     const { activities: run } = activities(storage, provider);
     expect(await run.transcribeRecordingVersion(recording.input)).toEqual({ outcome: "complete" });
 
-    expect(calls.map((call) => [call.audio.fileName, call.diarize, call.language])).toEqual([
+    expect(calls.map((call) => [call.audio.fileName, call.diarize, call.language]).sort()).toEqual([
       ["track-0.webm", true, "en"],
       ["track-1.webm", true, "en"],
     ]);
@@ -1370,14 +1370,18 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       diarizer: () => null,
       aligner: () => null,
     });
-    await expect(cancelled.transcribeRecordingVersion(recording.input)).rejects.toMatchObject({
+    // Another meeting: the first attempt above already kept both tracks' answers.
+    const other = await capturedRecording(storage);
+    await expect(cancelled.transcribeRecordingVersion(other.input)).rejects.toMatchObject({
       type: "interrupted",
     });
-    const versions = await listRecordingTranscriptVersions(client.db, {
-      ...recording.actor,
-      recordingId: recording.input.recordingId,
-    });
-    expect(versions.map((version) => version.state)).not.toContain("failed");
+    for (const meeting of [recording, other]) {
+      const versions = await listRecordingTranscriptVersions(client.db, {
+        ...meeting.actor,
+        recordingId: meeting.input.recordingId,
+      });
+      expect(versions.map((version) => version.state)).not.toContain("failed");
+    }
   });
 
   test("a retry asks the provider afresh, under a request identity no attempt used", async () => {
@@ -1417,8 +1421,10 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     expect(
       await activities(storage, provider).activities.transcribeRecordingVersion(recording.input),
     ).toEqual({ outcome: "complete" });
-    expect([...sent]).toEqual([
+    // The tracks are asked side by side, both again on the retry.
+    expect([...sent].sort()).toEqual([
       `${recording.input.versionId}:a1:0`,
+      `${recording.input.versionId}:a1:1`,
       `${recording.input.versionId}:a2:0`,
       `${recording.input.versionId}:a2:1`,
     ]);
@@ -1464,7 +1470,7 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       await activities(storage, provider).activities.transcribeRecordingVersion(recording.input),
     ).toEqual({ outcome: "complete" });
     // The first track was heard once; only the lost one is asked again.
-    expect(sent).toEqual([
+    expect(sent.sort()).toEqual([
       `${recording.input.versionId}:a1:0`,
       `${recording.input.versionId}:a1:1`,
       `${recording.input.versionId}:a2:1`,
@@ -1579,7 +1585,7 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     };
     const run = activities(storage, subscription, null, ours, aligner).activities;
     expect(await run.transcribeRecordingVersion(recording.input)).toEqual({ outcome: "complete" });
-    expect(aligned).toEqual([
+    expect(aligned.sort((left, right) => left.fileName.localeCompare(right.fileName))).toEqual([
       { fileName: "track-0.webm", words: ["Hello", "there"] },
       { fileName: "track-1.webm", words: ["Hi.", "Yes!"] },
     ]);
@@ -1667,8 +1673,8 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
         aligner,
       ).activities.transcribeRecordingVersion(recording.input),
     ).toEqual({ outcome: "complete" });
-    // The first track was asked once; the retry placed its kept words.
-    expect(asked).toEqual(["track-0.webm", "track-1.webm"]);
+    // Each track was asked once; the retry placed their kept words.
+    expect(asked.sort()).toEqual(["track-0.webm", "track-1.webm"]);
     const transcript = await getRecordingTranscriptPage(client.db, {
       ...recording.actor,
       recordingId: recording.input.recordingId,

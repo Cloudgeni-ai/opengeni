@@ -608,6 +608,16 @@ function meetingCharge(
   return spec.creditPricing ? { pricing: spec.creditPricing } : null;
 }
 
+/**
+ * Wait for every track's work, then fail with the first track's failure, if
+ * any: a track that fails never leaves another still running unseen, which a
+ * retry would otherwise race.
+ */
+async function everyTrack(work: ReadonlyArray<Promise<void>>): Promise<void> {
+  const settled = await Promise.allSettled(work);
+  for (const result of settled) if (result.status === "rejected") throw result.reason;
+}
+
 /** A meeting that sent no audio for this long is not scanned until it does. */
 export const SPEAKER_SCAN_IDLE_MILLISECONDS = 15 * 60_000;
 
@@ -1014,160 +1024,176 @@ export function createRecordingActivities(
           offsetMilliseconds: number;
           audio: Awaited<ReturnType<typeof preparedTrackAudio>>;
         }> = [];
-        for (const plan of plans) {
-          const track = job.recording.tracks.find((item) => item.trackNumber === plan.trackNumber)!;
-          const chunks = job.chunks.filter((chunk) => chunk.trackNumber === plan.trackNumber);
-          if (chunks.length === 0) continue;
-          const offsetMilliseconds = Math.min(...chunks.map((chunk) => chunk.startMilliseconds));
-          const audio = await measureRecordingStage("prepare", () =>
-            preparedTrackAudio({
-              db,
-              objectStorage,
-              settings,
-              actor,
-              recordingId: input.recordingId,
-              trackNumber: plan.trackNumber,
-              mimeType: track.mimeType,
-              chunks,
-              offsetMilliseconds,
-              knownDurationMilliseconds: Math.max(
-                0,
-                track.durationMilliseconds - offsetMilliseconds,
-              ),
-              signal,
-              store: true,
-            }),
-          );
-          telemetry.preparedBytes += audio.storedBytes;
-          prepared.push({ plan, track, offsetMilliseconds, audio });
-        }
-        for (const { plan, track, offsetMilliseconds, audio } of prepared) {
-          heartbeat({ phase: "transcribing", trackNumber: plan.trackNumber });
-          // The model's own diarization is still requested when it has one, so
-          // a failure of ours falls back to it.
-          const diarize = capabilities.diarization;
-          const useOurs =
-            ourDiarizer !== null &&
-            (requested.diarizer === "ours" || !capabilities.diarization || recognizeVoices);
-          const trackAudio = {
-            bytes: audio.bytes,
-            mimeType: audio.mimeType,
-            fileName: `track-${plan.trackNumber}.${audio.extension}`,
-          };
-          const request = {
-            model: found.spec.model,
-            language: requested.language,
-            diarize,
-            maxSpeakers: requested.speakers ?? requested.maxSpeakers,
-            keyterms: capabilities.keyterms ? requested.keyterms : undefined,
-            signal,
-            scope: {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              subjectId: input.ownerSubjectId,
-              // Each attempt asks afresh: a provider never sends a request
-              // identity twice, so reusing the last attempt's would refuse
-              // every retry after a lost worker or a provider failure.
-              requestId: `${input.versionId}:a${job.attempt}:${plan.trackNumber}`,
-            },
-          };
-          const onPiece = (piece: number) =>
-            heartbeat({ phase: "transcribing", trackNumber: plan.trackNumber, piece });
-          // Long quiet stretches (the computer's audio in a room meeting, a
-          // microphone while its person listens) hold no words, so they are
-          // never sent: a silent track not at all, and the rest only when the
-          // speakers come from our diarizer or nowhere, since a model's own
-          // speakers don't carry across the pieces.
-          const sound = await withHeartbeat(() =>
-            measureRecordingStage("convert", () =>
-              detectRecordingSound({
-                audio,
-                durationMilliseconds: audio.durationMilliseconds,
-                ffmpegPath: settings.voiceInputFfmpegPath,
+        // Tracks are prepared, then transcribed, side by side: the worker has
+        // the cores, and a meeting with computer audio has two.
+        await everyTrack(
+          plans.map(async (plan) => {
+            const track = job.recording.tracks.find(
+              (item) => item.trackNumber === plan.trackNumber,
+            )!;
+            const chunks = job.chunks.filter((chunk) => chunk.trackNumber === plan.trackNumber);
+            if (chunks.length === 0) return;
+            const offsetMilliseconds = Math.min(...chunks.map((chunk) => chunk.startMilliseconds));
+            const audio = await measureRecordingStage("prepare", () =>
+              preparedTrackAudio({
+                db,
+                objectStorage,
+                settings,
+                actor,
+                recordingId: input.recordingId,
+                trackNumber: plan.trackNumber,
+                mimeType: track.mimeType,
+                chunks,
+                offsetMilliseconds,
+                knownDurationMilliseconds: Math.max(
+                  0,
+                  track.durationMilliseconds - offsetMilliseconds,
+                ),
                 signal,
+                store: true,
               }),
-            ),
-          ).catch((error: unknown) => {
-            if (signal?.aborted) throw error;
-            observability.warn("couldn't find a track's quiet stretches; sending all of it", {
-              workspaceId: input.workspaceId,
-              recordingId: input.recordingId,
-              versionId: input.versionId,
-              trackNumber: plan.trackNumber,
-              error: errorMessage(error),
+            );
+            telemetry.preparedBytes += audio.storedBytes;
+            prepared.push({ plan, track, offsetMilliseconds, audio });
+          }),
+        );
+        prepared.sort((left, right) => left.plan.trackNumber - right.plan.trackNumber);
+        await everyTrack(
+          prepared.map(async ({ plan, track, offsetMilliseconds, audio }) => {
+            heartbeat({ phase: "transcribing", trackNumber: plan.trackNumber });
+            // The model's own diarization is still requested when it has one, so
+            // a failure of ours falls back to it.
+            const diarize = capabilities.diarization;
+            const useOurs =
+              ourDiarizer !== null &&
+              (requested.diarizer === "ours" || !capabilities.diarization || recognizeVoices);
+            const trackAudio = {
+              bytes: audio.bytes,
+              mimeType: audio.mimeType,
+              fileName: `track-${plan.trackNumber}.${audio.extension}`,
+            };
+            const request = {
+              model: found.spec.model,
+              language: requested.language,
+              diarize,
+              maxSpeakers: requested.speakers ?? requested.maxSpeakers,
+              keyterms: capabilities.keyterms ? requested.keyterms : undefined,
+              signal,
+              scope: {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                subjectId: input.ownerSubjectId,
+                // Each attempt asks afresh: a provider never sends a request
+                // identity twice, so reusing the last attempt's would refuse
+                // every retry after a lost worker or a provider failure.
+                requestId: `${input.versionId}:a${job.attempt}:${plan.trackNumber}`,
+              },
+            };
+            const onPiece = (piece: number) =>
+              heartbeat({ phase: "transcribing", trackNumber: plan.trackNumber, piece });
+            // Long quiet stretches (the computer's audio in a room meeting, a
+            // microphone while its person listens) hold no words, so they are
+            // never sent: a silent track not at all, and the rest only when the
+            // speakers come from our diarizer or nowhere, since a model's own
+            // speakers don't carry across the pieces.
+            const sound = await withHeartbeat(() =>
+              measureRecordingStage("convert", () =>
+                detectRecordingSound({
+                  audio,
+                  durationMilliseconds: audio.durationMilliseconds,
+                  ffmpegPath: settings.voiceInputFfmpegPath,
+                  signal,
+                }),
+              ),
+            ).catch((error: unknown) => {
+              if (signal?.aborted) throw error;
+              observability.warn("couldn't find a track's quiet stretches; sending all of it", {
+                workspaceId: input.workspaceId,
+                recordingId: input.recordingId,
+                versionId: input.versionId,
+                trackNumber: plan.trackNumber,
+                error: errorMessage(error),
+              });
+              return null;
             });
-            return null;
-          });
-          const silent = sound !== null && sound.length === 0;
-          const sendOnly = silent || useOurs || !diarize ? sound : null;
-          const runOurs = () =>
-            useOurs && !silent
-              ? measureRecordingStage("diarize", async () =>
-                  ourDiarizer.diarize(trackAudio, {
-                    // What was scanned while the meeting was recorded.
-                    cache: await speakerScan(objectStorage, plan.trackNumber),
-                    // A known head count is exact only when everyone is on
-                    // this one track; split across tracks, it is each one's
-                    // upper bound.
-                    ...(requested.speakers !== undefined && prepared.length === 1
-                      ? { speakers: requested.speakers }
-                      : { maxSpeakers: requested.speakers ?? requested.maxSpeakers }),
-                    signal,
-                  }),
-                ).catch((error: unknown) => {
-                  // Stopped with the worker: the retry runs it again, so the
-                  // transcript never silently loses our speakers.
-                  if (signal?.aborted) throw error;
-                  if (error instanceof RecordingSpeakersError && error.interrupted) throw error;
-                  telemetry.ourDiarizerFailed = true;
-                  observability.warn("our diarizer failed; using the model's speakers", {
-                    workspaceId: input.workspaceId,
-                    recordingId: input.recordingId,
-                    versionId: input.versionId,
-                    trackNumber: plan.trackNumber,
-                    error: errorMessage(error),
-                  });
-                  return null;
-                })
-              : Promise.resolve(null);
-          const [result, ours] = await withHeartbeat(async () => {
-            return await Promise.all([
-              transcribeTrack({
-                provider: found.provider,
-                spec: found.spec,
-                audio: { ...trackAudio, extension: audio.extension },
-                durationMilliseconds: audio.durationMilliseconds,
-                ffmpegPath: settings.voiceInputFfmpegPath,
-                credentials,
-                onPiece,
-                request,
-                aligner,
-                onAligned: (aligned) => addAlignment(telemetry, aligned),
-                pieces: piecesFor(plan.trackNumber),
-                sound: sendOnly,
-                onSent: (milliseconds) => {
-                  sentMilliseconds += milliseconds;
-                },
-              }),
-              runOurs(),
-            ]);
-          });
-          let words = result.words;
-          if (ours) {
-            words = labelWordsFromTurns(result.words, ours.turns);
-            ourDiarized = true;
-            trackVoices.push({ trackNumber: plan.trackNumber, source: track.source, result: ours });
-          } else if (diarize && result.diarized) {
-            providerDiarized = true;
-          }
-          for (const language of result.languages) languages.add(language);
-          audioMilliseconds += result.audioMilliseconds ?? audio.durationMilliseconds;
-          trackWords.push({
-            trackNumber: plan.trackNumber,
-            recorder: plan.recorderLabel ? { label: plan.recorderLabel, speaker: null } : null,
-            words: shiftWords(words, offsetMilliseconds),
-          });
-        }
+            const silent = sound !== null && sound.length === 0;
+            const sendOnly = silent || useOurs || !diarize ? sound : null;
+            const runOurs = () =>
+              useOurs && !silent
+                ? measureRecordingStage("diarize", async () =>
+                    ourDiarizer.diarize(trackAudio, {
+                      // What was scanned while the meeting was recorded.
+                      cache: await speakerScan(objectStorage, plan.trackNumber),
+                      // A known head count is exact only when everyone is on
+                      // this one track; split across tracks, it is each one's
+                      // upper bound.
+                      ...(requested.speakers !== undefined && prepared.length === 1
+                        ? { speakers: requested.speakers }
+                        : { maxSpeakers: requested.speakers ?? requested.maxSpeakers }),
+                      signal,
+                    }),
+                  ).catch((error: unknown) => {
+                    // Stopped with the worker: the retry runs it again, so the
+                    // transcript never silently loses our speakers.
+                    if (signal?.aborted) throw error;
+                    if (error instanceof RecordingSpeakersError && error.interrupted) throw error;
+                    telemetry.ourDiarizerFailed = true;
+                    observability.warn("our diarizer failed; using the model's speakers", {
+                      workspaceId: input.workspaceId,
+                      recordingId: input.recordingId,
+                      versionId: input.versionId,
+                      trackNumber: plan.trackNumber,
+                      error: errorMessage(error),
+                    });
+                    return null;
+                  })
+                : Promise.resolve(null);
+            const [result, ours] = await withHeartbeat(async () => {
+              return await Promise.all([
+                transcribeTrack({
+                  provider: found.provider,
+                  spec: found.spec,
+                  audio: { ...trackAudio, extension: audio.extension },
+                  durationMilliseconds: audio.durationMilliseconds,
+                  ffmpegPath: settings.voiceInputFfmpegPath,
+                  credentials,
+                  onPiece,
+                  request,
+                  aligner,
+                  onAligned: (aligned) => addAlignment(telemetry, aligned),
+                  pieces: piecesFor(plan.trackNumber),
+                  sound: sendOnly,
+                  onSent: (milliseconds) => {
+                    sentMilliseconds += milliseconds;
+                  },
+                }),
+                runOurs(),
+              ]);
+            });
+            let words = result.words;
+            if (ours) {
+              words = labelWordsFromTurns(result.words, ours.turns);
+              ourDiarized = true;
+              trackVoices.push({
+                trackNumber: plan.trackNumber,
+                source: track.source,
+                result: ours,
+              });
+            } else if (diarize && result.diarized) {
+              providerDiarized = true;
+            }
+            for (const language of result.languages) languages.add(language);
+            audioMilliseconds += result.audioMilliseconds ?? audio.durationMilliseconds;
+            trackWords.push({
+              trackNumber: plan.trackNumber,
+              recorder: plan.recorderLabel ? { label: plan.recorderLabel, speaker: null } : null,
+              words: shiftWords(words, offsetMilliseconds),
+            });
+          }),
+        );
+        // In track order, whichever finished first.
+        trackWords.sort((left, right) => left.trackNumber - right.trackNumber);
+        trackVoices.sort((left, right) => left.trackNumber - right.trackNumber);
         // With voice recognition on, the person recording's remembered voice
         // picks theirs among the voices on their own microphone.
         const ownerVoices =
