@@ -1,5 +1,41 @@
 # @opengeni/runtime
 
+## 6.6.0
+
+### Patch Changes
+
+- 01b3fcd: An invalid action inside a browser or Desktop batch is now reported at its own field (for example `action.actions.1.deltaX`) instead of claiming the batch's `type`, `actions` and `fenceEachAction` fields are wrong.
+- 3d82830: Claude Opus 5.5 and Sonnet 5.5 ask for summarized thinking again, so their reasoning shows in the chat timeline instead of only occasional progress notes. A progress note is still told apart from reasoning, by the marker in its signature.
+- 074f212: On a Connected Machine, a shell command now waits up to 60 seconds for its exit in the same `exec_command` call, the same finish floor as a managed sandbox (it was 30 seconds), so commands that take between 30 seconds and a minute no longer need a `command_read` afterwards. A Steer no longer waits for that window to end: after a one-second grace the running command returns its background handle, keeps running and reports its result when it finishes. The `yield_time_ms` description no longer mentions a 30-second Connected Machine limit. Pause and cancel still stop it at once. With `OPENGENI_EXPERIMENT_CUT_POLLING=false` the Connected Machine wait stays capped at 30 seconds.
+- 58a7f9f: A chat with a personal GitHub repository attached can now also use repositories whose URL starts with the same name, such as `opengeni` together with `opengeni-demos`. Before, the personal GitHub rewrite also caught the other repository, and repository preparation failed with "Git repository route not found". The `.git` clone URL of a personal GitHub repository now also goes through the broker.
+- 09bc485: An agent can now finish a goal and answer in one step: `goal_complete` takes an optional `reply`, and once the completion succeeds that reply ends the turn as its final answer, shown exactly as written. A session created through the API with `unattended: true` and a first message now gets a goal to complete that message unless the request names a goal. Like any goal, it makes the run continue when the agent stops without completing or pausing it, within the deployment's continuation and budget limits, so such runs can take more turns than before; pass `goal: null` to create one without a goal, as before. A keyed retry of such an unattended create now returns the original session instead of a conflict. A task that seems infeasible, missing data or a result the agent cannot verify is no longer by itself a reason to pause a goal: the agent tries the plausible alternatives first and, if it still pauses, names them in the rationale. The goal tools' and `wait_for_input`'s descriptions are shorter.
+- 538a433: A locator written as `role:button:Save` now finds the button named Save, the same as `button:Save`, instead of looking for a role called "role".
+- 4930632: When no sandbox can be created or woken because the sandbox fleet has no free capacity (compute's "no host can take it now", or E2B's typed busy error), the turn no longer reports the chat model or its provider as unavailable. It now records `sandbox_capacity_unavailable`, shows "No sandbox capacity is available right now" while the same turn retries about once a minute, and says so again if the retries run out. Other retryable sandbox control service failures record `sandbox_service_unavailable`; refusals that retrying cannot fix record `sandbox_service_refused` and stop. A capacity failure inside a tool call, which previously stopped the turn with raw error text, now retries the same way, unless an uncertain sandbox action in the same failure forbids a replay. Other sandbox provider SDK failures that read as a model provider outage are relabelled as the sandbox service. The person-facing text for these failures never includes the sandbox service's raw message.
+- 5a26902: Agents working in a sandbox or on a Connected Machine now check a change to something already running on the running system: the base sandbox instructions say to restart or reload the process that actually serves a change to a service, worker or scheduled job, exercise the real entry point and check what the user asked about, because unit tests alone do not show it works. They ask first only when a restart could disrupt others or lose work in progress. The same instructions now keep the agent's own scratch work out of the user's project: throwaway scripts and tests, and browsers, runtimes or libraries installed only for its own checks, go in a temporary directory outside the project and are removed when done, while tests the user asked for or the project expects still belong in it. Both are one clause appended to an existing line of the sandbox preamble (about 122 tokens), so sessions without a sandbox are unchanged. When the built-in browser cannot start because a machine has no Chrome or Chromium, its error now says to install one system-wide in its standard location, where the browser tool finds it, and not to install a browser or its libraries inside a project folder; when the executable it was set up to use has vanished, the error names that path.
+- c0ba1cc: Opengeni now refuses to build a sandbox on the worker or API host (`local` or `docker`) when that is not the deployment's configured default, for existing sessions too. Creating such sessions is already rejected, but sessions stored before that check, and shared-box children inheriting a parent's backend, could still name one. A turn on such a session now fails before any box, repository clone, setup, Rig or hydration hook or credential is prepared, with the terminal, non-retryable code `sandbox_backend_not_served` and a message telling the person to start a new chat. Terminal, files, browser, computer and viewer requests for it get a 409 with the same message. The deployment default is kept in `Settings.deploymentSandboxBackend`, which per-session settings rebinds preserve, so the sandbox client builder applies the same rule to every other caller, whatever is installed on the host. Remote providers and the default backend are unchanged.
+- Updated dependencies [3d82830]
+- Updated dependencies [fb49abf]
+- Updated dependencies [2c76a2a]
+- Updated dependencies [09bc485]
+- Updated dependencies [2e72a00]
+- Updated dependencies [029497c]
+- Updated dependencies [3cb05f9]
+- Updated dependencies [c0ba1cc]
+  - @opengeni/config@6.6.0
+  - @opengeni/sdk@6.6.0
+  - @opengeni/contracts@6.6.0
+  - @opengeni/codemode@6.6.0
+  - @opengeni/capabilities@6.6.0
+  - @opengeni/codex@6.6.0
+  - @opengeni/interaction@6.6.0
+  - @opengeni/observability@6.6.0
+  - @opengeni/tool-gateway@6.6.0
+  - @opengeni/vaults@6.6.0
+  - @opengeni/agent-proto@6.6.0
+  - @opengeni/decisions@6.6.0
+  - @opengeni/network@6.6.0
+  - @opengeni/xai-subscription@6.6.0
+
 ## 6.5.1
 
 ### Minor Changes

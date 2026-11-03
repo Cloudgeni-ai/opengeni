@@ -1,5 +1,18 @@
 # @opengeni/contracts
 
+## 6.6.0
+
+### Minor Changes
+
+- 2c76a2a: Each desktop dictation shortcut can pick its own speech-to-text model, such as one for English and another for Norwegian. The client config lists the models a dictation can use (`voiceInput.models`), a dictation recording may name its `providerId` and `model`, and it is then heard by exactly that model with no fallback to another provider. Escape no longer cancels a dictation, on the desktop or in the composer: only the Cancel button and the cancel shortcut do, so a stray Escape never loses speech or is taken from the app being typed in. The dictation window no longer draws a drop shadow around its pill.
+- 09bc485: An agent can now finish a goal and answer in one step: `goal_complete` takes an optional `reply`, and once the completion succeeds that reply ends the turn as its final answer, shown exactly as written. A session created through the API with `unattended: true` and a first message now gets a goal to complete that message unless the request names a goal. Like any goal, it makes the run continue when the agent stops without completing or pausing it, within the deployment's continuation and budget limits, so such runs can take more turns than before; pass `goal: null` to create one without a goal, as before. A keyed retry of such an unattended create now returns the original session instead of a conflict. A task that seems infeasible, missing data or a result the agent cannot verify is no longer by itself a reason to pause a goal: the agent tries the plausible alternatives first and, if it still pauses, names them in the rationale. The goal tools' and `wait_for_input`'s descriptions are shorter.
+
+### Patch Changes
+
+- 2e72a00: A chat or scheduled task can now carry up to 1024 inline Skills instead of 32. Going over the limit still rejects the request; nothing is dropped. The request size limit bounds the Skill files, and the model's Skill index keeps its own budget for names and descriptions.
+- 029497c: Secret masking no longer breaks JSON-escaped text: a masked signed-URL signature or password stops before the backslash of an escaped quote, so tool history and outputs that contain them stay valid JSON.
+- 3cb05f9: Slack agents are now shown one way everywhere: `@Opengeni Data team`, with the name as the admin wrote it (`+name` still works). In a thread, a bare name switches agents only when it is the whole message or is followed by "," or ":", and a bare name stays in the request. New names need two letters and can't be sentence starters such as "Hi" or "Test"; one-word names get a warning. Chats hand off only when the person asks for the agent by name, and otherwise answer and may show "<Agent> handles questions like this." with an Ask button. Admins can pick an announcement channel for new agents, the intro page shows a live Slack preview, sorts and searches channels, and reports channels where Slack limits posting. Chats started from a Slack mention show the request without the mention of Opengeni, with other people shown by name.
+
 ## 6.5.1
 
 ### Minor Changes
