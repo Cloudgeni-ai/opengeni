@@ -96,7 +96,7 @@ function AutoTopUpSettingsSection(props: {
   const setupKey = useRef<string | null>(null);
   const alive = useRef(false);
   const mayManage = useRef(props.canManageAutoTopUp);
-  mayManage.current = props.canManageAutoTopUp;
+  mayManage.current = props.canManageAutoTopUp && !resource.denied && resource.data !== null;
   useEffect(() => {
     alive.current = true;
     return () => {
@@ -168,9 +168,10 @@ function useBillingSettingsResource<T extends { accountId: string }>(
       setError(null);
     } catch (failure) {
       if (!alive.current || current !== sequence.current) return;
-      setError(apiErrorFacts(failure).status === 404 ? null : failure);
+      const status = apiErrorFacts(failure).status;
+      setError(status === 404 ? null : failure);
       // Never retain previously authorized content after revocation or a disabled feature.
-      if (isPermissionDenied(failure) || apiErrorFacts(failure).status === 404) setData(null);
+      if (isPermissionDenied(failure) || status === 401 || status === 404) setData(null);
     }
   }, [checkAccount, load]);
   useEffect(() => {

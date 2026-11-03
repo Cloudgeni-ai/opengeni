@@ -282,3 +282,29 @@ test("card setup does not redirect after the current viewer loses owner permissi
   expect(navigate).not.toHaveBeenCalled();
   expect(document.body.textContent).not.toContain("Set up card");
 });
+
+for (const status of [401, 403, 404]) {
+  test(`card setup cannot redirect after a refresh returns HTTP ${status}`, async () => {
+    let resolveSetup!: (value: { url: string }) => void;
+    let refused = false;
+    const navigate = mock((_url: string) => {});
+    const api = client({
+      getBillingAutoTopUp: async () => {
+        if (refused) throw apiFailure(status);
+        return { ...auto(), paymentMethod: null };
+      },
+      createBillingAutoTopUpSetupSession: async () =>
+        new Promise((resolve) => {
+          resolveSetup = resolve;
+        }),
+    });
+    await mount(panel(api, "org-a", { onNavigate: navigate }));
+    await click("Set up");
+    await click("Set up card");
+    refused = true;
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    expect(document.body.textContent).not.toContain("Set up card");
+    await act(async () => resolveSetup({ url: "https://checkout.stripe.com/refused" }));
+    expect(navigate).not.toHaveBeenCalled();
+  });
+}
