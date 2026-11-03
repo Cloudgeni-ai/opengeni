@@ -191,9 +191,37 @@ describe("tool discovery ranking", () => {
     expect(index.rank("get a site by path", 1)).toEqual([byPath]);
     // The run-together name itself still finds its tool.
     expect(index.rank("me_createmessages", 1)).toEqual([draft]);
-    // A word the tool uses whole is never split.
+  });
+  test("run-together names win in a realistic catalog without moving ordinary names", () => {
+    const extra = [
+      candidate("mcp__crm__addresses_list", "List every postal address saved for a contact."),
+      candidate("mcp__db__postgres_query", "Run a read-only SQL query against the database."),
+      candidate("mcp__hooks__list_deliveries", "List recent webhook delivery attempts."),
+      candidate("mcp__hooks__repos_listwebhooks", "List the webhook configured for a repository."),
+    ];
+    const index = new ToolSearchIndex([...CONNECTED_TOOL_CATALOG.map(catalogTool), ...extra]);
+    const best = (query: string) => names(index.rank(query, 1))[0];
+    expect(best("list messages in a folder")).toBe("mcp__outlook__me_mailfolders_listmessages");
+    expect(best("send mail with outlook")).toBe("mcp__outlook__me_sendmail");
+    // Names whose words are not run together rank exactly as before.
+    expect(best("request a review on a pull request")).toBe(
+      "mcp__github__pull_request_request_review",
+    );
+    expect(best("list contact addresses")).toBe("mcp__crm__addresses_list");
+    expect(names(index.rank("post a message", 3))).not.toContain("mcp__db__postgres_query");
+    // A leading verb comes off only when the tool uses the rest of the word.
+    expect(best("list repository webhooks")).toBe("mcp__hooks__repos_listwebhooks");
+  });
+  test("a name word is split only with evidence from the tool's own words", () => {
+    const settings = candidate("mcp_x__list_settings", "Lists the mail filters and forwarding.");
+    const changeset = candidate("mcp_x__changeset_get", "Get one changeset by ID.");
     const calendar = candidate("mcp_x__calendarview", "Get the calendarview of events.");
-    expect(new ToolSearchIndex([calendar]).rank("calendar", 1)).toEqual([]);
+    const index = new ToolSearchIndex([settings, changeset, calendar]);
+    // Ordinary words are not cut into a verb and a fragment.
+    expect(index.rank("tings", 3)).toEqual([]);
+    expect(names(index.rank("change something", 3))).not.toContain("mcp_x__changeset_get");
+    // A word the tool uses whole is never split.
+    expect(index.rank("calendar", 3)).toEqual([]);
   });
   test("ranks a connected account's tools past their account line", () => {
     // With several accounts of one connector every description starts with

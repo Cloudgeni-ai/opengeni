@@ -21,7 +21,12 @@ function stem(word: string): string {
 }
 
 function words(text: string): string[] {
-  return rawWords(text)
+  return searchWords(rawWords(text));
+}
+
+/** Searchable stems of already lowercased words. */
+function searchWords(raw: readonly string[]): string[] {
+  return raw
     .filter((w) => w.length > 1 && !STOPWORDS.has(w) && !/^[a-f0-9]{16,}$/.test(w))
     .map(stem);
 }
@@ -44,14 +49,17 @@ const OPERATION_PREFIXES = RAW_OPERATION_WORDS.split(" ").sort((a, b) => b.lengt
  * Split a name word that runs several words together, as lowercased
  * operationIds do (`createmessages`, `listlists`, `getitemscontent`), into
  * words the tool itself uses: operation verbs and words of its own
- * description and parameters. A word the tool uses whole stays whole, and
- * nothing is split by a global dictionary, so ordinary names keep their
- * meaning. A two-letter connective (`getbypath`) may join two pieces but never
- * starts or ends a name. Falls back to separating a leading operation verb.
+ * description and parameters. A word the tool uses whole, in any inflection,
+ * stays whole, and every split needs a piece from the tool's own words, so
+ * ordinary names (`address`, `settings`, `changeset`) keep their meaning. A
+ * two-letter connective (`getbypath`) may join two pieces but never starts or
+ * ends a name. Falls back to separating a leading operation verb only when
+ * the tool itself uses the rest of the word.
  */
-function segment(token: string, vocabulary: ReadonlySet<string>): string[] {
-  if (token.length < 6 || vocabulary.has(token) || /\d/.test(token)) return [token];
+function segment(token: string, own: Vocabulary): string[] {
+  if (!splittable(token) || own.words.has(token) || own.stems.has(stem(token))) return [token];
   const n = token.length;
+  const known = (piece: string) => own.words.has(piece) || OPERATION_PREFIX_SET.has(piece);
   // best[i]: fewest pieces covering token[0, i), with the last piece's start.
   const best: Array<{ pieces: number; from: number } | undefined> = [{ pieces: 0, from: -1 }];
   for (let end = 1; end <= n; end++) {
@@ -60,7 +68,7 @@ function segment(token: string, vocabulary: ReadonlySet<string>): string[] {
       if (!before) continue;
       const piece = token.slice(start, end);
       const connective = piece.length === 2 && STOPWORDS.has(piece) && start > 0 && end < n;
-      if (!connective && (piece.length < 3 || !vocabulary.has(piece))) continue;
+      if (!connective && (piece.length < 3 || !known(piece))) continue;
       const pieces = before.pieces + 1;
       const current = best[end];
       if (!current || pieces < current.pieces) best[end] = { pieces, from: start };
@@ -70,31 +78,45 @@ function segment(token: string, vocabulary: ReadonlySet<string>): string[] {
     const pieces: string[] = [];
     for (let end = n; end > 0; end = best[end]!.from)
       pieces.unshift(token.slice(best[end]!.from, end));
-    return pieces;
+    if (pieces.some((piece) => piece.length > 2 && own.words.has(piece))) return pieces;
   }
-  const verb = OPERATION_PREFIXES.find((op) => token.startsWith(op) && n - op.length >= 3);
+  const verb = OPERATION_PREFIXES.find(
+    (op) =>
+      token.startsWith(op) && n - op.length >= 3 && own.stems.has(stem(token.slice(op.length))),
+  );
   return verb ? [verb, token.slice(verb.length)] : [token];
 }
+
+const OPERATION_PREFIX_SET = new Set(OPERATION_PREFIXES);
+
+/** A name word long enough, and without digits, to be several words run together. */
+const splittable = (token: string) => token.length >= 6 && !/\d/.test(token);
+
+/** The words a tool's own description and parameters use, and their stems. */
+type Vocabulary = { words: ReadonlySet<string>; stems: { has(stem: string): boolean } };
 
 /**
  * A tool name with run-together words separated by the tool's own
  * vocabulary. `searchable` also keeps each split word whole, so a query that
- * repeats the exact name still matches it.
+ * repeats the exact name still matches it. The vocabulary is read only when
+ * some name word could be split.
  */
 function segmentedName(
   name: string,
-  vocabularyText: string,
-): { words: string; searchable: string } {
-  const vocabulary = new Set([...rawWords(vocabularyText), ...OPERATION_PREFIXES]);
+  vocabulary: () => Vocabulary,
+): { whole: string[]; separated: string[]; searchable: string } {
+  const whole = rawWords(name);
+  if (!whole.some(splittable)) return { whole, separated: whole, searchable: whole.join(" ") };
+  const own = vocabulary();
   const separated: string[] = [];
   const searchable: string[] = [];
-  for (const token of rawWords(name)) {
-    const pieces = segment(token, vocabulary);
+  for (const token of whole) {
+    const pieces = segment(token, own);
     separated.push(...pieces);
     searchable.push(...pieces);
     if (pieces.length > 1) searchable.push(token);
   }
-  return { words: separated.join(" "), searchable: [...new Set(searchable)].join(" ") };
+  return { whole, separated, searchable: searchable.join(" ") };
 }
 
 // Generic operation vocabulary, not per-tool aliases. Exact words retain greater
@@ -140,7 +162,10 @@ type Document = {
 };
 
 function field(text: string): Field {
-  const tokens = words(text);
+  return fieldOf(searchWords(rawWords(text)));
+}
+
+function fieldOf(tokens: readonly string[]): Field {
   const frequencies = new Map<string, number>();
   for (const token of tokens) frequencies.set(token, (frequencies.get(token) ?? 0) + 1);
   return { frequencies, length: tokens.length };
@@ -190,20 +215,22 @@ function document(tool: Tool): Document {
   const lead = description.split(/(?<=[.!?])\s|\n/, 1)[0] ?? "";
   const properties = (tool.parameters as { properties?: Record<string, unknown> }).properties;
   const parameterNames = Object.keys(properties ?? {}).join(" ");
-  const name = segmentedName(
-    separator < 0 ? tool.name : tool.name.slice(separator + 2),
-    `${description} ${parameterNames}`,
-  );
-  const fields = [
-    field(name.searchable),
-    field(lead),
-    field(description.slice(lead.length)),
-    field(parameterNames),
-  ];
-  const nameWords = words(name.words);
-  const operationWord = [nameWords[0], nameWords.at(-1), ...nameWords].find(
-    (word) => word && OPERATIONS.some((group) => group.has(word)),
-  );
+  // Each text is read into words and stems once, for its field and the
+  // name's vocabulary (a field's terms are already the stems it needs).
+  const texts = [lead, description.slice(lead.length), parameterNames].map(rawWords);
+  const textFields = texts.map((raw) => fieldOf(searchWords(raw)));
+  const name = segmentedName(separator < 0 ? tool.name : tool.name.slice(separator + 2), () => {
+    const words = new Set<string>();
+    for (const raw of texts) for (const word of raw) words.add(word);
+    const has = (term: string) => textFields.some((f) => f.frequencies.has(term));
+    return { words, stems: { has } };
+  });
+  const fields = [field(name.searchable), ...textFields];
+  const nameWords = searchWords(name.separated);
+  // The name's own words say what it does before any piece split out of them.
+  const operationWord = [searchWords(name.whole), nameWords]
+    .flatMap((list) => [list[0], list.at(-1), ...list])
+    .find((word) => word && OPERATIONS.some((group) => group.has(word)));
   return {
     tool,
     fields,
