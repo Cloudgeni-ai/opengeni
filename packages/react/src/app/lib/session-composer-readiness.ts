@@ -38,7 +38,8 @@ export function useSessionSendGate(): SessionSendGate {
         policyValid: committedPolicyValid,
         personalDecision: state.personalDecision,
         machineAccessDenied: state.machineAccessDenied,
-        personalLoading: state.loading || state.loadFailed,
+        personalLoading: state.loading,
+        loadFailed: state.loadFailed,
       }),
     [committedPolicyValid],
   );

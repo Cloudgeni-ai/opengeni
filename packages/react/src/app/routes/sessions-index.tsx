@@ -110,6 +110,14 @@ import { sessionDisplayTitle } from "../lib/session-rename";
 import { Notice } from "../../ui/notice";
 import { CreditRefusalNotice } from "../components/credits/credit-refusal-notice";
 import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
+import {
+  pickerPolicyRunnable,
+  ComposerSendBlockerNotice,
+  composerSendBlockerIsLoading,
+  getNewSessionSendBlocker,
+  newSessionStartBlockerReason,
+  type NewSessionSendState,
+} from "../lib/composer-send-blocking";
 import { creditRefusalRecord, type CreditRefusalRecord } from "../lib/model-access";
 import { isTransientServiceFailure, OPENGENI_UPDATING_NOTICE } from "../lib/transient-retry";
 import { useConnectionAccounts } from "../components/capabilities/use-connection-accounts";
@@ -134,13 +142,7 @@ import {
   isMachineComputeSelectable,
   resolveSelectableMachineSandboxId,
 } from "../lib/machine-selectability";
-import {
-  effortOptionsForModel,
-  findPickerRow,
-  modelUsesCredits,
-  runnableLatencyModesForModel,
-  type PickerModelRow,
-} from "../lib/model-policy";
+import { findPickerRow, modelUsesCredits, type PickerModelRow } from "../lib/model-policy";
 import { isPersonalWorkspace } from "../lib/managed-self-context";
 import { attachManualRepository } from "../lib/manual-repositories";
 import { hasAccountPermission, hasWorkspacePermission } from "../lib/permissions";
@@ -1090,11 +1092,10 @@ function SessionsIndexRouteContent({
     context.setReasoningEffort(choice.effort);
     if (choice.latencyMode !== null) context.setLatencyMode(choice.latencyMode);
   };
-  const newSessionPolicyValid = Boolean(
-    selectedPolicyRow?.selectable &&
-    effortOptionsForModel(selectedPolicyRow.catalog).includes(context.reasoningEffort) &&
-    (context.latencyMode === "standard" ||
-      runnableLatencyModesForModel(selectedPolicyRow.catalog).includes(context.latencyMode)),
+  const newSessionPolicyValid = pickerPolicyRunnable(
+    selectedPolicyRow,
+    context.reasoningEffort,
+    context.latencyMode,
   );
   const noRunnableModel =
     !modelCatalog.loading &&
@@ -1132,34 +1133,57 @@ function SessionsIndexRouteContent({
     if (!next) return;
     setModel(next.id);
     setReasoningEffort(next.effort);
+    // The replacement keeps the speed only where it runs it (a Free ChatGPT
+    // plan's GPT-6 Luna has no Ultrafast), so the swap never leaves a choice
+    // that cannot send.
+    const row = findPickerRow(modelCatalog.rows, next.id);
+    const fitted = row ? coveredModelChoice(row, next.effort, context.latencyMode) : null;
+    if (fitted?.latencyMode) setLatencyMode(fitted.latencyMode);
     // An automatic replacement is not the person's choice.
     setModelProvided((current) => (current === undefined ? current : false));
-  }, [pendingFallbackModel, setModel, setReasoningEffort]);
+  }, [
+    context.latencyMode,
+    modelCatalog.rows,
+    pendingFallbackModel,
+    setLatencyMode,
+    setModel,
+    setReasoningEffort,
+  ]);
   const codexConnected = modelCatalog.models.some(
     (candidate) =>
       candidate.provider === "codex-subscription" &&
       candidate.credentialReadiness.status === "ready",
   );
-  const startBlocker =
-    modelCatalog.loading || newSessionDraft.loading
-      ? null
-      : modelCatalog.error
-        ? "model_catalog_unavailable"
-        : !newSessionPolicyValid
-          ? !modelCatalog.rows.some((row) => row.selectable)
-            ? "no_model_connected"
-            : selectedPolicyRow &&
-                selectedPolicyRow.billingClass !== "opengeni_credits" &&
-                selectedPolicyRow.catalog.credentialReadiness.status !== "ready"
-              ? "selected_model_not_connected"
-              : "model_policy_unavailable"
-          : privateCreateUnavailable
-            ? "private_session_unavailable"
-            : attachments.hasUnresolved
-              ? "attachments_pending"
-              : !computeReady
-                ? "compute_unavailable"
-                : null;
+  // Send's one guard: its enabled state, the early-Send hold, the guard Send
+  // runs and the visible line below the composer all read it.
+  const sendState: NewSessionSendState = {
+    created: createdSessionAuthority !== null,
+    draftLoading: newSessionDraft.loading,
+    catalogLoading: modelCatalog.loading,
+    catalogFailed: Boolean(modelCatalog.error),
+    replacingModel: pendingFallbackModel !== null,
+    policyValid: newSessionPolicyValid,
+    anyModelSelectable: modelCatalog.rows.some((row) => row.selectable),
+    selectedModelNotConnected: Boolean(
+      selectedPolicyRow &&
+      selectedPolicyRow.billingClass !== "opengeni_credits" &&
+      selectedPolicyRow.catalog.credentialReadiness.status !== "ready",
+    ),
+    selectedModelSelectable: selectedPolicyRow?.selectable === true,
+    privateSessionUnavailable: privateCreateUnavailable,
+    toolsLoading: !context.workspaceMcpCatalogReady || personalResourceCatalogRefreshPending,
+    accountsLoading: connectionAccounts.loading,
+    accountsFailed: connectionAccounts.error !== null,
+    accountChoice: connectionAccounts.requiresAccountChoice,
+    resourcesLoading:
+      fixedResourceCatalogEnabled && (rigs.loading || !personalResourceEligibilitySettled),
+    resourcesResolved: fixedResourceSelection.selectionResolved,
+    uploadPending: attachments.hasUnresolved,
+    computeLoading: draft.compute.kind === "machine" && fleet.loading,
+    computeReady,
+  };
+  const sendBlocker = getNewSessionSendBlocker(sendState);
+  const startBlocker = newSessionStartBlockerReason(sendBlocker);
   useEffect(() => {
     const record = () => {
       if (startBlocker)
@@ -1202,20 +1226,9 @@ function SessionsIndexRouteContent({
         : attachments.readyResources.length > 0
           ? FILE_ONLY_MESSAGE_TEXT(t)
           : "";
-      if (
-        busy ||
-        !context.workspaceMcpCatalogReady ||
-        newSessionDraft.loading ||
-        !newSessionPolicyValid ||
-        privateCreateUnavailable ||
-        personalResourceCatalogRefreshPending ||
-        (!realtimeModel &&
-          createdSessionAuthority === null &&
-          (connectionAccounts.loading ||
-            connectionAccounts.error !== null ||
-            connectionAccounts.requiresAccountChoice)) ||
-        (createdSessionAuthority === null && !fixedResourceSelection.selectionResolved)
-      )
+      // The same guard as Send's enabled state and the visible line, so a
+      // Send that runs here was shown as available and a refusal is explained.
+      if (busy || getNewSessionSendBlocker({ ...sendState, voice: realtimeModel !== null }))
         return false;
       if (createdSessionAuthority === null) {
         const unavailable = unavailableSessionMcpServerIds(
@@ -1243,12 +1256,7 @@ function SessionsIndexRouteContent({
         });
         return false;
       }
-      if (
-        createdSessionAuthority === null &&
-        ((!text && !realtimeModel) || attachments.hasUnresolved || !computeReady)
-      ) {
-        return false;
-      }
+      if (createdSessionAuthority === null && !text && !realtimeModel) return false;
       // A chosen limit must be a valid amount; an older server never gets one.
       const usageLimit =
         usageLimitCapability === "enabled" ? parseSessionUsageLimitDraft(usageLimitDraft) : null;
@@ -1721,26 +1729,11 @@ function SessionsIndexRouteContent({
         message.trim().length > 0 ||
         attachments.readyResources.length > 0) &&
       !busy &&
-      !newSessionDraft.loading &&
-      newSessionPolicyValid &&
-      !personalResourceCatalogRefreshPending &&
-      (createdSessionAuthority !== null ||
-        (!connectionAccounts.loading &&
-          connectionAccounts.error === null &&
-          !connectionAccounts.requiresAccountChoice)) &&
-      (createdSessionAuthority !== null || fixedResourceSelection.selectionResolved) &&
-      (createdSessionAuthority !== null || (!attachments.hasUnresolved && computeReady)),
+      sendBlocker === null,
     // What Send needs right after the page opens is still loading: an early
-    // Send waits for it instead of doing nothing.
-    preparing:
-      modelCatalog.loading ||
-      newSessionDraft.loading ||
-      pendingFallbackModel !== null ||
-      personalResourceCatalogRefreshPending ||
-      (createdSessionAuthority === null &&
-        (connectionAccounts.loading ||
-          (fixedResourceCatalogEnabled && (rigs.loading || !personalResourceEligibilitySettled)) ||
-          (draft.compute.kind === "machine" && fleet.loading))),
+    // Send waits for it instead of doing nothing. Any other blocker shows its
+    // line below the composer.
+    preparing: composerSendBlockerIsLoading(sendBlocker),
     pause: async () => {},
     pausing: false,
     resume: async () => {},
@@ -2241,6 +2234,17 @@ function SessionsIndexRouteContent({
             </div>
           ) : null}
 
+          {/* Send's blocker, when no other surface already explains it. */}
+          <ComposerSendBlockerNotice
+            blocker={sendBlocker}
+            explained={NEW_SESSION_EXPLAINED_BLOCKERS}
+            className="mt-3"
+            onAction={(action) => {
+              if (action === "fix_model_settings") chooseCoveredModel(context.model);
+              else void modelCatalog.refresh();
+            }}
+          />
+
           {/* Accounts load quietly with the composer: only a problem shows here,
               never a loading line behind an open menu. */}
           {accountsFailure || connectionAccounts.accountChoiceMessage ? (
@@ -2502,6 +2506,9 @@ function RecentSessionRow({
 }
 
 /** Keep model policy adjacent to voice/send in the bottom action row. */
+/** The accounts notice below the new-chat composer explains these itself. */
+const NEW_SESSION_EXPLAINED_BLOCKERS = ["accounts", "account_choice"] as const;
+
 function SessionModelControl({
   hasImageAttachments,
   modelCatalog,

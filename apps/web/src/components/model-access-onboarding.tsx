@@ -6,6 +6,7 @@ import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { ArrowUpRightIcon, KeyRoundIcon, Loader2Icon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
+import { showCodexConnected } from "@/lib/codex-connect-result";
 
 import { CreditAmountPicker } from "@opengeni/react/app/components/credit-amount-picker";
 import { CouponRedeem } from "@opengeni/react/app/components/credits/coupon-redeem";
@@ -367,11 +368,12 @@ export function ModelAccessOnboardingPanel({
       setPending(null);
       if (result.status === "connected") {
         recordOutcome("connected");
-        toast.success(
-          kind === "codex"
-            ? `Codex connected for ${organizationName || "your organization"}${result.plan ? ` (${result.plan} plan)` : ""}`
-            : `SuperGrok connected for ${organizationName || "your organization"}`,
-        );
+        if (kind === "codex")
+          showCodexConnected(
+            `Codex connected for ${organizationName || "your organization"}`,
+            result,
+          );
+        else toast.success(`SuperGrok connected for ${organizationName || "your organization"}`);
         // Hold the leave buttons until the connected model is the next-chat selection.
         setBusy(true);
         try {

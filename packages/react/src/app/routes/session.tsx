@@ -51,6 +51,11 @@ import {
   failureFallbackReason,
 } from "../lib/failed-session-copy";
 import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
+import {
+  pickerPolicyRunnable,
+  ComposerSendBlockerNotice,
+  composerSendBlockerNotice,
+} from "../lib/composer-send-blocking";
 import { ChatPaymentPages } from "../components/chat-payment-pages";
 import { creditRefusalRecord, type CreditRefusalRecord } from "../lib/model-access";
 import { timelineShowsFailure } from "../lib/timeline-failure-owner";
@@ -257,11 +262,7 @@ import {
   type ComposerLaunchSearch,
 } from "../lib/composer-launch";
 import { connectableSubscriptions, isDeploymentFreeModel } from "../lib/deployment-free-model";
-import {
-  effortOptionsForModel,
-  findPickerRow,
-  runnableLatencyModesForModel,
-} from "../lib/model-policy";
+import { findPickerRow } from "../lib/model-policy";
 import { sessionTimelineEmptyStateCopy } from "../lib/session-empty-state";
 import {
   isCodexUsageLimitFailure,
@@ -3166,12 +3167,7 @@ function SessionChatPane(props: {
     composerPolicy.reasoningEffort === props.session.reasoningEffort &&
     composerPolicy.latencyMode === props.session.latencyMode,
   );
-  const catalogComboValid = Boolean(
-    selectedPolicyRow?.selectable &&
-    effortOptionsForModel(selectedPolicyRow.catalog).includes(reasoningEffort) &&
-    (latencyMode === "standard" ||
-      runnableLatencyModesForModel(selectedPolicyRow.catalog).includes(latencyMode)),
-  );
+  const catalogComboValid = pickerPolicyRunnable(selectedPolicyRow, reasoningEffort, latencyMode);
   // A model the catalog no longer lists (retired or removed) is refused by the
   // API, so the frozen session policy stops counting as sendable for it.
   const refusedSessionModel =
@@ -3271,6 +3267,28 @@ function SessionChatPane(props: {
         replacementLabel={composerModelUnavailable ? null : (selectedPolicyRow?.label ?? null)}
       />
     ) : null;
+
+  // Send's blocker as one visible line, unless the composer is still
+  // preparing or the unavailable-model notice or picker already explains it.
+  const sendBlocker = composerSendBlocker();
+  const visibleSendBlocker =
+    terminal || composerDelivery.preparing
+      ? null
+      : sendBlocker === "policy" && (unavailableModelNotice || noRunnableModel || !composerPolicy)
+        ? null
+        : sendBlocker === "policy" && selectedPolicyRow?.selectable !== true
+          ? "model_unavailable"
+          : sendBlocker;
+  const sendBlockerNotice = composerSendBlockerNotice(visibleSendBlocker) ? (
+    <ComposerSendBlockerNotice
+      blocker={visibleSendBlocker}
+      className="px-2 pt-2"
+      onAction={(action) => {
+        if (action === "fix_model_settings") chooseCoveredModel(model);
+        else void connectionAccounts.refresh();
+      }}
+    />
+  ) : null;
 
   useEffect(() => {
     if (
@@ -4491,6 +4509,7 @@ function SessionChatPane(props: {
                   modelSwitchHeadsUp ||
                   usageLimitNotice ||
                   creditRefusalNotice ||
+                  sendBlockerNotice ||
                   showMachineAccess ? (
                     <>
                       {!sessionAdmissionNeedsDifferentMachine(
@@ -4520,6 +4539,7 @@ function SessionChatPane(props: {
                         <div className="px-2 pt-2">{creditRefusalNotice}</div>
                       ) : null}
                       {ownLoginsHeadsUp}
+                      {sendBlockerNotice}
                     </>
                   ) : null
                 }
