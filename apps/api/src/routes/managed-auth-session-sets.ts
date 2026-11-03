@@ -1,4 +1,4 @@
-import { verifySignupChallenge } from "../auth/signup-challenge";
+import { verifySocialSignupChallenge } from "../auth/signup-challenge";
 import {
   assertManagedUserAdmission,
   getManagedSession,
@@ -399,9 +399,10 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
         if (stored) {
           await authContext.internalAdapter.deleteVerificationByIdentifier(receiptIdentifier);
         }
-        const signupVerified =
-          deps.settings.signupChallengeEnabled && Boolean(body.signupChallengeToken);
-        if (signupVerified) await verifySignupChallenge(deps.settings, body.signupChallengeToken);
+        const signupVerified = await verifySocialSignupChallenge(
+          deps.settings,
+          body.signupChallengeToken,
+        );
         const result = await available.managedAuth.api.signInSocial({
           body: {
             provider: body.provider,

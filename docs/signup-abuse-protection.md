@@ -22,9 +22,18 @@ client-supplied verification flags nor a direct Better Auth API call bypass the
 user-create backstop.
 
 OAuth signup carries the successful challenge through server-owned login state,
-bound to its provider and an expiry. A new OAuth user chooses **Create a new
-account** and completes the challenge; existing users continue normal login.
-This is distinct from organization invitations and existing-user sign-in.
+bound to its provider and an expiry. Continue with Google or GitHub signs in or
+creates the account from either tab and from the add-account window, so every
+click first runs the challenge invisibly (`execution: "execute"`,
+`appearance: "interaction-only"`); the widget appears inline only when Cloudflare
+asks for interaction, and the login continues once it is solved. The click skips
+the challenge while new accounts are paused. A social start whose token fails
+verification, or a click whose challenge fails, still starts the login without
+proof: an existing user signs in, and a new user is refused at the callback with
+`signup_challenge_required`. Consuming a token on an existing-user sign-in is
+harmless: it was minted for that click, and the proof only matters when the
+callback creates a user. Email sign-up keeps its visible widget; email sign-in
+needs none. This is distinct from organization invitations.
 
 The browser must reach `https://challenges.cloudflare.com` for the widget and the
 API must reach its Siteverify endpoint. A deployment CSP must allow the provider's

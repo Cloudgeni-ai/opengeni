@@ -5,6 +5,7 @@ import {
   requireSignupChallenge,
   runWithSignupChallenge,
   verifySignupChallenge,
+  verifySocialSignupChallenge,
 } from "./signup-challenge";
 const settings = {
   signupChallengeEnabled: true,
@@ -75,6 +76,42 @@ describe("signup challenge admission", () => {
   });
   test("disabled local installations need no token", async () => {
     await verifySignupChallenge({ ...settings, signupChallengeEnabled: false }, undefined);
+  });
+  test("a social start carries proof only for a verified token and never refuses a sign-in", async () => {
+    let calls = 0;
+    const counted = (value: unknown) =>
+      (async () => {
+        calls++;
+        return Response.json(value);
+      }) as unknown as typeof fetch;
+    expect(await verifySocialSignupChallenge(settings, "valid", counted(passed()))).toBe(true);
+    for (const reply of [
+      { ...passed(), success: false, "error-codes": ["timeout-or-duplicate"] },
+      { success: false, "error-codes": ["internal-error"] },
+      { ...passed(), hostname: "evil.test" },
+    ]) {
+      expect(await verifySocialSignupChallenge(settings, "token", counted(reply))).toBe(false);
+    }
+    expect(
+      await verifySocialSignupChallenge(settings, "token", (async () => {
+        throw new Error("timeout");
+      }) as unknown as typeof fetch),
+    ).toBe(false);
+    expect(await verifySocialSignupChallenge(settings, "x".repeat(2049), counted(passed()))).toBe(
+      false,
+    );
+    // No token, or the challenge is off: nothing to verify and nothing consumed.
+    calls = 0;
+    expect(await verifySocialSignupChallenge(settings, undefined, counted(passed()))).toBe(false);
+    expect(await verifySocialSignupChallenge(settings, "", counted(passed()))).toBe(false);
+    expect(
+      await verifySocialSignupChallenge(
+        { ...settings, signupChallengeEnabled: false },
+        "valid",
+        counted(passed()),
+      ),
+    ).toBe(false);
+    expect(calls).toBe(0);
   });
   test("OAuth proof is provider and expiry bound and malformed state denies", () => {
     const now = Date.now();

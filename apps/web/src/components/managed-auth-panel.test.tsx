@@ -585,3 +585,180 @@ test("an address the deployment doesn't allow is told it can't sign in, for a pa
       host.remove();
     }
   }));
+
+function fakeTurnstile() {
+  const widgets: Record<string, unknown>[] = [];
+  const executed: string[] = [];
+  window.turnstile = {
+    render: (_element, options) => {
+      widgets.push(options);
+      return String(widgets.length);
+    },
+    execute: (id) => {
+      executed.push(id);
+    },
+    remove: () => undefined,
+  };
+  const call = (index: number, name: string, ...args: unknown[]) =>
+    act(async () => {
+      (widgets[index]![name] as (...value: unknown[]) => unknown)(...args);
+    });
+  return { widgets, executed, call };
+}
+
+async function mountSocialPanel(
+  props: Partial<Parameters<typeof ManagedAuthPanel>[0]> = {},
+  onSocial: (provider: string, token?: string) => Promise<void> = async () => undefined,
+) {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const starts: Array<[string, string | undefined]> = [];
+  await act(async () =>
+    root.render(
+      <ManagedAuthPanel
+        signupChallengeSiteKey="test-key"
+        socialProviders={["google", "github"]}
+        onSocialSubmit={async (provider, token) => {
+          starts.push([provider, token]);
+          await onSocial(provider, token);
+        }}
+        onSubmit={async () => undefined}
+        {...props}
+      />,
+    ),
+  );
+  const button = (name: string) =>
+    Array.from(host.querySelectorAll("button")).find((b) => b.textContent?.trim() === name)!;
+  return {
+    host,
+    starts,
+    button,
+    click: (name: string) => act(async () => button(name).click()),
+    async unmount() {
+      await act(async () => root.unmount());
+      host.remove();
+      delete window.turnstile;
+    },
+  };
+}
+
+test("Continue with Google on the Sign in tab gets a challenge token first, then starts the login", async () => {
+  const turnstile = fakeTurnstile();
+  const panel = await mountSocialPanel();
+  try {
+    expect(panel.host.textContent).toContain("Welcome back.");
+    // Nothing visible: no widget rendered before a click.
+    expect(turnstile.widgets).toHaveLength(0);
+    await panel.click("Continue with Google");
+    expect(turnstile.widgets[0]).toMatchObject({
+      action: "signup",
+      execution: "execute",
+      appearance: "interaction-only",
+    });
+    expect(turnstile.executed).toEqual(["1"]);
+    expect(panel.starts).toEqual([]);
+    expect(panel.button("Continue with GitHub").disabled).toBe(true);
+    expect(panel.button("Sign up").disabled).toBe(true);
+    await turnstile.call(0, "callback", "signin-tab-token");
+    expect(panel.starts).toEqual([["google", "signin-tab-token"]]);
+    expect(panel.host.textContent).not.toContain("Complete the signup verification");
+  } finally {
+    await panel.unmount();
+  }
+});
+
+test("when Cloudflare asks for interaction the challenge shows inline and the login continues once solved", async () => {
+  const turnstile = fakeTurnstile();
+  const panel = await mountSocialPanel();
+  try {
+    await panel.click("Continue with GitHub");
+    await turnstile.call(0, "before-interactive-callback");
+    const widget = panel.host.querySelector('[aria-label="Signup verification"]')!;
+    expect(widget.className).toContain("mt-3");
+    // The rest of the form stays usable while a person solves it.
+    expect(panel.button("Continue with Google").disabled).toBe(false);
+    expect(panel.host.querySelector<HTMLInputElement>("#managed-auth-email")!.disabled).toBe(false);
+    await turnstile.call(0, "callback", "solved");
+    expect(panel.starts).toEqual([["github", "solved"]]);
+  } finally {
+    await panel.unmount();
+  }
+});
+
+test("choosing something else while the challenge waits for a person cancels the click", async () => {
+  const turnstile = fakeTurnstile();
+  const panel = await mountSocialPanel();
+  try {
+    await panel.click("Continue with Google");
+    await turnstile.call(0, "before-interactive-callback");
+    await panel.click("Sign up");
+    await turnstile.call(0, "callback", "too-late");
+    expect(panel.starts).toEqual([]);
+    expect(panel.host.textContent).toContain("Create account");
+    expect(panel.button("Continue with Google").disabled).toBe(false);
+  } finally {
+    await panel.unmount();
+  }
+});
+
+test("a challenge that can't produce a token still lets an existing person continue", async () => {
+  const turnstile = fakeTurnstile();
+  let fail = true;
+  const panel = await mountSocialPanel({}, async () => {
+    if (fail) throw new Error("provider unavailable");
+  });
+  try {
+    await panel.click("Continue with Google");
+    await turnstile.call(0, "error-callback", "600010");
+    expect(panel.starts).toEqual([["google", undefined]]);
+    // A provider start failure is reported and the buttons come back.
+    expect(panel.host.textContent).toContain("Couldn't continue with Google. Try again.");
+    expect(panel.button("Continue with Google").disabled).toBe(false);
+    fail = false;
+    await panel.click("Continue with Google");
+    await turnstile.call(1, "callback", "retry-token");
+    expect(panel.starts.at(-1)).toEqual(["google", "retry-token"]);
+  } finally {
+    await panel.unmount();
+  }
+});
+
+test("the Sign up tab uses its solved visible challenge, or runs one in the background", async () => {
+  const turnstile = fakeTurnstile();
+  let panel = await mountSocialPanel({ initialMode: "signup" });
+  try {
+    // The visible widget for email sign-up is unchanged.
+    expect(turnstile.widgets).toHaveLength(1);
+    expect(turnstile.widgets[0]!.execution).toBeUndefined();
+    await panel.click("Continue with GitHub");
+    expect(panel.host.textContent).not.toContain("Complete the signup verification");
+    expect(turnstile.widgets[1]).toMatchObject({ execution: "execute" });
+    await turnstile.call(1, "callback", "background-token");
+    expect(panel.starts).toEqual([["github", "background-token"]]);
+    await panel.unmount();
+
+    const next = fakeTurnstile();
+    panel = await mountSocialPanel({ initialMode: "signup" });
+    await next.call(0, "callback", "visible-token");
+    await panel.click("Continue with Google");
+    expect(next.widgets).toHaveLength(1);
+    expect(panel.starts).toEqual([["google", "visible-token"]]);
+  } finally {
+    await panel.unmount();
+  }
+});
+
+test("while new accounts are paused, or without a site key, social sign-in runs no challenge", async () => {
+  for (const props of [{ newSignupsEnabled: false }, { signupChallengeSiteKey: undefined }]) {
+    const turnstile = fakeTurnstile();
+    const panel = await mountSocialPanel(props);
+    try {
+      await panel.click("Continue with Google");
+      expect(turnstile.widgets).toHaveLength(0);
+      expect(panel.starts).toEqual([["google", undefined]]);
+    } finally {
+      await panel.unmount();
+    }
+  }
+});

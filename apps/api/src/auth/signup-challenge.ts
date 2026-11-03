@@ -112,3 +112,24 @@ export async function verifySignupChallenge(
     );
   }
 }
+
+/**
+ * A Google or GitHub start may turn out to be a sign-in, which needs no
+ * challenge, so a token that can't be verified must not refuse it. The start
+ * then carries no proof, and the user-create hook still refuses a new account.
+ */
+export async function verifySocialSignupChallenge(
+  settings: Settings,
+  token: unknown,
+  fetcher: typeof fetch = fetch,
+): Promise<boolean> {
+  if (!settings.signupChallengeEnabled || token === undefined || token === null || token === "") {
+    return false;
+  }
+  try {
+    await verifySignupChallenge(settings, token, fetcher);
+    return true;
+  } catch {
+    return false;
+  }
+}

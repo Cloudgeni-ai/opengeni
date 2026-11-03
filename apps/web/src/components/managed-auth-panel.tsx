@@ -1,4 +1,4 @@
-import { SignupChallenge } from "./signup-challenge";
+import { SignupChallenge, useSocialSignupChallenge } from "./signup-challenge";
 import { CheckIcon, KeyRoundIcon, Loader2Icon, RefreshCwIcon, UserIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
@@ -188,6 +188,11 @@ export function ManagedAuthPanel(props: {
   const [challengeReset, setChallengeReset] = useState(0);
   const challengeRequired =
     mode === "signup" && !emailOnlyMode && Boolean(props.signupChallengeSiteKey);
+  // Google or GitHub may sign someone in or create their account, so a click
+  // on either tab carries a challenge token while new accounts are open.
+  const socialChallenge = useSocialSignupChallenge(
+    newSignupsEnabled ? props.signupChallengeSiteKey : undefined,
+  );
   const [busy, setBusy] = useState(false);
   const [socialBusy, setSocialBusy] = useState<ManagedSocialProvider | null>(null);
   const [passkeyBusy, setPasskeyBusy] = useState(false);
@@ -198,7 +203,14 @@ export function ManagedAuthPanel(props: {
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [verificationEmail, setVerificationEmail] = useState<string | null>(null);
 
+  /** Another action replaces a Google or GitHub click still waiting on its challenge. */
+  function stopSocialChallenge() {
+    socialChallenge.cancel();
+    setSocialBusy(null);
+  }
+
   function selectMode(nextMode: ManagedAuthMode) {
+    stopSocialChallenge();
     setMode(nextMode);
     setResetMode(false);
     setLinkResendMode(false);
@@ -234,6 +246,7 @@ export function ManagedAuthPanel(props: {
   }
 
   async function submit() {
+    stopSocialChallenge();
     if (passkeySignupView) {
       await submitPasskey("signup");
       return;
@@ -352,24 +365,29 @@ export function ManagedAuthPanel(props: {
   }
 
   async function submitSocial(provider: ManagedSocialProvider) {
-    if (challengeRequired && !signupChallengeToken) {
-      setFormError("Complete the signup verification.");
-      return;
-    }
     if (!props.onSocialSubmit) return;
     setSocialBusy(provider);
     setFieldErrors({});
     setFormError(null);
+    setFormActionMode(null);
     setSuccessMessage(null);
+    // The Sign up tab may already hold a solved token; otherwise run one now.
+    const visibleToken = challengeRequired ? signupChallengeToken : undefined;
+    let token = visibleToken;
+    if (!token) {
+      const outcome = await socialChallenge.run();
+      if (outcome.status === "cancelled") return;
+      if (outcome.status === "verified") token = outcome.token;
+    }
     try {
-      await props.onSocialSubmit(provider, challengeRequired ? signupChallengeToken : undefined);
+      await props.onSocialSubmit(provider, token);
     } catch {
       setFormError(
         `Couldn't continue with ${provider === "google" ? "Google" : "GitHub"}. Try again.`,
       );
       setFormActionMode(null);
       setSocialBusy(null);
-      if (challengeRequired) {
+      if (visibleToken) {
         setSignupChallengeToken(undefined);
         setChallengeReset((value) => value + 1);
       }
@@ -378,6 +396,7 @@ export function ManagedAuthPanel(props: {
 
   async function submitPasskey(kind: "signin" | "signup") {
     if (!props.onPasskeySubmit) return;
+    stopSocialChallenge();
     const trimmedName = name.trim();
     setFieldErrors({});
     setFormError(null);
@@ -440,7 +459,10 @@ export function ManagedAuthPanel(props: {
     }
   }
 
-  const formInteractionBusy = busy || resendBusy || socialBusy !== null || passkeyBusy;
+  // While Cloudflare asks for interaction, the rest of the form stays usable:
+  // another choice cancels the waiting Google or GitHub click.
+  const socialLocked = socialBusy !== null && !socialChallenge.interactive;
+  const formInteractionBusy = busy || resendBusy || socialLocked || passkeyBusy;
   const passkeyButton =
     offerPasskeySignIn || offerPasskeySignUp ? (
       <Button
@@ -453,6 +475,7 @@ export function ManagedAuthPanel(props: {
             void submitPasskey("signin");
             return;
           }
+          stopSocialChallenge();
           setPasskeySignupMode(true);
           setFieldErrors({});
           setFormError(null);
@@ -634,12 +657,13 @@ export function ManagedAuthPanel(props: {
               {showSocial ? (
                 <ManagedSocialAuthButtons
                   providers={props.socialProviders!}
-                  busyProvider={socialBusy}
+                  busyProvider={socialLocked ? socialBusy : null}
                   disabled={busy || resendBusy || passkeyBusy}
                   onSelect={(provider) => void submitSocial(provider)}
                 />
               ) : null}
             </div>
+            {showSocial ? socialChallenge.element : null}
             <ManagedAuthDivider />
           </>
         ) : null}
