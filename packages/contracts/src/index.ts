@@ -1,3 +1,5 @@
+export * from "./billing-credit-notifications";
+import { BillingCreditNotification } from "./billing-credit-notifications";
 import * as primitives from "./primitives";
 import {
   WORKSPACE_CONTROL_REASON_MAX_BYTES,
@@ -17888,6 +17890,8 @@ export type InboxItem = z.infer<typeof InboxItem>;
 export const ListInboxResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     items: z.array(InboxItem),
+    /** Organization billing notices are not chat items or workspace events. */
+    billingNotifications: z.array(BillingCreditNotification).optional(),
     /** Open items that need the person (questions, approvals, paused goals). */
     needsYouCount: primitives.nonnegativeInteger,
     /** Open, unread, unsnoozed items of any kind. */

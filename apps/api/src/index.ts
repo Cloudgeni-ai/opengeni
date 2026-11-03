@@ -63,6 +63,7 @@ import {
   type SessionWorkflowClient,
 } from "./app";
 import { startBrowserHoldRenewalPump } from "./browser-hold-renewal";
+import { startBillingCreditNotificationDelivery } from "./billing-credit-notifications";
 import { observabilityEventBusOptions } from "./observability";
 import { startAuthCalloutResponder } from "./sandbox/auth-callout";
 import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-ingestion";
@@ -689,6 +690,15 @@ export async function startApi(options: StartApiOptions = {}) {
     },
   });
   const metricsServer = startApiMetricsListener(settings, observability);
+  const billingAppUrl = settings.webBaseUrl ?? settings.publicBaseUrl;
+  const stopBillingCreditNotificationDelivery =
+    routeDeps.managedAuth && billingAppUrl
+      ? startBillingCreditNotificationDelivery(
+          dbClient.db,
+          routeDeps.managedEmailTransport,
+          billingAppUrl,
+        )
+      : undefined;
   const stopSlackInteractionPump = settings.slackSigningSecret
     ? startSlackInteractionPump(routeDeps)
     : undefined;
@@ -810,6 +820,7 @@ export async function startApi(options: StartApiOptions = {}) {
       // Start private CLI session cleanup even if another service's drain stalls.
       const vaultProvidersClosed = closeNativeExternalVaultProviders().catch(() => undefined);
       metricsServer?.stop(true);
+      await stopBillingCreditNotificationDelivery?.();
       stopSlackInteractionPump?.();
       await stopSlackAgentUpdatePump?.();
       stopTeamsBotPump();
