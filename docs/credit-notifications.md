@@ -4,6 +4,9 @@ The control worker evaluates organization credit alerts through the existing
 maintenance cadence. The API drains their email receipts using the existing
 managed-email transport. Neither path charges money, changes pricing, or changes
 the BYOK fee. UI rendering and automatic top-up orchestration are separate work.
+The standalone API starts the delivery pump after binding its server, then drains
+the in-flight pass before closing its database. Merely composing `createApp` does
+not start this organization-wide scan; embedding hosts own background jobs.
 
 ## Balance and spend rules
 
@@ -60,6 +63,8 @@ Migration `1241_billing_credit_notifications.sql` adds:
   before the new writers start, in committed batches of at most 500 memberships;
   row locks serialize it with role changes and revocation. FORCE RLS and account
   scope apply to all four tables.
+  The projection explicitly revokes inherited runtime DML, including on databases
+  whose migration owner already has provisioned default privileges.
 
 Enqueue resolves recipients at the original operation, not on replay. Ordinary
 members, external actors, workspace-only admins and organization API keys are not

@@ -92,6 +92,9 @@ CREATE TRIGGER billing_credit_recipients_project AFTER INSERT OR UPDATE OR DELET
 DO $grants$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='opengeni_app') THEN
+    -- An already-provisioned owner grants runtime DML through default privileges.
+    -- Reset those inherited grants before installing this read-only projection.
+    REVOKE ALL ON billing_credit_notification_recipients FROM opengeni_app;
     GRANT SELECT ON billing_credit_notification_recipients TO opengeni_app;
     GRANT SELECT,INSERT,UPDATE,DELETE ON billing_credit_alert_settings,billing_credit_notifications,billing_credit_notification_deliveries TO opengeni_app;
     REVOKE ALL ON FUNCTION opengeni_private.project_billing_credit_recipients() FROM opengeni_app;

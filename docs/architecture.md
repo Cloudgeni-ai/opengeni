@@ -1857,7 +1857,9 @@ for account-fenced crossing state and durable recipient receipts, and
 `packages/core/src/billing-credit-notifications.ts` for the existing managed-email
 transport. The control worker evaluates canonical general availability and
 settled spend; the API delivers email and projects organization notices through
-the existing inbox and billing-authorized routes. Membership's invoker projection
+the existing inbox and billing-authorized routes. The standalone server owns the
+delivery pump's startup and draining shutdown; composing request routes alone
+does not start organization scans. Membership's invoker projection
 keeps recipients current. Billing events never enter workspace feeds merely
 because a recipient is a workspace administrator. See
 [credit notifications](credit-notifications.md) for thresholds, delivery ambiguity,

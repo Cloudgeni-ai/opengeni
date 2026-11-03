@@ -19,6 +19,7 @@ import {
 } from "@opengeni/core";
 import type { Permission } from "@opengeni/contracts";
 import { registerBillingRoutes } from "../src/routes/billing";
+import { startBillingCreditNotificationDelivery } from "../src/billing-credit-notifications";
 
 let fixture: RestrictedRuntimeTestDatabase | null = null,
   client: DbClient | null = null;
@@ -132,4 +133,43 @@ test("provider accepted-but-reply-lost retries the same key once, then records s
   expect(attempts).toHaveLength(2);
   expect(attempts[0]).toBe(attempts[1]);
   expect(await deliverBillingCreditNotification(input)).toBe(false);
+});
+
+test("the server-owned pump discovers and settles a durable notice before shutdown", async () => {
+  if (!client) return;
+  const org = await organization();
+  const notificationId = await enqueueBillingCreditNotification(client.db, {
+    accountId: org.accountId,
+    operationKey: "test:pump",
+    kind: "topup_success",
+    details: { availableBalanceMicros: 20_000_000, amountMicros: 20_000_000 },
+  });
+  let sent!: () => void;
+  const delivered = new Promise<void>((resolve) => {
+    sent = resolve;
+  });
+  let calls = 0;
+  const stop = startBillingCreditNotificationDelivery(
+    client.db,
+    {
+      sender: "sender@example.test",
+      idempotency: { scope: "pump-durable-v1", retentionSeconds: 86400 },
+      send: async () => {
+        calls++;
+        sent();
+        return { status: "sent", providerMessageId: "pump-provider-accepted" };
+      },
+    },
+    "https://app.test",
+  );
+  try {
+    await delivered;
+  } finally {
+    await stop();
+  }
+  expect(calls).toBe(1);
+  const [row] = await fixture!.admin`
+    select status,provider_message_id from billing_credit_notification_deliveries
+    where notification_id=${notificationId}::uuid`;
+  expect(row).toEqual({ status: "sent", provider_message_id: "pump-provider-accepted" });
 });
