@@ -331,6 +331,7 @@ function fileContent(input: ProviderFieldChange, current: VaultFieldRow | undefi
 }
 
 async function providerFieldValues(
+  type: VaultItemType,
   planned: readonly PlannedField[],
   resolveReference: (raw: string) => Promise<string>,
   generated: string[],
@@ -364,7 +365,15 @@ async function providerFieldValues(
       value = value.trim();
     }
     const saved = plainFieldKind(
-      { name: input.name, value, kind, chosen: input.kind !== undefined || current !== undefined },
+      {
+        name: input.name,
+        value,
+        kind,
+        chosen:
+          input.kind !== undefined ||
+          current !== undefined ||
+          standardFieldKind(type, input.name) === "text",
+      },
       fieldNotes,
     );
     writes.push({ ...base, kind: saved, value });
@@ -541,6 +550,7 @@ export async function writeProviderVaultItemOutcome(
     existing?.fields ?? [],
   );
   const fields = await providerFieldValues(
+    type,
     planned,
     deps.resolveReference,
     input.generated ?? [],

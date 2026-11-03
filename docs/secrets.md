@@ -398,11 +398,11 @@ Each agent attempt keeps one memory of secret values (`SecretValueMemory`):
   12 characters long, and single-line credential files) and MCP header
   values of at least 12 characters whose names say they carry credentials
   (`Authorization`, `Proxy-Authorization`, `Cookie`, and names with a word
-  such as token, key, secret, auth, password, session or signature). Names
-  are read word by word (`_`, `-`, `.` and camelCase separate words; a word
-  may end in one, as in `PGPASSWORD`, `DBPWD`, `OAUTH` or `JSESSIONID`, or
-  start with one, as in `TOKENVALUE`, and trailing digits are ignored, as in
-  `API_KEY2`), so `GIT_AUTHOR_NAME` is not a credential, and neither is a
+  such as token, key, secret, auth, password, session or signature). These
+  names match a credential word anywhere, even inside another word
+  (`PRIVATEKEYPEM`, `AUTHHEADER`, `SESSIONDATA`, `X-Authz`), once ordinary
+  words that contain one are set aside (`author`, `keyboard`, `monkey`,
+  `tokenizer`), so `GIT_AUTHOR_NAME` is not a credential, and neither is a
   name whose last word says the value is a name or label (`SESSION_NAME`).
   Names ending in `_FILE`, `_PATH`, `_DIR`, `_URL` or `_ENDPOINT` locate a
   credential and are skipped. Headers
@@ -445,21 +445,42 @@ field) reveals both the encoded and the decoded text. Only Opengeni's own
   symbol (`admin123`, `Password1!`), a camelCase name, a snake_case or
   kebab-case name of two parts (or three with a number, `deploy-bot-01`), a
   host, email, URL or path made only of such names and numbers. A value in
-  a known token format is always distinctive. Letters count as words only when their letter pairs are mostly
-  common English pairs (at most one uncommon pair in five), so random
-  letters such as `qkzvmxbtwe` stay distinctive. A weak value is replaced
-  only where it is the credential:
+  a known token format is always distinctive. Letters count as words only
+  when their letter pairs and triples are mostly common English ones (at
+  most one uncommon pair, and one uncommon triple, in five; in the parts of
+  a host, URL or path, runs of fewer than four letters are skipped and a
+  little more is allowed), so random letters such as `qkzvmxbtwe` and
+  `rdabaootck` stay distinctive. Random single-case letters still pass as
+  words about once in two thousand at 10 to 12 characters (about once in
+  250 at 8), and a random lowercase host, URL or path part about once in
+  300 at 10 characters and once in two thousand at 12; such a value is
+  then replaced only in credential positions. A word that fails the test
+  (an unusual name) stays distinctive and is masked everywhere, as before.
+  A weak value is replaced only where it is the credential:
   - alone on its line, or as the password of a URL (`scheme://user:<value>@`);
   - as a whole token that a credential name leads into: `password=…`,
     `PGPASSWORD: …`, `"token": "…"`, `Server=db;Password=…;Database=app`,
     `--password …`, "the password is …", `requirepass …`, `password …`
-    (netrc), `Authorization: Bearer …`, `Cookie: sid=…`. The name is read
-    word by word, as below; `;`, `,` and `&` end a token;
+    (netrc), `Authorization: Bearer …`, `Cookie: sid=…`,
+    `<password>…</password>`, `<add key="Password" value="…" />`,
+    `IDENTIFIED BY '…'`. The name is read word by word (`_`, `-`, `.` and
+    camelCase separate words; a word may end in a credential word, as in
+    `PGPASSWORD`, `DBPWD` or `masterauth`, or start with one, as in
+    `TOKENVALUE`). `session`, `private` and a lone `key` do not count on
+    their own (`--session main`, `--key reports.csv`), nor do ordinary words
+    such as `bypass`, nor names whose last word says the value names
+    something (`rpId`, `SESSION_NAME`). `;`, `,` and `&` end a token;
   - after a password option of a program that takes one: `mysql -p…`,
-    `sshpass -p …`, `redis-cli -a …`, `curl -u user:…`, `htpasswd -b file
-    user …` (`mkdir -p` and `ls -a` are not);
-  - piped into a command whose name or option names a credential
-    (`echo '…' | docker login --password-stdin`, `| chpasswd`);
+    `7z -p…`, `sshpass -p …`, `docker login -p …` (also `podman`,
+    `nerdctl`, `oc` and `az login`), `mongosh -p …`, `redis-cli -a …`,
+    `ldapsearch -w …`, `sqlcmd -P …`, `zip -P …`, `smbclient -U user%…`,
+    `curl -u user:…`, `htpasswd -b file user …` (`mkdir -p` and `ls -a` are
+    not);
+  - as the last field of a `.pgpass` line (`host:5432:db:user:…`);
+  - printed into the next command when that command reads a password:
+    `echo '…' | docker login --password-stdin`, `echo 'app:…' | chpasswd`,
+    `echo … | sudo -S`. A table row, `||` or a credential word in a comment
+    does not count;
   - as the value of a key whose line follows one naming a credential
     (`- name: DB_PASSWORD` then `value: …`, `credentials:` then `admin: …`),
     unless the key itself names something (`name:`, `host:`);
@@ -680,8 +701,8 @@ known).
 - A weak value alone on a line is still replaced, for example a directory
   name in `ls` output that is the same word as a saved password.
 - A weak value is kept as written in positions not listed above, such as a
-  `.pgpass` line (`host:5432:db:user:…`) or a positional argument
-  (`connect(host, "app", "…")`).
+  positional argument (`connect(host, "app", "…")`) or a lone `key` option
+  (`--key …`).
 - Multi-line credential files, values shorter than 8 characters and earlier
   values from connected vaults are not searched.
 - A value the agent read with `secret_get` stays readable for the rest of

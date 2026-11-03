@@ -133,6 +133,43 @@ describe("value strength", () => {
   });
 });
 
+test("random single-case letters and random host or URL parts are almost never weak", () => {
+  let seed = 7;
+  const next = () => {
+    seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
+    return seed / 2_147_483_648;
+  };
+  const letters = (length: number) => {
+    let value = "";
+    for (let index = 0; index < length; index += 1)
+      value += "abcdefghijklmnopqrstuvwxyz"[Math.floor(next() * 26)];
+    return value;
+  };
+  // About 0.05% are weak at these lengths; 0.2% allows for the sample.
+  for (const length of [10, 11, 12]) {
+    let weak = 0;
+    for (let sample = 0; sample < 5_000; sample += 1) {
+      const value = letters(length);
+      if (secretValueStrength(value) === "weak") weak += 1;
+      if (secretValueStrength(value.toUpperCase()) === "weak") weak += 1;
+    }
+    expect([length, weak <= 20]).toEqual([length, true]);
+  }
+  for (const make of [
+    (part: string) => `${scheme("https")}hooks.example.com/services/${part}`,
+    (part: string) => `${part}.example.com`,
+    (part: string) => `/srv/${part}/data`,
+  ]) {
+    let weak = 0;
+    for (let sample = 0; sample < 5_000; sample += 1) {
+      if (secretValueStrength(make(letters(12))) === "weak") weak += 1;
+    }
+    expect([make("x"), weak <= 10]).toEqual([make("x"), true]);
+  }
+  expect(secretValueStrength("rdabaootck")).toBe("distinctive");
+  expect(secretValueStrength("kgkelsuschi")).toBe("distinctive");
+});
+
 describe("a weak saved value", () => {
   test("does not alter paths, imports, identifiers, hosts or URL paths", () => {
     const memory = memoryWith(WORD);
@@ -172,6 +209,26 @@ describe("a weak saved value", () => {
       `PWA build of ${WORD}`,
       `# rotate the api key\nproject: ${WORD}`,
       `password_policy:\n  name: ${WORD}`,
+      // A pipe that does not feed a password reader.
+      `| ${WORD} | Session token rotation |`,
+      `const host = ${WORD} || getToken();`,
+      `type Kind = "${WORD}" | "token";`,
+      `UPDATE t SET col = ${WORD} || '{"sessionId":1}';`,
+      `cat ${WORD} | wc -l  # count keys`,
+      `echo ${WORD} | wc -l`,
+      // Words that name other things.
+      `--session ${WORD}`,
+      `SESSION=${WORD} ./run.sh`,
+      `const session = ${WORD}[next++]!;`,
+      `return cond ? "private" : "${WORD}";`,
+      `aws s3api get-object --key ${WORD} out`,
+      `"@scope/vaults-onepassword": "${WORD}:*"`,
+      `this bypass ${WORD} works`,
+      `credential: {\n  rpId: "${WORD}",`,
+      // Options that take a password only for some programs.
+      `docker run -p ${WORD} img`,
+      `ls -w ${WORD} x`,
+      `grep -P ${WORD} log.txt`,
     ];
     for (const text of unchanged) expect(memory.maskText(text)).toBe(text);
   });
@@ -232,6 +289,22 @@ describe("a weak saved value", () => {
       [`deploy --password ${WORD} --yes`, `deploy --password ${LABEL} --yes`],
       [`Cookie: theme=dark; sid=${WORD}`, `Cookie: theme=dark; sid=${LABEL}`],
       [`htpasswd -b .htpasswd admin ${WORD}`, `htpasswd -b .htpasswd admin ${LABEL}`],
+      // More programs, file formats and statements that hold a password.
+      [`docker login -u bob -p ${WORD}`, `docker login -u bob -p ${LABEL}`],
+      [`oc login -u bob -p ${WORD} https://x.test`, `oc login -u bob -p ${LABEL} https://x.test`],
+      [`az login -u bob -p ${WORD}`, `az login -u bob -p ${LABEL}`],
+      [`mongosh -u bob -p ${WORD}`, `mongosh -u bob -p ${LABEL}`],
+      [`ldapsearch -x -D cn=a -w ${WORD} -b dc=x`, `ldapsearch -x -D cn=a -w ${LABEL} -b dc=x`],
+      [`sqlcmd -S db -U sa -P ${WORD}`, `sqlcmd -S db -U sa -P ${LABEL}`],
+      [`zip -P ${WORD} out.zip f`, `zip -P ${LABEL} out.zip f`],
+      [`7z a -p${WORD} out.7z f`, `7z a -p${LABEL} out.7z f`],
+      [`smbclient //h/s -U bob%${WORD}`, `smbclient //h/s -U bob%${LABEL}`],
+      [`db.example.com:5432:app:bob:${WORD}\n`, `db.example.com:5432:app:bob:${LABEL}\n`],
+      [`<password>${WORD}</password>`, `<password>${LABEL}</password>`],
+      [`<add key="Password" value="${WORD}" />`, `<add key="Password" value="${LABEL}" />`],
+      [`CREATE USER a IDENTIFIED BY '${WORD}';`, `CREATE USER a IDENTIFIED BY '${LABEL}';`],
+      [`echo ${WORD} | sudo -S true`, `echo ${LABEL} | sudo -S true`],
+      [`?password=${WORD}&x=1`, `?password=${LABEL}&x=1`],
     ];
     for (const [text, masked] of cases) expect(memory.maskText(text)).toBe(masked);
     // Its whole base64 encoding, as in a Kubernetes Secret, is replaced anywhere.

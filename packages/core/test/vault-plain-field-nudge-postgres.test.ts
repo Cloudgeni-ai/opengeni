@@ -120,6 +120,27 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
         }),
       );
       expect(plain.fieldNotes).toBeUndefined();
+
+      // A login's own username field is a text field by its type: the kind
+      // stays text, with a note.
+      const standard = await service.saveForAgent(
+        principal,
+        SecretSaveInput.parse({
+          item: "Standard login",
+          saveTo: "user",
+          fields: [{ name: "username", value: TOKEN }],
+          mode: "create",
+        }),
+      );
+      expect(standard.fieldNotes).toEqual([
+        {
+          field: "username",
+          kind: "text",
+          reason: "format",
+          message:
+            'Looks like a GitHub token. Kept as text; save it with kind "concealed" if it is a secret.',
+        },
+      ]);
     });
   },
 );

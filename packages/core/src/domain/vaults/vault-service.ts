@@ -389,7 +389,10 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         name: input.name,
         value: plaintext,
         kind,
-        chosen: input.kind !== undefined || current !== undefined,
+        chosen:
+          input.kind !== undefined ||
+          current !== undefined ||
+          standardFieldKind(type, input.name) === "text",
       },
       fieldNotes,
     );

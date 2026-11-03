@@ -269,7 +269,7 @@ const WORD = "(?:\\p{Ll}+|\\p{Lu}\\p{Ll}+|\\p{Lu}+)";
 const WORD_TAIL = "[0-9]{0,4}[^\\p{L}\\p{N}\\s]?";
 /** One word, or two separated by a single space, with an optional tail. */
 const WORD_LIKE = new RegExp(`^${WORD}(?: ${WORD})?${WORD_TAIL}$`, "u");
-/** A camelCase or PascalCase identifier: `adminUser`, `MyService2`. */
+/** A camelCase or PascalCase identifier: `adminUser`, `HarborView2`. */
 const CAMEL_LIKE = new RegExp(
   `^(?:\\p{Ll}{2,}|\\p{Lu}\\p{Ll}{2,})(?:\\p{Lu}\\p{Ll}{2,})*${WORD_TAIL}$`,
   "u",
@@ -312,32 +312,142 @@ const COMMON_LETTER_PAIRS = new Set(
     "aze"
   ).match(/../gu),
 );
-/** At most one uncommon pair in this many pairs still reads as words. */
-const PAIRS_PER_UNCOMMON_PAIR = 5;
+/**
+ * The 2,402 letter triples that make up 95% of the triples in the same
+ * words. Pairs alone let about one random run of single-case letters in a
+ * hundred through; triples as well, about one in two thousand.
+ */
+const COMMON_LETTER_TRIPLES = new Set(
+  (
+    "abaabeabiablaboabrabsabuaccacdaceachaciackacoacqacractacyadaadbadcaddadeadfadiadjadl" +
+    "admadoadradsadvadwadyafeaffaftagaageaggagiagnagraicaidailaimainairaisaitakeakiaksala" +
+    "albalcaldalealfalgalialkallalmaloalpalralsaltalualvalwamaambameamiammampamsanaancand" +
+    "aneanganiankanmannanoanransantanuanyapaapeaphapiappapsaptaraarbarcardareargariarkarl" +
+    "armarnarrarsartaryasaascaseashasiaskasoassastasuasyataatcateatfathatiatlatoatsattatu" +
+    "audaugaulaunausautavaaveaviavoawaawnaxeaxiaxsayeayiaylaymaysazubacbadbalbanbapbarbas" +
+    "batbeabecbedbefbegbehbelbenberbesbhobidbigbilbinbitbjeblableblibloblybmiboabodboobor" +
+    "botbouboxbrabrebribrobscbsebsobstbtrbufbuibunbusbutbyibypbytcabcaccadcalcamcancapcar" +
+    "cascatcaucceccoccuceacebceccedceecefceicelcemcenceocepcercescetcevcewchachechichmcho" +
+    "chpchrchschtchuciacidciecifcilcincipciscitckackbckcckeckfckgckicklcknckockpckscktcku" +
+    "clacleclicloclucoacodcogcolcomconcoocopcorcoscoucovcpccpscptcpucqucracrecricrocrucry" +
+    "ctactcctecthctictlctmctnctoctpctrctscttctuculcumcurcuscutcyccypdabdacdaedagdaldandap" +
+    "dardasdatdaudaydbadbodbydcadcodcrddaddeddiddlddrdeadebdecdeddeedefdegdeldemdendeodep" +
+    "derdesdetdevdexdfadfedfidfodfrdgediadicdiddiedifdigdindiodirdisditdivdjudledlidlydma" +
+    "dmcdmedmidmodnodocdofdomdondopdordotdoudowdpadpedpodprdradredridrodsadscdsedshdsidsk" +
+    "dstdsudtadtedthdtodtuduaducduldupdurdusdvadvedvidwoeabeaceadeafeageakealeameaneapear" +
+    "easeateaueavebaebhebieboebpebrebsebuebyecaeceechecieckeclecoecrecsectecuecyedaedbedc" +
+    "eddedeedfedgedhediedledmedoedpedredsedteduedweeceedeekeemeeneepeereeseeteeveexefaefe" +
+    "effefieflefoefrefuegaegeegiegmegoegreguehaeheehoehteideigeineipeiteivejeekeekielaelc" +
+    "eldeleelfelielleloelpelrelseltelyemaembemeemiemoempemsemuenaencendeneenfengenienoenr" +
+    "ensentenuenveofeogeoneopeoreoueowepaepeephepieplepoeprepseptepuequeraerbercerdereerf" +
+    "ergerherierlermerneroerperrerserteruerverweryesaesceseesfeshesieskeslesoespesqessest" +
+    "esuesyetaetbetcetdeteetfetgethetietmetoetpetretsettetuetvetwetyeueeuneupeureusevaeve" +
+    "evievoewaewceweewiewoewrewsexaexcexeexfexhexiexpexrexsexteyeeysfabfacfadfaifalfaufea" +
+    "fecfedfeefenferfesfetffefffffifflffoffsficfiefigfilfinfirfitfixflafleflifloflufocfol" +
+    "fooforfoufrafrefrofseftefulfunfusfycfyigacgaggaigangatgchgcogdegeagecgedgeegeggeigel" +
+    "gemgengeogepgergesgetggegglghtgibgicgingisgitglegliglogmagmegnagnegnignognugoagoogor" +
+    "gotgovgprgragregrigrogsegstgsugthguagueguigumgurhabhadhaihalhanhapharhashathauhavhbo" +
+    "hclhcohdrheahechedheeheihelhemhenherheshexhichidhighilhinhiphishithivhmahmehnehoihol" +
+    "homhonhoohorhoshothouhowhpahrahrehrohsehsthtehtmhtshtthubhumhunhwohydhypiabiagialian" +
+    "iariatibeibiiblibribuicaiceichiciickicoicricsicticyidaidciddideidfidgidiidlidridsidt" +
+    "iedielienieriesieviewifaifeiffifiiftifyigaigeiggighigiignigrigsiguiinikeilaildileili" +
+    "illiloilsiltiluilyimaimeimiimmimpimsimuinainbincindineinfinginhiniinkinlinminninpins" +
+    "intinuinvinwiodionioriosiouipaipeipiiplippipripsiptiquireiriirmiroirrirsirtisaiscise" +
+    "isfishisiiskislismisoispisrissistisuitaitciteitfithitiitlitmitoitpitritsittituitwity" +
+    "ivaiveiviiwoixeizaizeizijecjoijoujsojudjumjuskabkackagkbokcokdokedkeekenkepkerkesket" +
+    "keykfikflkgrkilkinkipkitkloknokorkoukpokreksekspkstktiktokuplablaclailamlanlaplarlas" +
+    "latlaulaylbalcalcolculdaldcldeldildoldrldslealeblecledleelefleglellemlenleplerleslet" +
+    "leulevlewlexlfalfolialibliclidlielifligliklimlinlioliplislitlivlizllallbllcllellillm" +
+    "llollpllrllslltllullylmelnaloaloblocloglonlooloplorloslotloulovlowloylpalpelpolprlre" +
+    "lrolsclselsolstlsultaltelthltiltmltoltpltrltslualudlueluglumlunlurluslutlvalvelwolys" +
+    "mabmacmagmaimalmanmapmarmasmatmaumaxmaymbembimblmcomcpmeamebmecmedmeemelmemmenmeomer" +
+    "mesmetmevmicmidmigmilminmismitmizmmammemmimmommumodmonmormosmotmoumovmpampempimplmpo" +
+    "mprmpsmptmpumulmupmutnabnacnadnagnainalnamnannapnarnasnatnaunavnbanbinblnboncancench" +
+    "ncinclnconcrnctncuncyndandbndcndendindlndmndondpndrndsndtneanecnedneenegneinelnemnen" +
+    "neonepnernesnetneunevnewnexnfanfenfinflnfonfrnfungangcngdngengfnghnginglngmngongpngr" +
+    "ngsngtngunhenianicnidnienifnimninnionipnisnitniznkenkinksnlanlenlinlonlynmanmcnmenmo" +
+    "nnannenninnonoanobnodnolnomnonnopnornosnotnounownpanpenplnponprnpunqunrenronrunsansc" +
+    "nsensfnshnsinslnsonspnstnsunswntantbntcntdntentfnthntintlntmntontpntrntsnttntuntwnty" +
+    "nuanuenuinulnumnupnurnusnvanvenvinvonwanwenwinwooadoaloaroasoauobaobeobjoblobsocaocc" +
+    "oceociockocooctocuodaodeodiodsoduodyoesoffofioftogaogeoggogiognogoogrogsoicoidoinois" +
+    "ojeokaokeokioksokuolaolbolcoldoleoliolloloolpolrolsoluolvomaombomcomeomiommomoompoms" +
+    "onaonboncondoneonfongonhonionkonlonmonnonoonponronsontonuonvonwoodookooloomoopooroos" +
+    "ootopaopdopeopioplopmopooppopropsoptopuopyoraorborcordoreorgoriorkorlormornoroorporr" +
+    "orsortoruorworyosaoscoseosiosoospossostosuotaotcoteotfothotiotootsottouboudougouloun" +
+    "oupourousoutovaoveoviowaowcowdoweowiowlownowsoxboxcoxeoxfoxioxsoxyoymozepabpacpadpag" +
+    "paipalpanparpaspatpaupaypcapcopdapeapecpedpeepelpenperpespetpgrphaphephiphophrphypic" +
+    "pidpiepiipikpilpinpippirpisplaplepliplopluplypocpoipolponpoopopporpospotpowppappeppi" +
+    "pplppopprppsprepripropscpsepshpstptaptcpteptiptoptsptuptypubpulpurpusputquaquequiquo" +
+    "rabracradrafragrairalramranraprarrasratrauravrawrbarbirborcarcerchrcirclrcorcurdardc" +
+    "rderdirdrrdsrearebrecredreerefregrehreirejrelremrenreorepreqrerresretreurevrewrexrfa" +
+    "rfirforgargergirgrrgurhoriaribricridrierifrigrimrinrioriprisritrivrizrkbrkdrkerkfrki" +
+    "rksrlarlerlirlorlsrlyrmarmermirmormsrmurnarncrnernirnlrnornrrnsroarobrocrodrofrogroj" +
+    "rokrolromronrooroprorrosrotrourovrowroxrparperplrporprrptrrarrerrirrorrursarscrsersh" +
+    "rsirsorstrsurtartbrtcrterthrtirtmrtortrrtsrttrturtyrucrulrumrunruprusrutrvarvervirwa" +
+    "rworyarycryeryirypryrryssabsacsafsagsalsamsansapsarsatsavscasceschscisclscoscrseasec" +
+    "sedseesefsegseiselsemsensepseqsersessetseusevsfesfosgrshashcsheshishoshpshusibsicsid" +
+    "sifsigsilsimsinsiosissitsivsizskaskeskiskssktslasleslislosluslysmasmismosnasocsofsol" +
+    "somsonsorsouspaspespisplsposprsqlsqusressasscssessfssissksslssnssosspsstssusswstastb" +
+    "stcstdstesthstistlstmstostpstrstssttstustwstysuasubsucsuesufsugsuisulsumsupsursusswa" +
+    "sweswiswosymsynsystabtactadtagtaitaktaltamtantaptartastattautbatbetbitbotbrtbytcatch" +
+    "tcltcotcrtcutdetdoteatebtectedteeteftegtehteitekteltemtenteoteptertestettevtewtextfa" +
+    "tfitfotgrthathcthdthethfthithmthnthothrthsthuthwtiatibtictidtietiftigtiltimtintiotip" +
+    "tirtistittivtiztketlatletlitlotlytmatmetmitmltmotmstnatnetnotoatoctoftogtoktoltomton" +
+    "tootoptortostottoutovtowtpatpetpitpotprtputqutratretritrotrutrytsatsctsetsftshtsitsk" +
+    "tsotsrtsttsuttattettittlttottpttrttuttytuatuntupturtustuttvatvitwatwetwitwotyctyityl" +
+    "tymtyptyrtystyttyvtywuagualuanuaruatubaubjublubmubpubrubsubtuccuceuchuciuckuctudeudg" +
+    "udiuedueiuenueruesueuuffuggughugiuiduieuiluinuiruisuitulaulduleullultumaumbumeummumn" +
+    "umpunaunbuncunduneunfunguniunkunlunmunnunounpunrunsuntunwuotuouupaupcupdupeupgupiupl" +
+    "uppupsupturaurcureurfurguriurlurnurpurrursurvusauseushusiusluspusrustutautbutcutdute" +
+    "utfuthutiutlutmutoutputrutsuttvabvacvaivalvanvarvatvauveavecvedvefvelvemvenvepverves" +
+    "vetvewviavicvidvievigvilvinviovirvisvitvivvocvoivokvolwaiwakwalwanwapwarwaswatwaywde" +
+    "weawebwedweeweiwerweswhewhiwhowidwinwirwitwlewliwnewnlwnsworwrawriwsewstxacxaixamxap" +
+    "xcaxcexchxclxcoxcrxecxedxerxesxflxhaxidximxinxisxitxpaxpexpixplxpoxprxrexsexsuxtaxte" +
+    "xtrxtsxtuyabycayclycoydeydryedyeryexyfoyidyinyleyliyloymcymeymoynayncyntyouypaypeypo" +
+    "ypryptyreyroyseysiysnystysuyteytoywaywozatzedzenzerzeszinzonzoozur"
+  ).match(/.../gu),
+);
+/** At most one uncommon pair (or triple) in this many still reads as words. */
+const GRAMS_PER_UNCOMMON_GRAM = 5;
+const LENIENT_PAIR_SLACK = 2;
+const LENIENT_TRIPLE_SLACK = 3;
 
 /**
- * Whether a value's letters read as words: the letter pairs inside its words
- * (camelCase and separators split words) are mostly common English pairs, so
- * `pelican`, `harborMaster` and `deploy-bot` do and `qkzvmxbtwe`,
- * `CruPjtBwrw` and `FXIOFWLOJA` do not. A word that fails stays distinctive,
- * which only masks it as before. Letters outside A to Z are not judged.
+ * Whether a value's letters read as words: the letter pairs and triples
+ * inside its words (camelCase and separators split words) are mostly common
+ * English ones, so `pelican`, `harborMaster` and `deploy-bot` do and
+ * `qkzvmxbtwe`, `rdabaootck`, `CruPjtBwrw` and `FXIOFWLOJA` do not. A word
+ * that fails stays distinctive, which only masks it as before. Letters
+ * outside A to Z are not judged.
  *
- * Parts of a host, URL or path are judged leniently: abbreviations such as
- * `srv`, `npm` and `json` are common there, so runs of fewer than four
- * letters are skipped and one more uncommon pair is allowed.
+ * In a host, URL or path, runs of fewer than four letters are skipped:
+ * abbreviations such as `srv`, `npm` and `json` are common there.
  */
 function readsAsWords(text: string, lenient = false): boolean {
+  const runs = (text.match(/\p{Lu}?\p{Ll}+|\p{Lu}+/gu) ?? [])
+    .filter((run) => /^[A-Za-z]+$/u.test(run) && run.length >= (lenient ? 4 : 3))
+    .map((run) => run.toLowerCase());
+  // Judged over all runs together, so a value cannot spread rare ones thinly.
   let pairs = 0;
-  let uncommon = 0;
-  for (const run of text.match(/\p{Lu}?\p{Ll}+|\p{Lu}+/gu) ?? []) {
-    if (!/^[A-Za-z]+$/u.test(run) || run.length < (lenient ? 4 : 3)) continue;
-    const lower = run.toLowerCase();
-    for (let index = 0; index + 1 < lower.length; index += 1) {
+  let uncommonPairs = 0;
+  let triples = 0;
+  let uncommonTriples = 0;
+  for (const run of runs) {
+    for (let index = 0; index + 1 < run.length; index += 1) {
       pairs += 1;
-      if (!COMMON_LETTER_PAIRS.has(lower.slice(index, index + 2))) uncommon += 1;
+      if (!COMMON_LETTER_PAIRS.has(run.slice(index, index + 2))) uncommonPairs += 1;
+      if (index + 2 < run.length) {
+        triples += 1;
+        if (!COMMON_LETTER_TRIPLES.has(run.slice(index, index + 3))) uncommonTriples += 1;
+      }
     }
   }
-  return uncommon <= Math.floor((pairs + (lenient ? 2 : 0)) / PAIRS_PER_UNCOMMON_PAIR);
+  const pairSlack = lenient ? LENIENT_PAIR_SLACK : 0;
+  const tripleSlack = lenient ? LENIENT_TRIPLE_SLACK : 0;
+  return (
+    uncommonPairs <= Math.floor((pairs + pairSlack) / GRAMS_PER_UNCOMMON_GRAM) &&
+    uncommonTriples <= Math.floor((triples + tripleSlack) / GRAMS_PER_UNCOMMON_GRAM)
+  );
 }
 
 /** A single word-shaped name: a word with a short tail, an identifier or a snake/kebab name. */
@@ -353,7 +463,11 @@ function wordShaped(text: string, lenient = false): boolean {
  * or a path with a random segment carries a secret and is not.
  */
 function partsAreWeak(text: string): boolean {
-  const parts = text.split(/[/\\?#&=:.@~]+/u).filter((part) => part.length > 0);
+  // The scheme (`https`, `redis`) is not judged.
+  const parts = text
+    .replace(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//u, "")
+    .split(/[/\\?#&=:.@~]+/u)
+    .filter((part) => part.length > 0);
   return parts.every((part) => /^[0-9]+$/u.test(part) || wordShaped(part, true));
 }
 
@@ -867,13 +981,23 @@ const COOKIE = /(?:^|[\s"'])(?:set-)?cookie["']?\s*:\s*(?:[^\s;=]+=[^\s;]*;\s*)*
  * `sshpass -p …`, `redis-cli -a …`, `curl -u user:…`, `htpasswd -b file user …`.
  * Elsewhere `-p`, `-a` and `-u` mean other things (`mkdir -p`, `ls -a`).
  */
-const ATTACHED_P_PROGRAM = /(?:^|[\s/])(?:mysql|mariadb|mysqladmin|mysqldump|mysqlsh|sshpass)\s/u;
-const SPACED_P_PROGRAM = /(?:^|[\s/])sshpass\s/u;
+const ATTACHED_P_PROGRAM =
+  /(?:^|[\s/])(?:mysql|mariadb|mysqladmin|mysqldump|mysqlsh|sshpass|7z|7za|7zz|7zr)\s/u;
+const SPACED_P_PROGRAM =
+  /(?:^|[\s/])(?:sshpass|(?:docker|podman|nerdctl|oc|az)\s+login|mongo(?:sh|dump|restore|export|import|stat|top|files)?)\s/u;
 const A_PROGRAM = /(?:^|[\s/])(?:redis-cli|keydb-cli)\s/u;
 const U_PROGRAM = /(?:^|[\s/])curl\s/u;
+const W_PROGRAM =
+  /(?:^|[\s/])ldap(?:search|add|modify|delete|modrdn|compare|passwd|whoami|exop)\s/u;
+const CAPITAL_P_PROGRAM = /(?:^|[\s/])(?:sqlcmd|bcp|zip|unzip)\s/u;
+/** `smbclient -U user%…`: the password follows a `%`. */
+const PERCENT_USER =
+  /(?:^|[\s/])(?:smbclient|rpcclient|smbcacls|smbget)\s(?:.*\s)?(?:-U\s*|--user[=\s])["']?[^\s%"']+%$/u;
 const ATTACHED_P = /(?:^|\s)-p$/u;
 const SPACED_P = /(?:^|\s)-p\s+["']?$/u;
 const SPACED_A = /(?:^|\s)-a\s+["']?$/u;
+const SPACED_W = /(?:^|\s)-w\s+["']?$/u;
+const SPACED_CAPITAL_P = /(?:^|\s)-P\s+["']?$/u;
 const USER_COLON = /(?:^|\s)(?:-u|--user)(?:\s+|=)["']?[^\s:"']+:$/u;
 const HTPASSWD = /(?:^|[\s/])htpasswd\s+-\w*b\w*\s+\S+\s+\S+\s+["']?$/u;
 
@@ -887,20 +1011,42 @@ function commandSegment(before: string): string {
 const MAY_NAME_CREDENTIAL =
   /pass|pwd|pw|secret|token|key|auth|cred|bearer|session|cookie|private|signature|jwt/iu;
 /** Text that may hold a password option. */
-const MAY_HOLD_OPTION = /-[pau]|--user|htpasswd/u;
+const MAY_HOLD_OPTION = /-[pauwP]|--user|htpasswd/u;
 
-function nameLeadsIn(before: string): boolean {
+/** `<password>…`, `<ns:Secret type="x">…` (the closing tag follows the value). */
+const XML_ELEMENT = /<([A-Za-z_][\w.:-]*)(?:\s[^<>]*)?>$/u;
+/** `<add key="Password" value="…" />` (.NET configuration). */
+const XML_KEY_VALUE = new RegExp(
+  `\\bkey\\s*=\\s*${Q}([^"'<>\\\\]+)${Q}\\s+value\\s*=\\s*${Q}$`,
+  "iu",
+);
+/** SQL `IDENTIFIED BY '…'`, `IDENTIFIED WITH mysql_native_password BY '…'`. */
+const IDENTIFIED_BY = /\bidentified\s+(?:with\s+\S+\s+)?by\s+(?:password\s+)?["']?$/iu;
+/** A `.pgpass` line, whose last field is the password: `host:5432:db:user:…`. */
+const PGPASS_LINE = /^\s*[^\s:#]+:(?:[0-9]+|\*):[^\s:]+:[^\s:]+:$/u;
+/** Before an assignment, a name in a ternary (`? "a" :`) or after a `/` (`@scope/pkg":`) is not a key. */
+const NOT_A_KEY_BEFORE = /(?:\s\?\s+(?:\\?["'])?|\/)$/u;
+
+function nameLeadsIn(before: string, after: string): boolean {
+  if (IDENTIFIED_BY.test(before)) return true;
   if (!MAY_NAME_CREDENTIAL.test(before)) return false;
-  for (const pattern of [ASSIGNED, OPTION, STATED]) {
+  const assigned = ASSIGNED.exec(before);
+  if (
+    assigned?.[1] !== undefined &&
+    !NOT_A_KEY_BEFORE.test(before.slice(0, assigned.index)) &&
+    credentialNameSaysSecret(assigned[1])
+  ) {
+    return true;
+  }
+  for (const pattern of [OPTION, STATED, PASSWORD_WORD, XML_KEY_VALUE]) {
     const name = pattern.exec(before)?.[1];
     if (name !== undefined && credentialNameSaysSecret(name)) return true;
   }
-  return (
-    PASSWORD_WORD.test(before) ||
-    DIRECTIVE.test(before) ||
-    AUTH_SCHEME.test(before) ||
-    COOKIE.test(before)
-  );
+  const element = XML_ELEMENT.exec(before)?.[1];
+  if (element !== undefined && after.startsWith("</") && credentialNameSaysSecret(element)) {
+    return true;
+  }
+  return DIRECTIVE.test(before) || AUTH_SCHEME.test(before) || COOKIE.test(before);
 }
 
 function passwordOption(before: string): boolean {
@@ -908,17 +1054,32 @@ function passwordOption(before: string): boolean {
   const command = commandSegment(before);
   if (SPACED_P.test(command)) return SPACED_P_PROGRAM.test(command);
   if (SPACED_A.test(command)) return A_PROGRAM.test(command);
+  if (SPACED_W.test(command)) return W_PROGRAM.test(command);
+  if (SPACED_CAPITAL_P.test(command)) return CAPITAL_P_PROGRAM.test(command);
   if (USER_COLON.test(command)) return U_PROGRAM.test(command);
   return HTPASSWD.test(command);
 }
 
-/** Piped into a command that reads a password: `echo '…' | docker login --password-stdin`. */
-function pipedToPasswordReader(after: string): boolean {
-  const pipe = after.indexOf("|");
-  if (pipe < 0) return false;
-  return after
-    .slice(pipe + 1)
-    .split(/[\s|;&'"=]+/u)
+/** `echo …`, `printf '%s' …`: the value is what a command prints. */
+const PRINTED =
+  /(?:^|[\s;&|(])(?:echo|printf)(?:\s+-[A-Za-z]+)*(?:\s+(["'])%s(?:\\n)?\1)?\s+["']?(?:[^\s:"']+:)?$/u;
+/** A single pipe after the value, and the next command up to a comment or another command. */
+const PIPED_INTO = /^["']?[ \t]*\|(?!\|)([^#;|&]*)/u;
+/** `sudo -S` reads its password from standard input. */
+const SUDO_STDIN = /(?:^|\s)sudo\s+(?:-\w*S\w*)/u;
+
+/**
+ * Printed into a command that reads a password, whose name or options say so:
+ * `echo '…' | docker login --password-stdin`, `echo 'app:…' | chpasswd`,
+ * `echo … | sudo -S true`.
+ */
+function pipedToPasswordReader(before: string, after: string): boolean {
+  if (!PRINTED.test(before)) return false;
+  const next = PIPED_INTO.exec(after)?.[1];
+  if (next === undefined) return false;
+  if (SUDO_STDIN.test(next)) return true;
+  return next
+    .split(/[\s'"=]+/u)
     .some((word) => word.length > 0 && credentialNameSaysSecret(word.replace(/^-+/u, "")));
 }
 
@@ -1004,8 +1165,8 @@ function lineStartIndex(text: string, start: number, limit = LINE_SCAN_CHARS): n
 }
 
 /** Where the line holding `end` ends, at most `LINE_SCAN_CHARS` on. */
-function lineEndIndex(text: string, end: number): number {
-  const ceiling = Math.min(text.length, end + LINE_SCAN_CHARS);
+function lineEndIndex(text: string, end: number, limit = LINE_SCAN_CHARS): number {
+  const ceiling = Math.min(text.length, end + limit);
   for (let at = end; at < ceiling; at += 1) {
     const next = text[at]!;
     if (next === "\n" || next === "\r") return at;
@@ -1036,11 +1197,12 @@ function inUrlPasswordPosition(text: string, start: number, end: number): boolea
  * Whether a weak value at `start…end` is in a credential position: the
  * whole line (or the whole text), a URL's password, or a whole token that a
  * credential name leads into (`password=…`, `"token": "…"`, `--password …`,
- * "the password is …", `Authorization: Bearer …`), a password option of a
- * program that takes one (`mysql -p…`, `redis-cli -a …`, `curl -u user:…`),
- * piped into a command that reads a password, or the value of a key on a
- * line after one that names a credential (`- name: DB_PASSWORD` then
- * `value: …`). A base64 form inside a longer run (a Basic auth header)
+ * "the password is …", `Authorization: Bearer …`, `<password>…`,
+ * `IDENTIFIED BY '…'`), a password option of a program that takes one
+ * (`mysql -p…`, `docker login -p …`, `smbclient -U user%…`, `curl -u
+ * user:…`), the last field of a `.pgpass` line, printed into a command that
+ * reads a password, or the value of a key on a line after one that names a
+ * credential (`- name: DB_PASSWORD` then `value: …`). A base64 form inside a longer run (a Basic auth header)
  * needs only a credential word earlier on the line.
  */
 function weakValuePositionAllowed(
@@ -1054,7 +1216,9 @@ function weakValuePositionAllowed(
   if (left !== null && right !== null && !(left === "quote" && right === "quote")) return true;
   if (inUrlPasswordPosition(text, start, end)) return true;
   // Cheap boundary checks first, before any line is scanned.
-  const attachedOption = !inRun && text[start - 1] === "p" && text[start - 2] === "-";
+  // `mysql -p…`, `smbclient -U user%…`: the value is attached to the option.
+  const attachedOption =
+    !inRun && ((text[start - 1] === "p" && text[start - 2] === "-") || text[start - 1] === "%");
   if (!inRun && !boundaryAfter(text, end)) return false;
   if (!inRun && !attachedOption && !boundaryBefore(text, start)) return false;
   // A line longer than this before the value is not a key line.
@@ -1063,12 +1227,16 @@ function weakValuePositionAllowed(
   if (inRun) return hasCredentialWord(before);
   if (attachedOption) {
     const command = commandSegment(before);
+    if (text[start - 1] === "%") return PERCENT_USER.test(command);
     return ATTACHED_P.test(command) && ATTACHED_P_PROGRAM.test(command);
   }
-  if (nameLeadsIn(before) || passwordOption(before)) return true;
-  const after = text.slice(end, Math.min(lineEndIndex(text, end), end + CREDENTIAL_CONTEXT_CHARS));
-  if (pipedToPasswordReader(after)) return true;
+  const after = text.slice(end, lineEndIndex(text, end, CREDENTIAL_CONTEXT_CHARS));
+  if (nameLeadsIn(before, after) || passwordOption(before)) return true;
+  if (pipedToPasswordReader(before, after)) return true;
   if (lineStart === start - KEY_LINE_MAX_CHARS) return false;
+  if (lineEndAfter(text, end) === "break" && PGPASS_LINE.test(text.slice(lineStart, start))) {
+    return true;
+  }
   const key = KEY_ONLY_LINE.exec(text.slice(lineStart, start))?.[1];
   if (key === undefined || credentialNameDescribesValue(key)) return false;
   const previousStart = previousLineStartIndex(text, lineStart);
@@ -1078,6 +1246,8 @@ function weakValuePositionAllowed(
   return named !== undefined && credentialNameSaysSecret(named);
 }
 
+const RUN_BREAK = /[\s"'`<>()[\]{}]/u;
+
 function matchPosition(
   text: string,
   start: number,
@@ -1085,9 +1255,11 @@ function matchPosition(
   encoded: boolean,
 ): SecretValueMatchPosition {
   if (encoded) return "encoded";
-  const runStart = Math.max(0, start - 200);
-  const before = text.slice(runStart, start);
-  const run = /[^\s"'`<>()[\]{}]*$/u.exec(before)?.[0] ?? "";
+  // The run of non-space characters before the value, at most 200 back.
+  const floor = Math.max(0, start - 200);
+  let runStart = start;
+  while (runStart > floor && !RUN_BREAK.test(text[runStart - 1]!)) runStart -= 1;
+  const run = text.slice(runStart, start);
   if (run.includes("://") || run.includes(":\\/\\/")) return "url";
   const previous = text[start - 1] ?? "";
   const next = text[end] ?? "";

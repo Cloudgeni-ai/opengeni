@@ -111,17 +111,15 @@ export function plainFieldSecretHint(
     }
     const words = credentialNameWords(typeof fieldName === "string" ? fieldName : "");
     const last = words[words.length - 1];
-    // A fingerprint or key id is random but identifies a key; it is not one.
-    const identifier = last !== undefined && IDENTIFIER_LAST_WORD.test(last);
-    if (!identifier && looksRandomSecret(text)) {
+    // A fingerprint, key id or public key is random but is not a secret.
+    const notSecret =
+      (last !== undefined && IDENTIFIER_LAST_WORD.test(last)) ||
+      words.some((word) => /^public$/iu.test(word));
+    if (notSecret) return null;
+    if (looksRandomSecret(text)) {
       return { reason: "random", message: "Looks like a key or password." };
     }
-    if (
-      last &&
-      !identifier &&
-      !words.some((word) => /^public$/iu.test(word)) &&
-      credentialNameSaysSecret(fieldName)
-    ) {
+    if (last && credentialNameSaysSecret(fieldName)) {
       return { reason: "name", message: "The field name suggests a secret." };
     }
     return null;

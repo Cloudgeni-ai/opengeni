@@ -46,6 +46,8 @@ describe("plain field hints", () => {
       ["website", "https://example.com/login"],
       ["account", "f47ac10b-58cc-4372-a567-0e02b2c3d479"],
       ["public key", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeFakeFake user@host"],
+      // Random, but public.
+      ["public key", `${mixed(30)}!`],
       ["api key id", "id-0001"],
       ["region", "eu-west-1"],
       ["note", "Rotate this every quarter"],
@@ -90,6 +92,18 @@ describe("credential names", () => {
       "AUTH_METHOD",
       "keycloak-realm",
       "Accept",
+      // Alone, these words name other things: `--session main`, `private: true`, `--key file.csv`.
+      "session",
+      "SESSION",
+      "private",
+      "key",
+      "keys",
+      "bypass",
+      "compass",
+      "monkey",
+      "hotkey",
+      "rpId",
+      "credential_id",
     ]) {
       expect([name, credentialNameSaysSecret(name)]).toEqual([name, false]);
     }
@@ -111,10 +125,33 @@ describe("credentials put into an attempt", () => {
       "AUTH_TOKEN_PROVIDER",
       "TOKENVALUE",
       "PGPASSWORD",
+      // A credential word inside a compound, as before this change.
+      "PRIVATEKEYPEM",
+      "AUTHHEADER",
+      "AUTHORIZATIONHEADER",
+      "APITOKENVALUE",
+      "KEYDATA",
+      "SSL_KEYDATA",
+      "SESSIONDATA",
+      "COOKIEVALUE",
+      "AUTHSTRING",
+      "AUTHCODE",
+      "PWDHASH",
+      "KEYMATERIAL",
+      "X-Authz",
+      "X-Upstream-Authz",
+      "SESSION",
     ]) {
       expect([name, credentialNameMayHoldSecret(name)]).toEqual([name, true]);
     }
-    for (const name of ["GIT_AUTHOR_NAME", "SESSION_NAME", "API_KEY_LABEL", "REGION"]) {
+    for (const name of [
+      "GIT_AUTHOR_NAME",
+      "SESSION_NAME",
+      "API_KEY_LABEL",
+      "REGION",
+      "KEYBOARD_LAYOUT",
+      "TOKENIZER",
+    ]) {
       expect([name, credentialNameMayHoldSecret(name)]).toEqual([name, false]);
     }
   });
