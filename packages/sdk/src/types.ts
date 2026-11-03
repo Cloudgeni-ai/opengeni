@@ -1,4 +1,5 @@
 import type { WorkspaceTranscriptionPolicy } from "./transcription";
+import type { BillingCreditNotification } from "@opengeni/contracts/billing-credit-notifications";
 import type { SessionUsageLimit } from "@opengeni/contracts/session-usage-limits";
 export type {
   SessionUsageLimit,
@@ -7131,6 +7132,8 @@ export type InboxItemServerQuestion = {
 
 export type ListInboxResponse = {
   items: InboxItem[];
+  /** Organization billing notices for the recipient; not workspace inbox items. */
+  billingNotifications?: BillingCreditNotification[];
   /** Open, unsnoozed items that need the person (questions, approvals, paused goals). */
   needsYouCount: number;
   /** Open, unsnoozed, unread items of any kind. */

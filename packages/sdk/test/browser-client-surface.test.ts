@@ -203,7 +203,6 @@ const pendingBillingAlertMethods = [
   "getBillingAlertSettings",
   "updateBillingAlertSettings",
   "listBillingCreditNotifications",
-  "markBillingCreditNotificationRead",
 ];
 
 // Chat share links: the public share page reads a link without the SDK (no
