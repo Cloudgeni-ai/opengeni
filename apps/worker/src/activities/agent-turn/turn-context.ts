@@ -82,6 +82,7 @@ export type TurnControlState = {
   cancellationRequestedAt: number | null;
   activityStatus: RunAgentTurnResult["status"] | "unknown";
   turnMetricOutcome: TurnOutcome | null;
+  turnFailureOrigin?: import("@opengeni/observability").FailureOrigin;
   activityError: unknown;
   acknowledgeQuiescence: boolean;
 };

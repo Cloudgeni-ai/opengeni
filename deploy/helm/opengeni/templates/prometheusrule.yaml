@@ -388,17 +388,17 @@ spec:
           expr: |
             (
               (
-                sum by (provider) (increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome="completed"}[15m]))
+                sum by (provider) (increase(opengeni_turn_startup_milestone_duration_seconds_count{failure_origin!="customer_provider",namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome="completed"}[15m]))
                 or on(provider)
-                0 * sum by (provider) (increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome="failed"}[15m]))
+                0 * sum by (provider) (increase(opengeni_turn_startup_milestone_duration_seconds_count{failure_origin!="customer_provider",namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome="failed"}[15m]))
               )
               /
-              clamp_min(sum by (provider) (increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome=~"completed|failed"}[15m])), 1)
+              clamp_min(sum by (provider) (increase(opengeni_turn_startup_milestone_duration_seconds_count{failure_origin!="customer_provider",namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome=~"completed|failed"}[15m])), 1)
             ) < {{ $turnStartupFirstByteAvailabilityRatio }}
             and on(provider)
-            sum by (provider) (increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome=~"completed|failed"}[15m])) >= {{ $turnStartupMinSamples }}
+            sum by (provider) (increase(opengeni_turn_startup_milestone_duration_seconds_count{failure_origin!="customer_provider",namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome=~"completed|failed"}[15m])) >= {{ $turnStartupMinSamples }}
             and on(provider)
-            sum by (provider) (increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome="failed"}[15m])) > 0
+            sum by (provider) (increase(opengeni_turn_startup_milestone_duration_seconds_count{failure_origin!="customer_provider",namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome="failed"}[15m])) > 0
           for: 15m
           labels:
             severity: warning
@@ -426,12 +426,12 @@ spec:
         - alert: OpenGeniTurnFailureRatioHigh
           expr: |
             (
-              sum(increase(opengeni_turns_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="failed"}[10m]))
+              sum(increase(opengeni_turns_total{failure_origin!="customer_provider",namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="failed"}[10m]))
               /
-              clamp_min(sum(increase(opengeni_turns_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])), 1)
+              clamp_min(sum(increase(opengeni_turns_total{failure_origin!="customer_provider",namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])), 1)
             ) > 0.2
             and on()
-            sum(increase(opengeni_turns_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) >= 5
+            sum(increase(opengeni_turns_total{failure_origin!="customer_provider",namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) >= 5
           for: 5m
           labels:
             severity: warning
@@ -534,12 +534,12 @@ spec:
         - alert: OpenGeniModelCallFailureRatioHigh
           expr: |
             (
-              sum by (provider) (increase(opengeni_model_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="failed"}[10m]))
+              sum by (provider) (increase(opengeni_model_calls_total{failure_origin!="customer_provider",namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="failed"}[10m]))
               /
-              clamp_min(sum by (provider) (increase(opengeni_model_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])), 1)
+              clamp_min(sum by (provider) (increase(opengeni_model_calls_total{failure_origin!="customer_provider",namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])), 1)
             ) > 0.2
             and on(provider)
-            sum by (provider) (increase(opengeni_model_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) >= 5
+            sum by (provider) (increase(opengeni_model_calls_total{failure_origin!="customer_provider",namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) >= 5
           for: 5m
           labels:
             severity: warning
