@@ -15,7 +15,7 @@ import { listSessionEventSlices } from "@opengeni/db/session-event-slices";
 import * as sessionPreviewSchema from "@opengeni/db/schema";
 import { and, eq, sql } from "drizzle-orm";
 import { SessionMessageSearchRequest } from "@opengeni/contracts";
-import { ModelUnavailableError } from "@opengeni/contracts";
+import { ModelPolicyRefusedError, ModelUnavailableError } from "@opengeni/contracts";
 import { ContinueAfterCapabilitySetupRequest } from "@opengeni/contracts";
 import type { ContinueAfterCapabilitySetupResponse } from "@opengeni/contracts";
 import {
@@ -7121,6 +7121,24 @@ export function sessionCreateErrorResponse(c: Context, error: unknown): Response
         code: "SESSION_CREATE_REJECTED",
         message: error.message,
         details: { code: error.cause.code, modelId: error.cause.modelId },
+      },
+      422,
+    );
+  }
+  if (
+    error instanceof HTTPException &&
+    error.status === 422 &&
+    error.cause instanceof ModelPolicyRefusedError
+  ) {
+    return c.json(
+      {
+        code: "SESSION_CREATE_REJECTED",
+        message: error.message,
+        details: {
+          code: error.cause.code,
+          modelId: error.cause.modelId,
+          reason: error.cause.reason,
+        },
       },
       422,
     );

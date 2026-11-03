@@ -292,17 +292,27 @@ export function isConnectionAccountSubmissionError(error: unknown): boolean {
 export const MODEL_UNAVAILABLE_DETAIL_CODE = "model_unavailable";
 
 /**
- * The reason a refused new chat gives, in the server's own words. Session
- * create answers with a typed top-level body whose message is written for the
- * person (a model policy, a speed the model can't run, a project that is
- * gone); the generic "check your input" would hide which one it was.
+ * The reason a refused new chat gives. The refusals a person can hit (a model
+ * that isn't available to them, the workspace's model policy, a speed the
+ * model can't run) are typed by `details.code` and worded here; any other
+ * session create refusal shows the server's own reason, which still says more
+ * than the generic "check your input".
  */
 export function sessionCreateRefusalMessage(t: OpenGeniText, error: Error): string | null {
   if (!(error instanceof OpenGeniApiError) || error.status !== 422) return null;
-  if (error.details?.code === "UNSUPPORTED_LATENCY_MODE") {
+  const detailCode = error.details?.code;
+  if (detailCode === "UNSUPPORTED_LATENCY_MODE") {
     return t("lib.format.speedUnavailable");
   }
   if (error.code !== "SESSION_CREATE_REJECTED") return null;
+  if (detailCode === MODEL_UNAVAILABLE_DETAIL_CODE) {
+    return t("lib.format.newChatModelUnavailable");
+  }
+  if (detailCode === "model_policy") {
+    return error.details?.reason === "credits"
+      ? t("lib.format.modelPolicyCredits")
+      : t("lib.format.modelPolicyRefused");
+  }
   let message: unknown;
   try {
     message = (JSON.parse(error.body) as { message?: unknown } | null)?.message;
@@ -401,7 +411,10 @@ export function composerSubmissionErrorMessage(
   }
   if (error instanceof ComposerStateError) return error.message;
   if (error instanceof OpenGeniApiError && error.outcomeUnknown) return formatErrorMessage(error);
-  if (isModelUnavailableSubmissionError(error)) return t("lib.format.modelUnavailable");
+  if (isModelUnavailableSubmissionError(error)) {
+    // A refused new chat has no chat yet whose model is "no longer available".
+    return sessionCreateRefusalMessage(t, error) ?? t("lib.format.modelUnavailable");
+  }
   if (isConnectionAccountSubmissionError(error)) return t("lib.format.accountUnavailable");
   if (isSessionUsageLimitSubmissionError(error)) return t("lib.format.sessionUsageLimitReached");
   const createRefusal = sessionCreateRefusalMessage(t, error);

@@ -65,13 +65,13 @@ function StillWaitingNotice({ provider }: { provider: Provider }) {
 
 /** True once this code has waited `DEVICE_LOGIN_HINT_DELAY_MS`; a new code starts over. */
 function useWaitedLong(userCode: string): boolean {
-  const [slow, setSlow] = useState(false);
+  // Remember which code waited long, so a new code never shows the old notice.
+  const [slowCode, setSlowCode] = useState<string | null>(null);
   useEffect(() => {
-    setSlow(false);
-    const timer = setTimeout(() => setSlow(true), DEVICE_LOGIN_HINT_DELAY_MS);
+    const timer = setTimeout(() => setSlowCode(userCode), DEVICE_LOGIN_HINT_DELAY_MS);
     return () => clearTimeout(timer);
   }, [userCode]);
-  return slow;
+  return slowCode === userCode;
 }
 
 /** Native subscription styling over the shared clipboard and URL-validation behavior. */

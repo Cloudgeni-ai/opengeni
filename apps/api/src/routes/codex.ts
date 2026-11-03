@@ -1,7 +1,7 @@
 import type { CodexRateLimitResetCreditsAccountResult } from "@opengeni/db";
 import type { CodexResetRedemptionRecovery } from "@opengeni/db";
 import { codexOverviewProviderCall, type CodexProviderCall } from "./codex-overview-budget";
-import { codexConnectOfferedModels } from "./codex-connect-models";
+import { codexCatalogModels, codexConnectOfferedModels } from "./codex-connect-models";
 // Codex (ChatGPT) subscription connect / status / usage routes.
 //
 // Connect uses the device-code flow split into two stateless calls: `start`
@@ -13,10 +13,8 @@ import { codexConnectOfferedModels } from "./codex-connect-models";
 
 import {
   environmentsEncryptionKeyBytes,
-  configuredModels,
   getSettings,
   productLabelForModelId,
-  withCodexCatalogProvider,
   type Settings,
 } from "@opengeni/config";
 import {
@@ -217,19 +215,13 @@ export function codexModelsForPicker(
   providerLabel: string;
   api: "responses";
 }> {
-  return configuredModels(withCodexCatalogProvider(settings))
-    .filter(
-      (model) =>
-        model.providerId === CODEX_PROVIDER_ID &&
-        (supportedSlugs === undefined || supportedSlugs.includes(model.upstreamModelId)),
-    )
-    .map((model) => ({
-      id: model.id,
-      label: model.label,
-      provider: CODEX_PROVIDER_ID,
-      providerLabel: CODEX_PROVIDER_LABEL,
-      api: "responses" as const,
-    }));
+  return codexCatalogModels(settings, supportedSlugs).map((model) => ({
+    id: model.id,
+    label: model.label,
+    provider: CODEX_PROVIDER_ID,
+    providerLabel: CODEX_PROVIDER_LABEL,
+    api: "responses" as const,
+  }));
 }
 import { createSignedState, readSignedState } from "@opengeni/github";
 import {

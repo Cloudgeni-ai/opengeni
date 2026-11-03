@@ -2104,6 +2104,12 @@ export const englishMessages = {
     "A selected connector account is unavailable. Review accounts in + → Connectors, then edit and send your saved message.",
   "lib.format.modelUnavailable":
     "This chat's model is no longer available. Choose another model to continue. Your message is saved.",
+  "lib.format.newChatModelUnavailable":
+    "This model isn't available to you. Choose another model. Your message is saved.",
+  "lib.format.modelPolicyCredits":
+    "This model uses credits, which are off in this workspace. Choose a model paid by a subscription or API key. Your message is saved.",
+  "lib.format.modelPolicyRefused":
+    "This workspace's model policy doesn't allow this model. Choose another model. Your message is saved.",
   "lib.format.now": "now",
   "lib.format.speedUnavailable":
     "This model can't run at the selected speed. Choose another speed. Your message is saved.",

@@ -400,7 +400,50 @@ describe("a refused new chat stays visible", () => {
         details: { code: "model_unavailable", modelId: "codex/gpt-6-sol" },
       }),
     );
-    expect(composerSubmissionErrorMessage(t, model)).toBe(t("lib.format.modelUnavailable"));
+    // A new chat has no "chat's model": the refusal names the choice instead.
+    expect(composerSubmissionErrorMessage(t, model)).toBe(t("lib.format.newChatModelUnavailable"));
+    const notSelectable = new OpenGeniApiError(
+      422,
+      JSON.stringify({
+        code: "SESSION_CREATE_REJECTED",
+        message: "model is not selectable: codex/gpt-6-sol",
+        details: { code: "model_unavailable", modelId: "codex/gpt-6-sol" },
+      }),
+    );
+    expect(composerSubmissionErrorMessage(t, notSelectable)).toBe(
+      t("lib.format.newChatModelUnavailable"),
+    );
+    const policy = (reason: string) =>
+      new OpenGeniApiError(
+        422,
+        JSON.stringify({
+          code: "SESSION_CREATE_REJECTED",
+          message: `model "codex/gpt-6-sol" is not allowed by this workspace's model policy`,
+          details: { code: "model_policy", modelId: "codex/gpt-6-sol", reason },
+        }),
+      );
+    expect(composerSubmissionErrorMessage(t, policy("credits"))).toBe(
+      t("lib.format.modelPolicyCredits"),
+    );
+    expect(composerSubmissionErrorMessage(t, policy("provider"))).toBe(
+      t("lib.format.modelPolicyRefused"),
+    );
+    // Typed refusals never show developer text such as model ids.
+    for (const error of [model, notSelectable, policy("credits"), policy("model")]) {
+      expect(composerSubmissionErrorMessage(t, error)).not.toContain("codex/");
+    }
+    // An open chat's turn refusal keeps its own wording.
+    const turnRefusal = new OpenGeniApiError(
+      422,
+      JSON.stringify({
+        error: {
+          code: "validation_failed",
+          message: "model is not available: codex/gpt-6-sol",
+          details: { code: "model_unavailable" },
+        },
+      }),
+    );
+    expect(composerSubmissionErrorMessage(t, turnRefusal)).toBe(t("lib.format.modelUnavailable"));
     for (const message of [failure.message, composerSubmissionErrorMessage(t, speed)]) {
       expect(message).not.toBe(generic);
     }

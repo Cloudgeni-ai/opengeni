@@ -104,6 +104,14 @@ describe("HTTP rejection telemetry", () => {
       httpRejectionFactsFromEnvelope({ code: `has spaces ${sentinel}` }, "validation_failed")
         .reason,
     ).toBe("unclassified");
+    // A passed-through upstream body (lowercase code, its own details) is not
+    // one of our route bodies, so it can't add reason values.
+    expect(
+      httpRejectionFactsFromEnvelope(
+        { code: "model_not_found", details: { code: "upstream_detail" } },
+        "validation_failed",
+      ).reason,
+    ).toBe("unclassified");
   });
 
   test("fingerprints ignore identifiers, quoted values, and numbers", () => {

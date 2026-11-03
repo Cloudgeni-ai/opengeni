@@ -10,6 +10,19 @@ import { configuredModels, withCodexCatalogProvider, type Settings } from "@open
 export type CodexConnectOfferedModel = { id: string; label: string };
 
 /**
+ * Opengeni's Codex models, optionally only those whose upstream slug is in
+ * `supportedSlugs`. The one filter the picker (`codexModelsForPicker`) and the
+ * connect result share, so both always name the same models.
+ */
+export function codexCatalogModels(settings: Settings, supportedSlugs?: readonly string[]) {
+  return configuredModels(withCodexCatalogProvider(settings)).filter(
+    (model) =>
+      model.providerId === CODEX_PROVIDER_ID &&
+      (supportedSlugs === undefined || supportedSlugs.includes(model.upstreamModelId)),
+  );
+}
+
+/**
  * Which of Opengeni's Codex models a just-connected ChatGPT account offers,
  * read once from its live /models list with the tokens the sign-in returned
  * (nothing is stored). A Free plan offers GPT-6 Luna only; an account that
@@ -40,13 +53,11 @@ export async function codexConnectOfferedModels(input: {
       input.fetchImpl,
     );
     if (!read.ok) return null;
-    const offered = new Set(read.slugs);
     // The same models, filter and labels as the picker (codexModelsForPicker).
-    return configuredModels(withCodexCatalogProvider(input.settings))
-      .filter(
-        (model) => model.providerId === CODEX_PROVIDER_ID && offered.has(model.upstreamModelId),
-      )
-      .map((model) => ({ id: model.id, label: model.label }));
+    return codexCatalogModels(input.settings, read.slugs).map((model) => ({
+      id: model.id,
+      label: model.label,
+    }));
   } catch {
     return null;
   }

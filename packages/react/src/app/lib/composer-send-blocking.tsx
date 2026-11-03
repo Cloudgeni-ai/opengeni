@@ -194,7 +194,12 @@ export function composerSendBlockerNotice(
   }
 }
 
-/** Analytics names recorded before this guard existed; kept stable. */
+/**
+ * The analytics reason for a blocked new-chat Send. Reasons recorded before
+ * this guard existed keep their names; blockers that were not recorded before
+ * (for example accounts, account_choice and resources) report their own name,
+ * and the order of checks changed (private chat comes before uploads).
+ */
 export function newSessionStartBlockerReason(blocker: ComposerSendBlocker | null): string | null {
   switch (blocker) {
     case null:
