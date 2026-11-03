@@ -114,7 +114,9 @@ lists it as optional, with the same generic note on every server. A call that
 leaves it unset (missing, empty, or a phrase with spaces, which no identifier
 contains) gets the account's only value. If the account has several values, the
 call isn't sent and needs no approval: the model gets a recoverable error
-listing each name and id, recorded as not executed. A phrase value that matches
+listing each name and id, recorded as not executed. Codemode gets the same text,
+and the HTTP tool gateway returns it as a 422 with details code
+`account_parameter_choice_required`. A phrase value that matches
 one of those names case-insensitively picks it. Any other supplied value,
 including one padded with whitespace, is sent unchanged, and a parameter the
 tool already treats as optional is left alone. The values are looked up once

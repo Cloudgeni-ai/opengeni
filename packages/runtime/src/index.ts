@@ -1,4 +1,9 @@
 export { isOfficialDriveMcpConfig, mergeDriveMcpTools } from "./drive-mcp";
+// Nothing was sent: callers render the message, which names the choices.
+export {
+  McpAccountParameterChoiceError,
+  isMcpAccountParameterChoiceError,
+} from "./mcp-account-parameters";
 import type { SearchRecordForm } from "./hosted-search-evidence";
 export {
   activeAttemptSecretValues,

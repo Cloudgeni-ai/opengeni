@@ -73,6 +73,7 @@ import {
 } from "@opengeni/db";
 import {
   ConnectionApprovalPreflightError,
+  isMcpAccountParameterChoiceError,
   type LocalMcpServerRegistration,
   type PreparedWorkspaceToolGatewayTools,
   type ResolveConnectionCredentialInput,
@@ -1557,6 +1558,16 @@ export function throwWorkspaceToolGatewayHttpError(error: unknown): never {
   }
   if (error instanceof ToolGatewayBlockedError) {
     throw new HTTPException(403, { message: error.code, cause: error });
+  }
+  if (isMcpAccountParameterChoiceError(error)) {
+    // Nothing was sent; the message names the account's values to choose from.
+    throw new ApiHttpError(422, {
+      code: "validation_failed",
+      message: error.message,
+      retryable: false,
+      outcomeUnknown: false,
+      details: { code: "account_parameter_choice_required", parameter: error.parameter },
+    });
   }
   if (error instanceof ConnectionApprovalPreflightError) {
     // Nothing reached the provider: the person's connection needs attention.
