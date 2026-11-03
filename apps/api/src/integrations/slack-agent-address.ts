@@ -21,6 +21,11 @@ export type SlackAgentAddress =
       via: "plus" | "name";
       /** The text after the name, or null when nothing followed it. */
       remainder: string | null;
+      /**
+       * The punctuation right after the name, such as "," in "Data, take
+       * this", or null when a space, another word or nothing follows it.
+       */
+      end: string | null;
     }
   | { kind: "unknown"; requested: string };
 
@@ -73,6 +78,92 @@ function remainderAfter(body: string, end: number): string | null {
   return rest.trim().length > 0 ? rest : null;
 }
 
+/** Letters and digits only, compared like name keys. */
+function wordKey(value: string): string {
+  return slackAgentNameKey(value).replace(/[^\p{L}\p{N}]/gu, "");
+}
+
+/** Last words of a name people often leave out ("the analytics folks" for "Analytics team"). */
+const GENERIC_NAME_ENDINGS = new Set([
+  "team",
+  "desk",
+  "agent",
+  "helper",
+  "assistant",
+  "group",
+  "squad",
+  "crew",
+]);
+
+/** Shortest name, in letters, that tolerates a typo; shorter names collide with ordinary words ("date", "data"). */
+const MIN_TYPO_TOLERANT_LETTERS = 5;
+
+/**
+ * Whether a message asks for an agent by name anywhere in it: its words, in
+ * order, spell the agent's name ("ask the data team", "+data-team"), allowing
+ * one typo for names of five or more letters. A name ending in a generic word
+ * like "team" also matches without it when the rest is five or more letters
+ * ("analytics" for "Analytics team", but not "data" for "Data team"). Slack
+ * mentions and links are ignored. This is the server's check before a chat may
+ * hand a message off; the chat's instructions decide the rest.
+ */
+export function slackTextNamesAgent(text: string, agent: Pick<SlackRoutingAgent, "name">): boolean {
+  const nameParts = agent.name
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean)
+    .map(wordKey);
+  const full = nameParts.join("");
+  if (full.length === 0) return false;
+  const targets = [full];
+  const core = nameParts.slice(0, -1).join("");
+  if (
+    nameParts.length >= 2 &&
+    GENERIC_NAME_ENDINGS.has(nameParts[nameParts.length - 1]!) &&
+    core.length >= MIN_TYPO_TOLERANT_LETTERS
+  ) {
+    targets.push(core);
+  }
+  const words = (text.replace(/<[^>]*>/gu, " ").match(/[\p{L}\p{N}]+/gu) ?? []).map(wordKey);
+  const longest = Math.max(1, nameParts.length + 1);
+  for (const target of targets) {
+    for (let start = 0; start < words.length; start += 1) {
+      let joined = "";
+      for (let size = 1; size <= longest && start + size <= words.length; size += 1) {
+        joined += words[start + size - 1];
+        if (joined === target) return true;
+        if (target.length >= MIN_TYPO_TOLERANT_LETTERS && withinOneEdit(joined, target)) {
+          return true;
+        }
+        if (joined.length > target.length + 1) break;
+      }
+    }
+  }
+  return false;
+}
+
+/** The punctuation people put right after a name ("Data, …", "Data: …"), or null. */
+function punctuationAfter(body: string, end: number): string | null {
+  const next = body.slice(end).replace(/^[ \t]+/u, "")[0];
+  return next !== undefined && /[,:;.!?)]/u.test(next) ? next : null;
+}
+
+/**
+ * Whether a match is clearly an address, not the start of a sentence: `+name`,
+ * the name alone, or the name followed by "," or ":". Inside a thread that
+ * already has a chat only these move the thread to another agent, so "@Opengeni
+ * data looks fine now" stays with the chat it was meant for.
+ */
+export function slackAgentAddressIsExplicit(
+  address: Extract<SlackAgentAddress, { kind: "agent" }>,
+): boolean {
+  return (
+    address.via === "plus" ||
+    address.remainder === null ||
+    address.end === "," ||
+    address.end === ":"
+  );
+}
+
 /**
  * Find the Slack agent a message addresses at its start: the longest agent
  * name, or `+name`. Case, spaces and hyphens are ignored, so multi-word names
@@ -110,6 +201,7 @@ export function matchSlackAgentAddress(
         agent,
         via: plus ? "plus" : "name",
         remainder: remainderAfter(body, end),
+        end: punctuationAfter(body, end),
       };
     }
   }
@@ -136,6 +228,7 @@ export function matchSlackAgentAddress(
       agent: only!.agent,
       via: "plus",
       remainder: remainderAfter(body, only!.end),
+      end: punctuationAfter(body, only!.end),
     };
   }
   const requested = body.split(/[\s,:;.!?)]/u)[0] ?? "";

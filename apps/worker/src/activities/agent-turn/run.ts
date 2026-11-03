@@ -152,6 +152,7 @@ import { prepareTurnToolPolicy, prepareTurnToolRuntime } from "./tool-environmen
 import { applyTurnGitHubRepositoryBindings } from "./github-repository-bindings";
 import { dropUnavailableOptionalRepositories } from "./optional-repositories";
 import { buildTurnAgent } from "./agent-build";
+import { assertTurnSandboxBackendServed } from "./sandbox-route";
 import { createAttemptSecretValueMemory, runWithAttemptSecretValues } from "./secret-values";
 import { runAuxiliaryProviderDispatch } from "../auxiliary-provider-dispatch";
 
@@ -583,6 +584,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         claimedModelUsageSourceKeys,
         emittedModelUsageSourceKeys,
       } = claimed.ok;
+      // A stored session (or a shared-box child inheriting its parent's backend)
+      // may name a host backend this deployment does not serve. Refuse it here,
+      // against the worker's own settings, before any phase below can build a
+      // box, run a clone/setup/Rig/hydration hook or materialize credentials.
+      assertTurnSandboxBackendServed(settings, turn.sandboxBackend);
       // EU-ONLY INFERENCE — read the workspace's setting again on every
       // attempt, before any model call: a setting turned on after the claim
       // still applies. Every later phase uses these settings, so resolution,

@@ -33,7 +33,6 @@
 //! new end a hole its guest's file system grows into, and it is booked at
 //! that length like any disk.
 
-use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -79,20 +78,7 @@ const DIRTIED_SLACK: u64 = 256 << 10;
 /// all its disk may take, for that reading.
 const SETTLE_WITHIN: Duration = Duration::from_millis(100);
 
-/// Makes the disk at `path` at least `length` bytes long and returns how
-/// long it is. Its new end is a hole, which takes no disk until the guest
-/// writes there; the length lasts a crash, as the record that vouches for
-/// it, written next, must.
-pub(super) fn lengthen(path: &Path, length: u64) -> io::Result<u64> {
-    let disk = std::fs::OpenOptions::new().write(true).open(path)?;
-    let found = disk.metadata()?.len();
-    if found >= length {
-        return Ok(found);
-    }
-    disk.set_len(length)?;
-    disk.sync_all()?;
-    Ok(length)
-}
+pub(super) use crate::layout::lengthen;
 
 /// Ends what work named `key` waited for disk relief to free, if it did
 /// (see [`Input::Wants`]): it goes on, booking what it writes, or ends.

@@ -293,7 +293,7 @@ export type DesktopDictationShortcut =
   | { kind: "modifierChord"; modifiers: DesktopDictationModifier[] }
   | { kind: "accelerator"; accelerator: string };
 
-/** One dictation shortcut and the language it listens for. */
+/** One dictation shortcut, the language it listens for and the model that hears it. */
 export interface DesktopDictationProfile {
   id: string;
   /** What the person calls it ("Norwegian"). */
@@ -301,6 +301,18 @@ export interface DesktopDictationProfile {
   shortcut: DesktopDictationShortcut;
   /** An ISO 639-1 or 639-3 code ("nb", "en"); null detects the language. */
   language: string | null;
+  /**
+   * The speech-to-text model this shortcut's dictations use, such as one for
+   * English and another for Norwegian. Absent or null: the workspace's voice
+   * input model.
+   */
+  model?: DesktopDictationModel | null;
+}
+
+/** A speech-to-text model by its provider, as the workspace's voice input lists it. */
+export interface DesktopDictationModel {
+  providerId: string;
+  model: string;
 }
 
 /**
@@ -332,7 +344,7 @@ export interface DesktopDictationSettings {
    * else the newest one kept on this computer. Null: none.
    */
   retryShortcut?: DesktopDictationKeys | null;
-  /** Throws away the dictation under way, as Escape does. Null: none. */
+  /** Throws away the dictation under way. Null: none. */
   cancelShortcut?: DesktopDictationKeys | null;
 }
 
@@ -403,6 +415,8 @@ export type DesktopDictationRequest =
       dictationId: string;
       profileId: string;
       language: string | null;
+      /** The model to transcribe with; absent or null: the workspace's voice input model. */
+      model?: DesktopDictationModel | null;
       /** Names and words to listen for; absent from apps that don't offer it. */
       vocabulary?: string[];
     }
@@ -412,6 +426,7 @@ export type DesktopDictationRequest =
       dictationId: string;
       profileId: string;
       language: string | null;
+      model?: DesktopDictationModel | null;
       vocabulary: string[];
       audio: DesktopDictationAudio;
     }

@@ -1,5 +1,38 @@
 # @opengeni/capabilities
 
+## 6.5.1
+
+### Patch Changes
+
+- 7de2adf: Connector cards show a well-known service's own name and logo instead of its raw hostname and a letter, for example "Google Search Console" with its mark and a "Connect Google Search Console" button. The catalog overlay gains `identities` (name, logo and homepage only) for 164 services including every Google API row, and generated letter placeholders from integrations.sh are screened out so the product's own monogram shows instead. `validateLogoAsset` rejects such placeholders when called with `rejectGeneratedPlaceholder` (the catalog import and vendoring paths); a custom MCP server's own declared icon is accepted as before. A re-import clears a stored catalog logo once its row has no logo by policy (`RegistryCapabilityCatalogItemInput.clearLogoAsset`). The setup card no longer repeats a subtitle identical to its title. The SharePoint and OneDrive setup cards show their Microsoft marks instead of a letter, like Teams and Outlook already did.
+- Updated dependencies [f1998df]
+- Updated dependencies [3f9ef93]
+- Updated dependencies [ebfd447]
+- Updated dependencies [7a9c492]
+- Updated dependencies [468e8c3]
+- Updated dependencies [e4484f1]
+- Updated dependencies [7f3d037]
+- Updated dependencies [f4f82c0]
+- Updated dependencies [317fb4d]
+- Updated dependencies [033cd63]
+- Updated dependencies [b18bd6c]
+- Updated dependencies [83ccc2b]
+- Updated dependencies [da9b7e5]
+- Updated dependencies [0f7f559]
+- Updated dependencies [0f7f559]
+- Updated dependencies [de8fc61]
+- Updated dependencies [dd7759c]
+- Updated dependencies [70c726c]
+- Updated dependencies [4682263]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [abb4af1]
+- Updated dependencies [86e35f1]
+- Updated dependencies [0f7f559]
+  - @opengeni/contracts@6.5.0
+  - @opengeni/network@6.5.0
+
 ## 6.4.0
 
 ### Patch Changes

@@ -33,6 +33,7 @@ import {
   materializeRunCredentials,
   clearRunCredentials,
   codemodeTokenFileForSession,
+  SandboxBackendNotServedError,
 } from "../src/index";
 
 // local backend, web search OFF (the hosted web_search tool would try the
@@ -372,16 +373,19 @@ describe("P1.2 establishSandboxSessionFromEnvelope (unix_local)", () => {
   });
 
   test("backendOverride selects the client backend independent of settings.sandboxBackend", async () => {
-    // settings says 'none', but the override forces 'local' (resume-by-id is
-    // fenced to the box's ORIGINAL backend, not the process default).
+    // settings says 'none', but the override selects 'local' (resume-by-id is
+    // fenced to the box's ORIGINAL backend, not the process default). A host
+    // backend is built only as the configured default, so the override is
+    // honoured and refused for 'local' itself, rather than falling back to
+    // the 'none' default's missing client.
     const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
-    const established = await establishSandboxSessionFromEnvelope(settings, null, {
+    const refused = await establishSandboxSessionFromEnvelope(settings, null, {
       sessionId: "sess-override",
       recovery: "create-or-restore",
       backendOverride: "local",
-    });
-    expect(established.backendId).toBe("unix_local");
-    await (established.session as { close: () => Promise<void> }).close().catch(() => undefined);
+    }).catch((error: unknown) => error);
+    expect(refused).toBeInstanceOf(SandboxBackendNotServedError);
+    expect((refused as SandboxBackendNotServedError).backend).toBe("local");
   });
 
   test("the box is created with the SAME manifest environment the agent declares (no provided-session env delta)", async () => {

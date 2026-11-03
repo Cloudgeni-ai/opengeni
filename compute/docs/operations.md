@@ -542,6 +542,18 @@ to hosts that offer them; other pools' teams reach none.
   on meanwhile (its lease lapsed, or it was fenced) and registers again:
   it comes back draining, so a host on its way out never takes new
   sandboxes.
+- **Resizing a sandbox.** A deployment that creates sandboxes at a new
+  shape leaves older ones at theirs. `POST /v1/sandboxes/<id>/resize`
+  with any of `vcpus`, `memory_mib`, `memory_request_mib`,
+  `cpu_request_millis` and `disk_mib` (each omitted stays) moves the
+  sandbox off its host as `/move` does and gives it the new shape, which
+  its next wake places and books (ADR 27). Its files stay. A new `vcpus`
+  or `memory_mib` ends its running programs: it boots afresh from its
+  disk. New requests or a longer disk keep them; its file system grows to
+  fill the disk as it wakes. `disk_mib` may only grow. A sandbox held
+  awake is refused as `busy` unless the body has `"awake": true`; one
+  woken again each time it is handed off answers `unavailable`, and
+  asking again is safe.
 - **Removing a host.** Drain it to zero, then delete the machine (on GCP,
   `gcloud compute instance-groups managed delete-instances` so the group
   does not replace it). Never delete a host that still owns sandboxes: the

@@ -32,6 +32,7 @@ old one; old records stay as history.
 | 24 | [Busy sandboxes are slowed, never frozen, and the host never runs out](0024-busy-sandboxes-are-slowed-never-frozen.md) | Accepted |
 | 25 | [Pointers live in the control service, and stored objects carry their day](0025-pointers-in-the-control-service-and-objects-by-day.md) | Accepted, periods by 28 |
 | 26 | [A host that shares its machine](0026-a-host-that-shares-its-machine.md) | Accepted |
+| 27 | [Resizing a sandbox](0027-resizing-a-sandbox.md) | Accepted |
 | 28 | [Stored objects carry their hour, and the sweep runs hourly](0028-stored-objects-carry-their-hour.md) | Accepted |
 | 29 | [Disk relief counts as room](0029-disk-relief-for-admission.md) | Accepted |
 

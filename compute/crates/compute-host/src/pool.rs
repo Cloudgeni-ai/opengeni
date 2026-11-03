@@ -77,7 +77,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use tokio::time::{Instant, sleep, timeout};
 
-use crate::image::{CHUNK_BYTES, Depth, Images, Parts, Suspect, Verified, ZERO};
+use crate::image::{CHUNK_BYTES, Depth, Images, Made, Parts, Suspect, Verified, ZERO};
 use crate::layout::{
     Machine, Paths, copy_size, copy_sparse, link_kernel, remove_if_present, sync_parent,
     templates_dir, write_atomic,
@@ -345,14 +345,19 @@ impl Template {
             .map_err(CopyFailure::from)?
             .ok_or_else(|| CopyFailure::Unusable("the template has no image".into()))?;
         copy_sparse(&self.dir.join(DISK), &paths.disk).map_err(CopyFailure::from)?;
-        // A clone is made by whatever made its template.
+        // A clone is made by whatever made its template, and from the
+        // same machine and disk.
         images
             .publish_made_by(
                 Parts::Shared {
                     from: &source,
                     image: &image,
                 },
-                image.meta().runtime.as_deref(),
+                Made {
+                    runtime: image.meta().runtime.as_deref(),
+                    vcpus: image.meta().vcpus,
+                    disk_len: image.meta().disk_len,
+                },
             )
             .map_err(CopyFailure::from)?;
         Ok(())
@@ -995,6 +1000,7 @@ fn publish(
     fs::rename(&paths.disk, &disk)?;
     compute_engine::confined::check_written(&disk)?;
     seal(&disk)?;
+    let disk_len = fs::metadata(&disk)?.len();
     let images = Images::new(staging.join("images"));
     images
         .publish_made_by(
@@ -1003,7 +1009,11 @@ fn publish(
                 memory: &written.memory,
                 len: inputs.shape.bytes(),
             },
-            Some(runtime),
+            Made {
+                runtime: Some(runtime),
+                vcpus: Some(inputs.shape.vcpus),
+                disk_len: Some(disk_len),
+            },
         )
         .map_err(io::Error::other)?;
     let footprint = match images.current_verified() {

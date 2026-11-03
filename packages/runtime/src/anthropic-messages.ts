@@ -55,27 +55,41 @@ export class AnthropicProtocolError extends Error {
   readonly code = "anthropic_protocol_error";
 }
 
-/** Beta header that admits `thinking.display: "updates"`. */
-export const ANTHROPIC_THINKING_DISPLAY_UPDATES_BETA = "thinking-display-updates-2026-08-18";
-
 /**
- * Whether this model writes progress updates between tool calls as their own
- * `thinking` blocks (Claude Opus 5.5, Sonnet 5.5).
+ * Whether this model may write progress updates between tool calls as their
+ * own `thinking` blocks (Claude Opus 5.5, Sonnet 5.5).
  *
- * Such a model is asked for `display: "updates"`: reasoning blocks then come
- * back empty and only progress updates carry text. That text is Anthropic's
- * summary of the update, not the words the model wrote (those stay inside the
- * signed block), and it can claim things the model never said. It is therefore
- * reasoning: shown as a thought, never as the agent's message or reply, and it
- * never counts as a visible reply. Its signed block is replayed unchanged in
- * place like any other thinking block.
+ * Every Claude request asks for `display: "summarized"`, so each thinking
+ * block, reasoning or progress update alike, comes back as Anthropic's
+ * readable summary and is shown as a thought. That text is not the words the
+ * model wrote (those stay inside the signed block) and it can claim things the
+ * model never said. It is therefore reasoning: never the agent's message or
+ * reply, and it never counts as a visible reply. A progress update is told
+ * apart from reasoning by its signature (`anthropicThinkingIsProgressUpdate`)
+ * and marked, so the wait_for_input guard asks for the verbatim `reply`
+ * argument. Its signed block is replayed unchanged in place like any other
+ * thinking block.
  */
 export function anthropicWritesProgressUpdates(model: string): boolean {
   return claudeNativeModelProfile(model)?.progressUpdates === true;
 }
 
-function anthropicThinkingDisplay(model: string): "updates" | "summarized" {
-  return anthropicWritesProgressUpdates(model) ? "updates" : "summarized";
+const PROGRESS_UPDATE_SIGNATURE_MARKER = "narration";
+
+/**
+ * Whether a thinking block is a progress update (a note the model wrote for
+ * the person) rather than reasoning. Anthropic documents no field for this
+ * under `display: "summarized"`, but a progress update's signature carries
+ * the marker "narration" and a reasoning block's never does; Claude Code
+ * relies on the same marker. Checked against every thinking block of a
+ * long-running production chat: all 176 blocks that `display: "updates"`
+ * returned with text (the progress updates) carry it, and none of the 3,460
+ * empty (reasoning) blocks do. A signature that cannot be read counts as
+ * reasoning.
+ */
+export function anthropicThinkingIsProgressUpdate(signature: string): boolean {
+  if (!signature) return false;
+  return Buffer.from(signature, "base64").includes(PROGRESS_UPDATE_SIGNATURE_MARKER);
 }
 
 /**
@@ -806,7 +820,7 @@ export function buildAnthropicRequest(
       throw new AnthropicProtocolError(
         "The selected Claude model does not support this reasoning effort",
       );
-    body.thinking = { type: "adaptive", display: anthropicThinkingDisplay(model) };
+    body.thinking = { type: "adaptive", display: "summarized" };
     body.output_config = {
       effort,
     };
@@ -932,18 +946,19 @@ function requestSearchResultSources(body: Json): ClaudeCiteSource[] {
  * With native web search, Anthropic tells Claude to mark quotes with citation
  * tags (a `cite` tag whose `index="N-M"` names search result N, sentence M),
  * and turns them into structured citations only in ordinary answer text. A
- * `wait_for_input` call's `reply` is shown verbatim as the turn's answer, so
- * its tags would reach the person as raw markup. They become the quoted text,
- * linked to the search result the index names among the results this request
- * and response hold, or plain text when it names none. Only that reply is
- * changed: other tool arguments, such as file edits, keep their exact text.
+ * `wait_for_input` or `goal_complete` call's `reply` is shown verbatim as the
+ * turn's answer, so its tags would reach the person as raw markup. They become
+ * the quoted text, linked to the search result the index names among the
+ * results this request and response hold, or plain text when it names none.
+ * Only that reply is changed: other tool arguments, such as file edits, keep
+ * their exact text.
  */
 function withLinkedReplyCitations(
   toolName: string,
   input: Json,
   searchResults: () => readonly ClaudeCiteSource[],
 ): Json {
-  if (!/(?:^|__)wait_for_input$/u.test(toolName)) return input;
+  if (!/(?:^|__)(?:wait_for_input|goal_complete)$/u.test(toolName)) return input;
   const reply = input.reply;
   if (typeof reply !== "string" || !hasClaudeCiteTag(reply)) return input;
   const sources = searchResults();
@@ -1069,13 +1084,13 @@ export function anthropicResponse(
           text(block.thinking, "thinking text");
           text(block.signature, "thinking signature");
         } else text(block.data, "redacted thinking data");
-        // Readable thinking text is always Anthropic's summary (of reasoning,
-        // or of a progress update under display "updates"), never words the
-        // model wrote for the person. It stays reasoning so it is never shown
-        // or recorded as the agent's message (anthropicWritesProgressUpdates).
-        // Under "updates" only a progress update carries text: it is marked so
-        // the wait_for_input guard knows a note for the person was not shown
-        // as written and asks for the verbatim `reply` argument instead.
+        // Readable thinking text is always Anthropic's summary (of reasoning
+        // or of a progress update), never words the model wrote for the
+        // person. It stays reasoning so it is never shown or recorded as the
+        // agent's message (anthropicWritesProgressUpdates). A progress update
+        // (anthropicThinkingIsProgressUpdate) is marked, because it holds a
+        // note for the person that was not shown as written: the
+        // wait_for_input guard then asks for the verbatim `reply` argument.
         output.push({
           type: "reasoning",
           id,
@@ -1083,7 +1098,10 @@ export function anthropicResponse(
           providerData: {
             anthropic: {
               block: structuredClone(block),
-              ...(options.progressUpdates && block.type === "thinking" && block.thinking
+              ...(options.progressUpdates &&
+              block.type === "thinking" &&
+              block.thinking &&
+              anthropicThinkingIsProgressUpdate(String(block.signature ?? ""))
                 ? { progressUpdate: true }
                 : {}),
             },
@@ -1223,7 +1241,7 @@ export class AnthropicMessagesModel implements Model {
     if (claudeNativeModelProfile(this.model)?.prefixBoundThinking && resetsPrefix) {
       body.thinking = {
         type: "adaptive",
-        display: anthropicThinkingDisplay(this.model),
+        display: "summarized",
         ...body.thinking,
         block_binding: { prefix_mismatch_behavior: "drop_block" },
       };
@@ -1231,11 +1249,6 @@ export class AnthropicMessagesModel implements Model {
       delete body.top_p;
       const betas = new Set((headers.get("anthropic-beta") ?? "").split(",").filter(Boolean));
       betas.add("thinking-binding-controls-2026-08-01");
-      headers.set("anthropic-beta", [...betas].join(","));
-    }
-    if (body.thinking?.display === "updates") {
-      const betas = new Set((headers.get("anthropic-beta") ?? "").split(",").filter(Boolean));
-      betas.add(ANTHROPIC_THINKING_DISPLAY_UPDATES_BETA);
       headers.set("anthropic-beta", [...betas].join(","));
     }
     if ((claudeNativeModelProfile(this.model)?.contextWindowTokens ?? 0) > 200_000) {
