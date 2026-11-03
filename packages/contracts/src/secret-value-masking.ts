@@ -14,6 +14,13 @@
  * Properties:
  * - Values shorter than the minimum (8 characters by default) are never
  *   searched for: a short value such as a PIN would mangle unrelated text.
+ * - A distinctive value (random-looking: a token, key or strong password) is
+ *   searched for anywhere, in every form. A weak value (a word, a word with a
+ *   few digits, a host, an email, a path, or a low-entropy string) also
+ *   appears in unrelated names, paths and code, so it is replaced only as a
+ *   whole token in a credential position: the whole line, after a
+ *   credential word on the same line (`password=`, `"token": "…"`), or as a
+ *   URL's password. See `secretValueStrength`.
  * - The longest form wins where several match at one position.
  * - Idempotent: the labels and Opengeni's markers already in the text are
  *   kept, so masking masked text changes nothing. Other reference-shaped text
@@ -116,6 +123,48 @@ export type SecretValueMaskOptions = {
    * results, which are masked in full.
    */
   keepToolIdentities?: boolean;
+  /**
+   * Where weak values (see `secretValueStrength`) are replaced.
+   * "credential-positions" (default): only in a credential position, so the
+   * names, paths and code that merely contain them stay readable.
+   * "anywhere": like distinctive values. For explicit, scoped removals: the
+   * history scrub a person asked for, and values typed into one browser or
+   * desktop session.
+   */
+  weakValues?: "credential-positions" | "anywhere";
+  /**
+   * Called for every candidate occurrence of a known value: replaced, or
+   * (for a weak value outside a credential position) kept. Metadata only:
+   * the event never carries text. Must not throw; errors are ignored.
+   */
+  onMatch?: (event: SecretValueMatchEvent) => void;
+};
+
+/** How a known value is searched for in text (see `secretValueStrength`). */
+export type SecretValueStrength = "distinctive" | "weak";
+
+/** Estimated entropy of a value, in bits (Shannon entropy of its characters times its length). */
+export type SecretValueEntropyBucket = "lt32" | "32_64" | "64_128" | "ge128";
+
+/** Where an occurrence sits in the text around it. */
+export type SecretValueMatchPosition =
+  /** A whole token: surrounded by spaces, quotes, `=`, `,` and the like. */
+  | "token"
+  /** Joined to letters, digits, `_` or `-` (part of an identifier or name). */
+  | "identifier"
+  /** Joined to `/` or `\`, or followed by a file extension (part of a path). */
+  | "path"
+  /** Inside a URL. */
+  | "url"
+  /** An encoded form (JSON-escaped, percent-encoded or base64). */
+  | "encoded";
+
+/** One occurrence of a known value; never carries the value or the text. */
+export type SecretValueMatchEvent = {
+  outcome: "masked" | "kept";
+  strength: SecretValueStrength;
+  entropy: SecretValueEntropyBucket;
+  position: SecretValueMatchPosition;
 };
 
 export type SecretValueMaskDiagnostic = {
@@ -185,6 +234,91 @@ export function isSecretReferenceMaskLabel(label: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Strength
+// ---------------------------------------------------------------------------
+
+/** Shannon entropy of the characters of `value`, times its length, in bits. */
+export function secretValueEntropyBits(value: string): number {
+  if (typeof value !== "string" || value.length === 0) return 0;
+  const counts = new Map<string, number>();
+  for (const character of value) counts.set(character, (counts.get(character) ?? 0) + 1);
+  const length = [...value].length;
+  let perCharacter = 0;
+  for (const count of counts.values()) {
+    const share = count / length;
+    perCharacter -= share * Math.log2(share);
+  }
+  return perCharacter * length;
+}
+
+function entropyBucket(bits: number): SecretValueEntropyBucket {
+  if (bits < 32) return "lt32";
+  if (bits < 64) return "32_64";
+  if (bits < 128) return "64_128";
+  return "ge128";
+}
+
+function characterClasses(value: string): number {
+  return (
+    Number(/[a-z]/u.test(value)) +
+    Number(/[A-Z]/u.test(value)) +
+    Number(/[0-9]/u.test(value)) +
+    Number(/[^A-Za-z0-9]/u.test(value))
+  );
+}
+
+/**
+ * A word or words cased as words (lower case, Capitalized or ALL CAPS, single
+ * spaces between), optionally with up to four digits and one symbol after.
+ * A random run of mixed-case letters is not word-like.
+ */
+const WORD = "(?:\\p{Ll}+|\\p{Lu}\\p{Ll}+|\\p{Lu}+)";
+const WORD_LIKE = new RegExp(`^${WORD}(?: ${WORD})*[0-9]{0,4}[^\\p{L}\\p{N}\\s]?$`, "u");
+/** Values shaped like names of places, not secrets. */
+const HOST_LIKE = /^(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?::\d{1,5})?$/u;
+const EMAIL_LIKE = /^[^\s@]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}$/u;
+const URL_LIKE = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s@]+$/u;
+const PATH_LIKE = /^(?:\/|\.{1,2}\/|~\/|[A-Za-z]:\\)\S*$/u;
+/** Below this a value of at least 12 characters is repetitive enough to be weak. */
+const WEAK_ENTROPY_BITS = 40;
+
+/**
+ * A URL or path is weak only when none of its parts is distinctive: a
+ * webhook URL or a path with a random segment carries a secret in that
+ * segment and stays distinctive.
+ */
+function partsAreWeak(text: string): boolean {
+  const parts = text.split(/[/\\?#&=:.]+/u).filter((part) => part.length > 0);
+  return parts.every((part) => part.length < 12 || secretValueStrength(part) === "weak");
+}
+
+/**
+ * How a known value is searched for in text.
+ *
+ * Distinctive values (tokens, keys, random or strong passwords) almost never
+ * appear in unrelated text, so they are searched for anywhere, in every form.
+ * Weak values do appear in unrelated text: a dictionary word, a word with a
+ * few digits (`admin123`, `Password1!`), a short value with fewer than three
+ * kinds of characters, a host, an email, a URL, a path, or a long but
+ * repetitive string. Replacing them everywhere rewrites file names, imports,
+ * hosts and identifiers that merely contain the word, so they are replaced
+ * only in a credential position (see the module comment). Digit-only values
+ * (card and account numbers) stay distinctive: they are matched as exact
+ * digits, never as words.
+ */
+export function secretValueStrength(value: string): SecretValueStrength {
+  if (typeof value !== "string") return "weak";
+  const text = value.trim();
+  if (/^[0-9][0-9\s-]*$/u.test(text)) return "distinctive";
+  if (text.length < 12 && characterClasses(text) < 3) return "weak";
+  if (text.length < 32 && WORD_LIKE.test(text)) return "weak";
+  if (HOST_LIKE.test(text) || EMAIL_LIKE.test(text)) return "weak";
+  if ((URL_LIKE.test(text) || PATH_LIKE.test(text)) && partsAreWeak(text)) return "weak";
+  if (text.length >= 12 && secretValueEntropyBits(text) < WEAK_ENTROPY_BITS) return "weak";
+  return "distinctive";
+}
+
+// ---------------------------------------------------------------------------
 // Forms
 // ---------------------------------------------------------------------------
 
@@ -217,24 +351,28 @@ function base64(bytes: Uint8Array): string {
  * depends only on the value at each of the three byte alignments a value can
  * have inside a longer base64 run (for example `user:token` in Basic auth). */
 function base64Forms(value: string): string[] {
+  const { standalone, inRun } = base64FormsByPlacement(value);
+  return [...standalone, ...inRun];
+}
+
+/** `base64Forms`, split into the standalone encodings and the in-run parts. */
+function base64FormsByPlacement(value: string): { standalone: string[]; inRun: string[] } {
   const bytes = utf8Bytes(value);
-  if (bytes === null || bytes.length === 0) return [];
-  const forms: string[] = [];
+  if (bytes === null || bytes.length === 0) return { standalone: [], inRun: [] };
   const whole = base64(bytes);
-  forms.push(whole, whole.replace(/=+$/u, ""));
+  const standalone = [whole, whole.replace(/=+$/u, "")];
+  const inRun: string[] = [];
   for (let offset = 0; offset < 3; offset += 1) {
     const padded = new Uint8Array(offset + bytes.length);
     padded.set(bytes, offset);
     const encoded = base64(padded);
     const start = Math.ceil((offset * 8) / 6);
     const end = Math.floor(((offset + bytes.length) * 8) / 6);
-    if (end > start) forms.push(encoded.slice(start, end));
+    if (end > start) inRun.push(encoded.slice(start, end));
   }
-  const withUrlSafe: string[] = [];
-  for (const form of forms) {
-    withUrlSafe.push(form, form.replaceAll("+", "-").replaceAll("/", "_"));
-  }
-  return withUrlSafe;
+  const withUrlSafe = (forms: string[]) =>
+    forms.flatMap((form) => [form, form.replaceAll("+", "-").replaceAll("/", "_")]);
+  return { standalone: withUrlSafe(standalone), inRun: withUrlSafe(inRun) };
 }
 
 const PEM_BOUNDARY = /^-----(BEGIN|END) [A-Z0-9 ]+-----$/u;
@@ -350,6 +488,29 @@ export type CompiledSecretValueMasks = {
    */
   readonly byClippedEnd: ReadonlyMap<string, readonly ClippedStart[]>;
   readonly longestForm: number;
+  /**
+   * Forms of weak values (see `secretValueStrength`), replaced only in a
+   * credential position; every other form is replaced wherever it appears.
+   */
+  readonly weakForms: ReadonlyMap<string, WeakFormInfo>;
+  /** Metadata about each form, for match events. */
+  readonly formInfo: ReadonlyMap<string, FormInfo>;
+  readonly onMatch: ((event: SecretValueMatchEvent) => void) | undefined;
+};
+
+type FormInfo = {
+  strength: SecretValueStrength;
+  entropy: SecretValueEntropyBucket;
+  /** The form differs from the value as written or trimmed. */
+  encoded: boolean;
+};
+
+type WeakFormInfo = {
+  /**
+   * A base64 form that appears inside a longer base64 run (a Basic auth
+   * header), so it is never a whole token of its own.
+   */
+  inRun: boolean;
 };
 
 /** A distinctive start of a form: `form.slice(0, length)`. */
@@ -388,6 +549,11 @@ export function compileSecretValueMasks(
   // Clipped starts are indexed for the forms text usually shows (as written,
   // trimmed, JSON-escaped once), not the encoded variants.
   const clippable = new Set<string>();
+  const formInfo = new Map<string, FormInfo>();
+  const weakForms = new Map<string, WeakFormInfo>();
+  // A form a distinctive value has is never treated as weak, even when a weak
+  // value shares it.
+  const distinctiveForms = new Set<string>();
   for (const entry of entries) {
     if (typeof entry?.value !== "string" || typeof entry.label !== "string") continue;
     const forms = secretValueForms(entry.value, { ...options, minChars });
@@ -407,6 +573,31 @@ export function compileSecretValueMasks(
     }
     labelTexts.add(entry.label);
     for (const form of forms) if (!labels.has(form)) labels.set(form, entry.label);
+    const strength = secretValueStrength(entry.value);
+    const entropy = entropyBucket(secretValueEntropyBits(entry.value.trim()));
+    const plain = new Set([entry.value, entry.value.trim()]);
+    for (const form of forms) {
+      const existing = formInfo.get(form);
+      if (!existing || (existing.strength === "weak" && strength === "distinctive")) {
+        formInfo.set(form, { strength, entropy, encoded: !plain.has(form) });
+      }
+    }
+    if (strength === "distinctive" || options.weakValues === "anywhere") {
+      for (const form of forms) {
+        distinctiveForms.add(form);
+        weakForms.delete(form);
+      }
+    } else {
+      const inRun = new Set(
+        options.base64 === false ? [] : base64FormsByPlacement(entry.value).inRun,
+      );
+      for (const form of forms) {
+        if (distinctiveForms.has(form)) continue;
+        weakForms.set(form, { inRun: inRun.has(form) });
+      }
+      // A weak value's start is not distinctive: clipped starts are not indexed.
+      continue;
+    }
     clippable.add(entry.value);
     clippable.add(entry.value.trim());
     clippable.add(JSON.stringify(entry.value).slice(1, -1));
@@ -426,6 +617,7 @@ export function compileSecretValueMasks(
   let indexed = 0;
   for (let index = forms.length - 1; index >= 0; index -= 1) {
     const form = forms[index]!;
+    if (weakForms.has(form)) continue;
     if (options.clippedForms !== "all" && !clippable.has(form)) continue;
     if (form.length <= clippedMinChars || form.length > CLIPPED_INDEX_MAX_FORM_CHARS) continue;
     const shortest = Math.max(clippedMinChars, Math.ceil(form.length * clippedMinShare));
@@ -472,6 +664,9 @@ export function compileSecretValueMasks(
     ),
     byClippedEnd,
     longestForm: forms[0]?.length ?? 0,
+    weakForms,
+    formInfo,
+    onMatch: options.onMatch,
   };
 }
 
@@ -486,7 +681,7 @@ function clippedSecretTail(
   text: string,
   cut: number,
   masks: CompiledSecretValueMasks,
-): { length: number; label: string } | null {
+): { length: number; label: string; form: string } | null {
   const probe = masks.clippedMinChars;
   if (cut < probe || masks.byClippedEnd.size === 0) return null;
   const candidates = masks.byClippedEnd.get(text.slice(cut - probe, cut));
@@ -498,7 +693,7 @@ function clippedSecretTail(
     if (checked++ >= CLIPPED_MAX_CANDIDATES) break;
     if (!text.startsWith(form.slice(0, length), cut - length)) continue;
     const label = masks.labels.get(form);
-    if (label !== undefined) return { length, label };
+    if (label !== undefined) return { length, label, form };
   }
   return null;
 }
@@ -521,6 +716,175 @@ function keptRanges(text: string, pattern: RegExp): Array<[number, number]> {
  * last `@`, so a password containing one is all user info), host and port,
  * then the rest. */
 const ABSOLUTE_URL = /^([A-Za-z][A-Za-z0-9+.-]*:\/\/)(?:([^/?#\s]*)@)?([^/?#@\s]*)([^\s]*)$/u;
+
+// ---------------------------------------------------------------------------
+// Weak values: credential positions only
+// ---------------------------------------------------------------------------
+
+/**
+ * Characters that join a weak value to the text around it, so that it is part
+ * of a longer name: an identifier, a path, a host, an email or a file name.
+ * `:` joins only before a `/` or a digit (a URL scheme, a port, an image
+ * tag); trailing sentence punctuation does not join.
+ */
+const JOINING_CHARACTER = /[\p{L}\p{N}\p{M}_\-./\\+~%@]/u;
+const TRAILING_PUNCTUATION = /[.,;:!?]/u;
+const AFTER_TRAILING_PUNCTUATION = /[\s"'`)\]}>\\]/u;
+/**
+ * A credential word earlier on the same line makes the position a credential
+ * one: `password=…`, `"token": "…"`, `PGPASSWORD: …`, `Authorization: Basic …`,
+ * "the password is …". A false positive only masks as before.
+ */
+const CREDENTIAL_CONTEXT =
+  /pass(?:word|wd|phrase)?|pwd|secrets?|tokens?|keys?|auth(?:orization|entication)?|credentials?|creds|bearer/giu;
+/**
+ * A credential word ends where a lower-case letter does not continue it, so
+ * `PGPASSWORD`, `apiKey` and `secretName` count and `--author`, `keyboard`
+ * and `passenger` do not.
+ */
+function hasCredentialWord(text: string): boolean {
+  CREDENTIAL_CONTEXT.lastIndex = 0;
+  for (const match of text.matchAll(CREDENTIAL_CONTEXT)) {
+    const next = text[match.index + match[0].length];
+    if (next === undefined || !/[a-z]/u.test(next)) return true;
+  }
+  return false;
+}
+/** Characters before a weak value searched for a credential word or a line start. */
+const CREDENTIAL_CONTEXT_CHARS = 80;
+const LINE_SCAN_CHARS = 400;
+
+/** An escape sequence for a line break, tab or quote in JSON-escaped text ends at `at`. */
+function escapeEndsAt(text: string, at: number): boolean {
+  return at >= 2 && text[at - 2] === "\\" && /[nrt"]/u.test(text[at - 1]!) && text[at - 3] !== "\\";
+}
+
+function boundaryBefore(text: string, start: number): boolean {
+  if (start === 0) return true;
+  if (escapeEndsAt(text, start)) return true;
+  return !JOINING_CHARACTER.test(text[start - 1]!);
+}
+
+function boundaryAfter(text: string, end: number): boolean {
+  if (end >= text.length) return true;
+  const next = text[end]!;
+  if (next === "\\") return /[nrt"]/u.test(text[end + 1] ?? "");
+  if (next === ":") return !/[/\\0-9]/u.test(text[end + 1] ?? "");
+  if (TRAILING_PUNCTUATION.test(next)) {
+    const after = text[end + 1];
+    return after === undefined || AFTER_TRAILING_PUNCTUATION.test(after);
+  }
+  return !JOINING_CHARACTER.test(next);
+}
+
+/**
+ * How a line starts before `start` (spaces and tabs skipped): a real or
+ * escaped line break (or the start of the text), the opening quote of a JSON
+ * string value, or neither.
+ */
+function lineStartBefore(text: string, start: number): "break" | "quote" | null {
+  let at = start;
+  while (at > 0 && (text[at - 1] === " " || text[at - 1] === "\t")) at -= 1;
+  if (at === 0) return "break";
+  const previous = text[at - 1]!;
+  if (previous === "\n" || previous === "\r") return "break";
+  if (escapeEndsAt(text, at) && (previous === "n" || previous === "r")) return "break";
+  if (previous === '"' && /[:[,{]\s*$/u.test(text.slice(Math.max(0, at - 9), at - 1))) {
+    return "quote";
+  }
+  return null;
+}
+
+function lineEndAfter(text: string, end: number): "break" | "quote" | null {
+  let at = end;
+  while (at < text.length && (text[at] === " " || text[at] === "\t")) at += 1;
+  if (at >= text.length) return "break";
+  const next = text[at]!;
+  if (next === "\n" || next === "\r") return "break";
+  if (next === "\\" && /[nr]/u.test(text[at + 1] ?? "")) return "break";
+  if (next === '"' || (next === "\\" && text[at + 1] === '"')) return "quote";
+  return null;
+}
+
+/** Where the line holding `start` begins, at most `LINE_SCAN_CHARS` back. */
+function lineStartIndex(text: string, start: number): number {
+  const floor = Math.max(0, start - LINE_SCAN_CHARS);
+  for (let at = start; at > floor; at -= 1) {
+    const previous = text[at - 1]!;
+    if (previous === "\n" || previous === "\r") return at;
+    if (escapeEndsAt(text, at) && (previous === "n" || previous === "r")) return at;
+  }
+  return floor;
+}
+
+/** `scheme://user:` (or `scheme://:`) ends just before `start`, and `@` follows `end`. */
+function inUrlPasswordPosition(text: string, start: number, end: number): boolean {
+  if (text[start - 1] !== ":" || text[end] !== "@") return false;
+  const before = text.slice(Math.max(0, start - 1 - 256), start - 1);
+  return /[A-Za-z][A-Za-z0-9+.-]*:(?:\\?\/){2}[^\s/@:"'\\]*$/u.test(before);
+}
+
+/**
+ * Whether a weak value at `start…end` is in a credential position: the whole
+ * line (or the whole text), a URL's password, or a whole token after a
+ * credential word on the same line. A base64 form inside a longer run (a
+ * Basic auth header) needs only the credential word.
+ */
+function weakValuePositionAllowed(
+  text: string,
+  start: number,
+  end: number,
+  inRun: boolean,
+): boolean {
+  const left = lineStartBefore(text, start);
+  const right = left === null ? null : lineEndAfter(text, end);
+  if (left !== null && right !== null && !(left === "quote" && right === "quote")) return true;
+  if (inUrlPasswordPosition(text, start, end)) return true;
+  if (!inRun && !(boundaryBefore(text, start) && boundaryAfter(text, end))) return false;
+  const from = Math.max(lineStartIndex(text, start), start - CREDENTIAL_CONTEXT_CHARS);
+  return hasCredentialWord(text.slice(from, start));
+}
+
+function matchPosition(
+  text: string,
+  start: number,
+  end: number,
+  encoded: boolean,
+): SecretValueMatchPosition {
+  if (encoded) return "encoded";
+  const runStart = Math.max(0, start - 200);
+  const before = text.slice(runStart, start);
+  const run = /[^\s"'`<>()[\]{}]*$/u.exec(before)?.[0] ?? "";
+  if (run.includes("://") || run.includes(":\\/\\/")) return "url";
+  const previous = text[start - 1] ?? "";
+  const next = text[end] ?? "";
+  if (previous === "/" || previous === "\\" || next === "/" || next === "\\") return "path";
+  if (next === "." && /[A-Za-z0-9]/u.test(text[end + 1] ?? "")) return "path";
+  if (/[\p{L}\p{N}_-]/u.test(previous) || /[\p{L}\p{N}_-]/u.test(next)) return "identifier";
+  return "token";
+}
+
+function reportMatch(
+  masks: CompiledSecretValueMasks,
+  form: string,
+  outcome: SecretValueMatchEvent["outcome"],
+  text: string,
+  start: number,
+): void {
+  const sink = masks.onMatch;
+  if (!sink) return;
+  try {
+    const info = masks.formInfo.get(form);
+    sink({
+      outcome,
+      strength: info?.strength ?? "distinctive",
+      entropy: info?.entropy ?? "ge128",
+      position: matchPosition(text, start, start + form.length, info?.encoded === true),
+    });
+  } catch {
+    // Match events never affect masking.
+  }
+}
 
 /** Mask one text with compiled entries. */
 export function maskSecretValuesInText(text: string, masks: CompiledSecretValueMasks): string {
@@ -564,13 +928,22 @@ export function maskSecretValuesInText(text: string, masks: CompiledSecretValueM
     }
     const candidates = masks.byPrefix.get(text.slice(at, at + size));
     const limit = next < kept.length ? kept[next]![0] : text.length;
-    const form = candidates?.find(
-      (candidate) => at + candidate.length <= limit && text.startsWith(candidate, at),
-    );
+    let form: string | undefined;
+    for (const candidate of candidates ?? []) {
+      if (at + candidate.length > limit || !text.startsWith(candidate, at)) continue;
+      const weak = masks.weakForms.get(candidate);
+      if (weak && !weakValuePositionAllowed(text, at, at + candidate.length, weak.inRun)) {
+        reportMatch(masks, candidate, "kept", text, at);
+        continue;
+      }
+      form = candidate;
+      break;
+    }
     if (form === undefined) {
       at += 1;
       continue;
     }
+    reportMatch(masks, form, "masked", text, at);
     out += text.slice(copied, at) + masks.labels.get(form)!;
     at += form.length;
     copied = at;
@@ -598,6 +971,7 @@ export function maskSecretValuesInText(text: string, masks: CompiledSecretValueM
     if (!tail) continue;
     const start = cut - tail.length;
     if (overlapsKept(start, cut, keptBefore)) continue;
+    reportMatch(masks, tail.form, "masked", out, start);
     out = out.slice(0, start) + tail.label + out.slice(cut);
     changedFrom = start;
   }

@@ -4,6 +4,7 @@ import {
   isValidTotpInput,
   secretNameKey,
   VAULT_LIMITS,
+  type SecretSaveFieldNote,
   type VaultFieldInput,
   type VaultFieldKind,
   type VaultItemType,
@@ -33,6 +34,7 @@ import {
   storedProviderOperations,
   withoutProviderWrites,
 } from "./mapping";
+import { plainFieldKind } from "./plain-field-hints";
 import { vaultErrorCodeForProvider } from "./provider-registry";
 import { syncLinkedProviderVault, type ProviderVaultSyncResult } from "./provider-sync";
 import { prepareTypedFields, standardFieldKind } from "./typed-fields";
@@ -332,6 +334,7 @@ async function providerFieldValues(
   planned: readonly PlannedField[],
   resolveReference: (raw: string) => Promise<string>,
   generated: string[],
+  fieldNotes?: SecretSaveFieldNote[],
 ): Promise<ProviderWriteField[]> {
   const writes: ProviderWriteField[] = [];
   for (const { input, base, kind, current } of planned) {
@@ -360,7 +363,11 @@ async function providerFieldValues(
       }
       value = value.trim();
     }
-    writes.push({ ...base, value });
+    const saved = plainFieldKind(
+      { name: input.name, value, kind, chosen: input.kind !== undefined || current !== undefined },
+      fieldNotes,
+    );
+    writes.push({ ...base, kind: saved, value });
   }
   return writes;
 }
@@ -474,6 +481,8 @@ export async function writeProviderVaultItemOutcome(
     change: ProviderItemChange;
     /** Receives the names of fields whose values were generated. */
     generated?: string[];
+    /** Receives a note for each plain field whose value looks like a secret. */
+    fieldNotes?: SecretSaveFieldNote[];
   },
 ): Promise<ProviderWriteOutcome> {
   const { vault, existing, change } = input;
@@ -531,7 +540,12 @@ export async function writeProviderVaultItemOutcome(
     ),
     existing?.fields ?? [],
   );
-  const fields = await providerFieldValues(planned, deps.resolveReference, input.generated ?? []);
+  const fields = await providerFieldValues(
+    planned,
+    deps.resolveReference,
+    input.generated ?? [],
+    input.fieldNotes,
+  );
   const name = change.name ?? existing?.name ?? "";
   const category = change.category !== undefined ? change.category : (existing?.category ?? null);
   let written;

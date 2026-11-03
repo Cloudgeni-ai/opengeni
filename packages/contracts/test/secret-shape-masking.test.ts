@@ -622,3 +622,80 @@ describe("review regressions, round 3", () => {
     ]);
   });
 });
+
+describe("more provider formats and authorization headers", () => {
+  const hex = (length: number) => repeat("0a1b2c3d4e5f6789", 8).slice(0, length);
+  const mixed = (length: number) => repeat("Ab1Cd2Ef3", 60).slice(0, length);
+  const letters = (length: number) => repeat("AbCdEfGh", 10).slice(0, length);
+
+  test("vetted provider prefixes", () => {
+    const cases: Array<[string, string]> = [
+      ["google-oauth-client-secret", `GOCSPX-${mixed(28)}`],
+      ["huggingface-token", `hf_${letters(34)}`],
+      ["sendgrid-key", `SG.${mixed(22)}.${mixed(43)}`],
+      ["shopify-token", `shpat_${hex(32)}`],
+      ["shopify-token", `shpss_${hex(32)}`],
+      ["pypi-token", `pypi-AgEIcHlwaS5vcmc${mixed(60)}`],
+      ["databricks-token", `dapi${hex(32)}`],
+      ["digitalocean-token", `dop_v1_${hex(64)}`],
+      ["linear-key", `lin_api_${mixed(40)}`],
+      ["doppler-token", `dp.pt.${mixed(43)}`],
+      ["atlassian-token", `ATATT3${mixed(186)}`],
+    ];
+    for (const [kind, token] of cases) {
+      expect(kinds(`token: "${token}" ok`)).toEqual([[kind, token]]);
+    }
+  });
+
+  test("near misses of the provider prefixes stay readable", () => {
+    for (const text of [
+      `hf_${"a".repeat(34)}`,
+      `hf_${"A".repeat(34)}`,
+      `GOCSPX-${"a".repeat(28)}`,
+      "SG.short.value",
+      `shpat_${"z".repeat(32)}`,
+      `dapi${"g".repeat(32)}`,
+      "do_v1_abc",
+      "lin_api_short",
+      "dp.pt.short",
+      "my_dapi_helper",
+      `AKIA${"A".repeat(16)}`,
+    ]) {
+      expect([text, kinds(`value ${text} end`)]).toEqual([text, []]);
+    }
+  });
+
+  test("AWS secret access keys only next to their name", () => {
+    const key = mixed(40);
+    expect(kinds(`aws_secret_access_key = ${key}`)).toEqual([["aws-secret-access-key", key]]);
+    expect(kinds(`"SecretAccessKey": "${key}"`)).toEqual([["aws-secret-access-key", key]]);
+    expect(kinds(`sha1 ${key}`)).toEqual([]);
+  });
+
+  test("Bearer, token and Basic authorization values", () => {
+    const token = mixed(40);
+    expect(kinds(`Authorization: Bearer ${token}`)).toEqual([["authorization-header", token]]);
+    expect(kinds(`curl -H "Authorization: token ${token}" api`)).toEqual([
+      ["authorization-header", token],
+    ]);
+    const basic = Buffer.from(`app:${mixed(12)}`, "utf8").toString("base64");
+    expect(kinds(`Authorization: Basic ${basic}`)).toEqual([["authorization-header", basic]]);
+    // A specific token keeps its own kind.
+    const github = `ghp_${repeat("Ab1", 12)}`;
+    expect(kinds(`Authorization: Bearer ${github}`)).toEqual([["github-token", github]]);
+  });
+
+  test("authorization prose, code and placeholders stay readable", () => {
+    for (const text of [
+      "Bearer authentication is required",
+      "Bearer this.session.token2",
+      "Authorization: Bearer ${TOKEN}",
+      "Authorization: Bearer <token>",
+      "Basic auth is supported",
+      "Basic YWRtaW4=",
+      `Bearer ${"a".repeat(30)}`,
+    ]) {
+      expect([text, kinds(text)]).toEqual([text, []]);
+    }
+  });
+});

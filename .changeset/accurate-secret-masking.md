@@ -1,0 +1,8 @@
+---
+"@opengeni/contracts": minor
+"@opengeni/core": patch
+"@opengeni/worker-bundle": patch
+"@opengeni/api-router": patch
+---
+
+Known-value secret masking no longer rewrites unrelated text. A saved value that is weak (a dictionary word, a word with a few digits, a short value, a host or an email) is replaced only where it is the credential: alone on its line, as a URL's password, or as a whole token after a word such as password, token, key or auth on the same line. File names, paths, imports, identifiers, hosts and URL segments that merely contain the word stay as written. Distinctive values (tokens, keys, random passwords) are masked everywhere and in every form, as before, and browser typed values and the history scrub still search weak values anywhere. New shape detectors catch Google OAuth client secrets, Hugging Face, SendGrid, Shopify, PyPI, Databricks, DigitalOcean, Linear, Doppler and Atlassian tokens, AWS secret access keys next to their name, and Bearer, token and Basic authorization values. Run-credential and MCP header names are read word by word, so `GIT_AUTHOR_NAME` and `SESSION_NAME` are no longer treated as secrets. `secret_save` saves a new plain field whose value looks like a secret as concealed and reports it in `fieldNotes`; an explicit `text` kind is kept with a note. The item editor offers "Make concealed" under a text field whose value looks secret. `secretValueStrength`, `plainFieldSecretHint` and `credentialNameSaysSecret` are exported from `@opengeni/contracts`, and the worker counts occurrences in `opengeni_secret_mask_matches_total` (metadata only).
