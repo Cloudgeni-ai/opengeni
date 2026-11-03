@@ -3158,6 +3158,7 @@ async function createSessionForRequestInFileScope(
               workspaceId,
               subjectId: grant.subjectId,
               workspaceSettings: workspace.settings,
+              billingOrigin,
             }),
           );
   const inheritedModel =

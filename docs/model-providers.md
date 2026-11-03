@@ -981,7 +981,7 @@ Prices are a reviewed 2026-09-02 snapshot from public Gateway endpoint metadata.
 Gateway does not publish a separate cache-write rate for these routes, so the
 static fallback prices cache writes at the route's uncached-input rate.
 Managed turns normally debit the exact Gateway-reported inference cost for the
-provider that actually served the response, plus 5%. The static token rates
+provider that actually served the response, plus the configured margin. The static token rates
 above are only a conservative fallback if that response metadata is absent.
 Adding or changing a model requires reviewing the provider order, Responses
 tool/vision transport, cache reporting, pricing, definition, and tests together.
@@ -1215,7 +1215,7 @@ automatic compaction starts at 300,000, the same default as native Claude Opus 5
   `structured_output`.
 
 Price: managed turns debit Opper's exact per-response cost
-(`usage.opper.cost.total`) plus the standard 5% margin. The reviewed list price
+(`usage.opper.cost.total`) plus the configured margin. The reviewed list price
 above is the fallback when cost metadata is absent. Live 2026-10-05 costs equal
 the list rates exactly (706 input + 75 output tokens = $0.0047564, debited
 4,995 micros). The reviewed price table also keeps the earlier
@@ -1253,7 +1253,7 @@ Both use the same strict entry shape: `upstreamModelId`, `label`, optional
 table needs an explicit `OPENGENI_MODEL_PRICING_JSON` entry for its exact
 product id (`opper/<upstream>`, with `marginBps: 500`) before a credits-billed
 managed catalog validates. That price is the fallback; billing still uses
-Opper's reported cost +5%. Adding a paid route still needs review: a live
+Opper's reported cost plus the configured margin. Adding a paid route still needs review: a live
 tool/reasoning probe, the capability definition, cost policy, and price.
 
 ### Workspace rail
@@ -2217,6 +2217,10 @@ provider-rate model credit calculation, including explicit
 `marginBps`. Those rates remain provider costs, not fixed customer tariffs.
 Unset preserves existing per-price behavior; direct fixed credit prices are
 not margin-derived and are unchanged.
+
+Production and staging use `OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE=0` as verified
+November 3, 2026. Historical tables and debit examples above retain their
+then-configured margins; they are not a promise of a current 5% charge.
 
 GPT-5.6 Sol uses OpenAI's current promotional list price ($4 input, $0.40
 cached input, $5 cache write, and $20 output per million tokens), guaranteed

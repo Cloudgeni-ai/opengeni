@@ -3253,7 +3253,7 @@ The runtime secret must provide values such as:
   OpenRouter rail; keep it in the runtime Secret, never catalog JSON
 - optional `OPENGENI_OPPER_API_KEY` for the deployment-managed reviewed Opper
   rail (EU-pinned `opper/…` routes billed in Opengeni credits at Opper's
-  reported cost +5%; default Claude Opus 5.5 EU); keep it in the runtime Secret,
+  reported cost plus the configured credit margin; default Claude Opus 5.5 EU); keep it in the runtime Secret,
   never catalog JSON
 - optional `OPENGENI_MODEL_CATALOG_SOURCE=code|database` (default `code`),
   `OPENGENI_MODEL_COST_POLICY_JSON`, and `OPENGENI_MODEL_NOTES_JSON`
@@ -3276,8 +3276,11 @@ The runtime secret must provide values such as:
 - `OPENGENI_BYOK_PLATFORM_FEE_BPS` (default `500`, 5%) is the platform fee on
   calls served by a person's own API key, charged only with
   `OPENGENI_BILLING_MODE=stripe` and only from paid credit; `0` turns it off.
+  Production and staging have it paused at `0` as of November 2, 2026; this
+  also disables the paid-credit admission check for own keys.
   Own subscriptions pay no fee; with subscription plans enabled they need a
-  paid plan of at least $20/month. See
+  paid plan of at least $20/month and are for app-origin work, never customer
+  API-origin work. Existing internal legacy billing terms are unchanged. See
   [billing-origin.md](billing-origin.md#platform-fee-on-your-own-keys).
 - `OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING` (default `true`): on turns whose
   model Opengeni pays for while credit billing is active, hosted web search and
@@ -3547,7 +3550,8 @@ OPENGENI_WEB_TINYFISH_API_KEY=...            # free key; TinyFish is the default
 
 Set them on both the API and the worker (the API projects the effective tool
 list; the worker runs the tools). With credit billing active, priced calls are
-billed at provider cost + 5%. [Web search](web-search.md) owns the provider
+billed at provider cost plus the configured credit margin (zero when
+`OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE=0`). [Web search](web-search.md) owns the provider
 table, failover, URL rules, prices and the evaluation script.
 
 ## Terraform Registry MCP Docs

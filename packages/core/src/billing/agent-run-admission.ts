@@ -1,5 +1,6 @@
 import {
   canonicalizeConfiguredModelId,
+  resolveModelProviderForTurn,
   configuredStaticUsageLimits,
   type Settings,
 } from "@opengeni/config";
@@ -12,6 +13,7 @@ import {
   byokPaidCreditRefusalMessage,
   byokPlatformFeeActive,
   ownSubscriptionPlanAllows,
+  ownModelFunding,
 } from "./byok-platform-fee";
 import { coreRoutedSubscriptionFunding, modelFundingForAdmission } from "./limits";
 import {
@@ -34,6 +36,7 @@ export type AgentRunAdmissionDenial =
   | "byok_upgrade_required"
   /** The person's own subscription needs a paid plan (Pro or higher). */
   | "subscription_plan_required"
+  | "subscription_api_unavailable"
   | "allowance_exhausted"
   | "monthly_model_cost_limit"
   | "monthly_agent_run_limit";
@@ -50,12 +53,22 @@ export async function agentRunAdmissionDenial(
     initiatingHumanSubjectId?: string | null;
     acceptedTurn?: { sessionId: string; turnId: string };
     /**
-     * Who pays: API work needs credits; plan credit never pays for it. A
-     * resolver is read only when credits decide admission.
+     * Who pays: API work needs credits and cannot use subscriptions. A
+     * resolver reads the accepted work's frozen origin once for admission.
      */
     billingOrigin?: BillingOrigin | null | (() => Promise<BillingOrigin | null>);
   },
 ): Promise<AgentRunAdmissionDenial | null> {
+  const billingOrigin = chargeBillingOrigin(
+    typeof input.billingOrigin === "function" ? await input.billingOrigin() : input.billingOrigin,
+  );
+  if (
+    billingOrigin === "api" &&
+    ownModelFunding(resolveModelProviderForTurn(services.settings, input.model)?.model) ===
+      "subscription"
+  ) {
+    return "subscription_api_unavailable";
+  }
   const codexBilled = await isCodexBilledTurn({
     db: services.db,
     settings: services.settings,
@@ -78,6 +91,7 @@ export async function agentRunAdmissionDenial(
     }),
   );
   const externallyBilled = funding.fundedWithoutCredits;
+  if (funding.ownSubscription && billingOrigin === "api") return "subscription_api_unavailable";
   // The person's own subscription pays no fee; it needs a paid plan.
   if (
     funding.ownSubscription &&
@@ -87,9 +101,6 @@ export async function agentRunAdmissionDenial(
   }
   // The person's own key pays the platform fee, payable only from paid credit.
   if (funding.byok && byokPlatformFeeActive(services.settings, input.accountId)) {
-    const billingOrigin = chargeBillingOrigin(
-      typeof input.billingOrigin === "function" ? await input.billingOrigin() : input.billingOrigin,
-    );
     const balance = await getByokFeeSpendableBalance(services.db, input.accountId, billingOrigin);
     if (balance.balanceMicros <= 0) {
       return byokPaidCreditRefusalMessage(balance, billingOrigin) === BYOK_UPGRADE_REQUIRED_MESSAGE
@@ -110,10 +121,6 @@ export async function agentRunAdmissionDenial(
       });
       if (!decision.allowed) return "insufficient_credits";
     } else {
-      const billingOrigin =
-        typeof input.billingOrigin === "function"
-          ? await input.billingOrigin()
-          : input.billingOrigin;
       const balance = await getSpendableCreditBalance(
         services.db,
         input.accountId,

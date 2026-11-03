@@ -20,6 +20,7 @@ import {
 } from "@opengeni/xai-subscription";
 import { workspaceXaiOperationAvailable } from "../../xai-operation-availability";
 import { transcribeOnSubscriptionCore } from "./subscription-core";
+import { checkOwnSubscriptionPlan } from "../../billing/limits";
 
 const TRANSCRIBE_URL = `${XAI_PUBLIC_API_BASE_URL}/stt`;
 
@@ -56,6 +57,7 @@ export function createXaiSubscriptionTranscriptionProvider(input: {
         context.accountId ?? (await getWorkspace(input.db, context.workspaceId))?.accountId;
       // An unresolvable account fails closed rather than guessing a path.
       if (!accountId) return false;
+      if (!(await checkOwnSubscriptionPlan(input, accountId)).allowed) return false;
       return await workspaceXaiOperationAvailable(input.db, input.settings, {
         accountId,
         workspaceId: context.workspaceId,

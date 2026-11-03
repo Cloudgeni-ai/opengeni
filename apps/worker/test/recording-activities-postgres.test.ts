@@ -14,6 +14,7 @@ import {
 import { DICTATION_RETENTION_MILLISECONDS } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
+  chargeBillingOrigin,
   completeRecordingTranscriptVersion,
   createDb,
   createRecording,
@@ -30,6 +31,7 @@ import {
   setRecordingTrackPrepared,
   updateWorkspaceSettings,
   type DbClient,
+  type CreditDebitAttribution,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
@@ -113,7 +115,12 @@ function fakeProvider(
 
 async function capturedRecording(
   storage: ReturnType<typeof memoryStorage>,
-  transcription: { providerId: string; model: string; options: Record<string, unknown> } = {
+  transcription: {
+    providerId: string;
+    model: string;
+    options: Record<string, unknown>;
+    creditAttribution?: CreditDebitAttribution;
+  } = {
     providerId: "elevenlabs",
     model: "scribe_v2",
     options: { language: "en" },
@@ -269,6 +276,52 @@ test("a transcript's time budget grows with the audio, up to twelve hours", () =
 });
 
 describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
+  test("API-origin recordings preserve funding origin through transcription and meeting notes", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(
+      storage,
+      {
+        providerId: "elevenlabs",
+        model: "scribe_v2",
+        options: {},
+        creditAttribution: { kind: "service", billingOrigin: "api" },
+      },
+      ["microphone"],
+    );
+    const origins: string[] = [];
+    const provider = fakeProvider(async () => {
+      origins.push(chargeBillingOrigin());
+      return {
+        languages: ["eng"],
+        audioMilliseconds: 2_000,
+        diarized: false,
+        words: [
+          {
+            text: "Hello.",
+            startMilliseconds: 100,
+            endMilliseconds: 400,
+            speaker: null,
+            spaceBefore: false,
+          },
+        ],
+      };
+    });
+    const { activities: run } = activities(
+      storage,
+      provider,
+      "key",
+      null,
+      null,
+      undefined,
+      async () => {
+        origins.push(chargeBillingOrigin());
+        return { started: false, reason: "no_subscription" };
+      },
+    );
+    expect(await run.transcribeRecordingVersion(recording.input)).toEqual({ outcome: "complete" });
+    expect(origins).toEqual(["api", "api"]);
+  });
   test("a meeting's ready transcript starts its summary once; a failure is only logged", async () => {
     if (!client) return;
     const storage = memoryStorage();

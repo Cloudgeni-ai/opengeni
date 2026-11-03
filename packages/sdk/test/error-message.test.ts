@@ -20,6 +20,22 @@ test("neutral formatter is available through the core and browser entry points",
 });
 
 describe("brand-neutral error presentation", () => {
+  test("API subscription refusals explain model selection rather than permission or purchase", () => {
+    const error = new OpenGeniApiError(
+      403,
+      JSON.stringify({
+        error: {
+          code: "forbidden",
+          message: "Connected subscriptions are unavailable through the API.",
+          details: { code: "subscription_api_unavailable" },
+        },
+      }),
+    );
+    expect(formatErrorMessage(error)).toBe(
+      "Connected subscriptions are only available in the Opengeni apps. Choose a credit-billed model for API use.",
+    );
+    expect(error.details?.action).toBeUndefined();
+  });
   test("seat refusals preserve only the bounded upgrade action and do not suggest buying credits", () => {
     for (const action of [
       { type: "upgrade", href: "/billing", extra: { ignored: true } },

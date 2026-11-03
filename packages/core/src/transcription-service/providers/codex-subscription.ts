@@ -26,7 +26,9 @@ import {
   coreTranscriptionResult,
   coreTranscriptionUnavailable,
   withoutFallback,
+  assertSubscriptionTranscriptionAllowed,
 } from "./subscription-core";
+import { checkOwnSubscriptionPlan } from "../../billing/limits";
 
 const TRANSCRIBE_URL = "https://chatgpt.com/backend-api/transcribe";
 
@@ -56,6 +58,7 @@ async function transcribeOnCore(
     ) => Promise<Response>;
   },
 ): Promise<{ text: string; languages: string[] }> {
+  await assertSubscriptionTranscriptionAllowed({ ...input, accountId: request.accountId });
   const scope: SubscriptionCoreCodexOperationScope = {
     kind: "workspace",
     accountId: request.accountId,
@@ -174,6 +177,7 @@ export function createCodexSubscriptionTranscriptionProvider(input: {
         context.accountId ?? (await getWorkspace(input.db, context.workspaceId))?.accountId;
       // An unresolvable account fails closed rather than guessing a path.
       if (!accountId) return false;
+      if (!(await checkOwnSubscriptionPlan(input, accountId)).allowed) return false;
       const candidates = await listSubscriptionCoreCodexOperationCandidates(input.db, {
         kind: "workspace",
         accountId,

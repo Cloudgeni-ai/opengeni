@@ -49,6 +49,7 @@ import {
 } from "@opengeni/core/transcription-service";
 import {
   beginRecordingAudioExpiry,
+  withCreditDebitAttribution,
   claimRecordingTranscriptVersion,
   completeRecordingAudioExpiry,
   completeRecordingTranscriptVersion,
@@ -777,7 +778,10 @@ export function createRecordingActivities(
     let finishing = false;
     try {
       finished = await withRecordingUsage(usage, () => {
-        const work = transcribeClaimed();
+        const work = withCreditDebitAttribution(
+          job.creditAttribution ?? { kind: "unknown" },
+          transcribeClaimed,
+        );
         // The losing side of the race must not become an unhandled rejection.
         work.catch(() => undefined);
         // A step that doesn't listen for the abort still can't outlast the budget.
