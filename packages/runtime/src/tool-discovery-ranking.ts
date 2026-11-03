@@ -220,10 +220,10 @@ function document(tool: Tool): Document {
   const texts = [lead, description.slice(lead.length), parameterNames].map(rawWords);
   const textFields = texts.map((raw) => fieldOf(searchWords(raw)));
   const name = segmentedName(separator < 0 ? tool.name : tool.name.slice(separator + 2), () => {
-    const words = new Set<string>();
-    for (const raw of texts) for (const word of raw) words.add(word);
+    const ownWords = new Set<string>();
+    for (const raw of texts) for (const word of raw) ownWords.add(word);
     const has = (term: string) => textFields.some((f) => f.frequencies.has(term));
-    return { words, stems: { has } };
+    return { words: ownWords, stems: { has } };
   });
   const fields = [field(name.searchable), ...textFields];
   const nameWords = searchWords(name.separated);
