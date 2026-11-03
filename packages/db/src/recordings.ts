@@ -1130,6 +1130,7 @@ export async function listDeletingRecordingObjectKeys(
         .select({
           objectKey: schema.recordingTracks.preparedObjectKey,
           kind: schema.recordingTracks.kind,
+          trackNumber: schema.recordingTracks.trackNumber,
         })
         .from(schema.recordingTracks)
         .where(
@@ -1143,6 +1144,12 @@ export async function listDeletingRecordingObjectKeys(
       ...new Set([
         ...chunks.map((chunk) => chunk.objectKey),
         ...tracks.flatMap((track) => (track.objectKey ? [track.objectKey] : [])),
+        // The speaker scan saved while a meeting was still recording.
+        ...tracks.flatMap((track) =>
+          track.kind === "video"
+            ? []
+            : [recordingSpeakerScanObjectKey({ ...input, trackNumber: track.trackNumber })],
+        ),
         // A browser recording's video and the action log beside it, even if
         // the worker saved them without recording it yet.
         ...(tracks.some((track) => track.kind === "video")
@@ -1203,6 +1210,18 @@ export function recordingPreparedTrackObjectKey(input: {
   extension: string;
 }): string {
   return `workspaces/${input.workspaceId}/recordings/${input.recordingId}/prepared/track-${input.trackNumber}.${input.extension}`;
+}
+
+/**
+ * Where the worker keeps a meeting track's speaker scan while the meeting is
+ * still recording, so the final run only scans the audio after it.
+ */
+export function recordingSpeakerScanObjectKey(input: {
+  workspaceId: string;
+  recordingId: string;
+  trackNumber: number;
+}): string {
+  return `workspaces/${input.workspaceId}/recordings/${input.recordingId}/prepared/track-${input.trackNumber}.speakers`;
 }
 
 /**
@@ -4087,7 +4106,11 @@ export async function beginRecordingAudioExpiry(
           ),
         ),
       tx
-        .select({ objectKey: schema.recordingTracks.preparedObjectKey })
+        .select({
+          objectKey: schema.recordingTracks.preparedObjectKey,
+          kind: schema.recordingTracks.kind,
+          trackNumber: schema.recordingTracks.trackNumber,
+        })
         .from(schema.recordingTracks)
         .where(
           and(
@@ -4100,6 +4123,12 @@ export async function beginRecordingAudioExpiry(
       ...new Set([
         ...chunks.map((chunk) => chunk.objectKey),
         ...tracks.flatMap((track) => (track.objectKey ? [track.objectKey] : [])),
+        // Voice features from a scan the final transcript never collected.
+        ...tracks.flatMap((track) =>
+          track.kind === "video"
+            ? []
+            : [recordingSpeakerScanObjectKey({ ...input, trackNumber: track.trackNumber })],
+        ),
       ]),
     ];
   });

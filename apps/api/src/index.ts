@@ -352,6 +352,20 @@ export async function createTemporalWorkflowClient(
         throw error;
       }
     },
+    startRecordingSpeakerScan: async (input) => {
+      try {
+        await temporal.workflow.start("recordingSpeakerScanWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          workflowId: `recording-speaker-scan:${input.recordingId}`,
+          // One that ended (a long pause) starts again when audio does.
+          workflowIdReusePolicy: "ALLOW_DUPLICATE",
+          args: [input],
+        });
+      } catch (error) {
+        if (isWorkflowAlreadyStarted(error)) return;
+        throw error;
+      }
+    },
     startBrowserRecordingVideo: async (input) => {
       try {
         await temporal.workflow.start("browserRecordingVideoWorkflow", {

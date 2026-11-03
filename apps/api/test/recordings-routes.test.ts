@@ -96,6 +96,7 @@ async function fixture(
     },
   };
   const started: Started[] = [];
+  const speakerScans: string[] = [];
   const settings = testSettings({
     productAccessMode: "configured",
     sandboxBackend: "none",
@@ -129,6 +130,9 @@ async function fixture(
       triggerScheduledTask: noop,
       startRecordingWorkflow: async (input: Started) => {
         started.push(input);
+      },
+      startRecordingSpeakerScan: async (input: { recordingId: string }) => {
+        speakerScans.push(input.recordingId);
       },
     } as unknown as SessionWorkflowClient,
     managedAuth: null,
@@ -200,6 +204,7 @@ async function fixture(
     serviceSubjectId: `api_key:${serviceKey.id}`,
     objects,
     started,
+    speakerScans,
     admin,
     owner: await person(),
     other: await person(),
@@ -460,6 +465,8 @@ describe("recording routes", () => {
       );
       expect(complete.body).toEqual({ uploaded: [1], missing: [] });
     }
+    // Its first audio starts telling the speakers apart while it records.
+    expect([...new Set(scope.speakerScans)]).toEqual([recordingId]);
     expect(
       (await scope.other.call("POST", `/recordings/${recordingId}/finalize`, { tracks: [] }))
         .status,

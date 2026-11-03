@@ -25,6 +25,7 @@ import {
   listRecordingTranscriptVersions,
   markRecordingChunksUploaded,
   markRecordingDeleting,
+  recordingSpeakerScanObjectKey,
   rememberRecordingPersonVoice,
   reserveRecordingChunks,
   setRecordingTrackPrepared,
@@ -41,6 +42,8 @@ import {
   createRecordingActivities,
   recordingPieceRequestKey,
   recordingTranscriptBudgetMilliseconds,
+  speakerScanDue,
+  speakerScanMilliseconds,
   type RecordingActivityOptions,
 } from "../src/activities/recordings";
 import { RecordingSpeakersError } from "../src/activities/recording-speakers";
@@ -120,6 +123,8 @@ async function capturedRecording(
   },
   sources: ReadonlyArray<"microphone" | "system"> = ["microphone", "system"],
   silentTracks: ReadonlyArray<number> = [],
+  /** Still being recorded: its chunks are uploaded but it isn't finalized. */
+  capturing = false,
 ) {
   const db = client!.db;
   const suffix = crypto.randomUUID();
@@ -159,7 +164,8 @@ async function capturedRecording(
       byteLength: bytes.length,
       sha256: createHash("sha256").update(bytes).digest("hex"),
       startMilliseconds: chunkNumber * 1_000,
-      durationMilliseconds: 1_000,
+      // Still recording, it says it is past a minute long, enough to scan.
+      durationMilliseconds: capturing && chunkNumber === 1 ? 64_000 : 1_000,
     }));
     const reserved = await reserveRecordingChunks(db, {
       ...actor,
@@ -181,14 +187,17 @@ async function capturedRecording(
     });
   }
   const versionId = crypto.randomUUID();
-  await finalizeRecording(db, {
-    ...actor,
-    recordingId,
-    versionId,
-    tracks: sources.map((_, trackNumber) => ({ trackNumber, chunkCount: 2 })),
-    transcription,
-  });
+  const finalize = async () =>
+    await finalizeRecording(db, {
+      ...actor,
+      recordingId,
+      versionId,
+      tracks: sources.map((_, trackNumber) => ({ trackNumber, chunkCount: 2 })),
+      transcription,
+    });
+  if (!capturing) await finalize();
   return {
+    finalize,
     actor,
     input: {
       accountId: grant.accountId,
@@ -862,6 +871,102 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       ["speaker_1", "Speaker 2", null],
     ]);
     expect(await listRecordingPeople(client.db, recording.actor)).toEqual([]);
+  });
+
+  test("a meeting still being recorded has its speakers scanned ahead, and its transcript reuses the scan", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(
+      storage,
+      {
+        providerId: "elevenlabs",
+        model: "scribe_v2",
+        options: { language: "en", diarizer: "ours" },
+      },
+      ["microphone"],
+      [],
+      true,
+    );
+    const scanKey = recordingSpeakerScanObjectKey({
+      workspaceId: recording.input.workspaceId,
+      recordingId: recording.input.recordingId,
+      trackNumber: 0,
+    });
+    /** A scan's bytes: its header says how far it reached, at 16 kHz. */
+    const scanReaching = (milliseconds: number) => {
+      const bytes = new Uint8Array(40);
+      new DataView(bytes.buffer).setBigUint64(16, BigInt(milliseconds * 16), true);
+      return bytes;
+    };
+    const scans: Array<{ fileName: string; cache: Uint8Array | null }> = [];
+    const caches: Array<Uint8Array | null> = [];
+    const ours: RecordingDiarizer = {
+      id: "test",
+      scan: async (audio, options) => {
+        scans.push({ fileName: audio.fileName, cache: options.cache ?? null });
+        return scanReaching(64_000);
+      },
+      diarize: async (_audio, options) => {
+        caches.push(options.cache ?? null);
+        return {
+          turns: [{ startMilliseconds: 0, endMilliseconds: 1_500, speaker: "S0" }],
+          voices: [],
+          voiceModel: "test-voices",
+        };
+      },
+    };
+    const provider = fakeProvider(async () => ({
+      languages: ["eng"],
+      audioMilliseconds: 2_000,
+      diarized: false,
+      words: [
+        {
+          text: "Hello.",
+          startMilliseconds: 100,
+          endMilliseconds: 400,
+          speaker: null,
+          spaceBefore: false,
+        },
+      ],
+    }));
+    const { activities: run } = activities(storage, provider, "key", ours);
+    const work = {
+      accountId: recording.input.accountId,
+      workspaceId: recording.input.workspaceId,
+      recordingId: recording.input.recordingId,
+      ownerSubjectId: recording.input.ownerSubjectId,
+    };
+
+    expect(await run.scanRecordingSpeakers(work)).toEqual({ again: true });
+    expect(scans).toEqual([{ fileName: "track-0.webm", cache: null }]);
+    expect(speakerScanMilliseconds(storage.objects.get(scanKey)!.bytes)).toBe(64_000);
+    // Nothing new since: no scan.
+    expect(await run.scanRecordingSpeakers(work)).toEqual({ again: true });
+    expect(scans).toHaveLength(1);
+
+    await recording.finalize();
+    expect(await run.scanRecordingSpeakers(work)).toEqual({ again: false });
+    expect(await run.transcribeRecordingVersion(recording.input)).toEqual({ outcome: "complete" });
+    expect(caches).toEqual([scanReaching(64_000)]);
+    // Used, it is gone: voice features aren't kept beside the audio.
+    expect(storage.objects.has(scanKey)).toBe(false);
+  });
+
+  test("a speaker scan is due after a minute of new audio, or a tenth of a long meeting's", () => {
+    const minutes = (value: number) => value * 60_000;
+    expect(speakerScanDue({ audioMilliseconds: minutes(0.9), scannedMilliseconds: 0 })).toBe(false);
+    expect(speakerScanDue({ audioMilliseconds: minutes(1), scannedMilliseconds: 0 })).toBe(true);
+    expect(
+      speakerScanDue({ audioMilliseconds: minutes(21), scannedMilliseconds: minutes(20) }),
+    ).toBe(false);
+    expect(
+      speakerScanDue({ audioMilliseconds: minutes(22), scannedMilliseconds: minutes(20) }),
+    ).toBe(true);
+    // Never more than five minutes behind, however long the meeting.
+    expect(
+      speakerScanDue({ audioMilliseconds: minutes(185), scannedMilliseconds: minutes(180) }),
+    ).toBe(true);
+    expect(speakerScanMilliseconds(new Uint8Array(8))).toBe(0);
   });
 
   test("our diarizer names the speakers when asked, and the model's stay if it fails", async () => {
@@ -1591,7 +1696,8 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       ...recording.actor,
       recordingId: recording.input.recordingId,
     });
-    expect(await run.deleteRecordingMedia(recording.input)).toEqual({ deleted: 6, purged: true });
+    // The six, and each audio track's speaker scan, which may still exist.
+    expect(await run.deleteRecordingMedia(recording.input)).toEqual({ deleted: 8, purged: true });
     expect(storage.objects.size).toBe(0);
     expect(await run.deleteRecordingMedia(recording.input)).toEqual({ deleted: 0, purged: false });
   });

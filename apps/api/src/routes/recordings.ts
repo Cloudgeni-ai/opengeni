@@ -737,6 +737,29 @@ export function registerRecordingRoutes(
     });
   }
 
+  /** Never fails the upload: without it the speakers are only found after the end. */
+  async function startSpeakerScan(
+    actor: { workspaceId: string; subjectId: string; accountId: string },
+    recordingId: string,
+  ): Promise<void> {
+    try {
+      const recording = await getRecording(db, { ...actor, recordingId });
+      if (recording.purpose !== "meeting" || recording.state !== "capturing") return;
+      await deps.workflowClient.startRecordingSpeakerScan?.({
+        accountId: actor.accountId,
+        workspaceId: recording.workspaceId,
+        recordingId,
+        ownerSubjectId: recording.ownerSubjectId,
+      });
+    } catch (error) {
+      observability?.warn("couldn't start telling a meeting's speakers apart while it records", {
+        workspaceId: actor.workspaceId,
+        recordingId,
+        error: error instanceof Error ? error.message.slice(0, 500) : String(error),
+      });
+    }
+  }
+
   /** The live model a request names, else the provider's first, else the deployment's. */
   function liveModelChoice(requested: {
     providerId?: string | undefined;
@@ -1138,6 +1161,11 @@ export function registerRecordingRoutes(
         chunkNumbers: present,
       }),
     );
+    // About every half minute of a meeting's audio, make sure its speakers
+    // are being told apart while it records (starting it again is a no-op).
+    if (deps.workflowClient.startRecordingSpeakerScan && present.some((n) => n % 30 === 0)) {
+      await startSpeakerScan(actor, recordingId);
+    }
     if (newlyStoredBytes > 0) {
       count(
         "opengeni_recording_stored_bytes_total",

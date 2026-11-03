@@ -61,7 +61,9 @@ import {
   markRecordingDeleting,
   memberVoiceprints,
   purgeDeletingRecording,
+  listRecordingChunks,
   recordingPreparedTrackObjectKey,
+  recordingSpeakerScanObjectKey,
   RecordingNotFoundError,
   recordingVoiceChannel,
   saveRecordingTranscriptPieceResult,
@@ -606,6 +608,30 @@ function meetingCharge(
   return spec.creditPricing ? { pricing: spec.creditPricing } : null;
 }
 
+/** A meeting that sent no audio for this long is not scanned until it does. */
+export const SPEAKER_SCAN_IDLE_MILLISECONDS = 15 * 60_000;
+
+/** How far into the track a speaker scan reaches (its header, at 16 kHz). */
+export function speakerScanMilliseconds(scan: Uint8Array): number {
+  if (scan.byteLength < 24) return 0;
+  const view = new DataView(scan.buffer, scan.byteOffset, scan.byteLength);
+  return Math.floor(Number(view.getBigUint64(16, true)) / 16);
+}
+
+/**
+ * Whether enough new audio arrived to scan again: a minute, or a tenth of
+ * what was scanned (at most five minutes) once a meeting runs long, since
+ * every scan reads the track from its start. After the meeting ends, at most
+ * that much is left for the final transcript to go through.
+ */
+export function speakerScanDue(input: {
+  audioMilliseconds: number;
+  scannedMilliseconds: number;
+}): boolean {
+  const step = Math.max(60_000, Math.min(input.scannedMilliseconds / 10, 5 * 60_000));
+  return input.audioMilliseconds - input.scannedMilliseconds >= step;
+}
+
 export function createRecordingActivities(
   services: () => Promise<ControlActivityServices>,
   options: RecordingActivityOptions = {},
@@ -690,6 +716,22 @@ export function createRecordingActivities(
   ): Promise<RecordingTranscriptOutcome> {
     const { db, objectStorage, settings, observability } = await services();
     const actor = { workspaceId: input.workspaceId, subjectId: input.ownerSubjectId };
+    /** A track's speaker scan made while the meeting was recorded, if any. */
+    const speakerScan = async (
+      storage: ObjectStorage,
+      trackNumber: number,
+    ): Promise<Uint8Array | null> => {
+      const key = recordingSpeakerScanObjectKey({
+        workspaceId: input.workspaceId,
+        recordingId: input.recordingId,
+        trackNumber,
+      });
+      return await storage
+        .getObjectBytes(key)
+        .then((found) => found?.bytes ?? null)
+        // Without it every window is scanned now, which is only slower.
+        .catch(() => null);
+    };
     const leased = await claimRecordingTranscriptVersion(db, {
       ...actor,
       versionId: input.versionId,
@@ -1060,8 +1102,10 @@ export function createRecordingActivities(
           const sendOnly = silent || useOurs || !diarize ? sound : null;
           const runOurs = () =>
             useOurs && !silent
-              ? measureRecordingStage("diarize", () =>
+              ? measureRecordingStage("diarize", async () =>
                   ourDiarizer.diarize(trackAudio, {
+                    // What was scanned while the meeting was recorded.
+                    cache: await speakerScan(objectStorage, plan.trackNumber),
                     // A known head count is exact only when everyone is on
                     // this one track; split across tracks, it is each one's
                     // upper bound.
@@ -1245,7 +1289,24 @@ export function createRecordingActivities(
           telemetry.credits = creditCostMicros === null ? null : creditCostMicros / 1_000_000;
           return completed ? ({ outcome: "complete" } as const) : ({ outcome: "skipped" } as const);
         });
-        if (stage.outcome === "complete") await summarize();
+        if (stage.outcome === "complete") {
+          // The scan made while recording has served its purpose; kept, it
+          // would only store voice features beside the audio.
+          await Promise.all(
+            plans.map((plan) =>
+              objectStorage
+                .deleteObject(
+                  recordingSpeakerScanObjectKey({
+                    workspaceId: input.workspaceId,
+                    recordingId: input.recordingId,
+                    trackNumber: plan.trackNumber,
+                  }),
+                )
+                .catch(() => undefined),
+            ),
+          );
+          await summarize();
+        }
         return stage;
       } catch (error) {
         if (error instanceof RecordingNotFoundError) return { outcome: "skipped" };
@@ -1667,6 +1728,99 @@ export function createRecordingActivities(
     return { ...prepared, storedBytes: prepared.bytes.byteLength };
   }
 
+  /**
+   * Tell the speakers apart in a meeting's audio while it is still being
+   * recorded, so after it ends only the last minutes are left to go through.
+   * Each audio track's windows so far are kept beside its audio, and the
+   * next scan and the final transcript reuse them. `again` is false once
+   * there is nothing more to do: the meeting ended, it never uses our
+   * diarizer, or no audio has arrived for a long while.
+   */
+  async function scanRecordingSpeakers(input: RecordingWorkInput): Promise<{ again: boolean }> {
+    const { db, objectStorage, settings, observability } = await services();
+    const diarizer = diarizerFor(settings);
+    if (!objectStorage || !diarizer?.scan) return { again: false };
+    const actor = { workspaceId: input.workspaceId, subjectId: input.ownerSubjectId };
+    const recording = await getRecording(db, { ...actor, recordingId: input.recordingId }).catch(
+      (error: unknown) => {
+        if (error instanceof RecordingNotFoundError) return null;
+        throw error;
+      },
+    );
+    if (!recording || recording.purpose !== "meeting" || recording.state !== "capturing") {
+      return { again: false };
+    }
+    const signal = cancellation();
+    let lastArrival = 0;
+    for (const track of recording.tracks) {
+      if (track.kind === "video") continue;
+      const chunks = await listRecordingChunks(db, {
+        ...actor,
+        recordingId: input.recordingId,
+        trackNumber: track.trackNumber,
+      });
+      // The audio from the first chunk up to the first one not uploaded yet.
+      const contiguous: typeof chunks = [];
+      for (const chunk of chunks) {
+        if (chunk.state !== "uploaded" || chunk.chunkNumber !== contiguous.length) break;
+        contiguous.push(chunk);
+      }
+      for (const chunk of chunks) {
+        lastArrival = Math.max(lastArrival, (chunk.uploadedAt ?? chunk.createdAt).getTime());
+      }
+      if (contiguous.length === 0) continue;
+      const first = contiguous[0]!;
+      const last = contiguous[contiguous.length - 1]!;
+      const audioMilliseconds =
+        last.startMilliseconds + last.durationMilliseconds - first.startMilliseconds;
+      const key = recordingSpeakerScanObjectKey({
+        workspaceId: input.workspaceId,
+        recordingId: input.recordingId,
+        trackNumber: track.trackNumber,
+      });
+      const previous = (await objectStorage.getObjectBytes(key))?.bytes ?? null;
+      const scannedMilliseconds = previous ? speakerScanMilliseconds(previous) : 0;
+      if (!speakerScanDue({ audioMilliseconds, scannedMilliseconds })) continue;
+      const started = performance.now();
+      heartbeat({ phase: "scanning", trackNumber: track.trackNumber });
+      const audio = await prepareRecordingTrackAudio({
+        chunks: contiguous,
+        mimeType: track.mimeType,
+        ffmpegPath: settings.voiceInputFfmpegPath,
+        signal,
+        onProgress: () => heartbeat({ phase: "scanning", trackNumber: track.trackNumber }),
+        readChunk: async (chunk) =>
+          (await objectStorage.getObjectBytes(chunk.objectKey))?.bytes ?? null,
+      });
+      const scan = await diarizer.scan(
+        {
+          bytes: audio.bytes,
+          mimeType: audio.mimeType,
+          fileName: `track-${track.trackNumber}.${audio.extension}`,
+        },
+        { cache: previous, signal },
+      );
+      await objectStorage.putObject({
+        key,
+        contentType: "application/octet-stream",
+        body: scan,
+        sha256: createHash("sha256").update(scan).digest("hex"),
+      });
+      observability.info("scanned a meeting's speakers while it records", {
+        workspaceId: input.workspaceId,
+        recordingId: input.recordingId,
+        trackNumber: track.trackNumber,
+        audioMilliseconds,
+        previouslyScannedMilliseconds: scannedMilliseconds,
+        scannedMilliseconds: speakerScanMilliseconds(scan),
+        elapsedMilliseconds: Math.round(performance.now() - started),
+      });
+    }
+    // A recorder that stopped sending without ending the meeting.
+    const lastHeard = Math.max(lastArrival, new Date(recording.startedAt).getTime());
+    return { again: Date.now() - lastHeard < SPEAKER_SCAN_IDLE_MILLISECONDS };
+  }
+
   /** Retries ran out on a retryable failure: fail the version with its last cause. */
   async function failRecordingTranscript(
     input: RecordingTranscriptInput & { errorCode: string; errorMessage?: string },
@@ -1839,6 +1993,7 @@ export function createRecordingActivities(
 
   return {
     transcribeRecordingVersion,
+    scanRecordingSpeakers,
     failRecordingTranscript,
     deleteRecordingMedia,
     expireDictation,
