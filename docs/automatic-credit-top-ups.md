@@ -139,7 +139,11 @@ per pass and calls `process` sequentially. Discovery is advisory, not authority.
 A failed organization does not starve the page; overlapping ticks do not overlap
 within a process, and database fences arbitrate replicas. The cursor resets after
 the final page so earlier failed accounts are retried. One stoppable timer is
-registered per root database handle. This does not change the control worker loop.
+registered per root database handle. API shutdown stops admission before draining
+other pumps and awaits the active pass before closing the database. Embedded
+`createAppComposition` owners must likewise call its `stopBillingAutoTopUps`
+disposer; it stops admission synchronously and returns the drain promise. This
+does not change the control worker loop.
 
 Maintenance requires Stripe billing mode and a configured Stripe key, but does
 **not** require the fresh-charge activation flag: disabled deployments still

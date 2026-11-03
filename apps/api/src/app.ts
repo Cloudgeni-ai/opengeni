@@ -535,6 +535,9 @@ export function createAppComposition(deps: AppDependencies): {
   /** One pass renewing the holds of the browsers agent sessions hold; the
    * server runs it on a timer (see `startBrowserHoldRenewalPump`). */
   renewBrowserHolds: () => Promise<BrowserHoldRenewal>;
+  /** Stop admission synchronously, then drain the current top-up pass before
+   * closing the database. Embedded composition owners must call this too. */
+  stopBillingAutoTopUps: () => Promise<void>;
 } {
   assertOrganizationUserSetupQueryTransportConfigured(deps.settings);
   // The request-scoped workspace control-prefix budget is validated once by
@@ -2489,7 +2492,6 @@ export function createAppComposition(deps: AppDependencies): {
   registerPersonalApiKeyRoutes(app, routeDeps);
   registerOrganizationServiceAccountRoutes(app, routeDeps);
   registerBillingRoutes(app, routeDeps);
-  startBillingAutoTopUpMaintenance(routeDeps);
   registerBrowserIdentityRoutes(app, routeDeps);
   const interactionSecrets = createVaultInteractionSecretsPort({
     db: routeDeps.db,
@@ -2705,7 +2707,13 @@ export function createAppComposition(deps: AppDependencies): {
     return c.json(envelope, status as ContentfulStatusCode);
   });
 
-  return { app, routeDeps, renewBrowserHolds: browserSessionRoutes.renewBrowserHolds };
+  const billingAutoTopUps = startBillingAutoTopUpMaintenance(routeDeps);
+  return {
+    app,
+    routeDeps,
+    renewBrowserHolds: browserSessionRoutes.renewBrowserHolds,
+    stopBillingAutoTopUps: () => billingAutoTopUps?.stop() ?? Promise.resolve(),
+  };
 }
 
 function rejectionLogAttributes(rejection: HttpRejectionFacts) {

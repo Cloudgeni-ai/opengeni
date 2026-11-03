@@ -17,6 +17,7 @@ export function billingAutoTopUpMaintenance(ports: MaintenancePorts) {
   let cursor: string | null = null;
   let active = false;
   let stopped = false;
+  let currentPass = Promise.resolve();
   const report = (error: unknown, accountId?: string) => {
     try {
       ports.onError(error, accountId);
@@ -25,35 +26,39 @@ export function billingAutoTopUpMaintenance(ports: MaintenancePorts) {
     }
   };
   return {
-    async run(): Promise<void> {
-      if (active || stopped) return;
+    run(): Promise<void> {
+      if (active || stopped) return Promise.resolve();
       active = true;
-      try {
-        const accounts = await ports.discover(cursor, PAGE_SIZE);
-        for (const accountId of accounts) {
-          if (stopped) break;
-          try {
-            await ports.process(accountId);
-          } catch (error) {
-            report(error, accountId);
+      currentPass = (async () => {
+        try {
+          const accounts = await ports.discover(cursor, PAGE_SIZE);
+          for (const accountId of accounts) {
+            if (stopped) break;
+            try {
+              await ports.process(accountId);
+            } catch (error) {
+              report(error, accountId);
+            }
+            cursor = accountId;
           }
-          cursor = accountId;
+          if (accounts.length < PAGE_SIZE) cursor = null;
+        } catch (error) {
+          report(error);
+        } finally {
+          active = false;
         }
-        if (accounts.length < PAGE_SIZE) cursor = null;
-      } catch (error) {
-        report(error);
-      } finally {
-        active = false;
-      }
+      })();
+      return currentPass;
     },
     stop() {
       stopped = true;
+      return currentPass;
     },
   };
 }
 
 type Maintenance = ReturnType<typeof billingAutoTopUpMaintenance>;
-type MaintenanceHandle = { stop(): void };
+type MaintenanceHandle = { stop(): Promise<void> };
 const started = new WeakMap<object, MaintenanceHandle>();
 
 /** Stripe I/O belongs to the API process. Start even with fresh charging off:
@@ -82,8 +87,9 @@ export function startBillingAutoTopUpMaintenance(
   const handle = {
     stop() {
       clearInterval(timer);
-      maintenance.stop();
+      const stopped = maintenance.stop();
       if (started.get(deps.db) === handle) started.delete(deps.db);
+      return stopped;
     },
   };
   started.set(deps.db, handle);
