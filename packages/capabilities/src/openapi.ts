@@ -266,6 +266,13 @@ export function compileOpenApiRevision(
       ...(Object.values(bindings).some((binding) => binding.parameters.some(isNonExplodedFormQuery))
         ? { queryArraySerializationVersion: 1 }
         : {}),
+      // Older compilers ignored allowReserved, so the same document compiled
+      // to different bindings.
+      ...(Object.values(bindings).some((binding) =>
+        binding.parameters.some((parameter) => parameter.allowReserved),
+      )
+        ? { reservedPathExpansionVersion: 1 }
+        : {}),
       ...(options.schemaMode ? { schemaMode: options.schemaMode } : {}),
       // Reviewed read-only overrides change tool safety, so they are part of the
       // executable identity. Absent overrides keep existing digests unchanged.
@@ -843,20 +850,43 @@ function isReplaySafeMethod(method: OpenApiHttpMethod): boolean {
 /**
  * A path parameter's value as a path: each segment is encoded and `/` kept.
  * Leading, trailing and repeated slashes are dropped, so `/sites/hr` and
- * `sites/hr` mean the same. A `.` or `..` segment would be resolved away by
- * URL parsing, so it is refused instead of silently reaching another path.
+ * `sites/hr` mean the same. A segment that is already percent-encoded (a
+ * path copied from a browser) is decoded once first, so `R%26D%20Team` and
+ * `R&D Team` send the same bytes. A `.` or `..` segment, in either form,
+ * would be resolved away by URL parsing, so it is refused instead of
+ * silently reaching another path.
  */
 function reservedPathValue(name: string, value: string): string {
-  const segments = value.split("/").filter(Boolean);
-  if (segments.some((segment) => segment === "." || segment === "..")) {
-    throw new IntegrationInvocationError(
+  return value
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => pathSegment(name, decodedOnce(segment)))
+    .join("/");
+}
+
+function decodedOnce(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
+}
+
+/** One encoded path segment; `.` and `..` would move the request elsewhere. */
+function pathSegment(name: string, segment: string): string {
+  const invalid = (reason: string) =>
+    new IntegrationInvocationError(
       "parameter_invalid",
-      `The path parameter ${JSON.stringify(name)} cannot contain . or .. segments`,
+      `The path parameter ${JSON.stringify(name)} ${reason}`,
       "not_started",
       false,
     );
+  if (segment === "." || segment === "..") throw invalid("cannot be or contain . or ..");
+  try {
+    return encodeURIComponent(segment);
+  } catch {
+    throw invalid("is not valid Unicode text");
   }
-  return segments.map((segment) => encodeURIComponent(segment)).join("/");
 }
 
 function buildOperationUrl(binding: OpenApiOperationBinding, args: Record<string, unknown>): URL {
@@ -876,11 +906,12 @@ function buildOperationUrl(binding: OpenApiOperationBinding, args: Record<string
     );
     return parameter?.allowReserved
       ? reservedPathValue(name, scalarString(value))
-      : encodeURIComponent(scalarString(value));
+      : pathSegment(name, scalarString(value));
   });
   const base = new URL(binding.serverUrl);
+  // `./` keeps a first segment with a colon (`{drive-id}:/…`) from reading as a scheme.
   const url = new URL(
-    path.replace(/^\//, ""),
+    `./${path.replace(/^\//, "")}`,
     base.toString().endsWith("/") ? base : new URL(`${base}/`),
   );
   const query = objectValue(args.query);

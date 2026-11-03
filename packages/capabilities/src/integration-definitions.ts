@@ -46,10 +46,11 @@ export type IntegrationDefinitionSource =
         description?: string;
         /**
          * The path actually sent when the provider's documented form fails.
-         * The operation and its tool keep their identity. `{+name}` expands a
-         * path parameter as a path: each segment is encoded and `/` is kept
-         * (RFC 6570 reserved expansion), for example Graph's colon form
-         * `/sites/{site-id}:/{+path}`.
+         * The operation keeps its tool ID when the provider names it with an
+         * operationId (otherwise the ID follows method and path). `{+name}`
+         * expands a path parameter as a path: `/` is kept and each segment is
+         * encoded once, an already percent-encoded segment as it is, for
+         * example Graph's colon form `/sites/{site-id}:/{+path}`.
          */
         requestPath?: string;
         /** Query parameters the provider documents but rejects for this operation. */
@@ -294,7 +295,7 @@ export const MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION: IntegrationDefinitio
       "get /me/messages": {
         summary: "List messages",
         description:
-          "List the messages in the signed-in person's mailbox, across folders. Use $filter, $search, $orderby, $select and $top to narrow and page results.",
+          "List the messages in the signed-in person's mailbox, across folders. Narrow with $filter or $search ($search cannot be combined with $filter or $orderby), choose fields with $select, and page with $top and $skip or the response's @odata.nextLink.",
       },
       "post /me/messages": {
         summary: "Create draft message",
@@ -304,6 +305,27 @@ export const MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION: IntegrationDefinitio
       "get /me/messages/{message-id}": {
         summary: "Get message",
         description: "Read one message in the signed-in person's mailbox by its id.",
+      },
+      "patch /me/messages/{message-id}": {
+        summary: "Update message",
+        description:
+          "Update a message's properties, for example a draft's subject, body or recipients before it is sent.",
+      },
+      "delete /me/messages/{message-id}": {
+        summary: "Delete message",
+        description: "Delete one message in the signed-in person's mailbox by its id.",
+      },
+      "get /me/messages/{message-id}/$value": {
+        summary: "Get message MIME content",
+        description: "Read a message's raw MIME content.",
+      },
+      "put /me/messages/{message-id}/$value": {
+        summary: "Update message MIME content",
+        description: "Replace a message's raw MIME content.",
+      },
+      "delete /me/messages/{message-id}/$value": {
+        summary: "Delete message MIME content",
+        description: "Delete a message's raw MIME content.",
       },
     },
   },
@@ -594,8 +616,9 @@ export const MICROSOFT_TEAMS_INTEGRATION_DEFINITION: IntegrationDefinition = {
         method: "get",
         odataSkipToken: true,
         requiredScopes: ["ChannelMessage.Read.All"],
-        // Graph declares $orderby here but answers "Query option 'OrderBy' is not allowed".
-        omitQueryParameters: ["$orderby"],
+        // Graph declares these here but supports only $top and $expand; it
+        // answers $orderby with "Query option 'OrderBy' is not allowed".
+        omitQueryParameters: ["$orderby", "$skip", "$search", "$filter", "$count"],
       },
       {
         path: "/teams/{team-id}/channels/{channel-id}/messages",
@@ -701,7 +724,7 @@ export function integrationDefinitionReadOnlyOperations(
     definition.source.operationAllowlist
       .filter((entry) => entry.readOnly === true)
       .map((entry) => [
-        `${entry.method} ${entry.requestPath?.replace(/\{\+([^}]+)\}/g, "{$1}") ?? entry.path}`,
+        `${entry.method} ${entry.requestPath ? requestPathTemplate(entry.requestPath) : entry.path}`,
         entry.searchEntityTypes ? { searchEntityTypes: [...entry.searchEntityTypes] } : {},
       ]),
   );
@@ -733,103 +756,128 @@ export function filterOpenApiDocumentForDefinition(
   if (!isRecord(document.paths)) {
     throw new IntegrationProtocolError("openapi_paths", "OpenAPI document has no paths object");
   }
-  const paths = Object.fromEntries(
-    Object.entries(document.paths)
-      .filter(
-        ([path]) =>
-          (!operationPathPrefixes?.length ||
-            operationPathPrefixes.some(
-              (prefix) => path === prefix || path.startsWith(`${prefix}/`),
-            )) &&
-          !excludedOperationPathPrefixes.some(
+  const entries = Object.entries(document.paths)
+    .filter(
+      ([path]) =>
+        (!operationPathPrefixes?.length ||
+          operationPathPrefixes.some(
             (prefix) => path === prefix || path.startsWith(`${prefix}/`),
-          ),
-      )
-      .flatMap(([path, item]) => {
-        if (!operationAllowlist) return [[path, item]];
-        if (!isRecord(item)) return [];
-        const selected = operationAllowlist.filter((entry) => entry.path === path);
-        const reviewedOperations = selected
-          .filter(({ method }) => isRecord(item[method]))
-          .map(
-            ({
+          )) &&
+        !excludedOperationPathPrefixes.some(
+          (prefix) => path === prefix || path.startsWith(`${prefix}/`),
+        ),
+    )
+    .flatMap<[string, unknown]>(([path, item]) => {
+      if (!operationAllowlist) return [[path, item]];
+      if (!isRecord(item)) return [];
+      const selected = operationAllowlist.filter((entry) => entry.path === path);
+      const reviewedOperations = selected
+        .filter(({ method }) => isRecord(item[method]))
+        .map(
+          ({
+            method,
+            requiredScopes,
+            odataSkipToken,
+            description,
+            requestPath,
+            omitQueryParameters,
+          }) => {
+            const operation = item[method] as Record<string, unknown>;
+            if (operation.$ref)
+              throw new IntegrationProtocolError(
+                "integration_definition_reference",
+                "Reviewed operations must be inline OpenAPI operations",
+              );
+            const { servers: _servers, ...reviewed } = operation;
+            const reserved = reservedPathParameters(requestPath);
+            const omitQuery = omitQueryParameters ?? [];
+            const parameters = reviewedParameters(document, reviewed.parameters, {
+              reserved,
+              omitQuery,
+            });
+            return {
+              path: requestPath ? requestPathTemplate(requestPath) : path,
+              reserved,
+              omitQuery,
               method,
-              requiredScopes,
-              odataSkipToken,
-              description,
-              requestPath,
-              omitQueryParameters,
-            }) => {
-              const operation = item[method] as Record<string, unknown>;
-              if (operation.$ref)
-                throw new IntegrationProtocolError(
-                  "integration_definition_reference",
-                  "Reviewed operations must be inline OpenAPI operations",
-                );
-              const { servers: _servers, ...reviewed } = operation;
-              const reserved = reservedPathParameters(requestPath);
-              const parameters = reviewedParameters(document, reviewed.parameters, {
-                reserved,
-                omitQuery: omitQueryParameters ?? [],
-              });
-              return {
-                path: requestPath ? requestPath.replace(/\{\+([^}]+)\}/g, "{$1}") : path,
-                reserved,
-                method,
-                operation: {
-                  ...reviewed,
-                  ...(parameters ? { parameters } : {}),
-                  // Reviewed guidance is long; keep a short name when the provider has no summary.
-                  ...(description
-                    ? {
-                        description,
-                        ...(typeof reviewed.summary === "string" && reviewed.summary
-                          ? {}
-                          : { summary: `${method.toUpperCase()} ${path}` }),
-                      }
-                    : {}),
-                  ...(odataSkipToken
-                    ? {
-                        parameters: [
-                          ...(parameters ??
-                            (Array.isArray(reviewed.parameters) ? reviewed.parameters : [])),
-                          {
-                            name: "$skiptoken",
-                            in: "query",
-                            required: false,
-                            description:
-                              "Opaque $skiptoken from the previous response @odata.nextLink, URL-decoded once. Keep the same resource and other query values. Never supply the full URL.",
-                            schema: { type: "string", minLength: 1, maxLength: 16384 },
-                          },
-                        ],
-                      }
-                    : {}),
-                  ...(requiredScopes ? { security: [{ delegated: [...requiredScopes] }] } : {}),
-                },
-              };
-            },
-          );
-        if (reviewedOperations.length === 0) return [];
-        // Preserve shared parameters and descriptions, but do not allow a path $ref
-        // to reintroduce unreviewed methods or a provider override of the API origin.
-        // An operation with a reviewed request path gets its own path item.
-        const byPath = new Map<string, Record<string, unknown>>();
-        for (const reviewed of reviewedOperations) {
-          const shared = reviewedParameters(document, item.parameters, {
-            reserved: reviewed.reserved,
-            omitQuery: [],
-          });
-          const pathItem = byPath.get(reviewed.path) ?? {
-            ...(item.parameters ? { parameters: shared ?? item.parameters } : {}),
-            ...(item.summary ? { summary: item.summary } : {}),
-            ...(item.description ? { description: item.description } : {}),
+              operation: {
+                ...reviewed,
+                ...(parameters ? { parameters } : {}),
+                // Reviewed guidance is long; keep a short name when the provider has no summary.
+                ...(description
+                  ? {
+                      description,
+                      ...(typeof reviewed.summary === "string" && reviewed.summary
+                        ? {}
+                        : { summary: `${method.toUpperCase()} ${path}` }),
+                    }
+                  : {}),
+                ...(odataSkipToken
+                  ? {
+                      parameters: [
+                        ...(parameters ??
+                          (Array.isArray(reviewed.parameters) ? reviewed.parameters : [])),
+                        {
+                          name: "$skiptoken",
+                          in: "query",
+                          required: false,
+                          description:
+                            "Opaque $skiptoken from the previous response @odata.nextLink, URL-decoded once. Keep the same resource and other query values. Never supply the full URL.",
+                          schema: { type: "string", minLength: 1, maxLength: 16384 },
+                        },
+                      ],
+                    }
+                  : {}),
+                ...(requiredScopes ? { security: [{ delegated: [...requiredScopes] }] } : {}),
+              } as Record<string, unknown>,
+            };
+          },
+        );
+      if (reviewedOperations.length === 0) return [];
+      // A shared query parameter an operation omits can only be removed by
+      // moving the shared parameters into each operation.
+      const sharedParameters = Array.isArray(item.parameters) ? item.parameters : [];
+      const inlineShared = reviewedOperations.some(({ omitQuery }) =>
+        sharedParameters.some((parameter) => {
+          const resolved = resolveParameter(document, parameter);
+          return resolved?.in === "query" && omitQuery.includes(String(resolved.name));
+        }),
+      );
+      // Preserve shared parameters and descriptions, but do not allow a path $ref
+      // to reintroduce unreviewed methods or a provider override of the API origin.
+      // An operation with a reviewed request path gets its own path item.
+      const byPath = new Map<string, Record<string, unknown>>();
+      for (const reviewed of reviewedOperations) {
+        const corrections = { reserved: reviewed.reserved, omitQuery: reviewed.omitQuery };
+        let operation = reviewed.operation;
+        if (inlineShared) {
+          const merged = mergeParameters(document, sharedParameters, operation.parameters);
+          operation = {
+            ...operation,
+            parameters: reviewedParameters(document, merged, corrections) ?? merged,
           };
-          pathItem[reviewed.method] = reviewed.operation;
-          byPath.set(reviewed.path, pathItem);
         }
-        return [...byPath];
-      }),
-  );
+        const shared = inlineShared
+          ? undefined
+          : reviewedParameters(document, item.parameters, { ...corrections, omitQuery: [] });
+        const pathItem = byPath.get(reviewed.path) ?? {
+          ...(item.parameters && !inlineShared ? { parameters: shared ?? item.parameters } : {}),
+          ...(item.summary ? { summary: item.summary } : {}),
+          ...(item.description ? { description: item.description } : {}),
+        };
+        pathItem[reviewed.method] = operation;
+        byPath.set(reviewed.path, pathItem);
+      }
+      return [...byPath];
+    });
+  // A reviewed request path can name a path another operation already uses;
+  // their methods are merged rather than one path item replacing the other.
+  const paths: Record<string, unknown> = {};
+  for (const [path, item] of entries) {
+    const existing = paths[path];
+    paths[path] =
+      existing === undefined ? item : mergePathItems(document, definition, path, existing, item);
+  }
   if (Object.keys(paths).length === 0) {
     throw new IntegrationProtocolError(
       "integration_definition_empty",
@@ -855,10 +903,105 @@ function reservedPathParameters(requestPath: string | undefined): readonly strin
   return [...(requestPath ?? "").matchAll(/\{\+([^}]+)\}/g)].map((match) => match[1]!);
 }
 
+/** A reviewed request path as an OpenAPI path template (`{+name}` is `{name}`). */
+export function requestPathTemplate(requestPath: string): string {
+  return requestPath.replace(/\{\+([^}]+)\}/g, "{$1}");
+}
+
+const OPENAPI_METHODS = ["get", "put", "post", "delete", "options", "head", "patch", "trace"];
+
+/** A parameter object, following local references (`#/...`). */
+function resolveParameter(
+  document: Record<string, unknown>,
+  parameter: unknown,
+): Record<string, unknown> | undefined {
+  let current = parameter;
+  for (let depth = 0; depth < 8; depth++) {
+    if (!isRecord(current)) return undefined;
+    const ref = current.$ref;
+    if (typeof ref !== "string") return current;
+    if (!ref.startsWith("#/")) return undefined;
+    current = ref
+      .slice(2)
+      .split("/")
+      .map((part) => part.replaceAll("~1", "/").replaceAll("~0", "~"))
+      .reduce<unknown>((value, part) => (isRecord(value) ? value[part] : undefined), document);
+  }
+  return undefined;
+}
+
+/** Shared path-level parameters an operation does not override, then its own. */
+function mergeParameters(
+  document: Record<string, unknown>,
+  shared: unknown,
+  own: unknown,
+): unknown[] {
+  const ownList = Array.isArray(own) ? own : [];
+  const key = (parameter: unknown) => {
+    const resolved = resolveParameter(document, parameter);
+    return resolved ? `${String(resolved.in)} ${String(resolved.name)}` : undefined;
+  };
+  const overridden = new Set(ownList.map(key).filter(Boolean));
+  const sharedList = Array.isArray(shared) ? shared : [];
+  return [...sharedList.filter((parameter) => !overridden.has(key(parameter))), ...ownList];
+}
+
+/** A path item whose shared parameters are moved into each operation. */
+function withInlineParameters(
+  document: Record<string, unknown>,
+  item: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!Array.isArray(item.parameters)) return item;
+  const { parameters: shared, ...rest } = item;
+  for (const method of OPENAPI_METHODS) {
+    const operation = rest[method];
+    if (isRecord(operation)) {
+      rest[method] = {
+        ...operation,
+        parameters: mergeParameters(document, shared, operation.parameters),
+      };
+    }
+  }
+  return rest;
+}
+
+function mergePathItems(
+  document: Record<string, unknown>,
+  definition: IntegrationDefinition,
+  path: string,
+  first: unknown,
+  second: unknown,
+): Record<string, unknown> {
+  if (!isRecord(first) || !isRecord(second)) {
+    throw new IntegrationProtocolError(
+      "integration_definition_path",
+      `${definition.name} has an invalid path item for ${path}`,
+    );
+  }
+  const merged = withInlineParameters(document, first);
+  const other = withInlineParameters(document, second);
+  for (const method of OPENAPI_METHODS) {
+    if (other[method] === undefined) continue;
+    if (merged[method] !== undefined) {
+      throw new IntegrationProtocolError(
+        "integration_definition_duplicate_operation",
+        `${definition.name} defines ${method.toUpperCase()} ${path} twice`,
+      );
+    }
+    merged[method] = other[method];
+  }
+  return merged;
+}
+
+/** Generic guidance for a path parameter expanded as a path. */
+const RESERVED_PATH_PARAMETER_DESCRIPTION =
+  "A path, with segments separated by /. Give it as plain text without quotes; each segment is encoded when the request is sent.";
+
 /**
  * Parameters with reviewed corrections: reserved path parameters are marked
- * `allowReserved`, and query parameters the provider rejects are dropped.
- * Undefined when nothing changes, so unchanged operations keep their bytes.
+ * `allowReserved` with path guidance, and query parameters the provider
+ * rejects are dropped. Undefined when nothing changes, so unchanged
+ * operations keep their bytes.
  */
 function reviewedParameters(
   document: Record<string, unknown>,
@@ -867,23 +1010,14 @@ function reviewedParameters(
 ): unknown[] | undefined {
   if (!Array.isArray(value)) return undefined;
   if (corrections.reserved.length === 0 && corrections.omitQuery.length === 0) return undefined;
-  const resolve = (parameter: unknown): Record<string, unknown> | undefined => {
-    if (!isRecord(parameter)) return undefined;
-    const ref = parameter.$ref;
-    if (typeof ref !== "string") return parameter;
-    const name = ref.startsWith("#/components/parameters/")
-      ? ref.slice("#/components/parameters/".length)
-      : undefined;
-    const components = isRecord(document.components) ? document.components : {};
-    const shared = isRecord(components.parameters) ? components.parameters : {};
-    return name && isRecord(shared[name]) ? shared[name] : undefined;
-  };
   return value.flatMap((parameter) => {
-    const resolved = resolve(parameter);
+    const resolved = resolveParameter(document, parameter);
     if (!resolved) return [parameter];
     if (resolved.in === "query" && corrections.omitQuery.includes(String(resolved.name))) return [];
     if (resolved.in === "path" && corrections.reserved.includes(String(resolved.name)))
-      return [{ ...resolved, allowReserved: true }];
+      return [
+        { ...resolved, allowReserved: true, description: RESERVED_PATH_PARAMETER_DESCRIPTION },
+      ];
     return [parameter];
   });
 }
