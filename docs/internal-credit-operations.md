@@ -36,6 +36,16 @@ directory. The API pod's Bun SQL client can accept the URL over stdin; run
 diagnostics in a read-only transaction. The current account scope GUC is
 `opengeni.account_id`, not the obsolete `app.current_account_id`.
 
+Verify membership through the existing authenticated organization-admin
+projection (`GET /v1/organizations/:id/members`, see [HTTP API](http-api.md)),
+using the actual authorized actor, or the corresponding Organization settings
+member view. Merely setting an account GUC does **not** authorize direct reads
+of FORCE-RLS `organization_memberships`: the non-bypass migration owner can
+receive no rows without the lifecycle/capability context. An RLS-empty result
+is not evidence that an account has no members or is internal. Do not manufacture
+an actor or relax RLS to fill that gap. Obtain positive identity evidence from
+the authorized projection before proceeding with these billing-only reads.
+
 For example, these are read-only SQL statements (the `:'account_id'` syntax is
 psql's quoted variable substitution):
 
@@ -44,8 +54,6 @@ begin transaction isolation level repeatable read read only;
 set local statement_timeout = '90s';
 select set_config('opengeni.account_id', :'account_id', true);
 select id, name from managed_accounts where id = :'account_id'::uuid;
-select subject_id, role, status from organization_memberships
-where account_id = :'account_id'::uuid and subject_id like 'user:%';
 select plan_key, status, current_period_start, current_period_end
 from organization_plans where account_id = :'account_id'::uuid;
 select read_organization_plan_balance(:'account_id'::uuid, now());
