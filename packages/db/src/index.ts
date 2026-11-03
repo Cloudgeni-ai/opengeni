@@ -113,6 +113,7 @@ export {
 export { readCreditPromotionPolicy } from "./credit-promotion-policy";
 export * from "./subscription-plans";
 export * from "./billing-auto-top-up";
+export * from "./billing-auto-top-up-notifications";
 import { beginPlanCreditSettlement } from "./subscription-plans";
 export * from "./subscription-plan-maintenance";
 import {

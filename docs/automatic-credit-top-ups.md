@@ -56,6 +56,10 @@ are append-only; payment intents and completed results cannot be rewritten or
 deleted by the runtime. The additive migration uses only invoker-rights triggers,
 so it adds no unknown callable SECURITY DEFINER capability. Previous-binary
 readiness is tested against the pinned production inspector and evaluator.
+The integration follow-up also normalizes exact table grants for legacy/custom
+migration owners with broad default privileges, before another provisioning pass.
+Current and pinned production provisioning already remove those defaults; this
+compatibility normalization is not evidence of an active production defect.
 
 `billingAutoTopUpStore` requires a **root** database handle. Each `locked` call
 is its own committed transaction under the existing
@@ -126,34 +130,62 @@ use existing adjustment keys, and preserve dispute hold/release replay semantics
 Neither an adjustment nor a local error makes another PI chargeable for the same
 operation.
 
-## Integration ownership
+## Lifecycle and notifications
 
 `StripeAutoTopUps` in `apps/api/src/billing-auto-top-up.ts` exports `process(accountId)`
 for a bounded maintenance pass, `settings`, `handlePaymentIntent`, and `handleSetup`.
 `createBillingAutoTopUpService(deps, stripe?, notifications?)` is the API factory.
 The billing webhook already routes tagged setup/payment events through these
-handlers even when fresh charging is disabled, preserving recovery. A maintenance
-caller must supply known organization IDs and call `process`; discovery is not
-authority. This backend does not edit the shared worker maintenance loop; the
-integration owner wires its lifecycle and account discovery before activation.
+handlers even when fresh charging is disabled, preserving recovery.
+`apps/api/src/billing-auto-top-up-maintenance.ts` starts with `startApi`, immediately
+and every 60 seconds. It discovers one keyset page of at most 50 organization IDs
+per pass and calls `process` sequentially. Discovery is advisory, not authority.
+A failed organization does not starve the page; overlapping ticks do not overlap
+within a process, and database fences arbitrate replicas. The cursor resets after
+the final page so earlier failed accounts are retried. One stoppable timer is
+registered per root database handle. API shutdown stops admission before draining
+other pumps and awaits the active pass before closing the database. A mounted
+`createApp` router and the default `createAppComposition` do **not** start this
+background loop. An embedding host can opt in with
+`createAppComposition(deps, { startBillingAutoTopUps: true })` and must call its
+returned `stopBillingAutoTopUps` disposer before closing its database; it stops
+admission synchronously and returns the drain promise. This does not change the
+control worker loop.
 
-The notification worker owns the reusable durable outbox. Inject
-`AutoTopUpNotificationPort(tx, event)` from `@opengeni/db`: enqueue under the passed
-transaction, **do not send email inline**. Events contain `accountId`, `kind`
+Maintenance requires Stripe billing mode and a configured Stripe key, but does
+**not** require the fresh-charge activation flag: disabled deployments still
+reconcile previously reserved payments and enqueue outstanding terminal outcomes.
+Removing Stripe configuration stops that automatic recovery and therefore must
+not substitute for disabling fresh charges while payments remain unresolved.
+
+The API factory defaults to `enqueueBillingAutoTopUpNotification` from
+`@opengeni/db`, in both maintenance and webhook construction. This adapter uses
+the shared billing outbox; delivery uses its existing managed-email transport and
+billing-authorized inbox. `AutoTopUpNotificationPort(tx, event)` remains injectable
+for explicit integrations: enqueue under the passed transaction, **do not send
+email inline**. Events contain `accountId`, `kind`
 (`topup_success`, `topup_failed`, `cap_reached`), a stable `operationKey`,
 `amountMicros`, `chargeMicros`, and optional sanitized `failureReason`. Deduplicate
 by account/kind/key. Success/failure keys identify the immutable payment operation;
 pre-payment failure uses settings revision; cap uses UTC month plus settings
 revision. Terminal payment delivery checkpoints commit with the outbox enqueue;
-`process` replays undelivered terminal notifications after integration. No second
-notification outbox is introduced here. The integration owner must inject the
-same port in maintenance and webhook construction before activation.
+`process` replays undelivered terminal notifications, including operations settled
+by a previous binary without an injected port. The adapter snapshots canonical
+general credit availability and the pre-tax credit amount. Repeated cap events
+reuse their committed snapshot even when the wallet changes; changed kind or
+credit amount under the same key is rejected. No second notification outbox is
+introduced. Success copy identifies credits added, not the tax-inclusive card
+charge or an invoice. Failure copy tells the owner to review their card and
+explicitly enable again; cap copy says no next payment was started. These events
+retain one billing action and use the shared recipient authority checks.
 
 ## Verification and rollout
 
 Focused suites: `apps/api/test/billing-auto-top-up.test.ts`,
 `packages/db/test/billing-auto-top-up-postgres.test.ts`, and
-`packages/sdk/test/billing-auto-top-up.test.ts`. Run real PostgreSQL tests with
+`packages/sdk/test/billing-auto-top-up.test.ts`, plus
+`apps/api/test/billing-auto-top-up-maintenance.test.ts` and
+`apps/api/test/billing-auto-top-up-integration-postgres.test.ts`. Run real PostgreSQL tests with
 the restricted runtime and a non-public schema, plus
 `packages/db/test/runtime-posture-compatibility-postgres.test.ts`. Provider proof
 must use a verified `sk_test_`/`rk_test_` key and objects with `livemode:false`,
@@ -170,8 +202,10 @@ foreign-key target. The utility migrates an isolated restricted-role local
 PostgreSQL fixture, creates off-session SetupIntents and a Checkout setup session,
 injects lost create/confirmation responses plus local settlement rollback, proves
 one canonical charge/credit receipt, then tests decline, explicit card replacement
-and retry, and the monthly cap. Notification assertions use transactional fixture
-enqueue records, not side-effectful in-memory callbacks. It expires its unused
+and retry, and the monthly cap. Recovery races the API factory's disabled-charge
+maintenance pass against the real webhook handler. Notification assertions use
+the shared transactional billing outbox and its owner delivery rows, not a second
+fixture outbox or side-effectful in-memory callbacks. It expires its unused
 Checkout session and deletes the test customer; immutable test payment history
 remains at Stripe. This is provider integration proof, not proof that the new
 backend is deployed or that a person completed the browser setup flow.

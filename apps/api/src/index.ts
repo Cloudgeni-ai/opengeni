@@ -594,27 +594,30 @@ export async function startApi(options: StartApiOptions = {}) {
       throw error;
     }
   }
-  const { app, routeDeps, renewBrowserHolds } = createAppComposition({
-    ...startApiSessionAuthorizationOverride(options),
-    settings,
-    db: dbClient.db,
-    bus,
-    workflowClient: traceClientCalls(workflowClient.client, "temporal"),
-    documentIndexer: traceClientCalls(workflowClient.documentIndexer, "temporal"),
-    objectStorage,
-    ...(editableArtifactComposition
-      ? {
-          editableArtifacts: editableArtifactComposition.application,
-          editableArtifactExports: editableArtifactComposition.durableExports,
-          editableArtifactAgent: editableArtifactComposition.agent,
-          editableArtifactOfficeImports: editableArtifactComposition.officeImports,
-        }
-      : {}),
-    observability,
-    readinessChecks: {
-      db: runtimeDatabaseReadyCheck(dbClient.db, databasePosture),
+  const { app, routeDeps, renewBrowserHolds, stopBillingAutoTopUps } = createAppComposition(
+    {
+      ...startApiSessionAuthorizationOverride(options),
+      settings,
+      db: dbClient.db,
+      bus,
+      workflowClient: traceClientCalls(workflowClient.client, "temporal"),
+      documentIndexer: traceClientCalls(workflowClient.documentIndexer, "temporal"),
+      objectStorage,
+      ...(editableArtifactComposition
+        ? {
+            editableArtifacts: editableArtifactComposition.application,
+            editableArtifactExports: editableArtifactComposition.durableExports,
+            editableArtifactAgent: editableArtifactComposition.agent,
+            editableArtifactOfficeImports: editableArtifactComposition.officeImports,
+          }
+        : {}),
+      observability,
+      readinessChecks: {
+        db: runtimeDatabaseReadyCheck(dbClient.db, databasePosture),
+      },
     },
-  });
+    { startBillingAutoTopUps: true },
+  );
   if (!routeDeps.editableArtifacts) {
     observability.warn("editable artifact engine is not composed", {
       subsystem: "editable_artifacts",
@@ -816,6 +819,8 @@ export async function startApi(options: StartApiOptions = {}) {
   return {
     server,
     close: async () => {
+      // Prevent another charge/recovery pass while other shutdown pumps drain.
+      const billingAutoTopUpsStopped = stopBillingAutoTopUps();
       server.stop(true);
       // Start private CLI session cleanup even if another service's drain stalls.
       const vaultProvidersClosed = closeNativeExternalVaultProviders().catch(() => undefined);
@@ -835,6 +840,7 @@ export async function startApi(options: StartApiOptions = {}) {
       await stopEventSubscriptionPump();
       await stopWorkspaceWebhookDispatchPump();
       await stopNativePushDispatchPump();
+      await billingAutoTopUpsStopped;
       // Write queued presence before the database pool closes.
       await routeDeps.userPresence?.close().catch(() => undefined);
       await Promise.allSettled([

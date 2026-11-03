@@ -4,6 +4,7 @@ import {
   type RestrictedRuntimeTestDatabase,
 } from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
+import postgres from "postgres";
 import {
   billingAutoTopUpStore,
   createDb,
@@ -30,6 +31,53 @@ beforeAll(async () => {
 afterAll(async () => {
   await client?.close();
   await fixture?.release();
+}, 180_000);
+
+test("additive migration normalizes a legacy owner's broad journal grants before role reprovisioning", async () => {
+  if (!fixture) return;
+  const owner = postgres(fixture.ownerUrl, { max: 1 });
+  const schema = `topup_upgrade_${crypto.randomUUID().replaceAll("-", "")}`;
+  const migration = await Bun.file(
+    new URL("../drizzle/1239_billing_auto_top_up.sql", import.meta.url),
+  ).text();
+  const normalization = await Bun.file(
+    new URL("../drizzle/1243_billing_auto_top_up_exact_grants.sql", import.meta.url),
+  ).text();
+  const rollback = new Error("rollback isolated migration-grant fixture");
+  try {
+    await owner.begin(async (tx) => {
+      await tx`create schema ${tx(schema)}`;
+      await tx`select set_config('search_path',${schema},true)`;
+      await tx`create table managed_accounts(id uuid primary key)`;
+      // Current provisioning revokes these defaults; legacy/custom migration
+      // owners may retain them. Do not depend on a later provisioning pass.
+      await tx`alter default privileges in schema ${tx(schema)} grant select,insert,update,delete on tables to opengeni_app`;
+      await tx.unsafe(migration);
+      const [legacy] = await tx`select
+        has_table_privilege('opengeni_app', ${`${schema}.billing_auto_top_up_mutations`}, 'UPDATE') as can_rewrite_receipt,
+        has_table_privilege('opengeni_app', ${`${schema}.billing_auto_top_up_operations`}, 'DELETE') as can_delete_intent`;
+      expect(legacy).toMatchObject({ can_rewrite_receipt: true, can_delete_intent: true });
+      await tx.unsafe(normalization);
+      await tx.unsafe(normalization); // Safe to replay; no consent or data changes.
+      const rows =
+        await tx`select table_name,array_agg(privilege_type order by privilege_type) as privileges
+        from information_schema.role_table_grants where table_schema=${schema} and grantee='opengeni_app'
+        group by table_name order by table_name`;
+      expect([...rows]).toEqual([
+        { table_name: "billing_auto_top_up_mutations", privileges: ["INSERT", "SELECT"] },
+        {
+          table_name: "billing_auto_top_up_operations",
+          privileges: ["INSERT", "SELECT", "UPDATE"],
+        },
+        { table_name: "billing_auto_top_up_settings", privileges: ["INSERT", "SELECT", "UPDATE"] },
+      ]);
+      throw rollback;
+    });
+  } catch (error) {
+    if (error !== rollback) throw error;
+  } finally {
+    await owner.end();
+  }
 }, 180_000);
 
 async function ready(cap = 100_000_000) {
