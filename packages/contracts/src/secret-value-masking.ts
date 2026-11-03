@@ -928,7 +928,9 @@ export class SecretValueMemory {
   mask<T>(value: T, stage = "mask"): T {
     if (this.values.size === 0) return value;
     try {
-      return maskSecretValues(value, this.masks());
+      return maskSecretValues(value, this.masks(), {
+        keepToolIdentities: this.options.keepToolIdentities !== false,
+      });
     } catch (error) {
       this.report(stage, error);
       return value;
@@ -939,7 +941,7 @@ export class SecretValueMemory {
    * `mask` for data, such as tool output, where a tool-shaped record is not
    * conversation structure: a tool's identity is masked too. Never throws.
    */
-  private maskData<T>(value: T, stage: string): T {
+  maskData<T>(value: T, stage = "mask"): T {
     if (this.values.size === 0) return value;
     try {
       return maskSecretValues(value, this.masks(), { keepToolIdentities: false });
@@ -959,7 +961,8 @@ export class SecretValueMemory {
         break;
       }
     }
-    if (!markers) return this.mask(value, stage);
+    // Only tool output is searched for shapes: it is data.
+    if (!markers) return this.maskData(value, stage);
     try {
       if (this.compiledReferenced?.version !== this.changes) {
         this.compiledReferenced = {
@@ -970,7 +973,7 @@ export class SecretValueMemory {
           ),
         };
       }
-      return maskSecretValues(value, this.compiledReferenced.masks);
+      return maskSecretValues(value, this.compiledReferenced.masks, { keepToolIdentities: false });
     } catch (error) {
       this.report(stage, error);
       return value;

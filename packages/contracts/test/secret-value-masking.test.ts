@@ -136,6 +136,17 @@ describe("known-value secret masking", () => {
       type: "function_call",
       name: word,
     });
+    expect(memory.maskData({ type: "function_call", name: word })).toEqual({
+      type: "function_call",
+      name: DB_REF,
+    });
+    // A memory made for data masks tool names in every call.
+    const dataMemory = new SecretValueMemory({ keepToolIdentities: false });
+    dataMemory.remember(word, DB_REF);
+    expect(dataMemory.mask({ type: "function_call", name: word })).toEqual({
+      type: "function_call",
+      name: DB_REF,
+    });
   });
 
   test("replaces the value with its reference", () => {
