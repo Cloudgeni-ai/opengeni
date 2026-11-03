@@ -11,6 +11,8 @@ import {
   markSessionAttemptQuiesced,
   mutateWorkspaceControlInTransaction,
   peekSessionWork,
+  QUIESCENCE_REPAIR_CLOSE_GRACE_SECONDS,
+  QUIESCENCE_REPAIR_WAKE_QUIET_SECONDS,
   reconcileSessionAttemptQuiescence,
   repairMissingQuiescenceReceiptWakes,
   requestSessionTurnRecovery,
@@ -232,14 +234,48 @@ describe("missing quiescence-receipt wake repair", () => {
     await repairAll();
     expect((await wakeOf(stranded.sessionId)).pending).toBe(false);
 
-    // Still stranded ten minutes later: wake again.
+    // Still stranded one quiet window later: wake again.
     await shared.admin`
       update session_workflow_wake_outbox
-      set updated_at = now() - interval '11 minutes'
+      set updated_at = now() - make_interval(secs => ${QUIESCENCE_REPAIR_WAKE_QUIET_SECONDS + 5})
       where session_id = ${stranded.sessionId}
     `;
     await repairAll();
     expect((await wakeOf(stranded.sessionId)).pending).toBe(true);
+  });
+
+  test("inventory and scoped recheck share the exported close grace and quiet window", async () => {
+    // apps/worker's recovery-repair alert test bounds these constants against
+    // OpenGeniSessionRecoveryBacklogStale; the SQL must honor exactly them.
+    const grace = QUIESCENCE_REPAIR_CLOSE_GRACE_SECONDS;
+    const quiet = QUIESCENCE_REPAIR_WAKE_QUIET_SECONDS;
+    for (const quiesce of [false, true]) {
+      const due = await strandedRecovery({
+        closedSecondsAgo: grace + 5,
+        wakeDeliveredSecondsAgo: quiet + 5,
+        quiesce,
+      });
+      const closedTooRecently = await strandedRecovery({
+        closedSecondsAgo: grace - 15,
+        wakeDeliveredSecondsAgo: quiet + 5,
+        quiesce,
+      });
+      const wokenTooRecently = await strandedRecovery({
+        closedSecondsAgo: grace + 5,
+        wakeDeliveredSecondsAgo: quiet - 15,
+        quiesce,
+      });
+      expect(await discovered(due.sessionId)).toBe(true);
+      expect(await discovered(closedTooRecently.sessionId)).toBe(false);
+      expect(await discovered(wokenTooRecently.sessionId)).toBe(false);
+      await repairAll();
+      expect(await wakeOf(due.sessionId)).toEqual({
+        pending: true,
+        reason: quiesce ? "turn_recovery_repair" : "attempt_quiescence_repair",
+      });
+      expect((await wakeOf(closedTooRecently.sessionId)).pending).toBe(false);
+      expect((await wakeOf(wokenTooRecently.sessionId)).pending).toBe(false);
+    }
   });
 
   test("the closing activity's own receipt window is not preempted", async () => {
@@ -578,7 +614,10 @@ describe("missing quiescence-receipt wake repair", () => {
     if (process.env.OPENGENI_BENCH_RECOVERY_PLAN === "1") console.log(JSON.stringify(measurements));
   }, 60_000);
 
-  test("owner-key migration changes only the redundant predicate and preserves routine authority on replay", async () => {
+  test("owner-key and quiet-window migrations change only their predicate and preserve routine authority on replay", async () => {
+    const QUIET_WINDOW_1014 = "wake.updated_at < now() - interval '10 minutes'";
+    const QUIET_WINDOW_1239 = "wake.updated_at < now() - interval '2 minutes'";
+    expect(QUIESCENCE_REPAIR_WAKE_QUIET_SECONDS).toBe(120);
     const baseline = await readFile(
       new URL("../drizzle/0977_baseline_01.sql", import.meta.url),
       "utf8",
@@ -589,6 +628,10 @@ describe("missing quiescence-receipt wake repair", () => {
     if (!original) throw new Error("Missing original inventory routine");
     const migration = await readFile(
       new URL("../drizzle/1014_quiescence_repair_attempt_owner_key.sql", import.meta.url),
+      "utf8",
+    );
+    const quietWindowMigration = await readFile(
+      new URL("../drizzle/1239_quiescence_repair_wake_quiet_window.sql", import.meta.url),
       "utf8",
     );
     await shared.admin.begin(async (tx) => {
@@ -611,7 +654,10 @@ describe("missing quiescence-receipt wake repair", () => {
         select prosrc as body from pg_proc
         where oid='opengeni_private.list_quiescence_receipt_wake_repairs_v1(integer,uuid,uuid)'::regprocedure`;
       expect(
-        installed[0]!.body.replace("latest.account_id = session.account_id AND ", "").trim(),
+        installed[0]!.body
+          .replace("latest.account_id = session.account_id AND ", "")
+          .replace(QUIET_WINDOW_1239, QUIET_WINDOW_1014)
+          .trim(),
       ).toBe(old!.body.trim());
       expect(await readPosture()).toEqual(initialPosture);
       const oldRows =
@@ -637,6 +683,22 @@ describe("missing quiescence-receipt wake repair", () => {
         expect(constraint.condeferrable).toBe(false);
         expect(constraint.definition).toContain("FOREIGN KEY (workspace_id, account_id)");
         expect(constraint.definition).toContain("REFERENCES workspaces(id, account_id)");
+      }
+
+      // 1239 then changes only the quiet window, idempotently, keeping the
+      // routine's owner, grants and signature.
+      const [ownerKey] = await tx<{ body: string }[]>`
+        select prosrc as body from pg_proc
+        where oid='opengeni_private.list_quiescence_receipt_wake_repairs_v1(integer,uuid,uuid)'::regprocedure`;
+      expect(ownerKey!.body.split(QUIET_WINDOW_1014)).toHaveLength(2);
+      for (let replay = 0; replay < 2; replay++) {
+        await tx.unsafe(quietWindowMigration);
+        expect(await readPosture()).toEqual(initialPosture);
+        const [current] = await tx<{ body: string }[]>`
+          select prosrc as body from pg_proc
+          where oid='opengeni_private.list_quiescence_receipt_wake_repairs_v1(integer,uuid,uuid)'::regprocedure`;
+        expect(current!.body).toBe(installed[0]!.body);
+        expect(current!.body).toBe(ownerKey!.body.replace(QUIET_WINDOW_1014, QUIET_WINDOW_1239));
       }
     });
   });

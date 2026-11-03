@@ -1306,6 +1306,10 @@ export { sql as dbSql } from "drizzle-orm";
 export * from "./child-lifecycle-notices";
 export * from "./child-terminal-wake-repair";
 export type { QuiescenceReceiptWakeRepairCursor } from "./quiescence-receipt-wake-repair";
+export {
+  QUIESCENCE_REPAIR_CLOSE_GRACE_SECONDS,
+  QUIESCENCE_REPAIR_WAKE_QUIET_SECONDS,
+} from "./quiescence-receipt-wake-repair";
 import {
   repairMissingQuiescenceReceiptWakesWith,
   type QuiescenceReceiptWakeRepairCursor,

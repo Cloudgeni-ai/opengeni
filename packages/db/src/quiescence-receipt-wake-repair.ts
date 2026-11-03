@@ -8,6 +8,30 @@ import * as schema from "./schema";
 
 export type QuiescenceReceiptWakeRepairCursor = { workspaceId: string; sessionId: string };
 type Candidate = QuiescenceReceiptWakeRepairCursor & { accountId: string };
+
+/**
+ * How long after its attempt closed a recovering session becomes a repair
+ * candidate. The woken workflow can prove a dead activity gone only once
+ * Temporal's server-owned `runAgentTurn` heartbeat lease (two minutes after
+ * the last heartbeat, which precedes the close) has expired, so an earlier
+ * wake would only be paced away. Must be at least that heartbeat timeout.
+ * Migration 1239's inventory uses the same interval.
+ */
+export const QUIESCENCE_REPAIR_CLOSE_GRACE_SECONDS = 120;
+
+/**
+ * How long the session's latest wake must have been delivered before the
+ * reaper wakes it again: one repair wake per window while it stays stranded.
+ * A wake delivered after the activity lease expired already ran the exact
+ * reconciliation, so the stranding wake is never later than the close grace
+ * and a repair lands within close grace + this window (plus one dispatcher
+ * period). `OpenGeniSessionRecoveryBacklogStale` must clearly outlast that, so
+ * a self-repair within the designed time never pages; apps/worker's
+ * recovery-repair alert test holds the two together.
+ * Migration 1239's inventory uses the same interval.
+ */
+export const QUIESCENCE_REPAIR_WAKE_QUIET_SECONDS = 120;
+
 /** The root's peekSessionWork, injected so this module never imports the root
  * barrel that re-exports it. */
 export type QuiescenceRepairWorkPeek = (
@@ -101,7 +125,7 @@ async function repairCandidate(
             and attempt.state = 'closed'
             and attempt.outcome = 'interrupted_recoverable'
             and (attempt.quiesced_at is not null or ${session.status} = 'recovering')
-            and attempt.closed_at < now() - interval '2 minutes'
+            and attempt.closed_at < now() - make_interval(secs => ${QUIESCENCE_REPAIR_CLOSE_GRACE_SECONDS})
             and (
               exists (
                 select 1 from session_attempt_interruptions interruption
@@ -122,7 +146,7 @@ async function repairCandidate(
           where wake.workspace_id = ${candidate.workspaceId}
             and wake.session_id = ${candidate.sessionId}
             and (wake.wake_revision > wake.delivered_revision
-              or wake.updated_at >= now() - interval '10 minutes')
+              or wake.updated_at >= now() - make_interval(secs => ${QUIESCENCE_REPAIR_WAKE_QUIET_SECONDS}))
         ) as eligible,
         coalesce((
           select attempt.quiesced_at is null from session_turn_attempts attempt

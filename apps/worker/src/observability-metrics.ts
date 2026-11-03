@@ -1113,13 +1113,16 @@ export function recordSessionRecoveryBacklogGauges(
   }
 }
 
+/** How often the control worker re-reads the durable recovery aggregate. */
+export const SESSION_RECOVERY_MONITOR_INTERVAL_MS = 60_000;
+
 export function startSessionRecoveryMonitor(input: {
   observability: Observability;
   read: () => Promise<SessionRecoveryBacklog>;
   intervalMs?: number;
   now?: () => number;
 }): { close: () => Promise<void> } {
-  const intervalMs = input.intervalMs ?? 60_000;
+  const intervalMs = input.intervalMs ?? SESSION_RECOVERY_MONITOR_INTERVAL_MS;
   const now = input.now ?? Date.now;
   const startedAt = now();
   let lastSuccessAt: number | null = null;
