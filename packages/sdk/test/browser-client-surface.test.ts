@@ -206,6 +206,22 @@ const pendingBillingAlertMethods = [
   "markBillingCreditNotificationRead",
 ];
 
+// The Agents API landed before its app UI (the Agents page and agent chats).
+// Remove each entry when its browser consumer lands (the equality below enforces it).
+const pendingAgentsMethods = [
+  "createAgent",
+  "deleteAgent",
+  "deleteAgentSlackAvailability",
+  "getAgent",
+  "listAgentChats",
+  "listAgentRevisions",
+  "listAgentSlackChannels",
+  "listAgentSlackInstalls",
+  "listAgents",
+  "postAgentSlackIntro",
+  "putAgentSlackAvailability",
+];
+
 // Chat share links: the public share page reads a link without the SDK (no
 // credentials, no SDK bundle for someone without an account), and listing a
 // person's links is offered to the agent and SDK callers, not a web screen yet.
@@ -294,6 +310,7 @@ describe("browser client runtime surface", () => {
         ...pendingModelAccountMethods,
         ...pendingBillingAutoTopUpMethods,
         ...pendingBillingAlertMethods,
+        ...pendingAgentsMethods,
         ...chatShareLinkMethods,
         ...retiredDeadWebComponentMethods,
       ].sort(),
