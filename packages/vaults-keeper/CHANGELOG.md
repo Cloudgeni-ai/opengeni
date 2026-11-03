@@ -1,5 +1,16 @@
 # @opengeni/vaults-keeper
 
+## 6.7.0
+
+### Patch Changes
+
+- Updated dependencies [c08233e]
+- Updated dependencies [57237db]
+- Updated dependencies [cf35731]
+- Updated dependencies [4a7da4c]
+  - @opengeni/contracts@6.7.0
+  - @opengeni/vaults@6.7.0
+
 ## 6.6.0
 
 ### Patch Changes
