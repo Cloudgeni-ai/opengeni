@@ -72,6 +72,7 @@ import {
   ORGANIZATION_AZURE_OPENAI_PROVIDER_ID,
   ORGANIZATION_OPENAI_PROVIDER_ID,
   organizationDirectModelProviderOf,
+  organizationCompatibleConnectionIdOf,
   WORKSPACE_OPPER_MODEL_ID_PREFIX,
   allowedFirstPartyMcpToolsForSession,
   resolveSessionFirstPartyMcpTools,
@@ -375,6 +376,7 @@ function isCatalogOverlayModel(modelId: string | null | undefined): boolean {
     modelId?.startsWith(WORKSPACE_OPPER_MODEL_ID_PREFIX) === true ||
     modelId?.startsWith(ORGANIZATION_OPPER_MODEL_ID_PREFIX) === true ||
     organizationDirectModelProviderOf(modelId) !== null ||
+    organizationCompatibleConnectionIdOf(modelId) !== null ||
     (modelId != null && isClaudeSubscriptionModelId(modelId)) ||
     CLAUDE_CONNECTION_KINDS.some((kind) =>
       ["workspace", "organization"].some((scope) =>

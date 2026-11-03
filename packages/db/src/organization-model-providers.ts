@@ -175,7 +175,8 @@ export function organizationModelProviderCredentialDigest(credential: string): s
   return createHash("sha256").update(credential).digest("hex");
 }
 
-async function withOrganizationProviderAdministrator<T>(
+/** Runs `use` as an organization administrator (refused otherwise), in the organization's scope. */
+export async function withOrganizationProviderAdministrator<T>(
   db: Database,
   input: { organizationId: string; actorSubjectId: string },
   use: (scopedDb: Database) => Promise<T>,
@@ -199,7 +200,8 @@ function mapConnection(
   row: typeof schema.organizationModelProviderConnections.$inferSelect,
 ): OrganizationModelProviderConnection {
   return {
-    providerKind: row.providerKind,
+    // Every caller reads one of its own kinds; OpenAI-compatible endpoints have their own reads.
+    providerKind: row.providerKind as OrganizationModelProviderKind,
     status: row.status,
     version: row.version,
     endpoint: row.endpoint ?? null,
@@ -213,7 +215,7 @@ function mapConnectionOperation(
   row: typeof schema.organizationModelProviderConnectionOperations.$inferSelect,
 ): OrganizationModelProviderConnection {
   return {
-    providerKind: row.providerKind,
+    providerKind: row.providerKind as OrganizationModelProviderKind,
     status: row.resultStatus,
     version: row.resultVersion,
     endpoint: row.resultEndpoint ?? null,
@@ -252,7 +254,8 @@ export function mapOrganizationModelProviderCustomModel(
   return {
     id: row.id,
     accountId: row.accountId,
-    providerKind: row.providerKind,
+    // Callers filter by their own kinds; OpenAI-compatible models have their own reads.
+    providerKind: row.providerKind as OrganizationModelCatalogProviderKind,
     upstreamModelId: row.upstreamModelId,
     label: row.label,
     version: row.version,
@@ -764,12 +767,15 @@ export async function getOrganizationModelProviderCatalogInScope(
       ),
     );
   for (const connection of connections) {
-    if (connection.providerKind === "elevenlabs") continue;
+    if (connection.providerKind === "elevenlabs" || connection.providerKind === "openai_compatible")
+      continue;
     const entry = catalog[connection.providerKind];
     if (connection.status === "active") entry.active = true;
     if (connection.providerKind === "azure_openai") entry.endpoint = connection.endpoint ?? null;
   }
-  for (const model of models) catalog[model.providerKind].models.push(mapModel(model));
+  for (const model of models)
+    if (model.providerKind !== "openai_compatible")
+      catalog[model.providerKind].models.push(mapModel(model));
   return catalog;
 }
 

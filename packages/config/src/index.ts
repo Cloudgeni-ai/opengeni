@@ -3651,6 +3651,7 @@ export const RegistryProviderKind = z.enum([
   "direct-compatible-workspace",
   "direct-openai-organization",
   "direct-azure-organization",
+  "direct-compatible-organization",
   "openrouter-workspace",
   "openrouter-organization",
   "opper-workspace",
@@ -3947,6 +3948,12 @@ export const ORGANIZATION_OPENAI_PROVIDER_ID = "organization-openai" as const;
 export const ORGANIZATION_OPENAI_MODEL_ID_PREFIX = "organization-openai/" as const;
 export const ORGANIZATION_AZURE_OPENAI_PROVIDER_ID = "organization-azure-openai" as const;
 export const ORGANIZATION_AZURE_OPENAI_MODEL_ID_PREFIX = "organization-azure-openai/" as const;
+/**
+ * Organization-owned OpenAI-compatible endpoints: several per organization,
+ * each its own provider `organization-compatible-<connection id>` whose models
+ * are `organization-compatible-<connection id>/<model id>`.
+ */
+export const ORGANIZATION_COMPATIBLE_PROVIDER_ID_PREFIX = "organization-compatible-" as const;
 /** Opper's OpenAI-compatible Chat Completions surface (Bearer key). */
 export const OPPER_BASE_URL = "https://api.opper.ai/v3/compat" as const;
 
@@ -4238,7 +4245,11 @@ export const ModelCatalogDocument = z
       });
     }
     document.registryProviders.forEach((provider, providerIndex) => {
-      if (RESERVED_MODEL_PROVIDER_IDS.has(provider.id) || isDirectModelProviderId(provider.id)) {
+      if (
+        RESERVED_MODEL_PROVIDER_IDS.has(provider.id) ||
+        isDirectModelProviderId(provider.id) ||
+        provider.id.startsWith(ORGANIZATION_COMPATIBLE_PROVIDER_ID_PREFIX)
+      ) {
         context.addIssue({
           code: "custom",
           path: ["registryProviders", providerIndex, "id"],
@@ -8101,6 +8112,93 @@ export function withOrganizationAzureOpenAIEntraCredential(
   );
 }
 
+const ORGANIZATION_COMPATIBLE_ID =
+  /^organization-compatible-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\/|$)/;
+
+/** The registry provider id of one organization OpenAI-compatible endpoint. */
+export function organizationCompatibleProviderId(connectionId: string): string {
+  return `${ORGANIZATION_COMPATIBLE_PROVIDER_ID_PREFIX}${connectionId}`;
+}
+
+/** The product model id of a model served by one organization OpenAI-compatible endpoint. */
+export function organizationCompatibleModelId(
+  connectionId: string,
+  upstreamModelId: string,
+): string {
+  return `${organizationCompatibleProviderId(connectionId)}/${upstreamModelId}`;
+}
+
+/**
+ * The endpoint connection a product model id or provider id names, when it
+ * belongs to an organization OpenAI-compatible endpoint.
+ */
+export function organizationCompatibleConnectionIdOf(id: string | null | undefined): string | null {
+  return (id && ORGANIZATION_COMPATIBLE_ID.exec(id)?.[1]) || null;
+}
+
+/** One organization OpenAI-compatible endpoint, as the catalog and runtime overlay it. */
+export type OrganizationCompatibleEndpointOverlay = {
+  id: string;
+  baseUrl: string;
+  api: "chat" | "responses";
+  label?: string | null;
+  models: readonly { upstreamModelId: string; label?: string | null }[];
+  /** Present only at execution, after the worker decrypts the endpoint's key. */
+  apiKey?: string;
+};
+
+/**
+ * The organization's own OpenAI-compatible endpoints a workspace can use,
+ * replacing any earlier overlay of them. Like a workspace's own endpoint they
+ * carry text in and out with function calling over SSE, the capabilities
+ * every such API shares; the runtime DNS-pins their requests to public
+ * addresses. An endpoint without models adds nothing.
+ */
+export function withOrganizationCompatibleProviders(
+  settings: Settings,
+  endpoints: readonly OrganizationCompatibleEndpointOverlay[],
+): Settings {
+  const existing = parseModelProvidersJson(settings.modelProvidersJson);
+  const providers = existing.filter(
+    (provider) => !provider.id.startsWith(ORGANIZATION_COMPATIBLE_PROVIDER_ID_PREFIX),
+  );
+  if (providers.length === existing.length && endpoints.length === 0) return settings;
+  for (const endpoint of endpoints) {
+    const seen = new Set<string>();
+    const models: RegistryProvider["models"] = [];
+    for (const model of endpoint.models) {
+      if (seen.has(model.upstreamModelId)) continue;
+      seen.add(model.upstreamModelId);
+      models.push({
+        id: organizationCompatibleModelId(endpoint.id, model.upstreamModelId),
+        upstreamModelId: model.upstreamModelId,
+        aliases: [],
+        label: model.label?.trim() || model.upstreamModelId,
+        capabilities: openRouterCustomModelCapabilities(settings),
+        toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
+      });
+    }
+    if (models.length === 0) continue;
+    let hostname: string;
+    try {
+      hostname = new URL(endpoint.baseUrl).hostname;
+    } catch {
+      continue;
+    }
+    providers.push({
+      kind: "direct-compatible-organization",
+      id: organizationCompatibleProviderId(endpoint.id),
+      label: endpoint.label?.trim() || hostname,
+      api: endpoint.api,
+      wireProfile: "openai",
+      baseUrl: endpoint.baseUrl,
+      ...(endpoint.apiKey ? { apiKey: endpoint.apiKey } : {}),
+      models,
+    });
+  }
+  return { ...settings, modelProvidersJson: JSON.stringify(providers) };
+}
+
 /** The deployment's own Microsoft Entra identity, from the standard Azure SDK variables. */
 export function deploymentAzureEntraCredential(
   settings: Pick<
@@ -8555,6 +8653,7 @@ function registryCredentialSource(provider: InternalRegistryProvider): Credentia
     case "opper-organization":
     case "direct-openai-organization":
     case "direct-azure-organization":
+    case "direct-compatible-organization":
       return { kind: "organization_connection", mechanism: "api_key" };
     case "api-key":
     case "vercel-gateway-managed":
@@ -8593,6 +8692,7 @@ function registryBilling(provider: InternalRegistryProvider): BillingAttribution
     case "opper-organization":
     case "direct-openai-organization":
     case "direct-azure-organization":
+    case "direct-compatible-organization":
       return { upstreamPayer: "organization", metering: "external" };
     case "api-key":
     case "vercel-gateway-managed":
@@ -8780,6 +8880,12 @@ export function registryModelResidency(
         "unknown",
         "unknown",
         "A workspace's own OpenAI-compatible endpoint; where it processes data is not recorded.",
+      );
+    case "direct-compatible-organization":
+      return builtInResidencyRule(
+        "unknown",
+        "unknown",
+        "An organization's own OpenAI-compatible endpoint; where it processes data is not recorded.",
       );
     default: {
       const _exhaustive: never = provider.kind;
@@ -9600,8 +9706,10 @@ export function policyChargesCreditsForModel(settings: Settings, modelId: string
   const providerPrefix = slash > 0 ? canonicalModelId.slice(0, slash) : "";
   if (
     NON_CREDIT_POLICY_PROVIDER_IDS.has(providerPrefix) ||
-    // A workspace's own direct model connections (`workspace-openai-<id>/…`).
-    isDirectModelProviderId(providerPrefix)
+    // A workspace's own direct model connections (`workspace-openai-<id>/…`)
+    // and an organization's own OpenAI-compatible endpoints.
+    isDirectModelProviderId(providerPrefix) ||
+    providerPrefix.startsWith(ORGANIZATION_COMPATIBLE_PROVIDER_ID_PREFIX)
   ) {
     return false;
   }
@@ -13058,6 +13166,7 @@ export function validateModelCatalogSettings(
       provider.kind === "direct-compatible-workspace" ||
       provider.kind === "direct-openai-organization" ||
       provider.kind === "direct-azure-organization" ||
+      provider.kind === "direct-compatible-organization" ||
       provider.kind === "openrouter-workspace" ||
       provider.kind === "openrouter-organization" ||
       provider.kind === "opper-workspace" ||

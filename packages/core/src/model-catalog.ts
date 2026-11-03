@@ -40,6 +40,8 @@ import {
   organizationDirectModelIdPrefix,
   organizationDirectModelProviderOf,
   withOrganizationDirectCatalogProvider,
+  withOrganizationCompatibleProviders,
+  type OrganizationCompatibleEndpointOverlay,
   type OrganizationDirectModelProvider,
   type ConfiguredModel,
   type Settings,
@@ -64,6 +66,7 @@ import {
   getWorkspaceGatewayCustomModelForExecution,
   getWorkspaceOpenRouterCustomModelForExecution,
   getOrganizationModelProviderCustomModelForExecution,
+  listOrganizationCompatibleEndpointsForWorkspace,
   lockActiveOrganizationModelProviderCustomModelForAdmission,
   type Database,
   type OrganizationClaudeModelAdmissionAuthority,
@@ -437,6 +440,7 @@ export async function resolveWorkspaceCatalogSettings(
     retainedOpperCustomModels,
     retainedOrganizationOpperCustomModels,
     retainedOrganizationDirectCustomModels,
+    organizationCompatibleEndpoints,
   ] = await Promise.all([
     resolveCatalogSettings(db, envSettings),
     publicCatalog?.then((catalog) => catalog.workspaceCustomModels) ??
@@ -529,6 +533,13 @@ export async function resolveWorkspaceCatalogSettings(
               }),
           ),
         )
+      : Promise.resolve([]),
+    // The organization's own OpenAI-compatible endpoints this workspace can use.
+    supportsOrganizationProviderReads
+      ? listOrganizationCompatibleEndpointsForWorkspace(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+        })
       : Promise.resolve([]),
   ]);
   const includeRetainedModels = <T extends { upstreamModelId: string }>(
@@ -624,7 +635,13 @@ export async function resolveWorkspaceCatalogSettings(
                 withOrganizationOpenRouterCatalogProvider(
                   withOrganizationGatewayCatalogProvider(
                     withWorkspaceOpenRouterCatalogProvider(
-                      withWorkspaceGatewayCatalogProvider(resolved.settings, gatewayCustomModels),
+                      withWorkspaceGatewayCatalogProvider(
+                        withOrganizationCompatibleProviders(
+                          resolved.settings,
+                          organizationCompatibleEndpoints,
+                        ),
+                        gatewayCustomModels,
+                      ),
                       openRouterCustomModels,
                     ),
                     organizationGatewayModels,
@@ -729,6 +746,12 @@ export type WorkspaceModelSelectionInput = {
       }
     >
   >;
+  /**
+   * The organization's own OpenAI-compatible endpoints this workspace can use
+   * (only active ones), with their models. Absent when the caller's settings
+   * already carry them.
+   */
+  organizationCompatibleEndpoints?: readonly OrganizationCompatibleEndpointOverlay[];
   credentialReadinessObservations?:
     | Readonly<Record<string, ModelCredentialReadinessObservation>>
     | undefined;
@@ -887,6 +910,10 @@ function credentialReadinessFor(input: {
         };
   }
   if (source.kind === "organization_connection") {
+    // An organization's own endpoint is in the catalog only while it is
+    // active and reaches this workspace.
+    if (input.provider?.kind === "direct-compatible-organization")
+      return { status: "ready", reason: null, basis: "connection", checkedAt: null };
     const claudeKind = CLAUDE_CONNECTION_KINDS.find(
       (kind) => claudeProviderId(kind) === input.model.providerId,
     );
@@ -1061,8 +1088,12 @@ export function resolveWorkspaceModelSelection(
   const xaiSettings = input.settings.supergrokSubscriptionEnabled
     ? withXaiSubscriptionCatalogProvider(codexSettings)
     : codexSettings;
-  const directCatalogSettings = (settings: Settings) =>
-    withOrganizationDirectCatalogProviders(settings, input.organizationDirect ?? {});
+  const directCatalogSettings = (settings: Settings) => {
+    const direct = withOrganizationDirectCatalogProviders(settings, input.organizationDirect ?? {});
+    return input.organizationCompatibleEndpoints
+      ? withOrganizationCompatibleProviders(direct, input.organizationCompatibleEndpoints)
+      : direct;
+  };
   const catalogSettings = withClaudeConnectionCatalog(
     withClaudeConnectionCatalog(
       directCatalogSettings(
