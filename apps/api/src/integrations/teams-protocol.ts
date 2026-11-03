@@ -185,7 +185,7 @@ export function normalizeTeamsMessage(
   for (const mention of mentions) if (mention.text) text = text.replace(mention.text, "");
   text = text.trim();
   if (!text) return reject({ reason: "empty_text" });
-  const threadId = personal || groupChat ? null : (a.replyToId ?? a.id);
+  const threadId = personal || groupChat ? null : teamsChannelThreadId(a);
   const envelope = normalizeConversationInboundEnvelope({
     provider: "microsoft.teams",
     installationId: tenantId,
@@ -212,6 +212,147 @@ export function normalizeTeamsMessage(
     occurredAt: a.timestamp,
     identity: envelope.eventIdentity,
     routeIdentity: envelope.route.identity,
+  };
+}
+
+/**
+ * The root post of the channel thread an activity belongs to. Teams names it
+ * in the conversation id (`19:…@thread.tacv2;messageid=<root>`) for the root
+ * post and every reply, while `replyToId` can be missing on a reply. So the
+ * suffix wins; a reply to an unknown root falls back to `replyToId`, and only
+ * then to the activity itself.
+ */
+export function teamsChannelThreadId(a: {
+  id: string;
+  replyToId?: string | undefined;
+  conversation: { id: string };
+}): string {
+  const suffix = /;messageid=([^;]+)/i.exec(a.conversation.id)?.[1]?.trim();
+  return suffix || a.replyToId || a.id;
+}
+
+/** A conversation id without its per-thread `;messageid=` suffix. */
+export function teamsConversationBaseId(conversationId: string): string {
+  return conversationId.replace(/;messageid=[^;]*/i, "");
+}
+
+export const TEAMS_CONTEXT_MESSAGE_MAX_CHARS = 4000;
+
+/** Teams message text as plain text: mentions become `@Name`, tags drop, entities decode. */
+export function teamsPlainText(value: string): string {
+  return value
+    .replace(/<at[^>]*>(.*?)<\/at>/gis, "@$1")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|li|tr|h[1-6])>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+const ContextActivity = z.object({
+  type: z.literal("message"),
+  id: opaque,
+  timestamp: z.string().datetime({ offset: true }),
+  channelId: z.literal("msteams"),
+  from: z.object({
+    id: opaque,
+    aadObjectId: uuid,
+    name: z.string().max(512).optional(),
+    role: z.string().optional(),
+  }),
+  recipient: z.object({ id: opaque }),
+  conversation: z.object({
+    id: opaque,
+    conversationType: z.enum(["personal", "channel", "groupChat"]),
+    tenantId: uuid.optional(),
+  }),
+  channelData: z.object({
+    tenant: z.object({ id: uuid }),
+    channel: z.object({ id: opaque }).optional(),
+  }),
+  replyToId: opaque.optional(),
+  text: z.string().default(""),
+  entities: z
+    .array(
+      z
+        .object({ type: z.string(), mentioned: z.object({ id: z.string() }).optional() })
+        .passthrough(),
+    )
+    .max(100)
+    .optional(),
+  attachments: z.array(z.unknown()).max(64).optional(),
+});
+
+/** One human message in a shared Teams conversation, kept only as context for a later mention. */
+export type TeamsContextMessage = {
+  tenantId: string;
+  botId: string;
+  groupChat: boolean;
+  channelId: string | null;
+  /** The conversation without a thread suffix: the group chat, or the channel. */
+  conversationId: string;
+  /** The channel thread's root post id, or null in a group chat. */
+  threadId: string | null;
+  messageId: string;
+  actorId: string;
+  actorName: string | null;
+  text: string;
+  hasAttachments: boolean;
+  mentioned: boolean;
+  occurredAt: string;
+};
+
+/**
+ * Context for later mentions: any human message in a channel or group chat,
+ * mentioned or not. With resource-specific consent Teams delivers the
+ * unmentioned ones too. This never starts work; `normalizeTeamsMessage` still
+ * decides what invokes Opengeni. Personal chats, bots and malformed activities
+ * return null.
+ */
+export function teamsContextMessage(raw: unknown): TeamsContextMessage | null {
+  const parsed = ContextActivity.safeParse(raw);
+  if (!parsed.success) return null;
+  const a = parsed.data;
+  if (a.from.role === "bot" || a.from.id === a.recipient.id) return null;
+  const type = a.conversation.conversationType;
+  if (type === "personal") return null;
+  const tenantId = a.channelData.tenant.id.toLowerCase();
+  if (a.conversation.tenantId && a.conversation.tenantId.toLowerCase() !== tenantId) return null;
+  const groupChat = type === "groupChat";
+  if (!groupChat && !a.channelData.channel?.id) return null;
+  const text = teamsPlainText(a.text);
+  const hasAttachments = (a.attachments ?? []).some(
+    (value) =>
+      !(
+        value &&
+        typeof value === "object" &&
+        (value as { contentType?: unknown }).contentType === "text/html"
+      ),
+  );
+  if (!text && !hasAttachments) return null;
+  return {
+    tenantId,
+    botId: a.recipient.id,
+    groupChat,
+    channelId: groupChat ? null : a.channelData.channel!.id,
+    conversationId: teamsConversationBaseId(a.conversation.id),
+    threadId: groupChat ? null : teamsChannelThreadId(a),
+    messageId: a.id,
+    actorId: a.from.aadObjectId.toLowerCase(),
+    actorName: a.from.name?.trim().slice(0, 256) || null,
+    text: text.slice(0, TEAMS_CONTEXT_MESSAGE_MAX_CHARS),
+    hasAttachments,
+    mentioned: (a.entities ?? []).some(
+      (e) => e.type === "mention" && e.mentioned?.id === a.recipient.id,
+    ),
+    occurredAt: new Date(a.timestamp).toISOString(),
   };
 }
 const Proof = z

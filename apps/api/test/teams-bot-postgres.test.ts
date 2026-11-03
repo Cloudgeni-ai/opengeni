@@ -16,6 +16,10 @@ import {
   createConnection,
   upsertCapabilityCatalogItem,
   enableCapabilityInstallation,
+  recordTeamsContextMessage,
+  listTeamsContextMessages,
+  disconnectTeamsBot,
+  TEAMS_CONTEXT_MESSAGES_PER_THREAD,
 } from "@opengeni/db";
 import { updateManagedHumanSessionVisibility, type ApiRouteDeps } from "@opengeni/core";
 import { teamsRouteId } from "../src/integrations/teams-protocol";
@@ -257,6 +261,108 @@ test("duplicate channel delivery creates one native session, acknowledges, and p
   expect(f.messages).toEqual([f.messages[0]!, "The completed answer"]);
   await f.tick();
   expect(f.messages).toHaveLength(2);
+});
+test("a channel thread mention sees the unmentioned messages before it, and a follow-up only the new ones", async () => {
+  const f = await fixture();
+  const thread = "root";
+  const context = (messageId: string, minute: number, text: string, mentioned = false) =>
+    recordTeamsContextMessage(client.db, f.i, {
+      conversationId: "19:channel",
+      threadId: thread,
+      messageId,
+      actorId: f.actor,
+      actorName: "Ada Lovelace",
+      text,
+      hasAttachments: false,
+      mentioned,
+      occurredAt: `2026-11-02T13:0${minute}:00.000Z`,
+    });
+  const mention = (eventId: string, minute: number, text: string) => ({
+    ...f.input,
+    conversationId: `19:channel;messageid=${thread}`,
+    threadId: thread,
+    eventId,
+    payload: {
+      text,
+      personal: false,
+      groupChat: false,
+      conversationId: `19:channel;messageid=${thread}`,
+      threadId: thread,
+      eventId,
+      occurredAt: `2026-11-02T13:0${minute}:00.000Z`,
+    },
+  });
+  const userMessages = async (sessionId: string) =>
+    await shared.admin<{ text: string; model_context: string | null }[]>`
+      select payload ->> 'text' as text, payload ->> 'modelContext' as model_context
+      from session_events where session_id=${sessionId} and type='user.message' order by sequence`;
+  await context(thread, 1, "Root post: planning the launch");
+  await context("m2", 2, "The codeword is HERON");
+  // Recorded twice (Teams redelivery): kept once.
+  await context("m2", 2, "The codeword is HERON");
+  await context("m3", 3, "@Opengeni what is the codeword?", true);
+  // Posted after the mention: never part of its context.
+  await context("m4", 4, "Later message");
+  await enqueueTeamsMessage(client.db, f.i, mention("m3", 3, "what is the codeword?"));
+  await f.tick();
+  const [route] =
+    await shared.admin`select session_id from teams_bot_routes where route_id=${f.input.routeId}`;
+  const [first] = await userMessages(route!.session_id);
+  expect(first!.text).toBe("what is the codeword?");
+  expect(first!.model_context).toContain(
+    "Recent messages in this channel thread before the mention",
+  );
+  expect(first!.model_context).toContain("Root post: planning the launch");
+  expect(first!.model_context?.match(/The codeword is HERON/g)).toHaveLength(1);
+  expect(first!.model_context).not.toContain("Later message");
+  expect(first!.model_context).not.toContain("what is the codeword?");
+
+  await context("m5", 5, "Actually it changed to EGRET");
+  await context("m6", 6, "@Opengeni and now?", true);
+  await enqueueTeamsMessage(client.db, f.i, mention("m6", 6, "and now?"));
+  await f.tick();
+  const [, second] = await userMessages(route!.session_id);
+  expect(second!.text).toBe("and now?");
+  expect(second!.model_context).toContain("since Opengeni was last mentioned");
+  expect(second!.model_context).toContain("Later message");
+  expect(second!.model_context).toContain("Actually it changed to EGRET");
+  expect(second!.model_context).not.toContain("HERON");
+
+  // Each thread keeps its newest messages only; disconnecting removes them all.
+  for (let index = 0; index < TEAMS_CONTEXT_MESSAGES_PER_THREAD + 5; index++)
+    await recordTeamsContextMessage(client.db, f.i, {
+      conversationId: "19:channel",
+      threadId: "busy",
+      messageId: `busy-${index}`,
+      actorId: f.actor,
+      actorName: null,
+      text: `busy ${index}`,
+      hasAttachments: false,
+      mentioned: false,
+      occurredAt: new Date(Date.UTC(2026, 10, 2, 14, 0, index)).toISOString(),
+    });
+  const busy = await listTeamsContextMessages(client.db, f.i, {
+    conversationId: "19:channel",
+    threadId: "busy",
+    beforeMessageId: "none",
+    notAfter: "2026-11-03T00:00:00.000Z",
+    limit: 200,
+  });
+  expect(busy).toHaveLength(TEAMS_CONTEXT_MESSAGES_PER_THREAD);
+  expect(busy[0]!.text).toBe(`busy ${TEAMS_CONTEXT_MESSAGES_PER_THREAD + 4}`);
+  const roots = await listTeamsContextMessages(client.db, f.i, {
+    conversationId: "19:channel",
+    threadId: null,
+    beforeMessageId: "none",
+    notAfter: "2026-11-03T00:00:00.000Z",
+    limit: 5,
+    rootPostsOnly: true,
+  });
+  expect(roots.map((row) => row.text)).toEqual(["Root post: planning the launch"]);
+  await disconnectTeamsBot(client.db, f.i);
+  const [left] =
+    await shared.admin`select count(*)::int as n from teams_bot_context_messages where workspace_id=${f.i.workspace_id}`;
+  expect(left!.n).toBe(0);
 });
 test("throttling retries durable output while an ambiguous delivery is never repeated", async () => {
   const f = await fixture();

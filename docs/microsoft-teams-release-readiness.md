@@ -152,8 +152,14 @@ python3 -m zipfile -l ../opengeni-teams.zip
 ```
 
 The package defaults to personal conversations. Explicitly set
-`OPENGENI_TEAMS_APP_GROUP_CHATS=true` to include group chats. It makes no team,
-file-transfer, tab, SSO, RSC, or Graph permission claim. Do not add unsupported
+`OPENGENI_TEAMS_APP_GROUP_CHATS=true` to include group chats and
+`OPENGENI_TEAMS_APP_CHANNELS=true` to include team scope (approved channels).
+`OPENGENI_TEAMS_APP_CONVERSATION_CONTEXT=true` adds
+[conversation context](#conversation-context): `webApplicationInfo` with the bot
+ID and the resource-specific consent (RSC) application permissions
+`ChannelMessage.Read.Group` (with team scope) and `ChatMessage.Read.Chat` (with
+group chats). Without it the package makes no RSC claim. It never makes a
+file-transfer, tab, SSO, or Graph permission claim. Do not add unsupported
 channel capabilities merely to satisfy a validator: implement and verify them
 first. Manifest 1.25 does not by itself prove Store policy compliance.
 
@@ -209,8 +215,12 @@ Required acceptance cases:
 3. Install in the home tenant; link the exact human and authorized workspace.
    An unbound/unlinked sender cannot obtain workspace data or start agent work.
 4. Personal message creates/reuses the correct private conversation. A standard
-   channel mention starts/reuses its thread and replies in that thread. Ordinary
-   channel traffic does not trigger work or become ambient indexed content.
+   channel mention starts/reuses its thread and replies in that thread; a later
+   mention in the same thread continues the same chat. Ordinary channel traffic
+   never triggers work. With a conversation-context package, post unmentioned
+   messages in a thread, then mention Opengeni and verify the answer uses them;
+   mention again and verify only the newer messages are added. They are kept only
+   as the bounded, expiring context window below, never as indexed content.
 5. Duplicate delivery does not create duplicate work. Restart/retry and outbound
    uncertainty preserve truthful receipts. Verify cleanup/revocation and that a
    different tenant, conversation or workspace cannot reuse a stored binding.
@@ -322,7 +332,8 @@ Opengeni account in a direct chat and hold current read access to the connected
 workspace. The sender also needs permission to create sessions. Connector chat
 membership supplies the complete roster (up to 250 humans); missing identities,
 unknown bots, foreign tenants, oversized rosters, and failed lookup refuse work.
-No Graph/RSC all-message permission is needed. Identity proof links are never
+No Graph permission is needed; the optional RSC permission only adds
+[conversation context](#conversation-context). Identity proof links are never
 posted to the group.
 
 Group work is workspace-visible, not a private group ACL. It receives a distinct
@@ -349,3 +360,42 @@ Teams inline `text/html` representations accompanying canonical `activity.text`
 are accepted, matching Microsoft's [receive-message payload](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/build-conversational-capability#receive-a-message-activity).
 Only the canonical text is consumed. HTML is never parsed or fetched; URL-backed
 HTML, files, images, and mixed attachment arrays remain rejected.
+
+## Conversation context
+
+When someone mentions Opengeni in an approved channel thread or group chat, the
+agent also sees the recent messages people posted there without mentioning it,
+as a Slack thread mention does. Teams delivers those messages to the bot only
+when the installed package carries resource-specific consent: generate it with
+`OPENGENI_TEAMS_APP_CONVERSATION_CONTEXT=true` (see
+[Generate a package](#generate-a-package)), publish it as a new package version,
+and update the app where it is installed. The installer consents to the RSC
+permissions when adding or updating the app. With an older package nothing
+changes: only the mention itself is visible.
+
+- Every human message Teams delivers in an approved channel or group chat of an
+  active installation is kept in `teams_bot_context_messages`: plain text (at
+  most 4,000 characters), sender name and Entra object ID, time, thread root and
+  whether it mentioned Opengeni. Attachments are noted, never fetched. Personal
+  chats, bots and unapproved conversations are never kept. What starts work is
+  unchanged: only a fresh, explicit mention does.
+- The window is bounded: the newest 100 messages per channel thread or group
+  chat, for seven days. Disconnecting the installation deletes all of them.
+- A mention that starts a chat gets up to 30 earlier messages of its thread or
+  group chat, oldest to newest, within an 8,000-character budget. A new channel
+  post that mentions Opengeni gets up to five earlier channel posts instead. A
+  later mention that continues the same chat gets only what was posted since the
+  previous mention. The context is attached to that one user message as model
+  context, labelled as other people's messages and not instructions.
+- Opengeni's own replies, later edits, deleted messages and file contents are
+  not included. A failed context read never blocks the mention.
+- A channel thread is identified by the root post in the conversation ID
+  (`;messageid=<root>`), because Teams can omit `replyToId` on replies. A later
+  mention anywhere in the thread continues the same chat.
+
+The bot's Entra app is single-tenant, so this does not read Microsoft Graph:
+an app-only Graph token in a customer tenant would need a multi-tenant app
+registration. Messages posted before the context package was installed are not
+available. Teams delivers unmentioned channel messages for standard channels;
+private and shared channels are not covered. Reference:
+[receive all conversation messages with RSC](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/conversations/channel-messages-for-bots-and-agents).

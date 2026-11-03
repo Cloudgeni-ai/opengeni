@@ -12,6 +12,15 @@ export type TeamsManifestOptions = {
   version?: string;
   appName?: string;
   groupChats?: boolean;
+  /** Team scope: mention Opengeni in an approved channel. */
+  channels?: boolean;
+  /**
+   * Resource-specific consent so Teams also delivers the messages that do not
+   * mention Opengeni in the installed team or group chat. Opengeni keeps a
+   * bounded recent window of them as context for the next mention; they
+   * never start work.
+   */
+  conversationContext?: boolean;
 };
 
 function guid(value: string, name: string): string {
@@ -43,6 +52,22 @@ export function buildTeamsAppManifest(options: TeamsManifestOptions) {
   }
   const publicUrl = httpsUrl(options.publicBaseUrl, "publicBaseUrl");
   if (publicUrl.pathname !== "/") throw new Error("publicBaseUrl must be an origin");
+  const botId = guid(options.botId, "botId");
+  const scopes = [
+    "personal",
+    ...(options.channels ? ["team"] : []),
+    ...(options.groupChats ? ["groupchat"] : []),
+  ];
+  const contextPermissions = options.conversationContext
+    ? [
+        ...(options.channels ? [{ name: "ChannelMessage.Read.Group", type: "Application" }] : []),
+        ...(options.groupChats ? [{ name: "ChatMessage.Read.Chat", type: "Application" }] : []),
+      ]
+    : [];
+  const shared = [
+    ...(options.channels ? ["an approved channel"] : []),
+    ...(options.groupChats ? ["an approved group chat"] : []),
+  ].join(" or ");
   return {
     $schema: "https://developer.microsoft.com/json-schemas/teams/v1.25/MicrosoftTeams.schema.json",
     manifestVersion: "1.25",
@@ -57,22 +82,37 @@ export function buildTeamsAppManifest(options: TeamsManifestOptions) {
     name: { short: appName, full: appName },
     description: {
       short: "Work with Opengeni agents in Teams.",
-      full: options.groupChats
-        ? "Ask Opengeni agents for help in personal chats or mention Opengeni in an approved group chat. Every group participant must link their account and have access to the connected Opengeni workspace."
+      full: shared
+        ? `Ask Opengeni agents for help in personal chats or mention Opengeni in ${shared}. ${
+            options.groupChats
+              ? "Every group participant must link their account and have access to the connected Opengeni workspace."
+              : "Link your Opengeni account to get started."
+          }${
+            contextPermissions.length
+              ? " Opengeni reads recent messages there only to answer the next mention."
+              : ""
+          }`
         : "Ask Opengeni agents for help in personal chats. Connect your Opengeni account to get started.",
     },
     icons: { color: "color.png", outline: "outline.png" },
     accentColor: "#111111",
     bots: [
       {
-        botId: guid(options.botId, "botId"),
-        scopes: options.groupChats ? ["personal", "groupchat"] : ["personal"],
+        botId,
+        scopes,
         isNotificationOnly: false,
         supportsFiles: false,
       },
     ],
     validDomains: [publicUrl.hostname],
-    // No Graph, RSC, tabs, SSO, or unimplemented all-channel capability claim.
+    // RSC is the only permission claim, and only with conversationContext: no
+    // Graph, tabs or SSO. The resource value is unused by RSC but required.
+    ...(contextPermissions.length
+      ? {
+          webApplicationInfo: { id: botId, resource: "https://RscBasedStoreApp" },
+          authorization: { permissions: { resourceSpecific: contextPermissions } },
+        }
+      : {}),
   };
 }
 
@@ -94,6 +134,8 @@ export function teamsManifestOptionsFromEnv(
     version: env.OPENGENI_TEAMS_APP_VERSION,
     appName: env.OPENGENI_TEAMS_APP_NAME,
     groupChats: env.OPENGENI_TEAMS_APP_GROUP_CHATS === "true",
+    channels: env.OPENGENI_TEAMS_APP_CHANNELS === "true",
+    conversationContext: env.OPENGENI_TEAMS_APP_CONVERSATION_CONTEXT === "true",
   };
 }
 

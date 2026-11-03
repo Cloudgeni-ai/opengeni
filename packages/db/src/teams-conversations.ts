@@ -253,6 +253,9 @@ export async function disconnectTeamsBot(
     await tx.execute(
       sql`update teams_bot_outbox set state=case when state='sending' then 'unknown' else 'failed' end,error_code='installation_disconnected' where workspace_id=${i.workspace_id}::uuid and state in ('pending','sending')`,
     );
+    await tx.execute(
+      sql`delete from teams_bot_context_messages where workspace_id=${i.workspace_id}::uuid`,
+    );
     if (options.audit && prior?.active) {
       await insertDisconnectAuditEventInScope(tx, {
         accountId: i.account_id,
@@ -604,4 +607,100 @@ async function settleInactiveTeamsGroups(
   await tx.execute(
     sql`update teams_bot_outbox set state=case when state='sending' then 'unknown' else 'failed' end,error_code='group_audience_changed' where state in ('pending','sending') and route_id in(select route_id from teams_bot_routes where tenant_id=${i.tenant_id}::uuid and conversation_id=${conversationId} and group_audience is not null and not group_active)`,
   );
+}
+
+/** Messages kept per channel thread or group chat, newest first. */
+export const TEAMS_CONTEXT_MESSAGES_PER_THREAD = 100;
+/** How long a recorded message stays available as context. */
+export const TEAMS_CONTEXT_RETENTION_DAYS = 7;
+
+export type TeamsContextRecord = {
+  messageId: string;
+  actorId: string;
+  actorName: string | null;
+  text: string;
+  hasAttachments: boolean;
+  mentioned: boolean;
+  occurredAt: Date;
+};
+
+/**
+ * Keeps one human message from a shared Teams conversation as context for a
+ * later mention. Idempotent per message; trims the conversation thread to its
+ * newest `TEAMS_CONTEXT_MESSAGES_PER_THREAD` rows and drops the workspace's
+ * rows past retention as it goes.
+ */
+export async function recordTeamsContextMessage(
+  db: Database,
+  i: TeamsInstallation,
+  input: {
+    conversationId: string;
+    threadId: string | null;
+    messageId: string;
+    actorId: string;
+    actorName: string | null;
+    text: string;
+    hasAttachments: boolean;
+    mentioned: boolean;
+    occurredAt: string;
+  },
+): Promise<void> {
+  const thread = input.threadId ?? "";
+  await teamsScoped(db, i, async (tx) => {
+    await tx.execute(sql`insert into teams_bot_context_messages(account_id,workspace_id,tenant_id,conversation_id,thread_id,message_id,actor_id,actor_name,text,has_attachments,mentioned,occurred_at)
+      values(${i.account_id}::uuid,${i.workspace_id}::uuid,${i.tenant_id}::uuid,${input.conversationId},${thread},${input.messageId},${input.actorId}::uuid,${input.actorName?.slice(0, 256) ?? null},${input.text.slice(0, 4000)},${input.hasAttachments},${input.mentioned},${input.occurredAt}::timestamptz)
+      on conflict(workspace_id,conversation_id,message_id) do nothing`);
+    await tx.execute(
+      sql`delete from teams_bot_context_messages where workspace_id=${i.workspace_id}::uuid and conversation_id=${input.conversationId} and thread_id=${thread} and message_id in (select message_id from teams_bot_context_messages where workspace_id=${i.workspace_id}::uuid and conversation_id=${input.conversationId} and thread_id=${thread} order by occurred_at desc, message_id desc offset ${TEAMS_CONTEXT_MESSAGES_PER_THREAD})`,
+    );
+    await tx.execute(
+      sql`delete from teams_bot_context_messages where workspace_id=${i.workspace_id}::uuid and (conversation_id,message_id) in (select conversation_id,message_id from teams_bot_context_messages where workspace_id=${i.workspace_id}::uuid and created_at<now()-make_interval(days=>${TEAMS_CONTEXT_RETENTION_DAYS}) limit 500)`,
+    );
+  });
+}
+
+/**
+ * Recorded messages in one channel thread or group chat before a mention,
+ * newest first: at most `limit`, excluding the mention itself and anything
+ * recorded after it. With `rootPostsOnly`, only channel root posts (a new
+ * channel post mentioning Opengeni sees the posts before it).
+ */
+export async function listTeamsContextMessages(
+  db: Database,
+  i: TeamsInstallation,
+  input: {
+    conversationId: string;
+    threadId: string | null;
+    beforeMessageId: string;
+    notAfter: string;
+    limit: number;
+    rootPostsOnly?: boolean;
+  },
+): Promise<TeamsContextRecord[]> {
+  const limit = Math.max(1, Math.min(Math.floor(input.limit), 200));
+  const rows = await teamsScoped(db, i, (tx) =>
+    rawRows<{
+      message_id: string;
+      actor_id: string;
+      actor_name: string | null;
+      text: string;
+      has_attachments: boolean;
+      mentioned: boolean;
+      occurred_at: Date | string;
+    }>(
+      tx,
+      input.rootPostsOnly
+        ? sql`select message_id,actor_id,actor_name,text,has_attachments,mentioned,occurred_at from teams_bot_context_messages where workspace_id=${i.workspace_id}::uuid and tenant_id=${i.tenant_id}::uuid and conversation_id=${input.conversationId} and thread_id=message_id and message_id<>${input.beforeMessageId} and occurred_at<=${input.notAfter}::timestamptz order by occurred_at desc, message_id desc limit ${limit}`
+        : sql`select message_id,actor_id,actor_name,text,has_attachments,mentioned,occurred_at from teams_bot_context_messages where workspace_id=${i.workspace_id}::uuid and tenant_id=${i.tenant_id}::uuid and conversation_id=${input.conversationId} and thread_id=${input.threadId ?? ""} and message_id<>${input.beforeMessageId} and occurred_at<=${input.notAfter}::timestamptz order by occurred_at desc, message_id desc limit ${limit}`,
+    ),
+  );
+  return rows.map((row) => ({
+    messageId: row.message_id,
+    actorId: row.actor_id,
+    actorName: row.actor_name,
+    text: row.text,
+    hasAttachments: row.has_attachments,
+    mentioned: row.mentioned,
+    occurredAt: new Date(row.occurred_at),
+  }));
 }

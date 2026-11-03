@@ -65,6 +65,11 @@ import {
   verifyTeamsProof,
   type TeamsMessage,
 } from "./teams-protocol";
+import {
+  loadTeamsMentionModelContext,
+  recordTeamsContext,
+  teamsSharedConversationAllowed,
+} from "./teams-context";
 
 import {
   resolveTeamsGroupAudience,
@@ -296,6 +301,14 @@ async function runtime(deps: ApiRouteDeps): Promise<App> {
             await invalidateTeamsGroup(deps.db, installation, change.conversationId);
           return { status: 200 };
         }
+        // Every human message in an approved channel or group chat is kept as
+        // bounded context for the next mention there. Only a mention below
+        // starts work; a failed write never blocks it.
+        try {
+          if (await recordTeamsContext(deps, body)) observed("context_recorded");
+        } catch {
+          observed("context_record_failed");
+        }
         const m = normalizeTeamsMessage(body, (diagnostic) => {
           deps.observability?.info("Teams authenticated activity ignored", { ...diagnostic });
         });
@@ -308,14 +321,7 @@ async function runtime(deps: ApiRouteDeps): Promise<App> {
           observed("tenant_disabled");
           return { status: 200 };
         }
-        if (
-          !m.personal &&
-          !(m.groupChat
-            ? deps.settings.teamsBotAllowedGroupChatIds.includes(
-                `${m.tenantId}:${m.conversationId}`,
-              )
-            : deps.settings.teamsBotAllowedChannelIds.includes(`${m.tenantId}:${m.channelId}`))
-        ) {
+        if (!m.personal && !teamsSharedConversationAllowed(deps.settings, m)) {
           observed("channel_disabled");
           return { status: 200 };
         }
@@ -697,6 +703,14 @@ async function drainRoute(
     }
     const text = inbound.payload.text;
     if (typeof text !== "string") throw new Error("teams_inbox_payload_invalid");
+    // Recorded channel or group chat messages before this mention: since the
+    // previous mention when it continues the conversation's chat.
+    const modelContext = await loadTeamsMentionModelContext(
+      deps,
+      i,
+      inbound.payload,
+      r.session_bound,
+    );
     const scoped = await catalogDeps(deps, grant);
     const admissionActor = await actorGrant(deps, i, inbound.actor_id);
     if (
@@ -725,6 +739,7 @@ async function drainRoute(
           {
             requestedSessionId: r.session_id,
             initialMessage: text,
+            ...(modelContext ? { modelContext } : {}),
             visibility: r.personal ? "private" : "workspace",
             idempotencyKey: `teams:${r.route_id}`,
             clientEventId: inbound.event_id,
@@ -744,6 +759,7 @@ async function drainRoute(
       } else {
         await acceptSessionUserMessage(scoped, grant, routeSessionWorkspace(r), r.session_id, {
           text,
+          ...(modelContext ? { modelContext } : {}),
           clientEventId: inbound.event_id,
           teamsConversation: {
             routeId: r.route_id,
