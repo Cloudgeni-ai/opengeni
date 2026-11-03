@@ -1,14 +1,18 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import type { MCPServer } from "@openai/agents";
-import { PrefixedMcpServer } from "../src/index";
+import { createWorkspaceToolGateway } from "@opengeni/tool-gateway";
+import { PrefixedMcpServer, mcpToolErrorOutput, toolPreflightFailureOutput } from "../src/index";
 import {
   MCP_ACCOUNT_PARAMETER_NOTE,
+  McpAccountParameterChoiceError,
   accountChoicesFromResult,
+  accountParameterChoiceText,
   accountParameterUnset,
   mcpAccountParametersFor,
   withAccountParameterDefaults,
   type McpAccountParameter,
 } from "../src/mcp-account-parameters";
+import { runRecoverableMcpOperation } from "../src/mcp-operation-dispatch";
 
 const SITE: McpAccountParameter = {
   name: "siteId",
@@ -31,8 +35,20 @@ const textResult = (value: unknown) => [{ type: "text", text: JSON.stringify(val
 type FakeServerOptions = {
   sites?: unknown;
   resolverFails?: boolean;
+  /** The lookup never answers (until aborted, if the transport honours it). */
+  resolverHangs?: boolean;
   listResolver?: boolean;
 };
+
+const TWO_SITES = [
+  { id: "site-1", name: "Acme" },
+  { id: "site-2", name: "Beta Corp" },
+];
+
+afterEach(() => {
+  // Restore Date.now after a test that moves time.
+  (Date.now as unknown as { mockRestore?: () => void }).mockRestore?.();
+});
 
 function fakeServer(options: FakeServerOptions = {}) {
   const calls: { name: string; args: Record<string, unknown> | null }[] = [];
@@ -56,6 +72,7 @@ function fakeServer(options: FakeServerOptions = {}) {
       calls.push({ name, args });
       if (name === "listSites") {
         if (options.resolverFails) throw new Error("upstream unavailable");
+        if (options.resolverHangs) return await new Promise(() => {});
         return textResult(
           options.sites ?? [{ id: "site-1", name: "Acme", url: "https://acme.example" }],
         );
@@ -130,6 +147,7 @@ describe("account parameter schema", () => {
       "https://mcp.atlassian.com/v2/mcp?tools=all",
       "https://mcp.atlassian.com/v2/mcp",
       "https://mcp.atlassian.com/v1/mcp",
+      "https://mcp.atlassian.com/v1/mcp/authv2",
     ]) {
       expect(mcpAccountParametersFor(url).map((parameter) => parameter.name)).toEqual(["cloudId"]);
       expect(mcpAccountParametersFor(url)[0]?.resolver.toolName).toBe(
@@ -162,6 +180,24 @@ describe("account choices", () => {
     ).toEqual(expected);
   });
 
+  test("the shallowest list wins over a nested one", () => {
+    const payload = {
+      user: { accounts: [{ id: "account-1", name: "Me" }] },
+      resources: [{ id: "site-1", name: "Acme" }],
+    };
+    expect(accountChoicesFromResult(SITE, { content: textResult(payload) })).toEqual([
+      { value: "site-1", label: "Acme" },
+    ]);
+  });
+
+  test("a long choice list says how many it leaves out", () => {
+    const choices = Array.from({ length: 30 }, (_, index) => ({ value: `site-${index}` }));
+    const text = accountParameterChoiceText("siteId", choices);
+    expect(text).toContain("site-24");
+    expect(text).not.toContain("site-25,");
+    expect(text).toContain("and 5 more.");
+  });
+
   test("an error result or an unknown shape offers nothing", () => {
     expect(
       accountChoicesFromResult(SITE, { isError: true, content: textResult([{ id: "a" }]) }),
@@ -175,7 +211,13 @@ describe("account choices", () => {
   test("only a missing, empty or phrase value counts as unset", () => {
     for (const value of [undefined, null, "", "  ", "list accessible resources"])
       expect(accountParameterUnset(value)).toBe(true);
-    for (const value of ["site-1", "acme.atlassian.net", "https://acme.atlassian.net", 7])
+    for (const value of [
+      "site-1",
+      " site-1 ",
+      "acme.atlassian.net",
+      "https://acme.atlassian.net",
+      7,
+    ])
       expect(accountParameterUnset(value)).toBe(false);
   });
 });
@@ -227,17 +269,18 @@ describe("PrefixedMcpServer account parameters", () => {
   });
 
   test("asks the model to choose between several values without calling the tool", async () => {
-    const { server, providerCalls } = fakeServer({
-      sites: [
-        { id: "site-1", name: "Acme" },
-        { id: "site-2", name: "Beta Corp" },
-      ],
-    });
+    const { server, providerCalls } = fakeServer({ sites: TWO_SITES });
     const search = await toolNamed(server, "search");
-    const result = await server.callTool(search.name, { query: "q" });
-    expect((result as { isError?: boolean }).isError).toBe(true);
-    const text = errorText(result);
-    expect(text).toContain("siteId");
+    const error = await server.callTool(search.name, { query: "q" }).catch((reason) => reason);
+    expect(error).toBeInstanceOf(McpAccountParameterChoiceError);
+    // Nothing was sent, so a connector action settles as not executed.
+    expect((error as McpAccountParameterChoiceError).connectorActionOutcome).toBe("not_executed");
+    const rendered = mcpToolErrorOutput(error);
+    expect(rendered.isError).toBe(true);
+    const text = errorText(rendered);
+    expect(text).toBe(
+      accountParameterChoiceText("siteId", (error as McpAccountParameterChoiceError).choices),
+    );
     expect(text).toContain('"Acme" (site-1)');
     expect(text).toContain('"Beta Corp" (site-2)');
     expect(providerCalls()).toEqual([]);
@@ -246,7 +289,72 @@ describe("PrefixedMcpServer account parameters", () => {
     expect(providerCalls()[0]?.args).toEqual({ query: "q", siteId: "site-2" });
   });
 
-  test("a failed lookup sends the call on unchanged and is retried later", async () => {
+  test("approval hooks learn about the choice before anyone is asked", async () => {
+    const { server, providerCalls } = fakeServer({ sites: TWO_SITES });
+    await server.listTools();
+    const choice = await server.accountParameterChoice("search", { query: "q" });
+    expect(choice).toBeInstanceOf(McpAccountParameterChoiceError);
+    // The preflight containment shows the choice text itself.
+    expect(toolPreflightFailureOutput(choice)).toEqual({
+      isError: true,
+      content: [{ type: "text", text: choice!.message }],
+    });
+    expect(await server.accountParameterChoice("search", { query: "q", siteId: "site-1" })).toBe(
+      undefined,
+    );
+    expect(await server.accountParameterChoice("fetch", { query: "q" })).toBe(undefined);
+    expect(providerCalls()).toEqual([]);
+  });
+
+  test("a value only padded with whitespace is sent as it is", async () => {
+    const { server, providerCalls } = fakeServer({ sites: TWO_SITES });
+    const search = await toolNamed(server, "search");
+    await server.callTool(search.name, { query: "q", siteId: " site-2 " });
+    expect(providerCalls()[0]?.args).toEqual({ query: "q", siteId: " site-2 " });
+  });
+
+  test("concurrent calls share one lookup", async () => {
+    const { server, providerCalls, lookups } = fakeServer();
+    const search = await toolNamed(server, "search");
+    await Promise.all([1, 2, 3].map(() => server.callTool(search.name, { query: "q" })));
+    expect(lookups()).toBe(1);
+    expect(providerCalls().every((call) => call.args?.siteId === "site-1")).toBe(true);
+  });
+
+  test("the caller's abort ends a call waiting on the lookup, and nothing is sent", async () => {
+    const { server, providerCalls } = fakeServer({ resolverHangs: true });
+    await server.listTools();
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 50);
+    const startedAt = performance.now();
+    const result = await server
+      .executeCatalogTool("search", { query: "q" }, null, { signal: controller.signal })
+      .catch((reason: unknown) => reason);
+    expect(performance.now() - startedAt).toBeLessThan(2_000);
+    expect((result as { isError?: boolean }).isError).toBe(true);
+    expect(providerCalls()).toEqual([]);
+  });
+
+  test("a recoverable operation is never filled", async () => {
+    const { server, providerCalls, lookups } = fakeServer();
+    const search = await toolNamed(server, "search");
+    await runRecoverableMcpOperation(
+      {
+        operationId: crypto.randomUUID(),
+        serverId: "sites",
+        originalTool: "search",
+        observerTool: "search",
+        destinationDigest: "0".repeat(64),
+        argumentDigest: "0".repeat(64),
+      },
+      { capture: async () => "created", settleOriginal: async () => {} },
+      async () => (await server.callTool(search.name, { query: "q" })) as never,
+    ).catch(() => undefined);
+    expect(providerCalls()[0]?.args).toEqual({ query: "q" });
+    expect(lookups()).toBe(0);
+  });
+
+  test("a failed lookup sends calls on unchanged and is retried after a pause", async () => {
     const { server, providerCalls, lookups } = fakeServer({ resolverFails: true });
     const search = await toolNamed(server, "search");
     await server.callTool(search.name, { query: "q", siteId: "list sites" });
@@ -255,6 +363,10 @@ describe("PrefixedMcpServer account parameters", () => {
       { query: "q", siteId: "list sites" },
       { query: "q" },
     ]);
+    expect(lookups()).toBe(1);
+    const now = Date.now();
+    spyOn(Date, "now").mockReturnValue(now + 61_000);
+    await server.callTool(search.name, { query: "q" });
     expect(lookups()).toBe(2);
   });
 
@@ -287,5 +399,49 @@ describe("PrefixedMcpServer account parameters", () => {
     await outer.callTool(search.name, { query: "q" });
     expect(providerCalls()[0]?.args).toEqual({ query: "q", siteId: "site-1" });
     expect(lookups()).toBe(1);
+  });
+
+  test("the tool gateway validates the relaxed schema, fills, and settles a choice as not executed", async () => {
+    for (const sites of [undefined, TWO_SITES]) {
+      const { server, providerCalls } = fakeServer(sites ? { sites } : {});
+      const search = await toolNamed(server, "search");
+      const settlements: unknown[] = [];
+      const { gateway } = createWorkspaceToolGateway({
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        generation: 1,
+        definitions: [
+          {
+            identity: { serverId: "sites", toolName: "search" },
+            modelName: search.name,
+            inputSchema: search.inputSchema as Record<string, unknown>,
+            source: "mcp",
+            approval: "none",
+            lifecycle: {
+              prepare: async () => ({
+                complete: async (settlement) => {
+                  settlements.push(settlement);
+                },
+              }),
+            },
+            execute: async (args) => await server.executeCatalogTool("search", args),
+          },
+        ],
+      });
+      const outcome = await gateway
+        .callModel({ modelName: search.name, arguments: { query: "q" }, subjectId: "agent:test" })
+        .catch((reason: unknown) => reason);
+      if (!sites) {
+        expect((outcome as { isError?: boolean }).isError).not.toBe(true);
+        expect(providerCalls()[0]?.args).toEqual({ query: "q", siteId: "site-1" });
+        expect(settlements).toMatchObject([{ outcome: "completed" }]);
+      } else {
+        expect(outcome).toBeInstanceOf(McpAccountParameterChoiceError);
+        expect(providerCalls()).toEqual([]);
+        expect(settlements).toMatchObject([
+          { outcome: "failed", error: { connectorActionOutcome: "not_executed" } },
+        ]);
+      }
+    }
   });
 });

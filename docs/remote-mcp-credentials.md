@@ -113,13 +113,16 @@ When the server lists that lookup tool, every tool that required the parameter
 lists it as optional, with the same generic note on every server. A call that
 leaves it unset (missing, empty, or a phrase with spaces, which no identifier
 contains) gets the account's only value. If the account has several values, the
-call isn't sent: the model gets a recoverable error listing each name and id. A
-value matching one of those names picks it. A plausible supplied value is never
-replaced, and a parameter the tool already treats as optional is left alone.
-The values are looked up once per attempt by the wrapper around the physical
-server, with a 10-second limit. A failed or empty lookup sends the call on
-unchanged, so the provider's own error reaches the model. Recoverable
-operations, which dispatch exactly one physical call, are never filled.
+call isn't sent and needs no approval: the model gets a recoverable error
+listing each name and id, recorded as not executed. A phrase value that matches
+one of those names case-insensitively picks it. Any other supplied value,
+including one padded with whitespace, is sent unchanged, and a parameter the
+tool already treats as optional is left alone. The values are looked up once
+per attempt by the wrapper around the physical server, with a 10-second limit
+that the caller's abort also ends. A failed or empty lookup sends the call on
+unchanged, so the provider's own error reaches the model, and the lookup isn't
+retried for a minute. Tools in recoverable operations, which dispatch exactly
+one physical call, keep their schema and are never filled.
 
 ## Attached accounts
 

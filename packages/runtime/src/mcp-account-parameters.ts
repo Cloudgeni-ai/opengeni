@@ -61,7 +61,7 @@ export function mcpAccountParametersFor(url: string | undefined): readonly McpAc
 export const MCP_ACCOUNT_PARAMETER_NOTE =
   "Optional: defaults to the connected account's value. If the account has several, the call lists them to choose from.";
 
-const MAX_ACCOUNT_CHOICES = 50;
+const MAX_ACCOUNT_CHOICES = 200;
 const MAX_CHOICE_TEXT = 256;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -135,14 +135,26 @@ function text(value: unknown): string | undefined {
     : undefined;
 }
 
-/** Items of the first list that carries values: the payload itself, or a list one or two levels in. */
-function listedItems(payload: unknown, valueField: string, depth = 0): unknown[] | undefined {
-  if (Array.isArray(payload))
-    return payload.some((item) => isRecord(item) && text(item[valueField])) ? payload : undefined;
-  if (!isRecord(payload) || depth >= 2) return undefined;
-  for (const value of Object.values(payload)) {
-    const items = listedItems(value, valueField, depth + 1);
-    if (items) return items;
+const carriesValues = (items: unknown[], valueField: string): boolean =>
+  items.some((item) => isRecord(item) && text(item[valueField]) !== undefined);
+
+/**
+ * Items of the shallowest list that carries values: the payload itself, else a
+ * list directly inside it, else one a level deeper. Shallow lists win so a
+ * nested list (a user's own accounts) never shadows the payload's main one.
+ */
+function listedItems(payload: unknown, valueField: string): unknown[] | undefined {
+  let level: unknown[] = [payload];
+  for (let depth = 0; depth <= 2 && level.length > 0; depth += 1) {
+    const next: unknown[] = [];
+    for (const value of level) {
+      if (Array.isArray(value)) {
+        if (carriesValues(value, valueField)) return value;
+      } else if (isRecord(value)) {
+        next.push(...Object.values(value));
+      }
+    }
+    level = next;
   }
   return undefined;
 }
@@ -174,13 +186,15 @@ export function accountChoicesFromResult(
 }
 
 /**
- * Whether a supplied value leaves the parameter unset. Identifiers (ids, host
- * names, URLs) never contain whitespace, so a phrase is not one.
+ * Whether a supplied value leaves the parameter unset: missing, empty, or a
+ * phrase. Identifiers (ids, host names, URLs) never contain whitespace; a
+ * value only padded with it is still sent as it is.
  */
 export function accountParameterUnset(value: unknown): boolean {
-  return (
-    value === undefined || value === null || (typeof value === "string" && /^$|\s/u.test(value))
-  );
+  if (value === undefined || value === null) return true;
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  return trimmed === "" || /\s/u.test(trimmed);
 }
 
 export type AccountParameterFill =
@@ -215,15 +229,48 @@ export async function fillAccountParameters(
   return { kind: "arguments", arguments: filled };
 }
 
+const MAX_LISTED_CHOICES = 25;
+
 /** Model-facing text asking for one of the account's values. */
 export function accountParameterChoiceText(
   parameter: string,
   choices: readonly McpAccountChoice[],
 ): string {
   const listed = choices
+    .slice(0, MAX_LISTED_CHOICES)
     .map((choice) =>
       choice.label ? `${JSON.stringify(choice.label)} (${choice.value})` : choice.value,
     )
     .join(", ");
-  return `The tool was not called: the connected account has several values for ${parameter}. Call it again with ${parameter} set to the id of the one you mean: ${listed}.`;
+  const more =
+    choices.length > MAX_LISTED_CHOICES ? ` and ${choices.length - MAX_LISTED_CHOICES} more` : "";
+  return `The tool was not called: the connected account has several values for ${parameter}. Call it again with ${parameter} set to the id of the one you mean: ${listed}${more}.`;
+}
+
+/**
+ * Thrown when the model must choose one of the account's values. Nothing was
+ * sent to the provider, so a connector action settles as not executed; its
+ * message is the model-facing choice text.
+ */
+export class McpAccountParameterChoiceError extends Error {
+  override readonly name = "McpAccountParameterChoiceError";
+  readonly connectorActionOutcome = "not_executed" as const;
+
+  constructor(
+    readonly parameter: string,
+    readonly choices: readonly McpAccountChoice[],
+  ) {
+    super(accountParameterChoiceText(parameter, choices));
+  }
+}
+
+/** `instanceof` that tolerates hostile errors whose prototype lookup throws. */
+export function isMcpAccountParameterChoiceError(
+  error: unknown,
+): error is McpAccountParameterChoiceError {
+  try {
+    return error instanceof McpAccountParameterChoiceError;
+  } catch {
+    return false;
+  }
 }
