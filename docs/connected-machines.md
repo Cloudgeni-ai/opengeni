@@ -1329,6 +1329,47 @@ and re-attaches to the runner's authoritative retention log; it never limits or
 truncates command output. Completed stdout/stderr are assembled once for the
 tool result, and source frame references are then released.
 
+### Git review fanout and command-backlog recovery
+
+A large Git review can exceed the combined capture size or require per-file
+fallback when patch sections and metadata do not match. The fallback must read
+all selected files under the existing per-file content contract, with bounded
+physical concurrency. `SandboxChannelAService` admits four file reads per
+fallback, preserves result order, and stops admitting queued reads on failure
+or cancellation while joining those already dispatched. Turn-end capture passes
+its owner/deadline AbortSignal into Git read admission: superseding the capture
+stops queued files even when the provider itself keeps answering successfully.
+Already-started file reads retain their chunk collection and exact spool cleanup. This is scheduling,
+not a limit on the agent's work or the number of files reviewed. Eagerly
+constructing one command promise per changed file can flood the runner and
+command ledger before cancellation takes effect. This inherited bug can be
+activated by a large diff; a shared command preview is not evidence of a retry
+loop. Inspect full command contents and exact operation identities.
+
+Terminal command settlement uses the lightweight write-admission control
+projection under the canonical workspace/session locks. It must not compute
+UI settlement summaries or recount the stopping backlog there: doing that once
+per command makes recovery quadratic and extends the locks that other requests
+need. Pause, ancestor pause and workspace pause still govern completion wakes.
+
+When investigating congestion, correlate stopping-command count and oldest age,
+settlement throughput, PostgreSQL lock waits and API readiness. Group commands
+by their exact session, launch attempt and provider connection; distinguish a
+large set of distinct Git reads from replay of one operation. A growing backlog
+with falling settlement throughput needs investigation even when node CPU and
+memory have spare capacity.
+
+Contain the source with the normal session Pause action before draining its
+backlog. Reconcile against the recorded provider/enrollment, connection and op
+identity through the normal command lifecycle. Settle only with exact terminal
+exit or typed loss proof; preserve output-custody requirements and audit events.
+A temporary disconnect, timeout or expired claim is not process-death proof.
+Do not bulk-edit commands to `exited`/`lost`, fabricate exit codes, query a
+replacement connection as proof for its predecessor, or delete the ledger.
+Confirm that the backlog and lock waits fall and normal API reads recover before
+resuming the workload. Restarting API replicas alone does not remove either the
+queued commands or their settlement cost.
+
 ## Swap the active sandbox
 
 A session points at one active sandbox at a time. `swapActiveSandbox` re-points

@@ -1,7 +1,7 @@
 import { describe, expect, mock, spyOn, test } from "bun:test";
 import { DrizzleQueryError } from "drizzle-orm";
 import { CancelledFailure } from "@temporalio/activity";
-import { normalizeProtocolJsonValue, UnsupportedProtocolJsonValueError } from "@opengeni/runtime";
+import { UnsupportedProtocolJsonValueError } from "@opengeni/runtime";
 import * as parentWake from "../src/activities/parent-wake";
 import { settleTurnFailure } from "../src/activities/agent-turn/failure-settlement";
 import {
@@ -9,14 +9,23 @@ import {
   UNSUPPORTED_PROTOCOL_VALUE_MESSAGE,
 } from "../src/activities/agent-turn/protocol-value-failure";
 
-/** The error the history guard raised in the staging incident of 2 November 2026. */
+/**
+ * The error the history guard raised in the staging incident of 2 November
+ * 2026. Normalization now converts instead, so a stricter boundary is the
+ * only remaining source of this refusal.
+ */
 function symbolKeyRejection(): UnsupportedProtocolJsonValueError {
+  return new UnsupportedProtocolJsonValueError("$", "cannot contain symbol keys");
+}
+
+/** What `JSON.stringify` throws on a bigint, from a serializer outside protocol JSON. */
+function stringifyRefusal(): TypeError {
   try {
-    normalizeProtocolJsonValue({ type: "hosted_tool_call", [Symbol("mark")]: "runtime" });
+    JSON.stringify({ usage: 1n });
   } catch (error) {
-    if (error instanceof UnsupportedProtocolJsonValueError) return error;
+    if (error instanceof TypeError) return error;
   }
-  throw new Error("expected a protocol JSON rejection");
+  throw new Error("expected JSON.stringify to refuse a bigint");
 }
 
 function failureDeps(
@@ -144,6 +153,37 @@ describe("a value refused by a protocol JSON boundary", () => {
         expect(control.turnMetricOutcome).toBe("failed");
       }
       expect(deliver).toHaveBeenCalledTimes(2);
+    } finally {
+      deliver.mockRestore();
+    }
+  });
+
+  test("a JSON.stringify refusal from another serializer ends the turn the same way", async () => {
+    const deliver = spyOn(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(
+      undefined as never,
+    );
+    try {
+      const refusal = stringifyRefusal();
+      const { deps, settle } = failureDeps(
+        new Error("Failed to run function tools", { cause: refusal }),
+      );
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "idle" });
+      expect(settle.mock.calls[0]![0]).toEqual({
+        ...idleSettlement,
+        events: [
+          {
+            type: "turn.failed",
+            payload: {
+              ...idleSettlement.events[0]!.payload,
+              protocolValueError: refusal.message,
+            },
+          },
+          idleSettlement.events[1],
+        ],
+      });
+      // An unrelated TypeError keeps the generic failure.
+      const other = failureDeps(new TypeError("x is not a function"));
+      expect(await settleTurnFailure(other.deps as never)).toMatchObject({ status: "failed" });
     } finally {
       deliver.mockRestore();
     }

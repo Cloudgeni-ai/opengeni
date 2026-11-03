@@ -5,15 +5,16 @@ import { spawn } from "node:child_process";
 import { parseConfig } from "./backup/config";
 import { BackupRunner, prepareState } from "./backup/runner";
 
+const modes = ["init", "run", "list", "check", "verify", "restore"];
 const usage =
-  "Usage: bun run deployment:backup <run|list|check|verify|restore> --config <path> [--slot nightly|weekly --database <name> --target-service <isolated-target> --confirm-restore]";
+  "Usage: bun run deployment:backup <init|run|list|check|verify|restore> --config <path> [--run latest|<run-id> --database <name> --target-service <isolated-target> --confirm-restore]";
 export async function main(args: string[]): Promise<void> {
   if (args.includes("--help")) {
     console.log(usage);
     return;
   }
   const [mode, ...rest] = args;
-  if (!mode || !["run", "list", "check", "verify", "restore"].includes(mode)) throw Error(usage);
+  if (!mode || !modes.includes(mode)) throw Error(usage);
   const options: Record<string, string> = {};
   for (let i = 0; i < rest.length; i++) {
     const key = rest[i]!;
@@ -22,7 +23,7 @@ export async function main(args: string[]): Promise<void> {
       continue;
     }
     if (
-      !["--config", "--slot", "--database", "--target-service"].includes(key) ||
+      !["--config", "--run", "--database", "--target-service"].includes(key) ||
       options[key] ||
       !rest[i + 1] ||
       rest[i + 1]!.startsWith("--")
@@ -34,7 +35,7 @@ export async function main(args: string[]): Promise<void> {
   const config = parseConfig(JSON.parse(await readFile(options["--config"], "utf8")) as unknown);
   await prepareState(config);
   // A persistent OS lock survives neither process death nor reboot; no stale PID
-  // files and no unsafe remote lease emulation on eventually consistent storage.
+  // files. restic's own repository lock also guards the repository.
   if (process.env.OPENGENI_BACKUP_LOCK_HELD !== config.stateDirectory) {
     const child = spawn(
       "flock",
@@ -61,28 +62,28 @@ export async function main(args: string[]): Promise<void> {
     return;
   }
   const runner = new BackupRunner(config);
+  if (mode === "init") return runner.init();
   if (mode === "restore") {
-    if (
-      !["nightly", "weekly"].includes(options["--slot"] ?? "") ||
-      !options["--database"] ||
-      !options["--target-service"] ||
-      !options["--confirm-restore"]
-    )
+    if (!options["--database"] || !options["--target-service"] || !options["--confirm-restore"])
       throw Error(usage);
     await runner.restore(
-      options["--slot"] as "nightly" | "weekly",
+      options["--run"] ?? "latest",
       options["--database"],
       options["--target-service"],
     );
     return;
   }
-  const index =
-    mode === "run"
-      ? await runner.backup()
-      : mode === "list"
-        ? await runner.index()
-        : await runner.inspect(mode === "verify");
-  console.log(JSON.stringify(index, null, 2));
+  if (mode === "run") {
+    await runner.backup();
+    return;
+  }
+  const result =
+    mode === "list"
+      ? await runner.runs()
+      : mode === "check"
+        ? await runner.check()
+        : await runner.verify();
+  console.log(JSON.stringify(result, null, 2));
 }
 if (import.meta.main) {
   main(process.argv.slice(2)).catch((error) => {

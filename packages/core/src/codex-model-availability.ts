@@ -12,10 +12,17 @@ import {
   type SubscriptionCoreCodexServingConnection,
 } from "@opengeni/db";
 import { modelServiceTierCatalogEntry, type LatencyMode } from "@opengeni/contracts";
+import { startChildSpan } from "@opengeni/observability";
 import type { ModelAvailabilityObservation } from "./model-catalog";
 
 const CATALOG_CACHE_MS = SUBSCRIPTION_MODEL_CATALOG_TTL_MS;
 const CATALOG_ERROR_CACHE_MS = 5_000;
+/**
+ * How long a display read (picker, page load) waits for a live account list
+ * before it uses the last known one. The live read keeps going and records
+ * its result, so the next read is fresh.
+ */
+export const CODEX_CATALOG_DISPLAY_WAIT_MS = 300;
 type CatalogCacheEntry = {
   expiresAt: number;
   result: Promise<{ ok: boolean; slugs: string[]; checkedAt: string; expiresAt: number }>;
@@ -219,6 +226,77 @@ async function loadCoreConnectionCatalog(
 }
 
 /**
+ * One shared connection's model list for a display read. A fresh database
+ * observation is used as is. Otherwise the live read (token renewal and the
+ * provider's model list, up to its own timeout) gets a short wait; if it is
+ * still running, the last list observed under the current credential
+ * generation is used, or the account counts as unknown (selectable, never
+ * denied). Placement never uses this: it reads entitlements itself.
+ */
+async function readCoreConnectionCatalogForDisplay(
+  db: Database,
+  settings: Settings,
+  context: WorkspaceCodexCatalogContext,
+  connection: SubscriptionCoreCodexServingConnection,
+  deps: CatalogDependencies,
+  waitMs = CODEX_CATALOG_DISPLAY_WAIT_MS,
+): Promise<{ ok: boolean; slugs: string[]; checkedAt: string; expiresAt: number }> {
+  const observed = connection.modelCatalog;
+  const now = Date.now();
+  if (observed && observed.observedAt <= now && observed.expiresAt > now) {
+    return {
+      ok: true,
+      slugs: observed.slugs,
+      checkedAt: new Date(observed.observedAt).toISOString(),
+      expiresAt: observed.expiresAt,
+    };
+  }
+  const previous = observed && observed.observedAt <= now ? observed : null;
+  const span = startChildSpan(
+    "codex.model_catalog.refresh",
+    { "opengeni.model_catalog.previous": previous ? "expired" : "none" },
+    "internal",
+  );
+  // loadCoreConnectionCatalog never rejects: failures resolve as not ok.
+  const live = loadCoreConnectionCatalog(db, settings, context, connection, deps);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const settled = await Promise.race([
+    live,
+    new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), waitMs);
+    }),
+  ]);
+  if (timer !== undefined) clearTimeout(timer);
+  if (settled) {
+    span?.end({
+      attributes: {
+        "opengeni.model_catalog.outcome": settled.ok ? "refreshed" : "unavailable",
+      },
+    });
+    return settled;
+  }
+  span?.end({
+    attributes: {
+      "opengeni.model_catalog.outcome": previous ? "served_expired" : "served_unknown",
+    },
+  });
+  if (previous) {
+    return {
+      ok: true,
+      slugs: previous.slugs,
+      checkedAt: new Date(previous.observedAt).toISOString(),
+      expiresAt: previous.expiresAt,
+    };
+  }
+  return {
+    ok: false,
+    slugs: [],
+    checkedAt: new Date(now).toISOString(),
+    expiresAt: now + CATALOG_ERROR_CACHE_MS,
+  };
+}
+
+/**
  * Placement consumes the same per-account catalog facts as the picker, never
  * the union of another account's entitlements. Failed reads remain unknown.
  * Personal credentials require an accepted-turn lease and are not probed by
@@ -289,7 +367,7 @@ export async function loadWorkspaceCodexCatalogReadiness(
   const live = await Promise.all(
     shared.map(async (connection) => ({
       connection,
-      ...(await loadCoreConnectionCatalog(db, settings, context, connection, deps)),
+      ...(await readCoreConnectionCatalogForDisplay(db, settings, context, connection, deps)),
     })),
   );
   const observations: Record<string, ModelAvailabilityObservation> = {};

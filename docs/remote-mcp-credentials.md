@@ -129,9 +129,14 @@ works for their messages only where they turned it on:
   login that is on can always be turned off.
 - When a chat asks for a connector whose login the person added elsewhere, the
   Connect card offers it with one click ("Use it here") instead of a new sign-in.
-- In a chat shared with the workspace, the owner sees a one-line note that their
-  logins work for their messages there and that people in the workspace see what
-  the agent does with them, with "Stop using it here". It never blocks a turn.
+- In a chat shared with the workspace, the owner sees one quiet line above the
+  composer, "N personal connections in this chat", counting the accounts that
+  are on. It opens a menu that says people in the workspace see what the agent
+  does with them, with one switch per account. Off turns every connection of
+  that account off in this workspace; on turns it back on with the same grant
+  as **Where it works**. An account connected more than once is listed once.
+  A row turned off stays in the menu until the chat is left. It never blocks a
+  turn.
 
 Turning a login on is the owner's standing `connection.use` grant for that
 workspace (`always`, `workspace_shared`); it is not a per-chat approval. Other
@@ -139,6 +144,25 @@ people's messages never use someone's own login. Logins that are off in a
 workspace are not attached to turns there, so the agent sees the connector as
 not connected and offers the Connect card. Accepted turns keep the accounts
 frozen at acceptance. Personal GitHub keeps its own per-chat repository choice.
+
+Editing a queued message keeps its accepted accounts only when its own sender
+resubmits it. When anyone else (another member, a workspace API key) edits and
+sends it, it becomes the editor's own message: it runs as the editor, with the
+editor's own logins and allowance, never the original sender's.
+
+A waiting action runs on the accounts its message froze, whoever decides it,
+so approving an action that runs on someone's own login is that person's
+decision alone. Anyone who can control the chat may decline it, and actions on
+workspace logins keep their ordinary rules. The owner's own requests count as
+the owner: their signed-in session, their personal API key and a token issued
+on their behalf (`asUser`). Another member, a workspace API key with no person
+behind it, or someone else's Slack click gets `403` with
+`details.code: "APPROVAL_REQUIRES_ACCOUNT_OWNER"` (and `details.accountOwnerLabel`
+when known; the SDK's `isApprovalRequiresAccountOwnerError` checks it), whose message names the owner when known
+("Only Alice can approve this action, because it runs on their own account.").
+A tool review tells each viewer the same: `approvedBy: "account_owner"` with
+`accountOwnerLabel` and only `reject` for everyone else, and
+`approvedBy: "you"` for the owner in a chat shared with the workspace.
 
 The same list serves a person's own logins, model subscriptions and machines:
 `GET /v1/workspaces/:workspaceId/own-resources/reach?resourceKind=&resourceId=`

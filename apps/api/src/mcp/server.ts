@@ -67,6 +67,7 @@ import {
   type CapabilityCatalogItem,
   type GitHubRepository,
   type FirstPartyMcpToolName,
+  type SandboxBackend,
   Permission,
   type SessionAuthorizationOperation,
   type SessionAuthorizationActor,
@@ -180,6 +181,7 @@ import {
   allowedFirstPartyMcpToolsForSession,
   canonicalPublicOrigin,
   codemodeWorkspaceUrl,
+  servedSandboxBackends,
 } from "@opengeni/config";
 import {
   createSignedState,
@@ -448,6 +450,7 @@ import {
 import { uploadSlackTaskFile } from "../integrations/slack-task-file-upload";
 import {
   handOffSlackAgentChat,
+  suggestSlackAgentForChat,
   listSlackAgentChatsForSession,
 } from "../integrations/slack-interactions";
 import {
@@ -817,18 +820,24 @@ const scheduledTaskUpdateToolInput = (events: boolean) =>
 const sessionCreateToolInputs = new Map<string, ReturnType<typeof buildSessionCreateToolInput>>();
 
 /** Distinct selections are few; cache each built contract for reuse. */
-function sessionCreateToolInput(allowedTools: readonly FirstPartyMcpToolName[]) {
-  const key = allowedTools.join(",");
+function sessionCreateToolInput(
+  allowedTools: readonly FirstPartyMcpToolName[],
+  servedBackends: readonly SandboxBackend[],
+) {
+  const key = `${allowedTools.join(",")}|${servedBackends.join(",")}`;
   let input = sessionCreateToolInputs.get(key);
   if (!input) {
     if (sessionCreateToolInputs.size >= 256) sessionCreateToolInputs.clear();
-    input = buildSessionCreateToolInput(allowedTools);
+    input = buildSessionCreateToolInput(allowedTools, servedBackends);
     sessionCreateToolInputs.set(key, input);
   }
   return input;
 }
 
-function buildSessionCreateToolInput(allowedTools: readonly FirstPartyMcpToolName[]) {
+function buildSessionCreateToolInput(
+  allowedTools: readonly FirstPartyMcpToolName[],
+  servedBackends: readonly SandboxBackend[],
+) {
   const capabilityToggle = z4.boolean().optional();
   const sessionCreateAgentInput = z4
     .object({
@@ -912,7 +921,9 @@ function buildSessionCreateToolInput(allowedTools: readonly FirstPartyMcpToolNam
         .describe(
           "Omit for standard latency, even when model and reasoning are inherited. Fast or priority must be selected explicitly and supported by the model.",
         ),
-      sandboxBackend: CreateSessionRequest.out.shape.sandboxBackend,
+      // Advertise only the backends this deployment serves; core rejects any
+      // other value at create (sandboxBackendServed).
+      sandboxBackend: z4.enum(servedBackends as [SandboxBackend, ...SandboxBackend[]]).optional(),
       // Model-only structural coupling: workingDir cannot exist without a
       // targetSandboxId because both live inside one optional object. The
       // handler maps this back to the stable public REST/SDK request fields.
@@ -1066,7 +1077,8 @@ class PolicyMcpServer extends McpServer {
       if (!memory) return dispatch();
       return withSecretValueMasking(memory, async () => {
         try {
-          return memory.mask(await dispatch(), "first_party_result");
+          // A tool result is data: a tool-shaped record in it is masked in full.
+          return memory.maskData(await dispatch(), "first_party_result");
         } catch (error) {
           throw maskSecretValuesInError(error, memory);
         }
@@ -2925,16 +2937,35 @@ function registerSlackBotTools(
     "slack_agent_handoff",
     {
       description:
-        "Pass the Slack request this chat is answering on to another Slack agent that fits it better. Name the agent; the chat's own Slack thread and requester are used, never a destination you choose. The receiving agent starts a new chat in its own workspace and answers in the same thread. At most one hand-off per message, never to yourself and never back to the agent that passed it to you. If the requester cannot use that agent they are told privately and nothing is passed on. After status passed_on, make your entire final response exactly NO_REPLY.",
+        "Pass the Slack request this chat is answering on to another Slack agent the person asked for by name. Name the agent; the chat's own Slack thread and requester are used, never a destination you choose. Only works when the message names that agent (one typo allowed for longer names; a last word like team may be left out); otherwise answer yourself and use slack_agent_suggest. The receiving agent starts a new chat in its own workspace and answers in the same thread. At most one hand-off per message, never to yourself and never back to the agent that passed it to you. If the requester cannot use that agent they are told privately and nothing is passed on. After status passed_on, make your entire final response exactly NO_REPLY.",
       inputSchema: {
         agent: z4.string().min(1).max(120),
         note: z4.string().max(1000).optional(),
+        reason: z4
+          .string()
+          .max(500)
+          .optional()
+          .describe("Why you hand off, in a few words. Logged only; nobody sees it."),
       },
     },
-    async ({ agent, note }) => {
+    async ({ agent, note, reason }) => {
       if (!sessionId) throw new Error("Passing a request on requires a chat started from Slack");
       await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
-      return json(await handOffSlackAgentChat(deps, { grant, sessionId, agent, note }));
+      return json(await handOffSlackAgentChat(deps, { grant, sessionId, agent, note, reason }));
+    },
+  );
+
+  server.registerTool(
+    "slack_agent_suggest",
+    {
+      description:
+        'After answering a Slack request yourself, suggest a Slack agent that handles requests like it when the person did not ask for one. Name the agent. Opengeni then posts one line under your answer ("<Agent> handles questions like this.") with a button that sends the same message to that agent. Only agents the person can use are shown, and only one suggestion per answer. Do not mention the suggestion in your answer.',
+      inputSchema: { agent: z4.string().min(1).max(120) },
+    },
+    async ({ agent }) => {
+      if (!sessionId) throw new Error("Suggesting an agent requires a chat started from Slack");
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      return json(await suggestSlackAgentForChat(deps, { grant, sessionId, agent }));
     },
   );
 
@@ -3362,14 +3393,14 @@ function registerGoalTools(
   sessionId: string,
   json: (value: unknown) => { content: Array<{ type: "text"; text: string }> },
 ): void {
+  // Each tool's description states its byte limits and the normal-spacing,
+  // ledger-not-answer rule once; the schema enforces the limit per field.
   const boundedGoalToolString = (maxBytes: number, field: string, purpose: string) =>
     z4
       .string()
       .min(1)
       .max(maxBytes)
-      .describe(
-        `${purpose} At most ${maxBytes} UTF-8 bytes (ASCII characters count as one byte). Use normal spaces and sentences; summarize if needed, never squeeze words together. This is a ledger field, not the final answer.`,
-      )
+      .describe(purpose)
       .refine((value) => sessionGoalUtf8Bytes(value) <= maxBytes, {
         message: `${field} exceeds ${maxBytes} UTF-8 bytes`,
       });
@@ -3391,7 +3422,7 @@ function registerGoalTools(
   const progressNoteSchema = boundedGoalToolString(
     SESSION_GOAL_PROGRESS_MAX_BYTES,
     "goal progress note",
-    "A short human-readable status of concrete progress toward the unchanged goal. Keep only useful milestones; do not pack a deliverable, command transcript, or continuation instructions here.",
+    "A short human-readable status of concrete progress toward the unchanged goal.",
   );
   const inputWaitReasonSchema = boundedGoalToolString(
     2 * 1024,
@@ -3404,7 +3435,7 @@ function registerGoalTools(
     "goal_set",
     {
       description:
-        "Create a goal for a long-running objective that needs several turns or continued autonomous work, when this session has none or its goal is completed; answer a short or single-step request directly without a goal. text is the human-readable objective and successCriteria states its completion conditions; each allows 8192 UTF-8 bytes. Keep normal spaces; summarize, never compress words or put the deliverable in ledger text. Declare user-facing native document reports with reportRequirements before producing them. While active, idle moments synthesize continuation turns until goal_complete or goal_pause. To change an active or paused goal, use goal_update with its objective revision, a change kind, and rationale.",
+        "Create a goal for a long-running objective that needs several turns or continued autonomous work, when this session has none or its goal is completed; answer a short or single-step request directly without a goal. text is the human-readable objective and successCriteria states its completion conditions; each allows 8192 UTF-8 bytes. These are ledger fields, not the final answer: keep normal spaces and sentences, and summarize instead of squeezing words. Declare user-facing native document reports with reportRequirements before producing them. While active, idle moments synthesize continuation turns until goal_complete or goal_pause. To change an active or paused goal, use goal_update with its objective revision, a change kind, and rationale.",
       // `maxAutoContinuations` is deliberately not agent-facing: the ceiling is
       // API/scheduled-task pacing configuration, and an agent that set its own
       // cap used to silence its orchestration for hours. Continuation pacing is
@@ -3476,7 +3507,7 @@ function registerGoalTools(
     "goal_update",
     {
       description:
-        "Maintain your operational goal as user direction or meaningful new evidence clarifies the intended outcome. text and successCriteria each allow 8192 UTF-8 bytes; rationale allows 2048 UTF-8 bytes for a short human-readable explanation. Use normal spaces and summarize instead of squeezing words. Changes apply directly unless the user explicitly configured review_changes; refinement, adaptation, and replacement are audit classifications, not approval gates under the default policy. Use the exact expected objective revision. Updating a goal grants no additional authority and cannot change root constraints. Progress notes belong in goal_progress (8192 UTF-8 bytes), not a semantic goal rewrite; deliver the answer in your final reply.",
+        "Maintain your operational goal as user direction or meaningful new evidence clarifies the intended outcome. text and successCriteria each allow 8192 UTF-8 bytes; rationale allows 2048 UTF-8 bytes for a short human-readable explanation. These are ledger fields, not the final answer: use normal spaces and summarize instead of squeezing words. Changes apply directly unless the user explicitly configured review_changes; refinement, adaptation, and replacement are audit classifications, not approval gates under the default policy. Use the exact expected objective revision. Updating a goal grants no additional authority and cannot change root constraints. Progress notes belong in goal_progress (8192 UTF-8 bytes), not a semantic goal rewrite; deliver the answer in your final reply.",
       inputSchema: {
         text: goalText.optional(),
         successCriteria: successCriteriaSchema.nullable().optional(),
@@ -3573,16 +3604,16 @@ function registerGoalTools(
     "wait_for_input",
     {
       description:
-        "End the current turn and wait out of turn for relevant session input. This is self-only and does not require a goal. After success, the production runtime ends the turn at the tool-batch boundary without another model step or final message. Use it for long or uncertain waits, including right after spawning a child that needs minutes, instead of sleeping or repeatedly calling session_wait, session_get, or command_wait. No preliminary short wait or status recheck is required. timeoutSeconds is a relative safety-wake duration, not a blocking execution wait; choose it for the dependency or a meaningful user/task/Skill monitoring cadence, potentially hours or days within the schema limits. Do not schedule wakeups merely for unchanged reassurance unless an explicit update cadence requires it. The platform persists the first absolute deadline for the turn, and repeated calls do not extend it. After answering a question during a wait, preserve the existing deadline by passing the time remaining, not a fresh full timeout. If less than the schema minimum remains or the deadline has passed, a question-only human/API turn that consumed no immediate machine input may finish without replacing the retained wait; its deadline machinery remains authoritative. Do not send an invalid timeout or silently extend the deadline. Otherwise do not assume the old wait remains armed; register a valid wait if needed and make any unavoidable deadline adjustment explicit. Timeout never cancels a background command. A human/API prompt, agent message or Steer, child terminal result (it carries the child's final answer in payload.finalAnswer), scheduled input, terminal background-command result, or the deadline wakes the session. Use goal_pause instead when the active goal itself should stop pending a human decision. Pending Codemode calls require the same live attempt: observe them with command_wait/command_read rather than ending the turn. When this turn answers a person's message, put your complete answer in reply: it is shown to them exactly as written, while text written just before this call may reach them only as a short summary.",
+        "End this turn and wait out of turn for relevant session input (self-only; no goal needed). On success the Opengeni runtime ends the turn at the tool-batch boundary with no further model step or final message. Use it for long or uncertain waits, such as right after spawning a child that needs minutes, instead of sleeping or polling session_wait, session_get or command_wait; no preliminary short wait or status recheck is required. timeoutSeconds is a relative safety wake, not a blocking wait: pick it for the dependency or a meaningful user/task/Skill monitoring cadence, potentially hours or days within the schema limits, not for unchanged reassurance unless an explicit update cadence requires it. The turn's first absolute deadline persists and repeated calls do not extend it: after answering a question during a wait, keep it by passing the time remaining, not a fresh full timeout. If less than the schema minimum remains or the deadline has passed, a question-only human/API turn that consumed no immediate machine input may finish without replacing the retained wait; otherwise register a valid wait if needed and make any unavoidable deadline adjustment explicit. Timeout never cancels a background command. Wakes on a human/API prompt, agent message or Steer, child terminal result (final answer in payload.finalAnswer), scheduled input, terminal background-command result, or the deadline. Use goal_pause instead when the goal itself should stop pending a human decision. Pending Codemode calls require the same live attempt: observe them with command_wait/command_read instead of ending the turn. When this turn answers a person's message, put the complete answer in reply, shown exactly as written; text written before this call may reach them only as a short summary.",
       inputSchema: {
         reply: z4
           .string()
           .nullish()
           .describe(
-            "Your complete message to the person, shown to them verbatim as your reply (Markdown, tables and artifact images work). Pass it whenever this turn answers a person's message, and then do not also write the answer before this call. Omit it when there is nothing new to tell them.",
+            "Your complete message to the person, shown verbatim (Markdown, tables and artifact images work); do not also write it before this call. Omit it when there is nothing new to tell them.",
           ),
         reason: inputWaitReasonSchema.describe(
-          "Shown directly to the user; at most 2048 UTF-8 bytes. Write one short, natural sentence explaining what you are waiting for, with normal spacing. Exclude internal IDs, cursors, commit hashes, paths, and continuation instructions. Example: Waiting for the build and database checks to finish.",
+          "Shown directly to the user (at most 2048 UTF-8 bytes): one short, natural sentence with normal spacing saying what you are waiting for, without internal IDs, cursors, commit hashes, paths or continuation instructions. Example: Waiting for the build and database checks to finish.",
         ),
         timeoutSeconds: z4
           .number()
@@ -3637,19 +3668,25 @@ function registerGoalTools(
     "goal_complete",
     {
       description:
-        "Mark the session goal as completed with a short concrete proof for the goal ledger (evidence: at most 8192 characters). Evidence is not the deliverable and is not shown as your final chat reply; do not squeeze a report into it or remove spaces to fit. After this tool succeeds, reply to the user with the requested deliverable, or its summary and retained artifact link. Completion stops automatic goal continuations, not the current turn or its final reply. Every persisted report requirement must have a matching reportDeliveries entry containing a native document artifactId and its server-issued inspectionReceiptId from a post-edit body inspection. Missing, stale, inaccessible or summary-only proof fails; inspect again after an edit. Omit reportDeliveries only when no reports were declared.",
+        "Mark the session goal as completed with short concrete proof for the goal ledger (evidence: at most 8192 characters). Evidence is not the deliverable; do not squeeze a report into it or remove spaces to fit. Put your final answer to the user in reply (the requested deliverable, or its summary and retained artifact link): it is shown exactly as written and the Opengeni runtime ends the turn after this tool batch, so call this tool on its own after you have seen your last results. Without reply, reply to the user after this tool succeeds. Completion stops automatic goal continuations. Every persisted report requirement must have a matching reportDeliveries entry with a native document artifactId and its server-issued inspectionReceiptId from a post-edit body inspection; missing, stale, inaccessible or summary-only proof fails, so inspect again after an edit. Omit reportDeliveries only when no reports were declared.",
       inputSchema: {
         evidence: z4
           .string()
           .min(1)
           .max(8192)
+          .describe("Short ledger proof; not the final answer."),
+        // Read by the runtime, which ends the turn with it as the final
+        // answer once the completion succeeds; the ledger never stores it.
+        reply: z4
+          .string()
+          .nullish()
           .describe(
-            "Short ledger proof, at most 8192 characters; not the final answer. Keep normal spaces. Deliver the answer in your final user-facing reply.",
+            "Your final answer, shown verbatim (Markdown, tables and artifact images work); do not also write it before this call.",
           ),
         reportDeliveries: SessionGoalReportDeliveries.optional(),
       },
     },
-    async ({ evidence, reportDeliveries }) => {
+    async ({ evidence, reply, reportDeliveries }) => {
       await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
       await requireSession(deps.db, grant.workspaceId, sessionId);
       const existing = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
@@ -3705,8 +3742,9 @@ function registerGoalTools(
           ...delivery,
           artifactReference: `[Open report](/workspaces/${grant.workspaceId}/artifacts/editable/${delivery.artifactId})`,
         })),
-        handoff:
-          "Now reply to the user with the requested deliverable, or its summary and retained artifact link. The evidence is only ledger proof; this receipt does not deliver your final answer.",
+        handoff: reply?.trim()
+          ? "Your reply is this turn's final answer and ends the turn after this tool batch; if this turn still continues, give that answer as your final reply."
+          : "Now reply to the user with the requested deliverable, or its summary and retained artifact link. The evidence is only ledger proof; this receipt does not deliver your final answer.",
       });
     },
   );
@@ -3715,7 +3753,7 @@ function registerGoalTools(
     "goal_pause",
     {
       description:
-        "Pause the session goal with an evidence-based rationale when no meaningful authorized progress remains. rationale is a short human-readable blocker explanation, at most 2048 UTF-8 bytes; keep normal spaces and summarize instead of compressing words. Investigate recoverable failures and try plausible safe alternatives that could materially help; no fixed turn or retry count is required, and a definitive missing permission or required human decision can justify pausing immediately. State the blocker and what must change to resume. Work already in flight or a meaningful timed recheck uses the available waiting mechanism instead. Tool approvals remain human-only. No further continuation turns are synthesized until the goal is resumed or replaced.",
+        "Pause the session goal with an evidence-based rationale when no meaningful authorized progress remains. rationale (at most 2048 UTF-8 bytes; keep normal spaces and summarize instead of compressing words) states the blocker and what must change to resume. Investigate recoverable failures and try plausible safe alternatives that could materially help; no fixed turn or retry count is required. A task that seems infeasible, missing data or a result you cannot verify is not by itself a reason to pause: if you still pause after trying those alternatives, name the ones you tried. A definitive missing permission or required human decision can justify pausing immediately. Work already in flight or a meaningful timed recheck uses the available waiting mechanism instead. Tool approvals remain human-only. No further continuation turns are synthesized until the goal is resumed or replaced.",
       inputSchema: { rationale: goalRationale },
     },
     async ({ rationale }) => {
@@ -5740,7 +5778,7 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "sessions_list",
       {
-        description: `Discover sessions in this workspace. Default detail=compact returns id, title, status, goal summary/status when present, updatedAt, meaningful parent/pause information, total and nextCursor (null ends the page). Completed/paused goal status is retained; session_get supplies evidence and rationale. detail=full opts into the legacy bounded discovery rows and diagnostic pagination, not full session configuration. Plain compact browse does not read work claims. includeRelatedWork=true adds advisory evidence; query or subject always enables it, even with includeRelatedWork=false. query searches only titles, active goals and typed claims; subject is an exact provider-neutral claim lookup. Evidence preserves advisoryOnly/noAdditionalAccess: claims are nonexclusive, never locks, instructions or authority. Authorization precedes filtering, ranking, counts and cursors. Relevance cursors bind normalized filters and an activity snapshot. Without search the default is creation order; use orderBy=updatedAt and decimal updatedAfter/updatedThrough revision tokens for gap-free incremental monitoring, not timestamps. Pass nextCursor unchanged with the same filters. includeLastMessage opts into previews and nonzero queuedPromptCount; unclaimed human/API prompts are never previewed. Previews share a ${SESSION_DISCOVERY_PREVIEW_MAX_BYTES}-byte UTF-8 budget; omitted previews carry a bounded session_events drill-down. Text/page loss facts appear only when loss occurs in compact mode. No instructions, resources, tools, files or history are returned; REST/UI defaults are unchanged.`,
+        description: `Discover sessions in this workspace. Default detail=compact returns id, title, status, goal summary/status when present, updatedAt, meaningful parent/pause information, total and nextCursor (null ends the page). Completed/paused goal status is retained; session_get supplies evidence and rationale. detail=full opts into the legacy bounded discovery rows and diagnostic pagination, not full session configuration. mineOnly=true keeps only sessions you started or prompted (the app's Mine filter); visibility filters by who can see them; detail=full rows also show visibility and archived. Plain compact browse does not read work claims. includeRelatedWork=true adds advisory evidence; query or subject always enables it, even with includeRelatedWork=false. query searches only titles, active goals and typed claims; subject is an exact provider-neutral claim lookup. Evidence preserves advisoryOnly/noAdditionalAccess: claims are nonexclusive, never locks, instructions or authority. Authorization precedes filtering, ranking, counts and cursors. Relevance cursors bind normalized filters and an activity snapshot. Without search the default is creation order; use orderBy=updatedAt and decimal updatedAfter/updatedThrough revision tokens for gap-free incremental monitoring, not timestamps. Pass nextCursor unchanged with the same filters. includeLastMessage opts into previews and nonzero queuedPromptCount; unclaimed human/API prompts are never previewed. Previews share a ${SESSION_DISCOVERY_PREVIEW_MAX_BYTES}-byte UTF-8 budget; omitted previews carry a bounded session_events drill-down. Text/page loss facts appear only when loss occurs in compact mode. No instructions, resources, tools, files or history are returned; REST/UI defaults are unchanged.`,
         inputSchema: {
           limit: z4.number().int().positive().max(100).optional(),
           cursor: z4.string().max(512).optional(),
@@ -5771,6 +5809,18 @@ function registerWorkspaceOrchestrationTools(
             .max(8)
             .optional(),
           activeOnly: z4.boolean().optional(),
+          mineOnly: z4
+            .boolean()
+            .optional()
+            .describe(
+              "true keeps only sessions you started or prompted, with their child sessions. Keep unchanged when paging.",
+            ),
+          visibility: z4
+            .enum(["private", "workspace"])
+            .optional()
+            .describe(
+              "private: only you can see it; workspace: shared with everyone. Keep unchanged when paging.",
+            ),
           originSiteId: z4
             .string()
             .uuid()
@@ -5811,6 +5861,8 @@ function registerWorkspaceOrchestrationTools(
         query,
         statuses,
         activeOnly,
+        mineOnly,
+        visibility,
         originSiteId,
         recentHours,
         rootSessionId,
@@ -5877,6 +5929,8 @@ function registerWorkspaceOrchestrationTools(
             ...(query?.trim() ? { query } : {}),
             ...(statuses ? { statuses: statuses as SessionStatus[] } : {}),
             activeOnly: activeOnly === true,
+            ...(mineOnly === true ? { mineOnly: true } : {}),
+            ...(visibility ? { visibility } : {}),
             ...(originSiteId ? { originSiteId } : {}),
             ...(recentHours !== undefined ? { recentHours } : {}),
             ...(rootSessionId ? { rootSessionId } : {}),
@@ -6435,7 +6489,7 @@ function registerWorkspaceOrchestrationTools(
 
     if (callerSessionId !== null) {
       const commandReadNotes =
-        "Output larger than maxOutputBytes (default 16384) returns its start and its end, with the size of the omitted middle and a cursor to read it; a read with a cursor pages on from there (pass waitSeconds 0 to page without waiting), and the end cursor continues after the newest output. Output remains readable after the process exits. A terminal read observes completion and suppresses only its still-pending inbox notification; running reads and already claimed history are unchanged. These execution-wait limits do not cap wait_for_input: use it for long out-of-turn waits, except pending Codemode calls require observation in the same live attempt. Neither tool sends stdin or cancels the command.";
+        "Output larger than maxOutputBytes (default 16384) returns its start and its end, with the size of the omitted middle and a cursor to read it; a read with a cursor pages on from there (pass waitSeconds 0 to page without waiting), and the end cursor continues after the newest output. Output remains readable after the process exits. A terminal read observes completion and suppresses only its still-pending inbox notification; running reads and already claimed history are unchanged. A finished command's result, with its exit status and output, also reaches the session on its own, so there is no need to read only to learn that it finished. These execution-wait limits do not cap wait_for_input: use it for long out-of-turn waits, except pending Codemode calls require observation in the same live attempt. Neither tool sends stdin or cancels the command.";
       for (const toolName of ["command_read", "command_wait"] as const) {
         const multi = toolName === "command_wait";
         server.registerTool(
@@ -6579,7 +6633,12 @@ function registerWorkspaceOrchestrationTools(
       {
         description:
           "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Delegation has setup and coordination overhead: by default, answer directly when the work takes only a few steps, and send a related follow-up to a worker you already spawned with session_send_message instead of spawning another. Explicit user requests and applicable Skill guidance for delegation, independent review, or fresh workers override that default within existing authority. After spawning work that needs minutes, once nothing else can advance, call wait_for_input and end the turn instead of alternating session_wait and session_get; no preliminary short wait or status recheck is required. The worker's terminal result wakes you and carries its final answer (payload.finalAnswer). Do not duplicate a child's implementation; independent review or comparison may intentionally examine the same subject with a distinct deliverable. Track the child and join its actual result before completing dependent work. Give the child a concise semantic title; if omitted, one is derived from its delegated goal or initial message. The child inherits this session's visibility, agent-access scope and end-user label; a private session can only create a same-owner private child, and memoryScope may only narrow this session's selector. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Sandbox Environment or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. Normally omit tools, mcpServers, and firstPartyMcpTools so the worker inherits this session's exact selections; specialize its task through initialMessage rather than a hand-written partial tool list. To create a worker that cannot start, message, or follow other sessions, use agent: { capabilities: { from: 'all', subagents: false } } and keep tool lists omitted; its final answer still reaches you automatically. Explicit tool arrays replace the inherited selection and are only for deliberate restrictions. Do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
-        inputSchema: sessionCreateToolInput(childSelectableTools),
+        // `selfhosted` is reached through machineTarget, so it is not offered
+        // as a bare backend choice.
+        inputSchema: sessionCreateToolInput(
+          childSelectableTools,
+          servedSandboxBackends(deps.settings).filter((backend) => backend !== "selfhosted"),
+        ),
       },
       async (args) => {
         try {
@@ -8681,6 +8740,8 @@ export function capSessionDiscoveryPage(
       ...(session.channelId ? { projectId: session.channelId } : {}),
       title: title.text,
       titleTruncated: title.truncated,
+      visibility: session.visibility,
+      ...(session.archived ? { archived: true } : {}),
       parentSessionId: session.parentSessionId,
       isRoot: session.parentSessionId === null,
       status: session.status,

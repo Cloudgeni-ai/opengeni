@@ -101,7 +101,9 @@ import {
   SKILL_MAX_FILES,
   SKILL_MAX_FILE_BYTES,
   SKILL_MAX_TOTAL_BYTES,
+  INLINE_SKILLS_MAX,
 } from "./skill-files";
+export { INLINE_SKILLS_MAX } from "./skill-files";
 export * from "./model-connection-access";
 export * from "./subscription-account-actions";
 export * from "./sandbox-provider-command";
@@ -1203,6 +1205,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "slack_bot_prepare_message",
   "slack_bot_send_prepared_message",
   "slack_agent_handoff",
+  "slack_agent_suggest",
   "slack_agent_chats",
   "slack_agent_propose",
   "fiken_companies_list",
@@ -2714,12 +2717,27 @@ export const WorkspaceSessionToolDefaultsPatch = /* @__PURE__ */ defineSchema(()
     .strict(),
 );
 
+/** A model a dictation can name, such as for one desktop dictation shortcut. */
+export const DictationModelOption = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      providerId: VoiceInputProviderId,
+      providerName: primitives.string.trim().min(1).max(128),
+      model: primitives.string.trim().min(1).max(128),
+      name: primitives.string.trim().min(1).max(128),
+    })
+    .strict(),
+);
+export type DictationModelOption = z.infer<typeof DictationModelOption>;
+
 /** Client-safe voice-input capability projection. Never includes provider secrets. */
 export const ClientVoiceInputConfig = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       available: primitives.boolean,
       providers: z.array(VoiceInputProviderId).optional(),
+      /** Every model a dictation may name, of each ready provider. */
+      models: z.array(DictationModelOption).max(64).optional(),
       maxDurationSeconds: z.number().int().positive().max(600),
       maxSizeBytes: primitives.positiveInteger.max(25 * 1024 * 1024),
       acceptedMimeTypes: z.array(primitives.string.trim().min(1).max(128)).min(1).max(32),
@@ -11412,6 +11430,12 @@ export const SessionSystemUpdatePayload = /* @__PURE__ */ defineSchema(() =>
             commandId: primitives.uuid,
           })
           .strict(),
+        /**
+         * The start and end of the retained output as text, with a marker
+         * naming any omitted middle and its command_read cursor. Absent on
+         * results recorded before results carried output.
+         */
+        output: boundedUtf8String(16 * 1024).optional(),
         notice: z.string().optional(),
       })
       .passthrough(),
@@ -13012,7 +13036,7 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
     // Validated on save like session create Skills (SessionSkills) and stored
     // normalized; only the shape is declared here so Skill YAML validation
     // stays out of browser bundles, like UpdateSessionSkillsRequest.
-    skills: z.array(ScheduledTaskSkill).max(32).optional(),
+    skills: z.array(ScheduledTaskSkill).max(INLINE_SKILLS_MAX).optional(),
   };
 }
 
@@ -14395,7 +14419,7 @@ export type SessionSkillInput = z.input<typeof SessionSkill>;
 export const SessionSkills = /* @__PURE__ */ defineSkillContractSchema(() =>
   z
     .array(SessionSkill)
-    .max(32)
+    .max(INLINE_SKILLS_MAX)
     .transform((skills, ctx) => {
       const selected = new Map<string, { fingerprint: string; skill: SessionSkill }>();
       for (const skill of skills) {
@@ -14436,7 +14460,7 @@ export const StoredSessionSkills = /* @__PURE__ */ defineSkillContractSchema(() 
 export const UpdateSessionSkillsRequest = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      skills: z.array(z.unknown()).max(32),
+      skills: z.array(z.unknown()).max(INLINE_SKILLS_MAX),
       expectedVersion: primitives.positiveInteger,
     })
     .strict(),
@@ -20394,7 +20418,11 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
         // in its Site's project. An id that does not name a channel in the
         // workspace is a 422.
         channelId: z.string().uuid().nullable().optional(),
-        goal: GoalSpec.optional(),
+        // The session goal. Omitted on a top-level `unattended: true` create
+        // with an initial message, Opengeni sets one that stands for that
+        // message, so the run keeps going until the agent completes or pauses
+        // it; null creates the session without a goal.
+        goal: GoalSpec.nullable().optional(),
         clientEventId: SessionOperationKey.optional(),
         // Workspace-scoped CREATE idempotency key: collapses concurrent/retried
         // create calls carrying the same key to a single session (partial unique

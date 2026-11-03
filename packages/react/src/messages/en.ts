@@ -1245,8 +1245,7 @@ export const englishMessages = {
   "composerTranscriptionControl.pauseAutomaticRetry": "Pause automatic retry",
   "composerTranscriptionControl.recordingIsTooLargeTry":
     "Recording is too large. Try a shorter message.",
-  "composerTranscriptionControl.recordingPressEscapeToDiscard":
-    "Recording. Press Escape to discard.",
+  "composerTranscriptionControl.recordingPressEscapeToDiscard": "Recording.",
   "composerTranscriptionControl.recordingSavedOnThisDevice": "Recording saved.",
   "composerTranscriptionControl.requestingMicrophone": "Requesting microphone…",
   "composerTranscriptionControl.retryVoiceInput": "Retry voice input",
@@ -1603,7 +1602,7 @@ export const englishMessages = {
   "desktopDictation.settings.anyLanguage": "Any language",
   "desktopDictation.settings.cancelRecording": "Cancel",
   "desktopDictation.settings.cancelShortcutDescription":
-    "Throws away the dictation you're speaking; its speech stays in Recent dictations. Esc does this too.",
+    "Throws away the dictation you're speaking; its speech stays in Recent dictations.",
   "desktopDictation.settings.cancelShortcutLabel": "Cancel shortcut",
   "desktopDictation.settings.cancelledDictation": "Cancelled, not transcribed",
   "desktopDictation.settings.chordHold": "Hold the keys while you speak, and let go to finish.",
@@ -1621,6 +1620,11 @@ export const englishMessages = {
   "desktopDictation.settings.keyCombinationDescription": "Press the keys you want to use.",
   "desktopDictation.settings.languageDescription": "The language you speak with this shortcut.",
   "desktopDictation.settings.languageLabel": "Language",
+  "desktopDictation.settings.modelDescription":
+    "The speech-to-text model that hears this shortcut.",
+  "desktopDictation.settings.modelLabel": "Model",
+  "desktopDictation.settings.modelUnavailable": "Not available in this workspace now.",
+  "desktopDictation.settings.workspaceModel": "Workspace default",
   "desktopDictation.settings.modeHold": "Hold while speaking",
   "desktopDictation.settings.modeHoldDescription": "Dictates while you hold the keys down.",
   "desktopDictation.settings.modeLabel": "How the keys work",
@@ -2154,6 +2158,7 @@ export const englishMessages = {
   "lib.providerRecovery.modelStoppedRespondingAt": "{model} stopped responding{at}",
   "lib.providerRecovery.modelStoppedRightAfterCompacting":
     "{model} stopped right after compacting the conversation",
+  "lib.providerRecovery.noSandboxCapacityIsAvailable": "No sandbox capacity is available right now",
   "lib.providerRecovery.opengeniCanTReachAn": "{product} can't reach an upstream service",
   "lib.providerRecovery.opengeniIsApplyingAConfiguration":
     "{product} is applying a configuration update",
@@ -2173,6 +2178,8 @@ export const englishMessages = {
   "lib.providerRecovery.theSandboxIsnTReady": "The sandbox isn't ready yet",
   "lib.providerRecovery.theSandboxReachedItsMaximum":
     "The sandbox reached its maximum lifetime, so {product} is moving the workspace to a fresh sandbox",
+  "lib.providerRecovery.theSandboxServiceIsTemporarily":
+    "The sandbox service is temporarily unavailable",
   "lib.providerRecovery.tryAgainInAFew": "Try again in a few minutes, or switch to another model.",
   "lib.providerRecovery.tryAgainInAFew2": "Try again in a few minutes.",
   "lib.transientRetry.actionMayNotHaveGoneThrough":
@@ -3897,13 +3904,11 @@ export const englishMessages = {
   "openGeniChat.send": "Send",
   "openGeniLinks.fileIsTooLargeTo": "File is too large to download here.",
   "organizationModel.orgShortaccountid": "Org {shortAccountId}",
-  "ownLogins.couldNotStop": "Couldn't stop it. Try again.",
-  "ownLogins.sharedHeadsUp_one":
-    "Your {logins} login works for your messages here. People in this workspace see what the agent does with it.",
-  "ownLogins.sharedHeadsUp_other":
-    "Your {logins} logins work for your messages here. People in this workspace see what the agent does with them.",
-  "ownLogins.stopUsingHere": "Stop using it here",
-  "ownLogins.stopUsingLoginHere": "Stop using {login} here",
+  "ownLogins.couldNotChange": "Couldn't change it. Try again.",
+  "ownLogins.inThisChat_one": "{count} personal connection in this chat",
+  "ownLogins.inThisChat_other": "{count} personal connections in this chat",
+  "ownLogins.noneInThisChat": "No personal connections in this chat",
+  "ownLogins.workspaceSees": "People in this workspace see what the agent does with these.",
   "pierreDiff.diffForPath": "Diff for {path}",
   "pierreDiff.loadingDiff": "Loading diff…",
   "pierreDiff.noChanges": "No changes",
@@ -6151,6 +6156,12 @@ export const englishMessages = {
   "toolActionReview.reasonItDidNotRun": "{reason} It did not run.",
   "toolActionReview.someOfItRanCheck": "Some of it ran. Check the result before continuing.",
   "toolActionReview.theActionRanButReturned": "The action ran but returned an error.",
+  "toolActionReview.onlyTheAccountOwnerCanApprove":
+    "Only the person whose own account this runs on can approve it. You can decline it.",
+  "toolActionReview.onlyNameCanApprove":
+    "Only {name} can approve this, because it runs on their own account. You can decline it.",
+  "toolActionReview.onlyYouCanApprove":
+    "This runs on your own account, so only you can approve it.",
   "toolActionReview.theDetailsOfThisOlder":
     "The details of this older request couldn't be recovered, so it can't be approved. Decline it to let the agent continue.",
   "toolActionReview.theExactValuesSavedFor":

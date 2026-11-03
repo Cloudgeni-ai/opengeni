@@ -4125,7 +4125,13 @@ export type CreateSessionRequest = {
   // The rig to bind this session to (M3). Its active version is frozen onto the
   // session at create. Omitted ⇒ the workspace default rig when set, else rig-less.
   rigId?: string | undefined;
-  goal?: GoalSpec | undefined;
+  /**
+   * The session goal. When omitted on a top-level `unattended: true` create
+   * with an `initialMessage`, Opengeni sets a goal that stands for that
+   * message, so the run keeps going until the agent completes or pauses it.
+   * `null` creates the session without a goal.
+   */
+  goal?: GoalSpec | null | undefined;
   clientEventId?: string | undefined;
   // Workspace-scoped CREATE idempotency key: forward a STABLE value to make a
   // double-submit/retry of the same logical create collapse to one session.
@@ -4418,6 +4424,7 @@ export type FirstPartyMcpToolName =
   | "slack_bot_prepare_message"
   | "slack_bot_send_prepared_message"
   | "slack_agent_handoff"
+  | "slack_agent_suggest"
   | "slack_agent_chats"
   | "slack_agent_propose"
   | "fiken_companies_list"
@@ -5944,10 +5951,20 @@ export type ClientConfig = {
 export type ClientVoiceInputConfig = {
   available: boolean;
   providers?: VoiceInputProviderId[] | undefined;
+  /** Every model a dictation may name, of each ready provider. */
+  models?: DictationModelOption[] | undefined;
   maxDurationSeconds: number;
   maxSizeBytes: number;
   acceptedMimeTypes: string[];
   resumable?: ClientResumableVoiceInputConfig | undefined;
+};
+
+/** A model a dictation can name, such as for one desktop dictation shortcut. */
+export type DictationModelOption = {
+  providerId: VoiceInputProviderId;
+  providerName: string;
+  model: string;
+  name: string;
 };
 
 export type ClientResumableVoiceInputConfig = {
@@ -7769,6 +7786,8 @@ export type SessionSystemUpdatePayload =
         eventType: "sandbox.command.output.delta";
         commandId: string;
       };
+      /** Bounded start and end of the output (absent for lost commands and older results). */
+      output?: string | undefined;
       [key: string]: unknown;
     }
   | ({

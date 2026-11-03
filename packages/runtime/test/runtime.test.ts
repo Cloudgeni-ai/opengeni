@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { hostedSearchFixture } from "./fixtures/hosted-search";
 
 import {
@@ -6274,7 +6274,7 @@ describe("runtime event normalization", () => {
     expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("ogtool show <tool-path>");
     expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("list --json");
     expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("list --full");
-    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("same list, show, and call commands");
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("same list, show, call, and read commands");
     expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("same public Codemode operation journal");
   });
 
@@ -8465,17 +8465,31 @@ describe("runtime event normalization", () => {
     ]);
   });
 
-  test("rejects MCP result values the Agents SDK custom-data boundary would rewrite", async () => {
+  test("converts MCP result values JSON cannot carry before the Agents SDK custom-data boundary", async () => {
     const bridge = new McpResultCustomDataBridge();
-
-    await expect(
-      bridge.captureResult(null, async () => ({
+    const warn = spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const result = (await bridge.captureResult(null, async () => ({
         content: [{ type: "text" as const, text: "negative zero" }],
-        structuredContent: { exactValue: -0 },
-      })),
-    ).rejects.toThrow(
-      'Protocol JSON value at $.mcpResult["structuredContent"]["exactValue"] must be a finite number other than negative zero',
-    );
+        structuredContent: {
+          exactValue: -0,
+          total: 12n,
+          [Symbol("server mark")]: true,
+          at: new Date(0),
+        },
+      }))) as { structuredContent: Record<string, unknown> };
+      // The stored and SDK-visible forms agree: JSON writes -0 as 0.
+      expect(result.structuredContent).toEqual({
+        exactValue: 0,
+        total: 12,
+        at: "1970-01-01T00:00:00.000Z",
+      });
+      expect(Object.is(result.structuredContent.exactValue, 0)).toBe(true);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0]![1]).toMatchObject({ rootPath: "$.mcpResult", count: 4 });
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   test("releases only the live MCP audit marker after durable event capture", async () => {
@@ -9056,9 +9070,14 @@ describe("runtime event normalization", () => {
       },
       [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: { retained: true },
     });
-    await expect(runOnce("normalized-invalid")).rejects.toThrow(
-      "customDataExtractor must return an object or null.",
-    );
+    // An extractor that returns a non-object loses its custom data; the tool
+    // call and the run still succeed.
+    const invalid = await runOnce("normalized-invalid");
+    expect(invalid?.item.customData).toEqual({
+      [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: {
+        content: [{ type: "text", text: "content" }],
+      },
+    });
   });
 
   test("a prefixed inner extractor mirrors the SDK sparse-array JSON boundary", async () => {

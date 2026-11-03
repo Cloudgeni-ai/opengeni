@@ -2,6 +2,10 @@ import {
   recoverProviderClockAfterDependencyWait,
   PROVIDER_RECOVERY_SUSPENDED_AT,
 } from "./provider-recovery-clock";
+import {
+  pendingApprovalAccountOwner,
+  SessionApprovalForbiddenError,
+} from "./personal-connection-approval";
 export { continueSessionWaitingWork, getSessionMachineAccess } from "./session-machine-access";
 export { canonicalSecretPermissions } from "./canonical-secret-permissions";
 import { listWorkspaceBackgroundCommandsInScope } from "./session-background-commands";
@@ -44,6 +48,7 @@ import {
 } from "./model-call-timing";
 export * from "./human-input-secret-answers";
 export * from "./secret-use-approvals";
+export * from "./personal-connection-approval";
 export * from "./credential-profiles";
 export * from "./secret-value-masking";
 export * from "./secret-use-history";
@@ -1124,7 +1129,11 @@ import {
   UNATTRIBUTED_LEGACY_INITIATOR,
   type FrozenTurnInitiator,
 } from "./turn-initiator";
-export { frozenInitiatorForCommandActor, type FrozenTurnInitiator } from "./turn-initiator";
+export {
+  frozenInitiatorForCommandActor,
+  sameTurnSender,
+  type FrozenTurnInitiator,
+} from "./turn-initiator";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 import {
   fromPostgresLosslessJson,
@@ -1211,6 +1220,7 @@ import {
 } from "./session-realtime";
 import {
   insertConnectedMachineSessionBackgroundCommandInTransaction,
+  backgroundCommandResultOutputInTransaction,
   boundedSessionBackgroundCommandReason,
   insertManagedSessionBackgroundCommandInTransaction,
   settleClaimedConnectedMachineBackgroundCommandWithMutation,
@@ -7960,6 +7970,13 @@ export type RegistryCapabilityCatalogItemInput = {
   tier: "verified" | "community";
   provenance: string;
   logoAssetPath?: string | null;
+  /**
+   * The row has no logo by policy (an overlay `logoSourceUrl: null`, or a
+   * screened letter placeholder): clear any asset an earlier import stored.
+   * Without it a null `logoAssetPath` keeps the existing asset, because a
+   * skipped or failed fetch must not erase a good logo.
+   */
+  clearLogoAsset?: boolean;
   importBatchId: string;
   scopesHint?: string[];
   homepageUrl?: string | null;
@@ -10569,7 +10586,9 @@ export async function upsertRegistryCapabilityCatalogItem(
     credentialFacts: values.credentialFacts,
     tier: values.tier,
     provenance: values.provenance,
-    logoAssetPath: sql`coalesce(excluded.logo_asset_path, ${schema.capabilityCatalogItems.logoAssetPath})`,
+    logoAssetPath: input.clearLogoAsset
+      ? null
+      : sql`coalesce(excluded.logo_asset_path, ${schema.capabilityCatalogItems.logoAssetPath})`,
     importBatchId: values.importBatchId,
     stale: false,
     staleAt: null,
@@ -33369,6 +33388,8 @@ export async function getInitializedSessionCreateReplay(
     deferInitialTurn?: boolean;
     /** Resolved agent configuration of the retry; omitted skips the comparison. */
     agentConfig?: ResolvedAgentConfig | null;
+    /** The retry's `unattended: true`; a keyed replay must agree with the winner. */
+    unattended?: boolean;
   },
 ): Promise<InitializedSessionCreateReplay | null> {
   return await withWorkspaceSubjectSessionActivityRls(
@@ -38434,10 +38455,16 @@ export type SessionDiscoveryCursor = {
 };
 export const SESSION_DISCOVERY_GOAL_MAX_CHARS = 600;
 export const SESSION_DISCOVERY_MESSAGE_MAX_CHARS = 600;
+/** Who can see a session: only its owner, or everyone in the workspace. */
+export type SessionDiscoveryVisibility = "private" | "workspace";
+
 export type SessionDiscoverySummary = {
   id: string;
   title: string | null;
   titleOriginalChars: number | null;
+  visibility: SessionDiscoveryVisibility;
+  /** Archived to long-term storage: read-only, still readable. */
+  archived: boolean;
   channelId?: string | null;
   parentSessionId: string | null;
   rootSessionId: string;
@@ -38506,12 +38533,17 @@ type NormalizedSessionDiscoveryFilters = {
   channelId: string | null | undefined;
   parentSessionId: string | null | undefined;
   subject: WorkClaimSubjectFilter | null;
+  /** The app's Mine filter: chats the caller started or prompted. */
+  mineOnly: boolean;
+  visibility: SessionDiscoveryVisibility | null;
 };
 
 type SessionDiscoveryPageRow = {
   id: string | null;
   title: string | null;
   titleOriginalChars: number | string | null;
+  visibility: string | null;
+  archived: boolean | null;
   channelId?: string | null;
   parentSessionId: string | null;
   rootSessionId: string | null;
@@ -38586,6 +38618,8 @@ function normalizeSessionDiscoveryFilters(options: {
   channelId?: string | null;
   parentSessionId?: string | null;
   subject?: WorkClaimSubjectFilter;
+  mineOnly?: boolean;
+  visibility?: SessionDiscoveryVisibility;
 }): NormalizedSessionDiscoveryFilters {
   const query = normalizeSessionDiscoveryQuery(options.query ?? options.search);
   if (
@@ -38625,6 +38659,11 @@ function normalizeSessionDiscoveryFilters(options: {
       ? (options.parentSessionId ?? null)
       : undefined,
     subject,
+    mineOnly: options.mineOnly === true,
+    visibility:
+      options.visibility === undefined
+        ? null
+        : z.enum(["private", "workspace"]).parse(options.visibility),
   };
 }
 
@@ -38642,6 +38681,9 @@ function sessionDiscoveryFilterHash(filters: NormalizedSessionDiscoveryFilters):
           filters.parentSessionId === undefined ? { any: true } : filters.parentSessionId,
         ...(filters.channelId !== undefined ? { channelId: filters.channelId } : {}),
         subject: filters.subject,
+        // Added later: present only when set, so earlier relevance cursors keep their hash.
+        ...(filters.mineOnly ? { mineOnly: true } : {}),
+        ...(filters.visibility ? { visibility: filters.visibility } : {}),
       }),
     )
     .digest("hex");
@@ -38715,6 +38757,18 @@ async function selectSessionDiscoveryPageRows(
   }
   if (options.filters.activeOnly) {
     authorizationFilters.push(notInArray(schema.sessions.status, ["failed", "cancelled"]));
+  }
+  if (options.filters.mineOnly) {
+    if (!options.subjectId) throw new Error("sessions_list mineOnly requires a caller identity");
+    authorizationFilters.push(sessionMineSql(options.subjectId));
+  }
+  if (options.filters.visibility) {
+    authorizationFilters.push(
+      eq(
+        schema.sessions.visibility,
+        options.filters.visibility === "private" ? "user_private" : "workspace_shared",
+      ),
+    );
   }
   if (options.filters.recentHours !== null) {
     authorizationFilters.push(
@@ -39041,6 +39095,8 @@ async function selectSessionDiscoveryPageRows(
         select
           ${schema.sessions.id} as id,
           ${schema.sessions.title} as title,
+          ${schema.sessions.visibility} as visibility,
+          ${schema.sessions.archivedAt} is not null as archived,
           ${schema.sessions.channelId} as channel_id,
           ${schema.sessions.parentSessionId} as parent_session_id,
           ${schema.sessions.rootSessionId} as root_session_id,
@@ -39061,6 +39117,8 @@ async function selectSessionDiscoveryPageRows(
         page.id,
         page.title,
         page."titleOriginalChars",
+        page.visibility,
+        page.archived,
         page."channelId",
         page."parentSessionId",
         page."rootSessionId",
@@ -39083,6 +39141,8 @@ async function selectSessionDiscoveryPageRows(
           ranked_sessions.id,
           left(ranked_sessions.title, ${SESSION_DISCOVERY_CONTROL_TITLE_MAX_CHARS}) as title,
           char_length(ranked_sessions.title)::integer as "titleOriginalChars",
+          ranked_sessions.visibility,
+          ranked_sessions.archived,
           ranked_sessions.channel_id as "channelId",
           ranked_sessions.parent_session_id as "parentSessionId",
           ranked_sessions.root_session_id as "rootSessionId",
@@ -39277,6 +39337,9 @@ export async function listSessionDiscoverySummaries(
     activeOnly?: boolean;
     recentHours?: number;
     subject?: WorkClaimSubjectFilter;
+    /** The app's Mine filter (chats the caller started or prompted); needs subjectId. */
+    mineOnly?: boolean;
+    visibility?: SessionDiscoveryVisibility;
     claimLimit?: number;
     /** Skip advisory claim reads on plain MCP browse or an operator-disabled rollout.
      * Omitted retains the REST/UI legacy evidence default. */
@@ -39522,6 +39585,8 @@ export async function listSessionDiscoverySummaries(
         id: sessionId,
         title: row.title,
         titleOriginalChars: row.titleOriginalChars === null ? null : Number(row.titleOriginalChars),
+        visibility: row.visibility === "user_private" ? "private" : "workspace",
+        archived: row.archived === true,
         channelId: row.channelId ?? null,
         parentSessionId: relatedAccess === "root" ? row.parentSessionId : null,
         rootSessionId: relatedAccess === "root" ? row.rootSessionId! : sessionId,
@@ -61043,6 +61108,13 @@ export async function verifyWorkspaceMutationSettlement(
   },
 ): Promise<void> {
   const routeKind = input.routeKind ?? "home";
+  // Settle the exact admission: without an explicit route epoch, the route
+  // epoch is the one recorded when it was admitted, never the session's
+  // current epoch. A swap during a home-sandbox command moves the session's
+  // active route but changes nothing about where that command ran, so it must
+  // not reject the command's output (an active-route move is still fenced as
+  // route_fenced against the admission's recorded route).
+  const routeEpoch = input.routeEpoch ?? input.admission.routeEpoch;
   await verifyWorkspaceMutationSettlementForAuthority(
     db,
     {
@@ -61059,7 +61131,7 @@ export async function verifyWorkspaceMutationSettlement(
       expectedInstanceId: input.expectedInstanceId,
       routeKind,
       routeTargetId: routeKind === "home" ? null : (input.routeTargetId ?? null),
-      ...(input.routeEpoch === undefined ? {} : { routeEpoch: input.routeEpoch }),
+      routeEpoch,
     },
     input,
   );
@@ -91111,10 +91183,14 @@ function backgroundCommandTerminalMutation(input: {
           `Session ${input.sessionId} does not belong to account ${input.accountId}`,
         );
       }
+      // Terminal settlement only needs pause/admission state. Recounting all
+      // stopping commands here makes draining a backlog quadratic, while each
+      // count holds the session write lock and blocks unrelated lifecycle work.
       controlActive =
         (
-          await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
+          await evaluateSessionWriteAdmissionControl(tx, input.workspaceId, input.sessionId, {
             workspaceControl: locks.control,
+            lockedSession: session,
           })
         ).state === "active";
     },
@@ -91240,6 +91316,19 @@ function backgroundCommandTerminalMutation(input: {
                   : command.exitCode === 0
                     ? `${commandLabel}: completed successfully.`
                     : `${commandLabel}: exited with code ${command.exitCode ?? "unknown"}.`;
+      // The result carries the start and end of the output, so the turn it
+      // wakes or reaches needs no extra read to learn what the command did.
+      // A lost command (its sandbox gone, or contained) carries none: those
+      // settle in bulk under lease locks, and its output stays readable.
+      const output =
+        command.state === "lost"
+          ? null
+          : await backgroundCommandResultOutputInTransaction(tx, {
+              accountId: session.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              commandId: command.id,
+            });
       const payload = {
         type: "background_command_result" as const,
         commandId: command.id,
@@ -91248,6 +91337,7 @@ function backgroundCommandTerminalMutation(input: {
         reason,
         ...(command.failure ? { failure: command.failure } : {}),
         outputLocator,
+        ...(output !== null ? { output } : {}),
         ...(command.backgroundChildrenStopped
           ? { notice: CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE }
           : {}),
@@ -92431,6 +92521,20 @@ export async function acceptSessionApprovalDecision(
                     .limit(1)
                 ).length > 0;
           if (!resumable) return approvalConflict(sessionStatus, "not_pending");
+        }
+        // The call runs on the turn's frozen accounts, never the approver's:
+        // approving one that runs on someone's own account is theirs alone.
+        // Checked before the answer, so a non-owner always learns who decides.
+        if (payload.decision === "approve") {
+          const owner = await pendingApprovalAccountOwner(tx as unknown as Database, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: liveTurn.id,
+            approvalId,
+          });
+          if (owner !== null && owner.subjectId !== input.subjectId) {
+            throw new SessionApprovalForbiddenError(owner);
+          }
         }
         payload = approvalDecisionPayloadWithAnswer(pendingApproval, payload);
         if (input.interactionIntervention) {

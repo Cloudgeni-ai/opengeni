@@ -5,7 +5,9 @@ Status: Accepted, 2026-10-29. Replaces how
 on condition in the store, objects stored again after a week, deletes on
 condition) and where [18](0018-the-control-service-leases-and-fences.md)'s
 fenced pointer writes land. The fence itself, its stamps and its rule are
-unchanged.
+unchanged. Amended by [28](0028-stored-objects-carry-their-hour.md): names
+carry their hour, and a sweep deletes an unnamed object once its period
+ended an hour before it began.
 
 ## Context
 

@@ -910,6 +910,26 @@ and [`../AGENTS.md`](../AGENTS.md) Sandbox Notes.
 
 ### 3.9 Compute routing and sandbox ownership stay explicit
 
+A new session may name only a sandbox backend the deployment serves
+(`sandboxBackendServed` in `packages/config`): its default, `none`,
+`selfhosted` with Connected Machines on, and providers whose credentials are
+configured; `local` and `docker` run on the host and are served only as the
+default. Every create path applies it (REST/SDK, `session_create`, forks,
+schedule save and run admission) because the worker builds whatever provider
+a session row names. Shared children and existing rows keep their backend,
+except that a host backend the deployment does not serve is refused again
+before any box, hook or credential. Session code rebinds settings to the
+session's backend (`{...settings, sandboxBackend}`), so the rule reads
+`Settings.deploymentSandboxBackend`, which `getSettings` fixes once and every
+spread keeps (`hostSandboxBackendRefused`). The worker fails such a turn at
+start with the terminal `sandbox_backend_not_served`; `resolveSessionSandboxRuntime`
+answers every API-direct surface (Channel A terminal, files, browser and
+computer, and viewers) with 409; and `createSandboxClientForBackend` refuses
+the `local` or `docker` client for any other caller, whatever the host image
+contains. A stored host-backend lease that is still draining on such a
+deployment stays draining (fail closed) rather than being stopped through a
+refused client.
+
 A human owner's personal-machine move during a turn is explicit consent for
 that logical turn, independent of the initiating person. The separate turn
 receipt and attempt bindings survive recovery without rewriting accepted
@@ -1639,8 +1659,8 @@ immutable receipts, distinct causal claims and live personal-grant admission:
 [lifecycle](run-lifecycle.md).
 
 `session_turns.initiating_human_subject_id` alone never authorizes:
-`artifacts:publish`/archive/restore require exact mutation fences; pure service
-work fails closed. [Lifecycle](run-lifecycle.md).
+`artifacts:publish`/archive/restore require exact mutation fences, which pure
+service work passes like any run. [Lifecycle](run-lifecycle.md).
 
 All model/Codemode calls share current authorized catalogs, execution fences and
 approvals across backends/loading paths.
@@ -2915,7 +2935,7 @@ Canonical: `packages/runtime/src/sandbox/`,
 
 ---
 
-Turn-end review capture yields to queued turns and fences late commits. Single-read files and unique storage keys isolate cleanup. Recovery snapshots retain their separate fifteen-minute cadence.
+Turn-end review capture yields to queued turns and fences late commits. Its cancellation signal also fences admission of queued per-file Git reads; already-started reads retain output collection and exact spool cleanup. Single-read files and unique storage keys isolate cleanup. Recovery snapshots retain their separate fifteen-minute cadence.
 
 ## 9. Data and storage
 

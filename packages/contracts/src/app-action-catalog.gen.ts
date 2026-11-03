@@ -2312,6 +2312,19 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "workspace:read"
   },
   {
+    "id": "finishUnfinishedConnectSetups",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/connect/attempts/finish",
+    "request": [],
+    "response": [
+      "ConnectAttempt"
+    ],
+    "secretFields": [
+      "response.mcpSetup.headers[].secret",
+      "response.nextAction.userCode"
+    ]
+  },
+  {
     "id": "forkSession",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/forks",
@@ -4226,7 +4239,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ToolActionReview"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "getToolReviewDetails",

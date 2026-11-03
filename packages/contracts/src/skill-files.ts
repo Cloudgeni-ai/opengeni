@@ -2,6 +2,14 @@
 export const SKILL_MAX_FILES = 1024;
 export const SKILL_MAX_FILE_BYTES = 2 * 1024 * 1024;
 export const SKILL_MAX_TOTAL_BYTES = 8 * 1024 * 1024;
+/**
+ * Inline Skills one chat or scheduled task can carry. A request over this is
+ * rejected, never truncated. It is a backstop, not the cost bound: the API
+ * request size bounds the files, and the model's Skill index has its own
+ * budget for names and descriptions (it shortens them, then lists the rest
+ * as findable with skill_search).
+ */
+export const INLINE_SKILLS_MAX = 1024;
 
 export function isSafeSkillRelativePath(path: string): boolean {
   return (

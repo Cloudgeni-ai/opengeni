@@ -223,7 +223,7 @@ export async function disconnectPersonalGitHub(
     }
     if (error instanceof ConnectionDisconnectGenerationError) {
       throw new HTTPException(409, {
-        message: "personal GitHub connection changed; refresh before disconnecting",
+        message: "Your GitHub connection changed while disconnecting. Try again.",
       });
     }
     throw error;

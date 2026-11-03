@@ -284,7 +284,11 @@ them, so a call site sets a width and nothing else.
   and the title in 14/500 `fg`, over a hairline. Radix side submenus use the same panel.
 - **Empty, unavailable:** one plain sentence (or a 14px line plus one 12px reason) in
   the panel, never a card, dashed box or icon tile. Say it once, and hide an action that can't
-  work (no disabled "Refresh list" when GitHub is unavailable).
+  work. A failed load or background update adds one inline "Try again" link to that sentence.
+- **Lists refresh themselves; a menu has no Refresh row.** Opening a menu shows the kept rows at
+  once and updates them in the background (throttled, at most once per 30 seconds). When the
+  person leaves for another flow that changes the list (GitHub installs, choosing repositories,
+  the GitHub settings page), the list refreshes as soon as they are back, without the throttle.
 - **Loading never shows inside an action menu.** A menu opens at its final size: its data and
   code are fetched before it opens (the composer warms every "+" drill-in when "+" is hovered,
   focused or idle, via `lazyComposerPanel`) and kept, so a reopen shows the last rows and a

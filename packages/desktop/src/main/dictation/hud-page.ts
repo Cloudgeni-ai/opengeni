@@ -21,7 +21,7 @@ body {
   display: inline-flex; align-items: center; gap: 10px; box-sizing: border-box;
   height: 40px; margin: 0 12px 12px; padding: 0 7px 0 14px; border-radius: 20px;
   background: rgba(24, 24, 27, 0.94); white-space: nowrap;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.09), 0 10px 28px rgba(0, 0, 0, 0.32);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.09);
 }
 #pill.plain { padding-right: 16px; }
 .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: #ef4444; }

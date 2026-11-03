@@ -90,6 +90,7 @@ import type { GovernanceModelOk } from "./governance-model";
 import type { SandboxTurnRuntime } from "./sandbox-runtime";
 import type { AttemptIdentityState, EventingState, SandboxRuntimeState } from "./turn-context";
 import { createSharedRigSetupCoordinator } from "./sandbox-shared-preparation";
+import { createSandboxSetupReplayGuard, sandboxSetupFailure } from "./sandbox-setup-agent-failure";
 import { sandboxStartupPhaseObserver } from "./sandbox-startup-phase";
 import { errorMessage } from "@opengeni/contracts/values";
 
@@ -1145,6 +1146,7 @@ export async function bindLazySandboxProvisioner(
             publish: eventing.publish,
             publishInBackground: eventing.publishInBackground,
           });
+          const setupReplayGuard = createSandboxSetupReplayGuard();
           try {
             // Post-provision prerequisites: independent authorities and storage.
             // Join every started operation before failure/disposal; in particular
@@ -1192,6 +1194,10 @@ export async function bindLazySandboxProvisioner(
                   input.sessionId,
                 )
               : provisioned.established.session;
+            // Every setup write runs as a command through this fence, which
+            // lets the attempt writer drain settle the setup admission even
+            // when the setup itself never returns (an unanswered agent).
+            const setupCommandFence = eventing.toolCancellationFenceRef.current;
             await runWorkspaceMutationForSandbox(
               provisioned,
               "lazyOwnedSandboxSetup",
@@ -1225,30 +1231,30 @@ export async function bindLazySandboxProvisioner(
                             : {}),
                         }
                       : {}),
-                    ...(eventing.toolCancellationFenceRef.current
+                    ...(setupCommandFence
                       ? {
                           commandRunner:
-                            eventing.toolCancellationFenceRef.current.runSandboxCommand.bind(
-                              eventing.toolCancellationFenceRef.current,
-                            ),
+                            setupCommandFence.runSandboxCommand.bind(setupCommandFence),
                         }
                       : {}),
                     ...(sandboxState.sandboxGroupId && sandboxState.sandboxHolderId
                       ? {
-                          coordinateSharedRigSetup: createSharedRigSetupCoordinator({
-                            db,
-                            accountId: input.accountId,
-                            workspaceId: input.workspaceId,
-                            sandboxGroupId: sandboxState.sandboxGroupId,
-                            attemptId: input.attemptId,
-                            holderId: sandboxState.sandboxHolderId,
-                            sandbox: provisioned,
-                            ...(runtimeCancellationSignal
-                              ? { signal: runtimeCancellationSignal }
-                              : {}),
-                            observe: (measurement) =>
-                              recordSandboxSharedPreparation(observability, measurement),
-                          }),
+                          coordinateSharedRigSetup: setupReplayGuard.trackRigSetup(
+                            createSharedRigSetupCoordinator({
+                              db,
+                              accountId: input.accountId,
+                              workspaceId: input.workspaceId,
+                              sandboxGroupId: sandboxState.sandboxGroupId,
+                              attemptId: input.attemptId,
+                              holderId: sandboxState.sandboxHolderId,
+                              sandbox: provisioned,
+                              ...(runtimeCancellationSignal
+                                ? { signal: runtimeCancellationSignal }
+                                : {}),
+                              observe: (measurement) =>
+                                recordSandboxSharedPreparation(observability, measurement),
+                            }),
+                          ),
                         }
                       : {}),
                   },
@@ -1259,6 +1265,7 @@ export async function bindLazySandboxProvisioner(
                   measurement.durationSeconds * 1_000;
                 sandboxState.firstModelPreparationNestedSandboxPhases.push(measurement);
               },
+              setupCommandFence ? { commandFence: setupCommandFence } : {},
             );
             await attachCodemodeTokenRenewal(
               provisioned.established.session as CodemodeTokenWriterSession,
@@ -1283,6 +1290,11 @@ export async function bindLazySandboxProvisioner(
             }
             await toolResultSpill.materializeDeferred();
             throwIfTurnOperationCancelled(sandboxResumeSignal);
+          } catch (error) {
+            // Nothing the model asked for has reached the box yet, and every
+            // setup step above is idempotent, so an unanswered agent lets the
+            // same turn retry instead of failing it.
+            throw sandboxSetupFailure(setupReplayGuard, error);
           } finally {
             await measure.flush();
           }

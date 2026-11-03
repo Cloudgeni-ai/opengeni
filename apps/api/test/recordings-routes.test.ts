@@ -734,13 +734,14 @@ describe("recording routes", () => {
         })
       ).status,
     ).toBe(400);
+    // A dictation may name its model, but not how speakers are told apart.
     expect(
       (
         await scope.owner.call("POST", "/recordings", {
           recordingId: crypto.randomUUID(),
           purpose: "dictation",
           tracks: mic,
-          transcription: { providerId: "elevenlabs", model: "scribe_v2" },
+          transcription: { providerId: "elevenlabs", model: "scribe_v2", diarizer: "ours" },
         })
       ).status,
     ).toBe(400);
@@ -907,6 +908,81 @@ describe("recording routes", () => {
       language: "en",
       keyterms: ["Kubernetes"],
     });
+  });
+
+  test("a dictation that names its provider and model is heard by exactly that one", async () => {
+    let ready = ["openai"];
+    const transcription: TranscriptionService = {
+      limits: () => ({ maxDurationSeconds: 600, maxSizeBytes: 25_000_000, acceptedMimeTypes: [] }),
+      available: () => true,
+      availableProviderIds: async () => ready,
+      // The workspace's voice input would pick another provider.
+      selectProvider: () => "elevenlabs",
+      transcribe: async () => {
+        throw new Error("the worker transcribes dictations");
+      },
+    };
+    const scope = await fixture({ transcription });
+    await shared.admin`
+      update workspaces set settings = settings || '{"voiceInput":{"enabled":true}}'::jsonb
+      where id = ${scope.workspaceId}`;
+    const mic = [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm;codecs=opus" }];
+    const create = (transcriptionRequest: Record<string, unknown>) =>
+      scope.owner.call("POST", "/recordings", {
+        recordingId: crypto.randomUUID(),
+        purpose: "dictation",
+        tracks: mic,
+        transcription: transcriptionRequest,
+      });
+    // A model the deployment doesn't offer for dictation, or one without its provider.
+    expect((await create({ providerId: "openai", model: "no-such-model" })).status).toBe(400);
+    expect((await create({ model: "gpt-transcribe" })).status).toBe(400);
+    // Speakers and the like are still the workspace's to choose.
+    expect((await create({ providerId: "openai", speakers: 2 })).status).toBe(400);
+    const finalize = async (transcriptionRequest: Record<string, unknown>) => {
+      const created = await create(transcriptionRequest);
+      expect(created.status).toBe(201);
+      const recordingId = created.body.id as string;
+      const bytes = new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 1, 2, 3]);
+      const uploads = await scope.owner.call("POST", `/recordings/${recordingId}/uploads`, {
+        trackNumber: 0,
+        chunks: [
+          {
+            chunkNumber: 0,
+            byteLength: bytes.byteLength,
+            sha256: sha(bytes),
+            startMilliseconds: 0,
+            durationMilliseconds: 2_000,
+          },
+        ],
+      });
+      scope.objects.set(new URL(uploads.body.uploads[0].url).pathname.slice(1), bytes);
+      await scope.owner.call("POST", `/recordings/${recordingId}/chunks/complete`, {
+        trackNumber: 0,
+        chunkNumbers: [0],
+      });
+      const finalized = await scope.owner.call("POST", `/recordings/${recordingId}/finalize`, {
+        tracks: [{ trackNumber: 0, chunkCount: 1 }],
+      });
+      const versions = await shared.admin`
+        select provider_id, model, options from recording_transcript_versions
+        where recording_id = ${recordingId}`;
+      return { status: finalized.status, versions };
+    };
+    const named = await finalize({ providerId: "openai", model: "gpt-transcribe", language: "en" });
+    expect(named.status).toBe(200);
+    expect(named.versions).toEqual([
+      { provider_id: "openai", model: "gpt-transcribe", options: { language: "en" } },
+    ]);
+    // Naming only the provider takes its dictation model.
+    expect((await finalize({ providerId: "openai" })).versions).toMatchObject([
+      { provider_id: "openai", model: "gpt-transcribe" },
+    ]);
+    // Its provider isn't ready: refused rather than heard by another.
+    ready = [];
+    const refused = await finalize({ providerId: "openai", model: "gpt-transcribe" });
+    expect(refused.status).toBe(503);
+    expect(refused.versions).toEqual([]);
   });
 
   test("the workspace's meeting language, unless a recording names one or asks to detect", async () => {

@@ -792,12 +792,12 @@ async function assertAttemptAuthority(
         )
       FOR NO KEY UPDATE OF session
     ), locked_turn AS MATERIALIZED (
+      -- The exact live attempt and the session's selected tool and permission
+      -- are the authority. A run without a person (an owner-less scheduled
+      -- task) writes the workspace's artifacts like any other run; the
+      -- audience layer gives it no Only me owner.
       SELECT turn.id, turn.account_id, turn.workspace_id, turn.session_id,
-        turn.active_attempt_id, turn.execution_generation,
-        coalesce(
-          turn.initiating_human_subject_id,
-          case when turn.initiator_kind = 'subject' then turn.initiator_subject_id end
-        ) as initiating_human_subject_id
+        turn.active_attempt_id, turn.execution_generation
       FROM session_turns turn
       JOIN locked_session session
         ON session.id = turn.session_id
@@ -807,10 +807,6 @@ async function assertAttemptAuthority(
         AND turn.active_attempt_id = ${input.sourceAttemptId}::uuid
         AND turn.execution_generation = ${input.sourceExecutionGeneration}
         AND turn.status IN ('running', 'requires_action', 'recovering', 'waiting_capacity')
-        AND length(btrim(coalesce(
-          turn.initiating_human_subject_id,
-          case when turn.initiator_kind = 'subject' then turn.initiator_subject_id end
-        ))) BETWEEN 1 AND 1024
       FOR UPDATE OF turn
     ), locked_attempt AS MATERIALIZED (
       SELECT attempt.id, attempt.account_id, attempt.workspace_id,

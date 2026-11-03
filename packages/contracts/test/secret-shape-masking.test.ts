@@ -190,6 +190,18 @@ describe("deep masking and idempotency", () => {
       "github-token",
     ]);
   });
+
+  test("a token in a tool-name position is still masked and captured", () => {
+    const token = `ghp_${repeat("Ab1", 12)}`;
+    const value = [
+      { type: "function_call", callId: "c", name: token, arguments: "{}" },
+      { type: "tool_search_output", tools: [{ type: "function", name: token }] },
+    ];
+    const masked = maskSecretShapes(value) as Array<Record<string, any>>;
+    expect(masked[0]!.name).toBe("[masked github token]");
+    expect(masked[1]!.tools[0].name).toBe("[masked github token]");
+    expect(collectSecretShapes(value).map((match) => match.kind)).toEqual(["github-token"]);
+  });
 });
 
 describe("attempt memory capture", () => {
@@ -360,6 +372,33 @@ describe("review regressions", () => {
     expect(kinds(`{"url":"postgres:\\/\\/user:${FAKE_PASSWORD}@host\\/db"}`)).toEqual([
       ["url-password", FAKE_PASSWORD],
     ]);
+  });
+
+  test("masking JSON-escaped text keeps it valid JSON", () => {
+    const signature = `FAKE${repeat("0a1b", 8)}%3D`;
+    const sasUrl = `https://acct.blob.core.windows.net/c/f?sv=2022-11-02&sig=${signature}`;
+    const connection = `Server=db;Database=app;Password=${FAKE_PASSWORD}`;
+    const value = { tabs: [{ url: sasUrl, title: "Report" }], quoted: `"${sasUrl}"`, connection };
+    // Once and twice encoded: a JSON string holding a JSON document.
+    const once = JSON.stringify(value);
+    const twice = JSON.stringify({ output: once });
+    for (const text of [once, twice]) {
+      const masked = maskSecretShapesInText(text);
+      expect(masked).not.toContain(signature);
+      expect(masked).not.toContain(FAKE_PASSWORD);
+      expect(() => JSON.parse(masked)).not.toThrow();
+    }
+    const parsed = JSON.parse(maskSecretShapesInText(once)) as typeof value;
+    expect(parsed.tabs[0]!.url).toBe(
+      "https://acct.blob.core.windows.net/c/f?sv=2022-11-02&sig=[masked azure sas signature]",
+    );
+    expect(parsed.quoted).toBe(
+      '"https://acct.blob.core.windows.net/c/f?sv=2022-11-02&sig=[masked azure sas signature]"',
+    );
+    const inner = JSON.parse(
+      (JSON.parse(maskSecretShapesInText(twice)) as { output: string }).output,
+    ) as typeof value;
+    expect(inner.quoted).toContain("sig=[masked azure sas signature]");
   });
 
   test("the rest of a key whose BEGIN line was in an earlier chunk", () => {

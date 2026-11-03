@@ -1618,6 +1618,44 @@ existing route-specific projection: the verified Codex route accepts
 `additional_tools`; other Responses routes use text plus native exact-name loading.
 No new live-provider compatibility claim is made.
 
+**Tool names in history.** Providers validate tool names in the request's
+tools and in every history item that carries definitions (`tool_search_output`,
+`additional_tools`) or names a tool (a Responses `function_call`, a Chat tool
+call, a Claude `tool_use`); one invalid name fails the whole request. The one
+format every provider and gateway accepts is `^[a-zA-Z0-9_-]{1,64}$`, and
+top-level names already use it, but stored history can hold a name that does
+not: a known secret value inside a tool name was masked into a reference
+before tool identities were exempt from masking
+([Secrets](secrets.md#matching)), and an agent can name a tool in its
+published `server.tool` form. One provider-neutral step,
+`withProviderValidToolNames` (`provider-tool-names.ts`), gives each such name
+one valid name everywhere in the request, and a request tool's own name is
+never rewritten. The lazy tool transport applies it against the complete
+authorized catalog, deferred tools included: a flat name becomes the one tool
+it denotes, so a later call still binds to it, when exactly one does (dotted
+`server.tool`, a published short name, or the one tool that fits where a
+masking label stands for at least eight characters) and any stored
+definition of it has that tool's parameters. Every other name, namespaces and
+the names inside a namespace, and every name when the catalog could not be
+prepared, gets a stable alias with a digest of the whole name, so distinct
+names never collide. `projectHistoryForProvider` applies the same step with
+only the request's tools before the Responses and Claude Messages wire
+projections, so it aliases and never guesses. Chat Completions routes and
+their gateways keep their own treatment: a call whose name is not
+`^[a-zA-Z0-9_-]{1,64}$` replays as a historical fact rather than as a native
+call to a tool the request never declares. A definition that comes to repeat
+an earlier name in the same list is dropped. Valid names and unaffected items keep their identity, and a
+rewritten item keeps its identity across requests while the mapping holds, so
+cached prefixes do not change. Stored history is not rewritten; it is repaired
+on every replay, so Retry works on a chat that already failed. Names inside
+text (a disclosure's or search result's text) are not rewritten.
+
+Provider 400 invalid-request answers are counted, for monitoring only, as
+`opengeni_model_invalid_requests_total{provider,path,code}` with the request
+path the provider names and every index collapsed (`input[].tools[].name`).
+A new path is a new class of malformed request; the Runtime Failures
+dashboard shows it. Nothing is blocked or retried because of it.
+
 Static prompt/control-schema changes at upgrade invalidate the old cached prefix
 once for existing sessions; this is not a zero-cache-miss deployment. After that
 upgrade, catalogs/results never rewrite earlier items or grow the tool block.
