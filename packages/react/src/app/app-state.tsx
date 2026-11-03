@@ -263,17 +263,22 @@ function announcePersonalGitHubReconnect(
   state.shownFor.current = key;
   const login =
     typeof connection.metadata.githubLogin === "string" && connection.metadata.githubLogin
-      ? `@${connection.metadata.githubLogin}`
-      : "you";
+      ? connection.metadata.githubLogin
+      : null;
+  showPersonalGitHubReconnectToast(login, () => state.reconnect.current(workspaceId));
+}
+
+/** The lasting "Reconnect your GitHub" toast with its one action. */
+export function showPersonalGitHubReconnectToast(
+  githubLogin: string | null,
+  onReconnect: () => void,
+): void {
   toast.warning("Reconnect your GitHub", {
     id: PERSONAL_GITHUB_STATUS_TOAST_ID,
-    description: `Opengeni can't work as ${login} until you reconnect.`,
+    description: `Opengeni can't work as ${githubLogin ? `@${githubLogin}` : "you"} until you reconnect.`,
     duration: Infinity,
     closeButton: true,
-    action: {
-      label: "Reconnect",
-      onClick: () => state.reconnect.current(workspaceId),
-    },
+    action: { label: "Reconnect", onClick: onReconnect },
   });
 }
 
