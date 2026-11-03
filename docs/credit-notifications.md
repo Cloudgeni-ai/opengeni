@@ -63,8 +63,10 @@ members, external actors, workspace-only admins and organization API keys are no
 email recipients. Email requires a verified real address; passkey-only people
 still receive an inbox projection. Removed/suspended/demoted recipients immediately
 lose the inbox projection, and claims recheck live membership and email. Dispatch
-holds the existing organization membership fence through a bounded provider call;
-revocation committed before that fence prevents sending. No workspace or chat
+holds the existing organization membership fence through dispatch admission and
+up to five seconds waiting for the provider; revocation committed before that
+fence prevents sending. The timeout bounds waiting, not transport lifetime: an
+already-started send can finish afterward. No workspace or chat
 authority is inferred. Each message has one **Manage billing** action, using the
 recipient's same-organization Personal workspace when available.
 
@@ -74,6 +76,7 @@ provider namespace. A lost reply, timeout, crash or lost database acknowledgemen
 does not manufacture a success or a fresh key. Stale claim acknowledgements cannot
 settle a newer claim. Failed/unknown sends retry after five minutes, within the
 provider's declared retention (capped at 24 hours, with a 30-second safety margin).
+The deadline is rechecked immediately before retry dispatch, not just when claimed.
 Expired ambiguity stays durably recorded and is **not automatically resent**.
 Changed provider namespace, sender or email suppresses replay. A provider without
 idempotency retention receives at most the initial attempt. Exactly-once refers

@@ -44,6 +44,7 @@ CREATE TABLE billing_credit_notification_deliveries (
   lease_until timestamptz,
   next_attempt_at timestamptz NOT NULL DEFAULT now(),
   first_attempt_at timestamptz,
+  attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
   retry_before timestamptz,
   provider_scope text,
   message jsonb,

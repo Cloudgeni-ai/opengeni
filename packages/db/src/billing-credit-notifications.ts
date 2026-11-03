@@ -376,7 +376,7 @@ export async function claimBillingCreditNotification(
       lease_until=clock_timestamp()+interval '1 minute',email=${row.live_email},message=${JSON.stringify(message)}::jsonb,
       provider_scope=coalesce(provider_scope,${input.providerScope}),
       retry_before=coalesce(retry_before,clock_timestamp()+${Math.max(0, Math.min(86400, input.retentionSeconds))}*interval '1 second'),
-      first_attempt_at=coalesce(first_attempt_at,clock_timestamp()) where id=${row.id}::uuid`);
+      first_attempt_at=coalesce(first_attempt_at,clock_timestamp()),attempt_count=attempt_count+1 where id=${row.id}::uuid`);
     return {
       id: row.id,
       accountId: input.accountId,
@@ -388,8 +388,9 @@ export async function claimBillingCreditNotification(
   });
 }
 
-/** Hold the canonical membership fence through bounded dispatch. A revocation
- * committed before this fence prevents I/O; one after it follows the send. */
+/** Hold the canonical membership fence through dispatch admission and bounded
+ * waiting. A revocation committed before this fence prevents I/O; an admitted
+ * transport may still finish after the caller stops waiting. */
 export async function withBillingCreditDeliveryAuthority<T>(
   db: Database,
   claim: BillingCreditDeliveryClaim,
@@ -399,15 +400,26 @@ export async function withBillingCreditDeliveryAuthority<T>(
     await tx.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(${`organization-membership:${claim.accountId}`},0))`,
     );
-    const [valid] = await rawRows(
+    const [valid] = await rawRows<{ id: string; retry_allowed: boolean }>(
       tx,
-      sql`select d.id from billing_credit_notification_deliveries d
+      sql`select d.id,(d.attempt_count=1 or d.retry_before>clock_timestamp()+interval '30 seconds') as retry_allowed
+      from billing_credit_notification_deliveries d
       join billing_credit_notification_recipients r on r.account_id=d.account_id and r.subject_id=d.subject_id
       join auth_users u on r.subject_id='user:' || u.id
       where d.id=${claim.id}::uuid and d.claim_id=${claim.claimId}::uuid and d.status='sending'
         and d.lease_until>clock_timestamp() and u.email=${claim.email} and u.email_verified`,
     );
-    return valid ? send() : null;
+    if (!valid) return null;
+    if (!valid.retry_allowed) {
+      // A claimed retry may wait behind a membership operation or a busy pool.
+      // Preserve ambiguity rather than sending after the provider forgets its
+      // key. The caller's later settlement cannot replace this terminal fence.
+      await tx.execute(sql`update billing_credit_notification_deliveries set status='outcome_unknown',
+        lease_until=null,error_class='idempotency_window_expired'
+        where id=${claim.id}::uuid and claim_id=${claim.claimId}::uuid and status='sending'`);
+      return null;
+    }
+    return send();
   });
 }
 

@@ -298,6 +298,97 @@ test("revocation hides inbox and suppresses I/O even after durable claim", async
   expect(sent).toBe(false);
 });
 
+test("retry deadline is rechecked after claim and expired ambiguity survives settlement", async () => {
+  if (!client) return;
+  const a = await account();
+  await enqueue(a.accountId);
+  const first = (await claim(a.accountId))!;
+  await settleBillingCreditNotification(client.db, first, { status: "outcome_unknown" });
+  await fixture!
+    .admin`update billing_credit_notification_deliveries set next_attempt_at=now()-interval '1 minute',retry_before=clock_timestamp()+interval '31 seconds' where id=${first.id}`;
+  const retry = (await claim(a.accountId))!;
+  expect(retry).not.toBeNull();
+  // Simulate a delay after claim but within its one-minute lease.
+  await fixture!
+    .admin`update billing_credit_notification_deliveries set retry_before=clock_timestamp()-interval '1 second' where id=${retry.id}`;
+  let sends = 0;
+  expect(
+    await withBillingCreditDeliveryAuthority(client.db, retry, async () => ++sends),
+  ).toBeNull();
+  expect(sends).toBe(0);
+  await settleBillingCreditNotification(client.db, retry, { status: "suppressed" });
+  const [saved] = await fixture!
+    .admin`select status,error_class,attempt_count from billing_credit_notification_deliveries where id=${retry.id}`;
+  expect(saved).toMatchObject({
+    status: "outcome_unknown",
+    error_class: "idempotency_window_expired",
+    attempt_count: 2,
+  });
+  expect(await claim(a.accountId)).toBeNull();
+});
+
+test("non-idempotent transport can dispatch its initial claim but never a retry", async () => {
+  if (!client) return;
+  const a = await account();
+  await enqueue(a.accountId);
+  const initial = (await claimBillingCreditNotification(client.db, {
+    accountId: a.accountId,
+    sender: "test@example.test",
+    providerScope: "no-retention",
+    retentionSeconds: 0,
+    message,
+  }))!;
+  expect(initial).not.toBeNull();
+  let sends = 0;
+  expect(await withBillingCreditDeliveryAuthority(client.db, initial, async () => ++sends)).toBe(1);
+  await settleBillingCreditNotification(client.db, initial, { status: "outcome_unknown" });
+  await fixture!
+    .admin`update billing_credit_notification_deliveries set next_attempt_at=now()-interval '1 minute' where id=${initial.id}`;
+  expect(await claim(a.accountId)).toBeNull();
+  expect(sends).toBe(1);
+});
+
+test("caller transaction rollback removes the notification and its recipient obligations", async () => {
+  if (!client) return;
+  const a = await account();
+  const operationKey = crypto.randomUUID();
+  await expect(
+    client.db.transaction(async (tx) => {
+      await enqueueBillingCreditNotification(tx, {
+        accountId: a.accountId,
+        operationKey,
+        kind: "topup_success",
+        details: { availableBalanceMicros: 12_000_000, amountMicros: 12_000_000 },
+      });
+      throw new Error("rollback-charge-and-notice");
+    }),
+  ).rejects.toThrow("rollback-charge-and-notice");
+  expect(await listBillingCreditNotifications(client.db, a)).toEqual([]);
+});
+
+test("migration backfill projects existing memberships under the restricted migration owner", async () => {
+  if (!client || !fixture) return;
+  const a = await account();
+  const source = await Bun.file(
+    resolve(import.meta.dir, "../drizzle/1241_billing_credit_notifications.sql"),
+  ).text();
+  const start = source.indexOf("DO $backfill$");
+  const endMarker = "END $backfill$;";
+  const end = source.indexOf(endMarker, start);
+  expect(start).toBeGreaterThan(-1);
+  expect(end).toBeGreaterThan(start);
+  await fixture.admin`delete from billing_credit_notification_recipients where account_id=${a.accountId}`;
+  await fixture.admin.begin(async (tx) => {
+    await tx.unsafe(`SET LOCAL ROLE "${fixture!.ownerRole}"`);
+    const [role] = await tx`select rolsuper,rolbypassrls from pg_roles where rolname=current_user`;
+    expect(role).toMatchObject({ rolsuper: false, rolbypassrls: false });
+    await tx.unsafe(source.slice(start, end + endMarker.length));
+  });
+  const rows =
+    await fixture.admin`select subject_id from billing_credit_notification_recipients where account_id=${a.accountId}`;
+  expect(rows.map((r) => r.subject_id)).toEqual([a.subjectId]);
+});
+
 test("ordinary members receive nothing and a changed email cannot reuse a frozen message", async () => {
   if (!client) return;
   const a = await account();
