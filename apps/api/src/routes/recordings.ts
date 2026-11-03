@@ -1466,11 +1466,16 @@ export function registerRecordingRoutes(
     const actor = await actorFor(c, "sessions:read");
     const workspace = await getWorkspace(db, actor.workspaceId);
     const recordingSettings = resolveWorkspaceRecordingSettings(workspace?.settings);
-    const defaults = await meetingModelFor(deployment, recordingSettings.transcription, {
-      accountId: actor.accountId,
-      workspaceId: actor.workspaceId,
-      subjectId: actor.subjectId,
-    });
+    const defaults = await meetingModelFor(
+      deployment,
+      recordingSettings.transcription,
+      {
+        accountId: actor.accountId,
+        workspaceId: actor.workspaceId,
+        subjectId: actor.subjectId,
+      },
+      true,
+    );
     const pinned = deployment.pinned;
     const liveDefault = deployment.liveDefault;
     const offered = pinned

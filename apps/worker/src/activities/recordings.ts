@@ -1299,6 +1299,7 @@ export function createRecordingActivities(
         // retrying won't change the answer until the payer's credits do.
         if (error instanceof TranscriptionBillingRefusedError) return await fail(error.code, error);
         if (error instanceof TranscriptionServiceError) {
+          if (error.subscriptionCode) return await fail(error.subscriptionCode, error);
           if (!error.retryable) return await fail(`voice_${error.code}`, error);
           throw ApplicationFailure.retryable(error.message, `voice_${error.code}`);
         }

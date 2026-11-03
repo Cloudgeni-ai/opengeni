@@ -7,6 +7,7 @@ import {
   type TranscriptionService,
 } from "@opengeni/core";
 import {
+  applyCreditLedgerEntry,
   createConnection,
   createDb,
   createOrganizationApiKey,
@@ -15,6 +16,7 @@ import {
   ensureExternalIdentity,
   getWorkspaceUsage,
   setWorkspaceAllowance,
+  withBillingOriginOverride,
   type DbClient,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -246,6 +248,8 @@ describe("recording routes", () => {
   test("embedded recordings skip a saved subscription default and refuse an explicit subscription", async () => {
     const scope = await fixture({
       settings: {
+        billingMode: "stripe",
+        subscriptionPlansEnabled: true,
         codexSubscriptionEnabled: true,
         voiceInputProviderOrder: "codex-subscription,openai",
         recordingWordAlignment: true,
@@ -256,6 +260,24 @@ describe("recording routes", () => {
     await shared.admin`update workspaces set settings = settings ||
       '{"recordings":{"transcription":{"providerId":"codex-subscription","model":"chatgpt-dictation"}}}'::jsonb
       where id = ${scope.workspaceId}::uuid`;
+    await applyCreditLedgerEntry(db.db, {
+      accountId: scope.accountId,
+      amountMicros: 1_000_000,
+      type: "grant",
+      idempotencyKey: `recording-fallback:${scope.accountId}`,
+    });
+    for (const origin of ["api", "app"] as const) {
+      const catalog = await withBillingOriginOverride(origin, () =>
+        scope.owner.call("GET", "/recording-models"),
+      );
+      expect(catalog.status).toBe(200);
+      expect(catalog.body.default).toEqual({ providerId: "openai", model: "gpt-transcribe" });
+      expect(
+        catalog.body.models.find(
+          (model: { providerId: string }) => model.providerId === "codex-subscription",
+        ).available,
+      ).toBe(false);
+    }
     const id = await capturedRecording(scope);
     const result = await scope.owner.call("POST", `/recordings/${id}/finalize`, {
       tracks: [{ trackNumber: 0, chunkCount: 1 }],

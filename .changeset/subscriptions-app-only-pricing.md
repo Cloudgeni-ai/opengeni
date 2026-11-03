@@ -5,6 +5,7 @@
 "@opengeni/sdk": patch
 "@opengeni/worker-bundle": patch
 "@opengeni/runtime": patch
+"@opengeni/react": patch
 ---
 
 Refuse connected subscriptions for API-origin work, including scheduled and

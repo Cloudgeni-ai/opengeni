@@ -357,6 +357,36 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
           },
         });
         expect(providerCalls).toBe(callsBefore);
+        const rows =
+          await shared.admin`select state from session_realtime_connections where realtime_id = ${mode.id}::uuid`;
+        expect(rows.map((row) => row.state)).toEqual(["failed"]);
+        await upsertOrganizationPlan(client.db, { ...plan, status: "active" });
+        const [current] =
+          await shared.admin`select version, connection_epoch from session_realtime_modes where id = ${mode.id}::uuid`;
+        const retry = await withBillingOriginOverride("app", () =>
+          app.request(`${value.base}/${webrtc ? "webrtc" : "websocket"}`, {
+            method: "POST",
+            headers: value.headers,
+            body: JSON.stringify({
+              realtimeId: mode.id,
+              operationId: crypto.randomUUID(),
+              browserInstanceId: started.proof.browserInstanceId,
+              ownerKey: started.proof.ownerKey,
+              expectedVersion: current!.version,
+              expectedConnectionEpoch: current!.connection_epoch,
+              rotate: true,
+              ...(webrtc ? { sdp: "v=0\r\na=offer:fixture\r\n", version: "v3" } : {}),
+            }),
+          }),
+        );
+        // This fixture has no provider connection. Its corrected retry must
+        // pass admission and claim a new operation, not remain wedged in the old one.
+        expect(await retry.text()).not.toContain("REALTIME_CONNECTION_ACTIVE");
+        expect(
+          (
+            await shared.admin`select id from session_realtime_connections where realtime_id = ${mode.id}::uuid`
+          ).length,
+        ).toBe(2);
       }
     },
   );

@@ -1988,7 +1988,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         });
       } catch (error) {
         const refused = realtimeVoiceRefusalResponse(c, error);
-        if (!refused) throw error;
         await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
           scopedDb.transaction(async (tx) =>
             failSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
@@ -2003,6 +2002,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             }),
           ),
         ).catch(() => undefined);
+        if (!refused) throw error;
         return refused;
       }
       const broker =

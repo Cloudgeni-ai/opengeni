@@ -2514,6 +2514,7 @@ export const englishMessages = {
   "meetings.detailPage.aboutLessThan001": "Less than $0.01 for this {duration} meeting.",
   "meetings.detailPage.aboutThisTranscript": "About this transcript",
   "meetings.detailPage.addCredits": "Add credits",
+  "meetings.detailPage.upgradeToPro": "Upgrade to Pro",
   "meetings.detailPage.auto": "Auto",
   "meetings.detailPage.backToMeetings": "Back to Meetings",
   "meetings.detailPage.canTLoadThePreview": "Can't show the live text right now",
@@ -2935,6 +2936,8 @@ export const englishMessages = {
     "The credit allowance is used up for now. An admin can raise it, or transcribe with a model that doesn't use credits.",
   "meetings.recordings.errorMonthlyCostLimit":
     "This organization has reached its monthly spending limit. An admin can raise it, or transcribe with a model that doesn't use credits.",
+  "meetings.recordings.errorSubscriptionApiUnavailable":
+    "Connected subscriptions aren't available through the API. Choose a credit-billed model.",
   "meetings.recordings.errorPolicyBlocked":
     "This organization's policy doesn't allow this model. Try another model.",
   "meetings.recordings.errorTimedOut":
