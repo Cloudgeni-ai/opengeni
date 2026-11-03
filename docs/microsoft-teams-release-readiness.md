@@ -158,6 +158,9 @@ With team scope the manifest also declares `supportsChannelFeatures: "tier1"`,
 which the Teams admin center requires for manifest 1.25 team-scope uploads. It
 only allows the app to be added to shared and private channels;
 `OPENGENI_TEAMS_BOT_ALLOWED_CHANNEL_IDS` still decides which channels are served.
+Approving a private or shared channel puts what its members post to Opengeni
+in a chat visible to the connected workspace, so approve only channels whose
+members may share with that workspace.
 `OPENGENI_TEAMS_APP_CONVERSATION_CONTEXT=true` adds
 [conversation context](#conversation-context): `webApplicationInfo` with the bot
 ID and the resource-specific consent (RSC) application permissions

@@ -303,7 +303,8 @@ test("a channel thread mention sees the unmentioned messages before it, and a fo
   await context("m2", 2, "The codeword is HERON");
   // Recorded twice (Teams redelivery): kept once.
   await context("m2", 2, "The codeword is HERON");
-  await context("m3", 3, "@Opengeni what is the codeword?", true);
+  // Recorded unmarked, as the webhook does; the drain marks it once accepted.
+  await context("m3", 3, "@Opengeni what is the codeword?");
   // Posted after the mention: never part of its context.
   await context("m4", 4, "Later message");
   await enqueueTeamsMessage(client.db, f.i, mention("m3", 3, "what is the codeword?"));
@@ -319,9 +320,12 @@ test("a channel thread mention sees the unmentioned messages before it, and a fo
   expect(first!.model_context?.match(/The codeword is HERON/g)).toHaveLength(1);
   expect(first!.model_context).not.toContain("Later message");
   expect(first!.model_context).not.toContain("what is the codeword?");
+  const [marked] =
+    await shared.admin`select mentioned from teams_bot_context_messages where workspace_id=${f.i.workspace_id} and message_id='m3'`;
+  expect(marked!.mentioned).toBe(true);
 
   await context("m5", 5, "Actually it changed to EGRET");
-  await context("m6", 6, "@Opengeni and now?", true);
+  await context("m6", 6, "@Opengeni and now?");
   await enqueueTeamsMessage(client.db, f.i, mention("m6", 6, "and now?"));
   await f.tick();
   const [, second] = await userMessages(route!.session_id);

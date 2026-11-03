@@ -409,10 +409,12 @@ export function teamsContextRevision(raw: unknown): TeamsContextRevision | null 
   if (a.type === "messageDelete")
     return !eventType || eventType === "softDeleteMessage" ? { ...base, edit: null } : null;
   if (eventType && eventType !== "editMessage") return null;
+  // An edit without its new text says nothing about the content.
+  if (a.text === undefined) return null;
   return {
     ...base,
     edit: {
-      text: teamsPlainText(a.text ?? "").slice(0, TEAMS_CONTEXT_MESSAGE_MAX_CHARS),
+      text: teamsPlainText(a.text).slice(0, TEAMS_CONTEXT_MESSAGE_MAX_CHARS),
       hasAttachments: (a.attachments ?? []).some(
         (value) =>
           !(

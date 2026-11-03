@@ -420,13 +420,6 @@ async function runtime(deps: ApiRouteDeps): Promise<App> {
           eventId: `${m.identity}:${i.generation}`,
           payload: m,
         });
-        if (recorded) {
-          try {
-            await markTeamsContextMention(deps, i, m);
-          } catch {
-            observed("context_mention_mark_failed");
-          }
-        }
         return { status: 200 };
       };
       return app;
@@ -811,6 +804,16 @@ async function drainRoute(
         ]);
       await settleTeamsMessage(deps.db, i, r, inbound.event_id, null);
       r.session_bound = true;
+      // The chat has now seen this mention and its context: a later mention
+      // that continues the chat reads back only to here. Refused mentions
+      // stay ordinary context.
+      const { conversationId, eventId } = inbound.payload as Record<string, unknown>;
+      if (typeof conversationId === "string" && typeof eventId === "string")
+        await markTeamsContextMention(deps, i, { conversationId, eventId }).catch(() =>
+          deps.observability?.info("Teams authenticated activity outcome", {
+            reason: "context_mention_mark_failed",
+          }),
+        );
     } catch (error) {
       if (error instanceof HTTPException && error.status >= 400 && error.status < 500) {
         const noticeKind =

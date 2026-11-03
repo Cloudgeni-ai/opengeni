@@ -198,6 +198,20 @@ describe("Teams context messages", () => {
       ),
     ).toBeNull();
     expect(teamsContextRevision(channelActivity())).toBeNull();
+    // An edit without its new text changes nothing.
+    expect(
+      teamsContextRevision(
+        channelActivity({
+          type: "messageUpdate",
+          text: undefined,
+          channelData: {
+            tenant: { id: tenant },
+            channel: { id: channel },
+            eventType: "editMessage",
+          },
+        }),
+      ),
+    ).toBeNull();
     expect(
       teamsContextRevision(
         channelActivity({
