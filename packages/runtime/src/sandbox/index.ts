@@ -198,6 +198,11 @@ export {
   type ProviderSandboxFailureKind,
 } from "./provider-errors";
 export {
+  isSandboxProviderCapacityError,
+  isSandboxProviderError,
+  loadE2BServiceBusyError,
+} from "./provider-capacity";
+export {
   WORKSPACE_ARCHIVE_DESCRIPTOR_VERSION,
   WorkspaceArchiveIntegrityError,
   captureVerifiedWorkspaceArchive,
