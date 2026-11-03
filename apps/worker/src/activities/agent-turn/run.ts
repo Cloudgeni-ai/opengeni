@@ -291,6 +291,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       personalGitHubCredentials,
       startVideoGenerationWorkflow,
       startSessionTitleWorkflow,
+      startRigProviderImageRefresh,
     } = resolvedServices;
     const activityContext = currentActivityContext();
     const cancellationSignal = activityContext?.cancellationSignal;
@@ -769,6 +770,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnExecutionPolicy,
             chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
             requiredGeneratedVideoFiles,
+            startRigProviderImageRefresh: startRigProviderImageRefresh ?? null,
           });
           if ("exit" in governance) return governance.exit;
           await assertTurnModelConnection(db, providerTurn, {
