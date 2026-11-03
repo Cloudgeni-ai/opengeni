@@ -378,7 +378,9 @@ function SessionScreenBody({
         items={items}
         events={controller.events}
         status={status}
-        pause={timelineLivePause(queue.effectiveControl)}
+        pause={timelineLivePause(
+          queue.effectiveControl ?? controller.session.session?.effectiveControl,
+        )}
         emptyState={
           empty && failed ? (
             <LoadFailure

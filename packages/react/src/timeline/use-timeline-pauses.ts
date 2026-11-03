@@ -7,6 +7,9 @@ const OBSERVED_PAUSE_LIMIT = 20;
 
 type LivePauseHistory = {
   sessionId: string | null;
+  /** The live pause as last rendered; undefined while it is unknown. */
+  live: boolean | undefined;
+  /** The last known pause state: a brief unknown does not forget a pause. */
   paused: boolean | undefined;
   /** When the pause in force began, as best known. */
   since: string | null;
@@ -26,15 +29,18 @@ function nextHistory(
   if (!previous || previous.sessionId !== sessionId) {
     return {
       sessionId,
+      live: paused,
       paused,
       since: paused ? (since ?? now) : null,
       resumedAt: null,
       observed: [],
     };
   }
+  if (paused === undefined) return { ...previous, live: paused };
   if (previous.paused === true && paused === false) {
     return {
       ...previous,
+      live: paused,
       paused,
       since: null,
       resumedAt: now,
@@ -44,9 +50,9 @@ function nextHistory(
     };
   }
   if (paused === true && previous.paused !== true) {
-    return { ...previous, paused, since: since ?? now, resumedAt: null };
+    return { ...previous, live: paused, paused, since: since ?? now, resumedAt: null };
   }
-  return { ...previous, paused };
+  return { ...previous, live: paused, paused };
 }
 
 /**
@@ -68,11 +74,13 @@ export function useTimelinePauses(
   const sessionId = events?.[0]?.sessionId ?? null;
   const [stored, setStored] = useState<LivePauseHistory | null>(null);
   let history = stored;
-  if (!history || history.sessionId !== sessionId || history.paused !== paused) {
+  if (!history || history.sessionId !== sessionId || history.live !== paused) {
     // Derived during render so the first render after a flip is already right.
     history = nextHistory(stored, sessionId, paused, since, new Date().toISOString());
     setStored(history);
   }
+  // While the control is briefly unknown, the last known pause stays in force.
+  const livePaused = paused ?? (history.paused === true ? true : undefined);
   const historySince = history.since;
   const historyResumedAt = history.resumedAt;
   const observed = history.observed;
@@ -82,16 +90,16 @@ export function useTimelinePauses(
       enabled
         ? timelinePauseSpans(
             events ?? [],
-            paused === undefined
+            livePaused === undefined
               ? undefined
               : {
-                  paused,
+                  paused: livePaused,
                   since: since ?? historySince,
                   resumedAt: resumedAt ?? historyResumedAt,
                 },
             observed,
           )
         : [],
-    [enabled, events, paused, since, historySince, resumedAt, historyResumedAt, observed],
+    [enabled, events, livePaused, since, historySince, resumedAt, historyResumedAt, observed],
   );
 }

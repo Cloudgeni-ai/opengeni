@@ -214,6 +214,12 @@ describe("paused work", () => {
     ];
     // Cancel holds the control paused while the turn stops; it is not a pause.
     expect(timelinePauseSpans(events, { paused: true, since: at(50) })).toEqual([]);
+    // A parent's Cancel reaches a sub-chat as its status alone.
+    const cancelledByParent = [
+      ...running(),
+      event("session.status.changed", { status: "cancelled" }, 50, null),
+    ];
+    expect(timelinePauseSpans(cancelledByParent, { paused: true, since: at(50) })).toEqual([]);
   });
 
   test("a capacity wait before a pause is not work either", () => {
@@ -242,6 +248,14 @@ describe("paused work", () => {
       { startedAt: at(61), endedAt: at(121) },
     ]);
     expect(spans).toEqual([{ startedAt: at(61), endedAt: at(121) }]);
+    // A live sighting of a pause the events also record counts once.
+    expect(
+      timelinePauseSpans(
+        [...pausedDirectly(), event("session.control.resumed", { revision: 3 }, 221, null)],
+        { paused: false },
+        [{ startedAt: at(125), endedAt: at(240) }],
+      ),
+    ).toEqual([{ startedAt: at(121), endedAt: at(221) }]);
     const settled = [...running(), event("turn.completed", { output: "" }, 181)];
     const groups = groupTimeline(englishText, buildTimeline(englishText, settled), {
       readableTurns: true,
@@ -328,6 +342,36 @@ describe("MessageTimeline", () => {
       expect(status?.getAttribute("data-og-exchange-status")).toBe("working");
       // Worked 1s to 61s, then paused until this view saw the resume.
       expect(status?.textContent).toBe("Working · 1m");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a pause survives the control briefly being unknown", async () => {
+    const events = running();
+    const view = await renderComponent(
+      <MessageTimeline
+        events={events}
+        turnSummary={{ rolling: true }}
+        pause={{ paused: true, since: at(61) }}
+      />,
+    );
+    try {
+      await flush(50);
+      await view.rerender(<MessageTimeline events={events} turnSummary={{ rolling: true }} />);
+      await flush(50);
+      const status = () => view.container.querySelector("[data-og-exchange-status]");
+      expect(status()?.textContent).toBe("Paused · 1m");
+      await view.rerender(
+        <MessageTimeline
+          events={events}
+          turnSummary={{ rolling: true }}
+          pause={{ paused: false }}
+        />,
+      );
+      await flush(50);
+      expect(status()?.getAttribute("data-og-exchange-status")).toBe("working");
+      expect(status()?.textContent).toBe("Working · 1m");
     } finally {
       await view.unmount();
     }

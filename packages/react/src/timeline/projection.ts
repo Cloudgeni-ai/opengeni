@@ -2575,7 +2575,11 @@ export function timelinePauseSpans(
   let cancelling = false;
   for (const event of relevant) {
     const payload = asRecord(event.payload);
-    if (event.type === "session.control.paused" && payload.terminal === true) {
+    if (
+      (event.type === "session.control.paused" && payload.terminal === true) ||
+      // A parent's Cancel reaches its sub-chats as their status alone.
+      (event.type === "session.status.changed" && payload.status === "cancelled")
+    ) {
       cancelling = true;
       continue;
     }
@@ -2619,7 +2623,20 @@ export function timelinePauseSpans(
       spans.push(open);
     }
   }
-  for (const span of observed) if (span.endedAt) spans.push(span);
+  // A pause seen only through the live control, by the host's clock; skip it
+  // where the events record the same pause.
+  const recorded = [...spans];
+  for (const span of observed) {
+    if (!span.endedAt) continue;
+    const start = Date.parse(span.startedAt);
+    const end = Date.parse(span.endedAt);
+    const overlaps = recorded.some(
+      (other) =>
+        Date.parse(other.startedAt) < end &&
+        (other.endedAt === undefined || Date.parse(other.endedAt) > start),
+    );
+    if (!overlaps) spans.push(span);
+  }
   return spans;
 }
 
