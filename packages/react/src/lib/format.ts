@@ -291,6 +291,9 @@ export function isConnectionAccountSubmissionError(error: unknown): boolean {
 /** `details.code` the API sets on a 422 for a model missing from the live catalog. */
 export const MODEL_UNAVAILABLE_DETAIL_CODE = "model_unavailable";
 
+/** `details.code` the API sets on a 422 for a model the workspace's policy refuses. */
+export const MODEL_POLICY_DETAIL_CODE = "model_policy";
+
 /**
  * The reason a refused new chat gives. The refusals a person can hit (a model
  * that isn't available to them, the workspace's model policy, a speed the
@@ -308,7 +311,7 @@ export function sessionCreateRefusalMessage(t: OpenGeniText, error: Error): stri
   if (detailCode === MODEL_UNAVAILABLE_DETAIL_CODE) {
     return t("lib.format.newChatModelUnavailable");
   }
-  if (detailCode === "model_policy") {
+  if (detailCode === MODEL_POLICY_DETAIL_CODE) {
     return error.details?.reason === "credits"
       ? t("lib.format.modelPolicyCredits")
       : t("lib.format.modelPolicyRefused");
@@ -453,6 +456,8 @@ export function composerSubmissionCanRetry(error: Error): boolean {
   return !(
     isComposerCreditRefusal(error) ||
     isModelUnavailableSubmissionError(error) ||
+    // The policy refuses the same model again until someone changes it.
+    (error instanceof OpenGeniApiError && error.details?.code === MODEL_POLICY_DETAIL_CODE) ||
     isConnectionAccountSubmissionError(error) ||
     isSessionUsageLimitSubmissionError(error) ||
     (error instanceof OpenGeniApiError && error.code === "allowance_exhausted") ||

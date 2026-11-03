@@ -117,6 +117,7 @@ import {
   composerSendBlockerNotice,
   getNewSessionSendBlocker,
   NewSessionCreateFailureNotice,
+  newSessionCreateFailureRecord,
   newSessionSendSignature,
   newSessionStartBlockerReason,
   visibleNewSessionCreateFailure,
@@ -1103,16 +1104,20 @@ function SessionsIndexRouteContent({
     workspaceId,
     signature: sendSignature,
   });
+  const currentSendSignature = useLatestCallback(() => sendSignature);
   // Any other refused start is shown under the composer instead of a toast:
   // the chat was never created, so nothing else would say why.
-  const noteCreateFailure = (error: Error): boolean => {
+  const noteCreateFailure = (error: Error, sentSignature: string): boolean => {
     // A payment refusal keeps its own dialog.
     if (isPaymentRequiredError(error)) return false;
-    setCreateFailure({
+    const failure = newSessionCreateFailureRecord({
       workspaceId,
-      signature: sendSignature,
+      sent: sentSignature,
+      current: currentSendSignature(),
       message: composerSubmissionErrorMessage(t, error),
     });
+    if (!failure) return false;
+    setCreateFailure(failure);
     return true;
   };
   const chooseCoveredModel = (id: string) => {
@@ -1311,6 +1316,13 @@ function SessionsIndexRouteContent({
       const model = policy?.model ?? persistedValue.model;
       const reasoningEffort = policy?.effort ?? persistedValue.reasoningEffort;
       const latencyMode = policy?.latency ?? persistedValue.latencyMode;
+      // What this request carries, so its refusal is matched to the composer.
+      const sentSignature = newSessionSendSignature({
+        text: persistedValue.text,
+        model,
+        reasoningEffort,
+        latencyMode,
+      });
       // One Send always refers to one visible snapshot, even if a sibling edit
       // forces a draft save or create retry while the user continues typing.
       const visibleSignature = stableJson(persistedValue);
@@ -1396,7 +1408,7 @@ function SessionsIndexRouteContent({
                         draftConflict ||
                         newSessionDraft.reportUnavailable(error) ||
                         noteCreditRefusal(error, request) ||
-                        noteCreateFailure(error)
+                        noteCreateFailure(error, sentSignature)
                       );
                     },
                   },
@@ -1479,7 +1491,7 @@ function SessionsIndexRouteContent({
                       draftConflict ||
                       newSessionDraft.reportUnavailable(error) ||
                       noteCreditRefusal(error, request) ||
-                      noteCreateFailure(error)
+                      noteCreateFailure(error, sentSignature)
                     );
                   },
                 },

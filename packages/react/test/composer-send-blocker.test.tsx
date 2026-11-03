@@ -9,6 +9,7 @@ import {
   getComposerSendBlocker,
   getNewSessionSendBlocker,
   NewSessionCreateFailureNotice,
+  newSessionCreateFailureRecord,
   newSessionSendSignature,
   newSessionStartBlockerReason,
   pickerPolicyRunnable,
@@ -21,7 +22,7 @@ import { coveredModelChoice } from "../src/app/lib/free-credit-gap";
 import { composerFallbackModel } from "../src/app/lib/model-access-onboarding";
 import { findPickerRow, projectPickerRows } from "../src/model-policy";
 import { createOpenGeniText } from "../src/messages/runtime";
-import { composerSubmissionErrorMessage } from "../src/lib/format";
+import { composerSubmissionCanRetry, composerSubmissionErrorMessage } from "../src/lib/format";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { registerDom } from "./render-hook";
 
@@ -482,5 +483,59 @@ describe("a refused new chat stays visible", () => {
         signature: sent,
       }),
     ).toBeNull();
+  });
+
+  test("a refusal that lands after the composer changed is never silent", () => {
+    // Typing (or a voice link's model) changed what the composer holds while
+    // the create was in flight: the line would be hidden at once, so the
+    // caller must keep its toast instead.
+    const typedMore = newSessionSendSignature({
+      text: "hello there",
+      model: "codex/gpt-6-luna",
+      reasoningEffort: "low",
+      latencyMode: "standard",
+    });
+    expect(
+      newSessionCreateFailureRecord({
+        workspaceId: "ws-1",
+        sent,
+        current: typedMore,
+        message: failure.message,
+      }),
+    ).toBeNull();
+    // Unchanged: the line is recorded and visible for exactly what was sent.
+    const record = newSessionCreateFailureRecord({
+      workspaceId: "ws-1",
+      sent,
+      current: sent,
+      message: failure.message,
+    });
+    expect(visibleNewSessionCreateFailure(record, { workspaceId: "ws-1", signature: sent })).toBe(
+      failure.message,
+    );
+  });
+
+  test("a model policy refusal offers no retry that would be refused again", () => {
+    for (const code of ["SESSION_CREATE_REJECTED", undefined]) {
+      const policy = new OpenGeniApiError(
+        422,
+        JSON.stringify(
+          code
+            ? {
+                code,
+                message: "model is not allowed",
+                details: { code: "model_policy", modelId: "codex/gpt-6-sol", reason: "model" },
+              }
+            : {
+                error: {
+                  code: "validation_failed",
+                  message: "model is not allowed",
+                  details: { code: "model_policy", modelId: "codex/gpt-6-sol", reason: "model" },
+                },
+              },
+        ),
+      );
+      expect(composerSubmissionCanRetry(policy)).toBe(false);
+    }
   });
 });

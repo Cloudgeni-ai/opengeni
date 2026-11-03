@@ -295,6 +295,24 @@ export function visibleNewSessionCreateFailure(
   return failure.signature === current.signature ? failure.message : null;
 }
 
+/**
+ * The refusal to keep under the composer, or null when the composer no longer
+ * holds what was sent (typing or a model change landed while the start was in
+ * flight). On null the caller keeps its toast, so a refused start is never
+ * silent.
+ */
+export function newSessionCreateFailureRecord(input: {
+  workspaceId: string;
+  /** newSessionSendSignature of the values the request actually carried. */
+  sent: string;
+  /** newSessionSendSignature of what the composer holds now. */
+  current: string;
+  message: string;
+}): NewSessionCreateFailure | null {
+  if (input.sent !== input.current) return null;
+  return { workspaceId: input.workspaceId, signature: input.sent, message: input.message };
+}
+
 /** The persistent line for a refused new chat. */
 export function NewSessionCreateFailureNotice({
   message,
