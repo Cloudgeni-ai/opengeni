@@ -1,15 +1,8 @@
 import { mkdtemp, open, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  recordingAudioContainer,
-  type RecordingAudioContainer,
-} from "@opengeni/contracts";
-import {
-  readTail,
-  stoppedBySignal,
-  trackRecordingProcesses,
-} from "./recording-usage";
+import { recordingAudioContainer, type RecordingAudioContainer } from "@opengeni/contracts";
+import { readTail, stoppedBySignal, trackRecordingProcesses } from "./recording-usage";
 
 export { recordingAudioContainer, type RecordingAudioContainer };
 
@@ -96,13 +89,10 @@ const OGG_MAGIC = [0x4f, 0x67, 0x67, 0x53] as const;
  * Ogg header may be.
  */
 function mayStartContainer(bytes: Uint8Array, inRun: boolean): boolean {
-  if (bytes.length >= CONTAINER_HEADER_BYTES || startsContainer(bytes))
-    return false;
+  if (bytes.length >= CONTAINER_HEADER_BYTES || startsContainer(bytes)) return false;
   if (!inRun) return true;
   const beginsLike = (magic: readonly number[]) =>
-    bytes.every(
-      (byte, index) => index >= magic.length || byte === magic[index],
-    );
+    bytes.every((byte, index) => index >= magic.length || byte === magic[index]);
   return beginsLike(EBML_MAGIC) || beginsLike(OGG_MAGIC);
 }
 
@@ -126,9 +116,7 @@ function startsRun(
   if (container !== "aac") return startsContainer(bytes);
   if (!previous) return true;
   const expected = previous.startMilliseconds + previous.durationMilliseconds;
-  return (
-    Math.abs(chunk.startMilliseconds - expected) > ADTS_CONTINUITY_MILLISECONDS
-  );
+  return Math.abs(chunk.startMilliseconds - expected) > ADTS_CONTINUITY_MILLISECONDS;
 }
 
 export type PreparedAudioFormat = {
@@ -152,16 +140,7 @@ export const ARCHIVAL_AUDIO_FORMAT: PreparedAudioFormat = {
   mimeType: "audio/mp4",
   muxer: "mp4",
   codec: "libopus",
-  encoderArgs: [
-    "-b:a",
-    "16k",
-    "-application",
-    "voip",
-    "-ac",
-    "1",
-    "-movflags",
-    "+faststart",
-  ],
+  encoderArgs: ["-b:a", "16k", "-application", "voip", "-ac", "1", "-movflags", "+faststart"],
 };
 
 /**
@@ -169,9 +148,7 @@ export const ARCHIVAL_AUDIO_FORMAT: PreparedAudioFormat = {
  * once and not kept (a dictation): the source's own codec, so the models
  * that take it as it is still can.
  */
-export function preparedAudioFormat(
-  container: RecordingAudioContainer,
-): PreparedAudioFormat {
+export function preparedAudioFormat(container: RecordingAudioContainer): PreparedAudioFormat {
   // MP4 (Safari) and ADTS (phones) sources are AAC; everything else is Opus.
   return container === "mp4" || container === "aac"
     ? {
@@ -195,8 +172,7 @@ export class RecordingAudioError extends Error {
   constructor(
     message: string,
     /** `interrupted`: ffmpeg was stopped from outside, so the step is retried. */
-    readonly code:
-      "invalid_audio" | "missing_chunk" | "ffmpeg_failed" | "interrupted",
+    readonly code: "invalid_audio" | "missing_chunk" | "ffmpeg_failed" | "interrupted",
   ) {
     super(message);
   }
@@ -224,30 +200,16 @@ async function runFfmpeg(
     abort();
   }, FFMPEG_TIMEOUT_MS);
   try {
-    const [code, stderr] = await Promise.all([
-      child.exited,
-      readTail(child.stderr, stderrBytes),
-    ]);
+    const [code, stderr] = await Promise.all([child.exited, readTail(child.stderr, stderrBytes)]);
     if (code === 0) return { stderr };
-    const detail =
-      stderr.trim().split("\n").slice(-3).join(" ").slice(0, 400) ||
-      `exit ${code}`;
+    const detail = stderr.trim().split("\n").slice(-3).join(" ").slice(0, 400) || `exit ${code}`;
     if (hung) {
-      throw new RecordingAudioError(
-        `ffmpeg hung preparing the audio: ${detail}`,
-        "ffmpeg_failed",
-      );
+      throw new RecordingAudioError(`ffmpeg hung preparing the audio: ${detail}`, "ffmpeg_failed");
     }
     if (signal?.aborted || stoppedBySignal(child, stderr)) {
-      throw new RecordingAudioError(
-        `ffmpeg was stopped: ${detail}`,
-        "interrupted",
-      );
+      throw new RecordingAudioError(`ffmpeg was stopped: ${detail}`, "interrupted");
     }
-    throw new RecordingAudioError(
-      `ffmpeg could not prepare the audio: ${detail}`,
-      "ffmpeg_failed",
-    );
+    throw new RecordingAudioError(`ffmpeg could not prepare the audio: ${detail}`, "ffmpeg_failed");
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener("abort", abort);
@@ -256,14 +218,10 @@ async function runFfmpeg(
 
 /** The last `time=` ffmpeg reports, which is the written file's length. */
 export function ffmpegReportedMilliseconds(stderr: string): number | null {
-  const matches = [
-    ...stderr.matchAll(/time=(\d+):(\d{2}):(\d{2}(?:\.\d+)?)/gu),
-  ];
+  const matches = [...stderr.matchAll(/time=(\d+):(\d{2}):(\d{2}(?:\.\d+)?)/gu)];
   const last = matches.at(-1);
   if (!last) return null;
-  return Math.round(
-    (Number(last[1]) * 3600 + Number(last[2]) * 60 + Number(last[3])) * 1_000,
-  );
+  return Math.round((Number(last[1]) * 3600 + Number(last[2]) * 60 + Number(last[3])) * 1_000);
 }
 
 export type PreparedRecordingAudio = {
@@ -293,20 +251,13 @@ export async function prepareRecordingTrackAudio(input: {
 }): Promise<PreparedRecordingAudio> {
   const container = recordingAudioContainer(input.mimeType);
   if (!container) {
-    throw new RecordingAudioError(
-      `Unsupported audio type ${input.mimeType}`,
-      "invalid_audio",
-    );
+    throw new RecordingAudioError(`Unsupported audio type ${input.mimeType}`, "invalid_audio");
   }
   const format = input.format ?? preparedAudioFormat(container);
-  const ordered = [...input.chunks].sort(
-    (left, right) => left.chunkNumber - right.chunkNumber,
-  );
+  const ordered = [...input.chunks].sort((left, right) => left.chunkNumber - right.chunkNumber);
   if (ordered.length === 0)
     throw new RecordingAudioError("The track has no audio", "invalid_audio");
-  const directory = await mkdtemp(
-    join(input.tempRoot ?? tmpdir(), "opengeni-recording-"),
-  );
+  const directory = await mkdtemp(join(input.tempRoot ?? tmpdir(), "opengeni-recording-"));
   try {
     const runs: Array<{ startMilliseconds: number; path: string }> = [];
     let handle: Awaited<ReturnType<typeof open>> | null = null;
@@ -318,10 +269,7 @@ export async function prepareRecordingTrackAudio(input: {
         input.signal?.throwIfAborted();
         const read = await input.readChunk(chunk);
         if (!read) {
-          throw new RecordingAudioError(
-            `Chunk ${chunk.chunkNumber} is missing`,
-            "missing_chunk",
-          );
+          throw new RecordingAudioError(`Chunk ${chunk.chunkNumber} is missing`, "missing_chunk");
         }
         // Held bytes start where their own chunk did.
         const first: RecordingAudioChunk = held?.chunk ?? chunk;
@@ -334,10 +282,7 @@ export async function prepareRecordingTrackAudio(input: {
           continue;
         }
         if (!handle || startsRun(container, bytes, previous, first)) {
-          const header =
-            container === "aac"
-              ? startsAdtsFrame(bytes)
-              : startsContainer(bytes);
+          const header = container === "aac" ? startsAdtsFrame(bytes) : startsContainer(bytes);
           if (!header) {
             throw new RecordingAudioError(
               container === "aac"
@@ -438,17 +383,11 @@ export async function prepareRecordingTrackAudio(input: {
     }
     input.onProgress?.();
     const size = (await stat(output)).size;
-    if (size === 0)
-      throw new RecordingAudioError(
-        "The prepared audio is empty",
-        "invalid_audio",
-      );
+    if (size === 0) throw new RecordingAudioError("The prepared audio is empty", "invalid_audio");
     const reported = ffmpegReportedMilliseconds(result.stderr);
     const lastChunk = ordered.at(-1)!;
     const declared =
-      lastChunk.startMilliseconds +
-      lastChunk.durationMilliseconds -
-      runs[0]!.startMilliseconds;
+      lastChunk.startMilliseconds + lastChunk.durationMilliseconds - runs[0]!.startMilliseconds;
     return {
       bytes: new Uint8Array(await readFile(output)),
       mimeType: format.mimeType,
@@ -523,10 +462,7 @@ export async function transcodeRecordingAudio(input: {
     );
     const bytes = new Uint8Array(await readFile(output));
     if (bytes.byteLength === 0) {
-      throw new RecordingAudioError(
-        "The transcoded audio is empty",
-        "invalid_audio",
-      );
+      throw new RecordingAudioError("The transcoded audio is empty", "invalid_audio");
     }
     return {
       bytes,
@@ -576,22 +512,12 @@ const PIECE_OUTPUT: Record<
       "wav",
     ],
   },
-  webm: {
-    extension: "webm",
-    mimeType: "audio/webm",
-    args: ["-c:a", "copy", "-f", "webm"],
-  },
-  mp4: {
-    extension: "m4a",
-    mimeType: "audio/mp4",
-    args: ["-c:a", "copy", "-f", "ipod"],
-  },
+  webm: { extension: "webm", mimeType: "audio/webm", args: ["-c:a", "copy", "-f", "webm"] },
+  mp4: { extension: "m4a", mimeType: "audio/mp4", args: ["-c:a", "copy", "-f", "ipod"] },
 };
 
 /** Bytes per second of the converted formats, to size pieces under a file limit. */
-export const RECORDING_PIECE_BYTES_PER_SECOND: Partial<
-  Record<RecordingPieceFormat, number>
-> = {
+export const RECORDING_PIECE_BYTES_PER_SECOND: Partial<Record<RecordingPieceFormat, number>> = {
   flac: 32_000,
   wav: 32_000,
 };
@@ -613,14 +539,9 @@ export function parseSilences(
   stderr: string,
   durationMilliseconds: number,
 ): Array<{ startMilliseconds: number; endMilliseconds: number }> {
-  const silences: Array<{
-    startMilliseconds: number;
-    endMilliseconds: number;
-  }> = [];
+  const silences: Array<{ startMilliseconds: number; endMilliseconds: number }> = [];
   let start: number | null = null;
-  for (const match of stderr.matchAll(
-    /silence_(start|end): (-?\d+(?:\.\d+)?)/gu,
-  )) {
+  for (const match of stderr.matchAll(/silence_(start|end): (-?\d+(?:\.\d+)?)/gu)) {
     const at = Math.max(0, Math.round(Number(match[2]) * 1_000));
     if (match[1] === "start") {
       start = at;
@@ -633,10 +554,7 @@ export function parseSilences(
     }
   }
   if (start !== null && start < durationMilliseconds) {
-    silences.push({
-      startMilliseconds: start,
-      endMilliseconds: durationMilliseconds,
-    });
+    silences.push({ startMilliseconds: start, endMilliseconds: durationMilliseconds });
   }
   return silences;
 }
@@ -646,15 +564,11 @@ export function parseSilences(
  * into the quiet around it.
  */
 export function soundBetweenSilences(
-  silences: ReadonlyArray<{
-    startMilliseconds: number;
-    endMilliseconds: number;
-  }>,
+  silences: ReadonlyArray<{ startMilliseconds: number; endMilliseconds: number }>,
   durationMilliseconds: number,
   marginMilliseconds = RECORDING_QUIET_MARGIN_MILLISECONDS,
 ): Array<{ startMilliseconds: number; endMilliseconds: number }> {
-  const sound: Array<{ startMilliseconds: number; endMilliseconds: number }> =
-    [];
+  const sound: Array<{ startMilliseconds: number; endMilliseconds: number }> = [];
   const add = (startMilliseconds: number, endMilliseconds: number) => {
     const start = Math.max(0, startMilliseconds);
     const end = Math.min(durationMilliseconds, endMilliseconds);
@@ -671,10 +585,7 @@ export function soundBetweenSilences(
   let soundFrom = 0;
   for (const silence of silences) {
     if (silence.startMilliseconds > soundFrom) {
-      add(
-        soundFrom - marginMilliseconds,
-        silence.startMilliseconds + marginMilliseconds,
-      );
+      add(soundFrom - marginMilliseconds, silence.startMilliseconds + marginMilliseconds);
     }
     soundFrom = Math.max(soundFrom, silence.endMilliseconds);
   }
@@ -699,14 +610,9 @@ export async function detectRecordingSound(input: {
   // A track shorter than the minimum is quiet only when (nearly) all of it is.
   const minQuietSeconds = Math.max(
     0.1,
-    Math.min(
-      RECORDING_QUIET_MIN_MILLISECONDS,
-      input.durationMilliseconds - 500,
-    ) / 1_000,
+    Math.min(RECORDING_QUIET_MIN_MILLISECONDS, input.durationMilliseconds - 500) / 1_000,
   );
-  const directory = await mkdtemp(
-    join(input.tempRoot ?? tmpdir(), "opengeni-recording-sound-"),
-  );
+  const directory = await mkdtemp(join(input.tempRoot ?? tmpdir(), "opengeni-recording-sound-"));
   try {
     const source = join(directory, `source.${input.audio.extension}`);
     const handle = await open(source, "wx", 0o600);
@@ -764,9 +670,7 @@ export async function renderRecordingAudioPiece(input: {
   signal?: AbortSignal | undefined;
 }): Promise<{ bytes: Uint8Array; mimeType: string; extension: string }> {
   const output = PIECE_OUTPUT[input.format];
-  const directory = await mkdtemp(
-    join(input.tempRoot ?? tmpdir(), "opengeni-recording-piece-"),
-  );
+  const directory = await mkdtemp(join(input.tempRoot ?? tmpdir(), "opengeni-recording-piece-"));
   try {
     const source = join(directory, `source.${input.audio.extension}`);
     const target = join(directory, `piece.${output.extension}`);
@@ -805,10 +709,7 @@ export async function renderRecordingAudioPiece(input: {
     );
     const bytes = new Uint8Array(await readFile(target));
     if (bytes.byteLength === 0) {
-      throw new RecordingAudioError(
-        "The audio piece is empty",
-        "invalid_audio",
-      );
+      throw new RecordingAudioError("The audio piece is empty", "invalid_audio");
     }
     return { bytes, mimeType: output.mimeType, extension: output.extension };
   } finally {

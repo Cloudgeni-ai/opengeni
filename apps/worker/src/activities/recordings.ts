@@ -171,9 +171,7 @@ const MINUTE_MILLISECONDS = 60_000;
  * the budget leaves room for that and a lost attempt, and still ends in a
  * failed state the person can retry rather than "Transcribing" for a day.
  */
-export function recordingTranscriptBudgetMilliseconds(
-  audioMilliseconds: number,
-): number {
+export function recordingTranscriptBudgetMilliseconds(audioMilliseconds: number): number {
   return Math.min(
     12 * 60 * MINUTE_MILLISECONDS,
     30 * MINUTE_MILLISECONDS + 3 * Math.max(0, audioMilliseconds),
@@ -216,10 +214,7 @@ export type RecordingActivityOptions = {
    * The voice input service that transcribes dictations; defaults to the
    * deployment's configured voice input providers, with credit billing.
    */
-  dictationTranscription?: (
-    settings: Settings,
-    db: Database,
-  ) => TranscriptionService;
+  dictationTranscription?: (settings: Settings, db: Database) => TranscriptionService;
   /** Cuts a dictation into provider-sized WAV pieces; defaults to ffmpeg. */
   dictationSegmenter?: (settings: Settings) => TranscriptionSegmenter;
   /** Credit charges for meetings on deployment-funded models; defaults to voice input billing. */
@@ -247,12 +242,7 @@ async function loadRecordingProviderApiKey(
 ): Promise<string | null> {
   if (scope.providerId !== "elevenlabs") return null;
   return (
-    (await loadWorkspaceProviderApiKey(
-      db,
-      settings,
-      scope.workspaceId,
-      "elevenlabs",
-    )) ??
+    (await loadWorkspaceProviderApiKey(db, settings, scope.workspaceId, "elevenlabs")) ??
     (await loadOrganizationModelProviderApiKey(db, settings, {
       accountId: scope.accountId,
       workspaceId: scope.workspaceId,
@@ -304,12 +294,7 @@ function preparedPieceFormat(extension: string): RecordingPieceFormat {
 }
 
 /** Formats the worker can write, in the order it prefers them for a model. */
-const WRITABLE_PIECE_FORMATS: readonly RecordingPieceFormat[] = [
-  "flac",
-  "wav",
-  "webm",
-  "mp4",
-];
+const WRITABLE_PIECE_FORMATS: readonly RecordingPieceFormat[] = ["flac", "wav", "webm", "mp4"];
 
 /**
  * One track's view of the pieces kept for a version: reuses a kept piece
@@ -345,22 +330,17 @@ export function trackPieceResults(input: {
 }
 
 /** A kept piece read back; anything not shaped like a result is asked again. */
-function keptTranscriptionResult(
-  value: unknown,
-): RecordingTranscriptionResult | null {
+function keptTranscriptionResult(value: unknown): RecordingTranscriptionResult | null {
   if (!value || typeof value !== "object") return null;
   const result = value as Partial<RecordingTranscriptionResult>;
-  if (!Array.isArray(result.words) || !Array.isArray(result.languages))
-    return null;
+  if (!Array.isArray(result.words) || !Array.isArray(result.languages)) return null;
   if (typeof result.diarized !== "boolean") return null;
   return {
     languages: result.languages.filter(
       (language): language is string => typeof language === "string",
     ),
     audioMilliseconds:
-      typeof result.audioMilliseconds === "number"
-        ? result.audioMilliseconds
-        : null,
+      typeof result.audioMilliseconds === "number" ? result.audioMilliseconds : null,
     diarized: result.diarized,
     words: result.words,
     ...(typeof result.text === "string" ? { text: result.text } : {}),
@@ -373,10 +353,7 @@ function keptTranscriptionResult(
  * `reuse` answers a piece only when it was asked the same question.
  */
 export type RecordingPieceResults = {
-  reuse: (
-    pieceIndex: number,
-    requestKey: string,
-  ) => RecordingTranscriptionResult | null;
+  reuse: (pieceIndex: number, requestKey: string) => RecordingTranscriptionResult | null;
   keep: (
     pieceIndex: number,
     requestKey: string,
@@ -390,10 +367,7 @@ export type RecordingPieceResults = {
  */
 export function recordingPieceRequestKey(input: {
   model: string;
-  request: Pick<
-    RecordingTranscriptionRequest,
-    "language" | "diarize" | "maxSpeakers" | "keyterms"
-  >;
+  request: Pick<RecordingTranscriptionRequest, "language" | "diarize" | "maxSpeakers" | "keyterms">;
   audioSha256: string;
   startMilliseconds: number;
   endMilliseconds: number;
@@ -449,20 +423,10 @@ export async function transcribeTrack(input: {
   /** Adds the milliseconds of audio each piece sent to the model. */
   onSent?: (milliseconds: number) => void;
 }): Promise<RecordingTranscriptionResult> {
-  const { source, format, maxPieceMilliseconds } = pieceShape(
-    input.spec,
-    input.audio.extension,
-  );
+  const { source, format, maxPieceMilliseconds } = pieceShape(input.spec, input.audio.extension);
   const pieces = input.sound
-    ? planRecordingSoundPieces(
-        input.durationMilliseconds,
-        maxPieceMilliseconds,
-        input.sound,
-      )
-    : planRecordingTranscriptionPieces(
-        input.durationMilliseconds,
-        maxPieceMilliseconds,
-      );
+    ? planRecordingSoundPieces(input.durationMilliseconds, maxPieceMilliseconds, input.sound)
+    : planRecordingTranscriptionPieces(input.durationMilliseconds, maxPieceMilliseconds);
   if (pieces.length === 0) {
     return {
       languages: [],
@@ -526,10 +490,7 @@ export async function transcribeTrack(input: {
     // one request identity at most once, so pieces must not share it.
     const scope =
       input.request.scope && !whole
-        ? {
-            ...input.request.scope,
-            requestId: `${input.request.scope.requestId}:p${index}`,
-          }
+        ? { ...input.request.scope, requestId: `${input.request.scope.requestId}:p${index}` }
         : input.request.scope;
     let result = reused;
     if (!result) {
@@ -538,11 +499,7 @@ export async function transcribeTrack(input: {
           {
             ...input.request,
             ...(scope ? { scope } : {}),
-            audio: {
-              bytes: audio.bytes,
-              mimeType: audio.mimeType,
-              fileName: audio.fileName,
-            },
+            audio: { bytes: audio.bytes, mimeType: audio.mimeType, fileName: audio.fileName },
           },
           input.credentials,
         ),
@@ -556,15 +513,12 @@ export async function transcribeTrack(input: {
       input.onSent?.(piece.endMilliseconds - piece.startMilliseconds);
     }
     const aligned = await alignPiece(input, audio, result);
-    if (aligned !== result)
-      await input.pieces?.keep(index, requestKey, aligned);
+    if (aligned !== result) await input.pieces?.keep(index, requestKey, aligned);
     parts.push({ piece, result: aligned });
   }
   const merged = mergeRecordingTranscriptionPieces(parts);
   // Leaving quiet out doesn't shorten the track.
-  return input.sound
-    ? { ...merged, audioMilliseconds: input.durationMilliseconds }
-    : merged;
+  return input.sound ? { ...merged, audioMilliseconds: input.durationMilliseconds } : merged;
 }
 
 /**
@@ -607,10 +561,7 @@ function pieceShape(
   const accepted = spec.audioFormats;
   let format: RecordingPieceFormat | null = null;
   if (accepted && !accepted.includes(source)) {
-    format =
-      WRITABLE_PIECE_FORMATS.find((candidate) =>
-        accepted.includes(candidate),
-      ) ?? null;
+    format = WRITABLE_PIECE_FORMATS.find((candidate) => accepted.includes(candidate)) ?? null;
     if (!format) throw new PermanentRecordingFailure("model_unavailable");
   } else if (!accepted && source === "mp4") {
     // A meeting's kept file is Opus in MP4. A model that names no formats
@@ -619,9 +570,7 @@ function pieceShape(
     format = "webm";
   }
   const { maxDurationSeconds, maxFileBytes } = spec.capabilities;
-  const bytesPerSecond = format
-    ? RECORDING_PIECE_BYTES_PER_SECOND[format]
-    : undefined;
+  const bytesPerSecond = format ? RECORDING_PIECE_BYTES_PER_SECOND[format] : undefined;
   const limits = [
     maxDurationSeconds === null ? null : maxDurationSeconds * 1_000,
     // Converted audio has a known rate; keep a tenth spare under the file limit.
@@ -672,11 +621,7 @@ function meetingCharge(
   provider: RecordingTranscriptionProvider,
   spec: RecordingTranscriptionModelSpec,
 ): { pricing: VoiceInputPricing } | null {
-  if (
-    provider.funding !== "deployment" ||
-    !voiceInputCreditBillingActive(settings)
-  )
-    return null;
+  if (provider.funding !== "deployment" || !voiceInputCreditBillingActive(settings)) return null;
   return spec.creditPricing ? { pricing: spec.creditPricing } : null;
 }
 
@@ -685,24 +630,16 @@ export function createRecordingActivities(
   options: RecordingActivityOptions = {},
 ) {
   const loadApiKey = options.loadApiKey ?? loadRecordingProviderApiKey;
-  let deploymentMemo: {
-    settings: Settings;
-    deployment: SpeechToTextDeployment;
-  } | null = null;
+  let deploymentMemo: { settings: Settings; deployment: SpeechToTextDeployment } | null = null;
   /** The deployment's speech-to-text providers, the same ones the API offers. */
-  const deploymentFor = (
-    settings: Settings,
-    db: Database,
-  ): SpeechToTextDeployment => {
+  const deploymentFor = (settings: Settings, db: Database): SpeechToTextDeployment => {
     if (deploymentMemo?.settings !== settings) {
       deploymentMemo = {
         settings,
         deployment: createSpeechToTextDeployment(
           { settings, db },
           {
-            ...(options.registry
-              ? { providers: [...options.registry.values()] }
-              : {}),
+            ...(options.registry ? { providers: [...options.registry.values()] } : {}),
             loadWorkspaceKey: (providerId, scope) =>
               loadApiKey(db, settings, { ...scope, providerId }),
           },
@@ -711,50 +648,29 @@ export function createRecordingActivities(
     }
     return deploymentMemo.deployment;
   };
-  let defaultBilling: {
-    settings: Settings;
-    billing: TranscriptionBilling;
-  } | null = null;
-  const billingFor = (
-    settings: Settings,
-    db: Database,
-  ): TranscriptionBilling => {
+  let defaultBilling: { settings: Settings; billing: TranscriptionBilling } | null = null;
+  const billingFor = (settings: Settings, db: Database): TranscriptionBilling => {
     if (options.billing) return options.billing(settings, db);
     if (defaultBilling?.settings !== settings) {
-      defaultBilling = {
-        settings,
-        billing: createVoiceInputBilling({ db, settings }),
-      };
+      defaultBilling = { settings, billing: createVoiceInputBilling({ db, settings }) };
     }
     return defaultBilling.billing;
   };
-  let defaultDiarizer: {
-    settings: Settings;
-    diarizer: RecordingDiarizer | null;
-  } | null = null;
+  let defaultDiarizer: { settings: Settings; diarizer: RecordingDiarizer | null } | null = null;
   const diarizerFor = (settings: Settings): RecordingDiarizer | null => {
     if (options.diarizer) return options.diarizer(settings);
     if (defaultDiarizer?.settings !== settings) {
       const config = recordingSpeakersConfig(settings);
-      defaultDiarizer = {
-        settings,
-        diarizer: config ? createLocalDiarizer(config) : null,
-      };
+      defaultDiarizer = { settings, diarizer: config ? createLocalDiarizer(config) : null };
     }
     return defaultDiarizer.diarizer;
   };
-  let defaultAligner: {
-    settings: Settings;
-    aligner: RecordingWordAligner | null;
-  } | null = null;
+  let defaultAligner: { settings: Settings; aligner: RecordingWordAligner | null } | null = null;
   const alignerFor = (settings: Settings): RecordingWordAligner | null => {
     if (options.aligner) return options.aligner(settings);
     if (defaultAligner?.settings !== settings) {
       const config = recordingAlignerConfig(settings);
-      defaultAligner = {
-        settings,
-        aligner: config ? createLocalAligner(config) : null,
-      };
+      defaultAligner = { settings, aligner: config ? createLocalAligner(config) : null };
     }
     return defaultAligner.aligner;
   };
@@ -769,11 +685,7 @@ export function createRecordingActivities(
         settings,
         service: options.dictationTranscription
           ? options.dictationTranscription(settings, db)
-          : createTranscriptionService({
-              settings,
-              db,
-              deployment: deploymentFor(settings, db),
-            }),
+          : createTranscriptionService({ settings, db, deployment: deploymentFor(settings, db) }),
         segmenter: options.dictationSegmenter
           ? options.dictationSegmenter(settings)
           : createFfmpegTranscriptionSegmenter({
@@ -803,10 +715,7 @@ export function createRecordingActivities(
     input: RecordingTranscriptInput,
   ): Promise<RecordingTranscriptOutcome> {
     const { db, objectStorage, settings, observability } = await services();
-    const actor = {
-      workspaceId: input.workspaceId,
-      subjectId: input.ownerSubjectId,
-    };
+    const actor = { workspaceId: input.workspaceId, subjectId: input.ownerSubjectId };
     const leased = await claimRecordingTranscriptVersion(db, {
       ...actor,
       versionId: input.versionId,
@@ -830,9 +739,7 @@ export function createRecordingActivities(
     /** Temporal's cancellation, or the budget running out, whichever comes first. */
     const jobSignal = (): AbortSignal => {
       const temporal = cancellation();
-      return temporal
-        ? AbortSignal.any([temporal, budget.signal])
-        : budget.signal;
+      return temporal ? AbortSignal.any([temporal, budget.signal]) : budget.signal;
     };
     // A dictation is kept only long enough for its owner to take the text.
     const expiry =
@@ -857,9 +764,7 @@ export function createRecordingActivities(
         // The stored code is all the user sees; the cause is what an operator needs.
         providerId: job.version.providerId,
         model: job.version.model,
-        ...(cause instanceof Error
-          ? { error: cause.message.slice(0, 1_000) }
-          : {}),
+        ...(cause instanceof Error ? { error: cause.message.slice(0, 1_000) } : {}),
       });
       return { outcome: "failed", errorCode, ...expiry };
     };
@@ -875,8 +780,7 @@ export function createRecordingActivities(
       funding: "none",
       audioSeconds: 0,
       sentAudioSeconds: null,
-      queueSeconds:
-        job.queuedMilliseconds === null ? null : job.queuedMilliseconds / 1_000,
+      queueSeconds: job.queuedMilliseconds === null ? null : job.queuedMilliseconds / 1_000,
       preparedBytes: 0,
       providerCostUsd: null,
       credits: null,
@@ -896,24 +800,17 @@ export function createRecordingActivities(
         // The losing side of the race must not become an unhandled rejection.
         work.catch(() => undefined);
         // A step that doesn't listen for the abort still can't outlast the budget.
-        const outOfTime = new Promise<RecordingTranscriptOutcome>(
-          (resolve, reject) => {
-            const timedOut = () =>
-              (finishing ? work : fail("timed_out", budget.signal.reason)).then(
-                resolve,
-                reject,
-              );
-            if (budget.signal.aborted) timedOut();
-            else
-              budget.signal.addEventListener("abort", timedOut, { once: true });
-          },
-        );
+        const outOfTime = new Promise<RecordingTranscriptOutcome>((resolve, reject) => {
+          const timedOut = () =>
+            (finishing ? work : fail("timed_out", budget.signal.reason)).then(resolve, reject);
+          if (budget.signal.aborted) timedOut();
+          else budget.signal.addEventListener("abort", timedOut, { once: true });
+        });
         return Promise.race([work, outOfTime]);
       });
       return finished;
     } catch (error) {
-      if (error instanceof ApplicationFailure && error.type)
-        retryCode = error.type;
+      if (error instanceof ApplicationFailure && error.type) retryCode = error.type;
       throw error;
     } finally {
       clearTimeout(budgetTimer);
@@ -947,27 +844,20 @@ export function createRecordingActivities(
       try {
         // Choosing the model can ask Codex upstream: keep the activity alive.
         const outcome = await withHeartbeat(async () =>
-          (options.startMeetingSummary ?? startMeetingSummary)(
-            await services(),
-            {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              recordingId: input.recordingId,
-              versionId: input.versionId,
-              ownerSubjectId: input.ownerSubjectId,
-            },
-          ),
+          (options.startMeetingSummary ?? startMeetingSummary)(await services(), {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            recordingId: input.recordingId,
+            versionId: input.versionId,
+            ownerSubjectId: input.ownerSubjectId,
+          }),
         );
         observability.info("meeting summary", {
           workspaceId: input.workspaceId,
           recordingId: input.recordingId,
           versionId: input.versionId,
           ...(outcome.started
-            ? {
-                started: true,
-                sessionId: outcome.sessionId,
-                model: outcome.model,
-              }
+            ? { started: true, sessionId: outcome.sessionId, model: outcome.model }
             : { started: false, reason: outcome.reason }),
         });
       } catch (error) {
@@ -975,9 +865,7 @@ export function createRecordingActivities(
           workspaceId: input.workspaceId,
           recordingId: input.recordingId,
           versionId: input.versionId,
-          ...(error instanceof Error
-            ? { error: error.message.slice(0, 1_000) }
-            : {}),
+          ...(error instanceof Error ? { error: error.message.slice(0, 1_000) } : {}),
         });
       }
     }
@@ -985,8 +873,7 @@ export function createRecordingActivities(
     async function transcribeClaimed(): Promise<RecordingTranscriptOutcome> {
       try {
         if (now() >= deadline) throw new PermanentRecordingFailure("timed_out");
-        if (!objectStorage)
-          throw new PermanentRecordingFailure("storage_unavailable");
+        if (!objectStorage) throw new PermanentRecordingFailure("storage_unavailable");
         if (job.recording.purpose === "dictation") {
           return await transcribeDictation(objectStorage, job);
         }
@@ -1010,9 +897,7 @@ export function createRecordingActivities(
         // A meeting transcript places every word in time, to tell speakers
         // apart and to play from. A model that returns only text needs our
         // aligner to do it.
-        const aligner = found.spec.capabilities.wordTimestamps
-          ? null
-          : alignerFor(settings);
+        const aligner = found.spec.capabilities.wordTimestamps ? null : alignerFor(settings);
         if (!found.spec.capabilities.wordTimestamps && !aligner) {
           throw new PermanentRecordingFailure("model_unavailable");
         }
@@ -1030,8 +915,7 @@ export function createRecordingActivities(
           accountId: input.accountId,
           workspaceId: input.workspaceId,
         });
-        if (resolved === "missing")
-          throw new PermanentRecordingFailure("missing_provider_key");
+        if (resolved === "missing") throw new PermanentRecordingFailure("missing_provider_key");
         const credentials = resolved.credentials;
         if (
           found.provider.available &&
@@ -1061,9 +945,8 @@ export function createRecordingActivities(
         // our diarizer gives, so it tells the speakers apart whatever the model.
         const recognizeVoices =
           ourDiarizer !== null &&
-          resolveWorkspaceRecordingSettings(
-            (await getWorkspace(db, input.workspaceId))?.settings,
-          ).voiceprints === true;
+          resolveWorkspaceRecordingSettings((await getWorkspace(db, input.workspaceId))?.settings)
+            .voiceprints === true;
         const trackVoices: Array<{
           trackNumber: number;
           source: (typeof job.recording.tracks)[number]["source"];
@@ -1080,16 +963,13 @@ export function createRecordingActivities(
             kept,
             trackNumber,
             onReused: (pieceIndex) =>
-              observability.info(
-                "reused a transcribed piece from an earlier attempt",
-                {
-                  workspaceId: input.workspaceId,
-                  recordingId: input.recordingId,
-                  versionId: input.versionId,
-                  trackNumber,
-                  pieceIndex,
-                },
-              ),
+              observability.info("reused a transcribed piece from an earlier attempt", {
+                workspaceId: input.workspaceId,
+                recordingId: input.recordingId,
+                versionId: input.versionId,
+                trackNumber,
+                pieceIndex,
+              }),
             save: async (piece) => {
               await saveRecordingTranscriptPieceResult(db, {
                 ...actor,
@@ -1098,16 +978,13 @@ export function createRecordingActivities(
                 ...piece,
               }).catch((error: unknown) => {
                 // Not keeping it only costs a retry the same request again.
-                observability.warn(
-                  "couldn't keep a transcribed piece for retries",
-                  {
-                    workspaceId: input.workspaceId,
-                    recordingId: input.recordingId,
-                    versionId: input.versionId,
-                    trackNumber,
-                    error: errorMessage(error),
-                  },
-                );
+                observability.warn("couldn't keep a transcribed piece for retries", {
+                  workspaceId: input.workspaceId,
+                  recordingId: input.recordingId,
+                  versionId: input.versionId,
+                  trackNumber,
+                  error: errorMessage(error),
+                });
               });
             },
           });
@@ -1122,16 +999,10 @@ export function createRecordingActivities(
           audio: Awaited<ReturnType<typeof preparedTrackAudio>>;
         }> = [];
         for (const plan of plans) {
-          const track = job.recording.tracks.find(
-            (item) => item.trackNumber === plan.trackNumber,
-          )!;
-          const chunks = job.chunks.filter(
-            (chunk) => chunk.trackNumber === plan.trackNumber,
-          );
+          const track = job.recording.tracks.find((item) => item.trackNumber === plan.trackNumber)!;
+          const chunks = job.chunks.filter((chunk) => chunk.trackNumber === plan.trackNumber);
           if (chunks.length === 0) continue;
-          const offsetMilliseconds = Math.min(
-            ...chunks.map((chunk) => chunk.startMilliseconds),
-          );
+          const offsetMilliseconds = Math.min(...chunks.map((chunk) => chunk.startMilliseconds));
           const audio = await measureRecordingStage("prepare", () =>
             preparedTrackAudio({
               db,
@@ -1161,9 +1032,7 @@ export function createRecordingActivities(
           const diarize = capabilities.diarization;
           const useOurs =
             ourDiarizer !== null &&
-            (requested.diarizer === "ours" ||
-              !capabilities.diarization ||
-              recognizeVoices);
+            (requested.diarizer === "ours" || !capabilities.diarization || recognizeVoices);
           const trackAudio = {
             bytes: audio.bytes,
             mimeType: audio.mimeType,
@@ -1187,11 +1056,7 @@ export function createRecordingActivities(
             },
           };
           const onPiece = (piece: number) =>
-            heartbeat({
-              phase: "transcribing",
-              trackNumber: plan.trackNumber,
-              piece,
-            });
+            heartbeat({ phase: "transcribing", trackNumber: plan.trackNumber, piece });
           // Long quiet stretches (the computer's audio in a room meeting, a
           // microphone while its person listens) hold no words, so they are
           // never sent: a silent track not at all, and the rest only when the
@@ -1208,16 +1073,13 @@ export function createRecordingActivities(
             ),
           ).catch((error: unknown) => {
             if (signal?.aborted) throw error;
-            observability.warn(
-              "couldn't find a track's quiet stretches; sending all of it",
-              {
-                workspaceId: input.workspaceId,
-                recordingId: input.recordingId,
-                versionId: input.versionId,
-                trackNumber: plan.trackNumber,
-                error: errorMessage(error),
-              },
-            );
+            observability.warn("couldn't find a track's quiet stretches; sending all of it", {
+              workspaceId: input.workspaceId,
+              recordingId: input.recordingId,
+              versionId: input.versionId,
+              trackNumber: plan.trackNumber,
+              error: errorMessage(error),
+            });
             return null;
           });
           const silent = sound !== null && sound.length === 0;
@@ -1229,35 +1091,24 @@ export function createRecordingActivities(
                     // A known head count is exact only when everyone is on
                     // this one track; split across tracks, it is each one's
                     // upper bound.
-                    ...(requested.speakers !== undefined &&
-                    prepared.length === 1
+                    ...(requested.speakers !== undefined && prepared.length === 1
                       ? { speakers: requested.speakers }
-                      : {
-                          maxSpeakers:
-                            requested.speakers ?? requested.maxSpeakers,
-                        }),
+                      : { maxSpeakers: requested.speakers ?? requested.maxSpeakers }),
                     signal,
                   }),
                 ).catch((error: unknown) => {
                   // Stopped with the worker: the retry runs it again, so the
                   // transcript never silently loses our speakers.
                   if (signal?.aborted) throw error;
-                  if (
-                    error instanceof RecordingSpeakersError &&
-                    error.interrupted
-                  )
-                    throw error;
+                  if (error instanceof RecordingSpeakersError && error.interrupted) throw error;
                   telemetry.ourDiarizerFailed = true;
-                  observability.warn(
-                    "our diarizer failed; using the model's speakers",
-                    {
-                      workspaceId: input.workspaceId,
-                      recordingId: input.recordingId,
-                      versionId: input.versionId,
-                      trackNumber: plan.trackNumber,
-                      error: errorMessage(error),
-                    },
-                  );
+                  observability.warn("our diarizer failed; using the model's speakers", {
+                    workspaceId: input.workspaceId,
+                    recordingId: input.recordingId,
+                    versionId: input.versionId,
+                    trackNumber: plan.trackNumber,
+                    error: errorMessage(error),
+                  });
                   return null;
                 })
               : Promise.resolve(null);
@@ -1287,22 +1138,15 @@ export function createRecordingActivities(
           if (ours) {
             words = labelWordsFromTurns(result.words, ours.turns);
             ourDiarized = true;
-            trackVoices.push({
-              trackNumber: plan.trackNumber,
-              source: track.source,
-              result: ours,
-            });
+            trackVoices.push({ trackNumber: plan.trackNumber, source: track.source, result: ours });
           } else if (diarize && result.diarized) {
             providerDiarized = true;
           }
           for (const language of result.languages) languages.add(language);
-          audioMilliseconds +=
-            result.audioMilliseconds ?? audio.durationMilliseconds;
+          audioMilliseconds += result.audioMilliseconds ?? audio.durationMilliseconds;
           trackWords.push({
             trackNumber: plan.trackNumber,
-            recorder: plan.recorderLabel
-              ? { label: plan.recorderLabel, speaker: null }
-              : null,
+            recorder: plan.recorderLabel ? { label: plan.recorderLabel, speaker: null } : null,
             words: shiftWords(words, offsetMilliseconds),
           });
         }
@@ -1315,23 +1159,20 @@ export function createRecordingActivities(
                 memberSubjectId: input.ownerSubjectId,
               })
             : [];
-        const resolvedTracks = withoutMicrophoneEchoes(
-          trackWords,
-          job.recording.tracks,
-        ).map((track) => {
-          const ours = trackVoices.find(
-            (voices) => voices.trackNumber === track.trackNumber,
-          );
-          const matched =
-            track.recorder && ours && ownerVoices.length > 0
-              ? voiceMatchingVoiceprints({
-                  voices: ours.result.voices,
-                  model: ours.result.voiceModel,
-                  known: ownerVoices,
-                })
-              : null;
-          return withRecorderVoice(track, matched);
-        });
+        const resolvedTracks = withoutMicrophoneEchoes(trackWords, job.recording.tracks).map(
+          (track) => {
+            const ours = trackVoices.find((voices) => voices.trackNumber === track.trackNumber);
+            const matched =
+              track.recorder && ours && ownerVoices.length > 0
+                ? voiceMatchingVoiceprints({
+                    voices: ours.result.voices,
+                    model: ours.result.voiceModel,
+                    known: ownerVoices,
+                  })
+                : null;
+            return withRecorderVoice(track, matched);
+          },
+        );
         const segments = buildRecordingSegments(resolvedTracks);
         const voices: RecordingSpeakerVoice[] = [];
         if (recognizeVoices) {
@@ -1359,20 +1200,16 @@ export function createRecordingActivities(
           found.spec,
           sentMilliseconds,
           {
-            keyterms:
-              capabilities.keyterms && (requested.keyterms?.length ?? 0) > 0,
+            keyterms: capabilities.keyterms && (requested.keyterms?.length ?? 0) > 0,
           },
         );
         telemetry.audioSeconds = audioMilliseconds / 1_000;
         telemetry.sentAudioSeconds = sentMilliseconds / 1_000;
         telemetry.diarization = diarization;
         telemetry.speakers = new Set(
-          segments.flatMap((segment) =>
-            segment.speakerLabel ? [segment.speakerLabel] : [],
-          ),
+          segments.flatMap((segment) => (segment.speakerLabel ? [segment.speakerLabel] : [])),
         ).size;
-        telemetry.providerCostUsd =
-          costUsdMicros === null ? null : costUsdMicros / 1_000_000;
+        telemetry.providerCostUsd = costUsdMicros === null ? null : costUsdMicros / 1_000_000;
         // A microphone beside computer or tab audio is the person recording's.
         const recorderLabels = plans.flatMap((plan) =>
           plan.recorderLabel ? [plan.recorderLabel] : [],
@@ -1392,11 +1229,7 @@ export function createRecordingActivities(
             return null;
           });
           for (const label of recorderLabels) {
-            trackSpeakers.push({
-              label,
-              memberSubjectId: input.ownerSubjectId,
-              displayName,
-            });
+            trackSpeakers.push({ label, memberSubjectId: input.ownerSubjectId, displayName });
           }
         }
         const stage = await measureRecordingStage("finish", async () => {
@@ -1435,24 +1268,19 @@ export function createRecordingActivities(
             trackSpeakers,
             voices,
           });
-          telemetry.credits =
-            creditCostMicros === null ? null : creditCostMicros / 1_000_000;
-          return completed
-            ? ({ outcome: "complete" } as const)
-            : ({ outcome: "skipped" } as const);
+          telemetry.credits = creditCostMicros === null ? null : creditCostMicros / 1_000_000;
+          return completed ? ({ outcome: "complete" } as const) : ({ outcome: "skipped" } as const);
         });
         if (stage.outcome === "complete") await summarize();
         return stage;
       } catch (error) {
-        if (error instanceof RecordingNotFoundError)
-          return { outcome: "skipped" };
+        if (error instanceof RecordingNotFoundError) return { outcome: "skipped" };
         // Out of time: whatever the abort broke, the reason is the budget.
         // Once it is being charged and saved it is never failed for time.
         // The save is retried here, so only a database that stays down past
         // those retries leaves it to Temporal; past the budget that retry
         // fails it as timed_out. The charge is settled once by its source id.
-        if (budget.signal.aborted && !finishing)
-          return await fail("timed_out", error);
+        if (budget.signal.aborted && !finishing) return await fail("timed_out", error);
         // The worker is stopping (a deploy or a lost pod) and cancelled this
         // attempt, which kills its ffmpeg and model processes. That is never
         // the recording's fault: another worker retries it from the start,
@@ -1467,8 +1295,7 @@ export function createRecordingActivities(
         // the same answer, and the job never moves to another provider.
         if (findInferenceRegionRestrictedError(error))
           return await fail("region_restricted", error);
-        if (error instanceof PermanentRecordingFailure)
-          return await fail(error.code, error);
+        if (error instanceof PermanentRecordingFailure) return await fail(error.code, error);
         if (error instanceof RecordingAudioError) {
           if (error.code === "missing_chunk") {
             throw ApplicationFailure.retryable(error.message, "missing_chunk");
@@ -1476,23 +1303,15 @@ export function createRecordingActivities(
           return await fail(error.code, error);
         }
         if (error instanceof RecordingTranscriptionError) {
-          if (!error.retryable)
-            return await fail(`provider_${error.code}`, error);
-          throw ApplicationFailure.retryable(
-            error.message,
-            `provider_${error.code}`,
-          );
+          if (!error.retryable) return await fail(`provider_${error.code}`, error);
+          throw ApplicationFailure.retryable(error.message, `provider_${error.code}`);
         }
         // A dictation's voice input refused to bill it: nothing was sent, and
         // retrying won't change the answer until the payer's credits do.
-        if (error instanceof TranscriptionBillingRefusedError)
-          return await fail(error.code, error);
+        if (error instanceof TranscriptionBillingRefusedError) return await fail(error.code, error);
         if (error instanceof TranscriptionServiceError) {
           if (!error.retryable) return await fail(`voice_${error.code}`, error);
-          throw ApplicationFailure.retryable(
-            error.message,
-            `voice_${error.code}`,
-          );
+          throw ApplicationFailure.retryable(error.message, `voice_${error.code}`);
         }
         if (error instanceof TranscriptionSegmenterError) {
           if (!error.retryable) return await fail(error.code, error);
@@ -1515,14 +1334,10 @@ export function createRecordingActivities(
       if (resolveWorkspaceVoiceInputEnabled(workspace?.settings) === false) {
         throw new PermanentRecordingFailure("policy_blocked");
       }
-      const voiceInput = WorkspaceVoiceInputSettings.safeParse(
-        workspace?.settings.voiceInput,
-      ).data;
+      const voiceInput = WorkspaceVoiceInputSettings.safeParse(workspace?.settings.voiceInput).data;
       const { service, segmenter } = dictationFor(settings, db);
       const track = claimed.recording.tracks[0];
-      const chunks = claimed.chunks.filter(
-        (chunk) => chunk.trackNumber === track?.trackNumber,
-      );
+      const chunks = claimed.chunks.filter((chunk) => chunk.trackNumber === track?.trackNumber);
       const signal = jobSignal();
       const segments: Array<{
         startMilliseconds: number;
@@ -1539,9 +1354,7 @@ export function createRecordingActivities(
       let listCostMicros: number | null = null;
       const offered = dictationProviders(deploymentFor(settings, db));
       if (track && chunks.length > 0) {
-        const offsetMilliseconds = Math.min(
-          ...chunks.map((chunk) => chunk.startMilliseconds),
-        );
+        const offsetMilliseconds = Math.min(...chunks.map((chunk) => chunk.startMilliseconds));
         const audio = await measureRecordingStage("prepare", () =>
           preparedTrackAudio({
             db,
@@ -1553,43 +1366,28 @@ export function createRecordingActivities(
             mimeType: track.mimeType,
             chunks,
             offsetMilliseconds,
-            knownDurationMilliseconds: Math.max(
-              0,
-              track.durationMilliseconds - offsetMilliseconds,
-            ),
+            knownDurationMilliseconds: Math.max(0, track.durationMilliseconds - offsetMilliseconds),
             signal,
             store: false,
           }),
         );
         telemetry.preparedBytes += audio.storedBytes;
-        if (!(await segmenter.available()))
-          throw new PermanentRecordingFailure("unavailable");
+        if (!(await segmenter.available())) throw new PermanentRecordingFailure("unavailable");
         const providerSegmentSeconds = Math.min(
           TRANSCRIPTION_PROVIDER_SEGMENT_SECONDS,
           service.limits().maxDurationSeconds,
         );
-        const pinned =
-          claimed.version.providerId !== "host"
-            ? claimed.version.providerId
-            : null;
+        const pinned = claimed.version.providerId !== "host" ? claimed.version.providerId : null;
         // A dictation that named its model (a desktop shortcut's own) is heard
         // by exactly that model, never another provider's.
         const named = claimed.recording.transcription?.providerId
-          ? {
-              providerId: claimed.version.providerId,
-              model: claimed.version.model,
-            }
+          ? { providerId: claimed.version.providerId, model: claimed.version.model }
           : null;
-        const attribution = claimed.creditAttribution ?? {
-          kind: "unknown" as const,
-        };
+        const attribution = claimed.creditAttribution ?? { kind: "unknown" as const };
         heartbeat({ phase: "transcribing", trackNumber: track.trackNumber });
         const segmented = segmenter.segment({
           sourceMimeType: audio.mimeType,
-          totalDurationMilliseconds: Math.max(
-            1,
-            Math.round(audio.durationMilliseconds),
-          ),
+          totalDurationMilliseconds: Math.max(1, Math.round(audio.durationMilliseconds)),
           providerSegmentSeconds,
           chunks: (async function* () {
             yield audio.bytes;
@@ -1600,9 +1398,7 @@ export function createRecordingActivities(
         const pieces = segmented[Symbol.asyncIterator]();
         try {
           for (;;) {
-            const next = await measureRecordingStage("segment", () =>
-              pieces.next(),
-            );
+            const next = await measureRecordingStage("segment", () => pieces.next());
             if (next.done) break;
             const piece = next.value;
             const trustedSeconds = wavDurationSeconds(piece.bytes) ?? undefined;
@@ -1629,8 +1425,7 @@ export function createRecordingActivities(
                   ...(named
                     ? named
                     : {
-                        preferredProvider:
-                          pinned ?? voiceInput?.preferredProvider,
+                        preferredProvider: pinned ?? voiceInput?.preferredProvider,
                         fallbackEnabled: voiceInput?.fallbackEnabled,
                       }),
                   billing: {
@@ -1645,9 +1440,7 @@ export function createRecordingActivities(
               ),
             );
             creditCostMicros += result.creditCostMicros ?? 0;
-            const heard = offered.find(
-              (provider) => provider.id === result.providerId,
-            );
+            const heard = offered.find((provider) => provider.id === result.providerId);
             if (heard) {
               telemetry.provider = heard.id;
               telemetry.model = heard.model.model;
@@ -1660,20 +1453,14 @@ export function createRecordingActivities(
               charged = true;
             }
             const pieceCost = heard
-              ? estimateRecordingTranscriptionCostMicros(
-                  heard.model,
-                  piece.durationMilliseconds,
-                )
+              ? estimateRecordingTranscriptionCostMicros(heard.model, piece.durationMilliseconds)
               : null;
-            if (pieceCost !== null)
-              listCostMicros = (listCostMicros ?? 0) + pieceCost;
-            for (const language of result.languages ?? [])
-              languages.add(language);
+            if (pieceCost !== null) listCostMicros = (listCostMicros ?? 0) + pieceCost;
+            for (const language of result.languages ?? []) languages.add(language);
             audioMilliseconds += piece.durationMilliseconds;
             const text = result.text.trim();
             if (!text) continue;
-            const startMilliseconds =
-              offsetMilliseconds + piece.startMilliseconds;
+            const startMilliseconds = offsetMilliseconds + piece.startMilliseconds;
             segments.push({
               startMilliseconds,
               endMilliseconds: startMilliseconds + piece.durationMilliseconds,
@@ -1688,18 +1475,14 @@ export function createRecordingActivities(
         }
       }
       telemetry.audioSeconds = audioMilliseconds / 1_000;
-      telemetry.providerCostUsd =
-        listCostMicros === null ? null : listCostMicros / 1_000_000;
+      telemetry.providerCostUsd = listCostMicros === null ? null : listCostMicros / 1_000_000;
       telemetry.credits = charged ? creditCostMicros / 1_000_000 : null;
       const completed = await measureRecordingStage("finish", () =>
         completeRecordingTranscriptVersion(db, {
           ...actor,
           versionId: input.versionId,
           processingOwner: input.processingOwner,
-          languages: transcriptLanguages(
-            claimed.version.options.language,
-            languages,
-          ),
+          languages: transcriptLanguages(claimed.version.options.language, languages),
           diarized: false,
           diarization: "none",
           // The list price, like a meeting's; a version charged in credits
@@ -1710,9 +1493,7 @@ export function createRecordingActivities(
           segments,
         }),
       );
-      return completed
-        ? { outcome: "complete", ...expiry }
-        : { outcome: "skipped" };
+      return completed ? { outcome: "complete", ...expiry } : { outcome: "skipped" };
     }
 
     /**
@@ -1754,10 +1535,7 @@ export function createRecordingActivities(
             recordingId: input.recordingId,
             versionId: input.versionId,
             providerId: charge.providerId,
-            error:
-              error instanceof Error
-                ? error.message.slice(0, 500)
-                : String(error),
+            error: error instanceof Error ? error.message.slice(0, 500) : String(error),
           },
         );
         return 0;
@@ -1765,10 +1543,7 @@ export function createRecordingActivities(
     }
 
     async function withHeartbeat<T>(work: () => Promise<T>): Promise<T> {
-      const timer = setInterval(
-        () => heartbeat({ phase: "transcribing" }),
-        30_000,
-      );
+      const timer = setInterval(() => heartbeat({ phase: "transcribing" }), 30_000);
       try {
         return await work();
       } finally {
@@ -1786,30 +1561,19 @@ export function createRecordingActivities(
       version: Parameters<typeof completeRecordingTranscriptVersion>[1],
     ): ReturnType<typeof completeRecordingTranscriptVersion> {
       const save = options.saveTranscript ?? completeRecordingTranscriptVersion;
-      const delays =
-        options.saveRetryDelaysMilliseconds ?? SAVE_RETRY_DELAYS_MILLISECONDS;
+      const delays = options.saveRetryDelaysMilliseconds ?? SAVE_RETRY_DELAYS_MILLISECONDS;
       for (let attempt = 0; ; attempt += 1) {
         try {
           return await save(db, version);
         } catch (error) {
-          if (
-            error instanceof RecordingNotFoundError ||
-            attempt >= delays.length
-          )
-            throw error;
-          observability.warn(
-            "saving a charged meeting transcript failed; trying again",
-            {
-              workspaceId: input.workspaceId,
-              recordingId: input.recordingId,
-              versionId: input.versionId,
-              attempt: attempt + 1,
-              error:
-                error instanceof Error
-                  ? error.message.slice(0, 500)
-                  : String(error),
-            },
-          );
+          if (error instanceof RecordingNotFoundError || attempt >= delays.length) throw error;
+          observability.warn("saving a charged meeting transcript failed; trying again", {
+            workspaceId: input.workspaceId,
+            recordingId: input.recordingId,
+            versionId: input.versionId,
+            attempt: attempt + 1,
+            error: error instanceof Error ? error.message.slice(0, 500) : String(error),
+          });
           await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
         }
       }
@@ -1864,11 +1628,9 @@ export function createRecordingActivities(
         format,
         ffmpegPath: input.settings.voiceInputFfmpegPath,
         signal: input.signal,
-        onProgress: () =>
-          heartbeat({ phase: "preparing", trackNumber: input.trackNumber }),
+        onProgress: () => heartbeat({ phase: "preparing", trackNumber: input.trackNumber }),
         readChunk: async (chunk) =>
-          (await input.objectStorage.getObjectBytes(chunk.objectKey))?.bytes ??
-          null,
+          (await input.objectStorage.getObjectBytes(chunk.objectKey))?.bytes ?? null,
       });
     if (!input.store) {
       heartbeat({ phase: "preparing", trackNumber: input.trackNumber });
@@ -1888,9 +1650,7 @@ export function createRecordingActivities(
     });
     const existing = await getRecordingTrackPreparedObject(input.db, track);
     if (existing?.objectKey === objectKey) {
-      const stored = await input.objectStorage.getObjectBytes(
-        existing.objectKey,
-      );
+      const stored = await input.objectStorage.getObjectBytes(existing.objectKey);
       if (stored && stored.bytes.byteLength === existing.bytes) {
         if (!existing.chunkObjectsDeleted) {
           await deleteTrackChunkObjects({ ...input, objectKey });
@@ -1925,8 +1685,7 @@ export function createRecordingActivities(
       });
       return {
         ...transcoded,
-        durationMilliseconds:
-          transcoded.durationMilliseconds ?? input.knownDurationMilliseconds,
+        durationMilliseconds: transcoded.durationMilliseconds ?? input.knownDurationMilliseconds,
       };
     };
     let prepared: {
@@ -1963,11 +1722,7 @@ export function createRecordingActivities(
         prepared = await fromChunks(format);
       } catch (error) {
         // Another worker kept the track compact meanwhile and deleted the pieces.
-        if (
-          !(error instanceof RecordingAudioError) ||
-          error.code !== "missing_chunk"
-        )
-          throw error;
+        if (!(error instanceof RecordingAudioError) || error.code !== "missing_chunk") throw error;
         const now = await getRecordingTrackPreparedObject(input.db, track);
         if (!now?.chunkObjectsDeleted) throw error;
         prepared = await fromKept(now);
@@ -1984,8 +1739,7 @@ export function createRecordingActivities(
         ...track,
         objectKey,
         bytes: prepared.bytes.byteLength,
-        durationMilliseconds:
-          input.offsetMilliseconds + prepared.durationMilliseconds,
+        durationMilliseconds: input.offsetMilliseconds + prepared.durationMilliseconds,
       });
     } catch (error) {
       // Deleted meanwhile: its deletion listed keys before this one existed.
@@ -1995,9 +1749,7 @@ export function createRecordingActivities(
     }
     // The file this one replaces, made under an older name.
     if (existing && existing.objectKey !== objectKey) {
-      await input.objectStorage
-        .deleteObject(existing.objectKey)
-        .catch(() => undefined);
+      await input.objectStorage.deleteObject(existing.objectKey).catch(() => undefined);
     }
     await deleteTrackChunkObjects({ ...input, objectKey });
     return { ...prepared, storedBytes: prepared.bytes.byteLength };
@@ -2040,10 +1792,7 @@ export function createRecordingActivities(
 
   /** Retries ran out on a retryable failure: fail the version with its last cause. */
   async function failRecordingTranscript(
-    input: RecordingTranscriptInput & {
-      errorCode: string;
-      errorMessage?: string;
-    },
+    input: RecordingTranscriptInput & { errorCode: string; errorMessage?: string },
   ): Promise<{ expireAfterMilliseconds?: number }> {
     const { db, observability } = await services();
     observability.warn("recording transcript failed after retries", {
@@ -2051,9 +1800,7 @@ export function createRecordingActivities(
       recordingId: input.recordingId,
       versionId: input.versionId,
       errorCode: input.errorCode,
-      ...(input.errorMessage
-        ? { error: input.errorMessage.slice(0, 1_000) }
-        : {}),
+      ...(input.errorMessage ? { error: input.errorMessage.slice(0, 1_000) } : {}),
     });
     await failRecordingTranscriptVersion(db, {
       workspaceId: input.workspaceId,
@@ -2082,24 +1829,13 @@ export function createRecordingActivities(
     input: RecordingWorkInput,
   ): Promise<{ deleted: number; purged: boolean }> {
     const { db } = await services();
-    const actor = {
-      workspaceId: input.workspaceId,
-      subjectId: input.ownerSubjectId,
-    };
+    const actor = { workspaceId: input.workspaceId, subjectId: input.ownerSubjectId };
     try {
-      const recording = await getRecording(db, {
-        ...actor,
-        recordingId: input.recordingId,
-      });
-      if (recording.purpose !== "dictation")
-        return { deleted: 0, purged: false };
-      await markRecordingDeleting(db, {
-        ...actor,
-        recordingId: input.recordingId,
-      });
+      const recording = await getRecording(db, { ...actor, recordingId: input.recordingId });
+      if (recording.purpose !== "dictation") return { deleted: 0, purged: false };
+      await markRecordingDeleting(db, { ...actor, recordingId: input.recordingId });
     } catch (error) {
-      if (error instanceof RecordingNotFoundError)
-        return { deleted: 0, purged: false };
+      if (error instanceof RecordingNotFoundError) return { deleted: 0, purged: false };
       throw error;
     }
     return await deleteRecordingMedia(input);
@@ -2121,10 +1857,7 @@ export function createRecordingActivities(
     const keys = await listDeletingRecordingObjectKeys(db, actor);
     if (keys === null) return { deleted: 0, purged: false };
     if (!objectStorage)
-      throw ApplicationFailure.retryable(
-        "Object storage is unavailable",
-        "storage_unavailable",
-      );
+      throw ApplicationFailure.retryable("Object storage is unavailable", "storage_unavailable");
     const prefix = `workspaces/${input.workspaceId}/recordings/${input.recordingId}/`;
     let deleted = 0;
     for (const key of keys) {
@@ -2177,23 +1910,16 @@ export function createRecordingActivities(
     /** Earlier meetings brought to one compact file per track. */
     compaction: Awaited<ReturnType<typeof compactKeptRecordingAudio>>;
   }> {
-    const { db, objectStorage, startRecordingWorkflow, observability } =
-      await services();
+    const { db, objectStorage, startRecordingWorkflow, observability } = await services();
     const due = await listDueRecordingRetention(db, 50);
     let audioDeleted = 0;
     let recordingsDeleted = 0;
     let failed = 0;
     for (const item of due) {
-      const actor = {
-        workspaceId: item.workspaceId,
-        subjectId: item.ownerSubjectId,
-      };
+      const actor = { workspaceId: item.workspaceId, subjectId: item.ownerSubjectId };
       try {
         if (item.kind === "recording") {
-          await markRecordingDeleting(db, {
-            ...actor,
-            recordingId: item.recordingId,
-          });
+          await markRecordingDeleting(db, { ...actor, recordingId: item.recordingId });
           // The recovery sweep starts it later if this start fails.
           await startRecordingWorkflow?.({
             kind: "deletion",
@@ -2221,10 +1947,7 @@ export function createRecordingActivities(
         for (const key of keys) {
           if (key.startsWith(prefix)) await objectStorage.deleteObject(key);
         }
-        await completeRecordingAudioExpiry(db, {
-          ...actor,
-          recordingId: item.recordingId,
-        });
+        await completeRecordingAudioExpiry(db, { ...actor, recordingId: item.recordingId });
         audioDeleted += 1;
       } catch (error) {
         if (error instanceof RecordingNotFoundError) continue;
@@ -2233,16 +1956,11 @@ export function createRecordingActivities(
           workspaceId: item.workspaceId,
           recordingId: item.recordingId,
           kind: item.kind,
-          error:
-            error instanceof Error
-              ? error.message.slice(0, 1_000)
-              : String(error),
+          error: error instanceof Error ? error.message.slice(0, 1_000) : String(error),
         });
       }
     }
-    const compaction = await compactKeptRecordingAudio(
-      Date.now() + COMPACTION_SWEEP_MILLISECONDS,
-    );
+    const compaction = await compactKeptRecordingAudio(Date.now() + COMPACTION_SWEEP_MILLISECONDS);
     return {
       found: due.length,
       audioDeleted,
@@ -2300,14 +2018,9 @@ export function createRecordingActivities(
             trackNumber: item.trackNumber,
           }),
         ]);
-        const track = recording.tracks.find(
-          (entry) => entry.trackNumber === item.trackNumber,
-        );
-        if (!track || track.kind !== "audio" || chunks.length === 0 || !before)
-          continue;
-        const offsetMilliseconds = Math.min(
-          ...chunks.map((chunk) => chunk.startMilliseconds),
-        );
+        const track = recording.tracks.find((entry) => entry.trackNumber === item.trackNumber);
+        if (!track || track.kind !== "audio" || chunks.length === 0 || !before) continue;
+        const offsetMilliseconds = Math.min(...chunks.map((chunk) => chunk.startMilliseconds));
         const kept = await preparedTrackAudio({
           db,
           objectStorage,
@@ -2318,10 +2031,7 @@ export function createRecordingActivities(
           mimeType: track.mimeType,
           chunks,
           offsetMilliseconds,
-          knownDurationMilliseconds: Math.max(
-            0,
-            track.durationMilliseconds - offsetMilliseconds,
-          ),
+          knownDurationMilliseconds: Math.max(0, track.durationMilliseconds - offsetMilliseconds),
           signal: cancellation(),
           store: true,
         });
@@ -2344,10 +2054,7 @@ export function createRecordingActivities(
           workspaceId: item.workspaceId,
           recordingId: item.recordingId,
           trackNumber: item.trackNumber,
-          error:
-            error instanceof Error
-              ? error.message.slice(0, 1_000)
-              : String(error),
+          error: error instanceof Error ? error.message.slice(0, 1_000) : String(error),
         });
       }
     }

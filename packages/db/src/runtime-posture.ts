@@ -162,14 +162,8 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
   Record<(typeof RUNTIME_DEFINER_ROUTINES)[number], readonly string[]>
 > = {
   "list_due_event_trigger_tasks_v1(integer)": ["scheduled_task_event_settings"],
-  "prune_event_intake_v1(integer, integer, integer)": [
-    "event_deliveries",
-    "inbound_events",
-  ],
-  "list_stalled_recording_work_v1(integer)": [
-    "recording_transcript_versions",
-    "recordings",
-  ],
+  "prune_event_intake_v1(integer, integer, integer)": ["event_deliveries", "inbound_events"],
+  "list_stalled_recording_work_v1(integer)": ["recording_transcript_versions", "recordings"],
   "list_due_mcp_event_subscriptions_v1(integer)": ["mcp_event_subscriptions"],
   "list_due_event_source_feeds_v1(integer)": ["event_source_feeds"],
   "list_due_recording_retention_v1(integer)": [
@@ -183,27 +177,20 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "enrollments",
     "organization_memberships",
   ],
-  "rearm_unanswered_connected_commands(uuid, uuid, text)": [
-    "session_background_commands",
-  ],
-  "summarize_queued_turns_by_hold()": [
-    "session_turns",
-    "sessions",
-    "workspace_inference_controls",
-  ],
+  "rearm_unanswered_connected_commands(uuid, uuid, text)": ["session_background_commands"],
+  "summarize_queued_turns_by_hold()": ["session_turns", "sessions", "workspace_inference_controls"],
   "list_agent_held_browser_sessions(integer, bigint)": [
     "browser_sessions",
     "browser_session_associations",
     "sessions",
     "session_turns",
   ],
-  "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)":
-    [
-      "organization_inference_residency",
-      "organization_inference_residency_events",
-      "organization_memberships",
-      "api_keys",
-    ],
+  "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)": [
+    "organization_inference_residency",
+    "organization_inference_residency_events",
+    "organization_memberships",
+    "api_keys",
+  ],
   "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)": [
     "task_notes",
     "task_note_write_capabilities",
@@ -228,15 +215,12 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "mcp_operations",
     "session_history_items_repair_audit",
   ],
-  "grant_subscription_account_administrator(jsonb)": [
-    "organization_memberships",
-  ],
-  "native_push_device_v2(text)": [
+  "grant_subscription_account_administrator(jsonb)": ["organization_memberships"],
+  "native_push_device_v2(text)": ["opengeni_private.native_push_devices", "auth_sessions"],
+  "register_native_push_device_v2(text, text, text, text, text, text[], text)": [
     "opengeni_private.native_push_devices",
     "auth_sessions",
   ],
-  "register_native_push_device_v2(text, text, text, text, text, text[], text)":
-    ["opengeni_private.native_push_devices", "auth_sessions"],
   "claim_native_push_deliveries_v2(uuid, integer, integer)": [
     "opengeni_private.native_push_deliveries",
     "opengeni_private.native_push_devices",
@@ -257,18 +241,9 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "organization_memberships",
   ],
   "list_organization_vaults_v1(uuid, jsonb)": ["vaults", "vault_items"],
-  "list_organization_member_names_v1(uuid)": [
-    "organization_memberships",
-    "auth_users",
-  ],
-  "list_due_slack_agent_update_installations_v1(integer)": [
-    "slack_agent_update_settings",
-  ],
-  "list_organization_compute_v1(uuid, uuid, text)": [
-    "enrollments",
-    "rigs",
-    "sandboxes",
-  ],
+  "list_organization_member_names_v1(uuid)": ["organization_memberships", "auth_users"],
+  "list_due_slack_agent_update_installations_v1(integer)": ["slack_agent_update_settings"],
+  "list_organization_compute_v1(uuid, uuid, text)": ["enrollments", "rigs", "sandboxes"],
   "list_uncompacted_recording_tracks_v1(integer, text)": [
     "recordings",
     "recording_tracks",
@@ -285,11 +260,7 @@ export const SUBSCRIPTION_PLAN_FREE_ANNIVERSARY_ROUTINE =
 /** Read-only maintenance work checks (migrations 0730 and 0732) and the claim
  * each one previews, which fixes its owner and runtime grant. */
 export const MAINTENANCE_WORK_PROBE_ROUTINES = [
-  [
-    "session_workflow_wakes_due_v1()",
-    "claim_session_workflow_wakes(integer)",
-    "private",
-  ],
+  ["session_workflow_wakes_due_v1()", "claim_session_workflow_wakes(integer)", "private"],
   [
     "automatic_session_title_fanout_due_v1()",
     "claim_automatic_session_title_fanout_v1(integer)",
@@ -315,11 +286,7 @@ export const MAINTENANCE_WORK_PROBE_ROUTINES = [
     "list_idle_checkpoint_candidates(integer, bigint)",
     "private",
   ],
-  [
-    "browser_deadline_checkpoint_due_v1()",
-    "list_browser_deadline_checkpoints(integer)",
-    "private",
-  ],
+  ["browser_deadline_checkpoint_due_v1()", "list_browser_deadline_checkpoints(integer)", "private"],
   [
     "session_system_update_outbox_due_v1()",
     "claim_session_system_update_outbox_v2(integer)",
@@ -448,8 +415,7 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_MIGRATION_ROUTINE =
 
 const AUTOMATIC_SESSION_TITLE_POLICY_TRIGGER_ROUTINE =
   "enforce_automatic_session_title_policy_v1()";
-const AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE =
-  "automatic_session_title_fanout_outbox_v1";
+const AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE = "automatic_session_title_fanout_outbox_v1";
 export const SANDBOX_FILE_PUBLICATION_RUNTIME_ROUTINES = [
   "record_sandbox_file_publication(uuid, uuid, uuid, uuid)",
   "list_sandbox_file_publications(uuid, uuid, jsonb)",
@@ -479,13 +445,11 @@ export const ORGANIZATION_SIGNUP_USE_CASE_RUNTIME_ROUTINES = [
   "record_organization_signup_use_case(uuid, text, text)",
 ] as const;
 const ORGANIZATION_SIGNUP_USE_CASES_TABLE = "organization_signup_use_cases";
-export const SLACK_FILE_UPLOAD_OPERATIONS_TABLE =
-  "slack_file_upload_operations";
+export const SLACK_FILE_UPLOAD_OPERATIONS_TABLE = "slack_file_upload_operations";
 const AUTOMATIC_SESSION_TITLE_QUARANTINE_FENCE_ROUTINE =
   "acquire_automatic_session_title_quarantine_fences_v1(integer)";
 
-const MCP_OPERATION_CAPABILITY_ROUTINE =
-  "mcp_operation_command(jsonb, text, jsonb)";
+const MCP_OPERATION_CAPABILITY_ROUTINE = "mcp_operation_command(jsonb, text, jsonb)";
 const MCP_OPERATION_AUTHORITY_TABLES = [
   "mcp_operations",
   "sessions",
@@ -731,8 +695,7 @@ const ADDITIONAL_ORGANIZATION_CREATION_AUTHORITY_TABLES = [
   ...ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES,
   "additional_organization_creation_receipts",
 ] as const;
-const PRIVATE_SESSION_CREATE_POLICY_ROUTINE =
-  "get_private_session_create_policy(uuid, uuid, text)";
+const PRIVATE_SESSION_CREATE_POLICY_ROUTINE = "get_private_session_create_policy(uuid, uuid, text)";
 const ORGANIZATION_PRIVATE_SESSION_SETTINGS_READ_ROUTINE =
   "get_organization_private_session_settings(uuid, text)";
 const ORGANIZATION_PRIVATE_SESSION_SETTINGS_UPDATE_ROUTINE =
@@ -762,18 +725,15 @@ const ORGANIZATION_PRIVATE_SESSION_ROUTINE_AUTHORITY_TABLES = {
 const ORGANIZATION_PRIVATE_SESSION_ROUTINES = Object.keys(
   ORGANIZATION_PRIVATE_SESSION_ROUTINE_AUTHORITY_TABLES,
 );
-const ORGANIZATION_PRIVATE_SESSIONS_ENABLED_ROUTINE =
-  "organization_private_sessions_enabled(uuid)";
+const ORGANIZATION_PRIVATE_SESSIONS_ENABLED_ROUTINE = "organization_private_sessions_enabled(uuid)";
 /** Operator-only audited setter for the trial-credit kill switch (migration 0521). */
 const VERIFIED_SIGNUP_TRIAL_SWITCH_SETTER_ROUTINE =
   "set_verified_signup_trial_credits_enabled(boolean, text, text)";
-const VERIFIED_SIGNUP_TRIAL_SWITCH_TABLE =
-  "verified_signup_trial_switch_revisions";
+const VERIFIED_SIGNUP_TRIAL_SWITCH_TABLE = "verified_signup_trial_switch_revisions";
 /** Operator-only audited setter for the new-account sign-up switch (migration 0585). */
 const MANAGED_AUTH_NEW_SIGNUPS_SWITCH_SETTER_ROUTINE =
   "set_managed_auth_new_signups_enabled(boolean, text, text)";
-const MANAGED_AUTH_NEW_SIGNUPS_SWITCH_TABLE =
-  "managed_auth_new_signups_switch_revisions";
+const MANAGED_AUTH_NEW_SIGNUPS_SWITCH_TABLE = "managed_auth_new_signups_switch_revisions";
 const PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE =
   "preference_registry_create_knowledge_proposal_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, uuid, text, text, text, text, integer, text, jsonb, timestamp with time zone, text)";
 const PREFERENCE_KNOWLEDGE_PROPOSAL_AUTHORITY_TABLES = [
@@ -843,17 +803,13 @@ const SCHEDULED_PERSONAL_RESOURCE_ROUTINES = [
 ] as const;
 const PERSONAL_RESOURCE_CAPABILITY_PREDICATE_ROUTINE =
   "personal_resource_delegation_capability_active(text)";
-const PERSONAL_RESOURCE_CAPABILITY_TABLE =
-  "personal_resource_delegation_capabilities";
+const PERSONAL_RESOURCE_CAPABILITY_TABLE = "personal_resource_delegation_capabilities";
 const SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_PREDICATE_ROUTINE =
   "scheduled_personal_resource_capability_active(text)";
-const SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_TABLE =
-  "scheduled_personal_resource_capabilities";
-const VARIABLE_SET_CAPABILITY_PREDICATE_ROUTINE =
-  "variable_set_authority_capability_active(text)";
+const SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_TABLE = "scheduled_personal_resource_capabilities";
+const VARIABLE_SET_CAPABILITY_PREDICATE_ROUTINE = "variable_set_authority_capability_active(text)";
 const VARIABLE_SET_CAPABILITY_TABLE = "variable_set_authority_capabilities";
-const SITE_CANCELLATION_CAPABILITY_TABLE =
-  "site_session_cancellation_capabilities";
+const SITE_CANCELLATION_CAPABILITY_TABLE = "site_session_cancellation_capabilities";
 const SITE_CANCELLATION_PREDICATE =
   "site_session_cancellation_capability_active(uuid, uuid, uuid, uuid)";
 const SITE_CANCELLATION_PRIVATE_ROUTINES = [
@@ -862,8 +818,7 @@ const SITE_CANCELLATION_PRIVATE_ROUTINES = [
 ] as const;
 const PERSONAL_DOCUMENT_CAPABILITY_PREDICATE_ROUTINE =
   "personal_document_authority_capability_active(text)";
-const PERSONAL_DOCUMENT_CAPABILITY_TABLE =
-  "personal_document_authority_capabilities";
+const PERSONAL_DOCUMENT_CAPABILITY_TABLE = "personal_document_authority_capabilities";
 const PERSONAL_DOCUMENT_AUTHORITY_ROUTINES = [
   "create_personal_document_authority(uuid, uuid, uuid)",
   "resolve_document_original_file(uuid, uuid, text, uuid)",
@@ -961,8 +916,7 @@ const RETIRING_SUBSCRIPTION_TARGET_ROUTINES: ReadonlySet<string> = new Set([
   "resolve_workspace_codex_subscription_source(uuid, uuid)",
   "capture_legacy_codex_turn_sources(uuid, uuid)",
 ]);
-const VAULT_CAPABILITY_PREDICATE_ROUTINE =
-  "vault_authority_capability_active(text)";
+const VAULT_CAPABILITY_PREDICATE_ROUTINE = "vault_authority_capability_active(text)";
 const VAULT_CAPABILITY_TABLE = "vault_authority_capabilities";
 /** Vault routines (0739): the application role's only way into the vault tables. */
 export const VAULT_RUNTIME_ROUTINES = [
@@ -1007,11 +961,9 @@ export const VAULT_TABLES = [
   "vault_name_aliases",
   "vault_passkey_leases",
 ] as const;
-const SCOPED_COMPUTE_CAPABILITY_PREDICATE_ROUTINE =
-  "scoped_compute_capability_active(text)";
+const SCOPED_COMPUTE_CAPABILITY_PREDICATE_ROUTINE = "scoped_compute_capability_active(text)";
 const SCOPED_COMPUTE_CAPABILITY_TABLE = "scoped_compute_capabilities";
-const CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE =
-  "connection_tenancy_backfill_capabilities";
+const CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE = "connection_tenancy_backfill_capabilities";
 const CONNECTION_TENANCY_BACKFILL_CAPABILITY_PREDICATE_ROUTINE =
   "connection_tenancy_backfill_capability_active(uuid)";
 const SCOPED_COMPUTE_AUTHORITY_ROUTINES = [
@@ -1097,10 +1049,8 @@ const ORGANIZATION_RECOVERY_AUTHORITY_TABLES = [
 ] as const;
 const SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE =
   "session_private_actor_visible(uuid, uuid, uuid, text)";
-const SESSION_PRIVATE_ACTOR_VISIBLE_KEYS_ROUTINE =
-  "session_private_actor_visible_keys()";
-const SESSION_REFERENCE_VISIBLE_ROUTINE =
-  "session_reference_visible(uuid, uuid, uuid)";
+const SESSION_PRIVATE_ACTOR_VISIBLE_KEYS_ROUTINE = "session_private_actor_visible_keys()";
+const SESSION_REFERENCE_VISIBLE_ROUTINE = "session_reference_visible(uuid, uuid, uuid)";
 const TASK_NOTE_CAPABILITY_ROUTINES = [
   "create_task_note_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, integer)",
   "archive_task_note_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, integer, text)",
@@ -1213,10 +1163,8 @@ const MESSAGE_FORK_SESSION_CONTENT_ROUTINE =
   "fork_session_content(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer, uuid)";
 const REPLAY_APPLIED_SESSION_FORK_ROUTINE =
   "replay_applied_session_fork(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer)";
-const SESSION_TENANCY_ACTIVATED_ROUTINE =
-  "session_tenancy_product_activated(uuid, integer)";
-const SESSION_TENANCY_ANY_ACTIVATION_ROUTINE =
-  "session_tenancy_any_product_activation()";
+const SESSION_TENANCY_ACTIVATED_ROUTINE = "session_tenancy_product_activated(uuid, integer)";
+const SESSION_TENANCY_ANY_ACTIVATION_ROUTINE = "session_tenancy_any_product_activation()";
 const SESSION_TENANCY_QUIESCENCE_ROUTINE =
   "assert_session_tenancy_quiescent(uuid, uuid, uuid, boolean)";
 const TENANCY_BACKFILL_ACTIVATION_EVIDENCE_ROUTINE =
@@ -1260,8 +1208,7 @@ const SESSION_AUTHORITY_ROUTINES = new Set<string>([
   COMPANY_BRAIN_CONTEXT_SELECTION_ROUTINE,
   COMPANY_BRAIN_CONTEXT_INSPECTION_ROUTINE,
 ]);
-const XAI_SNAPSHOT_VALIDATOR_ROUTINE =
-  "xai_provider_account_authority_snapshot_v1_valid(jsonb)";
+const XAI_SNAPSHOT_VALIDATOR_ROUTINE = "xai_provider_account_authority_snapshot_v1_valid(jsonb)";
 const CLAUDE_SNAPSHOT_VALIDATOR_ROUTINE =
   "claude_provider_account_authority_snapshot_v1_valid(jsonb)";
 /**
@@ -1367,7 +1314,9 @@ export const SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES = [
 
 /** Where a retired routine lived: the data (target) schema or an owner schema. */
 export type RetiredSubscriptionRoutineSchema =
-  "target" | "opengeni_private" | "opengeni_subscription_internal";
+  | "target"
+  | "opengeni_private"
+  | "opengeni_subscription_internal";
 
 /**
  * M4 retirement (migration 0751, design 5.3 "R. Retirement"): every routine
@@ -1416,34 +1365,23 @@ export const SUBSCRIPTION_RETIRED_ROUTINES: readonly {
  * usage scope, and the legacy routines' runtime-capability policies on the
  * shared membership and authority tables.
  */
-export const SUBSCRIPTION_RETIRED_POLICIES: readonly {
-  table: string;
-  policy: string;
-}[] = [
+export const SUBSCRIPTION_RETIRED_POLICIES: readonly { table: string; policy: string }[] = [
   ...(["xai", "claude"] as const).flatMap((provider) => [
-    {
-      table: `${provider}_subscription_credentials`,
-      policy: `${provider}_subscription_scope`,
-    },
-    ...[
-      "rotation_settings",
-      "credential_leases",
-      "session_account_pins",
-      "capacity_waiters",
-    ].map((table) => ({
-      table: `${provider}_${table}`,
-      policy: `${provider}_subscription_pool_scope`,
-    })),
+    { table: `${provider}_subscription_credentials`, policy: `${provider}_subscription_scope` },
+    ...["rotation_settings", "credential_leases", "session_account_pins", "capacity_waiters"].map(
+      (table) => ({
+        table: `${provider}_${table}`,
+        policy: `${provider}_subscription_pool_scope`,
+      }),
+    ),
     ...["capability_read", "membership_lock"].map((suffix) => ({
       table: "organization_memberships",
       policy: `${provider}_subscription_${suffix}`,
     })),
-    ...["capability_insert", "capability_read", "capability_revoke"].map(
-      (suffix) => ({
-        table: "organization_user_resource_authorities",
-        policy: `${provider}_subscription_${suffix}`,
-      }),
-    ),
+    ...["capability_insert", "capability_read", "capability_revoke"].map((suffix) => ({
+      table: "organization_user_resource_authorities",
+      policy: `${provider}_subscription_${suffix}`,
+    })),
     // Only Claude kept per-credential usage (0598).
     ...(provider === "claude"
       ? [
@@ -1457,10 +1395,9 @@ export const SUBSCRIPTION_RETIRED_POLICIES: readonly {
 ];
 
 /** Migration 0751: the legacy factory triggers the retirement drops (data schema). */
-export const SUBSCRIPTION_RETIRED_TRIGGERS: readonly {
-  table: string;
-  trigger: string;
-}[] = (["xai", "claude"] as const).flatMap((provider) => [
+export const SUBSCRIPTION_RETIRED_TRIGGERS: readonly { table: string; trigger: string }[] = (
+  ["xai", "claude"] as const
+).flatMap((provider) => [
   {
     table: `${provider}_subscription_credentials`,
     trigger: `${provider}_subscription_credentials_authority_immutable_trg`,
@@ -1477,18 +1414,9 @@ export const SUBSCRIPTION_RETIRED_TRIGGERS: readonly {
     table: `${provider}_rotation_settings`,
     trigger: `${provider}_organization_rotation_update_guard`,
   },
-  {
-    table: `${provider}_rotation_settings`,
-    trigger: `${provider}_rotation_credential_pool_guard`,
-  },
-  {
-    table: `${provider}_credential_leases`,
-    trigger: `${provider}_lease_credential_pool_guard`,
-  },
-  {
-    table: `${provider}_session_account_pins`,
-    trigger: `${provider}_pin_credential_pool_guard`,
-  },
+  { table: `${provider}_rotation_settings`, trigger: `${provider}_rotation_credential_pool_guard` },
+  { table: `${provider}_credential_leases`, trigger: `${provider}_lease_credential_pool_guard` },
+  { table: `${provider}_session_account_pins`, trigger: `${provider}_pin_credential_pool_guard` },
 ]);
 
 /**
@@ -1502,68 +1430,52 @@ export const SUBSCRIPTION_RENAMED_ROUTINES: readonly {
   from: string;
   to: string;
 }[] = [
-  [
-    "auto_assign_subscription_codex_workspace()",
-    "auto_assign_subscription_core_workspace()",
-  ],
+  ["auto_assign_subscription_codex_workspace()", "auto_assign_subscription_core_workspace()"],
   [
     "auto_assign_subscription_codex_personal_workspace()",
     "auto_assign_subscription_core_personal_workspace()",
   ],
-  [
-    "record_subscription_codex_plan_change()",
-    "record_subscription_core_plan_change()",
-  ],
-].map(([from, to]) => ({
-  schema: "opengeni_private" as const,
-  from: from!,
-  to: to!,
-}));
+  ["record_subscription_codex_plan_change()", "record_subscription_core_plan_change()"],
+].map(([from, to]) => ({ schema: "opengeni_private" as const, from: from!, to: to! }));
 
 /** Migration 0751: 0689's triggers that take provider-free names (data schema). */
-export const SUBSCRIPTION_RENAMED_TRIGGERS: readonly {
-  table: string;
-  from: string;
-  to: string;
-}[] = [
-  {
-    table: "workspaces",
-    from: "workspaces_subscription_codex_auto_assign",
-    to: "workspaces_subscription_core_auto_assign",
-  },
-  {
-    table: "organization_memberships",
-    from: "organization_memberships_subscription_codex_auto_assign",
-    to: "organization_memberships_subscription_core_auto_assign",
-  },
-  {
-    table: "subscription_connections",
-    from: "subscription_connections_codex_plan_change_trg",
-    to: "subscription_connections_core_plan_change_trg",
-  },
-];
+export const SUBSCRIPTION_RENAMED_TRIGGERS: readonly { table: string; from: string; to: string }[] =
+  [
+    {
+      table: "workspaces",
+      from: "workspaces_subscription_codex_auto_assign",
+      to: "workspaces_subscription_core_auto_assign",
+    },
+    {
+      table: "organization_memberships",
+      from: "organization_memberships_subscription_codex_auto_assign",
+      to: "organization_memberships_subscription_core_auto_assign",
+    },
+    {
+      table: "subscription_connections",
+      from: "subscription_connections_codex_plan_change_trg",
+      to: "subscription_connections_core_plan_change_trg",
+    },
+  ];
 
 /**
  * Migration 0751: 0689's two owner-only auto-assignment policies (data
  * schema), which take provider-free names and read the provider-free
  * setting SUBSCRIPTION_AUTO_ASSIGN_SETTING.
  */
-export const SUBSCRIPTION_RENAMED_POLICIES: readonly {
-  table: string;
-  from: string;
-  to: string;
-}[] = [
-  {
-    table: "subscription_connection_workspaces",
-    from: "subscription_connection_workspaces_codex_auto_assign",
-    to: "subscription_connection_workspaces_core_auto_assign",
-  },
-  {
-    table: "subscription_connection_assignment_policies",
-    from: "subscription_connection_assignment_policies_codex_auto_assign",
-    to: "subscription_connection_assignment_policies_core_auto_assign",
-  },
-];
+export const SUBSCRIPTION_RENAMED_POLICIES: readonly { table: string; from: string; to: string }[] =
+  [
+    {
+      table: "subscription_connection_workspaces",
+      from: "subscription_connection_workspaces_codex_auto_assign",
+      to: "subscription_connection_workspaces_core_auto_assign",
+    },
+    {
+      table: "subscription_connection_assignment_policies",
+      from: "subscription_connection_assignment_policies_codex_auto_assign",
+      to: "subscription_connection_assignment_policies_core_auto_assign",
+    },
+  ];
 
 /** Migration 0751: the reach table takes the name of 0713's view over it. */
 export const SUBSCRIPTION_RENAMED_RELATIONS: readonly {
@@ -1584,8 +1496,7 @@ export const SUBSCRIPTION_RENAMED_RELATIONS: readonly {
  * renamed policies (0689's `opengeni.subscription_codex_auto_assign` before
  * migration 0751).
  */
-export const SUBSCRIPTION_AUTO_ASSIGN_SETTING =
-  "opengeni.subscription_core_auto_assign";
+export const SUBSCRIPTION_AUTO_ASSIGN_SETTING = "opengeni.subscription_core_auto_assign";
 
 /**
  * Every retired routine: dropped by migration 0751, or renamed by it (the
@@ -1596,30 +1507,21 @@ const RETIRED_ROUTINE_ENTRIES: readonly {
   signature: string;
 }[] = [
   ...SUBSCRIPTION_RETIRED_ROUTINES,
-  ...SUBSCRIPTION_RENAMED_ROUTINES.map(({ schema, from }) => ({
-    schema,
-    signature: from,
-  })),
+  ...SUBSCRIPTION_RENAMED_ROUTINES.map(({ schema, from }) => ({ schema, signature: from })),
 ];
 const RETIRED_POLICY_ENTRIES: readonly { table: string; policy: string }[] = [
   ...SUBSCRIPTION_RETIRED_POLICIES,
-  ...SUBSCRIPTION_RENAMED_POLICIES.map(({ table, from }) => ({
-    table,
-    policy: from,
-  })),
+  ...SUBSCRIPTION_RENAMED_POLICIES.map(({ table, from }) => ({ table, policy: from })),
 ];
 const RETIRED_TRIGGER_ENTRIES: readonly { table: string; trigger: string }[] = [
   ...SUBSCRIPTION_RETIRED_TRIGGERS,
-  ...SUBSCRIPTION_RENAMED_TRIGGERS.map(({ table, from }) => ({
-    table,
-    trigger: from,
-  })),
+  ...SUBSCRIPTION_RENAMED_TRIGGERS.map(({ table, from }) => ({ table, trigger: from })),
 ];
 /** Retired opengeni_private routines still present are reported once, as retired. */
 const RETIRED_PRIVATE_ROUTINES = new Set(
-  RETIRED_ROUTINE_ENTRIES.filter(
-    ({ schema }) => schema === "opengeni_private",
-  ).map(({ signature }) => signature),
+  RETIRED_ROUTINE_ENTRIES.filter(({ schema }) => schema === "opengeni_private").map(
+    ({ signature }) => signature,
+  ),
 );
 
 /**
@@ -1628,9 +1530,7 @@ const RETIRED_PRIVATE_ROUTINES = new Set(
  */
 export const SUBSCRIPTION_RETIRED_ROUTINE_NAMES: readonly string[] = [
   ...new Set(
-    RETIRED_ROUTINE_ENTRIES.map(({ signature }) =>
-      signature.slice(0, signature.indexOf("(")),
-    ),
+    RETIRED_ROUTINE_ENTRIES.map(({ signature }) => signature.slice(0, signature.indexOf("("))),
   ),
 ];
 
@@ -1641,23 +1541,15 @@ export const SUBSCRIPTION_RETIRED_ROUTINE_NAMES: readonly string[] = [
  * database that has not applied SUBSCRIPTION_RETIREMENT_MIGRATION still
  * holds, dropped objects and the Codex names of renamed ones alike.
  */
-export function retiredSubscriptionObjectDescriptions(
-  targetSchema = "public",
-): string[] {
+export function retiredSubscriptionObjectDescriptions(targetSchema = "public"): string[] {
   return [
     ...RETIRED_ROUTINE_ENTRIES.map(
       ({ schema, signature }) =>
         `routine ${schema === "target" ? targetSchema : schema}.${signature}`,
     ),
-    ...RETIRED_POLICY_ENTRIES.map(
-      ({ table, policy }) => `policy ${table}.${policy}`,
-    ),
-    ...RETIRED_TRIGGER_ENTRIES.map(
-      ({ table, trigger }) => `trigger ${table}.${trigger}`,
-    ),
-    ...SUBSCRIPTION_RENAMED_RELATIONS.map(
-      ({ schema, from }) => `relation ${schema}.${from}`,
-    ),
+    ...RETIRED_POLICY_ENTRIES.map(({ table, policy }) => `policy ${table}.${policy}`),
+    ...RETIRED_TRIGGER_ENTRIES.map(({ table, trigger }) => `trigger ${table}.${trigger}`),
+    ...SUBSCRIPTION_RENAMED_RELATIONS.map(({ schema, from }) => `relation ${schema}.${from}`),
   ].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
 }
 
@@ -1686,9 +1578,7 @@ export const SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES = [
  * (`opengeni_private.subscription_provider_cutover_committed`). A provider's
  * cutover PR adds its entry.
  */
-export const SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS: Readonly<
-  Record<string, string>
-> = {
+export const SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS: Readonly<Record<string, string>> = {
   codex: "0689_subscription_core_codex_cutover.sql",
   xai: "0747_subscription_core_xai_cutover.sql",
   claude: "0748_subscription_core_claude_cutover.sql",
@@ -1701,8 +1591,7 @@ export const SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS: Readonly<
  * withholds a provider cutover to characterize a legacy runtime withholds
  * this migration too.
  */
-export const SUBSCRIPTION_RETIREMENT_MIGRATION =
-  "0751_subscription_core_legacy_retirement.sql";
+export const SUBSCRIPTION_RETIREMENT_MIGRATION = "0751_subscription_core_legacy_retirement.sql";
 
 /**
  * Migration 0716 (M4 PR 0b): accepted authority across a provider's cutover.
@@ -1835,9 +1724,7 @@ const UNIFIED_KNOWLEDGE_ROUTINES = [
   "knowledge_document_prepare(uuid, uuid, uuid, jsonb)",
   "agent_learning_manage(uuid, uuid, jsonb, jsonb)",
 ] as const;
-const UNIFIED_KNOWLEDGE_ROUTINE_SET = new Set<string>(
-  UNIFIED_KNOWLEDGE_ROUTINES,
-);
+const UNIFIED_KNOWLEDGE_ROUTINE_SET = new Set<string>(UNIFIED_KNOWLEDGE_ROUTINES);
 const UNIFIED_KNOWLEDGE_AUTHORITY_TABLES = [
   "knowledge_entries",
   "knowledge_entry_revisions",
@@ -1869,8 +1756,7 @@ export const SESSION_USAGE_LIMIT_RUNTIME_ROUTINES = [
   "session_usage_limit_command(jsonb)",
   SESSION_USAGE_LIMIT_CAPABILITY_PREDICATE_ROUTINE,
 ] as const;
-export const SESSION_USAGE_LIMIT_STATE_ROUTINE =
-  "session_usage_limit_state(jsonb, boolean)";
+export const SESSION_USAGE_LIMIT_STATE_ROUTINE = "session_usage_limit_state(jsonb, boolean)";
 /** Pure amount rules shared by the event trigger and the legacy import. */
 export const SESSION_USAGE_LIMIT_AMOUNT_ROUTINES = [
   "session_usage_limit_meter_amount(numeric, text, numeric, numeric)",
@@ -1972,8 +1858,9 @@ export const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES = [
   "usage_allowance_capability_active(uuid, uuid)",
   SESSION_USAGE_LIMIT_CAPABILITY_PREDICATE_ROUTINE,
 ] as const;
-const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET =
-  new Set<string>(RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES);
+const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string>(
+  RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
+);
 
 /** Owner-internal helpers that must exist but must never be callable by the runtime role. */
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
@@ -2898,25 +2785,24 @@ export const RUNTIME_FULL_DML_TABLES = [
  * (an older binary's world); this binary requires the receipt, so its
  * contract is SELECT only.
  */
-export const SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES: Readonly<
-  Record<string, readonly string[]>
-> = Object.freeze({
-  xai: Object.freeze([
-    "xai_capacity_waiters",
-    "xai_credential_leases",
-    "xai_rotation_settings",
-    "xai_session_account_pins",
-    "xai_subscription_credentials",
-  ]),
-  claude: Object.freeze([
-    "claude_capacity_waiters",
-    "claude_credential_leases",
-    "claude_rotation_settings",
-    "claude_session_account_pins",
-    "claude_subscription_account_usage",
-    "claude_subscription_credentials",
-  ]),
-});
+export const SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES: Readonly<Record<string, readonly string[]>> =
+  Object.freeze({
+    xai: Object.freeze([
+      "xai_capacity_waiters",
+      "xai_credential_leases",
+      "xai_rotation_settings",
+      "xai_session_account_pins",
+      "xai_subscription_credentials",
+    ]),
+    claude: Object.freeze([
+      "claude_capacity_waiters",
+      "claude_credential_leases",
+      "claude_rotation_settings",
+      "claude_session_account_pins",
+      "claude_subscription_account_usage",
+      "claude_subscription_credentials",
+    ]),
+  });
 
 /** Configuration and lifecycle-owned audit rows are read-only at runtime. */
 export const RUNTIME_READ_ONLY_TABLES = [
@@ -2962,9 +2848,7 @@ export const RUNTIME_READ_ONLY_TABLES = [
 // Rolling compatibility only: old replicas and legacy SQL lifecycle routines
 // still finalize this counter. New writers use sessions.activity_xid. Keep its
 // exact FORCE-RLS/grant posture until a later contract release retires it.
-export const RUNTIME_READ_UPDATE_TABLES = [
-  "workspace_session_activity_revisions",
-] as const;
+export const RUNTIME_READ_UPDATE_TABLES = ["workspace_session_activity_revisions"] as const;
 
 /** Append-only evidence/revision tables are insertable and queryable, never mutable. */
 export const RUNTIME_READ_INSERT_TABLES = [
@@ -3216,8 +3100,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "workspace_variable_sets",
 ] as const;
 
-export type RuntimeTableDmlPrivilege =
-  "SELECT" | "INSERT" | "UPDATE" | "DELETE";
+export type RuntimeTableDmlPrivilege = "SELECT" | "INSERT" | "UPDATE" | "DELETE";
 export type RuntimeTablePrivilegeContract = Readonly<
   Record<string, readonly RuntimeTableDmlPrivilege[]>
 >;
@@ -3225,38 +3108,27 @@ export type RuntimeTablePrivilegeContract = Readonly<
 const FULL_DML_PRIVILEGES = ["SELECT", "INSERT", "UPDATE", "DELETE"] as const;
 
 /** Exact per-table DML contract. Absence means no direct table privileges. */
-export const RUNTIME_TABLE_PRIVILEGES: RuntimeTablePrivilegeContract =
-  Object.freeze({
-    ...Object.fromEntries(
-      RUNTIME_FULL_DML_TABLES.map((table) => [table, FULL_DML_PRIVILEGES]),
-    ),
-    ...Object.fromEntries(
-      RUNTIME_READ_ONLY_TABLES.map((table) => [table, ["SELECT"] as const]),
-    ),
-    ...Object.fromEntries(
-      Object.values(SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES)
-        .flat()
-        .map((table) => [table, ["SELECT"] as const]),
-    ),
-    ...Object.fromEntries(
-      RUNTIME_READ_UPDATE_TABLES.map((table) => [
-        table,
-        ["SELECT", "UPDATE"] as const,
-      ]),
-    ),
-    ...Object.fromEntries(
-      RUNTIME_READ_INSERT_TABLES.map((table) => [
-        table,
-        ["SELECT", "INSERT"] as const,
-      ]),
-    ),
-    ...Object.fromEntries(
-      RUNTIME_READ_INSERT_UPDATE_TABLES.map((table) => [
-        table,
-        ["SELECT", "INSERT", "UPDATE"] as const,
-      ]),
-    ),
-  });
+export const RUNTIME_TABLE_PRIVILEGES: RuntimeTablePrivilegeContract = Object.freeze({
+  ...Object.fromEntries(RUNTIME_FULL_DML_TABLES.map((table) => [table, FULL_DML_PRIVILEGES])),
+  ...Object.fromEntries(RUNTIME_READ_ONLY_TABLES.map((table) => [table, ["SELECT"] as const])),
+  ...Object.fromEntries(
+    Object.values(SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES)
+      .flat()
+      .map((table) => [table, ["SELECT"] as const]),
+  ),
+  ...Object.fromEntries(
+    RUNTIME_READ_UPDATE_TABLES.map((table) => [table, ["SELECT", "UPDATE"] as const]),
+  ),
+  ...Object.fromEntries(
+    RUNTIME_READ_INSERT_TABLES.map((table) => [table, ["SELECT", "INSERT"] as const]),
+  ),
+  ...Object.fromEntries(
+    RUNTIME_READ_INSERT_UPDATE_TABLES.map((table) => [
+      table,
+      ["SELECT", "INSERT", "UPDATE"] as const,
+    ]),
+  ),
+});
 
 /** All tables with any direct runtime DML; retained as the aggregate public contract. */
 export const RUNTIME_DML_TABLES = Object.freeze(
@@ -3294,9 +3166,7 @@ const DECLARED_PRIVATE_ROUTINES = new Set<string>([
   ...RUNTIME_DEFINER_ROUTINES,
 ]);
 const RUNTIME_DEFINER_ROUTINE_NAMES = new Set<string>(RUNTIME_DEFINER_ROUTINES);
-const DEFERRED_PRIVATE_ROUTINE_NAMES = new Set<string>(
-  DEFERRED_RUNTIME_PRIVATE_ROUTINES,
-);
+const DEFERRED_PRIVATE_ROUTINE_NAMES = new Set<string>(DEFERRED_RUNTIME_PRIVATE_ROUTINES);
 const DECLARED_TARGET_ROUTINES = new Set<string>([
   ...legacyRoutines.target,
   ...RETIRED_ROUTINE_ENTRIES.filter(({ schema }) => schema === "target").map(
@@ -3312,12 +3182,7 @@ const DECLARED_TARGET_ROUTINES = new Set<string>([
 function securelyShapedUnknownTable(
   table: Pick<
     RuntimePrivateTablePosture,
-    | "owner"
-    | "rlsEnabled"
-    | "rlsForced"
-    | "rlsActive"
-    | "policyCount"
-    | "hasInheritance"
+    "owner" | "rlsEnabled" | "rlsForced" | "rlsActive" | "policyCount" | "hasInheritance"
   >,
   runtimeRole: string,
 ): boolean {
@@ -3340,9 +3205,7 @@ function unknownRoutineViolations(
 ): string[] {
   const violations: string[] = [];
   if (routine.owner === runtimeRole) {
-    violations.push(
-      `runtime role owns unknown routine ${schema}.${routine.name}`,
-    );
+    violations.push(`runtime role owns unknown routine ${schema}.${routine.name}`);
   }
   // SECURITY INVOKER cannot elevate the runtime's identity. Revoked EXECUTE
   // alone does not make a definer inert: triggers do not check EXECUTE when
@@ -3363,9 +3226,7 @@ function unknownRoutineViolations(
       routine.triggerCallable !== false ||
       routine.hasDependents !== false)
   ) {
-    violations.push(
-      `unknown routine ${schema}.${routine.name} exposes SECURITY DEFINER execution`,
-    );
+    violations.push(`unknown routine ${schema}.${routine.name} exposes SECURITY DEFINER execution`);
   }
   return violations;
 }
@@ -3491,10 +3352,7 @@ export type RuntimeDatabasePosture = {
    */
   subscriptionProviderCutoverReceipts: string[];
   /** Catalog evidence for dropping receipts only after their feature tables. */
-  retiringFeatureTablesPresent?: {
-    subscription: boolean;
-    variableSets: boolean;
-  };
+  retiringFeatureTablesPresent?: { subscription: boolean; variableSets: boolean };
 };
 
 export class RuntimeDatabasePostureError extends Error {
@@ -3508,9 +3366,7 @@ export class RuntimeDatabasePostureError extends Error {
 }
 
 /** Posture/configuration mismatches cannot heal through connection backoff. */
-export function isRetryableRuntimeDatabaseStartupError(
-  error: unknown,
-): boolean {
+export function isRetryableRuntimeDatabaseStartupError(error: unknown): boolean {
   const seen = new Set<unknown>();
   let current = error;
   while (current instanceof Error && !seen.has(current)) {
@@ -3554,19 +3410,14 @@ function resultRows<T>(result: unknown): T[] {
   if (Array.isArray(rows)) {
     return rows as T[];
   }
-  throw new Error(
-    "Runtime database posture query returned an unsupported result shape",
-  );
+  throw new Error("Runtime database posture query returned an unsupported result shape");
 }
 
 function sorted(values: Iterable<string>): string[] {
   return [...values].sort((a, b) => a.localeCompare(b));
 }
 
-function difference(
-  left: ReadonlySet<string>,
-  right: ReadonlySet<string>,
-): string[] {
+function difference(left: ReadonlySet<string>, right: ReadonlySet<string>): string[] {
   return sorted([...left].filter((value) => !right.has(value)));
 }
 
@@ -3630,9 +3481,7 @@ export async function inspectRuntimeDatabasePosture(
       );
       const identity = identityRows[0];
       if (!identity) {
-        throw new Error(
-          "Runtime database posture could not resolve the current PostgreSQL role",
-        );
+        throw new Error("Runtime database posture could not resolve the current PostgreSQL role");
       }
 
       const mappedIdentity: RuntimeDatabaseIdentity = {
@@ -3751,12 +3600,9 @@ export async function inspectRuntimeDatabasePosture(
       }
 
       const relationshipRows = resultRows<RoleRelationshipCatalogRow>(
-        await tx.execute(
-          sql.raw(roleRelationshipsCatalogQuery("current_user")),
-        ),
+        await tx.execute(sql.raw(roleRelationshipsCatalogQuery("current_user"))),
       );
-      const memberships =
-        classifyRoleRelationships(relationshipRows).unsafeRelationships;
+      const memberships = classifyRoleRelationships(relationshipRows).unsafeRelationships;
 
       const schemas = resultRows<{
         name: string;
@@ -3866,9 +3712,7 @@ export async function inspectRuntimeDatabasePosture(
         `),
       );
       const tables = tableRows
-        .filter(
-          (row) => !row.private_schema || targetSchema === "opengeni_private",
-        )
+        .filter((row) => !row.private_schema || targetSchema === "opengeni_private")
         .map((row) => ({
           name: row.name,
           owner: row.owner,
@@ -3906,9 +3750,7 @@ export async function inspectRuntimeDatabasePosture(
           truncate: row.can_truncate,
           references: row.can_references,
           trigger: row.can_trigger,
-          ...(row.extra_privileges?.length
-            ? { extraPrivileges: row.extra_privileges }
-            : {}),
+          ...(row.extra_privileges?.length ? { extraPrivileges: row.extra_privileges } : {}),
           columnPrivileges: row.column_privileges,
           hasInheritance: row.has_inheritance,
         }));
@@ -3953,9 +3795,7 @@ export async function inspectRuntimeDatabasePosture(
         `),
       );
       const targetRoutines = routineRows
-        .filter(
-          (row) => !row.private_schema || targetSchema === "opengeni_private",
-        )
+        .filter((row) => !row.private_schema || targetSchema === "opengeni_private")
         .map((row) => ({
           name: row.name,
           owner: row.owner,
@@ -4118,21 +3958,12 @@ export function evaluateRuntimeDatabasePosture(
       return {
         ...table,
         select:
-          table.select ||
-          (denyColumns && table.columnPrivileges?.includes("SELECT")) ||
-          false,
+          table.select || (denyColumns && table.columnPrivileges?.includes("SELECT")) || false,
         insert:
-          table.insert ||
-          (denyColumns && table.columnPrivileges?.includes("INSERT")) ||
-          false,
+          table.insert || (denyColumns && table.columnPrivileges?.includes("INSERT")) || false,
         update:
-          table.update ||
-          (denyColumns && table.columnPrivileges?.includes("UPDATE")) ||
-          false,
-        references:
-          table.references ||
-          table.columnPrivileges?.includes("REFERENCES") ||
-          false,
+          table.update || (denyColumns && table.columnPrivileges?.includes("UPDATE")) || false,
+        references: table.references || table.columnPrivileges?.includes("REFERENCES") || false,
       };
     }),
   };
@@ -4151,27 +3982,18 @@ export function evaluateRuntimeDatabasePosture(
   const retiringSubscriptionPresent =
     posture.retiringFeatureTablesPresent?.subscription !== false ||
     posture.tables.some((table) =>
-      (RETIRING_FEATURE_TABLES.subscription as readonly string[]).includes(
-        table.name,
-      ),
+      (RETIRING_FEATURE_TABLES.subscription as readonly string[]).includes(table.name),
     );
   const retiringVariableSetsPresent =
     posture.retiringFeatureTablesPresent?.variableSets !== false ||
     posture.tables.some((table) =>
-      (RETIRING_FEATURE_TABLES.variableSets as readonly string[]).includes(
-        table.name,
-      ),
+      (RETIRING_FEATURE_TABLES.variableSets as readonly string[]).includes(table.name),
     );
-  if (
-    retiringSubscriptionPresent &&
-    !posture.subscriptionCodexCutoverActivationPresent
-  )
+  if (retiringSubscriptionPresent && !posture.subscriptionCodexCutoverActivationPresent)
     violations.push(
       "database is missing the 0689 Codex subscription-core cutover receipt; run the drained migration first",
     );
-  for (const [provider, migration] of Object.entries(
-    SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS,
-  )) {
+  for (const [provider, migration] of Object.entries(SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS)) {
     if (
       retiringSubscriptionPresent &&
       !posture.subscriptionProviderCutoverReceipts.includes(provider)
@@ -4182,13 +4004,8 @@ export function evaluateRuntimeDatabasePosture(
     }
   }
 
-  if (
-    retiringVariableSetsPresent &&
-    !posture.sessionVariableSetAttachmentsCutoverPresent
-  ) {
-    violations.push(
-      "database is missing the 0352 session Variable Set attachment runtime receipt",
-    );
+  if (retiringVariableSetsPresent && !posture.sessionVariableSetAttachmentsCutoverPresent) {
+    violations.push("database is missing the 0352 session Variable Set attachment runtime receipt");
   }
 
   if (!identity.currentUser || !identity.sessionUser) {
@@ -4213,10 +4030,7 @@ export function evaluateRuntimeDatabasePosture(
   const tablePrivileges = options.tablePrivileges ?? RUNTIME_TABLE_PRIVILEGES;
   const legacyTablesBeforeReceipt = new Set(
     Object.entries(SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES)
-      .filter(
-        ([provider]) =>
-          !posture.subscriptionProviderCutoverReceipts.includes(provider),
-      )
+      .filter(([provider]) => !posture.subscriptionProviderCutoverReceipts.includes(provider))
       .flatMap(([, tables]) => tables),
   );
   const directRuntimeTables = new Set(Object.keys(tablePrivileges));
@@ -4225,11 +4039,9 @@ export function evaluateRuntimeDatabasePosture(
       (options.protectedTables ? [] : PROTECTED_NO_DIRECT_DML_TABLES),
   );
   const targetSchemaCapabilityRoutines =
-    options.targetSchemaCapabilityRoutines ??
-    RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES;
+    options.targetSchemaCapabilityRoutines ?? RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES;
   const targetSchemaForbiddenRoutines =
-    options.targetSchemaForbiddenRoutines ??
-    RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES;
+    options.targetSchemaForbiddenRoutines ?? RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES;
   const knownTables = new Set([
     ...DECLARED_TARGET_TABLES,
     ...protectedTables,
@@ -4244,17 +4056,12 @@ export function evaluateRuntimeDatabasePosture(
   const toleratedUnknownTables = new Set(
     posture.tables
       .filter(
-        (table) =>
-          !knownTables.has(table.name) &&
-          securelyShapedUnknownTable(table, expectedRole),
+        (table) => !knownTables.has(table.name) && securelyShapedUnknownTable(table, expectedRole),
       )
       .map((table) => table.name),
   );
 
-  if (
-    identity.currentUser !== expectedRole ||
-    identity.sessionUser !== expectedRole
-  ) {
+  if (identity.currentUser !== expectedRole || identity.sessionUser !== expectedRole) {
     violations.push(
       `runtime identity must be ${expectedRole} (current_user=${identity.currentUser}, session_user=${identity.sessionUser})`,
     );
@@ -4266,8 +4073,7 @@ export function evaluateRuntimeDatabasePosture(
   if (identity.createDatabase) violations.push("runtime role has CREATEDB");
   if (identity.replication) violations.push("runtime role has REPLICATION");
   if (identity.inherit) violations.push("runtime role must be NOINHERIT");
-  if (identity.databaseOwner === expectedRole)
-    violations.push("runtime role owns the database");
+  if (identity.databaseOwner === expectedRole) violations.push("runtime role owns the database");
   if (identity.canCreateInDatabase) {
     violations.push("runtime role has CREATE on the current database");
   }
@@ -4275,25 +4081,17 @@ export function evaluateRuntimeDatabasePosture(
     violations.push(`row_security is ${identity.rowSecurity}, expected on`);
   }
   if (posture.memberships.length > 0) {
-    violations.push(
-      `runtime role has memberships: ${sorted(posture.memberships).join(", ")}`,
-    );
+    violations.push(`runtime role has memberships: ${sorted(posture.memberships).join(", ")}`);
   }
   if (posture.ownedSchemas.length > 0) {
-    violations.push(
-      `runtime role owns schemas: ${sorted(posture.ownedSchemas).join(", ")}`,
-    );
+    violations.push(`runtime role owns schemas: ${sorted(posture.ownedSchemas).join(", ")}`);
   }
   if (posture.ownedRelations.length > 0) {
-    violations.push(
-      `runtime role owns relations: ${sorted(posture.ownedRelations).join(", ")}`,
-    );
+    violations.push(`runtime role owns relations: ${sorted(posture.ownedRelations).join(", ")}`);
   }
 
   for (const schemaName of new Set([targetSchema, "opengeni_private"])) {
-    const schema = posture.schemas.find(
-      (candidate) => candidate.name === schemaName,
-    );
+    const schema = posture.schemas.find((candidate) => candidate.name === schemaName);
     if (!schema) {
       violations.push(`required schema ${schemaName} is missing`);
       continue;
@@ -4301,21 +4099,15 @@ export function evaluateRuntimeDatabasePosture(
     if (schema.owner === expectedRole) {
       violations.push(`runtime role owns schema ${schemaName}`);
     }
-    if (!schema.usage)
-      violations.push(`runtime role lacks USAGE on schema ${schemaName}`);
-    if (schema.create)
-      violations.push(`runtime role has CREATE on schema ${schemaName}`);
+    if (!schema.usage) violations.push(`runtime role lacks USAGE on schema ${schemaName}`);
+    if (schema.create) violations.push(`runtime role has CREATE on schema ${schemaName}`);
   }
 
-  const tableByName = new Map(
-    posture.tables.map((table) => [table.name, table]),
-  );
+  const tableByName = new Map(posture.tables.map((table) => [table.name, table]));
   // RUNTIME_DEFINER_ROUTINE_TABLES names private tables with their schema.
   const definerTableByName = new Map<string, { owner: string }>([
     ...tableByName,
-    ...posture.privateTables.map(
-      (table) => [`opengeni_private.${table.name}`, table] as const,
-    ),
+    ...posture.privateTables.map((table) => [`opengeni_private.${table.name}`, table] as const),
   ]);
   for (const table of posture.privateTables) {
     if (DECLARED_PRIVATE_TABLES.has(table.name)) {
@@ -4327,12 +4119,8 @@ export function evaluateRuntimeDatabasePosture(
         ...(table.update ? ["UPDATE"] : []),
         ...(table.references ? ["REFERENCES"] : []),
       ]);
-      if (
-        table.columnPrivileges?.some((privilege) => !tableGrants.has(privilege))
-      ) {
-        violations.push(
-          `private table ${table.name} has excess column privileges`,
-        );
+      if (table.columnPrivileges?.some((privilege) => !tableGrants.has(privilege))) {
+        violations.push(`private table ${table.name} has excess column privileges`);
       }
       continue;
     }
@@ -4361,16 +4149,13 @@ export function evaluateRuntimeDatabasePosture(
         table.extraPrivileges?.length ||
         table.columnPrivileges?.includes("REFERENCES"))
     ) {
-      violations.push(
-        `unknown private table ${table.name} has unsafe runtime privileges`,
-      );
+      violations.push(`unknown private table ${table.name} has unsafe runtime privileges`);
     }
   }
   if (
     !options.protectedTables &&
     !posture.privateRoutines.some(
-      (routine) =>
-        routine.name === SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE,
+      (routine) => routine.name === SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE,
     )
   ) {
     violations.push("subscription plan maintenance inventory is missing");
@@ -4392,16 +4177,10 @@ export function evaluateRuntimeDatabasePosture(
     `search_path=pg_catalog, ${/^[a-z_][a-z0-9_]*$/.test(targetSchema) ? targetSchema : quotedTargetSchema}, opengeni_private, pg_temp`,
   ]);
   const safeSearchPath = (routine: RuntimeRoutinePosture) =>
-    routine.name ===
-      "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)" ||
-    routine.name ===
-      "subscription_core_refresh_write_allowed(text, uuid, uuid, uuid)"
-      ? routine.configuration?.includes(
-          "search_path=pg_catalog, opengeni_private, pg_temp",
-        )
-      : routine.configuration?.some((configuration) =>
-          precursorSearchPaths.has(configuration),
-        );
+    routine.name === "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)" ||
+    routine.name === "subscription_core_refresh_write_allowed(text, uuid, uuid, uuid)"
+      ? routine.configuration?.includes("search_path=pg_catalog, opengeni_private, pg_temp")
+      : routine.configuration?.some((configuration) => precursorSearchPaths.has(configuration));
   const hardenedPrivateRoutine = (matches: RuntimeRoutinePosture[]) =>
     matches.length === 1 &&
     matches[0]!.execute &&
@@ -4410,15 +4189,11 @@ export function evaluateRuntimeDatabasePosture(
     !(privateSchemaOwner && matches[0]!.owner !== privateSchemaOwner) &&
     safeSearchPath(matches[0]!) === true;
   for (const expectedRoutine of SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES) {
-    const matches = posture.privateRoutines.filter(
-      (routine) => routine.name === expectedRoutine,
-    );
+    const matches = posture.privateRoutines.filter((routine) => routine.name === expectedRoutine);
     if (
       matches.length === 0 &&
       !retiringSubscriptionPresent &&
-      (
-        SUBSCRIPTION_CORE_PRECURSOR_PRIVATE_ROUTINES as readonly string[]
-      ).includes(expectedRoutine)
+      (SUBSCRIPTION_CORE_PRECURSOR_PRIVATE_ROUTINES as readonly string[]).includes(expectedRoutine)
     )
       continue;
     if (!hardenedPrivateRoutine(matches)) {
@@ -4428,14 +4203,11 @@ export function evaluateRuntimeDatabasePosture(
     }
   }
   for (const ownerOnly of SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES) {
-    const routine = [
-      ...posture.privateRoutines,
-      ...(posture.subscriptionOwnerRoutines ?? []),
-    ].find((candidate) => candidate.name === ownerOnly);
+    const routine = [...posture.privateRoutines, ...(posture.subscriptionOwnerRoutines ?? [])].find(
+      (candidate) => candidate.name === ownerOnly,
+    );
     if (routine && (routine.execute || routine.publicExecute)) {
-      violations.push(
-        `subscription M3 owner-only private routine ${ownerOnly} is executable`,
-      );
+      violations.push(`subscription M3 owner-only private routine ${ownerOnly} is executable`);
     }
   }
   const privateRoutinePresent = (prefix: string) =>
@@ -4465,9 +4237,7 @@ export function evaluateRuntimeDatabasePosture(
       // 0717 adds no runtime routine: once any of its helpers exists, all of
       // them must, owner-only and with a safe search path.
       ...(posture.subscriptionOwnerRoutines.some((routine) =>
-        (
-          SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES as readonly string[]
-        ).includes(routine.name),
+        (SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES as readonly string[]).includes(routine.name),
       )
         ? SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES
         : []),
@@ -4495,9 +4265,7 @@ export function evaluateRuntimeDatabasePosture(
             value === `search_path=pg_catalog, ${quotedTargetSchema}, pg_temp`,
         )
       ) {
-        violations.push(
-          `subscription owner implementation ${signature} is missing or unsafe`,
-        );
+        violations.push(`subscription owner implementation ${signature} is missing or unsafe`);
       }
     }
   }
@@ -4506,9 +4274,7 @@ export function evaluateRuntimeDatabasePosture(
       "update_organization_integration_policy(uuid, text, jsonb)",
       "assert_organization_integration_policy_administrator(uuid, text)",
     ]) {
-      const routines = posture.privateRoutines.filter(
-        (routine) => routine.name === name,
-      );
+      const routines = posture.privateRoutines.filter((routine) => routine.name === name);
       const quotedSchema = `"${targetSchema.replaceAll('"', '""')}"`;
       const searchPaths = new Set([
         `search_path=pg_catalog, ${quotedSchema}, pg_temp`,
@@ -4520,9 +4286,7 @@ export function evaluateRuntimeDatabasePosture(
         !routine?.execute ||
         routine.publicExecute ||
         !routine.securityDefiner ||
-        !routine.configuration?.some((configuration) =>
-          searchPaths.has(configuration),
-        ) ||
+        !routine.configuration?.some((configuration) => searchPaths.has(configuration)) ||
         [
           "organization_integration_policies",
           "organization_integration_policy_operations",
@@ -4530,25 +4294,18 @@ export function evaluateRuntimeDatabasePosture(
           "api_keys",
         ].some((table) => tableByName.get(table)?.owner !== routine.owner)
       ) {
-        violations.push(
-          "organization integration policy mutation capability is missing or unsafe",
-        );
+        violations.push("organization integration policy mutation capability is missing or unsafe");
       }
     }
   }
   const actualRlsTables = new Set(
-    posture.tables
-      .filter((table) => table.rlsEnabled)
-      .map((table) => table.name),
+    posture.tables.filter((table) => table.rlsEnabled).map((table) => table.name),
   );
   const classifiedProtectedTables = new Set([
     ...directRuntimeTables,
     ...protectedNoDirectDmlTables,
   ]);
-  const unclassifiedProtectedTables = difference(
-    protectedTables,
-    classifiedProtectedTables,
-  );
+  const unclassifiedProtectedTables = difference(protectedTables, classifiedProtectedTables);
   if (unclassifiedProtectedTables.length > 0) {
     violations.push(
       `protected tables lack an explicit privilege class: ${unclassifiedProtectedTables.join(", ")}`,
@@ -4556,43 +4313,31 @@ export function evaluateRuntimeDatabasePosture(
   }
   const protectedNoDirectDmlOverlap = difference(
     protectedNoDirectDmlTables,
-    new Set(
-      [...protectedNoDirectDmlTables].filter(
-        (table) => !directRuntimeTables.has(table),
-      ),
-    ),
+    new Set([...protectedNoDirectDmlTables].filter((table) => !directRuntimeTables.has(table))),
   );
   if (protectedNoDirectDmlOverlap.length > 0) {
     violations.push(
       `protected no-direct-DML tables also declare runtime privileges: ${protectedNoDirectDmlOverlap.join(", ")}`,
     );
   }
-  const nonProtectedNoDirectDmlTables = difference(
-    protectedNoDirectDmlTables,
-    protectedTables,
-  );
+  const nonProtectedNoDirectDmlTables = difference(protectedNoDirectDmlTables, protectedTables);
   if (nonProtectedNoDirectDmlTables.length > 0) {
     violations.push(
       `no-direct-DML tables are absent from the protected contract: ${nonProtectedNoDirectDmlTables.join(", ")}`,
     );
   }
   const catalogTables = new Set(tableByName.keys());
-  const missingRuntimeTables = difference(
-    directRuntimeTables,
-    catalogTables,
-  ).filter((name) => !RETIRING_FEATURE_TABLE_NAMES.has(name));
+  const missingRuntimeTables = difference(directRuntimeTables, catalogTables).filter(
+    (name) => !RETIRING_FEATURE_TABLE_NAMES.has(name),
+  );
   if (missingRuntimeTables.length > 0) {
-    violations.push(
-      `runtime privilege tables are missing: ${missingRuntimeTables.join(", ")}`,
-    );
+    violations.push(`runtime privilege tables are missing: ${missingRuntimeTables.join(", ")}`);
   }
   const missingTables = difference(protectedTables, catalogTables).filter(
     (name) => !RETIRING_FEATURE_TABLE_NAMES.has(name),
   );
   if (missingTables.length > 0) {
-    violations.push(
-      `protected tables are missing: ${missingTables.join(", ")}`,
-    );
+    violations.push(`protected tables are missing: ${missingTables.join(", ")}`);
   }
   const undeclaredRlsTables = difference(
     actualRlsTables,
@@ -4608,9 +4353,7 @@ export function evaluateRuntimeDatabasePosture(
     // Even an ungranted child can be read/written through a known parent.
     // Relation-local ACL flags do not describe that indirect access path.
     if (!knownTables.has(table.name) && table.hasInheritance) {
-      violations.push(
-        `unknown table ${table.name} has an inheritance or partition relationship`,
-      );
+      violations.push(`unknown table ${table.name} has an inheritance or partition relationship`);
     }
     const privileges = [
       ["SELECT", table.select],
@@ -4621,29 +4364,23 @@ export function evaluateRuntimeDatabasePosture(
       ["REFERENCES", table.references],
       ["TRIGGER", table.trigger],
     ] as const;
-    const expectedPrivileges = new Set<string>(
-      tablePrivileges[table.name] ?? [],
-    );
+    const expectedPrivileges = new Set<string>(tablePrivileges[table.name] ?? []);
     // Before a provider's receipt, provisioning still grants its legacy
     // tables full DML (an older binary's world): tolerated, since the missing
     // receipt is reported and refuses readiness on its own.
     const toleratedPrivileges = new Set<string>(expectedPrivileges);
     if (legacyTablesBeforeReceipt.has(table.name)) {
-      for (const privilege of FULL_DML_PRIVILEGES)
-        toleratedPrivileges.add(privilege);
+      for (const privilege of FULL_DML_PRIVILEGES) toleratedPrivileges.add(privilege);
     }
     if (toleratedUnknownTables.has(table.name)) {
       // RLS governs row DML, not TRUNCATE, REFERENCES, TRIGGER or MAINTAIN.
-      for (const privilege of FULL_DML_PRIVILEGES)
-        toleratedPrivileges.add(privilege);
+      for (const privilege of FULL_DML_PRIVILEGES) toleratedPrivileges.add(privilege);
     }
     if (table.owner === expectedRole) {
       violations.push(`runtime role owns table ${table.name}`);
     }
     const missingPrivileges = privileges
-      .filter(
-        ([privilege, granted]) => expectedPrivileges.has(privilege) && !granted,
-      )
+      .filter(([privilege, granted]) => expectedPrivileges.has(privilege) && !granted)
       .map(([privilege]) => privilege);
     if (missingPrivileges.length > 0) {
       violations.push(
@@ -4668,30 +4405,20 @@ export function evaluateRuntimeDatabasePosture(
   for (const tableName of protectedTables) {
     const table = tableByName.get(tableName);
     if (!table) continue;
-    if (!table.rlsEnabled)
-      violations.push(`table ${tableName} does not ENABLE RLS`);
-    if (!table.rlsForced)
-      violations.push(`table ${tableName} does not FORCE RLS`);
-    if (!table.rlsActive)
-      violations.push(`table ${tableName} has inactive RLS for runtime role`);
-    if (table.policyCount < 1)
-      violations.push(`table ${tableName} has no RLS policy`);
+    if (!table.rlsEnabled) violations.push(`table ${tableName} does not ENABLE RLS`);
+    if (!table.rlsForced) violations.push(`table ${tableName} does not FORCE RLS`);
+    if (!table.rlsActive) violations.push(`table ${tableName} has inactive RLS for runtime role`);
+    if (table.policyCount < 1) violations.push(`table ${tableName} has no RLS policy`);
   }
 
-  const targetSchemaOwner = posture.schemas.find(
-    (schema) => schema.name === targetSchema,
-  )?.owner;
+  const targetSchemaOwner = posture.schemas.find((schema) => schema.name === targetSchema)?.owner;
   for (const routine of posture.targetRoutines) {
     if (!knownTargetRoutines.has(routine.name)) {
-      violations.push(
-        ...unknownRoutineViolations(routine, targetSchema, expectedRole),
-      );
+      violations.push(...unknownRoutineViolations(routine, targetSchema, expectedRole));
     }
   }
   for (const forbiddenRoutine of targetSchemaForbiddenRoutines) {
-    const matches = posture.targetRoutines.filter(
-      (routine) => routine.name === forbiddenRoutine,
-    );
+    const matches = posture.targetRoutines.filter((routine) => routine.name === forbiddenRoutine);
     if (matches.length !== 1) {
       violations.push(
         `owner-internal target-schema helper ${forbiddenRoutine} is missing or ambiguous`,
@@ -4705,28 +4432,21 @@ export function evaluateRuntimeDatabasePosture(
         `owner-internal target-schema helper ${routine.name} is not SECURITY ${invoker ? "INVOKER" : "DEFINER"}`,
       );
     }
-    const authorityOwner =
-      tableByName.get("sessions")?.owner ?? targetSchemaOwner;
+    const authorityOwner = tableByName.get("sessions")?.owner ?? targetSchemaOwner;
     if (authorityOwner && routine.owner !== authorityOwner) {
       violations.push(
         `owner-internal target-schema helper ${routine.name} owner ${routine.owner} does not match session authority owner ${authorityOwner}`,
       );
     }
     if (routine.execute) {
-      violations.push(
-        `runtime role has forbidden owner-internal helper ${routine.name}`,
-      );
+      violations.push(`runtime role has forbidden owner-internal helper ${routine.name}`);
     }
     if (routine.publicExecute) {
-      violations.push(
-        `PUBLIC has forbidden owner-internal helper ${routine.name}`,
-      );
+      violations.push(`PUBLIC has forbidden owner-internal helper ${routine.name}`);
     }
   }
   for (const expectedRoutine of targetSchemaCapabilityRoutines) {
-    const matches = posture.targetRoutines.filter(
-      (routine) => routine.name === expectedRoutine,
-    );
+    const matches = posture.targetRoutines.filter((routine) => routine.name === expectedRoutine);
     if (
       matches.length === 0 &&
       !retiringVariableSetsPresent &&
@@ -4753,9 +4473,7 @@ export function evaluateRuntimeDatabasePosture(
         );
       }
     } else if (!routine.securityDefiner) {
-      violations.push(
-        `target-schema runtime capability ${routine.name} is not SECURITY DEFINER`,
-      );
+      violations.push(`target-schema runtime capability ${routine.name} is not SECURITY DEFINER`);
     }
     if (
       routine.name.startsWith("usage_allowance_") ||
@@ -4763,32 +4481,22 @@ export function evaluateRuntimeDatabasePosture(
     ) {
       const owners = new Set(
         RUNTIME_ALLOWANCE_PRIVATE_TABLES.map(
-          (name) =>
-            posture.privateTables.find((table) => table.name === name)?.owner,
+          (name) => posture.privateTables.find((table) => table.name === name)?.owner,
         ),
       );
       if (
         (!options.protectedTables ||
-          posture.privateTables.some(
-            (table) => table.name === "usage_allowance_capabilities",
-          )) &&
-        (owners.size !== 1 ||
-          owners.has(undefined) ||
-          !owners.has(routine.owner))
+          posture.privateTables.some((table) => table.name === "usage_allowance_capabilities")) &&
+        (owners.size !== 1 || owners.has(undefined) || !owners.has(routine.owner))
       ) {
         violations.push(
           `target-schema runtime capability ${routine.name} allowance authority owners do not match`,
         );
       }
-    } else if (
-      (SESSION_USAGE_LIMIT_RUNTIME_ROUTINES as readonly string[]).includes(
-        routine.name,
-      )
-    ) {
+    } else if ((SESSION_USAGE_LIMIT_RUNTIME_ROUTINES as readonly string[]).includes(routine.name)) {
       const owners = new Set(
         RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES.map(
-          (name) =>
-            posture.privateTables.find((table) => table.name === name)?.owner,
+          (name) => posture.privateTables.find((table) => table.name === name)?.owner,
         ),
       );
       if (
@@ -4796,9 +4504,7 @@ export function evaluateRuntimeDatabasePosture(
           posture.privateTables.some(
             (table) => table.name === "session_usage_limit_capabilities",
           )) &&
-        (owners.size !== 1 ||
-          owners.has(undefined) ||
-          !owners.has(routine.owner))
+        (owners.size !== 1 || owners.has(undefined) || !owners.has(routine.owner))
       ) {
         violations.push(
           `target-schema runtime capability ${routine.name} session usage limit authority owners do not match`,
@@ -4816,12 +4522,10 @@ export function evaluateRuntimeDatabasePosture(
           `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
         );
       } else {
-        const authorityTables = GOOGLE_DRIVE_AUTHORITY_TABLES.map((tableName) =>
-          tableByName.get(tableName)!,
+        const authorityTables = GOOGLE_DRIVE_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
         );
-        const authorityOwners = new Set(
-          authorityTables.map((table) => table.owner),
-        );
+        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
         if (authorityOwners.size !== 1) {
           violations.push(
             `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
@@ -4833,36 +4537,24 @@ export function evaluateRuntimeDatabasePosture(
         }
       }
     } else if (
-      (BILLING_SUBSCRIPTION_OPERATION_ROUTINES as readonly string[]).includes(
-        routine.name,
-      )
+      (BILLING_SUBSCRIPTION_OPERATION_ROUTINES as readonly string[]).includes(routine.name)
     ) {
       const table = tableByName.get("billing_subscription_operations");
-      if (
-        (!options.protectedTables || table) &&
-        (!table || table.owner !== routine.owner)
-      ) {
+      if ((!options.protectedTables || table) && (!table || table.owner !== routine.owner)) {
         violations.push(
           `subscription operation capability ${routine.name} authority table owner does not match`,
         );
       }
-    } else if (
-      (SUBSCRIPTION_PLAN_RUNTIME_ROUTINES as readonly string[]).includes(
-        routine.name,
-      )
-    ) {
+    } else if ((SUBSCRIPTION_PLAN_RUNTIME_ROUTINES as readonly string[]).includes(routine.name)) {
       const authorityTables = [
         "organization_plans",
         "plan_credit_periods",
         "credit_ledger_entries",
       ];
       if (
-        (!options.protectedTables ||
-          authorityTables.some((name) => tableByName.has(name))) &&
+        (!options.protectedTables || authorityTables.some((name) => tableByName.has(name))) &&
         authorityTables.some(
-          (name) =>
-            !tableByName.has(name) ||
-            tableByName.get(name)!.owner !== routine.owner,
+          (name) => !tableByName.has(name) || tableByName.get(name)!.owner !== routine.owner,
         )
       ) {
         violations.push(
@@ -4870,13 +4562,9 @@ export function evaluateRuntimeDatabasePosture(
         );
       }
     } else if (routine.name === MCP_OPERATION_CAPABILITY_ROUTINE) {
-      const missing = MCP_OPERATION_AUTHORITY_TABLES.filter(
-        (name) => !tableByName.has(name),
-      );
+      const missing = MCP_OPERATION_AUTHORITY_TABLES.filter((name) => !tableByName.has(name));
       if (missing.length > 0) {
-        violations.push(
-          `MCP operation authority tables are missing: ${missing.join(", ")}`,
-        );
+        violations.push(`MCP operation authority tables are missing: ${missing.join(", ")}`);
       } else if (
         MCP_OPERATION_AUTHORITY_TABLES.some(
           (name) => tableByName.get(name)!.owner !== routine.owner,
@@ -4887,10 +4575,9 @@ export function evaluateRuntimeDatabasePosture(
         );
       }
     } else if (routine.name === KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE) {
-      const missingAuthorityTables =
-        KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES.filter(
-          (tableName) => !tableByName.has(tableName),
-        );
+      const missingAuthorityTables = KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES.filter(
+        (tableName) => !tableByName.has(tableName),
+      );
       if (missingAuthorityTables.length > 0) {
         violations.push(
           `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
@@ -4899,9 +4586,7 @@ export function evaluateRuntimeDatabasePosture(
         const authorityTables = KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES.map(
           (tableName) => tableByName.get(tableName)!,
         );
-        const authorityOwners = new Set(
-          authorityTables.map((table) => table.owner),
-        );
+        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
         if (authorityOwners.size !== 1) {
           violations.push(
             `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
@@ -4927,9 +4612,7 @@ export function evaluateRuntimeDatabasePosture(
       ];
       if (
         names.some(
-          (name) =>
-            !tableByName.has(name) ||
-            tableByName.get(name)!.owner !== routine.owner,
+          (name) => !tableByName.has(name) || tableByName.get(name)!.owner !== routine.owner,
         )
       ) {
         violations.push(
@@ -4945,11 +4628,7 @@ export function evaluateRuntimeDatabasePosture(
     ) {
       const names =
         routine.name !== "ensure_external_identity(uuid, text, text)"
-          ? [
-              "external_identity_links",
-              "external_identities",
-              "organization_memberships",
-            ]
+          ? ["external_identity_links", "external_identities", "organization_memberships"]
           : [
               "external_identities",
               "organization_memberships",
@@ -4961,29 +4640,21 @@ export function evaluateRuntimeDatabasePosture(
         violations.push(
           `target-schema runtime capability ${routine.name} authority tables are missing: ${missing.join(", ")}`,
         );
-      } else if (
-        names.some((name) => tableByName.get(name)!.owner !== routine.owner)
-      ) {
+      } else if (names.some((name) => tableByName.get(name)!.owner !== routine.owner)) {
         violations.push(
           `target-schema runtime capability ${routine.name} authority table owners do not match`,
         );
       }
     } else if (routine.name === MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE) {
-      const authorityTables =
-        MANAGED_HUMAN_PERSONAL_WORKSPACE_AUTHORITY_TABLES.filter((tableName) =>
-          tableByName.has(tableName),
-        ).map((tableName) => tableByName.get(tableName)!);
-      const authorityOwners = new Set(
-        authorityTables.map((table) => table.owner),
-      );
+      const authorityTables = MANAGED_HUMAN_PERSONAL_WORKSPACE_AUTHORITY_TABLES.filter(
+        (tableName) => tableByName.has(tableName),
+      ).map((tableName) => tableByName.get(tableName)!);
+      const authorityOwners = new Set(authorityTables.map((table) => table.owner));
       if (authorityOwners.size > 1) {
         violations.push(
           `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
         );
-      } else if (
-        authorityTables[0] &&
-        routine.owner !== authorityTables[0].owner
-      ) {
+      } else if (authorityTables[0] && routine.owner !== authorityTables[0].owner) {
         violations.push(
           `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0].owner}`,
         );
@@ -4992,22 +4663,18 @@ export function evaluateRuntimeDatabasePosture(
       if (!tableByName.has("governed_learning_decision_receipts")) {
         continue;
       }
-      const missingAuthorityTables =
-        GOVERNED_LEARNING_EVALUATION_AUTHORITY_TABLES.filter(
-          (tableName) => !tableByName.has(tableName),
-        );
+      const missingAuthorityTables = GOVERNED_LEARNING_EVALUATION_AUTHORITY_TABLES.filter(
+        (tableName) => !tableByName.has(tableName),
+      );
       if (missingAuthorityTables.length > 0) {
         violations.push(
           `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
         );
       } else {
-        const authorityTables =
-          GOVERNED_LEARNING_EVALUATION_AUTHORITY_TABLES.map((tableName) =>
-            tableByName.get(tableName)!,
-          );
-        const authorityOwners = new Set(
-          authorityTables.map((table) => table.owner),
+        const authorityTables = GOVERNED_LEARNING_EVALUATION_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
         );
+        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
         if (authorityOwners.size !== 1) {
           violations.push(
             `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
@@ -5024,26 +4691,19 @@ export function evaluateRuntimeDatabasePosture(
       )
     ) {
       if (!tableByName.has("governed_learning_decision_receipts")) continue;
-      const missingAuthorityTables =
-        GOVERNED_LEARNING_INSPECTION_AUTHORITY_TABLES.filter(
-          (name) => !tableByName.has(name),
-        );
+      const missingAuthorityTables = GOVERNED_LEARNING_INSPECTION_AUTHORITY_TABLES.filter(
+        (name) => !tableByName.has(name),
+      );
       if (missingAuthorityTables.length > 0) {
         violations.push(
           `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
         );
       } else {
-        const authorityTables =
-          GOVERNED_LEARNING_INSPECTION_AUTHORITY_TABLES.map((name) =>
-            tableByName.get(name)!,
-          );
-        const authorityOwners = new Set(
-          authorityTables.map((table) => table.owner),
+        const authorityTables = GOVERNED_LEARNING_INSPECTION_AUTHORITY_TABLES.map(
+          (name) => tableByName.get(name)!,
         );
-        if (
-          authorityOwners.size !== 1 ||
-          routine.owner !== authorityTables[0]!.owner
-        ) {
+        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+        if (authorityOwners.size !== 1 || routine.owner !== authorityTables[0]!.owner) {
           violations.push(
             `target-schema runtime capability ${routine.name} owner does not match governed-learning inspection authority`,
           );
@@ -5057,22 +4717,18 @@ export function evaluateRuntimeDatabasePosture(
       if (!tableByName.has("governed_learning_activation_receipts")) {
         continue;
       }
-      const missingAuthorityTables =
-        GOVERNED_LEARNING_ACTIVATION_AUTHORITY_TABLES.filter(
-          (tableName) => !tableByName.has(tableName),
-        );
+      const missingAuthorityTables = GOVERNED_LEARNING_ACTIVATION_AUTHORITY_TABLES.filter(
+        (tableName) => !tableByName.has(tableName),
+      );
       if (missingAuthorityTables.length > 0) {
         violations.push(
           `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
         );
       } else {
-        const authorityTables =
-          GOVERNED_LEARNING_ACTIVATION_AUTHORITY_TABLES.map((tableName) =>
-            tableByName.get(tableName)!,
-          );
-        const authorityOwners = new Set(
-          authorityTables.map((table) => table.owner),
+        const authorityTables = GOVERNED_LEARNING_ACTIVATION_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
         );
+        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
         if (authorityOwners.size !== 1) {
           violations.push(
             `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
@@ -5088,22 +4744,18 @@ export function evaluateRuntimeDatabasePosture(
         routine.name as (typeof COMPANY_PROFILE_AGENT_ADMIN_ROUTINES)[number],
       )
     ) {
-      const missingAuthorityTables =
-        COMPANY_PROFILE_AGENT_ADMIN_AUTHORITY_TABLES.filter(
-          (tableName) => !tableByName.has(tableName),
-        );
+      const missingAuthorityTables = COMPANY_PROFILE_AGENT_ADMIN_AUTHORITY_TABLES.filter(
+        (tableName) => !tableByName.has(tableName),
+      );
       if (missingAuthorityTables.length > 0) {
         violations.push(
           `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
         );
       } else {
-        const authorityTables =
-          COMPANY_PROFILE_AGENT_ADMIN_AUTHORITY_TABLES.map((tableName) =>
-            tableByName.get(tableName)!,
-          );
-        const authorityOwners = new Set(
-          authorityTables.map((table) => table.owner),
+        const authorityTables = COMPANY_PROFILE_AGENT_ADMIN_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
         );
+        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
         if (authorityOwners.size !== 1) {
           violations.push(
             `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
@@ -5115,22 +4767,18 @@ export function evaluateRuntimeDatabasePosture(
         }
       }
     } else if (routine.name === ADDITIONAL_ORGANIZATION_CREATION_ROUTINE) {
-      const missingAuthorityTables =
-        ADDITIONAL_ORGANIZATION_CREATION_AUTHORITY_TABLES.filter(
-          (tableName) => !tableByName.has(tableName),
-        );
+      const missingAuthorityTables = ADDITIONAL_ORGANIZATION_CREATION_AUTHORITY_TABLES.filter(
+        (tableName) => !tableByName.has(tableName),
+      );
       if (missingAuthorityTables.length > 0) {
         violations.push(
           `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
         );
       } else {
-        const authorityTables =
-          ADDITIONAL_ORGANIZATION_CREATION_AUTHORITY_TABLES.map((tableName) =>
-            tableByName.get(tableName)!,
-          );
-        const authorityOwners = new Set(
-          authorityTables.map((table) => table.owner),
+        const authorityTables = ADDITIONAL_ORGANIZATION_CREATION_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
         );
+        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
         if (authorityOwners.size !== 1) {
           violations.push(
             `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
@@ -5142,26 +4790,20 @@ export function evaluateRuntimeDatabasePosture(
         }
       }
     } else if (
-      (
-        ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES as readonly string[]
-      ).includes(routine.name)
+      (ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES as readonly string[]).includes(routine.name)
     ) {
-      const missingAuthorityTables =
-        ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES.filter(
-          (tableName) => !tableByName.has(tableName),
-        );
+      const missingAuthorityTables = ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES.filter(
+        (tableName) => !tableByName.has(tableName),
+      );
       if (missingAuthorityTables.length > 0) {
         violations.push(
           `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
         );
       } else {
-        const authorityTables =
-          ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES.map((tableName) =>
-            tableByName.get(tableName)!,
-          );
-        const authorityOwners = new Set(
-          authorityTables.map((table) => table.owner),
+        const authorityTables = ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
         );
+        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
         if (authorityOwners.size !== 1) {
           violations.push(
             `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
@@ -5173,9 +4815,7 @@ export function evaluateRuntimeDatabasePosture(
         }
       }
     } else if (
-      (ORGANIZATION_PRIVATE_SESSION_ROUTINES as readonly string[]).includes(
-        routine.name,
-      )
+      (ORGANIZATION_PRIVATE_SESSION_ROUTINES as readonly string[]).includes(routine.name)
     ) {
       if (!tableByName.has("organization_private_session_settings")) {
         continue;
@@ -5192,12 +4832,8 @@ export function evaluateRuntimeDatabasePosture(
           `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
         );
       } else {
-        const authorityTables = authorityTableNames.map((tableName) =>
-          tableByName.get(tableName)!,
-        );
-        const authorityOwners = new Set(
-          authorityTables.map((table) => table.owner),
-        );
+        const authorityTables = authorityTableNames.map((tableName) => tableByName.get(tableName)!);
+        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
         if (authorityOwners.size !== 1) {
           violations.push(
             `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
@@ -5214,16 +4850,13 @@ export function evaluateRuntimeDatabasePosture(
       // as for the native Skill lifecycle, rather than the schema label.
       for (const name of UNIFIED_KNOWLEDGE_AUTHORITY_TABLES) {
         const table = tableByName.get(name);
-        if (!table)
-          violations.push(`Knowledge authority table ${name} is missing`);
+        if (!table) violations.push(`Knowledge authority table ${name} is missing`);
         else if (routine.owner !== table.owner)
           violations.push(
             `Knowledge capability ${routine.name} owner ${routine.owner} does not match ${name} owner ${table.owner}`,
           );
       }
-    } else if (
-      routine.name === "skill_apply_lifecycle(uuid, uuid, jsonb, jsonb)"
-    ) {
+    } else if (routine.name === "skill_apply_lifecycle(uuid, uuid, jsonb, jsonb)") {
       const authorityTables = [
         "preference_registry_preferences",
         "preference_registry_revisions",
@@ -5231,8 +4864,7 @@ export function evaluateRuntimeDatabasePosture(
       ];
       for (const name of authorityTables) {
         const table = tableByName.get(name);
-        if (!table)
-          violations.push(`Skill lifecycle authority table ${name} is missing`);
+        if (!table) violations.push(`Skill lifecycle authority table ${name} is missing`);
         else if (routine.owner !== table.owner)
           violations.push(
             `Skill lifecycle owner ${routine.owner} does not match ${name} owner ${table.owner}`,
@@ -5242,22 +4874,18 @@ export function evaluateRuntimeDatabasePosture(
       if (!tableByName.has("company_brain_preference_proposal_receipts")) {
         continue;
       }
-      const missingAuthorityTables =
-        PREFERENCE_KNOWLEDGE_PROPOSAL_AUTHORITY_TABLES.filter(
-          (tableName) => !tableByName.has(tableName),
-        );
+      const missingAuthorityTables = PREFERENCE_KNOWLEDGE_PROPOSAL_AUTHORITY_TABLES.filter(
+        (tableName) => !tableByName.has(tableName),
+      );
       if (missingAuthorityTables.length > 0) {
         violations.push(
           `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
         );
       } else {
-        const authorityTables =
-          PREFERENCE_KNOWLEDGE_PROPOSAL_AUTHORITY_TABLES.map((tableName) =>
-            tableByName.get(tableName)!,
-          );
-        const authorityOwners = new Set(
-          authorityTables.map((table) => table.owner),
+        const authorityTables = PREFERENCE_KNOWLEDGE_PROPOSAL_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
         );
+        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
         if (authorityOwners.size !== 1) {
           violations.push(
             `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
@@ -5268,20 +4896,12 @@ export function evaluateRuntimeDatabasePosture(
           );
         }
       }
-    } else if (
-      (ORGANIZATION_RECOVERY_ROUTINES as readonly string[]).includes(
-        routine.name,
-      )
-    ) {
-      const authorityTables = ORGANIZATION_RECOVERY_AUTHORITY_TABLES.filter(
-        (tableName) => tableByName.has(tableName),
+    } else if ((ORGANIZATION_RECOVERY_ROUTINES as readonly string[]).includes(routine.name)) {
+      const authorityTables = ORGANIZATION_RECOVERY_AUTHORITY_TABLES.filter((tableName) =>
+        tableByName.has(tableName),
       ).map((tableName) => tableByName.get(tableName)!);
-      const authorityOwners = new Set(
-        authorityTables.map((table) => table.owner),
-      );
-      if (
-        authorityTables.length !== ORGANIZATION_RECOVERY_AUTHORITY_TABLES.length
-      ) {
+      const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+      if (authorityTables.length !== ORGANIZATION_RECOVERY_AUTHORITY_TABLES.length) {
         violations.push(
           `target-schema runtime capability ${routine.name} organization recovery authority tables are missing`,
         );
@@ -5294,21 +4914,12 @@ export function evaluateRuntimeDatabasePosture(
           `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
         );
       }
-    } else if (
-      (MANAGED_AUTH_SESSION_SET_ROUTINES as readonly string[]).includes(
-        routine.name,
-      )
-    ) {
-      const authorityTables = MANAGED_AUTH_SESSION_SET_AUTHORITY_TABLES.filter(
-        (tableName) => tableByName.has(tableName),
+    } else if ((MANAGED_AUTH_SESSION_SET_ROUTINES as readonly string[]).includes(routine.name)) {
+      const authorityTables = MANAGED_AUTH_SESSION_SET_AUTHORITY_TABLES.filter((tableName) =>
+        tableByName.has(tableName),
       ).map((tableName) => tableByName.get(tableName)!);
-      const authorityOwners = new Set(
-        authorityTables.map((table) => table.owner),
-      );
-      if (
-        authorityTables.length !==
-        MANAGED_AUTH_SESSION_SET_AUTHORITY_TABLES.length
-      ) {
+      const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+      if (authorityTables.length !== MANAGED_AUTH_SESSION_SET_AUTHORITY_TABLES.length) {
         violations.push(
           `target-schema runtime capability ${routine.name} managed auth session-set authority tables are missing`,
         );
@@ -5321,21 +4932,12 @@ export function evaluateRuntimeDatabasePosture(
           `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
         );
       }
-    } else if (
-      (CANONICAL_HUMAN_IDENTITY_ROUTINES as readonly string[]).includes(
-        routine.name,
-      )
-    ) {
-      const authorityTables = CANONICAL_HUMAN_IDENTITY_AUTHORITY_TABLES.filter(
-        (tableName) => tableByName.has(tableName),
+    } else if ((CANONICAL_HUMAN_IDENTITY_ROUTINES as readonly string[]).includes(routine.name)) {
+      const authorityTables = CANONICAL_HUMAN_IDENTITY_AUTHORITY_TABLES.filter((tableName) =>
+        tableByName.has(tableName),
       ).map((tableName) => tableByName.get(tableName)!);
-      const authorityOwners = new Set(
-        authorityTables.map((table) => table.owner),
-      );
-      if (
-        authorityTables.length !==
-        CANONICAL_HUMAN_IDENTITY_AUTHORITY_TABLES.length
-      ) {
+      const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+      if (authorityTables.length !== CANONICAL_HUMAN_IDENTITY_AUTHORITY_TABLES.length) {
         violations.push(
           `target-schema runtime capability ${routine.name} canonical identity authority tables are missing`,
         );
@@ -5349,16 +4951,12 @@ export function evaluateRuntimeDatabasePosture(
         );
       }
     } else if (
-      (
-        PERSONAL_GITHUB_REPOSITORY_AUTHORITY_ROUTINES as readonly string[]
-      ).includes(routine.name)
+      (PERSONAL_GITHUB_REPOSITORY_AUTHORITY_ROUTINES as readonly string[]).includes(routine.name)
     ) {
-      const authorityTables = PERSONAL_GITHUB_REPOSITORY_AUTHORITY_TABLES.map(
-        (tableName) => tableByName.get(tableName),
+      const authorityTables = PERSONAL_GITHUB_REPOSITORY_AUTHORITY_TABLES.map((tableName) =>
+        tableByName.get(tableName),
       ).filter((table): table is RuntimeTablePosture => table !== undefined);
-      const authorityOwners = new Set(
-        authorityTables.map((table) => table.owner),
-      );
+      const authorityOwners = new Set(authorityTables.map((table) => table.owner));
       if (authorityOwners.size > 1) {
         violations.push(
           `target-schema runtime capability ${routine.name} personal GitHub repository authority table owners do not match`,
@@ -5372,34 +4970,20 @@ export function evaluateRuntimeDatabasePosture(
         }
       }
     } else if (
-      (PERSONAL_DOCUMENT_AUTHORITY_ROUTINES as readonly string[]).includes(
-        routine.name,
-      ) ||
-      (DOCUMENT_MIGRATION_AUTHORITY_ROUTINES as readonly string[]).includes(
-        routine.name,
-      )
+      (PERSONAL_DOCUMENT_AUTHORITY_ROUTINES as readonly string[]).includes(routine.name) ||
+      (DOCUMENT_MIGRATION_AUTHORITY_ROUTINES as readonly string[]).includes(routine.name)
     ) {
-      const authorityOwner =
-        tableByName.get("documents")?.owner ?? targetSchemaOwner;
+      const authorityOwner = tableByName.get("documents")?.owner ?? targetSchemaOwner;
       if (authorityOwner && routine.owner !== authorityOwner) {
         violations.push(
           `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match document authority owner ${authorityOwner}`,
         );
       }
-    } else if (
-      (VARIABLE_SET_AUTHORITY_ROUTINES as readonly string[]).includes(
-        routine.name,
-      )
-    ) {
-      const authorityTables = [
-        "workspace_variable_sets",
-        "workspace_variable_set_variables",
-      ]
+    } else if ((VARIABLE_SET_AUTHORITY_ROUTINES as readonly string[]).includes(routine.name)) {
+      const authorityTables = ["workspace_variable_sets", "workspace_variable_set_variables"]
         .map((tableName) => tableByName.get(tableName))
         .filter((table): table is RuntimeTablePosture => table !== undefined);
-      const authorityOwners = new Set(
-        authorityTables.map((table) => table.owner),
-      );
+      const authorityOwners = new Set(authorityTables.map((table) => table.owner));
       if (authorityOwners.size > 1) {
         violations.push(
           `target-schema runtime capability ${routine.name} variable-set table owners do not match`,
@@ -5412,15 +4996,11 @@ export function evaluateRuntimeDatabasePosture(
           );
         }
       }
-    } else if (
-      (VAULT_RUNTIME_ROUTINES as readonly string[]).includes(routine.name)
-    ) {
-      const authorityTables = VAULT_TABLES.map((tableName) =>
-        tableByName.get(tableName),
-      ).filter((table): table is RuntimeTablePosture => table !== undefined);
-      const authorityOwners = new Set(
-        authorityTables.map((table) => table.owner),
+    } else if ((VAULT_RUNTIME_ROUTINES as readonly string[]).includes(routine.name)) {
+      const authorityTables = VAULT_TABLES.map((tableName) => tableByName.get(tableName)).filter(
+        (table): table is RuntimeTablePosture => table !== undefined,
       );
+      const authorityOwners = new Set(authorityTables.map((table) => table.owner));
       if (authorityOwners.size > 1) {
         violations.push(
           `target-schema runtime capability ${routine.name} vault table owners do not match`,
@@ -5433,22 +5013,11 @@ export function evaluateRuntimeDatabasePosture(
           );
         }
       }
-    } else if (
-      (SCOPED_COMPUTE_AUTHORITY_ROUTINES as readonly string[]).includes(
-        routine.name,
-      )
-    ) {
-      const authorityTables = [
-        "rigs",
-        "rig_versions",
-        "enrollments",
-        "sandboxes",
-      ]
+    } else if ((SCOPED_COMPUTE_AUTHORITY_ROUTINES as readonly string[]).includes(routine.name)) {
+      const authorityTables = ["rigs", "rig_versions", "enrollments", "sandboxes"]
         .map((tableName) => tableByName.get(tableName))
         .filter((table): table is RuntimeTablePosture => table !== undefined);
-      const authorityOwners = new Set(
-        authorityTables.map((table) => table.owner),
-      );
+      const authorityOwners = new Set(authorityTables.map((table) => table.owner));
       if (authorityOwners.size > 1) {
         violations.push(
           `target-schema runtime capability ${routine.name} scoped-compute table owners do not match`,
@@ -5462,8 +5031,7 @@ export function evaluateRuntimeDatabasePosture(
         }
       }
     } else if (SESSION_AUTHORITY_ROUTINES.has(routine.name)) {
-      const authorityOwner =
-        tableByName.get("sessions")?.owner ?? targetSchemaOwner;
+      const authorityOwner = tableByName.get("sessions")?.owner ?? targetSchemaOwner;
       if (authorityOwner && routine.owner !== authorityOwner) {
         violations.push(
           `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match session authority owner ${authorityOwner}`,
@@ -5491,47 +5059,32 @@ export function evaluateRuntimeDatabasePosture(
       );
     }
     if (!routine.execute) {
-      violations.push(
-        `runtime role lacks target-schema capability ${routine.name}`,
-      );
+      violations.push(`runtime role lacks target-schema capability ${routine.name}`);
     }
-    const publicPolicyPredicate =
-      RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET.has(
-        routine.name,
-      );
+    const publicPolicyPredicate = RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET.has(
+      routine.name,
+    );
     if (publicPolicyPredicate && !routine.publicExecute) {
-      violations.push(
-        `PUBLIC lacks required shared-policy predicate ${routine.name}`,
-      );
+      violations.push(`PUBLIC lacks required shared-policy predicate ${routine.name}`);
     } else if (!publicPolicyPredicate && routine.publicExecute) {
-      violations.push(
-        `PUBLIC has forbidden target-schema capability ${routine.name}`,
-      );
+      violations.push(`PUBLIC has forbidden target-schema capability ${routine.name}`);
     }
   }
 
   const artifactOutbox = tableByName.get("editable_artifact_live_outbox");
   if (artifactOutbox) {
     if (!artifactOutbox.artifactOutboxDispatcherPolicy) {
-      violations.push(
-        "table editable_artifact_live_outbox lacks its owner dispatcher RLS policy",
-      );
+      violations.push("table editable_artifact_live_outbox lacks its owner dispatcher RLS policy");
     }
     for (const expectedRoutine of ARTIFACT_OUTBOX_CAPABILITY_ROUTINES) {
-      const matches = posture.privateRoutines.filter(
-        (routine) => routine.name === expectedRoutine,
-      );
+      const matches = posture.privateRoutines.filter((routine) => routine.name === expectedRoutine);
       if (matches.length !== 1) {
-        violations.push(
-          `artifact outbox capability ${expectedRoutine} is missing or ambiguous`,
-        );
+        violations.push(`artifact outbox capability ${expectedRoutine} is missing or ambiguous`);
         continue;
       }
       const routine = matches[0]!;
       if (!routine.securityDefiner) {
-        violations.push(
-          `artifact outbox capability ${routine.name} is not SECURITY DEFINER`,
-        );
+        violations.push(`artifact outbox capability ${routine.name} is not SECURITY DEFINER`);
       }
       if (routine.owner !== artifactOutbox.owner) {
         violations.push(
@@ -5554,13 +5107,10 @@ export function evaluateRuntimeDatabasePosture(
     AUTOMATIC_SESSION_TITLE_FANOUT_MIGRATION_ROUTINE,
     AUTOMATIC_SESSION_TITLE_POLICY_TRIGGER_ROUTINE,
   ]);
-  const automaticTitleFanoutCatalogPresent = posture.privateRoutines.some(
-    (routine) => automaticTitleFanoutRoutineNames.has(routine.name),
+  const automaticTitleFanoutCatalogPresent = posture.privateRoutines.some((routine) =>
+    automaticTitleFanoutRoutineNames.has(routine.name),
   );
-  if (
-    automaticTitleFanoutCatalogPresent &&
-    automaticTitleFanoutOutboxes.length !== 1
-  ) {
+  if (automaticTitleFanoutCatalogPresent && automaticTitleFanoutOutboxes.length !== 1) {
     violations.push(
       `automatic session title fanout private outbox ${AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE} is missing or ambiguous`,
     );
@@ -5604,9 +5154,7 @@ export function evaluateRuntimeDatabasePosture(
       );
     }
     for (const expectedRoutine of AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES) {
-      const matches = posture.privateRoutines.filter(
-        (routine) => routine.name === expectedRoutine,
-      );
+      const matches = posture.privateRoutines.filter((routine) => routine.name === expectedRoutine);
       if (matches.length !== 1) {
         violations.push(
           `automatic session title fanout capability ${expectedRoutine} is missing or ambiguous`,
@@ -5636,8 +5184,7 @@ export function evaluateRuntimeDatabasePosture(
       }
     }
     const enqueueMatches = posture.privateRoutines.filter(
-      (routine) =>
-        routine.name === AUTOMATIC_SESSION_TITLE_FANOUT_MIGRATION_ROUTINE,
+      (routine) => routine.name === AUTOMATIC_SESSION_TITLE_FANOUT_MIGRATION_ROUTINE,
     );
     if (enqueueMatches.length !== 1) {
       violations.push(
@@ -5667,8 +5214,7 @@ export function evaluateRuntimeDatabasePosture(
       }
     }
     const policyTriggerMatches = posture.privateRoutines.filter(
-      (routine) =>
-        routine.name === AUTOMATIC_SESSION_TITLE_POLICY_TRIGGER_ROUTINE,
+      (routine) => routine.name === AUTOMATIC_SESSION_TITLE_POLICY_TRIGGER_ROUTINE,
     );
     if (policyTriggerMatches.length !== 1) {
       violations.push(
@@ -5699,9 +5245,7 @@ export function evaluateRuntimeDatabasePosture(
     }
   }
 
-  const artifactMaterializationJobs = tableByName.get(
-    "editable_artifact_materialization_jobs",
-  );
+  const artifactMaterializationJobs = tableByName.get("editable_artifact_materialization_jobs");
   if (artifactMaterializationJobs) {
     for (const tableName of [
       "editable_artifact_materialization_jobs",
@@ -5713,15 +5257,11 @@ export function evaluateRuntimeDatabasePosture(
     ]) {
       const table = tableByName.get(tableName);
       if (table && !table.artifactMaterializerPolicy) {
-        violations.push(
-          `table ${tableName} lacks its owner materializer RLS policy`,
-        );
+        violations.push(`table ${tableName} lacks its owner materializer RLS policy`);
       }
     }
     for (const expectedRoutine of ARTIFACT_MATERIALIZER_CAPABILITY_ROUTINES) {
-      const matches = posture.privateRoutines.filter(
-        (routine) => routine.name === expectedRoutine,
-      );
+      const matches = posture.privateRoutines.filter((routine) => routine.name === expectedRoutine);
       if (matches.length !== 1) {
         violations.push(
           `artifact materializer capability ${expectedRoutine} is missing or ambiguous`,
@@ -5730,9 +5270,7 @@ export function evaluateRuntimeDatabasePosture(
       }
       const routine = matches[0]!;
       if (!routine.securityDefiner) {
-        violations.push(
-          `artifact materializer capability ${routine.name} is not SECURITY DEFINER`,
-        );
+        violations.push(`artifact materializer capability ${routine.name} is not SECURITY DEFINER`);
       }
       if (routine.owner !== artifactMaterializationJobs.owner) {
         violations.push(
@@ -5749,9 +5287,7 @@ export function evaluateRuntimeDatabasePosture(
   const artifactAuthority = tableByName.get("editable_artifacts");
   if (artifactAuthority) {
     const matches = posture.privateRoutines.filter((routine) =>
-      routine.name.startsWith(
-        "advance_editable_artifact_authorization_revision(",
-      ),
+      routine.name.startsWith("advance_editable_artifact_authorization_revision("),
     );
     if (matches.length !== 1) {
       violations.push(
@@ -5802,9 +5338,7 @@ export function evaluateRuntimeDatabasePosture(
   const artifactLiveTickets = tableByName.get("editable_artifact_live_tickets");
   if (artifactLiveTickets) {
     for (const expectedRoutine of ARTIFACT_LIVE_TICKET_CAPABILITY_ROUTINES) {
-      const matches = posture.privateRoutines.filter(
-        (routine) => routine.name === expectedRoutine,
-      );
+      const matches = posture.privateRoutines.filter((routine) => routine.name === expectedRoutine);
       if (matches.length !== 1) {
         violations.push(
           `artifact live ticket capability ${expectedRoutine} is missing or ambiguous`,
@@ -5813,9 +5347,7 @@ export function evaluateRuntimeDatabasePosture(
       }
       const routine = matches[0]!;
       if (!routine.securityDefiner) {
-        violations.push(
-          `artifact live ticket capability ${routine.name} is not SECURITY DEFINER`,
-        );
+        violations.push(`artifact live ticket capability ${routine.name} is not SECURITY DEFINER`);
       }
       if (routine.owner !== artifactLiveTickets.owner) {
         violations.push(
@@ -5823,15 +5355,11 @@ export function evaluateRuntimeDatabasePosture(
         );
       }
       if (!routine.execute) {
-        violations.push(
-          `runtime role lacks artifact live ticket capability ${routine.name}`,
-        );
+        violations.push(`runtime role lacks artifact live ticket capability ${routine.name}`);
       }
     }
     for (const internalRoutine of ARTIFACT_LIVE_TICKET_INTERNAL_ROUTINES) {
-      const matches = posture.privateRoutines.filter(
-        (routine) => routine.name === internalRoutine,
-      );
+      const matches = posture.privateRoutines.filter((routine) => routine.name === internalRoutine);
       if (matches.length !== 1) {
         violations.push(
           `artifact live ticket internal routine ${internalRoutine} is missing or ambiguous`,
@@ -5850,9 +5378,7 @@ export function evaluateRuntimeDatabasePosture(
         );
       }
       if (routine.execute) {
-        violations.push(
-          `runtime role has forbidden ticket schema resolver ${routine.name}`,
-        );
+        violations.push(`runtime role has forbidden ticket schema resolver ${routine.name}`);
       }
     }
   }
@@ -5861,8 +5387,7 @@ export function evaluateRuntimeDatabasePosture(
     (table) => table.name === PERSONAL_RESOURCE_CAPABILITY_TABLE,
   );
   const personalResourceCapabilityRoutines = posture.privateRoutines.filter(
-    (routine) =>
-      routine.name === PERSONAL_RESOURCE_CAPABILITY_PREDICATE_ROUTINE,
+    (routine) => routine.name === PERSONAL_RESOURCE_CAPABILITY_PREDICATE_ROUTINE,
   );
   if (personalResourceCapabilityTables.length !== 1) {
     violations.push(
@@ -5891,9 +5416,7 @@ export function evaluateRuntimeDatabasePosture(
       );
     }
     if (!routine.execute) {
-      violations.push(
-        `runtime role lacks personal-resource capability predicate ${routine.name}`,
-      );
+      violations.push(`runtime role lacks personal-resource capability predicate ${routine.name}`);
     }
     if (routine.publicExecute) {
       violations.push(
@@ -5917,8 +5440,7 @@ export function evaluateRuntimeDatabasePosture(
     (table) => table.name === PERSONAL_DOCUMENT_CAPABILITY_TABLE,
   );
   const personalDocumentCapabilityRoutines = posture.privateRoutines.filter(
-    (routine) =>
-      routine.name === PERSONAL_DOCUMENT_CAPABILITY_PREDICATE_ROUTINE,
+    (routine) => routine.name === PERSONAL_DOCUMENT_CAPABILITY_PREDICATE_ROUTINE,
   );
   if (personalDocumentCapabilityTables.length !== 1) {
     violations.push(
@@ -5947,9 +5469,7 @@ export function evaluateRuntimeDatabasePosture(
       );
     }
     if (!routine.execute) {
-      violations.push(
-        `runtime role lacks personal-document capability predicate ${routine.name}`,
-      );
+      violations.push(`runtime role lacks personal-document capability predicate ${routine.name}`);
     }
     if (routine.publicExecute) {
       violations.push(
@@ -5973,8 +5493,7 @@ export function evaluateRuntimeDatabasePosture(
     (table) => table.name === DOCUMENT_MIGRATION_CAPABILITY_TABLE,
   );
   const documentMigrationCapabilityRoutines = posture.privateRoutines.filter(
-    (routine) =>
-      routine.name === DOCUMENT_MIGRATION_CAPABILITY_PREDICATE_ROUTINE,
+    (routine) => routine.name === DOCUMENT_MIGRATION_CAPABILITY_PREDICATE_ROUTINE,
   );
   if (documentMigrationCapabilityTables.length !== 1) {
     violations.push(
@@ -6003,9 +5522,7 @@ export function evaluateRuntimeDatabasePosture(
       );
     }
     if (!routine.execute) {
-      violations.push(
-        `runtime role lacks document-migration capability predicate ${routine.name}`,
-      );
+      violations.push(`runtime role lacks document-migration capability predicate ${routine.name}`);
     }
     if (routine.publicExecute) {
       violations.push(
@@ -6029,8 +5546,7 @@ export function evaluateRuntimeDatabasePosture(
     (table) => table.name === SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_TABLE,
   );
   const scheduledCapabilityRoutines = posture.privateRoutines.filter(
-    (routine) =>
-      routine.name === SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_PREDICATE_ROUTINE,
+    (routine) => routine.name === SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_PREDICATE_ROUTINE,
   );
   if (scheduledCapabilityTables.length !== 1) {
     violations.push(
@@ -6042,10 +5558,7 @@ export function evaluateRuntimeDatabasePosture(
       `scheduled personal-resource capability predicate ${SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_PREDICATE_ROUTINE} is missing or ambiguous`,
     );
   }
-  if (
-    scheduledCapabilityTables.length === 1 &&
-    scheduledCapabilityRoutines.length === 1
-  ) {
+  if (scheduledCapabilityTables.length === 1 && scheduledCapabilityRoutines.length === 1) {
     const table = scheduledCapabilityTables[0]!;
     const routine = scheduledCapabilityRoutines[0]!;
     if (routine.owner !== table.owner) {
@@ -6092,26 +5605,17 @@ export function evaluateRuntimeDatabasePosture(
       retiringVariableSetsPresent ||
       variableSetCapabilityTables.length > 0 ||
       variableSetCapabilityRoutines.length > 0;
-    if (
-      variableSetCapabilityPresent &&
-      variableSetCapabilityTables.length !== 1
-    ) {
+    if (variableSetCapabilityPresent && variableSetCapabilityTables.length !== 1) {
       violations.push(
         `variable-set capability table ${VARIABLE_SET_CAPABILITY_TABLE} is missing or ambiguous`,
       );
     }
-    if (
-      variableSetCapabilityPresent &&
-      variableSetCapabilityRoutines.length !== 1
-    ) {
+    if (variableSetCapabilityPresent && variableSetCapabilityRoutines.length !== 1) {
       violations.push(
         `variable-set capability predicate ${VARIABLE_SET_CAPABILITY_PREDICATE_ROUTINE} is missing or ambiguous`,
       );
     }
-    if (
-      variableSetCapabilityTables.length === 1 &&
-      variableSetCapabilityRoutines.length === 1
-    ) {
+    if (variableSetCapabilityTables.length === 1 && variableSetCapabilityRoutines.length === 1) {
       const table = variableSetCapabilityTables[0]!;
       const routine = variableSetCapabilityRoutines[0]!;
       if (routine.owner !== table.owner) {
@@ -6125,14 +5629,10 @@ export function evaluateRuntimeDatabasePosture(
         );
       }
       if (!routine.execute) {
-        violations.push(
-          `runtime role lacks variable-set capability predicate ${routine.name}`,
-        );
+        violations.push(`runtime role lacks variable-set capability predicate ${routine.name}`);
       }
       if (routine.publicExecute) {
-        violations.push(
-          `PUBLIC has forbidden variable-set capability predicate ${routine.name}`,
-        );
+        violations.push(`PUBLIC has forbidden variable-set capability predicate ${routine.name}`);
       }
       const directPrivileges = [
         ["SELECT", table.select],
@@ -6153,19 +5653,14 @@ export function evaluateRuntimeDatabasePosture(
       (routine) => routine.name === VAULT_CAPABILITY_PREDICATE_ROUTINE,
     );
     if (vaultCapabilityTables.length !== 1) {
-      violations.push(
-        `vault capability table ${VAULT_CAPABILITY_TABLE} is missing or ambiguous`,
-      );
+      violations.push(`vault capability table ${VAULT_CAPABILITY_TABLE} is missing or ambiguous`);
     }
     if (vaultCapabilityRoutines.length !== 1) {
       violations.push(
         `vault capability predicate ${VAULT_CAPABILITY_PREDICATE_ROUTINE} is missing or ambiguous`,
       );
     }
-    if (
-      vaultCapabilityTables.length === 1 &&
-      vaultCapabilityRoutines.length === 1
-    ) {
+    if (vaultCapabilityTables.length === 1 && vaultCapabilityRoutines.length === 1) {
       const table = vaultCapabilityTables[0]!;
       const routine = vaultCapabilityRoutines[0]!;
       if (routine.owner !== table.owner) {
@@ -6174,19 +5669,13 @@ export function evaluateRuntimeDatabasePosture(
         );
       }
       if (!routine.securityDefiner) {
-        violations.push(
-          `vault capability predicate ${routine.name} is not SECURITY DEFINER`,
-        );
+        violations.push(`vault capability predicate ${routine.name} is not SECURITY DEFINER`);
       }
       if (!routine.execute) {
-        violations.push(
-          `runtime role lacks vault capability predicate ${routine.name}`,
-        );
+        violations.push(`runtime role lacks vault capability predicate ${routine.name}`);
       }
       if (routine.publicExecute) {
-        violations.push(
-          `PUBLIC has forbidden vault capability predicate ${routine.name}`,
-        );
+        violations.push(`PUBLIC has forbidden vault capability predicate ${routine.name}`);
       }
       const directPrivileges = [
         ["SELECT", table.select],
@@ -6233,14 +5722,10 @@ export function evaluateRuntimeDatabasePosture(
         );
       }
       if (!routine.execute) {
-        violations.push(
-          `runtime role lacks scoped-compute capability predicate ${routine.name}`,
-        );
+        violations.push(`runtime role lacks scoped-compute capability predicate ${routine.name}`);
       }
       if (routine.publicExecute) {
-        violations.push(
-          `PUBLIC has forbidden scoped-compute capability predicate ${routine.name}`,
-        );
+        violations.push(`PUBLIC has forbidden scoped-compute capability predicate ${routine.name}`);
       }
       const directPrivileges = [
         ["SELECT", table.select],
@@ -6277,9 +5762,7 @@ export function evaluateRuntimeDatabasePosture(
       planCatalogTable.update ||
       planCatalogTable.delete)
   ) {
-    violations.push(
-      "runtime role has forbidden write authority on the subscription plan catalog",
-    );
+    violations.push("runtime role has forbidden write authority on the subscription plan catalog");
   }
   if (!creditPolicyTable) {
     violations.push("credit promotion policy table is missing");
@@ -6293,9 +5776,7 @@ export function evaluateRuntimeDatabasePosture(
       creditPolicyTable.update ||
       creditPolicyTable.delete)
   ) {
-    violations.push(
-      "runtime role has forbidden write authority on the credit promotion policy",
-    );
+    violations.push("runtime role has forbidden write authority on the credit promotion policy");
   }
   const trialSwitchTable = posture.privateTables.find(
     (table) => table.name === VERIFIED_SIGNUP_TRIAL_SWITCH_TABLE,
@@ -6333,8 +5814,7 @@ export function evaluateRuntimeDatabasePosture(
     (table) => table.name === CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE,
   );
   const connectionBackfillCapabilityRoutines = posture.privateRoutines.filter(
-    (routine) =>
-      routine.name === CONNECTION_TENANCY_BACKFILL_CAPABILITY_PREDICATE_ROUTINE,
+    (routine) => routine.name === CONNECTION_TENANCY_BACKFILL_CAPABILITY_PREDICATE_ROUTINE,
   );
   if (connectionBackfillCapabilityTables.length !== 1) {
     violations.push(
@@ -6390,20 +5870,11 @@ export function evaluateRuntimeDatabasePosture(
   );
   if (publicationTables.length !== 1) {
     if (!options.protectedTables)
-      violations.push(
-        "sandbox file publication private relation is missing or ambiguous",
-      );
+      violations.push("sandbox file publication private relation is missing or ambiguous");
   } else {
     const table = publicationTables[0]!;
-    if (
-      !table.rlsEnabled ||
-      !table.rlsForced ||
-      !table.rlsActive ||
-      (table.policyCount ?? 0) < 2
-    ) {
-      violations.push(
-        "sandbox file publication relation lacks active FORCE-RLS file isolation",
-      );
+    if (!table.rlsEnabled || !table.rlsForced || !table.rlsActive || (table.policyCount ?? 0) < 2) {
+      violations.push("sandbox file publication relation lacks active FORCE-RLS file isolation");
     }
     if (
       table.select ||
@@ -6412,19 +5883,13 @@ export function evaluateRuntimeDatabasePosture(
       table.delete ||
       table.owner === expectedRole
     ) {
-      violations.push(
-        "runtime role has forbidden direct sandbox file publication authority",
-      );
+      violations.push("runtime role has forbidden direct sandbox file publication authority");
     }
     const filesOwner = tableByName.get("files")?.owner;
     if (filesOwner && table.owner !== filesOwner)
-      violations.push(
-        "sandbox file publication owner does not match file authority",
-      );
+      violations.push("sandbox file publication owner does not match file authority");
     for (const name of SANDBOX_FILE_PUBLICATION_RUNTIME_ROUTINES) {
-      const routines = posture.privateRoutines.filter(
-        (routine) => routine.name === name,
-      );
+      const routines = posture.privateRoutines.filter((routine) => routine.name === name);
       const quotedSchema = `"${targetSchema.replaceAll('"', '""')}"`;
       const searchPaths = new Set([
         `search_path=pg_catalog, ${quotedSchema}, pg_temp`,
@@ -6436,34 +5901,21 @@ export function evaluateRuntimeDatabasePosture(
         routines[0]!.publicExecute ||
         !routines[0]!.securityDefiner ||
         routines[0]!.owner !== table.owner ||
-        !routines[0]!.configuration?.some((configuration) =>
-          searchPaths.has(configuration),
-        )
+        !routines[0]!.configuration?.some((configuration) => searchPaths.has(configuration))
       ) {
-        violations.push(
-          `sandbox file publication capability ${name} is missing or unsafe`,
-        );
+        violations.push(`sandbox file publication capability ${name} is missing or unsafe`);
       }
     }
   }
 
-  const pinTables = posture.privateTables.filter(
-    (table) => table.name === ARTIFACT_PINS_TABLE,
-  );
+  const pinTables = posture.privateTables.filter((table) => table.name === ARTIFACT_PINS_TABLE);
   if (pinTables.length !== 1) {
     if (!options.protectedTables)
       violations.push("artifact pin private relation is missing or ambiguous");
   } else {
     const table = pinTables[0]!;
-    if (
-      !table.rlsEnabled ||
-      !table.rlsForced ||
-      !table.rlsActive ||
-      (table.policyCount ?? 0) < 1
-    )
-      violations.push(
-        "artifact pin relation lacks active FORCE-RLS workspace isolation",
-      );
+    if (!table.rlsEnabled || !table.rlsForced || !table.rlsActive || (table.policyCount ?? 0) < 1)
+      violations.push("artifact pin relation lacks active FORCE-RLS workspace isolation");
     if (
       table.select ||
       table.insert ||
@@ -6475,13 +5927,8 @@ export function evaluateRuntimeDatabasePosture(
       table.extraPrivileges?.length ||
       table.owner === expectedRole
     )
-      violations.push(
-        "runtime role has forbidden direct artifact pin authority",
-      );
-    if (
-      tableByName.get("files")?.owner &&
-      table.owner !== tableByName.get("files")!.owner
-    )
+      violations.push("runtime role has forbidden direct artifact pin authority");
+    if (tableByName.get("files")?.owner && table.owner !== tableByName.get("files")!.owner)
       violations.push("artifact pin owner does not match workspace authority");
     const quotedSchema = `"${targetSchema.replaceAll('"', '""')}"`;
     const searchPaths = new Set([
@@ -6489,18 +5936,14 @@ export function evaluateRuntimeDatabasePosture(
       `search_path=pg_catalog, ${/^[a-z_][a-z0-9_]*$/.test(targetSchema) ? targetSchema : quotedSchema}, pg_temp`,
     ]);
     for (const name of ARTIFACT_PIN_RUNTIME_ROUTINES) {
-      const routines = posture.privateRoutines.filter(
-        (routine) => routine.name === name,
-      );
+      const routines = posture.privateRoutines.filter((routine) => routine.name === name);
       if (
         routines.length !== 1 ||
         !routines[0]!.execute ||
         routines[0]!.publicExecute ||
         !routines[0]!.securityDefiner ||
         routines[0]!.owner !== table.owner ||
-        !routines[0]!.configuration?.some((configuration) =>
-          searchPaths.has(configuration),
-        )
+        !routines[0]!.configuration?.some((configuration) => searchPaths.has(configuration))
       )
         violations.push(`artifact pin capability ${name} is missing or unsafe`);
     }
@@ -6511,20 +5954,11 @@ export function evaluateRuntimeDatabasePosture(
   );
   if (slackFileUploadTables.length !== 1) {
     if (!options.protectedTables)
-      violations.push(
-        "Slack file upload private relation is missing or ambiguous",
-      );
+      violations.push("Slack file upload private relation is missing or ambiguous");
   } else {
     const table = slackFileUploadTables[0]!;
-    if (
-      !table.rlsEnabled ||
-      !table.rlsForced ||
-      !table.rlsActive ||
-      (table.policyCount ?? 0) < 1
-    ) {
-      violations.push(
-        "Slack file upload relation lacks active FORCE-RLS session isolation",
-      );
+    if (!table.rlsEnabled || !table.rlsForced || !table.rlsActive || (table.policyCount ?? 0) < 1) {
+      violations.push("Slack file upload relation lacks active FORCE-RLS session isolation");
     }
     if (
       !table.select ||
@@ -6533,15 +5967,11 @@ export function evaluateRuntimeDatabasePosture(
       table.delete ||
       table.owner === expectedRole
     ) {
-      violations.push(
-        "runtime role has unsafe Slack file upload ledger privileges",
-      );
+      violations.push("runtime role has unsafe Slack file upload ledger privileges");
     }
     const sessionOwner = tableByName.get("sessions")?.owner;
     if (sessionOwner && table.owner !== sessionOwner)
-      violations.push(
-        "Slack file upload owner does not match session authority",
-      );
+      violations.push("Slack file upload owner does not match session authority");
   }
 
   const scheduledSlackMessageTables = posture.privateTables.filter(
@@ -6549,20 +5979,11 @@ export function evaluateRuntimeDatabasePosture(
   );
   if (scheduledSlackMessageTables.length !== 1) {
     if (!options.protectedTables)
-      violations.push(
-        "scheduled Slack bot message private relation is missing or ambiguous",
-      );
+      violations.push("scheduled Slack bot message private relation is missing or ambiguous");
   } else {
     const table = scheduledSlackMessageTables[0]!;
-    if (
-      !table.rlsEnabled ||
-      !table.rlsForced ||
-      !table.rlsActive ||
-      (table.policyCount ?? 0) < 1
-    ) {
-      violations.push(
-        "scheduled Slack bot message relation lacks active FORCE-RLS isolation",
-      );
+    if (!table.rlsEnabled || !table.rlsForced || !table.rlsActive || (table.policyCount ?? 0) < 1) {
+      violations.push("scheduled Slack bot message relation lacks active FORCE-RLS isolation");
     }
     if (
       table.select ||
@@ -6571,19 +5992,13 @@ export function evaluateRuntimeDatabasePosture(
       table.delete ||
       table.owner === expectedRole
     ) {
-      violations.push(
-        "runtime role has forbidden direct scheduled Slack bot message authority",
-      );
+      violations.push("runtime role has forbidden direct scheduled Slack bot message authority");
     }
     const postLedgerOwner = tableByName.get("slack_bot_post_operations")?.owner;
     if (postLedgerOwner && table.owner !== postLedgerOwner)
-      violations.push(
-        "scheduled Slack bot message owner does not match Slack post authority",
-      );
+      violations.push("scheduled Slack bot message owner does not match Slack post authority");
     for (const name of SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES) {
-      const routines = posture.privateRoutines.filter(
-        (routine) => routine.name === name,
-      );
+      const routines = posture.privateRoutines.filter((routine) => routine.name === name);
       const quotedSchema = `"${targetSchema.replaceAll('"', '""')}"`;
       const searchPaths = new Set([
         `search_path=pg_catalog, ${quotedSchema}, pg_temp`,
@@ -6595,13 +6010,9 @@ export function evaluateRuntimeDatabasePosture(
         routines[0]!.publicExecute ||
         !routines[0]!.securityDefiner ||
         routines[0]!.owner !== table.owner ||
-        !routines[0]!.configuration?.some((configuration) =>
-          searchPaths.has(configuration),
-        )
+        !routines[0]!.configuration?.some((configuration) => searchPaths.has(configuration))
       ) {
-        violations.push(
-          `scheduled Slack bot message capability ${name} is missing or unsafe`,
-        );
+        violations.push(`scheduled Slack bot message capability ${name} is missing or unsafe`);
       }
     }
   }
@@ -6611,20 +6022,11 @@ export function evaluateRuntimeDatabasePosture(
   );
   if (botAccessTables.length !== 1) {
     if (!options.protectedTables)
-      violations.push(
-        "organization Slack bot access relation is missing or ambiguous",
-      );
+      violations.push("organization Slack bot access relation is missing or ambiguous");
   } else {
     const table = botAccessTables[0]!;
-    if (
-      !table.rlsEnabled ||
-      !table.rlsForced ||
-      !table.rlsActive ||
-      (table.policyCount ?? 0) < 1
-    )
-      violations.push(
-        "organization Slack bot access lacks active FORCE-RLS isolation",
-      );
+    if (!table.rlsEnabled || !table.rlsForced || !table.rlsActive || (table.policyCount ?? 0) < 1)
+      violations.push("organization Slack bot access lacks active FORCE-RLS isolation");
     if (
       table.select ||
       table.insert ||
@@ -6635,13 +6037,9 @@ export function evaluateRuntimeDatabasePosture(
       table.trigger ||
       table.owner === expectedRole
     )
-      violations.push(
-        "runtime role has forbidden direct organization Slack bot access authority",
-      );
+      violations.push("runtime role has forbidden direct organization Slack bot access authority");
     if (table.owner !== scheduledSlackMessageTables[0]?.owner)
-      violations.push(
-        "organization Slack bot access owner does not match Slack post authority",
-      );
+      violations.push("organization Slack bot access owner does not match Slack post authority");
   }
 
   const signupUseCaseTables = posture.privateTables.filter(
@@ -6649,20 +6047,11 @@ export function evaluateRuntimeDatabasePosture(
   );
   if (signupUseCaseTables.length !== 1) {
     if (!options.protectedTables)
-      violations.push(
-        "organization signup use case private relation is missing or ambiguous",
-      );
+      violations.push("organization signup use case private relation is missing or ambiguous");
   } else {
     const table = signupUseCaseTables[0]!;
-    if (
-      !table.rlsEnabled ||
-      !table.rlsForced ||
-      !table.rlsActive ||
-      (table.policyCount ?? 0) < 1
-    ) {
-      violations.push(
-        "organization signup use case relation lacks active FORCE-RLS isolation",
-      );
+    if (!table.rlsEnabled || !table.rlsForced || !table.rlsActive || (table.policyCount ?? 0) < 1) {
+      violations.push("organization signup use case relation lacks active FORCE-RLS isolation");
     }
     if (
       table.select ||
@@ -6671,48 +6060,33 @@ export function evaluateRuntimeDatabasePosture(
       table.delete ||
       table.owner === expectedRole
     ) {
-      violations.push(
-        "runtime role has forbidden direct organization signup use case authority",
-      );
+      violations.push("runtime role has forbidden direct organization signup use case authority");
     }
     const sessionOwner = tableByName.get("sessions")?.owner;
     if (sessionOwner && table.owner !== sessionOwner)
-      violations.push(
-        "organization signup use case owner does not match session authority",
-      );
+      violations.push("organization signup use case owner does not match session authority");
     const quotedSchema = `"${targetSchema.replaceAll('"', '""')}"`;
     const searchPaths = new Set([
       `search_path=pg_catalog, ${quotedSchema}, pg_temp`,
       `search_path=pg_catalog, ${/^[a-z_][a-z0-9_]*$/.test(targetSchema) ? targetSchema : quotedSchema}, pg_temp`,
     ]);
     for (const name of ORGANIZATION_SIGNUP_USE_CASE_RUNTIME_ROUTINES) {
-      const routines = posture.privateRoutines.filter(
-        (routine) => routine.name === name,
-      );
+      const routines = posture.privateRoutines.filter((routine) => routine.name === name);
       if (
         routines.length !== 1 ||
         !routines[0]!.execute ||
         routines[0]!.publicExecute ||
         !routines[0]!.securityDefiner ||
         routines[0]!.owner !== table.owner ||
-        !routines[0]!.configuration?.some((configuration) =>
-          searchPaths.has(configuration),
-        )
+        !routines[0]!.configuration?.some((configuration) => searchPaths.has(configuration))
       ) {
-        violations.push(
-          `organization signup use case capability ${name} is missing or unsafe`,
-        );
+        violations.push(`organization signup use case capability ${name} is missing or unsafe`);
       }
     }
   }
 
-  for (const name of [
-    "session_file_attachments",
-    "session_file_read_capabilities",
-  ]) {
-    const table = posture.privateTables.find(
-      (candidate) => candidate.name === name,
-    );
+  for (const name of ["session_file_attachments", "session_file_read_capabilities"]) {
+    const table = posture.privateTables.find((candidate) => candidate.name === name);
     if (!table) {
       if (!options.protectedTables)
         violations.push(`session attachment relation ${name} is missing`);
@@ -6726,15 +6100,10 @@ export function evaluateRuntimeDatabasePosture(
       table.update ||
       table.delete
     )
-      violations.push(
-        `session attachment relation ${name} has unsafe authority`,
-      );
+      violations.push(`session attachment relation ${name} has unsafe authority`);
     if (
       name === "session_file_attachments" &&
-      (!table.rlsEnabled ||
-        !table.rlsForced ||
-        !table.rlsActive ||
-        (table.policyCount ?? 0) < 1)
+      (!table.rlsEnabled || !table.rlsForced || !table.rlsActive || (table.policyCount ?? 0) < 1)
     )
       violations.push("session attachment grants lack FORCE-RLS isolation");
     const routines =
@@ -6745,9 +6114,7 @@ export function evaluateRuntimeDatabasePosture(
           ]
         : ["session_file_read_allowed(uuid, uuid, uuid)"];
     for (const signature of routines) {
-      const routine = posture.privateRoutines.find(
-        (candidate) => candidate.name === signature,
-      );
+      const routine = posture.privateRoutines.find((candidate) => candidate.name === signature);
       const quotedSchema = `"${targetSchema.replaceAll('"', '""')}"`;
       const paths =
         name === "session_file_read_capabilities"
@@ -6764,9 +6131,7 @@ export function evaluateRuntimeDatabasePosture(
         routine.owner !== table.owner ||
         !routine.configuration?.some((value) => paths.includes(value))
       )
-        violations.push(
-          `session attachment capability ${signature} is missing or unsafe`,
-        );
+        violations.push(`session attachment capability ${signature} is missing or unsafe`);
     }
   }
 
@@ -6789,9 +6154,7 @@ export function evaluateRuntimeDatabasePosture(
       archiveImportLedger.references ||
       archiveImportLedger.trigger
     )
-      violations.push(
-        "archived import ledger lacks private same-owner FORCE-RLS isolation",
-      );
+      violations.push("archived import ledger lacks private same-owner FORCE-RLS isolation");
     const quotedSchema = `"${targetSchema.replaceAll('"', '""')}"`;
     const paths = [
       `search_path=pg_catalog, ${quotedSchema}, pg_temp`,
@@ -6801,9 +6164,7 @@ export function evaluateRuntimeDatabasePosture(
       "read_archived_session_import_batch(uuid, uuid, uuid, text, text, text)",
       "record_archived_session_import_batch(uuid, uuid, uuid, text, text, text, text, integer, integer)",
     ]) {
-      const routine = posture.privateRoutines.find(
-        (candidate) => candidate.name === signature,
-      );
+      const routine = posture.privateRoutines.find((candidate) => candidate.name === signature);
       if (
         !routine ||
         !routine.execute ||
@@ -6812,9 +6173,7 @@ export function evaluateRuntimeDatabasePosture(
         routine.owner !== archiveImportLedger.owner ||
         !routine.configuration?.some((value) => paths.includes(value))
       )
-        violations.push(
-          `archived import capability ${signature} is missing or unsafe`,
-        );
+        violations.push(`archived import capability ${signature} is missing or unsafe`);
     }
   }
 
@@ -6824,13 +6183,8 @@ export function evaluateRuntimeDatabasePosture(
   const usageAllowanceCapability = posture.privateTables.find(
     (table) => table.name === "usage_allowance_capabilities",
   );
-  for (const indexName of [
-    "usage_maintenance_due",
-    "usage_allowance_membership_changes",
-  ]) {
-    const usageMaintenanceIndex = posture.privateTables.find(
-      (table) => table.name === indexName,
-    );
+  for (const indexName of ["usage_maintenance_due", "usage_allowance_membership_changes"]) {
+    const usageMaintenanceIndex = posture.privateTables.find((table) => table.name === indexName);
     if (
       usageMaintenanceIndex &&
       (usageMaintenanceIndex.owner === expectedRole ||
@@ -6850,9 +6204,7 @@ export function evaluateRuntimeDatabasePosture(
   if (!options.protectedTables || usageAllowanceCapability) {
     const authorityOwner = tableByName.get("workspaces")?.owner;
     for (const name of RUNTIME_ALLOWANCE_PRIVATE_TABLES) {
-      const table = posture.privateTables.find(
-        (candidate) => candidate.name === name,
-      );
+      const table = posture.privateTables.find((candidate) => candidate.name === name);
       if (
         !table ||
         table.owner === expectedRole ||
@@ -6869,9 +6221,7 @@ export function evaluateRuntimeDatabasePosture(
         table.references ||
         table.trigger
       ) {
-        violations.push(
-          `usage allowance private table ${name} is missing or unsafe`,
-        );
+        violations.push(`usage allowance private table ${name} is missing or unsafe`);
       }
     }
   }
@@ -6879,17 +6229,13 @@ export function evaluateRuntimeDatabasePosture(
     usageAllowanceCapability &&
     (usageAllowanceCapability.owner === expectedRole ||
       usageAllowanceCapability.owner !==
-        posture.privateTables.find(
-          (table) => table.name === "workspace_usage_allowances",
-        )?.owner ||
+        posture.privateTables.find((table) => table.name === "workspace_usage_allowances")?.owner ||
       usageAllowanceCapability.select ||
       usageAllowanceCapability.insert ||
       usageAllowanceCapability.update ||
       usageAllowanceCapability.delete)
   ) {
-    violations.push(
-      "usage allowance capability has unsafe owner or direct runtime privileges",
-    );
+    violations.push("usage allowance capability has unsafe owner or direct runtime privileges");
   }
   const allowanceAttribution = posture.privateTables.find(
     (table) => table.name === "usage_allowance_attribution_receipts",
@@ -6897,16 +6243,12 @@ export function evaluateRuntimeDatabasePosture(
   if (
     allowanceAttribution &&
     (allowanceAttribution.owner !==
-      posture.privateTables.find(
-        (table) => table.name === "workspace_usage_allowances",
-      )?.owner ||
+      posture.privateTables.find((table) => table.name === "workspace_usage_allowances")?.owner ||
       !allowanceAttribution.rlsEnabled ||
       !allowanceAttribution.rlsForced ||
       !allowanceAttribution.rlsActive)
   ) {
-    violations.push(
-      "usage allowance attribution receipts lack same-owner FORCE-RLS isolation",
-    );
+    violations.push("usage allowance attribution receipts lack same-owner FORCE-RLS isolation");
   }
   const sessionUsageLimitCapability = posture.privateTables.find(
     (table) => table.name === "session_usage_limit_capabilities",
@@ -6914,9 +6256,7 @@ export function evaluateRuntimeDatabasePosture(
   if (!options.protectedTables || sessionUsageLimitCapability) {
     const authorityOwner = tableByName.get("workspaces")?.owner;
     for (const name of RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES) {
-      const table = posture.privateTables.find(
-        (candidate) => candidate.name === name,
-      );
+      const table = posture.privateTables.find((candidate) => candidate.name === name);
       if (
         !table ||
         table.owner === expectedRole ||
@@ -6933,9 +6273,7 @@ export function evaluateRuntimeDatabasePosture(
         table.references ||
         table.trigger
       ) {
-        violations.push(
-          `session usage limit private table ${name} is missing or unsafe`,
-        );
+        violations.push(`session usage limit private table ${name} is missing or unsafe`);
       }
     }
     if (
@@ -6964,8 +6302,7 @@ export function evaluateRuntimeDatabasePosture(
     (!nativeOriginCapability ||
       nativeOriginCapability.owner === expectedRole ||
       nativeOriginCapability.owner !== tableByName.get("sessions")?.owner ||
-      nativeOriginCapability.owner !==
-        tableByName.get("organization_memberships")?.owner ||
+      nativeOriginCapability.owner !== tableByName.get("organization_memberships")?.owner ||
       !nativeOriginCapability.rlsEnabled ||
       !nativeOriginCapability.rlsForced ||
       !nativeOriginCapability.rlsActive ||
@@ -6977,9 +6314,7 @@ export function evaluateRuntimeDatabasePosture(
       nativeOriginCapability.references ||
       nativeOriginCapability.trigger)
   )
-    violations.push(
-      "Native LIVE-origin read capability has unsafe owner, RLS or privileges",
-    );
+    violations.push("Native LIVE-origin read capability has unsafe owner, RLS or privileges");
   const modalInventoryCapability = posture.privateTables.find(
     (table) => table.name === "modal_inventory_read_capabilities",
   );
@@ -7001,9 +6336,7 @@ export function evaluateRuntimeDatabasePosture(
       inventory.owner !== capability.owner ||
       !inventory.configuration?.includes("search_path=pg_catalog")
     ) {
-      violations.push(
-        "Modal inventory capability has unsafe owner, ACL or runtime privileges",
-      );
+      violations.push("Modal inventory capability has unsafe owner, ACL or runtime privileges");
     }
     const createInventory = posture.privateRoutines.find(
       (routine) => routine.name === "list_pending_modal_provider_creates()",
@@ -7016,13 +6349,10 @@ export function evaluateRuntimeDatabasePosture(
         createInventory.owner !== capability.owner ||
         !createInventory.configuration?.includes("search_path=pg_catalog"))
     ) {
-      violations.push(
-        "Modal create inventory has unsafe owner, ACL or runtime privileges",
-      );
+      violations.push("Modal create inventory has unsafe owner, ACL or runtime privileges");
     }
     const enrollmentInventory = posture.privateRoutines.find(
-      (routine) =>
-        routine.name === "list_stale_compute_sandbox_enrollments(uuid)",
+      (routine) => routine.name === "list_stale_compute_sandbox_enrollments(uuid)",
     );
     if (
       enrollmentInventory &&
@@ -7032,9 +6362,7 @@ export function evaluateRuntimeDatabasePosture(
         enrollmentInventory.owner !== capability.owner ||
         !enrollmentInventory.configuration?.includes("search_path=pg_catalog"))
     ) {
-      violations.push(
-        "Compute enrollment inventory has unsafe owner, ACL or runtime privileges",
-      );
+      violations.push("Compute enrollment inventory has unsafe owner, ACL or runtime privileges");
     }
   }
   if (organizationUsageCapability) {
@@ -7063,9 +6391,7 @@ export function evaluateRuntimeDatabasePosture(
       aggregateRoutine.publicExecute ||
       aggregateRoutine.owner !== capability.owner
     ) {
-      violations.push(
-        "organization usage aggregate capability is missing or unsafe",
-      );
+      violations.push("organization usage aggregate capability is missing or unsafe");
     }
   }
   const siteCancellation = posture.privateTables.find(
@@ -7075,9 +6401,7 @@ export function evaluateRuntimeDatabasePosture(
     (routine) => routine.name === SITE_CANCELLATION_PREDICATE,
   );
   const siteCancellationRoutines = posture.privateRoutines.filter((routine) =>
-    (SITE_CANCELLATION_PRIVATE_ROUTINES as readonly string[]).includes(
-      routine.name,
-    ),
+    (SITE_CANCELLATION_PRIVATE_ROUTINES as readonly string[]).includes(routine.name),
   );
   // Require the current production contract; reduced fixture/embedding inventories
   // may omit Sites, but any installed half must satisfy the complete capability.
@@ -7099,9 +6423,7 @@ export function evaluateRuntimeDatabasePosture(
       siteCancellation.references ||
       siteCancellation.trigger
     )
-      violations.push(
-        "Site cancellation capability ledger is missing or unsafe",
-      );
+      violations.push("Site cancellation capability ledger is missing or unsafe");
     const predicate = siteCancellationPredicate[0];
     if (
       siteCancellationPredicate.length !== 1 ||
@@ -7111,13 +6433,9 @@ export function evaluateRuntimeDatabasePosture(
       predicate.owner !== siteCancellation?.owner ||
       !predicate.configuration?.includes("search_path=pg_catalog")
     )
-      violations.push(
-        "Site cancellation policy predicate is missing or unsafe",
-      );
+      violations.push("Site cancellation policy predicate is missing or unsafe");
     for (const name of SITE_CANCELLATION_PRIVATE_ROUTINES) {
-      const matches = siteCancellationRoutines.filter(
-        (routine) => routine.name === name,
-      );
+      const matches = siteCancellationRoutines.filter((routine) => routine.name === name);
       const routine = matches[0];
       if (
         matches.length !== 1 ||
@@ -7129,25 +6447,19 @@ export function evaluateRuntimeDatabasePosture(
           ? routine.configuration?.includes("search_path=pg_catalog")
           : safeSearchPath(routine))
       )
-        violations.push(
-          `Site cancellation routine ${name} is missing or unsafe`,
-        );
+        violations.push(`Site cancellation routine ${name} is missing or unsafe`);
     }
   }
   const modelCallFactsOwner = tableByName.get("model_call_facts")?.owner;
   const modelFactCapabilityRoutines = new Set(
-    options.modelFactCapabilityRoutines ??
-      MODEL_FACT_CAPABILITY_ROUTINES.map(([name]) => name),
+    options.modelFactCapabilityRoutines ?? MODEL_FACT_CAPABILITY_ROUTINES.map(([name]) => name),
   );
   if (modelCallFactsOwner !== undefined) {
     for (const [name, violation] of MODEL_FACT_CAPABILITY_ROUTINES) {
-      const matches = posture.privateRoutines.filter(
-        (routine) => routine.name === name,
-      );
+      const matches = posture.privateRoutines.filter((routine) => routine.name === name);
       // An older binary does not require a later additive capability, but any
       // installed capability must retain the same owner and ACL safety contract.
-      if (matches.length === 0 && !modelFactCapabilityRoutines.has(name))
-        continue;
+      if (matches.length === 0 && !modelFactCapabilityRoutines.has(name)) continue;
       const routine = matches[0];
       if (
         matches.length !== 1 ||
@@ -7177,11 +6489,7 @@ export function evaluateRuntimeDatabasePosture(
       "session_turns",
       false,
     ],
-    [
-      "enqueue_organization_webhook_deliveries_v1()",
-      "organization_webhook_deliveries",
-      true,
-    ],
+    ["enqueue_organization_webhook_deliveries_v1()", "organization_webhook_deliveries", true],
     [
       "claim_organization_webhook_deliveries_v1(uuid, integer, integer)",
       "organization_webhook_deliveries",
@@ -7206,20 +6514,12 @@ export function evaluateRuntimeDatabasePosture(
   // Read-only maintenance work checks hold exactly the authority of the claim
   // each previews. Once that claim exists, its check must too, so a cadence
   // never silently loses the ability to see work.
-  for (const [
-    name,
-    claimName,
-    claimSchema,
-  ] of MAINTENANCE_WORK_PROBE_ROUTINES) {
+  for (const [name, claimName, claimSchema] of MAINTENANCE_WORK_PROBE_ROUTINES) {
     const claim = (
-      claimSchema === "target"
-        ? posture.targetRoutines
-        : posture.privateRoutines
+      claimSchema === "target" ? posture.targetRoutines : posture.privateRoutines
     ).find((entry) => entry.name === claimName);
     if (!claim) continue;
-    const matches = posture.privateRoutines.filter(
-      (routine) => routine.name === name,
-    );
+    const matches = posture.privateRoutines.filter((routine) => routine.name === name);
     const routine = matches[0];
     if (
       matches.length !== 1 ||
@@ -7230,22 +6530,16 @@ export function evaluateRuntimeDatabasePosture(
       !routine.execute ||
       !routine.configuration?.includes("search_path=pg_catalog")
     ) {
-      violations.push(
-        `maintenance work check ${name} is missing or has unsafe posture`,
-      );
+      violations.push(`maintenance work check ${name} is missing or has unsafe posture`);
     }
   }
   if (
     !options.protectedTables ||
-    posture.privateTables.some((table) =>
-      MAINTENANCE_PROBE_TABLES.includes(table.name),
-    )
+    posture.privateTables.some((table) => MAINTENANCE_PROBE_TABLES.includes(table.name))
   ) {
     const owner = tableByName.get("workspaces")?.owner;
     for (const name of MAINTENANCE_PRIVATE_TABLES) {
-      const table = posture.privateTables.find(
-        (candidate) => candidate.name === name,
-      );
+      const table = posture.privateTables.find((candidate) => candidate.name === name);
       if (
         !table ||
         table.owner !== owner ||
@@ -7258,38 +6552,28 @@ export function evaluateRuntimeDatabasePosture(
         table.references ||
         table.trigger
       ) {
-        violations.push(
-          `maintenance probe index ${name} is missing or accessible to runtime`,
-        );
+        violations.push(`maintenance probe index ${name} is missing or accessible to runtime`);
       }
     }
     for (const name of MAINTENANCE_PROBE_OWNER_ROUTINES) {
-      const routine = posture.privateRoutines.find(
-        (candidate) => candidate.name === name,
-      );
+      const routine = posture.privateRoutines.find((candidate) => candidate.name === name);
       if (
         !routine ||
         routine.owner !== owner ||
         routine.execute ||
         routine.publicExecute ||
         !routine.configuration?.some(
-          (value) =>
-            value === "search_path=pg_catalog" ||
-            integrationSearchPaths.includes(value),
+          (value) => value === "search_path=pg_catalog" || integrationSearchPaths.includes(value),
         )
       ) {
-        violations.push(
-          `maintenance probe helper ${name} is missing or unsafe`,
-        );
+        violations.push(`maintenance probe helper ${name} is missing or unsafe`);
       }
     }
     for (const name of [
       "maintenance_claim_active(text, text)",
       "maintenance_title_event_visible(text, uuid)",
     ]) {
-      const capability = posture.privateRoutines.find(
-        (routine) => routine.name === name,
-      );
+      const capability = posture.privateRoutines.find((routine) => routine.name === name);
       if (
         !capability ||
         capability.owner !== owner ||
@@ -7298,18 +6582,13 @@ export function evaluateRuntimeDatabasePosture(
         capability.publicExecute ||
         !capability.configuration?.includes("search_path=pg_catalog")
       ) {
-        violations.push(
-          `maintenance claim predicate ${name} is missing or unsafe`,
-        );
+        violations.push(`maintenance claim predicate ${name} is missing or unsafe`);
       }
     }
   }
   if (tableByName.has("organization_credential_providers")) {
     for (const [name] of integrationRoutine) {
-      if (
-        posture.privateRoutines.filter((routine) => routine.name === name)
-          .length !== 1
-      ) {
+      if (posture.privateRoutines.filter((routine) => routine.name === name).length !== 1) {
         violations.push(`integration routine ${name} is missing or ambiguous`);
       }
     }
@@ -7319,17 +6598,11 @@ export function evaluateRuntimeDatabasePosture(
       violations.push(`runtime role owns private routine ${routine.name}`);
     }
     if (!DECLARED_PRIVATE_ROUTINES.has(routine.name)) {
-      violations.push(
-        ...unknownRoutineViolations(routine, "opengeni_private", expectedRole),
-      );
+      violations.push(...unknownRoutineViolations(routine, "opengeni_private", expectedRole));
     }
     if (RUNTIME_DEFINER_ROUTINE_NAMES.has(routine.name)) {
       violations.push(
-        ...runtimeDefinerRoutineViolations(
-          routine,
-          definerTableByName,
-          targetSchema,
-        ),
+        ...runtimeDefinerRoutineViolations(routine, definerTableByName, targetSchema),
       );
     }
     if (routine.name === SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE) {
@@ -7345,9 +6618,7 @@ export function evaluateRuntimeDatabasePosture(
           "credit_ledger_entries",
         ].some((name) => routine.owner !== tableByName.get(name)?.owner)
       ) {
-        violations.push(
-          "subscription plan maintenance inventory has unsafe capability posture",
-        );
+        violations.push("subscription plan maintenance inventory has unsafe capability posture");
       }
     }
     if (
@@ -7358,18 +6629,13 @@ export function evaluateRuntimeDatabasePosture(
         !routine.configuration?.includes("search_path=pg_catalog") ||
         routine.owner !== tableByName.get("managed_accounts")?.owner)
     ) {
-      violations.push(
-        "subscription plan Free anniversary helper has unsafe capability posture",
-      );
+      violations.push("subscription plan Free anniversary helper has unsafe capability posture");
     }
     if (
-      routine.name ===
-        "list_pending_child_terminal_wake_repairs_v1(integer, uuid, uuid)" ||
+      routine.name === "list_pending_child_terminal_wake_repairs_v1(integer, uuid, uuid)" ||
       routine.name === "list_exhausted_scheduled_tasks(integer)" ||
-      routine.name ===
-        "list_scheduled_task_schedule_reconciliations(integer)" ||
-      routine.name ===
-        "list_quiescence_receipt_wake_repairs_v1(integer, uuid, uuid)"
+      routine.name === "list_scheduled_task_schedule_reconciliations(integer)" ||
+      routine.name === "list_quiescence_receipt_wake_repairs_v1(integer, uuid, uuid)"
     ) {
       const dispatcher = posture.privateRoutines.find(
         (entry) => entry.name === "claim_session_workflow_wakes(integer)",
@@ -7387,9 +6653,7 @@ export function evaluateRuntimeDatabasePosture(
         );
       }
     }
-    const integrationContract = integrationRoutine.find(
-      ([name]) => name === routine.name,
-    );
+    const integrationContract = integrationRoutine.find(([name]) => name === routine.name);
     if (integrationContract) {
       const [, tableName, definer] = integrationContract;
       if (
@@ -7397,9 +6661,7 @@ export function evaluateRuntimeDatabasePosture(
         !routine.execute ||
         routine.securityDefiner !== definer ||
         routine.owner !== tableByName.get(tableName)?.owner ||
-        !routine.configuration?.some((value) =>
-          integrationSearchPaths.includes(value),
-        )
+        !routine.configuration?.some((value) => integrationSearchPaths.includes(value))
       ) {
         violations.push(
           `integration routine ${routine.name} has unsafe execution, ownership or search path`,
@@ -7412,21 +6674,14 @@ export function evaluateRuntimeDatabasePosture(
         routine.publicExecute ||
         routine.securityDefiner ||
         routine.owner !== tableByName.get("teams_bot_routes")?.owner ||
-        !routine.configuration?.some((value) =>
-          integrationSearchPaths.includes(value),
-        ))
+        !routine.configuration?.some((value) => integrationSearchPaths.includes(value)))
     )
-      violations.push(
-        "Teams wake trigger has unsafe execution, ownership or search path",
-      );
-    const ownerInternalRoutine = OWNER_INTERNAL_PRIVATE_ROUTINES.has(
-      routine.name,
-    );
+      violations.push("Teams wake trigger has unsafe execution, ownership or search path");
+    const ownerInternalRoutine = OWNER_INTERNAL_PRIVATE_ROUTINES.has(routine.name);
     if (
-      [
-        "sync_usage_maintenance_due()",
-        "arm_usage_allowances_for_membership()",
-      ].includes(routine.name) &&
+      ["sync_usage_maintenance_due()", "arm_usage_allowances_for_membership()"].includes(
+        routine.name,
+      ) &&
       (routine.execute ||
         routine.publicExecute ||
         !routine.securityDefiner ||
@@ -7439,14 +6694,11 @@ export function evaluateRuntimeDatabasePosture(
           ].includes(value),
         ))
     )
-      violations.push(
-        `usage maintenance helper ${routine.name} has unsafe posture`,
-      );
+      violations.push(`usage maintenance helper ${routine.name} has unsafe posture`);
     if (
-      [
-        "validate_mcp_account_bindings(jsonb, jsonb)",
-        "fence_mcp_account_bindings()",
-      ].includes(routine.name)
+      ["validate_mcp_account_bindings(jsonb, jsonb)", "fence_mcp_account_bindings()"].includes(
+        routine.name,
+      )
     ) {
       if (routine.execute || routine.publicExecute) {
         violations.push(
@@ -7458,10 +6710,7 @@ export function evaluateRuntimeDatabasePosture(
           `MCP account binding internal routine ${routine.name} owner does not match turn owner`,
         );
       }
-      if (
-        routine.securityDefiner !==
-        (routine.name === "fence_mcp_account_bindings()")
-      ) {
+      if (routine.securityDefiner !== (routine.name === "fence_mcp_account_bindings()")) {
         violations.push(
           `MCP account binding internal routine ${routine.name} has unsafe execution mode`,
         );
@@ -7471,9 +6720,7 @@ export function evaluateRuntimeDatabasePosture(
       routine.name === "read_sender_connection(uuid, uuid, uuid, text)" &&
       (routine.execute || routine.publicExecute)
     ) {
-      violations.push(
-        "runtime or PUBLIC can call the internal sender connection reader",
-      );
+      violations.push("runtime or PUBLIC can call the internal sender connection reader");
     }
     if (
       [
@@ -7512,18 +6759,13 @@ export function evaluateRuntimeDatabasePosture(
       !RETIRED_PRIVATE_ROUTINES.has(routine.name) &&
       !DEFERRED_PRIVATE_ROUTINE_NAMES.has(routine.name)
     ) {
-      violations.push(
-        `runtime role lacks EXECUTE on private routine ${routine.name}`,
-      );
+      violations.push(`runtime role lacks EXECUTE on private routine ${routine.name}`);
     }
   }
   for (const name of RUNTIME_DEFINER_ROUTINES) {
     if (
-      RUNTIME_DEFINER_ROUTINE_TABLES[name].every((table) =>
-        definerTableByName.has(table),
-      ) &&
-      posture.privateRoutines.filter((routine) => routine.name === name)
-        .length !== 1
+      RUNTIME_DEFINER_ROUTINE_TABLES[name].every((table) => definerTableByName.has(table)) &&
+      posture.privateRoutines.filter((routine) => routine.name === name).length !== 1
     ) {
       violations.push(`runtime definer ${name} is missing or ambiguous`);
     }
@@ -7547,23 +6789,16 @@ function runtimeDefinerRoutineViolations(
 ): string[] {
   const violations: string[] = [];
   const label = `runtime definer ${routine.name}`;
-  if (!routine.securityDefiner)
-    violations.push(`${label} is not SECURITY DEFINER`);
-  if (routine.publicExecute !== false)
-    violations.push(`PUBLIC can execute ${label}`);
-  if (routine.triggerCallable !== false)
-    violations.push(`${label} is trigger-callable`);
-  if (routine.hasDependents !== false)
-    violations.push(`${label} has catalog dependents`);
+  if (!routine.securityDefiner) violations.push(`${label} is not SECURITY DEFINER`);
+  if (routine.publicExecute !== false) violations.push(`PUBLIC can execute ${label}`);
+  if (routine.triggerCallable !== false) violations.push(`${label} is trigger-callable`);
+  if (routine.hasDependents !== false) violations.push(`${label} has catalog dependents`);
   const tables: readonly string[] =
-    RUNTIME_DEFINER_ROUTINE_TABLES[
-      routine.name as keyof typeof RUNTIME_DEFINER_ROUTINE_TABLES
-    ] ?? [];
+    RUNTIME_DEFINER_ROUTINE_TABLES[routine.name as keyof typeof RUNTIME_DEFINER_ROUTINE_TABLES] ??
+    [];
   const owners = tables.map((name) => tableByName.get(name)?.owner);
   if (owners.length === 0 || owners.some((owner) => owner !== routine.owner)) {
-    violations.push(
-      `${label} owner ${routine.owner} does not match its tables' owner`,
-    );
+    violations.push(`${label} owner ${routine.owner} does not match its tables' owner`);
   }
   const searchPath = routine.configuration
     ?.find((value) => value.startsWith("search_path="))
@@ -7572,20 +6807,12 @@ function runtimeDefinerRoutineViolations(
     .split(",")
     .map((entry) => entry.trim().replaceAll('"', ""))
     .filter((entry) => entry.length > 0);
-  const allowed = new Set([
-    "$user",
-    targetSchema,
-    "opengeni_private",
-    "public",
-    "pg_catalog",
-  ]);
+  const allowed = new Set(["$user", targetSchema, "opengeni_private", "public", "pg_catalog"]);
   const pinned =
     entries.length > 0 &&
     entries[0] !== "pg_temp" &&
     entries.every(
-      (entry, index) =>
-        allowed.has(entry) ||
-        (entry === "pg_temp" && index === entries.length - 1),
+      (entry, index) => allowed.has(entry) || (entry === "pg_temp" && index === entries.length - 1),
     );
   if (!pinned) {
     violations.push(`${label} has no pinned search_path`);
