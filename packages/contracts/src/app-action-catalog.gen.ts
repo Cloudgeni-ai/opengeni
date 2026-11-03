@@ -3122,25 +3122,27 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
-<<<<<<< HEAD
-    "id": "getBillingAutoTopUp",
-    "method": "GET",
-    "path": "/v1/billing/auto-top-up",
-=======
     "id": "getBillingAlertSettings",
     "method": "GET",
     "path": "/v1/billing/alerts",
->>>>>>> fa80b957fbed3db6a961849f9599478d4e671f69
     "request": [],
     "query": [
       "accountId"
     ],
     "response": [
-<<<<<<< HEAD
-      "BillingAutoTopUpSettings"
-=======
       "BillingAlertSettings"
->>>>>>> fa80b957fbed3db6a961849f9599478d4e671f69
+    ]
+  },
+  {
+    "id": "getBillingAutoTopUp",
+    "method": "GET",
+    "path": "/v1/billing/auto-top-up",
+    "request": [],
+    "query": [
+      "accountId"
+    ],
+    "response": [
+      "BillingAutoTopUpSettings"
     ]
   },
   {
@@ -9540,16 +9542,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
-<<<<<<< HEAD
-    "id": "updateBillingAutoTopUp",
-    "method": "PUT",
-    "path": "/v1/billing/auto-top-up",
-    "request": [
-      "UpdateBillingAutoTopUpRequest"
-    ],
-    "response": [
-      "BillingAutoTopUpSettings"
-=======
     "id": "updateBillingAlertSettings",
     "method": "PUT",
     "path": "/v1/billing/alerts",
@@ -9558,7 +9550,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "BillingAlertSettings"
->>>>>>> fa80b957fbed3db6a961849f9599478d4e671f69
+    ]
+  },
+  {
+    "id": "updateBillingAutoTopUp",
+    "method": "PUT",
+    "path": "/v1/billing/auto-top-up",
+    "request": [
+      "UpdateBillingAutoTopUpRequest"
+    ],
+    "response": [
+      "BillingAutoTopUpSettings"
     ]
   },
   {
