@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { AttachedBrowserDeviceNotFoundError } from "@opengeni/db";
 import { Hono } from "hono";
 
 import { registeredApiRoutes } from "../../../scripts/public-api/action-catalog";
 import surface from "../../../scripts/public-api/surface.gen.json";
-import { registerComputerSessionRoutes } from "../src/routes/computer-sessions";
+import { computerRouteError, registerComputerSessionRoutes } from "../src/routes/computer-sessions";
 
 const routeUrl = new URL("../src/routes/computer-sessions.ts", import.meta.url);
 const computerSessionRoot = "/v1/workspaces/:workspaceId/computer-sessions";
@@ -32,6 +33,16 @@ function assertComputerRouteSurface(actual: readonly Route[], expected: readonly
 }
 
 describe("ComputerSession route discipline", () => {
+  test("an unknown attached device is a 404 that names the connected-machine placement", () => {
+    const error = computerRouteError(
+      new AttachedBrowserDeviceNotFoundError("Attached browser not found"),
+      "open",
+    );
+    expect(error.status).toBe(404);
+    expect(error.message).toContain("connected_machine");
+    expect(error.message).toContain("sandboxId");
+  });
+
   test("registers the entire public ComputerSession contract in the module and composed API", () => {
     const app = new Hono();
     // Registration must not perform resource access or start a controller.
