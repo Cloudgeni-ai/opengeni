@@ -114,8 +114,8 @@ export async function readIntegrationResponse(
   const contentType =
     response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
   if (body.byteLength === 0) return { data: null, contentType, bytes: 0 };
-  const text = new TextDecoder("utf-8", { fatal: false }).decode(body);
   if (contentType === "application/json" || contentType.endsWith("+json")) {
+    const text = new TextDecoder("utf-8", { fatal: false }).decode(body);
     try {
       return { data: JSON.parse(text), contentType, bytes: body.byteLength };
     } catch {
@@ -128,5 +128,27 @@ export async function readIntegrationResponse(
       );
     }
   }
-  return { data: text, contentType, bytes: body.byteLength };
+  // Text stays text. Other bytes that are not UTF-8 (a PDF, an image, an
+  // Office file) are returned as base64 rather than as replacement
+  // characters, so the content survives for code that decodes or saves it.
+  if (/^text\/|xml|yaml|csv|javascript|x-www-form-urlencoded/.test(contentType)) {
+    return {
+      data: new TextDecoder("utf-8", { fatal: false }).decode(body),
+      contentType,
+      bytes: body.byteLength,
+    };
+  }
+  try {
+    return {
+      data: new TextDecoder("utf-8", { fatal: true }).decode(body),
+      contentType,
+      bytes: body.byteLength,
+    };
+  } catch {
+    return {
+      data: { encoding: "base64", base64: Buffer.from(body).toString("base64") },
+      contentType,
+      bytes: body.byteLength,
+    };
+  }
 }

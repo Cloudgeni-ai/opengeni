@@ -415,11 +415,13 @@ export async function invokeOpenApiOperation(
   }
   assertSearchEntityTypes(binding, args);
   const firstCredential = await resolveOpenApiCredential(options, binding, toolId, args, false);
+  let credential = firstCredential;
   let response = await sendOpenApiRequest(options, binding, args, firstCredential, signal);
   if (response.status === 401 && options.credentialResolver && options.authority.connectionRef) {
     const refreshed = await resolveOpenApiCredential(options, binding, toolId, args, true);
     if (isReplaySafeMethod(binding.method) && refreshed) {
       await response.body?.cancel().catch(() => undefined);
+      credential = refreshed;
       response = await sendOpenApiRequest(options, binding, args, refreshed, signal);
     } else {
       await response.body?.cancel().catch(() => undefined);
@@ -433,13 +435,13 @@ export async function invokeOpenApiOperation(
     }
   }
   if (response.status >= 300 && response.status < 400) {
-    await response.body?.cancel().catch(() => undefined);
-    throw new IntegrationInvocationError(
-      "redirect_rejected",
-      "Integration attempted to redirect a credential-bearing request",
-      binding.method === "get" || binding.method === "head" ? "failed" : "unknown",
-      false,
-      response.status,
+    response = await followCredentialFreeRedirects(
+      options,
+      binding,
+      buildOperationUrl(binding, args),
+      response,
+      credential,
+      signal,
     );
   }
   const payload = await readIntegrationResponse(
@@ -553,6 +555,74 @@ async function resolveOpenApiCredential(
     );
   }
   return credential;
+}
+
+/** Redirect hops a safe read may follow, e.g. Graph `/content` to its download URL. */
+export const MAX_INTEGRATION_REDIRECTS = 3;
+const FOLLOWED_REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/**
+ * Follow a safe read's redirects without its credentials. Providers commonly
+ * answer a download with a redirect to a pre-signed URL (Microsoft Graph
+ * `/content`, file exports, archives); the URL itself authorizes the read.
+ * Each hop goes through the same pinned transport and deadline, carries no
+ * Authorization or other credential header, cookie or credential query
+ * parameter, and never downgrades from https. A mutation's redirect is still
+ * rejected: its side effect may already have happened.
+ */
+async function followCredentialFreeRedirects(
+  options: OpenApiServerOptions,
+  binding: OpenApiOperationBinding,
+  requestUrl: URL,
+  first: Response,
+  credential: Awaited<ReturnType<IntegrationCredentialResolver["resolve"]>>,
+  signal?: AbortSignal,
+): Promise<Response> {
+  const safe = binding.method === "get" || binding.method === "head";
+  const credentialQueryNames = (credential?.placements ?? [])
+    .filter((placement) => placement.carrier === "query")
+    .map((placement) => placement.name);
+  let response = first;
+  let current = requestUrl;
+  for (let hop = 0; response.status >= 300 && response.status < 400; hop++) {
+    const location = response.headers.get("location");
+    await response.body?.cancel().catch(() => undefined);
+    const target = location && URL.canParse(location, current) ? new URL(location, current) : null;
+    const reason = !safe
+      ? "Integration attempted to redirect a credential-bearing request"
+      : !FOLLOWED_REDIRECT_STATUSES.has(response.status) || !target
+        ? "Integration answered with a redirect that has no usable Location"
+        : hop >= MAX_INTEGRATION_REDIRECTS
+          ? `Integration redirected more than ${MAX_INTEGRATION_REDIRECTS} times`
+          : (current.protocol === "https:" && target.protocol !== "https:") ||
+              target.username ||
+              target.password
+            ? "Integration redirected to an insecure destination"
+            : undefined;
+    if (reason || !target) {
+      throw new IntegrationInvocationError(
+        "redirect_rejected",
+        reason ?? "Integration answered with a redirect that has no usable Location",
+        safe ? "failed" : "unknown",
+        false,
+        response.status,
+      );
+    }
+    target.hash = "";
+    for (const name of credentialQueryNames) target.searchParams.delete(name);
+    response = await fetchWithDeadline(
+      options.transport,
+      target,
+      {
+        method: binding.method.toUpperCase(),
+        headers: new Headers({ accept: "*/*" }),
+        ...(signal ? { signal } : {}),
+      },
+      options.timeoutMs ?? DEFAULT_INTEGRATION_TIMEOUT_MS,
+    );
+    current = target;
+  }
+  return response;
 }
 
 async function sendOpenApiRequest(
@@ -839,7 +909,7 @@ function buildOperationUrl(binding: OpenApiOperationBinding, args: Record<string
     if (value === undefined || value === null) {
       throw new IntegrationInvocationError(
         "path_parameter_missing",
-        "A required integration path parameter is missing",
+        `The required path parameter ${JSON.stringify(name)} is missing`,
         "not_started",
         false,
       );

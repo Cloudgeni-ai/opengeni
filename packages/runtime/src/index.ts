@@ -8192,6 +8192,30 @@ function isIntegrationInvocationOutcomeUnknownError(error: unknown): boolean {
   }
 }
 
+/**
+ * A generated OpenAPI/GraphQL integration call that failed with a known
+ * outcome (rejected before or by the provider, nothing left half-done): a
+ * provider redirect, a missing parameter, an expired authorization. It is an
+ * ordinary tool error the model can act on, not an unavailable tool.
+ */
+function recoverableIntegrationFailure(
+  error: unknown,
+): { code: string; message: string; status?: number; retryable: boolean } | undefined {
+  try {
+    if (!(error instanceof IntegrationInvocationError)) return undefined;
+    if (error.outcome !== "failed" && error.outcome !== "not_started") return undefined;
+    return {
+      code: error.code,
+      message: error.message,
+      ...(typeof error.status === "number" ? { status: error.status } : {}),
+      retryable: error.retryable,
+    };
+  } catch {
+    // Typed error recognition is observational. Preserve the source failure.
+    return undefined;
+  }
+}
+
 function mcpToolOutcomeUncertainContent(error: unknown): Array<{ type: "text"; text: string }> {
   let body: unknown;
   try {
@@ -10173,6 +10197,21 @@ export class PrefixedMcpServer implements MCPServer {
         throw error;
       }
       recordOutcome(mcpThrownToolCallOutcome(error, options?.signal));
+      // A generated integration's known-outcome failure goes back to the model
+      // as the tool's error, on any server: it says what the provider rejected
+      // and the tool stays usable with corrected arguments.
+      const integrationFailure = options?.propagateInvocationErrors
+        ? undefined
+        : recoverableIntegrationFailure(error);
+      if (integrationFailure) {
+        return boundedMcpToolResult({
+          isError: true,
+          content: [
+            { type: "text", text: JSON.stringify({ ok: false, error: integrationFailure }) },
+          ],
+          structuredContent: { ok: false, error: integrationFailure },
+        });
+      }
       // Best-effort INVOCATION isolation (sibling to the listTools guard). When
       // the model calls a best-effort server's tool and the call throws for ANY
       // other reason — a raw transport 401/403 that never became the broker's
