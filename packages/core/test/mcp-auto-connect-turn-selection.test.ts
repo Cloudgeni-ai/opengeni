@@ -16,8 +16,8 @@ function connector(n: number) {
   };
 }
 
-function login(n: number, mcpUrl = `https://app${n}.test/mcp`) {
-  return { providerDomain: `APP${n}.test`, metadata: { mcpUrl } };
+function login(n: number, mcpUrl = `https://app${n}.test/mcp`, turnedOnHere = true) {
+  return { providerDomain: `APP${n}.test`, turnedOnHere, metadata: { mcpUrl } };
 }
 
 describe("the auto-connect connectors a turn tries", () => {
@@ -45,6 +45,12 @@ describe("the auto-connect connectors a turn tries", () => {
       autoConnectConnectorsToTry([connector(1)], [login(1, "https://app1.test/other")]).map(
         (c) => c.id,
       ),
+    ).toEqual(["connector-1"]);
+  });
+
+  test("a login made in another workspace is still tried, so connecting turns it on here", () => {
+    expect(
+      autoConnectConnectorsToTry([connector(1)], [login(1, undefined, false)]).map((c) => c.id),
     ).toEqual(["connector-1"]);
   });
 });

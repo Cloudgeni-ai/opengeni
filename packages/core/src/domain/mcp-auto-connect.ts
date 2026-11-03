@@ -464,8 +464,9 @@ export async function connectAutoConnectLoginsForTurn(input: {
       })
       .filter((connector) => !recentlyRefused(connector.id, input.subjectId, now));
     if (candidates.length === 0) return;
-    // Apps the person already has a working login to need nothing, so they
-    // don't use up this turn's few attempts.
+    // Apps the person already has a working login to, turned on here, need
+    // nothing, so they don't use up this turn's few attempts. A login made in
+    // another workspace is still tried: connecting turns it on here.
     const working = (
       await listOwnConnectionMetadata(input.db, {
         accountId: input.accountId,
@@ -525,13 +526,17 @@ export async function connectMemberToOrganizationConnector(input: {
 }
 
 /**
- * The connectors a turn tries: those the person has no working login to,
- * at most a few. Logins they already have are left out before the limit, so
+ * The connectors a turn tries: those the person has no working login to that
+ * is turned on here, at most a few. Those are left out before the limit, so
  * apps later in the list are never starved by ones that need nothing.
  */
 export function autoConnectConnectorsToTry<C extends Pick<OrganizationConnectorRow, "config">>(
   candidates: readonly C[],
-  working: readonly { providerDomain: string; metadata: { mcpUrl?: unknown } }[],
+  working: readonly {
+    providerDomain: string;
+    turnedOnHere?: boolean | undefined;
+    metadata: { mcpUrl?: unknown };
+  }[],
 ): C[] {
   return candidates
     .filter((connector) => {
@@ -540,6 +545,7 @@ export function autoConnectConnectorsToTry<C extends Pick<OrganizationConnectorR
       if (!ref || !mcpUrl) return true;
       return !working.some(
         (connection) =>
+          connection.turnedOnHere === true &&
           connection.providerDomain.toLowerCase() === ref.providerDomain.toLowerCase() &&
           sameUrl(connection.metadata.mcpUrl, mcpUrl),
       );

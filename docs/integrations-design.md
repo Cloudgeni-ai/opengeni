@@ -390,7 +390,9 @@ provider connecting members to Opengeni's own `/v1/mcp`, is in
   member who already has a working login to that server is left alone.
 - **When.** Before each turn, for at most four auto-connect connectors the turn
   may use that the person has no login to (connectors they already have a
-  login to are left out before the limit applies), best effort; after a refusal that
+  login to, turned on in this workspace, are left out before the limit
+  applies; a login from another workspace is turned on here), best effort;
+  after a refusal that
   person's turns stop asking that app for ten minutes and the usual sign-in
   prompt stands in. A member's own **Connect** calls
   `POST /v1/workspaces/:id/organization-connectors/:connectorId/connect`

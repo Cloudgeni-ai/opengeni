@@ -321,24 +321,46 @@ export async function findActiveMcpTrustedIssuers(
 export type McpAssertionMatch = { status: "matched"; subjectId: string } | { status: "unmatched" };
 
 /**
- * The active member whose verified Opengeni email the issuer asserted, on
- * every redemption: an issuer's subject is linked to the member it matched
- * for the admin's view, never trusted in place of the email (the issuer may
- * since have said a different or unverified email for it).
+ * The active member an assertion names, on every redemption.
+ *
+ * An assertion with an email is matched by it, to a verified Opengeni email:
+ * a subject linked before never stands in for it (the issuer may since say a
+ * different or unverified email for that subject). Claude's subjects are
+ * opaque, so Claude is always matched by email. An identity provider may
+ * leave the email out; its `sub` is then its stable ID for the person, found
+ * through the member it was linked to by an earlier email match.
  */
 export async function matchMcpAssertionMember(
   db: Database,
   input: {
     accountId: string;
+    trust: Pick<McpTrustedIssuerRecord, "id" | "provider">;
+    assertionSubject: string;
+    /** The asserted email, null when the issuer said it isn't verified. */
     email: string | null;
+    /** Whether the assertion had an email claim at all. */
+    emailClaimed: boolean;
   },
 ): Promise<McpAssertionMatch> {
-  if (!input.email) return { status: "unmatched" };
   const email = input.email;
+  const bySubject = !input.emailClaimed && input.trust.provider !== "claude";
+  if (!email && !bySubject) return { status: "unmatched" };
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: null },
     async (tx) => {
+      if (!email) {
+        const [linked] = await rawRows<{ subject_id: string }>(
+          tx,
+          sql`select subject_id from organization_mcp_trusted_issuer_subjects
+            where account_id = ${input.accountId}::uuid
+              and trusted_issuer_id = ${input.trust.id}::uuid
+              and assertion_subject = ${input.assertionSubject}`,
+        );
+        return linked && (await isActiveMember(tx, input.accountId, linked.subject_id))
+          ? { status: "matched", subjectId: linked.subject_id }
+          : { status: "unmatched" };
+      }
       const people = await rawRows<{ id: string }>(
         tx,
         sql`select id from auth_users
@@ -388,6 +410,17 @@ export async function redeemMcpAssertion(
     db,
     { accountId: trust.accountId, workspaceId: null },
     async (tx) => {
+      // The trust may change while this runs: hold its lock first, before any
+      // row referencing it is touched, then use the live row. Turning it off,
+      // changing its access or removing it waits for this connection and then
+      // applies to it, or this waits and reads it.
+      await lockTrustedIssuerShared(tx, trust.id);
+      const [live] = await rawRows<TrustedIssuerRow>(
+        tx,
+        sql`select ${TRUST_COLUMNS} from organization_mcp_trusted_issuers trust
+          where trust.id = ${trust.id}::uuid and trust.account_id = ${trust.accountId}::uuid`,
+      );
+      if (!live) return { status: "refused", reason: "issuer_disabled" };
       await tx.execute(sql`delete from organization_mcp_assertion_replays
         where ctid in (
           select ctid from organization_mcp_assertion_replays
@@ -406,17 +439,7 @@ export async function redeemMcpAssertion(
         returning jti_hash`,
       );
       if (!fresh) return { status: "refused", reason: "replayed" };
-      // The trust may have changed since it was read: hold its lock, then use
-      // the live row. Turning it off, changing its access or removing it waits
-      // for this connection and then applies to it, or this waits and reads it.
-      await lockTrustedIssuerShared(tx, trust.id);
-      const [live] = await rawRows<TrustedIssuerRow>(
-        tx,
-        sql`select ${TRUST_COLUMNS} from organization_mcp_trusted_issuers trust
-          where trust.id = ${trust.id}::uuid and trust.account_id = ${trust.accountId}::uuid
-            and trust.status = 'active'`,
-      );
-      if (!live) return { status: "refused", reason: "issuer_disabled" };
+      if (live.status !== "active") return { status: "refused", reason: "issuer_disabled" };
       const organizationAccess = mapTrust(live).organizationAccess;
       if (!(await isActiveMember(tx, trust.accountId, input.subjectId)))
         return { status: "refused", reason: "no_matching_member" };

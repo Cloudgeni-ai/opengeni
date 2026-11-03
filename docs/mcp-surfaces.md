@@ -158,7 +158,9 @@ unchanged. An ID-JAG may also name a client ID its issuer registered itself
 (Claude's own client); that client is stored usable with the JWT bearer grant
 only. A document declaring a `token_endpoint_auth_method` other than `none`
 is refused (`invalid_client`): Opengeni never downgrades a client that says
-it authenticates.
+it authenticates. A registration saved before its document changed keeps no
+grant from then on, so no API instance serves it until the document is public
+again.
 
 A redemption is accepted only when every check passes, in this order, and
 otherwise answers `invalid_grant` (`invalid_client` or `invalid_target` where
@@ -181,10 +183,14 @@ the spec says so) with an `error_description`:
 6. The person is matched on every redemption by the assertion's `email`
    (unless `email_verified` is false) against an `email_verified` Opengeni
    account with an active membership; a `sub` seen before never stands in for
-   it. An email never creates an account or a membership.
+   an email the assertion carries. An identity provider (not Claude, whose
+   `sub` is opaque) may leave `email` out: its `(iss, sub)` then finds the
+   member an earlier email match linked it to. An email never creates an
+   account or a membership.
 
 Redemption and turning an issuer off or removing it take the same per-issuer
-lock, so no token is issued after the admin's change commits.
+lock (redemption before touching any row that references the issuer), so no
+token is issued after the admin's change commits.
 
 The response is an access token with scope `mcp:access` and no refresh
 token: the client redeems a fresh ID-JAG when it runs out. Each trust, person

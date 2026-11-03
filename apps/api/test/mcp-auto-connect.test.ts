@@ -37,6 +37,8 @@ const claudeIssuer = "https://identity.anthropic.test/issuers/acme-claude";
 const claudeClientId = "https://claude.test/oauth/mcp-client-metadata.json";
 /** A client whose document says it authenticates with a key Opengeni never checks. */
 const confidentialClientId = "https://confidential.test/oauth/client-metadata.json";
+/** What that client's document says; it may change after it was registered. */
+let confidentialAuthMethod = "private_key_jwt";
 const encryptionKey = randomBytes(32).toString("base64");
 const delegationSecret = "mcp-auto-connect-delegation-secret";
 const JWT_BEARER = "urn:ietf:params:oauth:grant-type:jwt-bearer";
@@ -89,7 +91,7 @@ const fakeInternet: typeof fetch = (async (input: string | URL | Request, init?:
       client_name: "Confidential",
       redirect_uris: ["https://confidential.test/callback"],
       grant_types: [JWT_BEARER],
-      token_endpoint_auth_method: "private_key_jwt",
+      token_endpoint_auth_method: confidentialAuthMethod,
     });
   if (outsideApp && url.hostname.endsWith("app.test")) return await outsideApp(request);
   return new Response("not found", { status: 404 });
@@ -446,6 +448,49 @@ describe("auto-connect, inbound: Claude connects members to the organization MCP
       "wrong_resource",
     ])
       expect({ reason, seen: reasons.has(reason) }).toEqual({ reason, seen: true });
+
+    // A client registered as public whose document now says it authenticates
+    // is refused from then on, not served from its saved registration.
+    const asConfidential = async () =>
+      await redeem(
+        app,
+        await idJag({ sub: "claude-user-1", email: owner.email, client_id: confidentialClientId }),
+        { client_id: confidentialClientId },
+      );
+    confidentialAuthMethod = "none";
+    resetMcpAutoConnectCaches();
+    expect((await asConfidential()).status).toBe(200);
+    confidentialAuthMethod = "private_key_jwt";
+    resetMcpAutoConnectCaches(); // a day later
+    expect(await asConfidential()).toMatchObject({
+      status: 401,
+      body: { error: "invalid_client" },
+    });
+    expect(await asConfidential()).toMatchObject({
+      status: 401,
+      body: { error: "invalid_client" },
+    });
+    resetMcpAutoConnectCaches(); // another API instance
+    expect(await asConfidential()).toMatchObject({
+      status: 401,
+      body: { error: "invalid_client" },
+    });
+
+    // An identity provider may leave the email out: its subject is then found
+    // through the member an earlier email match linked it to. Claude can't.
+    const noEmail = async (sub: string) => (await redeem(app, await idJag({ sub }))).status;
+    expect(await noEmail("claude-user-1")).toBe(400);
+    await shared.admin`update organization_mcp_trusted_issuers set provider = 'okta'
+      where id = ${trust.id}::uuid`;
+    expect(await noEmail("claude-user-1")).toBe(200);
+    expect(await noEmail("idp-user-never-seen")).toBe(400);
+    // An email it does send is still checked, never the link in its place.
+    expect(
+      (await redeem(app, await idJag({ sub: "claude-user-1", email: "nobody@example.test" })))
+        .status,
+    ).toBe(400);
+    await shared.admin`update organization_mcp_trusted_issuers set provider = 'claude'
+      where id = ${trust.id}::uuid`;
 
     // Turning the issuer off disconnects everyone it connected.
     const disabled = await app.request(`${base}/${trust.id}`, {

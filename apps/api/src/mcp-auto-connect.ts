@@ -307,9 +307,13 @@ export async function resolveMcpOAuthClient(
   clientId: string,
   options: { redirectUri?: string | null } = {},
 ): Promise<McpOAuthClient | null> {
-  const stored = await getMcpOAuthClient(deps.db, clientId);
-  if (!isClientMetadataDocumentUrl(clientId)) return stored;
+  const saved = await getMcpOAuthClient(deps.db, clientId);
+  if (!isClientMetadataDocumentUrl(clientId)) return saved;
+  // A document refused for asking for client authentication is saved with no
+  // grant; until it is fetched again and is public, it is no client at all.
+  const stored = saved && saved.grantTypes.length > 0 ? saved : null;
   const fetchedAt = metadataDocumentFetchedAt.get(clientId) ?? 0;
+  if (saved && !stored && Date.now() - fetchedAt < CLIENT_METADATA_DOCUMENT_TTL_MS) return null;
   const needsRedirect =
     !!options.redirectUri && !!stored && !stored.redirectUris.includes(options.redirectUri);
   if (stored && !needsRedirect && Date.now() - fetchedAt < CLIENT_METADATA_DOCUMENT_TTL_MS)
@@ -326,7 +330,18 @@ export async function resolveMcpOAuthClient(
   // Opengeni authenticates no client: one that says it authenticates (a
   // secret or a signed key) is refused rather than let in without it.
   const authMethod = document.token_endpoint_auth_method;
-  if (authMethod !== undefined && authMethod !== "none") return null;
+  if (authMethod !== undefined && authMethod !== "none") {
+    // A registration saved before the document changed must not stand in: it
+    // keeps no grant, so no replica can use it until the document is public again.
+    if (saved)
+      await upsertMcpOAuthMetadataDocumentClient(deps.db, {
+        clientId,
+        redirectUris: [clientId],
+        clientName: saved.clientName,
+        grantTypes: [],
+      });
+    return null;
+  }
   const redirectUris: string[] = [];
   for (const value of Array.isArray(document.redirect_uris) ? document.redirect_uris : []) {
     if (typeof value !== "string" || redirectUris.length >= 16) continue;
@@ -556,20 +571,28 @@ export async function redeemIdJagGrant(
     )
       throw new AssertionRefused("malformed", "The assertion's lifetime is too long");
     const emailVerified = payload.email_verified;
+    const claimedEmail = stringClaim(payload, "email");
     const usableEmail =
       emailVerified === false || emailVerified === "false"
         ? null
-        : (stringClaim(payload, "email")?.toLowerCase() ?? null);
+        : (claimedEmail?.toLowerCase() ?? null);
     const match = await matchMcpAssertionMember(deps.db, {
       accountId: trust.accountId,
+      trust,
+      assertionSubject: subject,
       email: usableEmail,
+      emailClaimed: claimedEmail !== null,
     });
     if (match.status !== "matched")
-      throw usableEmail === null && stringClaim(payload, "email")
+      throw usableEmail === null && claimedEmail
         ? new AssertionRefused("email_unverified", "The issuer says this email is not verified")
         : new AssertionRefused(
             "no_matching_member",
-            "No active member of this organization has that verified email",
+            claimedEmail
+              ? "No active member of this organization has that verified email"
+              : trust.provider === "claude"
+                ? "The assertion needs an email claim"
+                : "No member is linked to this subject yet; send an email claim once",
           );
     const client =
       (await resolveMcpOAuthClient(deps, helpers, clientId)) ??
