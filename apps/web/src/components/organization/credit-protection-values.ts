@@ -55,12 +55,12 @@ export function parseAutoTopUpDraft(draft: AutoTopUpDraft): {
   const amountMicros = parseDollars(draft.amount);
   const monthlyCapMicros = parseDollars(draft.monthlyCap);
   const errors: Partial<Record<"threshold" | "amount" | "monthlyCap", string>> = {};
-  if (thresholdMicros === null || thresholdMicros <= 0)
-    errors.threshold = "Enter an amount above $0.";
+  if (thresholdMicros === null || thresholdMicros <= 0 || thresholdMicros > 10_000_000_000)
+    errors.threshold = "Enter an amount above $0 and up to $10,000.";
   if (amountMicros === null || amountMicros < 5_000_000 || amountMicros > 10_000_000_000)
     errors.amount = "Enter an amount from $5 to $10,000.";
-  if (monthlyCapMicros === null || monthlyCapMicros <= 0)
-    errors.monthlyCap = "Enter a monthly limit in dollars.";
+  if (monthlyCapMicros === null || monthlyCapMicros <= 0 || monthlyCapMicros > 10_000_000_000)
+    errors.monthlyCap = "Enter a monthly limit up to $10,000.";
   else if (amountMicros !== null && monthlyCapMicros < amountMicros)
     errors.monthlyCap = "The monthly limit must cover at least one top-up.";
   return {

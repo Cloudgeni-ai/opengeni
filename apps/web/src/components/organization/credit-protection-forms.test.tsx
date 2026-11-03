@@ -8,7 +8,7 @@ import {
   type AutoTopUpValues,
 } from "./credit-protection-values";
 
-GlobalRegistrator.register();
+if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register();
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const { createRoot } = await import("react-dom/client");
 const { AutoTopUpForm, CreditAlertForm } = await import("./credit-protection-forms");
@@ -107,8 +107,9 @@ test("turning on is explicit, states the charge and cap, and saves once", async 
   expect(Boolean(document.querySelector('input[inputmode="decimal"]'))).toBe(false);
   await click("Set up");
   expect(onSave).not.toHaveBeenCalled();
-  expect(document.body.textContent).toContain("charge your saved card $25");
-  expect(document.body.textContent).toContain("up to $100 a month");
+  expect(document.body.textContent).toContain("charge your saved card off-session for $25");
+  expect(document.body.textContent).toContain("credits plus applicable tax");
+  expect(document.body.textContent).toContain("up to $100 total per UTC month");
   await click("Turn on automatic top-up");
   expect(onSave).toHaveBeenCalledTimes(1);
   expect(onSave.mock.calls[0]![0]).toEqual({
@@ -342,7 +343,7 @@ test("fresh card, spend and failure information is displayed without discarding 
     ),
   );
   expect(document.body.textContent).toContain("Visa ending in 4242");
-  expect(document.body.textContent).toContain("$75 topped up this month");
+  expect(document.body.textContent).toContain("$75 used this month");
   expect(document.body.textContent).toContain("payment failed");
   expect(
     document.querySelector<HTMLInputElement>('input[aria-label="Add each time (USD)"]')?.value,
@@ -472,4 +473,32 @@ test("an invalid dirty field is kept while untouched values follow a refresh", a
   ).toBe("20");
   await submit();
   expect(onSave).not.toHaveBeenCalled();
+});
+
+test("a zero alert threshold disables only low-balance warnings", async () => {
+  const onSave = mock(async (value: number) => value);
+  await mount(<CreditAlertForm thresholdMicros={10_000_000} canManage onSave={onSave} />);
+  await changeInput("Notify below (USD)", "0");
+  await submit();
+  expect(onSave).toHaveBeenCalledWith(0);
+  expect(document.body.textContent).toContain("$0 turns off low-balance warnings");
+});
+
+test("the cap includes pending charges and tax and cannot be lowered below them", async () => {
+  const onSave = mock(async (values: AutoTopUpValues) => settings(values));
+  await mount(
+    <AutoTopUpForm
+      settings={settings({ enabled: true, spentThisMonthMicros: 75_000_000 })}
+      canManage
+      onSave={onSave}
+      onSetupPaymentMethod={async () => {}}
+    />,
+  );
+  await changeInput("Monthly limit (USD)", "50");
+  await submit();
+  expect(onSave).not.toHaveBeenCalled();
+  expect(document.body.textContent).toContain("limit cannot be below charges and reservations");
+  expect(document.body.textContent).toContain("including pending charges and tax");
+  await click("Turn off automatic top-up");
+  expect(onSave.mock.calls[0]![0].enabled).toBe(false);
 });

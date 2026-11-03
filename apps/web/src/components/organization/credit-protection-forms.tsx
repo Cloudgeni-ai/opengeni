@@ -75,7 +75,7 @@ export function CreditAlertForm(props: {
     };
   }, []);
   const micros = parseDollars(amount);
-  const invalid = micros === null || micros <= 0;
+  const invalid = micros === null || micros < 0;
   async function save() {
     if (!props.canManage || pending.current || invalid || micros === saved) return;
     pending.current = true;
@@ -109,8 +109,8 @@ export function CreditAlertForm(props: {
       >
         <SettingRow
           label="Notify below"
-          description="Uses credits available for any model. Model-specific promotions don't count."
-          error={props.canManage && invalid ? "Enter an amount above $0." : undefined}
+          description="Uses general credits, excluding model promotions. $0 turns off low-balance warnings."
+          error={props.canManage && invalid ? "Enter $0 or more." : undefined}
           controlWidth="auto"
           control={
             props.canManage ? (
@@ -204,8 +204,16 @@ export function AutoTopUpForm(props: {
     };
   }, []);
   const parsed = parseAutoTopUpDraft(draft);
+  const capBelowReserved =
+    parsed.values !== null && parsed.values.monthlyCapMicros < saved.spentThisMonthMicros;
+  if (capBelowReserved)
+    parsed.errors.monthlyCap = "The limit cannot be below charges and reservations this month.";
   // Disabling must remain possible even if an unfinished input is invalid.
-  const next = !draft.enabled ? { ...saved, enabled: false } : parsed.values;
+  const next = !draft.enabled
+    ? { ...saved, enabled: false }
+    : capBelowReserved
+      ? null
+      : parsed.values;
   const changed = next !== null && !sameAutoTopUpValues(next, saved);
   const needsCard = draft.enabled && !saved.paymentMethod;
 
@@ -333,9 +341,13 @@ export function AutoTopUpForm(props: {
               <>
                 {(
                   [
-                    ["threshold", "When credits fall below", undefined],
-                    ["amount", "Add each time", "Minimum $5."],
-                    ["monthlyCap", "Monthly limit", "Resets on the 1st at midnight UTC."],
+                    [
+                      "threshold",
+                      "When credits fall below",
+                      "Credits outside your monthly plan, excluding model promotions.",
+                    ],
+                    ["amount", "Add each time", "Minimum $5, plus applicable tax."],
+                    ["monthlyCap", "Monthly limit", "Per UTC calendar month, including tax."],
                   ] as const
                 ).map(([field, label, description]) => (
                   <SettingRow
@@ -392,17 +404,19 @@ export function AutoTopUpForm(props: {
         </SettingRowGroup>
         {draft.enabled ? (
           <p className="pb-3 text-xs leading-[18px] text-fg-muted">
-            {formatBudget(saved.spentThisMonthMicros)} topped up this month.
+            {formatBudget(saved.spentThisMonthMicros)} used this month, including pending charges
+            and tax.
           </p>
         ) : null}
         {props.canManage ? (
           <>
             {draft.enabled && parsed.values && !needsCard ? (
               <p className="max-w-prose pb-3 text-xs leading-[18px] text-fg-muted">
-                By saving, you authorize Opengeni to charge your saved card{" "}
-                {formatBudget(parsed.values.amountMicros)} when credits fall below{" "}
-                {formatBudget(parsed.values.thresholdMicros)}, up to{" "}
-                {formatBudget(parsed.values.monthlyCapMicros)} a month. Turn this off at any time.
+                By saving, you authorize Opengeni to charge your saved card off-session for{" "}
+                {formatBudget(parsed.values.amountMicros)} of credits plus applicable tax when
+                credits fall below {formatBudget(parsed.values.thresholdMicros)}, up to{" "}
+                {formatBudget(parsed.values.monthlyCapMicros)} total per UTC month. Turn this off at
+                any time.
               </p>
             ) : null}
             {draft.enabled ||
