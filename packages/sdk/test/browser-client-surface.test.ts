@@ -187,6 +187,16 @@ const retiredGoogleDriveNativeMethods = [
 // remove each entry when its browser consumer lands (the equality below enforces it).
 const pendingModelAccountMethods = ["getOrganizationModelAccountSettings"];
 
+// Organization credit alerts land as a backend/SDK slice before the separately
+// owned billing settings and inbox UI. Remove each classification when that
+// browser consumer lands; the exact equality below enforces the handoff.
+const pendingBillingAlertMethods = [
+  "getBillingAlertSettings",
+  "updateBillingAlertSettings",
+  "listBillingCreditNotifications",
+  "markBillingCreditNotificationRead",
+];
+
 // Chat share links: the public share page reads a link without the SDK (no
 // credentials, no SDK bundle for someone without an account), and listing a
 // person's links is offered to the agent and SDK callers, not a web screen yet.
@@ -273,6 +283,7 @@ describe("browser client runtime surface", () => {
         ...retiredSettingsMethods,
         ...retiredGoogleDriveNativeMethods,
         ...pendingModelAccountMethods,
+        ...pendingBillingAlertMethods,
         ...chatShareLinkMethods,
         ...retiredDeadWebComponentMethods,
       ].sort(),
