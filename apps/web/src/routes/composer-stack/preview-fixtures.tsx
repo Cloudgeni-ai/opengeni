@@ -17,7 +17,7 @@ import {
   GALLERY_WORKSPACE_ID,
 } from "@/dev/composer-chrome-fixtures";
 
-export type StackPreviewState = "idle" | "running" | "waiting" | "all";
+export type StackPreviewState = "idle" | "running" | "paused" | "waiting" | "all";
 
 const WAIT_REASON = "Waiting for the Site sidebar and Site panel workers to finish.";
 
@@ -40,17 +40,22 @@ const fixtureClient = {
 
 export function previewState(): StackPreviewState {
   const value = new URLSearchParams(window.location.search).get("state");
-  return value === "running" || value === "waiting" || value === "all" ? value : "idle";
+  return value === "running" || value === "paused" || value === "waiting" || value === "all"
+    ? value
+    : "idle";
 }
 
 export function usePreviewTheme() {
   const theme =
     new URLSearchParams(window.location.search).get("theme") === "light" ? "light" : "dark";
+  // `?desktop=macos|windows`: the desktop shell's platform attribute.
+  const desktop = new URLSearchParams(window.location.search).get("desktop");
   useLayoutEffect(() => {
     const root = document.documentElement;
     root.dataset.ogTheme = theme;
     root.classList.toggle("dark", theme === "dark");
-  }, [theme]);
+    if (desktop && desktop !== "browser") root.dataset.desktop = desktop;
+  }, [theme, desktop]);
   return theme;
 }
 
@@ -72,9 +77,35 @@ export function previewAttachments(withAttachment: boolean): UseFileAttachmentsR
   };
 }
 
+/** When the paused preview's pause began: its frozen clock reads 2m 14s. */
+export const PREVIEW_PAUSED_AT = new Date(Date.now() - 3 * 60_000).toISOString();
+
 export function previewSession(state: StackPreviewState): Session {
+  const base = gallerySession();
   return gallerySession({
     status: state === "running" ? "running" : "idle",
+    // Pause parks the running turn for Resume: idle, its turn still open.
+    ...(state === "paused"
+      ? {
+          activeTurnId: "turn-working",
+          effectiveControl: {
+            ...base.effectiveControl,
+            state: "paused",
+            directState: "paused",
+            controlVersion: 1,
+            controlEtag: "preview-paused",
+            primaryBlocker: {
+              kind: "session",
+              sessionId: base.id,
+              displayName: "Paused here",
+              actor: "preview",
+              reason: null,
+              changedAt: PREVIEW_PAUSED_AT,
+              revision: 1,
+            },
+          },
+        }
+      : {}),
     backgroundCommandActivity:
       state === "running" || state === "all" ? { count: 1, state: "running" as const } : null,
     inputWait:
