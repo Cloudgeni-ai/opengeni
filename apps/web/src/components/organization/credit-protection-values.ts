@@ -24,6 +24,29 @@ export function autoTopUpDraft(settings: AutoTopUpValues): AutoTopUpDraft {
   };
 }
 
+/** Keep only fields the person edited; untouched fields follow refreshed settings. */
+export function reconcileAutoTopUpDraft(
+  draft: AutoTopUpDraft,
+  previous: AutoTopUpValues,
+  next: AutoTopUpValues,
+): AutoTopUpDraft {
+  return {
+    enabled: draft.enabled === previous.enabled ? next.enabled : draft.enabled,
+    threshold:
+      parseDollars(draft.threshold) === previous.thresholdMicros
+        ? dollarsInputValue(next.thresholdMicros)
+        : draft.threshold,
+    amount:
+      parseDollars(draft.amount) === previous.amountMicros
+        ? dollarsInputValue(next.amountMicros)
+        : draft.amount,
+    monthlyCap:
+      parseDollars(draft.monthlyCap) === previous.monthlyCapMicros
+        ? dollarsInputValue(next.monthlyCapMicros)
+        : draft.monthlyCap,
+  };
+}
+
 export function parseAutoTopUpDraft(draft: AutoTopUpDraft): {
   values: AutoTopUpValues | null;
   errors: Partial<Record<"threshold" | "amount" | "monthlyCap", string>>;

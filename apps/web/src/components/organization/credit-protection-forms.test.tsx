@@ -392,3 +392,84 @@ test("every visible money label is included in its accessible name", async () =>
     expect(input.getAttribute("aria-label")).toContain(label!.textContent!.trim());
   }
 });
+
+test("equivalent parent renders cannot roll back a confirmed enable or disable", async () => {
+  const original = settings();
+  const onSave = mock(async (values: AutoTopUpValues) =>
+    settings({ ...values, status: values.enabled ? "ready" : "off" }),
+  );
+  const props = { canManage: true, onSave, onSetupPaymentMethod: async () => {} };
+  await mount(<AutoTopUpForm settings={original} {...props} />);
+  await click("Set up");
+  await click("Turn on automatic top-up");
+  await act(async () => root!.render(<AutoTopUpForm settings={settings()} {...props} />));
+  expect(document.body.textContent).toContain("Turn off automatic top-up");
+  expect(document.body.textContent).toContain("Automatic top-up saved.");
+  const enabled = settings({ enabled: true, status: "ready" });
+  await act(async () => root!.render(<AutoTopUpForm settings={enabled} {...props} />));
+  await click("Turn off automatic top-up");
+  await act(async () =>
+    root!.render(
+      <AutoTopUpForm settings={settings({ enabled: true, status: "ready" })} {...props} />,
+    ),
+  );
+  expect(document.body.textContent).toContain("Automatic top-up is off.");
+  expect(document.body.textContent).not.toContain("Turn off automatic top-up");
+  expect(onSave).toHaveBeenCalledTimes(2);
+});
+
+test("a dirty amount does not overwrite an untouched monthly cap lowered by a refresh", async () => {
+  const onSave = mock(async (values: AutoTopUpValues) => settings(values));
+  const props = { canManage: true, onSave, onSetupPaymentMethod: async () => {} };
+  await mount(<AutoTopUpForm settings={settings({ enabled: true })} {...props} />);
+  await changeInput("Add each time (USD)", "30");
+  await act(async () =>
+    root!.render(
+      <AutoTopUpForm
+        settings={settings({ enabled: true, monthlyCapMicros: 50_000_000 })}
+        {...props}
+      />,
+    ),
+  );
+  expect(
+    document.querySelector<HTMLInputElement>('input[aria-label="Monthly limit (USD)"]')?.value,
+  ).toBe("50");
+  await submit();
+  expect(onSave.mock.calls[0]![0]).toEqual({
+    enabled: true,
+    thresholdMicros: 10_000_000,
+    amountMicros: 30_000_000,
+    monthlyCapMicros: 50_000_000,
+  });
+});
+
+test("an invalid dirty field is kept while untouched values follow a refresh", async () => {
+  const onSave = mock(async (values: AutoTopUpValues) => settings(values));
+  const props = { canManage: true, onSave, onSetupPaymentMethod: async () => {} };
+  await mount(<AutoTopUpForm settings={settings({ enabled: true })} {...props} />);
+  await changeInput("Add each time (USD)", "");
+  await act(async () =>
+    root!.render(
+      <AutoTopUpForm
+        settings={settings({
+          enabled: true,
+          monthlyCapMicros: 50_000_000,
+          thresholdMicros: 20_000_000,
+        })}
+        {...props}
+      />,
+    ),
+  );
+  expect(
+    document.querySelector<HTMLInputElement>('input[aria-label="Add each time (USD)"]')?.value,
+  ).toBe("");
+  expect(
+    document.querySelector<HTMLInputElement>('input[aria-label="Monthly limit (USD)"]')?.value,
+  ).toBe("50");
+  expect(
+    document.querySelector<HTMLInputElement>('input[aria-label="When credits fall below (USD)"]')
+      ?.value,
+  ).toBe("20");
+  await submit();
+  expect(onSave).not.toHaveBeenCalled();
+});

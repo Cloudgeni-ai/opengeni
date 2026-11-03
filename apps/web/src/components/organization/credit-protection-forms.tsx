@@ -8,6 +8,7 @@ import { dollarsInputValue, formatBudget, parseDollars } from "@/lib/usage-allow
 import {
   autoTopUpDraft,
   parseAutoTopUpDraft,
+  reconcileAutoTopUpDraft,
   sameAutoTopUpValues,
   type AutoTopUpValues,
 } from "./credit-protection-values";
@@ -157,6 +158,16 @@ export type AutoTopUpView = AutoTopUpValues & {
   paymentMethod: { brand: string; last4: string } | null;
 };
 
+function sameAutoTopUpView(a: AutoTopUpView, b: AutoTopUpView): boolean {
+  return (
+    sameAutoTopUpValues(a, b) &&
+    a.spentThisMonthMicros === b.spentThisMonthMicros &&
+    a.status === b.status &&
+    a.paymentMethod?.brand === b.paymentMethod?.brand &&
+    a.paymentMethod?.last4 === b.paymentMethod?.last4
+  );
+}
+
 /** Owns the draft only. Stripe and authority stay in the API-backed controller. */
 export function AutoTopUpForm(props: {
   settings: AutoTopUpView;
@@ -174,16 +185,17 @@ export function AutoTopUpForm(props: {
   const pending = useRef(false);
   const attempt = useRef<{ fingerprint: string; key: string } | null>(null);
   const savedRef = useRef(props.settings);
+  const receivedRef = useRef(props.settings);
   useEffect(() => {
+    // An equivalent parent render is not a refresh and must not roll back a
+    // newer save result. Controllers update their snapshot after every save.
+    if (sameAutoTopUpView(receivedRef.current, props.settings)) return;
+    receivedRef.current = props.settings;
     const previous = savedRef.current;
-    setDraft((current) => {
-      const values = parseAutoTopUpDraft(current).values;
-      return values && sameAutoTopUpValues(values, previous)
-        ? autoTopUpDraft(props.settings)
-        : current;
-    });
+    setDraft((current) => reconcileAutoTopUpDraft(current, previous, props.settings));
     savedRef.current = props.settings;
     setSaved(props.settings);
+    if (!sameAutoTopUpView(previous, props.settings)) setMessage(null);
   }, [props.settings]);
   useEffect(() => {
     live.current = true;

@@ -11,7 +11,8 @@ export function CreditProtectionPreview() {
   const state = search.get("state") ?? "ready";
   const canManage = state !== "readonly";
   const [message, setMessage] = useState("");
-  const settings: AutoTopUpView = {
+  const [threshold, setThreshold] = useState(10_000_000);
+  const [settings, setSettings] = useState<AutoTopUpView>(() => ({
     enabled: state === "ready" || state === "readonly" || state === "cap",
     thresholdMicros: 10_000_000,
     amountMicros: 25_000_000,
@@ -26,22 +27,29 @@ export function CreditProtectionPreview() {
             ? "ready"
             : "off",
     paymentMethod: state === "no-card" ? null : { brand: "Visa", last4: "4242" },
-  };
+  }));
   return (
     <>
       <CreditAlertForm
-        thresholdMicros={10_000_000}
+        thresholdMicros={threshold}
         canManage={canManage}
-        onSave={async (value) => value}
+        onSave={async (value) => {
+          setThreshold(value);
+          return value;
+        }}
       />
       <AutoTopUpForm
         settings={settings}
         canManage={canManage}
-        onSave={async (values) => ({
-          ...settings,
-          ...values,
-          status: values.enabled ? "ready" : "off",
-        })}
+        onSave={async (values) => {
+          const next: AutoTopUpView = {
+            ...settings,
+            ...values,
+            status: values.enabled ? "ready" : "off",
+          };
+          setSettings(next);
+          return next;
+        }}
         onSetupPaymentMethod={async () => {
           setMessage("Preview only. Card setup opens Stripe without making a charge.");
         }}
