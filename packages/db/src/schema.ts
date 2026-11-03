@@ -60,6 +60,7 @@ import {
   boolean,
   check,
   customType,
+  date,
   foreignKey,
   index,
   integer,
@@ -13651,6 +13652,77 @@ export const billingSubscriptionOperations = pgTable(
     pending: uniqueIndex("billing_subscription_operations_pending_idx")
       .on(table.accountId)
       .where(sql`${table.completedAt} is null`),
+  }),
+);
+
+export const billingAutoTopUpSettings = pgTable("billing_auto_top_up_settings", {
+  accountId: uuid("account_id")
+    .primaryKey()
+    .references(() => managedAccounts.id, { onDelete: "cascade" }),
+  enabled: boolean("enabled").notNull().default(false),
+  thresholdMicros: bigint("threshold_micros", { mode: "number" }).notNull().default(10000000),
+  amountMicros: bigint("amount_micros", { mode: "number" }).notNull().default(25000000),
+  monthlyCapMicros: bigint("monthly_cap_micros", { mode: "number" }).notNull().default(100000000),
+  consentSubject: text("consent_subject"),
+  consentVersion: text("consent_version"),
+  consentAt: timestamp("consent_at", { withTimezone: true }),
+  provider: text("provider"),
+  customerId: text("customer_id"),
+  paymentMethodId: text("payment_method_id"),
+  paymentMethodBrand: text("payment_method_brand"),
+  paymentMethodLast4: text("payment_method_last4"),
+  setupKey: uuid("setup_key"),
+  setupSubject: text("setup_subject"),
+  failureReason: text("failure_reason"),
+  capRequiredMicros: bigint("cap_required_micros", { mode: "number" }),
+  revision: uuid("revision").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .default(sql`clock_timestamp()`),
+});
+export const billingAutoTopUpMutations = pgTable(
+  "billing_auto_top_up_mutations",
+  {
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    operationKey: uuid("operation_key").notNull(),
+    actorSubject: text("actor_subject").notNull(),
+    request: jsonb("request").$type<Record<string, unknown>>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .default(sql`clock_timestamp()`),
+  },
+  (table) => ({ pk: primaryKey({ columns: [table.accountId, table.operationKey] }) }),
+);
+export const billingAutoTopUpOperations = pgTable(
+  "billing_auto_top_up_operations",
+  {
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    operationKey: uuid("operation_key").notNull(),
+    state: text("state").notNull().default("pending"),
+    reservationMonth: date("reservation_month").notNull(),
+    creditMicros: bigint("credit_micros", { mode: "number" }).notNull(),
+    chargeMicros: bigint("charge_micros", { mode: "number" }).notNull(),
+    intent: jsonb("intent").$type<import("./billing-auto-top-up").AutoTopUpIntent>().notNull(),
+    paymentIntentId: text("payment_intent_id").unique(),
+    confirmationStartedAt: timestamp("confirmation_started_at", { withTimezone: true }),
+    chargedAt: timestamp("charged_at", { withTimezone: true }),
+    failureReason: text("failure_reason"),
+    notificationDeliveredAt: timestamp("notification_delivered_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .default(sql`clock_timestamp()`),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.accountId, table.operationKey] }),
+    pending: uniqueIndex("billing_auto_top_up_one_pending")
+      .on(table.accountId)
+      .where(sql`${table.state} = 'pending'`),
+    month: index("billing_auto_top_up_month").on(table.accountId, table.reservationMonth),
   }),
 );
 
