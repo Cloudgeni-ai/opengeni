@@ -199,6 +199,37 @@ export type PreparedRecordingAudio = {
   offsetMilliseconds: number;
 };
 
+/** How many chunk downloads run ahead of the one being written. */
+export const CHUNK_READ_CONCURRENCY = 16;
+
+/**
+ * Read chunks in order while keeping up to `concurrency` downloads in flight,
+ * so a track of many small objects costs a few round trips, not one per chunk.
+ */
+export async function* readChunksInOrder<Chunk>(
+  chunks: readonly Chunk[],
+  read: (chunk: Chunk) => Promise<Uint8Array | null>,
+  concurrency: number = CHUNK_READ_CONCURRENCY,
+): AsyncGenerator<{ chunk: Chunk; bytes: Uint8Array | null }> {
+  const pending: Array<Promise<Uint8Array | null>> = [];
+  let next = 0;
+  const fill = () => {
+    while (next < chunks.length && pending.length < Math.max(1, concurrency)) {
+      const reading = read(chunks[next]!);
+      // A read left behind by an early stop must not surface as unhandled.
+      reading.catch(() => undefined);
+      pending.push(reading);
+      next += 1;
+    }
+  };
+  fill();
+  for (let index = 0; index < chunks.length; index += 1) {
+    const bytes = await pending.shift()!;
+    fill();
+    yield { chunk: chunks[index]!, bytes };
+  }
+}
+
 /**
  * Download a track's chunks, split them into runs and write one seekable
  * file. One run is remuxed with its codec copied; several runs are decoded,
@@ -229,9 +260,11 @@ export async function prepareRecordingTrackAudio(input: {
     // Short bytes held until the chunks after them show whether a header starts there.
     let held: { bytes: Uint8Array; chunk: RecordingAudioChunk } | null = null;
     try {
-      for (const chunk of ordered) {
+      for await (const { chunk, bytes: read } of readChunksInOrder(ordered, async (chunk) => {
         input.signal?.throwIfAborted();
-        const read = await input.readChunk(chunk);
+        return input.readChunk(chunk);
+      })) {
+        input.signal?.throwIfAborted();
         if (!read) {
           throw new RecordingAudioError(`Chunk ${chunk.chunkNumber} is missing`, "missing_chunk");
         }

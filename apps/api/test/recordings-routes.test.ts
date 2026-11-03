@@ -514,6 +514,33 @@ describe("recording routes", () => {
     });
     const versions = await scope.owner.call("GET", `/recordings/${recordingId}/transcripts`);
     expect(versions.body.versions).toHaveLength(1);
+    // A waiting list holds while the version is pending and answers the
+    // moment it settles, rather than the client checking every second.
+    const versionId = finalized.body.transcript.id as string;
+    expect(
+      (await scope.owner.call("GET", `/recordings/${recordingId}/transcripts?waitSeconds=26`))
+        .status,
+    ).toBe(400);
+    let started = Date.now();
+    const held = await scope.owner.call(
+      "GET",
+      `/recordings/${recordingId}/transcripts?waitSeconds=0.4&waitFor=${versionId}`,
+    );
+    expect(Date.now() - started).toBeGreaterThanOrEqual(350);
+    expect(held.body.versions[0]).toMatchObject({ id: versionId, state: "queued" });
+    started = Date.now();
+    const waiting = scope.owner.call(
+      "GET",
+      `/recordings/${recordingId}/transcripts?waitSeconds=20&waitFor=${versionId}`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await shared.admin`
+      update recording_transcript_versions
+      set state = 'failed', error_code = 'provider_error', completed_at = now()
+      where id = ${versionId}`;
+    const settled = await waiting;
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(settled.body.versions[0]).toMatchObject({ id: versionId, state: "failed" });
     // Each issued upload URL is a recorded audit fact; the URL and object key never are.
     const audits = await shared.admin`
       select action, metadata from audit_events
