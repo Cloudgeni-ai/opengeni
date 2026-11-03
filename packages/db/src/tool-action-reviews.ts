@@ -186,11 +186,12 @@ async function catalogReviewContext(
   }
 }
 
-/** The HTTP/core caller must independently authorize this session. RLS remains active here. */
 /**
  * Whose own (Only me) login an action runs on, with their frozen name, or
  * null for workspace logins. It never changes once the action exists, so a
  * card rendered from it is the same on every retry.
+ *
+ * The caller must independently authorize this session. RLS remains active here.
  */
 export async function getToolActionAccountOwner(
   db: Database,
@@ -206,6 +207,7 @@ export async function getToolActionAccountOwner(
   return owner ? { subjectId: owner, label: accountOwnerLabelForTurn(owner, record.turn) } : null;
 }
 
+/** The HTTP/core caller must independently authorize this session. RLS remains active here. */
 export async function getToolActionReview(
   db: Database,
   input: ReviewScope & {
