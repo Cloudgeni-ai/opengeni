@@ -53,9 +53,10 @@ merge, or deploy without the user's permission.
 
 ## Default integration
 
-Install `@opengeni/sdk` and `@opengeni/react` at the same version. Put
-`OPENGENI_API_KEY` in the server's git-ignored env. Self-hosted deployments
-also pass `baseUrl: process.env.OPENGENI_API_BASE_URL`.
+Install `@opengeni/sdk` and `@opengeni/react` at the same exact version, the
+current npm `latest` (see [Versions and upgrades](references/versions-and-upgrades.md)).
+Put `OPENGENI_API_KEY` in the server's git-ignored env. Self-hosted
+deployments also pass `baseUrl: process.env.OPENGENI_API_BASE_URL`.
 
 Server, one catch-all route at `/api/opengeni/*` (Next.js App Router shown):
 
@@ -215,8 +216,10 @@ Before production, and for the handoff, read the
 - The API key is used only by the server (the proxy); it never goes in browser
   code.
 - Never replace the proxy with a raw passthrough to the Opengeni API.
-- Keep every `@opengeni/*` package at one version. The SDK is ESM-only; from
-  CommonJS, use `await import("@opengeni/sdk")`.
+- Keep every `@opengeni/*` package at one pinned version. Server updates keep
+  that version working; upgrade all packages together when you want new
+  features ([Versions and upgrades](references/versions-and-upgrades.md)). The
+  SDK is ESM-only; from CommonJS, use `await import("@opengeni/sdk")`.
 - With cookie auth, pass the product's existing CSRF check as
   `authorizeMutation`. If it has none, keep the default (it refuses cross-site
   mutations by `Sec-Fetch-Site`); a hand-written Origin/Host check breaks

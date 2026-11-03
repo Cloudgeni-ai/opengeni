@@ -103,3 +103,15 @@ test("release-plan verdicts match the Batch contract", () => {
   );
   expect(releasePlanError({} as never)).toBe("Changesets returned a malformed release plan");
 });
+
+test("a major SDK or React changeset needs a linked compatibility exception", async () => {
+  const cwd = fixture({ "drop-field": { "@opengeni/sdk": "major" } });
+  expect(await checkChangesetPlan({ cwd })).toContain(
+    ".changeset/drop-field.md declares a major release of @opengeni/sdk",
+  );
+  writeFileSync(
+    join(cwd, ".changeset/drop-field.md"),
+    '---\n"@opengeni/sdk": major\n---\n\nRemove a field.\n\nCompatibility exception: https://github.com/Cloudgeni-ai/opengeni/pull/1#issuecomment-1\n',
+  );
+  expect(await checkChangesetPlan({ cwd })).toBeUndefined();
+});

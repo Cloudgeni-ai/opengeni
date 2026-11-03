@@ -143,6 +143,8 @@ export function regenerationPlan(
  */
 export const GENERATED_ARTIFACTS_NOT_RECHECKED: Readonly<Record<string, string>> = {
   "scripts/public-api/surface.gen.json": "the impact plan's public-api guard (PR and Batch)",
+  "scripts/public-api/published-sdk.gen.json":
+    "recorded from the published npm package by `bun run public-api:published-refresh`; the public-api guard (PR and Batch) checks the API still serves it",
   "apps/api/src/routes/github-browser-fonts.gen.ts": "the generated-fonts guard (PR and Batch)",
   "packages/react/src/lib/noto-sans-jp-loader.generated.ts":
     "the generated-fonts guard (PR and Batch)",

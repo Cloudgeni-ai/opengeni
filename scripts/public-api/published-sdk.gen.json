@@ -1,0 +1,2545 @@
+{
+  "schemaVersion": 1,
+  "packages": [
+    {
+      "name": "@opengeni/sdk",
+      "version": "4.6.1",
+      "calls": {
+        "DELETE /v1/auth/session-set/transactions/:p": [
+          "BrowserAccountsClient.cancelLoginTransaction"
+        ],
+        "DELETE /v1/native-app/push-device": [
+          "OpenGeniClient.unregisterNativePushDevice"
+        ],
+        "DELETE /v1/organizations/:p/api-keys/:p": [
+          "OpenGeniClient.deleteOrganizationApiKey"
+        ],
+        "DELETE /v1/organizations/:p/claude/accounts/:p": [
+          "OpenGeniClient.disconnectOrganizationClaudeSubscriptionAccount"
+        ],
+        "DELETE /v1/organizations/:p/credential-provider": [
+          "deleteOrganizationCredentialProvider"
+        ],
+        "DELETE /v1/organizations/:p/mcp-connections/:p": [
+          "OpenGeniClient.deleteOrganizationMcpConnection"
+        ],
+        "DELETE /v1/organizations/:p/model-providers/:p": [
+          "OpenGeniClient.revokeOrganizationModelProviderConnection"
+        ],
+        "DELETE /v1/organizations/:p/model-providers/:p/custom-models/:p": [
+          "OpenGeniClient.deleteOrganizationProviderCustomModel"
+        ],
+        "DELETE /v1/organizations/:p/personal-api-keys/:p": [
+          "OpenGeniClient.revokePersonalApiKey"
+        ],
+        "DELETE /v1/organizations/:p/service-accounts/:p": [
+          "OpenGeniClient.deleteOrganizationServiceAccount"
+        ],
+        "DELETE /v1/organizations/:p/supergrok/accounts/:p": [
+          "OpenGeniClient.disconnectOrganizationSuperGrokAccount"
+        ],
+        "DELETE /v1/organizations/:p/webhooks/:p": [
+          "deleteOrganizationWebhook"
+        ],
+        "DELETE /v1/organizations/:p/workspaces/:p": [
+          "OpenGeniClient.deleteOrganizationWorkspace"
+        ],
+        "DELETE /v1/workspaces/:p": [
+          "OpenGeniClient.deleteWorkspace"
+        ],
+        "DELETE /v1/workspaces/:p/allowance": [
+          "OpenGeniEmbeddingClient.clearWorkspaceAllowance",
+          "clearWorkspaceAllowance"
+        ],
+        "DELETE /v1/workspaces/:p/api-keys/:p": [
+          "OpenGeniClient.deleteApiKey"
+        ],
+        "DELETE /v1/workspaces/:p/automations/sources/:p": [
+          "OpenGeniAutomationsClient.disableSource"
+        ],
+        "DELETE /v1/workspaces/:p/automations/triggers/:p": [
+          "OpenGeniAutomationsClient.disableTrigger"
+        ],
+        "DELETE /v1/workspaces/:p/browser-sessions/:p/targets/:p": [
+          "OpenGeniClient.closeBrowserTarget"
+        ],
+        "DELETE /v1/workspaces/:p/channels/:p": [
+          "OpenGeniClient.deleteChannel"
+        ],
+        "DELETE /v1/workspaces/:p/claude/accounts/:p": [
+          "OpenGeniClient.disconnectClaudeSubscriptionAccount"
+        ],
+        "DELETE /v1/workspaces/:p/codex": [
+          "OpenGeniClient.codexDisconnect"
+        ],
+        "DELETE /v1/workspaces/:p/codex/accounts/:p": [
+          "OpenGeniClient.disconnectCodexAccount"
+        ],
+        "DELETE /v1/workspaces/:p/codex/apps": [
+          "OpenGeniClient.clearCodexAppsAccount"
+        ],
+        "DELETE /v1/workspaces/:p/connections/:p": [
+          "OpenGeniClient.deleteConnection",
+          "OpenGeniClient.disconnectGoogleDriveConnection",
+          "OpenGeniClient.disconnectPersonalGitHub"
+        ],
+        "DELETE /v1/workspaces/:p/credential-provider": [
+          "OpenGeniClient.deleteWorkspaceCredentialProvider"
+        ],
+        "DELETE /v1/workspaces/:p/document-bases/:p/documents/:p": [
+          "OpenGeniClient.deleteDocument"
+        ],
+        "DELETE /v1/workspaces/:p/gateway-custom-models/:p": [
+          "OpenGeniClient.deleteWorkspaceGatewayCustomModel"
+        ],
+        "DELETE /v1/workspaces/:p/github/installations/:p": [
+          "OpenGeniClient.unlinkGitHubInstallation"
+        ],
+        "DELETE /v1/workspaces/:p/integrations/:p/instances/:p": [
+          "OpenGeniClient.uninstallApiIntegration"
+        ],
+        "DELETE /v1/workspaces/:p/integrations/:p/instances/:p/facets/:p": [
+          "OpenGeniClient.removeIntegrationFacet"
+        ],
+        "DELETE /v1/workspaces/:p/members/:p": [
+          "OpenGeniClient.removeWorkspaceMember"
+        ],
+        "DELETE /v1/workspaces/:p/model-policy": [
+          "OpenGeniClient.deleteWorkspaceModelAccessPolicy"
+        ],
+        "DELETE /v1/workspaces/:p/model-providers/:p/custom-models/:p": [
+          "OpenGeniClient.deleteWorkspaceClaudeCustomModel"
+        ],
+        "DELETE /v1/workspaces/:p/openrouter-custom-models/:p": [
+          "OpenGeniClient.deleteWorkspaceOpenRouterCustomModel"
+        ],
+        "DELETE /v1/workspaces/:p/opper-custom-models/:p": [
+          "OpenGeniClient.deleteWorkspaceOpperCustomModel"
+        ],
+        "DELETE /v1/workspaces/:p/plugins/:p": [
+          "OpenGeniClient.uninstallPlugin"
+        ],
+        "DELETE /v1/workspaces/:p/pr-review/registrations/:p": [
+          "OpenGeniPrReviewClient.deleteAppRegistration"
+        ],
+        "DELETE /v1/workspaces/:p/pr-review/repositories/:p": [
+          "OpenGeniPrReviewClient.deleteRepositoryBinding"
+        ],
+        "DELETE /v1/workspaces/:p/published-artifacts/:p/data/collections/:p": [
+          "OpenGeniClient.deleteSiteDataCollection"
+        ],
+        "DELETE /v1/workspaces/:p/published-artifacts/:p/files/:p": [
+          "OpenGeniClient.deleteSiteDataFile"
+        ],
+        "DELETE /v1/workspaces/:p/published-artifacts/:p/sql/queries/:p": [
+          "OpenGeniClient.deleteSiteSqlQuery"
+        ],
+        "DELETE /v1/workspaces/:p/rigs/:p": [
+          "OpenGeniClient.deleteRig"
+        ],
+        "DELETE /v1/workspaces/:p/scheduled-tasks/:p": [
+          "OpenGeniClient.deleteScheduledTask"
+        ],
+        "DELETE /v1/workspaces/:p/sessions/:p": [
+          "OpenGeniClient.deleteSession"
+        ],
+        "DELETE /v1/workspaces/:p/sessions/:p/admin-access": [
+          "OpenGeniClient.revokeSessionAdminAccess"
+        ],
+        "DELETE /v1/workspaces/:p/sessions/:p/background-commands/:p": [
+          "OpenGeniClient.cancelSessionBackgroundCommand"
+        ],
+        "DELETE /v1/workspaces/:p/sessions/:p/goal": [
+          "OpenGeniClient.deleteGoal"
+        ],
+        "DELETE /v1/workspaces/:p/sessions/:p/realtime/:p": [
+          "OpenGeniClient.endSessionRealtime"
+        ],
+        "DELETE /v1/workspaces/:p/sessions/:p/viewers/:p": [
+          "OpenGeniClient.detachViewer"
+        ],
+        "DELETE /v1/workspaces/:p/skills/:p": [
+          "OpenGeniClient.uninstallSkill"
+        ],
+        "DELETE /v1/workspaces/:p/social/connections/:p": [
+          "OpenGeniClient.disconnectSocialConnection"
+        ],
+        "DELETE /v1/workspaces/:p/supergrok/accounts/:p": [
+          "OpenGeniClient.disconnectSuperGrokAccount"
+        ],
+        "DELETE /v1/workspaces/:p/transcription-recordings/:p": [
+          "OpenGeniClient.discardTranscriptionRecording"
+        ],
+        "DELETE /v1/workspaces/:p/user-resource-authorities/grants/:p": [
+          "OpenGeniClient.revokeUserResourceGrant"
+        ],
+        "DELETE /v1/workspaces/:p/webhooks/:p": [
+          "OpenGeniClient.deleteWorkspaceWebhook"
+        ],
+        "DELETE|GET|PATCH|POST|PUT /v1/workspaces/:p/connections/:p/1password/token": [
+          "vaultsApi"
+        ],
+        "DELETE|GET|PATCH|POST|PUT /v1/workspaces/:p/connections/:p/managed-vaults": [
+          "vaultsApi"
+        ],
+        "DELETE|GET|PATCH|POST|PUT /v1/workspaces/:p/connections/:p/provider-vaults": [
+          "vaultsApi"
+        ],
+        "DELETE|GET|PATCH|POST|PUT /v1/workspaces/:p/connections/1password/install": [
+          "vaultsApi"
+        ],
+        "DELETE|GET|PATCH|POST|PUT /v1/workspaces/:p/connections/1password/service-accounts": [
+          "vaultsApi"
+        ],
+        "DELETE|GET|PATCH|POST|PUT /v1/workspaces/:p/sessions/:p/secrets": [
+          "vaultsApi"
+        ],
+        "DELETE|GET|PATCH|POST|PUT /v1/workspaces/:p/sessions/:p/vault-policy": [
+          "vaultsApi"
+        ],
+        "DELETE|GET|PATCH|POST|PUT /v1/workspaces/:p/vault-providers/connections/:p/credentials": [
+          "vaultsApi"
+        ],
+        "DELETE|GET|PATCH|POST|PUT /v1/workspaces/:p/vault-providers/connections/:p/verify": [
+          "vaultsApi"
+        ],
+        "DELETE|GET|PATCH|POST|PUT /v1/workspaces/:p/vaults/:p": [
+          "vaultsApi"
+        ],
+        "DELETE|GET|PATCH|POST|PUT /v1/workspaces/:p/vaults/link": [
+          "vaultsApi"
+        ],
+        "DELETE|GET|POST /v1/workspaces/:p/connect/accounts": [
+          "OpenGeniClient.connectTransport"
+        ],
+        "DELETE|GET|POST /v1/workspaces/:p/connect/attempts/:p/advance": [
+          "OpenGeniClient.connectTransport"
+        ],
+        "DELETE|GET|POST /v1/workspaces/:p/connect/attempts/:p/cancel": [
+          "OpenGeniClient.connectTransport"
+        ],
+        "DELETE|GET|POST /v1/workspaces/:p/connect/catalog": [
+          "OpenGeniClient.connectTransport"
+        ],
+        "DELETE|GET|POST /v1/workspaces/:p/connections/:p:p": [
+          "OpenGeniClient.connectTransport"
+        ],
+        "DELETE|GET|POST /v1/workspaces/:p/github/installations/:p": [
+          "OpenGeniClient.connectTransport"
+        ],
+        "DELETE|GET|POST /v1/workspaces/:p/pr-review/registrations/:p": [
+          "OpenGeniClient.connectTransport"
+        ],
+        "DELETE|PUT /v1/workspaces/:p/published-artifacts/:p/session-access/:p": [
+          "OpenGeniClient.setSiteSessionAccess"
+        ],
+        "GET /v1/access/me": [
+          "OpenGeniClient.getAccessContext"
+        ],
+        "GET /v1/billing": [
+          "OpenGeniClient.getBilling"
+        ],
+        "GET /v1/billing/checkout/:p": [
+          "OpenGeniClient.getBillingCheckout"
+        ],
+        "GET /v1/billing/entitlements": [
+          "OpenGeniClient.getBillingEntitlements"
+        ],
+        "GET /v1/billing/subscription/plans": [
+          "OpenGeniClient.getBillingSubscriptionPlans"
+        ],
+        "GET /v1/billing/usage": [
+          "OpenGeniClient.getBillingUsage"
+        ],
+        "GET /v1/billing/usage-models": [
+          "OpenGeniClient.getOrganizationModelUsage"
+        ],
+        "GET /v1/billing/usage-summary": [
+          "OpenGeniClient.getOrganizationUsageSummary"
+        ],
+        "GET /v1/billing/usage-workspaces": [
+          "OpenGeniClient.getOrganizationUsageWorkspacePage"
+        ],
+        "GET /v1/catalog-assets": [
+          "catalogAssetPath"
+        ],
+        "GET /v1/config/client": [
+          "OpenGeniClient.getClientConfig"
+        ],
+        "GET /v1/inbox": [
+          "OpenGeniClient.listInbox"
+        ],
+        "GET /v1/inbox/settings": [
+          "OpenGeniClient.getInboxSettings"
+        ],
+        "GET /v1/mcp-connections/requests/:p": [
+          "OpenGeniClient.getMcpConnectionRequest"
+        ],
+        "GET /v1/native-app/push-device": [
+          "OpenGeniClient.getNativePushDevice"
+        ],
+        "GET /v1/organization-invitations": [
+          "OpenGeniClient.listOrganizationInvitations"
+        ],
+        "GET /v1/organization-memberships": [
+          "OpenGeniClient.listOrganizationMemberships"
+        ],
+        "GET /v1/organizations/:p/agent-admin-access": [
+          "OpenGeniClient.getOrganizationAgentAdminAccess"
+        ],
+        "GET /v1/organizations/:p/api-keys": [
+          "OpenGeniClient.listOrganizationApiKeys"
+        ],
+        "GET /v1/organizations/:p/api-keys/:p": [
+          "OpenGeniDocumentAuthorityClient.getOrganizationApiKey"
+        ],
+        "GET /v1/organizations/:p/claude/accounts": [
+          "OpenGeniClient.listOrganizationClaudeSubscriptionAccounts"
+        ],
+        "GET /v1/organizations/:p/claude/accounts/:p/usage": [
+          "OpenGeniClient.getOrganizationClaudeSubscriptionAccountUsage"
+        ],
+        "GET /v1/organizations/:p/codex/accounts/:p/usage": [
+          "OpenGeniClient.organizationCodexAccountUsage"
+        ],
+        "GET /v1/organizations/:p/credential-provider": [
+          "getOrganizationCredentialProvider"
+        ],
+        "GET /v1/organizations/:p/insights/calls": [
+          "OpenGeniClient.listInsightsCalls"
+        ],
+        "GET /v1/organizations/:p/insights/usage": [
+          "OpenGeniClient.getOrganizationInsightsUsage"
+        ],
+        "GET /v1/organizations/:p/integration-policy": [
+          "getOrganizationIntegrationPolicy"
+        ],
+        "GET /v1/organizations/:p/integration-policy/catalog": [
+          "getOrganizationIntegrationCatalog"
+        ],
+        "GET /v1/organizations/:p/invitations": [
+          "OpenGeniClient.listOrganizationInvitationsForOrganization"
+        ],
+        "GET /v1/organizations/:p/mcp-connections": [
+          "OpenGeniClient.listOrganizationMcpConnections"
+        ],
+        "GET /v1/organizations/:p/me/model-account-preferences": [
+          "OpenGeniClient.getModelAccountPreferences"
+        ],
+        "GET /v1/organizations/:p/members": [
+          "OpenGeniClient.listOrganizationAdministrationMembers"
+        ],
+        "GET /v1/organizations/:p/model-account-settings": [
+          "OpenGeniClient.getOrganizationModelAccountSettings"
+        ],
+        "GET /v1/organizations/:p/model-account-settings/overview": [
+          "OpenGeniClient.getModelAccountSettingsOverview"
+        ],
+        "GET /v1/organizations/:p/model-defaults": [
+          "OpenGeniClient.getOrganizationModelDefaults"
+        ],
+        "GET /v1/organizations/:p/model-providers/:p": [
+          "OpenGeniClient.getOrganizationModelProviderConnection"
+        ],
+        "GET /v1/organizations/:p/model-providers/:p/custom-models": [
+          "OpenGeniClient.listOrganizationProviderCustomModels"
+        ],
+        "GET /v1/organizations/:p/model-providers/claude_subscription/usage": [
+          "OpenGeniClient.getOrganizationClaudeSubscriptionUsage"
+        ],
+        "GET /v1/organizations/:p/overview": [
+          "OpenGeniClient.getOrganizationAdministrationOverview"
+        ],
+        "GET /v1/organizations/:p/personal-api-keys": [
+          "OpenGeniClient.listPersonalApiKeys"
+        ],
+        "GET /v1/organizations/:p/privacy-settings": [
+          "OpenGeniClient.getOrganizationPrivacySettings"
+        ],
+        "GET /v1/organizations/:p/private-session-settings": [
+          "getOrganizationPrivateSessionSettings",
+          "settingsPath"
+        ],
+        "GET /v1/organizations/:p/recovery": [
+          "OpenGeniClient.getOrganizationRecovery"
+        ],
+        "GET /v1/organizations/:p/retention-policy": [
+          "OpenGeniClient.getOrganizationRetentionPolicy"
+        ],
+        "GET /v1/organizations/:p/service-accounts": [
+          "OpenGeniClient.listOrganizationServiceAccounts"
+        ],
+        "GET /v1/organizations/:p/service-accounts/:p": [
+          "OpenGeniClient.getOrganizationServiceAccount"
+        ],
+        "GET /v1/organizations/:p/sessions": [
+          "OpenGeniClient.listOrganizationSessions"
+        ],
+        "GET /v1/organizations/:p/subscription-usage-pools": [
+          "OpenGeniClient.getOrganizationSubscriptionUsagePools"
+        ],
+        "GET /v1/organizations/:p/supergrok/accounts": [
+          "OpenGeniClient.listOrganizationSuperGrokAccounts"
+        ],
+        "GET /v1/organizations/:p/webhooks": [
+          "listOrganizationWebhooks"
+        ],
+        "GET /v1/organizations/:p/webhooks/:p": [
+          "getOrganizationWebhook"
+        ],
+        "GET /v1/organizations/:p/webhooks/:p/deliveries": [
+          "listOrganizationWebhookDeliveries"
+        ],
+        "GET /v1/workspaces": [
+          "OpenGeniClient.listWorkspaces"
+        ],
+        "GET /v1/workspaces/:p": [
+          "OpenGeniClient.getWorkspace",
+          "workspacePath"
+        ],
+        "GET /v1/workspaces/:p/access/grant": [
+          "getSessionProxyWorkspaceGrant"
+        ],
+        "GET /v1/workspaces/:p/agent-learning/instructions/reviews": [
+          "OpenGeniClient.listAgentInstructionReviews"
+        ],
+        "GET /v1/workspaces/:p/agent-learning/overrides": [
+          "OpenGeniClient.listAgentLearningOverrides"
+        ],
+        "GET /v1/workspaces/:p/agent-topology": [
+          "OpenGeniClient.listAgentTopology"
+        ],
+        "GET /v1/workspaces/:p/allowance": [
+          "OpenGeniEmbeddingClient.getWorkspaceAllowance",
+          "getWorkspaceAllowance"
+        ],
+        "GET /v1/workspaces/:p/allowance/state": [
+          "OpenGeniEmbeddingClient.getWorkspaceAllowanceState",
+          "getWorkspaceAllowanceState"
+        ],
+        "GET /v1/workspaces/:p/api-keys": [
+          "OpenGeniClient.listApiKeys"
+        ],
+        "GET /v1/workspaces/:p/artifact-catalog": [
+          "OpenGeniClient.listArtifactCatalog"
+        ],
+        "GET /v1/workspaces/:p/artifacts/:p": [
+          "OpenGeniClient.getRetainedArtifact"
+        ],
+        "GET /v1/workspaces/:p/artifacts/:p/content": [
+          "OpenGeniClient.getRetainedArtifactContent"
+        ],
+        "GET /v1/workspaces/:p/attached-browsers": [
+          "OpenGeniClient.listAttachedBrowsers"
+        ],
+        "GET /v1/workspaces/:p/attached-browsers/:p": [
+          "OpenGeniClient.getAttachedBrowser"
+        ],
+        "GET /v1/workspaces/:p/auth-runs": [
+          "OpenGeniClient.listAuthRuns"
+        ],
+        "GET /v1/workspaces/:p/auth-runs/:p": [
+          "OpenGeniClient.getAuthRun"
+        ],
+        "GET /v1/workspaces/:p/automations/runs": [
+          "OpenGeniAutomationsClient.listRuns"
+        ],
+        "GET /v1/workspaces/:p/automations/sources": [
+          "OpenGeniAutomationsClient.listSources"
+        ],
+        "GET /v1/workspaces/:p/automations/triggers": [
+          "OpenGeniAutomationsClient.listTriggers"
+        ],
+        "GET /v1/workspaces/:p/browser-identities": [
+          "OpenGeniClient.listBrowserIdentities"
+        ],
+        "GET /v1/workspaces/:p/browser-identities/:p": [
+          "OpenGeniClient.getBrowserIdentity"
+        ],
+        "GET /v1/workspaces/:p/browser-identities/:p/revisions": [
+          "OpenGeniClient.listBrowserRevisions"
+        ],
+        "GET /v1/workspaces/:p/browser-sessions": [
+          "OpenGeniClient.listBrowserSessions"
+        ],
+        "GET /v1/workspaces/:p/browser-sessions/:p": [
+          "OpenGeniClient.getBrowserSession"
+        ],
+        "GET /v1/workspaces/:p/browser-sessions/:p/clipboard": [
+          "OpenGeniClient.readBrowserClipboard"
+        ],
+        "GET /v1/workspaces/:p/browser-sessions/:p/downloads": [
+          "OpenGeniClient.listBrowserDownloads"
+        ],
+        "GET /v1/workspaces/:p/browser-sessions/:p/downloads/:p": [
+          "OpenGeniClient.getBrowserDownload"
+        ],
+        "GET /v1/workspaces/:p/browser-sessions/:p/operations/:p": [
+          "OpenGeniClient.getBrowserActionReceipt"
+        ],
+        "GET /v1/workspaces/:p/browser-sessions/:p/recordings/:p": [
+          "OpenGeniClient.getBrowserRecording"
+        ],
+        "GET /v1/workspaces/:p/browser-sessions/:p/targets": [
+          "OpenGeniClient.listBrowserTargets"
+        ],
+        "GET /v1/workspaces/:p/browser-sessions/:p/targets/:p/diagnostics": [
+          "OpenGeniClient.listBrowserDiagnostics"
+        ],
+        "GET /v1/workspaces/:p/browser-sessions/:p/targets/:p/observation": [
+          "OpenGeniClient.observeBrowserTarget"
+        ],
+        "GET /v1/workspaces/:p/browser-sessions/:p/targets/:p/screenshot": [
+          "OpenGeniClient.captureBrowserTarget"
+        ],
+        "GET /v1/workspaces/:p/browser-sessions/:p/targets/:p/state": [
+          "OpenGeniClient.getBrowserTargetState"
+        ],
+        "GET /v1/workspaces/:p/browser-sessions/:p/working-copy/adoptions/:p": [
+          "OpenGeniClient.getBrowserSessionWorkingCopyAdoption"
+        ],
+        "GET /v1/workspaces/:p/capabilities": [
+          "OpenGeniClient.listCapabilities"
+        ],
+        "GET /v1/workspaces/:p/capabilities/:p/tool-permissions": [
+          "OpenGeniClient.getConnectorToolPermissions"
+        ],
+        "GET /v1/workspaces/:p/capabilities/discovery/mcp-registry": [
+          "OpenGeniClient.discoverMcpCapabilities"
+        ],
+        "GET /v1/workspaces/:p/capabilities/discovery/plugins": [
+          "OpenGeniClient.discoverPlugins"
+        ],
+        "GET /v1/workspaces/:p/channels": [
+          "OpenGeniClient.listChannels"
+        ],
+        "GET /v1/workspaces/:p/claude/accounts": [
+          "OpenGeniClient.listClaudeSubscriptionAccounts"
+        ],
+        "GET /v1/workspaces/:p/claude/accounts/:p/usage": [
+          "OpenGeniClient.getClaudeSubscriptionAccountUsage"
+        ],
+        "GET /v1/workspaces/:p/codex/accounts": [
+          "OpenGeniClient.listCodexAccounts"
+        ],
+        "GET /v1/workspaces/:p/codex/accounts/:p/usage": [
+          "OpenGeniClient.codexAccountUsage"
+        ],
+        "GET /v1/workspaces/:p/codex/overview": [
+          "OpenGeniClient.codexOverview"
+        ],
+        "GET /v1/workspaces/:p/codex/status": [
+          "OpenGeniClient.codexStatus"
+        ],
+        "GET /v1/workspaces/:p/codex/usage": [
+          "OpenGeniClient.codexUsage"
+        ],
+        "GET /v1/workspaces/:p/company-brain": [
+          "OpenGeniDocumentAuthorityClient.getCompanyBrain"
+        ],
+        "GET /v1/workspaces/:p/company-brain/:p": [
+          "inspectorPath"
+        ],
+        "GET /v1/workspaces/:p/company-brain/:p:p": [
+          "listCompanyBrainContextReceipts",
+          "listCompanyBrainKnowledgeProposals"
+        ],
+        "GET /v1/workspaces/:p/company-brain/export": [
+          "OpenGeniDocumentAuthorityClient.exportCompanyBrainOkf"
+        ],
+        "GET /v1/workspaces/:p/company-profile": [
+          "OpenGeniClient.listCompanyProfile"
+        ],
+        "GET /v1/workspaces/:p/company-profile/agent-policy": [
+          "OpenGeniClient.getCompanyProfileAgentPolicy"
+        ],
+        "GET /v1/workspaces/:p/company-profile/diff": [
+          "OpenGeniClient.diffCompanyProfileRevisions"
+        ],
+        "GET /v1/workspaces/:p/company-profile/revisions/:p": [
+          "OpenGeniClient.getCompanyProfileRevision"
+        ],
+        "GET /v1/workspaces/:p/computer-sessions": [
+          "OpenGeniClient.listComputerSessions"
+        ],
+        "GET /v1/workspaces/:p/computer-sessions/:p": [
+          "OpenGeniClient.getComputerSession"
+        ],
+        "GET /v1/workspaces/:p/computer-sessions/:p/clipboard": [
+          "OpenGeniClient.readComputerClipboard"
+        ],
+        "GET /v1/workspaces/:p/computer-sessions/:p/input-posture": [
+          "OpenGeniClient.getComputerInputPosture"
+        ],
+        "GET /v1/workspaces/:p/computer-sessions/:p/operations/:p": [
+          "OpenGeniClient.getComputerActionReceipt",
+          "OpenGeniClient.getNativeComputerToolReceipt"
+        ],
+        "GET /v1/workspaces/:p/computer-sessions/:p/targets": [
+          "OpenGeniClient.listComputerTargets"
+        ],
+        "GET /v1/workspaces/:p/computer-sessions/:p/targets/:p/observation": [
+          "OpenGeniClient.observeComputerTarget"
+        ],
+        "GET /v1/workspaces/:p/computer-sessions/:p/targets/:p/screenshot": [
+          "OpenGeniClient.captureComputerTarget"
+        ],
+        "GET /v1/workspaces/:p/connect/accounts": [
+          "OpenGeniEmbeddingClient.listConnectAccounts"
+        ],
+        "GET /v1/workspaces/:p/connect/attempts": [
+          "OpenGeniEmbeddingClient.listPendingConnectAttempts"
+        ],
+        "GET /v1/workspaces/:p/connect/attempts/:p": [
+          "OpenGeniEmbeddingClient.getConnectAttempt"
+        ],
+        "GET /v1/workspaces/:p/connect/catalog": [
+          "OpenGeniEmbeddingClient.listConnectProviders"
+        ],
+        "GET /v1/workspaces/:p/connections": [
+          "OpenGeniClient.listConnections"
+        ],
+        "GET /v1/workspaces/:p/connections/:p/github/repositories": [
+          "OpenGeniClient.listPersonalGitHubRepositories"
+        ],
+        "GET /v1/workspaces/:p/connections/:p/github/repositories/:p/branches": [
+          "listPersonalGitHubRepositoryBranches"
+        ],
+        "GET /v1/workspaces/:p/connections/:p/slack-bot/organization-access": [
+          "OpenGeniClient.getOpenGeniSlackBotOrganizationAccess"
+        ],
+        "GET /v1/workspaces/:p/connections/accounts": [
+          "OpenGeniClient.listOwnConnectionAccounts"
+        ],
+        "GET /v1/workspaces/:p/connections/atlassian/:p/browse": [
+          "OpenGeniClient.browseAtlassianSources"
+        ],
+        "GET /v1/workspaces/:p/connections/github": [
+          "OpenGeniClient.personalGitHubStatus"
+        ],
+        "GET /v1/workspaces/:p/connections/operations/:p": [
+          "OpenGeniEmbeddingClient.getConnectionCreationResult"
+        ],
+        "GET /v1/workspaces/:p/connections/slack-bot/available": [
+          "OpenGeniClient.listAvailableOpenGeniSlackBots"
+        ],
+        "GET /v1/workspaces/:p/connections/slack-bot/bindings": [
+          "OpenGeniClient.listSlackInstallationBindings"
+        ],
+        "GET /v1/workspaces/:p/control-events": [
+          "OpenGeniClient.listWorkspaceControlEventPage"
+        ],
+        "GET /v1/workspaces/:p/control-events/stream": [
+          "OpenGeniClient.openWorkspaceControlEventStream"
+        ],
+        "GET /v1/workspaces/:p/credential-provider": [
+          "OpenGeniClient.getWorkspaceCredentialProvider"
+        ],
+        "GET /v1/workspaces/:p/document-authority-reclassifications": [
+          "OpenGeniDocumentAuthorityClient.listOrganizationDocumentAuthorityReclassifications"
+        ],
+        "GET /v1/workspaces/:p/document-bases": [
+          "OpenGeniDocumentAuthorityClient.listDocumentBases"
+        ],
+        "GET /v1/workspaces/:p/document-bases/:p": [
+          "OpenGeniClient.getDocumentBase"
+        ],
+        "GET /v1/workspaces/:p/document-bases/:p/documents": [
+          "OpenGeniClient.listDocuments"
+        ],
+        "GET /v1/workspaces/:p/document-default-collection-backfills": [
+          "OpenGeniDocumentAuthorityClient.listDocumentDefaultCollectionBackfillRuns"
+        ],
+        "GET /v1/workspaces/:p/document-default-collection-backfills/:p:p": [
+          "OpenGeniDocumentAuthorityClient.getDocumentDefaultCollectionBackfillAudit"
+        ],
+        "GET /v1/workspaces/:p/documents": [
+          "OpenGeniDocumentAuthorityClient.listAccessibleDocuments"
+        ],
+        "GET /v1/workspaces/:p/documents/:p/authority-reclassifications": [
+          "OpenGeniDocumentAuthorityClient.listDocumentAuthorityReclassifications"
+        ],
+        "GET /v1/workspaces/:p/documents/:p/original-file": [
+          "OpenGeniClient.getDocumentOriginalFile"
+        ],
+        "GET /v1/workspaces/:p/editable-artifacts": [
+          "OpenGeniClient.listSessionEditableArtifacts"
+        ],
+        "GET /v1/workspaces/:p/editable-artifacts/:p": [
+          "OpenGeniClient.getEditableArtifact"
+        ],
+        "GET /v1/workspaces/:p/editable-artifacts/:p/materializations/:p": [
+          "OpenGeniClient.getEditableArtifactMaterialization"
+        ],
+        "GET /v1/workspaces/:p/editable-artifacts/:p/materializations/:p/download": [
+          "OpenGeniClient.downloadEditableArtifactMaterialization"
+        ],
+        "GET /v1/workspaces/:p/feedback": [
+          "OpenGeniClient.listOwnFeedback"
+        ],
+        "GET /v1/workspaces/:p/files": [
+          "OpenGeniClient.listFiles"
+        ],
+        "GET /v1/workspaces/:p/files/:p:p": [
+          "OpenGeniClient.getFile"
+        ],
+        "GET /v1/workspaces/:p/gateway-custom-models": [
+          "OpenGeniClient.listWorkspaceGatewayCustomModels"
+        ],
+        "GET /v1/workspaces/:p/github/action-policies": [
+          "OpenGeniClient.getGitHubActionPolicies"
+        ],
+        "GET /v1/workspaces/:p/github/app": [
+          "OpenGeniClient.getGitHubApp"
+        ],
+        "GET /v1/workspaces/:p/github/connect": [
+          "OpenGeniClient.githubConnectUrl"
+        ],
+        "GET /v1/workspaces/:p/github/installations/:p/repositories/:p/branches": [
+          "listGitHubRepositoryBranches"
+        ],
+        "GET /v1/workspaces/:p/github/repositories": [
+          "OpenGeniClient.listGitHubRepositories"
+        ],
+        "GET /v1/workspaces/:p/identity-links": [
+          "OpenGeniEmbeddingClient.listIdentityLinks"
+        ],
+        "GET /v1/workspaces/:p/identity-links/:p": [
+          "OpenGeniEmbeddingClient.getIdentityLink"
+        ],
+        "GET /v1/workspaces/:p/inbox/member-notifications": [
+          "OpenGeniClient.getMemberNotifications"
+        ],
+        "GET /v1/workspaces/:p/inherited-integrations": [
+          "getWorkspaceInheritedIntegrations"
+        ],
+        "GET /v1/workspaces/:p/insights": [
+          "OpenGeniClient.getWorkspaceInsights"
+        ],
+        "GET /v1/workspaces/:p/insights/calls": [
+          "OpenGeniClient.listInsightsCalls"
+        ],
+        "GET /v1/workspaces/:p/insights/sites": [
+          "OpenGeniClient.getWorkspaceInsightsSiteUsage"
+        ],
+        "GET /v1/workspaces/:p/insights/usage": [
+          "OpenGeniClient.getWorkspaceInsightsUsage"
+        ],
+        "GET /v1/workspaces/:p/instruction-policies": [
+          "OpenGeniClient.listWorkspaceInstructionPolicies"
+        ],
+        "GET /v1/workspaces/:p/instruction-policies/:p": [
+          "OpenGeniClient.getWorkspaceInstructionPolicyRevision"
+        ],
+        "GET /v1/workspaces/:p/instruction-policies/diff": [
+          "OpenGeniClient.diffWorkspaceInstructionPolicyRevisions"
+        ],
+        "GET /v1/workspaces/:p/instruction-policies/onboarding-proposals": [
+          "OpenGeniClient.listWorkspaceInstructionPolicyOnboardingProposals"
+        ],
+        "GET /v1/workspaces/:p/integrations": [
+          "OpenGeniClient.listApiIntegrations"
+        ],
+        "GET /v1/workspaces/:p/integrations/:p/instances/:p/facets": [
+          "OpenGeniClient.listIntegrationFacets"
+        ],
+        "GET /v1/workspaces/:p/integrations/:p/instances/:p/facets/:p/browse": [
+          "OpenGeniClient.browseGoogleDriveFacetSource"
+        ],
+        "GET /v1/workspaces/:p/integrations/:p/instances/:p/uninstall-preview": [
+          "OpenGeniClient.previewApiIntegrationUninstall"
+        ],
+        "GET /v1/workspaces/:p/integrations/definitions": [
+          "OpenGeniClient.listIntegrationDefinitions"
+        ],
+        "GET /v1/workspaces/:p/integrations/slack/channel-routes": [
+          "OpenGeniClient.listOpenGeniSlackChannelRoutes"
+        ],
+        "GET /v1/workspaces/:p/integrations/slack/reaction-channels": [
+          "OpenGeniClient.listOpenGeniSlackReactionChannels"
+        ],
+        "GET /v1/workspaces/:p/integrations/slack/user-link-intents/:p": [
+          "OpenGeniClient.getSlackUserLinkAccess"
+        ],
+        "GET /v1/workspaces/:p/interaction-events/stream": [
+          "OpenGeniClient.openWorkspaceInteractionRevisionStream"
+        ],
+        "GET /v1/workspaces/:p/interaction-interventions": [
+          "OpenGeniClient.listInteractionInterventions"
+        ],
+        "GET /v1/workspaces/:p/interaction-interventions/:p": [
+          "OpenGeniClient.getInteractionIntervention"
+        ],
+        "GET /v1/workspaces/:p/knowledge/entries/:p:p": [
+          "OpenGeniClient.getKnowledgeEntry"
+        ],
+        "GET /v1/workspaces/:p/knowledge/entries/:p/history": [
+          "OpenGeniClient.listKnowledgeEntryHistory"
+        ],
+        "GET /v1/workspaces/:p/knowledge/review-groups": [
+          "OpenGeniClient.listKnowledgeReviewBatches"
+        ],
+        "GET /v1/workspaces/:p/learning": [
+          "OpenGeniClient.getWorkspaceLearningHistory"
+        ],
+        "GET /v1/workspaces/:p/live-events/stream": [
+          "OpenGeniClient.openWorkspaceLiveEventStream"
+        ],
+        "GET /v1/workspaces/:p/machines": [
+          "OpenGeniClient.listMachines"
+        ],
+        "GET /v1/workspaces/:p/machines/:p/metrics/series": [
+          "OpenGeniClient.machineMetricsSeries"
+        ],
+        "GET /v1/workspaces/:p/member-candidates": [
+          "OpenGeniClient.listWorkspaceMemberCandidates"
+        ],
+        "GET /v1/workspaces/:p/members": [
+          "OpenGeniClient.listWorkspaceMembers"
+        ],
+        "GET /v1/workspaces/:p/members/access-requests/slack": [
+          "OpenGeniClient.listSlackUserLinkAccessRequests"
+        ],
+        "GET /v1/workspaces/:p/memory-slack-publications": [
+          "OpenGeniMemorySlackClient.listMemorySlackPublications"
+        ],
+        "GET /v1/workspaces/:p/memory-slack-publications/channels": [
+          "OpenGeniMemorySlackClient.listMemorySlackPublicationChannels"
+        ],
+        "GET /v1/workspaces/:p/memory-slack-publications/configuration": [
+          "OpenGeniMemorySlackClient.getMemorySlackPublicationConfiguration"
+        ],
+        "GET /v1/workspaces/:p/model-account-settings": [
+          "OpenGeniClient.getWorkspaceModelAccountSettings"
+        ],
+        "GET /v1/workspaces/:p/model-catalog": [
+          "OpenGeniClient.getWorkspaceModelCatalog"
+        ],
+        "GET /v1/workspaces/:p/model-policy": [
+          "OpenGeniClient.getWorkspaceModelAccessPolicy"
+        ],
+        "GET /v1/workspaces/:p/model-providers/:p/custom-models": [
+          "OpenGeniClient.listWorkspaceClaudeCustomModels"
+        ],
+        "GET /v1/workspaces/:p/model-providers/claude_subscription/usage": [
+          "OpenGeniClient.getWorkspaceClaudeSubscriptionUsage"
+        ],
+        "GET /v1/workspaces/:p/network-routes": [
+          "OpenGeniClient.listNetworkRoutes"
+        ],
+        "GET /v1/workspaces/:p/network-routes/:p": [
+          "OpenGeniClient.getNetworkRoute"
+        ],
+        "GET /v1/workspaces/:p/new-session-draft": [
+          "OpenGeniClient.getNewSessionDraft"
+        ],
+        "GET /v1/workspaces/:p/office/workbooks": [
+          "OpenGeniClient.listOfficeWorkbooks"
+        ],
+        "GET /v1/workspaces/:p/openrouter-custom-models": [
+          "OpenGeniClient.listWorkspaceOpenRouterCustomModels"
+        ],
+        "GET /v1/workspaces/:p/opper-custom-models": [
+          "OpenGeniClient.listWorkspaceOpperCustomModels"
+        ],
+        "GET /v1/workspaces/:p/plugins": [
+          "OpenGeniClient.listInstalledPlugins"
+        ],
+        "GET /v1/workspaces/:p/plugins/:p/uninstall-preview": [
+          "OpenGeniClient.previewPluginUninstall"
+        ],
+        "GET /v1/workspaces/:p/plugins/details": [
+          "OpenGeniClient.getInstalledPluginDetails"
+        ],
+        "GET /v1/workspaces/:p/pr-review/github": [
+          "OpenGeniPrReviewClient.getManagedGitHubSetup"
+        ],
+        "GET /v1/workspaces/:p/pr-review/registrations": [
+          "OpenGeniPrReviewClient.listConfiguration"
+        ],
+        "GET /v1/workspaces/:p/preferences": [
+          "OpenGeniClient.listPreferenceRegistry"
+        ],
+        "GET /v1/workspaces/:p/preferences/:p": [
+          "OpenGeniClient.getPreferenceRegistry"
+        ],
+        "GET /v1/workspaces/:p/preferences/summary": [
+          "OpenGeniClient.getPreferenceRegistrySummary"
+        ],
+        "GET /v1/workspaces/:p/published-artifacts": [
+          "OpenGeniClient.listWorkspaceArtifacts"
+        ],
+        "GET /v1/workspaces/:p/published-artifacts/:p": [
+          "OpenGeniClient.getWorkspaceArtifact",
+          "siteDataPath"
+        ],
+        "GET /v1/workspaces/:p/published-artifacts/:p/content": [
+          "OpenGeniClient.getWorkspaceArtifactContent"
+        ],
+        "GET /v1/workspaces/:p/published-artifacts/:p/data": [
+          "OpenGeniClient.getSiteData"
+        ],
+        "GET /v1/workspaces/:p/published-artifacts/:p/data/collections/:p/export": [
+          "OpenGeniClient.exportSiteData"
+        ],
+        "GET /v1/workspaces/:p/published-artifacts/:p/files": [
+          "OpenGeniClient.listSiteDataFiles"
+        ],
+        "GET /v1/workspaces/:p/published-artifacts/:p/files/:p": [
+          "OpenGeniClient.getSiteDataFileUrl"
+        ],
+        "GET /v1/workspaces/:p/published-artifacts/:p/html": [
+          "OpenGeniClient.getWorkspaceArtifactHtml",
+          "downloadSessionProxySiteHtml"
+        ],
+        "GET /v1/workspaces/:p/published-artifacts/:p/publication": [
+          "sitePublicationPath"
+        ],
+        "GET /v1/workspaces/:p/published-artifacts/:p/session-access": [
+          "OpenGeniClient.listSiteSessionAccess"
+        ],
+        "GET /v1/workspaces/:p/published-artifacts/:p/sql": [
+          "OpenGeniClient.getSiteSql"
+        ],
+        "GET /v1/workspaces/:p/published-artifacts/:p/sql/export": [
+          "OpenGeniClient.exportSiteSql"
+        ],
+        "GET /v1/workspaces/:p/published-artifacts/:p/sql/inspect": [
+          "OpenGeniClient.inspectSiteSql"
+        ],
+        "GET /v1/workspaces/:p/realtime-model-catalog": [
+          "OpenGeniClient.getWorkspaceRealtimeModelCatalog"
+        ],
+        "GET /v1/workspaces/:p/rigs": [
+          "OpenGeniClient.listRigs"
+        ],
+        "GET /v1/workspaces/:p/rigs/:p": [
+          "OpenGeniClient.getRig"
+        ],
+        "GET /v1/workspaces/:p/rigs/:p/changes": [
+          "OpenGeniClient.listRigChanges"
+        ],
+        "GET /v1/workspaces/:p/rigs/:p/changes/:p": [
+          "OpenGeniClient.getRigChange"
+        ],
+        "GET /v1/workspaces/:p/rigs/:p/versions": [
+          "OpenGeniClient.listRigVersions"
+        ],
+        "GET /v1/workspaces/:p/sandbox-images": [
+          "OpenGeniClient.listWorkspaceSandboxImages"
+        ],
+        "GET /v1/workspaces/:p/scheduled-task-slack-channels": [
+          "OpenGeniClient.listScheduledTaskSlackChannels"
+        ],
+        "GET /v1/workspaces/:p/scheduled-tasks": [
+          "OpenGeniClient.listScheduledTasks"
+        ],
+        "GET /v1/workspaces/:p/scheduled-tasks/:p": [
+          "OpenGeniClient.getScheduledTask"
+        ],
+        "GET /v1/workspaces/:p/scheduled-tasks/:p/runs": [
+          "OpenGeniClient.listScheduledTaskRuns"
+        ],
+        "GET /v1/workspaces/:p/scheduled-tasks/attention": [
+          "OpenGeniClient.listScheduledTaskAccessAttention"
+        ],
+        "GET /v1/workspaces/:p/scheduled-tasks/private-summaries": [
+          "OpenGeniClient.listPrivateScheduledTaskSummaries"
+        ],
+        "GET /v1/workspaces/:p/session-mcp-tool-permissions": [
+          "OpenGeniClient.getSessionMcpToolPermissions"
+        ],
+        "GET /v1/workspaces/:p/session-message-search": [
+          "OpenGeniClient.searchSessionMessages"
+        ],
+        "GET /v1/workspaces/:p/session-tenancy/capabilities": [
+          "OpenGeniClient.getSessionTenancyCreateCapabilities"
+        ],
+        "GET /v1/workspaces/:p/sessions": [
+          "OpenGeniClient.listSessionPage",
+          "OpenGeniClient.listSessionSummaryPage",
+          "OpenGeniClient.listSessions"
+        ],
+        "GET /v1/workspaces/:p/sessions/:p": [
+          "OpenGeniClient.getSession",
+          "sessionPath"
+        ],
+        "GET /v1/workspaces/:p/sessions/:p/admin-access": [
+          "OpenGeniClient.getSessionAdminAccess"
+        ],
+        "GET /v1/workspaces/:p/sessions/:p/artifact-associations/:p": [
+          "getSessionProxyArtifactAssociation"
+        ],
+        "GET /v1/workspaces/:p/sessions/:p/artifacts/:p": [
+          "OpenGeniClient.getSessionRetainedArtifact"
+        ],
+        "GET /v1/workspaces/:p/sessions/:p/artifacts/:p/content": [
+          "OpenGeniClient.getSessionRetainedArtifactContent"
+        ],
+        "GET /v1/workspaces/:p/sessions/:p/background-commands": [
+          "OpenGeniClient.listSessionBackgroundCommands"
+        ],
+        "GET /v1/workspaces/:p/sessions/:p/codex-accounts": [
+          "OpenGeniClient.listSessionCodexAccounts"
+        ],
+        "GET /v1/workspaces/:p/sessions/:p/composer-draft": [
+          "OpenGeniClient.getComposerDraft"
+        ],
+        "GET /v1/workspaces/:p/sessions/:p/events": [
+          "OpenGeniClient.listEventPage"
+        ],
+        "GET /v1/workspaces/:p/sessions/:p/events/:p/message-preview": [
+          "OpenGeniClient.getSessionMessagePreview"
+        ],
+        "GET /v1/workspaces/:p/sessions/:p/events/stream": [
+          "OpenGeniClient.openEventStream"
+        ],
+        "GET /v1/workspaces/:p/sessions/:p/goal": [
+          "OpenGeniClient.findGoal",
+          "OpenGeniClient.getGoal"
+        ],
+        "GET /v1/workspaces/:p/sessions/:p/goal/revisions": [
+          "OpenGeniClient.listGoalRevisions"
+        ],
+        "GET /v1/workspaces/:p/sessions/:p/goal/revisions/page": [
+          "OpenGeniClient.listGoalRevisionPage"
+        ],
+        "GET /v1/workspaces/:p/sessions/:p/human-input-requests": [
+          "OpenGeniClient.listHumanInputRequests"
+        ],
+        "GET /v1/workspaces/:p/sessions/:p/human-input-requests/:p": [
+          "OpenGeniClient.getHumanInputRequest"
+        ],
+        "GET /v1/workspaces/:p/sessions/:p/inbox-mute": [
+          "OpenGeniClient.getSessionInboxMute"
+        ],
+        "GET /v1/workspaces/:p/sessions/:p/lineage": [
+          "OpenGeniClient.getSessionLineage"
+        ],
+        "GET /v1/workspaces/:p/sessions/:p/model-account": [
+          "OpenGeniClient.getSessionModelAccount"
+        ],
+        "GET /v1/workspaces/:p/sessions/:p/model-context": [
+          "OpenGeniClient.getSessionModelContext"
+        ],
+        "GET /v1/workspaces/:p/sessions/:p/queue": [
+          "OpenGeniClient.getQueue"
+        ],
+        "GET /v1/workspaces/:p/sessions/:p/sandbox-recovery": [
+          "OpenGeniClient.getSandboxRecovery"
+        ],
+        "GET /v1/workspaces/:p/sessions/:p/stream-capabilities": [
+          "OpenGeniClient.getStreamCapabilities"
+        ],
+        "GET /v1/workspaces/:p/sessions/:p/tool-reviews/:p": [
+          "OpenGeniClient.getToolActionReview"
+        ],
+        "GET /v1/workspaces/:p/sessions/:p/tool-reviews/:p/details": [
+          "OpenGeniClient.getToolReviewDetails"
+        ],
+        "GET /v1/workspaces/:p/sessions/:p/turns": [
+          "OpenGeniClient.listTurns"
+        ],
+        "GET /v1/workspaces/:p/sessions/:p/usage-limit": [
+          "OpenGeniClient.getSessionUsageLimit",
+          "getSessionUsageLimit",
+          "usageLimitPath"
+        ],
+        "GET /v1/workspaces/:p/sessions/:p/visibility/preview": [
+          "OpenGeniClient.previewSessionVisibilityChange"
+        ],
+        "GET /v1/workspaces/:p/sessions/:p/workspace/capture": [
+          "OpenGeniClient.getWorkspaceCapture"
+        ],
+        "GET /v1/workspaces/:p/sessions/:p/workspace/capture/file": [
+          "OpenGeniClient.getWorkspaceCaptureFile"
+        ],
+        "GET /v1/workspaces/:p/site-auth-connections": [
+          "OpenGeniClient.listSiteAuthConnections"
+        ],
+        "GET /v1/workspaces/:p/site-auth-connections/:p": [
+          "OpenGeniClient.getSiteAuthConnection"
+        ],
+        "GET /v1/workspaces/:p/site-hostnames/:p": [
+          "OpenGeniClient.checkSiteHostname"
+        ],
+        "GET /v1/workspaces/:p/site-limit-profile": [
+          "OpenGeniClient.getSiteLimitProfile"
+        ],
+        "GET /v1/workspaces/:p/site-platform-usage": [
+          "OpenGeniClient.getSitePlatformUsage"
+        ],
+        "GET /v1/workspaces/:p/skills": [
+          "OpenGeniClient.listInstalledSkills"
+        ],
+        "GET /v1/workspaces/:p/skills/:p/uninstall-preview": [
+          "OpenGeniClient.previewSkillUninstall"
+        ],
+        "GET /v1/workspaces/:p/skills/content": [
+          "OpenGeniClient.listWorkspaceSkills"
+        ],
+        "GET /v1/workspaces/:p/skills/content/:p:p": [
+          "OpenGeniClient.readWorkspaceSkill"
+        ],
+        "GET /v1/workspaces/:p/skills/search": [
+          "OpenGeniClient.searchPublicSkills"
+        ],
+        "GET /v1/workspaces/:p/social/connections": [
+          "OpenGeniClient.listSocialConnections"
+        ],
+        "GET /v1/workspaces/:p/subscription-usage-pools": [
+          "OpenGeniClient.getWorkspaceSubscriptionUsagePools"
+        ],
+        "GET /v1/workspaces/:p/supergrok/accounts": [
+          "OpenGeniClient.listSuperGrokAccounts"
+        ],
+        "GET /v1/workspaces/:p/supergrok/status": [
+          "OpenGeniClient.supergrokStatus"
+        ],
+        "GET /v1/workspaces/:p/transcription-recordings": [
+          "OpenGeniClient.listTranscriptionRecordings"
+        ],
+        "GET /v1/workspaces/:p/transcription-recordings/:p": [
+          "OpenGeniClient.getTranscriptionRecording"
+        ],
+        "GET /v1/workspaces/:p/usage": [
+          "OpenGeniEmbeddingClient.getUsage",
+          "getUsage"
+        ],
+        "GET /v1/workspaces/:p/usage/me": [
+          "OpenGeniEmbeddingClient.getMyUsage",
+          "getMyUsage"
+        ],
+        "GET /v1/workspaces/:p/user-resource-authorities": [
+          "OpenGeniClient.listUserResourceAuthorities"
+        ],
+        "GET /v1/workspaces/:p/video-generation": [
+          "OpenGeniClient.getVideoGenerationSettings"
+        ],
+        "GET /v1/workspaces/:p/video-generation/operations/:p": [
+          "OpenGeniClient.getVideoGenerationOperation"
+        ],
+        "GET /v1/workspaces/:p/webhooks": [
+          "OpenGeniClient.listWorkspaceWebhooks"
+        ],
+        "GET /v1/workspaces/:p/webhooks/:p": [
+          "getWorkspaceWebhook"
+        ],
+        "GET /v1/workspaces/:p/webhooks/:p/deliveries": [
+          "OpenGeniClient.listWorkspaceWebhookDeliveries"
+        ],
+        "GET /v1/workspaces/:p/workspace-state": [
+          "OpenGeniClient.getWorkspaceState"
+        ],
+        "GET /v1/workspaces/:p/workspace-state/export": [
+          "OpenGeniClient.exportWorkspaceState"
+        ],
+        "GET|PATCH|POST|PUT /v1/config/client": [
+          "createSessionProxyHandler"
+        ],
+        "GET|PATCH|POST|PUT /v1/workspaces/:p/:p/:p": [
+          "createSessionProxyHandler"
+        ],
+        "GET|PATCH|POST|PUT /v1/workspaces/:p/artifacts/:p/playback-source": [
+          "createSessionProxyHandler"
+        ],
+        "GET|PATCH|POST|PUT /v1/workspaces/:p/files/:p/download-url": [
+          "createSessionProxyHandler"
+        ],
+        "GET|PATCH|POST|PUT /v1/workspaces/:p/files/uploads/:p/complete": [
+          "createSessionProxyHandler"
+        ],
+        "GET|PATCH|POST|PUT /v1/workspaces/:p/inference-control": [
+          "createSessionProxyHandler"
+        ],
+        "GET|PATCH|POST|PUT /v1/workspaces/:p/model-catalog": [
+          "createSessionProxyHandler"
+        ],
+        "GET|PATCH|POST|PUT /v1/workspaces/:p/office/workbook-tickets": [
+          "createSessionProxyHandler"
+        ],
+        "GET|PATCH|POST|PUT /v1/workspaces/:p/office/workbooks": [
+          "createSessionProxyHandler"
+        ],
+        "GET|PATCH|POST|PUT /v1/workspaces/:p/published-artifacts/:p": [
+          "createSessionProxyHandler"
+        ],
+        "GET|PATCH|POST|PUT /v1/workspaces/:p/realtime-model-catalog": [
+          "createSessionProxyHandler"
+        ],
+        "GET|PATCH|POST|PUT /v1/workspaces/:p/sessions/:p": [
+          "createSessionProxyHandler"
+        ],
+        "GET|PATCH|POST|PUT /v1/workspaces/:p/usage/me": [
+          "createSessionProxyHandler"
+        ],
+        "GET|POST /v1/workspaces/:p/tools/approvals": [
+          "OpenGeniToolsClient.forWorkspace"
+        ],
+        "GET|POST /v1/workspaces/:p/tools/calls": [
+          "OpenGeniToolsClient.forWorkspace"
+        ],
+        "GET|POST /v1/workspaces/:p/tools/catalog": [
+          "OpenGeniToolsClient.forWorkspace"
+        ],
+        "GET|POST /v1/workspaces/:p/tools/declarations": [
+          "OpenGeniToolsClient.forWorkspace"
+        ],
+        "PATCH /v1/inbox/items/:p": [
+          "OpenGeniClient.updateInboxItem"
+        ],
+        "PATCH /v1/organizations/:p": [
+          "OpenGeniClient.updateOrganizationName"
+        ],
+        "PATCH /v1/organizations/:p/agent-admin-access": [
+          "OpenGeniClient.updateOrganizationAgentAdminAccess"
+        ],
+        "PATCH /v1/organizations/:p/api-keys/:p": [
+          "OpenGeniDocumentAuthorityClient.updateOrganizationApiKey"
+        ],
+        "PATCH /v1/organizations/:p/claude/accounts/:p": [
+          "OpenGeniClient.renameOrganizationClaudeSubscriptionAccount"
+        ],
+        "PATCH /v1/organizations/:p/claude/accounts/:p/allocator": [
+          "OpenGeniClient.setOrganizationClaudeSubscriptionAccountAllocator"
+        ],
+        "PATCH /v1/organizations/:p/claude/settings": [
+          "OpenGeniClient.setOrganizationClaudeSubscriptionRotationSettings"
+        ],
+        "PATCH /v1/organizations/:p/external-members/:p": [
+          "OpenGeniEmbeddingClient.updateExternalIdentityMembership"
+        ],
+        "PATCH /v1/organizations/:p/mcp-connections/:p": [
+          "OpenGeniClient.updateOrganizationMcpConnection"
+        ],
+        "PATCH /v1/organizations/:p/me/model-account-preferences": [
+          "OpenGeniClient.updateModelAccountPreferences"
+        ],
+        "PATCH /v1/organizations/:p/members/:p": [
+          "OpenGeniClient.updateOrganizationMember"
+        ],
+        "PATCH /v1/organizations/:p/model-account-settings": [
+          "OpenGeniClient.updateOrganizationModelAccountSettings"
+        ],
+        "PATCH /v1/organizations/:p/model-defaults": [
+          "OpenGeniClient.updateOrganizationModelDefaults"
+        ],
+        "PATCH /v1/organizations/:p/privacy-settings": [
+          "OpenGeniClient.updateOrganizationPrivacySettings"
+        ],
+        "PATCH /v1/organizations/:p/private-session-settings": [
+          "updateOrganizationPrivateSessionSettings"
+        ],
+        "PATCH /v1/organizations/:p/retention-policy": [
+          "OpenGeniClient.updateOrganizationRetentionPolicy"
+        ],
+        "PATCH /v1/organizations/:p/service-accounts/:p": [
+          "OpenGeniClient.updateOrganizationServiceAccount"
+        ],
+        "PATCH /v1/organizations/:p/supergrok/accounts/:p": [
+          "OpenGeniClient.renameOrganizationSuperGrokAccount"
+        ],
+        "PATCH /v1/organizations/:p/supergrok/accounts/:p/allocator": [
+          "OpenGeniClient.setOrganizationSuperGrokAccountAllocator"
+        ],
+        "PATCH /v1/organizations/:p/supergrok/settings": [
+          "OpenGeniClient.setOrganizationSuperGrokRotationSettings"
+        ],
+        "PATCH /v1/organizations/:p/webhooks/:p": [
+          "updateOrganizationWebhook"
+        ],
+        "PATCH /v1/organizations/:p/workspaces/:p": [
+          "OpenGeniClient.updateOrganizationWorkspace"
+        ],
+        "PATCH /v1/organizations/:p/workspaces/:p/external-members/:p": [
+          "OpenGeniEmbeddingClient.updateExternalWorkspaceMember"
+        ],
+        "PATCH /v1/organizations/:p/workspaces/:p/settings": [
+          "OpenGeniClient.updateOrganizationWorkspaceSettings"
+        ],
+        "PATCH /v1/workspaces/:p": [
+          "OpenGeniClient.updateWorkspace"
+        ],
+        "PATCH /v1/workspaces/:p/automations/sources/:p": [
+          "OpenGeniAutomationsClient.updateSource"
+        ],
+        "PATCH /v1/workspaces/:p/automations/triggers/:p": [
+          "OpenGeniAutomationsClient.updateTrigger"
+        ],
+        "PATCH /v1/workspaces/:p/browser-identities/:p": [
+          "OpenGeniClient.updateBrowserIdentity"
+        ],
+        "PATCH /v1/workspaces/:p/capabilities/:p/tool-permissions": [
+          "OpenGeniClient.updateConnectorToolPermissions"
+        ],
+        "PATCH /v1/workspaces/:p/channels/:p": [
+          "OpenGeniClient.updateChannel"
+        ],
+        "PATCH /v1/workspaces/:p/claude/accounts/:p": [
+          "OpenGeniClient.renameClaudeSubscriptionAccount"
+        ],
+        "PATCH /v1/workspaces/:p/claude/accounts/:p/allocator": [
+          "OpenGeniClient.setClaudeSubscriptionAccountAllocator"
+        ],
+        "PATCH /v1/workspaces/:p/claude/settings": [
+          "OpenGeniClient.setClaudeSubscriptionRotationSettings"
+        ],
+        "PATCH /v1/workspaces/:p/codex/accounts/:p": [
+          "OpenGeniClient.renameCodexAccount"
+        ],
+        "PATCH /v1/workspaces/:p/codex/accounts/:p/allocator": [
+          "OpenGeniClient.setCodexAccountAllocator"
+        ],
+        "PATCH /v1/workspaces/:p/codex/settings": [
+          "OpenGeniClient.setCodexRotationSettings"
+        ],
+        "PATCH /v1/workspaces/:p/company-profile/agent-policy": [
+          "OpenGeniClient.updateCompanyProfileAgentPolicy"
+        ],
+        "PATCH /v1/workspaces/:p/connections/:p": [
+          "OpenGeniClient.updateConnection"
+        ],
+        "PATCH /v1/workspaces/:p/connections/atlassian/:p/lifecycle": [
+          "OpenGeniClient.setAtlassianLifecycle"
+        ],
+        "PATCH /v1/workspaces/:p/connections/google-drive/:p/lifecycle": [
+          "OpenGeniClient.transitionGoogleDriveLifecycle"
+        ],
+        "PATCH /v1/workspaces/:p/github/action-policies": [
+          "OpenGeniClient.updateGitHubActionPolicy"
+        ],
+        "PATCH /v1/workspaces/:p/machines/:p/operation-policy": [
+          "OpenGeniClient.updateMachineOperationPolicy"
+        ],
+        "PATCH /v1/workspaces/:p/members/:p": [
+          "OpenGeniClient.updateWorkspaceMember"
+        ],
+        "PATCH /v1/workspaces/:p/model-account-settings": [
+          "OpenGeniClient.updateWorkspaceModelAccountSettings"
+        ],
+        "PATCH /v1/workspaces/:p/network-routes/:p": [
+          "OpenGeniClient.updateNetworkRoute"
+        ],
+        "PATCH /v1/workspaces/:p/pr-review/registrations/:p": [
+          "OpenGeniPrReviewClient.updateAppRegistration"
+        ],
+        "PATCH /v1/workspaces/:p/pr-review/repositories/:p": [
+          "OpenGeniPrReviewClient.updateRepositoryBinding"
+        ],
+        "PATCH /v1/workspaces/:p/published-artifacts/:p/status": [
+          "OpenGeniClient.setWorkspaceArtifactStatus"
+        ],
+        "PATCH /v1/workspaces/:p/rigs/:p": [
+          "OpenGeniClient.updateRig"
+        ],
+        "PATCH /v1/workspaces/:p/scheduled-tasks/:p": [
+          "OpenGeniClient.updateScheduledTask"
+        ],
+        "PATCH /v1/workspaces/:p/session-mcp-tool-permissions": [
+          "OpenGeniClient.updateSessionMcpToolPermissions"
+        ],
+        "PATCH /v1/workspaces/:p/sessions/:p": [
+          "OpenGeniClient.updateSession"
+        ],
+        "PATCH /v1/workspaces/:p/sessions/:p/goal": [
+          "OpenGeniClient.updateGoal"
+        ],
+        "PATCH /v1/workspaces/:p/sessions/:p/mcp-servers/:p/approval-policy": [
+          "OpenGeniClient.updateSessionMcpApprovalPolicy"
+        ],
+        "PATCH /v1/workspaces/:p/sessions/:p/realtime/:p/heartbeat": [
+          "OpenGeniClient.heartbeatSessionRealtime"
+        ],
+        "PATCH /v1/workspaces/:p/settings": [
+          "OpenGeniClient.updateWorkspaceSettings"
+        ],
+        "PATCH /v1/workspaces/:p/site-auth-connections/:p": [
+          "OpenGeniClient.updateSiteAuthConnection"
+        ],
+        "PATCH /v1/workspaces/:p/supergrok/accounts/:p": [
+          "OpenGeniClient.renameSuperGrokAccount"
+        ],
+        "PATCH /v1/workspaces/:p/supergrok/accounts/:p/allocator": [
+          "OpenGeniClient.setSuperGrokAccountAllocator"
+        ],
+        "PATCH /v1/workspaces/:p/supergrok/settings": [
+          "OpenGeniClient.setSuperGrokRotationSettings"
+        ],
+        "PATCH /v1/workspaces/:p/webhooks/:p": [
+          "OpenGeniClient.updateWorkspaceWebhook"
+        ],
+        "POST /v1/auth/organization-setup/preview": [
+          "previewOrganizationUserSetup"
+        ],
+        "POST /v1/auth/session-set/bootstrap": [
+          "BrowserAccountsClient.bootstrapSessionSet"
+        ],
+        "POST /v1/auth/session-set/deep-link/resolve": [
+          "BrowserAccountsClient.resolveDeepLink"
+        ],
+        "POST /v1/auth/session-set/logout-all": [
+          "BrowserAccountsClient.logoutSessionSet"
+        ],
+        "POST /v1/auth/session-set/logout-one": [
+          "BrowserAccountsClient.logoutLoginSlot"
+        ],
+        "POST /v1/auth/session-set/select": [
+          "BrowserAccountsClient.selectLoginSlot"
+        ],
+        "POST /v1/auth/session-set/transactions": [
+          "BrowserAccountsClient.beginLoginTransaction"
+        ],
+        "POST /v1/auth/session-set/transactions/email-password": [
+          "BrowserAccountsClient.completeEmailPasswordTransaction"
+        ],
+        "POST /v1/auth/session-set/transactions/social": [
+          "BrowserAccountsClient.startSocialTransaction"
+        ],
+        "POST /v1/billing/checkout": [
+          "OpenGeniClient.createBillingCheckout"
+        ],
+        "POST /v1/billing/portal": [
+          "OpenGeniClient.createBillingPortalSession"
+        ],
+        "POST /v1/billing/subscription/cancel": [
+          "OpenGeniClient.cancelBillingSubscription"
+        ],
+        "POST /v1/billing/subscription/change": [
+          "OpenGeniClient.changeBillingSubscription"
+        ],
+        "POST /v1/billing/subscription/checkout": [
+          "OpenGeniClient.createSubscriptionCheckout"
+        ],
+        "POST /v1/billing/subscription/portal": [
+          "OpenGeniClient.createSubscriptionPortalSession"
+        ],
+        "POST /v1/billing/subscription/upgrade": [
+          "OpenGeniClient.upgradeBillingSubscription"
+        ],
+        "POST /v1/enrollments/device/lookup": [
+          "OpenGeniClient.lookupDeviceEnrollment"
+        ],
+        "POST /v1/mcp-connections/requests/:p": [
+          "OpenGeniClient.answerMcpConnectionRequest"
+        ],
+        "POST /v1/native-app/authorize": [
+          "OpenGeniClient.authorizeNativeApp"
+        ],
+        "POST /v1/native-app/sign-out": [
+          "OpenGeniClient.signOutNativeApp"
+        ],
+        "POST /v1/native-app/token": [
+          "OpenGeniClient.exchangeNativeAppCode"
+        ],
+        "POST /v1/organization-invitations/:p/accept": [
+          "OpenGeniClient.acceptOrganizationInvitation"
+        ],
+        "POST /v1/organizations": [
+          "OpenGeniClient.createOrganization"
+        ],
+        "POST /v1/organizations/:p/api-keys": [
+          "OpenGeniClient.createOrganizationApiKey"
+        ],
+        "POST /v1/organizations/:p/claude/accounts/:p/activate": [
+          "OpenGeniClient.activateOrganizationClaudeSubscriptionAccount"
+        ],
+        "POST /v1/organizations/:p/claude/accounts/:p/usage/refresh": [
+          "OpenGeniClient.refreshOrganizationClaudeSubscriptionAccountUsage"
+        ],
+        "POST /v1/organizations/:p/claude/accounts/setup-token": [
+          "OpenGeniClient.connectOrganizationClaudeSubscriptionSetupToken"
+        ],
+        "POST /v1/organizations/:p/credential-provider/rotate-secret": [
+          "rotateOrganizationCredentialProviderSecret"
+        ],
+        "POST /v1/organizations/:p/external-identities/lookup": [
+          "OpenGeniEmbeddingClient.lookupExternalIdentity"
+        ],
+        "POST /v1/organizations/:p/invitations": [
+          "OpenGeniClient.createOrganizationInvitation"
+        ],
+        "POST /v1/organizations/:p/invitations/:p/delivery/retry": [
+          "retryOrganizationUserSetupDelivery"
+        ],
+        "POST /v1/organizations/:p/invitations/:p/revoke": [
+          "OpenGeniClient.revokeOrganizationInvitation"
+        ],
+        "POST /v1/organizations/:p/model-providers/:p/custom-models": [
+          "OpenGeniClient.createOrganizationProviderCustomModel"
+        ],
+        "POST /v1/organizations/:p/model-providers/claude_subscription/oauth/complete": [
+          "OpenGeniClient.completeOrganizationClaudeSubscriptionOAuth"
+        ],
+        "POST /v1/organizations/:p/model-providers/claude_subscription/oauth/start": [
+          "OpenGeniClient.startOrganizationClaudeSubscriptionOAuth"
+        ],
+        "POST /v1/organizations/:p/model-providers/claude_subscription/usage/refresh": [
+          "OpenGeniClient.refreshOrganizationClaudeSubscriptionUsage"
+        ],
+        "POST /v1/organizations/:p/personal-api-keys": [
+          "OpenGeniClient.createPersonalApiKey"
+        ],
+        "POST /v1/organizations/:p/recovery/operations": [
+          "OpenGeniClient.startOrganizationRecoveryOperation"
+        ],
+        "POST /v1/organizations/:p/recovery/operations/:p/approve": [
+          "OpenGeniClient.approveOrganizationRecoveryOperation"
+        ],
+        "POST /v1/organizations/:p/recovery/operations/:p/cancel": [
+          "OpenGeniClient.cancelOrganizationRecoveryOperation"
+        ],
+        "POST /v1/organizations/:p/recovery/operations/:p/execute": [
+          "OpenGeniClient.executeOrganizationRecoveryOperation"
+        ],
+        "POST /v1/organizations/:p/recovery/policy/accept": [
+          "OpenGeniClient.acceptOrganizationRecoveryCustody"
+        ],
+        "POST /v1/organizations/:p/recovery/policy/disable": [
+          "OpenGeniClient.disableOrganizationRecoveryPolicy"
+        ],
+        "POST /v1/organizations/:p/service-accounts": [
+          "OpenGeniClient.createOrganizationServiceAccount"
+        ],
+        "POST /v1/organizations/:p/supergrok/accounts/:p/activate": [
+          "OpenGeniClient.activateOrganizationSuperGrokAccount"
+        ],
+        "POST /v1/organizations/:p/supergrok/connect/poll": [
+          "OpenGeniClient.organizationSupergrokConnectPoll"
+        ],
+        "POST /v1/organizations/:p/supergrok/connect/start": [
+          "OpenGeniClient.organizationSupergrokConnectStart"
+        ],
+        "POST /v1/organizations/:p/webhooks": [
+          "createOrganizationWebhook"
+        ],
+        "POST /v1/organizations/:p/webhooks/:p/deliveries/:p/redeliver": [
+          "redeliverOrganizationWebhookDelivery"
+        ],
+        "POST /v1/organizations/:p/webhooks/:p/rotate-secret": [
+          "rotateOrganizationWebhookSecret"
+        ],
+        "POST /v1/organizations/:p/workspaces": [
+          "OpenGeniClient.createOrganizationWorkspace"
+        ],
+        "POST /v1/organizations/:p/workspaces/:p/members/:p/revoke": [
+          "OpenGeniClient.revokeOrganizationWorkspaceMember",
+          "OpenGeniEmbeddingClient.cancelExternalWorkspaceMemberGrant"
+        ],
+        "POST /v1/organizations/additional": [
+          "OpenGeniClient.createAdditionalOrganization"
+        ],
+        "POST /v1/site-auth/authorize": [
+          "OpenGeniClient.authorizeSiteViewer"
+        ],
+        "POST /v1/workspaces": [
+          "OpenGeniClient.createWorkspace"
+        ],
+        "POST /v1/workspaces/:p/agent-learning": [
+          "OpenGeniClient.saveAgentLearningSettings"
+        ],
+        "POST /v1/workspaces/:p/agent-learning/instructions/review": [
+          "OpenGeniClient.reviewAgentInstruction"
+        ],
+        "POST /v1/workspaces/:p/agent-learning/read": [
+          "OpenGeniClient.getAgentLearningSettings"
+        ],
+        "POST /v1/workspaces/:p/allowance/grants": [
+          "OpenGeniEmbeddingClient.grantWorkspaceCredits",
+          "grantWorkspaceCredits"
+        ],
+        "POST /v1/workspaces/:p/api-keys": [
+          "OpenGeniClient.createApiKey"
+        ],
+        "POST /v1/workspaces/:p/artifacts/:p/playback-source": [
+          "OpenGeniClient.createVideoArtifactPlaybackSource"
+        ],
+        "POST /v1/workspaces/:p/automations/sources": [
+          "OpenGeniAutomationsClient.createSource"
+        ],
+        "POST /v1/workspaces/:p/automations/sources/:p/events": [
+          "OpenGeniAutomationsClient.triggerManually"
+        ],
+        "POST /v1/workspaces/:p/automations/triggers": [
+          "OpenGeniAutomationsClient.createTrigger"
+        ],
+        "POST /v1/workspaces/:p/browser-identities": [
+          "OpenGeniClient.createBrowserIdentity"
+        ],
+        "POST /v1/workspaces/:p/browser-sessions": [
+          "OpenGeniClient.createBrowserSession"
+        ],
+        "POST /v1/workspaces/:p/browser-sessions/:p/actions": [
+          "OpenGeniClient.actInBrowser"
+        ],
+        "POST /v1/workspaces/:p/browser-sessions/:p/attachments": [
+          "OpenGeniClient.attachBrowserSession"
+        ],
+        "POST /v1/workspaces/:p/browser-sessions/:p/auth-runs": [
+          "OpenGeniClient.startBrowserAuthRun"
+        ],
+        "POST /v1/workspaces/:p/browser-sessions/:p/auth-runs/:p/external-auth": [
+          "OpenGeniClient.advanceExternalBrowserAuthRun"
+        ],
+        "POST /v1/workspaces/:p/browser-sessions/:p/auth-runs/:p/external-auth/interactive": [
+          "OpenGeniClient.openExternalBrowserAuthFlow"
+        ],
+        "POST /v1/workspaces/:p/browser-sessions/:p/auth-runs/:p/report": [
+          "OpenGeniClient.reportBrowserAuthRun"
+        ],
+        "POST /v1/workspaces/:p/browser-sessions/:p/auth-runs/:p/verify": [
+          "OpenGeniClient.verifyBrowserAuthRun"
+        ],
+        "POST /v1/workspaces/:p/browser-sessions/:p/downloads/:p/save": [
+          "OpenGeniClient.saveBrowserDownload"
+        ],
+        "POST /v1/workspaces/:p/browser-sessions/:p/end": [
+          "OpenGeniClient.endBrowserSession"
+        ],
+        "POST /v1/workspaces/:p/browser-sessions/:p/heartbeat": [
+          "OpenGeniClient.heartbeatBrowserSession"
+        ],
+        "POST /v1/workspaces/:p/browser-sessions/:p/recordings": [
+          "OpenGeniClient.startBrowserRecording"
+        ],
+        "POST /v1/workspaces/:p/browser-sessions/:p/recordings/:p/save": [
+          "OpenGeniClient.saveBrowserRecording"
+        ],
+        "POST /v1/workspaces/:p/browser-sessions/:p/resume": [
+          "OpenGeniClient.resumeBrowserSession"
+        ],
+        "POST /v1/workspaces/:p/browser-sessions/:p/revisions": [
+          "OpenGeniClient.publishBrowserRevision"
+        ],
+        "POST /v1/workspaces/:p/browser-sessions/:p/suspend": [
+          "OpenGeniClient.suspendBrowserSession"
+        ],
+        "POST /v1/workspaces/:p/browser-sessions/:p/targets": [
+          "OpenGeniClient.openBrowserTarget"
+        ],
+        "POST /v1/workspaces/:p/browser-sessions/:p/targets/:p/dom-read": [
+          "OpenGeniClient.readBrowserDom"
+        ],
+        "POST /v1/workspaces/:p/browser-sessions/:p/targets/:p/select": [
+          "OpenGeniClient.selectBrowserTarget"
+        ],
+        "POST /v1/workspaces/:p/browser-sessions/:p/targets/open-with-inventory": [
+          "OpenGeniClient.openBrowserTargetWithInventory"
+        ],
+        "POST /v1/workspaces/:p/browser-sessions/:p/working-copy/adoptions": [
+          "OpenGeniClient.adoptBrowserSessionWorkingCopy"
+        ],
+        "POST /v1/workspaces/:p/browser-sessions/:p/working-copy/adoptions/:p/revert": [
+          "OpenGeniClient.revertBrowserSessionWorkingCopyAdoption"
+        ],
+        "POST /v1/workspaces/:p/browser-sessions/:p/working-copy/inspection": [
+          "OpenGeniClient.inspectBrowserSessionWorkingCopy"
+        ],
+        "POST /v1/workspaces/:p/capabilities": [
+          "OpenGeniClient.createCapability"
+        ],
+        "POST /v1/workspaces/:p/capabilities/:p/disable": [
+          "OpenGeniClient.disableCapability"
+        ],
+        "POST /v1/workspaces/:p/capabilities/:p/enable": [
+          "OpenGeniClient.enableCapability"
+        ],
+        "POST /v1/workspaces/:p/capabilities/discovery/mcp-auth": [
+          "OpenGeniClient.inspectMcpAuthentication"
+        ],
+        "POST /v1/workspaces/:p/channels": [
+          "OpenGeniClient.createChannel"
+        ],
+        "POST /v1/workspaces/:p/claude/accounts/:p/activate": [
+          "OpenGeniClient.activateClaudeSubscriptionAccount"
+        ],
+        "POST /v1/workspaces/:p/claude/accounts/:p/usage/refresh": [
+          "OpenGeniClient.refreshClaudeSubscriptionAccountUsage"
+        ],
+        "POST /v1/workspaces/:p/claude/accounts/setup-token": [
+          "OpenGeniClient.connectClaudeSubscriptionSetupToken"
+        ],
+        "POST /v1/workspaces/:p/codex/accounts/:p/activate": [
+          "OpenGeniClient.activateCodexAccount"
+        ],
+        "POST /v1/workspaces/:p/codex/apps": [
+          "OpenGeniClient.designateCodexAppsAccount"
+        ],
+        "POST /v1/workspaces/:p/codex/connect/poll": [
+          "OpenGeniClient.codexConnectPoll"
+        ],
+        "POST /v1/workspaces/:p/codex/connect/start": [
+          "OpenGeniClient.codexConnectStart"
+        ],
+        "POST /v1/workspaces/:p/codex/usage/refresh": [
+          "OpenGeniClient.refreshCodexUsage"
+        ],
+        "POST /v1/workspaces/:p/company-profile/revisions/:p/activate": [
+          "OpenGeniClient.activateCompanyProfileRevision"
+        ],
+        "POST /v1/workspaces/:p/company-profile/rollback": [
+          "OpenGeniClient.rollbackCompanyProfile"
+        ],
+        "POST /v1/workspaces/:p/computer-sessions": [
+          "OpenGeniClient.createComputerSession"
+        ],
+        "POST /v1/workspaces/:p/computer-sessions/:p/actions": [
+          "OpenGeniClient.actInComputer"
+        ],
+        "POST /v1/workspaces/:p/computer-sessions/:p/attachments": [
+          "OpenGeniClient.attachComputerSession"
+        ],
+        "POST /v1/workspaces/:p/computer-sessions/:p/end": [
+          "OpenGeniClient.endComputerSession"
+        ],
+        "POST /v1/workspaces/:p/computer-sessions/:p/heartbeat": [
+          "OpenGeniClient.heartbeatComputerSession"
+        ],
+        "POST /v1/workspaces/:p/computer-sessions/:p/native-calls": [
+          "OpenGeniClient.callNativeComputerTool"
+        ],
+        "POST /v1/workspaces/:p/connect/attempts": [
+          "OpenGeniClient.beginConnect"
+        ],
+        "POST /v1/workspaces/:p/connect/attempts/:p/advance": [
+          "OpenGeniEmbeddingClient.advanceConnectAttempt"
+        ],
+        "POST /v1/workspaces/:p/connect/attempts/:p/cancel": [
+          "OpenGeniEmbeddingClient.cancelConnectAttempt"
+        ],
+        "POST /v1/workspaces/:p/connections": [
+          "OpenGeniClient.createConnection"
+        ],
+        "POST /v1/workspaces/:p/connections/:p/github/reconnect": [
+          "OpenGeniClient.reconnectPersonalGitHub"
+        ],
+        "POST /v1/workspaces/:p/connections/:p/github/repositories/verify": [
+          "OpenGeniClient.verifyPersonalGitHubRepositorySelections"
+        ],
+        "POST /v1/workspaces/:p/connections/atlassian/:p/source": [
+          "OpenGeniClient.saveAtlassianSources"
+        ],
+        "POST /v1/workspaces/:p/connections/fiken/install": [
+          "OpenGeniClient.installFikenConnection"
+        ],
+        "POST /v1/workspaces/:p/connections/fiken/oauth/start": [
+          "OpenGeniClient.startFikenOAuth"
+        ],
+        "POST /v1/workspaces/:p/connections/github/oauth/start": [
+          "OpenGeniClient.startPersonalGitHubOAuth"
+        ],
+        "POST /v1/workspaces/:p/connections/oauth/start": [
+          "OpenGeniClient.startConnectionOAuth"
+        ],
+        "POST /v1/workspaces/:p/connections/slack-bot/install": [
+          "OpenGeniClient.startOpenGeniSlackBotInstall"
+        ],
+        "POST /v1/workspaces/:p/credential-provider/rotate-secret": [
+          "rotateWorkspaceCredentialProviderSecret"
+        ],
+        "POST /v1/workspaces/:p/credential-provider/test": [
+          "testWorkspaceCredentialProvider"
+        ],
+        "POST /v1/workspaces/:p/document-bases": [
+          "OpenGeniClient.createDocumentBase"
+        ],
+        "POST /v1/workspaces/:p/document-bases/:p/documents": [
+          "OpenGeniClient.addDocument"
+        ],
+        "POST /v1/workspaces/:p/document-bases/:p/documents/:p/reindex": [
+          "OpenGeniDocumentAuthorityClient.reindexDocument"
+        ],
+        "POST /v1/workspaces/:p/document-default-collection-backfills": [
+          "OpenGeniDocumentAuthorityClient.runDocumentDefaultCollectionBackfill"
+        ],
+        "POST /v1/workspaces/:p/documents/:p/authority-reclassifications": [
+          "OpenGeniDocumentAuthorityClient.reclassifyDocumentAuthority"
+        ],
+        "POST /v1/workspaces/:p/documents/:p/move": [
+          "OpenGeniClient.moveDocument"
+        ],
+        "POST /v1/workspaces/:p/documents/:p/original-file/download-url": [
+          "OpenGeniDocumentAuthorityClient.createDocumentOriginalFileDownloadUrl"
+        ],
+        "POST /v1/workspaces/:p/editable-artifacts": [
+          "OpenGeniClient.createEditableArtifact"
+        ],
+        "POST /v1/workspaces/:p/editable-artifacts/:p/live-ticket": [
+          "HttpLiveTransport.mintTicket"
+        ],
+        "POST /v1/workspaces/:p/editable-artifacts/:p/materializations": [
+          "OpenGeniClient.createEditableArtifactMaterialization"
+        ],
+        "POST /v1/workspaces/:p/editable-artifacts/:p/versions": [
+          "OpenGeniClient.pinEditableArtifactVersion"
+        ],
+        "POST /v1/workspaces/:p/editable-artifacts/imports": [
+          "OpenGeniClient.importEditableArtifact"
+        ],
+        "POST /v1/workspaces/:p/enrollments/:p/revoke": [
+          "OpenGeniClient.removeEnrollment"
+        ],
+        "POST /v1/workspaces/:p/enrollments/device/approve": [
+          "OpenGeniClient.approveDeviceEnrollment"
+        ],
+        "POST /v1/workspaces/:p/enrollments/device/deny": [
+          "OpenGeniClient.denyDeviceEnrollment"
+        ],
+        "POST /v1/workspaces/:p/enrollments/token": [
+          "OpenGeniClient.mintEnrollToken"
+        ],
+        "POST /v1/workspaces/:p/external-members": [
+          "OpenGeniEmbeddingClient.addExternalWorkspaceMember"
+        ],
+        "POST /v1/workspaces/:p/feedback": [
+          "OpenGeniClient.createFeedback"
+        ],
+        "POST /v1/workspaces/:p/files/:p/download-url": [
+          "OpenGeniClient.createFileDownloadUrl"
+        ],
+        "POST /v1/workspaces/:p/files/uploads": [
+          "OpenGeniClient.beginFileUpload"
+        ],
+        "POST /v1/workspaces/:p/files/uploads/:p/complete": [
+          "OpenGeniClient.completeFileUpload"
+        ],
+        "POST /v1/workspaces/:p/gateway-custom-models": [
+          "OpenGeniClient.createWorkspaceGatewayCustomModel"
+        ],
+        "POST /v1/workspaces/:p/github/app-manifest": [
+          "OpenGeniClient.createGitHubAppManifest"
+        ],
+        "POST /v1/workspaces/:p/github/public-repositories/verify": [
+          "verifyPublicGitHubRepositoryRef"
+        ],
+        "POST /v1/workspaces/:p/github/repositories/sync": [
+          "OpenGeniClient.syncGitHubRepositories"
+        ],
+        "POST /v1/workspaces/:p/identity-links": [
+          "OpenGeniEmbeddingClient.beginIdentityLink"
+        ],
+        "POST /v1/workspaces/:p/identity-links/:p/confirm": [
+          "OpenGeniEmbeddingClient.confirmIdentityLink"
+        ],
+        "POST /v1/workspaces/:p/identity-links/:p/preview": [
+          "OpenGeniEmbeddingClient.previewIdentityLink"
+        ],
+        "POST /v1/workspaces/:p/identity-links/:p/revoke": [
+          "OpenGeniEmbeddingClient.revokeIdentityLink"
+        ],
+        "POST /v1/workspaces/:p/inference-control": [
+          "OpenGeniClient.setWorkspaceInferenceState"
+        ],
+        "POST /v1/workspaces/:p/instruction-policies/:p/activate": [
+          "OpenGeniClient.activateWorkspaceInstructionPolicyRevision"
+        ],
+        "POST /v1/workspaces/:p/instruction-policies/drafts": [
+          "OpenGeniClient.createWorkspaceInstructionPolicyDraft"
+        ],
+        "POST /v1/workspaces/:p/instruction-policies/import-legacy": [
+          "OpenGeniClient.importLegacyWorkspaceInstructionPolicyDraft"
+        ],
+        "POST /v1/workspaces/:p/instruction-policies/onboarding-proposals": [
+          "OpenGeniClient.createWorkspaceInstructionPolicyOnboardingProposal"
+        ],
+        "POST /v1/workspaces/:p/instruction-policies/rollback": [
+          "OpenGeniClient.rollbackWorkspaceInstructionPolicyRevision"
+        ],
+        "POST /v1/workspaces/:p/integrations/install": [
+          "OpenGeniClient.installApiIntegration"
+        ],
+        "POST /v1/workspaces/:p/integrations/oauth/start": [
+          "OpenGeniClient.startApiIntegrationOAuth"
+        ],
+        "POST /v1/workspaces/:p/integrations/preview": [
+          "OpenGeniClient.previewApiIntegration"
+        ],
+        "POST /v1/workspaces/:p/integrations/slack/user-link-intents": [
+          "OpenGeniClient.prepareSlackUserLinkAccess"
+        ],
+        "POST /v1/workspaces/:p/integrations/slack/user-link-intents/:p/cancel": [
+          "OpenGeniClient.cancelSlackUserLinkAccess"
+        ],
+        "POST /v1/workspaces/:p/integrations/slack/user-link-intents/:p/request-access": [
+          "OpenGeniClient.requestSlackUserLinkWorkspaceAccess"
+        ],
+        "POST /v1/workspaces/:p/interaction-interventions": [
+          "OpenGeniClient.createInteractionIntervention"
+        ],
+        "POST /v1/workspaces/:p/interaction-interventions/:p/resolve": [
+          "OpenGeniClient.resolveInteractionIntervention"
+        ],
+        "POST /v1/workspaces/:p/knowledge/drops": [
+          "OpenGeniClient.createKnowledgeDrop"
+        ],
+        "POST /v1/workspaces/:p/knowledge/entries": [
+          "OpenGeniClient.saveKnowledgeEntry"
+        ],
+        "POST /v1/workspaces/:p/knowledge/entries/:p/archive": [
+          "OpenGeniClient.archiveKnowledgeEntry"
+        ],
+        "POST /v1/workspaces/:p/knowledge/entries/:p/file/download-url": [
+          "OpenGeniClient.createKnowledgeFileDownloadUrl"
+        ],
+        "POST /v1/workspaces/:p/knowledge/entries/:p/restore": [
+          "OpenGeniClient.restoreKnowledgeEntry"
+        ],
+        "POST /v1/workspaces/:p/knowledge/entries/:p/review": [
+          "OpenGeniClient.reviewKnowledgeEntry"
+        ],
+        "POST /v1/workspaces/:p/knowledge/entries/prepare-save": [
+          "prepareKnowledgeSave"
+        ],
+        "POST /v1/workspaces/:p/knowledge/entries/review": [
+          "OpenGeniClient.reviewKnowledgeEntries"
+        ],
+        "POST /v1/workspaces/:p/knowledge/entries/search": [
+          "OpenGeniClient.listKnowledgeEntries"
+        ],
+        "POST /v1/workspaces/:p/knowledge/files/:p/prepare": [
+          "prepareKnowledgeFile"
+        ],
+        "POST /v1/workspaces/:p/learning/activations/:p/undo": [
+          "OpenGeniClient.undoGovernedLearningActivation"
+        ],
+        "POST /v1/workspaces/:p/machines/:p/audience/preview": [
+          "OpenGeniClient.previewMachineAudience"
+        ],
+        "POST /v1/workspaces/:p/machines/:p/privacy-settings": [
+          "OpenGeniClient.openMachinePrivacySettings"
+        ],
+        "POST /v1/workspaces/:p/machines/:p/screen-control": [
+          "OpenGeniClient.enableMachineScreenControl"
+        ],
+        "POST /v1/workspaces/:p/machines/:p/update": [
+          "OpenGeniClient.updateMachineAgent"
+        ],
+        "POST /v1/workspaces/:p/members": [
+          "OpenGeniClient.addWorkspaceMember"
+        ],
+        "POST /v1/workspaces/:p/members/access-requests/slack/:p/approve": [
+          "OpenGeniClient.approveSlackUserLinkAccessRequest"
+        ],
+        "POST /v1/workspaces/:p/members/access-requests/slack/:p/deny": [
+          "OpenGeniClient.denySlackUserLinkAccessRequest"
+        ],
+        "POST /v1/workspaces/:p/memory-slack-publications/:p/action": [
+          "OpenGeniMemorySlackClient.actOnMemorySlackPublication"
+        ],
+        "POST /v1/workspaces/:p/model-providers/:p/custom-models": [
+          "OpenGeniClient.createWorkspaceClaudeCustomModel"
+        ],
+        "POST /v1/workspaces/:p/model-providers/claude_subscription/oauth/complete": [
+          "OpenGeniClient.completeWorkspaceClaudeSubscriptionOAuth"
+        ],
+        "POST /v1/workspaces/:p/model-providers/claude_subscription/oauth/start": [
+          "OpenGeniClient.startWorkspaceClaudeSubscriptionOAuth"
+        ],
+        "POST /v1/workspaces/:p/model-providers/claude_subscription/usage/refresh": [
+          "OpenGeniClient.refreshWorkspaceClaudeSubscriptionUsage"
+        ],
+        "POST /v1/workspaces/:p/network-routes": [
+          "OpenGeniClient.createNetworkRoute"
+        ],
+        "POST /v1/workspaces/:p/office/workbook-tickets": [
+          "OpenGeniClient.createOfficeWorkbookTicket"
+        ],
+        "POST /v1/workspaces/:p/openrouter-custom-models": [
+          "OpenGeniClient.createWorkspaceOpenRouterCustomModel"
+        ],
+        "POST /v1/workspaces/:p/opper-custom-models": [
+          "OpenGeniClient.createWorkspaceOpperCustomModel"
+        ],
+        "POST /v1/workspaces/:p/pause-timer": [
+          "OpenGeniClient.setWorkspacePauseTimer"
+        ],
+        "POST /v1/workspaces/:p/plugins/install": [
+          "OpenGeniClient.installPlugin"
+        ],
+        "POST /v1/workspaces/:p/plugins/preview": [
+          "OpenGeniClient.previewPlugin"
+        ],
+        "POST /v1/workspaces/:p/pr-review/registrations": [
+          "OpenGeniPrReviewClient.createAppRegistration"
+        ],
+        "POST /v1/workspaces/:p/pr-review/repositories": [
+          "OpenGeniPrReviewClient.createRepositoryBinding"
+        ],
+        "POST /v1/workspaces/:p/preferences/:p/activate": [
+          "OpenGeniClient.activatePreferenceRegistryRevision"
+        ],
+        "POST /v1/workspaces/:p/preferences/:p/correct": [
+          "OpenGeniClient.correctPreferenceRegistry"
+        ],
+        "POST /v1/workspaces/:p/preferences/:p/deactivate": [
+          "OpenGeniClient.deactivatePreferenceRegistry"
+        ],
+        "POST /v1/workspaces/:p/preferences/:p/reject": [
+          "OpenGeniClient.rejectPreferenceRegistryProposal"
+        ],
+        "POST /v1/workspaces/:p/preferences/:p/scope": [
+          "OpenGeniClient.changePreferenceRegistryScope"
+        ],
+        "POST /v1/workspaces/:p/preferences/:p/supersede": [
+          "OpenGeniClient.supersedePreferenceRegistry"
+        ],
+        "POST /v1/workspaces/:p/preferences/full-content": [
+          "OpenGeniClient.getPreferenceRegistryFullContent"
+        ],
+        "POST /v1/workspaces/:p/preferences/proposals": [
+          "OpenGeniClient.createPreferenceRegistryProposal"
+        ],
+        "POST /v1/workspaces/:p/published-artifacts": [
+          "OpenGeniClient.createWorkspaceArtifact"
+        ],
+        "POST /v1/workspaces/:p/published-artifacts/:p/data/collections/:p/import": [
+          "OpenGeniClient.importSiteData"
+        ],
+        "POST /v1/workspaces/:p/published-artifacts/:p/data/collections/:p/reset": [
+          "OpenGeniClient.resetSiteDataCollection"
+        ],
+        "POST /v1/workspaces/:p/published-artifacts/:p/data/query": [
+          "OpenGeniClient.querySiteData"
+        ],
+        "POST /v1/workspaces/:p/published-artifacts/:p/data/write": [
+          "OpenGeniClient.writeSiteData"
+        ],
+        "POST /v1/workspaces/:p/published-artifacts/:p/duplicate": [
+          "OpenGeniClient.duplicateWorkspaceArtifact"
+        ],
+        "POST /v1/workspaces/:p/published-artifacts/:p/opened": [
+          "OpenGeniClient.recordSiteOpened"
+        ],
+        "POST /v1/workspaces/:p/published-artifacts/:p/rollback": [
+          "OpenGeniClient.rollbackWorkspaceArtifact"
+        ],
+        "POST /v1/workspaces/:p/published-artifacts/:p/sql/execute": [
+          "OpenGeniClient.executeSiteSql"
+        ],
+        "POST /v1/workspaces/:p/published-artifacts/:p/sql/import": [
+          "OpenGeniClient.importSiteSql"
+        ],
+        "POST /v1/workspaces/:p/published-artifacts/:p/sql/migrations": [
+          "OpenGeniClient.migrateSiteSql"
+        ],
+        "POST /v1/workspaces/:p/published-artifacts/:p/sql/queries/:p": [
+          "OpenGeniClient.runSiteSqlQuery"
+        ],
+        "POST /v1/workspaces/:p/published-artifacts/:p/sql/query": [
+          "OpenGeniClient.querySiteSql"
+        ],
+        "POST /v1/workspaces/:p/published-artifacts/:p/sql/reset": [
+          "OpenGeniClient.resetSiteSql"
+        ],
+        "POST /v1/workspaces/:p/published-artifacts/:p/versions": [
+          "OpenGeniClient.publishWorkspaceArtifactVersion"
+        ],
+        "POST /v1/workspaces/:p/rigs": [
+          "OpenGeniClient.createRig"
+        ],
+        "POST /v1/workspaces/:p/rigs/:p/changes": [
+          "OpenGeniClient.proposeRigChange"
+        ],
+        "POST /v1/workspaces/:p/rigs/:p/changes/:p/promote": [
+          "OpenGeniClient.promoteRigChange"
+        ],
+        "POST /v1/workspaces/:p/rigs/:p/changes/:p/verify": [
+          "OpenGeniClient.verifyRigChange"
+        ],
+        "POST /v1/workspaces/:p/rigs/:p/verify": [
+          "OpenGeniClient.verifyRig"
+        ],
+        "POST /v1/workspaces/:p/rigs/:p/versions/:p/activate": [
+          "OpenGeniClient.activateRigVersion"
+        ],
+        "POST /v1/workspaces/:p/scheduled-tasks": [
+          "OpenGeniClient.createScheduledTask"
+        ],
+        "POST /v1/workspaces/:p/scheduled-tasks/:p/pause": [
+          "OpenGeniClient.pauseScheduledTask"
+        ],
+        "POST /v1/workspaces/:p/scheduled-tasks/:p/refresh-access": [
+          "OpenGeniClient.refreshScheduledTaskAccess"
+        ],
+        "POST /v1/workspaces/:p/scheduled-tasks/:p/resume": [
+          "OpenGeniClient.resumeScheduledTask"
+        ],
+        "POST /v1/workspaces/:p/scheduled-tasks/:p/trigger": [
+          "OpenGeniClient.triggerScheduledTask"
+        ],
+        "POST /v1/workspaces/:p/scheduled-tasks/private-summaries/:p/pause": [
+          "OpenGeniClient.pausePrivateScheduledTask"
+        ],
+        "POST /v1/workspaces/:p/session-imports": [
+          "importArchivedSession"
+        ],
+        "POST /v1/workspaces/:p/session-imports/:p/events": [
+          "appendArchivedSessionEvents"
+        ],
+        "POST /v1/workspaces/:p/sessions": [
+          "OpenGeniClient.createSession"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/active-sandbox": [
+          "OpenGeniClient.swapActiveSandbox"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/artifacts/publish": [
+          "OpenGeniClient.publishSandboxFileArtifact"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/codex-account": [
+          "OpenGeniClient.pinSessionCodexAccount"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/composer-draft/submit": [
+          "OpenGeniClient.submitComposerDraft"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/context/clear": [
+          "OpenGeniClient.clearSessionContext"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/context/compact": [
+          "OpenGeniClient.compactSessionContext"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/control": [
+          "OpenGeniClient.controlSession"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/events": [
+          "OpenGeniClient.sendEvent"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/forks": [
+          "OpenGeniClient.forkSession"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/fs/delete": [
+          "OpenGeniClient.fsDelete"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/fs/list": [
+          "OpenGeniClient.fsList"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/fs/list-batch": [
+          "OpenGeniClient.fsListBatch"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/fs/mkdir": [
+          "OpenGeniClient.fsMkdir"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/fs/move": [
+          "OpenGeniClient.fsMove"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/fs/read": [
+          "OpenGeniClient.fsRead"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/fs/read-workspace": [
+          "OpenGeniClient.fsRead"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/fs/write": [
+          "OpenGeniClient.fsWrite"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/git/diff": [
+          "OpenGeniClient.gitDiff"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/git/log": [
+          "OpenGeniClient.gitLog"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/git/read-batch": [
+          "OpenGeniClient.gitReadBatch"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/git/show": [
+          "OpenGeniClient.gitShow"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/git/status": [
+          "OpenGeniClient.gitStatus"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/goal/revisions/:p/apply": [
+          "OpenGeniClient.applyGoalRevision"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/goal/revisions/:p/reject": [
+          "OpenGeniClient.rejectGoalRevision"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/goal/revisions/:p/rollback": [
+          "OpenGeniClient.rollbackGoalRevision"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/mcp-credentials/rotate": [
+          "OpenGeniEmbeddingClient.rotateSessionMcpCredentials"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/queue/:p/delete": [
+          "OpenGeniClient.deleteQueueItem"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/queue/:p/edit": [
+          "OpenGeniClient.editQueueItem"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/queue/:p/move": [
+          "OpenGeniClient.moveQueueItem"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/queue/:p/steer": [
+          "OpenGeniClient.steerQueueItem"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/realtime": [
+          "OpenGeniClient.beginSessionRealtime"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/realtime/:p/connections/:p/activate": [
+          "OpenGeniClient.activateCodexRealtimeConnection"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/realtime/:p/sync": [
+          "OpenGeniClient.syncSessionRealtimeLedger"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/realtime/gateway": [
+          "OpenGeniClient.negotiateGatewayRealtime"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/realtime/supergrok": [
+          "OpenGeniClient.negotiateXaiSubscriptionRealtime"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/realtime/webrtc": [
+          "OpenGeniClient.negotiateCodexRealtimeWebrtc"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/realtime/websocket": [
+          "OpenGeniClient.negotiateRealtimeWebsocket"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/retry": [
+          "OpenGeniClient.retrySession"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/sandbox-recovery": [
+          "OpenGeniClient.recoverSandbox"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/steer": [
+          "OpenGeniClient.steerMessage"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/stream-capabilities/acknowledge": [
+          "OpenGeniClient.acknowledgeStream"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/terminal/exec": [
+          "OpenGeniClient.terminalExec"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/terminal/pty": [
+          "OpenGeniClient.terminalPtyOpen"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/terminal/pty/close": [
+          "OpenGeniClient.terminalPtyClose"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/terminal/pty/resize": [
+          "OpenGeniClient.terminalPtyResize"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/terminal/pty/write": [
+          "OpenGeniClient.terminalPtyWrite"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/viewers": [
+          "OpenGeniClient.attachViewer"
+        ],
+        "POST /v1/workspaces/:p/sessions/:p/viewers/:p/heartbeat": [
+          "OpenGeniClient.heartbeatViewer"
+        ],
+        "POST /v1/workspaces/:p/site-auth-connections": [
+          "OpenGeniClient.createSiteAuthConnection"
+        ],
+        "POST /v1/workspaces/:p/skills/content/:p/approve": [
+          "OpenGeniClient.approveWorkspaceSkill"
+        ],
+        "POST /v1/workspaces/:p/skills/content/:p/reject": [
+          "OpenGeniClient.rejectWorkspaceSkill"
+        ],
+        "POST /v1/workspaces/:p/skills/content/:p/remove": [
+          "OpenGeniClient.removeWorkspaceSkill"
+        ],
+        "POST /v1/workspaces/:p/skills/content/:p/restore": [
+          "OpenGeniClient.restoreWorkspaceSkill"
+        ],
+        "POST /v1/workspaces/:p/skills/content/save": [
+          "OpenGeniClient.saveWorkspaceSkill"
+        ],
+        "POST /v1/workspaces/:p/skills/install": [
+          "OpenGeniClient.installSkill"
+        ],
+        "POST /v1/workspaces/:p/skills/library/:p/install": [
+          "OpenGeniClient.installLibrarySkill"
+        ],
+        "POST /v1/workspaces/:p/skills/preview": [
+          "OpenGeniClient.previewSkillImport"
+        ],
+        "POST /v1/workspaces/:p/social/oauth/start": [
+          "OpenGeniClient.startSocialOAuth"
+        ],
+        "POST /v1/workspaces/:p/supergrok/accounts/:p/activate": [
+          "OpenGeniClient.activateSuperGrokAccount"
+        ],
+        "POST /v1/workspaces/:p/supergrok/connect/poll": [
+          "OpenGeniClient.supergrokConnectPoll"
+        ],
+        "POST /v1/workspaces/:p/supergrok/connect/start": [
+          "OpenGeniClient.supergrokConnectStart"
+        ],
+        "POST /v1/workspaces/:p/tools/calls": [
+          "OpenGeniClient.callWorkspaceSiteTool"
+        ],
+        "POST /v1/workspaces/:p/tools/invoke": [
+          "createKnownWorkspaceTools"
+        ],
+        "POST /v1/workspaces/:p/tools/manifest": [
+          "createKnownWorkspaceTools"
+        ],
+        "POST /v1/workspaces/:p/tools/resolve": [
+          "createKnownWorkspaceTools"
+        ],
+        "POST /v1/workspaces/:p/tools/target-approvals": [
+          "createKnownWorkspaceTools"
+        ],
+        "POST /v1/workspaces/:p/transcription-recordings": [
+          "OpenGeniClient.createTranscriptionRecording"
+        ],
+        "POST /v1/workspaces/:p/transcription-recordings/:p/finalize": [
+          "OpenGeniClient.finalizeTranscriptionRecording"
+        ],
+        "POST /v1/workspaces/:p/transcription-recordings/:p/process-next": [
+          "OpenGeniClient.processNextTranscriptionRecordingSegment"
+        ],
+        "POST /v1/workspaces/:p/transcriptions": [
+          "OpenGeniClient.transcribeAudio"
+        ],
+        "POST /v1/workspaces/:p/user-resource-authorities/:p/grants": [
+          "OpenGeniDocumentAuthorityClient.issueUserResourceGrant"
+        ],
+        "POST /v1/workspaces/:p/webhooks": [
+          "OpenGeniClient.createWorkspaceWebhook"
+        ],
+        "POST /v1/workspaces/:p/webhooks/:p/deliveries/:p/redeliver": [
+          "OpenGeniClient.redeliverWorkspaceWebhookDelivery"
+        ],
+        "POST /v1/workspaces/:p/webhooks/:p/rotate-secret": [
+          "rotateWorkspaceWebhookSecret"
+        ],
+        "POST /v1/workspaces/:p/webhooks/:p/test": [
+          "testWorkspaceWebhook"
+        ],
+        "POST /v1/workspaces/external/:p/:p/session-imports": [
+          "importExternalWorkspaceArchivedSession"
+        ],
+        "POST /v1/workspaces/external/:p/:p/session-imports/:p/events": [
+          "appendExternalWorkspaceArchivedSessionEvents"
+        ],
+        "PUT /v1/inbox/settings": [
+          "OpenGeniClient.updateInboxSettings"
+        ],
+        "PUT /v1/native-app/push-device": [
+          "OpenGeniClient.registerNativePushDevice"
+        ],
+        "PUT /v1/organizations/:p/credential-provider": [
+          "putOrganizationCredentialProvider"
+        ],
+        "PUT /v1/organizations/:p/integration-policy": [
+          "updateOrganizationIntegrationPolicy"
+        ],
+        "PUT /v1/organizations/:p/model-providers/:p": [
+          "OpenGeniClient.upsertOrganizationModelProviderConnection"
+        ],
+        "PUT /v1/organizations/:p/recovery/policy": [
+          "OpenGeniClient.configureOrganizationRecoveryPolicy"
+        ],
+        "PUT /v1/organizations/:p/workspaces/:p/members/:p": [
+          "OpenGeniClient.putOrganizationWorkspaceMember"
+        ],
+        "PUT /v1/workspaces/:p/allowance": [
+          "OpenGeniEmbeddingClient.setWorkspaceAllowance",
+          "setWorkspaceAllowance"
+        ],
+        "PUT /v1/workspaces/:p/artifact-catalog/:p/:p/pin": [
+          "OpenGeniClient.updateArtifactPin"
+        ],
+        "PUT /v1/workspaces/:p/channels/order": [
+          "OpenGeniClient.reorderChannels"
+        ],
+        "PUT /v1/workspaces/:p/company-profile": [
+          "OpenGeniClient.updateCompanyProfile"
+        ],
+        "PUT /v1/workspaces/:p/connections/:p/github/repositories": [
+          "OpenGeniClient.replacePersonalGitHubRepositorySelections"
+        ],
+        "PUT /v1/workspaces/:p/connections/:p/slack-bot/organization-access": [
+          "OpenGeniClient.setOpenGeniSlackBotOrganizationAccess"
+        ],
+        "PUT /v1/workspaces/:p/credential-provider": [
+          "OpenGeniClient.putWorkspaceCredentialProvider"
+        ],
+        "PUT /v1/workspaces/:p/default-rig": [
+          "OpenGeniClient.setWorkspaceDefaultRig"
+        ],
+        "PUT /v1/workspaces/:p/files/:p/visibility": [
+          "OpenGeniClient.updateFileVisibility"
+        ],
+        "PUT /v1/workspaces/:p/inbox/member-notifications": [
+          "OpenGeniClient.updateMemberNotifications"
+        ],
+        "PUT /v1/workspaces/:p/integrations/:p/instances/:p/facets/:p": [
+          "OpenGeniClient.configureIntegrationFacet"
+        ],
+        "PUT /v1/workspaces/:p/integrations/:p/instances/:p/facets/:p/source": [
+          "OpenGeniClient.saveGoogleDriveFacetSource"
+        ],
+        "PUT /v1/workspaces/:p/integrations/slack/channel-routes": [
+          "OpenGeniClient.updateOpenGeniSlackChannelRoutes"
+        ],
+        "PUT /v1/workspaces/:p/machines/:p/audience": [
+          "OpenGeniClient.changeMachineAudience"
+        ],
+        "PUT /v1/workspaces/:p/members/:p/allowance": [
+          "OpenGeniEmbeddingClient.setMemberAllowance",
+          "setMemberAllowance"
+        ],
+        "PUT /v1/workspaces/:p/memory-slack-publications/configuration": [
+          "OpenGeniMemorySlackClient.updateMemorySlackPublicationConfiguration"
+        ],
+        "PUT /v1/workspaces/:p/model-policy": [
+          "OpenGeniClient.updateWorkspaceModelAccessPolicy"
+        ],
+        "PUT /v1/workspaces/:p/new-session-draft": [
+          "OpenGeniClient.saveNewSessionDraft"
+        ],
+        "PUT /v1/workspaces/:p/published-artifacts/:p/data/collections/:p": [
+          "OpenGeniClient.defineSiteDataCollection"
+        ],
+        "PUT /v1/workspaces/:p/published-artifacts/:p/sql/queries/:p": [
+          "OpenGeniClient.defineSiteSqlQuery"
+        ],
+        "PUT /v1/workspaces/:p/published-artifacts/:p/sql/settings": [
+          "OpenGeniClient.updateSiteSqlSettings"
+        ],
+        "PUT /v1/workspaces/:p/published-artifacts/:p/visibility": [
+          "OpenGeniClient.updateWorkspaceArtifactVisibility"
+        ],
+        "PUT /v1/workspaces/:p/sessions/:p/admin-access": [
+          "OpenGeniClient.grantSessionAdminAccess"
+        ],
+        "PUT /v1/workspaces/:p/sessions/:p/agent": [
+          "OpenGeniClient.updateSessionAgent"
+        ],
+        "PUT /v1/workspaces/:p/sessions/:p/archive": [
+          "OpenGeniClient.updateSessionArchive"
+        ],
+        "PUT /v1/workspaces/:p/sessions/:p/attention": [
+          "OpenGeniClient.updateSessionAttention"
+        ],
+        "PUT /v1/workspaces/:p/sessions/:p/channel": [
+          "OpenGeniClient.updateSessionChannel"
+        ],
+        "PUT /v1/workspaces/:p/sessions/:p/composer-draft": [
+          "OpenGeniClient.saveComposerDraft"
+        ],
+        "PUT /v1/workspaces/:p/sessions/:p/inbox-mute": [
+          "OpenGeniClient.setSessionInboxMute"
+        ],
+        "PUT /v1/workspaces/:p/sessions/:p/model-account": [
+          "OpenGeniClient.setSessionModelAccount"
+        ],
+        "PUT /v1/workspaces/:p/sessions/:p/pin": [
+          "OpenGeniClient.updateSessionPin"
+        ],
+        "PUT /v1/workspaces/:p/sessions/:p/retention": [
+          "OpenGeniClient.updateSessionRetention"
+        ],
+        "PUT /v1/workspaces/:p/sessions/:p/skills": [
+          "OpenGeniClient.updateSessionSkills"
+        ],
+        "PUT /v1/workspaces/:p/sessions/:p/tool-policy": [
+          "OpenGeniClient.updateSessionToolPolicy"
+        ],
+        "PUT /v1/workspaces/:p/sessions/:p/usage-limit": [
+          "OpenGeniClient.setSessionUsageLimit",
+          "setSessionUsageLimit"
+        ],
+        "PUT /v1/workspaces/:p/sessions/:p/visibility": [
+          "OpenGeniClient.updateSessionVisibility"
+        ],
+        "PUT /v1/workspaces/:p/site-limit-profile": [
+          "OpenGeniClient.updateSiteLimitProfile"
+        ],
+        "PUT /v1/workspaces/:p/transcription-recordings/:p/chunks/:p": [
+          "OpenGeniClient.uploadTranscriptionRecordingChunk"
+        ],
+        "PUT /v1/workspaces/:p/video-generation/policy": [
+          "OpenGeniClient.updateVideoGenerationPolicy"
+        ],
+        "PUT /v1/workspaces/external": [
+          "OpenGeniClient.ensureWorkspace"
+        ]
+      },
+      "acceptedGaps": [
+        {
+          "call": "DELETE /v1/workspaces/:p/transcription-recordings/:p",
+          "reason": "Removed in the October 27, 2026 pre-launch cleanup (see the exception log in docs/design/api-compatibility-policy.md) before the November 3, 2026 policy that forbids breaking changes. No API users existed, and the owner chose not to restore them."
+        },
+        {
+          "call": "GET /v1/workspaces/:p/automations/runs",
+          "reason": "Removed in the October 27, 2026 pre-launch cleanup (see the exception log in docs/design/api-compatibility-policy.md) before the November 3, 2026 policy that forbids breaking changes. No API users existed, and the owner chose not to restore them."
+        },
+        {
+          "call": "GET /v1/workspaces/:p/automations/sources",
+          "reason": "Removed in the October 27, 2026 pre-launch cleanup (see the exception log in docs/design/api-compatibility-policy.md) before the November 3, 2026 policy that forbids breaking changes. No API users existed, and the owner chose not to restore them."
+        },
+        {
+          "call": "GET /v1/workspaces/:p/automations/triggers",
+          "reason": "Removed in the October 27, 2026 pre-launch cleanup (see the exception log in docs/design/api-compatibility-policy.md) before the November 3, 2026 policy that forbids breaking changes. No API users existed, and the owner chose not to restore them."
+        },
+        {
+          "call": "GET /v1/workspaces/:p/pr-review/github",
+          "reason": "Removed in the October 27, 2026 pre-launch cleanup (see the exception log in docs/design/api-compatibility-policy.md) before the November 3, 2026 policy that forbids breaking changes. No API users existed, and the owner chose not to restore them."
+        },
+        {
+          "call": "GET /v1/workspaces/:p/pr-review/registrations",
+          "reason": "Removed in the October 27, 2026 pre-launch cleanup (see the exception log in docs/design/api-compatibility-policy.md) before the November 3, 2026 policy that forbids breaking changes. No API users existed, and the owner chose not to restore them."
+        },
+        {
+          "call": "GET /v1/workspaces/:p/transcription-recordings",
+          "reason": "Removed in the October 27, 2026 pre-launch cleanup (see the exception log in docs/design/api-compatibility-policy.md) before the November 3, 2026 policy that forbids breaking changes. No API users existed, and the owner chose not to restore them."
+        },
+        {
+          "call": "GET /v1/workspaces/:p/transcription-recordings/:p",
+          "reason": "Removed in the October 27, 2026 pre-launch cleanup (see the exception log in docs/design/api-compatibility-policy.md) before the November 3, 2026 policy that forbids breaking changes. No API users existed, and the owner chose not to restore them."
+        },
+        {
+          "call": "PATCH /v1/workspaces/:p/automations/sources/:p",
+          "reason": "Removed in the October 27, 2026 pre-launch cleanup (see the exception log in docs/design/api-compatibility-policy.md) before the November 3, 2026 policy that forbids breaking changes. No API users existed, and the owner chose not to restore them."
+        },
+        {
+          "call": "PATCH /v1/workspaces/:p/automations/triggers/:p",
+          "reason": "Removed in the October 27, 2026 pre-launch cleanup (see the exception log in docs/design/api-compatibility-policy.md) before the November 3, 2026 policy that forbids breaking changes. No API users existed, and the owner chose not to restore them."
+        },
+        {
+          "call": "PATCH /v1/workspaces/:p/pr-review/registrations/:p",
+          "reason": "Removed in the October 27, 2026 pre-launch cleanup (see the exception log in docs/design/api-compatibility-policy.md) before the November 3, 2026 policy that forbids breaking changes. No API users existed, and the owner chose not to restore them."
+        },
+        {
+          "call": "PATCH /v1/workspaces/:p/pr-review/repositories/:p",
+          "reason": "Removed in the October 27, 2026 pre-launch cleanup (see the exception log in docs/design/api-compatibility-policy.md) before the November 3, 2026 policy that forbids breaking changes. No API users existed, and the owner chose not to restore them."
+        },
+        {
+          "call": "POST /v1/workspaces/:p/automations/sources",
+          "reason": "Removed in the October 27, 2026 pre-launch cleanup (see the exception log in docs/design/api-compatibility-policy.md) before the November 3, 2026 policy that forbids breaking changes. No API users existed, and the owner chose not to restore them."
+        },
+        {
+          "call": "POST /v1/workspaces/:p/automations/sources/:p/events",
+          "reason": "Removed in the October 27, 2026 pre-launch cleanup (see the exception log in docs/design/api-compatibility-policy.md) before the November 3, 2026 policy that forbids breaking changes. No API users existed, and the owner chose not to restore them."
+        },
+        {
+          "call": "POST /v1/workspaces/:p/automations/triggers",
+          "reason": "Removed in the October 27, 2026 pre-launch cleanup (see the exception log in docs/design/api-compatibility-policy.md) before the November 3, 2026 policy that forbids breaking changes. No API users existed, and the owner chose not to restore them."
+        },
+        {
+          "call": "POST /v1/workspaces/:p/pr-review/registrations",
+          "reason": "Removed in the October 27, 2026 pre-launch cleanup (see the exception log in docs/design/api-compatibility-policy.md) before the November 3, 2026 policy that forbids breaking changes. No API users existed, and the owner chose not to restore them."
+        },
+        {
+          "call": "POST /v1/workspaces/:p/pr-review/repositories",
+          "reason": "Removed in the October 27, 2026 pre-launch cleanup (see the exception log in docs/design/api-compatibility-policy.md) before the November 3, 2026 policy that forbids breaking changes. No API users existed, and the owner chose not to restore them."
+        },
+        {
+          "call": "POST /v1/workspaces/:p/transcription-recordings",
+          "reason": "Removed in the October 27, 2026 pre-launch cleanup (see the exception log in docs/design/api-compatibility-policy.md) before the November 3, 2026 policy that forbids breaking changes. No API users existed, and the owner chose not to restore them."
+        },
+        {
+          "call": "POST /v1/workspaces/:p/transcription-recordings/:p/finalize",
+          "reason": "Removed in the October 27, 2026 pre-launch cleanup (see the exception log in docs/design/api-compatibility-policy.md) before the November 3, 2026 policy that forbids breaking changes. No API users existed, and the owner chose not to restore them."
+        },
+        {
+          "call": "POST /v1/workspaces/:p/transcription-recordings/:p/process-next",
+          "reason": "Removed in the October 27, 2026 pre-launch cleanup (see the exception log in docs/design/api-compatibility-policy.md) before the November 3, 2026 policy that forbids breaking changes. No API users existed, and the owner chose not to restore them."
+        },
+        {
+          "call": "PUT /v1/workspaces/:p/transcription-recordings/:p/chunks/:p",
+          "reason": "Removed in the October 27, 2026 pre-launch cleanup (see the exception log in docs/design/api-compatibility-policy.md) before the November 3, 2026 policy that forbids breaking changes. No API users existed, and the owner chose not to restore them."
+        }
+      ]
+    }
+  ]
+}
