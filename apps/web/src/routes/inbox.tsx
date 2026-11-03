@@ -366,8 +366,12 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
     [context.workspaces],
   );
   const workspacesWithItems = new Set(items.map((item) => item.workspaceId));
-  // Nothing to pick, nothing shown: the scope switch appears only when items span workspaces.
-  const showScope = workspacesWithItems.size > 1 || !workspacesWithItems.has(workspaceId);
+  const allBillingNotifications = inbox.data?.billingNotifications ?? [];
+  // Billing belongs to the organization, not this workspace. Keep the way
+  // back to the all-workspaces view even when the last chat item disappears.
+  const showScope =
+    allBillingNotifications.length > 0 ||
+    (items.length > 0 && (workspacesWithItems.size > 1 || !workspacesWithItems.has(workspaceId)));
   const scoped = items.filter((item) => scope === "all" || item.workspaceId === workspaceId);
   const awake = scoped.filter((item) => !isSnoozed(item, now));
   // Most important first: what waits on the person, then what agents wanted
@@ -376,7 +380,7 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
   const fromAgents = awake.filter((item) => item.kind === "notification");
   const replies = awake.filter((item) => item.kind === "reply");
   const snoozed = scoped.filter((item) => isSnoozed(item, now));
-  const billingNotifications = scope === "all" ? (inbox.data?.billingNotifications ?? []) : [];
+  const billingNotifications = scope === "all" ? allBillingNotifications : [];
 
   useEffect(() => {
     // An agent's note is read once shown in full; a reply shows only its start,
@@ -738,7 +742,7 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
           description="Questions, updates and billing notices for you."
         />
         <div className="flex min-w-0 flex-col gap-4 pt-6">
-          {showScope && items.length > 0 ? (
+          {showScope ? (
             <Toolbar>
               <SegmentedControl
                 aria-label="Show items from"
