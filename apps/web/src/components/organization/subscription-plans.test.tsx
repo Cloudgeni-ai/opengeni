@@ -1,7 +1,7 @@
 import { afterEach, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ReactNode } from "react";
-import { createRoot, type Root } from "react-dom/client";
+import type { Root } from "react-dom/client";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { useSubscriptionCatalog } from "./use-subscription-catalog";
@@ -15,6 +15,8 @@ import {
 
 GlobalRegistrator.register();
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+// React's input-event detection needs a document when react-dom is imported.
+const { createRoot } = await import("react-dom/client");
 const { SubscriptionPlans } = await import("./subscription-plans");
 const { SeatLimitNotice } = await import("./plan-seats");
 const { OrganizationCreditBalance } = await import("@/components/organization-credit-balance");
@@ -137,6 +139,38 @@ test("checkout retries retain one UUID even after closing and reopening confirma
     planKey: "pro",
     successUrl: "https://console.example.test/workspaces/a/organization?section=billing",
   });
+});
+
+test("checkout sends a typed promo code, trimmed, and only checkout asks for one", async () => {
+  const client = clientFixture();
+  client.createSubscriptionCheckout.mockImplementation(async () => {
+    throw new Error("This code can't be used for this plan.");
+  });
+  await mount(plans(client, "free"));
+  await click("Get Pro");
+  const input = document.querySelector<HTMLInputElement>("[role=dialog] input");
+  expect(input).not.toBeNull();
+  await submit();
+  expect(client.createSubscriptionCheckout.mock.calls[0]![0]).not.toHaveProperty("promotionCode");
+
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
+      input,
+      " PLAN100 ",
+    );
+    input!.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await submit();
+  expect(client.createSubscriptionCheckout.mock.calls[1]![0]).toMatchObject({
+    planKey: "pro",
+    promotionCode: "PLAN100",
+  });
+  expect(document.body.textContent).toContain("This code can't be used for this plan.");
+
+  await click("Cancel");
+  await mount(plans(clientFixture(), "pro"));
+  await click("Upgrade to Max");
+  expect(document.querySelector("[role=dialog] input")).toBeNull();
 });
 
 test("downgrade and cancel use separate period-end endpoints without expiring credit early", async () => {
@@ -334,7 +368,7 @@ test("balance splits monthly, promotional and other general credit without doubl
   expect(document.body.textContent).toContain("For app use. Resets monthly.");
   expect(document.body.textContent).toContain("Credits");
   expect(document.body.textContent).toContain("For API use, and app use beyond plan credit.");
-  expect(document.body.textContent).not.toContain("Platform fee on your own keys");
+  expect(document.body.textContent).not.toContain("Platform fee on your own API keys");
 });
 
 test("plan credit and credits are separate balances, and own-key fees have their own line", async () => {
@@ -374,7 +408,7 @@ test("plan credit and credits are separate balances, and own-key fees have their
   expect(document.body.textContent).not.toContain("Total balance");
   // A charge, set apart from the balances.
   expect(document.body.querySelector('[data-testid="byok-platform-fee"]')!.textContent).toBe(
-    "Platform fee on your own keysCharged this month$1.25",
+    "Platform fee on your own API keysCharged this month$1.25",
   );
 });
 
@@ -461,6 +495,34 @@ test("the Plans section states the two pricing lines", async () => {
   expect(document.body.textContent).toContain(
     "API use in your own product is pay-as-you-go at cost plus 5%, own keys welcome.",
   );
+});
+
+test("plans of at least $20 a month include own subscriptions with no fee, Free does not", async () => {
+  // A cheaper paid plan sits below the $20 line and does not include them.
+  const lite = {
+    ...previewPlans.find((item) => item.key === "pro")!,
+    key: "lite",
+    label: "Lite",
+    monthlyPriceMicros: 10_000_000,
+  };
+  const catalogPlans = [...previewPlans, lite];
+  await mount(
+    <SubscriptionPlans
+      client={clientFixture() as unknown as OpenGeniBrowserClient}
+      accountId="org-a"
+      returnUrl="https://console.example.test/workspaces/a/organization?section=billing"
+      catalog={{ accountId: "org-a", revision: 1, plans: catalogPlans, plan: previewPlan("free") }}
+      plan={previewPlan("free")}
+      canManage
+      supportEmail="support@example.test"
+      onChanged={() => {}}
+    />,
+  );
+  const lines = document.body.textContent?.match(/Your own AI subscriptions, no fee/g) ?? [];
+  // Pro, Max and Enterprise (custom price) qualify; Free and Lite do not.
+  expect(previewPlans.map((item) => item.key)).toEqual(["free", "pro", "max", "enterprise"]);
+  expect(document.body.textContent).toContain("Lite");
+  expect(lines).toHaveLength(3);
 });
 
 test("an organization without a monthly grant shows no empty plan credit meter or row", async () => {

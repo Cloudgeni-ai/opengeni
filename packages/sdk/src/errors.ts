@@ -523,6 +523,8 @@ export function formatErrorMessage(
         (error.details.action as { type?: unknown }).type === "upgrade_plan"
           ? "Upgrade to Pro to use your own key."
           : "Add credits to use your own key.";
+    } else if (error.details?.code === "subscription_plan_required") {
+      message = "Upgrade to Pro to use your own subscription.";
     } else if (error.status === 402 || error.code === "payment_required") {
       message = "There are not enough credits to continue.";
     } else if (error.status === 429 || error.code === "rate_limited") {

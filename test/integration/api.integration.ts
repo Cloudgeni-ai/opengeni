@@ -8257,6 +8257,11 @@ describe("API component integration", () => {
       {},
     );
     expect(memberPersonal.installUrl).toBeNull();
+    // Without github:manage the agent still has a link to the GitHub settings,
+    // where an admin installs the app on another account.
+    expect((memberPersonal as unknown as { settingsUrl: string | null }).settingsUrl).toBe(
+      `https://app.opengeni.test/workspaces/${grant.workspaceId}/plugins?open=integration%3Agithub`,
+    );
     expect(memberPersonal.personal).toMatchObject({ status: "not_connected", connectUrl: null });
     // Personal guidance reaches the agent only where personal sign-in exists.
     const describedTool = (server: unknown, name: string) =>

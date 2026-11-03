@@ -2836,11 +2836,21 @@ describe("connections routes", () => {
         allowSubjectOwned: true,
       });
       expect(provisionedCredential?.credential).toEqual(oauthCredential);
+      // A new own login starts turned on in the shared workspace it was added
+      // from (1168): one active workspace_shared grant there, and nothing else.
       const initialGrants = await shared!.admin`
-        select id, context, status from organization_user_resource_grants
+        select workspace_id::text as workspace_id, action, context, status
+        from organization_user_resource_grants
         where authority_id = ${provisionedBody.connection.authorityId}
       `;
-      expect(initialGrants).toHaveLength(0);
+      expect([...initialGrants]).toEqual([
+        {
+          workspace_id: workspace.workspaceId,
+          action: "connection.use",
+          context: "workspace_shared",
+          status: "active",
+        },
+      ]);
       const granted = await api.request(
         `/v1/workspaces/${workspace.workspaceId}/connection-authorities/${provisionedBody.connection.authorityId}/grants`,
         {
@@ -3118,11 +3128,13 @@ describe("connections routes", () => {
           .map((row) => row.personal_connection_delegations),
       ).toEqual([[otherDelegation], [otherDelegation]]);
       expect((await provision()).status).toBe(201);
+      // A replayed provision leaves the one grant the login started with.
       const grantsAfterReplay = await shared!.admin`
-        select id, context, status from organization_user_resource_grants
+        select workspace_id::text as workspace_id, action, context, status
+        from organization_user_resource_grants
         where authority_id = ${provisionedBody.connection.authorityId}
       `;
-      expect(grantsAfterReplay).toHaveLength(0);
+      expect([...grantsAfterReplay]).toEqual([...initialGrants]);
       const disconnected = await api.request(
         `/v1/workspaces/${workspace.workspaceId}/connections/${provisionedBody.connection.id}`,
         { method: "DELETE", headers },

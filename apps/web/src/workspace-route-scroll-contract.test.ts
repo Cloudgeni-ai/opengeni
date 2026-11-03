@@ -30,6 +30,7 @@ const workspaceRouteContracts = {
   workspaceMachinesRoute: { kind: "page", source: "routes/machines.tsx" },
   workspaceComputerUseRoute: { kind: "page", source: "routes/computer-use.tsx" },
   workspaceReadOnlyChatsRoute: { kind: "page", source: "routes/read-only-chats.tsx" },
+  workspaceLegacyReadOnlyChatsRoute: { kind: "redirect" },
   workspaceInboxRoute: { kind: "page", source: "routes/inbox.tsx" },
   workspaceInsightsRoute: { kind: "page", source: "routes/insights.tsx" },
   workspaceCapabilitiesRoute: {

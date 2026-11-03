@@ -8,6 +8,7 @@ import {
   organizationSettingsAccess,
   resolveOrganizationSettingsSection,
 } from "./organization-settings-access";
+import { organizationSettingsDescription } from "../components/settings/organization-settings-pages";
 import type { AccessContext, Workspace } from "@opengeni/react/app/types";
 
 const managed = { productAccessMode: "managed", auth: { mode: "managedSession" } } as const;
@@ -71,15 +72,29 @@ describe("organization settings access", () => {
     );
   });
 
-  test("members see only what they can use: identity (read-only), Models, their agents and security", () => {
+  test("members see only what they can use: identity (read-only), Models, their agents, People (names only) and security", () => {
     // Models shows a member their own Personal workspace's default and allowed models.
     // Every member connects their own coding agents to the organization MCP server.
+    // People shows a member who is in the organization, by name only.
     expect(visible("member", ["account:read"])).toEqual([
       "agents",
       "identity",
       "models",
+      "people",
       "security",
     ]);
+    // Single-user local mode has no people, and a key or service is no member.
+    expect(visible("member", ["account:read"], local)).not.toContain("people");
+    expect([
+      ...organizationSettingsAccess({
+        accessContext: {
+          ...context("member", ["account:read"]),
+          subjectId: "api_key:k1",
+        } as AccessContext,
+        clientConfig: managed as never,
+        accountId: "acme",
+      }).visibleSections,
+    ]).not.toContain("people");
   });
 
   test("a session without an organization membership gets no Models page", () => {
@@ -153,6 +168,44 @@ describe("organization settings access", () => {
     expect(owner).toMatchObject({ administrator: true, modelsAdministrator: true });
   });
 
+  test("owners and admins manage organization integrations and keys; only the owner makes a service account an admin", () => {
+    const access = (
+      role: "owner" | "admin" | "member",
+      permissions: string[],
+      clientConfig: typeof managed | typeof local = managed,
+    ) =>
+      organizationSettingsAccess({
+        accessContext: context(role, permissions, []),
+        clientConfig: clientConfig as never,
+        accountId: "acme",
+      });
+    const admin = access("admin", ["account:read", "members:manage", "billing:read"]);
+    expect(admin.canManageOrganizationIntegrations).toBe(true);
+    expect(admin.canMakeServiceAccountAdmin).toBe(false);
+    // Admins manage member-level keys and service accounts; owner-level ones stay the owner's.
+    expect(admin.canManageOrganizationApiKeys).toBe(true);
+    expect(admin.canManageOwnerLevelApiKeys).toBe(false);
+    expect(admin.visibleSections.has("developer")).toBe(true);
+    const owner = access("owner", ["account:read", "account:admin", "api_keys:manage"]);
+    expect(owner.canManageOrganizationIntegrations).toBe(true);
+    expect(owner.canMakeServiceAccountAdmin).toBe(true);
+    expect(owner.canManageOrganizationApiKeys).toBe(true);
+    expect(owner.canManageOwnerLevelApiKeys).toBe(true);
+    expect(access("owner", ["account:admin"], local).canManageOrganizationIntegrations).toBe(true);
+    const member = access("member", ["account:read"]);
+    expect(member.canManageOrganizationIntegrations).toBe(false);
+    expect(member.canManageOrganizationApiKeys).toBe(false);
+    expect(member.visibleSections.has("developer")).toBe(false);
+    // Without a signed-in session the admin role counts for nothing, as on the server.
+    const signedOut = access("admin", ["account:read"], {
+      productAccessMode: "managed",
+      auth: { mode: "none" },
+    } as never);
+    expect(signedOut.canManageOrganizationIntegrations).toBe(false);
+    expect(signedOut.canManageOrganizationApiKeys).toBe(false);
+    expect(signedOut.visibleSections.has("developer")).toBe(false);
+  });
+
   test("a workspace admin also sees Models, for the workspaces they administer", () => {
     const grants = [
       { workspaceId: "ws-team", accountId: "acme", permissions: ["workspace:admin"] },
@@ -163,6 +216,7 @@ describe("organization settings access", () => {
       "agents",
       "identity",
       "models",
+      "people",
       "security",
     ]);
     expect(
@@ -248,5 +302,14 @@ describe("organization helpers for the picker", () => {
     expect(pages("owner", ["account:admin"])).toBe(true);
     expect(pages("admin", ["account:read", "workspace:create"])).toBe(true);
     expect(pages("member", ["account:read"])).toBe(false);
+  });
+});
+
+describe("People subtitle", () => {
+  test("members, who see names only, aren't told about roles", () => {
+    expect(organizationSettingsDescription("people", "Acme")).toBe(
+      "Everyone in Acme, with one role each and a private Personal workspace.",
+    );
+    expect(organizationSettingsDescription("people", "Acme", false)).toBe("Everyone in Acme.");
   });
 });

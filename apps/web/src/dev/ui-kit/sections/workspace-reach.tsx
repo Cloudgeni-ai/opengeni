@@ -144,7 +144,7 @@ export default function WorkspaceReachSection() {
         <StateCell label="Long list" align="stretch">
           <Live
             owner={{ kind: "organization", name: ORGANIZATION }}
-            managedBy="Organization owners manage it."
+            managedBy="Organization owners and admins manage it."
             initial={{ workspaceIds: ["design", "legal"], personalWorkspaces: false }}
             personalWorkspaces="choice"
             workspaces={MANY}

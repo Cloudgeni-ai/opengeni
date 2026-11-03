@@ -346,6 +346,19 @@ export function CatalogItemPage({
           Turn off for this workspace
         </DropdownMenuItem>,
       );
+    } else if (item.enabled && item.kind === "mcp" && item.canRemove === true) {
+      // A member removes a custom server they added; admins turn servers off.
+      menu.push(
+        <DropdownMenuItem
+          key="remove-server"
+          variant="destructive"
+          disabled={busy}
+          onSelect={() => onAction({ type: "remove_server", item })}
+        >
+          <TrashIcon />
+          Remove from this workspace
+        </DropdownMenuItem>,
+      );
     }
   } else if (organizationTurnedOff) {
     // Back on means the organization's setup again: no sign-in or key of its own.

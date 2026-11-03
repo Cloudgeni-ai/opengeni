@@ -13,6 +13,7 @@ import type {
   DesktopDictationAudio,
   DesktopDictationHistoryEntry,
   DesktopDictationKeys,
+  DesktopDictationModel,
   DesktopDictationModifier,
   DesktopDictationOutput,
   DesktopDictationPermissionId,
@@ -43,6 +44,8 @@ const LANGUAGE = /^[a-z]{2,3}(-[A-Za-z0-9]{2,8})?$/u;
 const PROFILE_ID = /^[A-Za-z0-9_-]{1,64}$/u;
 const ENTRY_ID = /^[A-Za-z0-9_-]{1,100}$/u;
 const AUDIO_TYPE = /^audio\/[\w.+-]+(;[\w=.,+\- ]*)?$/u;
+/** A provider id or model name, as the server lists them. */
+const MODEL_PART = /^[\w.:/@+-]{1,128}$/u;
 
 /**
  * Off, with one shortcut: Control and Fn held together on a Mac, a key
@@ -137,7 +140,26 @@ function parseProfile(value: unknown): DesktopDictationProfile | null {
     return null;
   }
   const name = candidate.name.trim().slice(0, 60);
-  return { id: candidate.id, name: name || "Dictate", shortcut, language };
+  const model = parseModel(candidate.model);
+  return {
+    id: candidate.id,
+    name: name || "Dictate",
+    shortcut,
+    language,
+    ...(model ? { model } : {}),
+  };
+}
+
+/** A shortcut's own model, or null for the workspace's voice input model. */
+function parseModel(value: unknown): DesktopDictationModel | null {
+  if (!value || typeof value !== "object") return null;
+  const { providerId, model } = value as Record<string, unknown>;
+  return typeof providerId === "string" &&
+    MODEL_PART.test(providerId) &&
+    typeof model === "string" &&
+    MODEL_PART.test(model)
+    ? { providerId, model }
+    : null;
 }
 
 /** The same physical keys, so two shortcuts never fight over one press. */

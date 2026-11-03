@@ -34,6 +34,7 @@ import {
 import { SiteView } from "../../artifacts";
 import { SiteVersionMenu } from "../components/artifacts/site-version-menu";
 import { useArtifactsBackLink } from "../components/artifacts/artifact-page-chrome";
+import { CopyArtifactLinkButton } from "../components/artifacts/copy-artifact-link";
 import type {
   CreatedConversation,
   NewConversationCreateOptions,
@@ -189,16 +190,18 @@ export function SiteViewRoute({
   useRecordSiteOpened(client, workspaceId, siteId);
   const live = useSiteLiveVersion(client, workspaceId, siteId);
   const artifact = live.detail?.artifact;
-  // In the macOS app the Site's name is the window bar's title, as a page's
-  // is, instead of in its toolbar (which shows it again in full screen, where
-  // the bar's row is hidden).
-  const titleInWindowBar = useWindowBarTitle(artifact?.title ?? null);
   // The publish form, open for this Site; another Site starts without it.
   const siteKey = `${workspaceId}/${siteId}`;
   const [publishingFor, setPublishingFor] = useState<string | null>(null);
   const publishingSite =
     publishingFor === siteKey && artifact?.status === "active" ? artifact : null;
   const publishing = publishingSite !== null;
+  // In the macOS app the Site's name is the window bar's title, as a page's
+  // is, instead of in its toolbar (which shows it again in full screen, where
+  // the bar's row is hidden). The publish form, opened in front of the Site,
+  // names the bar once it has loaded; the Site's claim mounted first, so it
+  // yields while the form is open.
+  const titleInWindowBar = useWindowBarTitle(artifact?.title ?? null, publishing);
   // Full screen is the route's so opening the form can leave it first.
   const [fullScreen, setFullScreen] = useState(false);
   const openPublishing = useCallback(() => {
@@ -303,11 +306,18 @@ export function SiteViewRoute({
               // The one publication control. The Site view never says "Live":
               // it stays current, and says so only while Updating or Reconnecting.
               liveStatus={
-                <SitePublicationControl
-                  load={publication.load}
-                  canPublish={canPublish}
-                  onOpenPublishing={openPublishing}
-                />
+                <>
+                  <SitePublicationControl
+                    load={publication.load}
+                    canPublish={canPublish}
+                    onOpenPublishing={openPublishing}
+                  />
+                  <CopyArtifactLinkButton
+                    workspaceId={workspaceId}
+                    item={{ kind: "site", id: siteId }}
+                    className="size-8 rounded-md text-fg-muted hover:text-fg"
+                  />
+                </>
               }
               versionId={artifact ? (artifact.currentVersion?.id ?? null) : undefined}
               watch={live.watch}

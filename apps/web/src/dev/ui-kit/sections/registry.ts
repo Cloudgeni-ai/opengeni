@@ -92,6 +92,8 @@ export const SECTION_KEYS = [
   "shared-overview",
   // Selection
   "setting-row",
+  "own-where-it-works",
+  "my-things",
   "switch",
   "segmented-control",
   "choice-cards",
@@ -135,6 +137,7 @@ export const SECTION_KEYS = [
   "page-service-accounts",
   "page-models",
   "page-models-cache",
+  "page-models-sharing",
   "page-schedules",
   "page-schedule-form",
   "page-meetings",
@@ -412,6 +415,24 @@ export const SECTIONS: readonly SectionMeta[] = [
       },
     ],
     load: () => import("./setting-row"),
+  },
+  {
+    key: "own-where-it-works",
+    group: "Selection",
+    title: "Where it works",
+    purpose:
+      "Your own login, model plan or machine: each workspace you belong to, with a switch for your own messages there.",
+    usedOn: "Connector page, model plan page, machine page",
+    load: () => import("./own-where-it-works"),
+  },
+  {
+    key: "my-things",
+    group: "Selection",
+    title: "My things",
+    purpose:
+      "Every one of your own logins, model plans and machines in the organization, each with where it works.",
+    usedOn: "Settings › Your account › My things",
+    load: () => import("./my-things"),
   },
   {
     key: "switch",
@@ -1006,6 +1027,15 @@ export const SECTIONS: readonly SectionMeta[] = [
     purpose: "Production Models components with an in-memory API fixture.",
     usedOn: "Settings > Models",
     load: () => import("./page-models-cache"),
+  },
+  {
+    key: "page-models-sharing",
+    group: "Pages",
+    title: "Sharing a workspace's own account",
+    purpose:
+      "A workspace's own subscription account shared with other workspaces keeps its owner; going wider moves it to the organization.",
+    usedOn: "Settings > Models > account > Where it can be used",
+    load: () => import("./page-models-sharing"),
   },
   {
     key: "page-schedules",

@@ -106,7 +106,10 @@ import {
   organizationApiKeyNoun,
 } from "@/components/capabilities/organization-api-key-dialog";
 import { featuredConnectors } from "@/components/capabilities/featured-connectors";
-import { useApiIntegrationOAuthCallback } from "@/components/capabilities/use-api-integration-accounts";
+import {
+  useApiIntegrationOAuthCallback,
+  useFinishUnfinishedConnectSetups,
+} from "@/components/capabilities/use-api-integration-accounts";
 import {
   nativeCatalogItemNotice,
   nativeCatalogItemVisible,
@@ -134,6 +137,7 @@ import { ListRow, RowList } from "@opengeni/react/ui/list-row";
 import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { PageHeader } from "@opengeni/react/ui/page-header";
 import { SECTION_TITLE_CLASS } from "@opengeni/react/ui/section";
+import { WindowBarTitleBoundary } from "@opengeni/react/ui/window-bar-title";
 import { cn } from "@opengeni/react/app/lib/utils";
 import { PrReviewAutomationCard } from "@/components/capabilities/pr-review-automation-card";
 import { Button } from "@opengeni/react/ui/button";
@@ -579,6 +583,9 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   // curated definition here is oauth2-only, so a single shared effect (below)
   // handles the OAuth return for all of them.
   useApiIntegrationOAuthCallback({ workspaceId, refresh, onRuntimeChanged });
+  // A setup interrupted after sign-in (closed dialog, reload, closed app)
+  // finishes here without reopening it.
+  useFinishUnfinishedConnectSetups({ workspaceId, refresh, onRuntimeChanged });
   const teamsBot = useTeamsBotIntegration({ workspaceId, refreshRevision: catalogData.revision });
   const microsoftTeams = useMicrosoftTeamsIntegration({
     workspaceId,
@@ -1789,6 +1796,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
           workspaceId={workspaceId}
           items={items}
           connections={connections}
+          connectionsLoadFailed={connectionsRetryable}
           bindings={slackInstallationBindings}
           refresh={refresh}
           onRuntimeChanged={onRuntimeChanged}
@@ -1972,25 +1980,33 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
           className="mx-auto w-full max-w-[1200px] px-4 pt-6 pb-[max(1.25rem,env(safe-area-inset-bottom))] sm:px-6 lg:px-8"
         >
           <LineTabs value={activeTab} onValueChange={setActiveTab} className="min-w-0">
-            <PageHeader
-              icon={<PlugIcon />}
-              title="Capabilities"
-              description="Tools, skills, and plugins your agents can use"
-              actions={
-                <div
-                  ref={setCatalogActionTarget}
-                  className="flex items-center gap-2 empty:hidden"
-                />
-              }
-              tabs={
-                <LineTabsList aria-label="Capability types">
-                  <LineTabsTrigger value="all">All</LineTabsTrigger>
-                  <LineTabsTrigger value="connections">Connections</LineTabsTrigger>
-                  <LineTabsTrigger value="skills">Skills</LineTabsTrigger>
-                  <LineTabsTrigger value="plugins">Plugins</LineTabsTrigger>
-                </LineTabsList>
-              }
-            />
+            {/*
+              The catalog stays mounted, hidden, under the pages it opens: its
+              header names the macOS window bar only until an open page does.
+              Only the header: skill, plugin and bundle pages render inside
+              this tree (portaled out) and take the bar.
+            */}
+            <WindowBarTitleBoundary fallback>
+              <PageHeader
+                icon={<PlugIcon />}
+                title="Capabilities"
+                description="Tools, skills, and plugins your agents can use"
+                actions={
+                  <div
+                    ref={setCatalogActionTarget}
+                    className="flex items-center gap-2 empty:hidden"
+                  />
+                }
+                tabs={
+                  <LineTabsList aria-label="Capability types">
+                    <LineTabsTrigger value="all">All</LineTabsTrigger>
+                    <LineTabsTrigger value="connections">Connections</LineTabsTrigger>
+                    <LineTabsTrigger value="skills">Skills</LineTabsTrigger>
+                    <LineTabsTrigger value="plugins">Plugins</LineTabsTrigger>
+                  </LineTabsList>
+                }
+              />
+            </WindowBarTitleBoundary>
             {(connectionsAccessDenied ||
               (context.accessContext?.workspaceGrants.some(
                 (grant) => grant.workspaceId === workspaceId,

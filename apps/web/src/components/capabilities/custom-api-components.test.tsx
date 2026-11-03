@@ -209,6 +209,40 @@ describe("custom API components", () => {
       },
     });
   });
+
+  test("the server's canRemove decides whether a custom API's Remove is enabled", async () => {
+    for (const [canRemove, canManage, enabled] of [
+      // An admin's, another person's or an unknown installer's: not for a member.
+      [false, true, false],
+      // The member's own, even where adding stays with admins.
+      [true, false, true],
+    ] as const) {
+      const rendered = await render(
+        <CustomApiSection
+          instances={[{ ...installedInstance(), canRemove }]}
+          connections={[]}
+          canAdd={false}
+          canManage={canManage}
+          canChange={false}
+          busyKey={null}
+          onConnect={() => {}}
+          onUpdate={() => {}}
+          onReconnect={() => {}}
+          onRemove={() => {}}
+          onAddOwnKey={() => {}}
+          onSetOrganizationHere={() => {}}
+        />,
+      );
+      try {
+        const remove = Array.from(rendered.container.querySelectorAll("button")).find(
+          (button) => button.textContent?.trim() === "Remove",
+        );
+        expect(remove?.disabled).toBe(!enabled);
+      } finally {
+        await rendered.unmount();
+      }
+    }
+  });
 });
 
 function organizationInstance(

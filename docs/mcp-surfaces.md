@@ -122,7 +122,10 @@ Connected agents are listed, changed and disconnected at
 `/v1/organizations/:id/mcp-connections` (the person, or an agent with their
 Full access; SDK
 `listOrganizationMcpConnections`, `updateOrganizationMcpConnection`,
-`deleteOrganizationMcpConnection`). Migration `0601` is rolling.
+`deleteOrganizationMcpConnection`). Owners and admins also see everyone's and
+disconnect them, except that only an owner disconnects an owner's (each listed
+agent carries `canDisconnect`); only the person changes what their agent can
+do. Migration `0601` is rolling.
 
 ### App actions in chat
 

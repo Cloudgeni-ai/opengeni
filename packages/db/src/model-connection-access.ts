@@ -13,11 +13,15 @@ import {
   getSubscriptionCoreModelConnectionAccess,
   ModelConnectionWorkspaceNotInOrganizationError,
   readSubscriptionCoreModelConnectionAccess,
+  removeSubscriptionCoreModelConnectionFromWorkspace,
   updateSubscriptionCoreModelConnectionAccess,
   withModelConnectionAccessScope,
   type ModelConnectionAccess,
 } from "./subscription-core/access-editor";
-import type { SubscriptionCoreAccess } from "./subscription-core/access";
+import {
+  listSubscriptionCoreAdministeredWorkspaceIds,
+  type SubscriptionCoreAccess,
+} from "./subscription-core/access";
 
 // The policy shape, its errors and the route scope are shared with the
 // provider-neutral core editor; the public names stay exported from here.
@@ -176,6 +180,31 @@ export async function updateSubscriptionCoreProviderModelConnectionAccess(
   const provider = subscriptionCoreProviderOfKind(target.kind);
   if (!provider) throw new Error("This connection kind is not written to the core");
   return await updateSubscriptionCoreModelConnectionAccess(db, provider, target, policy);
+}
+
+/**
+ * Removes another workspace's own subscription connection from the workspace
+ * in `target` (D-52), for a kind whose provider is on the core. True when
+ * removed; null when no such connection serves the workspace.
+ */
+export async function removeSubscriptionCoreProviderModelConnectionFromWorkspace(
+  db: Database,
+  target: ModelConnectionTarget & { workspaceId: string },
+): Promise<true | null> {
+  const provider = subscriptionCoreProviderOfKind(target.kind);
+  if (!provider) throw new Error("This connection kind is not written to the core");
+  return await removeSubscriptionCoreModelConnectionFromWorkspace(db, provider, target);
+}
+
+/**
+ * The workspaces the person in `target` administers, which a workspace's own
+ * subscription connection can be given to from that workspace's route (D-52).
+ */
+export async function listModelConnectionAdministeredWorkspaceIds(
+  db: Database,
+  target: { accountId: string; workspaceId: string; subjectId: string },
+): Promise<string[]> {
+  return await listSubscriptionCoreAdministeredWorkspaceIds(db, target);
 }
 
 /**

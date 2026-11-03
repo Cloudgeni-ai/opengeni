@@ -2714,6 +2714,10 @@ async function registerInterruptionWakes(
  * cannot discover them. Signal-with-start is intentional here: a closed
  * workflow cheaply re-reads the terminal row and exits, while an open workflow
  * is released from an otherwise unbounded durable wait.
+ *
+ * A sub-chat whose content is already stored (or being stored) has no
+ * workflow left to release and refuses new wakes, so it is left out; without
+ * that, cancelling an archived chat with a stored sub-chat failed outright.
  */
 async function registerCancellationWakes(
   db: Database,
@@ -2735,6 +2739,7 @@ async function registerCancellationWakes(
       from ${schema.sessions} session
       where session.workspace_id = ${input.workspaceId}
         and session.id in (${sessionIds})
+        and session.content_archive_state is null
     ), upserted as (
       insert into ${schema.sessionWorkflowWakeOutbox} (
         session_id, account_id, workspace_id, temporal_workflow_id, reason, control_revision
@@ -3637,20 +3642,9 @@ async function cancelSessionSubtreeInTransaction(
     let sequence = session.lastSequence + (session.id === input.rootSessionId ? 1 : 0);
     const cancelledTurns = cancelledTurnsBySession.get(session.id) ?? [];
     const preinsertedEvents: Array<{ id: string; sequence: number }> = [];
-    const eventValues: SessionEventInsertWithPayload[] = [];
-    for (const update of (systemUpdatesBySession.get(session.id) ?? []).sort((left, right) =>
-      left.id.localeCompare(right.id),
-    )) {
-      eventValues.push({
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: session.id,
-        sequence: ++sequence,
-        type: "system.update.cancelled",
-        payload: { updateId: update.id, reason: "session_cancelled" },
-        occurredAt: now,
-      });
-    }
+    // Closing a turn's pending tool calls inserts its events right away, so
+    // it comes before every event batched below: the cursor accepts only
+    // inserts that continue it exactly.
     for (const turn of cancelledTurns) {
       const closedTools = await closePendingSessionToolCallsInTransaction(db, {
         accountId: input.accountId,
@@ -3668,6 +3662,22 @@ async function cancelSessionSubtreeInTransaction(
           sequence: event.sequence,
         })),
       );
+    }
+    const eventValues: SessionEventInsertWithPayload[] = [];
+    for (const update of (systemUpdatesBySession.get(session.id) ?? []).sort((left, right) =>
+      left.id.localeCompare(right.id),
+    )) {
+      eventValues.push({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: session.id,
+        sequence: ++sequence,
+        type: "system.update.cancelled",
+        payload: { updateId: update.id, reason: "session_cancelled" },
+        occurredAt: now,
+      });
+    }
+    for (const turn of cancelledTurns) {
       for (const humanInput of (humanInputsByTurn.get(turn.id) ?? []).sort((left, right) =>
         left.id.localeCompare(right.id),
       )) {
@@ -3781,6 +3791,12 @@ async function cancelSessionSubtreeInTransaction(
         queueVersion: sql`${schema.sessions.queueVersion} + 1`,
         queueHeadPosition: 0,
         queueTailPosition: 0,
+        // A cancelled chat has no turn left to wake: its input wait ends with
+        // it, so it no longer counts as waiting (nor keeps it from storage).
+        inputWaitTurnId: null,
+        inputWaitUntil: null,
+        inputWaitReason: null,
+        inputWaitSetAt: null,
         lastSequence: sequence,
         updatedAt: now,
       })
@@ -3811,18 +3827,10 @@ async function cancelSessionSubtreeInTransaction(
   };
 }
 
-/** Archive must never silently interrupt work that started after the UI's idle snapshot. */
-export class SessionArchiveConfirmationRequiredError extends Error {
-  readonly code = "session_archive_confirmation_required";
-  constructor() {
-    super("This chat has active work. Confirm Pause and archive to stop it for everyone.");
-  }
-}
-
 /**
  * Whether a chat or anything it started still has work: a turn, a wait for
- * input, an active goal or a running background command. Archive asks before
- * pausing such a chat.
+ * input, an active goal or a running background command. Archive cancels such
+ * work when its undo window ends.
  */
 export async function sessionWorkstreamHasActiveWork(
   db: Database | SessionActivityDatabase,
@@ -3863,8 +3871,6 @@ export async function mutateSessionControlInTransaction(
     expectedControlEtag?: string | null;
     /** Request-scoped callers bound the control prefix wait; lifecycle callers omit it. */
     controlLockTimeoutMs?: number;
-    /** Personal archive only: verify idle under the same control fence as Pause. */
-    requireIdleForArchive?: boolean;
   },
 ): Promise<SessionControlMutationResult> {
   const workspace = await lockWorkspaceInferenceControl(db, input.workspaceId, "update", {
@@ -3980,11 +3986,6 @@ export async function mutateSessionControlInTransaction(
       outcome: "replayed",
       replay: true,
     };
-  }
-  if (input.requireIdleForArchive && input.action === "pause") {
-    if (await sessionWorkstreamHasActiveWork(db, input.workspaceId, input.sessionId)) {
-      throw new SessionArchiveConfirmationRequiredError();
-    }
   }
   if (input.actor.type === "agent_attempt") {
     await assertAgentCommandAuthorityInTransaction(db, {

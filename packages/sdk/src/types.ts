@@ -1107,6 +1107,18 @@ export type ConnectionMetadata = {
   updatedBySubjectId: string | null;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Your own login only: whether it works for your messages in the workspace
+   * this list was read from. It does in your Personal workspace and in each
+   * shared workspace where it is turned on; it starts on where it was added.
+   */
+  turnedOnHere?: boolean | undefined;
+  /**
+   * The standing grant that turns your own login on here; revoke it with
+   * `revokeUserResourceGrant` to stop using the login here. Null in your
+   * Personal workspace, which needs none.
+   */
+  turnedOnHereGrantId?: string | null | undefined;
 };
 
 /** Where a brokered credential is written on each outbound provider request. */
@@ -2432,9 +2444,13 @@ export type UpdateSessionUnattendedRequest = {
 
 export type UpdateSessionArchiveRequest = {
   archived: boolean;
+  /** Ignored; kept for older clients. */
   clientEventId?: string;
+  /** Ignored; there is one kind of archive. Kept for older clients. */
   mode?: "pause_and_archive" | "hide_for_me";
+  /** Ignored; archiving stops running work itself. Kept for older clients. */
   confirmPause?: boolean;
+  /** Ignored; kept for older clients. */
   expectedVersion?: number;
 };
 
@@ -4402,7 +4418,9 @@ export type FirstPartyMcpToolName =
   | "slack_bot_prepare_message"
   | "slack_bot_send_prepared_message"
   | "slack_agent_handoff"
+  | "slack_agent_suggest"
   | "slack_agent_chats"
+  | "slack_agent_propose"
   | "fiken_companies_list"
   | "fiken_contacts_list"
   | "fiken_contact_create"
@@ -5412,6 +5430,12 @@ export type CodexAccount = {
   ownInWorkspaceIds?: string[];
   /** The organization's list only: who the account reaches. */
   reach?: SubscriptionAccountReach;
+  /**
+   * The workspace whose own account this is, or null for the organization's
+   * and personal accounts. In another workspace's list it was shared there by
+   * its owner, and that workspace can only remove it. Absent from older servers.
+   */
+  ownerWorkspaceId?: string | null;
   chatgptAccountId?: string | null;
   label?: string | null;
   email?: string | null;
@@ -5921,10 +5945,20 @@ export type ClientConfig = {
 export type ClientVoiceInputConfig = {
   available: boolean;
   providers?: VoiceInputProviderId[] | undefined;
+  /** Every model a dictation may name, of each ready provider. */
+  models?: DictationModelOption[] | undefined;
   maxDurationSeconds: number;
   maxSizeBytes: number;
   acceptedMimeTypes: string[];
   resumable?: ClientResumableVoiceInputConfig | undefined;
+};
+
+/** A model a dictation can name, such as for one desktop dictation shortcut. */
+export type DictationModelOption = {
+  providerId: VoiceInputProviderId;
+  providerName: string;
+  model: string;
+  name: string;
 };
 
 export type ClientResumableVoiceInputConfig = {
@@ -6049,13 +6083,15 @@ export type UserResourceKind =
   | "document"
   | "variable_set"
   | "rig"
-  | "connected_machine";
+  | "connected_machine"
+  | "subscription_connection";
 export type UserResourceGrantAction =
   | "connection.use"
   | "document.read"
   | "variable_set.use"
   | "rig.use"
-  | "connected_machine.use";
+  | "connected_machine.use"
+  | "subscription_connection.use";
 export type UserResourceAuthorityGrant = {
   grantId: string;
   targetWorkspaceId: string;
@@ -6100,7 +6136,9 @@ export type IssueUserResourceGrantRequest =
     }
   | {
       scope: "user";
-      resourceKind: Exclude<UserResourceKind, "connection">;
+      /** `connection` turns your own login on for your messages in this
+       * workspace (its `authorityId` from `listOwnConnectionAccounts`). */
+      resourceKind: UserResourceKind;
       mode: "always";
       context: "user_private" | "workspace_shared";
       sessionId?: null | undefined;
@@ -6119,6 +6157,52 @@ export type RevokeUserResourceGrantResponse = {
     status: "revoked";
     revokedAt: string;
   };
+};
+/** Your own things that you turn on workspace by workspace. */
+export type OwnResourceReachKind = "connection" | "subscription_connection" | "connected_machine";
+/** One of your workspaces in "Where it works" for your own login, plan or machine. */
+export type OwnResourceReachWorkspace = {
+  workspaceId: string;
+  name: string;
+  /** Your Personal workspace. */
+  personal: boolean;
+  /** The workspace this was asked from. */
+  current: boolean;
+  /** It works here for your own messages. Nobody else's messages ever use it. */
+  on: boolean;
+  /** Always on here: logins and plans in your Personal workspace. */
+  alwaysOn: boolean;
+  /** You may turn it on or off here. */
+  canChange: boolean;
+};
+export type OwnResourceReachResponse = {
+  resourceKind: OwnResourceReachKind;
+  resourceId: string;
+  /** Your Personal workspace first, then by name. */
+  workspaces: OwnResourceReachWorkspace[];
+};
+export type SetOwnResourceReachRequest = {
+  resourceKind: OwnResourceReachKind;
+  resourceId: string;
+  on: boolean;
+};
+export type SetOwnResourceReachResponse = { workspace: OwnResourceReachWorkspace };
+/** One of your own logins, model plans or machines, with where it works. */
+export type OwnResource = {
+  resourceKind: OwnResourceReachKind;
+  resourceId: string;
+  /** A login's or plan's account (its email when known), or a machine's name. */
+  name: string;
+  /** Login: the service it signs in to. Plan: the provider (`codex`, `claude`, `xai`). Machine: null. */
+  provider: string | null;
+  /** Plan only: the plan the provider reports, when known. */
+  plan: string | null;
+  /** Your Personal workspace first, then by name. */
+  workspaces: OwnResourceReachWorkspace[];
+};
+export type OwnResourcesResponse = {
+  /** Logins, then plans, then machines, each by name. */
+  resources: OwnResource[];
 };
 
 export type OrganizationMembershipRole = "owner" | "admin" | "member";
@@ -6452,6 +6536,18 @@ export type ListOrganizationMembersResponse = {
 };
 export type ListOrganizationAdministrationMembersResponse = {
   members: OrganizationAdministrationMember[];
+};
+/** An active person in the organization, by name only. */
+export type OrganizationMemberName = {
+  /** The organization membership id. */
+  id: string;
+  name: string | null;
+  you: boolean;
+};
+/** `available` is false until the deployment's database grants the names list. */
+export type ListOrganizationMemberNamesResponse = {
+  available: boolean;
+  members: OrganizationMemberName[];
 };
 export type AcceptOrganizationInvitationResponse = {
   invitation: OrganizationInvitation;
@@ -6860,6 +6956,12 @@ export type OrganizationMcpConnection = {
   lastUsedAt: string | null;
   expiresAt: string;
   revokedAt: null;
+  /**
+   * Listed agents: whether the caller can disconnect this one. Everyone
+   * disconnects their own; owners and admins anyone's, except only an owner an
+   * owner's.
+   */
+  canDisconnect?: boolean;
 };
 
 export type OrganizationMcpConnectionList = {
@@ -6890,6 +6992,11 @@ export type PersonalApiKey = {
   expiresAt: string | null;
   lastUsedAt: string | null;
   createdAt: string;
+  /**
+   * Listed keys: whether the caller can revoke this one. Everyone revokes their
+   * own; owners and admins anyone's, except only an owner an owner's.
+   */
+  canRevoke?: boolean;
 };
 
 export type ListPersonalApiKeysResponse = {
@@ -8449,6 +8556,56 @@ export type Rig = {
   versionCount: number;
   createdAt: string;
   updatedAt: string;
+  /** Where it works; present only for organization rigs. */
+  reach?: OrganizationComputeReach | null | undefined;
+};
+
+/**
+ * Where an organization machine or rig works: always in the workspace it was
+ * connected from or made in (`homeWorkspaceId`), plus every shared workspace
+ * of the organization (`allowedWorkspaceIds: null`) or the listed ones, and
+ * members' Personal workspaces when `allowPersonalWorkspaces` is on.
+ */
+export type OrganizationComputeReach = {
+  homeWorkspaceId: string;
+  allowedWorkspaceIds: string[] | null;
+  allowPersonalWorkspaces: boolean;
+};
+
+/** PUT .../machines/:enrollmentId/reach and PUT .../rigs/:rigId/reach body:
+ * an organization owner or admin changes where an organization machine or rig
+ * works. The ids are the organization's shared workspaces. */
+export type UpdateOrganizationComputeReachRequest = {
+  allowedWorkspaceIds: string[] | null;
+  allowPersonalWorkspaces: boolean;
+};
+
+export type OrganizationComputeReachResponse = {
+  reach: OrganizationComputeReach;
+};
+
+/** An organization machine or rig, wherever it works: its name and where it
+ * works. Machines carry the id of their sandbox, which machine pages open by. */
+export type OrganizationComputeSummary = {
+  id: string;
+  name: string;
+  sandboxId?: string | null | undefined;
+  reach: OrganizationComputeReach;
+};
+
+/** GET .../organization-machines: every organization machine, wherever it
+ * works, for organization owners. `complete` is false while the server can
+ * only list the ones that work in the requested workspace. */
+export type ListOrganizationMachinesResponse = {
+  machines: OrganizationComputeSummary[];
+  complete: boolean;
+};
+
+/** GET .../organization-rigs: every organization sandbox environment,
+ * wherever it works, for organization owners. `complete` as for machines. */
+export type ListOrganizationRigsResponse = {
+  rigs: OrganizationComputeSummary[];
+  complete: boolean;
 };
 
 export type RigChangeKind = "setup_append" | "definition_edit";
@@ -9406,6 +9563,13 @@ export type CapabilityCatalogItem = {
   metadata: Record<string, unknown>;
   createdAt?: string | undefined;
   updatedAt?: string | undefined;
+  /**
+   * Whether the viewer may remove this custom MCP server from the workspace
+   * (`removeCapabilityInstallation` on the client): integration admins
+   * remove any, a member only one they turned on, while it is on. Older
+   * servers omit it.
+   */
+  canRemove?: boolean | undefined;
 };
 
 export type CapabilityInstallation = {
@@ -9419,6 +9583,11 @@ export type CapabilityInstallation = {
   metadata: Record<string, unknown>;
   enabledAt: string;
   updatedAt: string;
+};
+
+export type RemoveCapabilityInstallationResponse = {
+  /** The installation that was removed. */
+  removed: CapabilityInstallation;
 };
 
 export type CapabilityCatalogResponse = {
@@ -9619,6 +9788,11 @@ export type IntegrationFacetBindingSummary = {
   updatedAt: string;
   directlyOwned: boolean;
   owners: CapabilityComponentOwner[];
+  /**
+   * Whether the caller may remove it: admins remove anything, a member only
+   * what they added. Older servers omit it.
+   */
+  canRemove?: boolean | undefined;
 };
 
 export type IntegrationInstanceFacetsResponse = {
@@ -9870,6 +10044,11 @@ export type ApiIntegrationInstallationSummary = {
     auth: ApiIntegrationAuthPreview;
     enabledHere: boolean;
   };
+  /**
+   * Whether the caller may remove this instance: admins remove any, a member
+   * only one they added. Older servers omit it.
+   */
+  canRemove?: boolean | undefined;
 };
 
 export type ListApiIntegrationsResponse = {
@@ -9999,6 +10178,11 @@ export type PluginInstallationSummary = {
   status: "active" | "needs_attention";
   installedAt: string;
   updatedAt: string;
+  /**
+   * Whether the caller may remove this plugin: admins remove any, a member
+   * only one they added. Older servers omit it.
+   */
+  canRemove?: boolean | undefined;
 };
 
 export type ListInstalledPluginsResponse = {
@@ -10978,6 +11162,8 @@ export type MachineView = {
    * session boxes; null limits on a real machine mean unrestricted. */
   operationPolicy: MachineOperationPolicy | null;
   metrics: MetricSample | null;
+  /** Where an organization machine works; null for every other machine. */
+  reach?: OrganizationComputeReach | null;
 };
 
 /** GET /v1/workspaces/:ws/machines — the dashboard list + the active-sandbox
@@ -11234,7 +11420,13 @@ export type EnrollTokenExchangeResponse = {
 
 export type ModelConnectionAccessPolicy = {
   allowedModels: string[] | null;
-  /** Organization-pool grants; null for every shared workspace, including new ones. */
+  /**
+   * The shared workspaces that may use the account; null for every shared
+   * workspace, including new ones. A workspace's own account always keeps
+   * serving its workspace. On a workspace's own route this is the list of
+   * workspaces it serves, and only workspaces the caller also administers
+   * can be added.
+   */
   allowedWorkspaces: string[] | null;
   allowPersonalWorkspaces: boolean;
   /**
@@ -11245,6 +11437,13 @@ export type ModelConnectionAccessPolicy = {
   allowedPeople?: string[] | null;
   /** Explicit owner consent to share a personal subscription with the organization. */
   sharePersonal?: true;
+  /**
+   * Explicit consent to make a workspace's own account the organization's, so
+   * that workspace's admins no longer manage it. Required on the organization
+   * route before it can serve every shared workspace, Personal workspaces or
+   * chosen people.
+   */
+  moveToOrganization?: true;
   version: number;
 };
 export type ModelConnectionAccessResponse = {

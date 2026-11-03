@@ -10,6 +10,14 @@ import { inertProps } from "../../lib/inert";
 import { retainedImageId } from "../../components/markdown";
 import { LazyPart } from "../../components/lazy-part";
 import { useConnectionAccounts } from "../components/capabilities/use-connection-accounts";
+import {
+  stopOwnLoginsHere,
+  turnOnOwnLoginsHere,
+} from "../components/capabilities/own-login-turned-on";
+import {
+  OwnLoginsSharedHeadsUp,
+  ownLoginsInUse,
+} from "../components/capabilities/own-logins-shared-heads-up";
 import { sessionAuthRecommendation } from "../../session-auth-recommendation";
 import { completeSessionCapabilityOAuth } from "../components/capabilities/attach-session-capability";
 import { finishMcpCapabilityOAuthReturn } from "./session-capability-oauth-return";
@@ -1109,14 +1117,15 @@ export function SessionRoute({
   // calm inline error on the reconnect card.
   const reconnectTransport = useMemo(() => context.client.connectTransport(), [context.client]);
   const [reconnectRequest, setReconnectRequest] = useState<NativeConnectRequest | null>(null);
-  // The account whose card in this chat opened the reconnect: once it is done,
-  // the agent continues the request that stopped, as after a first setup.
-  const reconnectCardConnection = useRef<string | null>(null);
+  // The account whose card in this chat opened each reconnect: once it is
+  // done, the agent continues the request that stopped, as after a first
+  // setup. Kept per request, since a reconnect can finish after its dialog
+  // closed and another one opened.
+  const reconnectCardConnections = useRef(new WeakMap<NativeConnectRequest, string>());
   // Workspace GitHub App setup from the follow-up repository menu uses this
   // route-level Connect dialog: the menu closes when GitHub's authorization
   // popup takes focus, which would unmount a dialog hosted inside it.
   const connectGitHubApp = useCallback(() => {
-    reconnectCardConnection.current = null;
     setReconnectRequest(githubAppConnectRequest(workspaceId, reconnectTransport, page.href()));
   }, [page, reconnectTransport, workspaceId]);
   const connectPersonalGitHub = context.connectPersonalGitHub;
@@ -1145,8 +1154,7 @@ export function SessionRoute({
           item.connectionId,
         );
         if (account) {
-          reconnectCardConnection.current = item.connectionId;
-          setReconnectRequest({
+          const request: NativeConnectRequest = {
             scope: { workspaceId, transport: reconnectTransport },
             providerId: account.providerId,
             ownership: account.ownership,
@@ -1162,7 +1170,9 @@ export function SessionRoute({
             displayName: account.label,
             returnUrl: page.href(),
             idempotencyKey: crypto.randomUUID(),
-          });
+          };
+          reconnectCardConnections.current.set(request, item.connectionId);
+          setReconnectRequest(request);
           return;
         }
       }
@@ -1534,6 +1544,13 @@ export function SessionRoute({
             params: { workspaceId },
           }))
       }
+      onContinueInNewSession={() =>
+        void navigate({
+          to: "/workspaces/$workspaceId/sessions",
+          params: { workspaceId },
+          search: { continueSessionId: sessionId },
+        })
+      }
       onApprove={(approvalId, answer) => approve(approvalId, "approve", answer)}
       onReject={(approvalId) => approve(approvalId, "reject")}
       onReconnect={onReconnect}
@@ -1559,7 +1576,8 @@ export function SessionRoute({
             request={reconnectRequest}
             onClose={() => setReconnectRequest(null)}
             onComplete={() => {
-              setReconnectRequest(null);
+              // Setup can finish after its dialog closed: leave a newer one open.
+              setReconnectRequest((current) => (current === reconnectRequest ? null : current));
               if (reconnectRequest.providerId === "github-app") {
                 toast.success("GitHub connected");
                 void context.refreshGitHub(workspaceId, undefined, {
@@ -1572,8 +1590,7 @@ export function SessionRoute({
               // server checks the account now has what its card asked for,
               // wakes the agent at most once per card, and not at all once
               // the person has written since. Never fails the finished setup.
-              const connectionId = reconnectCardConnection.current;
-              reconnectCardConnection.current = null;
+              const connectionId = reconnectCardConnections.current.get(reconnectRequest);
               if (connectionId)
                 void Promise.resolve()
                   .then(() =>
@@ -2173,6 +2190,8 @@ function SessionChatPane(props: {
   /** Opens where a person can make a refused Skill, instruction, or Knowledge change. */
   onLearningRefusalOpen: (place: LearningRefusalPlace) => void;
   onNewSession: () => void;
+  /** Starts a new chat that continues this archived chat's work. */
+  onContinueInNewSession: () => void;
   onApprove: (approvalId: string, answer?: McpElicitationAnswer) => Promise<void>;
   onReject: (approvalId: string) => Promise<void>;
   onReconnect: (item: AuthNeededItem) => void | Promise<void>;
@@ -2311,7 +2330,7 @@ function SessionChatPane(props: {
     [context.client, props.session.workspaceId],
   );
   const cancelled = isTerminalSessionStatus(props.session.status);
-  // Moved to long-term storage after a long idle period: readable, not continuable.
+  // Archived (moving to or in long-term storage): readable, not continuable.
   const readOnlyArchive = sessionReadOnlyArchive(props.session);
   const terminal = cancelled || readOnlyArchive !== null;
   const answerStore = useMemo(() => browserInteractiveAnswerStore(), []);
@@ -3049,7 +3068,7 @@ function SessionChatPane(props: {
     blocked: isTerminalSessionStatus(props.session.status)
       ? "This chat has ended. Start a new chat to use a repository."
       : sessionReadOnlyArchive(props.session)
-        ? "This chat is read-only. Start a new chat to use a repository."
+        ? "This chat is archived. Continue in a new chat to use a repository."
         : connectionAccounts.requiresAccountChoice
           ? "Choose an account for this chat's connected tools in the composer first."
           : personalAttachment.requiresDecision
@@ -3647,6 +3666,41 @@ function SessionChatPane(props: {
   const modelSwitchHeadsUp = chosenModelHeadsUp ? (
     <ModelSwitchHeadsUp text={chosenModelHeadsUp} className="px-3.5 pt-2.5 md:px-4" />
   ) : null;
+  // Your own logins in a chat shared with the workspace (D-54): one quiet line
+  // for you only, never a gate. A Personal workspace has nobody else. It stays
+  // mounted while none are on, so one turned off here can go back on.
+  const ownLoginsApply =
+    !terminal &&
+    props.session.tenancy?.visibility === "workspace" &&
+    !isPersonalWorkspace(workspace, context.managedSelfContext);
+  const ownLoginsHeadsUp = ownLoginsApply ? (
+    <OwnLoginsSharedHeadsUp
+      key={props.session.id}
+      // While the accounts can't be read, the line keeps what it last knew.
+      logins={
+        connectionAccounts.loading || connectionAccounts.error
+          ? null
+          : ownLoginsInUse(
+              // Only the connectors this chat uses.
+              connectionAccounts.accountGroups,
+              connectionAccounts.accountChoices,
+              context.accessContext.subjectId,
+            )
+      }
+      className="px-3.5 pt-2.5 md:px-4"
+      logoFor={(login) => props.resolveProviderLogo(login.accounts[0]!.providerDomain)}
+      onChange={async (login, on) => {
+        try {
+          if (on)
+            await turnOnOwnLoginsHere(context.client, props.session.workspaceId, login.accounts);
+          else await stopOwnLoginsHere(context.client, props.session.workspaceId, login.accounts);
+        } finally {
+          // Some connections may have changed even when one failed.
+          await connectionAccounts.refresh();
+        }
+      }}
+    />
+  ) : null;
   // The chat's Secrets row: hidden when its agent can't use secrets.
   const sessionSecrets = useSessionSecrets(props.session.id, {
     enabled: workspacePermissions.includes("secrets:list"),
@@ -3866,8 +3920,10 @@ function SessionChatPane(props: {
     props.session.workspaceId,
     "connections:write",
   );
+  // An archived chat is read-only: there is nothing to retry or recover.
   const failureRecovery =
     !props.hasNewer &&
+    !readOnlyArchive &&
     props.failure &&
     (props.session.status === "failed" ||
       (props.creditExhausted && props.session.status === "idle")) ? (
@@ -4063,8 +4119,7 @@ function SessionChatPane(props: {
             <div className={cn("mx-auto w-full max-w-3xl pt-6", gutter)}>
               <ReadOnlySessionNotice
                 session={props.session}
-                idleDays={context.clientConfig.sessionArchive?.idleDays}
-                onNewSession={props.onNewSession}
+                onContinue={props.onContinueInNewSession}
               />
             </div>
           ) : null}
@@ -4430,6 +4485,7 @@ function SessionChatPane(props: {
                 }}
                 disabled={terminal}
                 header={
+                  ownLoginsHeadsUp ||
                   unavailableModelNotice ||
                   codexUsageNotice ||
                   modelSwitchHeadsUp ||
@@ -4463,6 +4519,7 @@ function SessionChatPane(props: {
                       {creditRefusalNotice ? (
                         <div className="px-2 pt-2">{creditRefusalNotice}</div>
                       ) : null}
+                      {ownLoginsHeadsUp}
                     </>
                   ) : null
                 }

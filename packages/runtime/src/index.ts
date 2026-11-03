@@ -904,7 +904,11 @@ export {
   protocolItemsFromGeneratedItems,
   type OpenSuffixInterruptionKind,
 } from "./open-suffix";
-export { normalizeProtocolJsonValue, UnsupportedProtocolJsonValueError } from "./protocol-json";
+export {
+  normalizeProtocolJsonValue,
+  UnsupportedProtocolJsonValueError,
+  type ProtocolJsonOptions,
+} from "./protocol-json";
 export {
   projectHistoryForProvider,
   ProviderHistoryIncompatibleError,
@@ -9006,12 +9010,13 @@ function isFirstPartyMcpServer(
 }
 
 /**
- * The bound for one server's setup requests (initialize, tools/list): the
- * longer of its call timeout and its setup timeout. Undefined keeps the
- * client default.
+ * The bound for one server's setup requests (initialize, tools/list): its
+ * setup timeout when it has one, else its call timeout. A long call timeout
+ * (a server whose tools legitimately run for minutes) never stretches setup
+ * against an unreachable server. Undefined keeps the client default.
  */
 function mcpSetupTimeoutMs(config: Settings["mcpServers"][number]): number | undefined {
-  const timeoutMs = Math.max(config.timeoutMs ?? 0, config.setupTimeoutMs ?? 0);
+  const timeoutMs = config.setupTimeoutMs ?? config.timeoutMs ?? 0;
   return timeoutMs > 0 ? timeoutMs : undefined;
 }
 
@@ -10351,6 +10356,8 @@ export type RunAgentStreamOptions = {
   onSandboxSessionReady?: (session: SandboxSessionLike) => Promise<void> | void;
   contextCompactionSignal?: () => ProviderContextTokenSignal | null | undefined;
   contextCompactionRequested?: () => boolean | Promise<boolean>;
+  /** Drain completed SDK events before the host raises this compaction signal. */
+  onCompactionHandover?: (error: import("./context-compaction").CompactionNeededError) => void;
   /** Stored-size and per-request image compaction triggers. */
   contextHistoryFootprint?: HistoryFootprintCompactionOptions;
   // Host-managed git credential renewal registration. Called only after the
@@ -10602,8 +10609,10 @@ export async function runAgentStream(
         ...(overrides.modelPreemption ? { modelPreemption: overrides.modelPreemption } : {}),
       },
       () =>
-        withPreparedCompactionRequest(agent, () =>
-          runAgentStreamInternal(agent, input, settings, overrides, scope),
+        withPreparedCompactionRequest(
+          agent,
+          () => runAgentStreamInternal(agent, input, settings, overrides, scope),
+          overrides.onCompactionHandover,
         ),
     );
     // Observe the SDK's own settlement promise before exposing the stream. Do
@@ -13546,16 +13555,87 @@ function gitCredentialTokenWriterCommandLines(
   ];
 }
 
+/**
+ * Git matches `url.<base>.insteadOf` by plain string prefix, so a rule for
+ * `https://github.com/acme/app` alone would also capture
+ * `https://github.com/acme/app-demos.git`, `.../app.github.io` and every other
+ * repository whose URL merely starts with the brokered one, and send it to a
+ * broker route that cannot serve it ("Git repository route not found").
+ *
+ * Git applies the longest matching rule, so each brokered repository also gets
+ * an identity rule for every printable ASCII character that can continue its
+ * URL other than `/`. Those longer rules leave sibling URLs untouched, while the
+ * exact repository URL and paths below it (`<repository>/...`) still reach the
+ * broker. A continuation that is itself another brokered URL keeps that URL's
+ * own broker rule. The identity rules are expanded by a shell loop so each URL
+ * adds a few hundred bytes to the setup command, not ~10 KB.
+ *
+ * Every spelling the provider declares equivalent (`<repo>` and `<repo>.git`
+ * for GitHub and GitLab) is routed to the same broker URI, each with its own
+ * identity rules, so the clone URL a provider shows also uses the broker.
+ */
+function gitHttpBrokerRewrites(
+  routes: RuntimeGitHttpBrokerRouteDescriptor[],
+): Array<{ repositoryUri: string; brokerUri: string }> {
+  const rewrites = new Map<string, string>();
+  for (const route of routes) rewrites.set(route.repositoryUri, route.brokerUri);
+  for (const route of routes) {
+    for (const alias of gitRemoteUriAliases(route.repositoryUri, route.provider)) {
+      if (!rewrites.has(alias)) rewrites.set(alias, route.brokerUri);
+    }
+  }
+  return [...rewrites].map(([repositoryUri, brokerUri]) => ({ repositoryUri, brokerUri }));
+}
+
+function gitHttpBrokerSiblingContinuations(
+  repositoryUri: string,
+  brokeredRepositoryUris: ReadonlySet<string>,
+): string[] {
+  const continuations: string[] = [];
+  for (let code = 0x21; code <= 0x7e; code += 1) {
+    const next = String.fromCharCode(code);
+    if (next === "/" || brokeredRepositoryUris.has(`${repositoryUri}${next}`)) continue;
+    continuations.push(next);
+  }
+  return continuations;
+}
+
+/** Escape a value for a double-quoted Git config subsection name or value. */
+function gitConfigQuotedContent(value: string): string {
+  if (/[\u0000-\u001f\u007f]/u.test(value)) {
+    throw new Error("Git HTTP broker route contains a control character");
+  }
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
 function gitHttpBrokerConfigCommandLines(routes: RuntimeGitHttpBrokerRouteDescriptor[]): string[] {
+  const rewrites = gitHttpBrokerRewrites(routes);
+  const brokeredRepositoryUris = new Set(rewrites.map((rewrite) => rewrite.repositoryUri));
   return [
     'git_http_broker_config="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/http-broker.gitconfig"',
     'mkdir -p "$(dirname "$git_http_broker_config")"',
     'broker_umask="$(umask)"',
     "umask 077",
     ': > "$git_http_broker_config.tmp.$$"',
-    ...routes.map(
+    "opengeni_git_broker_sibling_rules() {",
+    '  opengeni_git_broker_repository="$1"',
+    "  shift",
+    '  for opengeni_git_broker_next in "$@"; do',
+    `    printf '[url "%s%s"]\\n\\tinsteadOf = "%s%s"\\n' "$opengeni_git_broker_repository" "$opengeni_git_broker_next" "$opengeni_git_broker_repository" "$opengeni_git_broker_next"`,
+    "  done",
+    "}",
+    ...rewrites.map(
       (route) =>
-        `git config --file "$git_http_broker_config.tmp.$$" --add ${shellQuote(`url.${route.brokerUri}.insteadOf`)} ${shellQuote(route.repositoryUri)}`,
+        `printf '[url "%s"]\\n\\tinsteadOf = "%s"\\n' ${shellQuote(gitConfigQuotedContent(route.brokerUri))} ${shellQuote(gitConfigQuotedContent(route.repositoryUri))} >> "$git_http_broker_config.tmp.$$"`,
+    ),
+    ...rewrites.map(
+      (route) =>
+        `opengeni_git_broker_sibling_rules ${[
+          route.repositoryUri,
+          ...gitHttpBrokerSiblingContinuations(route.repositoryUri, brokeredRepositoryUris),
+        ]
+          .map((value) => shellQuote(gitConfigQuotedContent(value)))
+          .join(" ")} >> "$git_http_broker_config.tmp.$$"`,
     ),
     'mv -f "$git_http_broker_config.tmp.$$" "$git_http_broker_config"',
     'umask "$broker_umask"',

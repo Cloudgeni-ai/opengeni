@@ -37,6 +37,29 @@ test("a meeting without a title is named plainly", () => {
   );
 });
 
+test("after a re-run it writes untouched notes again, over exactly their revision", () => {
+  const first = meetingSummaryPrompt({ recordingId: id, title: "Standup" });
+  // A first summary's message is unchanged by the option.
+  expect(meetingSummaryPrompt({ recordingId: id, title: "Standup", replacesRevision: null })).toBe(
+    first,
+  );
+  const again = meetingSummaryPrompt({ recordingId: id, title: "Standup", replacesRevision: 3 });
+  expect(again).toStartWith(
+    `Write the notes for the meeting "Standup" (meeting id ${id}) again. Its transcript was made again`,
+  );
+  expect(again).toContain("If that revision is not 3, someone changed the notes since");
+  expect(again).not.toContain("If that revision is above 0");
+  expect(again).toContain(
+    `meeting_notes_save: meetingId ${id}, the Markdown as notes, the name as title, and expectedRevision 3.`,
+  );
+  // Everything about the notes themselves is the same.
+  expect(again.slice(again.indexOf("Write the notes in Markdown"))).toBe(
+    first
+      .slice(first.indexOf("Write the notes in Markdown"))
+      .replace("expectedRevision 0", "expectedRevision 3"),
+  );
+});
+
 test("the notes name the meeting, in its language", () => {
   const prompt = meetingSummaryPrompt({ recordingId: id, title: null });
   expect(prompt).toContain("Name the meeting too: a title of at most eight words");

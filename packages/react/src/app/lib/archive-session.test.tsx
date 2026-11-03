@@ -1,87 +1,97 @@
-import { afterAll, beforeEach, expect, mock, test } from "bun:test";
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act } from "react";
-import { createRoot } from "react-dom/client";
-
-GlobalRegistrator.register();
-(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean | undefined }).IS_REACT_ACT_ENVIRONMENT = true;
-afterAll(() => GlobalRegistrator.unregister());
+import { beforeEach, expect, mock, test } from "bun:test";
 
 type Shown = {
+  kind: "plain" | "success";
   title: string;
-  options: {
-    toasterId?: string;
-    action?: { label: string; onClick: () => void };
-    onDismiss?: () => void;
-  };
+  options?:
+    | {
+        toasterId?: string;
+        duration?: number;
+        description?: string;
+        action?: { label: string; onClick: () => void };
+      }
+    | undefined;
 };
 // Every notice shown, with the options it was shown with.
 const shown: Shown[] = [];
 mock.module("sonner", () => ({
   toast: Object.assign(
     (title: string, options: Shown["options"]) => {
-      shown.push({ title, options });
+      shown.push({ kind: "plain", title, options });
       return shown.length;
     },
-    { dismiss: () => {} },
+    {
+      success: (title: string, options: Shown["options"]) => {
+        shown.push({ kind: "success", title, options });
+        return shown.length;
+      },
+      dismiss: () => {},
+    },
   ),
 }));
-mock.module("./app-host", () => ({ useAppHost: () => ({}) }));
 
-const { ArchiveConfirmationProvider, quotedChatName, useArchiveConfirmation } =
+const { ARCHIVE_UNDO_MS, archiveActionLabel, quotedChatName, requestSessionArchive } =
   await import("./archive-session");
-const { retainEmbeddedToaster } = await import("./toast");
 
-function confirmation() {
-  let captured!: ReturnType<typeof useArchiveConfirmation>;
-  function Capture() {
-    captured = useArchiveConfirmation();
-    return null;
-  }
-  const root = createRoot(document.createElement("div"));
-  act(() =>
-    root.render(
-      <ArchiveConfirmationProvider>
-        <Capture />
-      </ArchiveConfirmationProvider>,
-    ),
-  );
-  return captured;
+const requests: Array<{ sessionId: string; body: unknown }> = [];
+function appContext(permissions: string[] = ["sessions:control"]) {
+  return {
+    accessContext: {
+      workspaceGrants: [{ workspaceId: "ws", permissions, permissionMode: "explicit" }],
+    },
+    captureWorkspaceInvocation: () => 1,
+    ownsWorkspaceInvocation: () => true,
+    client: {
+      updateSessionArchive: async (_workspaceId: string, sessionId: string, body: unknown) => {
+        requests.push({ sessionId, body });
+        return {
+          id: sessionId,
+          workspaceId: "ws",
+          archived: (body as { archived: boolean }).archived,
+        };
+      },
+    },
+  } as unknown as Parameters<typeof requestSessionArchive>[0];
 }
-
-// An answer that comes back after the person moved to another page.
-const lateQuestion = (page: number) => ({
-  title: "Pause and archive “Busy chat”?",
-  description: "This chat has active work.",
-  confirmLabel: "Pause and archive",
-  page: page - 1,
-  late: { title: "“Busy chat” wasn't archived", description: "It has active work." },
-});
 
 beforeEach(() => {
   shown.length = 0;
+  requests.length = 0;
 });
 
-test("in an embed, a late answer asks in the embed's own notices, and its action archives", async () => {
-  const release = retainEmbeddedToaster(Symbol("embed"));
-  const archive = confirmation();
-  const answer = archive.confirm(lateQuestion(archive.page()));
-  release();
+test("Archive is offered only to people who can control a chat that is not archived yet", () => {
+  const chat = { workspaceId: "ws", archived: false };
+  expect(archiveActionLabel(appContext(), chat)).toBe("Archive");
+  expect(archiveActionLabel(appContext(), { ...chat, archived: true })).toBeNull();
+  expect(archiveActionLabel(appContext(["sessions:read"]), chat)).toBeNull();
+});
+
+test("archiving shows Undo for a few seconds, says it becomes final, and Undo is the caller's", async () => {
+  let undone = 0;
+  const updated = await requestSessionArchive(
+    appContext(),
+    { id: "chat", workspaceId: "ws" },
+    true,
+    "Quarterly plan",
+    () => (undone += 1),
+  );
+  expect(updated).toMatchObject({ archived: true });
+  expect(requests).toEqual([{ sessionId: "chat", body: { archived: true } }]);
   expect(shown).toHaveLength(1);
-  expect(shown[0]!.title).toBe("“Busy chat” wasn't archived");
-  // Inside an embed only the embed's toaster shows Opengeni notices.
-  expect(shown[0]!.options.toasterId).toBe("opengeni");
-  expect(shown[0]!.options.action?.label).toBe("Pause and archive");
-  shown[0]!.options.action!.onClick();
-  expect(await answer).toBe(true);
+  expect(shown[0]!.title).toBe("Archived “Quarterly plan”");
+  expect(shown[0]!.options?.duration).toBe(ARCHIVE_UNDO_MS);
+  expect(shown[0]!.options?.description).toContain("can't be restored");
+  expect(shown[0]!.options?.action?.label).toBe("Undo");
+  shown[0]!.options!.action!.onClick();
+  expect(undone).toBe(1);
 });
 
-test("dismissing a late notice leaves the chat as it was", async () => {
-  const archive = confirmation();
-  const answer = archive.confirm(lateQuestion(archive.page()));
-  shown[0]!.options.onDismiss!();
-  shown[0]!.options.action!.onClick();
-  expect(await answer).toBe(false);
+test("undoing sends archived false and confirms it", async () => {
+  await requestSessionArchive(appContext(), { id: "chat", workspaceId: "ws" }, false, "Plan");
+  expect(requests).toEqual([{ sessionId: "chat", body: { archived: false } }]);
+  expect(shown.map((notice) => [notice.kind, notice.title])).toEqual([
+    ["success", "Archive undone."],
+  ]);
 });
 
 test("a long chat name is shortened without breaking a character", () => {

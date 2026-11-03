@@ -12,8 +12,9 @@ export const PERSONAL_WORKSPACE_EXTERNAL_SOURCE = "opengeni:organization-members
 /**
  * Excludes a Personal workspace's own row from a `workspace_memberships` read.
  *
- * Migration 1159 makes a Personal workspace hold at most one row, its owner's.
- * That row is not membership evidence here. A membership row admits whoever
+ * Migration 1159 makes a Personal workspace hold at most one row, its owner's,
+ * and migration 1231 keeps that row in step with the owner's organization
+ * membership. That row is not membership evidence here. A membership row admits whoever
  * names its subject: a delegated bearer, a host token, a seam that never
  * checks who is asking. The owner reaches their Personal workspace only
  * through the `organization_memberships.personal_workspace_id` pointer, and only

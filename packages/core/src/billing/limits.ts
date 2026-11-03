@@ -8,9 +8,16 @@ import {
   API_CREDITS_REQUIRED_CODE,
   API_CREDITS_REQUIRED_MESSAGE,
   BYOK_PAID_CREDIT_REQUIRED_CODE,
+  SUBSCRIPTION_PLAN_REQUIRED_CODE,
+  SUBSCRIPTION_PLAN_REQUIRED_MESSAGE,
   type BillingOrigin,
 } from "@opengeni/contracts";
-import { byokPaidCreditRefusalMessage, byokPlatformFeeActive } from "./byok-platform-fee";
+import {
+  byokPaidCreditRefusalMessage,
+  byokPlatformFeeActive,
+  ownModelFunding,
+  ownSubscriptionPlanAllows,
+} from "./byok-platform-fee";
 import type {
   LimitAction,
   LimitDecision,
@@ -82,6 +89,7 @@ export const CREDIT_REFUSAL_CODES: ReadonlySet<string> = new Set([
   "insufficient_credits",
   API_CREDITS_REQUIRED_CODE,
   BYOK_PAID_CREDIT_REQUIRED_CODE,
+  SUBSCRIPTION_PLAN_REQUIRED_CODE,
 ]);
 
 export function modelFundingForAdmission(
@@ -94,11 +102,17 @@ export function modelFundingForAdmission(
    * keeps the legacy answer.
    */
   coreRoutedFunding?: boolean,
-): { fundedWithoutCredits: boolean; countsTowardTokenCap: boolean; byok: boolean } {
+): {
+  fundedWithoutCredits: boolean;
+  countsTowardTokenCap: boolean;
+  byok: boolean;
+  ownSubscription: boolean;
+} {
   const resolvedModel = model ? resolveModelProviderForTurn(settings, model)?.model : null;
   const codexSubscriptionModel =
     resolvedModel?.credentialSource.kind === "connected_subscription" &&
     resolvedModel.credentialSource.provider === "codex";
+  const funding = ownModelFunding(resolvedModel);
   const fundedWithoutCredits =
     codexBilled ||
     (coreRoutedFunding ??
@@ -113,12 +127,11 @@ export function modelFundingForAdmission(
     fundedWithoutCredits,
     countsTowardTokenCap:
       !codexBilled && resolvedModel != null && resolvedModel.billing.upstreamPayer === "deployment",
-    // The person's own key or subscription serves it: it pays the platform
-    // fee from paid credit. A deployment-funded free model does not.
-    byok:
-      fundedWithoutCredits &&
-      (codexBilled ||
-        (resolvedModel != null && resolvedModel.billing.upstreamPayer !== "deployment")),
+    // The person's own API key serves it: it pays the platform fee from paid
+    // credit. Their own subscription pays no fee but needs a paid plan. A
+    // deployment-funded free model is neither.
+    byok: fundedWithoutCredits && !codexBilled && funding === "api_key",
+    ownSubscription: fundedWithoutCredits && (codexBilled || funding === "subscription"),
   };
 }
 
@@ -204,13 +217,15 @@ export async function checkLimit(
         ...(input.acceptedTurn ? { acceptedTurn: input.acceptedTurn } : {}),
       })
     : undefined;
-  const { fundedWithoutCredits, countsTowardTokenCap, byok } = modelFundingForAdmission(
-    deps.settings,
-    input.model,
-    codexBilled,
-    coreFunding,
+  const { fundedWithoutCredits, countsTowardTokenCap, byok, ownSubscription } =
+    modelFundingForAdmission(deps.settings, input.model, codexBilled, coreFunding);
+  const creditDecision = await checkCreditBalance(
+    deps,
+    input,
+    fundedWithoutCredits,
+    byok,
+    ownSubscription,
   );
-  const creditDecision = await checkCreditBalance(deps, input, fundedWithoutCredits, byok);
   if (!creditDecision.allowed) {
     return creditDecision;
   }
@@ -237,8 +252,13 @@ async function checkCreditBalance(
   input: LimitCheckInput,
   externallyBilled: boolean,
   byok = false,
+  ownSubscription = false,
 ): Promise<LimitDecision> {
   if (externallyBilled) {
+    // The person's own subscription pays no fee but needs a paid plan.
+    if (ownSubscription && isCostlyAction(input.action)) {
+      return await checkOwnSubscriptionPlan(deps, input.accountId);
+    }
     // Paid outside Opengeni; the person's own key still pays the platform fee.
     if (
       byok &&
@@ -296,6 +316,23 @@ export async function checkByokPaidCredit(
         allowed: false,
         code: BYOK_PAID_CREDIT_REQUIRED_CODE,
         message: byokPaidCreditRefusalMessage(balance, chargeBillingOrigin(billingOrigin)),
+      };
+}
+
+/**
+ * Own-subscription admission: unlimited use on a paid plan of at least $20 a
+ * month, refused on Free with the one action that fixes it (upgrading).
+ */
+export async function checkOwnSubscriptionPlan(
+  deps: Pick<LimitDependencies, "db" | "settings">,
+  accountId: string,
+): Promise<LimitDecision> {
+  return (await ownSubscriptionPlanAllows(deps.db, deps.settings, accountId))
+    ? { allowed: true }
+    : {
+        allowed: false,
+        code: SUBSCRIPTION_PLAN_REQUIRED_CODE,
+        message: SUBSCRIPTION_PLAN_REQUIRED_MESSAGE,
       };
 }
 

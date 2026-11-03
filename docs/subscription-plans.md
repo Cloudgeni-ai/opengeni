@@ -69,6 +69,25 @@ Max $100/$500/unlimited (5× prepaid credit on paid plans); apply it with
    key. If rolling back to a previous current price, retain the displaced price
    as an alias too. Unknown prices and current-price amount mismatches still fail.
 
+## Promotion codes
+
+Plan checkout accepts one promotion code, typed in the console's Subscribe dialog
+or sent as `promotionCode` on `POST /v1/billing/subscription/checkout`. The API
+applies it up front; Stripe's own code field stays off because it cannot be limited
+to the right coupons.
+
+A coupon works on a plan only when its Stripe **Apply to specific products** list
+names that plan's product, so create plan coupons that way. Unrestricted coupons are
+refused because a plan pays out more credit than it costs: a $100 credit coupon would
+otherwise buy a first month of Max ($500 general credit) for nothing. The reverse is
+also refused, by Stripe: a coupon restricted to a plan product cannot apply to a credit
+top-up. Stripe still enforces first-purchase, customer and redemption limits.
+
+A discount changes the price only. Each paid invoice, including a $0 one, funds the
+plan's full monthly credit, so a coupon's **duration** decides how many discounted
+periods carry that credit. Upgrades go through the ordinary upgrade flow and take no
+new code.
+
 ## Database and worker contract
 
 `managed_accounts.id` is the organization identity; physical columns continue

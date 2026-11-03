@@ -21,6 +21,7 @@ fn capacity(free_mib: u64) -> Capacity {
         memory_mib: 64 * 1024,
         free_memory_mib: free_mib,
         reclaimable_memory_mib: 0,
+        cpu_millis: 64_000,
         free_cpu_millis: 64_000,
         free_disk_mib: 100_000,
         ready: Vec::new(),
@@ -415,6 +416,87 @@ fn memory_idle_saved_sandboxes_hold_counts_as_free_but_free_memory_goes_first() 
     for _ in 0..100 {
         assert_eq!(
             two.place(&wanted, &HashSet::new(), &mut rng).unwrap().host,
+            HostId(1)
+        );
+    }
+}
+
+/// Hosts of different sizes fill by the share of their room free, not by
+/// the amount: a host with twice the memory but half the processors, one
+/// 12 GiB runner already on it, does not take every runner while a
+/// smaller host sits idle.
+#[test]
+fn hosts_of_different_sizes_fill_by_the_share_of_their_room_free() {
+    let runner = Demand {
+        cpu_millis: 1_200,
+        ..demand(12_288)
+    };
+    let big = Capacity {
+        memory_mib: 57_600,
+        free_memory_mib: 57_600 - 12_288,
+        cpu_millis: 15_000,
+        free_cpu_millis: 15_000 - 1_200,
+        ..capacity(0)
+    };
+    let small = Capacity {
+        memory_mib: 29_760,
+        free_memory_mib: 29_760,
+        cpu_millis: 30_000,
+        free_cpu_millis: 30_000,
+        ..capacity(0)
+    };
+    let mut fleet = Fleet::new();
+    fleet.upsert(HostId(0), info(0), HostState::Live, big);
+    fleet.upsert(HostId(1), info(1), HostState::Live, small);
+    let mut rng = Rng::new(9);
+    // By amount, the big host (45 GiB free) would take the next two.
+    let mut order = Vec::new();
+    for _ in 0..3 {
+        let placed = fleet.place(&runner, &HashSet::new(), &mut rng).unwrap();
+        order.push(placed.host);
+        fleet.reserve(placed, &runner);
+    }
+    assert_eq!(order, [HostId(1), HostId(0), HostId(1)]);
+
+    // A host whose processor time is mostly promised has less of its room
+    // free than one with less memory free and every processor spare.
+    let mut fleet = Fleet::new();
+    let busy = Capacity {
+        cpu_millis: 8_000,
+        free_cpu_millis: 1_000,
+        ..capacity(60_000)
+    };
+    let spare = Capacity {
+        cpu_millis: 8_000,
+        free_cpu_millis: 8_000,
+        ..capacity(30_000)
+    };
+    fleet.upsert(HostId(0), info(0), HostState::Live, busy);
+    fleet.upsert(HostId(1), info(1), HostState::Live, spare);
+    for _ in 0..100 {
+        assert_eq!(
+            fleet
+                .place(&demand(1_000), &HashSet::new(), &mut rng)
+                .unwrap()
+                .host,
+            HostId(1)
+        );
+    }
+
+    // Equal shares free: the host with more memory free is better.
+    let mut fleet = Fleet::new();
+    let larger = Capacity {
+        memory_mib: 128 * 1024,
+        ..capacity(128 * 1024)
+    };
+    fleet.upsert(HostId(0), info(0), HostState::Live, capacity(64 * 1024));
+    fleet.upsert(HostId(1), info(1), HostState::Live, larger);
+    for _ in 0..100 {
+        assert_eq!(
+            fleet
+                .place(&demand(1_000), &HashSet::new(), &mut rng)
+                .unwrap()
+                .host,
             HostId(1)
         );
     }

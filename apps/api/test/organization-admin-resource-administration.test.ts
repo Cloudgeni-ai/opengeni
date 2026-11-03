@@ -186,6 +186,13 @@ describe("organization admins manage organization vaults, environments and machi
     expect(await vault(admin, other.workspaceId)).toBe(403);
     expect(await vault(admin, acme.workspaceId)).toBe(201);
     expect(await vault(owner, acme.workspaceId)).toBe(201);
+    // Every organization vault, wherever it works: the people who manage them.
+    const everyVault = (person: Person, workspaceId: string) =>
+      send(person, at(workspaceId, "/organization-vaults"), "GET");
+    expect(await everyVault(member, acme.workspaceId)).toBe(403);
+    expect(await everyVault(admin, other.workspaceId)).toBe(403);
+    expect(await everyVault(admin, acme.workspaceId)).toBe(200);
+    expect(await everyVault(owner, acme.workspaceId)).toBe(200);
 
     // Organization-owned 1Password connections.
     const onePassword = (person: Person, workspaceId: string) =>
@@ -230,6 +237,41 @@ describe("organization admins manage organization vaults, environments and machi
     const otherMachine = await organizationMachine(other.accountId, other.workspaceId, otherOwner);
     const revoke = (person: Person, workspaceId: string, enrollmentId: string) =>
       send(person, at(workspaceId, `/enrollments/${enrollmentId}/revoke`), "POST", {});
+
+    // Where an organization machine or Sandbox Environment works follows the
+    // same rule: the owner or an admin of that organization picks it.
+    const everywhere = { allowedWorkspaceIds: null, allowPersonalWorkspaces: true };
+    const machineReach = (person: Person, workspaceId: string, enrollmentId: string) =>
+      send(person, at(workspaceId, `/machines/${enrollmentId}/reach`), "PUT", everywhere);
+    expect(await machineReach(member, acme.workspaceId, acmeMachine)).toBe(403);
+    expect(await machineReach(admin, other.workspaceId, otherMachine)).toBe(403);
+    expect(await machineReach(admin, acme.workspaceId, acmeMachine)).toBe(200);
+    const createdRig = await app.request(at(acme.workspaceId, "/rigs"), {
+      method: "POST",
+      headers: browser(owner.cookie),
+      body: JSON.stringify({
+        scope: "organization",
+        name: `Org environment ${crypto.randomUUID().slice(0, 8)}`,
+      }),
+    });
+    expect(createdRig.status).toBe(201);
+    const acmeRig = ((await createdRig.json()) as { id: string }).id;
+    const rigReach = (person: Person, rigId: string) =>
+      send(person, at(acme.workspaceId, `/rigs/${rigId}/reach`), "PUT", everywhere);
+    expect(await rigReach(member, acmeRig)).toBe(403);
+    expect(await rigReach(admin, acmeRig)).toBe(200);
+
+    // The owners and admins who pick where each works list every one,
+    // wherever it works (Organization settings > Shared).
+    for (const kind of ["machines", "rigs"] as const) {
+      const listEverywhere = (person: Person, workspaceId: string) =>
+        send(person, at(workspaceId, `/organization-${kind}`), "GET");
+      expect(await listEverywhere(member, acme.workspaceId)).toBe(403);
+      expect(await listEverywhere(admin, other.workspaceId)).toBe(403);
+      expect(await listEverywhere(admin, acme.workspaceId)).toBe(200);
+      expect(await listEverywhere(owner, acme.workspaceId)).toBe(200);
+    }
+
     expect(await revoke(member, acme.workspaceId, acmeMachine)).toBe(403);
     expect(await revoke(admin, other.workspaceId, otherMachine)).toBe(403);
     expect(await revoke(admin, acme.workspaceId, acmeMachine)).toBe(200);

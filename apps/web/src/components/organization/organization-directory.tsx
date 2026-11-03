@@ -36,6 +36,7 @@ import type {
   OrganizationAdministrationOverview,
   OrganizationInvitation,
   OrganizationMember,
+  OrganizationMemberNames,
   OrganizationMembershipRole,
   OrganizationWorkspaceAccess,
   OrganizationWorkspaceAccessMember,
@@ -96,6 +97,12 @@ export interface OrganizationDirectory {
   managedSession: boolean;
   overview: Loaded<OrganizationAdministrationOverview | null>;
   members: Loaded<OrganizationMember[]>;
+  /**
+   * Who is in the organization by name only, for a member who isn't an owner
+   * or admin (they get `members`). `available` is false while the server
+   * doesn't offer the names list yet.
+   */
+  memberNames: Loaded<OrganizationMemberNames>;
   invitations: Loaded<{ invitations: OrganizationInvitation[]; nextCursor: string | null }>;
   /** Workspace ids the signed-in person can open. */
   accessibleWorkspaceIds: ReadonlySet<string>;
@@ -172,6 +179,7 @@ function failure(error: unknown, conflict: string): DirectoryActionError {
 }
 
 const EMPTY_INVITATIONS = { invitations: [] as OrganizationInvitation[], nextCursor: null };
+const NO_MEMBER_NAMES: OrganizationMemberNames = { available: false, members: [] };
 
 export function OrganizationDirectoryProvider({
   client,
@@ -209,6 +217,7 @@ export function OrganizationDirectoryProvider({
   const activeRef = useRef(new Map<OrganizationAdminOperationSlot, OrganizationAdminOperation>());
   const canAdminister = actorRole === "owner" || actorRole === "admin";
   const peopleEnabled = managedSession && canAdminister && !singleUser;
+  const namesEnabled = managedSession && actorRole === "member" && !singleUser;
 
   const [overview, setOverview] = useState<Owned<OrganizationAdministrationOverview | null>>({
     ownerKey: "",
@@ -219,6 +228,12 @@ export function OrganizationDirectoryProvider({
   const [members, setMembers] = useState<Owned<OrganizationMember[]>>({
     ownerKey: "",
     value: [],
+    loading: true,
+    error: null,
+  });
+  const [memberNames, setMemberNames] = useState<Owned<OrganizationMemberNames>>({
+    ownerKey: "",
+    value: NO_MEMBER_NAMES,
     loading: true,
     error: null,
   });
@@ -396,6 +411,39 @@ export function OrganizationDirectoryProvider({
     }
   }, [claim, client, identity.organizationId, identityKey, owns, peopleEnabled]);
 
+  const loadMemberNames = useCallback(async () => {
+    if (!namesEnabled) {
+      setMemberNames({
+        ownerKey: identityKey,
+        value: NO_MEMBER_NAMES,
+        loading: false,
+        error: null,
+      });
+      return;
+    }
+    // Members never load the administration list, so the slot is theirs.
+    const operation = claim("members", "read");
+    setMemberNames((current) => ({
+      ownerKey: identityKey,
+      value: current.ownerKey === identityKey ? current.value : NO_MEMBER_NAMES,
+      loading: true,
+      error: null,
+    }));
+    try {
+      const value = await client.listOrganizationMemberNames(identity.organizationId);
+      if (!owns(operation)) return;
+      setMemberNames({ ownerKey: identityKey, value, loading: false, error: null });
+    } catch (error) {
+      if (!owns(operation)) return;
+      setMemberNames({
+        ownerKey: identityKey,
+        value: NO_MEMBER_NAMES,
+        loading: false,
+        error: asError(error),
+      });
+    }
+  }, [claim, client, identity.organizationId, identityKey, namesEnabled, owns]);
+
   const loadInvitations = useCallback(
     async (cursor?: string, append = false) => {
       if (!peopleEnabled) {
@@ -446,8 +494,8 @@ export function OrganizationDirectoryProvider({
   );
 
   const reload = useCallback(async () => {
-    await Promise.all([loadOverview(), loadMembers(), loadInvitations()]);
-  }, [loadInvitations, loadMembers, loadOverview]);
+    await Promise.all([loadOverview(), loadMembers(), loadMemberNames(), loadInvitations()]);
+  }, [loadInvitations, loadMemberNames, loadMembers, loadOverview]);
 
   useEffect(() => {
     void reload();
@@ -877,6 +925,7 @@ export function OrganizationDirectoryProvider({
       managedSession,
       overview: visible(overview, null),
       members: visibleMembers,
+      memberNames: visible(memberNames, NO_MEMBER_NAMES),
       invitations: visible(invitations, EMPTY_INVITATIONS),
       accessibleWorkspaceIds,
       you: visibleMembers.value.find((member) => member.subjectId === identity.subjectId) ?? null,
@@ -909,6 +958,7 @@ export function OrganizationDirectoryProvider({
     loadMoreInvitations,
     managedSession,
     members,
+    memberNames,
     overview,
     planState,
     reload,

@@ -229,7 +229,7 @@ test("Storage keeps a chat active only where the deployment archives idle chats"
     await settle();
     const storage = storageSection()!;
     expect(storage.textContent).toContain("Keep this chat active");
-    expect(storage.textContent).toContain("no activity for 30 days become read-only");
+    expect(storage.textContent).toContain("no activity for 30 days are archived");
     const toggle = storage.querySelector<HTMLButtonElement>('[role="switch"]')!;
     expect(toggle.getAttribute("aria-checked")).toBe("false");
     await act(async () => toggle.click());

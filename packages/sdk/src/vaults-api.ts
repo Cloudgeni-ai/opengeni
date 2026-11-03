@@ -90,7 +90,7 @@ export function vaultsApi(client: VaultClientLike, workspaceId: string) {
       (await json<{ vaults: VaultSummary[] }>("GET", `${base}/vaults`, undefined, {}, signal))
         .vaults,
     /**
-     * Every organization vault, wherever it works (needs account:admin).
+     * Every organization vault, wherever it works (the organization's owner or an admin).
      * `complete` is false while the server lists only the ones that work here.
      */
     listOrganizationVaults: (signal?: AbortSignal) =>

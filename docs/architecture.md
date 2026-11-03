@@ -376,6 +376,9 @@ Replay: [notices/catalogs](run-lifecycle.md),
 shares prepared prefixes with both Responses compaction modes; Chat retains
 its transcript adapter. Both modes retain recent system-role input batches
 within existing budgets, preserving chronological accepted goal snapshots.
+At a worker compaction boundary, the SDK finishes through model-step handover
+so queued tool events drain before the original compaction signal is raised.
+Tool outputs and receipts are published before compaction can retire their history.
 
 Failed-session retry (`packages/db/src/session-retry.ts`) fences failure identity,
 reserves actor-scoped receipts, rejects unresolved execution/safety refusals,
@@ -448,6 +451,10 @@ into bounded snippets/cursors, not histories. See
 Docker/local SDK processes expose bounded-wait, turn-scoped handles, stay
 cancellation-fenced and stop before finalization; agents can test preview
 servers without awaiting exit.
+The Unix-local/Docker durable supervisor retains terminal run directories for
+one day. Cleanup runs independently of command launch with a PID/start-identity
+lock, so a slow disk or large history cannot consume the command response deadline;
+a later launcher recovers a dead cleanup owner without treating commands as lost.
 
 Interactive ttyd input readiness is separate from command execution proof.
 `agent/native/terminal-ready` owns the stock image's Bash 5.2 Readline producer;
@@ -903,6 +910,14 @@ and [`../AGENTS.md`](../AGENTS.md) Sandbox Notes.
 
 ### 3.9 Compute routing and sandbox ownership stay explicit
 
+A new session may name only a sandbox backend the deployment serves
+(`sandboxBackendServed` in `packages/config`): its default, `none`,
+`selfhosted` with Connected Machines on, and providers whose credentials are
+configured; `local` and `docker` run on the host and are served only as the
+default. Every create path applies it (REST/SDK, `session_create`, forks,
+schedule save and run admission) because the worker builds whatever provider
+a session row names. Shared children and existing rows keep their backend.
+
 A human owner's personal-machine move during a turn is explicit consent for
 that logical turn, independent of the initiating person. The separate turn
 receipt and attempt bindings survive recovery without rewriting accepted
@@ -1051,6 +1066,9 @@ Archive capture/restore: [storage](workspace-archive-storage.md).
 
 Lease liveness, provider existence, route attachment, archives, workspace readiness,
 and operation availability are independent; a warm row does not prove executability.
+An attached sibling whose bounded warming wait expires yields to same-turn
+lifecycle recovery rather than failing the turn or replacing the elected creator.
+Only that creator renews the warming lease; the reaper still fences abandoned owners.
 
 Resolve synthetic groups' effective backend once from session policy and deployment
 configuration. Fleet, swaps, viewers, API operations and worker turns share that answer.
@@ -2905,7 +2923,7 @@ Canonical: `packages/runtime/src/sandbox/`,
 
 ---
 
-Turn-end review capture yields to queued turns and fences late commits. Single-read files and unique storage keys isolate cleanup. Recovery snapshots retain their separate fifteen-minute cadence.
+Turn-end review capture yields to queued turns and fences late commits. Its cancellation signal also fences admission of queued per-file Git reads; already-started reads retain output collection and exact spool cleanup. Single-read files and unique storage keys isolate cleanup. Recovery snapshots retain their separate fifteen-minute cadence.
 
 ## 9. Data and storage
 
@@ -3364,13 +3382,14 @@ Teams reply discovery uses a content-free sequence wake on relevant durable sess
 An invoker-rights trigger updates the reserved route in the event transaction; delivery still
 checks the exact linked human and current session audience before reading reply content.
 Idle routes are excluded from pump claims, and pending output keeps its durable delivery state.
-Personal sidebar Archive is an atomic composition of native Pause and personal
-visibility in `archiveHumanSessionWorkstream` (`packages/core/src/application/session-commands.ts`).
-Its personal-state fence precedes the normal control/workspace/session locks;
-post-commit fanout uses the existing durable control outboxes. Shared-chat control
-authority is independent of creator identity. Restore never resumes, and explicit
-Hide for me does not pause. See [run lifecycle](run-lifecycle.md) for schedule and
-background-command semantics.
+The chat Archive action (`archiveHumanSessionWorkstream` in
+`packages/core/src/application/session-commands.ts`) is the one archive, for
+everyone, and needs session control regardless of who started the chat. It marks
+the chat tree archived (`sessions.archived_at`) and schedules a delayed workflow
+for the end of a ten-second Undo window; that workflow retires the chat's
+one-time automations, pauses its goals, cancels its running work and stores it
+through the idle-session archive. See [session storage
+lifecycle](session-storage-lifecycle.md#archiving-a-chat).
 
 Teams group chats use a separate native workspace-visible session namespace.
 The Connector roster freezes exact Teams actor-to-Opengeni human mappings in

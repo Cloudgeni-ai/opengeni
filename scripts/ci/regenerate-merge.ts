@@ -25,6 +25,7 @@ import type { RegeneratedFile, Regeneration } from "../batcher/regenerate";
 import {
   REGENERATED_ON_CONFLICT,
   regenerates,
+  regenerationPlan,
   type RegeneratedArtifact,
 } from "./check-generated-artifacts";
 
@@ -61,6 +62,8 @@ export async function regenerateMerge(options: RegenerateMergeOptions): Promise<
   const log = options.log ?? ((line: string) => console.log(line));
   if (!Number.isSafeInteger(pull) || pull < 1 || !SHA.test(head) || !SHA.test(main))
     throw new Error("--pull must be a PR number and --head and --main commit SHAs");
+  // Refuse a registry that would build a file from stale input before touching the checkout.
+  regenerationPlan(registry, []);
   const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
   const git = (args: string[], ok: number[] = [0]) => {
     const result = spawn(["git", ...args], cwd, env);
@@ -123,7 +126,7 @@ export async function regenerateMerge(options: RegenerateMergeOptions): Promise<
   }
   const mergedTree = git(["write-tree"]).text.trim();
 
-  const entries = registry.filter((entry) => conflicted.some((path) => regenerates(entry, path)));
+  const entries = regenerationPlan(registry, conflicted);
   const commandEnv = { ...env, OPENGENI_PUBLIC_API_BASE_REF: main };
   const steps = [
     ...(install ? [install] : []),

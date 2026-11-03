@@ -287,7 +287,16 @@ export function createLocalDiarizer(config: RecordingSpeakersConfig): RecordingD
         audio,
         [
           "diarize",
-          ...(options.maxSpeakers ? ["--max-speakers", String(options.maxSpeakers)] : []),
+          ...(options.speakers
+            ? [
+                "--min-speakers",
+                String(options.speakers),
+                "--max-speakers",
+                String(options.speakers),
+              ]
+            : options.maxSpeakers
+              ? ["--max-speakers", String(options.maxSpeakers)]
+              : []),
         ],
         options.signal,
       );

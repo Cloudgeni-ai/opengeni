@@ -1,8 +1,8 @@
-// Read-only chats: every chat this deployment moved to long-term storage after
-// a long idle period. They stay readable (open one to read the whole
-// conversation) but can't continue. Separate from the personal "Archive"
-// action, so chats you archived yourself are listed here too when they are
-// read-only. Reached from the session list's view menu.
+// Archived: every archived chat in the workspace, whether someone archived it
+// or it was archived after a long idle period. Archived chats move to
+// long-term storage; they stay readable (open one to read the whole
+// conversation) and searchable, and their work continues in a new chat.
+// Reached from the session list's view menu.
 import { useChannels } from "@opengeni/react";
 import type { SessionListEntry } from "@opengeni/sdk";
 import { useNavigate } from "@tanstack/react-router";
@@ -21,8 +21,9 @@ import { Toolbar, ToolbarGroup, ToolbarSearch } from "@opengeni/react/ui/toolbar
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { apiErrorFacts } from "@opengeni/react/ui/api-error";
 
-type SortBy = "updatedAt" | "createdAt" | "name";
+type SortBy = "archivedAt" | "updatedAt" | "createdAt" | "name";
 const SORT_OPTIONS: Array<{ value: SortBy; label: string }> = [
+  { value: "archivedAt", label: "Archived date" },
   { value: "updatedAt", label: "Last activity" },
   { value: "createdAt", label: "Created date" },
   { value: "name", label: "Name" },
@@ -34,8 +35,10 @@ const PAGE_SIZE = 50;
 const COLUMNS: RowListColumn[] = [{ id: "activity", label: "Last activity", width: 112 }];
 
 export function readOnlyChatsDescription(idleDays: number | undefined): string {
-  const period = idleDays ? `${idleDays} ${idleDays === 1 ? "day" : "days"}` : "a long time";
-  return `Chats with no activity for ${period} move to long-term storage. You can read them, but not continue them.`;
+  const idle = idleDays
+    ? ` Chats with no activity for ${idleDays} ${idleDays === 1 ? "day" : "days"} are archived too.`
+    : "";
+  return `Archived chats are in long-term storage. You can read and search them, and continue their work in a new chat.${idle}`;
 }
 
 export function ReadOnlyChatsRoute({ workspaceId }: { workspaceId: string }) {
@@ -44,7 +47,7 @@ export function ReadOnlyChatsRoute({ workspaceId }: { workspaceId: string }) {
   const channelsQuery = useChannels({ pollIntervalMs: 60_000 });
   const [searchDraft, setSearchDraft] = useState("");
   const [search, setSearch] = useState("");
-  const [sortBy, setSortBy] = useState<SortBy>("updatedAt");
+  const [sortBy, setSortBy] = useState<SortBy>("archivedAt");
   const [project, setProject] = useState<string>(ALL_PROJECTS);
   const [rows, setRows] = useState<SessionListEntry[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -61,9 +64,7 @@ export function ReadOnlyChatsRoute({ workspaceId }: { workspaceId: string }) {
   const readPage = useCallback(
     async (cursor: string | undefined) =>
       await context.client.listSessionSummaryPage(workspaceId, {
-        contentArchivedOnly: true,
-        // Chats you hid with Archive are still read-only chats.
-        archiveStatus: "all",
+        archiveStatus: "archived",
         parentSessionId: null,
         includePinned: false,
         limit: PAGE_SIZE,
@@ -142,7 +143,7 @@ export function ReadOnlyChatsRoute({ workspaceId }: { workspaceId: string }) {
   let body;
   if (loading && rows.length === 0) {
     body = (
-      <RowList label="Read-only chats" columns={COLUMNS} flush busy>
+      <RowList label="Archived chats" columns={COLUMNS} flush busy>
         <ListRowSkeleton count={4} />
       </RowList>
     );
@@ -150,7 +151,7 @@ export function ReadOnlyChatsRoute({ workspaceId }: { workspaceId: string }) {
     body = (
       <Notice
         tone="failed"
-        title="Couldn't load read-only chats"
+        title="Couldn't load archived chats"
         action={
           <Button type="button" size="sm" variant="outline" onClick={() => void load()}>
             Try again
@@ -165,7 +166,7 @@ export function ReadOnlyChatsRoute({ workspaceId }: { workspaceId: string }) {
       <EmptyState
         variant="page"
         icon={<ArchiveIcon />}
-        title="No read-only chats match"
+        title="No archived chats match"
         description="Try another search or project."
         action={
           <Button
@@ -185,18 +186,14 @@ export function ReadOnlyChatsRoute({ workspaceId }: { workspaceId: string }) {
       <EmptyState
         variant="page"
         icon={<ArchiveIcon />}
-        title="No read-only chats"
-        description={
-          idleDays
-            ? `Chats with no activity for ${idleDays} ${idleDays === 1 ? "day" : "days"} will show up here.`
-            : "This workspace has no chats in long-term storage."
-        }
+        title="No archived chats"
+        description="Chats you archive show up here, readable and searchable."
       />
     );
   } else {
     body = (
       <div className="flex min-w-0 flex-col gap-4">
-        <RowList label="Read-only chats" columns={COLUMNS} flush busy={loading}>
+        <RowList label="Archived chats" columns={COLUMNS} flush busy={loading}>
           {rows.map((row) => (
             <ReadOnlyChatRow
               key={row.id}
@@ -231,13 +228,13 @@ export function ReadOnlyChatsRoute({ workspaceId }: { workspaceId: string }) {
   return (
     <ContentPage width="standard">
       <div className="min-w-0 pb-7">
-        <PageHeader title="Read-only chats" description={readOnlyChatsDescription(idleDays)} />
+        <PageHeader title="Archived" description={readOnlyChatsDescription(idleDays)} />
         <div className="flex min-w-0 flex-col gap-4 pt-6">
           <Toolbar>
             <ToolbarSearch
               value={searchDraft}
               onValueChange={setSearchDraft}
-              placeholder="Search read-only chats"
+              placeholder="Search archived chats"
             />
             <ToolbarGroup>
               <SelectMenu
@@ -274,12 +271,12 @@ function ReadOnlyChatRow({
   projectName: string | null;
   onOpen: () => void;
 }) {
-  const archivedAt = row.retention?.archive?.archivedAt ?? null;
+  const archivedAt = row.archivedAt ?? row.retention?.archive?.archivedAt ?? null;
   const meta = [
     projectName,
     archivedAt ? (
-      <span key="stored">
-        Stored <RelativeTime date={archivedAt} inSentence />
+      <span key="archived">
+        Archived <RelativeTime date={archivedAt} inSentence />
       </span>
     ) : null,
   ].filter((part) => part !== null);

@@ -38,6 +38,7 @@ import {
   updateConnectorToolPermissions,
   settingsWithMcpCapabilityServers,
   freezeConnectionAccounts,
+  turnOnOwnLoginHere,
   workspaceSessionToolPolicyContext,
 } from "../src";
 import { mcpAccountBindingsFromVisibleConnections } from "../src/domain/mcp-account-bindings";
@@ -284,6 +285,14 @@ describe("subject-owned capability connection references", () => {
       const local = await create(workspace, "subject-alice", "synthetic-local");
       const remote = await create(origin, "subject-alice", "synthetic-origin");
       const foreign = await create(workspace, "subject-bob", "synthetic-foreign");
+      // Added in Alice's Personal workspace, her login works in this shared
+      // workspace once she turns it on here (D-54).
+      await turnOnOwnLoginHere(db, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId: "subject-alice",
+        authorityId: remote.authorityId!,
+      });
       await enableCapabilityInstallation(db, {
         ...workspace,
         capabilityId,

@@ -975,6 +975,11 @@ export function requireAccountAdminAuthorizationStamp(
  * ceiling an owner's agent needs. The role comes from this organization's own
  * grant, so being an admin in one organization grants nothing in another.
  * Agent turns, services and keys never qualify through a role.
+ *
+ * Organization integrations (webhooks, the credential provider, other people's
+ * personal keys and connected agents, except the owner's) and member-level
+ * organization API keys and service accounts use it too; owner-level keys and
+ * admin service accounts stay with `account:admin`.
  */
 export function holdsOrganizationAdministration(
   context: AccessContext,
@@ -1225,6 +1230,24 @@ export function hasIntegrationAdminPermission(
   grant: Pick<AccessGrant, "permissions" | "permissionMode">,
 ): boolean {
   return hasPermission(grant.permissions, "capabilities:manage", grant.permissionMode);
+}
+
+/**
+ * Whether this grant may remove an integration, plugin or integration source
+ * that `installerSubjectId` added. Integration admins remove anything; a
+ * member (`connections:write`) removes only what they added themselves. An
+ * unknown installer counts as an admin's.
+ */
+export function canRemoveIntegration(
+  grant: Pick<AccessGrant, "permissions" | "permissionMode" | "subjectId">,
+  installerSubjectId: string | null | undefined,
+): boolean {
+  if (hasIntegrationAdminPermission(grant)) return true;
+  return (
+    hasIntegrationSetupPermission(grant) &&
+    typeof installerSubjectId === "string" &&
+    installerSubjectId === grant.subjectId
+  );
 }
 
 /**
@@ -1799,15 +1822,12 @@ async function accessGrantAuthorization(
 /**
  * Did the managed cookie authenticate this exact native person?
  *
- * A managed human's personal workspace carries no `workspace_memberships` row,
- * so seams that fence on one must consult the
- * `organization_memberships.personal_workspace_id` pointer instead. That is a
- * runtime property, not a schema one: migration 0219's `42501` is a
- * precondition inside the provisioning function rather than a constraint, and
- * the parity report records `personal_workspace_has_no_membership_row` as
- * `basis: "runtime"` - its own term for something nothing in the schema
- * prevents. It holds because every membership writer requires `members:manage`
- * on the target, which a personal-workspace grant deliberately omits. `AGENTS.md`
+ * A managed human's personal workspace holds only its owner's own
+ * `workspace_memberships` row (migrations 1159 and 1231), and the runtime's
+ * membership readers never count it, so seams that fence on a row must consult
+ * the `organization_memberships.personal_workspace_id` pointer instead. A row
+ * admits whoever names its subject; the pointer plus this provenance check
+ * admits only the verified owner. `AGENTS.md`
  * scopes that exception tightly: it "derives an owner-only personal-workspace
  * grant only for the canonical managed-cookie (Better Auth) session", and
  * "Bearer/delegated principals, API keys, and account or organization

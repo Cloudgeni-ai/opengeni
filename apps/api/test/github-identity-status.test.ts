@@ -2,6 +2,7 @@ import { describe, expect, mock, test } from "bun:test";
 
 import {
   GITHUB_IDENTITIES_GUIDANCE,
+  githubSettingsUrl,
   personalGitHubConsoleBaseUrl,
   personalGitHubIdentityStatus,
   personalGitHubSetupProjection,
@@ -343,5 +344,12 @@ describe("personal GitHub console links", () => {
       "https://request.example.test",
     );
     expect(personalGitHubConsoleBaseUrl({})).toBe("");
+  });
+
+  test("the GitHub settings link opens the integration sheet, or is null without an origin", () => {
+    expect(githubSettingsUrl("https://app.example.test/", WORKSPACE_ID)).toBe(
+      `https://app.example.test/workspaces/${WORKSPACE_ID}/plugins?open=integration%3Agithub`,
+    );
+    expect(githubSettingsUrl("", WORKSPACE_ID)).toBeNull();
   });
 });

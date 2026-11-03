@@ -247,6 +247,9 @@ export async function upsertIntegrationFacetBinding(
         cursor: {},
         version: existing.version + 1,
         lastErrorCode: null,
+        // Adding a removed instance back makes whoever adds it its installer,
+        // which decides who besides admins may remove it again.
+        ...(existing.status === "disabled" ? { createdBySubjectId: input.createdBySubjectId } : {}),
         updatedAt: new Date(),
       })
       .where(eq(schema.integrationFacetBindings.id, existing.id))

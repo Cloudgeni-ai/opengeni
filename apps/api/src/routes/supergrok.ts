@@ -49,6 +49,7 @@ import { requireConnectOwnerAuthority } from "@opengeni/core";
 import { databaseUnavailableHttpError } from "../http/api-error";
 import { requirePrivateSubscriptionHuman } from "./subscription-pool-access";
 import { parseRequestBody } from "../http/request-body";
+import { turnOnOwnSubscriptionWhereAdded } from "../own-subscription-turned-on";
 
 type SuperGrokConnectState = {
   externalContinuationEncrypted?: string;
@@ -118,6 +119,7 @@ function accountJson(row: XaiSubscriptionAccountMetadata, activeCredentialId: st
   return {
     id: row.id,
     scope: row.scope,
+    ownerWorkspaceId: row.ownerWorkspaceId ?? null,
     subject: row.providerAccountId ?? row.accountEmail ?? row.id,
     email: row.accountEmail,
     label: row.label,
@@ -157,6 +159,8 @@ async function coreSuperGrokConnected(
     workspaceId: string | null;
     subjectId: string;
     personal?: boolean;
+    /** The shared workspace the person added their own subscription from (D-53). */
+    addedFrom?: string | undefined;
     encryptionKey: Uint8Array;
     tokens: { accessToken: string; refreshToken?: string | null; expiresInSeconds: number };
     identity: ReturnType<typeof xaiIdentityFromDeviceTokens>;
@@ -183,6 +187,13 @@ async function coreSuperGrokConnected(
   if (result.kind === "refused")
     throw coreConnectRefused(result.reason, "SuperGrok", input.personal === true);
   await deliverPoolCoreWake(deps, SUPERGROK_CORE, result.wake);
+  if (input.personal && input.addedFrom && input.workspaceId)
+    await turnOnOwnSubscriptionWhereAdded(deps.db, {
+      accountId: input.accountId,
+      workspaceId: input.addedFrom,
+      subjectId: input.subjectId,
+      connectionId: result.id,
+    });
   return result.id;
 }
 
@@ -445,6 +456,9 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
         workspaceId: authority.workspaceId,
         subjectId: authority.subjectId,
         personal: state.scope === "user",
+        ...(state.scope === "user" && authority.workspaceId !== workspaceId
+          ? { addedFrom: workspaceId }
+          : {}),
         encryptionKey,
         tokens: poll.tokens,
         identity,

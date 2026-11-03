@@ -3,7 +3,7 @@ import {
   omitStructuredContentTextDuplicates,
   type AttemptToolResult as AttemptToolResultValue,
 } from "@opengeni/contracts";
-import { UserError, type MCPServer } from "@openai/agents";
+import type { MCPServer } from "@openai/agents";
 import { randomUUID } from "node:crypto";
 import { normalizeProtocolJsonValue } from "./protocol-json";
 
@@ -133,54 +133,61 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return prototype === Object.prototype || prototype === null;
 }
 
-function assertSdkJsonCompatible(value: unknown): void {
-  if (value == null) return;
-  const valueType = typeof value;
-  if (valueType === "string" || valueType === "boolean") return;
-  if (valueType === "number") {
-    if (!Number.isFinite(value)) {
-      throw new UserError("customDataExtractor must return JSON-compatible data.");
-    }
-    return;
-  }
-  if (
-    valueType === "undefined" ||
-    valueType === "function" ||
-    valueType === "symbol" ||
-    valueType === "bigint"
-  ) {
-    throw new UserError("customDataExtractor must return JSON-compatible data.");
-  }
-  if (Array.isArray(value)) {
-    value.forEach((entry) => assertSdkJsonCompatible(entry));
-    return;
-  }
-  if (!isPlainRecord(value)) {
-    throw new UserError("customDataExtractor must return JSON-compatible data.");
-  }
-  for (const key of Reflect.ownKeys(value)) {
-    if (typeof key !== "string") {
-      throw new UserError("customDataExtractor must return JSON-compatible data.");
-    }
-    assertSdkJsonCompatible(value[key]);
-  }
-}
-
 function normalizeSdkToolOutputCustomData(value: unknown): Record<string, unknown> | undefined {
   if (value == null) return undefined;
-  if (!isPlainRecord(value)) {
-    throw new UserError("customDataExtractor must return an object or null.");
+  // A value JSON cannot carry (a symbol key, a function, a bigint, a cycle, a
+  // class instance) is converted and logged instead of failing the tool call.
+  const safe: unknown = normalizeProtocolJsonValue(value, "$.customData");
+  if (!isPlainRecord(safe)) {
+    // Custom data is optional audit data: a server extractor that returns
+    // something other than an object loses it instead of failing the run.
+    warnMcpBoundary("MCP custom data dropped", { reason: "not_an_object", type: typeName(safe) });
+    return undefined;
   }
-  if (Reflect.ownKeys(value).some((key) => typeof key !== "string")) {
-    throw new UserError("customDataExtractor must return an object with string keys.");
-  }
-  if (Object.keys(value).length === 0) return undefined;
-  assertSdkJsonCompatible(value);
-  return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
+  if (Object.keys(safe).length === 0) return undefined;
+  // The SDK's own JSON copy of custom data, so both paths store the same form.
+  return JSON.parse(JSON.stringify(safe)) as Record<string, unknown>;
 }
 
 function normalizeMcpResult(value: unknown): AttemptToolResultValue {
-  return normalizeProtocolJsonValue(AttemptToolResult.parse(value), "$.mcpResult");
+  // Convert what JSON cannot carry before the schema sees it, so a server's
+  // bigint, Date or symbol-keyed mark never fails the tool call.
+  const safe = normalizeProtocolJsonValue(value, "$.mcpResult");
+  const parsed = AttemptToolResult.safeParse(safe);
+  if (parsed.success) return normalizeProtocolJsonValue(parsed.data, "$.mcpResult");
+  // A result the schema refuses even after conversion (for example a
+  // structuredContent whose toJSON returns a string, or an oversized key) is
+  // kept as its JSON text, so the model and the audit copy still see it.
+  warnMcpBoundary("MCP result kept as text", {
+    reason: "schema_mismatch",
+    issues: String(parsed.error.issues.length),
+  });
+  // `_meta` stays out of the model's view here too, and an error result stays one.
+  const record = isPlainRecord(safe) ? safe : null;
+  const { _meta: _resultMeta, ...visible } = record ?? {};
+  return {
+    content: [{ type: "text", text: JSON.stringify(record ? visible : safe) ?? "null" }],
+    ...(record?.isError === true ? { isError: true } : {}),
+  };
+}
+
+function typeName(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
+}
+
+const MCP_WARNING_INTERVAL_MS = 60_000;
+const recentMcpWarnings = new Map<string, number>();
+
+function warnMcpBoundary(message: string, detail: Record<string, string>): void {
+  const key = `${message}|${Object.values(detail).join("|")}`;
+  const now = Date.now();
+  const last = recentMcpWarnings.get(key);
+  if (last !== undefined && now - last < MCP_WARNING_INTERVAL_MS) return;
+  if (recentMcpWarnings.size >= 100) recentMcpWarnings.clear();
+  recentMcpWarnings.set(key, now);
+  console.warn(message, detail);
 }
 
 /**

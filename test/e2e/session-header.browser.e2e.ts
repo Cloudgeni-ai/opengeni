@@ -707,10 +707,13 @@ describe("responsive production session header", () => {
       await find.waitFor({ state: "detached" });
       await header.getByRole("button", { name: "More session actions" }).click();
       await page.getByRole("menuitem", { name: "Archive", exact: true }).click();
-      // The confirmed archive projection flips the action to Restore.
-      await page.getByText("Chat archived.").waitFor();
+      // Archive asks nothing and offers Undo; an archived chat offers no
+      // Restore and no second Archive.
+      await page.getByText(/^Archived “/).waitFor();
+      await page.getByRole("button", { name: "Undo", exact: true }).waitFor();
       await header.getByRole("button", { name: "More session actions" }).click();
-      await page.getByRole("menuitem", { name: /^Restore/ }).waitFor();
+      await page.getByRole("menuitem", { name: "Find", exact: true }).waitFor();
+      expect(await page.getByRole("menuitem", { name: /^Restore|^Archive/ }).count()).toBe(0);
       expect(pageErrors.get(context)).toEqual([]);
     } finally {
       await context.close();

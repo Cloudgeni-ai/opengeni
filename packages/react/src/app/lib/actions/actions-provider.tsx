@@ -30,7 +30,7 @@ import { t } from "../console-text";
 import { isPersonalWorkspace, navigableWorkspaces } from "../managed-self-context";
 import { workspacesByOrganization } from "../org";
 import { hasWorkspacePermission } from "../permissions";
-import { readChatDirectory, recordChatVisit } from "./chat-directory";
+import { readChatDirectory, recordChatVisit, rememberChats } from "./chat-directory";
 import { sitePath } from "./site-directory";
 import {
   extendChatSwitcher,
@@ -287,6 +287,12 @@ export function ActionsProvider(props: { children: ReactNode }) {
     if (currentChat) recordChatVisit(subjectId, currentChat);
     // Title and pin changes refresh the record without reordering.
   }, [currentChat?.id, subjectId]); // eslint-disable-line react-hooks/exhaustive-deps
+  // The open chat's newest read keeps its record current, so archiving it
+  // (or renaming or pinning it) takes effect in Recent chats at once. The
+  // sidebar no longer lists an archived chat, so it cannot report it.
+  useEffect(() => {
+    if (currentChat) rememberChats(subjectId, [currentChat]);
+  }, [currentChat, subjectId]);
 
   // Control+Tab and ⌘K leave out chats in workspaces no longer open to the person.
   const reachable = useMemo(() => {

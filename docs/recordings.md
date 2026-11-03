@@ -600,6 +600,14 @@ A transcript that is already made and being charged and saved when the
 budget runs out is still saved, and a brief database error while saving it
 is retried at once.
 
+A retry never pays the provider twice for the same audio. Each piece of a
+track is kept with its version the moment the provider answers, before a
+text-only model's words are placed, keyed by what was asked: the model, the
+language, speaker and vocabulary options, the piece and a hash of the audio.
+When a worker is lost (a deploy, a crash) and the version is retried, every
+piece already answered is reused, and only the rest are asked for. Kept
+pieces are removed when the version completes or fails.
+
 Every track is diarized. When a recording has computer or tab audio (a
 `system` track), the microphone is the person recording's, but someone in
 the room with them may be on it too. One voice on the microphone is the
@@ -628,10 +636,12 @@ Otherwise, or when the request or `settings.recordings.diarizer` says
 `apps/worker/speakers` is a small Rust executable, `opengeni-speakers`, that
 runs two open ONNX models through ONNX Runtime: pyannote segmentation 3.0
 (MIT) finds who speaks when inside 10 second windows, and 3D-Speaker CAM++
-trained on VoxCeleb (Apache-2.0) turns each window's speakers into voice
-vectors. Vectors are clustered with average linkage at a cosine distance of
-0.55, small clusters are folded into the nearest large one, and every frame
-takes the speakers its window found. The worker image ships the executable
+"common advanced" (Apache-2.0), trained on about 200,000 speakers, turns each
+window's speakers into voice vectors: a fingerprint of the voice itself,
+independent of what is said. Vectors are clustered with average linkage at
+a cosine distance of 0.55, small clusters are folded into the nearest large
+one, and every frame takes the speakers its window found. The worker image
+ships the executable
 in `/opt/opengeni/speakers` with both models and their licenses, pinned by
 checksum. Elsewhere, set `OPENGENI_RECORDING_SPEAKERS_BINARY_PATH` and
 `OPENGENI_RECORDING_SPEAKER_MODELS_DIR`; without them only the model's own
@@ -647,6 +657,29 @@ collar and overlapping speech included), the diarization error rate is
 about 18 percent, which is in the same range as pyannote 3.1. It uses about
 3 CPU minutes per hour of audio, so an hour of meeting takes about 30
 seconds on 8 cores.
+
+The voice model was chosen on real Norwegian meetings recorded on a phone
+and a laptop, with ElevenLabs Scribe v2 and MAI-Transcribe-2 diarization as
+the reference where both agree. Over about 45,000 pairs of 1.5 to 6 second
+speech pieces from four meetings, the equal error rate (how often the same
+voice and two different voices can't be told apart) was:
+
+| Voice model | Equal error rate |
+|---|---|
+| 3D-Speaker CAM++ common advanced (Chinese and English, 200k speakers) | 12 % |
+| 3D-Speaker ERes2NetV2 common (Chinese, 200k speakers) | 14 % |
+| 3D-Speaker CAM++ VoxCeleb (the earlier model) | 22 % |
+| 3D-Speaker ERes2Net VoxCeleb | 24 % |
+| WeSpeaker ResNet34, ResNet293 and CAM++ (VoxCeleb) | 20 to 29 % |
+
+Models trained only on VoxCeleb, celebrity interviews, generalize worse to a
+phone in the middle of a table than models trained on many more speakers
+and recording conditions. Speaker attribution of the words in those meetings
+went from 15.8 to 12.4 percent wrong, and the meeting with three people no
+longer gets a fourth. On AMI the two models score the same (16.4 percent
+either way over eight meetings), and voices across meetings stay as
+distinct (the same person 0.83 median, different people at most 0.46).
+NeMo TitaNet takes other features and is not supported.
 
 It runs on 4 threads unless the worker sets `threads` (fewer on a smaller
 machine). More threads finish little sooner but cost much more: a
@@ -962,9 +995,15 @@ topic with nested bullets, then `## Decisions` and `## Action items`
 ### Built-in summary
 
 When a meeting's shown transcript first becomes ready, Opengeni starts one
-ordinary chat that writes its notes. A re-run of the transcript starts
-another only while the meeting still has no notes, and one transcript
-version never starts two (the chat is keyed by the version).
+ordinary chat that writes its notes. One transcript version never starts two
+(the chat is keyed by the version). A re-run of the transcript starts another
+while the meeting has no notes, and also to write again notes an earlier
+summary wrote that nobody has touched: notes last saved by a summary chat of
+this meeting in which every turn was the service's (none a person's). Those
+notes describe the transcript the re-run replaced, so the new chat is told
+the notes' revision and saves over exactly that one; if anyone saved since,
+it keeps theirs. Notes a person edited, an automation wrote, or someone
+talked to the notes chat about are never replaced.
 
 - **Whose chat.** The meeting owner's: an Only me chat owned by them for an
   Only me meeting, or a workspace chat for a meeting shared with the
@@ -1133,7 +1172,7 @@ this; their `language` option (and `ComposerTranscriptionControl`'s
 `useVoiceInput`'s `keyterms` the words it listens for. Taking
 the text deletes the dictation first and inserts the text only
 if that delete succeeded or couldn't reach the server, so two tabs never
-insert the same speech twice. Cancel or Escape deletes the dictation, while
+insert the same speech twice. Cancel deletes the dictation, while
 it records or while it is being heard, so nothing offers it again; a host
 that keeps speech (the desktop app) gets its copy first, through `onAudio`
 with `cancelled: true`, when it is longer than three seconds. Something
@@ -1167,7 +1206,14 @@ only in the app's recent dictations. The pieces:
 - The person can list a vocabulary (names and terms, one per line) that
   every dictation listens for, and set two more shortcuts: one that
   transcribes the last dictation again and types it, and one that cancels
-  the dictation in progress (Escape always does).
+  the dictation in progress, as the window's Cancel button does. Escape is
+  left to the app the person is typing in.
+- Each shortcut can also pick its own model from the workspace's
+  `voiceInput.models` (client config). A dictation recording may name a
+  `providerId` and `model` in its `transcription`; the server accepts only a
+  model it offers for dictation, and that dictation is heard by exactly
+  that model, with no fallback to another provider. A dictation that names
+  none uses the workspace's voice input provider, as before.
 - The last 50 dictations are kept on the computer, each with its text and
   its speech (up to 32 MB each, readable only by the person). From the
   settings page the person can copy a text, play its speech, or transcribe

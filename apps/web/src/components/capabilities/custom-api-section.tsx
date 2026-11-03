@@ -251,7 +251,8 @@ export function CustomApiSection({
                       variant="ghost"
                       size="xs"
                       className="pointer-coarse:min-h-11"
-                      disabled={!canManage || busyKey !== null}
+                      // Admins remove any instance, a member only one they added.
+                      disabled={!(instance.canRemove ?? canManage) || busyKey !== null}
                       onClick={() => onRemove(instance)}
                     >
                       <Trash2Icon />

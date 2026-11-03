@@ -1,4 +1,4 @@
-import { requestSessionArchive, useArchiveConfirmation } from "../../lib/archive-session";
+import { requestSessionArchive } from "../../lib/archive-session";
 // The session shell every session surface renders: the left rail (fixed and
 // resizable on desktop, an overlay drawer on phones), the canvas top strip with
 // the session header on session routes, and the canvas itself. Surface-owned
@@ -35,6 +35,7 @@ import {
   sessionUsageLimitCapability,
 } from "../../lib/session-usage-limit";
 import { RAIL_DEFAULT_WIDTH, RAIL_MAX_WIDTH, RAIL_MIN_WIDTH, useRail } from "./rail-context";
+import { RailSurface, ShellRail } from "./rail-surface";
 import { CollapsedSessionsButton, SessionList } from "./session-list";
 import {
   PrimaryNav,
@@ -99,10 +100,7 @@ export function RailBody() {
     );
   };
   return (
-    <div
-      data-rail
-      className="og-rail-glow isolate flex h-full min-h-0 flex-col overflow-hidden pt-[env(safe-area-inset-top)]"
-    >
+    <RailSurface data-rail>
       <div
         data-rail-scroll-viewport
         className="relative z-0 min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain"
@@ -209,7 +207,7 @@ export function RailBody() {
           {railFooter}
         </div>
       ) : null}
-    </div>
+    </RailSurface>
   );
 }
 
@@ -363,13 +361,12 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
       >
         {/* Fixed desktop rail — user-resizable when expanded. */}
         {chatList && !rail.isMobile ? (
-          <nav
+          <ShellRail
+            as="nav"
             aria-label="Primary"
-            data-shell-rail
             data-collapsed={rail.collapsed}
             style={rail.collapsed ? undefined : { width: resizing ? liveWidth! : rail.width }}
             className={cn(
-              "relative shrink-0 border-r border-border",
               // Animate the collapse/expand toggle, but never while dragging — a
               // transition there would lag the handle behind the pointer.
               !resizing && "motion-safe:transition-[width] motion-safe:duration-150",
@@ -380,7 +377,7 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
             {/* The drag handle only exists on the expanded desktop rail; the
                 collapsed strip and the mobile drawer are fixed-width. */}
             {!rail.collapsed ? <RailResizeHandle onStart={startResize} active={resizing} /> : null}
-          </nav>
+          </ShellRail>
         ) : null}
 
         {/* Mobile overlay drawer. */}
@@ -555,16 +552,13 @@ function SessionRouteHeader({
   const catalog = useWorkspaceModelCatalog(session.workspaceId);
   const selectedRow = findPickerRow(catalog.rows, displayModelId);
   const policyLoading = lastStarted.loading || catalog.loading;
-  const accountProvider = subscriptionAccountProvider(
-    displayModelId,
-    selectedRow?.catalog.credentialSource,
-  );
+  const accountProvider = subscriptionAccountProvider(displayModelId, selectedRow?.catalog);
   const repliesMute = useSessionRepliesMute(session);
   const sessionAdminAccess = useSessionAdminAccess(session);
   const adminAccess = useSessionUiFeature("adminAccess") ? sessionAdminAccess : null;
   const dock = useSessionUiFeature("dock");
-  const confirmArchive = useArchiveConfirmation();
   const archiveInFlight = useRef(false);
+  const onArchiveRef = useRef<((target: Session, archived: boolean) => Promise<void>) | null>(null);
   const onArchive = useCallback(
     async (target: Session, archived: boolean) => {
       if (archiveInFlight.current) return;
@@ -576,8 +570,8 @@ function SessionRouteHeader({
           context,
           target,
           archived,
-          confirmArchive,
           sessionDisplayTitle(target),
+          () => void onArchiveRef.current?.(target, false),
         );
         if (!updated) return;
         if (!context.ownsWorkspaceInvocation(target.workspaceId, accepted)) return;
@@ -591,18 +585,18 @@ function SessionRouteHeader({
           sessionId: target.id,
           archived: updated.archived,
         });
-        toast.success(updated.archived ? "Chat archived." : "Chat restored.");
       } catch (error) {
         if (!context.ownsWorkspaceInvocation(target.workspaceId, accepted)) return;
-        toast.error(archived ? "Couldn't archive the chat." : "Couldn't restore the chat.", {
+        toast.error(archived ? "Couldn't archive the chat." : "Couldn't undo the archive.", {
           description: errorMessage(error),
         });
       } finally {
         archiveInFlight.current = false;
       }
     },
-    [context, confirmArchive],
+    [context],
   );
+  onArchiveRef.current = onArchive;
 
   return (
     <SessionHeader

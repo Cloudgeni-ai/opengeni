@@ -614,7 +614,8 @@ function FacetRow({
             type="button"
             variant="ghost"
             size="xs"
-            disabled={!canManage || busy}
+            // Admins remove any facet, a member only one they added.
+            disabled={!(binding?.canRemove ?? canManage) || busy}
             onClick={onRemove}
           >
             <Trash2Icon />

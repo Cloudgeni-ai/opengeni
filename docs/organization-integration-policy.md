@@ -43,7 +43,7 @@ organization API integration checks its definition's key or
 - `admins`: only people who manage integrations (`capabilities:manage`) turn
   integrations on, add MCP servers or API integrations, or install plugins.
   Members can still connect their own accounts to integrations that are on,
-  configure their sources, and remove them.
+  configure their sources, and remove the ones they added.
 
 The workspace catalog (`GET /v1/workspaces/{workspaceId}/capabilities`)
 returns this setting as `memberIntegrationSetup`, so clients offer members only

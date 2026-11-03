@@ -167,6 +167,11 @@ export type OrganizationMember = Awaited<
   ReturnType<OpenGeniBrowserClient["listOrganizationMembers"]>
 >["members"][number];
 export type OrganizationMembershipRole = OrganizationMember["role"];
+/** Who is in the organization by name only, as any member reads it. */
+export type OrganizationMemberNames = Awaited<
+  ReturnType<OpenGeniBrowserClient["listOrganizationMemberNames"]>
+>;
+export type OrganizationMemberName = OrganizationMemberNames["members"][number];
 export type OrganizationAdministrationOverview = Awaited<
   ReturnType<OpenGeniBrowserClient["getOrganizationAdministrationOverview"]>
 >;

@@ -30,7 +30,6 @@ import { MetaChip } from "../../../ui/meta-chip";
 import type { CreateBotTemplateRequest, WorkspaceBotTemplate } from "@opengeni/contracts";
 import {
   ArchiveIcon,
-  ArchiveRestoreIcon,
   BellIcon,
   BellOffIcon,
   BotIcon,
@@ -76,7 +75,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuMeta,
   DropdownMenuSeparator,
   DropdownMenuShortcut,
   DropdownMenuTrigger,
@@ -267,7 +265,15 @@ export function SessionHeader({
   const rename = useInlineRename(session, onRename);
   const pin = useSessionPinToggle(session, onPin);
   const context = useOptionalAppContext();
-  const canArchive = Boolean(onArchive) && session.parentSessionId === null;
+  // Archiving is one-way, so an archived chat offers no archive action, and
+  // only people who can control the chat archive it.
+  const canArchive =
+    Boolean(onArchive) &&
+    session.parentSessionId === null &&
+    !session.archived &&
+    (context ? archiveActionLabel(context, session) !== null : true);
+  // An archived chat cannot be pinned.
+  const canPin = !session.archived;
   const [grantAdminOpen, setGrantAdminOpen] = useState(false);
   const shareLinksFeature = useSessionUiFeature("shareLinks");
   // Only the person who started a top-level chat can share it; the server
@@ -507,7 +513,7 @@ export function SessionHeader({
             <SearchIcon className="size-4" />
           </Button>
         )}
-        {inMenu("pin") ? null : (
+        {inMenu("pin") || !canPin ? null : (
           <Button
             ref={part("pin")}
             type="button"
@@ -682,16 +688,18 @@ export function SessionHeader({
                 Share…
               </DropdownMenuItem>
             ) : null}
-            <DropdownMenuItem
-              className={inMenu("pin") ? undefined : "lg:hidden"}
-              aria-keyshortcuts={pinKeys?.ariaKeys}
-              disabled={pin.busy}
-              onSelect={() => pin.toggle()}
-            >
-              <PinIcon className={session.pinned ? "fill-current" : undefined} />
-              {session.pinned ? "Unpin" : "Pin"}
-              {pinKeys ? <DropdownMenuShortcut>{pinKeys.label}</DropdownMenuShortcut> : null}
-            </DropdownMenuItem>
+            {canPin ? (
+              <DropdownMenuItem
+                className={inMenu("pin") ? undefined : "lg:hidden"}
+                aria-keyshortcuts={pinKeys?.ariaKeys}
+                disabled={pin.busy}
+                onSelect={() => pin.toggle()}
+              >
+                <PinIcon className={session.pinned ? "fill-current" : undefined} />
+                {session.pinned ? "Unpin" : "Pin"}
+                {pinKeys ? <DropdownMenuShortcut>{pinKeys.label}</DropdownMenuShortcut> : null}
+              </DropdownMenuItem>
+            ) : null}
             {currentPhoneAppPlatform() ? (
               <DropdownMenuItem
                 onSelect={() => {
@@ -787,17 +795,11 @@ export function SessionHeader({
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
                   aria-keyshortcuts={archiveKeys?.ariaKeys}
-                  onSelect={() => void onArchive?.(session, !session.archived)}
+                  onSelect={() => void onArchive?.(session, true)}
                 >
-                  {session.archived ? <ArchiveRestoreIcon /> : <ArchiveIcon />}
-                  {context
-                    ? archiveActionLabel(context, session)
-                    : session.archived
-                      ? "Restore"
-                      : "Archive"}
-                  {session.archived ? (
-                    <DropdownMenuMeta>Archived</DropdownMenuMeta>
-                  ) : archiveKeys ? (
+                  <ArchiveIcon />
+                  Archive
+                  {archiveKeys ? (
                     <DropdownMenuShortcut>{archiveKeys.label}</DropdownMenuShortcut>
                   ) : null}
                 </DropdownMenuItem>

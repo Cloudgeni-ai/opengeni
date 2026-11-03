@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { BillingPlanBalance, BillingSubscriptionCatalog } from "@opengeni/sdk";
+import { planIncludesOwnSubscriptions } from "@opengeni/contracts/billing-origin";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { Field, TextInput } from "@opengeni/react/ui/field";
 import { FormDialog } from "@opengeni/react/ui/form-dialog";
 import { MetaChip } from "@opengeni/react/ui/meta-chip";
 import { Notice } from "@opengeni/react/ui/notice";
@@ -43,6 +45,7 @@ export function SubscriptionPlans({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [promotionCode, setPromotionCode] = useState("");
   const live = useRef(false);
   const inFlight = useRef(false);
   // Keep retry identity even when a confirmation is closed and reopened.
@@ -66,6 +69,7 @@ export function SubscriptionPlans({
     const idempotencyKey = attempts.current.get(key) ?? crypto.randomUUID();
     attempts.current.set(key, idempotencyKey);
     setSelection({ target, action, idempotencyKey });
+    setPromotionCode("");
     setError(null);
   }
 
@@ -81,8 +85,10 @@ export function SubscriptionPlans({
     };
     try {
       if (selection.action === "checkout") {
+        const code = promotionCode.trim();
         const result = await client.createSubscriptionCheckout({
           ...request,
+          ...(code ? { promotionCode: code } : {}),
           successUrl: returnUrl,
           cancelUrl: returnUrl,
         });
@@ -237,6 +243,9 @@ export function SubscriptionPlans({
                       {item.monthlyCreditMicros / item.monthlyPriceMicros}× prepaid credit
                     </p>
                   ) : null}
+                  {planIncludesOwnSubscriptions(item) ? (
+                    <p className="text-xs text-fg-muted">Your own AI subscriptions, no fee</p>
+                  ) : null}
                   {item.freeCredit ? (
                     <p className="text-xs text-fg-muted">
                       For free-credit models · Eligible accounts only
@@ -335,6 +344,20 @@ export function SubscriptionPlans({
                   : ""}
               </p>
             )}
+            {selection.action === "checkout" ? (
+              <Field label="Promo code" optional>
+                <TextInput
+                  value={promotionCode}
+                  maxLength={64}
+                  autoComplete="off"
+                  disabled={busy}
+                  onChange={(event) => {
+                    setPromotionCode(event.target.value);
+                    setError(null);
+                  }}
+                />
+              </Field>
+            ) : null}
           </div>
         </FormDialog>
       ) : null}

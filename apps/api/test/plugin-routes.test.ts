@@ -209,6 +209,12 @@ beforeAll(async () => {
             url: "https://member-new.example.com/mcp",
             cacheToolsList: false,
           },
+          ...[1, 2, 3, 4].map((n) => ({
+            id: `removal_${n}_mcp`,
+            name: `Removal ${n} MCP`,
+            url: `https://removal-${n}.example.com/mcp`,
+            cacheToolsList: false,
+          })),
           {
             id: "personal_mcp",
             name: "Personal MCP",
@@ -259,6 +265,12 @@ beforeAll(async () => {
         }
         if (url === "https://127.0.0.1/plugin-member-new-mcp.json") {
           return Response.json(mcpOnlyPlugin("example/plugin-member-new", "member_new_mcp"));
+        }
+        const removal = /^https:\/\/127\.0\.0\.1\/plugin-removal-(\d)\.json$/.exec(url);
+        if (removal) {
+          return Response.json(
+            mcpOnlyPlugin(`example/plugin-removal-${removal[1]}`, `removal_${removal[1]}_mcp`),
+          );
         }
         if (url === "https://127.0.0.1/inventory.json") {
           return Response.json(openApiDocument());
@@ -974,4 +986,84 @@ describe("Plugin routes", () => {
     expect(await status("mcp:configured:member_shared_mcp")).toEqual(before);
     expect(before?.status).toBe("disabled");
   }, 60_000);
+
+  test("a member removes only plugins they added; an admin removes any", async () => {
+    if (!available || !shared) return;
+    const urlFor = (n: number) => `https://127.0.0.1/plugin-removal-${n}.json`;
+    const keyFor = (n: number) => `example/plugin-removal-${n}`;
+    // 1: the member's own. 2: an admin's. 3: another member's. 4: no recorded installer.
+    const memberAdd = await installResponse(
+      urlFor(1),
+      await preview(urlFor(1)),
+      crypto.randomUUID(),
+      MEMBER,
+    );
+    expect(memberAdd.status).toBe(201);
+    for (const n of [2, 3, 4])
+      await install(urlFor(n), await preview(urlFor(n)), crypto.randomUUID());
+    const installers: Record<number, string> = {
+      2: `user:plugin-route-admin-${crypto.randomUUID()}`,
+      3: `user:plugin-route-member-${crypto.randomUUID()}`,
+      4: "unattributed-legacy",
+    };
+    for (const [n, installer] of Object.entries(installers)) {
+      await shared.admin`update capability_plugin_installations set installed_by_subject_id = ${installer}
+        where workspace_id = ${workspaceId} and plugin_id = (
+          select id from capability_plugins where workspace_id = ${workspaceId} and plugin_key = ${keyFor(Number(n))})`;
+    }
+    const removable = async (permissions: string[]) => {
+      const listed = (await (await request("/plugins", {}, permissions)).json()) as {
+        plugins: { pluginKey: string; canRemove?: boolean; installedBySubjectId?: unknown }[];
+      };
+      const rows = listed.plugins.filter((plugin) =>
+        plugin.pluginKey.startsWith("example/plugin-removal-"),
+      );
+      // The installer stays on the server; the list carries only the decision.
+      expect(rows.some((plugin) => "installedBySubjectId" in plugin)).toBe(false);
+      return Object.fromEntries(rows.map((plugin) => [plugin.pluginKey, plugin.canRemove]));
+    };
+    expect(await removable(MEMBER)).toEqual({
+      [keyFor(1)]: true,
+      [keyFor(2)]: false,
+      [keyFor(3)]: false,
+      [keyFor(4)]: false,
+    });
+    expect(await removable(ADMIN)).toEqual({
+      [keyFor(1)]: true,
+      [keyFor(2)]: true,
+      [keyFor(3)]: true,
+      [keyFor(4)]: true,
+    });
+    const remove = async (n: number, permissions: string[]) => {
+      const impact = await (
+        await request(
+          `/plugins/${encodeURIComponent(keyFor(n))}/uninstall-preview`,
+          {},
+          permissions,
+        )
+      ).json();
+      return await request(
+        `/plugins/${encodeURIComponent(keyFor(n))}`,
+        {
+          method: "DELETE",
+          body: JSON.stringify({
+            expectedInstallationVersion: impact.installationVersion,
+            expectedPreviewToken: impact.previewToken,
+            idempotencyKey: crypto.randomUUID(),
+          }),
+        },
+        permissions,
+      );
+    };
+    for (const n of [2, 3, 4]) {
+      const refused = await remove(n, MEMBER);
+      expect(refused.status).toBe(403);
+      expect(await refused.text()).toContain(
+        "Only an admin can remove a plugin someone else added",
+      );
+    }
+    expect((await remove(1, MEMBER)).status).toBe(200);
+    for (const n of [2, 3, 4]) expect((await remove(n, ADMIN)).status).toBe(200);
+    expect(await removable(ADMIN)).toEqual({});
+  }, 90_000);
 });

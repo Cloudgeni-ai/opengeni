@@ -62,6 +62,37 @@ export type SlackAppHomeAgent = {
 /** Agents shown before the directory says "and more in Opengeni". */
 const AGENT_DIRECTORY_LIMIT = 20;
 
+/** The Ask button beside an agent in Home: opens the Ask form with that agent. */
+export const SLACK_HOME_ASK_ACTION_ID = "opengeni.home.ask";
+
+/** A press of an agent's Ask button in Home, or null. */
+export function slackAppHomeAskAction(payload: unknown): {
+  slackTeamId: string;
+  slackUserId: string;
+  triggerId: string;
+  agentId: string;
+} | null {
+  const envelope = record(payload);
+  if (envelope?.type !== "block_actions" || !Array.isArray(envelope.actions)) return null;
+  if (envelope.actions.length !== 1) return null;
+  const action = record(envelope.actions[0]);
+  if (action?.action_id !== SLACK_HOME_ASK_ACTION_ID) return null;
+  const agentId = boundedId(action.value, 64);
+  const slackTeamId = boundedId(record(envelope.team)?.id, 64);
+  const slackUserId = boundedId(record(envelope.user)?.id, 64);
+  const triggerId = boundedId(envelope.trigger_id, 256);
+  if (
+    !agentId ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(agentId) ||
+    !slackTeamId ||
+    !slackUserId ||
+    !triggerId
+  ) {
+    return null;
+  }
+  return { slackTeamId, slackUserId, triggerId, agentId };
+}
+
 /**
  * The agent directory at the top of Home: who people can ask and how. Empty
  * without agents, so Home is unchanged then.
@@ -88,6 +119,18 @@ export function buildSlackAppHomeAgentBlocks(
       ...(agent.iconUrl
         ? { accessory: { type: "image" as const, image_url: agent.iconUrl, alt_text: agent.name } }
         : {}),
+    });
+    blocks.push({
+      type: "actions",
+      block_id: `opengeni_home_agent_ask_${agent.id}`,
+      elements: [
+        {
+          type: "button",
+          action_id: SLACK_HOME_ASK_ACTION_ID,
+          text: { type: "plain_text", text: "Ask", emoji: true },
+          value: agent.id,
+        },
+      ],
     });
   }
   if (agents.length > AGENT_DIRECTORY_LIMIT) {

@@ -755,6 +755,8 @@ describe("API Integration routes", () => {
           instanceKey: "organization",
           name: "Ledger API",
           requiresConnection: false,
+          // Managed in the organization's settings, never removed here.
+          canRemove: false,
           organizationConnector: {
             connectorId: row!.id,
             login: "none",

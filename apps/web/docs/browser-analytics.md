@@ -54,9 +54,10 @@ once that lookup has finished.
 `/workspaces/<id>/`: `sessions`, `agents`, `secrets`, `rigs`, `machines`,
 `computer-use`, `insights`, `priority`, `plugins`, `capabilities`,
 `schedules`, `automations`, `documents`, `memory`, `state`, `artifacts`,
-`settings`, `organization`, `files`, `playground`, `read-only-chats`, `inbox`,
-`sites`, and `meetings`; a session page also carries `session_id`.
-`capabilities`, `agents` and `priority` are redirects, so they appear only
+`settings`, `organization`, `files`, `playground`, `archived`,
+`read-only-chats`, `inbox`, `sites`, and `meetings`; a session page also
+carries `session_id`. `capabilities`, `agents`, `priority` and
+`read-only-chats` (the Archived page's old path) are redirects, so they appear only
 when an old link or bookmark opens them. Pages outside a workspace are matched by
 exact path and never carry an id: `home` (`/`, including the sign-in panel),
 `session-link`, `identity-link`, `checkout-return` (`/billing`),

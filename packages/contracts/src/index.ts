@@ -101,7 +101,9 @@ import {
   SKILL_MAX_FILES,
   SKILL_MAX_FILE_BYTES,
   SKILL_MAX_TOTAL_BYTES,
+  INLINE_SKILLS_MAX,
 } from "./skill-files";
+export { INLINE_SKILLS_MAX } from "./skill-files";
 export * from "./model-connection-access";
 export * from "./subscription-account-actions";
 export * from "./sandbox-provider-command";
@@ -194,6 +196,7 @@ export * from "./event-triggers";
 export * from "./automation-templates";
 export * from "./bots";
 export * from "./slack-agents";
+export * from "./slack-agent-updates";
 export * from "./mcp-elicitation";
 import { McpElicitationContent, type McpElicitationApprovalRequest } from "./mcp-elicitation";
 import {
@@ -1202,7 +1205,9 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "slack_bot_prepare_message",
   "slack_bot_send_prepared_message",
   "slack_agent_handoff",
+  "slack_agent_suggest",
   "slack_agent_chats",
+  "slack_agent_propose",
   "fiken_companies_list",
   "fiken_contacts_list",
   "fiken_contact_create",
@@ -1523,7 +1528,14 @@ export const SessionTenancyVisibility = /* @__PURE__ */ defineSchema(() =>
 
 export const UserResourceAuthorityScope = /* @__PURE__ */ defineSchema(() => z.literal("user"));
 export const UserResourceKind = /* @__PURE__ */ defineSchema(() =>
-  z.enum(["connection", "document", "variable_set", "rig", "connected_machine"]),
+  z.enum([
+    "connection",
+    "document",
+    "variable_set",
+    "rig",
+    "connected_machine",
+    "subscription_connection",
+  ]),
 );
 export type UserResourceKind = z.infer<typeof UserResourceKind>;
 
@@ -1533,6 +1545,9 @@ export const USER_RESOURCE_ACTION_BY_KIND = {
   variable_set: "variable_set.use",
   rig: "rig.use",
   connected_machine: "connected_machine.use",
+  // An `always` grant in a workspace turns a person's own Codex, Claude or
+  // SuperGrok subscription on for their own turns there.
+  subscription_connection: "subscription_connection.use",
 } as const satisfies Record<UserResourceKind, string>;
 
 export const UserResourceLifecycleGrantMode = /* @__PURE__ */ defineSchema(() =>
@@ -1608,6 +1623,7 @@ export const UserResourceAuthorityGrant = /* @__PURE__ */ defineSchema(() =>
       "variable_set.use",
       "rig.use",
       "connected_machine.use",
+      "subscription_connection.use",
     ]),
     mode: UserResourceLifecycleGrantMode,
     context: SessionTenancyVisibility,
@@ -1648,7 +1664,9 @@ export const IssueUserResourceGrantRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       scope: UserResourceAuthorityScope,
-      resourceKind: UserResourceKind.exclude(["connection"]),
+      /** `connection` turns your own login on for your messages in this
+       * workspace; it takes only `always` (D-54). */
+      resourceKind: UserResourceKind,
       mode: ManagedUserResourceGrantMode,
       context: SessionTenancyVisibility,
       sessionId: z.string().uuid().nullable().optional(),
@@ -1656,6 +1674,13 @@ export const IssueUserResourceGrantRequest = /* @__PURE__ */ defineSchema(() =>
       workspaceSharedAcknowledged: primitives.boolean.default(false),
     })
     .superRefine((value, context) => {
+      if (value.resourceKind === "connection" && value.mode !== "always") {
+        context.addIssue({
+          code: "custom",
+          path: ["mode"],
+          message: "an own login is turned on for a workspace with always",
+        });
+      }
       if (value.context === "workspace_shared" && !value.workspaceSharedAcknowledged) {
         context.addIssue({
           code: "custom",
@@ -1701,6 +1726,95 @@ export const RevokeUserResourceGrantQuery = /* @__PURE__ */ defineSchema(() =>
     scope: UserResourceAuthorityScope,
   }),
 );
+/**
+ * Your own things that you turn on workspace by workspace: your logins
+ * (`connection`), model plans (`subscription_connection`) and machines
+ * (`connected_machine`). "Where it works" lists each workspace you belong to
+ * in the organization and whether the thing works there for your own
+ * messages. Nobody else's messages ever use it.
+ */
+export const OwnResourceReachKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["connection", "subscription_connection", "connected_machine"]),
+);
+export const OwnResourceReachQuery = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    resourceKind: OwnResourceReachKind,
+    resourceId: primitives.uuid,
+  }),
+);
+export const OwnResourceReachWorkspace = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    workspaceId: primitives.uuid,
+    name: z.string(),
+    /** Your Personal workspace. */
+    personal: primitives.boolean,
+    /** The workspace this was asked from. */
+    current: primitives.boolean,
+    /** It works here for your own messages. */
+    on: primitives.boolean,
+    /** Always on here and can't be turned off: logins and plans in your Personal workspace. */
+    alwaysOn: primitives.boolean,
+    /** You may turn it on or off here. Turning off is always allowed when it is on. */
+    canChange: primitives.boolean,
+  }),
+);
+export const OwnResourceReachResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    resourceKind: OwnResourceReachKind,
+    resourceId: primitives.uuid,
+    /** Personal first, then by name. */
+    workspaces: z.array(OwnResourceReachWorkspace),
+  }),
+);
+export const SetOwnResourceReachRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      resourceKind: OwnResourceReachKind,
+      resourceId: primitives.uuid,
+      on: primitives.boolean,
+    })
+    .strict(),
+);
+export const SetOwnResourceReachResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    workspace: OwnResourceReachWorkspace,
+  }),
+);
+/**
+ * One of your own logins, model plans or machines, with where it works. "My
+ * things" lists them all at once for the organization.
+ */
+export const OwnResource = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    resourceKind: OwnResourceReachKind,
+    resourceId: primitives.uuid,
+    /** A login's or plan's account (its email when known), or a machine's name. */
+    name: z.string(),
+    /**
+     * Login: the service it signs in to (its provider domain). Plan: the
+     * provider (`codex`, `claude`, `xai`). Machine: null.
+     */
+    provider: z.string().nullable(),
+    /** Plan only: the plan the provider reports, when known. */
+    plan: z.string().nullable(),
+    /** Personal first, then by name. Only workspaces where you can see it. */
+    workspaces: z.array(OwnResourceReachWorkspace),
+  }),
+);
+export const OwnResourcesResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    /** Logins, then plans, then machines, each by name. */
+    resources: z.array(OwnResource),
+  }),
+);
+export type OwnResourceReachKind = z.infer<typeof OwnResourceReachKind>;
+export type OwnResourceReachQuery = z.infer<typeof OwnResourceReachQuery>;
+export type OwnResourceReachWorkspace = z.infer<typeof OwnResourceReachWorkspace>;
+export type OwnResourceReachResponse = z.infer<typeof OwnResourceReachResponse>;
+export type SetOwnResourceReachRequest = z.infer<typeof SetOwnResourceReachRequest>;
+export type SetOwnResourceReachResponse = z.infer<typeof SetOwnResourceReachResponse>;
+export type OwnResource = z.infer<typeof OwnResource>;
+export type OwnResourcesResponse = z.infer<typeof OwnResourcesResponse>;
 export type UserResourceAuthorityGrant = z.infer<typeof UserResourceAuthorityGrant>;
 export type UserResourceAuthoritySummary = z.infer<typeof UserResourceAuthoritySummary>;
 export type ListUserResourceAuthoritiesQuery = z.infer<typeof ListUserResourceAuthoritiesQuery>;
@@ -2603,12 +2717,27 @@ export const WorkspaceSessionToolDefaultsPatch = /* @__PURE__ */ defineSchema(()
     .strict(),
 );
 
+/** A model a dictation can name, such as for one desktop dictation shortcut. */
+export const DictationModelOption = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      providerId: VoiceInputProviderId,
+      providerName: primitives.string.trim().min(1).max(128),
+      model: primitives.string.trim().min(1).max(128),
+      name: primitives.string.trim().min(1).max(128),
+    })
+    .strict(),
+);
+export type DictationModelOption = z.infer<typeof DictationModelOption>;
+
 /** Client-safe voice-input capability projection. Never includes provider secrets. */
 export const ClientVoiceInputConfig = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       available: primitives.boolean,
       providers: z.array(VoiceInputProviderId).optional(),
+      /** Every model a dictation may name, of each ready provider. */
+      models: z.array(DictationModelOption).max(64).optional(),
       maxDurationSeconds: z.number().int().positive().max(600),
       maxSizeBytes: primitives.positiveInteger.max(25 * 1024 * 1024),
       acceptedMimeTypes: z.array(primitives.string.trim().min(1).max(128)).min(1).max(32),
@@ -5002,6 +5131,11 @@ export const PersonalApiKey = /* @__PURE__ */ defineSchema(() =>
     expiresAt: primitives.nullableString,
     lastUsedAt: primitives.nullableString,
     createdAt: primitives.string,
+    /**
+     * Listed keys: whether the caller can revoke this one. Everyone revokes
+     * their own; owners and admins anyone's, except only an owner an owner's.
+     */
+    canRevoke: primitives.boolean.optional(),
   }),
 );
 export type PersonalApiKey = z.infer<typeof PersonalApiKey>;
@@ -9003,17 +9137,24 @@ export const UpdateSessionAttentionRequest = /* @__PURE__ */ defineSchema(() =>
 );
 export type UpdateSessionAttentionRequest = z.infer<typeof UpdateSessionAttentionRequest>;
 
-/** A member's personal archive state for a root chat. */
+/**
+ * Archive a root chat and its sub-chats for everyone (`archived: true`), or
+ * undo that (`archived: false`) within the few seconds after archiving. Once
+ * that window ends the chat's remaining work is stopped and its content moves
+ * to long-term storage; it stays readable and searchable but can no longer be
+ * restored or continued. Needs session control.
+ */
 export const UpdateSessionArchiveRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       archived: primitives.boolean,
-      /** Stable for retries of one intent; use a fresh ID for a later intentional archive. */
+      /** Ignored; repeating an Archive changes nothing. Kept for older clients. */
       clientEventId: z.string().min(1).max(200).optional(),
-      /** Hiding alone never changes shared execution. Ordinary archive pauses first. */
+      /** Ignored; there is one kind of archive. Kept for older clients. */
       mode: z.enum(["pause_and_archive", "hide_for_me"]).optional(),
-      /** Required when the locked chat tree has active work. Restore never resumes. */
+      /** Ignored; archiving stops running work itself. Kept for older clients. */
       confirmPause: z.boolean().optional(),
+      /** Ignored. Kept for older clients. */
       expectedVersion: z.number().int().nonnegative().optional(),
     })
     .strict(),
@@ -12046,6 +12187,82 @@ export const RigVerificationHealth = /* @__PURE__ */ defineSchema(() =>
 );
 export type RigVerificationHealth = z.infer<typeof RigVerificationHealth>;
 
+/**
+ * Where an organization machine or rig works: always in the workspace it was
+ * connected from or made in (`homeWorkspaceId`), plus every shared workspace
+ * of the organization (`allowedWorkspaceIds: null`) or the listed ones, and
+ * members' Personal workspaces when `allowPersonalWorkspaces` is on. Only
+ * organization machines and rigs have it.
+ */
+export const OrganizationComputeReach = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    homeWorkspaceId: primitives.uuid,
+    allowedWorkspaceIds: z.array(primitives.uuid).nullable(),
+    allowPersonalWorkspaces: primitives.boolean,
+  }),
+);
+export type OrganizationComputeReach = z.infer<typeof OrganizationComputeReach>;
+
+/**
+ * PUT /v1/workspaces/:workspaceId/machines/:enrollmentId/reach and
+ * PUT /v1/workspaces/:workspaceId/rigs/:rigId/reach: an organization owner or
+ * admin changes where an organization machine or rig works. The ids are the
+ * organization's shared workspaces; its home workspace always has it.
+ */
+export const UpdateOrganizationComputeReachRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      allowedWorkspaceIds: z.array(primitives.uuid).max(1000).nullable(),
+      allowPersonalWorkspaces: primitives.boolean,
+    })
+    .strict(),
+);
+export type UpdateOrganizationComputeReachRequest = z.infer<
+  typeof UpdateOrganizationComputeReachRequest
+>;
+
+/** The reach an organization machine or rig has after the change. */
+export const OrganizationComputeReachResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ reach: OrganizationComputeReach }),
+);
+export type OrganizationComputeReachResponse = z.infer<typeof OrganizationComputeReachResponse>;
+
+/**
+ * An organization machine or rig, wherever it works: its name and where it
+ * works, for Organization settings > Shared. Machines carry the id of their
+ * sandbox, which machine pages open by.
+ */
+export const OrganizationComputeSummary = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: primitives.uuid,
+    name: primitives.string,
+    sandboxId: primitives.uuid.nullable().optional(),
+    reach: OrganizationComputeReach,
+  }),
+);
+export type OrganizationComputeSummary = z.infer<typeof OrganizationComputeSummary>;
+
+/**
+ * GET /v1/workspaces/:workspaceId/organization-machines: every organization
+ * machine, wherever it works, for organization owners. `complete` is false
+ * while the server can only list the ones that work in the requested
+ * workspace.
+ */
+export const ListOrganizationMachinesResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ machines: z.array(OrganizationComputeSummary), complete: primitives.boolean }),
+);
+export type ListOrganizationMachinesResponse = z.infer<typeof ListOrganizationMachinesResponse>;
+
+/**
+ * GET /v1/workspaces/:workspaceId/organization-rigs: every organization
+ * sandbox environment, wherever it works, for organization owners.
+ * `complete` as for machines.
+ */
+export const ListOrganizationRigsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ rigs: z.array(OrganizationComputeSummary), complete: primitives.boolean }),
+);
+export type ListOrganizationRigsResponse = z.infer<typeof ListOrganizationRigsResponse>;
+
 export const Rig = /* @__PURE__ */ defineSchema(() =>
   z.object({
     id: primitives.uuid,
@@ -12066,6 +12283,8 @@ export const Rig = /* @__PURE__ */ defineSchema(() =>
     versionCount: primitives.nonnegativeInteger,
     createdAt: primitives.string,
     updatedAt: primitives.string,
+    /** Where it works; present only for organization rigs. */
+    reach: OrganizationComputeReach.nullable().optional(),
   }),
 );
 export type Rig = z.infer<typeof Rig>;
@@ -12811,7 +13030,7 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
     // Validated on save like session create Skills (SessionSkills) and stored
     // normalized; only the shape is declared here so Skill YAML validation
     // stays out of browser bundles, like UpdateSessionSkillsRequest.
-    skills: z.array(ScheduledTaskSkill).max(32).optional(),
+    skills: z.array(ScheduledTaskSkill).max(INLINE_SKILLS_MAX).optional(),
   };
 }
 
@@ -14194,7 +14413,7 @@ export type SessionSkillInput = z.input<typeof SessionSkill>;
 export const SessionSkills = /* @__PURE__ */ defineSkillContractSchema(() =>
   z
     .array(SessionSkill)
-    .max(32)
+    .max(INLINE_SKILLS_MAX)
     .transform((skills, ctx) => {
       const selected = new Map<string, { fingerprint: string; skill: SessionSkill }>();
       for (const skill of skills) {
@@ -14235,7 +14454,7 @@ export const StoredSessionSkills = /* @__PURE__ */ defineSkillContractSchema(() 
 export const UpdateSessionSkillsRequest = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      skills: z.array(z.unknown()).max(32),
+      skills: z.array(z.unknown()).max(INLINE_SKILLS_MAX),
       expectedVersion: primitives.positiveInteger,
     })
     .strict(),
@@ -14509,6 +14728,17 @@ export const ConnectionMetadata = /* @__PURE__ */ defineSchema(() =>
     updatedBySubjectId: primitives.nullableString,
     createdAt: primitives.string,
     updatedAt: primitives.string,
+    /**
+     * Your own login only: whether it works for your messages in the workspace
+     * this list was read from. It does in your Personal workspace and in each
+     * shared workspace where it is turned on; it starts on where it was added.
+     */
+    turnedOnHere: z.boolean().optional(),
+    /**
+     * The standing grant that turns your own login on here; revoke it to stop
+     * using the login here. Null in your Personal workspace, which needs none.
+     */
+    turnedOnHereGrantId: primitives.uuid.nullable().optional(),
   }),
 );
 export type ConnectionMetadata = z.infer<typeof ConnectionMetadata>;
@@ -14944,6 +15174,13 @@ export const CapabilityCatalogItem = /* @__PURE__ */ defineSchema(() =>
     metadata: z.record(primitives.string, z.unknown()).default({}),
     createdAt: z.string().optional(),
     updatedAt: z.string().optional(),
+    /**
+     * Whether the viewer may remove this custom MCP server from the workspace
+     * (`DELETE …/capabilities/:id/installation`): integration admins remove
+     * any, a member only one they turned on, while it is on. Set by the
+     * workspace catalog list; older servers omit it.
+     */
+    canRemove: primitives.boolean.optional(),
   }),
 );
 export type CapabilityCatalogItem = z.infer<typeof CapabilityCatalogItem>;
@@ -14991,6 +15228,14 @@ export const CapabilityInstallation = /* @__PURE__ */ defineSchema(() =>
   }),
 );
 export type CapabilityInstallation = z.infer<typeof CapabilityInstallation>;
+
+/** `DELETE …/capabilities/:capabilityId/installation`: the installation that was removed. */
+export const RemoveCapabilityInstallationResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ removed: CapabilityInstallation }).strict(),
+);
+export type RemoveCapabilityInstallationResponse = z.infer<
+  typeof RemoveCapabilityInstallationResponse
+>;
 
 export const CreateCapabilityCatalogItemRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -15364,6 +15609,11 @@ export const IntegrationFacetBindingSummary = /* @__PURE__ */ defineSchema(() =>
       updatedAt: primitives.string.datetime({ offset: true }),
       directlyOwned: primitives.boolean,
       owners: z.array(CapabilityComponentOwner),
+      /**
+       * Whether the viewer may remove it: integration admins remove anything,
+       * a member only what they added. Older servers omit it.
+       */
+      canRemove: primitives.boolean.optional(),
     })
     .strict(),
 );
@@ -15649,6 +15899,11 @@ export const ApiIntegrationInstallationSummary = /* @__PURE__ */ defineSchema(()
         })
         .strict()
         .optional(),
+      /**
+       * Whether the viewer may remove this account: integration admins remove
+       * anything, a member only what they added. Older servers omit it.
+       */
+      canRemove: primitives.boolean.optional(),
     })
     .strict(),
 );
@@ -15896,6 +16151,11 @@ export const PluginInstallationSummary = /* @__PURE__ */ defineSchema(() =>
       status: z.enum(["active", "needs_attention"]),
       installedAt: primitives.string.datetime({ offset: true }),
       updatedAt: primitives.string.datetime({ offset: true }),
+      /**
+       * Whether the viewer may remove it: integration admins remove anything,
+       * a member only what they added. Older servers omit it.
+       */
+      canRemove: primitives.boolean.optional(),
     })
     .strict(),
 );
@@ -22118,6 +22378,8 @@ export const MachineView = /* @__PURE__ */ defineSchema(() =>
     // Per-enrollment desired policy. Null for managed/session sandboxes.
     operationPolicy: MachineOperationPolicy.nullable().default(null),
     metrics: MetricSample.nullable(),
+    /** Where an organization machine works; null for every other machine. */
+    reach: OrganizationComputeReach.nullable().default(null),
   }),
 );
 export type MachineView = z.infer<typeof MachineView>;

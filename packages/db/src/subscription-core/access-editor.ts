@@ -3,6 +3,7 @@ import type { Database } from "../database";
 import { subscriptionCoreProvider } from "../subscription-core-providers";
 import {
   readSubscriptionCoreConnectionAccess,
+  removeSubscriptionCoreConnectionFromWorkspace,
   SubscriptionCoreAccessForbiddenError,
   SubscriptionCoreAccessWorkspaceNotInOrganizationError,
   updateSubscriptionCoreConnectionAccess,
@@ -21,6 +22,8 @@ export type ModelConnectionAccess = {
   /** Chosen people (organization membership ids); shared core connections only. */
   allowedPeople?: string[] | null | undefined;
   sharePersonal?: true | undefined;
+  /** Organization route: move a workspace's own connection to the organization (D-52). */
+  moveToOrganization?: true | undefined;
   version: number;
 };
 
@@ -124,6 +127,28 @@ export async function updateSubscriptionCoreModelConnectionAccess(
   } catch (error) {
     if (error instanceof SubscriptionCoreAccessWorkspaceNotInOrganizationError)
       throw new ModelConnectionWorkspaceNotInOrganizationError();
+    if (error instanceof SubscriptionCoreAccessForbiddenError)
+      throw new ModelConnectionAccessForbiddenError();
+    throw error;
+  }
+}
+
+/**
+ * Removes another workspace's own connection from the workspace in `target`
+ * (D-52). True when removed; null when no such connection serves it.
+ */
+export async function removeSubscriptionCoreModelConnectionFromWorkspace(
+  db: Database,
+  provider: ProviderId,
+  target: SubscriptionCoreAccessTarget & { workspaceId: string },
+): Promise<true | null> {
+  try {
+    return await removeSubscriptionCoreConnectionFromWorkspace(
+      db,
+      subscriptionCoreProvider(provider),
+      { ...coreTarget(target), workspaceId: target.workspaceId },
+    );
+  } catch (error) {
     if (error instanceof SubscriptionCoreAccessForbiddenError)
       throw new ModelConnectionAccessForbiddenError();
     throw error;

@@ -4,14 +4,19 @@
  * Both are pages (DESIGN.md section 8). Creating offers the optional intro
  * step on the same page right after the agent exists.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   SLACK_AGENT_DESCRIPTION_MAX_LENGTH,
   SLACK_AGENT_INSTRUCTIONS_MAX_LENGTH,
   SLACK_AGENT_INTRO_CHANNELS_MAX,
   SLACK_AGENT_NAME_MAX_LENGTH,
-  slackAgentHandle,
+  SLACK_AGENT_OPEN_LABEL,
+  slackAgentCallText,
+  slackAgentNameKey,
   slackAgentNameProblem,
+  slackAgentNameProblemText,
+  slackAgentNameWarning,
+  slackAgentOpenDisclosure,
 } from "@opengeni/contracts";
 import type {
   SessionAvatar as SessionAvatarValue,
@@ -24,14 +29,12 @@ import { toast } from "sonner";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 
 import { useAppContext } from "@opengeni/react/app/app-context";
+import { useNavigate } from "@opengeni/react/app/lib/navigation";
 import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import type { ConnectionMetadata } from "@opengeni/react/app/types";
+import { sessionAvatarFallbackHue } from "@opengeni/react/app/components/session/session-avatar";
 import {
-  SessionAvatar,
-  sessionAvatarFallbackHue,
-} from "@opengeni/react/app/components/session/session-avatar";
-import {
-  SessionAvatarPicker,
+  SessionAvatarPickerButton,
   sessionAvatarDraft,
   sessionAvatarDraftErrors,
   sessionAvatarFromDraft,
@@ -45,12 +48,14 @@ import {
 import { Button } from "@opengeni/react/ui/button";
 import { ErrorMessage } from "@opengeni/react/ui/error-message";
 import { CheckboxField, Field, FieldStack, TextArea, TextInput } from "@opengeni/react/ui/field";
-import { FlushFormPage } from "@opengeni/react/ui/flush-form-page";
+import { FormPage } from "@opengeni/react/ui/form-dialog";
+import { inAppClick } from "@opengeni/react/ui/in-app-click";
 import { Notice } from "@opengeni/react/ui/notice";
 import { SelectMenu } from "@opengeni/react/ui/select-menu";
 import { Skeleton } from "@opengeni/react/ui/skeleton";
 
 import { openGeniSlackBotUiMetadata } from "@/lib/slack-bot";
+import { previewPersonName, SlackAgentIntroPreview } from "./slack-agent-intro-preview";
 import { slackAgentCall, slackAgentErrorCode } from "./slack-agents";
 
 /** What a new agent starts from, such as a bot template. */
@@ -63,18 +68,57 @@ export type SlackAgentSeed = {
 
 const EMPTY_SEED: SlackAgentSeed = { name: "", description: "", avatar: null, instructions: "" };
 
-function nameError(name: string): string | null {
+/**
+ * Why a name can't be saved. Only a new or changed name meets every rule, so
+ * an agent named before the stricter rules can still be saved unchanged.
+ */
+function nameError(name: string, current: string | undefined): string | null {
+  if (current !== undefined && slackAgentNameKey(name) === slackAgentNameKey(current)) return null;
   const problem = slackAgentNameProblem(name);
-  if (problem === "empty") return "Give it a name.";
-  if (problem === "reserved")
-    return `"${name.trim()}" already means something in Slack. Choose another name.`;
-  if (problem === "invalid")
-    return "Use letters, numbers, spaces and hyphens, starting with a letter or number.";
-  return null;
+  return problem ? slackAgentNameProblemText(name, problem) : null;
+}
+
+const DESCRIPTION_MISSING = "Say in one sentence what it helps with.";
+
+/** "Works in the Platform workspace.", or "Works in this workspace." when the name already says it. */
+function worksIn(workspaceName: string): string {
+  return /workspace$/i.test(workspaceName.trim())
+    ? `Works in ${workspaceName}.`
+    : `Works in the ${workspaceName} workspace.`;
 }
 
 function installationName(connection: ConnectionMetadata): string {
   return openGeniSlackBotUiMetadata(connection)?.slackTeamName ?? "Slack workspace";
+}
+
+/** The agent's Memory: its Knowledge collection, opened on the Knowledge page. */
+function MemoryField({
+  workspaceId,
+  collectionId,
+  reviewFirst,
+}: {
+  workspaceId: string;
+  collectionId: string;
+  reviewFirst: boolean;
+}) {
+  const navigate = useNavigate();
+  const href = `/workspaces/${workspaceId}/state?entry=${encodeURIComponent(collectionId)}`;
+  return (
+    <Field
+      label="Memory"
+      group
+      hint={reviewFirst ? "New Memory is saved for review first." : undefined}
+    >
+      <a
+        href={href}
+        onClick={inAppClick(() => void navigate({ href }))}
+        className="w-fit rounded-[4px] text-sm text-fg underline decoration-fg/25 underline-offset-2 hover:decoration-fg"
+        data-slack-agent-memory=""
+      >
+        Open in Knowledge
+      </a>
+    </Field>
+  );
 }
 
 export function SlackAgentFormPage({
@@ -83,7 +127,9 @@ export function SlackAgentFormPage({
   workspaceId,
   workspaceName,
   connections,
-  memoryReviewFirst,
+  connectionsLoaded = true,
+  connectionsError = null,
+  onRetryConnections,
   onClose,
   onSaved,
 }: {
@@ -95,8 +141,11 @@ export function SlackAgentFormPage({
   workspaceName: string;
   /** Opengeni bots a new agent can be called through. */
   connections: ConnectionMetadata[];
-  /** New Memory waits for review in the agent's workspace; null when unknown. */
-  memoryReviewFirst: boolean | null;
+  /** False while the bots are still loading; the form can open before them. */
+  connectionsLoaded?: boolean | undefined;
+  /** Why the bots couldn't all load; then a missing bot may only have failed to load. */
+  connectionsError?: string | null | undefined;
+  onRetryConnections?: (() => void) | undefined;
   onClose: () => void;
   /** After a create or an edit. */
   onSaved: (agent: SlackAgent, created: boolean) => void;
@@ -122,7 +171,8 @@ export function SlackAgentFormPage({
       "icon",
     ),
   );
-  const [connectionId, setConnectionId] = useState(connections[0]?.id ?? "");
+  // Empty until someone picks one: the bots can arrive after the form opens.
+  const [connectionId, setConnectionId] = useState("");
   const [errors, setErrors] = useState<{
     name?: string | null;
     description?: string | null;
@@ -131,19 +181,42 @@ export function SlackAgentFormPage({
   }>({});
   const [unavailable, setUnavailable] = useState<ConnectionMetadata | null>(null);
   const [turningOn, setTurningOn] = useState(false);
+  const [open, setOpen] = useState(agent?.open ?? false);
+  const [pickerOpen, setPickerOpen] = useState(false);
   const avatar = sessionAvatarFromDraft(draft, name, null);
-  const connection = connections.find((row) => row.id === connectionId) ?? null;
-  const reviewFirst = agent ? agent.memoryReviewFirst : memoryReviewFirst;
+  const connection = connections.find((row) => row.id === connectionId) ?? connections[0] ?? null;
+  // Only when no bot arrived: with one, creating works and the Slack page behind says the rest.
+  const loadFailed = !agent && !connection && connectionsLoaded && Boolean(connectionsError);
   const agentWorkspaceName = agent ? (agent.targetWorkspaceName ?? workspaceName) : workspaceName;
-  const handle = name.trim() ? slackAgentHandle(name) : null;
+  const nameHint = name.trim()
+    ? [
+        `People ask it with ${slackAgentCallText(name)}.`,
+        slackAgentNameKey(name) === (agent ? slackAgentNameKey(agent.name) : null)
+          ? null
+          : slackAgentNameWarning(name),
+      ]
+        .filter(Boolean)
+        .join(" ")
+    : undefined;
+  // Opening an agent to anyone in Slack is an organization admin's call; any
+  // admin of the workspace can close it again. The API enforces both.
+  const agentAccountId = agent
+    ? accessContext?.workspaceGrants.find((grant) => grant.workspaceId === agent.targetWorkspaceId)
+        ?.accountId
+    : undefined;
+  const canOpen = Boolean(
+    agentAccountId && hasAccountPermission(accessContext, agentAccountId, "account:admin"),
+  );
 
   function validate(): boolean {
     const next = {
-      name: nameError(name),
-      description: description.trim() ? null : "Say in one line what it does.",
+      name: nameError(name, agent?.name),
+      description: description.trim() ? null : DESCRIPTION_MISSING,
       ...sessionAvatarDraftErrors(draft, name, null),
     };
     setErrors(next);
+    // Name and description first; then the picker opens on the icon's error.
+    if (!next.name && !next.description && (next.emoji || next.letters)) setPickerOpen(true);
     return !next.name && !next.description && !next.emoji && !next.letters && avatar !== null;
   }
 
@@ -186,6 +259,7 @@ export function SlackAgentFormPage({
     if (instructions.trim() !== (current.instructions ?? ""))
       change.instructions = instructions.trim();
     if (JSON.stringify(avatar) !== JSON.stringify(current.avatar)) change.avatar = avatar;
+    if (open !== current.open) change.open = open;
     if (Object.keys(change).length === 1) {
       onClose();
       return true;
@@ -251,24 +325,42 @@ export function SlackAgentFormPage({
   }
 
   return (
-    <FlushFormPage
+    <FormPage
       title={agent ? `Edit ${agent.name}` : "New Slack agent"}
-      description={
-        agent
-          ? `Works in ${agentWorkspaceName}.`
-          : `Works in ${workspaceName}. This can't change later.`
-      }
-      backLabel="Slack"
-      onClose={onClose}
+      description={worksIn(agentWorkspaceName)}
+      back={{ label: "Slack", onClick: onClose }}
+      onCancel={onClose}
       submitLabel={agent ? "Save" : "Create agent"}
       pendingLabel={agent ? "Saving…" : "Creating…"}
       pending={turningOn ? true : undefined}
+      // Until every bot is in, the bot shared with this workspace may still be missing.
+      submitDisabled={!agent && (!connection || !connectionsLoaded)}
+      disabledReason={
+        !agent && !connection && connectionsLoaded && !loadFailed
+          ? "Add a Slack workspace to create Slack agents."
+          : undefined
+      }
       onSubmit={async () => {
         if (!validate()) return false;
         return agent ? await update(agent) : await create();
       }}
     >
       <FieldStack>
+        {loadFailed ? (
+          <Notice
+            tone="failed"
+            title="Couldn't load all Slack connections"
+            action={
+              onRetryConnections ? (
+                <Button type="button" variant="outline" size="sm" onClick={onRetryConnections}>
+                  Retry
+                </Button>
+              ) : undefined
+            }
+          >
+            {connectionsError}
+          </Notice>
+        ) : null}
         {unavailable ? (
           <Notice
             tone="waiting"
@@ -292,28 +384,24 @@ export function SlackAgentFormPage({
           </Notice>
         ) : null}
         <div className="flex items-start gap-4">
-          <div className="flex size-12 shrink-0 items-center justify-center">
-            {avatar ? (
-              <SessionAvatar
-                avatar={avatar}
-                name={name || "Agent"}
-                workspaceId={agent?.targetWorkspaceId ?? workspaceId}
-                seed={seedKey}
-                size="lg"
-              />
-            ) : (
-              <span
-                aria-hidden="true"
-                className="flex size-12 items-center justify-center rounded-lg border border-dashed border-border-strong"
-              />
-            )}
-          </div>
+          <SessionAvatarPickerButton
+            label="Icon"
+            allowNone={false}
+            draft={draft}
+            onChange={(next) => {
+              setDraft(next);
+              setErrors((current) => ({ name: current.name, description: current.description }));
+            }}
+            name={name}
+            image={null}
+            errors={errors}
+            workspaceId={agent?.targetWorkspaceId ?? workspaceId}
+            seed={seedKey}
+            open={pickerOpen}
+            onOpenChange={setPickerOpen}
+          />
           <div className="min-w-0 flex-1">
-            <Field
-              label="Name"
-              error={errors.name ?? undefined}
-              hint={handle ? `People call it with @Opengeni +${handle}` : undefined}
-            >
+            <Field label="Name" error={errors.name ?? undefined} hint={nameHint}>
               <TextInput
                 value={name}
                 maxLength={SLACK_AGENT_NAME_MAX_LENGTH}
@@ -327,7 +415,11 @@ export function SlackAgentFormPage({
             </Field>
           </div>
         </div>
-        <Field label="Description" error={errors.description ?? undefined}>
+        <Field
+          label="What it helps with"
+          error={errors.description ?? undefined}
+          hint="Shown to people in Slack and used to suggest this agent. One sentence, starting with a verb."
+        >
           <TextInput
             value={description}
             maxLength={SLACK_AGENT_DESCRIPTION_MAX_LENGTH}
@@ -339,17 +431,13 @@ export function SlackAgentFormPage({
             }}
           />
         </Field>
-        <SessionAvatarPicker
-          label="Icon"
-          allowNone={false}
-          draft={draft}
-          onChange={(next) => {
-            setDraft(next);
-            setErrors((current) => ({ name: current.name, description: current.description }));
-          }}
+        <SlackAgentIntroPreview
           name={name}
-          image={null}
-          errors={errors}
+          description={description}
+          avatar={avatar}
+          workspaceId={agent?.targetWorkspaceId ?? workspaceId}
+          seed={seedKey}
+          addedBy={previewPersonName(accessContext?.subjectLabel)}
         />
         <Field
           label="Instructions"
@@ -368,7 +456,7 @@ export function SlackAgentFormPage({
           <Field label="Slack workspace" group>
             <SelectMenu
               aria-label="Slack workspace"
-              value={connectionId}
+              value={connection?.id ?? ""}
               onValueChange={(value) => {
                 setConnectionId(value);
                 setUnavailable(null);
@@ -377,14 +465,25 @@ export function SlackAgentFormPage({
             />
           </Field>
         ) : null}
-        <Field label="Memory" group>
-          <p className="m-0 text-sm leading-5 text-fg-muted" data-slack-agent-memory="">
-            {`A Knowledge collection named after the agent in ${agentWorkspaceName}, created automatically.`}
-            {reviewFirst ? " New Memory is saved for review first." : ""}
-          </p>
-        </Field>
+        {agent?.knowledgeCollectionId ? (
+          <MemoryField
+            workspaceId={agent.targetWorkspaceId}
+            collectionId={agent.knowledgeCollectionId}
+            reviewFirst={agent.memoryReviewFirst}
+          />
+        ) : null}
+        {agent ? (
+          <CheckboxField
+            label={SLACK_AGENT_OPEN_LABEL}
+            description={slackAgentOpenDisclosure(name.trim() || agent.name, agentWorkspaceName)}
+            disabledReason="Only an organization admin can turn this on."
+            checked={open}
+            disabled={!open && !canOpen}
+            onCheckedChange={setOpen}
+          />
+        ) : null}
       </FieldStack>
-    </FlushFormPage>
+    </FormPage>
   );
 }
 
@@ -393,6 +492,7 @@ type IntroStatus = SlackAgentIntroResponse["results"][number]["status"];
 
 const INTRO_STATUS_TEXT: Record<Exclude<IntroStatus, "posted">, string> = {
   not_in_channel: "Add the Opengeni app to this channel first.",
+  restricted: "Opengeni can't post in this channel. Slack limits who can post here.",
   failed: "Couldn't post here. Try again.",
 };
 
@@ -401,6 +501,16 @@ function channelLabel(channel: IntroChannel): string {
     ? `Private · ${channel.name ?? channel.id}`
     : `#${channel.name ?? channel.id}`;
 }
+
+/** Channels by name, so a long list reads like Slack's. */
+export function sortIntroChannels(channels: readonly IntroChannel[]): IntroChannel[] {
+  return [...channels].sort((a, b) =>
+    (a.name ?? a.id).localeCompare(b.name ?? b.id, undefined, { sensitivity: "base" }),
+  );
+}
+
+/** Show the search box once the list is longer than this. */
+const INTRO_SEARCH_FROM = 8;
 
 /** Post a short intro of an agent in channels the Opengeni app is already in. */
 export function SlackAgentIntroPage({
@@ -413,11 +523,14 @@ export function SlackAgentIntroPage({
   justCreated?: boolean | undefined;
   onClose: () => void;
 }) {
-  const { client } = useAppContext();
+  const { client, accessContext } = useAppContext();
   const [channels, setChannels] = useState<IntroChannel[] | null>(null);
   const [loadError, setLoadError] = useState<unknown>(null);
   const [revision, setRevision] = useState(0);
   const [selected, setSelected] = useState<string[]>([]);
+  const [touched, setTouched] = useState(false);
+  const [announcementChannelId, setAnnouncementChannelId] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
   const [results, setResults] = useState<Record<string, IntroStatus>>({});
   useEffect(() => {
     let live = true;
@@ -436,7 +549,11 @@ export function SlackAgentIntroPage({
           cursor = result.nextCursor ?? undefined;
           if (!cursor) break;
         }
-        if (live) setChannels([...new Map(collected.map((row) => [row.id, row])).values()]);
+        if (live) {
+          setChannels(
+            sortIntroChannels([...new Map(collected.map((row) => [row.id, row])).values()]),
+          );
+        }
       } catch (failure) {
         if (live) setLoadError(failure);
       }
@@ -445,18 +562,49 @@ export function SlackAgentIntroPage({
       live = false;
     };
   }, [client, agent.targetWorkspaceId, agent.id, revision]);
+  // The organization's announcement channel, picked by default. Without it
+  // (or without access to the setting) nothing is picked.
+  useEffect(() => {
+    let live = true;
+    void client
+      .getOpenGeniSlackAgentUpdateSettings(agent.targetWorkspaceId, agent.connectionId)
+      .then((settings) => {
+        if (live) setAnnouncementChannelId(settings.announcementChannelId ?? null);
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [client, agent.targetWorkspaceId, agent.connectionId]);
+  useEffect(() => {
+    if (touched || !channels || !announcementChannelId) return;
+    // A channel that already has this intro is not picked again.
+    if (channels.some((channel) => channel.id === announcementChannelId && !channel.introduced)) {
+      setSelected([announcementChannelId]);
+    }
+  }, [touched, channels, announcementChannelId]);
+  const visible = useMemo(() => {
+    const needle = query.trim().replace(/^#/u, "").toLowerCase();
+    if (!channels || !needle) return channels;
+    return channels.filter(
+      (channel) =>
+        selected.includes(channel.id) ||
+        (channel.name ?? channel.id).toLowerCase().includes(needle),
+    );
+  }, [channels, query, selected]);
   const full = selected.length >= SLACK_AGENT_INTRO_CHANNELS_MAX;
   const empty = channels !== null && channels.length === 0;
+  const call = slackAgentCall(agent);
   return (
-    <FlushFormPage
+    <FormPage
       title={`Introduce ${agent.name}`}
       description={
         justCreated
-          ? `${agent.name} is ready. Post a short intro so people know to call ${slackAgentCall(agent)}.`
-          : `Post a short intro so people know to call ${slackAgentCall(agent)}.`
+          ? `${agent.name} is ready. Post a short intro so people know to ask ${call}.`
+          : `Post a short intro so people know to ask ${call}.`
       }
-      backLabel="Slack"
-      onClose={onClose}
+      back={{ label: "Slack", onClick: onClose }}
+      onCancel={onClose}
       cancelLabel={justCreated ? "Skip" : "Cancel"}
       submitLabel="Post intro"
       pendingLabel="Posting…"
@@ -481,68 +629,104 @@ export function SlackAgentIntroPage({
           return true;
         }
         setResults(byChannel);
-        setSelected(failed.map((result) => result.channelId));
+        // Keep the channels a retry could fix.
+        setTouched(true);
+        setSelected(
+          failed
+            .filter((result) => result.status !== "restricted")
+            .map((result) => result.channelId),
+        );
         return false;
       }}
     >
-      {loadError ? (
-        <ErrorMessage
-          variant="inline"
-          title="Couldn't load Slack channels"
-          {...apiErrorDetails(loadError)}
-          action={
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => setRevision((value) => value + 1)}
-            >
-              Try again
-            </Button>
-          }
-        >
-          {userErrorTextWithoutReference(loadError)}
-        </ErrorMessage>
-      ) : channels === null ? (
-        <div className="grid gap-3" aria-busy="true" aria-label="Loading channels">
-          <Skeleton className="h-5 w-48" />
-          <Skeleton className="h-5 w-40" />
-          <Skeleton className="h-5 w-56" />
-        </div>
-      ) : empty ? (
-        <p className="text-sm text-fg-muted">
-          Opengeni isn't in any channels yet. Invite @Opengeni to a channel in Slack, then come
-          back.
-        </p>
-      ) : (
-        <fieldset className="grid gap-3" aria-label="Channels">
-          {channels.map((channel) => {
-            const checked = selected.includes(channel.id);
-            const status = results[channel.id];
-            return (
-              <CheckboxField
-                key={channel.id}
-                label={channelLabel(channel)}
-                description={
-                  status === "posted" ? "Posted." : status ? INTRO_STATUS_TEXT[status] : undefined
-                }
-                checked={checked}
-                disabled={!checked && full}
-                onCheckedChange={(next) =>
-                  setSelected((current) =>
-                    next ? [...current, channel.id] : current.filter((id) => id !== channel.id),
-                  )
-                }
+      <FieldStack>
+        <SlackAgentIntroPreview
+          name={agent.name}
+          description={agent.description}
+          avatar={agent.avatar}
+          workspaceId={agent.targetWorkspaceId}
+          seed={agent.id}
+          addedBy={previewPersonName(accessContext?.subjectLabel)}
+        />
+        {loadError ? (
+          <ErrorMessage
+            variant="inline"
+            title="Couldn't load Slack channels"
+            {...apiErrorDetails(loadError)}
+            action={
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setRevision((value) => value + 1)}
+              >
+                Try again
+              </Button>
+            }
+          >
+            {userErrorTextWithoutReference(loadError)}
+          </ErrorMessage>
+        ) : channels === null || visible === null ? (
+          <div className="grid gap-3" aria-busy="true" aria-label="Loading channels">
+            <Skeleton className="h-5 w-48" />
+            <Skeleton className="h-5 w-40" />
+            <Skeleton className="h-5 w-56" />
+          </div>
+        ) : empty ? (
+          <p className="text-sm text-fg-muted">
+            Opengeni isn't in any channels yet. Invite @Opengeni to a channel in Slack, then come
+            back.
+          </p>
+        ) : (
+          <fieldset className="grid gap-3" aria-label="Channels">
+            {channels.length > INTRO_SEARCH_FROM ? (
+              <TextInput
+                type="search"
+                aria-label="Search channels"
+                placeholder="Search channels"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
               />
-            );
-          })}
-          {full ? (
-            <p className="text-xs text-fg-muted">
-              Up to {SLACK_AGENT_INTRO_CHANNELS_MAX} channels at a time.
-            </p>
-          ) : null}
-        </fieldset>
-      )}
-    </FlushFormPage>
+            ) : null}
+            {visible.map((channel) => {
+              const checked = selected.includes(channel.id);
+              const status = results[channel.id];
+              const blocked = status === "restricted";
+              return (
+                <CheckboxField
+                  key={channel.id}
+                  label={channelLabel(channel)}
+                  description={
+                    status === "posted"
+                      ? "Posted."
+                      : status
+                        ? INTRO_STATUS_TEXT[status]
+                        : channel.introduced
+                          ? "Intro already posted."
+                          : undefined
+                  }
+                  checked={checked}
+                  disabled={!checked && (full || blocked)}
+                  onCheckedChange={(next) => {
+                    setTouched(true);
+                    setSelected((current) =>
+                      next ? [...current, channel.id] : current.filter((id) => id !== channel.id),
+                    );
+                  }}
+                />
+              );
+            })}
+            {visible.length === 0 ? (
+              <p className="text-sm text-fg-muted">No channels match.</p>
+            ) : null}
+            {full ? (
+              <p className="text-xs text-fg-muted">
+                Up to {SLACK_AGENT_INTRO_CHANNELS_MAX} channels at a time.
+              </p>
+            ) : null}
+          </fieldset>
+        )}
+      </FieldStack>
+    </FormPage>
   );
 }

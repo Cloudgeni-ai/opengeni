@@ -1,10 +1,11 @@
 /**
- * Slack agents: named teammates people call through the one Opengeni Slack
- * app with `@Opengeni +name`. Each works in one fixed Opengeni workspace.
+ * Slack agents: named teammates people ask through the one Opengeni Slack
+ * app with `@Opengeni Data team`. Each works in one fixed Opengeni workspace.
  * The list shows every agent in the organization to anyone; edit and delete
  * appear only where the reader administers the agent's workspace.
  */
 import { useCallback, useEffect, useState } from "react";
+import { slackAgentCallText } from "@opengeni/contracts";
 import type { SlackAgent } from "@opengeni/sdk";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import { toast } from "sonner";
@@ -25,9 +26,9 @@ import { ErrorMessage } from "@opengeni/react/ui/error-message";
 import { ListRow, ListRowSkeleton, RowList } from "@opengeni/react/ui/list-row";
 import { Notice } from "@opengeni/react/ui/notice";
 
-/** How people call an agent in Slack. */
-export function slackAgentCall(agent: Pick<SlackAgent, "handle">): string {
-  return `@Opengeni +${agent.handle}`;
+/** How people ask an agent in Slack, for example `@Opengeni Data team`. */
+export function slackAgentCall(agent: Pick<SlackAgent, "name">): string {
+  return slackAgentCallText(agent.name);
 }
 
 /** The reason code the API put in a refusal's details, such as `slack_bot_unavailable`. */
@@ -41,8 +42,6 @@ export type SlackAgentsState = {
   /** Undefined while the first load runs. */
   agents: SlackAgent[] | undefined;
   routingEnabled: boolean;
-  /** This workspace saves new Knowledge for review first. */
-  memoryReviewFirst: boolean;
   error: unknown;
   reload: () => void;
   /** Apply a local change (a create, edit or delete) without reloading. */
@@ -54,7 +53,6 @@ export function useSlackAgents(workspaceId: string): SlackAgentsState {
   const { client } = useAppContext();
   const [agents, setAgents] = useState<SlackAgent[] | undefined>(undefined);
   const [routingEnabled, setRoutingEnabled] = useState(true);
-  const [memoryReviewFirst, setMemoryReviewFirst] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [revision, setRevision] = useState(0);
   useEffect(() => {
@@ -66,7 +64,6 @@ export function useSlackAgents(workspaceId: string): SlackAgentsState {
         if (!live) return;
         setAgents(result.agents);
         setRoutingEnabled(result.routingEnabled);
-        setMemoryReviewFirst(result.memoryReviewFirst);
       })
       .catch((failure: unknown) => {
         if (!live) return;
@@ -83,7 +80,7 @@ export function useSlackAgents(workspaceId: string): SlackAgentsState {
       setAgents((current) => update(current ?? [])),
     [],
   );
-  return { agents, routingEnabled, memoryReviewFirst, error, reload, replace };
+  return { agents, routingEnabled, error, reload, replace };
 }
 
 export function SlackAgentsSection({
@@ -118,7 +115,7 @@ export function SlackAgentsSection({
   return (
     <DetailSection
       title="Slack agents"
-      description="Agents people call in Slack. Each works in one Opengeni workspace."
+      description="Agents people ask in Slack. Each works in one Opengeni workspace."
       action={
         createAction && agents && agents.length > 0 ? (
           <Button size="sm" variant="outline" onClick={onCreate}>
@@ -178,7 +175,11 @@ export function SlackAgentsSection({
               }
               title={agent.name}
               description={agent.description}
-              meta={[workspaceName(agent), slackAgentCall(agent)]}
+              meta={[
+                workspaceName(agent),
+                slackAgentCall(agent),
+                ...(agent.open ? ["Anyone in Slack"] : []),
+              ]}
               onOpen={agent.viewerCanManage ? () => onEdit(agent) : undefined}
               menuLabel={`More actions for ${agent.name}`}
               menu={
@@ -206,7 +207,10 @@ export function SlackAgentsSection({
           if (!open) setDeleting(null);
         }}
         title={`Delete ${deleting?.name ?? "this Slack agent"}?`}
-        consequences={["Its channel settings are removed.", "Its chats stay."]}
+        consequences={[
+          "Its channel settings are removed.",
+          deleting?.knowledgeCollectionId ? "Its chats and Memory stay." : "Its chats stay.",
+        ]}
         confirmLabel="Delete agent"
         pendingLabel="Deleting…"
         onConfirm={async () => {

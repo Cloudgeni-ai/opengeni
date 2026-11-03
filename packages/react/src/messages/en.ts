@@ -1245,8 +1245,7 @@ export const englishMessages = {
   "composerTranscriptionControl.pauseAutomaticRetry": "Pause automatic retry",
   "composerTranscriptionControl.recordingIsTooLargeTry":
     "Recording is too large. Try a shorter message.",
-  "composerTranscriptionControl.recordingPressEscapeToDiscard":
-    "Recording. Press Escape to discard.",
+  "composerTranscriptionControl.recordingPressEscapeToDiscard": "Recording.",
   "composerTranscriptionControl.recordingSavedOnThisDevice": "Recording saved.",
   "composerTranscriptionControl.requestingMicrophone": "Requesting microphone…",
   "composerTranscriptionControl.retryVoiceInput": "Retry voice input",
@@ -1603,7 +1602,7 @@ export const englishMessages = {
   "desktopDictation.settings.anyLanguage": "Any language",
   "desktopDictation.settings.cancelRecording": "Cancel",
   "desktopDictation.settings.cancelShortcutDescription":
-    "Throws away the dictation you're speaking; its speech stays in Recent dictations. Esc does this too.",
+    "Throws away the dictation you're speaking; its speech stays in Recent dictations.",
   "desktopDictation.settings.cancelShortcutLabel": "Cancel shortcut",
   "desktopDictation.settings.cancelledDictation": "Cancelled, not transcribed",
   "desktopDictation.settings.chordHold": "Hold the keys while you speak, and let go to finish.",
@@ -1621,6 +1620,11 @@ export const englishMessages = {
   "desktopDictation.settings.keyCombinationDescription": "Press the keys you want to use.",
   "desktopDictation.settings.languageDescription": "The language you speak with this shortcut.",
   "desktopDictation.settings.languageLabel": "Language",
+  "desktopDictation.settings.modelDescription":
+    "The speech-to-text model that hears this shortcut.",
+  "desktopDictation.settings.modelLabel": "Model",
+  "desktopDictation.settings.modelUnavailable": "Not available in this workspace now.",
+  "desktopDictation.settings.workspaceModel": "Workspace default",
   "desktopDictation.settings.modeHold": "Hold while speaking",
   "desktopDictation.settings.modeHoldDescription": "Dictates while you hold the keys down.",
   "desktopDictation.settings.modeLabel": "How the keys work",
@@ -2088,6 +2092,10 @@ export const englishMessages = {
     "Upgrade to Pro to use your own key. Your message and attachments are saved.",
   "lib.format.composerByokUpgradeRequiredAskOwner":
     "Ask an organization owner to upgrade to Pro to use your own key. Your message and attachments are saved.",
+  "lib.format.composerSubscriptionUpgradeRequired":
+    "Upgrade to Pro to use your own subscription. Your message and attachments are saved.",
+  "lib.format.composerSubscriptionUpgradeRequiredAskOwner":
+    "Ask an organization owner to upgrade to Pro to use your own subscription. Your message and attachments are saved.",
   "lib.format.days": "{count}d",
   "lib.format.hours": "{count}h",
   "lib.format.messageReferenceCorrelationid": "{message} Reference: {correlationId}.",
@@ -2106,6 +2114,11 @@ export const englishMessages = {
   "lib.format.seconds": "{count}s",
   "lib.format.sessionUsageLimitReached":
     "This task's usage limit is reached. Your message is saved.",
+  "lib.format.subscriptionUpgradeRequired":
+    "Upgrade to Pro to use your own subscription. The conversation is preserved.",
+  "lib.format.subscriptionUpgradeRequiredAskOwner":
+    "Ask an organization owner to upgrade to Pro to use your own subscription.",
+  "lib.format.subscriptionUpgradeRequiredHeadline": "Upgrade to Pro to use your own subscription.",
   "lib.format.theModelProviderRefusedThe":
     "The model provider refused the request: this deployment's provider quota is exhausted.",
   "lib.format.theModelProviderRejectedThis":
@@ -2280,8 +2293,12 @@ export const englishMessages = {
   "machines.machineDetail.backToMachines": "Back to machines",
   "machines.machineDetail.everyoneInThisWorkspaceCan":
     "Everyone in this workspace can run chats on it.",
-  "machines.machineDetail.everyWorkspaceInTheOrganization":
-    "Every workspace in the organization can use it.",
+  "machines.machineDetail.availableIn": "Available in",
+  "machines.machineDetail.availableInNameLabel": "Where {name} is available: {summary}",
+  "machines.machineDetail.membersCanUseItWhere":
+    "Members can use it in the workspaces it's available in.",
+  "machines.machineDetail.organizationOwnersChooseWhere":
+    "Organization owners and admins choose the workspaces it works in.",
   "machines.machineDetail.justNow": "just now",
   "machines.machineDetail.keptOutExtraCopiesOf_one": "Kept out {count} extra copy of the agent",
   "machines.machineDetail.keptOutExtraCopiesOf_other": "Kept out {count} extra copies of the agent",
@@ -2527,13 +2544,14 @@ export const englishMessages = {
   "meetings.detailPage.itSStillBeingRecorded":
     "It's still being recorded on another device. The transcript appears here when it's done.",
   "meetings.detailPage.language": "Language",
-  "meetings.detailPage.leaveEmptyToLetThe": "Leave empty if you're not sure.",
+  "meetings.detailPage.leaveEmptyToLetThe":
+    "How many people talk in the meeting. Leave empty if you're not sure.",
   "meetings.detailPage.leftUnnamed": "Left unnamed",
   "meetings.detailPage.listeningWhatSSaidShows": "Listening…",
   "meetings.detailPage.loadingMeeting": "Loading meeting",
-  "meetings.detailPage.makesANewVersionFrom":
-    "Makes a new transcript from the audio. Speaker names carry over; corrected words don't.",
-  "meetings.detailPage.maximumNumberOfSpeakers": "Maximum number of speakers",
+  "meetings.detailPage.makesANewTranscriptNotesToo":
+    "Makes a new transcript from the audio. Speaker names carry over, and notes written automatically that no one has changed are written again. Corrected words don't carry over.",
+  "meetings.detailPage.numberOfSpeakers": "Number of speakers",
   "meetings.detailPage.me": "Me",
   "meetings.detailPage.meetings": "Meetings",
   "meetings.detailPage.model": "Model",
@@ -2596,6 +2614,7 @@ export const englishMessages = {
   "meetings.detailPage.show": "Show",
   "meetings.detailPage.speakers": "Speakers",
   "meetings.detailPage.speakersToReview": "Speakers to review",
+  "meetings.detailPage.wrongNumberOfSpeakers": "Wrong number of speakers?",
   "meetings.detailPage.starting": "Starting…",
   "meetings.detailPage.suggestedFromTheirVoice": "Suggested by voice",
   "meetings.detailPage.suggestionDismissed": "Suggestion dismissed",
@@ -3472,8 +3491,8 @@ export const englishMessages = {
   /** While imported recordings upload, before they show in the list. */
   "native.meetings.audioImport.uploading_one": "Uploading the imported recording…",
   "native.meetings.audioImport.uploading_other": "Uploading {count} imported recordings…",
-  "native.meetings.meetingView.aNewTranscriptIsMadeFromTheFullAudio":
-    "Makes a new transcript from the audio. Speaker names carry over.",
+  "native.meetings.meetingView.aNewTranscriptAndNotesToo":
+    "Makes a new transcript from the audio. Speaker names carry over, and notes written automatically that no one has changed are written again.",
   "native.meetings.meetingView.delete": "Delete",
   "native.meetings.meetingView.makePrivate": "Make private",
   "native.meetings.meetingView.nameSpeaker": "Name speaker",
@@ -3882,6 +3901,11 @@ export const englishMessages = {
   "openGeniChat.send": "Send",
   "openGeniLinks.fileIsTooLargeTo": "File is too large to download here.",
   "organizationModel.orgShortaccountid": "Org {shortAccountId}",
+  "ownLogins.couldNotChange": "Couldn't change it. Try again.",
+  "ownLogins.inThisChat_one": "{count} personal connection in this chat",
+  "ownLogins.inThisChat_other": "{count} personal connections in this chat",
+  "ownLogins.noneInThisChat": "No personal connections in this chat",
+  "ownLogins.workspaceSees": "People in this workspace see what the agent does with these.",
   "pierreDiff.diffForPath": "Diff for {path}",
   "pierreDiff.loadingDiff": "Loading diff…",
   "pierreDiff.noChanges": "No changes",
@@ -4701,7 +4725,8 @@ export const englishMessages = {
     "Finish signing in to {name}. If you closed the sign-in window, open it again.",
   "sessionIntegrationCapabilityCard.stopWaiting": "Cancel",
   "sessionIntegrationCapabilityCard.tryAgain": "Try again",
-  "sessionList.archive": "Hide for me",
+  "sessionList.archive": "Archive",
+  "sessionList.archived": "Archived",
   "sessionList.cancel": "Cancel",
   "sessionList.chats": "Chats",
   "sessionList.loadingChats": "Loading chats…",
@@ -4710,10 +4735,12 @@ export const englishMessages = {
   "sessionList.rename": "Rename",
   "sessionList.save": "Save",
   "sessionList.showMore": "Show more",
+  "sessionList.undo": "Undo",
   "sessionListModel.older": "Older",
   "sessionListModel.previous7Days": "Previous 7 days",
   "sessionListModel.today": "Today",
   "sessionListModel.yesterday": "Yesterday",
+  "sessionMcpCapabilityCard.connectADifferentAccount": "Connect a different account",
   "sessionMcpCapabilityCard.connected": "Connected",
   "sessionMcpCapabilityCard.connectionDetailsAreUnavailable": "Connection details are unavailable.",
   "sessionMcpCapabilityCard.connectionSetupCouldNotFinish":
@@ -4768,12 +4795,18 @@ export const englishMessages = {
     "This recommendation is not an available OAuth MCP integration. Review the current connection catalog.",
   "sessionMcpCapabilityCard.trySigningInAgain": "Try signing in again",
   "sessionMcpCapabilityCard.useInThisConversation": "Use in this conversation",
+  "sessionMcpCapabilityCard.useItHere": "Use it here",
+  "sessionMcpCapabilityCard.useYourLoginHereScope":
+    "Only you can use it. In shared chats here, people see what the agent does with it.",
+  "sessionMcpCapabilityCard.useYourLoginHereToo":
+    "You added {account} in another workspace. Use it for your messages here too?",
   "sessionMcpCapabilityCard.whoCanUseThisConnection": "Who can use this connection?",
   "sessionMcpCapabilityCard.yourAccountIsConnected": "Your account is connected.",
   "sessionMcpCapabilityCard.yourAccountIsConnectedEnable":
     "Your account is connected. Enable it for this conversation to finish.",
   "sessionMcpCapabilityCard.yourAccountNeedsReconnectionBefore":
     "Your account needs reconnection before it can be used here.",
+  "sessionMcpCapabilityCard.yourNameAccount": "your {name} account",
   "sessionProxyScope.chatIsUnavailableRightNow":
     "Chat is unavailable right now. Ask an administrator for help.",
   "sessionProxyScope.couldNotLoadTheConversation": "Could not load the conversation.",

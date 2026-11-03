@@ -63,7 +63,12 @@ the archive state); messages to an archived session return 409
 `SESSION_ARCHIVED_READ_ONLY`. The session list accepts
 `contentArchivedOnly=true` to list only archived sessions, and
 `GET /v1/config/client` reports `sessionArchive: { enabled, idleDays }` when the
-deployment archives idle sessions. See
+deployment archives idle sessions. `PUT
+/v1/workspaces/:workspaceId/sessions/:sessionId/archive` with
+`{ "archived": true }` archives a chat for everyone (`sessions:control`); within
+ten seconds `{ "archived": false }` undoes it, after that the archive is final
+(409 `session_archive_final`), and 409 `session_archive_blocked` lists what keeps
+a chat live. See
 [`session-storage-lifecycle.md`](session-storage-lifecycle.md).
 
 Session create accepts `unattended: true` for a session no person will follow

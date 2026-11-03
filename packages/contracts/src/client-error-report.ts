@@ -296,6 +296,7 @@ export const CLIENT_PAGES = [
   "secrets",
   "rigs",
   "playground",
+  "archived",
   "read-only-chats",
   "inbox",
   "sites",

@@ -68,6 +68,10 @@ import type {
   SlackAgentListResponse,
   SlackAgentResponse,
   UpdateSlackAgentRequest,
+  SlackAgentUpdatePreviewRequest,
+  SlackAgentUpdatePreviewResponse,
+  SlackAgentUpdateSettings,
+  UpdateSlackAgentUpdateSettingsRequest,
   CreateAutomationTemplateRequest,
   CreateEventSourceRequest,
   CreateEventSourceResponse,
@@ -387,6 +391,7 @@ import type {
   SessionMcpToolPermissionsResponse,
   UpdateSessionMcpToolPermissionsRequest,
   CapabilityInstallation,
+  RemoveCapabilityInstallationResponse,
   ApiIntegrationPreview,
   ApiIntegrationOAuthStartRequest,
   ApiIntegrationUninstallPreview,
@@ -575,10 +580,18 @@ import type {
   ListManagedOrganizationMembershipsResponse,
   ListUserResourceAuthoritiesOptions,
   ListUserResourceAuthoritiesResponse,
+  IssueUserResourceGrantRequest,
+  UserResourceGrantMutationResponse,
   UpdateGitHubActionPolicyRequest,
   RevokeUserResourceGrantResponse,
+  OwnResourceReachKind,
+  OwnResourceReachResponse,
+  OwnResourcesResponse,
+  SetOwnResourceReachRequest,
+  SetOwnResourceReachResponse,
   ListOrganizationInvitationsPageResponse,
   ListOrganizationAdministrationMembersResponse,
+  ListOrganizationMemberNamesResponse,
   AcceptOrganizationInvitationRequest,
   AcceptOrganizationInvitationResponse,
   AcceptOrganizationRecoveryCustodyRequest,
@@ -779,6 +792,10 @@ import type {
   UpdateSessionSkillsRequest,
   RemoveSessionResourcesRequest,
   UpdateRigRequest,
+  UpdateOrganizationComputeReachRequest,
+  OrganizationComputeReachResponse,
+  ListOrganizationMachinesResponse,
+  ListOrganizationRigsResponse,
   UpdateWorkspaceMemberRequest,
   UpdateWorkspaceModelAccessPolicyRequest,
   UpdateWorkspaceRequest,
@@ -943,7 +960,7 @@ export type SessionListPageOptions = {
   /**
    * Only these sessions, at most 200 ids. Narrows the caller's ordinary list
    * (other filters, archive status and Site scope still apply); never widens it.
-   * Pass `archiveStatus: "all"` to include personally archived sessions.
+   * Pass `archiveStatus: "all"` to include archived sessions.
    */
   sessionIds?: readonly string[];
   /** Return only the complete personal pinned projection. */
@@ -952,7 +969,8 @@ export type SessionListPageOptions = {
   includePinned?: boolean;
   /** Return archived root chats instead of the active session list. */
   archivedOnly?: boolean;
-  sortBy?: "updatedAt" | "createdAt" | "name";
+  /** `archivedAt` orders archived chats by when they were archived. */
+  sortBy?: "updatedAt" | "createdAt" | "name" | "archivedAt";
   archiveStatus?: "active" | "archived" | "all";
   /** Stop this caller's finite page read when its owning route is abandoned. */
   signal?: AbortSignal | undefined;
@@ -2866,6 +2884,33 @@ export class OpenGeniClient {
       "PUT",
       `/v1/workspaces/${workspaceId}/machines/${enrollmentId}/audience`,
       input,
+    );
+  }
+
+  /** Change where an organization Connected Machine works: every shared
+   * workspace (`allowedWorkspaceIds: null`) or chosen ones, plus members'
+   * Personal workspaces when switched on. The workspace it was connected from
+   * always has it. Organization owners and admins only. */
+  async updateMachineReach(
+    workspaceId: string,
+    enrollmentId: string,
+    request: UpdateOrganizationComputeReachRequest,
+  ): Promise<OrganizationComputeReachResponse> {
+    return await this.requestJson<OrganizationComputeReachResponse>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/machines/${enrollmentId}/reach`,
+      request,
+    );
+  }
+
+  /** Every organization Connected Machine, wherever it works, with where each
+   * works. Organization owners only; a workspace's machine list holds only
+   * the ones that work there. `complete` is false while the server can only
+   * list the ones that work in this workspace. */
+  async listOrganizationMachines(workspaceId: string): Promise<ListOrganizationMachinesResponse> {
+    return await this.requestJson<ListOrganizationMachinesResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/organization-machines`,
     );
   }
 
@@ -6569,6 +6614,23 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Issue an exact-session or standing personal-resource grant. A person's
+   * own subscription is turned on for their own turns in a workspace with a
+   * standing `subscription_connection` grant there.
+   */
+  async issueUserResourceGrant(
+    workspaceId: string,
+    authorityId: string,
+    request: IssueUserResourceGrantRequest,
+  ): Promise<UserResourceGrantMutationResponse> {
+    return await this.requestJson<UserResourceGrantMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/user-resource-authorities/${authorityId}/grants`,
+      request,
+    );
+  }
+
   /** Revoke an owner grant through the exact workspace it targets. */
   async revokeUserResourceGrant(
     workspaceId: string,
@@ -6577,6 +6639,48 @@ export class OpenGeniClient {
     return await this.requestJson<RevokeUserResourceGrantResponse>(
       "DELETE",
       `/v1/workspaces/${workspaceId}/user-resource-authorities/grants/${grantId}?scope=user`,
+    );
+  }
+
+  /**
+   * "Where it works" for your own login, plan or machine: each workspace you
+   * belong to in its organization, and whether it works there for your own
+   * messages. Ask from any workspace where you can see it.
+   */
+  async getOwnResourceReach(
+    workspaceId: string,
+    resource: { resourceKind: OwnResourceReachKind; resourceId: string },
+  ): Promise<OwnResourceReachResponse> {
+    const query = new URLSearchParams({
+      resourceKind: resource.resourceKind,
+      resourceId: resource.resourceId,
+    });
+    return await this.requestJson<OwnResourceReachResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/own-resources/reach?${query.toString()}`,
+    );
+  }
+
+  /** Turn your own login, plan or machine on or off for your own messages in one workspace. */
+  async setOwnResourceReach(
+    workspaceId: string,
+    request: SetOwnResourceReachRequest,
+  ): Promise<SetOwnResourceReachResponse> {
+    return await this.requestJson<SetOwnResourceReachResponse>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/own-resources/reach`,
+      request,
+    );
+  }
+
+  /**
+   * "My things": every one of your own logins, model plans and machines in
+   * this workspace's organization, each with where it works.
+   */
+  async listOwnResources(workspaceId: string): Promise<OwnResourcesResponse> {
+    return await this.requestJson<OwnResourcesResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/own-resources`,
     );
   }
 
@@ -6675,6 +6779,16 @@ export class OpenGeniClient {
     organizationId: string,
   ): Promise<ListOrganizationAdministrationMembersResponse> {
     return await this.listOrganizationAdministrationMembers(organizationId);
+  }
+
+  /** Who is in the organization, by name only; any member may read it. */
+  async listOrganizationMemberNames(
+    organizationId: string,
+  ): Promise<ListOrganizationMemberNamesResponse> {
+    return await this.requestJson<ListOrganizationMemberNamesResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/member-names`,
+    );
   }
 
   /** Canonical organization identity and every non-personal workspace access roster. */
@@ -6929,6 +7043,14 @@ export class OpenGeniClient {
         this.requestJson("GET", `${root(workspaceId)}/accounts`, undefined, undefined, options),
       pending: (workspaceId, options) =>
         this.requestJson("GET", `${root(workspaceId)}/attempts`, undefined, undefined, options),
+      finishUnfinished: (workspaceId, options) =>
+        this.requestJson(
+          "POST",
+          `${root(workspaceId)}/attempts/finish`,
+          undefined,
+          undefined,
+          options,
+        ),
       begin: (workspaceId, input, options) =>
         this.requestJson("POST", `${root(workspaceId)}/attempts`, input, undefined, options),
       get: (workspaceId, id, options) =>
@@ -8085,6 +8207,30 @@ export class OpenGeniClient {
     );
   }
 
+  /** Change where an organization Sandbox Environment works: every shared
+   * workspace (`allowedWorkspaceIds: null`) or chosen ones, plus members'
+   * Personal workspaces when switched on. Organization owners and admins only. */
+  async updateRigReach(
+    workspaceId: string,
+    rigId: string,
+    request: UpdateOrganizationComputeReachRequest,
+  ): Promise<OrganizationComputeReachResponse> {
+    return await this.requestJson<OrganizationComputeReachResponse>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/rigs/${rigId}/reach`,
+      request,
+    );
+  }
+
+  /** Every organization Sandbox Environment, wherever it works, with where
+   * each works. Organization owners only. `complete` as for machines. */
+  async listOrganizationRigs(workspaceId: string): Promise<ListOrganizationRigsResponse> {
+    return await this.requestJson<ListOrganizationRigsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/organization-rigs`,
+    );
+  }
+
   async deleteRig(workspaceId: string, rigId: string): Promise<void> {
     await this.requestJson<unknown>("DELETE", `/v1/workspaces/${workspaceId}/rigs/${rigId}`);
   }
@@ -9128,6 +9274,22 @@ export class OpenGeniClient {
     return await this.requestJson<CapabilityInstallation>(
       "POST",
       `/v1/workspaces/${workspaceId}/capabilities/${encodeURIComponent(capabilityId)}/disable`,
+    );
+  }
+
+  /**
+   * Remove a custom MCP server added in this workspace, so it is no longer
+   * on; anyone who may turn integrations on can add it again. Integration
+   * admins remove any; a member only one they turned on, while it is on
+   * (otherwise 403 `capabilities:manage`). See `canRemove` on catalog items.
+   */
+  async removeCapabilityInstallation(
+    workspaceId: string,
+    capabilityId: string,
+  ): Promise<RemoveCapabilityInstallationResponse> {
+    return await this.requestJson<RemoveCapabilityInstallationResponse>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/capabilities/${encodeURIComponent(capabilityId)}/installation`,
     );
   }
 
@@ -10772,6 +10934,41 @@ export class OpenGeniClient {
     );
   }
 
+  /** Update messages about Slack agents for one Slack installation. */
+  async getOpenGeniSlackAgentUpdateSettings(
+    workspaceId: string,
+    connectionId: string,
+  ): Promise<SlackAgentUpdateSettings> {
+    return await this.requestJson<SlackAgentUpdateSettings>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/integrations/slack/agent-updates?connectionId=${encodeURIComponent(connectionId)}`,
+    );
+  }
+
+  /** An organization admin turns update messages on or off, or limits them to channel posts. */
+  async setOpenGeniSlackAgentUpdateSettings(
+    workspaceId: string,
+    request: UpdateSlackAgentUpdateSettingsRequest,
+  ): Promise<SlackAgentUpdateSettings> {
+    return await this.requestJson<SlackAgentUpdateSettings>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/integrations/slack/agent-updates`,
+      request,
+    );
+  }
+
+  /** An organization admin sends one update message to their own linked Slack account now. */
+  async previewOpenGeniSlackAgentUpdate(
+    workspaceId: string,
+    request: SlackAgentUpdatePreviewRequest,
+  ): Promise<SlackAgentUpdatePreviewResponse> {
+    return await this.requestJson<SlackAgentUpdatePreviewResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/integrations/slack/agent-updates/preview`,
+      request,
+    );
+  }
+
   async updateConnection(
     workspaceId: string,
     connectionId: string,
@@ -12134,6 +12331,22 @@ export class OpenGeniClient {
       "PUT",
       `/v1/${target.scope}/${encodeURIComponent(target.scopeId)}/model-connections/${target.kind}/${encodeURIComponent(target.connectionId)}/access`,
       policy,
+    );
+  }
+
+  /**
+   * Stops a workspace from using another workspace's own subscription account
+   * that was shared with it. Only the owning workspace or the organization
+   * changes the account otherwise. Requires workspace admin.
+   */
+  async removeModelConnectionFromWorkspace(target: {
+    workspaceId: string;
+    kind: "codex" | "supergrok" | "claude_subscription";
+    connectionId: string;
+  }): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/workspaces/${encodeURIComponent(target.workspaceId)}/model-connections/${target.kind}/${encodeURIComponent(target.connectionId)}/access`,
     );
   }
 

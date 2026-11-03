@@ -85,7 +85,7 @@ export function OrganizationReachDialog({
   home?: { workspaceId: string; reason: string } | undefined;
   organizationId: string;
   organizationName: string;
-  /** Who manages it, as a sentence: "Organization owners manage it." */
+  /** Who manages it, as a sentence: "Organization owners and admins manage it." */
   managedBy: string;
   /** The workspace the page is open in. */
   hereId: string;

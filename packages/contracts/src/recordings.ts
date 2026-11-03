@@ -154,6 +154,12 @@ export const RecordingTranscriptionOptions = /* @__PURE__ */ defineSchema(() =>
         .optional(),
       /** Upper bound on distinct speakers when the model diarizes. */
       maxSpeakers: z.number().int().min(1).max(32).optional(),
+      /**
+       * How many people speak, when known. Speaker detection then finds
+       * exactly that many in a recording with one track; with several tracks
+       * it is each track's upper bound.
+       */
+      speakers: z.number().int().min(1).max(32).optional(),
       /** Names and terms the model should recognize. */
       keyterms: z.array(z.string().trim().min(1).max(50)).max(100).optional(),
       /** Who tells speakers apart; defaults to the workspace's choice, else `auto`. */

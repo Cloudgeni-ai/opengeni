@@ -40,6 +40,13 @@ export type SubscriptionCoreAccessPolicy = {
   /** The chosen people (organization membership ids), or null when not limited to people. */
   allowedPeople?: string[] | null | undefined;
   sharePersonal?: true | undefined;
+  /**
+   * Organization route: an explicit move of a workspace's own connection to the
+   * organization (D-52). Required before it can serve every shared workspace,
+   * Personal workspaces or chosen people; the workspace's administrators then
+   * stop managing it.
+   */
+  moveToOrganization?: true | undefined;
   version: number;
 };
 
@@ -102,6 +109,27 @@ export class SubscriptionCoreAccessForbiddenError extends Error {
   constructor() {
     super("You can't change what this account serves");
     this.name = "SubscriptionCoreAccessForbiddenError";
+  }
+}
+
+/**
+ * A workspace's own connection was asked to serve every shared workspace,
+ * Personal workspaces or chosen people without moving it to the organization.
+ */
+export class SubscriptionCoreAccessMoveRequiredError extends Error {
+  constructor() {
+    super(
+      "Move this account to the organization before it can serve every workspace, Personal workspaces or chosen people",
+    );
+    this.name = "SubscriptionCoreAccessMoveRequiredError";
+  }
+}
+
+/** A workspace route tried to add a workspace its person doesn't administer. */
+export class SubscriptionCoreAccessWorkspaceNotAdministeredError extends Error {
+  constructor() {
+    super("You can only add workspaces you're an admin of");
+    this.name = "SubscriptionCoreAccessWorkspaceNotAdministeredError";
   }
 }
 
@@ -219,6 +247,136 @@ async function organizationSharedWorkspaceIds(tx: Database, accountId: string) {
   return new Set(rows.map((row) => row.workspace_id));
 }
 
+/** Every workspace a connection is assigned to, as the caller's row policies show them. */
+async function servedWorkspaceIds(
+  tx: Database,
+  target: SubscriptionCoreAccessTarget,
+  connectionId: string,
+): Promise<string[]> {
+  const rows = await rawRows<{ workspace_id: string }>(
+    tx,
+    sql`select assignment.workspace_id::text as workspace_id
+      from subscription_connection_workspaces assignment
+      where assignment.account_id = ${target.accountId}::uuid
+        and assignment.connection_id = ${connectionId}::uuid
+      order by assignment.workspace_id`,
+  );
+  return rows.map((row) => row.workspace_id);
+}
+
+/**
+ * Sets the other workspaces a workspace's own connection serves, from the
+ * managing workspace's context. Its row policies let that workspace's
+ * administrators remove any other workspace and add one they also administer;
+ * the owning workspace itself always stays.
+ */
+async function setServedWorkspaces(
+  tx: Database,
+  target: SubscriptionCoreAccessTarget & { workspaceId: string },
+  connectionId: string,
+  allowedWorkspaces: readonly string[],
+): Promise<void> {
+  const wanted = new Set([target.workspaceId, ...allowedWorkspaces]);
+  const served = new Set(await servedWorkspaceIds(tx, target, connectionId));
+  const removed = [...served].filter((workspaceId) => !wanted.has(workspaceId));
+  const added = [...wanted].filter((workspaceId) => !served.has(workspaceId));
+  if (removed.length > 0)
+    await tx.execute(sql`delete from subscription_connection_workspaces assignment
+      where assignment.account_id = ${target.accountId}::uuid
+        and assignment.connection_id = ${connectionId}::uuid
+        and assignment.workspace_id = any(${uuidArray(new Set(removed))})`);
+  if (added.length === 0) return;
+  try {
+    await tx.execute(sql`insert into subscription_connection_workspaces
+        (account_id, connection_id, workspace_id)
+      select ${target.accountId}::uuid, ${connectionId}::uuid, workspace_id
+      from unnest(${uuidArray(new Set(added))}) as workspace_id
+      on conflict do nothing`);
+  } catch (error) {
+    // The share policy needs an administrator membership in each added
+    // workspace; a Personal workspace has no memberships, so it never passes.
+    const state = nestedPostgresSqlState(error);
+    if (state === "42501" || state === "23514")
+      throw new SubscriptionCoreAccessWorkspaceNotAdministeredError();
+    throw error;
+  }
+}
+
+/**
+ * The workspaces the person in `target` administers in its organization, as
+ * the share policy sees them from that workspace: the ones a workspace's own
+ * connection can be given to from its route (D-52). Personal workspaces have
+ * no memberships, so they are never among them.
+ */
+export async function listSubscriptionCoreAdministeredWorkspaceIds(
+  db: Database,
+  target: { accountId: string; workspaceId: string; subjectId: string },
+): Promise<string[]> {
+  return await withWorkspaceSubjectRls(db, target.workspaceId, target.subjectId, async (tx) => {
+    const rows = await rawRows<{ workspace_id: string }>(
+      tx,
+      sql`select membership.workspace_id::text as workspace_id
+        from workspace_memberships membership
+        where membership.account_id = ${target.accountId}::uuid
+          and membership.subject_id = ${target.subjectId}
+          and opengeni_private.workspace_membership_administers(
+            membership.role, membership.permissions)
+        order by membership.workspace_id`,
+    );
+    return rows.map((row) => row.workspace_id);
+  });
+}
+
+/**
+ * Removes another workspace's own connection from the workspace in `target`
+ * (D-52): that workspace's administrators can stop using it but can't change
+ * it. True when it was removed; null when no such connection serves this
+ * workspace. A person who can see it but isn't an administrator here is
+ * refused.
+ */
+export async function removeSubscriptionCoreConnectionFromWorkspace(
+  db: Database,
+  provider: SubscriptionCoreProvider,
+  target: SubscriptionCoreAccessTarget & { workspaceId: string },
+): Promise<true | null> {
+  const providerId = subscriptionCoreProviderId(provider);
+  return await withSubscriptionCoreAccessScope(db, target, async (tx) => {
+    const connectionId = await resolveSubscriptionConnectionId(tx, {
+      accountId: target.accountId,
+      provider: providerId,
+      connectionId: target.connectionId,
+    });
+    if (!connectionId) return null;
+    const [serving] = await rawRows<{ id: string }>(
+      tx,
+      sql`select connection.id::text as id
+        from subscription_connections connection
+        join subscription_connection_workspaces assignment
+          on assignment.account_id = connection.account_id
+          and assignment.connection_id = connection.id
+          and assignment.workspace_id = ${target.workspaceId}::uuid
+        where connection.account_id = ${target.accountId}::uuid
+          and connection.id = ${connectionId}::uuid
+          and connection.provider = ${providerId}
+          and connection.kind = ${subscriptionCoreConnectionKind(provider)}
+          and connection.ownership = 'shared'
+          and connection.managed_by_workspace_id is not null
+          and connection.managed_by_workspace_id <> ${target.workspaceId}::uuid`,
+    );
+    if (!serving) return null;
+    const removed = await rawRows<{ workspace_id: string }>(
+      tx,
+      sql`delete from subscription_connection_workspaces assignment
+        where assignment.account_id = ${target.accountId}::uuid
+          and assignment.connection_id = ${connectionId}::uuid
+          and assignment.workspace_id = ${target.workspaceId}::uuid
+        returning assignment.workspace_id::text as workspace_id`,
+    );
+    if (removed.length === 0) throw new SubscriptionCoreAccessForbiddenError();
+    return true;
+  });
+}
+
 async function projection(
   tx: Database,
   provider: SubscriptionCoreProvider,
@@ -226,27 +384,32 @@ async function projection(
   connection: AccessRow,
 ): Promise<SubscriptionCoreAccess> {
   const version = Number(connection.access_version);
-  // A workspace's own account is never offered to other workspaces from there.
-  if (target.workspaceId !== null)
+  // A workspace's own account: the workspaces it serves, itself always among
+  // them (D-52). Read through the managing workspace's row policy.
+  if (target.workspaceId !== null) {
+    const served = await servedWorkspaceIds(tx, target, connection.id);
     return {
       policy: {
         allowedModels: connection.allowed_model_ids,
-        allowedWorkspaces: null,
+        allowedWorkspaces: [...new Set([target.workspaceId, ...served])].sort(),
         allowPersonalWorkspaces: false,
         allowedPeople: null,
         version,
       },
-      localWorkspaceIds: [],
-      managedByWorkspaceId: null,
+      localWorkspaceIds: [target.workspaceId],
+      managedByWorkspaceId: target.workspaceId,
       peopleSupported: false,
     };
+  }
   const shared = await organizationSharedWorkspaceIds(tx, target.accountId);
   const owner = connection.managed_by_workspace_id;
   const allowedModels = connection.allowed_model_ids;
   const base = {
     localWorkspaceIds: owner !== null && shared.has(owner) ? [owner] : [],
     managedByWorkspaceId: connection.managed_by_workspace_id,
-    peopleSupported: connection.managed_by_workspace_id === null,
+    // A workspace's own account can be limited to people too, once it is
+    // moved to the organization (`moveToOrganization`, D-52).
+    peopleSupported: true,
   };
   if (connection.scope_kind === "organization")
     return {
@@ -432,9 +595,12 @@ async function chosenPeople(tx: Database, accountId: string, connectionId: strin
  * - otherwise `workspaces` scope over the chosen shared workspaces (all of
  *   today's when the choice is "all, including new ones") plus every Personal
  *   workspace when they are allowed, with the reach kept for later ones.
- * A workspace's own connection stays its own while it reaches only that
- * workspace; any other reach makes it the organization's (D-50). In a
- * workspace, only the models of the workspace's own connection change.
+ * A workspace's own connection stays its own whatever chosen shared workspaces
+ * it serves (D-52); serving every shared workspace, Personal workspaces or
+ * chosen people needs `moveToOrganization`, which makes it the organization's.
+ * In a workspace, the models of the workspace's own connection change, and a
+ * non-null `allowedWorkspaces` sets the other workspaces it serves: its
+ * administrators remove any of them and add ones they also administer.
  */
 export async function updateSubscriptionCoreConnectionAccess(
   db: Database,
@@ -452,9 +618,12 @@ export async function updateSubscriptionCoreConnectionAccess(
     throw new SubscriptionCoreAccessInvalidError(
       "Choose workspaces before sharing this personal account",
     );
-  if (target.workspaceId !== null && (policy.allowedWorkspaces !== null || people !== null))
+  if (
+    target.workspaceId !== null &&
+    (people !== null || policy.allowPersonalWorkspaces || policy.moveToOrganization)
+  )
     throw new SubscriptionCoreAccessInvalidError(
-      "Workspace connections cannot assign other workspaces",
+      "A workspace's own account serves only chosen shared workspaces",
     );
   if (people !== null && (policy.allowedWorkspaces?.length !== 0 || policy.allowPersonalWorkspaces))
     throw new SubscriptionCoreAccessInvalidError(
@@ -493,7 +662,8 @@ export async function updateSubscriptionCoreConnectionAccess(
       return null;
     const id = current.id;
     const models = textArray(policy.allowedModels);
-    if (target.workspaceId !== null) {
+    const ownWorkspaceId = target.workspaceId;
+    if (ownWorkspaceId !== null) {
       const [updated] = await rawRows<AccessRow>(
         tx,
         sql`update subscription_connections connection set allowed_model_ids = ${models},
@@ -502,18 +672,29 @@ export async function updateSubscriptionCoreConnectionAccess(
           returning ${ACCESS_COLUMNS}`,
       );
       if (!updated) return null;
+      // Null keeps the workspaces it serves (an older client's form).
+      if (policy.allowedWorkspaces !== null)
+        await setServedWorkspaces(
+          tx,
+          { ...target, workspaceId: ownWorkspaceId },
+          id,
+          policy.allowedWorkspaces,
+        );
       return await projection(tx, provider, target, updated);
     }
 
     const shared = await organizationSharedWorkspaceIds(tx, target.accountId);
     if (policy.allowedWorkspaces?.some((workspaceId) => !shared.has(workspaceId)))
       throw new SubscriptionCoreAccessWorkspaceNotInOrganizationError();
-    // A workspace's own account can be given to workspaces (which makes it the
-    // organization's), but not to chosen people (peopleSupported is false).
-    if (people !== null && current.managed_by_workspace_id !== null)
-      throw new SubscriptionCoreAccessInvalidError(
-        "An account a workspace manages cannot be limited to people",
-      );
+    // A workspace's own account keeps its owner for chosen shared workspaces;
+    // anything wider is the organization's and needs an explicit move (D-52).
+    const owner = current.managed_by_workspace_id;
+    const keepOwner = owner !== null && !policy.moveToOrganization;
+    if (
+      keepOwner &&
+      (people !== null || policy.allowedWorkspaces === null || policy.allowPersonalWorkspaces)
+    )
+      throw new SubscriptionCoreAccessMoveRequiredError();
     if (people !== null) {
       // A person already chosen who has since left may stay listed (people
       // scope admits only active memberships); anyone added must be active.
@@ -535,31 +716,23 @@ export async function updateSubscriptionCoreConnectionAccess(
     const personal = accountWorkspaces
       .map((row) => row.id)
       .filter((workspaceId) => !shared.has(workspaceId));
-    // A workspace's own connection stays its own while it reaches exactly
-    // that workspace; anything else makes it the organization's.
-    const owner = current.managed_by_workspace_id;
-    const keepOwner =
-      owner !== null &&
-      people === null &&
-      !policy.allowPersonalWorkspaces &&
-      policy.allowedWorkspaces !== null &&
-      policy.allowedWorkspaces.length === 1 &&
-      policy.allowedWorkspaces[0] === owner;
     const organizationScope =
       people === null && policy.allowedWorkspaces === null && policy.allowPersonalWorkspaces;
     const reach =
-      people === null && !organizationScope
+      people === null && !organizationScope && !keepOwner
         ? {
             sharedWorkspaces: policy.allowedWorkspaces === null,
             personalWorkspaces: policy.allowPersonalWorkspaces,
           }
         : { sharedWorkspaces: false, personalWorkspaces: false };
+    // The owning workspace always serves its own connection.
     const desired = new Set(
       people !== null || organizationScope
         ? []
         : [
             ...(policy.allowedWorkspaces ?? shared),
             ...(policy.allowPersonalWorkspaces ? personal : []),
+            ...(keepOwner ? [owner] : []),
           ],
     );
     // The owner changes first, so the reach written next is checked against

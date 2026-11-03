@@ -172,6 +172,30 @@ describe("shared capability connection lifecycle", () => {
     );
     expect(h.enableCapability).toHaveBeenCalledTimes(1);
   });
+  test("removes a custom server only when the server says the viewer may", async () => {
+    const removeCapabilityInstallation = mock(async () => ({ removed: {} }));
+    const removable = { ...item, enabled: true, canRemove: true };
+    const h = harness({ removeCapabilityInstallation });
+    await performCapabilityAction(
+      { ...h.options, item: removable },
+      { type: "remove_server", item: removable },
+    );
+    expect(removeCapabilityInstallation).toHaveBeenCalledWith("workspace", "test-key");
+    expect(h.options.refresh).toHaveBeenCalledTimes(1);
+    expect(h.options.onRuntimeChanged).toHaveBeenCalledTimes(1);
+    expect(h.options.onComplete).toHaveBeenCalledTimes(1);
+
+    for (const canRemove of [false, undefined]) {
+      const kept = { ...item, enabled: true, ...(canRemove === undefined ? {} : { canRemove }) };
+      await expect(
+        performCapabilityAction(
+          { ...h.options, item: kept },
+          { type: "remove_server", item: kept },
+        ),
+      ).rejects.toThrow("Ask a workspace admin");
+    }
+    expect(removeCapabilityInstallation).toHaveBeenCalledTimes(1);
+  });
 
   describe("per-account connector management", () => {
     const gmail = CapabilityCatalogItem.parse({

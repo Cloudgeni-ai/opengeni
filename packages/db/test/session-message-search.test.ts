@@ -7,7 +7,7 @@ import {
   createSession,
   grantWorkspaceAccess,
   searchSessionMessagesForSubject,
-  setSessionArchive,
+  requestSessionArchive,
   SessionListAccessError,
   ensureManagedAccessForUser,
   transitionSessionVisibility,
@@ -235,7 +235,7 @@ test("long reads retain the 32-window budget and stop on between-read cancellati
   }
 }, 180_000);
 
-test("list scope, member removal, workspace and personally archived boundaries apply before counts", async () => {
+test("list scope, member removal, workspace and archived boundaries apply before counts", async () => {
   const allowed = await makeSession();
   const denied = await makeSession();
   await insert(allowed.id, 1, "user.message", { text: "isolated-token" });
@@ -265,11 +265,11 @@ test("list scope, member removal, workspace and personally archived boundaries a
       { subjectId: "user:removed" },
     ),
   ).rejects.toBeInstanceOf(SessionListAccessError);
-  await setSessionArchive(client.db, {
+  await requestSessionArchive(client.db, {
+    accountId: accountId,
     workspaceId,
     sessionId: allowed.id,
     subjectId,
-    archived: true,
   });
   expect((await collect({ query: "isolated-token", sessionId: allowed.id })).matches).toHaveLength(
     0,

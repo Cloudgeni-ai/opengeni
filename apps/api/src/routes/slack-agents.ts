@@ -12,7 +12,11 @@ import { createHash } from "node:crypto";
 import {
   CreateSlackAgentRequest,
   slackAgentHandle,
+  slackAgentIntroLines,
+  slackAgentMessageMrkdwn,
   slackAgentNameKey,
+  slackAgentNameProblem,
+  slackAgentNameProblemText,
   SlackAgentChannelListResponse,
   SlackAgentIntroRequest,
   SlackAgentIntroResponse,
@@ -22,23 +26,23 @@ import {
   type SlackAgent,
 } from "@opengeni/contracts";
 import {
-  availableSlackBotConnectionMetadata,
   deleteSlackAgent,
+  findSlackBotUserLinkForSubject,
   getAgentLearningSettings,
   getSlackAgent,
   getWorkspace,
   getWorkspaceGrant,
-  insertSlackAgent,
   listOrganizationSlackAgents,
+  listSlackAgentIntroChannelIds,
   listSlackInstallationBindings,
-  saveKnowledgeEntry,
-  setSlackAgentKnowledgeCollection,
+  recordSlackAgentIntroPost,
   updateSlackAgent,
   type SlackAgentRecord,
 } from "@opengeni/db";
 import {
   hasPermission,
   knowledgeContextForAccess,
+  requireAccountAdminAuthorizationStamp,
   requireAccessGrant,
   requireAccessGrantAuthorization,
   type ApiRouteDeps,
@@ -55,7 +59,7 @@ import {
   createOpenGeniSlackBotInteractionClient,
   SlackBotProviderError,
 } from "../integrations/slack-bot";
-import { escapeSlackMrkdwn } from "../integrations/slack-app-home";
+import { createSlackAgent } from "../integrations/slack-agent-create";
 
 const SLACK_AGENT_ADMIN_SUBJECT_ID = "service:slack-interaction";
 
@@ -128,24 +132,6 @@ async function readerAccess(
     read: hasPermission(permissions, "workspace:read"),
     admin: hasPermission(permissions, "workspace:admin"),
   };
-}
-
-/** The Slack installation a connection is, as seen from a workspace it is available in. */
-async function installationFor(
-  deps: ApiRouteDeps,
-  scope: { accountId: string; workspaceId: string },
-  connectionId: string,
-) {
-  const available = await availableSlackBotConnectionMetadata(deps.db, scope);
-  const connection = available.find(
-    (candidate) => candidate.id === connectionId && candidate.status === "active",
-  );
-  if (!connection) return null;
-  const home = { accountId: scope.accountId, workspaceId: connection.workspaceId };
-  const binding = (await listSlackInstallationBindings(deps.db, home)).find(
-    (candidate) => candidate.connectionId === connectionId && candidate.state === "active",
-  );
-  return binding ? { home, binding } : null;
 }
 
 export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -222,19 +208,20 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const payload = CreateSlackAgentRequest.parse(
       await parseRequestJson(c, CreateSlackAgentRequest),
     );
-    const target = await getWorkspace(deps.db, workspaceId);
-    if (!target) throw new HTTPException(404, { message: "Workspace not found" });
-    if (target.kind === "personal") {
+    const outcome = await createSlackAgent(deps, {
+      grant,
+      request: payload,
+      memoryContext: () => knowledgeContextForAccess(deps, access, "documents:manage"),
+    });
+    if (outcome.kind === "workspace_not_found") {
+      throw new HTTPException(404, { message: "Workspace not found" });
+    }
+    if (outcome.kind === "personal_workspace") {
       throw new HTTPException(422, {
         message: "A Slack agent works in a shared workspace, not a personal one.",
       });
     }
-    const installation = await installationFor(
-      deps,
-      { accountId: grant.accountId, workspaceId },
-      payload.connectionId,
-    );
-    if (!installation) {
+    if (outcome.kind === "slack_bot_unavailable") {
       throw new ApiHttpError(409, {
         code: "conflict",
         message: "The Opengeni Slack app is not available in this workspace.",
@@ -242,52 +229,9 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
         details: { code: "slack_bot_unavailable" },
       });
     }
-    const created = await insertSlackAgent(deps.db, installation.home, {
-      connectionId: payload.connectionId,
-      slackTeamId: installation.binding.slackTeamId,
-      targetAccountId: grant.accountId,
-      targetWorkspaceId: workspaceId,
-      name: payload.name,
-      nameKey: slackAgentNameKey(payload.name),
-      description: payload.description,
-      avatar: payload.avatar,
-      instructions: payload.instructions,
-      createdBySubjectId: grant.subjectId,
-    });
-    if (created === "name_taken") throw nameTaken();
-    // The agent's Memory: a Knowledge collection in its workspace, named after
-    // it. A failure here leaves the agent without Memory rather than failing
-    // the create; the agent still works and the collection can be retried.
-    let agent = created;
-    try {
-      const operationId = deterministicUuid(`slack-agent-memory:${created.id}`);
-      const receipt = await withAccessGrantSessionRlsContext(deps, grant, async () =>
-        saveKnowledgeEntry(
-          deps.db,
-          await knowledgeContextForAccess(deps, access, "documents:manage"),
-          {
-            operationId,
-            expectedVersion: 0,
-            scope: "workspace",
-            entry: {
-              title: created.name,
-              kind: "group",
-              content: `Memory of the Slack agent ${created.name}: lasting facts, decisions and preferences people shared with it.`,
-            },
-          },
-        ),
-      );
-      const entryId = z.object({ entryId: z.string().uuid() }).safeParse(receipt);
-      if (entryId.success) {
-        agent =
-          (await setSlackAgentKnowledgeCollection(deps.db, installation.home, {
-            agentId: created.id,
-            knowledgeCollectionId: entryId.data.entryId,
-          })) ?? created;
-      }
-    } catch {
-      // Reported by the missing Memory on the agent, not by failing the create.
-    }
+    if (outcome.kind === "name_taken") throw nameTaken();
+    const { agent, installation } = outcome;
+    const target = { name: outcome.targetWorkspaceName };
     return c.json(
       SlackAgentResponse.parse({
         agent: agentView(agent, {
@@ -318,11 +262,42 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     return { grant, agent };
   };
 
+  /**
+   * Opening an agent to anyone in Slack lets people outside its workspace use
+   * what the workspace shares, so it takes the request's verified
+   * organization admin proof (`account:admin` for the agent's organization).
+   * Turning it off only needs the workspace admin every edit already needs.
+   */
+  const requireOrganizationAdmin = async (
+    c: Parameters<typeof requireAccessGrantAuthorization>[0],
+    workspaceId: string,
+  ) => {
+    requireAccountAdminAuthorizationStamp(
+      await requireAccessGrantAuthorization(c, deps, workspaceId, "workspace:admin"),
+    );
+  };
+
   app.patch(`${base}/:agentId`, async (c) => {
     const { agent } = await requireManagedAgent(c);
     const payload = UpdateSlackAgentRequest.parse(
       await parseRequestJson(c, UpdateSlackAgentRequest),
     );
+    if (payload.open === true && !agent.open) {
+      await requireOrganizationAdmin(c, agent.targetWorkspaceId);
+    }
+    // Every name rule applies to a new name; an unchanged one (even one that
+    // predates the stricter rules) can still be saved.
+    if (payload.name !== undefined && slackAgentNameKey(payload.name) !== agent.nameKey) {
+      const problem = slackAgentNameProblem(payload.name);
+      if (problem) {
+        throw new ApiHttpError(422, {
+          code: "validation_failed",
+          message: slackAgentNameProblemText(payload.name, problem),
+          retryable: false,
+          details: { code: "slack_agent_name_invalid", problem },
+        });
+      }
+    }
     const updated = await updateSlackAgent(
       deps.db,
       { accountId: agent.accountId, workspaceId: agent.workspaceId },
@@ -336,6 +311,7 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
           ...(payload.description !== undefined ? { description: payload.description } : {}),
           ...(payload.avatar !== undefined ? { avatar: payload.avatar } : {}),
           ...(payload.instructions !== undefined ? { instructions: payload.instructions } : {}),
+          ...(payload.open !== undefined ? { open: payload.open } : {}),
         },
       },
     );
@@ -417,12 +393,20 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     c.header("cache-control", "private, no-store");
     const cursor = z.string().max(1_024).safeParse(c.req.query("cursor"));
     const result = await introChannels(grant, agent, cursor.success ? cursor.data || null : null);
+    const introduced = new Set(
+      await listSlackAgentIntroChannelIds(
+        deps.db,
+        { accountId: agent.accountId, workspaceId: agent.workspaceId },
+        { slackAgentId: agent.id },
+      ),
+    );
     return c.json(
       SlackAgentChannelListResponse.parse({
         channels: result.channels.slice(0, 200).map((channel) => ({
           id: channel.id,
           name: channel.name || null,
           isPrivate: channel.isPrivate,
+          introduced: introduced.has(channel.id),
         })),
         nextCursor: result.nextCursor,
       }),
@@ -453,7 +437,14 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
       connectionId: agent.connectionId,
       subjectId: SLACK_AGENT_ADMIN_SUBJECT_ID,
     });
-    const text = slackAgentIntroText(agent, binding?.botUserId ?? null);
+    const addedBy = await findSlackBotUserLinkForSubject(deps.db, home, {
+      connectionId: agent.connectionId,
+      subjectId: grant.subjectId,
+    }).catch(() => null);
+    const text = slackAgentIntroText(agent, {
+      botUserId: binding?.botUserId ?? null,
+      addedBySlackUserId: addedBy?.slackUserId ?? null,
+    });
     const identity = client.postIdentity(agent.targetWorkspaceId, {
       title: agent.name,
       avatar: agent.avatar,
@@ -466,10 +457,10 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       try {
         await client.postMessage({
-          // One intro per channel per version of the agent, so a retried
-          // request never posts twice.
+          // One intro per channel per version of the agent and admin, so a
+          // retried request never posts twice.
           operationId: deterministicUuid(
-            `slack-agent-intro:${agent.id}:${agent.version}:${channelId}`,
+            `slack-agent-intro:v2:${agent.id}:${agent.version}:${channelId}:${grant.subjectId}`,
           ),
           channelId,
           text,
@@ -479,25 +470,65 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
         });
         results.push({ channelId, status: "posted" });
       } catch (error) {
-        results.push({
-          channelId,
-          status:
-            error instanceof SlackBotProviderError &&
-            (error.code === "not_in_channel" || error.code === "channel_not_found")
-              ? "not_in_channel"
-              : "failed",
-        });
+        results.push({ channelId, status: slackAgentIntroFailureStatus(error) });
+        continue;
       }
+      await recordSlackAgentIntroPost(deps.db, home, {
+        connectionId: agent.connectionId,
+        slackAgentId: agent.id,
+        slackChannelId: channelId,
+        postedBySubjectId: grant.subjectId,
+      }).catch((error: unknown) => {
+        console.warn("[slack-agent-intro] could not record the post", {
+          agentId: agent.id,
+          error: error instanceof Error ? error.name : "unknown",
+        });
+      });
     }
     return c.json(SlackAgentIntroResponse.parse({ results }));
   });
 }
 
-/** The intro an agent posts in a channel an admin picked, under its own name. */
+/** Slack refuses these posts for reasons a retry won't change. */
+const RESTRICTED_INTRO_ERRORS = new Set([
+  "restricted_action",
+  "restricted_action_read_only_channel",
+  "restricted_action_thread_only_channel",
+  "restricted_action_non_threadable_channel",
+  "is_archived",
+  "slack_connect_unsupported",
+  "ekm_access_denied",
+  "team_access_not_granted",
+]);
+
+export function slackAgentIntroFailureStatus(
+  error: unknown,
+): SlackAgentIntroResponse["results"][number]["status"] {
+  if (!(error instanceof SlackBotProviderError)) return "failed";
+  if (error.code === "not_in_channel" || error.code === "channel_not_found") {
+    return "not_in_channel";
+  }
+  if (RESTRICTED_INTRO_ERRORS.has(error.code)) return "restricted";
+  return "failed";
+}
+
+/**
+ * The intro an agent posts in a channel an admin picked, under its own name.
+ * The same lines feed the form's preview. "Added by" names the admin only when
+ * their Slack account is known.
+ */
 export function slackAgentIntroText(
   agent: Pick<SlackAgentRecord, "name" | "description">,
-  botUserId: string | null,
+  options: { botUserId: string | null; addedBySlackUserId: string | null },
 ): string {
-  const mention = botUserId ? `<@${botUserId}>` : "@Opengeni";
-  return `Hi, I'm *${escapeSlackMrkdwn(agent.name)}*. ${escapeSlackMrkdwn(agent.description)}\nAsk me with ${mention} +${slackAgentHandle(agent.name)}`;
+  return slackAgentMessageMrkdwn(
+    slackAgentIntroLines({
+      name: agent.name,
+      description: agent.description,
+      addedBy: options.addedBySlackUserId
+        ? { slackUserId: options.addedBySlackUserId, name: "admin" }
+        : null,
+    }),
+    { botUserId: options.botUserId },
+  );
 }

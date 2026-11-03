@@ -118,6 +118,8 @@ describe("session control surface architecture", () => {
       'className={cn("mb-1 w-full shrink-0 has-[>div:empty]:hidden", gutter)}',
     );
     expect(route.match(/\bgutter,\n\s+readOnlyArchive && "hidden"/g)).toHaveLength(1);
+    // An archived chat is read-only, so a failed last turn offers no Retry.
+    expect(route).toMatch(/const failureRecovery =\s*!props\.hasNewer &&\s*!readOnlyArchive &&/);
     // The wait status is a chip in SessionChrome, not a separate banner row.
     expect(route).not.toContain("<LazySessionWaitStatus");
   });
@@ -377,13 +379,16 @@ describe("session control surface architecture", () => {
     expect(row).toContain("<ContextMenuContent");
     expect(row).toContain("<RowQuickActions");
     expect(quickActions).toContain('label={session.pinned ? "Unpin session" : "Pin session"}');
-    // Someone who cannot pause the chat only hides it for themselves (#5711).
-    expect(quickActions).toMatch(
-      /archiveLabel === "Hide for me"\s*\? "Hide for me"\s*: session\.archived\s*\? "Restore session"\s*: "Archive session"/,
+    // There is one archive, for people who can control the chat: no personal
+    // hide and no Restore (an archived chat is not in the list at all).
+    expect(quickActions).toContain(
+      'label={session.parentSessionId !== null ? archiveLabel : "Archive session"}',
     );
+    expect(quickActions).not.toContain("Hide for me");
+    expect(quickActions).not.toContain("Restore session");
     // A spawned row archives its workstream instead of offering nothing.
     expect(quickActions).not.toContain("parentSessionId === null");
-    expect(quickActions).toContain("onArchive(target, !target.archived");
+    expect(quickActions).toContain("onArchive(target, true");
     // Session and Site rows share one placement and one tooltip button.
     expect(quickActions).toContain("RAIL_ROW_QUICK_ACTIONS_CLASS");
     expect(siteRow).toContain("RAIL_ROW_QUICK_ACTIONS_CLASS");

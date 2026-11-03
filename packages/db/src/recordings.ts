@@ -2599,6 +2599,7 @@ export async function completeRecordingTranscriptVersion(
       })
       .where(eq(schema.recordingTranscriptVersions.id, version.id))
       .returning();
+    await deletePieceResults(tx, input.workspaceId, version.id);
     const labels = new Set(
       ordered.map((segment) => segment.speakerLabel).filter((label): label is string => !!label),
     );
@@ -2783,6 +2784,126 @@ export async function completeRecordingTranscriptVersion(
 }
 
 /** Record that a version cannot be made. The recording fails only if it has no transcript. */
+/** One piece of one track a provider already transcribed for a version still being made. */
+export type RecordingTranscriptPieceResult = {
+  trackNumber: number;
+  pieceIndex: number;
+  /** SHA-256 of what was asked; a result is reused only for the same question. */
+  requestKey: string;
+  result: Record<string, unknown>;
+};
+
+/**
+ * The pieces a version's earlier attempts already got back, so a retry
+ * reuses them instead of asking and paying the provider again. Empty unless
+ * the version is processing under this owner.
+ */
+export async function listRecordingTranscriptPieceResults(
+  db: Database,
+  input: RecordingActor & { versionId: string; processingOwner: string },
+): Promise<RecordingTranscriptPieceResult[]> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    return await tx
+      .select({
+        trackNumber: schema.recordingTranscriptPieceResults.trackNumber,
+        pieceIndex: schema.recordingTranscriptPieceResults.pieceIndex,
+        requestKey: schema.recordingTranscriptPieceResults.requestKey,
+        result: schema.recordingTranscriptPieceResults.result,
+      })
+      .from(schema.recordingTranscriptPieceResults)
+      .innerJoin(
+        schema.recordingTranscriptVersions,
+        and(
+          eq(
+            schema.recordingTranscriptVersions.workspaceId,
+            schema.recordingTranscriptPieceResults.workspaceId,
+          ),
+          eq(
+            schema.recordingTranscriptVersions.id,
+            schema.recordingTranscriptPieceResults.versionId,
+          ),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.recordingTranscriptPieceResults.workspaceId, input.workspaceId),
+          eq(schema.recordingTranscriptPieceResults.versionId, input.versionId),
+          eq(schema.recordingTranscriptVersions.state, "processing"),
+          eq(schema.recordingTranscriptVersions.processingOwner, input.processingOwner),
+        ),
+      );
+  });
+}
+
+/**
+ * Keep a piece a provider transcribed, while the version is still being
+ * made by this owner; a later answer for the same piece replaces it.
+ * Returns whether it was kept.
+ */
+export async function saveRecordingTranscriptPieceResult(
+  db: Database,
+  input: RecordingActor & {
+    versionId: string;
+    processingOwner: string;
+  } & RecordingTranscriptPieceResult,
+): Promise<boolean> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const [version] = await tx
+      .select({
+        accountId: schema.recordingTranscriptVersions.accountId,
+        recordingId: schema.recordingTranscriptVersions.recordingId,
+      })
+      .from(schema.recordingTranscriptVersions)
+      .where(
+        and(
+          eq(schema.recordingTranscriptVersions.workspaceId, input.workspaceId),
+          eq(schema.recordingTranscriptVersions.id, input.versionId),
+          eq(schema.recordingTranscriptVersions.state, "processing"),
+          eq(schema.recordingTranscriptVersions.processingOwner, input.processingOwner),
+        ),
+      )
+      .for("share");
+    if (!version) return false;
+    await tx
+      .insert(schema.recordingTranscriptPieceResults)
+      .values({
+        accountId: version.accountId,
+        workspaceId: input.workspaceId,
+        recordingId: version.recordingId,
+        versionId: input.versionId,
+        trackNumber: input.trackNumber,
+        pieceIndex: input.pieceIndex,
+        requestKey: input.requestKey,
+        result: input.result,
+      })
+      .onConflictDoUpdate({
+        target: [
+          schema.recordingTranscriptPieceResults.versionId,
+          schema.recordingTranscriptPieceResults.trackNumber,
+          schema.recordingTranscriptPieceResults.pieceIndex,
+        ],
+        set: {
+          requestKey: input.requestKey,
+          result: input.result,
+          createdAt: sql`clock_timestamp()`,
+        },
+      });
+    return true;
+  });
+}
+
+/** A finished version no longer needs the pieces kept for its retries. */
+async function deletePieceResults(tx: Database, workspaceId: string, versionId: string) {
+  await tx
+    .delete(schema.recordingTranscriptPieceResults)
+    .where(
+      and(
+        eq(schema.recordingTranscriptPieceResults.workspaceId, workspaceId),
+        eq(schema.recordingTranscriptPieceResults.versionId, versionId),
+      ),
+    );
+}
+
 export async function failRecordingTranscriptVersion(
   db: Database,
   input: RecordingActor & { versionId: string; processingOwner: string; errorCode: string },
@@ -2807,6 +2928,7 @@ export async function failRecordingTranscriptVersion(
       )
       .returning();
     if (!failed) return null;
+    await deletePieceResults(tx, input.workspaceId, failed.id);
     const recording = await lockRecording(tx, input.workspaceId, failed.recordingId);
     const [current] = await tx
       .select({ id: schema.recordingTranscriptVersions.id })
@@ -3431,6 +3553,12 @@ export type MeetingSummaryCandidate =
         ownerSubjectId: string;
         visibility: RecordingVisibility;
       };
+      /**
+       * The revision of the notes this summary replaces: notes an earlier
+       * built-in summary wrote that nobody has touched since. Null when the
+       * meeting has no notes yet.
+       */
+      replacesRevision: number | null;
     }
   | {
       start: false;
@@ -3444,6 +3572,13 @@ export type MeetingSummaryCandidate =
  * (`settings.recordings.autoSummary: false`), with no notes saved yet. It
  * does not guess whether an automation will write notes: whatever saves notes
  * first keeps them, because the summary only saves the first notes.
+ *
+ * A re-run also starts it when the notes are an earlier built-in summary's
+ * that nobody has touched: last saved by a summary chat of this meeting in
+ * which no person or other agent ever started a turn. Those notes describe the
+ * transcript the re-run replaced, so the new summary writes them again. Notes
+ * a person edited, an automation wrote, or someone talked to the notes chat
+ * about are kept.
  */
 export async function meetingSummaryCandidate(
   db: Database,
@@ -3485,7 +3620,10 @@ export async function meetingSummaryCandidate(
     const settings = workspace?.settings as { recordings?: { autoSummary?: unknown } } | undefined;
     if (settings?.recordings?.autoSummary === false) return { start: false, reason: "turned_off" };
     const [notes] = await tx
-      .select({ kind: schema.recordingNotes.kind })
+      .select({
+        revision: schema.recordingNotes.revision,
+        sessionId: schema.recordingNotes.updatedBySessionId,
+      })
       .from(schema.recordingNotes)
       .where(
         and(
@@ -3494,8 +3632,10 @@ export async function meetingSummaryCandidate(
           eq(schema.recordingNotes.kind, "notes"),
         ),
       );
-    // Any saved notes, even cleared ones: the summary only ever writes the first.
-    if (notes) return { start: false, reason: "has_notes" };
+    // Any other saved notes, even cleared ones, are kept.
+    if (notes && !(await untouchedSummaryNotes(tx, recording, notes.sessionId))) {
+      return { start: false, reason: "has_notes" };
+    }
     return {
       start: true,
       recording: {
@@ -3505,8 +3645,58 @@ export async function meetingSummaryCandidate(
         ownerSubjectId: recording.ownerSubjectId,
         visibility: fromVisibility(recording.visibility),
       },
+      replacesRevision: notes?.revision ?? null,
     };
   });
+}
+
+/**
+ * Whether notes last saved by this chat are a built-in summary's own, never
+ * touched: the chat is one this meeting's summary created, and every turn in
+ * it was the service's (its first message, or upkeep such as compaction),
+ * none a person's or another agent's.
+ */
+async function untouchedSummaryNotes(
+  tx: Database,
+  recording: RecordingRow,
+  sessionId: string | null,
+): Promise<boolean> {
+  if (!sessionId) return false;
+  const [session] = await tx
+    .select({
+      createdByKind: schema.sessions.createdByKind,
+      createdBySubjectId: schema.sessions.createdBySubjectId,
+      policyRole: schema.sessions.policyRole,
+      metadata: schema.sessions.metadata,
+    })
+    .from(schema.sessions)
+    .where(
+      and(
+        eq(schema.sessions.workspaceId, recording.workspaceId),
+        eq(schema.sessions.id, sessionId),
+      ),
+    );
+  if (
+    !session ||
+    session.createdByKind !== "service" ||
+    session.createdBySubjectId !== MEETING_SUMMARY_SUBJECT_ID ||
+    session.policyRole !== MEETING_SUMMARY_POLICY_ROLE ||
+    session.metadata[MEETING_SUMMARY_RECORDING_METADATA_KEY] !== recording.id
+  ) {
+    return false;
+  }
+  const [touched] = await tx
+    .select({ id: schema.sessionTurns.id })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, recording.workspaceId),
+        eq(schema.sessionTurns.sessionId, sessionId),
+        ne(schema.sessionTurns.initiatorKind, "service"),
+      ),
+    )
+    .limit(1);
+  return !touched;
 }
 
 export type SaveRecordingNoteInput = RecordingActor & {

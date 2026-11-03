@@ -6,7 +6,7 @@ import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
 } from "@opengeni/testing/shared-pg";
-import { bootstrapWorkspace, createDb, createSession, type DbClient } from "../src";
+import { bootstrapWorkspace, createDb, type DbClient } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 
@@ -55,22 +55,31 @@ describe.skipIf(!realDatabase)("1180 pinned chats are not archived", () => {
     });
     const accountId = access.defaultAccountId!;
     const workspaceId = access.defaultWorkspaceId!;
+    const admin = owned!.admin;
+    // Raw SQL, not the Drizzle helpers: the schema describes head, and this
+    // database stops before 1180, so later sessions columns do not exist yet.
+    // The session triggers read tenant rows as their definer, so admit this
+    // workspace the way the application does.
     const chat = async (message: string) =>
-      await createSession(client!.db, {
-        accountId,
-        workspaceId,
-        initialMessage: message,
-        resources: [],
-        metadata: {},
-        model: "test-model",
-        reasoningEffort: "medium" as const,
-        latencyMode: "standard" as const,
-        sandboxBackend: "none",
+      await admin.begin(async (tx) => {
+        await tx`
+          select set_config('opengeni.account_id', ${accountId}, true),
+            set_config('opengeni.workspace_id', ${workspaceId}, true)`;
+        const [row] = await tx<{ id: string }[]>`
+          insert into sessions (
+            account_id, workspace_id, initial_message, model, reasoning_effort, latency_mode,
+            sandbox_backend, sandbox_group_id, tool_policy
+          ) values (
+            ${accountId}, ${workspaceId}, ${message}, 'test-model', 'medium', 'standard', 'none',
+            gen_random_uuid(),
+            jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
+          )
+          returning id`;
+        return row!;
       });
     const both = await chat("archived, then pinned from search");
     const archivedOnly = await chat("archived");
     const pinnedOnly = await chat("pinned");
-    const admin = owned!.admin;
     await admin`
       insert into session_pins
         (account_id, workspace_id, subject_id, session_id, pinned, pinned_at, version,

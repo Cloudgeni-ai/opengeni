@@ -555,6 +555,15 @@ describe("inert LIVE native origin projection under restricted FORCE RLS", () =>
         expect(result.projection.membership.basis).toBe("personal_workspace");
     } else expect(result).toEqual({ kind: "fenced" });
     const personal = await seed({ personal: true });
+    // The owner's own row (migration 1231) is never the basis; the pointer is,
+    // and it still works without the row (before the 1232 backfill).
+    const withRow = await project(personal.scope);
+    expect(withRow.kind).toBe("live");
+    if (withRow.kind === "live")
+      expect(withRow.projection.membership.basis).toBe("personal_workspace");
+    await adminMutation(personal, async (tx) => {
+      await tx`delete from workspace_memberships where workspace_id=${personal.scope.workspaceId} and subject_id=${personal.human}`;
+    });
     expect(
       await fixture.admin`select 1 from workspace_memberships where workspace_id=${personal.scope.workspaceId}
       and subject_id=${personal.human}`,

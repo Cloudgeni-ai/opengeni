@@ -6,11 +6,21 @@ import type {
 } from "@opengeni/db";
 import {
   matchSlackAgentAddress,
+  slackAgentAddressIsExplicit,
   type SlackAgentAddress,
   type SlackRoutingAgent,
 } from "./slack-agent-address";
 
 export type { SlackRoutingAgent } from "./slack-agent-address";
+
+/**
+ * Whether a message's agent address may move a thread that already has a
+ * chat: an unknown `+name` (which the resolver answers) or a clear call of an
+ * agent. A bare name that only starts a sentence may not.
+ */
+export function slackAgentAddressMayMoveThread(address: SlackAgentAddress | null): boolean {
+  return address !== null && (address.kind !== "agent" || slackAgentAddressIsExplicit(address));
+}
 
 export type SlackRouteTenancy = { accountId: string; workspaceId: string };
 
@@ -176,8 +186,10 @@ export type SlackRouteInputs = {
   agents?: readonly SlackRoutingAgent[];
   /** The agent of the chat already mapped to this thread, if any. */
   threadAgentId?: string | null;
-  /** A request passed on to this exact agent by another chat. */
+  /** A request passed on to this exact agent by another chat, or sent to it from the Ask form. */
   handoffAgentId?: string | null;
+  /** The agent that passed the request on; null when a person chose the agent (Ask form). */
+  handedOffBySlackAgentId?: string | null;
 };
 
 /**
@@ -296,12 +308,33 @@ export function resolveSlackWorkspaceRoute(input: SlackRouteInputs): SlackRouteR
   const usableAgents = agents.filter((agent) =>
     candidates.some((candidate) => candidate.workspaceId === agent.targetWorkspaceId),
   );
+  // An open agent can be named by anyone; whether this person may use it
+  // (a guest or an external user may not) is checked by the caller. It is
+  // never offered on the picker, which only lists what membership allows.
+  const nameableAgents = agents.some((agent) => agent.open === true)
+    ? agents.filter(
+        (agent) =>
+          agent.open === true || usableAgents.some((candidate) => candidate.id === agent.id),
+      )
+    : usableAgents;
 
-  // 0b. A request another chat passed on goes to exactly that agent. Access is
-  //     still checked live by the caller, like every other resolved route.
+  // 0b. A request another chat passed on, or one a person sent from the Ask
+  //     form, goes to exactly that agent. Access is still checked live by the
+  //     caller, like every other resolved route. Choosing another agent on the
+  //     form for a thread that already has a chat moves the thread, exactly
+  //     like naming that agent in the thread.
   if (input.handoffAgentId) {
     const agent = agents.find((candidate) => candidate.id === input.handoffAgentId);
-    if (agent) return agentResolution(agent, "handoff");
+    if (agent) {
+      if (
+        input.threadTenancy &&
+        !input.handedOffBySlackAgentId &&
+        agent.id !== (input.threadAgentId ?? null)
+      ) {
+        return { ...agentResolution(agent, "agent_name"), switchThread: true };
+      }
+      return agentResolution(agent, "handoff");
+    }
   }
 
   const address = slackAgentAddressForEntry(input.entry, agents, input.botUserId);
@@ -312,7 +345,7 @@ export function resolveSlackWorkspaceRoute(input: SlackRouteInputs): SlackRouteR
           reason: "unknown_agent" as const,
           requested: found.requested,
           candidates,
-          usableAgents,
+          usableAgents: nameableAgents,
         }
       : {
           kind: "denied" as const,
@@ -320,16 +353,23 @@ export function resolveSlackWorkspaceRoute(input: SlackRouteInputs): SlackRouteR
           requested: found.agent.name,
           candidates,
           agent: found.agent,
-          usableAgents,
+          usableAgents: nameableAgents,
         };
   const usable = (agent: SlackRoutingAgent) =>
-    usableAgents.some((candidate) => candidate.id === agent.id);
+    nameableAgents.some((candidate) => candidate.id === agent.id);
 
   // 1. A mapped thread keeps its workspace, even if the channel moved since.
-  //    Naming a different agent in the thread moves the thread to that agent.
-  //    An unknown `+name` in a thread is ordinary text there, so the thread
+  //    Clearly addressing a different agent in the thread (`+name`, the name
+  //    alone, or the name followed by "," or ":") moves the thread to that
+  //    agent. A bare name that merely starts a sentence ("Data looks fine
+  //    now") and an unknown `+name` are ordinary text there, so the thread
   //    simply continues.
-  if (input.threadTenancy && address && address.kind === "agent") {
+  if (
+    input.threadTenancy &&
+    address &&
+    address.kind === "agent" &&
+    slackAgentAddressIsExplicit(address)
+  ) {
     if (!usable(address.agent)) return addressRefusal(address);
     if (address.agent.id !== (input.threadAgentId ?? null)) {
       return { ...agentResolution(address.agent, "agent_name"), switchThread: true };
@@ -458,10 +498,28 @@ export function resolveSlackWorkspaceRoute(input: SlackRouteInputs): SlackRouteR
 }
 
 /**
+ * The text a request is passed on with, to another agent: a `+name` address
+ * (after any leading mention of Opengeni) is removed, so the next agent is not
+ * sent the first one's address. A bare name is kept, because it may be part
+ * of the request ("Ops desk, Analytics should check revenue"). Text without a
+ * `+name` address is returned unchanged.
+ */
+export function slackRequestTextForAnotherAgent(
+  entry: Pick<SlackInteractionInboxEntry, "triggerKind" | "slackChannelId" | "text">,
+  agents: readonly SlackRoutingAgent[],
+  botUserId: string | null,
+): string {
+  const address = slackAgentAddressForEntry(entry, agents, botUserId);
+  if (address?.kind !== "agent" || address.via !== "plus") return entry.text;
+  const { lead } = splitSlackLeadingMention(entry.text, botUserId);
+  return `${lead}${address.remainder ?? ""}`.trim() || entry.text;
+}
+
+/**
  * The message text the model actually sees.
  *
- * A prefix override is addressing information, not part of the request, so it is
- * stripped exactly once and only when it matched.
+ * A prefix override and `+name` are addressing information, not part of the
+ * request, so they are stripped exactly once and only when they matched.
  */
 export function slackRoutedRequestText(
   text: string,
@@ -472,11 +530,13 @@ export function slackRoutedRequestText(
   if (
     resolution.kind === "resolved" &&
     address?.kind === "agent" &&
+    address.via === "plus" &&
     address.agent.id === resolution.slackAgentId &&
     address.remainder !== null
   ) {
-    // The agent's name addresses the message, like a prefix. Nothing after the
-    // name keeps the text as typed, so a request is never emptied.
+    // `+name` addresses the message, like a prefix. A bare name is kept: it
+    // may be part of the request ("Data is wrong on the dashboard"). Nothing
+    // after the name keeps the text as typed, so a request is never emptied.
     const { lead } = splitSlackLeadingMention(text, botUserId);
     return `${lead}${address.remainder}`;
   }

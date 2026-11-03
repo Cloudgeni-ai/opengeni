@@ -33,6 +33,7 @@ describe("content-free customer journey", () => {
   });
   test("labels every workspace page, including agents and secrets", () => {
     for (const page of [
+      "archived",
       "read-only-chats",
       "agents",
       "secrets",

@@ -890,6 +890,7 @@ export async function runTurnStreamAttempt(
         initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
         sessionId: input.sessionId,
         ...(billingState.isByokTurn ? { byok: true } : {}),
+        ...(billingState.isOwnSubscriptionTurn ? { ownSubscription: true } : {}),
         ...(billingState.billingOrigin ? { billingOrigin: billingState.billingOrigin } : {}),
       }),
       checkSteer
@@ -924,6 +925,7 @@ export async function runTurnStreamAttempt(
       throw new Error("Run input was not prepared");
     }
     steerHandover = false;
+    let compactionHandover: Error | undefined;
     // Keep the fence in step with a Steer the watch already noticed.
     eventing.toolCancellationFenceRef.current?.setForegroundWaitYield(
       steerWatch?.signal().aborted === true,
@@ -1111,6 +1113,9 @@ export async function runTurnStreamAttempt(
         }
         attempt.modelRequestStarted = true;
         return await runtime.runStream(agent, runInput!, eventing.modelRunSettings, {
+          onCompactionHandover: (error) => {
+            compactionHandover = error;
+          },
           beforeModelRequest: (point) => {
             streamTiming.onModelRequestEntry(point);
             return modelCallAdmission.beforeModelRequest(point);
@@ -2054,6 +2059,9 @@ export async function runTurnStreamAttempt(
       temporalCancellationSignal: cancellationSignal,
       runtimeCancellationSignal,
     });
+    // SDK handover preserves queued events; only compact once their outputs
+    // and receipts have crossed the ordinary durable publication boundary.
+    if (compactionHandover) throw compactionHandover;
     // External Codemode stays reachable until finalization. Close wait
     // admission before any terminal output/history decision, and drain an
     // already-admitted wait before consulting the actual runner-yield latch.

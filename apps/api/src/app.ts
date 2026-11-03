@@ -47,6 +47,7 @@ import {
   normalizeOrganizationAccessPolicy,
   REGION_RESTRICTED,
   REGION_RESTRICTED_MESSAGE,
+  type DictationModelOption,
 } from "@opengeni/contracts";
 import {
   httpRejectionFactsFromEnvelope,
@@ -397,6 +398,7 @@ import { registerCompanyBrainRoutes } from "./routes/company-brain";
 import { registerSlackTaskPolicyRoutes } from "./routes/slack-task-policy";
 import { registerSlackBotAccessRoutes } from "./routes/slack-bot-access";
 import { registerSlackAgentRoutes } from "./routes/slack-agents";
+import { registerSlackAgentUpdateRoutes } from "./routes/slack-agent-updates";
 import { registerWorkspaceStateRoutes } from "./routes/workspace-state";
 import { registerWorkspaceArtifactRoutes } from "./routes/workspace-artifacts";
 import { isSiteDataFileUploadRequest, registerSiteDataRoutes } from "./routes/site-data";
@@ -1559,6 +1561,7 @@ export function createAppComposition(deps: AppDependencies): {
     let requiredModelGeography: "eu" | undefined;
     let voiceInputAvailable = false;
     let voiceInputProviders: string[] = [];
+    let voiceInputModels: DictationModelOption[] = [];
     const requestedWorkspaceId = c.req.query("workspaceId");
     if (
       requestedWorkspaceId !== undefined &&
@@ -1634,6 +1637,7 @@ export function createAppComposition(deps: AppDependencies): {
             // `available` honours the workspace preference and fallback, so
             // the composer never offers a mic every request would refuse.
             voiceInputProviders = (await transcription.availableProviderIds?.(voiceContext)) ?? [];
+            voiceInputModels = (await transcription.availableModels?.(voiceContext)) ?? [];
             voiceInputAvailable =
               voiceInputProviders.length > 0 &&
               (await Promise.resolve(transcription.available(voiceContext)).catch(() => false));
@@ -1732,6 +1736,7 @@ export function createAppComposition(deps: AppDependencies): {
         },
         voiceInput: {
           providers: voiceInputProviders,
+          ...(voiceInputModels.length > 0 ? { models: voiceInputModels } : {}),
           available: voiceInputAvailable,
           maxDurationSeconds: deps.settings.voiceInputMaxDurationSeconds,
           maxSizeBytes: deps.settings.voiceInputMaxSizeBytes,
@@ -2515,6 +2520,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerSlackTaskPolicyRoutes(app, routeDeps);
   registerSlackBotAccessRoutes(app, routeDeps);
   registerSlackAgentRoutes(app, routeDeps);
+  registerSlackAgentUpdateRoutes(app, routeDeps);
   registerWorkspaceStateRoutes(app, routeDeps);
   registerMemorySlackPublicationRoutes(app, routeDeps);
   registerWorkspaceArtifactRoutes(app, routeDeps);
@@ -4167,6 +4173,10 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/machines\/[^/]+\/audience$/,
     label: "/v1/workspaces/:workspaceId/machines/:enrollmentId/audience",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/machines\/[^/]+\/reach$/,
+    label: "/v1/workspaces/:workspaceId/machines/:enrollmentId/reach",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/machines$/,

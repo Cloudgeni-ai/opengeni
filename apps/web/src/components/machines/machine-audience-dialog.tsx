@@ -47,6 +47,12 @@ export interface MachineAudienceDialogProps {
   subjectId: string;
   /** Workspace admins can share a machine and pick another owner. */
   workspaceAdmin: boolean;
+  /**
+   * Whether the person may share the machine with the whole workspace: a
+   * workspace admin, or the owner of a Personal workspace (still only them).
+   * Defaults to `workspaceAdmin`. Mirrors the API's audience check.
+   */
+  canShareWithWorkspace?: boolean;
   /** A personal workspace has nobody else to share with. */
   personalWorkspace?: boolean;
   open: boolean;
@@ -207,6 +213,7 @@ export function MachineAudienceDialog({
   machine,
   subjectId,
   workspaceAdmin,
+  canShareWithWorkspace = workspaceAdmin,
   personalWorkspace = false,
   open,
   onOpenChange,
@@ -225,7 +232,7 @@ export function MachineAudienceDialog({
   const [members, setMembers] = useState<WorkspaceMember[] | null>(null);
 
   const changing = target !== current;
-  const sharingNeedsAdmin = changing && target === "workspace" && !workspaceAdmin;
+  const sharingNeedsAdmin = changing && target === "workspace" && !canShareWithWorkspace;
   const pickOwner = changing && target === "only_me" && workspaceAdmin && !personalWorkspace;
 
   // Admins can make the machine someone else's: list the workspace's people.

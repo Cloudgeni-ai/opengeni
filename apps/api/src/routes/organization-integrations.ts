@@ -16,7 +16,8 @@ import {
 import {
   accountScopedApiKeyWorkspaceAuthority,
   accessGrantAuthorizationFromContext,
-  requireAccountAdminAuthorizationStamp,
+  holdsOrganizationAdministration,
+  requireOrganizationAdministrationStamp,
   requireAccessContext,
   requireCanonicalLocalAccountAdministrator,
   type AccessGrantAuthorization,
@@ -59,7 +60,11 @@ import {
   newIntegrationSecret,
 } from "./workspace-integrations";
 
-/** Account administrators or verified full-access organization keys; never workspace keys. */
+/**
+ * The organization's owner or an admin, signed in as themselves (or a verified
+ * agent acting as them with `account:admin` in its access), or a verified
+ * full-access organization key; never workspace keys or agent attempts.
+ */
 export function requireOrganizationIntegrationAdmin(
   context: AccessContext,
   organizationId: string,
@@ -88,7 +93,7 @@ export function requireOrganizationIntegrationAdmin(
       throw new HTTPException(403, { message: "organization API key authority required" });
     }
   } else {
-    if (!grant.permissions.includes("account:admin"))
+    if (!holdsOrganizationAdministration(context, organizationId))
       throw new MissingPermissionRefusal("account:admin");
     if (
       !authorization ||
@@ -103,7 +108,7 @@ export function requireOrganizationIntegrationAdmin(
     ) {
       throw new HTTPException(403, { message: "Canonical organization administrator required" });
     }
-    requireAccountAdminAuthorizationStamp(authorization);
+    requireOrganizationAdministrationStamp(authorization);
   }
   return grant.subjectId;
 }

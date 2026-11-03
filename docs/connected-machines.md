@@ -1329,6 +1329,47 @@ and re-attaches to the runner's authoritative retention log; it never limits or
 truncates command output. Completed stdout/stderr are assembled once for the
 tool result, and source frame references are then released.
 
+### Git review fanout and command-backlog recovery
+
+A large Git review can exceed the combined capture size or require per-file
+fallback when patch sections and metadata do not match. The fallback must read
+all selected files under the existing per-file content contract, with bounded
+physical concurrency. `SandboxChannelAService` admits four file reads per
+fallback, preserves result order, and stops admitting queued reads on failure
+or cancellation while joining those already dispatched. Turn-end capture passes
+its owner/deadline AbortSignal into Git read admission: superseding the capture
+stops queued files even when the provider itself keeps answering successfully.
+Already-started file reads retain their chunk collection and exact spool cleanup. This is scheduling,
+not a limit on the agent's work or the number of files reviewed. Eagerly
+constructing one command promise per changed file can flood the runner and
+command ledger before cancellation takes effect. This inherited bug can be
+activated by a large diff; a shared command preview is not evidence of a retry
+loop. Inspect full command contents and exact operation identities.
+
+Terminal command settlement uses the lightweight write-admission control
+projection under the canonical workspace/session locks. It must not compute
+UI settlement summaries or recount the stopping backlog there: doing that once
+per command makes recovery quadratic and extends the locks that other requests
+need. Pause, ancestor pause and workspace pause still govern completion wakes.
+
+When investigating congestion, correlate stopping-command count and oldest age,
+settlement throughput, PostgreSQL lock waits and API readiness. Group commands
+by their exact session, launch attempt and provider connection; distinguish a
+large set of distinct Git reads from replay of one operation. A growing backlog
+with falling settlement throughput needs investigation even when node CPU and
+memory have spare capacity.
+
+Contain the source with the normal session Pause action before draining its
+backlog. Reconcile against the recorded provider/enrollment, connection and op
+identity through the normal command lifecycle. Settle only with exact terminal
+exit or typed loss proof; preserve output-custody requirements and audit events.
+A temporary disconnect, timeout or expired claim is not process-death proof.
+Do not bulk-edit commands to `exited`/`lost`, fabricate exit codes, query a
+replacement connection as proof for its predecessor, or delete the ledger.
+Confirm that the backlog and lock waits fall and normal API reads recover before
+resuming the workload. Restarting API replicas alone does not remove either the
+queued commands or their settlement cost.
+
 ## Swap the active sandbox
 
 A session points at one active sandbox at a time. `swapActiveSandbox` re-points
@@ -1840,14 +1881,20 @@ place. The machine keeps its enrollment id, sandbox id, credentials and live
 connection, so its chats, schedules and the installed agent are not registered
 again, and the agent keeps running (with its running commands) without a
 restart or an upgrade. On the Machines page, open the machine and choose
-**Who can use it?**. Organization machines are shared with the whole
-organization and cannot be changed here.
+**Who can use it?**. Organization machines belong to the organization and
+cannot be changed here. The organization's owner or an admin chooses which
+workspaces they work in instead (see
+[Choose where an organization machine works](#choose-where-an-organization-machine-works)).
 
 - Narrowing to **Only me** is done by the person who will own the machine, or by
   a workspace admin who picks that owner. The owner must be an active member who
   can use the workspace.
 - Widening to **This workspace** needs `workspace:admin`, and is done by the
-  machine's owner, so nobody exposes another person's Only me machine.
+  machine's owner, so nobody exposes another person's Only me machine. In a
+  Personal workspace, where This workspace is still only its owner, the verified
+  owner acting as themselves may widen it without `workspace:admin` (the same
+  check as the workspace's other settings). Making a machine Only me for
+  someone else still needs `workspace:admin`.
 - Both need `enrollments:manage`. An agent cannot change it.
 
 The dialog shows what one confirmation will do, as counts in plain sentences
@@ -1914,6 +1961,61 @@ they gave their full access: a session with admin access or a connected agent
 with full access calls the same two routes as them (the `previewMachineAudience`
 and `changeMachineAudience` admin actions). An agent acting as itself, or one
 with less than the person's full access, is refused.
+
+### Choose where an organization machine works
+
+An organization machine works in the organization's workspaces that an
+organization owner or admin picks, like the organization's model keys and connectors:
+every shared workspace, or chosen ones, plus a separate switch for members'
+Personal workspaces. The workspace it was connected from always has it,
+because its rows live there. A machine connected before this keeps working
+everywhere it did: every shared workspace and every Personal workspace.
+
+On the Machines page, an organization machine shows **Available in** with a
+short summary. Organization owners and admins see **Change** next to it, which
+opens the shared **Available in** picker. Taking workspaces away warns that chats and
+schedules there stop using the machine from their next turn. Nothing is moved
+or rebuilt: the machine list, the fleet
+tools, attempt resolution and direct attaches all check where the machine works
+on every call, so a workspace it no longer works in simply stops seeing it.
+
+`PUT /v1/workspaces/:ws/machines/:enrollmentId/reach` with
+`{ allowedWorkspaceIds: string[] | null, allowPersonalWorkspaces: boolean }`
+sets it (`null` means every shared workspace) and answers `{ reach }`, the same
+shape the machine list reports as `reach` for organization machines
+(`homeWorkspaceId`, `allowedWorkspaceIds`, `allowPersonalWorkspaces`). It needs
+`enrollments:manage`, and the caller is the organization's owner or an admin
+signed in as themselves (or a credential holding `account:admin`), the same
+rule as changing the machine. The connecting workspace is dropped
+from the list, since it always has the machine, and any id that is not a shared
+workspace of the organization answers `400` with `details.workspaceIds`. A
+workspace machine or an Only me machine answers `409`: those already work only
+in their workspace, or wherever their owner uses them. As with who can use a
+machine, a person makes this change, directly or through an agent they gave
+their full access. Each change records a `connected_machine.reach.changed`
+audit event with the previous and new reach.
+
+`GET /v1/workspaces/:ws/organization-machines` lists every organization
+machine wherever it works, as `{ machines: [{ id, name, sandboxId, reach }],
+complete }` (`id` is the enrollment), for Organization settings › Shared. It
+needs `enrollments:read` and an organization owner or admin, from a person or
+an agent acting as them; an agent acting as itself gets `403` and sees only
+what works in its workspace. Until a later release grants the
+organization-wide read (migration 1224 adds it), it answers the organization
+machines that work in this workspace with `complete: false`.
+
+### Where your own machine works
+
+An **Only me** machine runs its owner's own messages, and only in the
+workspaces where it is on. It starts on in the owner's Personal workspace and
+in the workspace it was connected from. Opening the machine on the Machines
+page shows **Where it works** under **Who can use it?**: every workspace the
+owner belongs to in the organization, with a switch for each. Turning it on
+in a workspace is the owner's standing `always` `connected_machine.use` grant
+there, for private and shared chats; turning it off revokes it, including in
+the Personal workspace. Other people's messages never run on it. The list and
+switches use the same own-resources reach routes as personal logins (see
+`docs/remote-mcp-credentials.md`).
 
 ### Zero-click token (fleet / headless)
 

@@ -35,6 +35,18 @@ GET/PUT routes are `/v1/{organizations|workspaces}/:scopeId/model-connections/:k
 Organization administration requires the existing verified browser administrator;
 private SuperGrok policy management requires its owning managed browser human.
 
+A workspace's own Codex, SuperGrok or Claude subscription can also serve other
+shared workspaces and stays that workspace's (D-52 in
+`docs/subscription-accounts.md`). On its workspace route, `allowedWorkspaces`
+lists every workspace it serves, its own always included, and `workspaces` offers
+the shared workspaces the caller administers plus the ones it already serves.
+Adding a workspace the caller doesn't administer is a 403; people, Personal
+workspaces and `moveToOrganization` are a 422 there. On the organization route,
+choosing every shared workspace, Personal workspaces or people for such an account
+needs `moveToOrganization: true` (otherwise 422), which makes it the
+organization's. `DELETE` on the workspace route removes another workspace's own
+account from that workspace: 204 when removed, 404 when it isn't shared there.
+
 The workspace catalog intersects connection model permissions with the workspace
 policy. Rotation-off catalogs use the effective active subscription; rotating
 pools combine permissions from eligible subscriptions. An assigned paused or

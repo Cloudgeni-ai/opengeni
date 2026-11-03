@@ -7,6 +7,7 @@ import {
 } from "@opengeni/contracts";
 import {
   DEFAULT_MODAL_IMAGE_REF,
+  FIRST_PARTY_MCP_CALL_TIMEOUT_MS,
   FIRST_PARTY_MCP_SETUP_TIMEOUT_MS,
   DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS,
   DEFAULT_GOAL_IDLE_BACKOFF_MS,
@@ -1867,6 +1868,12 @@ describe("sandbox preparation profiles", () => {
       });
     }
     expect(FIRST_PARTY_MCP_SETUP_TIMEOUT_MS).toBeGreaterThanOrEqual(30_000);
+    // Opengeni's own tools may run for minutes (a large file publish); the
+    // client must not give up on a call the API goes on to finish.
+    expect(settings.mcpServers.find((server) => server.id === "opengeni")).toMatchObject({
+      timeoutMs: FIRST_PARTY_MCP_CALL_TIMEOUT_MS,
+    });
+    expect(FIRST_PARTY_MCP_CALL_TIMEOUT_MS).toBeGreaterThan(60_000);
   });
 
   test("derives built-in document MCP URL from OPENGENI_MCP_URL", () => {
@@ -2825,6 +2832,13 @@ describe("backend-gated sandbox required-credential validation", () => {
     expect(computeGatewayConfigured(settings)).toBe(true);
     expect(settings.computeVcpus).toBe(2);
     expect(settings.computeMemoryMib).toBe(4096);
+    expect(settings.computeDiskMib).toBeUndefined();
+    expect(
+      withEnv({ ...ready, OPENGENI_COMPUTE_DISK_MIB: "32768" }, () => getSettings()).computeDiskMib,
+    ).toBe(32_768);
+    expect(() =>
+      withEnv({ ...ready, OPENGENI_COMPUTE_DISK_MIB: "0" }, () => getSettings()),
+    ).toThrow();
     expect(() =>
       withEnv({ ...ready, OPENGENI_COMPUTE_LINK_URL: undefined }, () => getSettings()),
     ).toThrow("OPENGENI_COMPUTE_LINK_URL is required");

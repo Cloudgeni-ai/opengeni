@@ -1498,24 +1498,19 @@ never replays historical work or changes the accepted account selection of a
 capacity-waiting turn. A capacity waiter pinned to an allocator-disabled account
 requires an authorized account change; time or a deploy cannot override it.
 
-Personal sidebar Archive composes native Pause and the member's archive row in
-one transaction, taking the personal-state fence before the control/workspace/
-session prefix. It pauses idle chats too; active work anywhere in the tree
-requires explicit confirmation under the control lock. `sessions:control` governs
-Pause regardless of the chat creator; `hide_for_me` explicitly changes only the
-caller's sidebar visibility. Shared Pause affects everyone. Restore changes only
-personal visibility and never resumes. A stable `clientEventId` replays an archive
-intent without undoing a later explicit Resume; use a new ID for a new intent.
-Native Pause interrupts descendant work and requests background-command
-cancellation through the existing durable settlement protocol. Completion of the
-HTTP request does not mean every external command has already stopped.
-
-Archive does not rewrite schedule ownership or enabled flags. Existing-session
-and reusable-session schedules cannot admit work into an effectively paused chat
-or descendant. Their definitions remain visible and enabled for their owners;
-only an explicit Resume can make the chat executable again. Independent
-new-chat-per-run schedules are not schedules *in* the archived chat and remain
-unaffected. Personal hiding alone makes no execution guarantee.
+The chat Archive action needs `sessions:control`, regardless of the chat
+creator, and applies to everyone. It refuses while something keeps the chat live
+on purpose (keep-live, a repeating automation in it, a site sign-in). Otherwise
+it marks the tree archived at once: new messages, steers and agent sends are
+refused, and machine inputs are settled like input to a cancelled chat. Running
+work is left alone for the ten-second Undo window, so Undo returns the chat
+exactly as it was. When the window ends, a delayed workflow retires the tree's
+one-time automations, pauses active goals, and cancels running work as the
+person who archived it (native cancel, so background commands are asked to stop
+through the existing durable settlement protocol). The idle-session archive
+then stores the chat as soon as nothing runs. Repeating an Archive changes
+nothing. See [session storage
+lifecycle](session-storage-lifecycle.md#archiving-a-chat).
 
 Scheduled admission refuses an effectively paused session under every overlap
 policy (`refusePaused`), not only skip: an occurrence queued behind a Pause
@@ -2747,11 +2742,21 @@ the arguments. The floor applies only where the schema offers `background`
 (`finishFloor`), so `OPENGENI_EXPERIMENT_OUTPUT_COST=false` or
 `OPENGENI_EXPERIMENT_CUT_POLLING=false` keeps the requested wait, and the
 latter also restores the 30-second cap. Connected Machine (op-stream) commands
-keep their own 30-second background yield ceiling; the floor is sent to them as
-the requested yield, so a tiny requested yield there waits up to 30 seconds.
-The machine waits that window in one block, so a Steer during such a wait takes
-effect when it ends (up to 30 seconds), while Pause and turn cancellation still
-cancel the operation at once.
+are sent the effective wait as their requested yield (the floor, or the
+30-second cap when cut polling is off) and cap it at 60 seconds
+(`SELFHOSTED_BACKGROUND_MAX_YIELD_MS`, equal to the floor), so a command that
+ends within a minute returns in the same call there too. The machine waits that
+window in one block; when a Steer is waiting, the turn ends the block early
+through the operation's `yieldExecCommand` control (an abort signal on the
+op-stream yield), so the command returns its background handle promptly and
+keeps running, exactly as when the window ends. The early yield waits out
+`OP_STREAM_EARLY_YIELD_GRACE_MS` (1 second) from when the operation is running,
+so a quick command started while a Steer waits still returns its result
+inline. Lifecycle commands and commands without background adoption keep their
+wait; Pause and turn cancellation still cancel the operation at once. Connected
+Machine commands receive an empty, closed stdin, so an input prompt reads
+end-of-file instead of waiting out the window. OpenSandbox remote
+operations have no early yield yet.
 Live output still streams to the command card while the call
 waits, and Pause/Steer cancellation is still checked between slices. The
 model-facing `exec_command` schema is non-strict and requires only `cmd` and

@@ -78,9 +78,12 @@ export function subscriptionCheckoutParams(input: {
   priceId: string;
   successUrl: string;
   cancelUrl: string;
+  /** A code already checked against this plan. Stripe's own code field stays off. */
+  promotionCodeId?: string | undefined;
 }): Stripe.Checkout.SessionCreateParams {
   return {
     mode: "subscription",
+    ...(input.promotionCodeId ? { discounts: [{ promotion_code: input.promotionCodeId }] } : {}),
     customer: input.customerId,
     customer_update: { address: "auto", name: "auto" },
     automatic_tax: { enabled: true },
@@ -146,7 +149,33 @@ export class StripeSubscriptions {
         message: "plan Stripe price does not match the runtime catalog",
       });
     }
-    return plan;
+    return { ...plan, stripeProductId: id(price.product) };
+  }
+
+  /**
+   * Looks up a customer-typed code for one plan. The coupon must name the plan's
+   * Stripe product: a plan pays out more credit than it costs, so an unrestricted
+   * credit coupon must not buy one. Stripe's page field could not enforce this.
+   */
+  private async planPromotionCode(code: string, productId: string | undefined): Promise<string> {
+    const listed = await this.stripe.promotionCodes.list({
+      code,
+      active: true,
+      limit: 1,
+      expand: ["data.promotion.coupon.applies_to"],
+    });
+    const promotionCode = listed.data[0];
+    const coupon =
+      promotionCode && typeof promotionCode.promotion?.coupon === "object"
+        ? promotionCode.promotion.coupon
+        : null;
+    if (!promotionCode || !coupon?.valid) {
+      throw new HTTPException(422, { message: "That code isn't valid or has expired." });
+    }
+    if (!productId || !coupon.applies_to?.products.includes(productId)) {
+      throw new HTTPException(422, { message: "This code can't be used for this plan." });
+    }
+    return promotionCode.id;
   }
 
   private async subscriptions(customer: string, accountId: string) {
@@ -168,9 +197,16 @@ export class StripeSubscriptions {
     idempotencyKey: string;
     successUrl: string;
     cancelUrl: string;
+    promotionCode?: string | undefined;
   }) {
     this.requireEnabled();
     const plan = await this.paidPlan(input.planKey);
+    const promotionCodeId = input.promotionCode
+      ? await this.planPromotionCode(input.promotionCode, plan.stripeProductId)
+      : undefined;
+    // The console keeps one key per plan, so trying another code is a new
+    // Stripe request rather than a conflicting replay of the first.
+    const requestKey = `subscription-checkout:${input.accountId}:${input.idempotencyKey}`;
     return await this.store.locked(input.accountId, async (tx) => {
       const state = await tx.state();
       if (
@@ -181,13 +217,29 @@ export class StripeSubscriptions {
           message: "organization already has a subscription; manage it instead",
         });
       }
-      const session = await this.stripe.checkout.sessions.create(
-        subscriptionCheckoutParams({
-          ...input,
-          priceId: plan.stripePriceId!,
-        }),
-        { idempotencyKey: `subscription-checkout:${input.accountId}:${input.idempotencyKey}` },
-      );
+      let session: Stripe.Checkout.Session;
+      try {
+        session = await this.stripe.checkout.sessions.create(
+          subscriptionCheckoutParams({
+            accountId: input.accountId,
+            customerId: input.customerId,
+            successUrl: input.successUrl,
+            cancelUrl: input.cancelUrl,
+            priceId: plan.stripePriceId!,
+            promotionCodeId,
+          }),
+          {
+            idempotencyKey: promotionCodeId ? `${requestKey}:${promotionCodeId}` : requestKey,
+          },
+        );
+      } catch (error) {
+        // Stripe refuses a code whose other restrictions this purchase doesn't
+        // meet (first purchase only, another customer's code).
+        if (promotionCodeId && error instanceof Stripe.errors.StripeInvalidRequestError) {
+          throw new HTTPException(422, { message: "This code can't be used for this plan." });
+        }
+        throw error;
+      }
       if (!session.url)
         throw new HTTPException(502, { message: "Stripe did not return a checkout URL" });
       return { checkoutSessionId: session.id, url: session.url };
@@ -734,6 +786,8 @@ export class StripeSubscriptions {
       status: "paid",
       limit: 100,
     })) {
+      // A fully discounted invoice collected nothing, so it has no charge to refund.
+      if (invoice.amount_paid === 0) continue;
       // An old, previously legitimate subscription can become a live loser
       // after a later subscription takes over. Never refund its prior history.
       for await (const payment of this.stripe.invoicePayments.list({

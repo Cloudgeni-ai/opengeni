@@ -18,14 +18,18 @@ import {
 import {
   deliverSubscriptionCoreWake,
   getModelConnectionAccess,
+  listModelConnectionAdministeredWorkspaceIds,
   listOrganizationAdministrationMembers,
   nestedPostgresSqlState,
   readSubscriptionCoreProviderModelConnectionAccess,
+  removeSubscriptionCoreProviderModelConnectionFromWorkspace,
   subscriptionCoreAccessChangeWake,
   ModelConnectionAccessForbiddenError,
   SubscriptionCoreAccessInvalidError,
+  SubscriptionCoreAccessMoveRequiredError,
   SubscriptionCoreAccessPeopleUnlistableError,
   SubscriptionCoreAccessPersonNotInOrganizationError,
+  SubscriptionCoreAccessWorkspaceNotAdministeredError,
   ModelConnectionWorkspaceNotInOrganizationError,
   updateModelConnectionAccess,
   updateSubscriptionCoreProviderModelConnectionAccess,
@@ -178,6 +182,10 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
       // Shared core connections at organization scope can be limited to people
       // and report the workspaces that use them as their own (design 5.4).
       const organizationCore = coreAccess !== null && connection.workspaceId === null;
+      // A workspace's own subscription account can also serve other shared
+      // workspaces (D-52): its route offers the ones the person administers,
+      // plus the ones it already serves.
+      const workspaceCore = coreAccess !== null && connection.workspaceId !== null;
       let settings =
         connection.workspaceId === null
           ? (await deps.resolveCatalogSettings()).settings
@@ -189,6 +197,20 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
             ).settings;
       settings = withCodexCatalogProvider(withXaiSubscriptionCatalogProvider(settings));
       let workspaces: Array<{ id: string; name: string }> = [];
+      if (workspaceCore && connection.workspaceId !== null) {
+        const [administered, shared] = await Promise.all([
+          listModelConnectionAdministeredWorkspaceIds(deps.db, {
+            accountId: connection.accountId,
+            workspaceId: connection.workspaceId,
+            subjectId: connection.subjectId,
+          }),
+          listSharedWorkspacesForAccount(deps.db, connection.accountId),
+        ]);
+        const offered = new Set([...administered, ...(coreAccess.policy.allowedWorkspaces ?? [])]);
+        workspaces = shared
+          .filter((workspace) => offered.has(workspace.id))
+          .map(({ id, name }) => ({ id, name }));
+      }
       if (connection.workspaceId === null) {
         const actor = {
           organizationId: connection.accountId,
@@ -294,7 +316,13 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
                 managedByWorkspaceId: coreAccess.managedByWorkspaceId,
                 ...(coreAccess.personalSharingSupported ? { personalSharingSupported: true } : {}),
               }
-            : {}),
+            : workspaceCore
+              ? {
+                  peopleSupported: false,
+                  localWorkspaceIds: coreAccess.localWorkspaceIds,
+                  managedByWorkspaceId: coreAccess.managedByWorkspaceId,
+                }
+              : {}),
         }),
       );
     });
@@ -311,13 +339,21 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
         throw new HTTPException(422, {
           message: "Personal sharing requires the organization subscription route",
         });
+      if (policy.moveToOrganization && (!core || connection.workspaceId !== null))
+        throw new HTTPException(422, {
+          message: "Only the organization can take over a workspace's account",
+        });
       if (policy.allowedModels?.some((id) => !id.startsWith(modelPrefix(connection))))
         throw new HTTPException(422, {
           message: "Model belongs to a different connection provider",
         });
+      // A workspace's own subscription account can serve chosen shared
+      // workspaces (D-52); other workspace connections serve only their own.
       if (
         connection.workspaceId !== null &&
-        (policy.allowedWorkspaces !== null || policy.allowedPeople != null)
+        (policy.allowedPeople != null ||
+          policy.allowPersonalWorkspaces ||
+          (!core && policy.allowedWorkspaces !== null))
       )
         throw new HTTPException(422, {
           message: "Workspace connections cannot be assigned to other workspaces",
@@ -335,10 +371,14 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
         if (
           error instanceof SubscriptionCoreAccessPersonNotInOrganizationError ||
           error instanceof SubscriptionCoreAccessPeopleUnlistableError ||
-          error instanceof SubscriptionCoreAccessInvalidError
+          error instanceof SubscriptionCoreAccessInvalidError ||
+          error instanceof SubscriptionCoreAccessMoveRequiredError
         )
           throw new HTTPException(422, { message: error.message });
-        if (error instanceof ModelConnectionAccessForbiddenError)
+        if (
+          error instanceof ModelConnectionAccessForbiddenError ||
+          error instanceof SubscriptionCoreAccessWorkspaceNotAdministeredError
+        )
           throw new HTTPException(403, { message: error.message });
         throw error;
       }
@@ -363,5 +403,29 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
       }
       return c.json(updated);
     });
+    if (scope === "workspaces")
+      // A workspace another workspace's own subscription account serves can
+      // stop using it here; only its owner changes it otherwise (D-52).
+      app.delete(path, async (c) => {
+        const { connection, core } = await target(c, true);
+        if (!core || connection.workspaceId === null)
+          throw new HTTPException(404, { message: "Connection not found" });
+        let removed;
+        try {
+          removed = await removeSubscriptionCoreProviderModelConnectionFromWorkspace(deps.db, {
+            ...connection,
+            workspaceId: connection.workspaceId,
+          });
+        } catch (error) {
+          if (error instanceof ModelConnectionAccessForbiddenError)
+            throw new HTTPException(403, { message: error.message });
+          throw error;
+        }
+        if (!removed)
+          throw new HTTPException(404, {
+            message: "No other workspace's account is shared with this workspace under that id",
+          });
+        return c.body(null, 204);
+      });
   }
 }

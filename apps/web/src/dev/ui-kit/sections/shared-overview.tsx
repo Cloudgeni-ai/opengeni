@@ -10,8 +10,9 @@ import { KitSection, StateCell, StatesGrid } from "../kit";
 
 /* ----------------------------------------------------------------------------
    Organization settings › Shared: the real page against an in-memory client.
-   "admin" is an organization admin who isn't an owner, so only the vaults
-   that work here are listed; "partial" fails the rigs list.
+   "admin" is an organization admin who isn't an owner, so only the machines,
+   sandbox environments and vaults that work here are listed; "partial" fails
+   the sandbox environments list.
    -------------------------------------------------------------------------- */
 
 const HERE = "22222222-2222-4222-8222-222222222222";
@@ -21,12 +22,38 @@ const SUPPORT = "66666666-6666-4666-8666-666666666666";
 const RESEARCH = "77777777-7777-4777-8777-777777777777";
 const LEGAL = "88888888-8888-4888-8888-888888888888";
 const MINE = "99999999-9999-4999-8999-999999999999";
+const SOMEONES_PERSONAL = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
 type Fixture = "owner" | "admin" | "loading" | "error" | "partial" | "empty";
 
 function wait(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+const reach = (
+  homeWorkspaceId: string,
+  allowedWorkspaceIds: string[] | null,
+  allowPersonalWorkspaces = false,
+) => ({ homeWorkspaceId, allowedWorkspaceIds, allowPersonalWorkspaces });
+
+const MACHINES = [
+  {
+    id: "e1",
+    sandboxId: "m1",
+    name: "shared-gpu-rig-north-europe-01",
+    reach: reach(HERE, null, true),
+  },
+  { id: "e2", sandboxId: "m2", name: "build-farm", reach: reach(HERE, [SALES, FINANCE]) },
+  { id: "e3", sandboxId: "m3", name: "legal-scanner", reach: reach(LEGAL, []) },
+  { id: "e5", sandboxId: "m5", name: "studio-mac-mini", reach: reach(SOMEONES_PERSONAL, []) },
+];
+
+const RIGS = [
+  { id: "r1", name: "Data pipeline", reach: reach(HERE, null) },
+  { id: "r2", name: "Sales demo", reach: reach(SALES, [], true) },
+];
+
+const forbidden = () => new OpenGeniApiError(403, '{"error":"missing permission account:admin"}');
 
 const VAULTS = [
   {
@@ -72,37 +99,38 @@ function useFixtureClient(fixture: Fixture): SharedOverviewClient {
     }
     const client = {
       listCapabilities: async () => ({ items: [], installations: [] }),
+      listOrganizationMachines: async () => {
+        await settle();
+        if (fixture === "admin") throw forbidden();
+        return { complete: true, machines: empty ? [] : MACHINES };
+      },
+      listOrganizationRigs: async () => {
+        await settle();
+        if (fixture === "admin") throw forbidden();
+        if (fixture === "partial") throw new OpenGeniApiError(503, '{"error":"unavailable"}');
+        return { complete: true, rigs: empty ? [] : RIGS };
+      },
       listMachines: async () => {
         await settle();
         if (empty) return { activeSandboxId: null, activeEpoch: 0, machines: [] };
         return {
           activeSandboxId: null,
           activeEpoch: 0,
-          machines: [
-            {
-              sandboxId: "m1",
-              enrollmentId: "e1",
-              name: "shared-gpu-rig-north-europe-01",
-              scope: "organization",
-              state: "reconnecting",
-              isSessionGroup: false,
-            },
-            {
-              sandboxId: "m2",
-              enrollmentId: "e2",
-              name: "build-farm",
-              scope: "organization",
-              state: "online",
-              isSessionGroup: false,
-            },
-          ],
+          machines: MACHINES.slice(0, 2).map((machine) => ({
+            sandboxId: machine.sandboxId,
+            enrollmentId: machine.id,
+            name: machine.name,
+            scope: "organization",
+            state: "online",
+            isSessionGroup: false,
+            reach: machine.reach,
+          })),
         };
       },
       listRigs: async () => {
         await settle();
-        if (fixture === "partial") throw new OpenGeniApiError(503, '{"error":"unavailable"}');
         if (empty) return [];
-        return [{ id: "r1", name: "Data pipeline", scope: "organization", status: "active" }];
+        return [{ ...RIGS[0]!, scope: "organization", status: "active" }];
       },
       listWorkspaceSkills: async () => {
         await settle();
@@ -112,6 +140,8 @@ function useFixtureClient(fixture: Fixture): SharedOverviewClient {
             id: `o${index}`,
             scope: "organization",
             status: "active",
+            // The Skills list holds the ones that work elsewhere for the people who manage them.
+            availableHere: fixture === "admin" ? true : index < 9,
           })),
           nextCursor: null,
         };

@@ -1,13 +1,17 @@
 import {
   CreateRigRequest,
+  type ListOrganizationRigsResponse,
   ProposeRigChangeRequest,
   RigDefinitionEditPayload,
   UpdateRigRequest,
+  UpdateOrganizationComputeReachRequest,
 } from "@opengeni/contracts";
 import {
   beginRigChangeVerificationAttempt,
+  listOrganizationCompute,
   listRigs,
   RigChangeTransitionError,
+  updateOrganizationRigReach,
 } from "@opengeni/db";
 import type { Hono } from "hono";
 import type { Context } from "hono";
@@ -36,6 +40,14 @@ import {
 } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
 import { ApiHttpError } from "../http/api-error";
+import { parseRequestJson } from "../http/request-body";
+import {
+  organizationComputeHere,
+  organizationComputeReachResponse,
+  requireComputeReachCaller,
+  requireOrganizationCompute,
+  requireOrganizationComputeLister,
+} from "../http/organization-compute-reach";
 import { errorMessage } from "@opengeni/contracts/values";
 
 async function parseRigRequest<T>(c: Context, schema: ZodType<T>, label: string): Promise<T> {
@@ -182,6 +194,27 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(await listRigs(db, grant));
   });
 
+  // Every organization sandbox environment, wherever it works: names and
+  // where each works, for the organization owners and admins who decide that
+  // (Organization settings > Shared). The list above holds only the ones that
+  // work here. Until the list routine is granted (migration 1224), the
+  // organization ones that work in this workspace, with `complete: false`.
+  app.get("/v1/workspaces/:workspaceId/organization-rigs", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId, "rigs:use");
+    requireOrganizationComputeLister(authorization, "sandbox environment");
+    const grant = authorization.grant;
+    const everywhere = await listOrganizationCompute(db, grant, "rig");
+    if (everywhere) {
+      return c.json({ rigs: everywhere, complete: true } satisfies ListOrganizationRigsResponse);
+    }
+    const here = (await listRigs(db, grant)).filter((rig) => rig.status === "active");
+    return c.json({
+      rigs: organizationComputeHere(here),
+      complete: false,
+    } satisfies ListOrganizationRigsResponse);
+  });
+
   app.post("/v1/workspaces/:workspaceId/rigs", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
@@ -246,6 +279,27 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     await deleteRigForApi({ db }, grant, rig, { allowOrganization });
     return c.json({ ok: true });
+  });
+
+  // Where an organization rig works: every shared workspace or chosen ones,
+  // and members' Personal workspaces when switched on. The workspace it was
+  // made in always has it. The organization's owner or an admin decides this; chats and
+  // schedules in a workspace it no longer works in stop using it at their next
+  // attempt.
+  app.put("/v1/workspaces/:workspaceId/rigs/:rigId/reach", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const { grant, rig } = await requireRigMutation(c, workspaceId, "rigs:manage");
+    requireOrganizationCompute(rig.scope, "sandbox environment");
+    requireComputeReachCaller(c, grant, "sandbox environment");
+    const body = await parseRequestJson(c, UpdateOrganizationComputeReachRequest);
+    const result = await updateOrganizationRigReach(db, rig.id, {
+      accountId: grant.accountId,
+      homeWorkspaceId: rig.workspaceId,
+      allowedWorkspaceIds: body.allowedWorkspaceIds,
+      allowPersonalWorkspaces: body.allowPersonalWorkspaces,
+      subjectId: grant.subjectId,
+    });
+    return c.json(organizationComputeReachResponse(result, "sandbox environment"));
   });
 
   app.get("/v1/workspaces/:workspaceId/rigs/:rigId/versions", async (c) => {

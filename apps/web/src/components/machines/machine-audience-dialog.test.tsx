@@ -296,6 +296,27 @@ describe("who can use a machine", () => {
     await act(async () => root.unmount());
   });
 
+  test("the owner of a Personal workspace shares their machine there without admin", async () => {
+    const client = fakeClient();
+    const { root } = await render(
+      <MachineAudienceDialog
+        client={client}
+        workspaceId="personal-a"
+        machine={machine("user")}
+        subjectId="user:me"
+        workspaceAdmin={false}
+        canShareWithWorkspace
+        personalWorkspace
+        open
+        onOpenChange={() => undefined}
+      />,
+    );
+    expect(document.body.textContent).not.toContain("Only a workspace admin");
+    expect(client.previews).toEqual([{ audience: "workspace" }]);
+    expect(button("Share with workspace").disabled).toBe(false);
+    await act(async () => root.unmount());
+  });
+
   test("names the new owner when an admin narrows it for someone else", () => {
     expect(
       machineAudienceSummaryLines(

@@ -5,6 +5,7 @@ import {
   GENERATED_ARTIFACTS_NOT_RECHECKED,
   REGENERATED_ON_CONFLICT,
   regenerates,
+  regenerationPlan,
   runGeneratedArtifactChecks,
   staleArtifactAnnotation,
 } from "./check-generated-artifacts";
@@ -60,6 +61,40 @@ test("the merge batcher regenerates existing artifacts with plain commands", () 
   const snapshot = REGENERATED_ON_CONFLICT.find((entry) => entry.name === "Public API snapshot")!;
   expect(regenerates(snapshot, "scripts/public-api/surface.gen.json")).toBe(true);
   expect(regenerates(snapshot, "scripts/public-api/surface.gen.json.bak")).toBe(false);
+});
+
+test("the merge batcher regenerates the public API snapshot before what reads it", () => {
+  const names = (conflicted: string[]) =>
+    regenerationPlan(REGENERATED_ON_CONFLICT, conflicted).map((entry) => entry.name);
+  // The action catalog imports surface.gen.json: built before the snapshot is
+  // refreshed, it lists a PR's new routes from main's old surface.
+  expect(
+    names([
+      "apps/api/src/mcp/action-schema-imports.gen.ts",
+      "packages/contracts/src/app-action-catalog.gen.ts",
+      "scripts/public-api/surface.gen.json",
+    ]),
+  ).toEqual(["Public API snapshot", "Organization MCP action catalog"]);
+  // A snapshot conflict alone still rebuilds the catalog from the new snapshot.
+  expect(names(["scripts/public-api/surface.gen.json"])).toEqual([
+    "Public API snapshot",
+    "Organization MCP action catalog",
+  ]);
+  expect(names(["packages/react/styles/compiled.css"])).toEqual(["React compiled CSS"]);
+  // Every input an entry reads is a registered artifact.
+  for (const entry of REGENERATED_ON_CONFLICT)
+    for (const input of entry.reads ?? [])
+      expect(REGENERATED_ON_CONFLICT.some((other) => regenerates(other, input))).toBe(true);
+});
+
+test("an entry that reads what a later entry regenerates is refused", () => {
+  const registry = [
+    { name: "Reader", artifacts: ["b.gen.txt"], regenerate: "bun b.ts", reads: ["a.gen.txt"] },
+    { name: "Source", artifacts: ["a.gen.txt"], regenerate: "bun a.ts" },
+  ];
+  expect(() => regenerationPlan(registry, ["b.gen.txt"])).toThrow(
+    '"Reader" reads a.gen.txt, which "Source" regenerates after it',
+  );
 });
 
 test("a failing check is reported as stale with its output", async () => {

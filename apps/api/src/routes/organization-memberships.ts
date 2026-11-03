@@ -23,6 +23,7 @@ import {
   ListOrganizationInvitationsPageQuery,
   ListOrganizationInvitationsPageResponse,
   ListOrganizationAdministrationMembersResponse,
+  ListOrganizationMemberNamesResponse,
   OrganizationAdministrationOverview,
   OrganizationInferenceResidency,
   OrganizationInvitation,
@@ -83,6 +84,7 @@ import {
   requireWorkspace,
   listOrganizationAdministrationMembers,
   listOrganizationInvitations,
+  listOrganizationMemberNames,
   listSelfOrganizationInvitations,
   listSelfOrganizationMemberships,
   nestedPostgresDetail,
@@ -1251,6 +1253,41 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       );
     } catch (error) {
       return await rethrowMembershipErrorWithPlans(context, deps, error);
+    }
+  });
+
+  // Who is in the organization, by name only, for any of its members: the
+  // person in their browser or an agent acting as them with account:read.
+  // The database checks the person's active membership in this organization.
+  app.get("/v1/organizations/:organizationId/member-names", async (context) => {
+    const organizationId = parseId(
+      OrganizationId,
+      context.req.param("organizationId"),
+      "organization id",
+    );
+    const { subjectId } = await requireOrganizationPerson(context, deps, "account:read");
+    try {
+      const members = await listOrganizationMemberNames(deps.db, {
+        organizationId,
+        actorSubjectId: subjectId,
+      });
+      return context.json(
+        ListOrganizationMemberNamesResponse.parse(
+          members === null ? { available: false, members: [] } : { available: true, members },
+        ),
+      );
+    } catch (error) {
+      if (nestedPostgresSqlState(error) === "42501") {
+        throw new HTTPException(403, {
+          message: "only members of this organization can see who is in it",
+        });
+      }
+      return await rethrowMembershipErrorWithPlans(
+        context,
+        deps,
+        error,
+        "this organization has more members than the list shows",
+      );
     }
   });
 

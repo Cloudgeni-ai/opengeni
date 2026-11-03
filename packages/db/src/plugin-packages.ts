@@ -58,6 +58,8 @@ export type InstalledPluginPackage = {
   installationVersion: number;
   manifest: Record<string, unknown>;
   status: string;
+  /** Who added (or last updated) this installation; see {@link uninstallPluginPackage}. */
+  installedBySubjectId: string;
 };
 
 export type InstalledPluginPackageSummary = {
@@ -75,6 +77,8 @@ export type InstalledPluginPackageSummary = {
   status: "active" | "needs_attention";
   installedAt: string;
   updatedAt: string;
+  /** Who added (or last updated) it: a member removes only what they added. */
+  installedBySubjectId: string;
 };
 
 export type PreparedPluginPackage = InstalledPluginPackage & {
@@ -118,6 +122,7 @@ export async function getInstalledPluginPackage(
         installationVersion: schema.capabilityPluginInstallations.version,
         manifest: schema.capabilityPluginVersions.manifest,
         status: schema.capabilityPluginInstallations.status,
+        installedBySubjectId: schema.capabilityPluginInstallations.installedBySubjectId,
       })
       .from(schema.capabilityPluginInstallations)
       .innerJoin(
@@ -161,6 +166,7 @@ export async function listInstalledPluginPackages(
         status: schema.capabilityPluginInstallations.status,
         installedAt: schema.capabilityPluginInstallations.installedAt,
         updatedAt: schema.capabilityPluginInstallations.updatedAt,
+        installedBySubjectId: schema.capabilityPluginInstallations.installedBySubjectId,
       })
       .from(schema.capabilityPluginInstallations)
       .innerJoin(
@@ -210,6 +216,7 @@ export async function listInstalledPluginPackages(
         status: row.status,
         installedAt: row.installedAt.toISOString(),
         updatedAt: row.updatedAt.toISOString(),
+        installedBySubjectId: row.installedBySubjectId,
       };
     });
   });
@@ -439,6 +446,7 @@ export async function preparePluginPackageInstall(
           installationVersion: installation.version,
           manifest: input.manifest,
           status: installation.status,
+          installedBySubjectId: installation.installedBySubjectId,
           operationId: operation.id,
           replayResult: operation.result ?? null,
         };
@@ -1001,6 +1009,11 @@ export async function uninstallPluginPackage(
     expectedPreviewToken?: string;
     idempotencyKey: string;
     skillActor?: SkillActor;
+    /**
+     * A member's removal: only a plugin this subject added. Anything an admin
+     * or another person added throws {@link IntegrationChangeRequiresAdminError}.
+     */
+    memberRemoval?: boolean;
   },
 ): Promise<{
   status: "not_installed" | "uninstalled";
@@ -1067,6 +1080,10 @@ export async function uninstallPluginPackage(
           });
           return { status: "not_installed", retainedComponents: [] };
         }
+        if (input.memberRemoval && plugin.installedBySubjectId !== input.subjectId)
+          throw new IntegrationChangeRequiresAdminError(
+            "Only an admin can remove a plugin someone else added.",
+          );
         if (plugin.installationVersion !== input.expectedInstallationVersion) {
           throw new PluginInstallationVersionConflictError("Plugin installation changed");
         }
@@ -1212,6 +1229,7 @@ async function pluginPackageInScope(
       installationVersion: schema.capabilityPluginInstallations.version,
       manifest: schema.capabilityPluginVersions.manifest,
       status: schema.capabilityPluginInstallations.status,
+      installedBySubjectId: schema.capabilityPluginInstallations.installedBySubjectId,
     })
     .from(schema.capabilityPluginInstallations)
     .innerJoin(

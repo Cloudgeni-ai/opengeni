@@ -656,9 +656,9 @@ describe("stock OpenGeniChat behind the default session proxy", () => {
       ),
     ).toBeNull();
 
-    // 4. New chat and personal archive ("Hide for me") are offered by default.
+    // 4. New chat and Archive are offered by default.
     expect(chat.buttons()).toContain("New chat");
-    expect(chat.buttons().some((label) => /^Hide for me:/.test(label))).toBe(true);
+    expect(chat.buttons().some((label) => /^Archive:/.test(label))).toBe(true);
     expect(failures(chat.browser)).toEqual([]);
   });
 
@@ -779,7 +779,7 @@ describe("stock OpenGeniChat behind the default session proxy", () => {
       { defaultSessionId: undefined, newChat: false, listProps: { archive: false } },
     );
     expect(chat.buttons()).not.toContain("New chat");
-    expect(chat.buttons().some((label) => /^Hide for me:/.test(label))).toBe(false);
+    expect(chat.buttons().some((label) => /^Archive:/.test(label))).toBe(false);
     expect(
       chat.browser.some((line) => line.includes("POST /v1/workspaces/" + WS + "/sessions")),
     ).toBe(false);

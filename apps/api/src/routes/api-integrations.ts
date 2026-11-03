@@ -22,6 +22,7 @@ import {
   type AccessGrant,
 } from "@opengeni/contracts";
 import {
+  canRemoveIntegration,
   hasIntegrationAdminPermission,
   MissingPermissionRefusal,
   requireAccessGrant,
@@ -82,7 +83,7 @@ function refuseOrganizationInstance(instanceKey: string | undefined): void {
 /** Shared native/embedded install validation. The caller must still authorize
  * capabilities:manage and commit under its own live-authority boundary. */
 export function validatedIntegrationInstallInput(
-  grant: AccessGrant,
+  grant: Pick<AccessGrant, "accountId" | "subjectId" | "permissions" | "permissionMode">,
   workspaceId: string,
   payload: InstallApiIntegrationRequest,
   resolved: ResolvedApiIntegrationPreview,
@@ -335,6 +336,12 @@ export function registerApiIntegrationRoutes(
                   },
                 }
               : {}),
+            // An instance carried in from another workspace is removed there,
+            // and one the organization serves here in the organization's settings.
+            canRemove:
+              !integration.personalExtension &&
+              !integration.organizationConnector &&
+              canRemoveIntegration(grant, integration.instanceCreatedBySubjectId),
           };
         }),
       }),
@@ -475,10 +482,14 @@ export function registerApiIntegrationRoutes(
               instanceKey,
               expectedInstallationVersion: payload.expectedInstallationVersion,
               expectedInstanceVersion: payload.expectedInstanceVersion,
+              // Members remove only accounts they added (decided in the transaction).
+              ...(hasIntegrationAdminPermission(grant) ? {} : { memberRemoval: true }),
             }),
           ),
         );
       } catch (error) {
+        if (error instanceof IntegrationChangeRequiresAdminError)
+          throw new MissingPermissionRefusal("capabilities:manage", { message: error.message });
         if (
           error instanceof ApiIntegrationInstallationVersionConflictError ||
           error instanceof IntegrationFacetBindingVersionConflictError

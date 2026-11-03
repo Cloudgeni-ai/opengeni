@@ -883,9 +883,10 @@ describe("turn exact-content boundaries", () => {
     });
   });
 
-  test("keeps non-object undefined values fail-closed at the pending receipt boundary", () => {
-    expect(() =>
-      pendingToolCallFromSdkEvent({
+  test("stores an undefined array element as null at the pending receipt boundary", () => {
+    const warn = spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const pending = pendingToolCallFromSdkEvent({
         type: "run_item_stream_event",
         item: {
           type: "tool_call_item",
@@ -897,10 +898,20 @@ describe("turn exact-content boundaries", () => {
             providerData: { values: ["ok", undefined] },
           },
         },
-      }),
-    ).toThrow(
-      'Protocol JSON value at $["item"]["rawItem"]["providerData"]["values"][1] cannot contain undefined',
-    );
+      });
+      expect(pending?.callItem).toEqual({
+        type: "function_call",
+        callId: "call_invalid_array",
+        name: "example_tool",
+        arguments: "{}",
+        providerData: { values: ["ok", null] },
+      });
+      // An undefined element becomes null exactly as JSON.stringify does, so
+      // nothing JSON can carry is lost and nothing is logged.
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   test("public diagnostics exclude arbitrary bodies while internal failure events remain exact", () => {
@@ -4101,6 +4112,31 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(disposed).toBe(1);
     expect(completed).toBe(0);
     expect(failed).toBe(0);
+  });
+
+  test("a sibling warming wait yields once to same-turn recovery without local retries", async () => {
+    const transition = new SandboxLeaseTransitionError(
+      "group-1",
+      3,
+      "provider_recovery_in_progress",
+      "local",
+      "box-1",
+      "warming",
+    );
+    let establishes = 0;
+    const provisioner = createTurnSandboxProvisioner(async () => {
+      establishes += 1;
+      throw transition;
+    });
+    await expect(provisioner.get()).rejects.toBe(transition);
+    await expect(provisioner.get()).rejects.toBe(transition);
+    expect(establishes).toBe(1);
+    expect(isLazySandboxProvisionRetryable(transition)).toBe(false);
+    expect(classifySandboxLogicalProvisionFailure("local", transition)).toMatchObject({
+      expected: true,
+      retryable: true,
+      code: "provider_recovery_in_progress",
+    });
   });
 
   test("an exhausted expected transition settles one logical id before a later re-read", async () => {

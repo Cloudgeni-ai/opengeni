@@ -194,13 +194,25 @@ const RULES: Rule[] = [
     method: "PUT",
     pattern: /\/model-connections\/:kind\/:connectionId\/access$/,
     text: () =>
-      "Change which workspaces and which models a model connection can serve. Workspaces: all (optionally including Personal workspaces), selected ones, or none. Models: all including new ones, or only chosen ones. Applies to new chats and schedules; running work keeps going.",
+      "Change which workspaces and which models a model connection can serve. Workspaces: all (optionally including Personal workspaces), selected ones, or none. Models: all including new ones, or only chosen ones. A workspace's own subscription account stays its workspace's when shared with selected workspaces; serving all workspaces, Personal workspaces or people needs moveToOrganization: true on the organization route, after which only organization admins manage it. Applies to new chats and schedules; running work keeps going.",
+  },
+  {
+    method: "DELETE",
+    pattern: /\/model-connections\/:kind\/:connectionId\/access$/,
+    text: () =>
+      "Stop this workspace from using another workspace's own subscription account that was shared with it. Only that workspace's admins or the organization's can share it here again.",
   },
   {
     method: "GET",
     pattern: /\/organizations\/:organizationId\/model-account-settings$/,
     text: () =>
-      "Read the organization's subscription account settings for every workspace: rotation, cross-provider failover and its fallback order, whether personal accounts are allowed, and personal fallback, plus which ones are locked so workspaces cannot change them.",
+      "Read the organization's subscription account settings for every workspace: rotation, cross-provider failover and its fallback order, and whether personal accounts are allowed, plus which ones are locked so workspaces cannot change them. The returned personal-fallback value is retired and changes nothing.",
+  },
+  {
+    method: "PATCH",
+    pattern: /\/organizations\/:organizationId\/me\/model-account-preferences$/,
+    text: () =>
+      "Retired: the personal-fallback opt-in no longer changes which account pays. To use your own subscription for the messages you send in a workspace, issue an always, workspace_shared grant on its subscription_connection user-resource authority in that workspace.",
   },
   {
     method: "PATCH",

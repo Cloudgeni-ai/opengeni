@@ -32,18 +32,21 @@ import {
   SwapActiveSandboxResponse,
   UpdateMachineOperationPolicyRequest,
   UpdateMachineAgentResponse,
+  UpdateOrganizationComputeReachRequest,
 } from "@opengeni/contracts";
-import type { AccessGrant } from "@opengeni/contracts";
+import type { AccessGrant, ListOrganizationMachinesResponse } from "@opengeni/contracts";
 import {
   changeMachineAudience,
   continueSessionWaitingWork,
   nestedPostgresSqlState,
   getLiveEnrollmentConnection,
   listEnrollments,
+  listOrganizationCompute,
   previewMachineAudienceChange,
   readMachineMetricsSeries,
   requireSession,
   updateEnrollmentOperationPolicy,
+  updateOrganizationMachineReach,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { z } from "zod";
@@ -55,6 +58,7 @@ import {
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
+  workspaceSettingsAuthorized,
 } from "@opengeni/core";
 import type { AccessGrantAuthorization, ApiRouteDeps } from "@opengeni/core";
 import { buildFleetContextForSession, swapActiveSandbox } from "@opengeni/core";
@@ -86,6 +90,13 @@ import {
   requireMachineAudienceAuthority,
   requireMachineScopeAuthority,
 } from "../sandbox/machine-authority";
+import {
+  organizationComputeHere,
+  organizationComputeReachResponse,
+  requireComputeReachCaller,
+  requireOrganizationCompute,
+  requireOrganizationComputeLister,
+} from "../http/organization-compute-reach";
 
 // The supported series windows → milliseconds. An unknown/absent window defaults
 // to 1h (the default). Bounded so a caller cannot request an unbounded
@@ -289,16 +300,23 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     requireFullAccessIfAgent(c, "Changing who can use a machine");
-    return grant;
+    // Sharing with the whole workspace is a workspace admin's call, or, in a
+    // Personal workspace (still only them), its verified owner's.
+    const mayShareWithWorkspace = await workspaceSettingsAuthorized(
+      deps,
+      authorization,
+      workspaceId,
+    );
+    return { grant, caller: { ...grant, mayShareWithWorkspace } };
   }
 
   app.post("/v1/workspaces/:workspaceId/machines/:enrollmentId/audience/preview", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAudienceCaller(c, workspaceId);
+    const { grant, caller } = await requireAudienceCaller(c, workspaceId);
     const enrollmentId = c.req.param("enrollmentId");
     const body = await parseRequestJson(c, MachineAudiencePreviewRequest);
     const machine = await requireScopedEnrollment(grant, enrollmentId);
-    const { ownerSubjectId } = machineAudienceRequestFor(grant, workspaceId, machine, body);
+    const { ownerSubjectId } = machineAudienceRequestFor(caller, workspaceId, machine, body);
     const preview = await previewMachineAudienceChange(db, {
       accountId: grant.accountId,
       workspaceId,
@@ -313,11 +331,11 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.put("/v1/workspaces/:workspaceId/machines/:enrollmentId/audience", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAudienceCaller(c, workspaceId);
+    const { grant, caller } = await requireAudienceCaller(c, workspaceId);
     const enrollmentId = c.req.param("enrollmentId");
     const body = await parseRequestJson(c, ChangeMachineAudienceRequest);
     const machine = await requireScopedEnrollment(grant, enrollmentId);
-    const { ownerSubjectId } = machineAudienceRequestFor(grant, workspaceId, machine, body);
+    const { ownerSubjectId } = machineAudienceRequestFor(caller, workspaceId, machine, body);
     const changed = await changeMachineAudience(db, {
       accountId: grant.accountId,
       workspaceId,
@@ -328,6 +346,68 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       expectedGeneration: body.expectedGeneration,
     });
     return c.json(machineAudienceChangeResponse(changed));
+  });
+
+  // ── Where an organization machine works ──────────────────────────────────────
+  // PUT .../reach: every shared workspace of the organization or chosen ones,
+  // and members' Personal workspaces when switched on. The workspace it was
+  // connected from always has it. The organization's owner or an admin decides this; chats and
+  // schedules in a workspace it no longer works in stop using it at their next
+  // attach or attempt.
+  app.put("/v1/workspaces/:workspaceId/machines/:enrollmentId/reach", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireMachineAccessGrant(c, deps, workspaceId, "enrollments:read");
+    const grant = authorization.grant;
+    assertSelfhostedEnabled();
+    const enrollmentId = c.req.param("enrollmentId");
+    const body = await parseRequestJson(c, UpdateOrganizationComputeReachRequest);
+    const machine = await requireScopedEnrollment(grant, enrollmentId);
+    requireMachineScopeAuthority(authorization, machine.scope, "change");
+    requireOrganizationCompute(machine.scope, "machine");
+    requireComputeReachCaller(c, grant, "machine");
+    const result = await updateOrganizationMachineReach(db, enrollmentId, {
+      accountId: grant.accountId,
+      homeWorkspaceId: machine.workspaceId,
+      allowedWorkspaceIds: body.allowedWorkspaceIds,
+      allowPersonalWorkspaces: body.allowPersonalWorkspaces,
+      subjectId: grant.subjectId,
+    });
+    return c.json(organizationComputeReachResponse(result, "machine"));
+  });
+
+  // ── Every organization machine, wherever it works ──────────────────────────
+  // GET .../organization-machines: names and where each works, for the
+  // organization owners and admins who decide that (Organization settings >
+  // Shared). A workspace's machine list holds only the ones that work there.
+  // Until the list routine is granted (migration 1224), the organization
+  // machines that work in this workspace, with `complete: false`.
+  app.get("/v1/workspaces/:workspaceId/organization-machines", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireMachineAccessGrant(c, deps, workspaceId, "enrollments:read");
+    const grant = authorization.grant;
+    assertSelfhostedEnabled();
+    requireOrganizationComputeLister(authorization, "machine");
+    const everywhere = await listOrganizationCompute(db, grant, "machine");
+    if (everywhere) {
+      return c.json({
+        machines: everywhere,
+        complete: true,
+      } satisfies ListOrganizationMachinesResponse);
+    }
+    const here = await listEnrollments(db, grant, { status: "active" });
+    return c.json({
+      machines: organizationComputeHere(
+        here.map((enrollment) => ({
+          id: enrollment.id,
+          // As the machine list names it.
+          name: enrollment.sandboxName ?? `${enrollment.os} machine`,
+          scope: enrollment.scope,
+          sandboxId: enrollment.sandboxId ?? null,
+          reach: enrollment.reach ?? null,
+        })),
+      ),
+      complete: false,
+    } satisfies ListOrganizationMachinesResponse);
   });
 
   // ── POST /workspaces/:ws/machines/:enrollmentId/screen-control ─────────────

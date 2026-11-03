@@ -198,8 +198,10 @@ lists these internal accounts, so no deployment configuration is needed
 (setting it replaces the list; `none` lists no account). For a listed account
 all work is funded as app use, which is how every turn was funded before
 origins existed: any credit pays any use, in today's order. Later billing
-changes (the own-key platform fee, newly metered tools) skip listed accounts
-too. Two shared changes do reach them, neither a new block or charge: paid
+changes (the own-key platform fee, the paid-plan rule for own subscriptions,
+newly metered tools) skip listed accounts too, so the team's heavy use of its
+own Claude and Codex subscriptions is neither charged nor refused. Two shared
+changes do reach them, neither a new block or charge: paid
 tools may draw on a Free plan period's model-scoped credit first, and a failed
 video does not return the scoped plan credit it used.
 
@@ -212,16 +214,18 @@ internal account is added the same way. Processes install it at boot
 
 ## Platform fee on your own keys
 
-A call served by the person's own provider key (workspace or organization
-keys, workspace Gateway, organization Azure OpenAI and similar) or their own
-Claude, Codex or SuperGrok subscription costs Opengeni nothing upstream. It
-pays a platform fee instead, in the app and over the API alike:
+A call served by the person's own API key (workspace or organization provider
+keys, workspace Gateway, organization Azure OpenAI, a custom endpoint key and
+similar) costs Opengeni nothing upstream. It pays a platform fee instead, in
+the app and over the API alike:
 `byokPlatformFeeBps` (`OPENGENI_BYOK_PLATFORM_FEE_BPS`, default 500 = 5%) of
 the call's list-price equivalent, rounded up to the micro-dollar. The fee is
 charged only with Stripe billing (`OPENGENI_BILLING_MODE=stripe`), where people
 can buy the credit it needs; `0` turns it off. An account on legacy billing
-terms (an internal account: CloudGeni or our own team, above) is skipped, so
-the team's heavy use of its own Claude and Codex subscriptions pays no fee. A host that binds its own entitlements
+terms (an internal account: CloudGeni or our own team, above) is skipped. Own
+subscriptions never pay this fee; they need a paid plan instead (see
+[Own subscriptions need a paid plan](#own-subscriptions-need-a-paid-plan)).
+A host that binds its own entitlements
 is not special: its own-key calls are admitted, charged and refused by the
 same rule everywhere (session and run admission, model calls, limits and
 settlement).
@@ -346,6 +350,44 @@ first, and the next receipt records it and folds those rows into its totals.
 Workspace and member allowances count fee debits like any other debit, so an
 allowance that also counts unbilled usage at list price sees an own-key call
 at 105% of list.
+
+## Own subscriptions need a paid plan
+
+A call served by the person's own subscription (Claude, Codex/ChatGPT,
+SuperGrok or any other `connected_subscription` route) pays no platform fee
+and no credits. Instead, using an own subscription needs a paid plan of at
+least $20 a month (`OWN_SUBSCRIPTION_MIN_PLAN_PRICE_MICROS`): Pro, Max or a
+custom (Enterprise) plan, `active` or `trialing`. On such a plan subscription
+use is unlimited and the plan keeps its normal included credits; the plan
+price is the platform fee for subscriptions. The price is the plan's current
+catalog price (`getOrganizationPlanStanding`); a plan with no catalog price
+(custom, or no longer listed) counts as custom. The rule applies only with
+Stripe billing and subscription plans enabled
+(`OPENGENI_BILLING_MODE=stripe`, `OPENGENI_SUBSCRIPTION_PLANS_ENABLED=true`),
+in the app and over the API alike, and skips accounts on legacy billing
+terms.
+
+An own-key or own-subscription route is told apart by its billing metadata:
+a model whose credential source or upstream payer is `connected_subscription`
+(or whose provider kind is a subscription) is an own subscription
+(`ownModelFunding` in `packages/core/src/billing/byok-platform-fee.ts`); any
+other route Opengeni does not pay for upstream is an own API key.
+
+- **Refusal:** on the Free plan, without a plan, or on a plan that is past due
+  or canceled, an own-subscription call is refused before it runs: HTTP 402,
+  code `subscription_plan_required`, "Upgrade to Pro to use your own
+  subscription." and the one `upgrade_plan` action. The worker re-checks
+  between model calls; scheduled runs skip the occurrence as out of credits
+  and goals pause on credits until the plan is upgraded.
+- **Already connected on Free:** a subscription connected before this rule
+  stays connected and keeps its settings; only its use is refused with the
+  upgrade action, and it works again as soon as the account is on a qualifying
+  plan. It is never picked as the default model for a new chat or scheduled
+  task while the plan does not allow it, so those fall through to a model the
+  account can run. Free accounts can still use Opengeni's models within the
+  Free plan's monthly credit, or their own API keys with paid credit.
+- **Session titles:** a title generated on the person's own subscription costs
+  Opengeni nothing and is not gated or charged.
 
 ## Rollout
 

@@ -5,6 +5,7 @@ import {
   buildSlackAppHomeAgentBlocks,
   buildSlackAppHomeBlocks,
   isSlackAppHomeLinkAction,
+  slackAppHomeAskAction,
   slackAppHomeOpenedEvent,
 } from "../src/integrations/slack-app-home";
 
@@ -40,8 +41,47 @@ describe("Slack App Home agent directory", () => {
       text: { text: "*Data &lt;Team&gt;*\nAnswers revenue questions.\n`@Opengeni +data-team`" },
       accessory: { type: "image", image_url: "https://example.test/icon.png" },
     });
-    expect(blocks[2]).not.toHaveProperty("accessory");
+    // Each agent has an Ask button that opens the Ask form with it chosen.
+    expect(blocks[2]).toEqual({
+      type: "actions",
+      block_id: "opengeni_home_agent_ask_agent-1",
+      elements: [
+        {
+          type: "button",
+          action_id: "opengeni.home.ask",
+          text: { type: "plain_text", text: "Ask", emoji: true },
+          value: "agent-1",
+        },
+      ],
+    });
+    expect(blocks[3]).not.toHaveProperty("accessory");
+    expect(blocks[4]).toMatchObject({ type: "actions", elements: [{ value: "agent-2" }] });
     expect(blocks.at(-1)).toEqual({ type: "divider" });
+  });
+
+  test("reads an Ask press, and only a well-formed one", () => {
+    const agentId = "6f1c2d3e-4b5a-4c6d-8e7f-901234567890";
+    const press = (
+      overrides: Record<string, unknown> = {},
+      action: Record<string, unknown> = {},
+    ) => ({
+      type: "block_actions",
+      trigger_id: "trigger-1",
+      team: { id: "T1" },
+      user: { id: "U1" },
+      actions: [{ action_id: "opengeni.home.ask", value: agentId, ...action }],
+      ...overrides,
+    });
+    expect(slackAppHomeAskAction(press())).toEqual({
+      slackTeamId: "T1",
+      slackUserId: "U1",
+      triggerId: "trigger-1",
+      agentId,
+    });
+    expect(isSlackAppHomeLinkAction(press())).toBe(false);
+    expect(slackAppHomeAskAction(press({}, { value: "not-an-id" }))).toBeNull();
+    expect(slackAppHomeAskAction(press({ trigger_id: undefined }))).toBeNull();
+    expect(slackAppHomeAskAction(press({}, { action_id: "opengeni.home.connect" }))).toBeNull();
   });
 });
 

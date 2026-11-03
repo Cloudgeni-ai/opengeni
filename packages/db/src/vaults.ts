@@ -389,7 +389,8 @@ export async function listVaultsForSubject(
 
 /**
  * Every organization vault, wherever it works (migration 1218), for the
- * people who manage organization vaults; the caller checks account:admin.
+ * people who manage organization vaults; the caller checks organization
+ * administration (the owner or an admin).
  * Summaries only: a vault's items still need it to reach the workspace.
  * Null while the routine's runtime EXECUTE is withheld (runtime-posture
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES). The grant is checked in its own
@@ -436,7 +437,7 @@ export async function createVault(
     description?: string | null;
     ownerKind: "user" | "workspace" | "organization";
     availability?: { allowedWorkspaceIds: string[] | null; allowPersonalWorkspaces: boolean };
-    /** The caller holds account:admin. */
+    /** The caller administers the organization (the owner or an admin). */
     allowOrganization?: boolean;
   },
 ): Promise<VaultRow> {
@@ -911,7 +912,7 @@ export async function linkProviderVault(
     providerVaultRef: string;
     mode: VaultMode;
     availability?: { allowedWorkspaceIds: string[] | null; allowPersonalWorkspaces: boolean };
-    /** The caller holds account:admin. */
+    /** The caller administers the organization (the owner or an admin). */
     allowOrganization?: boolean;
   },
 ): Promise<VaultRow> {

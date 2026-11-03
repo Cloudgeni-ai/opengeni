@@ -351,12 +351,13 @@ afterAll(async () => {
 });
 
 describe("OAuth connectors in the owner's Personal workspace", () => {
-  test("the premise: the Personal workspace has no workspace_memberships row", async () => {
+  test("the premise: the Personal workspace's only workspace_memberships row is its owner's", async () => {
     if (!shared) return;
     const human = await provisionManagedHuman();
-    const rows = await shared.admin`
-      select 1 from workspace_memberships where workspace_id = ${human.personalWorkspaceId}`;
-    expect(rows.length).toBe(0);
+    const rows = await shared.admin<Array<{ subjectId: string }>>`
+      select subject_id as "subjectId" from workspace_memberships
+      where workspace_id = ${human.personalWorkspaceId}`;
+    expect([...rows]).toEqual([{ subjectId: human.subjectId }]);
   });
 
   test("Fiken connects through the OAuth start route and callback", async () => {

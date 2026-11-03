@@ -5,7 +5,11 @@ import { Button } from "../../../ui/button";
 import type { SessionFailureSummary } from "../../lib/events";
 import { failedSessionCopy } from "../../lib/failed-session-copy";
 import type { FreeCreditGap } from "../../lib/free-credit-gap";
-import { creditRefusalHeadline, type CreditRefusalKind } from "../../../lib/format";
+import {
+  creditRefusalHeadline,
+  isUpgradeRefusal,
+  type CreditRefusalKind,
+} from "../../../lib/format";
 import { t } from "../../lib/console-text";
 import { analyticsAction } from "../../../ui/analytics-actions";
 import {
@@ -222,7 +226,7 @@ export function FailedSessionBanner({
           </>
         ) : null}
         {billingFailure ? (
-          creditRefusal === "byok_upgrade_required" ? (
+          isUpgradeRefusal(creditRefusal) ? (
             workspaceId && canBuyCredits ? (
               <UpgradeLink workspaceId={workspaceId} />
             ) : null

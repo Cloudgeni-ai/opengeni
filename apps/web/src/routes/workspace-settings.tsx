@@ -61,7 +61,7 @@ import {
 import { WorkspaceApiKeysPage } from "./workspace-api-keys";
 import type { DeveloperLocation } from "@/lib/developer-route";
 import { openSettingsDestination } from "@/lib/open-settings-destination";
-import { hasAccountPermission } from "@opengeni/react/app/lib/permissions";
+import { canAdministerOrganization } from "@opengeni/react/app/lib/workspaces";
 import { OrganizationManagedWorkspaceAccess } from "./workspace-managed-access";
 
 export function WorkspaceSettingsRoute({
@@ -176,7 +176,11 @@ function OperationalWorkspaceSettingsRoute({
   // single-user session.
   const canManageOrganizationIntegrations =
     administersOrganization &&
-    hasAccountPermission(context.accessContext, accountId, "account:admin");
+    canAdministerOrganization({
+      accessContext: context.accessContext,
+      clientConfig: context.clientConfig,
+      accountId,
+    });
 
   return (
     <WorkspaceSettingsContent>
@@ -257,6 +261,12 @@ function OperationalWorkspaceSettingsRoute({
         </Suspense>
       ) : null}
 
+      {section === "mine" ? (
+        <Suspense fallback={<SettingsRowsFallback label="Loading your things" />}>
+          <LazyMyThings key={workspaceId} client={context.client} workspaceId={workspaceId} />
+        </Suspense>
+      ) : null}
+
       {section === "developer" ? (
         <Suspense fallback={<SettingsRowsFallback label="Loading developer settings" />}>
           <LazyWorkspaceDeveloperSettings
@@ -321,14 +331,15 @@ function WorkspaceGeneralSettings({
     "workspace:admin",
   );
   // Anyone who can start chats in a shared workspace renames it; a Personal
-  // workspace keeps its name.
-  const canRename =
-    !personal &&
-    canContributeWorkspaceContent(
-      context.accessContext,
-      activeWorkspace,
-      context.managedSelfContext,
-    );
+  // workspace is renamed by whoever manages its settings: its owner, acting as
+  // themselves. Mirrors PATCH /v1/workspaces/:id.
+  const canRename = personal
+    ? canManageSettings
+    : canContributeWorkspaceContent(
+        context.accessContext,
+        activeWorkspace,
+        context.managedSelfContext,
+      );
   const canDeleteWorkspace = canAdminister;
   // Deleting the account's only workspace is refused server-side; disable the
   // affordance when this is the only workspace in the active account.
@@ -381,9 +392,9 @@ function WorkspaceGeneralSettings({
           label="Name"
           description={<RowValue>{activeWorkspace.name}</RowValue>}
           control={
-            // A Personal workspace keeps its name: no button that could only
-            // say it isn't allowed.
-            personal ? undefined : (
+            // In a Personal workspace only its owner could ever rename it, so
+            // anyone else gets no button that could only say it isn't allowed.
+            personal && !canRename ? undefined : (
               <DisabledReasonTooltip
                 reason={
                   canRename
@@ -1057,6 +1068,11 @@ const LazyWorkspaceUsagePage = lazy(async () => {
 const LazyAvailableHere = lazy(async () => {
   const module = await import("@/components/settings/available-here");
   return { default: module.AvailableHere };
+});
+
+const LazyMyThings = lazy(async () => {
+  const module = await import("@opengeni/react/app/components/my-things");
+  return { default: module.MyThings };
 });
 
 const LazyWorkspaceDeveloperSettings = lazy(async () => {

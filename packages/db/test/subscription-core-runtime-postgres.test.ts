@@ -651,7 +651,7 @@ describe("provider-neutral subscription runtime persistence", () => {
   );
 
   test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
-    "placement world reads owner preferences without direct membership-table access",
+    "placement world names the chat owner without direct membership-table access",
     async () => {
       const state = await fixture();
       const [membership] = await shared!.admin<{ id: string }[]>`
@@ -686,10 +686,6 @@ describe("provider-neutral subscription runtime persistence", () => {
           ${state.accountId}::uuid, ${state.connectionId}::uuid,
           ${state.workspaceId}::uuid, 'organization'
         )`;
-      await shared!.admin`
-        insert into subscription_person_preferences (
-          account_id, organization_membership_id, personal_fallback_opt_in
-        ) values (${state.accountId}::uuid, ${membership!.id}::uuid, true)`;
 
       const result = await withSubscriptionCorePlacementWorld(
         client!.db,
@@ -721,9 +717,7 @@ describe("provider-neutral subscription runtime persistence", () => {
 
       expect(result.status).toBe("completed");
       if (result.status === "completed") {
-        expect(result.value.people).toEqual([
-          { membershipId: membership!.id, active: true, personalFallbackOptIn: true },
-        ]);
+        expect(result.value.people).toEqual([{ membershipId: membership!.id, active: true }]);
         expect(result.value.models).toHaveLength(2);
         expect(result.value.allowedModelIds).toEqual(["codex/b"]);
         expect(result.value.decision).toMatchObject({ kind: "run", modelId: "codex/b" });

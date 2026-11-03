@@ -15,6 +15,7 @@ import {
   revokeOrganizationApiKey,
   ensureExternalIdentity,
   getExternalLinkTurnAuthorization,
+  getWorkspaceGrant,
   createDb,
   createOrganizationInvitation,
   createSession,
@@ -27,7 +28,6 @@ import {
   saveNewSessionDraftInTransaction,
   SessionListAccessError,
   SessionPinAccessError,
-  setSessionArchive,
   setSessionAttention,
   setSessionPin,
   subjectHasLiveWorkspaceAuthorityInScope,
@@ -188,8 +188,9 @@ async function createAuthHuman(bootstrapOwnOrganization = true): Promise<AuthHum
 
 /**
  * Resolve the human's access context through the real managed provisioning
- * lifecycle. Their personal workspace deliberately has NO `workspace_memberships`
- * row (migration 0219 raises on one).
+ * lifecycle. Their personal workspace has only the owner's own
+ * `workspace_memberships` row (migration 1231), which the runtime never counts
+ * as membership: access comes from the organization membership's pointer.
  */
 async function resolveManagedHuman(
   auth: AuthHuman,
@@ -1259,13 +1260,16 @@ describe("managed-human session surface inside their own personal workspace", ()
     expect(hostOperations).toEqual(["session.fork.create"]);
   }, 180_000);
 
-  test("the premise: the personal workspace has no workspace_memberships row", async () => {
+  test("the premise: the personal workspace's only workspace_memberships row is its owner's", async () => {
     if (!shared || !client) return;
     const human = await provisionManagedHuman();
-    const [count] = await shared.admin<Array<{ count: number }>>`
-      select count(*)::int as count from workspace_memberships
+    const rows = await shared.admin<Array<{ subjectId: string }>>`
+      select subject_id as "subjectId" from workspace_memberships
       where workspace_id = ${human.personalWorkspaceId}`;
-    expect(count).toEqual({ count: 0 });
+    expect([...rows]).toEqual([{ subjectId: human.subjectId }]);
+    expect(
+      await getWorkspaceGrant(client.db, human.subjectId, human.personalWorkspaceId),
+    ).toBeNull();
     const [legacyCount] = await shared.admin<Array<{ count: number }>>`
       select count(*)::int as count from workspace_memberships
       where workspace_id = ${human.legacyWorkspaceId} and subject_id = ${human.subjectId}`;
@@ -1730,10 +1734,10 @@ describe("the personal-workspace exception stays owner-only", () => {
   test("the owner's own membership row gives a delegated bearer naming the owner nothing", async () => {
     if (!shared || !client) return;
     const owner = await provisionManagedHuman();
-    await shared.admin`
-      insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
-      values (${owner.accountId}, ${owner.personalWorkspaceId}, ${owner.subjectId}, 'member',
-        ${JSON.stringify(managedPersonalWorkspacePermissions)}::text::jsonb)`;
+    const [ownerRow] = await shared.admin<Array<{ permissions: string[] }>>`
+      select permissions from workspace_memberships
+      where workspace_id = ${owner.personalWorkspaceId} and subject_id = ${owner.subjectId}`;
+    expect(ownerRow?.permissions).toEqual([...managedPersonalWorkspacePermissions]);
 
     // A token for the Personal workspace itself, and one for the owner's
     // shared workspace that then asks for Personal.
@@ -1828,16 +1832,6 @@ describe("the exception is owner-scoped at the database seam, not only at the ro
       ).rejects.toBeInstanceOf(SessionPinAccessError);
 
       await expect(
-        setSessionArchive(client.db, {
-          workspaceId: owner.personalWorkspaceId,
-          subjectId: other.subjectId,
-          sessionId,
-          archived: true,
-          personalWorkspaceOwnerException: true,
-        }),
-      ).rejects.toBeInstanceOf(SessionPinAccessError);
-
-      await expect(
         saveDraftDirectly(owner.personalWorkspaceId, owner.accountId, other.subjectId),
       ).rejects.toBeInstanceOf(NewSessionDraftAccessError);
 
@@ -1866,15 +1860,6 @@ describe("the exception is owner-scoped at the database seam, not only at the ro
           personalWorkspaceOwnerException: true,
         }),
       ).toMatchObject({ id: sessionId, unread: true });
-      expect(
-        await setSessionArchive(client.db, {
-          workspaceId: owner.personalWorkspaceId,
-          subjectId: owner.subjectId,
-          sessionId,
-          archived: true,
-          personalWorkspaceOwnerException: true,
-        }),
-      ).toMatchObject({ id: sessionId, archived: true });
       expect(
         await saveDraftDirectly(owner.personalWorkspaceId, owner.accountId, owner.subjectId),
       ).toMatchObject({ revision: 1 });
@@ -1924,15 +1909,6 @@ describe("the exception is owner-scoped at the database seam, not only at the ro
         subjectId: suspended.subjectId,
         sessionId,
         unread: true,
-        personalWorkspaceOwnerException: true,
-      }),
-    ).rejects.toBeInstanceOf(SessionPinAccessError);
-    await expect(
-      setSessionArchive(client.db, {
-        workspaceId: suspended.personalWorkspaceId,
-        subjectId: suspended.subjectId,
-        sessionId,
-        archived: true,
         personalWorkspaceOwnerException: true,
       }),
     ).rejects.toBeInstanceOf(SessionPinAccessError);
@@ -2152,5 +2128,162 @@ describe("managed personal-resource grant HTTP lifecycle", () => {
     };
     expect(revoked.grant.status).toBe("revoked");
     expect(revoked.grant.revokedAt).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z$/u);
+  }, 180_000);
+
+  test("Where it works lists your workspaces for your own login and switches one", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    const other = await provisionManagedHuman();
+    const app = buildApp(undefined, true);
+    const headers = { cookie: human.cookie, "content-type": "application/json" };
+    // Your own login, added in the shared workspace: it starts on there.
+    const loginId = await shared.admin.begin(async (tx) => {
+      await tx`select set_config('opengeni.account_id', ${human.accountId}, true),
+        set_config('opengeni.workspace_id', ${human.legacyWorkspaceId}, true),
+        set_config('opengeni.subject_id', ${human.subjectId}, true)`;
+      const [row] = await tx<Array<{ id: string }>>`
+        insert into connections (account_id, workspace_id, subject_id, provider_domain, kind, credential_encrypted)
+        values (${human.accountId}, ${human.legacyWorkspaceId}, ${human.subjectId}, 'linear.app', 'oauth2', 'ciphertext')
+        returning id`;
+      return row!.id;
+    });
+    const reach = async (workspaceId: string, resourceId = loginId) =>
+      await app.request(
+        `http://x/v1/workspaces/${workspaceId}/own-resources/reach?resourceKind=connection&resourceId=${resourceId}`,
+        { headers },
+      );
+
+    const listed = await reach(human.personalWorkspaceId);
+    expect(listed.status).toBe(200);
+    const body = (await listed.json()) as {
+      workspaces: Array<{ workspaceId: string; personal: boolean; current: boolean; on: boolean }>;
+    };
+    expect(
+      body.workspaces.map(({ workspaceId, personal, current, on }) => ({
+        workspaceId,
+        personal,
+        current,
+        on,
+      })),
+    ).toEqual([
+      { workspaceId: human.personalWorkspaceId, personal: true, current: true, on: true },
+      { workspaceId: human.legacyWorkspaceId, personal: false, current: false, on: true },
+    ]);
+    expect(body.workspaces[0]).toMatchObject({ alwaysOn: true, canChange: false });
+
+    const off = await app.request(
+      `http://x/v1/workspaces/${human.legacyWorkspaceId}/own-resources/reach`,
+      {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({ resourceKind: "connection", resourceId: loginId, on: false }),
+      },
+    );
+    expect(off.status).toBe(200);
+    expect(await off.json()).toMatchObject({
+      workspace: { workspaceId: human.legacyWorkspaceId, current: true, on: false },
+    });
+    const personalOff = await app.request(
+      `http://x/v1/workspaces/${human.personalWorkspaceId}/own-resources/reach`,
+      {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({ resourceKind: "connection", resourceId: loginId, on: false }),
+      },
+    );
+    expect(personalOff.status).toBe(422);
+
+    // Not yours, or not a thing at all: not found where you asked.
+    expect((await reach(human.legacyWorkspaceId, crypto.randomUUID())).status).toBe(404);
+    expect(
+      (
+        await app.request(
+          `http://x/v1/workspaces/${other.personalWorkspaceId}/own-resources/reach?resourceKind=connection&resourceId=${loginId}`,
+          { headers: { cookie: other.cookie } },
+        )
+      ).status,
+    ).toBe(404);
+  }, 180_000);
+
+  test("My things lists your own logins with where each works, and nobody else's", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    const other = await provisionManagedHuman();
+    const app = buildApp(undefined, true);
+    const addLogin = async (person: typeof human, domain: string) =>
+      await shared!.admin.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${person.accountId}, true),
+          set_config('opengeni.workspace_id', ${person.legacyWorkspaceId}, true),
+          set_config('opengeni.subject_id', ${person.subjectId}, true)`;
+        const [row] = await tx<Array<{ id: string }>>`
+          insert into connections (account_id, workspace_id, subject_id, provider_domain, kind, credential_encrypted)
+          values (${person.accountId}, ${person.legacyWorkspaceId}, ${person.subjectId}, ${domain}, 'oauth2', 'ciphertext')
+          returning id`;
+        return row!.id;
+      });
+    const linear = await addLogin(human, "linear.app");
+    const notion = await addLogin(human, "notion.so");
+    await addLogin(other, "github.com");
+
+    const listed = await app.request(
+      `http://x/v1/workspaces/${human.legacyWorkspaceId}/own-resources`,
+      { headers: { cookie: human.cookie } },
+    );
+    expect(listed.status).toBe(200);
+    const body = (await listed.json()) as {
+      resources: Array<{
+        resourceKind: string;
+        resourceId: string;
+        name: string;
+        provider: string | null;
+        workspaces: Array<{ workspaceId: string; current: boolean; on: boolean }>;
+      }>;
+    };
+    expect(
+      body.resources.map(({ resourceKind, resourceId, name, provider }) => ({
+        resourceKind,
+        resourceId,
+        name,
+        provider,
+      })),
+    ).toEqual([
+      {
+        resourceKind: "connection",
+        resourceId: linear,
+        name: "linear.app",
+        provider: "linear.app",
+      },
+      { resourceKind: "connection", resourceId: notion, name: "notion.so", provider: "notion.so" },
+    ]);
+    expect(
+      body.resources[0]!.workspaces.map(({ workspaceId, current, on }) => ({
+        workspaceId,
+        current,
+        on,
+      })),
+    ).toEqual([
+      { workspaceId: human.personalWorkspaceId, current: false, on: true },
+      { workspaceId: human.legacyWorkspaceId, current: true, on: true },
+    ]);
+
+    // Someone else's list never shows yours.
+    const theirs = await app.request(
+      `http://x/v1/workspaces/${other.personalWorkspaceId}/own-resources`,
+      { headers: { cookie: other.cookie } },
+    );
+    expect(theirs.status).toBe(200);
+    const theirIds = (
+      (await theirs.json()) as { resources: Array<{ resourceId: string }> }
+    ).resources.map((resource) => resource.resourceId);
+    expect(theirIds).not.toContain(linear);
+    expect(theirIds).toHaveLength(1);
+    // And you can't ask from a workspace that isn't yours.
+    expect(
+      (
+        await app.request(`http://x/v1/workspaces/${other.personalWorkspaceId}/own-resources`, {
+          headers: { cookie: human.cookie },
+        })
+      ).status,
+    ).toBeGreaterThanOrEqual(403);
   }, 180_000);
 });

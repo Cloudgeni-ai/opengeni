@@ -42,29 +42,25 @@ import { ModelsFormPage } from "@opengeni/react/app/components/models/models-ui"
 
    One switch per provider says whether new chats share work between that
    provider's subscriptions. A rule that only matters while another is on
-   (personal fallback, the fallback order) is indented under it and shown
-   only then. On the Defaults scope each rule says which workspaces use it;
-   on a workspace each rule says whether it uses the default or was changed
-   there, with the default's value.
+   (the fallback order) is indented under it and shown only then. A person
+   turns their own subscription on per workspace on its own page (D-53), so
+   there is no separate personal-fallback rule. On the Defaults scope each
+   rule says which workspaces use it; on a workspace each rule says whether it
+   uses the default or was changed there, with the default's value.
    -------------------------------------------------------------------------- */
 
 /** The rules on these pages, in order. `providers` is changed on each provider's own page. */
 export type AccountRule =
   | "rotation"
   | "personalConnectionsAllowed"
-  | "personalFallbackAllowed"
   | "crossProviderFailover"
   | "fallbackOrder";
 
-type SwitchRule =
-  | "personalConnectionsAllowed"
-  | "personalFallbackAllowed"
-  | "crossProviderFailover";
+type SwitchRule = "personalConnectionsAllowed" | "crossProviderFailover";
 
 export const ACCOUNT_RULES: readonly AccountRule[] = [
   "rotation",
   "personalConnectionsAllowed",
-  "personalFallbackAllowed",
   "crossProviderFailover",
   "fallbackOrder",
 ];
@@ -76,11 +72,8 @@ const RULES: Record<AccountRule, { label: string; description: string }> = {
   },
   personalConnectionsAllowed: {
     label: "Personal subscriptions",
-    description: "People can connect their own subscriptions and use them in their own chats.",
-  },
-  personalFallbackAllowed: {
-    label: "Fall back to personal subscriptions",
-    description: "When shared subscriptions run out, people who opt in continue on their own.",
+    description:
+      "People can connect their own subscriptions and use them for their own messages, where they turn them on.",
   },
   crossProviderFailover: {
     label: "Switch models when subscriptions run out",
@@ -179,7 +172,6 @@ function failureMessage(caught: unknown): string {
 type RuleChange = {
   rotation?: Record<string, { mode: ModelAccountRotationMode }>;
   personalConnectionsAllowed?: boolean;
-  personalFallbackAllowed?: boolean;
   crossProviderFailover?: boolean;
 };
 
@@ -274,10 +266,7 @@ function AccountRuleRows({
           />
         );
       })}
-      {switchRow(
-        "personalConnectionsAllowed",
-        values.personalConnectionsAllowed ? switchRow("personalFallbackAllowed") : null,
-      )}
+      {switchRow("personalConnectionsAllowed")}
       {switchingAvailable
         ? switchRow(
             "crossProviderFailover",
@@ -489,7 +478,7 @@ export function OrganizationAccountRulesSection({
           />
           <SettingNavRow
             label="What workspaces can change"
-            description="Rules a workspace’s admins can set differently for their workspace."
+            description="Rules a workspace’s admins, and each person in their Personal workspace, can set differently."
             value={changeableRulesSummary(organization.locked)}
             onOpen={onEditLocks}
           />
@@ -526,7 +515,7 @@ export function AccountRuleLocksPage({
   return (
     <ModelsFormPage
       title="What workspaces can change"
-      description="Workspace admins can set these rules differently for their workspace. Anything you turn off uses the default, everywhere."
+      description="Workspace admins can set these rules differently for their workspace, and each person for their Personal workspace. Anything you turn off uses the default, everywhere."
       submitLabel="Save"
       pendingLabel="Saving…"
       loading={!organization && !state.error}
@@ -684,9 +673,6 @@ export function accountRuleChanges(
     ...(own("personalConnectionsAllowed")
       ? [`Personal subscriptions: ${onOff(values.personalConnectionsAllowed)}`]
       : []),
-    ...(own("personalFallbackAllowed")
-      ? [`Personal fallback: ${onOff(values.personalFallbackAllowed)}`]
-      : []),
     ...(own("crossProviderFailover")
       ? [`Switch models: ${onOff(values.crossProviderFailover)}`]
       : []),
@@ -700,7 +686,9 @@ function workspaceRulesSummary(changes: number, workspaceName: string): string {
     return `${changes === 1 ? "1 rule" : `${changes} rules`} changed for ${workspaceName}. The rest use the defaults.`;
   }
   // The scope header already says a change here applies only to this workspace.
-  return `${workspaceName} uses the defaults for every rule.`;
+  // A Personal workspace is "your Personal workspace": the sentence starts it.
+  const named = `${workspaceName.charAt(0).toUpperCase()}${workspaceName.slice(1)}`;
+  return `${named} uses the defaults for every rule.`;
 }
 
 export function WorkspaceAccountRulesSection({

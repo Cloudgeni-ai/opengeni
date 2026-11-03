@@ -53,7 +53,8 @@ Rules that hold across the table:
   and leaving the organization revokes it for good. Only the person can create
   one (in the browser, or through an agent or key with their Full access, so a
   limited key never mints a broader one); they see and revoke their own, and
-  owners and admins see and revoke everyone's. A personal key is never combined
+  owners and admins see and revoke everyone's, except that only an owner
+  revokes an owner's (each listed key carries `canRevoke`). A personal key is never combined
   with external-user or service headers. It works on every route the person
   can use, including the organization MCP server (`/v1/mcp`). Stored rows keep
   the legacy `permissions` column empty, so an older API instance in a rolling

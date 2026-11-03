@@ -43,6 +43,7 @@ import {
 } from "./codex";
 import { SUBSCRIPTION_CORE_CUTOVER_DISABLED, typedHttpError } from "./subscription-core-http";
 import { parseRequestBody } from "../http/request-body";
+import { turnOnOwnSubscriptionWhereAdded } from "../own-subscription-turned-on";
 
 export { SUBSCRIPTION_CORE_CUTOVER_DISABLED, typedHttpError };
 
@@ -72,6 +73,8 @@ export async function coreCodexConnected(
     subjectId: string;
     /** The person's own subscription: only a personal connection, else refused. */
     personal?: boolean;
+    /** The shared workspace the person added their own subscription from (D-53). */
+    addedFrom?: string | undefined;
     credential: SubscriptionCoreCodexCredentialInput;
   },
 ) {
@@ -118,6 +121,13 @@ export async function coreCodexConnected(
   } catch {
     // Every core waiter has its own bounded recheck; a lost wake only delays.
   }
+  if (input.personal && input.addedFrom)
+    await turnOnOwnSubscriptionWhereAdded(deps.db, {
+      accountId: input.accountId,
+      workspaceId: input.addedFrom,
+      subjectId: input.subjectId,
+      connectionId: result.id,
+    });
   const activeCredentialId =
     input.workspaceId === null
       ? (
@@ -241,6 +251,7 @@ export async function coreCodexSetSource(
     workspaceId: string;
     subjectId: string;
     mode: "automatic" | "workspace" | "organization" | "disabled";
+    personalWorkspaceOwnerVerified?: boolean;
   },
 ) {
   let result: Awaited<ReturnType<typeof setSubscriptionCoreWorkspaceCodexSource>>;
@@ -441,7 +452,13 @@ export async function coreCodexClearApps(
   return result.kind === "conflict" ? c.json(response, 409) : c.json(response);
 }
 
-type Admin = { accountId: string; workspaceId: string | null; subjectId: string };
+type Admin = {
+  accountId: string;
+  workspaceId: string | null;
+  subjectId: string;
+  /** The request verified a Personal workspace's owner acting as themselves (1233). */
+  personalWorkspaceOwnerVerified?: boolean;
+};
 
 export async function coreCodexActivate(
   c: Context,

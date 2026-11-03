@@ -131,6 +131,8 @@ export const reapExpiredFileUploads = defaultControlActivities.reapExpiredFileUp
 export const deleteTransientObjects = defaultControlActivities.deleteTransientObjects;
 export const maintainSessionStorage = defaultControlActivities.maintainSessionStorage;
 export const archiveIdleSessions = defaultControlActivities.archiveIdleSessions;
+export const stopArchivedSessionWork = defaultControlActivities.stopArchivedSessionWork;
+export const storeArchivedSession = defaultControlActivities.storeArchivedSession;
 export const recoverVideoGenerationWorkflows =
   defaultControlActivities.recoverVideoGenerationWorkflows;
 export const recoverSessionTitleWorkflows = defaultControlActivities.recoverSessionTitleWorkflows;
