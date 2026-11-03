@@ -49,6 +49,7 @@ import {
   providerQuotaExhaustedMessage,
   SelfhostedWorkspaceRootChangedError,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
+  IncompleteChatCompletionError,
   AnthropicRequestError,
   findAnthropicRequestSizeError,
   AnthropicSizeRecoveryExhaustedError,
@@ -2539,6 +2540,11 @@ function baseAgentRunFailurePayload(
       timeoutClass: "transport",
       detail: message,
     };
+  }
+  if (error instanceof IncompleteChatCompletionError) {
+    // No terminal evidence means upstream work may already have happened.
+    // Stop without executing the partial tools or authorizing another request.
+    return { error: error.message, code: error.code, retryable: false };
   }
   if (code === UNKNOWN_MODEL_FINISH_REASON_CODE) {
     return {

@@ -726,6 +726,8 @@ export {
 } from "./model-preparation-diagnostics";
 export {
   CodexSubscriptionUnavailableError,
+  INCOMPLETE_CHAT_COMPLETION_CODE,
+  IncompleteChatCompletionError,
   OrganizationGatewayUnavailableError,
   OrganizationOpenRouterUnavailableError,
   OrganizationOpperUnavailableError,
