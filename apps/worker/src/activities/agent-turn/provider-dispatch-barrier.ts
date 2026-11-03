@@ -1,5 +1,7 @@
 import type { TurnHistorySink } from "./history-sink";
 import type { Settings } from "@opengeni/config";
+import { ownedTurnSandboxForAgent } from "./turn-sandbox-access";
+import type { SandboxRuntimeState } from "./turn-context";
 
 export class SandboxCapabilitiesChangedError extends Error {
   readonly code = "native_capabilities_changed_this_attempt";
@@ -11,6 +13,23 @@ export class SandboxCapabilitiesChangedError extends Error {
 }
 
 type ActiveRoutePointer = { activeSandboxId: string | null; activeEpoch: number };
+
+type RouteContinuableSession = { assertActiveRouteContinuable?: () => Promise<void> };
+
+/**
+ * The routed session the agent's own tools use, which is the one that can tell
+ * whether a moved route is still servable. A home box provisioned on demand
+ * fills `resolvedSandbox` with the raw provider box, so reading that would see
+ * no route at all and never end the attempt after a move.
+ */
+export function activeRouteSessionForBoundary(
+  sandboxState: Pick<
+    SandboxRuntimeState,
+    "resolvedSandbox" | "lazyOwnedSandbox" | "turnSandboxProvisioner"
+  >,
+): RouteContinuableSession | undefined {
+  return ownedTurnSandboxForAgent(sandboxState)?.session as RouteContinuableSession | undefined;
+}
 
 /**
  * Ends an attempt between tool batches when its route moved somewhere it can
