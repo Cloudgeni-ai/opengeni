@@ -67,6 +67,10 @@ pub(crate) struct Fake {
     pub(crate) puts: Mutex<u32>,
     /// Copies within the bucket, through `object_store`.
     pub(crate) copies: Mutex<u32>,
+    /// Reads of a whole object, and of only its size and tag, through
+    /// `object_store`.
+    pub(crate) gets: Mutex<u32>,
+    pub(crate) heads: Mutex<u32>,
     /// Answers this many of the next requests through the XML API with
     /// 503, as Cloud Storage does while it scales up to a client's rate.
     pub(crate) unavailable: Mutex<u32>,
@@ -396,6 +400,13 @@ impl ObjectStore for Bucket {
         if options.range.is_some() {
             return Err(object_store::Error::NotImplemented);
         }
+        *if options.head {
+            &self.0.heads
+        } else {
+            &self.0.gets
+        }
+        .lock()
+        .unwrap() += 1;
         self.0.wait().await;
         let object = self
             .0

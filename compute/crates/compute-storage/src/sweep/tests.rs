@@ -284,6 +284,37 @@ async fn what_a_sweep_took_meanwhile_is_uploaded_again() {
     store.get_chunk(&next.reference).await.unwrap();
 }
 
+/// On S3 an archive's tries read no chunk back: a try again the same
+/// hour, carrying into the next hour, the try after a fence, and copying
+/// as a try reaches each chunk all check chunks by their size and tag.
+#[tokio::test(start_paused = true)]
+async fn tries_and_copies_on_s3_read_no_chunk_back() {
+    let fake = Fake::new(paused_clock());
+    let store = ChunkStore::over_fake_s3(&fake, "p");
+    let contents: Vec<_> = (0..8).map(chunk).collect();
+    let held = Arc::new(Held::new());
+    let holding = store.clone().holding(Arc::clone(&held));
+    for content in &contents {
+        assert!(put(&holding, content).await.new);
+    }
+    for content in &contents {
+        assert!(!put(&holding, content).await.new, "found this hour");
+    }
+    tokio::time::advance(HOUR).await;
+    assert_eq!(store.keep(&held).await.copied, 8);
+    for content in &contents {
+        let found = put(&holding, content).await;
+        assert!(!found.new && !found.copied, "carried already");
+    }
+    tokio::time::advance(HOUR).await;
+    for content in &contents {
+        assert!(put(&holding, content).await.copied);
+    }
+    assert_eq!(*fake.copies.lock().unwrap(), 16);
+    assert_eq!(*fake.gets.lock().unwrap(), 0, "no chunk read back");
+    assert!(*fake.heads.lock().unwrap() >= 8 * 4);
+}
+
 /// Archives `contents` as sandbox `name` until a publication lands, at most
 /// `tries` times: each chunk uploaded takes `upload` to send, one copied or
 /// found stored takes no time. With `keep`, what the tries store is

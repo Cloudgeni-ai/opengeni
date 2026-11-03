@@ -35,7 +35,7 @@ use crate::{
     fresh::{Clock, period_of},
     manifest::{DiskManifest, MAX_MANIFEST_BYTES},
     pointer_store::{ObjectPointers, PointerStore},
-    upload::{Created, Gcs},
+    upload::{Created, Gcs, md5_hex, tag_is_md5},
 };
 
 /// Largest pointer object accepted; pointers only name manifests.
@@ -291,6 +291,18 @@ impl ChunkStore {
             settle: Duration::ZERO,
             stored: remembering(carried::REMEMBERED),
             held: None,
+        }
+    }
+
+    /// A store over `fake`'s bucket as over S3: it trusts the store to
+    /// check what it is sent, and the bucket tags each object with the MD5
+    /// of its bytes.
+    #[cfg(test)]
+    pub(crate) fn over_fake_s3(fake: &Arc<crate::fake::Fake>, prefix: &str) -> Self {
+        *fake.tags_follow_bytes.lock().unwrap() = true;
+        Self {
+            uploader: Uploader::StoreVerified,
+            ..Self::over_fake(fake, prefix)
         }
     }
 
@@ -645,8 +657,14 @@ impl ChunkStore {
     /// GCS keeps the CRC32C and MD5 it computed when the object was stored;
     /// matching them against the checksums recorded in `reference` proves
     /// the bytes without downloading them, and any write that changed the
-    /// bytes changed them. Other stores, and references recorded without
-    /// checksums, are read and hashed in full.
+    /// bytes changed them. S3, and stores like it, give an object stored by
+    /// one plain write, or copied from one, the MD5 of its bytes as its
+    /// entity tag: one request for the object's size and tag proves it the
+    /// same way. A tag that is no plain MD5, or not the one recorded (a
+    /// store may tag by its own scheme, as when it encrypts with its own
+    /// keys), proves nothing either way, and the object is read. Other
+    /// stores, and references recorded without checksums, are read and
+    /// hashed in full.
     pub async fn has_chunk(&self, reference: &ChunkRef) -> Result<bool> {
         reference.validate()?;
         let path = self.path(&reference.key());
@@ -655,6 +673,21 @@ impl ChunkStore {
                 .stored(&path)
                 .await?
                 .is_some_and(|stored| stored.checksums == *expected));
+        }
+        let md5 = reference.checksums.as_deref().and_then(md5_hex);
+        if let (Uploader::StoreVerified, Some(md5)) = (&self.uploader, md5) {
+            let meta = match self.backend.head(&path).await {
+                Ok(meta) => meta,
+                Err(object_store::Error::NotFound { .. }) => return Ok(false),
+                Err(error) => return Err(error.into()),
+            };
+            if meta.size != u64::from(reference.stored_len) {
+                return Ok(false);
+            }
+            let tagged = meta.e_tag.as_deref().and_then(|tag| tag_is_md5(tag, &md5));
+            if tagged == Some(true) {
+                return Ok(true);
+            }
         }
         match self.read_chunk(&path, reference).await {
             Ok(_) => Ok(true),

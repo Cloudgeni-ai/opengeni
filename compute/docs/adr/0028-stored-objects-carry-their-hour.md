@@ -78,13 +78,14 @@ before it began, whatever the period's length.
   next try reuses only names of its own current hour, and the fence still
   stops every try a sweep crossed.
 - The cost is one copy request per unpublished chunk per hour, plus a
-  check of the copy. GCS checks it by its checksums; on S3 and Azure the
-  check reads it back. The next try checks each chunk it finds, again a
-  read on S3 and Azure, instead of sending it. A store with no copy
-  uploads the chunk again. An archive held up for hours keeps copying
-  every hour. Every carried copy leaves the earlier one for the sweep.
-  Remembering the chunks costs up to about 20 MB a host. Holding them
-  costs about what the archive's own references to them cost.
+  check of the copy. GCS checks it by its checksums, and S3 by its size
+  and entity tag (the MD5 of its bytes), with one request each; on Azure,
+  or when the tag is not that MD5, the check reads it back. The next try
+  checks each chunk it finds the same way instead of sending it. A store
+  with no copy uploads the chunk again. An archive held up for hours keeps
+  copying every hour. Every carried copy leaves the earlier one for the
+  sweep. Remembering the chunks costs up to about 20 MB a host. Holding
+  them costs about what the archive's own references to them cost.
 - Carrying starts as the hour begins by the writer's clock. The sweep may
   take a chunk once that hour ended an hour before by its own clock. So
   the slack is `CLOCK_SKEW` less the clocks' disagreement, a full hour in
