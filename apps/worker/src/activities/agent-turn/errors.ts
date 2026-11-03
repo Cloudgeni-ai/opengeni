@@ -1615,7 +1615,11 @@ export function isTransientProviderError(error: unknown): boolean {
   if (isExactStatuslessUpstreamConnectivityMessage(message)) {
     return true;
   }
-  return /overloaded|an error occurred while processing your request|connection error|service unavailable|bad gateway|gateway timeout/i.test(
+  // A statusless error is typically a provider error event in the middle of a
+  // streamed response. One that tells the caller to retry (for example an
+  // OpenAI-compatible server that produced a malformed tool call) is a bad
+  // generation, not a request fault.
+  return /overloaded|an error occurred while processing your request|connection error|service unavailable|bad gateway|gateway timeout|\bplease (?:retry|try again)\b/i.test(
     message,
   );
 }
