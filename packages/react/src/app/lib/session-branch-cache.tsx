@@ -42,6 +42,7 @@ export function sessionBranchSummaryKey(session: Session, readRevision = 0): str
     stats.queuedDescendants,
     stats.attentionDescendants,
     stats.pausedDescendants,
+    stats.pausedWorkDescendants ?? 0,
     stats.failedDescendants,
     stats.unreadFailedDescendants ?? stats.failedDescendants,
     stats.unreadDescendants ?? 0,

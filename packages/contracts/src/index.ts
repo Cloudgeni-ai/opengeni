@@ -16728,6 +16728,11 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
         waitingDescendants: z.number().int().nonnegative().optional(),
         attentionDescendants: primitives.nonnegativeInteger,
         pausedDescendants: primitives.nonnegativeInteger,
+        /**
+         * Paused descendants whose work is parked for Resume: a turn still
+         * open, queued or running, or an input wait. Absent from older servers.
+         */
+        pausedWorkDescendants: z.number().int().nonnegative().optional(),
         /** Historical failed lifecycle states, including already-reviewed failures. */
         failedDescendants: primitives.nonnegativeInteger,
         unreadDescendants: z.number().int().nonnegative().optional(),

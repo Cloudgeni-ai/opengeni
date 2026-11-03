@@ -24,10 +24,12 @@ export {
   groupTimeline,
   sessionStatusFromEvents,
   mcpToolLeaf,
+  timelineLivePause,
+  timelinePauseSpans,
   toolDisplayName,
   toolMatchesLeaf,
 } from "./projection";
-export type { GroupTimelineOptions } from "./projection";
+export type { GroupTimelineOptions, TimelineLivePause, TimelinePauseSpan } from "./projection";
 
 // item types
 export type {

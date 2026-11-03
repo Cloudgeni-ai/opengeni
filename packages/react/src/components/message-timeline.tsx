@@ -134,6 +134,8 @@ import {
   defaultToolRegistry,
   groupTimeline,
   LightboxProvider,
+  timelinePauseSpans,
+  type TimelineLivePause,
   type ActivityItem,
   type AgentMessageItem,
   type AuthNeededItem,
@@ -236,6 +238,14 @@ export type MessageTimelineProps = {
   items?: TimelineItem[] | undefined;
   /** Current session status (reserved; tip "Working…" chrome removed for now). */
   status?: SessionStatus | null | undefined;
+  /**
+   * The session's live Pause, from its effective control
+   * (`timelineLivePause(session.effectiveControl)`). A turn still open under a
+   * pause reads "Paused" with its clock stopped, and paused time is not
+   * counted as work. Omit to rely on the session's events alone, which do not
+   * show a pause of an ancestor or the workspace that interrupted nothing.
+   */
+  pause?: TimelineLivePause | null | undefined;
   /** Host-owned controls beside Copy and the timestamp on settled message rows. */
   renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
   /**
@@ -647,6 +657,7 @@ export function MessageTimeline({
   events,
   items,
   status: _status,
+  pause,
   renderMessageActions,
   renderMessageSender,
   renderMessageText,
@@ -816,9 +827,37 @@ export function MessageTimeline({
   const olderPageBudgetRef = useRef(0);
   const [olderDemand, setOlderDemand] = useState(0);
   const readableTurns = turnSummary?.rolling === true;
+  const livePaused = pause?.paused;
+  const livePausedSince = pause?.since ?? null;
+  // When this view saw a live pause end: a resume's own events can arrive
+  // after the control does, and the paused time must not count as work.
+  const [observedResumeAt, setObservedResumeAt] = useState<string | null>(null);
+  const previousLivePaused = useRef(livePaused);
+  useEffect(() => {
+    if (previousLivePaused.current === true && livePaused === false)
+      setObservedResumeAt(new Date().toISOString());
+    else if (livePaused) setObservedResumeAt(null);
+    previousLivePaused.current = livePaused;
+  }, [livePaused]);
+  const pauses = useMemo(
+    () =>
+      readableTurns
+        ? timelinePauseSpans(
+            events ?? [],
+            livePaused === undefined
+              ? undefined
+              : {
+                  paused: livePaused,
+                  since: livePausedSince,
+                  resumedAt: pause?.resumedAt ?? observedResumeAt,
+                },
+          )
+        : [],
+    [readableTurns, events, livePaused, livePausedSince, pause?.resumedAt, observedResumeAt],
+  );
   const projectedGroups = useMemo(
-    () => groupTimeline(t, resolvedItems, { readableTurns }),
-    [resolvedItems, readableTurns, t],
+    () => groupTimeline(t, resolvedItems, { readableTurns, pauses }),
+    [resolvedItems, readableTurns, pauses, t],
   );
   // A new timeline revision (including session/turn replacement) owns layout.
   // Never leave an old decorative transform running on its retained rows.

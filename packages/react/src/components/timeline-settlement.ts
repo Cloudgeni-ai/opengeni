@@ -14,7 +14,7 @@ export function captureTimelineSettlement(
   if (timelineHasReader(scroller, answeredCard)) return null;
   const live = Array.from(
     scroller.querySelectorAll(
-      '[data-og-exchange-status="working"], [data-og-exchange-status="waiting"]',
+      '[data-og-exchange-status="working"], [data-og-exchange-status="waiting"], [data-og-exchange-status="paused"]',
     ),
   );
   // At the live tip the newest retained answer owns the transition. An older

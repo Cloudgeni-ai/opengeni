@@ -921,7 +921,9 @@ function TimelineGroupView({
                   label: base.label,
                   preview: base.detail ? <WaitDetail text={base.detail} /> : undefined,
                 }
-              : { kind: "worked", durationMs: base.durationMs, label: base.label };
+              : base.kind === "paused"
+                ? { kind: "paused", durationMs: base.durationMs, label: base.label }
+                : { kind: "worked", durationMs: base.durationMs, label: base.label };
         return (
           <TurnSummary
             items={group.items}

@@ -2099,6 +2099,8 @@ export type Session = {
         waitingDescendants?: number | undefined;
         attentionDescendants: number;
         pausedDescendants: number;
+        /** Paused descendants whose work is parked for Resume. Absent from older servers. */
+        pausedWorkDescendants?: number | undefined;
         failedDescendants: number;
         unreadDescendants?: number | undefined;
         unreadFailedDescendants?: number | undefined;
