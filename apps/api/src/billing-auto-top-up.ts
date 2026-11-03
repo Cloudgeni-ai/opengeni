@@ -325,13 +325,16 @@ export class StripeAutoTopUps {
         current.intent.taxExpiresAt <= Date.now() / 1000 + 60 ||
         (await account.spent()) > settings.monthly_cap_micros ||
         payment.status === "requires_action" ||
+        payment.status === "requires_payment_method" ||
         payment.last_payment_error
       ) {
         await this.cancel(
           account,
           current,
           payment,
-          payment.status === "requires_action" || payment.last_payment_error
+          payment.status === "requires_action" ||
+            payment.status === "requires_payment_method" ||
+            payment.last_payment_error
             ? "Your card could not be charged off-session. Update the card and enable automatic top-ups again."
             : "Automatic top-up stopped before payment. Enable it again when ready.",
         );
@@ -356,7 +359,11 @@ export class StripeAutoTopUps {
       }
       assertAutoTopUpPayment(current, payment);
       if (await this.settle(account, current, payment)) return;
-      if (payment.status === "requires_action" || payment.last_payment_error) {
+      if (
+        payment.status === "requires_action" ||
+        payment.status === "requires_payment_method" ||
+        payment.last_payment_error
+      ) {
         await this.cancel(
           account,
           current,
@@ -475,7 +482,11 @@ export class StripeAutoTopUps {
         return;
       }
       if (await this.settle(account, operation, payment)) return;
-      if (payment.status === "requires_action" || payment.last_payment_error) {
+      if (
+        payment.status === "requires_action" ||
+        payment.status === "requires_payment_method" ||
+        payment.last_payment_error
+      ) {
         await this.cancel(
           account,
           operation,

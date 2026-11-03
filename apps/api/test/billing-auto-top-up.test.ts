@@ -47,6 +47,7 @@ function harness() {
     spentBefore = 0,
     charged = 0,
     taxAmount = 2750,
+    taxCalls = 0,
     createCalls = 0,
     confirmCalls = 0,
     capEvents = 0;
@@ -55,6 +56,7 @@ function harness() {
     rollbackBind = false,
     rollbackSettlement = false,
     decline = false,
+    clearedFailure = false,
     authentication = false;
   let ownerActive = true,
     customerCurrency = "usd",
@@ -139,7 +141,11 @@ function harness() {
       settings.enabled = false;
       settings.failure_reason = reason;
     },
-    capReached: async () => {
+    capReached: async (
+      current: AutoTopUpSettingsRow,
+      required = current.cap_required_micros ?? current.amount_micros,
+    ) => {
+      settings.cap_required_micros = required;
       capEvents++;
     },
     deliver: async () => {},
@@ -182,14 +188,17 @@ function harness() {
     },
     tax: {
       calculations: {
-        create: async () => ({
-          id: "taxcalc_quote",
-          currency: "usd",
-          livemode: false,
-          customer: "cus_org",
-          amount_total: taxAmount,
-          expires_at: Math.floor(Date.now() / 1000) + 86400 * 30,
-        }),
+        create: async () => {
+          taxCalls++;
+          return {
+            id: "taxcalc_quote",
+            currency: "usd",
+            livemode: false,
+            customer: "cus_org",
+            amount_total: taxAmount,
+            expires_at: Math.floor(Date.now() / 1000) + 86400 * 30,
+          };
+        },
       },
     },
     paymentIntents: {
@@ -224,6 +233,16 @@ function harness() {
         expect(canonical?.confirmation_started_at).toBeTruthy();
         confirmCalls++;
         const payment = payments.get(pi)!;
+        if (clearedFailure) {
+          payment.status = "requires_payment_method";
+          payment.payment_method = null;
+          payment.last_payment_error = null;
+          if (confirmLost) {
+            confirmLost = false;
+            throw new Error("confirm timeout");
+          }
+          return structuredClone(payment);
+        }
         if (decline || authentication) {
           payment.status = authentication ? "requires_action" : "requires_payment_method";
           payment.last_payment_error = {
@@ -281,6 +300,9 @@ function harness() {
     get capEvents() {
       return capEvents;
     },
+    get taxCalls() {
+      return taxCalls;
+    },
     set balance(v: number) {
       balance = v;
     },
@@ -304,6 +326,9 @@ function harness() {
     },
     set decline(v: boolean) {
       decline = v;
+    },
+    set clearedFailure(v: boolean) {
+      clearedFailure = v;
     },
     set authentication(v: boolean) {
       authentication = v;
@@ -415,6 +440,40 @@ test("disabled deployments never create charges but settle already-successful pa
   await h.service(false).process(accountId);
   expect(h.granted.size).toBe(1);
   expect(h.charged).toBe(1);
+});
+test.each(["confirmation", "maintenance", "webhook"] as const)(
+  "%s cancels requires_payment_method even when Stripe cleared the prior error",
+  async (path) => {
+    const h = harness();
+    h.clearedFailure = true;
+    if (path === "confirmation") {
+      await h.service().process(accountId);
+    } else {
+      h.confirmLost = true;
+      await expect(h.service().process(accountId)).rejects.toThrow("confirm timeout");
+      if (path === "maintenance") await h.service().process(accountId);
+      else await h.service().handlePaymentIntent([...h.payments.values()][0]!);
+    }
+    await h.service().process(accountId);
+    expect(h.settings.enabled).toBe(false);
+    expect((await h.service().settings(accountId)).status).toBe("payment_failed");
+    expect([...h.payments.values()][0]!.status).toBe("canceled");
+    expect([...h.operations.values()][0]!.state).toBe("failed");
+    expect(h.charged).toBe(0);
+    expect(h.confirmCalls).toBe(1);
+    expect(h.granted.size).toBe(0);
+  },
+);
+test("repeated cap passes retain the gross tax quote instead of oscillating ready", async () => {
+  const h = harness();
+  h.settings.monthly_cap_micros = 25_000_000;
+  for (let pass = 0; pass < 3; pass++) {
+    await h.service().process(accountId);
+    expect((await h.service().settings(accountId)).status).toBe("cap_reached");
+    expect(h.settings.cap_required_micros).toBe(27_500_000);
+  }
+  expect(h.taxCalls).toBe(1);
+  expect(h.createCalls).toBe(0);
 });
 test("disable after an unknown create cancels instead of confirming", async () => {
   const h = harness();

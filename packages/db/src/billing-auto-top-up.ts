@@ -315,7 +315,7 @@ export class AutoTopUpAccountStore {
   }
   async capReached(
     settings: AutoTopUpSettingsRow,
-    requiredMicros = settings.amount_micros,
+    requiredMicros = settings.cap_required_micros ?? settings.amount_micros,
   ): Promise<void> {
     await this.tx.execute(
       sql`update billing_auto_top_up_settings set cap_required_micros = ${requiredMicros} where account_id = ${this.accountId}::uuid`,

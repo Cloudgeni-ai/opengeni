@@ -160,3 +160,18 @@ must use a verified `sk_test_`/`rk_test_` key and objects with `livemode:false`,
 never a live card or key. Keep deployment activation off until independent review,
 exact-head CI, test-mode recovery proof, notification/lifecycle integration and
 the deployment's receipt-versus-invoice requirement are satisfied.
+
+`apps/api/test/billing-auto-top-up.stripe-proof.ts` exports an explicit,
+non-discovered `runStripeAutoTopUpProof` utility. It requires a verified test key
+and dedicated test organization/owner IDs; it must never run in ordinary CI or
+against live Stripe. When using shared staging credentials, create a dedicated
+staging organization first so existing customer-mirroring webhooks have a valid
+foreign-key target. The utility migrates an isolated restricted-role local
+PostgreSQL fixture, creates off-session SetupIntents and a Checkout setup session,
+injects lost create/confirmation responses plus local settlement rollback, proves
+one canonical charge/credit receipt, then tests decline, explicit card replacement
+and retry, and the monthly cap. Notification assertions use transactional fixture
+enqueue records, not side-effectful in-memory callbacks. It expires its unused
+Checkout session and deletes the test customer; immutable test payment history
+remains at Stripe. This is provider integration proof, not proof that the new
+backend is deployed or that a person completed the browser setup flow.

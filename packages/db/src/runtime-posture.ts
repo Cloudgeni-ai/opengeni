@@ -1931,10 +1931,10 @@ export const FORCE_RLS_TABLES = [
   "automation_trigger_events",
   "automation_trigger_revisions",
   "automation_triggers",
-  "billing_customers",
-  "billing_auto_top_up_settings",
-  "billing_auto_top_up_operations",
   "billing_auto_top_up_mutations",
+  "billing_auto_top_up_operations",
+  "billing_auto_top_up_settings",
+  "billing_customers",
   "billing_subscription_operations",
   "bot_templates",
   "browser_identities",
@@ -2907,12 +2907,12 @@ export const RUNTIME_READ_INSERT_TABLES = [
 
 /** Durable operation journals are append/read plus claim/settle updates, never deletes. */
 export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
-  "billing_auto_top_up_settings",
-  "billing_auto_top_up_operations",
   "agent_calls",
   "attached_browser_devices",
   "attached_browser_inventories",
   "auth_runs",
+  "billing_auto_top_up_operations",
+  "billing_auto_top_up_settings",
   "browser_identities",
   "browser_session_retained_downloads",
   "browser_sessions",

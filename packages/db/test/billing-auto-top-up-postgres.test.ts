@@ -137,6 +137,28 @@ test("concurrent reservations permit one pending and include tax in the monthly 
   await state(attempt, "P0T01");
 }, 180_000);
 
+test("cap notification replays preserve the known tax-inclusive requirement until settings change", async () => {
+  if (!client) return;
+  const { store, accountId, subject, request } = await ready(25_000_000);
+  await store.locked(accountId, async (account) => {
+    await account.capReached((await account.settings())!, 27_500_000);
+  });
+  for (let pass = 0; pass < 3; pass++) {
+    await store.locked(accountId, async (account) => {
+      await account.capReached((await account.settings())!);
+      expect((await account.settings())!.cap_required_micros).toBe(27_500_000);
+    });
+  }
+  await store.locked(accountId, async (account) => {
+    await account.update(subject, {
+      ...request,
+      monthlyCapMicros: 30_000_000,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    expect((await account.settings())!.cap_required_micros).toBeNull();
+  });
+}, 180_000);
+
 test("settings retries cannot reset spend, replay over newer consent or accept a changed request", async () => {
   if (!client) return;
   const { store, accountId, subject, request, intent } = await ready();
