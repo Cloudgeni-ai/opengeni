@@ -13075,6 +13075,14 @@ const SCHEDULED_TASK_GENERATED_CHAT_FIELDS = [
   "memoryScope",
   "agentAccess",
   "skills",
+  "firstPartyMcpTools",
+  "firstPartyMcpPermissions",
+] as const;
+
+/** Set once when a task is created; see ScheduledTaskAgentConfigInput. */
+const SCHEDULED_TASK_CREATE_ONLY_FIELDS = [
+  "firstPartyMcpTools",
+  "firstPartyMcpPermissions",
 ] as const;
 
 function refineScheduledTaskGeneratedChatFields(
@@ -13171,50 +13179,63 @@ export function knowledgeSourceAgentConfig(
 
 /** Ingress-bounded agent config for create/update requests. */
 export const ScheduledTaskAgentConfigInput = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
-  z.object(scheduledTaskAgentConfigShape(true)).superRefine((value, context) => {
-    if (value.executionTarget && (value.machineTarget || value.sandboxBackend !== undefined)) {
-      context.addIssue({
-        code: "custom",
-        path: ["executionTarget"],
-        message: "workspace_default cannot be combined with machineTarget or sandboxBackend",
-      });
-    }
-    if (value.machineTarget && value.sandboxBackend !== undefined) {
-      context.addIssue({
-        code: "custom",
-        path: ["machineTarget"],
-        message: "machineTarget cannot be combined with sandboxBackend",
-      });
-    }
-    if (value.sandboxBackend === "selfhosted") {
-      context.addIssue({
-        code: "custom",
-        path: ["sandboxBackend"],
-        message:
-          "Omit sandboxBackend and select machineTarget for a separate agent; existing-chat schedules inherit the chat's machine",
-      });
-    }
-    if (
-      scheduledTaskJsonUtf8Bytes(scheduledTaskAgentConfigWithoutSkills(value)) >
-      SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES
-    ) {
-      context.addIssue({
-        code: "custom",
-        message: `scheduled task agent config exceeds ${SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES} UTF-8 bytes`,
-      });
-    }
-    if (
-      scheduledOccurrencePayloadUtf8Bytes(value) >
-      SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES -
-        SCHEDULED_TASK_OCCURRENCE_PAYLOAD_INGRESS_HEADROOM_BYTES
-    ) {
-      context.addIssue({
-        code: "custom",
-        message: `scheduled task prompt, resources, and tools exceed the ${SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES - SCHEDULED_TASK_OCCURRENCE_PAYLOAD_INGRESS_HEADROOM_BYTES} UTF-8 byte occurrence payload`,
-      });
-    }
-    refineScheduledTaskAgentConfig(value, context);
-  }),
+  z
+    .object({
+      ...scheduledTaskAgentConfigShape(true),
+      /**
+       * Opengeni tools and permissions of each chat the task starts, as on
+       * session create. Set once at creation and kept as the task's creator
+       * selection, never in its stored agentConfig. Omitted: an agent's task
+       * keeps its own chat's selection and any other task follows the
+       * defaults. Permissions must be held by the creating credential.
+       */
+      firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
+      firstPartyMcpPermissions: z.array(Permission).min(1).optional(),
+    })
+    .superRefine((value, context) => {
+      if (value.executionTarget && (value.machineTarget || value.sandboxBackend !== undefined)) {
+        context.addIssue({
+          code: "custom",
+          path: ["executionTarget"],
+          message: "workspace_default cannot be combined with machineTarget or sandboxBackend",
+        });
+      }
+      if (value.machineTarget && value.sandboxBackend !== undefined) {
+        context.addIssue({
+          code: "custom",
+          path: ["machineTarget"],
+          message: "machineTarget cannot be combined with sandboxBackend",
+        });
+      }
+      if (value.sandboxBackend === "selfhosted") {
+        context.addIssue({
+          code: "custom",
+          path: ["sandboxBackend"],
+          message:
+            "Omit sandboxBackend and select machineTarget for a separate agent; existing-chat schedules inherit the chat's machine",
+        });
+      }
+      if (
+        scheduledTaskJsonUtf8Bytes(scheduledTaskAgentConfigWithoutSkills(value)) >
+        SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: `scheduled task agent config exceeds ${SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES} UTF-8 bytes`,
+        });
+      }
+      if (
+        scheduledOccurrencePayloadUtf8Bytes(value) >
+        SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES -
+          SCHEDULED_TASK_OCCURRENCE_PAYLOAD_INGRESS_HEADROOM_BYTES
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: `scheduled task prompt, resources, and tools exceed the ${SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES - SCHEDULED_TASK_OCCURRENCE_PAYLOAD_INGRESS_HEADROOM_BYTES} UTF-8 byte occurrence payload`,
+        });
+      }
+      refineScheduledTaskAgentConfig(value, context);
+    }),
 );
 export type ScheduledTaskAgentConfigInput = z.infer<typeof ScheduledTaskAgentConfigInput>;
 
@@ -14261,6 +14282,14 @@ export const UpdateScheduledTaskRequest =
             code: "custom",
             path: ["agentConfigPatch"],
             message: "agentConfigPatch cannot be combined with agentConfig replacement",
+          });
+        }
+        for (const field of SCHEDULED_TASK_CREATE_ONLY_FIELDS) {
+          if (value.agentConfig?.[field] === undefined) continue;
+          context.addIssue({
+            code: "custom",
+            path: ["agentConfig", field],
+            message: `${field} is set when a task is created; create the task again to change it`,
           });
         }
         if (value.targetSessionId && value.runMode && value.runMode !== "existing_session") {

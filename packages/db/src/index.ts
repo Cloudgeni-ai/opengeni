@@ -7356,6 +7356,9 @@ export type ScheduledTaskCreatorSessionPolicy = {
  * its generated sessions. An agent-created task stores its creating session's
  * explicit first-party selection (null follows defaults) and permission set
  * so a narrowed session cannot widen its permissions through a schedule.
+ * A human/API creator may instead name the tools and permissions at create
+ * (`agentConfig.firstPartyMcpTools` / `firstPartyMcpPermissions`), stored
+ * here with a null session policy.
  * Its owner's explicit access refresh re-freezes tools and permissions within their grants;
  * the session policy and optional credential restriction never change after
  * create. A restriction alone does not select tools or permissions.
