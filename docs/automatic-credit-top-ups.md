@@ -56,6 +56,10 @@ are append-only; payment intents and completed results cannot be rewritten or
 deleted by the runtime. The additive migration uses only invoker-rights triggers,
 so it adds no unknown callable SECURITY DEFINER capability. Previous-binary
 readiness is tested against the pinned production inspector and evaluator.
+The integration follow-up also normalizes exact table grants for legacy/custom
+migration owners with broad default privileges, before another provisioning pass.
+Current and pinned production provisioning already remove those defaults; this
+compatibility normalization is not evidence of an active production defect.
 
 `billingAutoTopUpStore` requires a **root** database handle. Each `locked` call
 is its own committed transaction under the existing
