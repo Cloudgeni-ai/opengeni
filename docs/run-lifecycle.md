@@ -953,12 +953,12 @@ memory roles. The bounded, update-immutable
 selector, not a standalone grant or a way for a service to impersonate that
 human. Named human-bound capabilities may consume it only with their own exact
 fences. The generic workspace-artifact mutation family (create, publish,
-rollback, archive, and restore) is one narrow
-attempt-scoped use: a service-initiated turn may proceed only when the field
-retains a human, the request carries worker-signed exact attempt claims, and
-PostgreSQL revalidates their session/turn/attempt/execution generation, current
-live turn and attempt, selected artifact mutation tool, `artifacts:publish`, and
-absence of a pending interruption; pure service work fails closed. Direct human
+rollback, archive, and restore) does not consume it: the request carries
+worker-signed exact attempt claims, and PostgreSQL revalidates their
+session/turn/attempt/execution generation, current live turn and attempt,
+selected artifact mutation tool, `artifacts:publish`, and absence of a pending
+interruption. Pure service work (an owner-less scheduled run) passes the same
+fences and gets workspace-shared artifacts with no Only me owner. Direct human
 artifact API requests instead authorize from their ordinary authenticated access
 grant. Within governance, service-initiated goal continuations and compactions
 use the frozen causal human as the personal-preference subject while retaining
