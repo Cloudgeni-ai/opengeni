@@ -1077,7 +1077,8 @@ class PolicyMcpServer extends McpServer {
       if (!memory) return dispatch();
       return withSecretValueMasking(memory, async () => {
         try {
-          return memory.mask(await dispatch(), "first_party_result");
+          // A tool result is data: a tool-shaped record in it is masked in full.
+          return memory.maskData(await dispatch(), "first_party_result");
         } catch (error) {
           throw maskSecretValuesInError(error, memory);
         }

@@ -210,6 +210,13 @@ export function runtimeMetricsHooksForObservability(
         value: durationSeconds,
       });
     },
+    onModelInvalidRequest: ({ provider, path, code }) => {
+      observability.incrementCounter({
+        name: "opengeni_model_invalid_requests_total",
+        help: "Provider 400 invalid-request answers to model calls by request path (indices collapsed) and error code. Monitoring only.",
+        labels: { provider, path, code },
+      });
+    },
     onSandboxCreate: ({ backend, imageSource, outcome, durationSeconds }) => {
       observability.incrementCounter({
         name: "opengeni_sandbox_creates_total",

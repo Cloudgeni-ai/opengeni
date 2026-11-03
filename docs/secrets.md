@@ -424,6 +424,25 @@ field) reveals both the encoded and the decoded text. Only Opengeni's own
   the `[opengeni credential: …]`, `[masked …]` and `[secret]` markers are
   kept; a value that appears inside text that merely looks like a reference
   is still masked.
+- Known-value masking keeps a tool's identity in conversation structure: the
+  `name` or `namespace` of a call or result item (`function_call`,
+  `function_call_result`, `custom_tool_call`, `mcp_call`,
+  `mcp_approval_request`) or of a definition listed under `tools`
+  (`function`, `custom`, `namespace`), when it is a valid tool name
+  (`^[a-zA-Z0-9_-]{1,64}$`) and no data key such as `output`, `arguments`,
+  `content` or `result` lies above it. Tool names are catalog data the
+  provider already receives unmasked in the request's tools. A known value
+  inside one (a password that is a plain word) would otherwise become a
+  reference, which providers reject as a tool name and which no longer maps
+  the call to its tool. This applies only to model input and stored
+  conversation history. Tool output and browser or desktop results are data,
+  so they are masked in full even where a record looks like a call.
+  Arguments, outputs and descriptions are still masked, and shape detection
+  masks a secret-shaped token everywhere, tool-name positions included. The operator
+  history scrub ([Removing secrets from stored history](#removing-secrets-from-stored-history))
+  removes the value everywhere, tool names included. A tool name stored masked
+  or scrubbed is repaired on replay (see
+  [Tool names in history](model-providers.md)).
 - A value cut off just before a truncation mark (`...` or `…`), or at the
   end of a text of at least 1,024 characters (output clipped to a size), has
   its visible start replaced too, when at least 16 characters and at least
