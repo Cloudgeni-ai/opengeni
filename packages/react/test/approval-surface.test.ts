@@ -259,6 +259,41 @@ describe("ApprovalSurface", () => {
     expect(mounted.container.textContent).toContain("Approve action");
   });
 
+  test("a waiting action whose review offers no decision says so and re-reads it, never a silent footer", async () => {
+    // Read while a sibling decision resumed the turn: pending, but no actions.
+    const reads: ToolActionReview[] = [
+      { ...savedReview(), availableActions: [] },
+      { ...savedReview(), availableActions: ["approve", "reject"] },
+    ];
+    let calls = 0;
+    const loadReview = async () => reads[Math.min(calls++, reads.length - 1)]!;
+    mounted = await renderComponent(
+      createElement(ApprovalSurface, {
+        approvals: [approval],
+        loadReview,
+        onApprove: noDecision,
+        onReject: noDecision,
+      }),
+    );
+    await act(async () => undefined);
+    const text = () => mounted!.container.textContent ?? "";
+    const buttons = () =>
+      [...mounted!.container.querySelectorAll("button")].map((button) => button.textContent);
+    expect(text()).toContain("This action can't be decided yet.");
+    expect(buttons()).toContain("Try again");
+    expect(buttons()).not.toContain("Approve action");
+    // Try again (or the automatic re-read) fetches the review again; once it
+    // offers decisions the buttons are back without re-entering the chat.
+    const retry = [...mounted.container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Try again",
+    )!;
+    await act(async () => retry.click());
+    await act(async () => undefined);
+    expect(calls).toBe(2);
+    expect(buttons()).toEqual(expect.arrayContaining(["Decline", "Approve action"]));
+    expect(text()).not.toContain("This action can't be decided yet.");
+  });
+
   test("readable persisted account labels do not replace the exact approval identity", async () => {
     const [pending] = approvalsFromRequiresAction({
       approvals: [

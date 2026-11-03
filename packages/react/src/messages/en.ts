@@ -34,6 +34,8 @@ export const englishMessages = {
   "approvalSurface.sendingAnswer": "Sending answer…",
   /** Above an MCP server's question in the middle of a tool call, e.g. "Linear asks". */
   "approvalSurface.serverAsks": "{server} asks",
+  /** A waiting action whose review offers no decision yet; a Try again link follows. */
+  "approvalSurface.thisActionCanTBeDecided": "This action can't be decided yet.",
   "approvalSurface.tryAgain": "Try again",
   "approvalSurface.viewFullDetails": "View full details",
   "approvalSurface.youDonTHaveAccess":

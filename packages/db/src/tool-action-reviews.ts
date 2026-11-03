@@ -30,6 +30,15 @@ type ReviewScope = {
   approvalId: string;
 };
 
+/** Turn states that still take decisions for their pending actions (not ended). */
+const DECIDABLE_TURN_STATUSES: ReadonlySet<string> = new Set([
+  "requires_action",
+  "queued",
+  "running",
+  "recovering",
+  "waiting_capacity",
+]);
+
 async function reviewSnapshot(db: Database, input: ReviewScope) {
   return await withRlsContext(db, input, async (scoped) => {
     const [record] = await scoped
@@ -247,7 +256,11 @@ export async function getToolActionReview(
   // A person can always decline a waiting action. Approving needs the exact saved
   // arguments; when an older request's arguments cannot be recovered, decline is
   // the only safe decision and keeps the session from staying stuck.
-  const waiting = status === "pending" && turn.status === "requires_action";
+  // Waiting means undecided while its turn lives: deciding one of a pause's
+  // approvals resumes the turn (queued, running, ...), and the others stay
+  // decidable meanwhile, exactly as the decision endpoint accepts them. A turn
+  // that ended already made its pending actions "cancelled" above.
+  const waiting = status === "pending" && DECIDABLE_TURN_STATUSES.has(turn.status);
   const args = request.reviewArguments;
   const context = request.reviewContext ?? undefined;
   const parsed = decodeReviewArguments(args);
