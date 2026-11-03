@@ -3,9 +3,11 @@ import type { McpServerConfig, Settings } from "@opengeni/config";
 import type { McpConnectionAccountBinding } from "@opengeni/contracts";
 import {
   buildConnectionTokenResolver,
+  getConnectionMetadata,
   listEnabledMcpCapabilityServers,
   type Database,
   type EventSourceRecord,
+  type ResolveConnectionCredentialResult,
 } from "@opengeni/db";
 import { boundMcpResponseBody, MCP_MAX_RESPONSE_BYTES } from "@opengeni/runtime/mcp-network";
 import { settingsWithMcpCapabilityServers } from "../capabilities";
@@ -118,9 +120,33 @@ export async function ownerConnectionBindings(
 }
 
 /**
+ * Why a sign-in could not be used, as the error the subscription loop acts on.
+ * A refresh that failed while the connection is still active means the
+ * provider's sign-in service did not answer (a rejected grant marks the
+ * connection for re-auth). That is retried like any outage, and reported as
+ * the service not answering if it lasts, instead of asking the person to
+ * reconnect a connection that still works.
+ */
+export async function connectionCredentialFailure(
+  result: Exclude<ResolveConnectionCredentialResult, { status: "ok" }>,
+  reconnect: string,
+  connectionIsActive: (connectionId: string) => Promise<boolean>,
+): Promise<Error> {
+  if (
+    result.reason === "refresh_failed" &&
+    result.connectionId &&
+    (await connectionIsActive(result.connectionId).catch(() => false))
+  ) {
+    return new Error("The sign-in service did not answer while refreshing the connection");
+  }
+  return new McpEventSourceUnavailableError("reconnect", reconnect);
+}
+
+/**
  * Request headers for `destinationUrl`, signed in with one of the owner's
  * connections. A credential that cannot be resolved means the owner has to
- * reconnect: `reconnect` says so.
+ * reconnect: `reconnect` says so. A sign-in service that is only down is
+ * retried instead (see connectionCredentialFailure).
  */
 export function ownerConnectionHeaders(
   deps: Pick<McpEventSourceClientDeps, "db" | "settings">,
@@ -141,7 +167,15 @@ export function ownerConnectionHeaders(
       ...(forceRefresh ? { forceRefresh: true } : {}),
     });
     if (result.status !== "ok") {
-      throw new McpEventSourceUnavailableError("reconnect", request.reconnect);
+      throw await connectionCredentialFailure(result, request.reconnect, async (connectionId) => {
+        const connection = await getConnectionMetadata(
+          deps.db,
+          binding.originWorkspaceId,
+          connectionId,
+          binding.subjectScope === "subject" ? owner.ownerSubjectId : null,
+        );
+        return connection?.status === "active";
+      });
     }
     return { ...server.headers, ...result.headers };
   };
