@@ -258,6 +258,7 @@ import {
 } from "./auth/managed-auth-attempt-context";
 import { createManagedEmailTransport } from "./auth/managed-email";
 import { startManagedSignInNotificationDelivery } from "./auth/managed-sign-in-notifications";
+import { startBillingCreditNotificationDelivery } from "./billing-credit-notifications";
 import {
   assertManagedEmailTransportMetadata,
   assertOrganizationUserSetupQueryTransportConfigured,
@@ -573,6 +574,13 @@ export function createAppComposition(deps: AppDependencies): {
     deps.managedAuthSessionAdapter ??
     (managedAuth ? createBetterAuthSessionAdapter(managedAuth, deps.db) : null);
   if (managedAuth) startManagedSignInNotificationDelivery(deps.db, managedEmailTransport);
+  if (managedAuth && (deps.settings.webBaseUrl ?? deps.settings.publicBaseUrl)) {
+    startBillingCreditNotificationDelivery(
+      deps.db,
+      managedEmailTransport,
+      (deps.settings.webBaseUrl ?? deps.settings.publicBaseUrl)!,
+    );
+  }
   const objectStorage =
     deps.objectStorage === undefined ? createObjectStorage(deps.settings) : deps.objectStorage;
   let documentServices: DocumentServices | null = deps.documentServices ?? null;

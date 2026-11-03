@@ -1,3 +1,8 @@
+import type {
+  BillingAlertSettings,
+  UpdateBillingAlertSettingsRequest,
+  ListBillingCreditNotificationsResponse,
+} from "@opengeni/contracts/billing-credit-notifications";
 import {
   copyObservedSessionSequence,
   recordObservedSessionSequence,
@@ -11685,6 +11690,36 @@ export class OpenGeniClient {
   }
 
   // --- Billing (account-scoped) --------------------------------------------------------------------
+
+  async getBillingAlertSettings(
+    options: { accountId?: string } = {},
+  ): Promise<BillingAlertSettings> {
+    return this.requestJson("GET", "/v1/billing/alerts", undefined, options);
+  }
+
+  async updateBillingAlertSettings(
+    request: UpdateBillingAlertSettingsRequest,
+  ): Promise<BillingAlertSettings> {
+    return this.requestJson("PUT", "/v1/billing/alerts", request);
+  }
+
+  async listBillingCreditNotifications(
+    options: { accountId?: string } = {},
+  ): Promise<ListBillingCreditNotificationsResponse> {
+    return this.requestJson("GET", "/v1/billing/notifications", undefined, options);
+  }
+
+  async markBillingCreditNotificationRead(
+    notificationId: string,
+    options: { accountId?: string } = {},
+  ): Promise<{ ok: boolean }> {
+    return this.requestJson(
+      "POST",
+      `/v1/billing/notifications/${encodeURIComponent(notificationId)}/read`,
+      undefined,
+      options,
+    );
+  }
 
   async getBilling(options: { accountId?: string } = {}): Promise<BillingSummary> {
     return await this.requestJson<BillingSummary>("GET", "/v1/billing", undefined, {

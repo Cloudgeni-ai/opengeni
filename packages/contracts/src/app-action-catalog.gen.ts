@@ -3122,15 +3122,25 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+<<<<<<< HEAD
     "id": "getBillingAutoTopUp",
     "method": "GET",
     "path": "/v1/billing/auto-top-up",
+=======
+    "id": "getBillingAlertSettings",
+    "method": "GET",
+    "path": "/v1/billing/alerts",
+>>>>>>> fa80b957fbed3db6a961849f9599478d4e671f69
     "request": [],
     "query": [
       "accountId"
     ],
     "response": [
+<<<<<<< HEAD
       "BillingAutoTopUpSettings"
+=======
+      "BillingAlertSettings"
+>>>>>>> fa80b957fbed3db6a961849f9599478d4e671f69
     ]
   },
   {
@@ -5015,6 +5025,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "connections:read"
   },
   {
+    "id": "listBillingCreditNotifications",
+    "method": "GET",
+    "path": "/v1/billing/notifications",
+    "request": [],
+    "query": [
+      "accountId"
+    ],
+    "response": [
+      "ListBillingCreditNotificationsResponse"
+    ]
+  },
+  {
     "id": "listBotTemplates",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/bot-templates",
@@ -6349,6 +6371,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "MetricSample"
     ],
     "permission": "enrollments:read"
+  },
+  {
+    "id": "markBillingCreditNotificationRead",
+    "method": "POST",
+    "path": "/v1/billing/notifications/:notificationId/read",
+    "request": [],
+    "query": [
+      "accountId"
+    ],
+    "response": []
   },
   {
     "id": "migrateSiteSql",
@@ -9508,6 +9540,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+<<<<<<< HEAD
     "id": "updateBillingAutoTopUp",
     "method": "PUT",
     "path": "/v1/billing/auto-top-up",
@@ -9516,6 +9549,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "BillingAutoTopUpSettings"
+=======
+    "id": "updateBillingAlertSettings",
+    "method": "PUT",
+    "path": "/v1/billing/alerts",
+    "request": [
+      "UpdateBillingAlertSettingsRequest"
+    ],
+    "response": [
+      "BillingAlertSettings"
+>>>>>>> fa80b957fbed3db6a961849f9599478d4e671f69
     ]
   },
   {

@@ -308,7 +308,11 @@ import {
   UninstallPluginRequest,
   UninstallSkillRequest,
   UpdateAutomationTemplateRequest,
+<<<<<<< HEAD
   UpdateBillingAutoTopUpRequest,
+=======
+  UpdateBillingAlertSettingsRequest,
+>>>>>>> fa80b957fbed3db6a961849f9599478d4e671f69
   UpdateBotTemplateRequest,
   UpdateBrowserIdentityRequest,
   UpdateChannelRequest,
@@ -702,7 +706,11 @@ export const ACTION_REQUEST_SCHEMAS: Readonly<Record<string, unknown>> = {
   UninstallPluginRequest,
   UninstallSkillRequest,
   UpdateAutomationTemplateRequest,
+<<<<<<< HEAD
   UpdateBillingAutoTopUpRequest,
+=======
+  UpdateBillingAlertSettingsRequest,
+>>>>>>> fa80b957fbed3db6a961849f9599478d4e671f69
   UpdateBotTemplateRequest,
   UpdateBrowserIdentityRequest,
   UpdateChannelRequest,
