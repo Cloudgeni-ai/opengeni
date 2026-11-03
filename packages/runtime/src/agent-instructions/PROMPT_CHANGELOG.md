@@ -12,9 +12,13 @@ o200k tokens of instructions and from about 2,530 to 700 of built-in tools.
   connectors, artifacts, automations, sessions, browser, secrets or Skill
   management) gets `NEUTRAL_AGENT_IDENTITY` instead of the Opengeni workspace
   agent introduction. A configured `identity` still replaces either.
-- Tool discovery renders only when a tool can be deferred. The worker decides
-  this from frozen per-turn facts (`turnToolRouterExpected`) and passes
-  `toolSearchAbsent`; any doubt keeps the section and the router.
+- Tool discovery renders only when a tool can be deferred and the attempt can
+  install the search router. The worker decides the first from frozen
+  per-turn facts (`turnToolRouterExpected`) and passes `toolSearchAbsent`; any
+  doubt keeps the section and the router. The runtime adds the second: with no
+  lazy transport, or with tool search off for the deployment and no router in
+  history, there is no `tool_search` to name. The Images and video module's
+  "If it is deferred, use … `tool_search`" sentence follows the same rule.
 - Waiting renders only with `wait_for_input`, schedules or subagents. The
   Progress updates monitoring sentences and the Autonomy "Monitor or wait"
   bullet need `wait_for_input` or schedules.

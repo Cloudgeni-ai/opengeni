@@ -2876,6 +2876,20 @@ function gitBindingDiscoveryApplies(
  * the cached instructions of a turn without one.
  */
 /**
+ * The tool view the modular composer reads. An attempt that cannot install the
+ * search router (see `lazyToolTransportFor`) has no tool search, so the
+ * composer leaves out its guidance even when the host did not say so.
+ */
+function modularToolAvailability(
+  settings: Settings,
+  options: BuildAgentOptions,
+): { toolAvailability?: AgentPromptToolAvailability } {
+  const view = options.agentPromptToolAvailability;
+  if (lazyToolTransportFor(settings, options)) return view ? { toolAvailability: view } : {};
+  return { toolAvailability: { ...(view ?? { unavailable: [] }), toolSearchAbsent: true } };
+}
+
+/**
  * The Skill index layer renders unless it is already in history. A configured
  * session leaves out an empty index: there is nothing to read.
  */
@@ -3011,9 +3025,7 @@ function inspectModularAgentInstructions(
     renderer: config.renderer,
     identity: appendDeploymentAgentInstructions(identity, settings),
     resources,
-    ...(options.agentPromptToolAvailability
-      ? { toolAvailability: options.agentPromptToolAvailability }
-      : {}),
+    ...modularToolAvailability(settings, options),
     ...agentPromptExperimentsFor(settings),
     ...(codemodeIsAvailable(options) ? { codemode: CODEMODE_PROGRAMMATIC_DIRECTIVE } : {}),
     ...(options.codeSearchAvailable ? { codeSearch: CODE_SEARCH_DIRECTIVE } : {}),
@@ -3958,6 +3970,25 @@ export function buildOpenGeniAgent(
 }
 
 /**
+ * The lazy tool transport this attempt installs, or undefined when it has no
+ * search router: no transport, or the deployment turned tool search off and
+ * the session never exposed the router.
+ */
+function lazyToolTransportFor(
+  settings: Settings,
+  options: Pick<BuildAgentOptions, "lazyToolTransport" | "agentConfig" | "toolRouterInHistory">,
+): NonNullable<BuildAgentOptions["lazyToolTransport"]> | undefined {
+  const transport =
+    options.lazyToolTransport ??
+    (options.agentConfig && options.toolRouterInHistory ? "generic_dispatch" : undefined);
+  if (!transport) return undefined;
+  const enabled =
+    transport === "codex_native" ? settings.codexToolSearchEnabled : settings.lazyToolSearchEnabled;
+  if (!enabled && !(options.agentConfig && options.toolRouterInHistory)) return undefined;
+  return transport;
+}
+
+/**
  * Install the explicitly resolved progressive-disclosure transport. The legacy
  * rollout flag remains only an on/off switch; provider selection never depends
  * on the unrelated sandbox structured-tool Boolean.
@@ -3976,13 +4007,8 @@ function maybeInstallLazyToolTransport(
   settings: Settings,
   options: BuildAgentOptions,
 ): void {
-  const transport =
-    options.lazyToolTransport ??
-    (options.agentConfig && options.toolRouterInHistory ? "generic_dispatch" : undefined);
+  const transport = lazyToolTransportFor(settings, options);
   if (!transport) return;
-  const enabled =
-    transport === "codex_native" ? settings.codexToolSearchEnabled : settings.lazyToolSearchEnabled;
-  if (!enabled && !(options.agentConfig && options.toolRouterInHistory)) return;
 
   const mcpServers = options.mcpServers ?? [];
   // Prepared servers use exact model-name mappings, not SDK lifecycle names

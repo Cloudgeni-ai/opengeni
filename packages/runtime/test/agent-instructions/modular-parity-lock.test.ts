@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { noneAgentCapabilities, type ResolvedAgentConfig } from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing/settings";
 import { inspectPersistentAgentInstructions, type BuildAgentOptions } from "../../src/index";
-import { MODULAR_PARITY_CASES } from "./modular-parity-cases";
+import { MODULAR_PARITY_CASES, PARITY_SETTINGS } from "./modular-parity-cases";
 
 /**
  * `length:sha256` of each case, recorded from the composer before the
@@ -120,12 +120,15 @@ const LOCKED: Record<string, string> = {
 };
 
 function digest(options: BuildAgentOptions): string {
-  const composed = inspectPersistentAgentInstructions(testSettings(), options).composed;
+  const composed = inspectPersistentAgentInstructions(
+    testSettings(PARITY_SETTINGS),
+    options,
+  ).composed;
   return `${composed.length}:${createHash("sha256").update(composed).digest("hex")}`;
 }
 
 function render(options: BuildAgentOptions): string {
-  return inspectPersistentAgentInstructions(testSettings(), options).composed;
+  return inspectPersistentAgentInstructions(testSettings(PARITY_SETTINGS), options).composed;
 }
 
 /** Every word of `smaller` appears in `larger`, in order: text was only removed. */
@@ -237,4 +240,29 @@ describe("an absent feature only omits its own text", () => {
       if (variant.pure) expect(isWordSubsequence(body(smaller), body(full))).toBe(true);
     });
   }
+});
+
+describe("tool discovery follows the router", () => {
+  const options = MODULAR_PARITY_CASES["all/none"]!;
+  test("no router without a transport or with tool search off", () => {
+    expect(render(options)).toContain("## Tool discovery");
+    const off = inspectPersistentAgentInstructions(
+      testSettings({ lazyToolSearchEnabled: false }),
+      options,
+    );
+    expect(off.composed).not.toContain("## Tool discovery");
+    const { lazyToolTransport: _transport, ...withoutTransport } = options;
+    expect(render(withoutTransport)).not.toContain("## Tool discovery");
+  });
+  test("a router already in history keeps its guidance", () => {
+    const { lazyToolTransport: _transport, ...withoutTransport } = options;
+    const kept = inspectPersistentAgentInstructions(
+      testSettings({ lazyToolSearchEnabled: false }),
+      {
+        ...withoutTransport,
+        toolRouterInHistory: true,
+      },
+    );
+    expect(kept.composed).toContain("## Tool discovery");
+  });
 });

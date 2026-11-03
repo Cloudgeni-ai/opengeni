@@ -20,6 +20,7 @@ import {
   FIRST_PARTY_MCP_TOOL_CAPABILITIES,
   FIRST_PARTY_MCP_TOOL_NAMES,
   FIRST_PARTY_IN_PROCESS_TOOL_NAMES,
+  AGENT_FUNCTION_TOOL_CAPABILITIES,
   allAgentCapabilities,
   noneAgentCapabilities,
   projectAgentEffectiveTools,
@@ -1630,3 +1631,73 @@ const INVENTORY = {
   },
   tools: { request_human_input: 2964 },
 };
+
+// Every tool the prompt names must be one the model can reach in that request:
+// in the tool list, or behind the search router when the router is there.
+describe("the prompt names only attached tools", () => {
+  // "remember" is also an English word in prose. The media module names the
+  // provider-dependent media tools on purpose: the capability permits
+  // discovering them, and it says an adapter may not be attached.
+  const NAMED_BY_DESIGN: ReadonlySet<string> = new Set([
+    "remember",
+    "generate_image",
+    "generate_video",
+    "get_video_generation_capabilities",
+    "image_generation",
+  ]);
+  const KNOWN_TOOLS = [
+    ...new Set([
+      ...FIRST_PARTY_MCP_TOOL_NAMES,
+      ...FIRST_PARTY_IN_PROCESS_TOOL_NAMES,
+      ...Object.keys(AGENT_FUNCTION_TOOL_CAPABILITIES),
+      "tool_search",
+      "tool_invoke",
+      "tool_list",
+      "web_search",
+    ]),
+  ].filter((tool) => !NAMED_BY_DESIGN.has(tool));
+  const named = (text: string, tool: string) =>
+    new RegExp(`(?:^|[^a-z0-9_]|__)${tool}(?![a-z0-9_])`, "u").test(text);
+  const bare = (name: string) => name.replace(/^(?:opengeni|interaction)__/u, "");
+  const cases: Array<[string, FixtureOptions]> = [
+    ["none, API turn", { agent: agentConfig("none"), humanRecipient: false, builtins: false }],
+    ["none, user turn", { agent: agentConfig("none"), builtins: false }],
+    [
+      "embedding profile",
+      {
+        agent: agentConfig("none"),
+        builtins: false,
+        eagerProduct: true,
+        hasSkills: false,
+        humanRecipient: false,
+      },
+    ],
+    ["all", { agent: agentConfig("all") }],
+    ["all, tool search on", { agent: agentConfig("all"), lazy: true }],
+    ...AGENT_CAPABILITY_IDS.map(
+      (id) =>
+        [
+          `none + ${id}`,
+          {
+            agent: agentConfig("none", id, id === "skills" ? "manage" : true),
+            humanRecipient: false,
+          },
+        ] as [string, FixtureOptions],
+    ),
+  ];
+  for (const [name, options] of cases) {
+    test(name, async () => {
+      const captured = await captureWorkerRequest(options);
+      const system = captured.request.systemInstructions ?? "";
+      const reachable = new Set([...captured.names, ...captured.deferredNames].map(bare));
+      const router = reachable.has("tool_search");
+      const missing = KNOWN_TOOLS.filter(
+        (tool) =>
+          named(system, tool) &&
+          !reachable.has(tool) &&
+          !(router && captured.catalog.entries.some((entry) => entry.identity.toolName === tool)),
+      );
+      expect(missing).toEqual([]);
+    });
+  }
+});

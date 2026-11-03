@@ -11,7 +11,8 @@ import type { BuildAgentOptions } from "../../src/index";
  * Configured compositions in which every feature a conditional section reads
  * is present: web search, goals, something to learn into, something that can
  * resume a wait, a readable Skill index, privacy facts, the search router and
- * a shared workspace. Their composed bytes were recorded before the
+ * a shared workspace, rendered with tool search on (`PARITY_SETTINGS`). Their
+ * composed bytes were recorded before the
  * pay-for-what-is-relevant gates existed, so a gate can only ever omit text
  * for an absent feature; it never changes a session that has the feature.
  */
@@ -68,6 +69,7 @@ function cases(): Record<string, BuildAgentOptions> {
       out[`${name}/${backend}`] = {
         agentConfig: configured(caps),
         activeSandboxBackend: backend,
+        lazyToolTransport: "generic_dispatch",
         ...extra,
       };
     }
@@ -91,14 +93,17 @@ function cases(): Record<string, BuildAgentOptions> {
   out["none-with-features/docker"] = {
     agentConfig: configured(capabilities("none", minimal)),
     activeSandboxBackend: "docker",
+    lazyToolTransport: "generic_dispatch",
   };
   out["none-with-features/selfhosted"] = {
     agentConfig: configured(capabilities("none", minimal)),
     activeSandboxBackend: "selfhosted",
+    lazyToolTransport: "generic_dispatch",
   };
   out["none-with-features-and-workspace/none"] = {
     agentConfig: configured(capabilities("none", { ...minimal, artifacts: true })),
     activeSandboxBackend: "none",
+    lazyToolTransport: "generic_dispatch",
   };
   out["none-with-features-manage/none"] = {
     agentConfig: configured(
@@ -110,8 +115,12 @@ function cases(): Record<string, BuildAgentOptions> {
       }),
     ),
     activeSandboxBackend: "none",
+    lazyToolTransport: "generic_dispatch",
   };
   return out;
 }
 
 export const MODULAR_PARITY_CASES: Record<string, BuildAgentOptions> = cases();
+
+/** Tool search is on, so the router exists whenever the case installs a transport. */
+export const PARITY_SETTINGS = { lazyToolSearchEnabled: true } as const;
