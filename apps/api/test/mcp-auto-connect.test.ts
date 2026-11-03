@@ -575,10 +575,21 @@ describe("auto-connect, outbound: Opengeni connects members to an outside MCP ap
         `/v1/organizations/${organizationId}/connectors/${connector.id}/auto-connect/test`,
         { method: "POST", headers: browser(owner.cookie) },
       );
-      expect(await tested.json()).toMatchObject({
+      const testedBody = (await tested.json()) as { generation: number };
+      expect(testedBody).toMatchObject({
         status: "connected",
         autoConnect: { verifiedAt: expect.any(String), lastError: null },
       });
+      // The returned generation is current: a change right after the test saves.
+      const afterTest = await app.request(
+        `/v1/organizations/${organizationId}/connectors/${connector.id}`,
+        {
+          method: "PATCH",
+          headers: browser(owner.cookie),
+          body: JSON.stringify({ expectedGeneration: testedBody.generation, status: "active" }),
+        },
+      );
+      expect(afterTest.status).toBe(200);
       expect(redeemed.at(-1)).toMatchObject({
         sub: owner.subjectId,
         email: owner.email,

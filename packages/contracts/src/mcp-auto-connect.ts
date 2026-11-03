@@ -259,11 +259,17 @@ export type OrganizationConnectorAutoConnect = z.infer<typeof OrganizationConnec
 /** Result of trying auto-connect as the admin who asks. */
 export const TestOrganizationConnectorAutoConnectResponse = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("status", [
-    z.object({ status: z.literal("connected"), autoConnect: OrganizationConnectorAutoConnect }),
+    z.object({
+      status: z.literal("connected"),
+      autoConnect: OrganizationConnectorAutoConnect,
+      /** The connector's generation after the outcome was saved. */
+      generation: primitives.positiveInteger,
+    }),
     z.object({
       status: z.literal("refused"),
       message: primitives.string,
       autoConnect: OrganizationConnectorAutoConnect,
+      generation: primitives.positiveInteger,
     }),
   ]),
 );

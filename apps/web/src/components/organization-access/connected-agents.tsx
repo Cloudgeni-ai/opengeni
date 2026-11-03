@@ -150,7 +150,7 @@ export function ConnectedAgents(props: ConnectedAgentsProps) {
     // Only owners and admins manage auto-connect; anyone else gets the plain "not here".
     const refused = connections !== null && !canManageAll;
     const listFailed = issuers.error !== null && issuers.list === null;
-    if (location.issuer === "new" && (refused || listFailed))
+    if (refused || listFailed)
       return (
         <DetailPage
           back={{ label: "Connected agents", onClick: () => onNavigate({}) }}
@@ -160,8 +160,16 @@ export function ConnectedAgents(props: ConnectedAgentsProps) {
             <EmptyState
               variant="page"
               icon={<BotIcon />}
-              title="Only owners and admins set up auto-connect"
-              description="Ask one of them to turn it on for your organization."
+              title={
+                location.issuer === "new"
+                  ? "Only owners and admins set up auto-connect"
+                  : "Only owners and admins manage auto-connect"
+              }
+              description={
+                location.issuer === "new"
+                  ? "Ask one of them to turn it on for your organization."
+                  : "Ask one of them to change it."
+              }
             />
           ) : (
             <ErrorMessage
@@ -207,6 +215,10 @@ export function ConnectedAgents(props: ConnectedAgentsProps) {
         workspacesError={props.workspacesError}
         onRetryWorkspaces={props.onRetryWorkspaces}
         onClose={() => onNavigate({})}
+        onRefresh={() => {
+          void issuers.refresh();
+          void refresh();
+        }}
         onSaved={(next) => {
           issuers.accept(next);
           // Access and on/off apply to every agent it connected.

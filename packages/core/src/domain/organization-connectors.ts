@@ -421,9 +421,10 @@ export async function testOrganizationConnectorAutoConnect(
   );
   const view = organizationConnectorAutoConnectView(input.settings, updated ?? current);
   if (!view) throw new HTTPException(409, { message: "This connector changed; reload it" });
+  const generation = (updated ?? current).generation;
   return attempt.status === "connected"
-    ? { status: "connected" as const, autoConnect: view }
-    : { status: "refused" as const, message: attempt.message, autoConnect: view };
+    ? { status: "connected" as const, autoConnect: view, generation }
+    : { status: "refused" as const, message: attempt.message, autoConnect: view, generation };
 }
 
 /**

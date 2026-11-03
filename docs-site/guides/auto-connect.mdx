@@ -22,7 +22,11 @@ Owners and admins set it up. Members don't need to do anything.
 
 ## Connect Claude to Opengeni
 
-You need to be an owner or admin in Opengeni and in Claude.
+You need to be an owner or admin in Opengeni and an Owner or Primary Owner in
+Claude. If your Claude organization signs in through Okta, Claude-issued
+auto-connect isn't available there: follow
+[Connect through your identity provider](#connect-through-your-identity-provider)
+and choose **IdP-managed** in Claude.
 
 <Steps>
   <Step title="Start in Opengeni">
@@ -31,8 +35,8 @@ You need to be an owner or admin in Opengeni and in Claude.
   </Step>
   <Step title="Add Opengeni to Claude">
     In Claude's organization settings, add a custom connector with the **Server URL**. Open the
-    connector and set up **Managed authorization**, choose **Claude-issued**, and enter the **Tenant
-    ID**.
+    connector, click **Set up** on its **Managed authorization** row, choose **Claude-issued**, and
+    enter the **Tenant ID**.
   </Step>
   <Step title="Trust Claude's issuer">
     Claude then shows an **Issuer URL**, unique to your Claude organization. Paste it into **Issuer
@@ -40,7 +44,7 @@ You need to be an owner or admin in Opengeni and in Claude.
   </Step>
   <Step title="Choose access and turn it on">
     Choose what each person's agent can do and in which workspaces, then **Turn on auto-connect**.
-    Back in Claude, run the connector's test.
+    Back in Claude, click **Run test** under **Connection status**.
   </Step>
 </Steps>
 
@@ -95,7 +99,7 @@ organization connector can connect every member automatically:
   <Step title="Trust Opengeni in the app">
     The connector's page shows your organization's **Issuer URL** and Opengeni's **Client ID**.
     Enter them in the app's settings for trusted (ID-JAG) issuers. If the app gave you its own
-    client ID for Opengeni, enter that in Opengeni instead.
+    client ID for Opengeni, choose **Change** under **Client ID** and enter it.
   </Step>
   <Step title="Test it">
     Choose **Test as you**. Opengeni connects you without saving anything and shows the app's answer

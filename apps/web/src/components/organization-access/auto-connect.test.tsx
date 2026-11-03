@@ -427,6 +427,108 @@ describe("auto-connect on Connected agents", () => {
     }
   });
 
+  test("a failed issuer check can be run again, and submitting asks again", async () => {
+    const { api, calls } = fakeAutoConnect([]);
+    let reachable = false;
+    const flaky: AutoConnectApi = {
+      ...api,
+      check: async (request) => {
+        // The fake records the call; an unreachable issuer is recorded here.
+        if (!reachable) {
+          calls.push({ method: "check", args: [request] });
+          throw new Error("socket hang up");
+        }
+        return await api.check(request);
+      },
+    };
+    const view = await mount({ issuers: flaky, start: { issuer: "new" } });
+    try {
+      const field = view.container.querySelector<HTMLInputElement>(
+        'input[placeholder^="https://identity.anthropic.com"]',
+      )!;
+      await type(field, CLAUDE_URL);
+      await waitFor(() => view.text().includes("Check again"));
+      const failedChecks = calls.filter((call) => call.method === "check").length;
+      reachable = true;
+      await click(button(view.container, "Check again"));
+      await waitFor(() => view.text().includes("Found 2 signing keys."));
+      expect(calls.filter((call) => call.method === "check").length).toBe(failedChecks + 1);
+      expect(view.text()).not.toContain("Check again");
+
+      // Failing again, Turn on auto-connect checks once more before refusing.
+      reachable = false;
+      await type(field, `${CLAUDE_URL}x`);
+      await waitFor(() => view.text().includes("Check again"));
+      const before = calls.filter((call) => call.method === "check").length;
+      reachable = true;
+      await type(field, CLAUDE_URL);
+      await submit(view.container);
+      await waitFor(() => calls.some((call) => call.method === "create"));
+      expect(calls.filter((call) => call.method === "check").length).toBeGreaterThan(before);
+      expect(calls.some((call) => call.method === "create")).toBe(true);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("an issuer that can't be loaded says so and offers to try again", async () => {
+    const { api } = fakeAutoConnect([issuer()]);
+    let failing = true;
+    const view = await mount({
+      issuers: {
+        ...api,
+        list: async () => {
+          if (failing) throw new Error("Network error");
+          return await api.list();
+        },
+      },
+      start: { issuer: ISSUER_ID },
+    });
+    try {
+      expect(view.text()).toContain("Couldn't load auto-connect.");
+      expect(view.text()).not.toContain("This issuer isn't here");
+      failing = false;
+      await click(button(view.container, "Try again"));
+      expect(view.text()).toContain("Recent attempts");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("Refresh updates the issuer's status with its recent attempts", async () => {
+    const { api, calls } = fakeAutoConnect([issuer({ connectedPeople: 0, lastConnectedAt: null })]);
+    let connected = false;
+    const view = await mount({
+      issuers: {
+        ...api,
+        list: async () => {
+          const list = await api.list();
+          return connected
+            ? {
+                ...list,
+                trustedIssuers: list.trustedIssuers.map((each) => ({
+                  ...each,
+                  connectedPeople: 1,
+                  lastConnectedAt: at,
+                })),
+              }
+            : list;
+        },
+      },
+      start: { issuer: ISSUER_ID },
+    });
+    try {
+      expect(view.text()).toContain("Waiting for the first connection");
+      connected = true;
+      const lists = calls.filter((call) => call.method === "list").length;
+      await click(button(view.container, "Refresh"));
+      expect(calls.filter((call) => call.method === "list").length).toBeGreaterThan(lists);
+      expect(view.text()).not.toContain("Waiting for the first connection");
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("an auto-connected agent's access is set by its issuer", async () => {
     const { api } = fakeAutoConnect([issuer()]);
     const view = await mount({

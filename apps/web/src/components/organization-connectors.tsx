@@ -361,12 +361,18 @@ export function OrganizationConnectors({
         onNavigate({ kind: "connector", connectorId: connector.id, view: "replace-key" })
       }
       onSetStatus={(status) => update({ status })}
+      onChangeAutoConnectClientId={(autoConnectClientId) => update({ autoConnectClientId })}
       onTestAutoConnect={async () => {
         const result = await client.testOrganizationConnectorAutoConnect(
           organizationId,
           connector.id,
         );
-        state.accept({ ...connector, autoConnect: result.autoConnect });
+        // The saved outcome moves the generation; later changes send the new one.
+        state.accept({
+          ...connector,
+          autoConnect: result.autoConnect,
+          generation: result.generation,
+        });
         return result;
       }}
       onRemove={async () => {
@@ -661,16 +667,20 @@ type AutoConnectCheck =
 function useAutoConnectCheck(
   target: CheckOrganizationConnectorAutoConnectRequest | null,
   check: (request: CheckOrganizationConnectorAutoConnectRequest) => Promise<AutoConnectSupport>,
-): AutoConnectCheck {
-  const key = target ? JSON.stringify(target) : null;
+): { check: AutoConnectCheck; retry: () => void } {
+  const [attempt, setAttempt] = useState(0);
+  const key = target ? JSON.stringify({ ...target, attempt }) : null;
   const [state, setState] = useState<{ key: string | null; check: AutoConnectCheck }>({
     key: null,
     check: { status: "idle" },
   });
+  const retry = useCallback(() => setAttempt((current) => current + 1), []);
   useEffect(() => {
     if (!key) return;
     let live = true;
-    const request = JSON.parse(key) as CheckOrganizationConnectorAutoConnectRequest;
+    const { attempt: _attempt, ...request } = JSON.parse(
+      key,
+    ) as CheckOrganizationConnectorAutoConnectRequest & { attempt: number };
     const timer = setTimeout(
       () => {
         setState({ key, check: { status: "checking" } });
@@ -690,8 +700,8 @@ function useAutoConnectCheck(
       clearTimeout(timer);
     };
   }, [key, check]);
-  if (!key) return { status: "idle" };
-  return state.key === key ? state.check : { status: "checking" };
+  if (!key) return { check: { status: "idle" }, retry };
+  return { check: state.key === key ? state.check : { status: "checking" }, retry };
 }
 
 function sentence(text: string): string {
@@ -699,14 +709,20 @@ function sentence(text: string): string {
 }
 
 /** Why "Connect everyone automatically" can't be chosen yet, or null. */
-export function autoConnectUnavailableReason(check: AutoConnectCheck, name: string): string | null {
+export function autoConnectUnavailableReason(
+  check: AutoConnectCheck,
+  name: string,
+  source: "catalog" | "custom" = "custom",
+): string | null {
   switch (check.status) {
     case "idle":
-      return "Enter the server's address first.";
+      return source === "catalog"
+        ? "Choose a connector first."
+        : "Enter the server's address first.";
     case "checking":
       return `Checking whether ${name} supports it…`;
     case "failed":
-      return `Couldn't check ${name}. Try again in a moment.`;
+      return `Couldn't check ${name}.`;
     case "done":
       if (check.support.supported) return null;
       return sentence(check.support.reason ?? `${name} doesn't support auto-connect yet`);
@@ -784,11 +800,19 @@ function NewConnectorPage({
           : null,
     [source, item?.id, item?.authKind, endpointUrl],
   );
-  const autoConnect = useAutoConnectCheck(autoConnectTarget, onCheckAutoConnect);
+  const { check: autoConnect, retry: retryAutoConnect } = useAutoConnectCheck(
+    autoConnectTarget,
+    onCheckAutoConnect,
+  );
   const serverName =
     source === "catalog" ? (item?.name ?? "the server") : name.trim() || "the server";
   const autoConnectReason =
-    choices.allowed.auto_connect ?? autoConnectUnavailableReason(autoConnect, serverName);
+    choices.allowed.auto_connect ??
+    autoConnectUnavailableReason(
+      autoConnect,
+      serverName,
+      source === "catalog" ? "catalog" : "custom",
+    );
   const autoConnectSupport = autoConnect.status === "done" ? autoConnect.support : null;
   const needsClientId =
     login === "auto_connect" &&
@@ -1137,6 +1161,17 @@ function NewConnectorPage({
             />
           </ChoiceCards>
         )}
+        {source !== "api" && autoConnect.status === "failed" ? (
+          <Button
+            type="button"
+            variant="link"
+            size="sm"
+            className="-mt-2 h-auto self-start px-0 text-xs font-medium underline underline-offset-4"
+            onClick={retryAutoConnect}
+          >
+            Check auto-connect again
+          </Button>
+        ) : null}
         {needsClientId ? (
           <Field
             label="Client ID"
@@ -1199,6 +1234,7 @@ function ConnectorPage({
   onReplaceKey,
   onSetStatus,
   onTestAutoConnect,
+  onChangeAutoConnectClientId,
   onRemove,
 }: {
   connector: OrganizationConnector;
@@ -1209,6 +1245,8 @@ function ConnectorPage({
   onReplaceKey: () => void;
   onSetStatus: (status: OrganizationConnector["status"]) => Promise<void>;
   onTestAutoConnect: () => Promise<TestOrganizationConnectorAutoConnectResponse>;
+  /** A client ID the app gave Opengeni, or null for Opengeni's own document. */
+  onChangeAutoConnectClientId: (clientId: string | null) => Promise<void>;
   onRemove: () => Promise<void>;
 }) {
   const [removing, setRemoving] = useState(false);
@@ -1324,6 +1362,7 @@ function ConnectorPage({
             setup={connector.autoConnect}
             organizationName={organizationName}
             onTest={onTestAutoConnect}
+            onChangeClientId={onChangeAutoConnectClientId}
           />
         ) : null}
         <DetailSection title="In each workspace">
@@ -1374,14 +1413,37 @@ export function AutoConnectSetup({
   setup,
   organizationName,
   onTest,
+  onChangeClientId,
 }: {
   name: string;
   setup: NonNullable<OrganizationConnector["autoConnect"]>;
   organizationName: string;
   onTest: () => Promise<TestOrganizationConnectorAutoConnectResponse>;
+  onChangeClientId: (clientId: string | null) => Promise<void>;
 }) {
   const [testing, setTesting] = useState(false);
   const [testError, setTestError] = useState<string | null>(null);
+  /** The client ID being typed, or null while it isn't being changed. */
+  const [editingClientId, setEditingClientId] = useState<string | null>(null);
+  const [clientIdError, setClientIdError] = useState<string | null>(null);
+  const [savingClientId, setSavingClientId] = useState(false);
+  const saveClientId = () => {
+    const next = editingClientId?.trim() ?? "";
+    if (next.length > 512) {
+      setClientIdError("That client ID is too long.");
+      return;
+    }
+    if (next === setup.clientId) {
+      setEditingClientId(null);
+      return;
+    }
+    setSavingClientId(true);
+    setClientIdError(null);
+    onChangeClientId(next || null)
+      .then(() => setEditingClientId(null))
+      .catch((caught: unknown) => setClientIdError(userErrorText(caught)))
+      .finally(() => setSavingClientId(false));
+  };
   const failedAt = setup.lastError ? Date.parse(setup.lastError.at) : null;
   const verifiedAt = setup.verifiedAt ? Date.parse(setup.verifiedAt) : null;
   const state =
@@ -1414,9 +1476,70 @@ export function AutoConnectSetup({
           <Field label="Issuer URL" hint={`Paste this into ${name}'s trusted issuer setting.`}>
             <CopyField value={setup.issuer} label="issuer URL" variant="field" size="md" />
           </Field>
-          <Field label="Client ID" hint={`Opengeni's client ID at ${name}, if it asks for one.`}>
-            <CopyField value={setup.clientId} label="client ID" variant="field" size="md" />
-          </Field>
+          {editingClientId === null ? (
+            <Field
+              label="Client ID"
+              hint={
+                <>
+                  Opengeni's client ID at {name}, if it asks for one.{" "}
+                  <Button
+                    type="button"
+                    variant="link"
+                    size="sm"
+                    className="h-auto px-0 text-xs font-medium underline underline-offset-4"
+                    onClick={() => {
+                      setClientIdError(null);
+                      setEditingClientId(setup.clientId);
+                    }}
+                  >
+                    Change
+                  </Button>
+                </>
+              }
+            >
+              <CopyField value={setup.clientId} label="client ID" variant="field" size="md" />
+            </Field>
+          ) : (
+            <div className="flex min-w-0 flex-col gap-3">
+              <Field
+                label="Client ID"
+                hint={`The client ID ${name} gave Opengeni. Leave it empty to use Opengeni's own.`}
+                error={clientIdError ?? undefined}
+              >
+                <TextInput
+                  value={editingClientId}
+                  onChange={(event) => {
+                    setEditingClientId(event.target.value);
+                    setClientIdError(null);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      saveClientId();
+                    }
+                  }}
+                  mono
+                  suppressAutofill
+                  spellCheck={false}
+                  autoFocus
+                />
+              </Field>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button type="button" size="sm" disabled={savingClientId} onClick={saveClientId}>
+                  {savingClientId ? "Saving…" : "Save"}
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  disabled={savingClientId}
+                  onClick={() => setEditingClientId(null)}
+                >
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          )}
         </FieldStack>
         {testError ? (
           <ErrorMessage variant="inline" title="Couldn't run the test." announce>

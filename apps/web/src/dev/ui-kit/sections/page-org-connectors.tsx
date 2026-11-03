@@ -312,8 +312,9 @@ function fakeClient(initial: OrganizationConnector[]): OpenGeniBrowserClient {
         verifiedAt: new Date().toISOString(),
         lastError: null,
       };
-      rows = rows.map((row) => (row.id === id ? { ...row, autoConnect } : row));
-      return { status: "connected", autoConnect };
+      const generation = current.generation + 1;
+      rows = rows.map((row) => (row.id === id ? { ...row, autoConnect, generation } : row));
+      return { status: "connected", autoConnect, generation };
     },
     listCapabilities: async () => ({ items: CATALOG }),
     catalogAssetUrl: () => null,

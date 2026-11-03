@@ -30072,9 +30072,11 @@
         "$": "union=[\"status=connected\",\"status=refused\"]",
         "$|status=connected": "object",
         "$|status=connected.autoConnect": "ref(OrganizationConnectorAutoConnect)!",
+        "$|status=connected.generation": "integer!",
         "$|status=connected.status": "const!=[\"\\\"connected\\\"\"]",
         "$|status=refused": "object",
         "$|status=refused.autoConnect": "ref(OrganizationConnectorAutoConnect)!",
+        "$|status=refused.generation": "integer!",
         "$|status=refused.message": "string!",
         "$|status=refused.status": "const!=[\"\\\"refused\\\"\"]"
       }

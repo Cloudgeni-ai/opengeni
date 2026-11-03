@@ -161,7 +161,7 @@ const PROVIDERS: Record<
   okta: {
     label: "Okta",
     kind: "Okta",
-    description: "People who sign in to their AI app through Okta.",
+    description: "People who sign in to Claude or another AI app through Okta.",
     placeholder: "https://example.okta.com",
   },
   other: {
@@ -476,7 +476,11 @@ function useIssuerCheck(
   api: AutoConnectApi,
   issuer: string,
   jwksUri: string,
-): { check: IssuerCheck; now: () => Promise<CheckMcpTrustedIssuerResponse | null> } {
+): {
+  check: IssuerCheck;
+  now: () => Promise<CheckMcpTrustedIssuerResponse | null>;
+  retry: () => void;
+} {
   const key = isIssuerUrl(issuer)
     ? JSON.stringify({ issuer, jwksUri: isIssuerUrl(jwksUri) ? jwksUri : null })
     : null;
@@ -517,14 +521,20 @@ function useIssuerCheck(
     : state.key === key
       ? state.check
       : { status: "checking" };
+  // A failed check may have been the issuer's hiccup: submitting asks again.
   const now = useCallback(async () => {
     if (!key) return null;
-    if (state.key === key && state.check.status === "done") return state.check.result;
+    if (state.key === key && state.check.status === "done" && state.check.result.status === "ok")
+      return state.check.result;
+    setState({ key, check: { status: "checking" } });
     const result = await run(JSON.parse(key) as CheckMcpTrustedIssuerRequest);
     setState({ key, check: { status: "done", result } });
     return result;
   }, [key, run, state]);
-  return { check, now };
+  const retry = useCallback(() => {
+    void now();
+  }, [now]);
+  return { check, now, retry };
 }
 
 function keysFoundText(result: Extract<CheckMcpTrustedIssuerResponse, { status: "ok" }>): string {
@@ -633,7 +643,7 @@ export function AutoConnectSetupPage({
   const [errors, setErrors] = useState<Partial<Record<string, string>>>({});
   const [formError, setFormError] = useState<ReactNode>(null);
   const trimmedIssuer = issuer.trim();
-  const { check, now } = useIssuerCheck(api, trimmedIssuer, jwksUri.trim());
+  const { check, now, retry } = useIssuerCheck(api, trimmedIssuer, jwksUri.trim());
   const blocked = policyBlockedReason(policy);
   const clear = (key: string) =>
     setErrors((current) => {
@@ -658,9 +668,20 @@ export function AutoConnectSetupPage({
     );
   const issuerError =
     errors.issuer ??
-    (check.status === "done" && check.result.status === "failed"
-      ? check.result.message
-      : undefined);
+    (check.status === "done" && check.result.status === "failed" ? (
+      <>
+        {check.result.message}{" "}
+        <Button
+          type="button"
+          variant="link"
+          size="sm"
+          className="h-auto px-0 text-xs font-medium underline underline-offset-4"
+          onClick={retry}
+        >
+          Check again
+        </Button>
+      </>
+    ) : undefined);
 
   return (
     <FlushFormPage
@@ -686,12 +707,10 @@ export function AutoConnectSetupPage({
         if (apps.length > 20) next.clientIds = "Allow at most 20 apps.";
         if (apps.some((each) => each.length > 256)) next.clientIds = "A client ID is too long.";
         if (blocked) next.access = blocked;
-        if (Object.keys(next).length === 0) {
-          const result = await now();
-          if (result?.status === "failed") next.issuer = result.message;
-        }
         setErrors(next);
         if (Object.keys(next).length > 0) return false;
+        // The check's own message (with Check again) says why it can't be trusted.
+        if ((await now())?.status === "failed") return false;
         try {
           const created = await api.create({
             name:
@@ -868,6 +887,7 @@ export function TrustedIssuerPage({
   workspacesError,
   onRetryWorkspaces,
   onClose,
+  onRefresh,
   onSaved,
   onRemoved,
 }: {
@@ -881,6 +901,8 @@ export function TrustedIssuerPage({
   workspacesError?: boolean | undefined;
   onRetryWorkspaces?: (() => void) | undefined;
   onClose: () => void;
+  /** Loads the issuer's summary again: people connected, last connected, status. */
+  onRefresh: () => void;
   onSaved: (next: McpTrustedIssuer) => void;
   onRemoved: (id: string) => void;
 }) {
@@ -897,7 +919,7 @@ export function TrustedIssuerPage({
             variant="page"
             icon={<KeyRoundIcon />}
             title="This issuer isn't here"
-            description="It was removed, or you can't see it. Owners and admins manage auto-connect."
+            description="It may have been removed."
           />
         )}
       </DetailPage>
@@ -914,6 +936,7 @@ export function TrustedIssuerPage({
       workspacesError={workspacesError}
       onRetryWorkspaces={onRetryWorkspaces}
       onClose={onClose}
+      onRefresh={onRefresh}
       onSaved={onSaved}
       onRemoved={onRemoved}
     />
@@ -930,6 +953,7 @@ function LoadedTrustedIssuerPage({
   workspacesError,
   onRetryWorkspaces,
   onClose,
+  onRefresh,
   onSaved,
   onRemoved,
 }: {
@@ -942,6 +966,7 @@ function LoadedTrustedIssuerPage({
   workspacesError?: boolean | undefined;
   onRetryWorkspaces?: (() => void) | undefined;
   onClose: () => void;
+  onRefresh: () => void;
   onSaved: (next: McpTrustedIssuer) => void;
   onRemoved: (id: string) => void;
 }) {
@@ -955,7 +980,11 @@ function LoadedTrustedIssuerPage({
   const [statusPending, setStatusPending] = useState(false);
   const [removing, setRemoving] = useState(false);
   const events = useIssuerEvents(api, issuer.id, issuer.updatedAt);
+  // A saved change resets the form; a refresh of the same settings keeps edits.
+  const applied = useRef(issuer.updatedAt);
   useEffect(() => {
+    if (applied.current === issuer.updatedAt) return;
+    applied.current = issuer.updatedAt;
     setPolicy(issuer.access);
     setClientIds((issuer.allowedClientIds ?? []).join("\n"));
     setJwksUri(issuer.jwksUri ?? "");
@@ -1140,7 +1169,16 @@ function LoadedTrustedIssuerPage({
         <DetailSection
           title="Recent attempts"
           description="Each new connection and each refusal, newest first."
-          action={<RowButton onClick={() => void events.refresh()}>Refresh</RowButton>}
+          action={
+            <RowButton
+              onClick={() => {
+                void events.refresh();
+                onRefresh();
+              }}
+            >
+              Refresh
+            </RowButton>
+          }
         >
           <IssuerEvents
             events={events.events}
