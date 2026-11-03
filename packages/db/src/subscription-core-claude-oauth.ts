@@ -115,11 +115,14 @@ export function claudeRefreshedCredential(
 }
 
 /**
- * The plan a renewed Claude sign-in reports, from the profile endpoint:
+ * The plan a Claude sign-in reports at renewal, from the profile endpoint:
  * Claude's token refresh reports none, so a plan change (or the Max tier,
  * Max or Ultra) shows after the next renewal instead of only on a new
  * sign-in. Optional: without the `user:profile` scope, or on any failure, it
- * is null and the recorded plan stays. Never throws.
+ * is null and the recorded plan stays. A Max plan whose tier the profile
+ * doesn't name is null too, so an unresolved read never replaces a known
+ * tier (a plan change also clears the connection's model cooldowns). Never
+ * throws; its deadline bounds how long the renewal waits for it.
  */
 export async function requestClaudeProfilePlan(
   token: string,
@@ -128,7 +131,7 @@ export async function requestClaudeProfilePlan(
 ): Promise<string | null> {
   if (!scopes.includes("user:profile")) return null;
   try {
-    const signal = AbortSignal.timeout(5_000);
+    const signal = AbortSignal.timeout(3_000);
     const response = await fetchImpl(CLAUDE_OAUTH_PROFILE_URL, {
       headers: { authorization: `Bearer ${token}`, accept: "application/json" },
       redirect: "error",
@@ -138,9 +141,10 @@ export async function requestClaudeProfilePlan(
       await response.body?.cancel().catch(() => undefined);
       return null;
     }
-    return claudeSubscriptionProfilePlan(
+    const plan = claudeSubscriptionProfilePlan(
       await readResponseJsonBounded<unknown>(response, 64 * 1024, "Claude profile", { signal }),
     );
+    return plan === "claude_max" ? null : plan;
   } catch {
     return null;
   }

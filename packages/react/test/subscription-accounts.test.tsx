@@ -9,7 +9,10 @@ import {
   subscriptionWindowLabel,
   subscriptionWindows,
 } from "../src/app/lib/subscription-accounts";
-import { SubscriptionUsageWindows } from "../src/app/components/models/subscription-usage";
+import {
+  SubscriptionUsageWindows,
+  subscriptionUsageReadings,
+} from "../src/app/components/models/subscription-usage";
 
 // One adapter per provider feeds the one shared display: plans by the names
 // the providers sell them under today, and only the windows each reports.
@@ -104,6 +107,43 @@ describe("windows", () => {
       reached: true,
       until: NOW + HOUR,
       near: false,
+    });
+  });
+});
+
+describe("model-scoped weeks", () => {
+  test("a spent Fable week limits only Fable: the account stays available, near its limit", () => {
+    const windows = subscriptionWindows(
+      "claude",
+      [
+        { id: "seven_day", usedPercent: 30, resetsAt: NOW + 72 * HOUR },
+        { id: "seven_day_fable", usedPercent: 100, resetsAt: NOW + 30 * HOUR },
+        { id: "seven_day_haiku", usedPercent: 100, resetsAt: NOW + 30 * HOUR },
+      ],
+      NOW,
+    );
+    expect(windows.map((window) => [window.label, window.limitReached, window.scoped])).toEqual([
+      ["Week", false, false],
+      ["Fable week", true, true],
+      ["Haiku week", true, true],
+    ]);
+    expect(subscriptionLimit(windows, null, NOW)).toEqual({
+      reached: false,
+      until: null,
+      near: true,
+    });
+  });
+
+  test("the account page meter reads a refused window as 0% left", () => {
+    const [refused] = subscriptionWindows(
+      "claude",
+      [{ id: "seven_day", usedPercent: 60, resetsAt: NOW + HOUR, status: "exhausted" }],
+      NOW,
+    );
+    expect(subscriptionUsageReadings([refused!], NOW)[0]).toMatchObject({
+      label: "Week",
+      percent: 0,
+      limitReached: true,
     });
   });
 });

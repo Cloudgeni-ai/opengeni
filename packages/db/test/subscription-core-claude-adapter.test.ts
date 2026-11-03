@@ -72,15 +72,27 @@ const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
 /** A scripted OAuth token endpoint; each call consumes the next reply. */
-function scriptedTokenEndpoint(replies: Array<() => Response>) {
+/**
+ * The token endpoint answers `replies` in order; the profile endpoint (read
+ * at renewal for the plan) answers `profileReplies`, else 404.
+ */
+function scriptedTokenEndpoint(
+  replies: Array<() => Response>,
+  profileReplies: Array<() => Response> = [],
+) {
   const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+  const profileCalls: Array<{ authorization: string | null }> = [];
   const fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    if (String(input) === CLAUDE_OAUTH_PROFILE_URL) {
+      profileCalls.push({ authorization: new Headers(init?.headers).get("authorization") });
+      return profileReplies.shift()?.() ?? json(404, { error: "not_found" });
+    }
     calls.push({ url: String(input), body: JSON.parse(String(init?.body ?? "{}")) });
     const next = replies.shift();
     if (!next) throw new Error("unexpected token call");
     return next();
   }) as unknown as typeof globalThis.fetch;
-  return { calls, fetch };
+  return { calls, profileCalls, fetch };
 }
 
 describe("Claude adapter", () => {
@@ -227,34 +239,38 @@ describe("Claude adapter", () => {
   });
 
   test("the OAuth refresh rotates the token pair and keeps the identity", async () => {
-    const endpoint = scriptedTokenEndpoint([
-      () =>
-        json(200, {
-          access_token: "sk-ant-oat01-access-two",
-          refresh_token: "refresh-two",
-          expires_in: 3600,
-          scope: "user:inference user:profile",
-        }),
-      // The renewed token reads the plan from the profile: the Max tier
-      // tells Max (5x) from Ultra (20x).
-      () =>
-        json(200, {
-          account: { uuid: identity.accountUuid, has_claude_max: true },
-          organization: {
-            organization_type: "claude_max",
-            rate_limit_tier: "default_claude_max_20x",
-          },
-        }),
-      // A response without a refresh token keeps the current one.
-      () =>
-        json(200, {
-          access_token: "sk-ant-oat01-access-three",
-          expires_in: 7200,
-          scope: "user:profile user:inference",
-        }),
-      // A profile outage never fails the renewal: the recorded plan stays.
-      () => json(503, { error: "unavailable" }),
-    ]);
+    const endpoint = scriptedTokenEndpoint(
+      [
+        () =>
+          json(200, {
+            access_token: "sk-ant-oat01-access-two",
+            refresh_token: "refresh-two",
+            expires_in: 3600,
+            scope: "user:inference user:profile",
+          }),
+        // A response without a refresh token keeps the current one.
+        () =>
+          json(200, {
+            access_token: "sk-ant-oat01-access-three",
+            expires_in: 7200,
+            scope: "user:profile user:inference",
+          }),
+      ],
+      [
+        // The renewal reads the plan from the profile: the Max tier tells Max
+        // (5x) from Ultra (20x).
+        () =>
+          json(200, {
+            account: { uuid: identity.accountUuid, has_claude_max: true },
+            organization: {
+              organization_type: "claude_max",
+              rate_limit_tier: "default_claude_max_20x",
+            },
+          }),
+        // A profile outage never fails the renewal: the recorded plan stays.
+        () => json(503, { error: "unavailable" }),
+      ],
+    );
     const now = Date.parse("2026-10-11T09:59:30.000Z");
     const { adapter } = subscriptionCoreClaudeProvider({ fetch: endpoint.fetch, now: () => now });
     const first = await adapter.refresh!.rotate(oauthCredential);
@@ -278,15 +294,54 @@ describe("Claude adapter", () => {
     expect(second.planType).toBeNull();
     expect(endpoint.calls.map((call) => call.url)).toEqual([
       CLAUDE_OAUTH_TOKEN_URL,
-      CLAUDE_OAUTH_PROFILE_URL,
       CLAUDE_OAUTH_TOKEN_URL,
-      CLAUDE_OAUTH_PROFILE_URL,
     ]);
     expect(endpoint.calls[0]!.body).toMatchObject({
       grant_type: "refresh_token",
       refresh_token: "refresh-one",
     });
-    expect(endpoint.calls[2]!.body).toMatchObject({ refresh_token: "refresh-two" });
+    expect(endpoint.calls[1]!.body).toMatchObject({ refresh_token: "refresh-two" });
+    // The profile is read with the token being replaced, before the refresh:
+    // once the refresh token rotates, nothing may delay persisting it.
+    expect(endpoint.profileCalls).toEqual([
+      { authorization: "Bearer sk-ant-oat01-access-one" },
+      { authorization: "Bearer sk-ant-oat01-access-two" },
+    ]);
+  });
+
+  test("an unresolved Max tier or a token without the profile scope keeps the recorded plan", async () => {
+    const refresh = () =>
+      json(200, {
+        access_token: "sk-ant-oat01-access-two",
+        refresh_token: "refresh-two",
+        expires_in: 3600,
+        scope: "user:inference user:profile",
+      });
+    const endpoint = scriptedTokenEndpoint(
+      [refresh, refresh, refresh],
+      [
+        () =>
+          json(200, {
+            account: { uuid: identity.accountUuid },
+            organization: { organization_type: "claude_max" },
+          }),
+        () =>
+          json(200, {
+            account: { uuid: identity.accountUuid },
+            organization: { organization_type: "claude_pro" },
+          }),
+      ],
+    );
+    const { adapter } = subscriptionCoreClaudeProvider({ fetch: endpoint.fetch });
+    // A bare claude_max never replaces a known tier.
+    expect((await adapter.refresh!.rotate(oauthCredential)).planType).toBeNull();
+    expect((await adapter.refresh!.rotate(oauthCredential)).planType).toBe("claude_pro");
+    const noScope = await adapter.refresh!.rotate({
+      ...oauthCredential,
+      oauth: { ...oauthCredential.oauth!, scopes: ["user:inference"] },
+    });
+    expect(noScope.planType).toBeNull();
+    expect(endpoint.profileCalls).toHaveLength(2);
   });
 
   test("a revoked grant is a relogin; other refresh failures are not", async () => {

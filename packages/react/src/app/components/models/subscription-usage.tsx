@@ -136,7 +136,8 @@ export function subscriptionUsageReadings(
 ): UsageWindowReading[] {
   return windows.map((window) => ({
     label: window.label,
-    percent: window.leftPercent,
+    // A refused window reads 0% left, as the menu says it, whatever its share.
+    percent: window.limitReached && window.leftPercent !== null ? 0 : window.leftPercent,
     ...(window.limitReached ? { limitReached: true } : {}),
     ...(window.resetPassed || (window.extra && window.limitReached)
       ? { valueLabel: subscriptionWindowValue(window) }

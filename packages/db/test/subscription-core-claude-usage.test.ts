@@ -35,6 +35,12 @@ import {
   type SubscriptionCoreClaudeUsageReading,
   type SubscriptionCoreClaudeUsageRow,
 } from "../src/subscription-core-claude-usage";
+import {
+  subscriptionCoreOperations,
+  subscriptionCoreUsageMergeOptions,
+} from "../src/subscription-core/operations";
+import { decodeSubscriptionQuota } from "../src/subscription-core-repository";
+import { quotaCapacity } from "@opengeni/subscriptions";
 
 const realFetch = globalThis.fetch;
 const denied: string[] = [];
@@ -345,6 +351,101 @@ describe("early reset: availability and the claimed blocks a reading ends", () =
     ]) {
       expect(subscriptionCoreClaudeUsageConfirmsAvailability(response)).toBe(false);
     }
+  });
+
+  describe("through the quota merge", () => {
+    const models = ["organization-claude-subscription/claude-opus-5-5"];
+    const future = (hours: number) => new Date(Date.now() + hours * 3_600_000).toISOString();
+    /** The stored quota after a refusal claimed on `claim`, observed a minute ago. */
+    const refusedRow = (claim: "five_hour" | "seven_day") => {
+      const refusedAt = new Date(Date.now() - 60_000);
+      const reset = String(Math.floor(refusedAt.getTime() / 1000) + 7_200);
+      const prefix = claim === "five_hour" ? "5h" : "7d";
+      const observation = parseClaudeUsageHeaders(
+        new Headers({
+          "anthropic-ratelimit-unified-status": "rejected",
+          "anthropic-ratelimit-unified-representative-claim": claim,
+          "anthropic-ratelimit-unified-reset": reset,
+          [`anthropic-ratelimit-unified-${prefix}-utilization`]: "1",
+          [`anthropic-ratelimit-unified-${prefix}-status`]: "rejected",
+          [`anthropic-ratelimit-unified-${prefix}-reset`]: reset,
+        }),
+        refusedAt,
+      )!;
+      const decoded = decodeSubscriptionCoreClaudeQuota({
+        observation,
+        refreshGeneration: 1,
+        upstreamModelIds: subscriptionCoreClaudeUpstreamModelIds(models),
+      });
+      const write = subscriptionCoreOperations(
+        SUBSCRIPTION_CORE_CLAUDE,
+      ).mergeSubscriptionCoreUsageObservation(null, 1, { ...decoded, revision: 0 })!;
+      return {
+        quota: write.stored,
+        quota_revision: 1,
+        quota_observed_refresh_generation: 1,
+        quota_updated_at: refusedAt,
+      };
+    };
+    /** The stored quota's capacity now, after merging one usage-endpoint body. */
+    const afterReading = async (
+      row: ReturnType<typeof refusedRow>,
+      body: Record<string, unknown>,
+    ) => {
+      const reading = await read(body);
+      const observation = decodeSubscriptionCoreClaudeUsage({
+        response: reading,
+        observedAt: Date.now(),
+        refreshGeneration: 1,
+        modelIds: models,
+      });
+      const write = observation
+        ? subscriptionCoreOperations(
+            SUBSCRIPTION_CORE_CLAUDE,
+          ).mergeSubscriptionCoreUsageObservation(
+            row,
+            1,
+            observation,
+            subscriptionCoreUsageMergeOptions(SUBSCRIPTION_CORE_CLAUDE.adapter, reading),
+          )
+        : null;
+      const quota = decodeSubscriptionQuota(write ? { ...row, quota: write.stored } : row)!;
+      return quotaCapacity(quota, Date.now()).kind;
+    };
+
+    test("a refusal on the 5h limit stands through a reading that answers 5h with null", async () => {
+      const row = refusedRow("five_hour");
+      expect(quotaCapacity(decodeSubscriptionQuota(row)!, Date.now()).kind).toBe("exhausted");
+      for (const body of [
+        { five_hour: null, seven_day: { utilization: 40, resets_at: future(48) } },
+        { seven_day: { utilization: 40, resets_at: future(48) } },
+        { five_hour: null, seven_day: null },
+      ])
+        expect(await afterReading(row, body)).toBe("exhausted");
+    });
+
+    test("a weekly refusal ends early on an Ultra reading without a 5h limit", async () => {
+      const row = refusedRow("seven_day");
+      expect(quotaCapacity(decodeSubscriptionQuota(row)!, Date.now()).kind).toBe("exhausted");
+      // Still at the limit, or no percentage: it stands.
+      expect(
+        await afterReading(row, {
+          five_hour: null,
+          seven_day: { utilization: 100, resets_at: future(2) },
+        }),
+      ).toBe("exhausted");
+      expect(
+        await afterReading(row, { five_hour: null, seven_day: { resets_at: future(2) } }),
+      ).toBe("exhausted");
+      expect(await afterReading(row, { five_hour: null })).toBe("exhausted");
+      // Reset early, and the plan has no 5h limit: the account serves again.
+      expect(
+        await afterReading(row, {
+          five_hour: null,
+          seven_day: { utilization: 3, resets_at: future(160) },
+        }),
+      ).not.toBe("exhausted");
+    });
   });
 
   test("an explicitly absent window never ends a block that claims it", async () => {

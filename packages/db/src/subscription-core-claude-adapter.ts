@@ -191,17 +191,20 @@ export function subscriptionCoreClaudeAdapter(
         // A setup token has no refresh token: never called for its format,
         // and refused as a relogin if it were.
         if (!credential.oauth) throw new ClaudeSubscriptionReconnectRequired();
+        // Claude's refresh reports no plan: read it from the profile with the
+        // current token, before the refresh. Once Anthropic rotates the
+        // refresh token nothing fallible may run before it is persisted.
+        // Unknown (no scope, an expired token, any failure): the recorded
+        // plan stays.
+        const planType = await requestClaudeProfilePlan(
+          credential.token,
+          credential.oauth.scopes,
+          deps.fetch ?? globalThis.fetch,
+        );
         // The OAuth call has its own deadline and classifies a revoked grant
         // as ClaudeSubscriptionReconnectRequired, anything else as retryable.
         const tokens = await requestClaudeTokenRefresh(credential, deps.fetch ?? globalThis.fetch);
         const rotated = claudeRefreshedCredential(credential, tokens, now());
-        // Claude's refresh reports no plan: read it from the profile with the
-        // new token. Unknown (no scope, any failure): the recorded plan stays.
-        const planType = await requestClaudeProfilePlan(
-          rotated.credential.token,
-          rotated.credential.oauth?.scopes ?? [],
-          deps.fetch ?? globalThis.fetch,
-        );
         return { ...rotated, planType };
       },
       reloginMessage(error) {

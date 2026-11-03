@@ -38,6 +38,11 @@ export type SubscriptionWindow = {
   resetPassed: boolean;
   /** Paid extra usage, not part of the plan's included allowance. */
   extra: boolean;
+  /**
+   * Limits only some models (a weekly Fable, Opus or Sonnet limit): reaching
+   * it never makes the whole account read as limited.
+   */
+  scoped: boolean;
 };
 
 /** Whether the account can take work, from its windows and any refusal. */
@@ -49,7 +54,7 @@ export type SubscriptionLimit = {
   near: boolean;
 };
 
-type WindowSpec = { label: string; order: number; extra?: boolean };
+type WindowSpec = { label: string; order: number; extra?: boolean; scoped?: boolean };
 
 type SubscriptionAdapter = {
   /** The name plans are sold under: "Claude", "ChatGPT", "SuperGrok". */
@@ -104,9 +109,9 @@ const ADAPTERS: Record<string, SubscriptionAdapter> = {
     planName: (plan) => CLAUDE_PLANS[plan] ?? words(plan.replace(/^claude_/, "")),
     windows: {
       ...SHARED_WINDOWS,
-      seven_day_fable: { label: "Fable week", order: 21 },
-      seven_day_opus: { label: "Opus week", order: 22 },
-      seven_day_sonnet: { label: "Sonnet week", order: 23 },
+      seven_day_fable: { label: "Fable week", order: 21, scoped: true },
+      seven_day_opus: { label: "Opus week", order: 22, scoped: true },
+      seven_day_sonnet: { label: "Sonnet week", order: 23, scoped: true },
       seven_day_overage_included: { label: "Included extra", order: 80, extra: true },
     },
   },
@@ -212,6 +217,10 @@ export function subscriptionWindows(
               (leftPercent !== null && leftPercent < SUBSCRIPTION_NEAR_LIMIT_LEFT)),
           resetPassed,
           extra: specs[input.id]?.extra === true,
+          // A scoped weekly limit this build doesn't know ("seven_day_haiku") too.
+          scoped:
+            specs[input.id]?.scoped === true ||
+            (!specs[input.id] && /^seven_day_.+$/.test(input.id)),
         },
       };
     })
@@ -224,7 +233,9 @@ export const SUBSCRIPTION_NEAR_LIMIT_LEFT = 10;
 
 /**
  * The account's limit state from its included-usage windows and a stored
- * refusal deadline. Extra usage never makes an account look limited or free.
+ * refusal deadline. Extra usage never makes an account look limited or free,
+ * and a spent model-scoped week (Fable) only limits those models: the
+ * window says so itself, and it still counts as near a limit.
  */
 export function subscriptionLimit(
   windows: readonly SubscriptionWindow[],
@@ -232,7 +243,7 @@ export function subscriptionLimit(
   now: number = Date.now(),
 ): SubscriptionLimit {
   const included = windows.filter((window) => !window.extra);
-  const reached = included.filter((window) => window.limitReached);
+  const reached = included.filter((window) => window.limitReached && !window.scoped);
   const refusalEnd = epoch(exhaustedUntil);
   const refused = refusalEnd !== null && refusalEnd > now;
   const ends = [...reached.map((window) => window.resetsAt), ...(refused ? [refusalEnd] : [])];
@@ -240,7 +251,10 @@ export function subscriptionLimit(
     reached: reached.length > 0 || refused,
     // The account serves again only once every reached limit has ended.
     until: ends.length > 0 && ends.every((end) => end !== null) ? Math.max(...ends) : null,
-    near: reached.length === 0 && !refused && included.some((window) => window.nearLimit),
+    near:
+      reached.length === 0 &&
+      !refused &&
+      included.some((window) => window.nearLimit || (window.scoped && window.limitReached)),
   };
 }
 
