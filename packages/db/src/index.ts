@@ -1215,6 +1215,7 @@ import {
 } from "./session-realtime";
 import {
   insertConnectedMachineSessionBackgroundCommandInTransaction,
+  backgroundCommandResultOutputInTransaction,
   boundedSessionBackgroundCommandReason,
   insertManagedSessionBackgroundCommandInTransaction,
   settleClaimedConnectedMachineBackgroundCommandWithMutation,
@@ -91310,6 +91311,19 @@ function backgroundCommandTerminalMutation(input: {
                   : command.exitCode === 0
                     ? `${commandLabel}: completed successfully.`
                     : `${commandLabel}: exited with code ${command.exitCode ?? "unknown"}.`;
+      // The result carries the start and end of the output, so the turn it
+      // wakes or reaches needs no extra read to learn what the command did.
+      // A lost command (its sandbox gone, or contained) carries none: those
+      // settle in bulk under lease locks, and its output stays readable.
+      const output =
+        command.state === "lost"
+          ? null
+          : await backgroundCommandResultOutputInTransaction(tx, {
+              accountId: session.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              commandId: command.id,
+            });
       const payload = {
         type: "background_command_result" as const,
         commandId: command.id,
@@ -91318,6 +91332,7 @@ function backgroundCommandTerminalMutation(input: {
         reason,
         ...(command.failure ? { failure: command.failure } : {}),
         outputLocator,
+        ...(output !== null ? { output } : {}),
         ...(command.backgroundChildrenStopped
           ? { notice: CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE }
           : {}),

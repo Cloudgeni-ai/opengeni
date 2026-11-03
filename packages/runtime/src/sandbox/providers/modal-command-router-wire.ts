@@ -53,6 +53,8 @@ const startEncoderFingerprint = `sha256:${createHash("sha256")
  * for hours. Invalid UTF-8 can decode to three bytes per input byte, so 1 MiB
  * stays below the 4 MiB per-stream capture bound after decoding. */
 export const MODAL_ROUTER_READ_PAGE_BYTES = 1024 * 1024;
+/** Longest wait one router output read accepts. Longer waits are split. */
+export const MODAL_ROUTER_READ_MAX_WAIT_MS = 50_000;
 const maxWireBytes = 4 * 1024 * 1024;
 
 /** Modal's DNS answers TXT queries for a task router name with NXDOMAIN, not
@@ -485,7 +487,7 @@ export class ModalCommandRouterWire {
       offset < 0 ||
       !Number.isFinite(waitMs) ||
       waitMs < 0 ||
-      waitMs > 50_000
+      waitMs > MODAL_ROUTER_READ_MAX_WAIT_MS
     )
       throw new Error("Invalid Modal output read bounds");
     const chunks: Buffer[] = [];

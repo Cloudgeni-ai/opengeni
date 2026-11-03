@@ -17,6 +17,7 @@ import {
   DESKTOP_IPC,
   type DesktopMeetingDetectionStatus,
   type DesktopMeetingRequest,
+  type DesktopRecordingMeeting,
 } from "../../contract";
 import { ENGLISH_MEETING_WORDS, fillMeetingWords, type MeetingWords } from "./words";
 import {
@@ -668,6 +669,36 @@ const PROBLEMS: Record<string, string> = {
     "Calls can't be noticed because no sound server (PulseAudio or PipeWire) is running.",
 };
 
+/** A meeting a page records, as the app's menu shows it. */
+export interface MeetingRecording {
+  page: MeetingPage;
+  /** Its name so far; null when it has none or the page didn't say. */
+  title: string | null;
+  paused: boolean;
+  /** Recorded time at `at`; while not paused it grows from there. */
+  elapsedMilliseconds: number;
+  at: number;
+  /** The page described its recording, so it takes an `open` request. */
+  canOpen: boolean;
+}
+
+/** Recorded time so far, excluding pauses. */
+export function recordedMilliseconds(recording: MeetingRecording, now: number): number {
+  return recording.elapsedMilliseconds + (recording.paused ? 0 : Math.max(0, now - recording.at));
+}
+
+/** The meeting a page described with its recording, or null for anything else. */
+export function recordingMeeting(value: unknown): DesktopRecordingMeeting | null {
+  if (!value || typeof value !== "object") return null;
+  const { title, elapsedMilliseconds, paused } = value as Record<string, unknown>;
+  if (typeof elapsedMilliseconds !== "number" || !Number.isFinite(elapsedMilliseconds)) return null;
+  return {
+    title: typeof title === "string" && title.trim() ? title.trim().slice(0, 200) : null,
+    elapsedMilliseconds: Math.max(0, elapsedMilliseconds),
+    paused: paused === true,
+  };
+}
+
 /** A page that records meetings: Electron's WebContents. */
 export interface MeetingPage {
   readonly id: number;
@@ -758,8 +789,10 @@ export class MeetingDetection {
   private running = false;
   /** Pages that take choices, oldest first. */
   private readonly pages: MeetingPage[] = [];
-  private readonly recordingPages = new Set<MeetingPage>();
+  /** The pages that record, oldest first, with what they said about it. */
+  private readonly recordingPages = new Map<MeetingPage, MeetingRecording>();
   private readonly listeners = new Set<() => void>();
+  private readonly recordingListeners = new Set<() => void>();
   private pending: { request: DesktopMeetingRequest; timer: NodeJS.Timeout } | null = null;
   private cannotRecord: NodeJS.Timeout | null = null;
   private readonly reminders: CalendarReminders | null;
@@ -901,15 +934,78 @@ export class MeetingDetection {
     if (this.send(pending.request)) this.clearPending();
   }
 
-  /** A page started or stopped recording a meeting. */
-  setRecording(page: MeetingPage, recording: boolean): void {
-    if (recording) this.recordingPages.add(page);
-    else this.recordingPages.delete(page);
+  /**
+   * A page started or stopped recording a meeting, and what it said about
+   * the meeting. A page built before it described its meetings says nothing:
+   * the recording counts from when the app heard of it.
+   */
+  setRecording(
+    page: MeetingPage,
+    recording: boolean,
+    meeting: DesktopRecordingMeeting | null = null,
+  ): void {
     const now = this.now();
+    const before = this.recordingPages.get(page);
+    if (!recording) {
+      if (!this.recordingPages.delete(page)) return;
+    } else if (meeting) {
+      this.recordingPages.set(page, { page, ...meeting, at: now, canOpen: true });
+    } else if (!before) {
+      this.recordingPages.set(page, {
+        page,
+        title: null,
+        paused: false,
+        elapsedMilliseconds: 0,
+        at: now,
+        canOpen: false,
+      });
+    }
     const any = this.recordingPages.size > 0;
     if (!any) this.recordingSince = null;
     else this.recordingSince ??= now;
     this.prompter.setRecording(any, now);
+    for (const listener of this.recordingListeners) listener();
+  }
+
+  /** The meeting being recorded here, the newest when pages record several; null for none. */
+  recording(): MeetingRecording | null {
+    let newest: MeetingRecording | null = null;
+    for (const [page, recording] of this.recordingPages) {
+      if (!page.isDestroyed()) newest = recording;
+    }
+    return newest;
+  }
+
+  /** Runs `listener` when a recording starts, stops, or its title or pause changes. */
+  onRecording(listener: () => void): () => void {
+    this.recordingListeners.add(listener);
+    return () => {
+      this.recordingListeners.delete(listener);
+    };
+  }
+
+  /** Stop the recordings going on, from the app's menu; false when none is. */
+  stopRecording(): boolean {
+    const pages = [...this.recordingPages.keys()].filter((page) => !page.isDestroyed());
+    if (pages.length === 0) return false;
+    this.options.log("Meeting detection: stopping the recording from the menu.");
+    for (const page of pages) {
+      page.send(DESKTOP_IPC.meetingDetectionRequest, { kind: "stop", app: "" });
+    }
+    return true;
+  }
+
+  /**
+   * Ask the page recording `recording` to show it; false when that page
+   * can't (it didn't describe its recording) or is gone.
+   */
+  openRecording(recording: MeetingRecording): boolean {
+    const page = recording.page;
+    if (!recording.canOpen || page.isDestroyed() || !this.recordingPages.has(page)) return false;
+    page.send(DESKTOP_IPC.meetingDetectionRequest, {
+      kind: "open",
+    } satisfies DesktopMeetingRequest);
+    return true;
   }
 
   /** A page closed or went to another address: it neither records nor listens. */

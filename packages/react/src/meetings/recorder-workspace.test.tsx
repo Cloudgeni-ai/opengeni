@@ -95,7 +95,8 @@ type Desktop = {
               calendarEvent?: { provider: "google" | "microsoft"; id: string };
               replace?: boolean;
             }
-          | { kind: "stop" },
+          | { kind: "stop" }
+          | { kind: "open" },
       ) => void)
     | null;
 };
@@ -289,6 +290,29 @@ describe("A recording and the workspace it was made in", () => {
       await settle();
       expect(view.opened).toEqual(["workspace-a/recording-in-workspace-a"]);
       await until(() => view.seen.workspaceId === "workspace-b");
+      expect(events.some((event) => event.includes("capture ended"))).toBe(false);
+    } finally {
+      await view.unmount();
+      removeDesktop();
+    }
+  });
+  test("the desktop app's menu opens the meeting being recorded, without stopping it", async () => {
+    events.length = 0;
+    const desktop = installDesktop();
+    const view = mountProvider();
+    try {
+      await view.render("workspace-a");
+      await until(() => view.seen.recorder !== null);
+      // Nothing records yet: Meetings opens instead.
+      await act(async () => desktop.listener!({ kind: "open" }));
+      expect(view.opened).toEqual([]);
+      expect(view.meetingsOpened.length).toBe(1);
+      await act(async () => setStates.get("workspace-a")!("recording"));
+      await view.render("workspace-b");
+      await settle();
+      await act(async () => desktop.listener!({ kind: "open" }));
+      expect(view.opened).toEqual(["workspace-a/recording-in-workspace-a"]);
+      expect(view.seen.recorder?.state).toBe("recording");
       expect(events.some((event) => event.includes("capture ended"))).toBe(false);
     } finally {
       await view.unmount();

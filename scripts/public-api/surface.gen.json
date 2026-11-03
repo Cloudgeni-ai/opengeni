@@ -40480,6 +40480,9 @@
       "ErrorMessageProps": "type",
       "TechnicalDetails": "value"
     },
+    "@opengeni/react/ui/error-text": {
+      "ErrorText": "value"
+    },
     "@opengeni/react/ui/field": {
       "Checkbox": "value",
       "CheckboxField": "value",

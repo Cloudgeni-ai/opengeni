@@ -11430,6 +11430,12 @@ export const SessionSystemUpdatePayload = /* @__PURE__ */ defineSchema(() =>
             commandId: primitives.uuid,
           })
           .strict(),
+        /**
+         * The start and end of the retained output as text, with a marker
+         * naming any omitted middle and its command_read cursor. Absent on
+         * results recorded before results carried output.
+         */
+        output: boundedUtf8String(16 * 1024).optional(),
         notice: z.string().optional(),
       })
       .passthrough(),

@@ -102,12 +102,15 @@ export interface DesktopMeetingDetectionStatus {
 }
 
 /**
- * What the person chose on the app's meeting card: record the call an app
- * just started, or stop recording because the call ended. `app` is the call
- * app's name ("Zoom", "Google Chrome"); `title` suggests a name for the
- * meeting. From a reminder before a calendar meeting (Join and start recording),
- * `calendarEvent` is that event, which names the meeting; with `replace`,
- * a meeting being recorded stops and is kept, and the new one starts.
+ * What the person chose on the app's meeting card or menu: record the call an
+ * app just started, stop recording (the call ended, or Stop Recording in the
+ * menu), or open the meeting this page records (its live transcript). `app` is
+ * the call app's name ("Zoom", "Google Chrome"); `title` suggests a name for
+ * the meeting. From a reminder before a calendar meeting (Join and start
+ * recording), `calendarEvent` is that event, which names the meeting; with
+ * `replace`, a meeting being recorded stops and is kept, and the new one
+ * starts. `open` reaches only a page that described its recording with
+ * {@link DesktopMeetingDetection.setRecording}.
  */
 export type DesktopMeetingRequest =
   | {
@@ -117,7 +120,17 @@ export type DesktopMeetingRequest =
       calendarEvent?: { provider: "google" | "microsoft"; id: string };
       replace?: boolean;
     }
-  | { kind: "stop"; app: string };
+  | { kind: "stop"; app: string }
+  | { kind: "open" };
+
+/** The meeting a page records, for the app's menu bar or tray. */
+export interface DesktopRecordingMeeting {
+  /** Its name so far, or null when it has none yet. */
+  title: string | null;
+  /** Recorded time so far, excluding pauses. */
+  elapsedMilliseconds: number;
+  paused: boolean;
+}
 
 /**
  * Call detection. While on, the app shows a card in the top corner of the
@@ -136,8 +149,11 @@ export interface DesktopMeetingDetection {
   /**
    * Tell the app whether this page is recording a meeting, so it doesn't
    * offer to record another and can offer to stop when the call ends.
+   * Describe the meeting with `meeting` (again whenever its title or pause
+   * changes) to show it in the app's menu, which can then ask this page to
+   * open it (an `open` request).
    */
-  setRecording(recording: boolean): void;
+  setRecording(recording: boolean, meeting?: DesktopRecordingMeeting): void;
   /**
    * The person chose Record or Stop on the card. The window comes to the
    * front first. Only the page's newest listener receives them; the app

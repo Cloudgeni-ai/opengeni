@@ -313,6 +313,16 @@ function useDesktopMeetingRequests(
       }
       const recordingId = recorder?.recordingId ?? null;
       const recordingWorkspaceId = store.workspaceId?.() ?? null;
+      if (request.kind === "open") {
+        // The app's menu: show the meeting this page records, its live transcript.
+        const opened =
+          recordingId && recordingWorkspaceId && capturing(recorder?.state)
+            ? store.openMeeting?.(recordingId, recordingWorkspaceId)
+            : false;
+        if (!opened) latest.current.onOpenMeetings?.();
+        return;
+      }
+      if (request.kind !== "stop") return;
       if (!recorder || (recorder.state !== "recording" && recorder.state !== "paused")) return;
       void recorder.stop().then(() => {
         if (recordingId && recordingWorkspaceId) {

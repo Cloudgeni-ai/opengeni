@@ -193,6 +193,25 @@ their requests as writers because the replacement attempt resumes the same box;
 the holder clause is defence in depth. The physical quiescence receipt itself
 keeps the strict predicate.
 
+**Platform setup still running at finalization is settled by the writer
+drain.** Lazy and eager owned-box setup (`lazyOwnedSandboxSetup`,
+`eagerOwnedSandboxSetup`) make every sandbox write as a lifecycle command
+through the attempt's tool-cancellation fence. Finalization joins in-flight
+provisioning only briefly, so a setup waiting on an agent that stopped
+answering (for example during a worker-shutdown interruption) can still be
+pending when the proof-bearing release runs. That release used to refuse it,
+drop the holder without proof and leave its admission open for good: the
+closed attempt then kept `writer_pending` true, so neither its recovery nor
+any later turn of the session was ever claimed. A pending mutation registered
+with the exact fence that the attempt's writer drain cancelled and quiesced is
+now covered by that drain: the drain stopped or durably handed off each of
+its commands, and the cancelled fence refuses every later one, so whatever
+the setup still waits on cannot write to the box. The release then settles
+the admission `rejected` as for every other drained writer, on every backend.
+Any other in-flight mutation, a setup whose outcome is unknown, and a release
+without that drain keep the admission fenced. A hard worker crash runs no
+drain, so its setup admission still waits for the existing physical proofs.
+
 **Requests left on a retired box are settled once the box is proven gone.**
 A stopped box's cold commit settles every open request, PTY and process it
 leaves on its exact provider tuple, not only crashed-worker orphans (a
@@ -1059,6 +1078,18 @@ attempt-loss fences still win stale settlement; retained physical writers and
 capture/quiescence proofs keep their independent lifecycle.
 The existing blocked-admission wire kind also parks older workflow workers
 during a rolling deployment; no synthetic physical admission is created.
+
+Owned-box platform setup that fails only because the sandbox's machine agent
+did not answer (offline, reconnecting, draining, timed out or replaced, as a
+typed `SelfhostedControlError`) also recovers the same turn, as
+`sandbox_command_start_unavailable` with the connectivity backoff and the
+five-recovery budget; exhaustion fails the turn as before, without the Modal
+parking above. Setup runs before any model-requested command reaches
+the box, and its credential, client, repository and file hooks are
+idempotent. The one non-idempotent step, a rig setup script that started and
+did not finish, keeps its failure terminal, and an uncertain mutation outcome
+anywhere in the failure still vetoes recovery. The same liveness error from a
+model's own command is never classified this way.
 
 An observation deadline, NOT_FOUND or provider/lease loss is not completion
 proof. Once the exact closed, quiesced attempt's home setup invocation has a
@@ -3742,7 +3773,15 @@ The exact terminal transition is also the fallback agent-input boundary: changin
 command to `exited|lost` and appending `session.command.finished` commit
 together. For a nonterminal session, one dedupe-keyed
 `background_command_result` and `system.update.pending` join that transaction
-unless command completion was already observed. A command completion registers
+unless command completion was already observed. The result carries the start
+and end of the retained output as text (`output`: at most 8 KiB of output read
+from at most 16 rows, with the command_read marker naming any omitted middle
+and its cursor; the omitted-row count stops at 1,000 rows), so the turn it
+wakes or reaches needs no extra read; a failed or oversized read leaves
+`output` absent and never blocks the settlement. A `lost` result (sandbox gone
+or contained, often settled in bulk) carries no `output`; its output stays
+readable. A
+command completion registers
 a workflow wake only for a current explicit session input wait. Otherwise the
 result stays available without starting a model turn, including failures and
 results queued before the preceding turn finished. Eligible new input can carry
@@ -3759,6 +3798,30 @@ may still arrive once; delivered history and earlier running tool receipts remai
 unchanged. Observation happens while serving the read, without a separate
 worker-history delivery handshake; a crash between observation and receipt
 preservation is an accepted tradeoff.
+A running turn also delivers results itself (`settings.experimentCutPolling`,
+on by default). After each function tool or hosted `apply_patch` edit the
+worker takes the session's still-pending command results, oldest first, each
+that fits the room the tool's own output leaves in the model's tool-output
+budget (at most 16 KiB; nothing below 1 KiB, so a large tool output never has
+its end pushed into the truncated middle), observing each command and superseding its pending result in one
+transaction exactly as a terminal read does, and appends them (summary,
+command ID, output) to that plain-text tool result, which the model reads with
+its next call. The appended text is masked for known secret values first
+(hosted `apply_patch` results bypass the function-tool masking). A cheap
+unlocked probe skips the session lock when nothing is
+pending. JSON, image and structured results are left unchanged, nothing is
+taken once the turn is cancelled, and nothing is taken in a model step after a
+`wait_for_input` started (that wait could otherwise end the turn with a result
+the model has not read and that no longer wakes it). A `wait_for_input` in a
+step whose other results already carried command results is refused with a
+short explanation (its reply was not shown, so the model sends it again), and
+the turn continues. The appended text is part of the
+stored tool result, so history and the prompt-cache prefix never change; the
+timeline shows the tool's own output. The prompt's do-not-poll sentence
+renders only when this delivery is on. Results not taken during the turn stay
+pending and arrive as ordinary input, as above. A crash between taking and
+storing the tool result loses only that copy, as with a terminal read; the
+output stays readable.
 Subsequent retained reads reuse the persisted completion-observation receipt
 without reacquiring session/event write locks. They still perform the same scoped
 command and output reads; the first observation retains settlement/claim locking.

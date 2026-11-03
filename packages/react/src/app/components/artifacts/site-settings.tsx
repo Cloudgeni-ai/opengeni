@@ -26,7 +26,7 @@ import { isPersonalWorkspace } from "../../lib/managed-self-context";
 import { hasWorkspacePermission } from "../../lib/permissions";
 import { sitesClientConfig } from "../../lib/site-publishing";
 import { useDuplicateSite } from "../../lib/use-duplicate-site";
-import { errorMessage } from "@opengeni/contracts/values";
+import { userErrorText } from "../../../ui/api-error";
 
 // Stands in for the Site while it loads so the audience hook keeps its order.
 const PLACEHOLDER_SITE: WorkspaceArtifact = {
@@ -108,7 +108,7 @@ export function useSiteManagement({
       return true;
     } catch (error) {
       toast.error(status === "archived" ? "Couldn't archive Site" : "Couldn't restore Site", {
-        description: errorMessage(error),
+        description: userErrorText(error),
       });
       return false;
     } finally {

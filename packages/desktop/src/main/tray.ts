@@ -21,6 +21,25 @@ import {
 /** How long the menu bar shows a check after a dictation's text is delivered. */
 export const DICTATION_DONE_MS = 800;
 
+/** How often the menu's recording time moves on while a meeting records. */
+export const MEETING_TICK_MS = 30_000;
+
+/** A meeting being recorded, as the menu shows it. */
+export interface TrayMeeting {
+  /** Its name so far; null when it has none. */
+  title: string | null;
+  paused: boolean;
+  /** Recorded time at `at` (a `Date.now()`), excluding pauses; it grows from there unless paused. */
+  elapsedMilliseconds: number;
+  at: number;
+  /** Its page can open it; otherwise the menu only brings its account up. */
+  canOpen: boolean;
+  /** The account it records in, when the window shows another one. */
+  otherAccount: string | null;
+}
+
+export type TrayMeetingAction = "open" | "stop";
+
 export interface TrayActions {
   open(): void;
   pause(): void;
@@ -29,6 +48,8 @@ export interface TrayActions {
   quit(): void;
   /** The dictation items' actions. */
   dictation?(action: DictationMenuAction): void;
+  /** The recording meeting's items' actions. */
+  meeting?(action: TrayMeetingAction): void;
 }
 
 export interface TraySummary {
@@ -51,16 +72,22 @@ const PERMISSION_LABELS: Record<ThisComputerPermissionId, string> = {
 };
 
 /**
- * The menu bar (macOS) or tray item: how a dictation is going and its
- * controls, whether this computer is available to agents, a pause control,
- * any permission still to allow, and a way back to the window. While a
- * dictation is under way its icon shows how it is going.
+ * The menu bar (macOS) or tray item: a meeting being recorded, how a
+ * dictation is going and their controls, whether this computer is available
+ * to agents, a pause control, any permission still to allow, and a way back
+ * to the window. While a dictation is under way its icon shows how it is
+ * going; otherwise, while a meeting records, the icon says so.
  */
 export class AppTray {
   private readonly tray: Tray;
   private readonly idle: NativeImage;
   private summary: TraySummary | null = null;
   private dictationMenu: DictationMenu | null = null;
+  private meeting: TrayMeeting | null = null;
+  private meetingTimer: ReturnType<typeof setInterval> | null = null;
+  /** The menu is open: rebuilding it then could close it, so wait. */
+  private menuOpen = false;
+  private stale = false;
   /** The glyph showing; null for the app's icon. */
   private glyph: TrayGlyph | null = null;
   private readonly images = new Map<string, NativeImage>();
@@ -91,6 +118,19 @@ export class AppTray {
     this.render();
   }
 
+  /** The meeting being recorded; null when none is. */
+  setMeeting(meeting: TrayMeeting | null): void {
+    this.meeting = meeting;
+    if (meeting && !this.meetingTimer) {
+      // The recording time is in minutes: move it on now and then.
+      this.meetingTimer = setInterval(() => this.render(), MEETING_TICK_MS);
+      this.meetingTimer.unref?.();
+    } else if (!meeting) {
+      this.stopMeetingTimer();
+    }
+    this.render();
+  }
+
   /** A dictation's text was delivered: a check, briefly. */
   dictationDone(): void {
     this.clearDone();
@@ -104,6 +144,7 @@ export class AppTray {
   destroy(): void {
     this.clearDone();
     this.stopAnimation();
+    this.stopMeetingTimer();
     this.tray.destroy();
   }
 
@@ -115,15 +156,33 @@ export class AppTray {
       this.actions,
       this.dictationMenu,
       this.platform,
+      this.meeting,
     );
     this.tray.setToolTip(toolTip);
-    this.tray.setContextMenu(Menu.buildFromTemplate(template));
+    if (this.menuOpen) {
+      this.stale = true;
+    } else {
+      const menu = Menu.buildFromTemplate(template);
+      menu.on("menu-will-show", () => {
+        this.menuOpen = true;
+      });
+      menu.on("menu-will-close", () => {
+        this.menuOpen = false;
+        if (!this.stale) return;
+        this.stale = false;
+        // After the click it closed for has run.
+        setTimeout(() => this.render(), 0);
+      });
+      this.tray.setContextMenu(menu);
+    }
     this.showIcon();
   }
 
   private showIcon(): void {
     const phase = this.dictationMenu?.activity.phase ?? "idle";
-    const glyph: TrayGlyph | null = phase !== "idle" ? phase : this.doneTimer ? "done" : null;
+    // A dictation is short and wants attention; a meeting shows otherwise.
+    const glyph: TrayGlyph | null =
+      phase !== "idle" ? phase : this.doneTimer ? "done" : this.meeting ? "meeting" : null;
     if (glyph === this.glyph) return;
     this.glyph = glyph;
     this.stopAnimation();
@@ -156,6 +215,11 @@ export class AppTray {
   private stopAnimation(): void {
     if (this.animation) clearInterval(this.animation);
     this.animation = null;
+  }
+
+  private stopMeetingTimer(): void {
+    if (this.meetingTimer) clearInterval(this.meetingTimer);
+    this.meetingTimer = null;
   }
 
   private clearDone(): void {
@@ -277,6 +341,58 @@ function dictationSection(
   }
 }
 
+/** "12 min", "1 h 5 min"; under a minute, "just started". */
+export function recordedWords(milliseconds: number): string {
+  const minutes = Math.floor(milliseconds / 60_000);
+  if (minutes < 1) return "just started";
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest === 0 ? `${hours} h` : `${hours} h ${rest} min`;
+}
+
+function clockTime(at: number): string {
+  return new Date(at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+}
+
+/** The meeting section: what is recording, for how long, and opening or stopping it. */
+function meetingSection(
+  meeting: TrayMeeting,
+  actions: TrayActions,
+  now: number,
+): MenuItemConstructorOptions[] {
+  const recorded =
+    meeting.elapsedMilliseconds + (meeting.paused ? 0 : Math.max(0, now - meeting.at));
+  const started = meeting.at - meeting.elapsedMilliseconds;
+  const what = meeting.title ? shorten(meeting.title) : `Started ${clockTime(started)}`;
+  return [
+    {
+      label: `Meeting: ${meeting.paused ? "paused" : "recording"} · ${recordedWords(recorded)}`,
+      enabled: false,
+    },
+    {
+      label: meeting.otherAccount ? `${what} · ${shorten(meeting.otherAccount)}` : what,
+      enabled: false,
+    },
+    {
+      label: meeting.canOpen ? "Open Live Transcript" : "Show Recording",
+      click: () => actions.meeting?.("open"),
+    },
+    { label: "Stop Recording", click: () => actions.meeting?.("stop") },
+    { type: "separator" },
+  ];
+}
+
+/** What the tooltip says while a meeting records. */
+function meetingTip(meeting: TrayMeeting | null, now: number): string | null {
+  if (!meeting) return null;
+  const recorded =
+    meeting.elapsedMilliseconds + (meeting.paused ? 0 : Math.max(0, now - meeting.at));
+  return meeting.paused
+    ? `meeting recording paused (${recordedWords(recorded)})`
+    : `recording a meeting (${recordedWords(recorded)})`;
+}
+
 /** What the tooltip says while a dictation is under way. */
 function dictationTip(menu: DictationMenu | null | undefined): string | null {
   const activity = menu?.activity;
@@ -294,13 +410,18 @@ function dictationTip(menu: DictationMenu | null | undefined): string | null {
   }
 }
 
-/** The tray's tooltip and menu for a summary of this computer and how dictation is going. */
+/**
+ * The tray's tooltip and menu for a summary of this computer, how dictation
+ * is going, and the meeting being recorded.
+ */
 export function trayMenu(
   summary: TraySummary,
   productName: string,
   actions: TrayActions,
   dictation: DictationMenu | null = null,
   platform: NodeJS.Platform = process.platform,
+  meeting: TrayMeeting | null = null,
+  now: number = Date.now(),
 ): { toolTip: string; template: MenuItemConstructorOptions[] } {
   const missing = summary.running ? (summary.missingPermissions ?? []) : [];
   const status = !summary.running
@@ -312,9 +433,9 @@ export function trayMenu(
         : summary.reconnecting
           ? "connecting…"
           : "available to agents";
-  const dictating = dictationTip(dictation);
-  const toolTip = dictating
-    ? `${productName}: ${dictating}`
+  const busy = dictationTip(dictation) ?? meetingTip(meeting, now);
+  const toolTip = busy
+    ? `${productName}: ${busy}`
     : !summary.connected
       ? productName
       : `${productName}: ${
@@ -353,6 +474,7 @@ export function trayMenu(
   return {
     toolTip,
     template: [
+      ...(meeting ? meetingSection(meeting, actions, now) : []),
       ...dictationItems,
       ...computer,
       { label: `Open ${productName}`, click: () => actions.open() },
