@@ -1560,6 +1560,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           } = await waitForTurnOperation(
             dropUnavailableOptionalRepositories({
               db,
+              ...(cancellationSignal ? { signal: cancellationSignal } : {}),
               settings: runSettings,
               workspaceId: input.workspaceId,
               activeSandboxBackend,

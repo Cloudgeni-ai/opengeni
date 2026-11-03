@@ -5,6 +5,8 @@ import {
   bootstrapWorkspace,
   createDb,
   createSession,
+  enqueueSessionWorkflowWake,
+  markSessionWorkflowWakeDelivered,
   settleConnectedMachineSessionBackgroundCommand,
   type Database,
 } from "../src";
@@ -85,6 +87,31 @@ test("settling a command in an incident-sized backlog never recounts the backlog
     select id from session_background_commands where session_id = ${session.id} limit 2`;
   const queries: string[] = [];
   const measured = observe(client.db, queries);
+  const temporalWorkflowId = `session-${session.id}`;
+  const wakeRevision = await enqueueSessionWorkflowWake(client.db, {
+    accountId,
+    workspaceId,
+    sessionId: session.id,
+    temporalWorkflowId,
+    reason: "preexisting",
+  });
+  expect(
+    await markSessionWorkflowWakeDelivered(measured, {
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      temporalWorkflowId,
+      wakeRevision,
+    }),
+  ).toEqual({ action: "acknowledged" });
+  expect(
+    queries.filter(
+      (query) =>
+        /count\s*\(/i.test(query) &&
+        /session_background_commands|session_attempt_interruptions/i.test(query),
+    ),
+  ).toEqual([]);
+  queries.length = 0;
   for (const command of commands) {
     const result = await settleConnectedMachineSessionBackgroundCommand(measured, {
       accountId,

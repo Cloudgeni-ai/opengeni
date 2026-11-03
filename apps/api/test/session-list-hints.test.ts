@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { waitFor } from "@opengeni/testing/process";
 import type { SessionListChangeSource, SessionListNotification } from "@opengeni/db";
 import {
@@ -61,6 +61,122 @@ function fixture(
       }),
   };
 }
+
+function manualFixture(authorizeIds?: (ids: string[]) => Promise<SessionListHintIds>) {
+  let tick!: () => void;
+  const original = globalThis.setInterval;
+  const timer = spyOn(globalThis, "setInterval").mockImplementation(((callback: () => void) => {
+    tick = callback;
+    return original(() => {}, 60_000);
+  }) as typeof setInterval);
+  try {
+    return { ...fixture(authorizeIds), tick: () => tick() };
+  } finally {
+    timer.mockRestore();
+  }
+}
+
+test("slow authorization retains one coalesced follow-up instead of a queue per timer tick", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let first = true;
+  const f = manualFixture(async (ids) => {
+    if (first) {
+      first = false;
+      await gate;
+    }
+    return ids;
+  });
+  try {
+    await waitFor(() => f.frames.length === 1);
+    f.change("same");
+    f.tick();
+    await waitFor(() => f.reads.length === 1);
+    for (let i = 0; i < 30; i++) {
+      f.change("same");
+      f.tick();
+    }
+    f.change("last");
+    f.tick();
+    expect(f.reads).toHaveLength(1);
+    release();
+    await waitFor(() => f.frames.some((frame) => frame.sessionIds?.includes("last")));
+    expect(f.reads).toEqual([["same"], ["same", "last"]]);
+    expect(f.errors).toEqual([]);
+  } finally {
+    release();
+    f.stop();
+  }
+});
+
+test("an excessive dirty-ID set becomes one content-free reconciliation", async () => {
+  const f = manualFixture();
+  try {
+    await waitFor(() => f.frames.length === 1);
+    for (let i = 0; i < 10_000; i++) f.change(`session-${i}`);
+    f.tick();
+    await waitFor(() => f.frames.length === 2);
+    expect(f.reads).toEqual([]);
+    expect(f.frames[1]?.sessionIds).toBeNull();
+  } finally {
+    f.stop();
+  }
+});
+
+test("changes during a fast read still wait for the normal flush cadence", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const f = manualFixture(async (ids) => {
+    await gate;
+    return ids;
+  });
+  try {
+    await waitFor(() => f.frames.length === 1);
+    f.change("first");
+    f.tick();
+    await waitFor(() => f.reads.length === 1);
+    f.change("second");
+    release();
+    await waitFor(() => f.frames.length >= 2);
+    expect(f.reads).toEqual([["first"]]);
+    f.tick();
+    await waitFor(() => f.frames.length === 3);
+    expect(f.reads).toEqual([["first"], ["second"]]);
+  } finally {
+    release();
+    f.stop();
+  }
+});
+
+test("unsubscribe during authorization prevents the pending write", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const f = manualFixture(async (ids) => {
+    await gate;
+    return ids;
+  });
+  try {
+    await waitFor(() => f.frames.length === 1);
+    f.change("late");
+    f.tick();
+    await waitFor(() => f.reads.length === 1);
+    f.stop();
+    release();
+    await gate;
+    // Drain the authorization/write promise chain without a timing threshold.
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(f.frames).toHaveLength(1);
+  } finally {
+    release();
+    f.stop();
+  }
+});
 
 test("idle costs no authorization reads; dirty IDs are coalesced and filtered before emission", async () => {
   const f = fixture(async (ids) => ids.filter((id) => id !== "private"));
