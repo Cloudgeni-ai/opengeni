@@ -783,7 +783,9 @@ export type OpenGeniWorkerServiceOptions = Omit<WorkerOptions, "activityDependen
   onDrainStarted?: () => void;
   activityDependencies: ActivityDependencies & { db: Database; bus: EventBus };
   /** Host-owned final containment after a stalled cleanup has drained peers.
-   * The standalone process exits; embedded hosts own their termination policy. */
+   * The standalone process exits; embedded hosts own their termination policy.
+   * Supplying it also lets `run()` resolve once only contained finalizers
+   * remain in flight, so the host must exit its process after `run()` settles. */
   terminateWorker?: () => void;
   /**
    * Exact catalog posture required by the standalone runtime. Embedded hosts
@@ -935,7 +937,7 @@ export async function createOpenGeniWorkerService(
         startRecordingWorkflow,
         requestWorkerDrain: () => {
           if (!cleanupContainment) throw new Error("worker cleanup containment is not initialized");
-          cleanupContainment.request();
+          return cleanupContainment.request();
         },
       },
     });
@@ -1036,6 +1038,9 @@ export async function createOpenGeniWorkerService(
   cleanupContainment = createWorkerCleanupContainment({
     drain: () => lifecycle?.drain("stalled turn finalization") ?? false,
     ...(options.terminateWorker ? { terminate: options.terminateWorker } : {}),
+    ...(activeWorkerBundle.worker.inFlightActivities
+      ? { inFlightActivities: () => activeWorkerBundle.worker.inFlightActivities?.() }
+      : {}),
     observability,
     // A stalled cleanup drains peers through the ordinary turn sequence:
     // natural grace, WORKER_SHUTDOWN checkpoint, SDK force stop. Terminate
@@ -1048,6 +1053,9 @@ export async function createOpenGeniWorkerService(
   const activeCleanupContainment = cleanupContainment;
   lifecycle = createWorkerServiceLifecycle({
     cleanupContainmentRequested: activeCleanupContainment.requested,
+    // Only a host that exits the process may stop with a stalled finalizer
+    // still executing; the exit is what ends that JavaScript.
+    ...(options.terminateWorker ? { contained: activeCleanupContainment.contained } : {}),
     ...(options.onDrainStarted ? { onDrainStarted: options.onDrainStarted } : {}),
     role: options.role,
     worker: {

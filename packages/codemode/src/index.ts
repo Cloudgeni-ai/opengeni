@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   ATTEMPT_TOOL_CATALOG_VERSION,
   ATTEMPT_TOOL_CATALOG_MAX_BYTES,
@@ -217,6 +217,15 @@ export interface CodemodeTools {
   [key: string]: CodemodeTools | CodemodeToolFunction;
 }
 
+/** The API's refusal for a bearer whose agent attempt has ended. It never
+ * becomes valid again; only a different (renewed) bearer can succeed. */
+export const CODEMODE_CALLER_STALE_CODE = "agent_attempt_caller_stale";
+
+/** True when the attempt bearer used for this request was refused permanently. */
+export function isCodemodeCallerStaleError(error: unknown): error is CodemodeTransportError {
+  return error instanceof CodemodeTransportError && error.remoteCode === CODEMODE_CALLER_STALE_CODE;
+}
+
 /** Persistent, idempotent client for one exact sandbox attempt bearer. */
 export class CodemodeClient {
   private readonly baseUrl: string;
@@ -224,6 +233,10 @@ export class CodemodeClient {
   private readonly pollIntervalMs: number;
   private readonly timeoutMs: number;
   private catalogSnapshot: AttemptToolCatalogValue | null = null;
+  /** Digest of the bearer the API refused as stale, with that refusal. Later
+   * requests with the same bearer fail locally instead of re-asking the API;
+   * a renewed bearer (token file rewritten for a new attempt) is tried again. */
+  private staleRefusal: { bearerDigest: string; error: CodemodeTransportError } | null = null;
 
   constructor(private readonly options: CodemodeClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/u, "");
@@ -531,6 +544,16 @@ export class CodemodeClient {
   private async request(path: string, init: RequestInit, throwOnError = true): Promise<Response> {
     const token =
       typeof this.options.token === "function" ? await this.options.token() : this.options.token;
+    const bearerDigest = createHash("sha256").update(token).digest("hex");
+    if (this.staleRefusal?.bearerDigest === bearerDigest) {
+      const refused = this.staleRefusal.error;
+      throw new CodemodeTransportError(refused.message, refused.status, {
+        ...(refused.remoteCode ? { code: refused.remoteCode } : {}),
+        retryable: false,
+        outcomeUnknown: false,
+        ...(refused.details ? { details: refused.details } : {}),
+      });
+    }
     const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
       ...init,
       headers: {
@@ -561,7 +584,13 @@ export class CodemodeClient {
       } catch {
         // The status is sufficient; never echo an unbounded provider body.
       }
-      throw new CodemodeTransportError(message, response.status, errorOptions);
+      const error = new CodemodeTransportError(message, response.status, errorOptions);
+      if (isCodemodeCallerStaleError(error)) {
+        this.staleRefusal = { bearerDigest, error };
+        // The bearer's attempt ended: nothing it could ask for is current.
+        this.catalogSnapshot = null;
+      }
+      throw error;
     }
     return response;
   }
