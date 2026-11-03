@@ -286,12 +286,22 @@ class BrokerReconnectRequiredError extends Error {
   }
 }
 
+/** The token refresh failed for a passing reason (GitHub 5xx, timeout). */
+class BrokerProviderUnavailableError extends Error {
+  constructor() {
+    super("personal GitHub token refresh is temporarily unavailable");
+  }
+}
+
 function brokerAuthorityError(error: unknown): Response {
   if (error instanceof BrokerRepositoryRemovedError) {
     return brokerError(403, "This repository was removed from this chat.");
   }
   if (error instanceof BrokerReconnectRequiredError) {
     return brokerError(403, PERSONAL_GITHUB_RECONNECT_MESSAGE);
+  }
+  if (error instanceof BrokerProviderUnavailableError) {
+    return brokerError(502, "GitHub is temporarily unavailable. Try again.");
   }
   return brokerError(401, "Git broker authorization is no longer current.");
 }
@@ -384,6 +394,11 @@ async function authorizeBrokerProviderRequest(
   ) {
     // A refused refresh has just moved the connection to needs_reauth; say so.
     await assertCurrentConnectionAndSelection(deps, claims, repository);
+    // Still current and active: the refresh failed for a passing reason, so
+    // Git hears "try again", not that its authorization ended.
+    if (credential.status !== "ok" && credential.reason === "refresh_failed") {
+      throw new BrokerProviderUnavailableError();
+    }
     throw new Error("personal GitHub credential resolution was denied");
   }
   await assertCurrentConnectionAndSelection(deps, claims, repository);
@@ -491,7 +506,9 @@ async function assertCurrentConnectionAndSelection(
     connection.accountId === claims.accountId &&
     connection.workspaceId === claims.originWorkspaceId &&
     connection.subjectId === claims.ownerSubjectId &&
-    personalGitHubConnectionNeedsReconnect(connection)
+    personalGitHubConnectionNeedsReconnect(connection) &&
+    PersonalGitHubConnectionMetadata.safeParse(connection.metadata).data?.credentialBindingId ===
+      claims.credentialBindingId
   ) {
     throw new BrokerReconnectRequiredError();
   }

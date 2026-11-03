@@ -18,7 +18,7 @@ type GitHubTokenOutcome =
   | { kind: "token" }
   | { kind: "error"; error: string; description?: string };
 
-function fakeGitHubTokenEndpoint(outcome: GitHubTokenOutcome) {
+function fakeGitHubTokenEndpoint(outcome: GitHubTokenOutcome, options?: { alwaysForm?: boolean }) {
   const requests: { accept: string | null; body: URLSearchParams }[] = [];
   const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
     const headers = new Headers(init?.headers);
@@ -39,7 +39,7 @@ function fakeGitHubTokenEndpoint(outcome: GitHubTokenOutcome) {
             error_description: outcome.description ?? "The refresh token passed is incorrect.",
             error_uri: "https://docs.github.com/apps/oauth",
           };
-    if (headers.get("accept")?.includes("application/json")) {
+    if (!options?.alwaysForm && headers.get("accept")?.includes("application/json")) {
       return Response.json(fields, { status: 200 });
     }
     return new Response(
@@ -150,7 +150,41 @@ describe("personal GitHub token refresh against GitHub's response contract", () 
 
     expect(error).toBeInstanceOf(ConnectionRefreshHttpError);
     expect((error as ConnectionRefreshHttpError).oauthErrorCode).toBe("bad_refresh_token");
+    expect((error as ConnectionRefreshHttpError).httpStatus).toBe(400);
+    expect((error as Error).message).toBe(
+      "connection refresh refused by the provider (bad_refresh_token)",
+    );
   });
+
+  test("a form-encoded answer still refreshes when the Accept header is lost", async () => {
+    const github = fakeGitHubTokenEndpoint({ kind: "token" }, { alwaysForm: true });
+    const refreshed = await refreshOAuthConnectionCredential(
+      personalGitHubCredential(),
+      personalRef,
+      settings,
+      github.transport,
+    );
+    expect(refreshed.credential).toMatchObject({
+      access_token: "ghu_refreshed",
+      refresh_token: "ghr_rotated",
+    });
+    expect(refreshed.expiresAt!.getTime()).toBeGreaterThan(Date.now() + 7 * 3600 * 1000);
+  });
+
+  for (const code of ["slow_down", "temporarily_unavailable", "incorrect_client_credentials"]) {
+    test(`${code} in a 200 answer stays transient: reconnecting would not help`, async () => {
+      const github = fakeGitHubTokenEndpoint({ kind: "error", error: code });
+      const error = await refreshOAuthConnectionCredential(
+        personalGitHubCredential(),
+        personalRef,
+        settings,
+        github.transport,
+      ).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(ConnectionRefreshHttpError);
+      expect((error as ConnectionRefreshHttpError).httpStatus).toBe(503);
+      expect((error as ConnectionRefreshHttpError).oauthErrorCode).toBe(code);
+    });
+  }
 
   test("an expired personal GitHub token refreshes through the resolver", async () => {
     const github = fakeGitHubTokenEndpoint({ kind: "token" });

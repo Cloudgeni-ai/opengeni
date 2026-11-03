@@ -372,10 +372,8 @@ function personalAuthorityResolver(input: {
   }): Promise<GitHubRestResolvedAuthority> => {
     // A grant GitHub refused bumps the connection out of `active`; tell the
     // agent the person must reconnect instead of a generic authority error.
-    const reconnectOr = async (error: GitHubRestAuthorityError) =>
-      (await personalConnectionNeedsReconnect(input))
-        ? new GitHubRestAuthorityError(PERSONAL_GITHUB_RECONNECT_MESSAGE)
-        : error;
+    const reconnectOr = (error: GitHubRestAuthorityError) =>
+      personalReconnectOr(error, () => personalConnectionNeedsReconnect(input));
     let current: Awaited<ReturnType<typeof validatePersonalRepository>>;
     try {
       current = await validatePersonalRepository(
@@ -442,15 +440,32 @@ function personalAuthorityResolver(input: {
   };
 }
 
-async function personalConnectionNeedsReconnect(input: {
-  db: Database;
-  accountId: string;
-  turn: SessionTurnForExecution;
-}): Promise<boolean> {
+/**
+ * A generic personal authority failure becomes "reconnect" when GitHub refused
+ * the person's stored grant; any other failure keeps its own message.
+ */
+export async function personalReconnectOr(
+  error: GitHubRestAuthorityError,
+  needsReconnect: () => Promise<boolean>,
+): Promise<GitHubRestAuthorityError> {
+  return (await needsReconnect().catch(() => false))
+    ? new GitHubRestAuthorityError(PERSONAL_GITHUB_RECONNECT_MESSAGE)
+    : error;
+}
+
+/** Whether the turn's frozen personal GitHub connection now needs reconnecting. */
+export async function personalConnectionNeedsReconnect(
+  input: {
+    db: Database;
+    accountId: string;
+    turn: Pick<SessionTurnForExecution, "personalConnectionDelegations">;
+  },
+  readConnection: typeof getConnectionMetadata = getConnectionMetadata,
+): Promise<boolean> {
   try {
     const delegation = exactPersonalDelegation(input.turn.personalConnectionDelegations);
     if (!delegation.originWorkspaceId) return false;
-    const connection = await getConnectionMetadata(
+    const connection = await readConnection(
       input.db,
       delegation.originWorkspaceId,
       delegation.connectionId,

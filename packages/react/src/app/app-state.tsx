@@ -233,6 +233,9 @@ export const GITHUB_STATUS_TOAST_ID = "opengeni-github-status";
 /** The one "Your GitHub account is unavailable" toast. */
 export const PERSONAL_GITHUB_STATUS_TOAST_ID = "opengeni-personal-github-status";
 
+/** The one lasting "Reconnect your GitHub" toast. */
+export const PERSONAL_GITHUB_RECONNECT_TOAST_ID = "opengeni-personal-github-reconnect";
+
 /**
  * Whether a personal GitHub status asks the person to reconnect: the stored
  * grant stopped working (GitHub refused a refresh), not a disconnect.
@@ -245,8 +248,7 @@ function personalGitHubNeedsReconnect(
 
 type PersonalGitHubReconnectToast = {
   /** The connection (id:version) the toast last appeared for. */
-  shownFor: { current: string | null };
-  reconnect: { current: (workspaceId: string) => void };
+  shownFor: string | null;
 };
 
 /**
@@ -255,17 +257,17 @@ type PersonalGitHubReconnectToast = {
  */
 function announcePersonalGitHubReconnect(
   state: PersonalGitHubReconnectToast,
-  workspaceId: string,
   connection: NonNullable<PersonalGitHubConnectionStatusResponse["connection"]>,
+  onReconnect: () => void,
 ): void {
   const key = `${connection.id}:${connection.version}`;
-  if (state.shownFor.current === key) return;
-  state.shownFor.current = key;
+  if (state.shownFor === key) return;
+  state.shownFor = key;
   const login =
     typeof connection.metadata.githubLogin === "string" && connection.metadata.githubLogin
       ? connection.metadata.githubLogin
       : null;
-  showPersonalGitHubReconnectToast(login, () => state.reconnect.current(workspaceId));
+  showPersonalGitHubReconnectToast(login, onReconnect);
 }
 
 /** The lasting "Reconnect your GitHub" toast with its one action. */
@@ -274,7 +276,7 @@ export function showPersonalGitHubReconnectToast(
   onReconnect: () => void,
 ): void {
   toast.warning("Reconnect your GitHub", {
-    id: PERSONAL_GITHUB_STATUS_TOAST_ID,
+    id: PERSONAL_GITHUB_RECONNECT_TOAST_ID,
     description: `Opengeni can't work as ${githubLogin ? `@${githubLogin}` : "you"} until you reconnect.`,
     duration: Infinity,
     closeButton: true,
@@ -283,9 +285,9 @@ export function showPersonalGitHubReconnectToast(
 }
 
 function clearPersonalGitHubReconnectToast(state: PersonalGitHubReconnectToast): void {
-  if (state.shownFor.current === null) return;
-  state.shownFor.current = null;
-  toast.dismiss(PERSONAL_GITHUB_STATUS_TOAST_ID);
+  if (state.shownFor === null) return;
+  state.shownFor = null;
+  toast.dismiss(PERSONAL_GITHUB_RECONNECT_TOAST_ID);
 }
 
 export type SlackLinkPrepareController<Request> = ReturnType<
@@ -524,10 +526,12 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   const personalGitHubQuietRetry = useRef(createQuietRetry());
   const refreshGitHubRef = useRef<AppContextValue["refreshGitHub"]>(async () => {});
   const refreshPersonalGitHubRef = useRef<AppContextValue["refreshPersonalGitHub"]>(async () => {});
-  const personalGitHubReconnectToast = useRef<PersonalGitHubReconnectToast>({
-    shownFor: { current: null },
-    reconnect: { current: () => undefined },
-  });
+  const personalGitHubReconnectToast = useRef<PersonalGitHubReconnectToast>({ shownFor: null });
+  // The toast reconnects the exact connection it was shown for.
+  const reconnectPersonalGitHubFromToast = useLatestCallback(
+    (workspaceId: string, connectionId: string) =>
+      void beginPersonalGitHubOAuth(workspaceId, true, connectionId),
+  );
   useEffect(
     () => () => {
       githubQuietRetry.current.reset();
@@ -1658,6 +1662,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         setPersonalGitHubCatalogReady(true);
         setPersonalGitHubBusy(false);
         personalGitHubQuietRetry.current.reset();
+        clearPersonalGitHubReconnectToast(personalGitHubReconnectToast.current);
         return;
       }
       setPersonalGitHubBusy(true);
@@ -1670,16 +1675,14 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         personalGitHubQuietRetry.current.reset();
       };
       const showReconnectState = (status: PersonalGitHubConnectionStatusResponse): boolean => {
-        if (!status.enabled || !personalGitHubNeedsReconnect(status.connection)) {
-          if (!status.connection || status.connection.status === "active") {
-            clearPersonalGitHubReconnectToast(personalGitHubReconnectToast.current);
-          }
+        const connection = status.connection;
+        if (!status.enabled || !personalGitHubNeedsReconnect(connection)) {
+          // Reconnected, disconnected or turned off: nothing left to act on.
+          clearPersonalGitHubReconnectToast(personalGitHubReconnectToast.current);
           return false;
         }
-        announcePersonalGitHubReconnect(
-          personalGitHubReconnectToast.current,
-          workspaceId,
-          status.connection,
+        announcePersonalGitHubReconnect(personalGitHubReconnectToast.current, connection, () =>
+          reconnectPersonalGitHubFromToast(workspaceId, connection.id),
         );
         return true;
       };
@@ -1763,7 +1766,8 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
               return;
             }
           }
-          // Nothing for the person to do: the failure shows in place.
+          // Nothing for the person to do: a background read stays quiet, and
+          // the next read tries again.
           if (!options?.userInitiated) return;
         }
         toast.error("Your GitHub account is unavailable", {
@@ -1774,27 +1778,26 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         if (ownsRefresh()) setPersonalGitHubBusy(false);
       }
     },
-    [client],
+    [client, reconnectPersonalGitHubFromToast],
   );
 
   useInsertionEffect(() => {
     refreshPersonalGitHubRef.current = refreshPersonalGitHub;
   }, [refreshPersonalGitHub]);
 
-  useInsertionEffect(() => {
-    personalGitHubReconnectToast.current.reconnect.current = (workspaceId) =>
-      void beginPersonalGitHubOAuth(workspaceId, true);
-  });
-
-  async function beginPersonalGitHubOAuth(workspaceId: string, reconnect: boolean): Promise<void> {
-    const connection = personalGitHubStatus?.connection;
+  async function beginPersonalGitHubOAuth(
+    workspaceId: string,
+    reconnect: boolean,
+    connectionId?: string,
+  ): Promise<void> {
+    const reconnectAccountId = connectionId ?? personalGitHubStatus?.connection?.id;
     try {
       const attempt = await client.beginConnect(workspaceId, {
         providerId: "github-personal",
         ownership: "personal",
         returnUrl: hostPage.href(),
         idempotencyKey: crypto.randomUUID(),
-        ...(reconnect && connection ? { reconnectAccountId: connection.id } : {}),
+        ...(reconnect && reconnectAccountId ? { reconnectAccountId } : {}),
       });
       if (attempt.nextAction.type !== "authorize")
         throw new Error("GitHub did not return an authorization link");
@@ -1813,10 +1816,21 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     if (!connection) return true;
     setPersonalGitHubBusy(true);
     try {
-      await client.disconnectPersonalGitHub(workspaceId, connection.id, {
-        expectedVersion: connection.version,
-        idempotencyKey: crypto.randomUUID(),
-      });
+      const disconnect = (target: { id: string; version: number }) =>
+        client.disconnectPersonalGitHub(workspaceId, target.id, {
+          expectedVersion: target.version,
+          idempotencyKey: crypto.randomUUID(),
+        });
+      try {
+        await disconnect(connection);
+      } catch (error) {
+        if (!(error instanceof OpenGeniApiError && error.status === 409)) throw error;
+        // The connection moved on while the page held it (a reconnect or a
+        // token refresh finished meanwhile). Removing your own GitHub is still
+        // what was asked: read the current connection and remove that one.
+        const current = (await client.personalGitHubStatus(workspaceId)).connection;
+        if (current && current.status !== "revoked") await disconnect(current);
+      }
       await refreshPersonalGitHub(workspaceId, undefined, { userInitiated: true });
       toast.success("Your GitHub account was disconnected");
       return true;

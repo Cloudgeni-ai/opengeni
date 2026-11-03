@@ -330,6 +330,8 @@ export const PERSONAL_GITHUB_RECONNECT_MESSAGE =
 /**
  * A personal GitHub connection whose grant GitHub refused (a failed token
  * refresh): it stays the person's, but only reconnecting makes it work again.
+ * Nothing sets `error` on personal GitHub today; it is included so a future
+ * failure state also asks for a reconnect instead of failing silently.
  */
 export function personalGitHubConnectionNeedsReconnect(
   connection: Pick<

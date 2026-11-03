@@ -12,7 +12,7 @@ import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/brow
 import { actRun, flush, registerDom, renderHook } from "../../test/render-hook";
 import {
   createSlackLinkPrepareController,
-  PERSONAL_GITHUB_STATUS_TOAST_ID,
+  PERSONAL_GITHUB_RECONNECT_TOAST_ID,
   useAppState,
   type AppStateHost,
 } from "./app-state";
@@ -39,7 +39,7 @@ configurePageAppHost({
   } as unknown as NavigationHost,
 });
 
-function personalConnection(status: "active" | "needs_reauth", version: number) {
+function personalConnection(status: "active" | "needs_reauth" | "revoked", version: number) {
   return {
     id: "personal-1",
     status,
@@ -53,6 +53,10 @@ function personalGitHubHost(api: {
   statuses: ReturnType<typeof personalConnection>[];
   repositories: () => unknown;
   oauthStarts: number;
+  reconnectAccountIds?: Array<string | undefined>;
+  disconnects?: Array<{ connectionId: string; expectedVersion: number }>;
+  /** The live connection version; a disconnect naming another one is refused. */
+  liveVersion?: number;
 }) {
   const client = new Proxy(
     {
@@ -78,9 +82,23 @@ function personalGitHubHost(api: {
         reviewUrl: null,
       }),
       listPersonalGitHubRepositories: async () => api.repositories(),
-      beginConnect: async () => {
+      beginConnect: async (_workspaceId: string, request: { reconnectAccountId?: string }) => {
         api.oauthStarts += 1;
+        api.reconnectAccountIds?.push(request.reconnectAccountId);
         return { nextAction: { type: "authorize", url: "https://github.com/login/oauth" } };
+      },
+      disconnectPersonalGitHub: async (
+        _workspaceId: string,
+        connectionId: string,
+        request: { expectedVersion: number },
+      ) => {
+        api.disconnects?.push({ connectionId, expectedVersion: request.expectedVersion });
+        if (api.liveVersion !== undefined && request.expectedVersion !== api.liveVersion) {
+          throw new OpenGeniApiError(409, "personal GitHub connection changed", {
+            correlationId: crypto.randomUUID(),
+          });
+        }
+        return {};
       },
     } as Record<string, unknown>,
     { get: (target, key) => target[key as string] ?? (async () => ({})) },
@@ -146,6 +164,7 @@ describe("a personal GitHub grant that needs reconnecting", () => {
       statuses: [personalConnection("active", 3), personalConnection("needs_reauth", 4)],
       repositories: reconnectRefused,
       oauthStarts: 0,
+      reconnectAccountIds: [] as Array<string | undefined>,
     };
     const rendered = await openWorkspace(personalGitHubHost(api));
     try {
@@ -162,7 +181,7 @@ describe("a personal GitHub grant that needs reconnecting", () => {
       const [title, data] = toastWarning.mock.calls[0]!;
       expect(title).toBe("Reconnect your GitHub");
       expect(data).toMatchObject({
-        id: PERSONAL_GITHUB_STATUS_TOAST_ID,
+        id: PERSONAL_GITHUB_RECONNECT_TOAST_ID,
         description: "Opengeni can't work as @benyhh until you reconnect.",
         duration: Infinity,
         closeButton: true,
@@ -175,6 +194,7 @@ describe("a personal GitHub grant that needs reconnecting", () => {
         await flush(10);
       });
       expect(api.oauthStarts).toBe(1);
+      expect(api.reconnectAccountIds).toEqual(["personal-1"]);
 
       // A later background read of the same stale grant does not bring a
       // dismissed toast back.
@@ -228,8 +248,31 @@ describe("a personal GitHub grant that needs reconnecting", () => {
       expect(toastWarning).toHaveBeenCalledTimes(1);
       await refresh();
       await flush(10);
-      expect(toastDismiss).toHaveBeenCalledWith(PERSONAL_GITHUB_STATUS_TOAST_ID);
+      expect(toastDismiss).toHaveBeenCalledWith(PERSONAL_GITHUB_RECONNECT_TOAST_ID);
       expect(rendered.result.current.appContext!.personalGitHubSelection).toEqual(selection);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("disconnecting instead of reconnecting clears the toast", async () => {
+    const toastWarning = spyOn(Sonner.toast, "warning");
+    const toastDismiss = spyOn(Sonner.toast, "dismiss");
+    const api = {
+      statuses: [personalConnection("needs_reauth", 4), personalConnection("revoked", 5)],
+      repositories: () => ({ repositories: [], nextCursor: null, selection: null }),
+      oauthStarts: 0,
+    };
+    const rendered = await openWorkspace(personalGitHubHost(api));
+    try {
+      const refresh = () =>
+        actRun(() => rendered.result.current.appContext!.refreshPersonalGitHub(WORKSPACE_ID));
+      await refresh();
+      await flush(10);
+      expect(toastWarning).toHaveBeenCalledTimes(1);
+      await refresh();
+      await flush(10);
+      expect(toastDismiss).toHaveBeenCalledWith(PERSONAL_GITHUB_RECONNECT_TOAST_ID);
     } finally {
       await rendered.unmount();
     }
@@ -255,6 +298,57 @@ describe("a personal GitHub grant that needs reconnecting", () => {
       await flush(10);
       expect(toastError).not.toHaveBeenCalled();
       expect(toastWarning).not.toHaveBeenCalled();
+    } finally {
+      await rendered.unmount();
+    }
+  });
+});
+
+// Bendik reconnected and then pressed Disconnect in the dialog that was still
+// open: the page held the connection version from before the reconnect
+// finished, and Disconnect failed with "changed; refresh before
+// disconnecting". Removing your own GitHub must always work.
+describe("disconnecting your GitHub", () => {
+  afterEach(() => {
+    for (const method of ["error", "success"] as const) {
+      (Sonner.toast[method] as unknown as { mockRestore?: () => void }).mockRestore?.();
+    }
+  });
+
+  test("a connection that changed while the page held it is still disconnected", async () => {
+    const toastError = spyOn(Sonner.toast, "error");
+    const toastSuccess = spyOn(Sonner.toast, "success");
+    const api = {
+      statuses: [personalConnection("needs_reauth", 4)],
+      repositories: () => ({ repositories: [], nextCursor: null, selection: null }),
+      oauthStarts: 0,
+      disconnects: [] as Array<{ connectionId: string; expectedVersion: number }>,
+      liveVersion: 4,
+    };
+    const rendered = await openWorkspace(personalGitHubHost(api));
+    try {
+      await actRun(() => rendered.result.current.appContext!.refreshPersonalGitHub(WORKSPACE_ID));
+      await flush(10);
+      expect(rendered.result.current.appContext!.personalGitHubStatus?.connection?.version).toBe(4);
+
+      // A reconnect finishes elsewhere: the live connection is now version 5.
+      api.statuses.splice(0, api.statuses.length, personalConnection("active", 5));
+      api.liveVersion = 5;
+
+      let disconnected = false;
+      await actRun(async () => {
+        disconnected =
+          await rendered.result.current.appContext!.disconnectPersonalGitHub(WORKSPACE_ID);
+      });
+      await flush(10);
+
+      expect(disconnected).toBe(true);
+      expect(api.disconnects).toEqual([
+        { connectionId: "personal-1", expectedVersion: 4 },
+        { connectionId: "personal-1", expectedVersion: 5 },
+      ]);
+      expect(toastError).not.toHaveBeenCalled();
+      expect(toastSuccess).toHaveBeenCalledWith("Your GitHub account was disconnected");
     } finally {
       await rendered.unmount();
     }

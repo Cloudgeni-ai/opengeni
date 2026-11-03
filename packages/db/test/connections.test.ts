@@ -1196,7 +1196,7 @@ describe("personal GitHub refresh on stored connections", () => {
     expect(result).toMatchObject({ status: "auth_needed", reason: "refresh_failed" });
     const after = await storedRow(stored.connectionId);
     expect(after.status).toBe("needs_reauth");
-    expect(after.last_error).toBe("connection refresh failed with HTTP 400");
+    expect(after.last_error).toBe("connection refresh refused by the provider (bad_refresh_token)");
     const metadata = await getConnectionMetadata(
       db,
       stored.workspaceId,

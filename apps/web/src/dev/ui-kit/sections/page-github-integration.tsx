@@ -1,4 +1,5 @@
 import { useMemo, type ReactNode } from "react";
+import { toast } from "sonner";
 import { AppContext } from "@opengeni/react/app/app-context";
 import { showPersonalGitHubReconnectToast } from "@opengeni/react/app/app-state";
 import { nativeIntegrationModel } from "@opengeni/react/app/components/capabilities/native-connect-readiness";
@@ -168,6 +169,12 @@ function fakeContext(state: State) {
       personalGitHubRepositories: [],
       personalGitHubCatalogReady: true,
       personalGitHubBusy: false,
+      // Preview wiring: the production disconnect retries a connection that
+      // changed while the page held it, then shows this toast.
+      disconnectPersonalGitHub: async () => {
+        toast.success("Your GitHub account was disconnected");
+        return true;
+      },
     } as Record<string, unknown>,
     {
       get(target, key) {

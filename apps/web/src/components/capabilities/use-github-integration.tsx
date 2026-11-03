@@ -128,8 +128,11 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   const catalogLoading = context.repoBusy || !context.githubCatalogReady;
   const personalConnection = context.personalGitHubStatus?.connection ?? null;
   const personalConnected = personalConnection?.status === "active";
+  // A disconnected (revoked) row offers Connect, not Reconnect.
   const personalNeedsAttention = Boolean(
-    personalConnection && personalConnection.status !== "active",
+    personalConnection &&
+    personalConnection.status !== "active" &&
+    personalConnection.status !== "revoked",
   );
   const bound = status?.status === "bound" && installations.length > 0;
   // Stored installations stay unlinkable even when none is active (suspended,
