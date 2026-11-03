@@ -42,6 +42,8 @@ export interface OpenApiParameterBinding {
   readonly description?: string;
   readonly style?: string;
   readonly explode?: boolean;
+  /** A path parameter expanded as a path: `/` is kept and each segment encoded. */
+  readonly allowReserved?: true;
 }
 
 export interface OpenApiOperationBinding {
@@ -680,6 +682,12 @@ function readParameters(
         parameter.explode === false
           ? { style: "form", explode: false }
           : {}),
+        // Reserved expansion (OpenAPI allowReserved, RFC 6570 `{+name}`), as
+        // reviewed definitions mark it. Other bindings keep their old shape
+        // and immutable revision ID.
+        ...(location === "path" && parameter.allowReserved === true
+          ? { allowReserved: true as const }
+          : {}),
         schema: dereferenceSchema(document, parameter.schema),
         ...(stringValue(parameter.description)
           ? { description: stringValue(parameter.description)! }
@@ -832,6 +840,25 @@ function isReplaySafeMethod(method: OpenApiHttpMethod): boolean {
   return method === "get" || method === "head" || method === "options";
 }
 
+/**
+ * A path parameter's value as a path: each segment is encoded and `/` kept.
+ * Leading, trailing and repeated slashes are dropped, so `/sites/hr` and
+ * `sites/hr` mean the same. A `.` or `..` segment would be resolved away by
+ * URL parsing, so it is refused instead of silently reaching another path.
+ */
+function reservedPathValue(name: string, value: string): string {
+  const segments = value.split("/").filter(Boolean);
+  if (segments.some((segment) => segment === "." || segment === "..")) {
+    throw new IntegrationInvocationError(
+      "parameter_invalid",
+      `The path parameter ${JSON.stringify(name)} cannot contain . or .. segments`,
+      "not_started",
+      false,
+    );
+  }
+  return segments.map((segment) => encodeURIComponent(segment)).join("/");
+}
+
 function buildOperationUrl(binding: OpenApiOperationBinding, args: Record<string, unknown>): URL {
   const pathArgs = objectValue(args.path);
   const path = binding.pathTemplate.replace(/\{([^}]+)\}/g, (_match, name: string) => {
@@ -844,7 +871,12 @@ function buildOperationUrl(binding: OpenApiOperationBinding, args: Record<string
         false,
       );
     }
-    return encodeURIComponent(scalarString(value));
+    const parameter = binding.parameters.find(
+      (entry) => entry.location === "path" && entry.name === name,
+    );
+    return parameter?.allowReserved
+      ? reservedPathValue(name, scalarString(value))
+      : encodeURIComponent(scalarString(value));
   });
   const base = new URL(binding.serverUrl);
   const url = new URL(

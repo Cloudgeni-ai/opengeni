@@ -44,8 +44,26 @@ export type IntegrationDefinitionSource =
         searchEntityTypes?: readonly string[];
         /** Reviewed guidance that replaces the provider's generic description. */
         description?: string;
+        /**
+         * The path actually sent when the provider's documented form fails.
+         * The operation and its tool keep their identity. `{+name}` expands a
+         * path parameter as a path: each segment is encoded and `/` is kept
+         * (RFC 6570 reserved expansion), for example Graph's colon form
+         * `/sites/{site-id}:/{+path}`.
+         */
+        requestPath?: string;
+        /** Query parameters the provider documents but rejects for this operation. */
+        omitQueryParameters?: readonly string[];
       }>[];
       excludedOperationPathPrefixes?: readonly string[];
+      /**
+       * Reviewed summary and description for operations selected by prefix,
+       * keyed `"<method> <path>"`, where the provider's text describes a
+       * different operation.
+       */
+      operationText?: Readonly<
+        Record<string, Readonly<{ summary?: string; description?: string }>>
+      >;
       /** Expose JSON bodies without expanding the provider entity graph. */
       schemaMode?: "provider_validated_json";
     }>;
@@ -270,6 +288,24 @@ export const MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION: IntegrationDefinitio
       "/me/mailboxSettings",
       "/me/outlook",
     ],
+    // Graph's document describes these mailbox operations as open-extension
+    // and eventMessage operations.
+    operationText: {
+      "get /me/messages": {
+        summary: "List messages",
+        description:
+          "List the messages in the signed-in person's mailbox, across folders. Use $filter, $search, $orderby, $select and $top to narrow and page results.",
+      },
+      "post /me/messages": {
+        summary: "Create draft message",
+        description:
+          "Create a draft message in the signed-in person's Drafts folder without sending it. Send it later with the send tool for that message.",
+      },
+      "get /me/messages/{message-id}": {
+        summary: "Get message",
+        description: "Read one message in the signed-in person's mailbox by its id.",
+      },
+    },
   },
   baseUrl: MICROSOFT_GRAPH_BASE_URL,
   authentication: microsoftOAuth(["Mail.ReadWrite", "Mail.Send", "MailboxSettings.ReadWrite"]),
@@ -399,7 +435,7 @@ export const MICROSOFT_SHAREPOINT_INTEGRATION_DEFINITION: IntegrationDefinition 
         searchEntityTypes: SHAREPOINT_SEARCH_ENTITY_TYPES,
         requiredScopes: SHAREPOINT_SCOPE,
         description:
-          'Search SharePoint and OneDrive files, lists and sites the signed-in person can access. Send {"requests":[{"entityTypes":["driveItem"],"query":{"queryString":"..."},"from":0,"size":25}]}. Use entityTypes driveItem for files, listItem for list items, site for sites, list for lists and libraries; combine driveItem, listItem and list in one request if needed, but search site separately. KQL is supported in queryString (for example filetype:docx or path:"https://contoso.sharepoint.com/sites/hr"). Page with from and size. Only driveItem, listItem, list, site and drive can be searched here.',
+          'Search SharePoint and OneDrive files, lists and sites the signed-in person can access. Send {"requests":[{"entityTypes":["driveItem"],"query":{"queryString":"..."},"from":0,"size":25}]}. Use entityTypes driveItem for files, listItem for list items, site for sites, list for lists and libraries. Send exactly one entry in requests per call (several entries are rejected); its entityTypes may combine driveItem, listItem and list, but search site in a call of its own. KQL is supported in queryString (for example filetype:docx or path:"https://contoso.sharepoint.com/sites/hr"). Page with from and size. Only driveItem, listItem, list, site and drive can be searched here.',
       },
       {
         path: "/sites",
@@ -420,6 +456,9 @@ export const MICROSOFT_SHAREPOINT_INTEGRATION_DEFINITION: IntegrationDefinition 
         path: "/sites/{site-id}/getByPath(path='{path}')",
         method: "get",
         requiredScopes: SHAREPOINT_SCOPE,
+        // Graph rejects a server-relative path inside the function call's
+        // quotes; its colon form addresses the same site.
+        requestPath: "/sites/{site-id}:/{+path}",
         description:
           "Resolve a SharePoint site URL. For https://contoso.sharepoint.com/sites/hr, use site-id contoso.sharepoint.com and path /sites/hr. If that fails, find the site by keyword with the site search instead.",
       },
@@ -530,7 +569,7 @@ export const MICROSOFT_TEAMS_INTEGRATION_DEFINITION: IntegrationDefinition = {
         searchEntityTypes: ["chatMessage"],
         requiredScopes: ["Chat.Read", "ChannelMessage.Read.All"],
         description:
-          'Search Teams chat and channel messages the signed-in person can access, using the same index as the Teams search box. Send {"requests":[{"entityTypes":["chatMessage"],"query":{"queryString":"..."},"from":0,"size":25}]}. KQL is supported in queryString, for example pricing from:"Anna Larsen". Page with from and size; for messages, total counts only the current page, so use moreResultsAvailable to decide whether to fetch more. Sorting is not supported. Hits include a summary and the message\'s chat or channel ids; read the full message or thread with the chat and channel message tools. Only chatMessage can be searched here.',
+          'Search Teams chat and channel messages the signed-in person can access, using the same index as the Teams search box. Send {"requests":[{"entityTypes":["chatMessage"],"query":{"queryString":"..."},"from":0,"size":25}]}, with exactly one entry in requests per call. KQL is supported in queryString, for example pricing from:"Anna Larsen". Page with from and size; for messages, total counts only the current page, so use moreResultsAvailable to decide whether to fetch more. Sorting is not supported. Hits include a summary and the message\'s chat or channel ids; read the full message or thread with the chat and channel message tools. Only chatMessage can be searched here.',
       },
       {
         path: "/me/joinedTeams",
@@ -555,6 +594,8 @@ export const MICROSOFT_TEAMS_INTEGRATION_DEFINITION: IntegrationDefinition = {
         method: "get",
         odataSkipToken: true,
         requiredScopes: ["ChannelMessage.Read.All"],
+        // Graph declares $orderby here but answers "Query option 'OrderBy' is not allowed".
+        omitQueryParameters: ["$orderby"],
       },
       {
         path: "/teams/{team-id}/channels/{channel-id}/messages",
@@ -660,7 +701,7 @@ export function integrationDefinitionReadOnlyOperations(
     definition.source.operationAllowlist
       .filter((entry) => entry.readOnly === true)
       .map((entry) => [
-        `${entry.method} ${entry.path}`,
+        `${entry.method} ${entry.requestPath?.replace(/\{\+([^}]+)\}/g, "{$1}") ?? entry.path}`,
         entry.searchEntityTypes ? { searchEntityTypes: [...entry.searchEntityTypes] } : {},
       ]),
   );
@@ -708,10 +749,17 @@ export function filterOpenApiDocumentForDefinition(
         if (!operationAllowlist) return [[path, item]];
         if (!isRecord(item)) return [];
         const selected = operationAllowlist.filter((entry) => entry.path === path);
-        const operations = Object.fromEntries(
-          selected
-            .filter(({ method }) => isRecord(item[method]))
-            .map(({ method, requiredScopes, odataSkipToken, description }) => {
+        const reviewedOperations = selected
+          .filter(({ method }) => isRecord(item[method]))
+          .map(
+            ({
+              method,
+              requiredScopes,
+              odataSkipToken,
+              description,
+              requestPath,
+              omitQueryParameters,
+            }) => {
               const operation = item[method] as Record<string, unknown>;
               if (operation.$ref)
                 throw new IntegrationProtocolError(
@@ -719,10 +767,18 @@ export function filterOpenApiDocumentForDefinition(
                   "Reviewed operations must be inline OpenAPI operations",
                 );
               const { servers: _servers, ...reviewed } = operation;
-              return [
+              const reserved = reservedPathParameters(requestPath);
+              const parameters = reviewedParameters(document, reviewed.parameters, {
+                reserved,
+                omitQuery: omitQueryParameters ?? [],
+              });
+              return {
+                path: requestPath ? requestPath.replace(/\{\+([^}]+)\}/g, "{$1}") : path,
+                reserved,
                 method,
-                {
+                operation: {
                   ...reviewed,
+                  ...(parameters ? { parameters } : {}),
                   // Reviewed guidance is long; keep a short name when the provider has no summary.
                   ...(description
                     ? {
@@ -735,7 +791,8 @@ export function filterOpenApiDocumentForDefinition(
                   ...(odataSkipToken
                     ? {
                         parameters: [
-                          ...(Array.isArray(reviewed.parameters) ? reviewed.parameters : []),
+                          ...(parameters ??
+                            (Array.isArray(reviewed.parameters) ? reviewed.parameters : [])),
                           {
                             name: "$skiptoken",
                             in: "query",
@@ -749,23 +806,28 @@ export function filterOpenApiDocumentForDefinition(
                     : {}),
                   ...(requiredScopes ? { security: [{ delegated: [...requiredScopes] }] } : {}),
                 },
-              ];
-            }),
-        );
-        if (Object.keys(operations).length === 0) return [];
+              };
+            },
+          );
+        if (reviewedOperations.length === 0) return [];
         // Preserve shared parameters and descriptions, but do not allow a path $ref
         // to reintroduce unreviewed methods or a provider override of the API origin.
-        return [
-          [
-            path,
-            {
-              ...(item.parameters ? { parameters: item.parameters } : {}),
-              ...(item.summary ? { summary: item.summary } : {}),
-              ...(item.description ? { description: item.description } : {}),
-              ...operations,
-            },
-          ],
-        ];
+        // An operation with a reviewed request path gets its own path item.
+        const byPath = new Map<string, Record<string, unknown>>();
+        for (const reviewed of reviewedOperations) {
+          const shared = reviewedParameters(document, item.parameters, {
+            reserved: reviewed.reserved,
+            omitQuery: [],
+          });
+          const pathItem = byPath.get(reviewed.path) ?? {
+            ...(item.parameters ? { parameters: shared ?? item.parameters } : {}),
+            ...(item.summary ? { summary: item.summary } : {}),
+            ...(item.description ? { description: item.description } : {}),
+          };
+          pathItem[reviewed.method] = reviewed.operation;
+          byPath.set(reviewed.path, pathItem);
+        }
+        return [...byPath];
       }),
   );
   if (Object.keys(paths).length === 0) {
@@ -774,11 +836,56 @@ export function filterOpenApiDocumentForDefinition(
       `${definition.name} did not match any operations in the supplied OpenAPI document`,
     );
   }
+  for (const [key, text] of Object.entries(definition.source.operationText ?? {})) {
+    const [method, ...rest] = key.split(" ");
+    const pathItem = paths[rest.join(" ")];
+    const operation = isRecord(pathItem) && method ? pathItem[method] : undefined;
+    if (!isRecord(pathItem) || !isRecord(operation) || operation.$ref) continue;
+    paths[rest.join(" ")] = { ...pathItem, [method!]: { ...operation, ...text } };
+  }
   return {
     ...document,
     paths,
     servers: [{ url: definition.baseUrl }],
   };
+}
+
+/** Path parameters a reviewed request path expands as paths (`{+name}`). */
+function reservedPathParameters(requestPath: string | undefined): readonly string[] {
+  return [...(requestPath ?? "").matchAll(/\{\+([^}]+)\}/g)].map((match) => match[1]!);
+}
+
+/**
+ * Parameters with reviewed corrections: reserved path parameters are marked
+ * `allowReserved`, and query parameters the provider rejects are dropped.
+ * Undefined when nothing changes, so unchanged operations keep their bytes.
+ */
+function reviewedParameters(
+  document: Record<string, unknown>,
+  value: unknown,
+  corrections: { reserved: readonly string[]; omitQuery: readonly string[] },
+): unknown[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  if (corrections.reserved.length === 0 && corrections.omitQuery.length === 0) return undefined;
+  const resolve = (parameter: unknown): Record<string, unknown> | undefined => {
+    if (!isRecord(parameter)) return undefined;
+    const ref = parameter.$ref;
+    if (typeof ref !== "string") return parameter;
+    const name = ref.startsWith("#/components/parameters/")
+      ? ref.slice("#/components/parameters/".length)
+      : undefined;
+    const components = isRecord(document.components) ? document.components : {};
+    const shared = isRecord(components.parameters) ? components.parameters : {};
+    return name && isRecord(shared[name]) ? shared[name] : undefined;
+  };
+  return value.flatMap((parameter) => {
+    const resolved = resolve(parameter);
+    if (!resolved) return [parameter];
+    if (resolved.in === "query" && corrections.omitQuery.includes(String(resolved.name))) return [];
+    if (resolved.in === "path" && corrections.reserved.includes(String(resolved.name)))
+      return [{ ...resolved, allowReserved: true }];
+    return [parameter];
+  });
 }
 
 export function googleDiscoveryToOpenApi(discovery: unknown): Record<string, unknown> {
