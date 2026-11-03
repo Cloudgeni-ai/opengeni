@@ -1,5 +1,28 @@
 # @opengeni/codex
 
+## 6.7.0
+
+### Patch Changes
+
+- Updated dependencies [c08233e]
+- Updated dependencies [57237db]
+- Updated dependencies [cf35731]
+- Updated dependencies [4a7da4c]
+  - @opengeni/contracts@6.7.0
+  - @opengeni/network@6.7.0
+
+## 6.6.0
+
+### Patch Changes
+
+- Updated dependencies [2c76a2a]
+- Updated dependencies [09bc485]
+- Updated dependencies [2e72a00]
+- Updated dependencies [029497c]
+- Updated dependencies [3cb05f9]
+  - @opengeni/contracts@6.6.0
+  - @opengeni/network@6.6.0
+
 ## 6.5.1
 
 ### Patch Changes

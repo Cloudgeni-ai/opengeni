@@ -24,6 +24,7 @@ import type {
 import { OpenGeniApiError, type InteractionTransport } from "@opengeni/sdk";
 import {
   INTERACTION_ATTEMPT_TOOL_NAMES,
+  BROWSER_OPEN_RESULT_GUIDANCE,
   createInteractionAttemptToolDefinitions,
   interactionRequestNeedingCurrentTarget,
   launchCarrier,
@@ -405,17 +406,17 @@ describe("interaction attempt tools", () => {
       permissions: ["sessions:control"],
       transport: partialTransport({}),
     });
-    // The entry tools are visible from the first request of every session that
-    // can drive a browser or computer, so the CAPTCHA rule travels with them
-    // rather than with the secrets capability.
-    for (const name of ["browser_open", "computer_open"]) {
-      const description = definitions.find(
-        (definition) => definition.modelName === `interaction__${name}`,
-      )!.description;
-      expect(description).toEndWith(
-        "Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.",
-      );
-    }
+    // The CAPTCHA rule travels with the entry tools' descriptions rather than
+    // with the secrets capability, so it survives compaction of earlier
+    // results.
+    const rule =
+      "Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.";
+    const description = (name: string) =>
+      definitions.find((definition) => definition.modelName === `interaction__${name}`)!
+        .description;
+    expect(description("computer_open")).toEndWith(rule);
+    expect(description("browser_open")).toEndWith(rule);
+    expect(BROWSER_OPEN_RESULT_GUIDANCE).not.toContain("CAPTCHA");
   });
 
   test("login tools tell the model to sign in itself and hand off only physical steps", () => {
@@ -1458,15 +1459,26 @@ describe("interaction attempt tools", () => {
         selectedTools: ["browser_open"],
         permissions: ["sessions:control"],
       });
-      const result = await definitions[0]!.execute(
-        {
-          browserSessionId,
-          ...(scenario === "selected" ? {} : { initialUrl: requested.url }),
-        },
-        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
-      );
+      const guidance = JSON.stringify(BROWSER_OPEN_RESULT_GUIDANCE).slice(1, -1);
+      const open = (kind: "model" | "codemode") =>
+        definitions[0]!.execute(
+          {
+            browserSessionId,
+            ...(scenario === "selected" ? {} : { initialUrl: requested.url }),
+          },
+          { operationId: randomUUID(), caller: { kind, subjectId: `${kind}:test` } },
+        );
+      // Code Mode callers never get the model guidance, and do not use up
+      // the model's first showing.
+      expect(JSON.stringify((await open("codemode")).content)).not.toContain(guidance);
+      observed.length = 0;
+      const result = await open("model");
       const primary = scenario === "selected" ? selected : requested;
       expect(observed).toEqual([primary.id]);
+      // How to work with the session follows the first result the model
+      // reads in this attempt; later opens add nothing to history.
+      expect(JSON.stringify(result.content)).toContain(guidance);
+      expect(JSON.stringify((await open("model")).content)).not.toContain(guidance);
       const content = result.structuredContent as Record<string, unknown>;
       if (scenario === "selected") {
         // Without a requested URL every tab stays listed.

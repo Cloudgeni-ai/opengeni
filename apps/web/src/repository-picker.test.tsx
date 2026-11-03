@@ -11,6 +11,8 @@ import {
   type RepositoryContextPickerProps,
 } from "@opengeni/react/app/components/repository-picker";
 import { groupRepositories } from "@opengeni/react/app/lib/session-tools";
+import { AppHostProvider, type AppHost } from "@opengeni/react/app/lib/app-host";
+import type { LinkProps } from "@opengeni/react/app/lib/navigation";
 import { actRun, registerDom, renderComponent } from "../../../packages/react/test/render-hook";
 import type {
   GitHubInstallationBinding,
@@ -41,7 +43,7 @@ describe("repository picker GitHub binding status", () => {
     const presentation = repositoryBindingPresentation("unbound", url, "platform");
     expect(presentation).toMatchObject({
       connectUrl: url,
-      connectLabel: "Connect workspace App",
+      connectLabel: "Install",
       healthy: false,
       canRefresh: false,
     });
@@ -57,7 +59,7 @@ describe("repository picker GitHub binding status", () => {
     expect(presentation.emptyDescription).not.toContain("not configured");
   });
 
-  test("projects bound-empty as healthy with truthful provider-policy copy", () => {
+  test("projects bound-empty as healthy with plain copy", () => {
     const presentation = repositoryBindingPresentation(
       "bound",
       "https://api.opengeni.test/github/connect",
@@ -67,8 +69,9 @@ describe("repository picker GitHub binding status", () => {
       healthy: true,
       canRefresh: true,
     });
-    expect(presentation.emptyDescription).toContain("none of its explicitly allowed repositories");
-    expect(presentation.emptyDescription).toContain("policy approval");
+    expect(presentation.emptyDescription).toBe(
+      "The Opengeni app is installed, but no repositories are shared with this workspace yet.",
+    );
   });
 
   test("projects disabled without a connect URL or healthy controls", () => {
@@ -86,11 +89,10 @@ describe("repository picker GitHub binding status", () => {
 });
 
 describe("repository picker GitHub App links", () => {
-  test("connect and installation settings start from a click, never a page-load link", async () => {
+  test("install starts from a click, never a page-load link; managing goes to GitHub settings", async () => {
     const stale =
       "https://api.opengeni.test/v1/workspaces/workspace/github/connect?state=minted-at-load";
     let connects = 0;
-    const configured: number[] = [];
     const rendered = await renderComponent(
       createElement(RepositoryContextMenuBody, {
         setupMode: "platform",
@@ -114,7 +116,6 @@ describe("repository picker GitHub App links", () => {
         selectedRepoRefs: {},
         manualRepos: [],
         manualOpen: false,
-        githubAppOpen: false,
         org: "",
         pending: false,
         repoBusy: false,
@@ -126,17 +127,12 @@ describe("repository picker GitHub App links", () => {
         onManualAdd: () => {},
         onManualUpdate: () => {},
         onManualRemove: () => {},
-        onGitHubAppOpenChange: () => {},
         onOrgChange: () => {},
         onStartGitHubApp: () => {},
         onConnectWorkspaceApp: () => {
           connects += 1;
         },
-        onConfigureInstallation: async (installationId: number) => {
-          configured.push(installationId);
-          throw new Error("You can't change this installation's repositories.");
-        },
-        onDisconnectInstallation: async () => {},
+        githubSettingsUrl: "/workspaces/workspace/plugins?open=integration:github",
       }),
     );
     // No anchor may carry a signed state captured when the page loaded.
@@ -147,17 +143,22 @@ describe("repository picker GitHub App links", () => {
     ).toEqual([]);
 
     const buttons = () => [...rendered.container.querySelectorAll<HTMLButtonElement>("button")];
-    const connect = buttons().find((button) => button.textContent === "Connect workspace App");
+    expect(rendered.container.textContent).toContain("Connect GitHub to pick repositories.");
+    const connect = buttons().find((button) => button.textContent === "Install");
     expect(connect).toBeTruthy();
     await actRun(() => connect!.click());
     expect(connects).toBe(1);
 
-    const settings = buttons().find((button) => button.textContent === "Repositories");
-    await actRun(() => settings!.click());
-    await actRun(() => Promise.resolve());
-    expect(configured).toEqual([42]);
-    expect(rendered.container.querySelector('[role="alert"]')?.textContent).toBe(
-      "Couldn't open GitHub. You can't change this installation's repositories.",
+    // A stored installation is managed on the GitHub settings page, not in the picker.
+    const manage = [...rendered.container.querySelectorAll("a")].find(
+      (anchor) => anchor.textContent === "Manage GitHub access",
+    );
+    expect(manage?.getAttribute("href")).toBe(
+      "/workspaces/workspace/plugins?open=integration:github",
+    );
+    expect(rendered.container.textContent).not.toContain("octo-org");
+    expect(buttons().some((button) => /Unlink|Repositories/.test(button.textContent ?? ""))).toBe(
+      false,
     );
     await rendered.unmount();
   });
@@ -179,7 +180,6 @@ describe("repository picker GitHub load failure", () => {
       selectedRepoRefs: {},
       manualRepos: [],
       manualOpen: false,
-      githubAppOpen: false,
       org: "",
       pending: false,
       repoBusy: false,
@@ -192,36 +192,84 @@ describe("repository picker GitHub load failure", () => {
       onManualAdd: () => {},
       onManualUpdate: () => {},
       onManualRemove: () => {},
-      onGitHubAppOpenChange: () => {},
       onOrgChange: () => {},
       onStartGitHubApp: () => {},
       onConnectWorkspaceApp: () => {},
-      onConfigureInstallation: async () => {},
-      onDisconnectInstallation: async () => {},
     };
   }
 
-  test("says GitHub couldn't load and offers a refresh instead of setup", async () => {
+  test("says GitHub couldn't load and offers Try again instead of setup", async () => {
     let refreshes = 0;
     const rendered = await renderComponent(
-      createElement(
-        RepositoryContextMenuBody,
-        failedLoadProps(async () => {
+      createElement(RepositoryContextMenuBody, {
+        ...failedLoadProps(async () => {
           refreshes += 1;
         }),
-      ),
+        githubSettingsUrl: "/workspaces/w/plugins?open=integration:github",
+      }),
     );
     const text = rendered.container.textContent ?? "";
     expect(text).toContain("Couldn't load GitHub");
     expect(text).not.toContain("unavailable");
     expect(text).not.toContain("No repositories");
-    const refresh = [...rendered.container.querySelectorAll<HTMLButtonElement>("button")].find(
-      (button) => button.textContent === "Refresh list",
+    expect(text).not.toContain("Refresh list");
+    const retry = [...rendered.container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent === "Try again",
     );
-    expect(refresh).toBeTruthy();
-    await actRun(() => refresh!.click());
+    expect(retry).toBeTruthy();
+    // Not a dead end: the GitHub settings page stays one click away.
+    expect(
+      [...rendered.container.querySelectorAll("a")].find(
+        (link) => link.textContent === "Manage GitHub access",
+      ),
+    ).toBeTruthy();
+    await actRun(() => retry!.click());
     await actRun(() => Promise.resolve());
     expect(refreshes).toBe(1);
+    await rendered.unmount();
+  });
+
+  test("a refresh that failed while the list is shown says so and offers Try again", async () => {
+    let retries = 0;
+    const rendered = await renderComponent(
+      createElement(RepositoryContextMenuBody, {
+        ...failedLoadProps(async () => {
+          retries += 1;
+        }),
+        status: "bound" as const,
+        githubLoadFailed: false,
+        githubUpdateFailed: true,
+      }),
+    );
+    const alert = rendered.container.querySelector('[role="alert"]');
+    expect(alert?.textContent).toBe("Couldn't update the list. Try again");
+    await actRun(() => alert!.querySelector("button")!.click());
+    await actRun(() => Promise.resolve());
+    expect(retries).toBe(1);
+    await rendered.unmount();
+  });
+
+  test("a failed background update says so and offers Try again", async () => {
+    let retries = 0;
+    const rendered = await renderComponent(
+      createElement(RepositoryContextMenuBody, {
+        ...failedLoadProps(async () => {
+          retries += 1;
+        }),
+        status: "bound" as const,
+        githubLoadFailed: false,
+        onOpenRefresh: async () => {
+          throw new Error("Catalog unavailable");
+        },
+      }),
+    );
+    await actRun(() => Promise.resolve());
+    const alert = rendered.container.querySelector('[role="alert"]');
+    expect(alert?.textContent).toBe("Couldn't update the list. Catalog unavailable Try again");
+    await actRun(() => alert!.querySelector("button")!.click());
+    await actRun(() => Promise.resolve());
+    expect(retries).toBe(1);
+    expect(rendered.container.querySelector('[role="alert"]')).toBeNull();
     await rendered.unmount();
   });
 });
@@ -275,7 +323,6 @@ describe("additive repository picker", () => {
         selectedRepoRefs: { [repository.id]: "main" },
         manualRepos: [],
         manualOpen: false,
-        githubAppOpen: false,
         org: "",
         pending: false,
         repoBusy: false,
@@ -287,12 +334,9 @@ describe("additive repository picker", () => {
         onManualAdd: () => {},
         onManualUpdate: () => {},
         onManualRemove: () => {},
-        onGitHubAppOpenChange: () => {},
         onOrgChange: () => {},
         onStartGitHubApp: () => {},
         onConnectWorkspaceApp: () => {},
-        onConfigureInstallation: async () => {},
-        onDisconnectInstallation: async () => {},
       }),
     );
 
@@ -338,7 +382,6 @@ describe("additive repository picker", () => {
         selectedRepoRefs: { [repository.id]: "main" },
         manualRepos: [],
         manualOpen: false,
-        githubAppOpen: false,
         org: "",
         pending: false,
         repoBusy: false,
@@ -351,21 +394,18 @@ describe("additive repository picker", () => {
         onManualAdd: () => {},
         onManualUpdate: () => {},
         onManualRemove: () => {},
-        onGitHubAppOpenChange: () => {},
         onOrgChange: () => {},
         onStartGitHubApp: () => {},
         onConnectWorkspaceApp: () => {},
-        onConfigureInstallation: async () => {},
-        onDisconnectInstallation: async () => {},
       }),
     );
 
     const mounted = rendered.container.querySelector<HTMLButtonElement>(
-      'button[aria-label="example/app mounted"]',
+      'button[aria-label="example/app in this chat"]',
     );
     expect(mounted?.getAttribute("aria-disabled")).toBe("true");
     expect(mounted?.getAttribute("aria-checked")).toBe("true");
-    expect(rendered.container.textContent).toContain("Mounted");
+    expect(rendered.container.textContent).toContain("In chat");
     expect(rendered.container.querySelector('input[aria-label="example/app ref"]')).toBeNull();
     expect(rendered.container.textContent).toContain("main");
     await rendered.unmount();
@@ -389,7 +429,6 @@ describe("additive repository picker", () => {
       selectedRepoRefs: {},
       manualRepos: [],
       manualOpen: false,
-      githubAppOpen: false,
       org: "",
       pending: false,
       repoBusy: false,
@@ -404,12 +443,9 @@ describe("additive repository picker", () => {
       onManualAdd: () => {},
       onManualUpdate: () => {},
       onManualRemove: () => {},
-      onGitHubAppOpenChange: () => {},
       onOrgChange: () => {},
       onStartGitHubApp: () => {},
       onConnectWorkspaceApp: () => {},
-      onConfigureInstallation: async () => {},
-      onDisconnectInstallation: async () => {},
     };
     const trigger = await renderComponent(createElement(RepositoryContextPicker, props));
     expect(
@@ -426,11 +462,10 @@ describe("additive repository picker", () => {
       }),
     );
     const row = mounted.container.querySelector<HTMLButtonElement>(
-      'button[aria-label="octocat/private-repository mounted as you"]',
+      'button[aria-label="octocat/private-repository in this chat as you"]',
     );
     expect(row?.getAttribute("aria-disabled")).toBe("true");
-    expect(mounted.container.textContent).toContain("GitHub access");
-    expect(mounted.container.textContent).toContain("Mounted");
+    expect(mounted.container.textContent).toContain("In chat");
     await mounted.unmount();
 
     let openRefreshes = 0;
@@ -480,7 +515,7 @@ describe("additive repository picker", () => {
     ).toBe(false);
     await actRun(() => addActions[0]?.click());
     expect(manualAdds).toBe(1);
-    expect(body.container.textContent).toContain("Mounted");
+    expect(body.container.textContent).toContain("In chat");
     expect(body.container.querySelector('button[aria-label="Refresh repositories"]')).toBeNull();
     await body.rerender(
       createElement(
@@ -495,14 +530,9 @@ describe("additive repository picker", () => {
       ),
     );
     expect(openRefreshes).toBe(1);
-    const refresh = [...body.container.querySelectorAll<HTMLButtonElement>("button")].find(
-      (button) => button.textContent?.includes("Refresh list"),
-    );
-    await actRun(() => refresh?.click());
-    expect(explicitRefreshes).toBe(1);
-    expect(body.container.querySelector('[role="alert"]')?.textContent).toBe(
-      "Couldn't refresh the list. Catalog unavailable",
-    );
+    // The list refreshes itself; there is no Refresh row and nothing to retry.
+    expect(body.container.textContent).not.toContain("Refresh list");
+    expect(body.container.textContent).not.toContain("Try again");
     await body.rerender(
       createElement(RepositoryContextMenuBody, {
         ...bodyProps,
@@ -530,15 +560,15 @@ describe("additive repository picker", () => {
       }),
     );
     const manualSwitch = manual.container.querySelector<HTMLButtonElement>(
-      'button[aria-label="https://example.test/repo.git mounted"]',
+      'button[aria-label="https://example.test/repo.git in this chat"]',
     );
     expect(manualSwitch?.getAttribute("aria-checked")).toBe("true");
     expect(manualSwitch?.getAttribute("aria-disabled")).toBe("true");
     expect(manual.container.textContent).toContain("release");
-    expect(manual.container.textContent).toContain("Unavailable in catalog");
+    expect(manual.container.textContent).toContain("No longer shared");
     expect(
       manual.container
-        .querySelector('button[aria-label="https://github.com/removed/personal.git mounted"]')
+        .querySelector('button[aria-label="https://github.com/removed/personal.git in this chat"]')
         ?.getAttribute("aria-checked"),
     ).toBe("true");
     expect(manual.container.querySelector('input[aria-label="Repository URL"]')).toBeNull();
@@ -619,12 +649,12 @@ describe("repositories from several GitHub accounts and your GitHub", () => {
       selectedRepoRefs: {},
       manualRepos: [],
       manualOpen: false,
-      githubAppOpen: false,
       org: "",
       pending: false,
       repoBusy: false,
       githubAppBusy: false,
-      personalGitHubManageUrl: "/workspaces/w/plugins?open=integration:github",
+      personalGitHubManageUrl: "/workspaces/w/plugins?open=integration:github&github=personal",
+      githubSettingsUrl: "/workspaces/w/plugins?open=integration:github",
       onRefresh: async () => {},
       onTogglePersonalGitHubRepo: (repo) => calls.push(`personal:${repo.fullName}`),
       onPersonalGitHubRefChange: (id, ref) => calls.push(`personal-ref:${id}:${ref}`),
@@ -635,12 +665,10 @@ describe("repositories from several GitHub accounts and your GitHub", () => {
       onManualAdd: () => {},
       onManualUpdate: () => {},
       onManualRemove: () => {},
-      onGitHubAppOpenChange: () => {},
       onOrgChange: () => {},
       onStartGitHubApp: () => {},
       onConnectWorkspaceApp: () => calls.push("install-app"),
-      onConfigureInstallation: async () => {},
-      onDisconnectInstallation: async () => {},
+      onLeaveForGitHub: () => calls.push("leave"),
       ...overrides,
     };
     return { props: base, calls };
@@ -697,10 +725,26 @@ describe("repositories from several GitHub accounts and your GitHub", () => {
     expect(docs?.disabled).toBe(false);
     await actRun(() => docs!.click());
     expect(calls).toEqual(["app:globex/docs"]);
-    // Personal-only rows say how they act, without an identity choice.
-    expect(text).toContain("As you");
+    // With your GitHub connected, every selected row says who it acts as;
+    // only a repository reachable both ways offers a choice.
+    expect(text).not.toContain("As you");
+    expect(text.match(/Acts as/g)).toHaveLength(3);
+    expect(text).toContain("Acts asYou (@octocat)");
+    expect(text).toContain("Acts asOpengeni app");
     expect(rendered.container.querySelector('[aria-label="octocat/dotfiles acts as"]')).toBeNull();
+    // A selected row shows its branch once, in the branch field.
+    expect(text).not.toContain("release");
     await rendered.unmount();
+
+    // Without your GitHub there is one identity, so nothing to explain.
+    const appOnly = props({
+      personalGitHubStatus: { enabled: true, connection: null, reviewUrl: null } as never,
+      personalGitHubRepositories: [],
+      selectedRepoIds: new Set([acmeApi.id]),
+    });
+    const second = await renderComponent(createElement(RepositoryContextMenuBody, appOnly.props));
+    expect(second.container.textContent).not.toContain("Acts as");
+    await second.unmount();
   });
 
   test("a repository reachable both ways is one row that acts as you by default", async () => {
@@ -792,15 +836,14 @@ describe("repositories from several GitHub accounts and your GitHub", () => {
     const text = rendered.container.textContent ?? "";
     expect(text).toContain("No repositories match your search.");
     expect(text).not.toContain("No repositories connected");
-    // The access entries stay behind the footer instead of jumping inline.
-    expect(text).toContain("GitHub access");
+    // Account setup stays behind the settings link instead of jumping inline.
+    expect(text).toContain("Manage GitHub access");
     expect(text).not.toContain("Your GitHub");
     await rendered.unmount();
   });
 
-  test("GitHub access lists your GitHub and the Opengeni app", async () => {
+  test("account management sits behind one Manage GitHub access link", async () => {
     const { props: picker, calls } = props({
-      githubAppOpen: true,
       installations: [
         {
           installationId: 100,
@@ -814,40 +857,309 @@ describe("repositories from several GitHub accounts and your GitHub", () => {
     });
     const rendered = await renderComponent(createElement(RepositoryContextMenuBody, picker));
     const text = rendered.container.textContent ?? "";
-    expect(text).toContain("GitHub access");
-    expect(text).not.toContain("Connected GitHub accounts");
-    expect(text).toContain("Your GitHub");
-    expect(text).toContain("@octocat · 2 repos");
     expect(
       rendered.container.querySelector<HTMLAnchorElement>(
         "a[href='/workspaces/w/plugins?open=integration:github']",
       )?.textContent,
-    ).toBe("Choose repos");
-    expect(text).toContain("Opengeni app");
-    expect(text).toContain("acme");
-    const install = [...rendered.container.querySelectorAll<HTMLButtonElement>("button")].find(
-      (button) => button.textContent === "Install on another account",
-    );
-    await actRun(() => install!.click());
-    expect(calls).toEqual(["install-app"]);
+    ).toBe("Manage GitHub access");
+    // The old "GitHub access" disclosure and its account rows are gone.
+    expect(text.replace("Manage GitHub access", "")).not.toContain("GitHub access");
+    for (const removed of [
+      "Your GitHub",
+      "Install on another account",
+      "workspace repositories",
+      "Choose repos",
+    ]) {
+      expect(text).not.toContain(removed);
+    }
+    expect(
+      [...rendered.container.querySelectorAll("button")].some((button) =>
+        /^(Unlink|Repositories)$/.test(
+          button.getAttribute("aria-label") ?? button.textContent ?? "",
+        ),
+      ),
+    ).toBe(false);
+    expect(calls).toEqual([]);
     await rendered.unmount();
 
     const disconnected = props({
-      githubAppOpen: true,
       personalGitHubStatus: { enabled: true, connection: null, reviewUrl: null } as never,
       personalGitHubRepositories: [],
     });
     const second = await renderComponent(
       createElement(RepositoryContextMenuBody, disconnected.props),
     );
-    expect(second.container.textContent).toContain(
-      "Connect your GitHub – work appears under your name",
-    );
-    const connect = [...second.container.querySelectorAll<HTMLButtonElement>("button")].find(
-      (button) => button.textContent === "Connect",
-    );
-    await actRun(() => connect!.click());
-    expect(disconnected.calls).toEqual(["connect-personal"]);
+    // With repositories to pick, connecting your GitHub is a settings task too.
+    expect(second.container.textContent).not.toContain("Your GitHub");
+    expect(second.container.textContent).toContain("Manage GitHub access");
     await second.unmount();
+  });
+
+  test("with nothing to pick, both ways to connect are offered in plain words", async () => {
+    const first = props({
+      status: "unbound",
+      repositories: [],
+      groups: [],
+      personalGitHubStatus: { enabled: true, connection: null, reviewUrl: null } as never,
+      personalGitHubRepositories: [],
+    });
+    const rendered = await renderComponent(createElement(RepositoryContextMenuBody, first.props));
+    const text = rendered.container.textContent ?? "";
+    expect(text).toContain("Connect GitHub to pick repositories.");
+    expect(text).toContain("Your GitHubWork appears under your name.");
+    expect(text).toContain(
+      "Opengeni appWork appears as the Opengeni bot, shared with the workspace.",
+    );
+    // Nothing is connected yet: no settings link and no list to refresh.
+    expect(text).not.toContain("Manage GitHub access");
+    expect(text).not.toContain("Refresh list");
+    expect(text).not.toContain("No repositories connected");
+    const button = (label: string) =>
+      [...rendered.container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (candidate) => candidate.textContent === label,
+      );
+    await actRun(() => button("Connect")!.click());
+    await actRun(() => button("Install")!.click());
+    // Connecting your GitHub leaves for GitHub, so the list refreshes once the
+    // person is back; the app's connect dialog syncs the list itself.
+    expect(first.calls).toEqual(["leave", "connect-personal", "install-app"]);
+    await rendered.unmount();
+
+    // Your GitHub connected without chosen repositories: choose them next.
+    const chooseNext = props({
+      status: "unbound",
+      repositories: [],
+      groups: [],
+      personalGitHubRepositories: [],
+    });
+    const second = await renderComponent(
+      createElement(RepositoryContextMenuBody, chooseNext.props),
+    );
+    expect(second.container.textContent).toContain("@octocat · 0 repos");
+    expect(
+      second.container.querySelector<HTMLAnchorElement>(
+        "a[href='/workspaces/w/plugins?open=integration:github&github=personal']",
+      )?.textContent,
+    ).toBe("Choose repos");
+    expect(second.container.textContent).toContain("Manage GitHub access");
+    expect(second.container.textContent).not.toContain("Refresh list");
+    const links = [...second.container.querySelectorAll<HTMLAnchorElement>("a")];
+    await actRun(() => links.find((link) => link.textContent === "Choose repos")!.click());
+    await actRun(() => links.find((link) => link.textContent === "Manage GitHub access")!.click());
+    expect(chooseNext.calls).toEqual(["leave", "leave"]);
+    await second.unmount();
+
+    // A member who can't install sees why instead of a dead button.
+    const member = props({
+      status: "unbound",
+      installUrl: null,
+      repositories: [],
+      groups: [],
+      personalGitHubStatus: { enabled: true, connection: null, reviewUrl: null } as never,
+      personalGitHubRepositories: [],
+    });
+    const third = await renderComponent(createElement(RepositoryContextMenuBody, member.props));
+    expect(third.container.textContent).toContain("A workspace admin can install it.");
+    expect(
+      [...third.container.querySelectorAll("button")].some(
+        (candidate) => candidate.textContent === "Install",
+      ),
+    ).toBe(false);
+    await third.unmount();
+  });
+});
+
+describe("repository picker setup and navigation", () => {
+  function base(
+    overrides: Partial<RepositoryContextPickerProps> = {},
+  ): RepositoryContextPickerProps {
+    const repository: GitHubRepository = {
+      id: 1,
+      installationId: 100,
+      fullName: "acme/api",
+      name: "api",
+      private: true,
+      htmlUrl: "https://github.com/acme/api",
+      cloneUrl: "https://github.com/acme/api.git",
+      defaultBranch: "main",
+      accountLogin: "acme",
+      accountType: "Organization",
+    };
+    return {
+      setupMode: "platform",
+      configured: true,
+      status: "bound",
+      installUrl: null,
+      linkUrl: null,
+      installations: [],
+      repositories: [repository],
+      groups: groupRepositories([repository]),
+      selectedRepoIds: new Set<number>(),
+      selectedRepoRefs: {},
+      manualRepos: [],
+      manualOpen: false,
+      org: "",
+      pending: false,
+      repoBusy: false,
+      githubAppBusy: false,
+      githubSettingsUrl: "/workspaces/w/plugins?open=integration:github",
+      onRefresh: async () => {},
+      onToggleRepo: () => {},
+      onRefChange: () => {},
+      onManualOpenChange: () => {},
+      onManualAdd: () => {},
+      onManualUpdate: () => {},
+      onManualRemove: () => {},
+      onOrgChange: () => {},
+      onStartGitHubApp: () => {},
+      onConnectWorkspaceApp: () => {},
+      ...overrides,
+    };
+  }
+
+  test("an operator without the app keeps Create app once other repositories are listed", async () => {
+    let started = 0;
+    const rendered = await renderComponent(
+      createElement(
+        RepositoryContextMenuBody,
+        base({
+          setupMode: "operator",
+          configured: false,
+          status: "disabled",
+          repositories: [],
+          groups: [],
+          personalGitHubStatus: {
+            enabled: true,
+            connection: { status: "active", metadata: { githubLogin: "octocat" } },
+            reviewUrl: null,
+          } as unknown as PersonalGitHubConnectionStatusResponse,
+          personalGitHubRepositories: [
+            {
+              repositoryId: "900",
+              fullName: "octocat/dotfiles",
+              canonicalUrl: "https://github.com/octocat/dotfiles",
+              defaultBranch: "main",
+              visibility: "private",
+              private: true,
+              archived: false,
+              disabled: false,
+              permissions: { pull: true, push: true, admin: false, maintain: false, triage: false },
+              selectedAccess: "write",
+            },
+          ],
+          onTogglePersonalGitHubRepo: () => {},
+          onStartGitHubApp: () => {
+            started += 1;
+          },
+        }),
+      ),
+    );
+    expect(rendered.container.textContent).toContain("dotfiles");
+    expect(rendered.container.querySelector("#github-org-menu")).toBeTruthy();
+    const create = [...rendered.container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent?.includes("Create app"),
+    );
+    await actRun(() => create!.click());
+    expect(started).toBe(1);
+    await rendered.unmount();
+  });
+
+  test("app page links go through the host's navigation, so an embed opens them beside it", async () => {
+    const hostLinks: string[] = [];
+    const HostLink = (props: LinkProps) => {
+      hostLinks.push(String(props.href));
+      return createElement(
+        "a",
+        { href: props.href, "data-host-link": "", className: props.className },
+        props.children as never,
+      );
+    };
+    const rendered = await renderComponent(
+      createElement(
+        AppHostProvider,
+        { host: { navigation: { Link: HostLink } } as unknown as AppHost },
+        createElement(
+          RepositoryContextMenuBody,
+          base({
+            newChatUrl: "/workspaces/w",
+            lockedRepoIds: new Set([1]),
+          }),
+        ),
+      ),
+    );
+    expect(hostLinks).toEqual(
+      expect.arrayContaining(["/workspaces/w/plugins?open=integration:github", "/workspaces/w"]),
+    );
+    const manage = [...rendered.container.querySelectorAll("a")].find(
+      (link) => link.textContent === "Manage GitHub access",
+    );
+    expect(manage?.hasAttribute("data-host-link")).toBe(true);
+    await rendered.unmount();
+  });
+});
+
+describe("repository picker in a follow-up chat", () => {
+  test("says how to change a repository already in the chat, in plain words", async () => {
+    const repository: GitHubRepository = {
+      id: 7,
+      installationId: 1,
+      fullName: "acme/app",
+      name: "app",
+      private: true,
+      htmlUrl: "https://github.com/acme/app",
+      cloneUrl: "https://github.com/acme/app.git",
+      defaultBranch: "main",
+      accountLogin: "acme",
+      accountType: "Organization",
+    };
+    const removals: string[] = [];
+    const rendered = await renderComponent(
+      createElement(FollowUpRepositoryMenuBody, {
+        setupMode: "platform",
+        configured: true,
+        status: "bound",
+        installUrl: null,
+        linkUrl: null,
+        installations: [],
+        repositories: [repository],
+        groups: groupRepositories([repository]),
+        selectedRepoIds: new Set([repository.id]),
+        selectedRepoRefs: { [repository.id]: "main" },
+        lockedRepoIds: new Set([repository.id]),
+        manualRepos: [],
+        manualOpen: false,
+        org: "",
+        pending: false,
+        repoBusy: false,
+        githubAppBusy: false,
+        newChatUrl: "/workspaces/w",
+        onRemoveMountedRepository: (target) => removals.push(target.kind),
+        onRefresh: async () => {},
+        onToggleRepo: () => {},
+        onRefChange: () => {},
+        onManualOpenChange: () => {},
+        onManualAdd: () => {},
+        onManualUpdate: () => {},
+        onManualRemove: () => {},
+        onOrgChange: () => {},
+        onStartGitHubApp: () => {},
+        onConnectWorkspaceApp: () => {},
+      }),
+    );
+    const text = rendered.container.textContent ?? "";
+    expect(text).toContain("In chat");
+    expect(text).toContain(
+      "To change the branch of a repository already in this chat, start a new chat.",
+    );
+    expect(text).not.toMatch(/[Mm]ounted|retarget/);
+    expect(rendered.container.querySelector("a[href='/workspaces/w']")?.textContent).toBe(
+      "start a new chat",
+    );
+    const row = rendered.container.querySelector<HTMLButtonElement>(
+      'button[role="switch"][aria-label="acme/app in this chat"]',
+    );
+    await actRun(() => row!.click());
+    expect(removals).toEqual(["app"]);
+    await rendered.unmount();
   });
 });

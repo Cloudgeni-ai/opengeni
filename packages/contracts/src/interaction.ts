@@ -4390,6 +4390,8 @@ export const INTERACTION_SECRET_MASK_OPTIONS: SecretValueMaskOptions = {
   skipKey: (key) => NON_TEXT_KEY.test(key),
   // A short code inside a host or port would leave a tab with no valid address.
   keepUrlHosts: true,
+  // Results are data, not conversation: a tool-shaped record is masked in full.
+  keepToolIdentities: false,
 };
 
 /** Deep copy with every occurrence of a supplied secret value in a text

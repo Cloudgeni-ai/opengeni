@@ -75,6 +75,7 @@ import { captureProviderRequestBody } from "./model-request-capture";
 import { observePromptCacheRequestBody } from "./prompt-cache-fingerprint";
 import { streamIdleTimeoutModelFetch } from "./model-stream-idle-timeout";
 import { withoutQuotaExhaustedRetries } from "./provider-quota";
+import { invalidRequestSignatureOfResponse } from "./provider-invalid-request";
 import {
   captureClaudeRequestToken,
   prepareClaudeSubscriptionRequest,
@@ -900,6 +901,7 @@ export function instrumentedModelFetch(
         }
       }
       recordModelCallMetric(provider, response.ok ? "completed" : "failed", started);
+      if (response.status === 400) recordModelInvalidRequestMetric(provider, response);
       return response;
     } catch (error) {
       capture.cancel();
@@ -934,6 +936,24 @@ function recordModelCallMetric(
   } catch {
     // Metrics emission must never affect a model call.
   }
+}
+
+/**
+ * Count a provider's 400 by the request path it names. The body is read from
+ * a clone taken before the response is returned, and the call never waits
+ * for it.
+ */
+function recordModelInvalidRequestMetric(provider: string, response: Response): void {
+  const hook = runtimeMetricsHooks?.onModelInvalidRequest;
+  if (!hook) return;
+  void invalidRequestSignatureOfResponse(response).then((signature) => {
+    if (!signature) return;
+    try {
+      hook({ provider, ...signature });
+    } catch {
+      // Metrics emission must never affect a model call.
+    }
+  });
 }
 
 function azureDeploymentBaseUrl(settings: Settings): string {

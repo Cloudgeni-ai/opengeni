@@ -780,6 +780,32 @@ impl Store for PostgresStore {
         Ok(write_of(&written))
     }
 
+    async fn respec(&self, row: &SandboxRow) -> Result<bool> {
+        if row.ownership.owner.is_some() {
+            return Ok(false);
+        }
+        let fields = Fields::of(row)?;
+        let written = self
+            .client()
+            .await?
+            .execute(
+                "update compute_sandboxes set spec = $2, epoch = $3, taken = $4, \
+                 whole_epoch = $5, version = version + 1 \
+                 where id = $1 and version = $6 and owner is null",
+                &[
+                    &fields.id,
+                    &fields.spec,
+                    &fields.epoch,
+                    &fields.taken,
+                    &fields.whole,
+                    &big(row.version)?,
+                ],
+            )
+            .await
+            .map_err(database)?;
+        Ok(written == 1)
+    }
+
     async fn delete(&self, id: Id, version: u64) -> Result<bool> {
         let deleted = self
             .client()

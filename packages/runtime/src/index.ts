@@ -12,6 +12,21 @@ import {
   installToolResultSecretMasking,
   secretMaskedToolResolver,
 } from "./tool-result-secret-masking";
+export {
+  COMMAND_COMPLETION_NOTICE_MAX_BYTES,
+  CommandCompletionDelivery,
+  renderCommandCompletionNotice,
+  withoutAppendedCommandCompletions,
+  withoutAppendedText,
+  type BackgroundCommandCompletion,
+  type CommandCompletionSource,
+} from "./command-completion-delivery";
+import {
+  commandCompletionModelCallFilter,
+  commandCompletionToolResolver,
+  installCommandCompletionDelivery,
+  type CommandCompletionDelivery,
+} from "./command-completion-delivery";
 import { DRIVE_MCP_BRIDGE_ADAPTER, type DriveMcpBridgeContext } from "./drive-mcp";
 import { sharedKnowledgeGuidance } from "./agent-instructions/modules/knowledge";
 import { measureMcpPhase } from "@opengeni/observability";
@@ -525,16 +540,21 @@ export {
   type ManagedCodemodeClientDownload,
 } from "./sandbox/codemode-client";
 import {
+  GOAL_COMPLETE_REPLY_NOT_DELIVERED,
   InputWaitYield,
   waitForInputReply,
+  type InputWaitGuardResult,
   type InputWaitRequest,
   type InputWaitYieldStream,
 } from "./input-wait-yield";
 export {
+  GOAL_COMPLETE_REPLY_NOT_DELIVERED,
   InputWaitYield,
+  modelResponseClientToolCallCount,
   modelResponseHasProgressUpdate,
   modelResponseHasVisibleText,
   waitForInputReply,
+  type InputWaitGuardResult,
   type InputWaitRequest,
 } from "./input-wait-yield";
 import { withModelStepHandover } from "./model-step-handover";
@@ -2710,6 +2730,12 @@ export type BuildAgentOptions = {
    * result is masked with it before the model, the run state or history sees it.
    */
   secretValueMemory?: SecretValueMemory | null;
+  /**
+   * The session's finished background commands, delivered with the next
+   * plain-text tool result (command-completion-delivery.ts). Applied while
+   * settings.experimentCutPolling is on.
+   */
+  commandCompletionDelivery?: CommandCompletionDelivery | null;
 };
 
 /** @deprecated Persistent display metadata is no longer model-visible. */
@@ -2870,6 +2896,11 @@ export function agentPromptResourcesFor(
     ...(options.secrets?.referencesEnabled ? { secretReferences: true } : {}),
     ...(options.unattended ? { unattended: true } : {}),
     ...(settings.githubPersonalOauthEnabled ? { personalGitHub: true } : {}),
+    // The worker attaches finished commands to later tool results whenever a
+    // sandbox is active and cut polling is on (see installCommandCompletionDelivery).
+    ...(backend !== "none" && settings.experimentCutPolling
+      ? { commandCompletionDelivery: true }
+      : {}),
     ...(repositoryIdentities.length > 0 ? { repositoryIdentities } : {}),
   };
 }
@@ -3711,6 +3742,9 @@ export function buildOpenGeniAgent(
       );
     }
     installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
+    if (options.commandCompletionDelivery && settings.experimentCutPolling) {
+      installCommandCompletionDelivery(agent, options.commandCompletionDelivery);
+    }
     // Last, so it masks exactly what every other wrapper hands to the model.
     if (options.secretValueMemory) {
       installToolResultSecretMasking(agent, options.secretValueMemory);
@@ -3864,6 +3898,9 @@ export function buildOpenGeniAgent(
     );
   }
   installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
+  if (options.commandCompletionDelivery && settings.experimentCutPolling) {
+    installCommandCompletionDelivery(agent, options.commandCompletionDelivery);
+  }
   // Last, so it masks exactly what every other wrapper hands to the model.
   if (options.secretValueMemory) {
     installToolResultSecretMasking(agent, options.secretValueMemory);
@@ -5492,7 +5529,7 @@ export type PrepareToolsOptions = {
    * wait would end a person's turn without any visible reply. It receives the
    * call's verbatim `reply` argument, if any.
    */
-  inputWaitReplyGuard?: (request: InputWaitRequest) => Promise<string | null>;
+  inputWaitReplyGuard?: (request: InputWaitRequest) => Promise<InputWaitGuardResult>;
   /** Frozen, explicitly selected account labels keyed by execution route, not provider. */
   mcpAccountLabels?: ReadonlyMap<string, McpAccountRouteLabel>;
   /** Opt-in exact-attempt persistence; absence preserves ordinary MCP execution. */
@@ -9939,10 +9976,28 @@ export class PrefixedMcpServer implements MCPServer {
     // A wait that would end a person's turn without a visible reply is refused
     // before admission, so the model answers first and nothing remote changes.
     // Its optional `reply` is the verbatim answer, recorded once it is accepted.
-    const waitRequest =
-      unprefixed === "wait_for_input" ? { reply: waitForInputReply(args) } : undefined;
-    if (unprefixed === "wait_for_input") {
-      const refusal = await this.inputWaitYield?.replyRefusal(waitRequest);
+    // A `goal_complete` carrying a `reply` ends the turn the same way, with that
+    // reply as its final answer; the guard may refuse it before admission too.
+    const finalReply = unprefixed === "goal_complete" ? waitForInputReply(args) : null;
+    const waitRequest: InputWaitRequest | undefined =
+      unprefixed === "wait_for_input"
+        ? { reply: waitForInputReply(args) }
+        : finalReply !== null
+          ? { reply: finalReply, kind: "goal_complete" }
+          : undefined;
+    // Without a gate (or once the guard keeps the turn) a completion's reply
+    // cannot end the turn; the completion still runs.
+    const finalDecision =
+      waitRequest?.kind === "goal_complete"
+        ? ((await this.inputWaitYield?.finalReplyDecision(waitRequest)) ?? {
+            refusal: null,
+            endTurn: false,
+          })
+        : undefined;
+    if (waitRequest) {
+      const refusal = finalDecision
+        ? finalDecision.refusal
+        : await this.inputWaitYield?.replyRefusal(waitRequest);
       if (refusal) {
         return boundedMcpToolResult({
           isError: true,
@@ -9952,8 +10007,14 @@ export class PrefixedMcpServer implements MCPServer {
     }
     // Admission must precede the physical remote call, not merely observe its
     // result: model dispatch and terminal settlement drain this reservation.
+    // A sealed gate refuses a wait, but never blocks a goal completion: that
+    // completion then runs without ending the turn.
     const completeWait =
-      unprefixed === "wait_for_input" ? this.inputWaitYield?.beginWait(waitRequest) : undefined;
+      unprefixed === "wait_for_input"
+        ? this.inputWaitYield?.beginWait(waitRequest)
+        : waitRequest && finalDecision?.endTurn
+          ? this.beginFinalReply(waitRequest)
+          : undefined;
     try {
       this.runMcpCredentials?.assertAvailable(this.registryId);
       const physicalCall = async (callArgs: Record<string, unknown>) => {
@@ -10028,8 +10089,17 @@ export class PrefixedMcpServer implements MCPServer {
       recordOutcome(
         result.isError === true && !exchange?.requested ? "provider_declared_error" : "success",
       );
-      if (unprefixed === "wait_for_input" && result.isError !== true) {
-        completeWait?.(true);
+      const delivered = completeWait && result.isError !== true ? completeWait(true) : false;
+      if (finalReply !== null && result.isError !== true && !delivered) {
+        // The completion succeeded but its reply did not end the turn, so the
+        // model must still answer; its receipt alone would not say so.
+        return {
+          ...result,
+          content: [
+            ...(result.content ?? []),
+            { type: "text", text: GOAL_COMPLETE_REPLY_NOT_DELIVERED },
+          ],
+        };
       }
       return result;
     } catch (error) {
@@ -10134,6 +10204,14 @@ export class PrefixedMcpServer implements MCPServer {
     }
   }
 
+  private beginFinalReply(request: InputWaitRequest): ((success: boolean) => boolean) | undefined {
+    try {
+      return this.inputWaitYield?.beginWait(request);
+    } catch {
+      return undefined;
+    }
+  }
+
   invalidateToolsCache(): Promise<void> {
     if (this.frozenTools) return Promise.resolve();
     return this.inner.invalidateToolsCache();
@@ -10220,7 +10298,10 @@ export async function restoreInterruptedRunState(
   }
   return await RunState.fromString(agent, serializedRunState, {
     clientToolSearchRehydration: "preserve_history",
-    resolveMissingFunctionTool: secretMaskedToolResolver(agent, mcpToolResolverForAgent(agent)),
+    resolveMissingFunctionTool: secretMaskedToolResolver(
+      agent,
+      commandCompletionToolResolver(agent, mcpToolResolverForAgent(agent)),
+    ),
   });
 }
 
@@ -10490,11 +10571,11 @@ export const CODE_SEARCH_DIRECTIVE =
   "To find where something is implemented, configured or decided in the code, start with one `code_search` call (a precise question plus 6-15 likely identifiers, file-name fragments, config keys or error strings) instead of a series of separate searches and file reads. When the question asks whether something is required, enforced or the default, add a subQuestion and keywords for what could skip, bypass or override it. Use the returned passages directly instead of re-reading them. Their evidence rating covers only what the search returned, so spend follow-up searches outside those passages: other entry points to the same outcome (API routes, automatic or self-service paths), defaults, flags, exceptions and its unfollowed leads.";
 
 export const CODEMODE_PROGRAMMATIC_DIRECTIVE =
-  "Default `ogtool list` enumerates every authorized tool with a compact summary, without schemas or an output-size cutoff. " +
-  "Codemode uses current-attempt credentials. Keep ordinary running commands alive with `command_wait`/`command_read`. When a call returns `codemode_approval_pending`, retain its operation ID and let the review pause work. The worker resumes that exact stored operation after human approval; JavaScript locals do not resume. A later authorized attempt of the same turn can use `ogtool read <operation-id>` or `environmentCodemodeClient().status(operationId)` / `.resume(operationId)` to observe its result. Never copy the payload into another call to request approval. Observation failure or outcome_unknown does not prove execution failed; inspect actual state before any separately authorized retry. " +
-  "Managed sandboxes select the worker-release client on PATH for every command, including warm boxes. When OPENGENI_CODEMODE_CLIENT_MODULE is set, persistent Bun programs must use `const { tools, openGeni } = await import(process.env.OPENGENI_CODEMODE_CLIENT_MODULE!)`; do not import the older image-baked package or invoke /usr/local/bin/ogtool directly. The stock-package import below is only for environments without that deployment-selected module. " +
-  "Every tool in the Codemode catalog (what `ogtool list` shows) is also callable programmatically from the sandbox through the same frozen catalog, authority, credentials, policy, and execution path. Built-in sandbox tools for the shell, file patching, image viewing and terminal input are not in that catalog; inside the sandbox, use the shell and filesystem directly. " +
-  'In stock sandboxes, write persistent Bun code with `import { tools, openGeni } from "@opengeni/codemode"`; run `ogtool declarations <file.d.ts>` when project-local catalog types are useful. For shell calls, discover tools with `ogtool list`, inspect an unfamiliar tool with `ogtool show <tool-path>`, then use `ogtool call <tool-path> \'<json-args>\'`. Listing is compact by default; `list --json` gives compact structured discovery and `list --full` explicitly includes all schemas. When $OPENGENI_CODEMODE_NATIVE_CLIENT is available, prefer the connection-bound native client even if an older `ogtool` is installed: use `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode` with the same list, show, and call commands; this uses the same public Codemode operation journal, not another tool path. If no compatible installed client is available and Bun plus $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `bun x -p "$OPENGENI_OGTOOL_PACKAGE_SPEC" ogtool ...`; never guess a version or install `latest`. Prefer Codemode for loops, polling, bulk filtering, and intermediate data that should remain in the sandbox instead of consuming your context window. Tools needing review return a compact durable pending handle in Codemode. New calls use the current permission snapshot; an existing review keeps its original action.';
+  "Every tool in the Codemode catalog (what `ogtool list` shows) is also callable programmatically from the sandbox through the same frozen catalog, authority, credentials, policy, and execution path. Built-in sandbox tools for the shell, file patching, image viewing and terminal input are not in that catalog; inside the sandbox, use the shell and filesystem directly. Prefer Codemode for loops, polling, bulk filtering, and intermediate data that should remain in the sandbox instead of consuming your context window. " +
+  'When $OPENGENI_CODEMODE_NATIVE_CLIENT is available, prefer the connection-bound native client even if an older `ogtool` is installed: `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode` takes the same list, show, call, and read commands and uses the same public Codemode operation journal. Otherwise use a compatible `ogtool` from PATH (managed sandboxes put the worker-release client there for every command); if none is compatible, with Bun and $OPENGENI_OGTOOL_PACKAGE_SPEC use the exact pinned `bun x -p "$OPENGENI_OGTOOL_PACKAGE_SPEC" ogtool ...`; never guess a version or install `latest`. ' +
+  "Default `ogtool list` enumerates every authorized tool with a compact summary, without schemas or an output-size cutoff; `list --json` is structured and `list --full` includes all schemas. Inspect a tool with `ogtool show <tool-path>` and call it with `ogtool call <tool-path> '<json-args>'`. " +
+  'When OPENGENI_CODEMODE_CLIENT_MODULE is set, persistent Bun programs must use `const { tools, openGeni } = await import(process.env.OPENGENI_CODEMODE_CLIENT_MODULE!)` (do not import the older image-baked package or invoke /usr/local/bin/ogtool directly); otherwise import them from "@opengeni/codemode"; `ogtool declarations <file.d.ts>` writes catalog types. ' +
+  "A call needing review returns `codemode_approval_pending` with an operation ID: keep it and let the review pause the work; never copy the payload into another call to request approval. After approval the worker resumes that exact stored operation with its original action (JavaScript locals do not resume), and `ogtool read <operation-id>` (or `resume` to wait) observes the result from any authorized attempt of the same turn; new calls use the current permission snapshot. Observation failure or outcome_unknown does not prove execution failed; inspect actual state before any separately authorized retry.";
 
 function modelModalityProjectionFilterForAgent(
   agent: object,
@@ -10802,6 +10883,7 @@ async function runAgentStreamInternal(
     const ownedFilter = composeCallModelInputFilters(
       [
         inputWaitYield?.modelInputFilter,
+        commandCompletionModelCallFilter(agent),
         measuredModelInputFilter(
           "input_filter_base",
           baseModelInputFilterForSettings(settings, {
@@ -10982,6 +11064,7 @@ async function runAgentStreamInternal(
   const callModelInputFilter = composeCallModelInputFilters(
     [
       inputWaitYield?.modelInputFilter,
+      commandCompletionModelCallFilter(agent),
       measuredModelInputFilter(
         "input_filter_base",
         baseModelInputFilterForSettings(settings, {
@@ -11115,7 +11198,10 @@ function lazyToolRunBindings(agent: Agent<any, any>): {
   const runtime = lazyToolRuntimeForAgent(agent);
   return {
     ...(runtime ? { toolNotFoundBehavior: "return_error_to_model" as const } : {}),
-    resolveMissingFunctionTool: secretMaskedToolResolver(agent, mcpToolResolverForAgent(agent)),
+    resolveMissingFunctionTool: secretMaskedToolResolver(
+      agent,
+      commandCompletionToolResolver(agent, mcpToolResolverForAgent(agent)),
+    ),
   };
 }
 

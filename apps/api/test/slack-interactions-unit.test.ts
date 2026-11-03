@@ -22,6 +22,7 @@ import {
   isSlackInfoCommand,
   normalizedBlockActionInteraction,
   slackDeliveryTextsCoalesce,
+  slackControlActorIsOpengeni,
   slackDefaultsLinePostSeed,
   slackEventInboxEntry,
   slackInteractionRoutePolicy,
@@ -684,6 +685,17 @@ describe("Slack event classification and safe projection", () => {
     expect(slackDeliveryTextsCoalesce("Final", "Finally different")).toBe(false);
     expect(slackDeliveryTextsCoalesce("middle", "prefix middle suffix")).toBe(false);
     expect(slackDeliveryTextsCoalesce("", "Final result")).toBe(false);
+  });
+
+  test("only an agent attempt or the system counts as Opengeni stopping a task", () => {
+    expect(slackControlActorIsOpengeni("attempt:4f1c2e0a-0000-4000-8000-000000000001")).toBe(true);
+    expect(slackControlActorIsOpengeni("system:session_cancelled")).toBe(true);
+    expect(slackControlActorIsOpengeni("opengeni:automatic-sandbox-recovery")).toBe(true);
+    // People, outside services and anything unknown keep a stop silent.
+    expect(slackControlActorIsOpengeni("user:4f1c2e0a-0000-4000-8000-000000000002")).toBe(false);
+    expect(slackControlActorIsOpengeni("service:customer-backend")).toBe(false);
+    expect(slackControlActorIsOpengeni("dev")).toBe(false);
+    expect(slackControlActorIsOpengeni(null)).toBe(false);
   });
 
   test("pins the exact reacted message before budgeting long surrounding context", () => {

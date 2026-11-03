@@ -989,6 +989,49 @@
         "w": 12,
         "h": 8
       }
+    },
+    {
+      "id": 29,
+      "type": "timeseries",
+      "title": "Provider invalid requests by path",
+      "description": "Provider 400 invalid-request answers to model calls, by the request path the provider names (indices collapsed, such as input[].tools[].name) and its error code. A new path is a new class of malformed request, usually one failing a chat on every retry. Monitoring only: nothing is blocked or retried because of it.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["last", "sum"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (provider, path, code) (increase(opengeni_model_invalid_requests_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__range]))",
+          "legendFormat": "{{provider}} · {{path}} · {{code}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 85,
+        "w": 24,
+        "h": 8
+      }
     }
   ]
 }

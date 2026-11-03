@@ -1,5 +1,103 @@
 # @opengeni/api-router
 
+## 6.7.0
+
+### Patch Changes
+
+- c08233e: Background commands that finish while the agent is working now report themselves. Their exit status and the start and end of their output follow the agent's next plain-text tool result (including `apply_patch` edits), and are recorded as read exactly like a terminal `command_read`, so the same result is never delivered again. The agent no longer spends a `command_read` only to learn that a command finished. The `background_command_result` input that wakes a waiting session, or reaches its next turn, now carries the same bounded output, so that turn needs no extra read either. Earlier history never changes, JSON and image tool results are left as they were, and results not delivered during a turn still arrive as ordinary input. The timeline keeps showing each tool's own output. Results only use the room a tool's own output leaves in the model's tool-output budget, and are masked for known secret values. `OPENGENI_EXPERIMENT_CUT_POLLING=false` turns the in-turn delivery off, along with the prompt sentence that tells the agent not to poll.
+- 57237db: Your GitHub keeps working past its token's 8-hour lifetime. Opengeni now asks GitHub for a JSON reply when it renews the token. Without that, GitHub answered form-encoded and every renewal failed silently. The connection still showed as connected, while Git and the `github_personal__*` tools failed with "authorization is no longer current" or "credential is unavailable".
+
+  When GitHub refuses a renewal, which it reports as a successful response carrying an error, the connection is now marked as needing a reconnect instead of staying "connected". Temporary GitHub errors, such as `slow_down` or a server error, leave the connection connected and Git and the tools say GitHub is temporarily unavailable. The GitHub settings page shows "needs to reconnect" with a Reconnect button. A Reconnect toast stays until the person acts on it or closes it, and appears once per stale connection. Git and the GitHub tools say the person must reconnect. A repository list that couldn't load no longer reads "0 repos", and a background read that needs nothing from the person no longer shows a toast.
+
+  Disconnecting Your GitHub always works for its owner. If the connection changed while the dialog was open, for example after a reconnect, Opengeni reads it again and disconnects the current one instead of asking the person to refresh.
+
+- Updated dependencies [c08233e]
+- Updated dependencies [e764a94]
+- Updated dependencies [6659742]
+- Updated dependencies [6659742]
+- Updated dependencies [a064a2a]
+- Updated dependencies [b0736b7]
+- Updated dependencies [57237db]
+- Updated dependencies [cf35731]
+- Updated dependencies [af08d2a]
+- Updated dependencies [d7a740f]
+- Updated dependencies [4a7da4c]
+  - @opengeni/runtime@6.7.0
+  - @opengeni/db@6.7.0
+  - @opengeni/contracts@6.7.0
+  - @opengeni/core@6.7.0
+  - @opengeni/documents@6.7.0
+  - @opengeni/events@6.7.0
+  - @opengeni/artifact-tool@6.7.0
+  - @opengeni/capabilities@6.7.0
+  - @opengeni/codemode@6.7.0
+  - @opengeni/codex@6.7.0
+  - @opengeni/config@6.7.0
+  - @opengeni/github@6.7.0
+  - @opengeni/interaction@6.7.0
+  - @opengeni/observability@6.7.0
+  - @opengeni/storage@6.7.0
+  - @opengeni/tool-gateway@6.7.0
+  - @opengeni/vaults@6.7.0
+  - @opengeni/vaults-bitwarden@6.7.0
+  - @opengeni/vaults-keeper@6.7.0
+  - @opengeni/vaults-onepassword@6.7.0
+  - @opengeni/vaults-protonpass@6.7.0
+  - @opengeni/agent-proto@6.7.0
+  - @opengeni/network@6.7.0
+  - @opengeni/xai-subscription@6.7.0
+
+## 6.6.0
+
+### Patch Changes
+
+- fb49abf: Connecting a built-in integration such as SharePoint, Outlook or OneDrive now finishes as soon as the person signs in: the provider's callback saves the account and adds every reviewed tool in one step, so nobody waits on "Finishing setup…" and closing the dialog, reloading or quitting the desktop app during the hand-back can no longer leave the account connected without tools. The Connect dialog closes itself and the Capabilities page says "SharePoint connected". The callback reads the reviewed tools before its short commit and finishes only what the person who started the setup could have installed themselves, with the same permission and member policy checks.
+
+  If the callback cannot read the reviewed tools in time, the server keeps trying in the background. A setup still left with a saved account and no tools finishes the next time the person opens Capabilities or an in-chat setup card for it is shown, through the new `POST /v1/workspaces/:workspaceId/connect/attempts/finish` (`connectTransport().finishUnfinished`, `finishUnfinishedConnectSetups`); in chat, its tools then join that chat and the agent continues. This covers setups from before this release too, for 7 days after they started and even once their attempt has expired (it then moves from `expired` to `complete`; the transition report carries the previous state). Finishing applies the same rollout, permission and member policy checks as installing by hand, finishes one setup per account at a time, and never finishes a setup that a later setup of the same account replaced, so tools the person removed stay removed. Neither Capabilities nor the chat card waits for it. Closing the Connect dialog after signing in also lets the remaining setup carry on in the background (`continueConnectSetup`); `NativeConnectSetup`'s `onComplete` can therefore fire after `onClose`.
+
+- 80eb21d: Forking a chat at an agent reply that was sent through `wait_for_input`'s `reply` now works: the fork ends at that wait call and its result. Such replies were refused as "from before the conversation was compacted"; the remaining refusal for a message with no matching history point now says so plainly.
+- 09bc485: An agent can now finish a goal and answer in one step: `goal_complete` takes an optional `reply`, and once the completion succeeds that reply ends the turn as its final answer, shown exactly as written. A session created through the API with `unattended: true` and a first message now gets a goal to complete that message unless the request names a goal. Like any goal, it makes the run continue when the agent stops without completing or pausing it, within the deployment's continuation and budget limits, so such runs can take more turns than before; pass `goal: null` to create one without a goal, as before. A keyed retry of such an unattended create now returns the original session instead of a conflict. A task that seems infeasible, missing data or a result the agent cannot verify is no longer by itself a reason to pause a goal: the agent tries the plausible alternatives first and, if it still pauses, names them in the rationale. The goal tools' and `wait_for_input`'s descriptions are shorter.
+- e78f4e5: Slack threads no longer get a pile of identical "Opengeni stopped this task." messages when a chat is archived or cancelled. The notice now posts at most once, only when Opengeni itself stopped the running task, and never when a person stopped it from the app, the API or Slack.
+- Updated dependencies [01b3fcd]
+- Updated dependencies [3d82830]
+- Updated dependencies [fb49abf]
+- Updated dependencies [074f212]
+- Updated dependencies [2c76a2a]
+- Updated dependencies [80eb21d]
+- Updated dependencies [58a7f9f]
+- Updated dependencies [09bc485]
+- Updated dependencies [2e72a00]
+- Updated dependencies [029497c]
+- Updated dependencies [538a433]
+- Updated dependencies [4930632]
+- Updated dependencies [3cb05f9]
+- Updated dependencies [5a26902]
+- Updated dependencies [c0ba1cc]
+  - @opengeni/runtime@6.6.0
+  - @opengeni/config@6.6.0
+  - @opengeni/db@6.6.0
+  - @opengeni/contracts@6.6.0
+  - @opengeni/core@6.6.0
+  - @opengeni/documents@6.6.0
+  - @opengeni/github@6.6.0
+  - @opengeni/storage@6.6.0
+  - @opengeni/events@6.6.0
+  - @opengeni/codemode@6.6.0
+  - @opengeni/artifact-tool@6.6.0
+  - @opengeni/capabilities@6.6.0
+  - @opengeni/codex@6.6.0
+  - @opengeni/interaction@6.6.0
+  - @opengeni/observability@6.6.0
+  - @opengeni/tool-gateway@6.6.0
+  - @opengeni/vaults@6.6.0
+  - @opengeni/vaults-bitwarden@6.6.0
+  - @opengeni/vaults-keeper@6.6.0
+  - @opengeni/vaults-onepassword@6.6.0
+  - @opengeni/vaults-protonpass@6.6.0
+  - @opengeni/agent-proto@6.6.0
+  - @opengeni/network@6.6.0
+  - @opengeni/xai-subscription@6.6.0
+
 ## 6.5.1
 
 ### Minor Changes

@@ -15918,7 +15918,7 @@
         "$.firstPartyMcpPermissions[]": "ref(Permission)",
         "$.firstPartyMcpTools": "array?",
         "$.firstPartyMcpTools[]": "ref(FirstPartyMcpToolName)",
-        "$.goal": "ref(GoalSpec)?",
+        "$.goal": "ref(GoalSpec)? null",
         "$.idempotencyKey": "string?",
         "$.initialMessage": "string?",
         "$.installedSkillIds": "array?",
@@ -29871,8 +29871,10 @@
       "shape": {
         "$": "object",
         "$.accountLabel": "string?",
+        "$.accountOwnerLabel": "string?",
         "$.actionDigest": "string!",
         "$.approveLabel": "string!",
+        "$.approvedBy": "enum?=[\"\\\"account_owner\\\"\",\"\\\"you\\\"\"]",
         "$.availableActions": "array!",
         "$.availableActions[]": "enum=[\"\\\"approve\\\"\",\"\\\"reject\\\"\"]",
         "$.consequence": "string?",
@@ -34305,6 +34307,7 @@
       "ApiKeyConnectionCredential": "type",
       "applyUrlRotation": "value",
       "ApplyWorkspaceSkillRevisionRequest": "type",
+      "APPROVAL_REQUIRES_ACCOUNT_OWNER_CODE": "value",
       "ApproveSlackUserLinkAccessRequest": "type",
       "AppShotCapture": "type",
       "ArtifactCatalogItem": "type",
@@ -35010,6 +35013,7 @@
       "InteractionSemanticSnapshot": "type",
       "InteractionSessionListOptions": "type",
       "InteractionTransport": "type",
+      "isApprovalRequiresAccountOwnerError": "value",
       "isConnectedMachineOutcomeUnknownOutput": "value",
       "isMaintenanceError": "value",
       "isOpenGeniSiteBridgeCancelMessage": "value",
@@ -36303,6 +36307,7 @@
       "ReadEditableArtifactResourceOptions": "type"
     },
     "@opengeni/sdk/browser": {
+      "APPROVAL_REQUIRES_ACCOUNT_OWNER_CODE": "value",
       "ConnectorToolPermission": "type",
       "ConnectorToolPermissionEntry": "type",
       "ConnectorToolPermissionsResponse": "type",
@@ -36310,6 +36315,7 @@
       "FetchResponse": "type",
       "formatErrorMessage": "value",
       "GetSessionOptions": "type",
+      "isApprovalRequiresAccountOwnerError": "value",
       "isMaintenanceError": "value",
       "isRetryableStreamError": "value",
       "isTransientRequestError": "value",
@@ -36448,10 +36454,12 @@
       "sessionRealtimeOwnerStorageNamespace": "value"
     },
     "@opengeni/sdk/core": {
+      "APPROVAL_REQUIRES_ACCOUNT_OWNER_CODE": "value",
       "FetchLike": "type",
       "FetchResponse": "type",
       "formatErrorMessage": "value",
       "GetSessionOptions": "type",
+      "isApprovalRequiresAccountOwnerError": "value",
       "isMaintenanceError": "value",
       "isRetryableStreamError": "value",
       "isTransientRequestError": "value",
@@ -40428,6 +40436,9 @@
       "ErrorMessage": "value",
       "ErrorMessageProps": "type",
       "TechnicalDetails": "value"
+    },
+    "@opengeni/react/ui/error-text": {
+      "ErrorText": "value"
     },
     "@opengeni/react/ui/field": {
       "Checkbox": "value",

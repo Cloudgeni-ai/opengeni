@@ -1,5 +1,100 @@
 # Modular prompt changelog
 
+Finished background commands report themselves. When a command the agent
+left running finishes during the turn, its exit status and the start and end
+of its output follow the next plain-text tool result, and the durable
+`background_command_result` input now carries the same output, so the agent
+no longer needs a `command_read` only to learn that a command finished.
+When a sandbox is active and cut polling is on (new `commandCompletionDelivery`
+resource fact), Background commands gains one sentence (about 170 bytes)
+saying so, in every tool-availability variant; with
+`OPENGENI_EXPERIMENT_CUT_POLLING=false` the section is unchanged. The
+`command_read` and `command_wait` descriptions say that a finished command's
+result reaches the session on its own. The legacy text is unchanged.
+
+```diff
++ A command that finishes while you work reports its exit status and output on its own, after a later tool result or as input, so do not poll only to learn that it finished.
+```
+
+Fixed guidance that rides on every request is shorter where it cannot help:
+
+- The Codemode directive (legacy and modular, about 630 to 520 o200k tokens)
+  says the same things more compactly: catalog scope, when to prefer Codemode,
+  which client to run (native client, a compatible `ogtool` from PATH, or
+  the pinned package), the list/show/call/declarations commands, the Bun module import,
+  and the approval-pending and outcome-unknown rules. It drops the misplaced
+  "Keep ordinary running commands alive with `command_wait`/`command_read`"
+  sentence (command guidance lives in Runtime mechanics) and the
+  `environmentCodemodeClient()` method names (`ogtool read` observes the same
+  operation from any authorized attempt of the same turn). The legacy locks for the two cases with Codemode change.
+- With Knowledge learning Off, which refuses every Knowledge write, the
+  guidance for the save-only Knowledge tools is omitted; with
+  workspace-instruction learning Off, the instruction-change clause is omitted
+  (see Tool-availability variants). The learning-mode rule, retrieval and
+  grounding stay. Skills learning Off changes nothing: it does not disable
+  installed Skills, so the Skill index and reading guidance stay.
+- The `browser_open` description keeps what matters before opening (placement,
+  the user's Chrome, headed or headless, storage, screenshots, Code Mode for
+  bulk work with its browser API, the CAPTCHA rule). How to work with the
+  open session (act on the outline, the family tools, the dedicated attached
+  tab) now follows the first `browser_open` result the model reads in an
+  attempt (`BROWSER_OPEN_RESULT_GUIDANCE`); later opens and Code Mode callers
+  get the plain result.
+
+A session that cannot spawn children no longer reads how to delegate to them.
+When the session's nesting depth has reached its frozen maximum, the
+first-party MCP server already hides `session_create`; the prompt's tool
+availability now proves it absent too and records `childSessionsImpossible`
+(the worker passes the session's `nestedAgentDepth` and
+`effectiveMaxNestedAgentDepth`, both frozen on the session, so the prefix stays
+stable across turns). Without `session_create`, Session coordination drops the
+delegation-judgment sentences. When the session can never have children, it
+also drops the "After spawning" child-integration paragraph and the
+`child_requires_action` paragraph (together about 470 o200k tokens for a
+session at its maximum depth). A turn that merely lacks `session_create` (for
+example a scheduled turn with a narrower selection) keeps the integration
+rules, because the session may already own children. Session coordination
+keeps the child-session delivery rule, session management, session links,
+targets, Send/Steer receipt and supervision rules, the "do not repurpose" and
+"handle what you can in this session" sentences, and the short-wait guidance.
+Sessions that can still spawn render byte for byte as before. The bundled
+`projects` Skill is listed only when `project_list` is selected, because it
+only explains the project tools.
+
+Goal completion can carry the final answer. `goal_complete` gains an optional
+`reply`: once the completion succeeds, the runtime ends the turn at that tool
+batch with the reply as its final answer, shown exactly as written, the way
+`wait_for_input` ends a turn with its `reply`. Completion plus answer is one
+model call instead of two. A `reply` passed together with other tool calls in
+one response is refused before anything is completed (at most twice per
+attempt); after that the completion runs but the reply does not end the turn,
+so the model sees those results first. When a reply does not end the turn,
+its receipt tells the model to answer. The goals module's handoff paragraph
+and the goal continuation say so (about 200 bytes more). The goal an API
+create now gives an unattended request carries its own note that it needs no
+restating, in its success criteria, so the instructions gain no unattended
+sentence and the legacy locks do not change. The goal tool schemas drop the
+spacing and ledger boilerplate each text field repeated; each tool
+description states that rule once, and the schemas still enforce the byte
+limits.
+
+Goal pauses name what was tried. The goals module's pause paragraph gains one
+sentence (about 230 bytes): a task that seems infeasible, missing data or a
+result the agent cannot verify is not by itself a reason to pause; it tries
+the plausible in-scope alternatives and, if it still pauses, names the ones it
+tried in the rationale. A definitive missing permission or required human
+decision still justifies an immediate pause. The `goal_pause` tool
+description and the goal continuation's blocked audit say the same, and
+`wait_for_input`'s description is shortened without dropping a rule the
+instructions do not also state.
+
+```diff
+- After goal_complete succeeds, finish the same turn with the requested answer, or a concise summary and retained artifact link.
++ Put the requested answer, or a concise summary and retained artifact link, in goal_complete's reply: it is shown exactly as written and ends the turn, so call goal_complete on its own once you have seen your last results.
++ Without a reply, finish the same turn with that answer after goal_complete succeeds.
++ A task that seems infeasible, missing data or a result you cannot verify is not by itself a reason to pause: try the plausible in-scope alternatives, and if you still pause, name the ones you tried in the rationale.
+```
+
 The sandbox preamble (`sandboxBaseInstructions`, the SDK default that every
 sandbox and Connected Machine agent receives ahead of the modular contract)
 extends two existing lines in place; nothing is added for sessions without a
@@ -827,6 +922,10 @@ When a named tool is proven absent, only the clauses naming it change:
   `session_send_message` follow-up clause, the `wait_for_input` long-wait and
   `finalAnswer` sentences, the `session_wait` join and short-wait sentences,
   and the `session_get` contrasts each need their tools.
+  Without `session_create` the delegation-judgment sentences are dropped; the
+  "After spawning" paragraph and the `child_requires_action` paragraph are
+  dropped only with `childSessionsImpossible` (a session at its maximum
+  nesting depth, which can have no children).
 - Runtime mechanics and base behavior: without `wait_for_input` the in-flight
   and already-waiting sentences and the three base-behavior `wait_for_input`
   clauses are dropped, and `## Waiting` keeps only its tool-neutral sentence
@@ -851,9 +950,16 @@ Tool discovery, media, accepted user/workspace/Skill instructions, active-goal
 continuation input, and the Codemode/code-search/Git-binding attempt
 directives are unchanged.
 
-Known exception: the Codemode directive's observation clause still names
-`command_wait`/`command_read` when those tools are proven absent; a test pins
-it as the only surviving prompt-named tool.
+The Codemode directive no longer names `command_wait`/`command_read`, so with
+every prompt-named tool proven absent no instruction layer names one (pinned by
+a test).
+
+Learning modes: with the accepted turn's effective Knowledge learning mode Off,
+the Knowledge authoring tools (`knowledge_save`, `knowledge_prepare_save`,
+`knowledge_retain_message`, `knowledge_retain_file`, `knowledge_archive`,
+`task_note_promote_knowledge`) render as absent, and with workspace-instruction
+learning Off so does `instruction_policy_save`. Their tools stay in the catalog
+and still refuse; only the guidance for calls that cannot succeed is omitted.
 
 Linked turns: the permission ceiling of a turn acting for a linked external
 identity is that turn's own snapshot. A session mixing linked and unlinked

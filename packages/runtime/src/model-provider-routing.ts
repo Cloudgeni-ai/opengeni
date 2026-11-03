@@ -27,6 +27,7 @@ import {
   projectHistoryForProvider,
   responsesRouteDeclaresAdditionalTools,
 } from "./provider-history-adapter";
+import { requestFunctionToolNames } from "./provider-tool-names";
 import {
   appendChatReasoningDetails,
   chatReasoning,
@@ -365,6 +366,7 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
           ? request.input
           : (projectHistoryForProvider(request.input, "responses", {
               declaresAdditionalTools: responsesRouteDeclaresAdditionalTools(this.provider.kind),
+              knownToolNames: requestFunctionToolNames(request.tools),
             }) as ModelRequest["input"]);
       return super._buildResponsesCreateRequest(
         input === request.input ? request : { ...request, input },

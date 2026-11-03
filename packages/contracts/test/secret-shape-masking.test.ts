@@ -190,6 +190,18 @@ describe("deep masking and idempotency", () => {
       "github-token",
     ]);
   });
+
+  test("a token in a tool-name position is still masked and captured", () => {
+    const token = `ghp_${repeat("Ab1", 12)}`;
+    const value = [
+      { type: "function_call", callId: "c", name: token, arguments: "{}" },
+      { type: "tool_search_output", tools: [{ type: "function", name: token }] },
+    ];
+    const masked = maskSecretShapes(value) as Array<Record<string, any>>;
+    expect(masked[0]!.name).toBe("[masked github token]");
+    expect(masked[1]!.tools[0].name).toBe("[masked github token]");
+    expect(collectSecretShapes(value).map((match) => match.kind)).toEqual(["github-token"]);
+  });
 });
 
 describe("attempt memory capture", () => {

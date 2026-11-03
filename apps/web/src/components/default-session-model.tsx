@@ -8,6 +8,7 @@ import { payerShortLabel } from "@opengeni/react/app/components/models/models-ui
 import { ModelPicker } from "@opengeni/react/app/components/pickers";
 import { buttonVariants } from "@opengeni/react/ui/button";
 import { SettingRow } from "@opengeni/react/ui/setting-row";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import {
   availabilityReasonLabel,
@@ -181,11 +182,7 @@ export function DefaultSessionModelPreferenceRow(props: {
         await props.organizationDefaults.update({ sessionDefaults: next });
         return true;
       } catch (caught) {
-        toast.error(
-          caught instanceof Error && caught.message
-            ? caught.message
-            : "Couldn't save the default model. Try again.",
-        );
+        toast.error(userErrorText(caught, "Couldn't save the default model. Try again."));
         return false;
       }
     }

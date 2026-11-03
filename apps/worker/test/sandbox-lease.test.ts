@@ -3212,6 +3212,66 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     ).toMatchObject({ workspaceGeneration: admission.workspaceGeneration });
   }, 60_000);
 
+  test("(1b-home-route) a home command's output survives the session moving to another machine", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const attempt = await freshWarmSnapshotAttempt(ids);
+    ids.groupId = attempt.sandboxGroupId;
+    const leaseId = await insertLease(ids, {
+      liveness: "warm",
+      refcount: 1,
+      turnHolders: 1,
+      leaseEpoch: 11,
+      expiresInMs: 600_000,
+      instanceId: "box-home-swap",
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "box-home-swap" } },
+      },
+    });
+    await insertHolder(ids, leaseId, "turn", attempt.holderId, 0, attempt.sessionId);
+
+    // A command admitted on the session's own home sandbox, the way routed
+    // home mutations are admitted: no explicit route, so the route epoch is
+    // the session's epoch at admission.
+    const admission = await advanceWorkspaceGeneration(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 11,
+      expectedInstanceId: "box-home-swap",
+      operation: "execCommand",
+    });
+    expect(admission.routeKind).toBe("home");
+    expect(admission.routeEpoch).toBe(0);
+    // While it runs, the same turn moves the session to another machine.
+    await admin`
+      update sessions set active_epoch = active_epoch + 1
+      where workspace_id = ${ids.workspaceId} and id = ${attempt.sessionId}`;
+
+    // The home command still settles with its output accepted: moving the
+    // session's active route does not touch what ran on its home sandbox.
+    await verifyWorkspaceMutationSettlement(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 11,
+      expectedInstanceId: "box-home-swap",
+      admission,
+      operation: "execCommand",
+      outcome: "resolved",
+    });
+    const [settled] = await admin<{ providerOutcome: string | null; settledAt: Date | null }[]>`
+      select provider_outcome as "providerOutcome", settled_at as "settledAt"
+      from sandbox_workspace_mutation_admissions where id = ${admission.id}`;
+    expect(settled?.providerOutcome).toBe("resolved");
+    expect(settled?.settledAt).toBeInstanceOf(Date);
+  }, 60_000);
+
   test("(1b-settlement-race) provider success settles once before a stale-route rejection", async () => {
     if (!available) return;
     const ids = await freshWorkspace();

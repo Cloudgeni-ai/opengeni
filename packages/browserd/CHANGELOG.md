@@ -1,5 +1,33 @@
 # @opengeni/browserd
 
+## 0.4.19
+
+### Patch Changes
+
+- Updated dependencies [c08233e]
+- Updated dependencies [57237db]
+- Updated dependencies [cf35731]
+- Updated dependencies [4a7da4c]
+  - @opengeni/contracts@6.7.0
+  - @opengeni/interaction@6.7.0
+
+## 0.4.18
+
+### Patch Changes
+
+- 041e773: When Chrome ends a tab's debugging between an observation and the next action (another extension's frame appearing, as a password manager's menu does), the action now runs on a new attachment instead of failing with "Browser tab debugging unavailable", as long as no input was sent yet. This covers the action's pre-dispatch check of the tab and its own first reads.
+- 63bf4f9: A click whose target the page carries back out of the window just after it was scrolled to (for example a page that animates its own scroll to the accordion section an earlier click in the same batch opened) waits for the page to stop moving and scrolls to the target again, instead of failing with "out of view: nothing is at its center". A target no scroll can reach is still refused definitely.
+- a7b98ec: A click whose target is covered by something still animating away, such as a dialog fading out after its Close button was pressed in the same batch, waits for it to go (up to 1.5 s) instead of failing with "covered by … at its center". A cover that is not animating is still refused at once.
+- e912706: When Chrome ends a tab's debugging during a fill (another extension's autofill frame appearing as the field gets focus), the fill now reports completed if the field holds the requested value on the new attachment, instead of an unknown outcome.
+- 5a26902: Agents working in a sandbox or on a Connected Machine now check a change to something already running on the running system: the base sandbox instructions say to restart or reload the process that actually serves a change to a service, worker or scheduled job, exercise the real entry point and check what the user asked about, because unit tests alone do not show it works. They ask first only when a restart could disrupt others or lose work in progress. The same instructions now keep the agent's own scratch work out of the user's project: throwaway scripts and tests, and browsers, runtimes or libraries installed only for its own checks, go in a temporary directory outside the project and are removed when done, while tests the user asked for or the project expects still belong in it. Both are one clause appended to an existing line of the sandbox preamble (about 122 tokens), so sessions without a sandbox are unchanged. When the built-in browser cannot start because a machine has no Chrome or Chromium, its error now says to install one system-wide in its standard location, where the browser tool finds it, and not to install a browser or its libraries inside a project folder; when the executable it was set up to use has vanished, the error names that path.
+- Updated dependencies [2c76a2a]
+- Updated dependencies [09bc485]
+- Updated dependencies [2e72a00]
+- Updated dependencies [029497c]
+- Updated dependencies [3cb05f9]
+  - @opengeni/contracts@6.6.0
+  - @opengeni/interaction@6.6.0
+
 ## 0.4.17
 
 ### Patch Changes

@@ -201,3 +201,53 @@ test("a callback inheriting a finished scope cannot retain new terminal pages", 
   resume();
   await late;
 });
+
+test("a wait longer than one provider read is split into bounded reads until exit", async () => {
+  // A large workspace upload asks to wait many minutes. The provider refuses a
+  // single read longer than its bound, so the adapter must read in slices.
+  const waits: number[] = [];
+  const session: ChannelASession = {};
+  installModalCommandSession(session, {
+    start: async () => ({
+      kind: "modal-router-v1",
+      sandboxId: "sb-synthetic",
+      taskId: "task-synthetic",
+      execId: "exec-long",
+      streams: {
+        stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+        stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+      },
+    }),
+    read: async (value, waitMs) => {
+      if (!Number.isFinite(waitMs) || waitMs < 0 || waitMs > 50_000)
+        throw new Error("Invalid Modal output read bounds");
+      waits.push(waitMs);
+      const done = waits.length === 3;
+      const stdout = done ? "uploaded" : "";
+      const command = structuredClone(value) as ModalRouterProviderCommand;
+      command.streams.stdout.byteOffset += Buffer.byteLength(stdout);
+      for (const stream of ["stdout", "stderr"] as const) {
+        command.streams[stream].eof = done;
+        command.streams[stream].exitCode = done ? 0 : null;
+      }
+      return {
+        command,
+        expected: value as ModalRouterProviderCommand,
+        chunks: done ? [{ stream: "stdout" as const, chunkId: "stdout", text: stdout }] : [],
+        exitCode: done ? 0 : null,
+      };
+    },
+    readProbe: async () => {
+      throw new Error("unexpected probe");
+    },
+    write: async () => {
+      throw new Error("unexpected input write");
+    },
+  });
+  const result = await withProviderCommandHandle(104, () =>
+    executeSynchronousCommand(session, { cmd: "synthetic", yieldTimeMs: 16 * 60_000 }),
+  );
+  expect(result).toMatchObject({ stdout: "uploaded", stderr: "", exitCode: 0 });
+  expect(waits).toHaveLength(3);
+  expect(Math.max(...waits)).toBeLessThanOrEqual(50_000);
+});

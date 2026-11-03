@@ -13,5 +13,6 @@ mod moves;
 mod native;
 mod pointers;
 mod reach;
+mod resize;
 mod support;
 mod templates;

@@ -439,7 +439,7 @@ import {
   WorkspaceCaptureManifestCache,
 } from "./workspace-capture";
 import { publishSandboxFileArtifact } from "../sandbox-file-artifacts";
-import { ApiHttpError } from "../http/api-error";
+import { ApiHttpError, approvalForbiddenHttpError } from "../http/api-error";
 import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
 import { recordAcceptedApiAdmission } from "../admission-trace";
 import { parseRequestBody, parseRequestJson, parseRequestQuery } from "../http/request-body";
@@ -1450,7 +1450,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       sessionId: c.req.param("sessionId"),
       approvalId: c.req.param("approvalId"),
     };
-    const review = await getToolActionReview(db, input);
+    const review = await getToolActionReview(db, { ...input, viewerSubjectId: grant.subjectId });
     if (!review) throw new HTTPException(404, { message: "Review not found" });
     c.header("Cache-Control", "private, no-store");
     return c.json(review);
@@ -4604,6 +4604,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         if (error instanceof SessionApprovalAnswerError) {
           throw new HTTPException(422, { message: error.message });
         }
+        const forbidden = approvalForbiddenHttpError(error);
+        if (forbidden) throw forbidden;
         throw error;
       }
       if (accepted.action === "conflict") {
@@ -6167,7 +6169,7 @@ const SESSION_FORK_POINT_REFUSAL_MESSAGES: Record<SessionForkPointRefusal, strin
   message_unavailable:
     "Only your messages and the agent's replies can be fork points. Choose one of those, or fork the whole session.",
   boundary_not_retained:
-    "This message is from before the conversation was compacted, so it can't be a fork point. Choose a more recent message, or fork the whole session.",
+    "This message can't be matched to a point in the conversation the agent saw, so it can't be a fork point. Choose a nearby message, or fork the whole session.",
   history_compacted:
     "The conversation up to this message was compacted, so it can't be copied as it was then. Choose a more recent message, or fork the whole session.",
   unfinished_tool_exchange:

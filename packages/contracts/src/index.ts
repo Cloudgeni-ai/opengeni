@@ -11430,6 +11430,12 @@ export const SessionSystemUpdatePayload = /* @__PURE__ */ defineSchema(() =>
             commandId: primitives.uuid,
           })
           .strict(),
+        /**
+         * The start and end of the retained output as text, with a marker
+         * naming any omitted middle and its command_read cursor. Absent on
+         * results recorded before results carried output.
+         */
+        output: boundedUtf8String(16 * 1024).optional(),
         notice: z.string().optional(),
       })
       .passthrough(),
@@ -20412,7 +20418,11 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
         // in its Site's project. An id that does not name a channel in the
         // workspace is a 422.
         channelId: z.string().uuid().nullable().optional(),
-        goal: GoalSpec.optional(),
+        // The session goal. Omitted on a top-level `unattended: true` create
+        // with an initial message, Opengeni sets one that stands for that
+        // message, so the run keeps going until the agent completes or pauses
+        // it; null creates the session without a goal.
+        goal: GoalSpec.nullable().optional(),
         clientEventId: SessionOperationKey.optional(),
         // Workspace-scoped CREATE idempotency key: collapses concurrent/retried
         // create calls carrying the same key to a single session (partial unique

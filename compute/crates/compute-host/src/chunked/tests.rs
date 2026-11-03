@@ -33,6 +33,8 @@ fn sparse(path: &Path, length: u64, writes: &[(u64, &[u8])]) {
 
 /// The runtime the test images say made them.
 const RUNTIME: &str = "Firecracker v1.0.0 on a test processor";
+/// The virtual processors the test images say they were saved with.
+const VCPUS: u8 = 3;
 
 fn files(dir: &Path, memory: bool) -> SavedFiles {
     SavedFiles {
@@ -42,6 +44,7 @@ fn files(dir: &Path, memory: bool) -> SavedFiles {
             memory: dir.join("memory"),
             chunks: None,
             runtime: Some(RUNTIME.to_owned()),
+            vcpus: Some(VCPUS),
         }),
         profile: None,
         image: None,
@@ -105,6 +108,11 @@ async fn a_former_owner_writes_nothing_once_a_later_one_claims_the_copy() {
             receipt: receipt.clone(),
             memory: true,
             disk_bytes: CHUNK_BYTES,
+            // What it was saved with: its memory's length from its manifest.
+            made_at: MadeAt {
+                vcpus: Some(VCPUS),
+                memory_bytes: Some(CHUNK_BYTES),
+            },
         }
     );
     assert!(
@@ -558,11 +566,13 @@ async fn a_sandbox_comes_back_byte_for_byte_and_unchanged_chunks_are_not_stored_
         manifest,
         prefilled,
         runtime,
+        vcpus,
     } = store.fetch(sandbox, &into).await.unwrap()
     else {
         panic!("memory should stay in the store");
     };
     assert_eq!(runtime.as_deref(), Some(RUNTIME), "the runtime comes back");
+    assert_eq!(vcpus, Some(VCPUS), "and how many processors it had");
     assert_eq!(memory_len, big);
     assert!(prefilled.is_none(), "an unusable profile packs nothing");
     assert_eq!(
@@ -1338,4 +1348,52 @@ async fn a_chunk_an_image_lost_is_stored_again_once_a_verification_finds_it() {
     let b_files = made_from(dir.path(), &path, image, "b", &[]);
     archived(&store, b, &b_files).await;
     assert_eq!(backend.take(), (4, 0));
+}
+
+/// What an archive stores is held until it publishes, and carried into each
+/// new hour meanwhile; a published archive leaves nothing held.
+#[tokio::test]
+async fn an_archive_holds_what_it_stores_until_it_publishes() {
+    use compute_storage::fresh::Clock;
+    use compute_storage::store::Kept;
+
+    let now = Arc::new(std::sync::Mutex::new(SystemTime::now()));
+    let clock = {
+        let now = Arc::clone(&now);
+        Clock::from_fn(move || *now.lock().unwrap())
+    };
+    let chunks =
+        ChunkStore::new(Arc::new(InMemory::new()), ObjectPath::from("t")).with_clock(clock);
+    let store = Chunked::new(chunks.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let saved = files(dir.path(), false);
+    sparse(
+        saved.disk.path(),
+        3 * CHUNK_BYTES,
+        &[(0, b"one"), (CHUNK_BYTES, b"two")],
+    );
+    let sandbox = id("0123456789abcdef0123456789abcdef");
+
+    let held = store.held(sandbox);
+    let holding = store.holding(&held);
+    holding
+        .archive_once(sandbox, save(), &saved, &CancellationToken::new())
+        .await
+        .unwrap()
+        .stored()
+        .unwrap();
+    assert_eq!(held.len(), 2, "both chunks, not the zeros");
+    *now.lock().unwrap() += Duration::from_secs(3_600);
+    let kept = chunks.keep(&held).await;
+    assert_eq!((kept.copied, kept.lost, kept.failed), (2, 0, 0), "{kept:?}");
+    assert_eq!(chunks.keep(&held).await, Kept::default(), "carried already");
+    drop((holding, held));
+
+    store
+        .archive(sandbox, save(), &saved, &CancellationToken::new())
+        .await
+        .unwrap()
+        .stored()
+        .unwrap();
+    assert!(store.in_flight.lock().unwrap().is_empty());
 }

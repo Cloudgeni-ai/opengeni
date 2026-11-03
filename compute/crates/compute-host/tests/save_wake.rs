@@ -1177,3 +1177,181 @@ async fn adopt_checkpointed(
         "nothing done after it: {output}"
     );
 }
+
+/// Hands `id`, held under `owner_epoch`, off from `agent` once it is
+/// saved, as the fleet does for a move or a resize.
+async fn saved_and_handed_off(agent: &Agent, id: Id, owner_epoch: u64) {
+    let slept = agent
+        .client
+        .call(&Request::Sleep {
+            id,
+            generation: None,
+            level: LevelName::Saved,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(slept, Reply::Done), "{slept:?}");
+    wait_for(&agent.client, id, LevelName::Saved).await;
+    let handed_off = agent
+        .client
+        .call(&Request::HandOff {
+            id,
+            owner_epoch,
+            awake: false,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(handed_off, Reply::Done), "{handed_off:?}");
+}
+
+/// Has `agent` take `id` up under `owner_epoch` at the shape `config`
+/// gives, as after a resize: `whole` as the service sends it, only while
+/// the machine stays the same.
+async fn adopt_resized(
+    agent: &Agent,
+    id: Id,
+    owner_epoch: u64,
+    config: SandboxConfig,
+    whole: bool,
+) {
+    let adopted = agent
+        .client
+        .call(&Request::Adopt {
+            id,
+            config,
+            owner_epoch,
+            whole,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(adopted, Reply::Done), "{adopted:?}");
+}
+
+/// How long, in MiB, the guest sees the drive its root file system is on.
+/// This lab's guests take no restore notices, so they do not grow their
+/// file system when their drive grows: the guest tests check that.
+async fn root_drive_mib(agent: &Agent, id: Id) -> u64 {
+    let output = exec(
+        &agent.client,
+        id,
+        "echo sectors=$(cat /sys/dev/block/$(awk '$5 == \"/\" {print $3}' /proc/self/mountinfo | tail -1)/size)",
+    )
+    .await;
+    let sectors: u64 = field(&output, "sectors")
+        .parse()
+        .unwrap_or_else(|_| panic!("{output}"));
+    (sectors * 512) >> 20
+}
+
+/// A sandbox resized as the fleet resizes one (ADR 27): handed off, then
+/// adopted at its new shape. Given a longer disk and a new request, it is
+/// restored with its programs and its VM told its drive grew; given more
+/// processors and memory, it boots from its disk at that machine, its
+/// programs gone and its files and disk kept.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resized_sandbox_keeps_its_files_and_its_programs_only_on_the_same_machine() {
+    const UID: u32 = (1 << 30) + 5000;
+    let Some(lab) = lab() else { return };
+    let store = Chunked::new(ChunkStore::new(Arc::new(InMemory::new()), "resize".into()));
+    let id: Id = "00000000-0000-4000-8000-0000000000b8".parse().unwrap();
+    let one = start(&lab, &format!("z{}", short()), UID, store.clone()).await;
+    let two = start_with(
+        &lab,
+        &format!("y{}", short()),
+        UID + 1000,
+        store,
+        Setup {
+            cgroup: "/sys/fs/cgroup/compute-host-test-2".into(),
+            ..Setup::default()
+        },
+    )
+    .await;
+    let mut config = SandboxConfig {
+        disk_mib: None,
+        reach: Vec::new(),
+        vcpus: 1,
+        memory_mib: 512,
+        memory_request_mib: None,
+        cpu_request_millis: None,
+        sleep: SleepConfig::default(),
+        image: None,
+        link: None,
+    };
+    let created = one
+        .client
+        .call(&Request::Create {
+            id,
+            config: config.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(created, Reply::Done), "{created:?}");
+    let setup = exec(
+        &one.client,
+        id,
+        &format!("{SETUP}\necho kept > /kept; sync"),
+    )
+    .await;
+    let sum = field(&setup, "sum").to_owned();
+    let before = root_drive_mib(&one, id).await;
+
+    // A longer disk and a new request: the same machine.
+    saved_and_handed_off(&one, id, 1).await;
+    let base = std::fs::metadata(lab.join("base.ext4")).unwrap().len() >> 20;
+    let longer = before.max(base) + 512;
+    config.disk_mib = Some(u32::try_from(longer).unwrap());
+    config.memory_request_mib = Some(256);
+    adopt_resized(&two, id, 2, config.clone(), true).await;
+    let output = exec(
+        &two.client,
+        id,
+        "echo count=$(cat /dev/shm/count)\n\
+         echo was=$(md5sum < /dev/shm/blob | cut -d' ' -f1)\n\
+         echo disk=$(cat /kept)",
+    )
+    .await;
+    assert!(
+        field(&output, "count").parse::<u64>().is_ok(),
+        "its programs carried on: {output}"
+    );
+    assert_eq!(field(&output, "was"), sum, "{output}");
+    assert_eq!(field(&output, "disk"), "kept", "{output}");
+    assert_eq!(
+        root_drive_mib(&two, id).await,
+        longer,
+        "its drive grew from {before} MiB before it ran on"
+    );
+
+    // More processors and memory: another machine, booted from its disk.
+    // This lab's agents have no notice port to ask the guest to write its
+    // disks out before a save, as hosts do, so the test asks.
+    exec(&two.client, id, "sync").await;
+    saved_and_handed_off(&two, id, 2).await;
+    config.vcpus = 2;
+    config.memory_mib = 1024;
+    adopt_resized(&one, id, 3, config, false).await;
+    let output = exec(
+        &one.client,
+        id,
+        "echo count=$(cat /dev/shm/count 2>/dev/null)\n\
+         echo cpus=$(nproc)\n\
+         echo memory=$(awk '/MemTotal/ {print $2}' /proc/meminfo)\n\
+         echo disk=$(cat /kept)",
+    )
+    .await;
+    assert_eq!(field(&output, "count"), "", "its programs ended: {output}");
+    assert_eq!(field(&output, "cpus"), "2", "{output}");
+    let memory_kib: u64 = field(&output, "memory").parse().unwrap();
+    assert!(memory_kib > 768 * 1024, "{output}");
+    assert_eq!(field(&output, "disk"), "kept", "{output}");
+    assert_eq!(root_drive_mib(&one, id).await, longer, "it kept its disk");
+    let removed = one
+        .client
+        .call(&Request::Remove {
+            id,
+            generation: None,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(removed, Reply::Done), "{removed:?}");
+}

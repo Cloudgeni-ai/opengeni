@@ -249,7 +249,7 @@ describe("native branded-host error paths", () => {
       await submitNewChat(view.container);
       expect(attempts).toBe(1);
       expect(view.container.querySelector("[role='alert']")!.textContent).toBe(
-        "You don’t have permission to do that. Reference: acme-403.",
+        "You don’t have permission to do that.",
       );
       expect(view.container.querySelector("textarea")!.value).toBe("A private ACME question");
       expect(
@@ -627,7 +627,7 @@ describe("native branded-host error paths", () => {
     try {
       await submitNewChat(view.container);
       expect(view.container.querySelector("[role='alert']")!.textContent).toBe(
-        "ACME Assistant: You don’t have permission to do that. Reference: acme-403.",
+        "ACME Assistant: You don’t have permission to do that.",
       );
       expect(received).toContain(error);
       expect(error).toMatchObject({

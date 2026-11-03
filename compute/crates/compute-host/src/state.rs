@@ -94,9 +94,11 @@ pub(crate) struct Allocation {
     pub gid: u32,
     /// Its link to the host, when it is networked.
     pub link: Option<LinkAddresses>,
-    /// Its disk's length, from when its first files were written. A disk
-    /// keeps its length, in object storage too, whatever base image the
-    /// host has since; unknown only until then, before it is recorded.
+    /// Its disk's length, from when its first files were written, or for
+    /// one adopted, its stored copy's grown to the length its config asks
+    /// for, which its first fetch makes it. A disk keeps its length, in
+    /// object storage too, whatever base image the host has since; unknown
+    /// only until then, before it is recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_bytes: Option<u64>,
 }
