@@ -55,6 +55,7 @@ import {
   type AnthropicRequestSize,
   ToolCallError,
   findInferenceRegionRestrictedError,
+  SandboxBackendNotServedError,
 } from "@opengeni/runtime";
 import {
   mcpTransportRequestFailureDiagnostic,
@@ -1779,6 +1780,20 @@ function withProviderWebPageExplained(
   };
 }
 
+/** The typed host-backend refusal anywhere in an error's cause chain. */
+export function findSandboxBackendNotServedError(
+  error: unknown,
+): SandboxBackendNotServedError | null {
+  const seen = new Set<unknown>();
+  for (let current = error; current && typeof current === "object";) {
+    if (current instanceof SandboxBackendNotServedError) return current;
+    if (seen.has(current) || seen.size >= 16) return null;
+    seen.add(current);
+    current = (current as { cause?: unknown }).cause;
+  }
+  return null;
+}
+
 /**
  * Record the closed provider condition on a retryable model-provider failure so
  * clients can say "overloaded" rather than a generic outage. Presentation
@@ -1881,6 +1896,17 @@ function classifyAgentRunFailurePayload(
       code: regionRestricted.code,
       retryable: false,
       model: regionRestricted.modelName,
+    };
+  }
+  // The deployment does not serve the session's host sandbox backend. Nothing
+  // was built, and every retry gives the same answer, however the
+  // provisioning path wrapped it.
+  const backendNotServed = findSandboxBackendNotServedError(error);
+  if (backendNotServed) {
+    return {
+      error: backendNotServed.message,
+      code: backendNotServed.code,
+      retryable: false,
     };
   }
   // A checkpoint (compaction) request only summarizes history: it runs no

@@ -29,9 +29,21 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: .bun-version
+      - name: Install restic
+        timeout-minutes: 2
+        env:
+          RESTIC_VERSION: 0.19.1
+          RESTIC_SHA256: f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/restic.bz2" \
+            "https://github.com/restic/restic/releases/download/v${RESTIC_VERSION}/restic_${RESTIC_VERSION}_linux_amd64.bz2"
+          echo "$RESTIC_SHA256  $RUNNER_TEMP/restic.bz2" | sha256sum -c -
+          bunzip2 -c "$RUNNER_TEMP/restic.bz2" > "$RUNNER_TEMP/restic"
+          sudo install -m 0755 "$RUNNER_TEMP/restic" /usr/local/bin/restic
+          restic version
       - name: Test operator runner
         timeout-minutes: 5
-        run: bun test scripts/backup/backup.test.ts --timeout 60000
+        run: bun test scripts/backup/backup.test.ts --timeout 120000
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:

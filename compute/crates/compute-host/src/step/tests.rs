@@ -617,7 +617,10 @@ async fn only_an_image_no_vmm_here_reads_is_given_up() {
                     memory: &memory,
                     len: 8192,
                 },
-                Some(made_under),
+                Made {
+                    runtime: Some(made_under),
+                    ..Made::default()
+                },
             )
             .unwrap();
 
@@ -673,7 +676,10 @@ async fn a_restore_tells_the_streams_before_it_starts_a_vm_process() {
                 memory: &memory,
                 len: 8192,
             },
-            Some(RUNTIME),
+            Made {
+                runtime: Some(RUNTIME),
+                ..Made::default()
+            },
         )
         .unwrap();
     let clock = crate::resume::RunClock::default();
@@ -710,7 +716,10 @@ async fn a_restore_that_cannot_tell_the_streams_starts_no_vm_process() {
                 memory: &memory,
                 len: 8192,
             },
-            Some(RUNTIME),
+            Made {
+                runtime: Some(RUNTIME),
+                ..Made::default()
+            },
         )
         .unwrap();
     let (clock, _door) = crate::resume::RunClock::with_broken_door();
@@ -722,6 +731,51 @@ async fn a_restore_that_cannot_tell_the_streams_starts_no_vm_process() {
     assert_eq!(clock.launches(), 0);
     let durable = sandbox.records.settle(sandbox.id).await.unwrap();
     assert!(durable.image, "the saved image was given up");
+}
+
+/// A memory image restores the machine it was saved from, so one that
+/// records another shape than the sandbox's is given up before any VMM
+/// sees it, and the sandbox wakes from its disk. One that records none was
+/// made before shapes were recorded, at the sandbox's own.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_memory_image_saved_at_another_shape_is_given_up_unrestored() {
+    const MIB: u64 = 1 << 20;
+    for (vcpus, len, given_up) in [
+        (Some(2), 256 * MIB, true),
+        (Some(1), 128 * MIB, true),
+        (Some(1), 256 * MIB, false),
+    ] {
+        let sandbox = Sandbox::new().await;
+        let saved = sandbox.record(Change::new().image(true)).await;
+        let (state, memory) = (
+            sandbox.paths.dir.join("state"),
+            sandbox.paths.dir.join("memory"),
+        );
+        fs::write(&state, "state").unwrap();
+        fs::File::create(&memory).unwrap().set_len(len).unwrap();
+        images_of(&sandbox.paths)
+            .publish_made_by(
+                Parts::Whole {
+                    state: &state,
+                    memory: &memory,
+                    len,
+                },
+                Made {
+                    vcpus,
+                    ..Made::default()
+                },
+            )
+            .unwrap();
+        let ran = sandbox.job(NoStore, saved, false).run(Step::Restore).await;
+        let durable = sandbox.records.settle(sandbox.id).await.unwrap();
+        if given_up {
+            assert_eq!(ran.outcome, Outcome::Failed(Failure::MemoryLost));
+            assert_eq!(Counting::count(&sandbox.engine.restores), 0);
+            assert!(!durable.image, "{vcpus:?} vcpus, {len} bytes");
+        } else {
+            assert_eq!(Counting::count(&sandbox.engine.restores), 1);
+        }
+    }
 }
 
 /// A save of a VM whose memory is still arriving waits for it, but a wake

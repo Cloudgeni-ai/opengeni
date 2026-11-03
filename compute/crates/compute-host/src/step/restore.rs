@@ -115,7 +115,7 @@ impl<E: Engine, S: Store> Job<E, S> {
         };
         notes::phase("load");
         // Before the image is marked stale, so a failure may try it again.
-        if let Err(error) = self.tell_disk_length(&vm).await {
+        if let Err(error) = self.tell_disk_length(&vm, &image).await {
             let outcome = self.end_with_memory(vm, live_memory, failure(&error)).await;
             return (outcome, After::NoVm);
         }
@@ -158,6 +158,33 @@ impl<E: Engine, S: Store> Job<E, S> {
         }
         self.woke().await;
         (Outcome::Done, After::New(vm, live_memory))
+    }
+
+    /// Gives `image` up, so the sandbox wakes from its disk, when it records
+    /// a shape other than the sandbox's: it would bring back the machine it
+    /// was saved from, at another size than the sandbox is booked and
+    /// limited at. A sandbox is adopted at a new shape only without such an
+    /// image (see `FilesOnly`), so this guards against one kept anyway.
+    pub(super) async fn refuse_made_elsewhere(&mut self, image: &Verified) -> Result<(), Outcome> {
+        let Some(made) = self.made_elsewhere(image) else {
+            return Ok(());
+        };
+        tracing::warn!(id = %self.id, made, "the memory image was saved at another shape; waking from the disk");
+        if let Err(error) = self.commit(Change::new().image(false)).await {
+            return Err(state_failure(&error));
+        }
+        Err(Outcome::Failed(Failure::MemoryLost))
+    }
+
+    /// The shape `image` was saved at, if it records one other than the
+    /// sandbox's. An image that does not record its processors was made
+    /// before it was recorded, at the shape of this record, which no host
+    /// changes.
+    fn made_elsewhere(&self, image: &Verified) -> Option<String> {
+        let meta = image.meta();
+        let vcpus = meta.vcpus?;
+        (vcpus != self.record.config.vcpus || meta.memory_len != self.spec.memory_bytes())
+            .then(|| format!("{vcpus} vcpus and {} MiB", meta.memory_len >> 20))
     }
 
     /// Decides what the VMM refusing to load `image` means. The image is

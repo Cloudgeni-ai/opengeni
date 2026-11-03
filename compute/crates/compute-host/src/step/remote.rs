@@ -12,7 +12,7 @@ use super::{
     Archived, Base, Job, archive_receipt, blocking, clear_local, failure, images_of, io_failure,
     learned, pager_learned, state_failure, suspect_error, wake_profile, withdraw_base,
 };
-use crate::image::{Parts, Suspect};
+use crate::image::{Images, Made, Parts, Suspect, Verified};
 use crate::layout::{remove_if_present, write_atomic};
 use crate::observe::{Alarm, notes};
 use crate::state::{Change, Disk, unix_ms_now};
@@ -81,6 +81,9 @@ impl<E: Engine, S: Store> Job<E, S> {
                 memory: images.memory(image.generation()),
                 chunks: Some(Arc::new(chunks.0.clone())),
                 runtime: image.meta().runtime.clone(),
+                // An image that does not say was made at this record's
+                // shape, which no host changes.
+                vcpus: image.meta().vcpus.or(Some(self.record.config.vcpus)),
             }),
             profile: profile.exists().then_some(profile),
             image: self.record.config.image,
@@ -239,47 +242,22 @@ impl<E: Engine, S: Store> Job<E, S> {
         };
         let images = images_of(&paths);
         let memory_len = self.spec.memory_bytes();
+        // The disk comes back as long as it was saved, which is how long
+        // its memory image takes it to be; a sandbox given a longer one
+        // since (see `Allocation::disk_bytes`) has it lengthened here, and
+        // its guest grows its file system to fill it as it wakes.
+        let (wanted, disk) = (self.record.allocation.disk_bytes, paths.disk.clone());
         let published = blocking(move || {
-            let published = match &fetched {
-                FetchedMemory::None => images.clear().map_err(Suspect::from).map(|()| None),
-                FetchedMemory::Local {
-                    state,
-                    memory,
-                    runtime,
-                } => images
-                    .publish_made_by(
-                        Parts::Whole {
-                            state,
-                            memory,
-                            len: memory_len,
-                        },
-                        runtime.as_deref(),
-                    )
-                    .map(Some),
-                FetchedMemory::Remote {
-                    state,
-                    memory_len,
-                    chunks,
-                    manifest,
-                    prefilled,
-                    runtime,
-                } => images
-                    .publish_made_by(
-                        Parts::Remote {
-                            state,
-                            memory_len: *memory_len,
-                            chunks: crate::image::ChunkMap(chunks.clone()),
-                            manifest,
-                            prefilled: prefilled.as_ref(),
-                        },
-                        runtime.as_deref(),
-                    )
-                    .map(Some),
-            };
+            let disk_len = fs::metadata(&disk)?.len();
+            if let Some(wanted) = wanted {
+                crate::layout::lengthen(&disk, wanted)?;
+            }
+            let published = publish_fetched(&images, &fetched, memory_len, disk_len);
             let _ = fs::remove_dir_all(&scratch);
-            published
+            Ok(published)
         })
-        .await;
+        .await
+        .and_then(|published| published);
         let outcome = match published {
             Ok(Ok(Some(image))) => {
                 let images = images_of(&paths);
@@ -371,4 +349,57 @@ impl<E: Engine, S: Store> Job<E, S> {
             Err(error) => io_failure(OP, error),
         }
     }
+}
+
+/// Publishes the memory image a fetch brought back, saying the shape it was
+/// made at and how long the disk was beside it, or clears the images when
+/// the copy kept none.
+fn publish_fetched(
+    images: &Images,
+    fetched: &FetchedMemory,
+    memory_len: u64,
+    disk_len: u64,
+) -> Result<Option<Verified>, Suspect> {
+    let (parts, runtime, vcpus) = match fetched {
+        FetchedMemory::None => return images.clear().map_err(Suspect::from).map(|()| None),
+        FetchedMemory::Local {
+            state,
+            memory,
+            runtime,
+            vcpus,
+        } => (
+            Parts::Whole {
+                state,
+                memory,
+                len: memory_len,
+            },
+            runtime,
+            vcpus,
+        ),
+        FetchedMemory::Remote {
+            state,
+            memory_len,
+            chunks,
+            manifest,
+            prefilled,
+            runtime,
+            vcpus,
+        } => (
+            Parts::Remote {
+                state,
+                memory_len: *memory_len,
+                chunks: crate::image::ChunkMap(chunks.clone()),
+                manifest,
+                prefilled: prefilled.as_ref(),
+            },
+            runtime,
+            vcpus,
+        ),
+    };
+    let made = Made {
+        runtime: runtime.as_deref(),
+        vcpus: *vcpus,
+        disk_len: Some(disk_len),
+    };
+    images.publish_made_by(parts, made).map(Some)
 }

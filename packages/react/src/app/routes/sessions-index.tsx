@@ -7,7 +7,6 @@ import { ANALYTICS_COLLECTION_ENABLED_EVENT } from "../lib/analytics-consent";
 import { useWorkspaceRigs } from "../lib/use-workspace-rigs";
 import { useRepositoryCatalogRefresh } from "../lib/use-follow-up-repositories";
 import { useGitHubAppConnectLauncher } from "../components/github-app-connect-launcher";
-import { openGitHubInstallationSettings } from "../lib/github-app-connect";
 import { captureAnalyticsEvent } from "../lib/analytics-observer";
 import { useWorkspaceMachines } from "../lib/use-workspace-machines";
 import { useSessionListHintRefresh } from "../lib/use-session-list-hint-refresh";
@@ -52,7 +51,7 @@ import {
   type Rig,
   type SessionRealtimeModel,
 } from "@opengeni/sdk";
-import { Link, type PageHost, useNavigate, usePage } from "../lib/navigation";
+import { Link, useNavigate, usePage } from "../lib/navigation";
 import { CreditCardIcon, LockIcon } from "lucide-react";
 import {
   createElement,
@@ -2557,8 +2556,8 @@ function workspaceRepositoryPickerProps(
   workspaceId: string,
   disabled: boolean,
   onConnectWorkspaceApp: () => void,
-  page: PageHost,
 ): RepositoryContextPickerProps {
+  const githubSettingsUrl = `/workspaces/${encodeURIComponent(workspaceId)}/plugins?open=integration:github`;
   return {
     setupMode:
       context.githubStatus?.setupMode ??
@@ -2574,17 +2573,18 @@ function workspaceRepositoryPickerProps(
     selectedPersonalGitHubRepoIds: context.selectedPersonalGitHubRepoIds,
     selectedPersonalGitHubRepoRefs: context.selectedPersonalGitHubRepoRefs,
     personalGitHubBusy: context.personalGitHubBusy,
-    personalGitHubManageUrl: `/workspaces/${encodeURIComponent(workspaceId)}/plugins?open=integration:github`,
+    personalGitHubManageUrl: `${githubSettingsUrl}&github=personal`,
+    githubSettingsUrl,
     groups: context.repositoryGroups,
     selectedRepoIds: context.selectedRepoIds,
     selectedRepoRefs: context.selectedRepoRefs,
     manualRepos: context.manualRepos,
     manualOpen: context.manualReposOpen,
-    githubAppOpen: context.githubAppOpen,
     org: context.githubOrg,
     pending: context.busy || disabled,
     repoBusy: context.repoBusy,
     githubLoadFailed: context.githubStatusFailed && !context.githubCatalogReady,
+    githubUpdateFailed: context.githubStatusFailed && context.githubCatalogReady,
     githubAppBusy: context.githubAppBusy,
     onRefresh: async () => {
       await Promise.all([
@@ -2730,15 +2730,9 @@ function workspaceRepositoryPickerProps(
       });
     },
     validationError: context.repositoryValidationError,
-    onGitHubAppOpenChange: context.setGithubAppOpen,
     onOrgChange: context.setGithubOrg,
     onStartGitHubApp: () => void context.startGitHubAppManifestFlow(workspaceId),
     onConnectWorkspaceApp,
-    onConfigureInstallation: (installationId: number) =>
-      openGitHubInstallationSettings(context.client, workspaceId, installationId, page.assign),
-    onDisconnectInstallation: async (installationId: number) => {
-      await context.disconnectGitHubInstallation(workspaceId, installationId);
-    },
   };
 }
 
@@ -2755,17 +2749,10 @@ function WorkspaceRepositoryMenuBody({
   catalogRefresh: ReturnType<typeof useRepositoryCatalogRefresh>;
   onConnectWorkspaceApp: () => void;
 }) {
-  const page = usePage();
   const context = useAppContext();
   return (
     <RepositoryContextMenuBody
-      {...workspaceRepositoryPickerProps(
-        context,
-        workspaceId,
-        disabled,
-        onConnectWorkspaceApp,
-        page,
-      )}
+      {...workspaceRepositoryPickerProps(context, workspaceId, disabled, onConnectWorkspaceApp)}
       {...catalogRefresh}
       {...(leading ? { leading } : {})}
     />

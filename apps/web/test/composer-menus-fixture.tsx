@@ -115,7 +115,6 @@ function Fixture() {
   const [settings, setSettings] = useState<AgentLearningOverrides>({});
   const [agentTabOpen, setAgentTabOpen] = useState(false);
   const [refreshes, setRefreshes] = useState(0);
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
   const [manualAdded, setManualAdded] = useState(false);
   const [fileCount, setFileCount] = useState(0);
@@ -135,7 +134,6 @@ function Fixture() {
     lockedRepoIds: isNew ? new Set() : new Set([1]),
     manualRepos: [],
     manualOpen,
-    githubAppOpen: settingsOpen,
     org: "",
     pending: false,
     repoBusy: false,
@@ -161,10 +159,8 @@ function Fixture() {
     },
     onManualUpdate: () => {},
     onManualRemove: () => {},
-    onGitHubAppOpenChange: setSettingsOpen,
     onOrgChange: () => {},
     onStartGitHubApp: () => {},
-    onDisconnectInstallation: async () => {},
     newChatUrl: "?new",
   };
   const RepositoryBody = isNew ? RepositoryContextMenuBody : FollowUpRepositoryMenuBody;
