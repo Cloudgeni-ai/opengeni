@@ -3,7 +3,6 @@ import {
   Clock3Icon,
   HourglassIcon,
   Loader2Icon,
-  PauseIcon,
   TriangleAlertIcon,
   ZapIcon,
 } from "lucide-react";
@@ -43,6 +42,24 @@ export function ActiveWorkMark({ className }: { className?: string | undefined }
   );
 }
 
+/**
+ * Lucide's pause glyph, drawn inline: importing the icon module here would pull
+ * it into the eager rail chunk's shared icon group.
+ */
+function PausedWorkMark() {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 24 24"
+      data-og-rail-paused=""
+      className="size-3 shrink-0 fill-current text-fg-subtle"
+    >
+      <rect x="6" y="4" width="4" height="16" rx="1" />
+      <rect x="14" y="4" width="4" height="16" rx="1" />
+    </svg>
+  );
+}
+
 /** The one descendant-aware status marker shared by rows and section headers. */
 function RailAggregateDot({ summary }: { summary: RailAggregateStatus }) {
   if (summary.kind === "neutral") return null;
@@ -64,7 +81,7 @@ function RailAggregateDot({ summary }: { summary: RailAggregateStatus }) {
   }
   if (summary.kind === "paused") {
     // Work parked by Pause: it resumes where it stopped, so no spinner.
-    return <PauseIcon aria-hidden="true" className="size-3 shrink-0 fill-current text-fg-subtle" />;
+    return <PausedWorkMark />;
   }
   if (summary.kind === "active_work") {
     return <ActiveWorkMark />;

@@ -158,7 +158,7 @@ describe("a paused chat in the sidebar", () => {
     const markup = renderToStaticMarkup(
       <RailTrailingMetadata summary={{ kind: "paused", count: 1, total: 1, label: "1 paused" }} />,
     );
-    expect(markup).toContain("lucide-pause");
+    expect(markup).toContain("data-og-rail-paused");
     expect(markup).not.toContain("animate-spin");
   });
 });
