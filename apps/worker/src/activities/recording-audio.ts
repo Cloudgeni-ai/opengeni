@@ -607,14 +607,13 @@ export async function renderRecordingAudioPiece(input: {
     } finally {
       await handle.close();
     }
-    const cut = input.whole
+    // Seeking on the input jumps to the piece through the file's index;
+    // seeking on the output decoded everything before it, so a long track's
+    // later pieces each took as long as the track up to them.
+    const seek = input.whole ? [] : ["-ss", (input.startMilliseconds / 1_000).toFixed(3)];
+    const length = input.whole
       ? []
-      : [
-          "-ss",
-          (input.startMilliseconds / 1_000).toFixed(3),
-          "-to",
-          (input.endMilliseconds / 1_000).toFixed(3),
-        ];
+      : ["-t", (Math.max(0, input.endMilliseconds - input.startMilliseconds) / 1_000).toFixed(3)];
     await runFfmpeg(
       input.ffmpegPath,
       [
@@ -623,9 +622,10 @@ export async function renderRecordingAudioPiece(input: {
         "-loglevel",
         "error",
         "-y",
+        ...seek,
         "-i",
         source,
-        ...cut,
+        ...length,
         "-vn",
         "-map",
         "0:a:0",

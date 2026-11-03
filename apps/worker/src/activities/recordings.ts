@@ -106,10 +106,10 @@ import {
   renderRecordingAudioPiece,
   type RecordingPieceFormat,
 } from "./recording-audio";
+import { mapConcurrently } from "./concurrently";
 import {
   DICTATION_PIECE_CONCURRENCY,
   dictationPiecePlan,
-  mapConcurrently,
   pcmWavPiece,
   planDictationPieces,
   readPcmWav,
@@ -159,6 +159,8 @@ export type RecordingTranscriptOutcome = (
 const TRANSCRIPT_LEASE_SECONDS = 3 * 60 * 60;
 
 const MINUTE_MILLISECONDS = 60_000;
+/** At most this many pieces of one meeting track are sent to the model at once. */
+const MEETING_PIECE_CONCURRENCY = 4;
 
 /**
  * How long one transcript may take from the moment it was asked for, waiting
@@ -426,11 +428,9 @@ export async function transcribeTrack(input: {
   const audioSha256 = input.pieces
     ? createHash("sha256").update(input.audio.bytes).digest("hex")
     : "";
-  const parts: Array<{
-    piece: (typeof pieces)[number];
-    result: RecordingTranscriptionResult;
-  }> = [];
-  for (const [index, piece] of pieces.entries()) {
+  // Pieces are heard a few at once: a long meeting's pieces one after another
+  // took as long as all their requests together.
+  const parts = await mapConcurrently(pieces, MEETING_PIECE_CONCURRENCY, async (piece, index) => {
     input.onPiece?.(index);
     const whole =
       pieces.length === 1 &&
@@ -451,8 +451,7 @@ export async function transcribeTrack(input: {
     // A text-only model's piece kept before its words were placed is placed
     // again, which needs its audio; everything else is reused as it is.
     if (reused && (reused.words.length > 0 || !input.aligner)) {
-      parts.push({ piece, result: reused });
-      continue;
+      return { piece, result: reused };
     }
     const audio =
       whole && !format
@@ -501,8 +500,8 @@ export async function transcribeTrack(input: {
     }
     const aligned = await alignPiece(input, audio, result);
     if (aligned !== result) await input.pieces?.keep(index, requestKey, aligned);
-    parts.push({ piece, result: aligned });
-  }
+    return { piece, result: aligned };
+  });
   const merged = mergeRecordingTranscriptionPieces(parts);
   // Leaving quiet out doesn't shorten the track.
   return input.sound ? { ...merged, audioMilliseconds: input.durationMilliseconds } : merged;

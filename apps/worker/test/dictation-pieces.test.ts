@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
   dictationPiecePlan,
-  mapConcurrently,
   pcmWavPiece,
   planDictationPieces,
   readPcmWav,
 } from "../src/activities/dictation-pieces";
+import { mapConcurrently } from "../src/activities/concurrently";
 
 const RATE = 16_000;
 
