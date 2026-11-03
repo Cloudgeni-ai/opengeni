@@ -1417,7 +1417,8 @@ async function dragRowToProject(row: Locator, project: string) {
 }
 
 test("a Site row moves to another project or Default like a chat row, by menu or by dragging", async () => {
-  await page.goto(`${url}?scenario=sites&theme=light`);
+  // `publish`: a member who may publish, so the row also offers Duplicate.
+  await page.goto(`${url}?scenario=sites&theme=light&publish`);
   await siteInProject("Website redesign", pricingSiteId).waitFor();
 
   // Right-click offers the Site's actions and the chat row's Move to project
