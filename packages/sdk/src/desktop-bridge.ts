@@ -86,6 +86,17 @@ export interface DesktopMeetingDetectionStatus {
   autoRecord?: boolean;
   /** This computer, its OS version and this app build can tell when a call starts. */
   available: boolean;
+  /**
+   * The person's switch for reminders before calendar meetings: about a
+   * minute before a meeting with a join link starts, a card offers to join it
+   * and start its notes. Absent from apps built before it existed.
+   */
+  calendarReminders?: boolean;
+  /**
+   * Whether the signed-in person has a calendar Opengeni can read, as last
+   * checked; absent until then (and from older apps).
+   */
+  calendar?: "connected" | "none";
   /** Why detection isn't working right now, in a sentence for its row. */
   problem?: string;
 }
@@ -94,10 +105,18 @@ export interface DesktopMeetingDetectionStatus {
  * What the person chose on the app's meeting card: record the call an app
  * just started, or stop recording because the call ended. `app` is the call
  * app's name ("Zoom", "Google Chrome"); `title` suggests a name for the
- * meeting.
+ * meeting. From a reminder before a calendar meeting (Join and start notes),
+ * `calendarEvent` is that event, which names the meeting; with `replace`,
+ * a meeting being recorded stops and is kept, and the new one starts.
  */
 export type DesktopMeetingRequest =
-  | { kind: "record"; app: string; title: string }
+  | {
+      kind: "record";
+      app: string;
+      title: string;
+      calendarEvent?: { provider: "google" | "microsoft"; id: string };
+      replace?: boolean;
+    }
   | { kind: "stop"; app: string };
 
 /**
@@ -112,6 +131,7 @@ export interface DesktopMeetingDetection {
   update(change: {
     enabled?: boolean;
     autoRecord?: boolean;
+    calendarReminders?: boolean;
   }): Promise<DesktopMeetingDetectionStatus>;
   /**
    * Tell the app whether this page is recording a meeting, so it doesn't

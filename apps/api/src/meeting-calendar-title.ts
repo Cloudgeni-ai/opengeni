@@ -6,6 +6,7 @@
 // failure, a slow provider or no calendar at all leaves the date name, and
 // the conversation names the meeting later.
 import type { Settings } from "@opengeni/config";
+import { firstMeetingJoinLink } from "./meeting-join-links";
 import {
   buildConnectionTokenResolver,
   listConnectionsMetadata,
@@ -26,8 +27,14 @@ const STARTS_SOON_MS = 10 * 60_000;
 /** An event that ends this soon after recording began is the previous one running over. */
 const ENDS_SOON_MS = 60_000;
 
-/** One calendar event, as much of it as naming a meeting needs. */
+/** The calendars events are read from. */
+export type MeetingCalendarProvider = "google" | "microsoft";
+
+/** One calendar event, as much of it as naming or joining a meeting needs. */
 export type MeetingCalendarEvent = {
+  /** The provider's id for the event (one occurrence of a recurring one). */
+  id?: string;
+  provider?: MeetingCalendarProvider;
   title: string;
   start: Date;
   end: Date;
@@ -43,27 +50,48 @@ export type MeetingCalendarEvent = {
    * one may be an invitation nobody expected.
    */
   unanswered?: boolean;
+  /** The link that joins its call, when it has one. */
+  joinUrl?: string;
+  /** The service that link joins, e.g. "Google Meet". */
+  service?: string;
 };
 
+/** A calendar event named by its provider and id, such as the one a recording was started for. */
+export type MeetingCalendarEventRef = { provider: MeetingCalendarProvider; id: string };
+
+function nameable(event: MeetingCalendarEvent): boolean {
+  return (
+    event.meeting &&
+    !event.private &&
+    !event.declined &&
+    calendarTitle(event.title) !== null &&
+    event.end.getTime() > event.start.getTime()
+  );
+}
+
 /**
- * The event a recording that started at `at` is most likely of: one under
- * way or about to start; one the owner answered first, then the one whose
- * start is nearest, then the shorter. Null when none fits.
+ * The event a recording that started at `at` is most likely of: the one it
+ * was started for, when given and still on the calendar; else one under way
+ * or about to start; one the owner answered first, then the one whose start
+ * is nearest, then the shorter. Null when none fits.
  */
 export function meetingEventAt(
   events: readonly MeetingCalendarEvent[],
   at: Date,
+  chosen?: MeetingCalendarEventRef,
 ): MeetingCalendarEvent | null {
+  if (chosen) {
+    const named = events.find(
+      (event) => event.id === chosen.id && event.provider === chosen.provider && nameable(event),
+    );
+    if (named) return named;
+  }
   const time = at.getTime();
   const fitting = events.filter(
     (event) =>
-      event.meeting &&
-      !event.private &&
-      !event.declined &&
-      calendarTitle(event.title) !== null &&
+      nameable(event) &&
       event.start.getTime() <= time + STARTS_SOON_MS &&
-      event.end.getTime() > time + ENDS_SOON_MS &&
-      event.end.getTime() > event.start.getTime(),
+      event.end.getTime() > time + ENDS_SOON_MS,
   );
   fitting.sort(
     (a, b) =>
@@ -81,7 +109,12 @@ export function calendarTitle(title: string): string | null {
 }
 
 type GoogleEvent = {
+  id?: unknown;
   summary?: unknown;
+  hangoutLink?: unknown;
+  conferenceData?: { entryPoints?: Array<{ entryPointType?: unknown; uri?: unknown }> };
+  location?: unknown;
+  description?: unknown;
   status?: unknown;
   visibility?: unknown;
   eventType?: unknown;
@@ -105,8 +138,19 @@ export function googleCalendarEvents(body: unknown): MeetingCalendarEvent[] {
     const self = Array.isArray(item.attendees)
       ? item.attendees.find((attendee) => attendee?.self === true)
       : undefined;
+    const video = Array.isArray(item.conferenceData?.entryPoints)
+      ? item.conferenceData.entryPoints
+          .filter((entry) => entry?.entryPointType === "video")
+          .map((entry) => entry.uri)
+      : [];
+    const join = firstMeetingJoinLink(
+      [item.hangoutLink, ...video],
+      [item.location, item.description],
+    );
     return [
       {
+        ...(typeof item.id === "string" && item.id ? { id: item.id } : {}),
+        provider: "google" as const,
         title: item.summary,
         start: start ?? new Date(0),
         end: end ?? new Date(0),
@@ -114,13 +158,19 @@ export function googleCalendarEvents(body: unknown): MeetingCalendarEvent[] {
         private: item.visibility === "private" || item.visibility === "confidential",
         declined: item.status === "cancelled" || self?.responseStatus === "declined",
         unanswered: self?.responseStatus === "needsAction",
+        ...(join ? { joinUrl: join.url, service: join.service } : {}),
       },
     ];
   });
 }
 
 type GraphEvent = {
+  id?: unknown;
   subject?: unknown;
+  onlineMeeting?: { joinUrl?: unknown } | null;
+  onlineMeetingUrl?: unknown;
+  location?: { displayName?: unknown; locationUri?: unknown } | null;
+  body?: { content?: unknown } | null;
   isAllDay?: unknown;
   isCancelled?: unknown;
   sensitivity?: unknown;
@@ -145,8 +195,14 @@ export function graphCalendarEvents(body: unknown): MeetingCalendarEvent[] {
     const start = graphTime(item?.start?.dateTime);
     const end = graphTime(item?.end?.dateTime);
     if (typeof item?.subject !== "string" || !start || !end) return [];
+    const join = firstMeetingJoinLink(
+      [item.onlineMeeting?.joinUrl, item.onlineMeetingUrl, item.location?.locationUri],
+      [item.location?.displayName, item.body?.content],
+    );
     return [
       {
+        ...(typeof item.id === "string" && item.id ? { id: item.id } : {}),
+        provider: "microsoft" as const,
         title: item.subject,
         start,
         end,
@@ -158,6 +214,7 @@ export function graphCalendarEvents(body: unknown): MeetingCalendarEvent[] {
           item.sensitivity === "confidential",
         declined: item.isCancelled === true || item.responseStatus?.response === "declined",
         unanswered: item.responseStatus?.response === "notResponded",
+        ...(join ? { joinUrl: join.url, service: join.service } : {}),
       },
     ];
   });
@@ -203,46 +260,57 @@ export type MeetingCalendarLookup = {
   onProblem?: (problem: { providerDomain: string; reason: string }) => void;
 };
 
-function eventsRequest(connection: ConnectionMetadataWithVerification, at: Date) {
-  const from = new Date(at.getTime() + ENDS_SOON_MS).toISOString();
-  const to = new Date(at.getTime() + STARTS_SOON_MS).toISOString();
+const GOOGLE_FIELDS =
+  "items(id,summary,status,visibility,eventType,start,end,attendees(self,responseStatus))";
+/** With what joining needs: the call's link, wherever the event keeps it. */
+const GOOGLE_JOIN_FIELDS =
+  "items(id,summary,status,visibility,eventType,start,end,attendees(self,responseStatus)," +
+  "hangoutLink,conferenceData(entryPoints(entryPointType,uri)),location,description)";
+const GRAPH_SELECT = "id,subject,isAllDay,isCancelled,sensitivity,showAs,start,end,responseStatus";
+const GRAPH_JOIN_SELECT = `${GRAPH_SELECT},onlineMeeting,onlineMeetingUrl,location,body`;
+
+/** The events that end after `from` and start before `to`, with join links when `join`. */
+function eventsRequest(
+  connection: ConnectionMetadataWithVerification,
+  window: { from: Date; to: Date; join: boolean },
+) {
+  const from = window.from.toISOString();
+  const to = window.to.toISOString();
   if (connection.providerDomain.toLowerCase() === GOOGLE_CALENDAR_PROVIDER_DOMAIN) {
     const url = new URL(GOOGLE_EVENTS_URL);
-    // Events that end after `from` and start before `to`.
     url.searchParams.set("timeMin", from);
     url.searchParams.set("timeMax", to);
     url.searchParams.set("singleEvents", "true");
     url.searchParams.set("maxResults", "25");
-    url.searchParams.set(
-      "fields",
-      "items(summary,status,visibility,eventType,start,end,attendees(self,responseStatus))",
-    );
+    url.searchParams.set("fields", window.join ? GOOGLE_JOIN_FIELDS : GOOGLE_FIELDS);
     return { url: url.toString(), headers: {}, parse: googleCalendarEvents };
   }
   const url = new URL(GRAPH_CALENDAR_VIEW_URL);
   url.searchParams.set("startDateTime", from);
   url.searchParams.set("endDateTime", to);
   url.searchParams.set("$top", "25");
-  url.searchParams.set(
-    "$select",
-    "subject,isAllDay,isCancelled,sensitivity,showAs,start,end,responseStatus",
-  );
+  url.searchParams.set("$select", window.join ? GRAPH_JOIN_SELECT : GRAPH_SELECT);
   return {
     url: url.toString(),
-    headers: { Prefer: 'outlook.timezone="UTC"' },
+    // The body as text, where a join link written into the invitation is found.
+    headers: {
+      Prefer: window.join
+        ? 'outlook.timezone="UTC", outlook.body-content-type="text"'
+        : 'outlook.timezone="UTC"',
+    },
     parse: graphCalendarEvents,
   };
 }
 
 /**
- * The name of the owner's calendar event at `at`, from every calendar of
- * theirs this deployment can read. Null when there is none, or on any
- * failure or once the time is up.
+ * The events between `from` and `to` on every calendar of the owner's this
+ * deployment can read, and whether they have one at all. A calendar that
+ * fails or answers too late adds no events; `null` once the time is up.
  */
-export async function meetingCalendarTitle(
+async function readMeetingCalendars(
   lookup: MeetingCalendarLookup,
-  input: { subjectId: string; at: Date },
-): Promise<string | null> {
+  input: { subjectId: string; from: Date; to: Date; join: boolean },
+): Promise<{ connected: boolean; events: MeetingCalendarEvent[] } | null> {
   const timeout = AbortSignal.timeout(lookup.timeoutMs ?? MEETING_CALENDAR_LOOKUP_TIMEOUT_MS);
   let settled = false;
   const problem = (providerDomain: string, reason: string) => {
@@ -253,16 +321,16 @@ export async function meetingCalendarTitle(
       // Reporting never changes the outcome.
     }
   };
-  const read = async (): Promise<string | null> => {
+  const read = async () => {
     const connections = meetingCalendarConnections(await lookup.listConnections(), {
       subjectId: input.subjectId,
       googleCalendarEnabled: lookup.googleCalendarEnabled,
     });
-    if (connections.length === 0) return null;
+    if (connections.length === 0) return { connected: false, events: [] };
     const found = await Promise.all(
       connections.map(async (connection) => {
         try {
-          const request = eventsRequest(connection, input.at);
+          const request = eventsRequest(connection, input);
           const credential = await lookup.credentialHeaders(connection, request.url);
           if (!credential) {
             problem(connection.providerDomain, "credential unavailable");
@@ -288,8 +356,7 @@ export async function meetingCalendarTitle(
         }
       }),
     );
-    const event = meetingEventAt(found.flat(), input.at);
-    return event ? calendarTitle(event.title) : null;
+    return { connected: true, events: found.flat() };
   };
   const expired = new Promise<null>((resolve) => {
     timeout.addEventListener(
@@ -309,6 +376,119 @@ export async function meetingCalendarTitle(
   } finally {
     settled = true;
   }
+}
+
+/**
+ * The name of the owner's calendar event at `at`, from every calendar of
+ * theirs this deployment can read: `event` when the recording was started
+ * for it, else the one at that time. Null when there is none, or on any
+ * failure or once the time is up.
+ */
+export async function meetingCalendarTitle(
+  lookup: MeetingCalendarLookup,
+  input: { subjectId: string; at: Date; event?: MeetingCalendarEventRef },
+): Promise<string | null> {
+  const read = await readMeetingCalendars(lookup, {
+    subjectId: input.subjectId,
+    from: new Date(input.at.getTime() + ENDS_SOON_MS),
+    to: new Date(input.at.getTime() + STARTS_SOON_MS),
+    join: false,
+  });
+  const event = read ? meetingEventAt(read.events, input.at, input.event) : null;
+  return event ? calendarTitle(event.title) : null;
+}
+
+/** How far ahead the upcoming meetings are read. */
+export const UPCOMING_MEETINGS_AHEAD_MS = 20 * 60_000;
+/** A meeting that started at most this long ago may still be joined. */
+export const UPCOMING_MEETINGS_STARTED_MS = 5 * 60_000;
+
+/** A meeting about to start, with the link that joins it. */
+export type UpcomingMeeting = {
+  id: string;
+  provider: MeetingCalendarProvider;
+  title: string;
+  /** Private, personal or confidential: shown only to its owner, never a meeting's name. */
+  private: boolean;
+  startsAt: string;
+  endsAt: string;
+  joinUrl: string;
+  service: string;
+  /** The owner hasn't answered the invitation. */
+  unanswered: boolean;
+};
+
+/**
+ * The meetings with a join link that start in the next minutes (or started a
+ * few minutes ago), soonest first; at the same start one the owner answered
+ * comes first, then the shorter. All-day, declined, cancelled and
+ * out-of-office events are no meetings to join.
+ */
+export function upcomingMeetingsAt(
+  events: readonly MeetingCalendarEvent[],
+  now: Date,
+): UpcomingMeeting[] {
+  const time = now.getTime();
+  const seen = new Set<string>();
+  return events
+    .filter(
+      (event) =>
+        event.meeting &&
+        !event.declined &&
+        event.id !== undefined &&
+        event.provider !== undefined &&
+        event.joinUrl !== undefined &&
+        event.end.getTime() > time &&
+        event.end.getTime() > event.start.getTime() &&
+        event.start.getTime() >= time - UPCOMING_MEETINGS_STARTED_MS &&
+        event.start.getTime() <= time + UPCOMING_MEETINGS_AHEAD_MS,
+    )
+    .sort(
+      (a, b) =>
+        a.start.getTime() - b.start.getTime() ||
+        Number(a.unanswered === true) - Number(b.unanswered === true) ||
+        a.end.getTime() - a.start.getTime() - (b.end.getTime() - b.start.getTime()),
+    )
+    .flatMap((event) => {
+      const key = `${event.provider}:${event.id}`;
+      if (seen.has(key)) return [];
+      seen.add(key);
+      return [
+        {
+          id: event.id!,
+          provider: event.provider!,
+          title: calendarTitle(event.title) ?? "",
+          private: event.private,
+          startsAt: event.start.toISOString(),
+          endsAt: event.end.toISOString(),
+          joinUrl: event.joinUrl!,
+          service: event.service ?? "Meeting",
+          unanswered: event.unanswered === true,
+        },
+      ];
+    });
+}
+
+/**
+ * The owner's meetings about to start, for a reminder that joins one and
+ * starts its notes. `calendar` says whether they have a calendar this
+ * deployment can read; a calendar that can't be read now lists nothing.
+ */
+export async function upcomingMeetings(
+  lookup: MeetingCalendarLookup,
+  input: { subjectId: string; now: Date },
+): Promise<{ calendar: "connected" | "none"; meetings: UpcomingMeeting[] }> {
+  const read = await readMeetingCalendars(lookup, {
+    subjectId: input.subjectId,
+    from: input.now,
+    to: new Date(input.now.getTime() + UPCOMING_MEETINGS_AHEAD_MS),
+    join: true,
+  });
+  if (read === null) return { calendar: "connected", meetings: [] };
+  return {
+    calendar: read.connected ? "connected" : "none",
+    meetings: upcomingMeetingsAt(read.events, input.now),
+  };
 }
 
 /** The lookup against this deployment's database and connection broker. */

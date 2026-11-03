@@ -6,7 +6,11 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 
-import type { MeetingRecorder, MeetingRecorderStore } from "./recorder-context";
+import type {
+  MeetingRecorder,
+  MeetingRecorderStore,
+  MeetingStartRequest,
+} from "./recorder-context";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -82,7 +86,18 @@ async function until(check: () => boolean) {
 }
 
 type Desktop = {
-  listener: ((request: { kind: "record"; title?: string } | { kind: "stop" }) => void) | null;
+  listener:
+    | ((
+        request:
+          | {
+              kind: "record";
+              title?: string;
+              calendarEvent?: { provider: "google" | "microsoft"; id: string };
+              replace?: boolean;
+            }
+          | { kind: "stop" },
+      ) => void)
+    | null;
 };
 
 function installDesktop(): Desktop {
@@ -116,7 +131,7 @@ function mountProvider() {
   };
   const opened: string[] = [];
   const meetingsOpened: string[] = [];
-  let pendingStart: () => boolean = () => false;
+  let pendingStart: () => MeetingStartRequest | null = () => null;
   let open: ((recordingId: string, workspaceId: string) => boolean) | null = null;
   function Probe() {
     const current = useMeetingRecorder();
@@ -127,23 +142,24 @@ function mountProvider() {
   }
   function PendingStart() {
     const { take } = usePendingMeetingStart();
-    pendingStart = () => take() !== null;
+    pendingStart = take;
     return null;
   }
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
-  return {
+  const view = {
     seen,
     opened,
     meetingsOpened,
     // Taking the pending start clears provider state, so it runs inside act.
-    takePendingStart: () => {
-      let taken = false;
+    takePendingStart: () => view.takePendingRequest() !== null,
+    takePendingRequest: () => {
+      let taken: MeetingStartRequest | null = null;
       act(() => {
         taken = pendingStart();
       });
-      return taken;
+      return taken as MeetingStartRequest | null;
     },
     open: (recordingId: string, workspaceId: string) => open!(recordingId, workspaceId),
     render: (workspaceId: string | null, options: { scope?: string | null } = {}) =>
@@ -168,6 +184,7 @@ function mountProvider() {
       container.remove();
     },
   };
+  return view;
 }
 
 describe("A recording and the workspace it was made in", () => {
@@ -392,6 +409,39 @@ describe("A recording and the person who made it", () => {
       await act(async () => setStates.get("workspace-a")!("stopped"));
       await act(async () => desktop.listener!({ kind: "record", title: "Call" }));
       expect(view.takePendingStart()).toBe(true);
+      expect(view.meetingsOpened).toEqual(["workspace-a", "workspace-a"]);
+    } finally {
+      await view.unmount();
+      removeDesktop();
+    }
+  });
+  test("a reminder's Join and switch notes stops the recording, then starts the next meeting's", async () => {
+    events.length = 0;
+    const desktop = installDesktop();
+    const view = mountProvider();
+    try {
+      await view.render("workspace-a");
+      await until(() => view.seen.recorder !== null);
+      await settle();
+      await act(async () => setStates.get("workspace-a")!("recording"));
+      const calendarEvent = { provider: "google" as const, id: "event-2" };
+      // Without replace, a reminder's Join shows the recording going on.
+      await act(async () =>
+        desktop.listener!({ kind: "record", title: "Planning", calendarEvent }),
+      );
+      expect(view.takePendingRequest()).toBeNull();
+      expect(view.seen.recorder?.state).toBe("recording");
+      // With it, the recording stops and is kept, then the next one starts for its event.
+      await act(async () =>
+        desktop.listener!({ kind: "record", title: "Planning", calendarEvent, replace: true }),
+      );
+      await settle();
+      expect(view.seen.recorder?.state).toBe("stopped");
+      expect(view.takePendingRequest()).toEqual({
+        title: "Planning",
+        titleSource: "app",
+        calendarEvent,
+      });
       expect(view.meetingsOpened).toEqual(["workspace-a", "workspace-a"]);
     } finally {
       await view.unmount();

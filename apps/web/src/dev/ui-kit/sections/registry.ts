@@ -141,6 +141,7 @@ export const SECTION_KEYS = [
   "page-schedules",
   "page-schedule-form",
   "page-meetings",
+  "page-meeting-reminders",
   "page-dictation",
   "page-knowledge",
   "page-org-people",
@@ -1060,6 +1061,15 @@ export const SECTIONS: readonly SectionMeta[] = [
     purpose: "Record a meeting, then read its transcript and name who spoke.",
     usedOn: "Main rail",
     load: () => import("./page-meetings"),
+  },
+  {
+    key: "page-meeting-reminders",
+    group: "Pages",
+    title: "Meeting reminders",
+    purpose:
+      "A minute before a calendar meeting, the desktop app offers to join it and start notes: the switch, and the one-time offer to connect a calendar.",
+    usedOn: "Desktop app: Settings → Computer use, and Meetings",
+    load: () => import("./page-meeting-reminders"),
   },
   {
     key: "page-dictation",

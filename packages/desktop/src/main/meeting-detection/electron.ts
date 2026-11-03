@@ -66,13 +66,18 @@ export interface CreateMeetingDetectionOptions {
    * waits for another page. The newest by default.
    */
   chooseTarget?: MeetingDetectionOptions["chooseTarget"];
+  /**
+   * Reminders before the active account's calendar meetings, with one click
+   * to join and start notes. None by default.
+   */
+  calendar?: MeetingDetectionOptions["calendar"];
   log?: (message: string, error?: unknown) => void;
 }
 
 /**
  * Meeting detection for an Electron app. Answer the page with
  * `handleMeetingDetectionIpc`, call `start()` once the app is ready and
- * `stop()` as it quits.
+ * `shutdown()` as it quits.
  */
 export function createMeetingDetection(options: CreateMeetingDetectionOptions): MeetingDetection {
   const file = options.logDir ? meetingDetectionFileLog(options.logDir) : null;
@@ -106,6 +111,7 @@ export function createMeetingDetection(options: CreateMeetingDetectionOptions): 
     }),
     reveal: options.reveal,
     ...(options.chooseTarget ? { chooseTarget: options.chooseTarget } : {}),
+    ...(options.calendar ? { calendar: options.calendar } : {}),
     log,
   });
 }

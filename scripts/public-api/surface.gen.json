@@ -9968,6 +9968,17 @@
     },
     {
       "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/upcoming-meetings",
+      "sdk": [
+        "OpenGeniRecordingsClient.listUpcomingMeetings"
+      ],
+      "request": [],
+      "response": [
+        "UpcomingMeetingsResponse"
+      ]
+    },
+    {
+      "method": "GET",
       "path": "/v1/workspaces/:workspaceId/usage",
       "sdk": [
         "OpenGeniEmbeddingClient.getUsage",
@@ -15781,6 +15792,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.calendarEvent": "ref(RecordingCalendarEventRef)?",
         "$.externalRef": "string?",
         "$.metadata": "object?",
         "$.metadata{}": "union null=[\"0\",\"1\",\"2\",\"3\",\"4\"]",
@@ -24716,6 +24728,16 @@
         "$.workspaceId": "string!"
       }
     },
+    "RecordingCalendarEventRef": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.id": "string!",
+        "$.provider": "enum!=[\"\\\"google\\\"\",\"\\\"microsoft\\\"\"]"
+      }
+    },
     "RecordingCapturePurpose": {
       "io": [
         "input"
@@ -30704,6 +30726,34 @@
         "$.skillReleases": "array?",
         "$.skillReleases[]": "ref(SkillSourceReleaseReceipt)",
         "$.status": "enum!=[\"\\\"not_installed\\\"\",\"\\\"retained_by_other_owners\\\"\",\"\\\"uninstalled\\\"\"]"
+      }
+    },
+    "UpcomingMeeting": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.endsAt": "string!",
+        "$.id": "string!",
+        "$.joinUrl": "string!",
+        "$.private": "boolean!",
+        "$.provider": "enum!=[\"\\\"google\\\"\",\"\\\"microsoft\\\"\"]",
+        "$.service": "string!",
+        "$.startsAt": "string!",
+        "$.title": "string!",
+        "$.unanswered": "boolean!"
+      }
+    },
+    "UpcomingMeetingsResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.calendar": "enum!=[\"\\\"connected\\\"\",\"\\\"none\\\"\"]",
+        "$.meetings": "array!",
+        "$.meetings[]": "ref(UpcomingMeeting)"
       }
     },
     "UpdateAutomationTemplateRequest": {
@@ -43571,6 +43621,7 @@
       "listRecordingPeople",
       "listRecordingTranscriptVersions",
       "listRecordings",
+      "listUpcomingMeetings",
       "rememberRecordingPersonVoice",
       "saveRecordingNote",
       "setCurrentRecordingTranscript",
@@ -57093,6 +57144,9 @@
       ],
       "listRecordingTranscriptVersions": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"elementType\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RecordingTranscriptVersion\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSArrayType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "listUpcomingMeetings": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpcomingMeetingsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "rememberRecordingPersonVoice": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RememberRecordingPersonVoiceRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RecordingPerson\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"

@@ -381,6 +381,31 @@ export class DesktopShell {
         const shown = accountId ? this.window?.contentsFor(accountId) : null;
         return pages.find((page) => page === shown);
       },
+      // Reminders before the active account's calendar meetings; that account records.
+      calendar: {
+        account: () => {
+          const active = this.store.active();
+          return active && !active.signedOut && active.workspaceId ? { id: active.id } : null;
+        },
+        upcoming: async (accountId) => {
+          const workspaceId = this.store.get(accountId)?.workspaceId;
+          const client = workspaceId ? await this.client(accountId) : null;
+          if (!client || !workspaceId) return null;
+          try {
+            return await client.requestJson(
+              "GET",
+              `/v1/workspaces/${encodeURIComponent(workspaceId)}/upcoming-meetings`,
+            );
+          } catch (caught) {
+            // A server from before reminders has no such route: nothing to remind of.
+            if ((caught as { status?: number }).status === 404) return null;
+            throw caught;
+          }
+        },
+        openUrl: (url) => {
+          if (new URL(url).protocol === "https:") void shell.openExternal(url);
+        },
+      },
       log: (message, caught) => console.warn(message, caught ?? ""),
     });
     this.appShots = new AppShots({
@@ -529,7 +554,11 @@ export class DesktopShell {
       setTimeout(() => migrateMacLoginItem(this.config.appId), 5_000);
     }
     app.on("activate", () => this.reveal());
-    powerMonitor.on("resume", () => this.retryUnreachable());
+    powerMonitor.on("resume", () => {
+      this.retryUnreachable();
+      this.meetings.refreshCalendar();
+    });
+    powerMonitor.on("unlock-screen", () => this.meetings.refreshCalendar());
     app.on("before-quit", (event) => {
       if (this.quitConfirmed) {
         this.quitting = true;
@@ -555,7 +584,7 @@ export class DesktopShell {
       this.appShots.stop();
       this.systemAudio.stopAll();
       this.dictation.stop();
-      this.meetings.stop();
+      this.meetings.shutdown();
       this.computer.shutdownNow();
     });
     app.on("window-all-closed", () => {
@@ -1391,6 +1420,8 @@ export class DesktopShell {
   }
 
   private accountsChanged(): void {
+    // Only the active account reminds of its meetings.
+    this.meetings.accountChanged();
     this.broadcast(DESKTOP_IPC.accountsChanged, this.accountsSnapshot());
     Menu.setApplicationMenu(this.menu());
     void this.refreshTray();

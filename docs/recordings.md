@@ -84,7 +84,11 @@ weaker source, in this order:
    others may see. The lookup is bounded to three seconds and any failure
    leaves the title as it was. Capture runs before the server has the
    recording, so it never delays recording; the recorder shows the name
-   once the server has it (`serverTitle` in the upload status).
+   once the server has it (`serverTitle` in the upload status). A create
+   request with `calendarEvent` (`{ provider: "google" | "microsoft", id }`),
+   such as a meeting joined from the desktop app's reminder, prefers that
+   event when it is on the calendar then, under the same rules, and keeps
+   it in `metadata.calendarEvent`.
 3. `conversation`: written with the meeting's notes. The built-in summary
    (below) passes a short name to `meeting_notes_save` as `title`, in the
    meeting's language; it is kept only while the title is from a weaker
@@ -313,6 +317,35 @@ such as one signed out or for an account without meetings, never shows the
 card. The app remembers the answer, so after a restart it asks before any
 window has loaded; a page that closes doesn't change it, because Record opens
 the window again.
+
+It can also remind the person before a calendar meeting, the way a notetaker
+does. Pass `calendar` to `createMeetingDetection`:
+
+```ts
+calendar: {
+  account: () => activeAccount(), // { id } of the signed-in account, or null
+  upcoming: (accountId) => client.requestJson(`/v1/workspaces/${workspaceId}/upcoming-meetings`),
+  openUrl: (url) => void shell.openExternal(url), // an https join link
+},
+```
+
+`GET /v1/workspaces/:workspaceId/upcoming-meetings` returns the caller's own
+meetings from their connected Google Calendar or Outlook Calendar that start
+within twenty minutes (or started up to five minutes ago) and have a Google
+Meet, Zoom, Microsoft Teams or Webex link, skipping declined, cancelled and
+all-day events: `{ calendar: "connected" | "none", meetings: [{ id, provider,
+title, private, startsAt, endsAt, joinUrl, service, unanswered }] }`. About a minute
+before one starts, the card says "<title> · Starts in 1 min · Google Meet"
+with Join and start notes and Not now. Join opens the link and starts a
+recording with that `calendarEvent`, named after it (after the service for a
+private event). While another meeting is being recorded the button is Join
+and switch notes, which stops and keeps that recording first; a recording
+started up to ten minutes before the meeting counts as joining it, so there is
+no card. Each meeting is offered once, only for the active account, and a
+reminder never covers a question to record a call that just started. The
+person turns reminders off with `update({ calendarReminders: false })`;
+`status()` also says whether a calendar is connected (`calendar`), so
+settings can offer to connect one.
 
 On a phone, `@opengeni/react-native/meetings` has the same pieces for React
 Native screens:

@@ -1,4 +1,5 @@
-// The words of the card that asks whether to record a call. English unless
+// The words of the card that asks whether to record a call, or offers to
+// join a calendar meeting about to start. English unless
 // the app gives its own, so an app in another language passes `words` to
 // `createMeetingDetection`.
 
@@ -32,6 +33,20 @@ export interface MeetingWords {
   callRecording?: string;
   /** Closes the card and keeps recording. */
   ok?: string;
+  /**
+   * A reminder before a calendar meeting. Added later, so an app's own words
+   * may lack them and the English is shown. When it starts: `{minutes}`.
+   */
+  startsIn?: string;
+  startingNow?: string;
+  /** It started `{minutes}` ago. */
+  startedAgo?: string;
+  /** The reminder's title for an event without one. */
+  untitledMeeting?: string;
+  /** Opens the meeting and starts recording its notes. */
+  joinAndStart?: string;
+  /** Opens the meeting, stops the recording going on and starts this one's. */
+  joinAndSwitch?: string;
 }
 
 export const ENGLISH_MEETING_WORDS: Required<MeetingWords> = {
@@ -48,6 +63,12 @@ export const ENGLISH_MEETING_WORDS: Required<MeetingWords> = {
   recordingStarted: "Recording this call",
   callRecording: "A call in {app} started, so it's being recorded.",
   ok: "OK",
+  startsIn: "Starts in {minutes} min",
+  startingNow: "Starting now",
+  startedAgo: "Started {minutes} min ago",
+  untitledMeeting: "Meeting",
+  joinAndStart: "Join and start notes",
+  joinAndSwitch: "Join and switch notes",
 };
 
 /** `template` with each `{name}` replaced. */
