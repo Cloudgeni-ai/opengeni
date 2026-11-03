@@ -98,6 +98,50 @@ describe("published SDK inventory", () => {
     ]);
     // A removed call must not be "served" by an unrelated route of the same length.
     expect(resolveCall("DELETE /v1/workspaces/:p/social/connections/:p", registered)).toEqual([]);
+    // A generic call has no literal after its first placeholder, so it pins nothing loosely.
+    expect(resolveCall("GET /v1/workspaces/:p/:p/:p", registered)).toEqual([]);
+  });
+
+  test("route overrides pin a generic call's real routes and survive refresh", () => {
+    const call = "GET|POST /v1/workspaces/:p/:p/:p";
+    const override = {
+      call,
+      routes: ["GET /v1/workspaces/:workspaceId/company-brain/files"],
+      reason: "The proxy only reaches company-brain files.",
+    };
+    const refreshed = refreshPublishedPackage({
+      name: "@opengeni/sdk",
+      version: "4.6.1",
+      calls: { [call]: ["createSessionProxyHandler"] },
+      registered,
+      previous: {
+        name: "@opengeni/sdk",
+        version: "4.6.1",
+        calls: {},
+        acceptedGaps: [],
+        routeOverrides: [override],
+      },
+      acceptGapsReason: null,
+    });
+    expect(refreshed.newGaps).toEqual([]);
+    expect(refreshed.entry.calls[call]!.routes).toEqual(override.routes);
+    expect(refreshed.entry.routeOverrides).toEqual([override]);
+    const valid = { schemaVersion: 2 as const, packages: [refreshed.entry] };
+    expect(validatePublishedInventory(valid)).toBeDefined();
+    expect(
+      publishedSdkFindings(
+        valid,
+        registered.filter((route) => !route.path.endsWith("/files")),
+      ).breaking.map((finding) => finding.id),
+    ).toEqual([
+      "published-sdk:@opengeni/sdk@4.6.1:GET /v1/workspaces/:workspaceId/company-brain/files",
+    ]);
+    const drifted = structuredClone(valid);
+    drifted.packages[0]!.calls[call]!.routes = [SESSION];
+    expect(() => validatePublishedInventory(drifted)).toThrow(/recorded routes/);
+    const unexplained = structuredClone(valid);
+    unexplained.packages[0]!.routeOverrides![0]!.reason = "";
+    expect(() => validatePublishedInventory(unexplained)).toThrow(/explain/);
   });
 
   test("a removed route a published SDK calls is breaking, exactly by method and path", () => {

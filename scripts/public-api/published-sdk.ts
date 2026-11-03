@@ -23,6 +23,11 @@
  * existing accepted gaps. It refuses to record a new gap unless
  * `--accept-gaps "<reason>"` is passed; a new gap means a published SDK method
  * already fails against the API, which this policy does not allow.
+ *
+ * A generic call (no literal segment after its first placeholder, such as
+ * `${base}/${area}/${id}`) never resolves loosely: it would pin every route of
+ * that shape, including web-only ones. Pin its real routes by hand in the
+ * package's `routeOverrides` with a reason; refresh keeps them.
  */
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -34,6 +39,9 @@ export const PUBLISHED_SDK_PATH = "scripts/public-api/published-sdk.gen.json";
 const PACKAGE_NAME = "@opengeni/sdk";
 
 export type PublishedGap = { call: string; reason: string };
+
+/** Hand-pinned routes for a call the resolver cannot resolve precisely. */
+export type PublishedRouteOverride = { call: string; routes: string[]; reason: string };
 
 export type PublishedCall = {
   /** SDK methods that make the call. */
@@ -49,6 +57,8 @@ export type PublishedPackage = {
   calls: Record<string, PublishedCall>;
   /** Calls no registered route served when this version was recorded. */
   acceptedGaps: PublishedGap[];
+  /** Calls whose routes are pinned by hand instead of resolved. */
+  routeOverrides?: PublishedRouteOverride[];
 };
 
 export type PublishedInventory = { schemaVersion: 2; packages: PublishedPackage[] };
@@ -84,11 +94,18 @@ export function publishedSdkCalls(sourceDirectory: string): Record<string, strin
  * as in `company-brain/${kind}`) only counts when it is structural like this;
  * otherwise an unrelated route that happens to have the same length (for
  * example `/v1/workspaces/external/:source/:id/allowance`) would "serve" a
- * removed call.
+ * removed call. It also needs a literal after the SDK's first placeholder, so
+ * a generic `/v1/workspaces/:p/:p/:p` does not pin every route of that shape.
  */
 function literalsAlign(sdkPath: string, routePath: string): boolean {
   const sdk = sdkPath.split("/");
   const route = routePath.split("/");
+  const firstPlaceholder = sdk.findIndex((segment) => segment.includes(":p"));
+  if (
+    firstPlaceholder >= 0 &&
+    !sdk.slice(firstPlaceholder + 1).some((segment) => segment !== "" && !segment.includes(":p"))
+  )
+    return false;
   for (let index = 0; index < sdk.length; index += 1) {
     const segment = route[index];
     if (segment === "*") return true;
@@ -161,6 +178,25 @@ export function validatePublishedInventory(value: unknown): PublishedInventory {
     if (typeof pkg.calls !== "object" || pkg.calls === null)
       throw new Error(`${where}.calls must be an object`);
     if (!Array.isArray(pkg.acceptedGaps)) throw new Error(`${where}.acceptedGaps must be an array`);
+    if (pkg.routeOverrides !== undefined && !Array.isArray(pkg.routeOverrides))
+      throw new Error(`${where}.routeOverrides must be an array`);
+    for (const override of pkg.routeOverrides ?? []) {
+      const recorded = typeof override.call === "string" ? pkg.calls[override.call] : undefined;
+      if (!recorded)
+        throw new Error(
+          `${where} route override ${JSON.stringify(override.call)} is not a recorded call`,
+        );
+      if (typeof override.reason !== "string" || override.reason.trim().length < 10)
+        throw new Error(`${where} route override ${override.call} must explain the pinned routes`);
+      if (
+        !Array.isArray(override.routes) ||
+        override.routes.length === 0 ||
+        JSON.stringify([...override.routes].sort()) !== JSON.stringify(recorded.routes)
+      )
+        throw new Error(
+          `${where} route override ${override.call} must list the call's recorded routes`,
+        );
+    }
     const gaps = new Set<string>();
     for (const gap of pkg.acceptedGaps) {
       if (typeof gap.call !== "string" || !(gap.call in pkg.calls))
@@ -191,11 +227,15 @@ export function refreshPublishedPackage(input: {
   acceptGapsReason: string | null;
 }): { entry: PublishedPackage; newGaps: string[] } {
   const known = new Map((input.previous?.acceptedGaps ?? []).map((gap) => [gap.call, gap.reason]));
+  const overrides = (input.previous?.routeOverrides ?? []).filter(
+    (override) => override.call in input.calls,
+  );
+  const pinned = new Map(overrides.map((override) => [override.call, override.routes]));
   const calls: Record<string, PublishedCall> = {};
   const acceptedGaps: PublishedGap[] = [];
   const newGaps: string[] = [];
   for (const [call, sdk] of Object.entries(input.calls)) {
-    const routes = resolveCall(call, input.registered);
+    const routes = [...(pinned.get(call) ?? resolveCall(call, input.registered))].sort();
     calls[call] = { sdk, routes };
     if (routes.length > 0) continue;
     const reason = known.get(call);
@@ -206,7 +246,13 @@ export function refreshPublishedPackage(input: {
     }
   }
   return {
-    entry: { name: input.name, version: input.version, calls, acceptedGaps },
+    entry: {
+      name: input.name,
+      version: input.version,
+      calls,
+      acceptedGaps,
+      ...(overrides.length > 0 ? { routeOverrides: overrides } : {}),
+    },
     newGaps,
   };
 }
@@ -241,8 +287,10 @@ async function refresh(): Promise<void> {
     const { registeredRoutes } = await import("./registered-routes");
     const file = join(root, PUBLISHED_SDK_PATH);
     const existing = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null;
+    // Not validated here: a hand-added route override is only consistent after
+    // refresh applies it. The result is validated below.
     const packages: PublishedPackage[] =
-      existing?.schemaVersion === 2 ? validatePublishedInventory(existing).packages : [];
+      existing?.schemaVersion === 2 && Array.isArray(existing.packages) ? existing.packages : [];
     const previous =
       packages.find((pkg) => pkg.name === PACKAGE_NAME && pkg.version === version) ??
       // Gap reasons from an older inventory format stay valid for the same version.
@@ -272,7 +320,8 @@ async function refresh(): Promise<void> {
     next.sort((a, b) =>
       a.name === b.name ? Bun.semver.order(a.version, b.version) : a.name.localeCompare(b.name),
     );
-    writeFileSync(file, `${JSON.stringify({ schemaVersion: 2, packages: next }, null, 2)}\n`);
+    const inventory = validatePublishedInventory({ schemaVersion: 2, packages: next });
+    writeFileSync(file, `${JSON.stringify(inventory, null, 2)}\n`);
     process.stdout.write(
       `[published-sdk] recorded ${PACKAGE_NAME}@${version}: ${Object.keys(calls).length} calls, ${entry.acceptedGaps.length} accepted gaps\n`,
     );

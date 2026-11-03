@@ -1806,7 +1806,7 @@ them, and `@deprecated` members keep working. Clients should ignore unknown
 response fields, enum values and event types. Official server builds expose
 `serverVersion` on `/healthz` and `/v1/config/client`. Full policy:
 `docs/design/api-compatibility-policy.md`.
-The only exceptions are rare security fixes, announced with migration notes.
+Rare exceptions (an emergency security fix or an explicit product-owner decision) are announced with migration notes.
 
 ## Proxy through your own API
 

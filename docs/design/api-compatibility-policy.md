@@ -196,7 +196,10 @@ SDK placeholder may stand in for a route literal only when every literal the
 SDK wrote lines up with a route literal. The check fails when the candidate API
 no longer registers one of the stored routes, by method and path. Calls the
 API had already dropped before 2026-11-03 (26 for 4.6.1) are listed as
-`acceptedGaps` with their reason. After
+`acceptedGaps` with their reason. A generic call with no literal after its
+first placeholder (such as the 4.6.1 session proxy's `${base}/${area}/${id}`)
+never resolves loosely; its real routes are pinned by hand in
+`routeOverrides` with a reason, and refresh keeps them. After
 each stable SDK publication, record the new version with
 `bun run public-api:published-refresh` (defaults to the npm `latest` tag;
 `-- --version X` for another); it keeps earlier versions and refuses to record
@@ -234,6 +237,9 @@ The pull-request template asks every change for its external API impact.
 
 ## Follow-ups
 
+- **Published React routes.** The published `@opengeni/react` session UI
+  reaches routes through the session proxy that no inventory records yet.
+  Record them alongside the SDK's.
 - **Refusals name the minimum SDK version.** When a revision is first added to
   `REFUSED_API_CONTRACT_REVISIONS`, its refusal body must carry a typed field
   (for example `minimumSdkVersion`) and a message of the form "upgrade
