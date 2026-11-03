@@ -1624,7 +1624,13 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         client_name: "Opengeni",
         redirect_uris: [`${baseUrl}/v1/integrations/oauth/callback`],
         token_endpoint_auth_method: "none",
-        grant_types: ["authorization_code", "refresh_token"],
+        // The JWT bearer grant redeems the ID-JAGs an organization's Opengeni
+        // issuer signs (auto-connect organization connectors).
+        grant_types: [
+          "authorization_code",
+          "refresh_token",
+          "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        ],
         response_types: ["code"],
       }),
     );

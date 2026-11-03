@@ -4925,6 +4925,9 @@ export const mcpOauthRefreshTokens = pgTable(
     connectedAt: timestamp("connected_at", { withTimezone: true }),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    /** Auto-connected: the trusted issuer that vouched for the person, and its subject. */
+    trustedIssuerId: uuid("trusted_issuer_id"),
+    assertionSubject: text("assertion_subject"),
   },
   (table) => ({
     workspaceAccount: foreignKey({
@@ -4937,6 +4940,11 @@ export const mcpOauthRefreshTokens = pgTable(
       table.generation,
     ),
     expires: index("mcp_oauth_refresh_tokens_expires_idx").on(table.expiresAt),
+    trustedIssuer: index("mcp_oauth_refresh_tokens_trusted_issuer_idx").on(
+      table.trustedIssuerId,
+      table.assertionSubject,
+      table.clientId,
+    ),
   }),
 );
 
@@ -14243,6 +14251,122 @@ export const organizationConnectors = pgTable(
     ),
   }),
 );
+
+// --- MCP auto-connect (1239) -------------------------------------------------
+// Inbound: issuers an organization trusts to vouch for its members (ID-JAG).
+export const organizationMcpTrustedIssuers = pgTable(
+  "organization_mcp_trusted_issuers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    provider: text("provider").$type<"claude" | "okta" | "other">().notNull(),
+    issuer: text("issuer").notNull(),
+    jwksUri: text("jwks_uri"),
+    allowedClientIds: jsonb("allowed_client_ids").$type<string[]>(),
+    organizationAccess: jsonb("organization_access").$type<OrganizationAccessPolicy>().notNull(),
+    status: text("status").$type<"active" | "disabled">().notNull().default("active"),
+    createdBySubjectId: text("created_by_subject_id").notNull(),
+    updatedBySubjectId: text("updated_by_subject_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    issuerKey: unique("organization_mcp_trusted_issuers_issuer_key").on(
+      table.accountId,
+      table.issuer,
+    ),
+    issuerLookup: index("organization_mcp_trusted_issuers_issuer_idx").on(table.issuer),
+  }),
+);
+
+export const organizationMcpTrustedIssuerSubjects = pgTable(
+  "organization_mcp_trusted_issuer_subjects",
+  {
+    trustedIssuerId: uuid("trusted_issuer_id")
+      .notNull()
+      .references(() => organizationMcpTrustedIssuers.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    assertionSubject: text("assertion_subject").notNull(),
+    subjectId: text("subject_id").notNull(),
+    email: text("email"),
+    firstConnectedAt: timestamp("first_connected_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    lastConnectedAt: timestamp("last_connected_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.trustedIssuerId, table.assertionSubject] }),
+    account: index("organization_mcp_trusted_issuer_subjects_account_idx").on(
+      table.accountId,
+      table.trustedIssuerId,
+    ),
+  }),
+);
+
+export const organizationMcpTrustedIssuerEvents = pgTable(
+  "organization_mcp_trusted_issuer_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    trustedIssuerId: uuid("trusted_issuer_id")
+      .notNull()
+      .references(() => organizationMcpTrustedIssuers.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    outcome: text("outcome").$type<"connected" | "refused">().notNull(),
+    reason: text("reason"),
+    subjectId: text("subject_id"),
+    email: text("email"),
+    clientId: text("client_id"),
+    clientName: text("client_name"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    recent: index("organization_mcp_trusted_issuer_events_recent_idx").on(
+      table.trustedIssuerId,
+      table.createdAt,
+    ),
+  }),
+);
+
+export const organizationMcpAssertionReplays = pgTable(
+  "organization_mcp_assertion_replays",
+  {
+    trustedIssuerId: uuid("trusted_issuer_id")
+      .notNull()
+      .references(() => organizationMcpTrustedIssuers.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    jtiHash: text("jti_hash").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.trustedIssuerId, table.jtiHash] }),
+    expires: index("organization_mcp_assertion_replays_expires_idx").on(
+      table.accountId,
+      table.expiresAt,
+    ),
+  }),
+);
+
+// Outbound: the organization's own ID-JAG signing key (Opengeni as the issuer).
+export const organizationIdentityIssuers = pgTable("organization_identity_issuers", {
+  accountId: uuid("account_id")
+    .primaryKey()
+    .references(() => managedAccounts.id, { onDelete: "cascade" }),
+  keyId: text("key_id").notNull(),
+  algorithm: text("algorithm").$type<"RS256" | "ES256">().notNull(),
+  publicJwk: jsonb("public_jwk").$type<Record<string, unknown>>().notNull(),
+  privateKeyEncrypted: text("private_key_encrypted").notNull(),
+  createdBySubjectId: text("created_by_subject_id").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 // --- Capabilities platform ---------------------------------------------------
 // Authoritative Plugin, immutable Version, Facet, installation, and ownership

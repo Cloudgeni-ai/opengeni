@@ -609,6 +609,28 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "workspace:read"
   },
   {
+    "id": "checkMcpTrustedIssuer",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/mcp-trusted-issuers/check",
+    "request": [
+      "CheckMcpTrustedIssuerRequest"
+    ],
+    "response": [
+      "CheckMcpTrustedIssuerResponse"
+    ]
+  },
+  {
+    "id": "checkOrganizationConnectorAutoConnect",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/connectors/auto-connect/check",
+    "request": [
+      "CheckOrganizationConnectorAutoConnectRequest"
+    ],
+    "response": [
+      "AutoConnectSupport"
+    ]
+  },
+  {
     "id": "checkSiteHostname",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/site-hostnames/:label",
@@ -836,6 +858,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "secretFields": [
       "request.token"
     ]
+  },
+  {
+    "id": "connectWorkspaceOrganizationConnector",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/organization-connectors/:connectorId/connect",
+    "request": [],
+    "response": [],
+    "permission": "connections:write"
   },
   {
     "id": "continueAfterCapabilitySetup",
@@ -1145,6 +1175,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "KnowledgeOriginalFileDownload"
+    ]
+  },
+  {
+    "id": "createMcpTrustedIssuer",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/mcp-trusted-issuers",
+    "request": [
+      "CreateMcpTrustedIssuerRequest"
+    ],
+    "response": [
+      "McpTrustedIssuer"
     ]
   },
   {
@@ -1750,6 +1791,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [],
     "permission": "sessions:control"
+  },
+  {
+    "id": "deleteMcpTrustedIssuer",
+    "method": "DELETE",
+    "path": "/v1/organizations/:organizationId/mcp-trusted-issuers/:trustedIssuerId",
+    "request": [],
+    "response": []
   },
   {
     "id": "deleteOpenGeniSlackAgent",
@@ -5488,6 +5536,24 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "MachinesResponse"
+    ]
+  },
+  {
+    "id": "listMcpTrustedIssuerEvents",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/mcp-trusted-issuers/:trustedIssuerId/events",
+    "request": [],
+    "response": [
+      "ListMcpTrustedIssuerEventsResponse"
+    ]
+  },
+  {
+    "id": "listMcpTrustedIssuers",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/mcp-trusted-issuers",
+    "request": [],
+    "response": [
+      "ListMcpTrustedIssuersResponse"
     ]
   },
   {
@@ -9354,6 +9420,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "testOrganizationConnectorAutoConnect",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/connectors/:connectorId/auto-connect/test",
+    "request": [],
+    "response": [
+      "TestOrganizationConnectorAutoConnectResponse"
+    ]
+  },
+  {
     "id": "testWorkspaceCredentialProvider",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/credential-provider/test",
@@ -9729,6 +9804,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "OrganizationComputeReachResponse"
     ],
     "permission": "enrollments:read"
+  },
+  {
+    "id": "updateMcpTrustedIssuer",
+    "method": "PATCH",
+    "path": "/v1/organizations/:organizationId/mcp-trusted-issuers/:trustedIssuerId",
+    "request": [
+      "UpdateMcpTrustedIssuerRequest"
+    ],
+    "response": [
+      "McpTrustedIssuer"
+    ]
   },
   {
     "id": "updateMemberNotifications",

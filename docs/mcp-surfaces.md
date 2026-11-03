@@ -127,6 +127,84 @@ disconnect them, except that only an owner disconnects an owner's (each listed
 agent carries `canDisconnect`); only the person changes what their agent can
 do. Migration `0601` is rolling.
 
+#### Auto-connect (Enterprise-Managed Authorization)
+
+An organization can trust an identity issuer so that members are connected to
+`/v1/mcp` the first time an MCP client uses it, with no Opengeni sign-in or
+consent screen. This implements the MCP
+[Enterprise-Managed Authorization](https://modelcontextprotocol.io/extensions/auth/enterprise-managed-authorization)
+extension: the client redeems an Identity Assertion JWT Authorization Grant
+(ID-JAG, `draft-ietf-oauth-identity-assertion-authz-grant`) at `/oauth/token`
+with the RFC 7523 JWT bearer grant. The issuer is either:
+
+- **Claude** (`provider: "claude"`): Claude's per-organization issuer,
+  `https://identity.anthropic.com/issuers/<id>`, on Claude Team and
+  Enterprise. The admin adds `/v1/mcp` as a custom connector in Claude, picks
+  Claude-issued managed authorization, enters the organization ID as the
+  tenant ID and pastes Claude's issuer URL into Opengeni.
+- **An identity provider** (`okta` or `other`), such as Okta Cross App
+  Access, whose issuer signs ID-JAGs for people signed in through it.
+
+The authorization server metadata advertises the grant:
+`grant_types_supported` includes `urn:ietf:params:oauth:grant-type:jwt-bearer`,
+`authorization_grant_profiles_supported` is
+`["urn:ietf:params:oauth:grant-profile:id-jag"]`, and
+`client_id_metadata_document_supported` is `true`. A client may be named by
+its Client ID Metadata Document URL at both `/oauth/authorize` and
+`/oauth/token`; the document is fetched through the public-address fetcher,
+stored as an `mcp_oauth_clients` row and fetched again after a day, or sooner
+when a request uses a redirect URI it lacks. Dynamic registration is
+unchanged. An ID-JAG may also name a client ID its issuer registered itself
+(Claude's own client); that client is stored usable with the JWT bearer grant
+only.
+
+A redemption is accepted only when every check passes, in this order, and
+otherwise answers `invalid_grant` (`invalid_client` or `invalid_target` where
+the spec says so) with an `error_description`:
+
+1. `iss` is an active trusted issuer. When several organizations trust the
+   same issuer, `aud_tenant` (or `tenant`) must name the organization ID;
+   Opengeni's tenant ID is always the organization ID.
+2. The header `typ` is `oauth-id-jag+jwt`, `alg` is ES256 or RS256, and the
+   signature verifies against the issuer's keys (its configured key set URL,
+   or OIDC/RFC 8414 discovery; cached, and fetched again for an unknown
+   `kid`). Nothing unverified is recorded beyond the trust it names.
+3. `aud` is exactly Opengeni's issuer; `resource` (claim and request), when
+   present, is the organization MCP resource only.
+4. The claim `client_id` matches the request's, and is in the trust's allowed
+   client IDs when the admin set any.
+5. `exp`, `iat` (60 s skew, at most an hour's lifetime), `sub` and `jti` are
+   present; each `jti` is redeemed once per issuer
+   (`mcp_oauth_assertion_replays`).
+6. The person is matched: by a `sub` the issuer connected before, else by the
+   assertion's `email` (unless `email_verified` is false) against an
+   `email_verified` Opengeni account with an active membership. An email never
+   creates an account or a membership.
+
+The response is an access token with scope `mcp:access` and no refresh
+token: the client redeems a fresh ID-JAG when it runs out. Each trust, person
+and client make one connection, listed in Connected agents as
+**Auto-connected**, with the access the trust sets for everyone it connects
+(`organizationAccess`). Changing the trust's access applies to its live
+connections; changing an auto-connected agent's own access is refused.
+Disconnecting one revokes it until the client redeems again, and turning the
+issuer off or removing it disconnects everyone it connected.
+
+Owners and admins manage issuers at
+`/v1/organizations/:id/mcp-trusted-issuers` (SDK `listMcpTrustedIssuers`,
+`checkMcpTrustedIssuer`, `createMcpTrustedIssuer`, `updateMcpTrustedIssuer`,
+`deleteMcpTrustedIssuer`, `listMcpTrustedIssuerEvents`). `check` reads an
+issuer URL's keys before it is saved; `events` lists recent attempts with
+their refusal reason (`McpAutoConnectRefusalReason`, for example
+`no_matching_member` or `wrong_audience`) so an admin can fix a setup without
+logs. The web app shows them under Organization settings → Connected agents →
+Auto-connect. The routes answer `404` unless MCP OAuth and a public base URL
+are configured. Migrations `1239`, `1240` and `1241` are rolling.
+
+The other direction, Opengeni connecting members to an outside MCP app the
+same way, is an organization connector with `login: "auto_connect"`; see
+[Integrations design § 5.5](integrations-design.md#55-auto-connect-opengeni-as-the-id-jag-issuer).
+
 ### App actions in chat
 
 In a chat a person started themselves, the agent can do what that person could

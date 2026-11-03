@@ -27,7 +27,17 @@ import type {
   ClaudeSubscriptionAccount,
   ClaudeSubscriptionOAuthStartRequest,
   ClaudeSubscriptionSetupTokenRequest,
+  AutoConnectSupport,
+  CheckMcpTrustedIssuerRequest,
+  CheckMcpTrustedIssuerResponse,
+  CheckOrganizationConnectorAutoConnectRequest,
+  CreateMcpTrustedIssuerRequest,
   CreateOrganizationConnectorRequest,
+  ListMcpTrustedIssuerEventsResponse,
+  ListMcpTrustedIssuersResponse,
+  McpTrustedIssuer,
+  TestOrganizationConnectorAutoConnectResponse,
+  UpdateMcpTrustedIssuerRequest,
   ListOrganizationConnectorsResponse,
   OrganizationApiIntegrationHere,
   OrganizationConnector,
@@ -6236,6 +6246,124 @@ export class OpenGeniClient {
     await this.requestVoid(
       "DELETE",
       `/v1/organizations/${organizationId}/connectors/${connectorId}`,
+    );
+  }
+
+  /**
+   * Whether a connector can connect everyone automatically: its server must
+   * accept ID-JAGs (MCP Enterprise-Managed Authorization). Ask before adding it.
+   */
+  async checkOrganizationConnectorAutoConnect(
+    organizationId: string,
+    request: CheckOrganizationConnectorAutoConnectRequest,
+  ): Promise<AutoConnectSupport> {
+    return await this.requestJson<AutoConnectSupport>(
+      "POST",
+      `/v1/organizations/${organizationId}/connectors/auto-connect/check`,
+      request,
+    );
+  }
+
+  /**
+   * Try an auto-connect connector as yourself: Opengeni signs an ID-JAG for
+   * you and the app redeems it. Saves only the outcome on the connector.
+   */
+  async testOrganizationConnectorAutoConnect(
+    organizationId: string,
+    connectorId: string,
+  ): Promise<TestOrganizationConnectorAutoConnectResponse> {
+    return await this.requestJson<TestOrganizationConnectorAutoConnectResponse>(
+      "POST",
+      `/v1/organizations/${organizationId}/connectors/${connectorId}/auto-connect/test`,
+      {},
+    );
+  }
+
+  /**
+   * Connect yourself to an auto-connect connector that works in this
+   * workspace. When the app refuses, the message says why; sign in instead.
+   */
+  async connectWorkspaceOrganizationConnector(
+    workspaceId: string,
+    connectorId: string,
+  ): Promise<{ status: "connected" } | { status: "refused"; message: string }> {
+    return await this.requestJson<{ status: "connected" } | { status: "refused"; message: string }>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/organization-connectors/${connectorId}/connect`,
+      {},
+    );
+  }
+
+  // --- Auto-connect: trusted issuers (organization MCP server) ----------------------------------
+
+  /**
+   * Issuers whose ID-JAGs connect members to the organization MCP server
+   * with no sign-in (Claude's organization issuer, or an identity provider),
+   * with the MCP URL and audience to give the app. Owners and admins.
+   */
+  async listMcpTrustedIssuers(organizationId: string): Promise<ListMcpTrustedIssuersResponse> {
+    return await this.requestJson<ListMcpTrustedIssuersResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/mcp-trusted-issuers`,
+    );
+  }
+
+  /** Look an issuer up before trusting it: whether its signing keys load. */
+  async checkMcpTrustedIssuer(
+    organizationId: string,
+    request: CheckMcpTrustedIssuerRequest,
+  ): Promise<CheckMcpTrustedIssuerResponse> {
+    return await this.requestJson<CheckMcpTrustedIssuerResponse>(
+      "POST",
+      `/v1/organizations/${organizationId}/mcp-trusted-issuers/check`,
+      request,
+    );
+  }
+
+  /** Trust an issuer, with the access every app it connects gets. */
+  async createMcpTrustedIssuer(
+    organizationId: string,
+    request: CreateMcpTrustedIssuerRequest,
+  ): Promise<McpTrustedIssuer> {
+    return await this.requestJson<McpTrustedIssuer>(
+      "POST",
+      `/v1/organizations/${organizationId}/mcp-trusted-issuers`,
+      request,
+    );
+  }
+
+  /**
+   * Change a trusted issuer. New access applies to every app it connected;
+   * turning it off disconnects them.
+   */
+  async updateMcpTrustedIssuer(
+    organizationId: string,
+    trustedIssuerId: string,
+    request: UpdateMcpTrustedIssuerRequest,
+  ): Promise<McpTrustedIssuer> {
+    return await this.requestJson<McpTrustedIssuer>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/mcp-trusted-issuers/${trustedIssuerId}`,
+      request,
+    );
+  }
+
+  /** Stop trusting an issuer and disconnect every app it connected. */
+  async deleteMcpTrustedIssuer(organizationId: string, trustedIssuerId: string): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/organizations/${organizationId}/mcp-trusted-issuers/${trustedIssuerId}`,
+    );
+  }
+
+  /** Recent auto-connect attempts through an issuer, refusals with their reason. */
+  async listMcpTrustedIssuerEvents(
+    organizationId: string,
+    trustedIssuerId: string,
+  ): Promise<ListMcpTrustedIssuerEventsResponse> {
+    return await this.requestJson<ListMcpTrustedIssuerEventsResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/mcp-trusted-issuers/${trustedIssuerId}/events`,
     );
   }
 

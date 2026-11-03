@@ -12472,7 +12472,9 @@ function organizationCustomCatalogItem(
     surfaceType: null,
     transport: null,
     mcpUrl: null,
-    authKind: organizationConnectorLogin(connector.config) === "each_person" ? "oauth2" : null,
+    authKind: ["each_person", "auto_connect"].includes(organizationConnectorLogin(connector.config))
+      ? "oauth2"
+      : null,
     credentialFacts: [],
     tier: null,
     provenance: null,
@@ -95616,6 +95618,8 @@ export {
 
 export * from "./workspace-artifacts";
 export * from "./mcp-oauth";
+export * from "./mcp-auto-connect";
+export * from "./id-jag-issuer";
 export * from "./tool-gateway-approvals";
 export * from "./site-tool-allowances";
 export * from "./workspace-member-execution-defaults";

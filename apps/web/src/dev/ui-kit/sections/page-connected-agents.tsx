@@ -1,4 +1,11 @@
+import type {
+  CheckMcpTrustedIssuerResponse,
+  McpTrustedIssuer,
+  McpTrustedIssuerEvent,
+} from "@opengeni/contracts";
 import { useMemo, useState } from "react";
+
+import type { AutoConnectApi } from "@/components/organization-access/auto-connect";
 
 import {
   ConnectedAgents,
@@ -78,6 +85,157 @@ const CONNECTIONS: McpConnection[] = [
   },
 ];
 
+const AUTO_CONNECTED: McpConnection = {
+  id: "9c4a3f7d-4e5f-4a6b-9c2d-3e4f5a6b7c83",
+  clientName: "Claude",
+  clientHost: "claude.ai",
+  actor: "user",
+  connectedBy: { subjectId: "person-maria", name: "Maria Chen" },
+  policy: {
+    preset: "read_only",
+    permissions: presetPermissions("read_only"),
+    workspaceScope: { kind: "all" },
+  },
+  createdAt: ago(60 * 5),
+  lastUsedAt: ago(2),
+  expiresAt: ahead(29),
+  revokedAt: null,
+  autoConnect: { trustedIssuerId: "1d2e3f4a-5b6c-4d7e-8f9a-0b1c2d3e4f5a", issuerName: "Claude" },
+};
+
+const CLAUDE_ISSUER: McpTrustedIssuer = {
+  id: "1d2e3f4a-5b6c-4d7e-8f9a-0b1c2d3e4f5a",
+  organizationId: organization.id,
+  name: "Claude",
+  provider: "claude",
+  issuer: "https://identity.anthropic.com/issuers/iss_01JD7Y3W9K2M4Q6R8T0V",
+  jwksUri: null,
+  allowedClientIds: null,
+  access: {
+    preset: "read_only",
+    permissions: presetPermissions("read_only") as McpTrustedIssuer["access"]["permissions"],
+    workspaceScope: { kind: "all" },
+  },
+  status: "active",
+  connectedPeople: 14,
+  lastConnectedAt: ago(2),
+  lastRefusal: null,
+  createdAt: ago(60 * 24 * 6),
+  updatedAt: ago(60 * 24 * 6),
+};
+
+const OKTA_ISSUER: McpTrustedIssuer = {
+  ...CLAUDE_ISSUER,
+  id: "2e3f4a5b-6c7d-4e8f-9a0b-1c2d3e4f5a6b",
+  name: "Okta",
+  provider: "okta",
+  issuer: "https://acme.okta.com",
+  connectedPeople: 0,
+  lastConnectedAt: null,
+  lastRefusal: { reason: "no_matching_member", at: ago(12) },
+  createdAt: ago(60 * 3),
+  updatedAt: ago(60 * 3),
+};
+
+const NEW_ISSUER: McpTrustedIssuer = {
+  ...CLAUDE_ISSUER,
+  id: "3f4a5b6c-7d8e-4f9a-0b1c-2d3e4f5a6b7c",
+  connectedPeople: 0,
+  lastConnectedAt: null,
+  createdAt: ago(1),
+  updatedAt: ago(1),
+};
+
+const EVENTS: McpTrustedIssuerEvent[] = [
+  {
+    id: "a1000000-0000-4000-8000-000000000001",
+    outcome: "connected",
+    reason: null,
+    person: { subjectId: "person-maria", name: "Maria Chen" },
+    email: "maria@acme.dev",
+    clientName: "Claude",
+    at: ago(5 * 60),
+  },
+  {
+    id: "a1000000-0000-4000-8000-000000000002",
+    outcome: "refused",
+    reason: "no_matching_member",
+    person: null,
+    email: "contractor@gmail.com",
+    clientName: "Claude",
+    at: ago(60 * 26),
+  },
+  {
+    id: "a1000000-0000-4000-8000-000000000003",
+    outcome: "connected",
+    reason: null,
+    person: { subjectId: "person-jonas", name: "Jonas Berg" },
+    email: "jonas@acme.dev",
+    clientName: "Claude",
+    at: ago(60 * 24 * 2),
+  },
+];
+
+function fakeAutoConnect(initial: McpTrustedIssuer[]): AutoConnectApi {
+  let rows = [...initial];
+  return {
+    list: async () => ({
+      trustedIssuers: rows,
+      mcpUrl: MCP_URL,
+      audience: "https://app.opengeni.ai",
+    }),
+    check: async ({ issuer }): Promise<CheckMcpTrustedIssuerResponse> => {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      return issuer.includes("anthropic.com") || issuer.includes("okta.com")
+        ? {
+            status: "ok",
+            issuer,
+            jwksUri: `${issuer}/jwks`,
+            keyCount: 2,
+            algorithms: ["ES256"],
+          }
+        : {
+            status: "failed",
+            issuer,
+            message: "Opengeni couldn't find this issuer's signing keys. Check the URL.",
+          };
+    },
+    create: async (request) => {
+      const created: McpTrustedIssuer = {
+        ...NEW_ISSUER,
+        id: crypto.randomUUID(),
+        name: request.name,
+        provider: request.provider,
+        issuer: request.issuer,
+        access: request.access,
+      };
+      rows = [...rows, created];
+      return created;
+    },
+    update: async (id, request) => {
+      rows = rows.map((row) =>
+        row.id === id
+          ? {
+              ...row,
+              ...(request.access ? { access: request.access } : {}),
+              ...(request.status ? { status: request.status } : {}),
+              ...(request.allowedClientIds !== undefined
+                ? { allowedClientIds: request.allowedClientIds }
+                : {}),
+              ...(request.jwksUri !== undefined ? { jwksUri: request.jwksUri } : {}),
+              updatedAt: new Date().toISOString(),
+            }
+          : row,
+      );
+      return rows.find((row) => row.id === id)!;
+    },
+    remove: async (id) => {
+      rows = rows.filter((row) => row.id !== id);
+    },
+    events: async (id) => ({ events: id === CLAUDE_ISSUER.id ? EVENTS : [] }),
+  };
+}
+
 function fakeApi(initial: McpConnection[]): McpConnectionsApi {
   let rows = [...initial];
   return {
@@ -96,12 +254,16 @@ const LIST: ConnectedAgentsLocation = {};
 
 function AgentsPreview({
   initial,
+  issuers,
   start = LIST,
 }: {
   initial: McpConnection[];
+  /** Auto-connect issuers, for an owner's view; omit for a member's. */
+  issuers?: McpTrustedIssuer[];
   start?: ConnectedAgentsLocation;
 }) {
   const api = useMemo(() => fakeApi(initial), [initial]);
+  const autoConnect = useMemo(() => (issuers ? fakeAutoConnect(issuers) : null), [issuers]);
   const [location, setLocation] = useState<ConnectedAgentsLocation>(start);
   return (
     <div className="mx-auto w-full max-w-[960px] px-6 py-8 max-sm:px-4">
@@ -114,6 +276,9 @@ function AgentsPreview({
         location={location}
         onNavigate={setLocation}
         onCreateApiKey={() => setLocation({})}
+        {...(autoConnect
+          ? { autoConnect: { organizationId: organization.id, api: autoConnect } }
+          : {})}
       />
     </div>
   );
@@ -137,6 +302,76 @@ export default function PageConnectedAgentsSection() {
       >
         <PagePreview label="Connected agents" height={980}>
           <AgentsPreview initial={CONNECTIONS} />
+        </PagePreview>
+      </KitBlock>
+      <KitBlock
+        title="Auto-connect: off"
+        description="Owners and admins see Auto-connect between setup and the list. Off, it's one line and one action."
+      >
+        <PagePreview label="Auto-connect off" height={1120}>
+          <AgentsPreview initial={CONNECTIONS} issuers={[]} />
+        </PagePreview>
+      </KitBlock>
+      <KitBlock
+        title="Auto-connect: on"
+        description="Each trusted issuer is a row: how many people it connected, what their agents can do and where. A refused or waiting issuer says so. Auto-connected agents say so in the list."
+      >
+        <PagePreview label="Auto-connect on" height={1280}>
+          <AgentsPreview
+            initial={[AUTO_CONNECTED, ...CONNECTIONS]}
+            issuers={[CLAUDE_ISSUER, OKTA_ISSUER]}
+          />
+        </PagePreview>
+      </KitBlock>
+      <KitBlock
+        title="Set up auto-connect"
+        description="Pick where people come from. Claude shows the two values to paste into Claude's Managed authorization setup, then takes the Issuer URL Claude shows, checked as it's typed. Access defaults to Read only in every workspace."
+      >
+        <PagePreview label="Auto-connect setup page" height={1500}>
+          <AgentsPreview initial={CONNECTIONS} issuers={[]} start={{ issuer: "new" }} />
+        </PagePreview>
+      </KitBlock>
+      <KitBlock
+        title="An issuer: working"
+        description="Status first, then what every auto-connected agent can do (Save appears once changed), the setup values again, and recent attempts with plain reasons. Turn off and Remove are in the ⋯ menu."
+      >
+        <PagePreview label="Claude issuer" height={1700}>
+          <AgentsPreview
+            initial={[AUTO_CONNECTED, ...CONNECTIONS]}
+            issuers={[CLAUDE_ISSUER, OKTA_ISSUER]}
+            start={{ issuer: CLAUDE_ISSUER.id }}
+          />
+        </PagePreview>
+      </KitBlock>
+      <KitBlock
+        title="An issuer: refused and waiting"
+        description="The last refusal says what to fix. A new issuer waits for its first connection and says how to test it."
+      >
+        <PagePreview label="Okta issuer" height={1300}>
+          <AgentsPreview
+            initial={CONNECTIONS}
+            issuers={[OKTA_ISSUER]}
+            start={{ issuer: OKTA_ISSUER.id }}
+          />
+        </PagePreview>
+        <PagePreview label="New Claude issuer" height={1300}>
+          <AgentsPreview
+            initial={CONNECTIONS}
+            issuers={[NEW_ISSUER]}
+            start={{ issuer: NEW_ISSUER.id }}
+          />
+        </PagePreview>
+      </KitBlock>
+      <KitBlock
+        title="An auto-connected agent"
+        description="Its access follows the issuer, so it reads as set for everyone; Change opens the issuer."
+      >
+        <PagePreview label="Auto-connected Claude" height={900}>
+          <AgentsPreview
+            initial={[AUTO_CONNECTED, ...CONNECTIONS]}
+            issuers={[CLAUDE_ISSUER]}
+            start={{ agent: AUTO_CONNECTED.id }}
+          />
         </PagePreview>
       </KitBlock>
       <KitBlock title="Empty" description="Setup stays first; the empty list is one quiet line.">

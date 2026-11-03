@@ -272,6 +272,50 @@ describe("shared capability connection lifecycle", () => {
       expect(h.options.redirect).toHaveBeenCalledWith("https://accounts.example/consent");
     });
 
+    test("an organization connector that connects people automatically skips sign-in", async () => {
+      const automatic = CapabilityCatalogItem.parse({
+        ...gmail,
+        lifecycle: { status: "ready", readiness: "ready", managedBy: "organization" },
+        metadata: {
+          organizationConnector: { id: "connector-1", generation: 1, login: "auto_connect" },
+        },
+      });
+      const startConnectionOAuth = mock(async (_workspaceId: string, _request: object) => ({
+        state: "s",
+        authorizationUrl: "https://accounts.example/consent",
+      }));
+      const connectWorkspaceOrganizationConnector = mock(
+        async (_workspaceId: string, _connectorId: string) => ({ status: "connected" }),
+      );
+      const h = harness({ startConnectionOAuth, connectWorkspaceOrganizationConnector });
+      await performCapabilityAction(
+        { ...h.options, item: automatic },
+        { type: "reconnect_oauth", item: automatic, connectionId: null, ownership: "personal" },
+      );
+      expect(connectWorkspaceOrganizationConnector.mock.calls[0]).toEqual([
+        "workspace",
+        "connector-1",
+      ]);
+      expect(startConnectionOAuth).not.toHaveBeenCalled();
+      expect(h.options.refresh).toHaveBeenCalled();
+      expect(h.options.onComplete).toHaveBeenCalled();
+
+      // Refused: the person signs in as usual.
+      const refused = harness({
+        startConnectionOAuth,
+        connectWorkspaceOrganizationConnector: mock(async () => ({
+          status: "refused",
+          message: "Mail doesn't trust this issuer",
+        })),
+      });
+      await performCapabilityAction(
+        { ...refused.options, item: automatic },
+        { type: "reconnect_oauth", item: automatic, connectionId: null, ownership: "personal" },
+      );
+      expect(startConnectionOAuth).toHaveBeenCalledTimes(1);
+      expect(refused.options.redirect).toHaveBeenCalledWith("https://accounts.example/consent");
+    });
+
     test("per-account Reconnect re-signs exactly that row, in the workspace that owns it", async () => {
       const startConnectionOAuth = mock(async (_workspaceId: string, _request: object) => ({
         state: "s",

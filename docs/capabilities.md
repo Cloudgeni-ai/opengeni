@@ -190,6 +190,14 @@ turns sign in to it:
 - `each_person`: everyone connects their own account to the server's OAuth,
   as with a workspace connector enabled for personal accounts. Google's MCP
   servers only allow this.
+- `auto_connect`: everyone has their own account, but Opengeni connects them
+  the first time they use it, with no sign-in screen: the organization's
+  Opengeni issuer signs an ID-JAG for them and the app, which trusts that
+  issuer, issues their token. Only for MCP servers whose authorization server
+  accepts the JWT bearer grant, checked before adding
+  (`checkOrganizationConnectorAutoConnect`) and tested with
+  `testOrganizationConnectorAutoConnect`. See
+  [Integrations design § 5.5](integrations-design.md#55-auto-connect-opengeni-as-the-id-jag-issuer).
 - `organization_key`: request headers held by the organization, probed and
   then stored encrypted exactly like
   [credential headers](#credential-headers). The API returns header names only.
