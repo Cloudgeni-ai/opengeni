@@ -260,9 +260,9 @@ export async function prepareRecordingTrackAudio(input: {
     // Short bytes held until the chunks after them show whether a header starts there.
     let held: { bytes: Uint8Array; chunk: RecordingAudioChunk } | null = null;
     try {
-      for await (const { chunk, bytes: read } of readChunksInOrder(ordered, async (chunk) => {
+      for await (const { chunk, bytes: read } of readChunksInOrder(ordered, async (next) => {
         input.signal?.throwIfAborted();
-        return input.readChunk(chunk);
+        return input.readChunk(next);
       })) {
         input.signal?.throwIfAborted();
         if (!read) {
