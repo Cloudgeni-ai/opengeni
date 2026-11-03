@@ -88,7 +88,9 @@ version. The optional `x-opengeni-sdk-version` now records the built package's
 version on HTTP and SSE requests. The API accepts missing/unknown values and
 records only a bounded version-shaped value in request logs and spans, never
 high-cardinality metric labels. It is not identity, authorization, negotiation,
-or a replacement for a deprecation announcement.
+or a replacement for a deprecation announcement. The checked-in embedded Site
+bridge deliberately omits this npm-client diagnostic, so its bytes do not
+depend on package version bumps or require a new Version PR regeneration step.
 
 Update pins deliberately using npm registry metadata and known integrator
 lockfiles. Never use floating tags in CI or drop a red version. The canonical
