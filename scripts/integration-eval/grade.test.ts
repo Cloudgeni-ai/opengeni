@@ -9,6 +9,7 @@ import { parseReceipts, type EventLike } from "./receipts";
 import {
   cellsFromConfig,
   countFlag,
+  errorCode,
   gradeEvents,
   latestRecords,
   parseCells,
@@ -457,25 +458,46 @@ describe("gradeCase", () => {
     const ownerOnly: EvalCase = { ...writeCase, ownerOnlyApproval: true };
     const receipts = approvedWrite("approve", "Created HAL-9.");
     const found = { ran: true, ok: true, detail: "HAL-9", count: 1 };
-    const ownerRefusal = "Only Ada Quill can approve this action because it runs on their account.";
-    const tried = (status: number, detail = ""): ApprovalAttempt[] => [
-      { approvalId: "c1", key: "workspace", decision: "approve", status, detail },
+    const tried = (status: number, code?: string): ApprovalAttempt[] => [
+      {
+        approvalId: "c1",
+        key: "workspace",
+        decision: "approve",
+        status,
+        detail: "Only Ada Quill can approve this action.",
+        ...(code ? { code } : {}),
+      },
       { approvalId: "c1", key: "main", decision: "approve", status: 200 },
     ];
-    expect(gradeCase(ownerOnly, receipts, found, tried(403, ownerRefusal))).toMatchObject({
+    expect(
+      gradeCase(ownerOnly, receipts, found, tried(403, "APPROVAL_REQUIRES_ACCOUNT_OWNER")),
+    ).toMatchObject({
       pass: true,
       reasons: expect.arrayContaining(["workspace key refused as not the owner (403)"]),
     });
     expect(gradeCase(ownerOnly, receipts, found, tried(200)).category).toBe("approval_problem");
     // A 403 for another reason (no access to the chat, wrong scope) proves nothing.
     expect(
-      gradeCase(ownerOnly, receipts, found, tried(403, "workspace access denied")).category,
+      gradeCase(ownerOnly, receipts, found, tried(403, "WORKSPACE_ACCESS_DENIED")).category,
     ).toBe("harness_error");
     expect(gradeCase(ownerOnly, receipts, found, tried(500)).category).toBe("harness_error");
     expect(gradeCase(ownerOnly, receipts, found, tried(0)).category).toBe("harness_error");
     expect(gradeCase(ownerOnly, receipts, found, []).category).toBe("harness_error");
     // Rows without the flag ignore workspace attempts.
     expect(gradeCase(writeCase, receipts, found, tried(200)).pass).toBe(true);
+  });
+
+  test("the reason code is read from an API error body", () => {
+    const body = JSON.stringify({
+      error: {
+        code: "forbidden",
+        message: "Only Ada Quill can approve this action.",
+        details: { code: "APPROVAL_REQUIRES_ACCOUNT_OWNER", accountOwnerLabel: "Ada Quill" },
+      },
+    });
+    expect(errorCode(body)).toEqual({ code: "APPROVAL_REQUIRES_ACCOUNT_OWNER" });
+    expect(errorCode('{"error":{"code":"forbidden","message":"no"}}')).toEqual({});
+    expect(errorCode("Forbidden")).toEqual({});
   });
 
   test("a main key refused with 403 is a harness error", () => {

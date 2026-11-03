@@ -202,8 +202,8 @@ function gradeApproved(
   return answerChecks(testCase, receipts, reasons);
 }
 
-/** The 403 the product returns when someone other than a personal connection's owner approves. */
-const OWNER_ONLY_REFUSAL = /APPROVAL_REQUIRES_ACCOUNT_OWNER|can approve this action/i;
+/** The reason code of the 403 the product returns when someone other than a personal connection's owner approves. */
+const OWNER_ONLY_REFUSAL = "APPROVAL_REQUIRES_ACCOUNT_OWNER";
 
 /**
  * Owner-only rows: the workspace key's approve attempt on the row's own tool
@@ -231,7 +231,7 @@ function ownerOnlyCheck(
       "a workspace key approved a write on a personal connection",
     ]);
   const other = tries.find(
-    (attempt) => attempt.status !== 403 || !OWNER_ONLY_REFUSAL.test(attempt.detail ?? ""),
+    (attempt) => attempt.status !== 403 || attempt.code !== OWNER_ONLY_REFUSAL,
   );
   if (other)
     return fail("harness_error", [

@@ -218,6 +218,17 @@ async function initApprovalKeys(baseUrl: string): Promise<void> {
     }).init();
 }
 
+/** The structured reason code of an API error body (`error.details.code`), if any. */
+export function errorCode(body: string): { code?: string } {
+  try {
+    const parsed = JSON.parse(body) as { error?: { details?: { code?: unknown } } };
+    const code = parsed.error?.details?.code;
+    return typeof code === "string" ? { code } : {};
+  } catch {
+    return {};
+  }
+}
+
 const httpStatus = (error: unknown): number => (error instanceof HttpFailure ? error.status : -1);
 
 function runMarker(): string {
@@ -283,7 +294,9 @@ async function driveSession(
           key,
           decision: choice,
           status,
-          ...(error instanceof HttpFailure ? { detail: error.body.slice(0, 300) } : {}),
+          ...(error instanceof HttpFailure
+            ? { detail: error.body.slice(0, 300), ...errorCode(error.body) }
+            : {}),
         });
       };
       // Owner-only rows: a workspace key tries first and must be refused.

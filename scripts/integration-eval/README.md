@@ -121,7 +121,7 @@ Regression rows for specific fixes:
 |---|---|
 | Workspace Slack bot tools only where a bot is installed, and Ask first for interactive bot sends | `slack.write.post` (an approval must be requested), `slack.write.denied`, `slack.not_connected.channel-summary` (no bot tools hide the Slack card) |
 | Connect card for a named integration despite strong matches on installed tools; near-miss integration names | `clickup.not_connected.strong-match` (runs in the connected workspace; keep ClickUp disconnected there), `airtable.not_connected.spacing`, `airtable.not_connected.typo` |
-| Only the owner may approve writes on a personal connection | `slack.write.owner-only-approval` (needs the owner's personal key as `OPENGENI_EVAL_API_KEY`, their personal Slack connection on Ask first, no shared Slack connection in the workspace, and `OPENGENI_EVAL_WORKSPACE_API_KEY`; the workspace key's approve must get the owner-only 403) |
+| Only the owner may approve writes on a personal connection | `slack.write.owner-only-approval` (needs the owner's personal key as `OPENGENI_EVAL_API_KEY`, their personal Slack connection on Ask first, no shared Slack connection in the workspace, and `OPENGENI_EVAL_WORKSPACE_API_KEY`; the workspace key's approve must get a 403 with reason code `APPROVAL_REQUIRES_ACCOUNT_OWNER`) |
 
 Rerun the same rows, with the same models and efforts, into a new directory:
 

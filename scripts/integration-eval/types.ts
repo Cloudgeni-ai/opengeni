@@ -222,4 +222,6 @@ export type ApprovalAttempt = {
   status: number;
   /** Start of the error body, for refusals. */
   detail?: string;
+  /** The error's reason code (`error.details.code`), e.g. APPROVAL_REQUIRES_ACCOUNT_OWNER. */
+  code?: string;
 };
