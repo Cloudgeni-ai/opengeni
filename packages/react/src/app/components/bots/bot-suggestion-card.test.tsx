@@ -14,6 +14,7 @@ const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
 const { AppContext } = await import("../../app-context");
 const { BotSuggestionCard } = await import("./bot-suggestion-card");
+const { listenForBotTemplateDrafts } = await import("../../lib/bot-suggestions");
 
 afterAll(() => GlobalRegistrator.unregister());
 
@@ -96,4 +97,46 @@ test("accepting keeps the avatar and description the agent chose", async () => {
     session.id,
     { title: "Invoice checker", description: "Checks invoices", avatar },
   ] as never);
+});
+
+test("saving the draft opens this chat's template dialog and hides the card once saved", async () => {
+  const requests: unknown[] = [];
+  let saved = () => {};
+  const other = listenForBotTemplateDrafts(document, "another-chat", () => {
+    throw new Error("another chat's header must not open");
+  });
+  const stop = listenForBotTemplateDrafts(document, session.id, (request) => {
+    requests.push(request);
+    saved = request.onSaved;
+  });
+  try {
+    const avatar = { kind: "emoji", emoji: "🧾", hue: 60 } as const;
+    const draft = suggestion({ avatar, setupInstructions: "Check each invoice." });
+    await act(async () =>
+      root.render(
+        <AppContext.Provider value={appContext}>
+          <BotSuggestionCard session={{ ...session, botSuggestion: draft }} events={[]} />
+        </AppContext.Provider>,
+      ),
+    );
+    const button = [...container.querySelectorAll("button")].find(
+      (candidate) => candidate.textContent === "Save as template…",
+    )!;
+    await act(async () => button.click());
+    expect(requests).toEqual([
+      expect.objectContaining({
+        sessionId: session.id,
+        name: "Invoice checker",
+        avatar,
+        setupInstructions: "Check each invoice.",
+        visibility: "workspace",
+      }),
+    ]);
+    expect(container.querySelector("[data-bot-suggestion]")).not.toBeNull();
+    await act(async () => saved());
+    expect(container.querySelector("[data-bot-suggestion]")).toBeNull();
+  } finally {
+    stop();
+    other();
+  }
 });

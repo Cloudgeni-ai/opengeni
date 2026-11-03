@@ -1,4 +1,10 @@
-import type { Session, SessionBotSuggestion, SessionEvent } from "@opengeni/sdk";
+import type {
+  BotTemplateVisibility,
+  Session,
+  SessionAvatar,
+  SessionBotSuggestion,
+  SessionEvent,
+} from "@opengeni/sdk";
 
 /* ----------------------------------------------------------------------------
    Bot suggestions (`bot_suggest`): the newest one the agent made in a chat,
@@ -100,4 +106,48 @@ export function dismissBotSuggestion(sessionId: string, suggestionId: string): v
   } catch {
     // Without storage the card returns after a reload; nothing else depends on it.
   }
+}
+
+/* A card under the chat asks the chat's header to open its "Save as bot
+   template" dialog with the agent's draft, rather than rendering a second copy
+   of that dialog. The header claims the request with `preventDefault`. */
+const SAVE_BOT_TEMPLATE_DRAFT_EVENT = "opengeni:save-bot-template-draft";
+
+export type BotTemplateDraftRequest = {
+  sessionId: string;
+  name: string;
+  description: string;
+  avatar: SessionAvatar | null;
+  setupInstructions: string;
+  visibility: BotTemplateVisibility;
+  /** Runs after the template is saved. */
+  onSaved: () => void;
+};
+
+/** Ask this chat's header to open the dialog; false when nothing opened it. */
+export function requestBotTemplateDraft(
+  events: EventTarget,
+  request: BotTemplateDraftRequest,
+): boolean {
+  const event = new CustomEvent<BotTemplateDraftRequest>(SAVE_BOT_TEMPLATE_DRAFT_EVENT, {
+    detail: request,
+    cancelable: true,
+  });
+  return !events.dispatchEvent(event);
+}
+
+/** The header's side: claim requests for this chat. */
+export function listenForBotTemplateDrafts(
+  events: EventTarget,
+  sessionId: string,
+  open: (request: BotTemplateDraftRequest) => void,
+): () => void {
+  const listener = (event: Event) => {
+    const request = (event as CustomEvent<BotTemplateDraftRequest>).detail;
+    if (request.sessionId !== sessionId) return;
+    event.preventDefault();
+    open(request);
+  };
+  events.addEventListener(SAVE_BOT_TEMPLATE_DRAFT_EVENT, listener);
+  return () => events.removeEventListener(SAVE_BOT_TEMPLATE_DRAFT_EVENT, listener);
 }

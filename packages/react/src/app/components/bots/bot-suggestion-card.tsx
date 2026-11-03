@@ -9,11 +9,12 @@ import {
   botSuggestionDismissed,
   currentBotSuggestion,
   dismissBotSuggestion,
+  requestBotTemplateDraft,
 } from "../../lib/bot-suggestions";
 import { useNavigate } from "../../lib/navigation";
 import { toast } from "../../lib/toast";
+import { useUiEventTarget } from "../../lib/ui-events";
 import { SessionAvatar, sessionAvatarFallbackHue } from "../session/session-avatar";
-import { BotTemplateDialog } from "./bot-template-dialog";
 
 /**
  * The agent's own bot suggestion (`bot_suggest`), as a card under the chat.
@@ -32,7 +33,7 @@ export function BotSuggestionCard(props: { session: Session; events: readonly Se
   );
   const [dismissedId, setDismissedId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [templateOpen, setTemplateOpen] = useState(false);
+  const uiEvents = useUiEventTarget("document");
 
   if (!suggestion) return null;
   if (dismissedId === suggestion.id || botSuggestionDismissed(session.id, suggestion.id)) {
@@ -81,6 +82,20 @@ export function BotSuggestionCard(props: { session: Session; events: readonly Se
     } finally {
       setBusy(false);
     }
+  };
+
+  // The chat's header owns the template dialog; the card hands it the draft.
+  const saveTemplate = () => {
+    const opened = requestBotTemplateDraft(uiEvents, {
+      sessionId: session.id,
+      name: suggestion.name,
+      description: suggestion.description ?? "",
+      avatar: suggestion.avatar,
+      setupInstructions: suggestion.setupInstructions ?? "",
+      visibility: session.tenancy?.visibility === "private" ? "private" : "workspace",
+      onSaved: dismiss,
+    });
+    if (!opened) toast.error("Couldn't open the template editor here");
   };
 
   const openReuse = () => {
@@ -155,7 +170,7 @@ export function BotSuggestionCard(props: { session: Session; events: readonly Se
                   type="button"
                   size="sm"
                   variant={isBot ? "default" : "outline"}
-                  onClick={() => setTemplateOpen(true)}
+                  onClick={saveTemplate}
                 >
                   Save as template…
                 </Button>
@@ -171,30 +186,6 @@ export function BotSuggestionCard(props: { session: Session; events: readonly Se
           </Button>
         </div>
       </div>
-      {create && suggestion.setupInstructions ? (
-        <BotTemplateDialog
-          open={templateOpen}
-          onOpenChange={setTemplateOpen}
-          workspaceId={session.workspaceId}
-          seed={session.id}
-          mode="save"
-          initial={{
-            name: suggestion.name,
-            description: suggestion.description ?? "",
-            avatar: suggestion.avatar,
-            setupInstructions: suggestion.setupInstructions,
-            visibility: session.tenancy?.visibility === "private" ? "private" : "workspace",
-          }}
-          onSubmit={async (values) => {
-            const created = await context.client.createBotTemplate(session.workspaceId, {
-              ...values,
-              sourceSessionId: session.id,
-            });
-            toast.success("Bot template saved", { description: created.name });
-            dismiss();
-          }}
-        />
-      ) : null}
     </section>
   );
 }

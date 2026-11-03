@@ -111,6 +111,10 @@ import {
   type UpdateSessionProfileFn,
 } from "../session/session-profile-editor";
 import { BotTemplateDialog } from "../bots/bot-template-dialog";
+import {
+  listenForBotTemplateDrafts,
+  type BotTemplateDraftRequest,
+} from "../../lib/bot-suggestions";
 import { useUiEventTarget } from "../../lib/ui-events";
 
 const SUBSCRIPTION_RAILS: ReadonlySet<BillingClass> = new Set([
@@ -288,6 +292,8 @@ export function SessionHeader({
   const canEditProfile = Boolean(onUpdateProfile);
   const [profileOpen, setProfileOpen] = useState(false);
   const [saveTemplateOpen, setSaveTemplateOpen] = useState(false);
+  // The agent's draft when a bot suggestion card under the chat opened it.
+  const [templateDraft, setTemplateDraft] = useState<BotTemplateDraftRequest | null>(null);
   // Menu actions that move focus (rename input, find field) run after the menu
   // has closed, so its focus restoration cannot steal focus back to the trigger.
   const afterMenuClose = useRef<(() => void) | null>(null);
@@ -338,6 +344,13 @@ export function SessionHeader({
     uiEvents.addEventListener(RENAME_CURRENT_CHAT_EVENT, start);
     return () => uiEvents.removeEventListener(RENAME_CURRENT_CHAT_EVENT, start);
   }, [uiEvents, startRenaming]);
+  useEffect(() => {
+    if (!onSaveBotTemplate) return;
+    return listenForBotTemplateDrafts(uiEvents, session.id, (request) => {
+      setTemplateDraft(request);
+      setSaveTemplateOpen(true);
+    });
+  }, [uiEvents, session.id, onSaveBotTemplate]);
   const providerControl = isSubscriptionRail ? (
     (accountSlot ?? (
       <BillingClassMark
@@ -661,7 +674,10 @@ export function SessionHeader({
             {onSaveBotTemplate ? (
               <DropdownMenuItem
                 onSelect={() => {
-                  afterMenuClose.current = () => setSaveTemplateOpen(true);
+                  afterMenuClose.current = () => {
+                    setTemplateDraft(null);
+                    setSaveTemplateOpen(true);
+                  };
                 }}
               >
                 <BotIcon />
@@ -827,23 +843,29 @@ export function SessionHeader({
         {onSaveBotTemplate && saveTemplateOpen ? (
           <BotTemplateDialog
             open={saveTemplateOpen}
-            onOpenChange={setSaveTemplateOpen}
+            onOpenChange={(open) => {
+              setSaveTemplateOpen(open);
+              if (!open) setTemplateDraft(null);
+            }}
             workspaceId={session.workspaceId}
             seed={session.id}
             mode="save"
-            initial={{
-              name: sessionDisplayTitle(session),
-              description: session.description ?? "",
-              avatar: session.avatar ?? null,
-              setupInstructions: "",
-              // Shared like the chat, so an Only me chat stays private by default.
-              visibility: session.tenancy?.visibility === "private" ? "private" : "workspace",
-            }}
+            initial={
+              templateDraft ?? {
+                name: sessionDisplayTitle(session),
+                description: session.description ?? "",
+                avatar: session.avatar ?? null,
+                setupInstructions: "",
+                // Shared like the chat, so an Only me chat stays private by default.
+                visibility: session.tenancy?.visibility === "private" ? "private" : "workspace",
+              }
+            }
             onSubmit={async (values) => {
               const created = await onSaveBotTemplate({ ...values, sourceSessionId: session.id });
               toast.success("Bot template saved", {
                 description: created.name,
               });
+              templateDraft?.onSaved();
             }}
           />
         ) : null}
