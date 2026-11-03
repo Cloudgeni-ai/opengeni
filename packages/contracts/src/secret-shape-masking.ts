@@ -225,6 +225,28 @@ function mixedCase(value: string): boolean {
 }
 
 /** `Basic <base64>` is a credential only when it decodes to `user:password`. */
+/** `YOUR_ACCESS_TOKEN_HERE_123`: a placeholder in docs and examples. */
+const ALL_CAPS_PLACEHOLDER = /^[A-Z0-9]+(?:_[A-Z0-9]+)+$/;
+
+/**
+ * Whether the word after `Bearer` or `token` is a token rather than code,
+ * a path or prose: `this.session.token2` (unless one part is a long random
+ * run), `tokens/session-2024/abcdef12` (a lower-case path of short segments),
+ * `YOUR_ACCESS_TOKEN_HERE_123` and `authentication2024spec` (neither mixed
+ * case, nor long, nor a quarter digits) are not.
+ */
+function bearerValue(value: string): boolean {
+  if (MEMBER_ACCESS.test(value) && !value.split(".").some((part) => part.length >= 20)) {
+    return false;
+  }
+  // A path in lower case. Base64 tokens hold `/` too, but mixed case.
+  const lowerPath = value.includes("/") && !/[A-Z]/.test(value);
+  if (lowerPath && value.split("/").every((segment) => segment.length < 16)) return false;
+  if (ALL_CAPS_PLACEHOLDER.test(value)) return false;
+  const digits = value.replace(/[^0-9]/g, "").length;
+  return mixedCase(value) || value.length >= 32 || digits * 4 >= value.length;
+}
+
 function basicCredential(value: string): boolean {
   if (!/^[A-Za-z0-9+/]+={0,2}$/.test(value) || value.length % 4 !== 0) return false;
   try {
@@ -358,9 +380,7 @@ const DETECTORS: readonly Detector[] = [
       /(?:\bBearer|(?:authorization|auth)["']?\s*[:=]\s*["']?(?:Bearer|token|Token))\s+([A-Za-z0-9._~+/-]{16,4096}={0,2})(?![A-Za-z0-9._~+/=-])/gi,
     secret: (match) => match[1],
     needsDigit: true,
-    // `Bearer this.session.token2`: code, unless one part is a long random run.
-    accept: (_text, _match, value) =>
-      !MEMBER_ACCESS.test(value) || value.split(".").some((part) => part.length >= 20),
+    accept: (_text, _match, value) => bearerValue(value),
   },
   {
     kind: "authorization-header",

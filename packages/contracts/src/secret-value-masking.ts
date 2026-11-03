@@ -258,63 +258,125 @@ function entropyBucket(bits: number): SecretValueEntropyBucket {
   return "ge128";
 }
 
-function characterClasses(value: string): number {
-  return (
-    Number(/[a-z]/u.test(value)) +
-    Number(/[A-Z]/u.test(value)) +
-    Number(/[0-9]/u.test(value)) +
-    Number(/[^A-Za-z0-9]/u.test(value))
-  );
-}
-
 /**
- * A word or words cased as words (lower case, Capitalized or ALL CAPS, single
- * spaces between), optionally with up to four digits and one symbol after.
- * A random run of mixed-case letters is not word-like.
+ * A word cased as a word (lower case, Capitalized or ALL CAPS). A random run
+ * of mixed-case letters is not one.
  */
 const WORD = "(?:\\p{Ll}+|\\p{Lu}\\p{Ll}+|\\p{Lu}+)";
-const WORD_LIKE = new RegExp(`^${WORD}(?: ${WORD})*[0-9]{0,4}[^\\p{L}\\p{N}\\s]?$`, "u");
+/** Up to four digits and one symbol after a word: `admin123`, `Password1!`. */
+const WORD_TAIL = "[0-9]{0,4}[^\\p{L}\\p{N}\\s]?";
+/** One word, or two separated by a single space, with an optional tail. */
+const WORD_LIKE = new RegExp(`^${WORD}(?: ${WORD})?${WORD_TAIL}$`, "u");
+/** A camelCase or PascalCase identifier: `adminUser`, `MyService2`. */
+const CAMEL_LIKE = new RegExp(
+  `^(?:\\p{Ll}{2,}|\\p{Lu}\\p{Ll}{2,})(?:\\p{Lu}\\p{Ll}{2,})*${WORD_TAIL}$`,
+  "u",
+);
+/** A snake_case or kebab-case name of at most three parts: `db_admin`, `deploy-bot-01`. */
+const SNAKE_LIKE = new RegExp(`^(?:${WORD}|[0-9]+)(?:[_-](?:${WORD}|[0-9]+)){1,2}$`, "u");
 /** Values shaped like names of places, not secrets. */
 const HOST_LIKE = /^(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?::\d{1,5})?$/u;
 const EMAIL_LIKE = /^[^\s@]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}$/u;
 const URL_LIKE = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s@]+$/u;
 const PATH_LIKE = /^(?:\/|\.{1,2}\/|~\/|[A-Za-z]:\\)\S*$/u;
-/** Below this a value of at least 12 characters is repetitive enough to be weak. */
-const WEAK_ENTROPY_BITS = 40;
+/** Longer word-shaped values are treated as passphrases. */
+const WORD_SHAPED_MAX_CHARS = 32;
+/**
+ * A value of at least this many characters is weak when its entropy is below
+ * `WEAK_ENTROPY_SHARE` of the most its length and alphabet allow: a long but
+ * repetitive string such as `aaaaaaaabbbbbbbb`. Random keys and passwords,
+ * hex and base64 included, stay well above it.
+ */
+const WEAK_ENTROPY_MIN_CHARS = 12;
+const WEAK_ENTROPY_SHARE = 0.5;
+
+/** Letter runs of at least this many letters must read as a word to be word-shaped. */
+const PRONOUNCEABLE_MIN_LETTERS = 6;
+const CONSONANT_RUN = /[b-df-hj-np-tv-xz]{5,}/u;
+const VOWEL = /[aeiouy]/gu;
 
 /**
- * A URL or path is weak only when none of its parts is distinctive: a
- * webhook URL or a path with a random segment carries a secret in that
- * segment and stays distinctive.
+ * Whether every longer ASCII letter run reads as a word: no five consonants
+ * in a row and at least one vowel in five letters, so `pelican` and
+ * `Password` do and a random run such as `qkzvmxbtwe` does not. A word that
+ * fails stays distinctive, which only masks it as before.
+ */
+function pronounceable(text: string): boolean {
+  for (const run of text.match(/\p{Lu}?\p{Ll}+|\p{Lu}+/gu) ?? []) {
+    if (run.length < PRONOUNCEABLE_MIN_LETTERS || !/^[A-Za-z]+$/u.test(run)) continue;
+    const lower = run.toLowerCase();
+    if (CONSONANT_RUN.test(lower)) return false;
+    if ((lower.match(VOWEL)?.length ?? 0) * 5 < lower.length) return false;
+  }
+  return true;
+}
+
+/** A single word-shaped name: a word with a short tail, an identifier or a snake/kebab name. */
+function wordShaped(text: string): boolean {
+  if (text.length >= WORD_SHAPED_MAX_CHARS) return false;
+  if (!(WORD_LIKE.test(text) || CAMEL_LIKE.test(text) || SNAKE_LIKE.test(text))) return false;
+  return pronounceable(text);
+}
+
+/**
+ * The size of the alphabet a value seems drawn from: 16 for hex, otherwise
+ * the sizes of the kinds of characters it has.
+ */
+function alphabetSize(text: string): number {
+  if (/^[0-9a-f]+$/u.test(text) || /^[0-9A-F]+$/u.test(text)) return 16;
+  return (
+    (/[a-z]/u.test(text) ? 26 : 0) +
+    (/[A-Z]/u.test(text) ? 26 : 0) +
+    (/[0-9]/u.test(text) ? 10 : 0) +
+    (/[^A-Za-z0-9]/u.test(text) ? 32 : 0)
+  );
+}
+
+/**
+ * A host, email, URL or path is weak only when every part is a word-shaped
+ * name or a number: `db.example.com:5432` is, `bR7.kQ2.mX9.Lp`, a webhook URL
+ * or a path with a random segment carries a secret and is not.
  */
 function partsAreWeak(text: string): boolean {
-  const parts = text.split(/[/\\?#&=:.]+/u).filter((part) => part.length > 0);
-  return parts.every((part) => part.length < 12 || secretValueStrength(part) === "weak");
+  const parts = text.split(/[/\\?#&=:.@]+/u).filter((part) => part.length > 0);
+  return parts.every((part) => /^[0-9]+$/u.test(part) || wordShaped(part));
 }
 
 /**
  * How a known value is searched for in text.
  *
- * Distinctive values (tokens, keys, random or strong passwords) almost never
- * appear in unrelated text, so they are searched for anywhere, in every form.
- * Weak values do appear in unrelated text: a dictionary word, a word with a
- * few digits (`admin123`, `Password1!`), a short value with fewer than three
- * kinds of characters, a host, an email, a URL, a path, or a long but
- * repetitive string. Replacing them everywhere rewrites file names, imports,
- * hosts and identifiers that merely contain the word, so they are replaced
- * only in a credential position (see the module comment). Digit-only values
- * (card and account numbers) stay distinctive: they are matched as exact
- * digits, never as words.
+ * Distinctive values (tokens, keys, random or strong passwords, passphrases
+ * of three or more words) almost never appear in unrelated text, so they are
+ * searched for anywhere, in every form. Weak values do appear in unrelated
+ * text: a word or two with a few digits and a symbol (`admin123`,
+ * `Password1!`), a camelCase or snake_case name, a host, email, URL or path
+ * made only of such names, or a long but repetitive string. Replacing them
+ * everywhere rewrites file names, imports, hosts and identifiers that merely
+ * contain the word, so they are replaced only in a credential position (see
+ * the module comment). Digit-only values (card and account numbers) stay
+ * distinctive: they are matched as exact digits, never as words.
  */
 export function secretValueStrength(value: string): SecretValueStrength {
   if (typeof value !== "string") return "weak";
   const text = value.trim();
   if (/^[0-9][0-9\s-]*$/u.test(text)) return "distinctive";
-  if (text.length < 12 && characterClasses(text) < 3) return "weak";
-  if (text.length < 32 && WORD_LIKE.test(text)) return "weak";
-  if (HOST_LIKE.test(text) || EMAIL_LIKE.test(text)) return "weak";
-  if ((URL_LIKE.test(text) || PATH_LIKE.test(text)) && partsAreWeak(text)) return "weak";
-  if (text.length >= 12 && secretValueEntropyBits(text) < WEAK_ENTROPY_BITS) return "weak";
+  if (/\s/u.test(text)) {
+    return text.length < WORD_SHAPED_MAX_CHARS && WORD_LIKE.test(text) ? "weak" : "distinctive";
+  }
+  if (wordShaped(text)) return "weak";
+  if (
+    HOST_LIKE.test(text) ||
+    EMAIL_LIKE.test(text) ||
+    URL_LIKE.test(text) ||
+    PATH_LIKE.test(text)
+  ) {
+    return partsAreWeak(text) ? "weak" : "distinctive";
+  }
+  const length = [...text].length;
+  if (length >= WEAK_ENTROPY_MIN_CHARS) {
+    const most = length * Math.log2(Math.min(length, alphabetSize(text)));
+    if (secretValueEntropyBits(text) < WEAK_ENTROPY_SHARE * most) return "weak";
+  }
   return "distinctive";
 }
 
@@ -731,25 +793,39 @@ const JOINING_CHARACTER = /[\p{L}\p{N}\p{M}_\-./\\+~%@]/u;
 const TRAILING_PUNCTUATION = /[.,;:!?]/u;
 const AFTER_TRAILING_PUNCTUATION = /[\s"'`)\]}>\\]/u;
 /**
- * A credential word earlier on the same line makes the position a credential
- * one: `password=…`, `"token": "…"`, `PGPASSWORD: …`, `Authorization: Basic …`,
- * "the password is …". A false positive only masks as before.
+ * A credential word near the value on the same line makes the position a
+ * credential one: `password=…`, `"token": "…"`, `PGPASSWORD: …`,
+ * `Authorization: Basic …`, "the password is …", `echo '…' | docker login
+ * --password-stdin`. A false positive only masks as before.
  */
 const CREDENTIAL_CONTEXT =
-  /pass(?:word|wd|phrase)?|pwd|secrets?|tokens?|keys?|auth(?:orization|entication)?|credentials?|creds|bearer/giu;
+  /pass(?:words?|wd|phrases?|codes?)?|pwd|pw|secrets?|tokens?|keys?|auth(?:orization|entication)?|credentials?|creds|bearer/giu;
 /**
- * A credential word ends where a lower-case letter does not continue it, so
- * `PGPASSWORD`, `apiKey` and `secretName` count and `--author`, `keyboard`
- * and `passenger` do not.
+ * A credential word starts where a lower-case letter does not precede it
+ * (unless it starts a camelCase word) and ends where a lower-case letter does
+ * not continue it, so `PGPASSWORD`, `apiKey`, `ADMIN_PW` and `secretName`
+ * count and `--author`, `keyboard`, `monkey` and `passenger` do not.
  */
 function hasCredentialWord(text: string): boolean {
   CREDENTIAL_CONTEXT.lastIndex = 0;
   for (const match of text.matchAll(CREDENTIAL_CONTEXT)) {
+    const previous = text[match.index - 1];
+    const startsWord =
+      previous === undefined || !/[a-z]/u.test(previous) || /[A-Z]/u.test(match[0][0]!);
     const next = text[match.index + match[0].length];
-    if (next === undefined || !/[a-z]/u.test(next)) return true;
+    if (startsWord && (next === undefined || !/[a-z]/u.test(next))) return true;
   }
   return false;
 }
+/**
+ * Command-line options followed by a password: `mysql -pW`, `mysql -p W`,
+ * `redis-cli -a W`, `curl -u user:W`, `--user user:W`.
+ */
+const ATTACHED_PASSWORD_FLAG = /(?:^|[\s"'=])-p$/u;
+const PASSWORD_FLAG = /(?:^|[\s"'])-[pa]\s+$/u;
+const USER_PASSWORD_FLAG = /(?:^|[\s"'])(?:-u|--user)(?:\s+|=)[^\s:"']+:$/u;
+/** A line that is only a key before the value: `value: …`, `- admin: …`, `"value": "…`. */
+const KEY_ONLY_LINE = /^\s*(?:-\s+)?["']?[\w.-]+["']?\s*[:=]\s*["']?$/u;
 /** Characters before a weak value searched for a credential word or a line start. */
 const CREDENTIAL_CONTEXT_CHARS = 80;
 const LINE_SCAN_CHARS = 400;
@@ -768,6 +844,9 @@ function boundaryBefore(text: string, start: number): boolean {
 function boundaryAfter(text: string, end: number): boolean {
   if (end >= text.length) return true;
   const next = text[end]!;
+  // Separators of connection strings, lists and query strings:
+  // `Password=…;Database=app`, `PWD=…;UID=sa`, `password=…&user=app`.
+  if (next === ";" || next === "," || next === "&") return true;
   if (next === "\\") return /[nrt"]/u.test(text[end + 1] ?? "");
   if (next === ":") return !/[/\\0-9]/u.test(text[end + 1] ?? "");
   if (TRAILING_PUNCTUATION.test(next)) {
@@ -817,6 +896,28 @@ function lineStartIndex(text: string, start: number): number {
   return floor;
 }
 
+/** Where the line holding `end` ends, at most `LINE_SCAN_CHARS` on. */
+function lineEndIndex(text: string, end: number): number {
+  const ceiling = Math.min(text.length, end + LINE_SCAN_CHARS);
+  for (let at = end; at < ceiling; at += 1) {
+    const next = text[at]!;
+    if (next === "\n" || next === "\r") return at;
+    if (next === "\\" && /[nr]/u.test(text[at + 1] ?? "") && text[at - 1] !== "\\") return at;
+  }
+  return ceiling;
+}
+
+/** Where the line before the one starting at `lineStart` begins, or `null` at the text start. */
+function previousLineStartIndex(text: string, lineStart: number): number | null {
+  let at = lineStart;
+  if (at === 0) return null;
+  if (text[at - 1] === "\n") at -= 1;
+  if (text[at - 1] === "\r") at -= 1;
+  if (at === lineStart && escapeEndsAt(text, at)) at -= 2;
+  if (at === lineStart) return null;
+  return lineStartIndex(text, at);
+}
+
 /** `scheme://user:` (or `scheme://:`) ends just before `start`, and `@` follows `end`. */
 function inUrlPasswordPosition(text: string, start: number, end: number): boolean {
   if (text[start - 1] !== ":" || text[end] !== "@") return false;
@@ -826,9 +927,11 @@ function inUrlPasswordPosition(text: string, start: number, end: number): boolea
 
 /**
  * Whether a weak value at `start…end` is in a credential position: the whole
- * line (or the whole text), a URL's password, or a whole token after a
- * credential word on the same line. A base64 form inside a longer run (a
- * Basic auth header) needs only the credential word.
+ * line (or the whole text), a URL's password, a password option
+ * (`-pW`, `-a W`, `-u user:W`), or a whole token with a credential word near
+ * it on the same line, or on the line before when its own line is only a key
+ * (`- name: DB_PASSWORD` then `value: W`). A base64 form inside a longer run
+ * (a Basic auth header) needs only the credential word.
  */
 function weakValuePositionAllowed(
   text: string,
@@ -840,9 +943,19 @@ function weakValuePositionAllowed(
   const right = left === null ? null : lineEndAfter(text, end);
   if (left !== null && right !== null && !(left === "quote" && right === "quote")) return true;
   if (inUrlPasswordPosition(text, start, end)) return true;
+  const lineStart = lineStartIndex(text, start);
+  const before = text.slice(Math.max(lineStart, start - CREDENTIAL_CONTEXT_CHARS), start);
+  if (!inRun && ATTACHED_PASSWORD_FLAG.test(before) && boundaryAfter(text, end)) return true;
   if (!inRun && !(boundaryBefore(text, start) && boundaryAfter(text, end))) return false;
-  const from = Math.max(lineStartIndex(text, start), start - CREDENTIAL_CONTEXT_CHARS);
-  return hasCredentialWord(text.slice(from, start));
+  if (hasCredentialWord(before)) return true;
+  if (!inRun && (PASSWORD_FLAG.test(before) || USER_PASSWORD_FLAG.test(before))) return true;
+  const lineEnd = lineEndIndex(text, end);
+  if (hasCredentialWord(text.slice(end, Math.min(lineEnd, end + CREDENTIAL_CONTEXT_CHARS)))) {
+    return true;
+  }
+  if (inRun || !KEY_ONLY_LINE.test(text.slice(lineStart, start))) return false;
+  const previousStart = previousLineStartIndex(text, lineStart);
+  return previousStart !== null && hasCredentialWord(text.slice(previousStart, lineStart));
 }
 
 function matchPosition(
@@ -929,17 +1042,20 @@ export function maskSecretValuesInText(text: string, masks: CompiledSecretValueM
     const candidates = masks.byPrefix.get(text.slice(at, at + size));
     const limit = next < kept.length ? kept[next]![0] : text.length;
     let form: string | undefined;
+    let keptForm: string | undefined;
     for (const candidate of candidates ?? []) {
       if (at + candidate.length > limit || !text.startsWith(candidate, at)) continue;
       const weak = masks.weakForms.get(candidate);
       if (weak && !weakValuePositionAllowed(text, at, at + candidate.length, weak.inRun)) {
-        reportMatch(masks, candidate, "kept", text, at);
+        keptForm ??= candidate;
         continue;
       }
       form = candidate;
       break;
     }
     if (form === undefined) {
+      // One event per position, however many forms of the value start here.
+      if (keptForm !== undefined) reportMatch(masks, keptForm, "kept", text, at);
       at += 1;
       continue;
     }

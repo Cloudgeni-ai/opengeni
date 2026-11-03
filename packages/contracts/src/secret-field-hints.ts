@@ -12,22 +12,27 @@ import { secretValueEntropyBits, secretValueStrength } from "./secret-value-mask
 
 /** A word of a variable, header or field name that says it holds a credential. */
 const SECRET_NAME_WORD =
-  /^(?:tokens?|secrets?|password|passwd|passphrase|pass|pwd|keys?|apikey|credentials?|creds|auth|authorization|session|cookies?|bearer|private|signature|jwt)$/iu;
-/** A compound word that ends with one: `PGPASSWORD`, `ACCESSKEY`, `AUTHTOKEN`, `CLIENTSECRET`. */
-const SECRET_NAME_SUFFIX = /(?:token|secret|password|passwd|key|cookie|signature)$/iu;
+  /^(?:tokens?|secrets?|passwords?|passwd|passphrase|passcode|pass|pwd|pw|keys?|apikey|credentials?|creds|auth|authorization|authentication|session|cookies?|bearer|private|signature|jwt)$/iu;
+/**
+ * A compound word that ends with one: `PGPASSWORD`, `ACCESSKEY`, `AUTHTOKEN`,
+ * `CLIENTSECRET`, `JSESSIONID`.
+ */
+const SECRET_NAME_SUFFIX = /(?:token|secret|password|passwd|key|cookie|signature|sessionid)$/iu;
 /**
  * The last word says the value names, locates or describes something:
  * `GIT_AUTHOR_NAME`, `SESSION_NAME`, `TOKEN_ENDPOINT`, `KEY_ALGORITHM`.
  */
 const NON_SECRET_LAST_WORD =
-  /^(?:names?|user|username|email|host|hostname|url|uri|endpoint|region|path|file|dir|type|kind|mode|version|header|prefix|scopes?|expiry|expires|expiration|ttl|timeout|length|format|algorithm|issuer|audience|domain|port|method|provider|scheme|strategy)$/iu;
+  /^(?:names?|user|username|email|host|hostname|url|uri|endpoint|region|path|file|dir|type|kind|mode|version|prefix|scopes?|expiry|expires|expiration|ttl|timeout|length|format|algorithm|issuer|audience|domain|port|method|provider|scheme|strategy)$/iu;
 /** Identifiers of a credential, which are not the credential: `api key id`, `key number`. */
 const IDENTIFIER_LAST_WORD = /^(?:ids?|number|no|fingerprint|hint|label)$/iu;
 
+/** The words of a name, trailing digits dropped: `API_KEY2` is `API`, `KEY`. */
 function nameWords(name: string): string[] {
   return name
     .replace(/([a-z0-9])([A-Z])/gu, "$1 $2")
     .split(/[^A-Za-z0-9]+/u)
+    .map((word) => word.replace(/[0-9]+$/u, ""))
     .filter((word) => word.length > 0);
 }
 

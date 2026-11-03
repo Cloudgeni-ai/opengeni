@@ -680,6 +680,14 @@ describe("more provider formats and authorization headers", () => {
     ]);
     const basic = Buffer.from(`app:${mixed(12)}`, "utf8").toString("base64");
     expect(kinds(`Authorization: Basic ${basic}`)).toEqual([["authorization-header", basic]]);
+    // Base64 with `/`, lower-case hex, and a short mixed-case token.
+    for (const value of [
+      `${mixed(6)}/${mixed(10)}/${mixed(16)}`,
+      "7f3a9c2e1b4d6f8a0c2e4b6d",
+      mixed(16),
+    ]) {
+      expect(kinds(`Authorization: Bearer ${value}`)).toEqual([["authorization-header", value]]);
+    }
     // A specific token keeps its own kind.
     const github = `ghp_${repeat("Ab1", 12)}`;
     expect(kinds(`Authorization: Bearer ${github}`)).toEqual([["github-token", github]]);
@@ -694,6 +702,11 @@ describe("more provider formats and authorization headers", () => {
       "Basic auth is supported",
       "Basic YWRtaW4=",
       `Bearer ${"a".repeat(30)}`,
+      // Lower-case paths, ALL_CAPS placeholders and words with a few digits.
+      "Bearer tokens/session-2024/abcdef12",
+      "auth: token cache/v2/sessions/abc123def456",
+      "the Bearer authentication2024spec here",
+      "Authorization: Bearer YOUR_ACCESS_TOKEN_HERE_123",
     ]) {
       expect([text, kinds(text)]).toEqual([text, []]);
     }

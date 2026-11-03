@@ -42,6 +42,11 @@ describe("value strength", () => {
       `${WORD}@example.com`,
       `/srv/${WORD}/data`,
       "aaaaaaaaaaaaaaaaaaaa",
+      `${WORD}User`,
+      `deploy-${WORD}-01`,
+      `${WORD[0]!.toUpperCase()}${WORD.slice(1)} Smith`,
+      `db.${WORD}.example.com:5432`,
+      `${scheme("https")}github.com/${WORD}/${WORD}-client`,
     ]) {
       expect([value, secretValueStrength(value)]).toEqual([value, "weak"]);
     }
@@ -54,9 +59,50 @@ describe("value strength", () => {
       `ghp_${DISTINCTIVE}${DISTINCTIVE}`,
       "4111111111111111",
       `https://hooks.example.com/services/${DISTINCTIVE}`,
+      // Random passwords that are short, repeat a character or have two kinds of characters.
+      "aB3dE5aH7jK3",
+      "k3j9x2m7q1",
+      "a3f9c2e81b7d",
+      // Random parts joined like a host, an email or a path.
+      "bR7.kQ2.mX9.Lp",
+      "kT9mQ.vX2pL.rZ8nW.hJ",
+      "Xk9#mQ2$vL@Lp4.Rt",
+      "./Xk9#mQ2$vLp4Rt8",
+      // A passphrase of three or more words, and a run of letters that is not a word.
+      "correct horse battery staple",
+      "qkzvmxbtwe",
+      // A saved URL with a password in it.
+      `${scheme("postgres")}app:${WORD}@db.example.com/app`,
     ]) {
       expect([value, secretValueStrength(value)]).toEqual([value, "distinctive"]);
     }
+  });
+
+  test("random hex, base64 and symbol passwords of 12 or more characters are distinctive", () => {
+    // A fixed linear congruential generator keeps the samples reproducible.
+    let seed = 7;
+    const next = () => {
+      seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
+      return seed / 2_147_483_648;
+    };
+    const alphabets = [
+      "0123456789abcdef",
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*",
+    ];
+    const weak: string[] = [];
+    for (const alphabet of alphabets) {
+      for (const length of [16, 24, 32, 40, 64, 128]) {
+        for (let sample = 0; sample < 200; sample += 1) {
+          let value = "";
+          for (let index = 0; index < length; index += 1) {
+            value += alphabet[Math.floor(next() * alphabet.length)];
+          }
+          if (secretValueStrength(value) === "weak") weak.push(value);
+        }
+      }
+    }
+    expect(weak).toEqual([]);
   });
 });
 
@@ -75,6 +121,10 @@ describe("a weak saved value", () => {
       `git log --author=${WORD}`,
       `{"path":"docs/${WORD}.md","name":"${WORD}-notes"}`,
       `The ${WORD} role owns the pipeline.`,
+      // A credential word inside another word, or a key that is not one.
+      `the monkey ate ${WORD} today`,
+      `- name: DB_HOST\n  value: ${WORD}.example.com\n`,
+      `- name: DB_HOST\n  value: ${WORD}\n`,
     ];
     for (const text of unchanged) expect(memory.maskText(text)).toBe(text);
   });
@@ -92,6 +142,32 @@ describe("a weak saved value", () => {
         `${scheme("mysql")}app:${WORD}@db.internal:3306/app`,
         `${scheme("mysql")}app:${LABEL}@db.internal:3306/app`,
       ],
+      // Connection strings, lists and query strings.
+      [`Server=db;Password=${WORD};Database=app`, `Server=db;Password=${LABEL};Database=app`],
+      [`Driver={ODBC};PWD=${WORD};UID=sa`, `Driver={ODBC};PWD=${LABEL};UID=sa`],
+      [`password=${WORD}&user=app`, `password=${LABEL}&user=app`],
+      // More credential words.
+      [`ADMIN_PW=${WORD}`, `ADMIN_PW=${LABEL}`],
+      [JSON.stringify({ pw: WORD }), JSON.stringify({ pw: LABEL })],
+      [JSON.stringify({ passcode: WORD }), JSON.stringify({ passcode: LABEL })],
+      [`passwords: ${WORD}`, `passwords: ${LABEL}`],
+      // Password options.
+      [`mysql -u app -p${WORD} app`, `mysql -u app -p${LABEL} app`],
+      [`mysql -u app -p ${WORD} app`, `mysql -u app -p ${LABEL} app`],
+      [`redis-cli -a ${WORD} ping`, `redis-cli -a ${LABEL} ping`],
+      [`curl -u admin:${WORD} https://x.test`, `curl -u admin:${LABEL} https://x.test`],
+      [`curl --user admin:${WORD} https://x.test`, `curl --user admin:${LABEL} https://x.test`],
+      // Piped into a command that reads a password.
+      [
+        `echo '${WORD}' | docker login --password-stdin`,
+        `echo '${LABEL}' | docker login --password-stdin`,
+      ],
+      // The key on the line before.
+      [
+        `- name: DB_PASSWORD\n  value: ${WORD}\n- name: DB_HOST`,
+        `- name: DB_PASSWORD\n  value: ${LABEL}\n- name: DB_HOST`,
+      ],
+      [`credentials:\n  admin: ${WORD}\nother: 1`, `credentials:\n  admin: ${LABEL}\nother: 1`],
     ];
     for (const [text, masked] of cases) expect(memory.maskText(text)).toBe(masked);
     // Inside a base64 run (Basic auth): the encoded value is replaced in the run.

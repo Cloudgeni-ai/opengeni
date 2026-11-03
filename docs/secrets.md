@@ -80,6 +80,8 @@ exposed, so saving one is made hard without ever refusing the save:
   would default to text as concealed when its value looks secret, and says
   so in `fieldNotes`. An explicit `kind: "text"`, and an existing text field,
   are kept as text with a note instead.
+- Item create and update requests over the HTTP API keep the kind they
+  send (a missing kind is text), so a kind never changes without a note.
 
 ## Who can use what
 
@@ -398,7 +400,8 @@ Each agent attempt keeps one memory of secret values (`SecretValueMemory`):
   (`Authorization`, `Proxy-Authorization`, `Cookie`, and names with a word
   such as token, key, secret, auth, password, session or signature). Names
   are read word by word (`_`, `-`, `.` and camelCase separate words; a word
-  may end in one, as in `PGPASSWORD`), so `GIT_AUTHOR_NAME` is not a
+  may end in one, as in `PGPASSWORD` or `JSESSIONID`, and trailing digits
+  are ignored, as in `API_KEY2`), so `GIT_AUTHOR_NAME` is not a
   credential, and a name whose last word says it names or locates something
   (`SESSION_NAME`, `TOKEN_ENDPOINT`, `AUTH_METHOD`) is not either. Headers
   such as `Accept` are not remembered. The label is a marker such as
@@ -433,24 +436,33 @@ field) reveals both the encoded and the decoded text. Only Opengeni's own
 ### Matching
 
 - Each value is first rated by strength. Distinctive values (tokens, keys,
-  random or strong passwords, digit-only card and account numbers) almost
-  never appear in unrelated text and are searched for anywhere, in every
-  form below. Weak values do appear in unrelated text: a dictionary word, a
-  word with up to four digits and a symbol (`admin123`, `Password1!`), a
-  value under 12 characters with fewer than three kinds of characters, a
-  host, an email, a URL or path with no distinctive part, or a long but
-  repetitive string (under 40 bits). A weak value is replaced only where it
-  is the credential: alone on its line,
-  the password of a URL (`scheme://user:<value>@`), or a whole token with a
-  credential word (password, pwd, secret, token, key, auth, credential,
-  bearer) earlier on the same line, within 80 characters (`password=…`,
-  `PGPASSWORD: …`, `"token": "…"`). Inside a base64 run (a Basic auth
-  header) the credential word is enough. A weak value is never replaced
-  inside an identifier, a file name, a path, a host or a URL segment, so a
-  saved dictionary word no longer rewrites unrelated paths and code. The
-  shape detectors below still catch a weak password inside a URL or a
-  connection string. Browser and desktop typed values and the history
-  scrub search weak values anywhere, as before.
+  random or strong passwords, passphrases of three or more words, digit-only
+  card and account numbers) almost never appear in unrelated text and are
+  searched for anywhere, in every form below. Weak values do appear in
+  unrelated text: one or two words with up to four digits and a symbol
+  (`admin123`, `Password1!`), a camelCase or snake_case name of up to three
+  parts, a host, email, URL or path made only of such names and numbers, or a
+  long but repetitive string (entropy under half of what its length and
+  alphabet allow). A run of six or more letters counts as a word only when it
+  reads as one (no five consonants in a row, a vowel in every five letters),
+  so random letters stay distinctive. A weak value is replaced only where it
+  is the credential: alone on its line; the password of a URL
+  (`scheme://user:<value>@`); after a password option (`-p<value>`,
+  `-p <value>`, `-a <value>`, `-u user:<value>`, `--user user:<value>`); or a
+  whole token with a credential word (password, passcode, pwd, pw, secret,
+  token, key, auth, credential, bearer) at the start of a word earlier on the
+  same line within 80 characters (`password=…`, `PGPASSWORD: …`,
+  `"token": "…"`, `Server=db;Password=…;Database=app`), after it past a pipe
+  (`echo '…' | docker login --password-stdin`), or on the line before when
+  its own line is only a key (`- name: DB_PASSWORD` then `value: …`). `;`,
+  `,` and `&` always end a token. Inside a base64 run (a Basic auth header)
+  the credential word is enough. A weak value is never replaced inside an
+  identifier, a file name, a path, a host or a URL segment, so a saved
+  dictionary word no longer rewrites unrelated paths and code. In tool
+  output, the shape detectors below also catch a weak password inside a URL
+  or a connection string; model input and stored history rely on the
+  positions above. Browser and desktop typed values and the history scrub
+  search weak values anywhere, as before.
 - Each value is searched as written, trimmed, line by line, JSON-escaped (once and twice), percent-encoded (URI
   component, `+` for spaces, form encoding) and base64 (standard and URL-safe,
   standalone and inside a longer base64 run such as a Basic auth header).
@@ -590,8 +602,10 @@ secret part is replaced:
 - AWS secret access keys (40 base64 characters) only right after their name
   (`aws_secret_access_key = …`, `"SecretAccessKey": "…"`).
 - Authorization values: `Bearer <token>` and `Authorization: token <token>`
-  of at least 16 characters with a digit (code such as
-  `Bearer this.session.token` is not one), and `Basic <base64>` when it
+  of at least 16 characters with a digit that are mixed case, 32 or more
+  characters or a quarter digits (code such as `Bearer this.session.token`,
+  a lower-case path such as `tokens/session-2024/abc`, an ALL_CAPS
+  placeholder and prose are not), and `Basic <base64>` when it
   decodes to `user:password`. A token with its own format keeps that kind.
 
 Tokens must contain a digit, and placeholders such as `${PASSWORD}` (or any

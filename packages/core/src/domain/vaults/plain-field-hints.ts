@@ -3,7 +3,9 @@
  * value that looks like a secret in a field that would be saved as `text`
  * is saved as `concealed` when nobody chose the kind (a new field whose
  * default is text), and kept as text with a note when `text` was asked for
- * or the field already is text. Nothing here refuses a save.
+ * or the field already is text. Only saves that report notes (the agent's
+ * `secret_save`) are nudged: without `notes` the kind is unchanged, so a
+ * kind never changes silently. Nothing here refuses a save.
  */
 import {
   plainFieldSecretHint,
@@ -15,7 +17,7 @@ export function plainFieldKind(
   input: { name: string; value: string; kind: VaultFieldKind; chosen: boolean },
   notes: SecretSaveFieldNote[] | undefined,
 ): VaultFieldKind {
-  if (input.kind !== "text") return input.kind;
+  if (notes === undefined || input.kind !== "text") return input.kind;
   const hint = plainFieldSecretHint(input.name, input.value);
   if (!hint) return input.kind;
   if (input.chosen) {

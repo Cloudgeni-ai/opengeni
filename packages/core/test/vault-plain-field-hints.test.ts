@@ -35,9 +35,12 @@ describe("plainFieldKind", () => {
     expect(
       plainFieldKind({ name: "password", value: TOKEN, kind: "concealed", chosen: true }, notes),
     ).toBe("concealed");
-    expect(
-      plainFieldKind({ name: "x", value: TOKEN, kind: "text", chosen: false }, undefined),
-    ).toBe("concealed");
     expect(notes).toEqual([]);
+  });
+
+  test("a save that reports no notes keeps its kind", () => {
+    expect(
+      plainFieldKind({ name: "account", value: TOKEN, kind: "text", chosen: false }, undefined),
+    ).toBe("text");
   });
 });

@@ -62,6 +62,15 @@ describe("credential names", () => {
       "clientSecret",
       "AWS_SECRET_ACCESS_KEY",
       "COOKIE",
+      "Authentication",
+      "SMTP_AUTHENTICATION",
+      "PASSWORD2",
+      "API_KEY2",
+      "TOKEN1",
+      "AUTHORIZATION_HEADER",
+      "AUTH_HEADER",
+      "JSESSIONID",
+      "ADMIN_PW",
     ]) {
       expect([name, credentialNameSaysSecret(name)]).toEqual([name, true]);
     }
