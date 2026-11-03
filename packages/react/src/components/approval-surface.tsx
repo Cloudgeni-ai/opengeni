@@ -281,10 +281,14 @@ function ApprovalRequest({
     denied?: boolean;
   } | null>(null);
   // Hide stale facts during render, before passive effect cleanup can run. A
-  // re-read of the same undecided action keeps its notice up meanwhile.
+  // re-read of the same undecided action (same facts, same loader) keeps its
+  // notice up meanwhile.
   const current =
     result?.request === request ||
-    (result?.request.approval === request.approval && reviewUndecidable(result?.review))
+    (result !== null &&
+      result.request.loadReview === request.loadReview &&
+      reviewUndecidable(result.review) &&
+      dequal(result.request.approval, request.approval))
       ? result
       : null;
   const loaded = current?.review;
@@ -327,14 +331,22 @@ function ApprovalRequest({
       active = false;
     };
   }, [request]);
+  // Each automatic re-read waits from when the previous read answered.
+  const readSettled = result?.request === request;
   useEffect(() => {
-    if (!undecidable || undecidableRetries.current >= UNDECIDABLE_RETRY_DELAYS_MS.length) return;
-    const timer = setTimeout(
-      () => setRetry((value) => value + 1),
-      UNDECIDABLE_RETRY_DELAYS_MS[undecidableRetries.current++],
-    );
+    if (
+      !undecidable ||
+      !readSettled ||
+      undecidableRetries.current >= UNDECIDABLE_RETRY_DELAYS_MS.length
+    )
+      return;
+    const delay = UNDECIDABLE_RETRY_DELAYS_MS[undecidableRetries.current]!;
+    const timer = setTimeout(() => {
+      undecidableRetries.current += 1;
+      setRetry((value) => value + 1);
+    }, delay);
     return () => clearTimeout(timer);
-  }, [undecidable, request]);
+  }, [undecidable, readSettled, request]);
   const stableApproval = request.approval;
   const { formatToolName, approve: approveLabel } = messages;
   const toolName = approvalToolName(stableApproval);
@@ -428,12 +440,16 @@ function ApprovalRequest({
           data-og-tool-review=""
           data-og-tool-review-undecidable=""
         >
-          <p role="status" className="m-0 text-og-sm text-og-fg">
-            {t("approvalSurface.thisActionCanTBeDecided")}{" "}
+          <p className="m-0 text-og-sm text-og-fg">
+            <span role="status">{t("approvalSurface.thisActionCanTBeDecided")}</span>{" "}
             <button
               type="button"
               className="min-h-8 font-medium underline underline-offset-4 [@media(pointer:coarse)]:min-h-11 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
-              onClick={() => setRetry((value) => value + 1)}
+              onClick={() => {
+                // Asking again starts a fresh round of automatic re-reads.
+                undecidableRetries.current = 0;
+                setRetry((value) => value + 1);
+              }}
             >
               {t("approvalSurface.tryAgain")}
             </button>

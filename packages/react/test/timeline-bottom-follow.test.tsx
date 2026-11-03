@@ -332,7 +332,11 @@ function capabilityConversation(): SessionEvent[] {
   ];
 }
 
-function capabilityTimeline(events: SessionEvent[], complete: boolean): ReactElement {
+function capabilityTimeline(
+  events: SessionEvent[],
+  complete: boolean,
+  expanded = false,
+): ReactElement {
   return (
     <MessageTimeline
       events={events}
@@ -345,14 +349,16 @@ function capabilityTimeline(events: SessionEvent[], complete: boolean): ReactEle
           typeLabel="App"
           description="Read your notes."
           skill={false}
-          expanded={false}
+          expanded={expanded}
           complete={complete}
           actionLabel="Connect Notes"
           note=""
           onOpen={() => {}}
           onClose={() => {}}
         >
-          <button type="button">Continue</button>
+          <button type="button" data-testid="dialog-action">
+            Continue
+          </button>
         </SessionCapabilityFrame>
       )}
     />
@@ -407,5 +413,28 @@ test("finishing a connect card keeps following, and never pulls back a reader wh
     expect(following(scrolled.container)).toBe("false");
   } finally {
     await scrolled.unmount();
+  }
+});
+
+test("the card's setup dialog is not reading the conversation", async () => {
+  const view = await renderComponent(capabilityTimeline(capabilityConversation(), false, true));
+  try {
+    await flush(50);
+    const action = document.querySelector<HTMLElement>('[data-testid="dialog-action"]');
+    expect(action).not.toBeNull();
+    // The dialog is portaled outside the scroller, but React still bubbles its
+    // events through the timeline's handlers.
+    const scroller = view.container.querySelector("[data-og-timeline-scroller]");
+    expect(scroller?.contains(action)).toBe(false);
+    await act(async () => {
+      action!.focus();
+      action!.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+      action!.dispatchEvent(new WheelEvent("wheel", { deltaY: -120, bubbles: true }));
+      action!.click();
+    });
+    await flush(20);
+    expect(following(view.container)).toBe("true");
+  } finally {
+    await view.unmount();
   }
 });

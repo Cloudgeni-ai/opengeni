@@ -294,6 +294,41 @@ describe("ApprovalSurface", () => {
     expect(text()).not.toContain("This action can't be decided yet.");
   });
 
+  test("re-reading an undecided action keeps its notice and focus while the approval is re-created", async () => {
+    let calls = 0;
+    let answer: (review: ToolActionReview) => void = () => undefined;
+    const loadReview = () =>
+      calls++ === 0
+        ? Promise.resolve({ ...savedReview(), availableActions: [] } as ToolActionReview)
+        : new Promise<ToolActionReview>((resolve) => {
+            answer = resolve;
+          });
+    // Event projection hands the surface an equal, newly created approval.
+    const render = () =>
+      createElement(ApprovalSurface, {
+        approvals: [{ ...approval }],
+        loadReview,
+        onApprove: noDecision,
+        onReject: noDecision,
+      });
+    mounted = await renderComponent(render());
+    await act(async () => undefined);
+    await mounted.rerender(render());
+    const retry = [...mounted.container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Try again",
+    )!;
+    retry.focus();
+    await act(async () => retry.click());
+    expect(calls).toBe(2);
+    expect(mounted.container.textContent).toContain("This action can't be decided yet.");
+    expect(mounted.container.textContent).not.toContain("Loading action details");
+    expect(document.activeElement).toBe(retry);
+    await act(async () => answer(savedReview()));
+    expect(
+      [...mounted.container.querySelectorAll("button")].map((button) => button.textContent),
+    ).toEqual(expect.arrayContaining(["Decline", "Approve action"]));
+  });
+
   test("readable persisted account labels do not replace the exact approval identity", async () => {
     const [pending] = approvalsFromRequiresAction({
       approvals: [
