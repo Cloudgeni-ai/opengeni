@@ -259,6 +259,7 @@ import {
 import { createManagedEmailTransport } from "./auth/managed-email";
 import { startManagedSignInNotificationDelivery } from "./auth/managed-sign-in-notifications";
 import { startBillingCreditNotificationDelivery } from "./billing-credit-notifications";
+import { startBillingAutoTopUpMaintenance } from "./billing-auto-top-up-maintenance";
 import {
   assertManagedEmailTransportMetadata,
   assertOrganizationUserSetupQueryTransportConfigured,
@@ -2488,6 +2489,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerPersonalApiKeyRoutes(app, routeDeps);
   registerOrganizationServiceAccountRoutes(app, routeDeps);
   registerBillingRoutes(app, routeDeps);
+  startBillingAutoTopUpMaintenance(routeDeps);
   registerBrowserIdentityRoutes(app, routeDeps);
   const interactionSecrets = createVaultInteractionSecretsPort({
     db: routeDeps.db,

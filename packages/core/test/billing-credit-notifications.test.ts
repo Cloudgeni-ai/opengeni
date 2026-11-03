@@ -38,3 +38,33 @@ test("canonical general-only availability excludes promotions and held credit wi
   expect(generalAvailableCreditMicros(balance)).toBe(14_000_000);
   expect(generalAvailableCreditMicros({ ...balance, generalBalanceMicros: -20_000_000 })).toBe(0);
 });
+
+test.each([
+  ["topup_success", "Credits added: $25.00."],
+  [
+    "topup_failed",
+    "Automatic top-ups are off. Review your card and settings before enabling them again.",
+  ],
+  [
+    "cap_reached",
+    "The next automatic top-up would exceed your monthly limit. No payment was started.",
+  ],
+] as const)(
+  "%s communicates the outcome with one billing action and no invoice claim",
+  (kind, expected) => {
+    const result = billingCreditEmail({
+      kind,
+      details: { availableBalanceMicros: 30_000_000, amountMicros: 25_000_000 },
+      sender: "sender@example.test",
+      email: "owner@example.test",
+      billingUrl: "https://app.test/billing",
+    });
+    expect(result.text).toContain(expected);
+    expect(result.text).not.toContain("invoice");
+    expect(result.text).not.toContain("Charged");
+    expect(result.text).not.toContain("Free-plan");
+    expect(result.html.match(/<a /g)).toHaveLength(1);
+    if (kind === "cap_reached") expect(result.text).not.toContain("$25.00");
+    if (kind === "topup_failed") expect(result.text).toContain("Requested credits: $25.00.");
+  },
+);
