@@ -114,6 +114,7 @@ import {
   pickerPolicyRunnable,
   ComposerSendBlockerNotice,
   composerSendBlockerIsLoading,
+  composerSendBlockerNotice,
   getNewSessionSendBlocker,
   NewSessionCreateFailureNotice,
   newSessionSendSignature,
@@ -1203,6 +1204,9 @@ function SessionsIndexRouteContent({
       selectedPolicyRow.catalog.credentialReadiness.status !== "ready",
     ),
     selectedModelSelectable: selectedPolicyRow?.selectable === true,
+    // Null capabilities only mean the request is still in flight.
+    privateSessionLoading:
+      tenancyCapabilities === null && (personalWorkspace || draft.visibility === "private"),
     privateSessionUnavailable: privateCreateUnavailable,
     toolsLoading: !context.workspaceMcpCatalogReady || personalResourceCatalogRefreshPending,
     accountsLoading: connectionAccounts.loading,
@@ -1216,6 +1220,9 @@ function SessionsIndexRouteContent({
     computeReady,
   };
   const sendBlocker = getNewSessionSendBlocker(sendState);
+  // Voice skips the connected-tool accounts; its control and URL launch read
+  // the same guard so a voice start can't be dropped silently either.
+  const voiceSendBlocker = getNewSessionSendBlocker({ ...sendState, voice: true });
   const startBlocker = newSessionStartBlockerReason(sendBlocker);
   useEffect(() => {
     const record = () => {
@@ -1707,15 +1714,7 @@ function SessionsIndexRouteContent({
       });
       return;
     }
-    if (
-      busy ||
-      !computeReady ||
-      !newSessionPolicyValid ||
-      !context.workspaceMcpCatalogReady ||
-      attachments.hasUnresolved
-    ) {
-      return;
-    }
+    if (busy || voiceSendBlocker !== null) return;
     handledLaunchKeyRef.current = launchKey;
     void submitNewSession(launchRealtime, {
       model: launchModel,
@@ -1725,10 +1724,7 @@ function SessionsIndexRouteContent({
       if (!ok) handledLaunchKeyRef.current = null;
     });
   }, [
-    attachments.hasUnresolved,
     busy,
-    computeReady,
-    context.workspaceMcpCatalogReady,
     launchEffort,
     launchFollowDefault,
     launchLatency,
@@ -1740,11 +1736,11 @@ function SessionsIndexRouteContent({
     launch.channelId,
     navigate,
     newSessionDraft.loading,
-    newSessionPolicyValid,
     setLatencyMode,
     setModel,
     setReasoningEffort,
     submitNewSession,
+    voiceSendBlocker,
     workspaceId,
   ]);
 
@@ -2196,27 +2192,22 @@ function SessionsIndexRouteContent({
                       : voiceSelection.loadState
                   }
                   modelMenu="split"
-                  disabled={
-                    busy ||
-                    newSessionDraft.loading ||
-                    attachments.hasUnresolved ||
-                    !newSessionPolicyValid ||
-                    !computeReady ||
-                    personalMachineSelected ||
-                    !context.workspaceMcpCatalogReady
-                  }
+                  disabled={busy || voiceSendBlocker !== null || personalMachineSelected}
                   disabledReason={
-                    attachments.hasUnresolved
+                    voiceSendBlocker === "upload"
                       ? "Wait for attachments to finish before starting voice."
-                      : !newSessionPolicyValid
+                      : voiceSendBlocker === "policy"
                         ? "Choose supported model settings before starting voice."
-                        : !computeReady
+                        : voiceSendBlocker === "compute"
                           ? "Choose where this session should run first."
-                          : personalMachineSelected
-                            ? "Start with a message so personal machine access can attach to an accepted turn."
-                            : !context.workspaceMcpCatalogReady
-                              ? "Wait for session tools to finish loading."
-                              : null
+                          : voiceSendBlocker !== null &&
+                              composerSendBlockerIsLoading(voiceSendBlocker)
+                            ? "Wait for the chat to finish loading."
+                            : voiceSendBlocker !== null
+                              ? (composerSendBlockerNotice(voiceSendBlocker)?.message ?? null)
+                              : personalMachineSelected
+                                ? "Start with a message so personal machine access can attach to an accepted turn."
+                                : null
                   }
                   onStart={async (model) => await submitNewSession(model)}
                 />
@@ -2281,11 +2272,16 @@ function SessionsIndexRouteContent({
           {/* Send's blocker, when no other surface already explains it. */}
           <ComposerSendBlockerNotice
             blocker={sendBlocker}
-            explained={NEW_SESSION_EXPLAINED_BLOCKERS}
+            explained={
+              fixedResourceCatalogError
+                ? [...NEW_SESSION_EXPLAINED_BLOCKERS, "resources"]
+                : NEW_SESSION_EXPLAINED_BLOCKERS
+            }
             className="mt-3"
             onAction={(action) => {
               if (action === "fix_model_settings") chooseCoveredModel(context.model);
-              else void modelCatalog.refresh();
+              else if (sendBlocker === "model_catalog") void modelCatalog.refresh();
+              else if (sendBlocker === "accounts") void connectionAccounts.refresh();
             }}
           />
 
@@ -2549,10 +2545,10 @@ function RecentSessionRow({
   );
 }
 
-/** Keep model policy adjacent to voice/send in the bottom action row. */
 /** The accounts notice below the new-chat composer explains these itself. */
 const NEW_SESSION_EXPLAINED_BLOCKERS = ["accounts", "account_choice"] as const;
 
+/** Keep model policy adjacent to voice/send in the bottom action row. */
 function SessionModelControl({
   hasImageAttachments,
   modelCatalog,

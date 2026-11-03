@@ -229,6 +229,8 @@ describe("the new-chat Send guard", () => {
       [{ policyValid: false, selectedModelSelectable: false }, "model_unavailable"],
       [{ policyValid: false }, "policy"],
       [{ privateSessionUnavailable: true }, "private_session"],
+      // Capabilities still loading in a Personal workspace: wait, never a false "unavailable".
+      [{ privateSessionLoading: true, privateSessionUnavailable: true }, "loading"],
       [{ toolsLoading: true }, "loading"],
       [{ accountsLoading: true }, "loading"],
       [{ accountsFailed: true }, "accounts"],
@@ -298,6 +300,8 @@ describe("every blocker is visible", () => {
     "model_unavailable",
     "private_session",
     "accounts",
+    "accounts_denied",
+    "updating",
     "account_choice",
     "resources",
     "compute",
@@ -330,8 +334,13 @@ describe("every blocker is visible", () => {
       personalDecision: false,
       personalLoading: false,
     };
-    expect(getComposerSendBlocker({ ...ready, loadFailed: true })).toBe("accounts");
-    expect(getComposerSendBlocker({ ...ready, personalLoading: true, loadFailed: true })).toBe(
+    expect(getComposerSendBlocker({ ...ready, loadFailed: "failed" })).toBe("accounts");
+    // A permission denial can't be retried, and a brief outage reconnects by itself.
+    expect(getComposerSendBlocker({ ...ready, loadFailed: "denied" })).toBe("accounts_denied");
+    expect(composerSendBlockerNotice("accounts_denied")?.action).toBeNull();
+    expect(getComposerSendBlocker({ ...ready, loadFailed: "updating" })).toBe("updating");
+    expect(composerSendBlockerNotice("updating")?.action).toBeNull();
+    expect(getComposerSendBlocker({ ...ready, personalLoading: true, loadFailed: "failed" })).toBe(
       "personal_loading",
     );
   });

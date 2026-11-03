@@ -29,6 +29,10 @@ export type ComposerSendBlocker =
   | "model_unavailable"
   | "private_session"
   | "accounts"
+  /** The person may not read the chat's connected accounts; an admin must grant it. */
+  | "accounts_denied"
+  /** Opengeni is briefly unreachable; the page reconnects on its own. */
+  | "updating"
   | "account_choice"
   | "resources"
   | "compute";
@@ -39,8 +43,12 @@ export function getComposerSendBlocker(input: {
   policyValid: boolean;
   personalDecision: boolean;
   personalLoading: boolean;
-  /** Something Send needs failed to load (the chat's connected accounts). */
-  loadFailed?: boolean | undefined;
+  /**
+   * Something Send needs failed to load (the chat's connected accounts):
+   * a failure Retry may fix, a permission denial, or a brief outage the page
+   * reconnects from by itself.
+   */
+  loadFailed?: false | "failed" | "denied" | "updating" | undefined;
   machineAccessDenied?: boolean | undefined;
 }): ComposerSendBlocker | null {
   if (input.uploadPending) return "upload";
@@ -49,6 +57,8 @@ export function getComposerSendBlocker(input: {
   if (input.machineAccessDenied) return "machine_permission";
   if (input.personalDecision) return "personal_decision";
   if (input.personalLoading) return "personal_loading";
+  if (input.loadFailed === "denied") return "accounts_denied";
+  if (input.loadFailed === "updating") return "updating";
   if (input.loadFailed) return "accounts";
   return null;
 }
@@ -81,6 +91,8 @@ export type NewSessionSendState = {
   anyModelSelectable: boolean;
   selectedModelNotConnected: boolean;
   selectedModelSelectable: boolean;
+  /** Whether this workspace can create the chat's private visibility is still loading. */
+  privateSessionLoading?: boolean | undefined;
   privateSessionUnavailable: boolean;
   toolsLoading: boolean;
   accountsLoading: boolean;
@@ -108,6 +120,8 @@ export function getNewSessionSendBlocker(input: NewSessionSendState): ComposerSe
     if (input.selectedModelNotConnected) return "model_not_connected";
     return input.selectedModelSelectable ? "policy" : "model_unavailable";
   }
+  // Unknown is not unavailable: an early Send waits for the answer.
+  if (input.privateSessionLoading) return "loading";
   if (input.privateSessionUnavailable) return "private_session";
   if (input.toolsLoading) return "loading";
   // A session already created by a failed attempt keeps its accounts,
@@ -160,6 +174,13 @@ export function composerSendBlockerNotice(
         message: "Couldn't load your connected accounts.",
         action: { kind: "retry", label: "Retry" },
       };
+    case "accounts_denied":
+      return {
+        message: "You can't view this chat's accounts. Ask a workspace admin.",
+        action: null,
+      };
+    case "updating":
+      return { message: "Reconnecting. Send will work again in a moment.", action: null };
     case "repository":
       return { message: "Check the selected repositories to send.", action: null };
     case "private_session":

@@ -1,10 +1,10 @@
-import { fetchCodexModels, CODEX_CLIENT_VERSION, type CodexFetch } from "@opengeni/codex";
 import {
-  configuredModels,
-  productLabelForModelId,
-  withCodexCatalogProvider,
-  type Settings,
-} from "@opengeni/config";
+  CODEX_CLIENT_VERSION,
+  CODEX_PROVIDER_ID,
+  fetchCodexModels,
+  type CodexFetch,
+} from "@opengeni/codex";
+import { configuredModels, withCodexCatalogProvider, type Settings } from "@opengeni/config";
 
 /** A Codex model the just-connected account offers, as Opengeni names it. */
 export type CodexConnectOfferedModel = { id: string; label: string };
@@ -41,14 +41,12 @@ export async function codexConnectOfferedModels(input: {
     );
     if (!read.ok) return null;
     const offered = new Set(read.slugs);
+    // The same models, filter and labels as the picker (codexModelsForPicker).
     return configuredModels(withCodexCatalogProvider(input.settings))
       .filter(
-        (model) =>
-          model.credentialSource.kind === "connected_subscription" &&
-          model.credentialSource.provider === "codex" &&
-          offered.has(model.upstreamModelId),
+        (model) => model.providerId === CODEX_PROVIDER_ID && offered.has(model.upstreamModelId),
       )
-      .map((model) => ({ id: model.id, label: productLabelForModelId(model.id) }));
+      .map((model) => ({ id: model.id, label: model.label }));
   } catch {
     return null;
   }

@@ -21,7 +21,7 @@ export type CodexEntitlementRejectionEvidence =
   | "plan_entitlement";
 
 export type CodexEntitlementRejection = {
-  status: 400 | 403 | 404 | 429;
+  status: 400 | 403 | 429;
   evidence: CodexEntitlementRejectionEvidence;
 };
 
@@ -41,13 +41,15 @@ const PLAN_ENTITLEMENT_MESSAGE =
 
 /**
  * The Codex backend's refusal of a model this ChatGPT account cannot use
- * (its plan, workspace settings or rollout): HTTP 400 "The 'gpt-6-luna'
- * model is not supported when using Codex with a ChatGPT account." or HTTP
- * 404 "Model not found gpt-6-luna" (openai/codex#47784, #35904). The account
- * may serve other models, so this is model access, not a broken credential.
+ * (its plan or workspace settings): HTTP 400 "The 'gpt-6-luna' model is not
+ * supported when using Codex with a ChatGPT account." (openai/codex#47784).
+ * The account may serve other models, so this is model access, not a broken
+ * credential. A 404 "Model not found" is deliberately not included: it also
+ * means a client below the model's minimum version or a rollout in progress
+ * (openai/codex#35904), so it keeps its ordinary visible turn error instead
+ * of a per-account cooldown that blames the plan.
  */
-const MODEL_ACCESS_MESSAGE =
-  /\bmodel is not supported when using codex with a chatgpt account\b|\bmodel not found\b/i;
+const MODEL_ACCESS_MESSAGE = /\bmodel is not supported when using codex with a chatgpt account\b/i;
 
 function stringField(value: unknown): string {
   return typeof value === "string" ? value : "";
@@ -86,7 +88,7 @@ export function classifyCodexEntitlementRejection(
       stringField(body?.message),
       stringField(body?.detail),
     ].join(" ");
-    if ((status === 400 || status === 404) && MODEL_ACCESS_MESSAGE.test(message)) {
+    if (status === 400 && MODEL_ACCESS_MESSAGE.test(message)) {
       return { status, evidence: "plan_entitlement" };
     }
     if (status === 400 || status === 403 || status === 429) {

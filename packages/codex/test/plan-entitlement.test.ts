@@ -123,20 +123,25 @@ describe("Codex plan entitlement rejection classification", () => {
         }),
       ),
     ).toEqual({ status: 400, evidence: "plan_entitlement" });
-    // openai/codex#35904: HTTP 404 "Model not found <slug>".
+    // openai/codex#35904: a 404 "Model not found" can also mean an old client
+    // version or a rollout, so it never cools the model down for the account.
     expect(
       classifyCodexEntitlementRejection(
         codexApiError(404, { detail: "Model not found gpt-6-sol" }),
       ),
-    ).toEqual({ status: 404, evidence: "plan_entitlement" });
-    // Any other 404 stays on its existing path.
+    ).toBeNull();
     expect(
       classifyCodexEntitlementRejection(codexApiError(404, { detail: "Not Found" })),
     ).toBeNull();
     // Only the Codex transport's own errors qualify.
     expect(
       classifyCodexEntitlementRejection(
-        Object.assign(new Error("404 Model not found gpt-6-sol"), { status: 404 }),
+        Object.assign(
+          new Error(
+            "The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account.",
+          ),
+          { status: 400 },
+        ),
       ),
     ).toBeNull();
   });

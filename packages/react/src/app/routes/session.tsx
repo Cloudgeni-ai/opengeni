@@ -2937,7 +2937,14 @@ function SessionChatPane(props: {
       personalAttachment.loading ||
       personalAttachment.refreshing ||
       connectionAccounts.loading,
-    loadFailed: connectionAccounts.error !== null,
+    loadFailed:
+      connectionAccounts.error === null
+        ? false
+        : connectionAccounts.accessDenied
+          ? "denied"
+          : connectionAccounts.unavailable
+            ? "updating"
+            : "failed",
   };
   const composerSendBlocker = () => sendGate.blocker(sendState);
   const workspaceAccountId = context.workspaces.find(
@@ -3283,10 +3290,16 @@ function SessionChatPane(props: {
     <ComposerSendBlockerNotice
       blocker={visibleSendBlocker}
       className="px-2 pt-2"
-      onAction={(action) => {
-        if (action === "fix_model_settings") chooseCoveredModel(model);
-        else void connectionAccounts.refresh();
-      }}
+      // While the picker is locked (sending, draft loading) the fix can't
+      // apply, so the line shows no action rather than one that does nothing.
+      onAction={
+        modelPickerDisabled && visibleSendBlocker === "policy"
+          ? undefined
+          : (action) => {
+              if (action === "fix_model_settings") chooseCoveredModel(model);
+              else if (visibleSendBlocker === "accounts") void connectionAccounts.refresh();
+            }
+      }
     />
   ) : null;
 
