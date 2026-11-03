@@ -3,7 +3,6 @@ import { TextInput } from "@opengeni/react/ui/field";
 import { RowButton } from "@opengeni/react/ui/page-actions";
 import { Section } from "@opengeni/react/ui/section";
 import { SettingRow, SettingRowGroup, useSettingRowControl } from "@opengeni/react/ui/setting-row";
-import { Switch } from "@opengeni/react/ui/switch";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 import { dollarsInputValue, formatBudget, parseDollars } from "@/lib/usage-allowances";
 import {
@@ -59,6 +58,15 @@ export function CreditAlertForm(props: {
   const [message, setMessage] = useState<string | null>(null);
   const live = useRef(false);
   const pending = useRef(false);
+  const savedRef = useRef(props.thresholdMicros);
+  useEffect(() => {
+    const previous = savedRef.current;
+    setAmount((current) =>
+      parseDollars(current) === previous ? dollarsInputValue(props.thresholdMicros) : current,
+    );
+    savedRef.current = props.thresholdMicros;
+    setSaved(props.thresholdMicros);
+  }, [props.thresholdMicros]);
   useEffect(() => {
     live.current = true;
     return () => {
@@ -76,6 +84,7 @@ export function CreditAlertForm(props: {
     try {
       const next = await props.onSave(micros);
       if (!live.current) return;
+      savedRef.current = next;
       setSaved(next);
       setAmount(dollarsInputValue(next));
       setMessage("Alert threshold saved.");
@@ -160,9 +169,22 @@ export function AutoTopUpForm(props: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [unconfirmed, setUnconfirmed] = useState(false);
   const live = useRef(false);
   const pending = useRef(false);
   const attempt = useRef<{ fingerprint: string; key: string } | null>(null);
+  const savedRef = useRef(props.settings);
+  useEffect(() => {
+    const previous = savedRef.current;
+    setDraft((current) => {
+      const values = parseAutoTopUpDraft(current).values;
+      return values && sameAutoTopUpValues(values, previous)
+        ? autoTopUpDraft(props.settings)
+        : current;
+    });
+    savedRef.current = props.settings;
+    setSaved(props.settings);
+  }, [props.settings]);
   useEffect(() => {
     live.current = true;
     return () => {
@@ -175,17 +197,25 @@ export function AutoTopUpForm(props: {
   const changed = next !== null && !sameAutoTopUpValues(next, saved);
   const needsCard = draft.enabled && !saved.paymentMethod;
 
-  async function save() {
-    if (!props.canManage || pending.current || !next || !changed || needsCard) return;
+  async function save(explicit?: AutoTopUpValues) {
+    const requested = explicit ?? next;
+    if (
+      !props.canManage ||
+      pending.current ||
+      !requested ||
+      (!unconfirmed && sameAutoTopUpValues(requested, saved)) ||
+      (requested.enabled && !saved.paymentMethod)
+    )
+      return;
     pending.current = true;
     setBusy(true);
     setError(null);
     setMessage(null);
     const values: AutoTopUpValues = {
-      enabled: next.enabled,
-      thresholdMicros: next.thresholdMicros,
-      amountMicros: next.amountMicros,
-      monthlyCapMicros: next.monthlyCapMicros,
+      enabled: requested.enabled,
+      thresholdMicros: requested.thresholdMicros,
+      amountMicros: requested.amountMicros,
+      monthlyCapMicros: requested.monthlyCapMicros,
     };
     const fingerprint = JSON.stringify(values);
     if (attempt.current?.fingerprint !== fingerprint)
@@ -193,12 +223,22 @@ export function AutoTopUpForm(props: {
     try {
       const result = await props.onSave(values, attempt.current.key);
       if (!live.current) return;
+      savedRef.current = result;
       setSaved(result);
       setDraft(autoTopUpDraft(result));
       attempt.current = null;
+      setUnconfirmed(false);
       setMessage(result.enabled ? "Automatic top-up saved." : "Automatic top-up is off.");
     } catch (failure) {
-      if (live.current) setError(userErrorText(failure, "Couldn't save automatic top-up."));
+      if (live.current) {
+        setUnconfirmed(true);
+        setError(
+          userErrorText(
+            failure,
+            "The change wasn't confirmed. Retry or turn automatic top-up off.",
+          ),
+        );
+      }
     } finally {
       pending.current = false;
       if (live.current) setBusy(false);
@@ -247,17 +287,31 @@ export function AutoTopUpForm(props: {
         <SettingRowGroup>
           <SettingRow
             label="Top up automatically"
-            controlWidth="compact"
+            controlWidth="auto"
             control={
               props.canManage ? (
-                <Switch
-                  checked={draft.enabled}
-                  pending={busy}
-                  onCheckedChange={(enabled) => {
-                    setDraft((previous) => ({ ...previous, enabled }));
-                    setMessage(null);
-                  }}
-                />
+                saved.enabled || unconfirmed ? (
+                  <RowButton
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void save({ ...saved, enabled: false })}
+                  >
+                    Turn off automatic top-up
+                  </RowButton>
+                ) : (
+                  <RowButton
+                    type="button"
+                    disabled={busy}
+                    onClick={() => {
+                      setDraft((previous) =>
+                        draft.enabled ? autoTopUpDraft(saved) : { ...previous, enabled: true },
+                      );
+                      setMessage(null);
+                    }}
+                  >
+                    {draft.enabled ? "Cancel setup" : "Set up"}
+                  </RowButton>
+                )
               ) : (
                 <span className="text-sm text-fg">{saved.enabled ? "On" : "Off"}</span>
               )
@@ -267,16 +321,11 @@ export function AutoTopUpForm(props: {
               <>
                 {(
                   [
-                    ["threshold", "When credits fall below", "Top-up threshold", undefined],
-                    ["amount", "Add each time", "Top-up amount", "Minimum $5."],
-                    [
-                      "monthlyCap",
-                      "Monthly limit",
-                      "Monthly top-up limit",
-                      "Resets on the 1st at midnight UTC.",
-                    ],
+                    ["threshold", "When credits fall below", undefined],
+                    ["amount", "Add each time", "Minimum $5."],
+                    ["monthlyCap", "Monthly limit", "Resets on the 1st at midnight UTC."],
                   ] as const
-                ).map(([field, label, inputLabel, description]) => (
+                ).map(([field, label, description]) => (
                   <SettingRow
                     key={field}
                     label={label}
@@ -286,7 +335,7 @@ export function AutoTopUpForm(props: {
                     control={
                       props.canManage ? (
                         <DollarsInput
-                          label={inputLabel}
+                          label={label}
                           name={`auto-topup-${field}`}
                           value={draft[field]}
                           disabled={busy}
@@ -370,7 +419,11 @@ export function AutoTopUpForm(props: {
                     {busy ? "Opening Stripe…" : "Set up card"}
                   </RowButton>
                 ) : (
-                  <RowButton type="submit" variant="default" disabled={busy || !changed || !next}>
+                  <RowButton
+                    type="submit"
+                    variant="default"
+                    disabled={busy || (!changed && !unconfirmed) || !next}
+                  >
                     {busy
                       ? "Saving…"
                       : !draft.enabled && saved.enabled

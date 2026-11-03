@@ -105,7 +105,7 @@ test("turning on is explicit, states the charge and cap, and saves once", async 
     />,
   );
   expect(Boolean(document.querySelector('input[inputmode="decimal"]'))).toBe(false);
-  await act(async () => (document.querySelector('[role="switch"]') as HTMLButtonElement).click());
+  await click("Set up");
   expect(onSave).not.toHaveBeenCalled();
   expect(document.body.textContent).toContain("charge your saved card $25");
   expect(document.body.textContent).toContain("up to $100 a month");
@@ -132,7 +132,7 @@ test("a missing card offers setup instead of silently enabling top-ups", async (
       onSetupPaymentMethod={setup}
     />,
   );
-  await act(async () => (document.querySelector('[role="switch"]') as HTMLButtonElement).click());
+  await click("Set up");
   await submit();
   expect(onSave).not.toHaveBeenCalled();
   await click("Set up card");
@@ -155,7 +155,7 @@ test("retries retain request identity and prevent simultaneous saves", async () 
       onSetupPaymentMethod={async () => {}}
     />,
   );
-  await changeInput("Top-up amount (USD)", "50");
+  await changeInput("Add each time (USD)", "50");
   await submit();
   await submit();
   expect(onSave).toHaveBeenCalledTimes(1);
@@ -176,8 +176,7 @@ test("turning off remains available with invalid unfinished inputs", async () =>
       onSetupPaymentMethod={async () => {}}
     />,
   );
-  await changeInput("Monthly top-up limit (USD)", "");
-  await act(async () => (document.querySelector('[role="switch"]') as HTMLButtonElement).click());
+  await changeInput("Monthly limit (USD)", "");
   await click("Turn off automatic top-up");
   expect(onSave.mock.calls[0]![0]).toEqual({
     enabled: false,
@@ -246,7 +245,7 @@ test("a pending result for the previous organization cannot replace the new orga
       onSetupPaymentMethod={async () => {}}
     />,
   );
-  await changeInput("Top-up amount (USD)", "50");
+  await changeInput("Add each time (USD)", "50");
   await submit();
   await act(async () =>
     root!.render(
@@ -261,10 +260,11 @@ test("a pending result for the previous organization cannot replace the new orga
   );
   await act(async () => resolve(settings({ enabled: true, amountMicros: 50_000_000 })));
   expect(
-    document.querySelector<HTMLInputElement>('input[aria-label="Top-up threshold (USD)"]')?.value,
+    document.querySelector<HTMLInputElement>('input[aria-label="When credits fall below (USD)"]')
+      ?.value,
   ).toBe("20");
   expect(
-    document.querySelector<HTMLInputElement>('input[aria-label="Top-up amount (USD)"]')?.value,
+    document.querySelector<HTMLInputElement>('input[aria-label="Add each time (USD)"]')?.value,
   ).toBe("25");
   expect(document.body.textContent).not.toContain("Automatic top-up saved.");
 });
@@ -276,4 +276,119 @@ test("read-only alert settings show the threshold without exposing a save contro
   expect(document.body.textContent).toContain("$10");
   await submit();
   expect(onSave).not.toHaveBeenCalled();
+});
+
+test("an enable whose response was lost can still be turned off explicitly", async () => {
+  let serverEnabled = false;
+  const onSave = mock(async (values: AutoTopUpValues) => {
+    serverEnabled = values.enabled;
+    if (values.enabled) throw new Error("Response lost");
+    return settings(values);
+  });
+  await mount(
+    <AutoTopUpForm
+      settings={settings()}
+      canManage
+      onSave={onSave}
+      onSetupPaymentMethod={async () => {}}
+    />,
+  );
+  await click("Set up");
+  await click("Turn on automatic top-up");
+  expect(serverEnabled).toBe(true);
+  expect(document.body.textContent).not.toContain("Automatic top-up is off.");
+  await click("Turn off automatic top-up");
+  expect(serverEnabled).toBe(false);
+  expect(onSave).toHaveBeenCalledTimes(2);
+  expect(document.body.textContent).toContain("Automatic top-up is off.");
+});
+
+test("turn-off is immediate but does not claim completion before the response", async () => {
+  let resolve!: (value: AutoTopUpView) => void;
+  const onSave = mock(
+    (_value: AutoTopUpValues): Promise<AutoTopUpView> =>
+      new Promise((done) => {
+        resolve = done;
+      }),
+  );
+  await mount(
+    <AutoTopUpForm
+      settings={settings({ enabled: true, status: "ready" })}
+      canManage
+      onSave={onSave}
+      onSetupPaymentMethod={async () => {}}
+    />,
+  );
+  await click("Turn off automatic top-up");
+  expect(onSave).toHaveBeenCalledTimes(1);
+  expect(onSave.mock.calls[0]![0].enabled).toBe(false);
+  expect(document.body.textContent).not.toContain("Automatic top-up is off.");
+  await act(async () => resolve(settings()));
+  expect(document.body.textContent).toContain("Automatic top-up is off.");
+});
+
+test("fresh card, spend and failure information is displayed without discarding a dirty amount", async () => {
+  const onSave = mock(async (values: AutoTopUpValues) => settings(values));
+  const props = { canManage: true, onSave, onSetupPaymentMethod: async () => {} };
+  await mount(<AutoTopUpForm settings={settings({ paymentMethod: null })} {...props} />);
+  await click("Set up");
+  await changeInput("Add each time (USD)", "50");
+  await act(async () =>
+    root!.render(
+      <AutoTopUpForm
+        settings={settings({ spentThisMonthMicros: 75_000_000, status: "payment_failed" })}
+        {...props}
+      />,
+    ),
+  );
+  expect(document.body.textContent).toContain("Visa ending in 4242");
+  expect(document.body.textContent).toContain("$75 topped up this month");
+  expect(document.body.textContent).toContain("payment failed");
+  expect(
+    document.querySelector<HTMLInputElement>('input[aria-label="Add each time (USD)"]')?.value,
+  ).toBe("50");
+  await click("Turn on automatic top-up");
+  expect(onSave.mock.calls[0]![0].amountMicros).toBe(50_000_000);
+});
+
+test("pristine settings follow a same-organization refresh while dirty alert input is kept", async () => {
+  const onSave = mock(async (value: number) => value);
+  await mount(<CreditAlertForm thresholdMicros={10_000_000} canManage onSave={onSave} />);
+  await act(async () =>
+    root!.render(<CreditAlertForm thresholdMicros={20_000_000} canManage onSave={onSave} />),
+  );
+  expect(
+    document.querySelector<HTMLInputElement>('input[aria-label="Notify below (USD)"]')?.value,
+  ).toBe("20");
+  await changeInput("Notify below (USD)", "30");
+  await act(async () =>
+    root!.render(<CreditAlertForm thresholdMicros={40_000_000} canManage onSave={onSave} />),
+  );
+  expect(
+    document.querySelector<HTMLInputElement>('input[aria-label="Notify below (USD)"]')?.value,
+  ).toBe("30");
+  await submit();
+  expect(onSave).toHaveBeenCalledWith(30_000_000);
+  await act(async () =>
+    root!.render(
+      <CreditAlertForm thresholdMicros={50_000_000} canManage={false} onSave={onSave} />,
+    ),
+  );
+  expect(document.body.textContent).toContain("$50");
+});
+
+test("every visible money label is included in its accessible name", async () => {
+  await mount(
+    <AutoTopUpForm
+      settings={settings({ enabled: true, status: "ready" })}
+      canManage
+      onSave={async (values) => settings(values)}
+      onSetupPaymentMethod={async () => {}}
+    />,
+  );
+  for (const input of document.querySelectorAll<HTMLInputElement>('input[inputmode="decimal"]')) {
+    const label = document.querySelector(`label[for="${input.id}"]`);
+    expect(label?.textContent).toBeTruthy();
+    expect(input.getAttribute("aria-label")).toContain(label!.textContent!.trim());
+  }
 });
