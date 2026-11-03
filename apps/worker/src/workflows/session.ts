@@ -101,6 +101,17 @@ export const RECOVERY_BACKOFF_WAIT_PATCH = "session-recovery-backoff-wait-v1";
  * of a workflow that recorded the marker until a patched worker returns.
  */
 export const APPROVAL_WAIT_PRE_PEEK_BASELINE_PATCH = "session-approval-wait-pre-peek-baseline-v1";
+/**
+ * The same pre-peek baseline for the two other peek-chosen waits whose
+ * deadline can be far away: a capacity waiter (until the provider's reset)
+ * and a recovering turn's durable backoff. A Pause, Steer, Send or capacity
+ * signal that lands while their peek is in flight then ends the wait at once
+ * instead of at the deadline. Each command keeps its own marker so old
+ * histories replay with their recorded baseline.
+ */
+export const CAPACITY_WAIT_PRE_PEEK_BASELINE_PATCH = "session-capacity-wait-pre-peek-baseline-v1";
+export const RECOVERY_BACKOFF_PRE_PEEK_BASELINE_PATCH =
+  "session-recovery-backoff-pre-peek-baseline-v1";
 const RECOVERY_BACKOFF_MIN_WAIT_MS = 1_000;
 
 /**
@@ -588,7 +599,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
 
   async function waitForProviderCapacity(
     initial: activities.CodexCapacityWaitRef,
-    entryBaseline?: { wakeups: number; capacityWakeups: number },
+    entryBaseline?: { wakeups: number; capacityWakeups: number; interruptionWakeups?: number },
   ): Promise<void> {
     let current = initial;
     let firstEntryBaseline = entryBaseline;
@@ -598,8 +609,12 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       // baselined away; later iterations use their normal local snapshot.
       const seenWakeups = firstEntryBaseline?.wakeups ?? wakeups;
       const seenCapacityWakeups = firstEntryBaseline?.capacityWakeups ?? capacityWakeups;
-      const seenInterruptionWakeups = interruptionWakeups;
+      // Only a wait chosen by a peek passes an interruption baseline: a
+      // Pause/Steer accepted while that peek was in flight wins at once.
+      const seenInterruptionWakeups =
+        firstEntryBaseline?.interruptionWakeups ?? interruptionWakeups;
       firstEntryBaseline = undefined;
+      if (interruptionWakeups !== seenInterruptionWakeups) return;
       const parsedDeadline = Date.parse(current.nextCheckAt);
       const timerMs = Number.isFinite(parsedDeadline)
         ? Math.max(0, parsedDeadline - Date.now())
@@ -771,7 +786,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     // Wake counters as they stood before the peek below read durable state.
     // A signal counted after this point may describe a commit the peek did
     // not see, so a wait chosen by that peek must not baseline it away.
-    const prePeekWakes = { approvalWakeups, wakeups, interruptionWakeups };
+    const prePeekWakes = { approvalWakeups, wakeups, interruptionWakeups, capacityWakeups };
     const workflowId = workflowInfo().workflowId;
     // Re-evaluate at the changed command, not only workflow entry. A replay
     // without the marker keeps its old shape; the next live admission cycle
@@ -828,8 +843,11 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         // session's own receipts) re-peeks, and the database decides whether
         // the backoff still holds. The floor keeps clock skew between the
         // workflow and the database from turning into a tight peek loop.
-        const seenWakeups = wakeups;
-        const seenInterruptionWakeups = interruptionWakeups;
+        const backoffBaseline = patched(RECOVERY_BACKOFF_PRE_PEEK_BASELINE_PATCH)
+          ? prePeekWakes
+          : { wakeups, interruptionWakeups };
+        const seenWakeups = backoffBaseline.wakeups;
+        const seenInterruptionWakeups = backoffBaseline.interruptionWakeups;
         await condition(
           () =>
             interruptionWakeups !== seenInterruptionWakeups ||
@@ -890,7 +908,11 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       return;
     }
     if (peek.kind === "capacity-wait") {
-      await waitForProviderCapacity(peek.ref);
+      if (patched(CAPACITY_WAIT_PRE_PEEK_BASELINE_PATCH)) {
+        await waitForProviderCapacity(peek.ref, prePeekWakes);
+      } else {
+        await waitForProviderCapacity(peek.ref);
+      }
       continue;
     }
     if (peek.kind === "sandbox-lifecycle-wait") {
