@@ -78,7 +78,6 @@ function chatRequest(request: ModelRequest, modelId: string): ModelRequest {
       ? request.input
       : (projectHistoryForProvider(request.input, "chat", {
           hoistsSystemMessages: chatRouteHoistsSystemMessages(modelId),
-          knownToolNames: requestFunctionToolNames(request.tools),
         }) as ModelRequest["input"]);
   return projectChatReasoning(
     projectChatToolImages(input === request.input ? request : { ...request, input }),

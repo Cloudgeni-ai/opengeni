@@ -41,6 +41,16 @@ test("the error path is the provider's, with every index collapsed and no messag
     path: "unknown",
     code: "unknown",
   });
+  // A word before a colon is message text, not a path.
+  for (const message of ["Error: bad", "pelicans2024: rejected"]) {
+    expect(invalidRequestSignature({ error: { message } }).path).toBe("unknown");
+  }
+  // A tool schema's property names are collapsed.
+  expect(
+    invalidRequestSignature({
+      error: { param: "tools[3].function.parameters.properties.customer_ssn.type" },
+    }).path,
+  ).toBe("tools[].function.parameters.properties.*.type");
 });
 
 test("a 400 model call is counted by path without delaying or consuming the response", async () => {

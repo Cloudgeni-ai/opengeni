@@ -187,14 +187,15 @@ describe("provider projection", () => {
     });
   });
 
-  test("Chat and Claude replay the same valid names as native calls", () => {
+  test("Claude replays a valid alias; Chat replays an invalid call as a historical fact", () => {
     const history = storedHistory();
     const alias = providerToolNameAlias(MASKED_SLACK_SEND);
     const chat = projectHistoryForProvider(history, "chat", { knownToolNames: KNOWN });
     // Chat has no tool search item: it replays as a historical fact.
     expect(chat.some((item) => item.type === "tool_search_output")).toBe(false);
-    // The call keeps its native form under a valid name.
-    expect(chat.find((item) => item.type === "function_call")?.name).toBe(alias);
+    // No native call to a tool the request never declares.
+    expect(chat.some((item) => item.type === "function_call")).toBe(false);
+    expect(chat.some((item) => item.type === "function_call_result")).toBe(false);
     const claude = projectHistoryForProvider(history, "anthropic-messages", {
       knownToolNames: KNOWN,
     });

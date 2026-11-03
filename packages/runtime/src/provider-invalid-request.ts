@@ -10,11 +10,13 @@ export type InvalidRequestSignature = { path: string; code: string };
 
 const MAX_BODY_CHARACTERS = 64 * 1024;
 const MAX_PATH_CHARACTERS = 96;
-const PATH_CHARACTERS = /^[A-Za-z_][A-Za-z0-9_.[\]]*$/;
+const PATH_CHARACTERS = /^[A-Za-z_][A-Za-z0-9_.[\]*]*$/;
 const CODE = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
-/** A leading `messages.3.content.0.tool_use.name:` (Claude, Pydantic-style). */
-const LEADING_PATH = /^\s*([A-Za-z_][\w.[\]]*)\s*:/;
-/** A request path inside a message, such as `[input[26].tools[1].name]`. */
+/**
+ * A request path inside a message, such as `messages.3.content.0.tool_use.name:`
+ * (Claude) or `[input[26].tools[1].name]` (a gateway). Only these request
+ * roots count, so no other word of a message is ever taken for a path.
+ */
 const EMBEDDED_PATH =
   /\b((?:input|messages|tools|contents|system|instructions)(?:\[\d+\]|\.\d+|\.[A-Za-z_]\w*)+)/;
 
@@ -24,12 +26,17 @@ function record(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-/** `input[26].tools[1].name` and `messages.3.content.0` with every index as `[]`. */
+/**
+ * `input[26].tools[1].name` and `messages.3.content.0` with every index as
+ * `[]`, and a tool schema's property names as `*`, so the label stays
+ * structural and bounded.
+ */
 function normalizedPath(raw: string): string | null {
   const path = raw
     .trim()
     .replace(/\[\d+\]/g, "[]")
-    .replace(/\.\d+(?=\.|\[|$)/g, "[]");
+    .replace(/\.\d+(?=\.|\[|$)/g, "[]")
+    .replace(/\.properties\.[A-Za-z0-9_-]+/g, ".properties.*");
   return path.length <= MAX_PATH_CHARACTERS && PATH_CHARACTERS.test(path) ? path : null;
 }
 
@@ -46,10 +53,7 @@ export function invalidRequestSignature(body: unknown): InvalidRequestSignature 
   const error = record(envelope?.error) ?? envelope ?? {};
   const message = typeof error.message === "string" ? error.message : "";
   const raw =
-    (typeof error.param === "string" && error.param) ||
-    LEADING_PATH.exec(message)?.[1] ||
-    EMBEDDED_PATH.exec(message)?.[1] ||
-    null;
+    (typeof error.param === "string" && error.param) || EMBEDDED_PATH.exec(message)?.[1] || null;
   return { path: (raw && normalizedPath(raw)) || "unknown", code: errorCode(error) };
 }
 

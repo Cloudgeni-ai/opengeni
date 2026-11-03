@@ -1639,10 +1639,12 @@ definition of it has that tool's parameters. Every other name, namespaces and
 the names inside a namespace, and every name when the catalog could not be
 prepared, gets a stable alias with a digest of the whole name, so distinct
 names never collide. `projectHistoryForProvider` applies the same step with
-only the request's tools before every wire projection (Responses, Chat
-Completions with its gateways, and Claude Messages), so it aliases and never
-guesses. A definition that comes to repeat an earlier name in the same list
-is dropped. Valid names and unaffected items keep their identity, and a
+only the request's tools before the Responses and Claude Messages wire
+projections, so it aliases and never guesses. Chat Completions routes and
+their gateways keep their own treatment: a call whose name is not
+`^[a-zA-Z0-9_-]{1,64}$` replays as a historical fact rather than as a native
+call to a tool the request never declares. A definition that comes to repeat
+an earlier name in the same list is dropped. Valid names and unaffected items keep their identity, and a
 rewritten item keeps its identity across requests while the mapping holds, so
 cached prefixes do not change. Stored history is not rewritten; it is repaired
 on every replay, so Retry works on a chat that already failed. Names inside

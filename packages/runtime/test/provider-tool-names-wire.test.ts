@@ -115,15 +115,20 @@ function wireToolNames(body: unknown): { definitions: string[]; calls: string[] 
   return { definitions, calls };
 }
 
-function expectPortableNames(body: unknown): string[] {
+function expectPortableNames(body: unknown, nativeCalls = true): string[] {
   const { definitions, calls } = wireToolNames(body);
   for (const name of [...definitions, ...calls]) expect(name).toMatch(PORTABLE_TOOL_NAME);
+  expect(definitions).toContain(KNOWN);
+  // Chat replays a call it cannot name natively as a historical fact.
+  if (!nativeCalls) {
+    expect(calls).toEqual([]);
+    return calls;
+  }
   expect(calls).toHaveLength(HOSTILE.length);
   // The adapter sees only the request's tools, so nothing is guessed: every
   // name keeps one distinct name of its own, collisions included.
   expect(new Set(calls).size).toBe(HOSTILE.length);
   expect(calls).not.toContain(KNOWN);
-  expect(definitions).toContain(KNOWN);
   return calls;
 }
 
@@ -181,7 +186,7 @@ describe("hostile history tool names reach every provider wire valid", () => {
     expect(search.tools.map((tool: { name: string }) => tool.name)).toEqual(calls);
   });
 
-  test("Chat Completions (OpenRouter, gateways, Gemini): calls stay native tool calls", async () => {
+  test("Chat Completions (OpenRouter, gateways, Gemini): invalid calls become facts", async () => {
     const provider: ResolvedModelProvider = { ...responsesProvider, api: "chat" };
     const { client, bodies } = openAIClient(provider, () =>
       Response.json({
@@ -201,7 +206,10 @@ describe("hostile history tool names reach every provider wire valid", () => {
     );
     const model = new OpenGeniChatCompletionsModel(client, "google/gemini-fixture");
     await getOrCreateTrace(() => model.getResponse(request(history(false))));
-    expectPortableNames(bodies[0]);
+    expectPortableNames(bodies[0], false);
+    // Every hostile name is still visible to the model, as text.
+    const text = JSON.stringify(bodies[0].messages);
+    expect(text).toContain("server.lookup");
   });
 
   test("Claude Messages", async () => {

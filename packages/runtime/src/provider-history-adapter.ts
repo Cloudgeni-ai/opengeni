@@ -41,7 +41,8 @@ export type ProviderHistoryOptions = {
   knownToolNames?: readonly string[];
 };
 
-const CHAT_FUNCTION_NAME = /^[a-zA-Z0-9_-]+$/;
+/** The one tool-name format every Chat route and gateway accepts. */
+const CHAT_FUNCTION_NAME = /^[a-zA-Z0-9_-]{1,64}$/;
 const HISTORICAL_FACT_MAX_CHARS = 32_000;
 
 /** Marks a request-local item that declares tools newly available to the model. */
@@ -346,13 +347,17 @@ export function projectHistoryForProvider(
   const input = projected.every((item, index) => item === items[index]) ? items : projected;
   // Every API validates the tool names of history items that carry tool
   // definitions or call a tool, and one invalid name fails the whole request.
-  // One provider-neutral naming step runs before any wire projection, so a
-  // definition, a disclosure and the calls that name it keep one valid name.
   // The lazy tool transport already bound names to the authorized catalog;
-  // with only the request's tools here, a name is never guessed, only aliased.
-  const named = withProviderValidToolNames(withWireValidFunctionCallArguments(input), {
-    names: options.knownToolNames ?? [],
-  });
+  // with only the request's tools here, a name is never guessed, only aliased,
+  // so a definition, a disclosure and the calls that name it keep one valid
+  // name. Chat keeps its own treatment: a call with an invalid name replays as
+  // a historical fact (isChatIncompatibleCall) rather than as a native call to
+  // a tool the request never declares.
+  const wireValid = withWireValidFunctionCallArguments(input);
+  const named =
+    providerApi === "chat"
+      ? wireValid
+      : withProviderValidToolNames(wireValid, { names: options.knownToolNames ?? [] });
   return projectWireHistory(named, providerApi, options);
 }
 
