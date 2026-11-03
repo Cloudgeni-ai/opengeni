@@ -126,8 +126,6 @@ export type AppContextValue = {
   selectedPersonalGitHubRepoRefs: Record<string, string>;
   setSelectedPersonalGitHubRepoRefs: Dispatch<SetStateAction<Record<string, string>>>;
   personalGitHubAuthority: McpConnectionAccountSelection | null;
-  githubAppOpen: boolean;
-  setGithubAppOpen: Dispatch<SetStateAction<boolean>>;
   githubOrg: string;
   setGithubOrg: Dispatch<SetStateAction<string>>;
   selectedCapabilityToolIds: Set<string>;

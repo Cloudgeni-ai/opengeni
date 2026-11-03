@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 # The control service and front door (compute-control) as a container image.
-# The same binary runs the store's daily sweep (`compute-control sweep`, a
-# job beside the service, with the pointers the service keeps; ADR 25). It
+# The same binary runs the store's hourly sweep (`compute-control sweep`, a
+# job beside the service, with the pointers the service keeps; ADR 25, 28). It
 # also carries GitHub runner pools (`compute-runners serve`, ADR 23), a
 # deployment of their own. It does not carry the host agent: a fleet's
 # store is never swept by the host agent's own sweep, which reads the

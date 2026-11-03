@@ -520,8 +520,8 @@ with the workspace's voice input and kept like any dictation.
   xdotool on X11 and wtype or ydotool on Wayland, and only copies without
   them.
 - **Failures keep the speech.** A failed transcription shows Retry; Dismiss
-  or Escape keeps anything longer than a few seconds as a saved dictation
-  that the composer offers later.
+  keeps anything longer than a few seconds as a saved dictation that the
+  composer offers later.
 - **History, replay and transcribing again.** The last 50 dictations are kept
   on the computer with their speech (`dictation.json` and
   `dictation-audio/`, readable only by the person, up to 32 MB each). The
@@ -530,8 +530,17 @@ with the workspace's voice input and kept like any dictation.
   transcribes it again, which uploads the kept speech as a new dictation and
   replaces the text. An optional retry shortcut does that for the last
   dictation and types the new text; an optional cancel shortcut works like
-  Escape. Cancel deletes the dictation; its speech, after the first few
+  the window's Cancel button. Escape is never taken: it belongs to the app
+  the person is typing in, and a stray press must not lose their speech.
+  Cancel deletes the dictation; its speech, after the first few
   seconds, stays only here, marked cancelled, to play or transcribe again.
+- **A model per shortcut.** Each shortcut can pick its own speech-to-text
+  model from the workspace's voice input models (`voiceInput.models` in the
+  client config), such as one for English and another for Norwegian. The
+  dictation recording names that provider and model, and is heard by
+  exactly it, never another provider. Without a pick, or where the signed-in
+  workspace doesn't offer the picked model, the workspace's voice input
+  model hears it.
 - **Vocabulary.** Names and terms the person lists (up to 100) go with every
   dictation as the recording's `keyterms`, and reach the voice input model
   when it takes them.

@@ -1822,6 +1822,9 @@
 :where(.og-root).max-h-\[min\(22rem\,var\(--radix-popover-content-available-height\)\)\],:where(.og-root) .max-h-\[min\(22rem\,var\(--radix-popover-content-available-height\)\)\] {
     max-height: min(22rem, var(--radix-popover-content-available-height));
   }
+:where(.og-root).max-h-\[min\(26rem\,var\(--radix-dropdown-menu-content-available-height\)\)\],:where(.og-root) .max-h-\[min\(26rem\,var\(--radix-dropdown-menu-content-available-height\)\)\] {
+    max-height: min(26rem, var(--radix-dropdown-menu-content-available-height));
+  }
 :where(.og-root).max-h-\[min\(28rem\,55vh\)\],:where(.og-root) .max-h-\[min\(28rem\,55vh\)\] {
     max-height: min(28rem, 55vh);
   }
@@ -12128,6 +12131,11 @@
 :where(.og-root).\[\&_img\]\:object-cover,:where(.og-root) .\[\&_img\]\:object-cover {
     & img {
       object-fit: cover;
+    }
+  }
+:where(.og-root).\[\&_img\]\:p-0\.5,:where(.og-root) .\[\&_img\]\:p-0\.5 {
+    & img {
+      padding: calc(var(--spacing) * 0.5);
     }
   }
 :where(.og-root).\[\&_img\]\:p-1,:where(.og-root) .\[\&_img\]\:p-1 {

@@ -512,9 +512,15 @@ export class DesktopShell {
     // Dictation shortcuts work only while the app runs: it opens at login while they are on.
     let dictating = this.dictation.enabled;
     this.dictation.onChange(() => {
+      this.tray?.setDictation(this.dictation.menu());
       if (this.dictation.enabled === dictating) return;
       dictating = this.dictation.enabled;
       void this.refreshTray();
+    });
+    // The menu bar shows how a dictation is going, even when its window can't.
+    this.dictation.onActivity((activity) => {
+      if (activity.phase === "done") this.tray?.dictationDone();
+      else this.tray?.setDictation(this.dictation.menu());
     });
     const hidden =
       (openedAtLogin() || this.reopenedWithoutWindow()) && this.store.active() !== null;
@@ -1472,8 +1478,10 @@ export class DesktopShell {
       if (change) setOpenAtLogin(this.config, change === "open");
     }
     // macOS keeps running without a window anyway; the menu bar item is for the
-    // computer. Elsewhere the tray is how a closed window comes back.
-    const wanted = process.platform === "darwin" ? summary.connected : hasAccounts;
+    // computer and for dictation. Elsewhere the tray is how a closed window
+    // comes back.
+    const wanted =
+      (process.platform === "darwin" ? summary.connected : hasAccounts) || this.dictation.enabled;
     if (!wanted) {
       this.tray?.destroy();
       this.tray = null;
@@ -1486,7 +1494,9 @@ export class DesktopShell {
       allow: (permission) =>
         void this.computer.requestPermission(permission).catch(() => undefined),
       quit: () => app.quit(),
+      dictation: (action) => this.dictation.menuAction(action),
     });
+    this.tray.setDictation(this.dictation.menu());
     this.tray.update(summary);
   }
 }

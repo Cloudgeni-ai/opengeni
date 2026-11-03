@@ -83,7 +83,7 @@ function refuseOrganizationInstance(instanceKey: string | undefined): void {
 /** Shared native/embedded install validation. The caller must still authorize
  * capabilities:manage and commit under its own live-authority boundary. */
 export function validatedIntegrationInstallInput(
-  grant: AccessGrant,
+  grant: Pick<AccessGrant, "accountId" | "subjectId" | "permissions" | "permissionMode">,
   workspaceId: string,
   payload: InstallApiIntegrationRequest,
   resolved: ResolvedApiIntegrationPreview,

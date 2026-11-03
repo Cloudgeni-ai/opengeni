@@ -6,10 +6,15 @@ import {
   resourceMountPath,
   stableJson,
 } from "@opengeni/contracts";
-import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  GITHUB_RETURN_REFRESH_INTERVAL_MS,
+  REPOSITORY_OPEN_REFRESH_COOLDOWN_MS,
+  markGitHubAccessChanged,
+  returningFromGitHub,
+} from "./github-access-return";
 import { toast } from "./toast";
 
-import { openGitHubInstallationSettings } from "./github-app-connect";
 import type {
   MountedRepositoryTarget,
   RepositoryContextPickerProps,
@@ -24,7 +29,6 @@ import {
 } from "./session-tools";
 import type { GitStatusResponse } from "@opengeni/contracts";
 import type { GitHubRepository, ResourceRef, Session } from "../types";
-import { usePage } from "./navigation";
 import { errorMessage } from "@opengeni/contracts/values";
 import { ConfirmDialog } from "../../ui/confirm-dialog";
 import { userErrorText } from "../../ui/api-error";
@@ -107,7 +111,13 @@ type RepositoryRefreshContext = Pick<
   | "personalGitHubBusy"
 >;
 
-/** Keep this above the lazily mounted menu so rapid reopenings share one cooldown. */
+/**
+ * Keep this above the lazily mounted menu so rapid reopenings share one cooldown.
+ * There is no Refresh action: the menu refreshes on open (throttled), and once
+ * the person is back from changing GitHub access (window focus, or the composer
+ * mounting again after the settings page) it refreshes at once and, for an App
+ * manager, syncs from GitHub so newly shared repositories show up.
+ */
 export function useRepositoryCatalogRefresh(
   workspaceId: string,
   context: RepositoryRefreshContext,
@@ -140,21 +150,27 @@ export function useRepositoryCatalogRefresh(
         canReadPersonal,
       ]);
       const previous = gate.current;
+      // Back from changing GitHub access: skip the cooldown and pick up the change.
+      const returning = !explicit && returningFromGitHub(workspaceId);
       if (previous?.key === key) {
         if (previous.inFlight) return previous.inFlight;
-        if (!explicit && Date.now() - previous.attemptedAt < 30_000) return;
+        const cooldown = returning
+          ? GITHUB_RETURN_REFRESH_INTERVAL_MS
+          : REPOSITORY_OPEN_REFRESH_COOLDOWN_MS;
+        if (!explicit && Date.now() - previous.attemptedAt < cooldown) return;
       }
       if ((canUseGitHub && context.repoBusy) || (canReadPersonal && context.personalGitHubBusy))
         return;
       const accepted = { key, attemptedAt: Date.now(), inFlight: null as Promise<void> | null };
       gate.current = accepted;
-      // Opening is read-only. Explicit refresh may sync for an App manager;
-      // ordinary users keep catalog reads. Context retains its async ownership fences.
+      // Opening is read-only. A retry, or coming back from a GitHub flow, may
+      // sync for an App manager; ordinary users keep catalog reads. Context
+      // retains its async ownership fences.
       const request = Promise.all([
         ...(canUseGitHub
           ? [
               context.refreshGitHub(workspaceId, undefined, {
-                sync: explicit && canManageGitHub,
+                sync: (explicit || returning) && canManageGitHub,
                 userInitiated: explicit,
               }),
             ]
@@ -172,10 +188,29 @@ export function useRepositoryCatalogRefresh(
     },
     [context, workspaceId, canUseGitHub, canManageGitHub, canReadPersonal],
   );
+  const passiveRefresh = useRef(() => refresh(false));
+  passiveRefresh.current = () => refresh(false);
+  // The person went to GitHub (install, choose repositories) in another tab or
+  // window, or to the GitHub settings page: refresh as soon as they are back,
+  // before they reopen the menu.
+  useEffect(() => {
+    const onReturn = () => {
+      if (document.visibilityState === "hidden" || !returningFromGitHub(workspaceId)) return;
+      void passiveRefresh.current().catch(() => undefined);
+    };
+    onReturn();
+    window.addEventListener("focus", onReturn);
+    document.addEventListener("visibilitychange", onReturn);
+    return () => {
+      window.removeEventListener("focus", onReturn);
+      document.removeEventListener("visibilitychange", onReturn);
+    };
+  }, [workspaceId]);
   return {
     refreshAllowed: canUseGitHub || canReadPersonal,
     onOpenRefresh: useCallback(() => refresh(false), [refresh]),
     onRefresh: useCallback(() => refresh(true), [refresh]),
+    onLeaveForGitHub: useCallback(() => markGitHubAccessChanged(workspaceId), [workspaceId]),
   };
 }
 
@@ -220,7 +255,6 @@ export function useFollowUpRepositories(
 } {
   const context = useAppContext();
   const catalogRefresh = useRepositoryCatalogRefresh(session.workspaceId, context);
-  const page = usePage();
   const [pendingRepoIds, setPendingRepoIds] = useState<Set<number>>(() => new Set());
   const [pendingRepoRefs, setPendingRepoRefs] = useState<Record<number, string>>({});
   const [pendingPersonalRepoIds, setPendingPersonalRepoIds] = useState<Set<string>>(
@@ -418,26 +452,6 @@ export function useFollowUpRepositories(
       mountedPersonalRepoIds,
       mountedRepositorySelection.selectedRepoIds,
     ],
-  );
-
-  const disconnectRepositoryInstallation = useCallback(
-    async (installationId: number) => {
-      const removedIds = new Set(
-        context.githubRepos
-          .filter((repository) => repository.installationId === installationId)
-          .map((repository) => repository.id),
-      );
-      setPendingRepoIds(
-        (current) => new Set([...current].filter((repositoryId) => !removedIds.has(repositoryId))),
-      );
-      setPendingRepoRefs((current) =>
-        Object.fromEntries(
-          Object.entries(current).filter(([repositoryId]) => !removedIds.has(Number(repositoryId))),
-        ),
-      );
-      await context.disconnectGitHubInstallation(session.workspaceId, installationId);
-    },
-    [context, session.workspaceId],
   );
 
   const togglePendingPersonalRepository = useCallback(
@@ -644,17 +658,18 @@ export function useFollowUpRepositories(
       selectedPersonalGitHubRepoIds: selectedPersonalRepoIds,
       selectedPersonalGitHubRepoRefs: selectedPersonalRepoRefs,
       personalGitHubBusy: context.personalGitHubBusy,
-      personalGitHubManageUrl: `/workspaces/${encodeURIComponent(session.workspaceId)}/plugins?open=integration:github`,
+      personalGitHubManageUrl: `/workspaces/${encodeURIComponent(session.workspaceId)}/plugins?open=integration:github&github=personal`,
+      githubSettingsUrl: `/workspaces/${encodeURIComponent(session.workspaceId)}/plugins?open=integration:github`,
       groups: context.repositoryGroups,
       selectedRepoIds,
       selectedRepoRefs,
       manualRepos: [...mountedManualRepos, ...pendingManualRepos],
       manualOpen: manualReposOpen,
-      githubAppOpen: context.githubAppOpen,
       org: context.githubOrg,
       pending: disabled || context.busy,
       repoBusy: context.repoBusy,
       githubLoadFailed: context.githubStatusFailed && !context.githubCatalogReady,
+      githubUpdateFailed: context.githubStatusFailed && context.githubCatalogReady,
       githubAppBusy: context.githubAppBusy,
       lockedRepoIds: mountedRepositorySelection.selectedRepoIds,
       lockedPersonalGitHubRepoIds: mountedPersonalRepoIds,
@@ -832,25 +847,14 @@ export function useFollowUpRepositories(
         });
       },
       newChatUrl: `/workspaces/${session.workspaceId}`,
-      onGitHubAppOpenChange: context.setGithubAppOpen,
       onOrgChange: context.setGithubOrg,
       onStartGitHubApp: () => void context.startGitHubAppManifestFlow(session.workspaceId),
       onConnectWorkspaceApp,
-      onConfigureInstallation: (installationId: number) =>
-        openGitHubInstallationSettings(
-          context.client,
-          session.workspaceId,
-          installationId,
-          page.assign,
-        ),
-      onDisconnectInstallation: disconnectRepositoryInstallation,
     }),
     [
-      page,
       catalogRefresh,
       canRemoveRepositories,
       context,
-      disconnectRepositoryInstallation,
       onConnectWorkspaceApp,
       lockedManualRepoIds,
       manualReposOpen,

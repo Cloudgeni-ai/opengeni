@@ -25,7 +25,10 @@
 //! Chunks no pointer refers to any more are deleted by a sweep
 //! ([`Chunked::sweep`]); an archive publishes its pointer within the
 //! window that keeps a sweep from deleting what it reused (see
-//! [`compute_storage::fresh`]).
+//! [`compute_storage::fresh`]). A sweep's fence stops an archive in flight;
+//! what it stored it carries into each new hour meanwhile, so the next try
+//! finds it instead of uploading it again, however long the archive took
+//! (see [`ChunkStore::keeping`]).
 //!
 //! An archive reuses what the sandbox's earlier copy holds at the same
 //! offsets, and for a disk made from a stored image, what the image holds:
@@ -39,14 +42,14 @@ use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use compute_engine::{CancellationToken, EngineError, ErrorKind};
 use compute_storage::Error as StorageError;
 use compute_storage::chunk::{ChunkRef, EncodedChunk};
 use compute_storage::copy::{self, Head, MemoryHead};
 use compute_storage::manifest::{DiskManifest, ExtentSource};
-use compute_storage::store::{Begun, ChunkStore, Publication, Rewrite};
+use compute_storage::store::{Begun, ChunkStore, Held, Publication, Rewrite};
 pub use compute_storage::sweep::Report;
 use futures::{StreamExt as _, stream};
 use tokio::sync::{Mutex, Semaphore};
@@ -56,8 +59,8 @@ use crate::image::{Hash, ZERO, chunk_count, chunk_range, hash_chunks};
 use crate::lanes::Lanes;
 use crate::protocol::{Id, ImageId};
 use crate::store::{
-    Archive, Claimed, FetchInto, FetchedMemory, Owned, OwnerEpoch, Prefilled, Receipt, SavedFiles,
-    Stamp, Store,
+    Archive, Claimed, FetchInto, FetchedMemory, MadeAt, Owned, OwnerEpoch, Prefilled, Receipt,
+    SavedFiles, Stamp, Store,
 };
 use crate::threads::Threads;
 use crate::working_set::{self, WakeProfile};
@@ -78,6 +81,13 @@ const VERIFY_CHECKS: usize = 64;
 /// zstd level 1: measured nearly as small as higher levels at a fraction of
 /// the time, which matters because sleeping waits for it.
 const ZSTD_LEVEL: i32 = 1;
+/// How long what a sandbox's stopped archive stored is held for its next
+/// try once nothing runs: tries follow within minutes, and an hour after
+/// it was last carried a sweep may take it anyway.
+const HELD_IDLE: Duration = Duration::from_secs(3_600);
+
+/// Each sandbox's archive's held chunks, and when a try last began.
+type InFlight = std::sync::Mutex<HashMap<Id, (Arc<Held>, SystemTime)>>;
 
 /// One chunk-sized piece of a stored file: where it is, and the chunk
 /// holding it (`None` for zeros).
@@ -105,6 +115,9 @@ pub struct Chunked {
     compress: Arc<Semaphore>,
     /// A wake's transfers are foreground: background ones give way.
     lanes: Arc<Lanes>,
+    /// What each sandbox's archive stored that it has not published yet,
+    /// held across its tries, and when a try last began.
+    in_flight: Arc<InFlight>,
 }
 
 /// What identifies one version of a local file: if any of it changes, the
@@ -253,6 +266,7 @@ impl Chunked {
             transfers: Arc::new(Semaphore::new(TRANSFERS_PER_HOST)),
             compress: Arc::new(Semaphore::new(Threads::for_host().compress)),
             lanes: Arc::default(),
+            in_flight: Arc::default(),
         }
     }
 
@@ -623,6 +637,7 @@ impl Chunked {
                 state,
                 memory,
                 runtime: stored.runtime.clone(),
+                vcpus: stored.vcpus,
             });
         };
         let chunks = refs
@@ -644,6 +659,7 @@ impl Chunked {
             manifest: manifest_bytes,
             prefilled,
             runtime: stored.runtime.clone(),
+            vcpus: stored.vcpus,
         })
     }
 
@@ -668,7 +684,10 @@ impl Chunked {
             .await
             .map_err(|error| storage_error("archive", error))?;
         if put.new {
-            crate::observe::notes::bytes("uploaded", chunk.bytes.len() as u64);
+            // A copy within the store, of what an archive a sweep stopped
+            // stored an hour before, moves nothing over the network.
+            let how = if put.copied { "copied" } else { "uploaded" };
+            crate::observe::notes::bytes(how, chunk.bytes.len() as u64);
         }
         Ok(Some(put.reference))
     }
@@ -711,8 +730,39 @@ impl Chunked {
     }
 }
 
-impl Store for Chunked {
-    async fn archive(
+impl Chunked {
+    /// The same store, holding in `held` every chunk it stores.
+    fn holding(&self, held: &Arc<Held>) -> Self {
+        Self {
+            chunks: self.chunks.clone().holding(Arc::clone(held)),
+            ..self.clone()
+        }
+    }
+
+    /// What sandbox `id`'s archive stored and has not published, held from
+    /// its earlier tries. Forgets what no try has held for [`HELD_IDLE`].
+    fn held(&self, id: Id) -> Arc<Held> {
+        let now = self.chunks.now();
+        let mut in_flight = self
+            .in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        in_flight.retain(|_, (held, began)| {
+            Arc::strong_count(held) > 1
+                || now
+                    .duration_since(*began)
+                    .is_ok_and(|idle| idle < HELD_IDLE)
+        });
+        let (held, began) = in_flight
+            .entry(id)
+            .or_insert_with(|| (Arc::new(Held::new()), now));
+        *began = now;
+        Arc::clone(held)
+    }
+
+    /// One try of archiving sandbox `id`, storing its chunks through a
+    /// store holding them ([`Self::holding`]).
+    async fn archive_once(
         &self,
         id: Id,
         save: Stamp,
@@ -772,6 +822,7 @@ impl Store for Chunked {
                     state,
                     memory,
                     runtime: image.runtime.clone(),
+                    vcpus: image.vcpus,
                 })),
                 _ => None,
             })
@@ -817,6 +868,35 @@ impl Store for Chunked {
         self.confirmed
             .confirm_sandbox(id, receipt.clone(), confirmed);
         Ok(Archive::Stored(receipt))
+    }
+}
+
+impl Store for Chunked {
+    async fn archive(
+        &self,
+        id: Id,
+        save: Stamp,
+        files: &SavedFiles,
+        cancel: &CancellationToken,
+    ) -> Result<Archive, EngineError> {
+        // What a try stores is carried into each new hour while it runs, and
+        // held for the next try when this one fails, as one a sweep's fence
+        // stopped does: that try then finds it rather than uploading it
+        // again.
+        let held = self.held(id);
+        let holding = self.holding(&held);
+        let once = holding.archive_once(id, save, files, cancel);
+        let (archived, kept) = self.chunks.keeping(&held, once).await;
+        if kept.copied_bytes > 0 {
+            crate::observe::notes::bytes("copied", kept.copied_bytes);
+        }
+        if archived.is_ok() {
+            self.in_flight
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&id);
+        }
+        archived
     }
 
     async fn verify(&self, id: Id, receipt: &Receipt) -> Result<bool, EngineError> {
@@ -898,16 +978,30 @@ impl Store for Chunked {
             Err(error) => return Err(storage_error(OP, error)),
         };
         let head = parse_head(OP, &bytes)?;
-        let disk = self
-            .chunks
-            .get_manifest(&head.disk)
-            .await
-            .map_err(|error| storage_error(OP, error))?;
+        // The memory manifest's length is the memory's the image was saved
+        // with.
+        let memory = async {
+            match &head.memory {
+                Some(stored) => self
+                    .chunks
+                    .get_manifest(&stored.memory)
+                    .await
+                    .map(|manifest| MadeAt {
+                        vcpus: stored.vcpus,
+                        memory_bytes: Some(manifest.disk_len),
+                    }),
+                None => Ok(MadeAt::default()),
+            }
+        };
+        let (disk, made_at) = tokio::join!(self.chunks.get_manifest(&head.disk), memory);
+        let disk = disk.map_err(|error| storage_error(OP, error))?;
+        let made_at = made_at.map_err(|error| storage_error(OP, error))?;
         Ok(Owned::Done(Some(Claimed {
             save: stamp.save,
             receipt: receipt_of(&bytes),
             memory: head.memory.is_some(),
             disk_bytes: disk.disk_len,
+            made_at,
         })))
     }
 

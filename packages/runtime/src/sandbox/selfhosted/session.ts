@@ -221,7 +221,14 @@ const SELFHOSTED_EXEC_REPLY_GRACE_MS = 5_000;
  *  range while also fitting the reply grace. */
 const SELFHOSTED_MAX_EXEC_TIMEOUT_MS = 2_147_483_647 - SELFHOSTED_EXEC_REPLY_GRACE_MS;
 const SELFHOSTED_BACKGROUND_DEFAULT_YIELD_MS = 10_000;
-const SELFHOSTED_BACKGROUND_MAX_YIELD_MS = 30_000;
+/**
+ * The longest foreground wait before a command continues in the background:
+ * the command finish floor (COMMAND_FINISH_FLOOR_MS), so a command that ends
+ * within a minute returns its result in the same call, as on a managed
+ * sandbox. A Steer still takes effect at once: the turn ends the wait early
+ * through `yieldExecCommand`.
+ */
+export const SELFHOSTED_BACKGROUND_MAX_YIELD_MS = 60_000;
 
 function normalizeOperationResourcePolicy(
   policy: SelfhostedOperationResourcePolicy | undefined,
@@ -1454,7 +1461,14 @@ export class SelfhostedSession {
     };
     this.inFlightOpStreamClients.set(opId, client);
     this.inFlightOpStreamOutput.set(opId, retainedOutput);
+    const yieldBackground = backgroundYieldMs > 0 && this.adoptBackgroundCommand !== undefined;
+    const earlyYield = new AbortController();
     const remoteControl: RemoteOperationControl = {
+      yieldExecCommand: (requestedOpId) => {
+        if (requestedOpId !== opId || !yieldBackground) return false;
+        earlyYield.abort();
+        return true;
+      },
       cancelExecCommand: async (requestedOpId) => {
         if (requestedOpId !== opId) return false;
         await client.cancel(opId);
@@ -1471,75 +1485,74 @@ export class SelfhostedSession {
     try {
       const wallMs =
         executionTimeoutMs > 0 ? executionTimeoutMs + SELFHOSTED_EXEC_REPLY_GRACE_MS : 0;
-      const result =
-        backgroundYieldMs > 0 && this.adoptBackgroundCommand
-          ? await client.execWithYield(opId, execReq, executionTimeoutMs, wallMs, {
-              yieldMs: backgroundYieldMs,
-              captureOutput: async (frames) => {
-                if (adoptedCommandId)
-                  await this.captureBackgroundCommandOutput?.(adoptedCommandId, frames);
-              },
-              onYield: async () => {
-                ownershipTransferPending = true;
-                notifyDurableOpOwnershipTransferStarted(opId);
-                const adopted = await this.adoptBackgroundCommand!({
-                  controlWorkspaceId: admission.controlWorkspaceId,
-                  enrollmentId: this.agentId,
-                  connectionInstanceId: admission.connectionInstanceId,
-                  opId,
-                  command,
+      const result = yieldBackground
+        ? await client.execWithYield(opId, execReq, executionTimeoutMs, wallMs, {
+            yieldMs: backgroundYieldMs,
+            yieldSignal: earlyYield.signal,
+            captureOutput: async (frames) => {
+              if (adoptedCommandId)
+                await this.captureBackgroundCommandOutput?.(adoptedCommandId, frames);
+            },
+            onYield: async () => {
+              ownershipTransferPending = true;
+              notifyDurableOpOwnershipTransferStarted(opId);
+              const adopted = await this.adoptBackgroundCommand!({
+                controlWorkspaceId: admission.controlWorkspaceId,
+                enrollmentId: this.agentId,
+                connectionInstanceId: admission.connectionInstanceId,
+                opId,
+                command,
+              });
+              adoptedCommandId = adopted.commandId;
+              this.ownedCommandReaders.set(adopted.commandId, async () => {
+                const replay = await client.readExisting(opId, 250, async (frames) => {
+                  await this.captureBackgroundCommandOutput?.(adopted.commandId, frames);
                 });
-                adoptedCommandId = adopted.commandId;
-                this.ownedCommandReaders.set(adopted.commandId, async () => {
-                  const replay = await client.readExisting(opId, 250, async (frames) => {
-                    await this.captureBackgroundCommandOutput?.(adopted.commandId, frames);
+                const terminal = replay.status === "completed" ? replay : replay.terminal;
+                const outputReceipt =
+                  replay.outputReceipt ??
+                  (replay.status === "running" ? replay.terminal?.outputReceipt : undefined);
+                if (terminal) {
+                  await this.settleBackgroundCommand?.({
+                    commandId: adopted.commandId,
+                    controlWorkspaceId: admission.controlWorkspaceId,
+                    enrollmentId: this.agentId,
+                    connectionInstanceId: admission.connectionInstanceId,
+                    opId,
+                    outcome: "exited",
+                    ...(this.captureBackgroundCommandOutput && outputReceipt
+                      ? { outputReceipt }
+                      : {}),
+                    exitCode: terminal.outcome.response.exitCode,
+                    backgroundChildrenStopped: terminal.outcome.response.backgroundChildrenStopped,
+                    reason: terminal.outcome.failure
+                      ? `op_failure_${terminal.outcome.failure.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128)}`
+                      : "op_exit",
+                    ...(terminal.outcome.failure
+                      ? {
+                          failure: {
+                            code: terminal.outcome.failure.failureCode
+                              .replace(/[^A-Za-z0-9_-]/g, "_")
+                              .slice(0, 128),
+                            detail: terminal.outcome.failure.failureDetail,
+                            retryable: false as const,
+                          },
+                        }
+                      : {}),
                   });
-                  const terminal = replay.status === "completed" ? replay : replay.terminal;
-                  const outputReceipt =
-                    replay.outputReceipt ??
-                    (replay.status === "running" ? replay.terminal?.outputReceipt : undefined);
-                  if (terminal) {
-                    await this.settleBackgroundCommand?.({
-                      commandId: adopted.commandId,
-                      controlWorkspaceId: admission.controlWorkspaceId,
-                      enrollmentId: this.agentId,
-                      connectionInstanceId: admission.connectionInstanceId,
-                      opId,
-                      outcome: "exited",
-                      ...(this.captureBackgroundCommandOutput && outputReceipt
-                        ? { outputReceipt }
-                        : {}),
-                      exitCode: terminal.outcome.response.exitCode,
-                      backgroundChildrenStopped:
-                        terminal.outcome.response.backgroundChildrenStopped,
-                      reason: terminal.outcome.failure
-                        ? `op_failure_${terminal.outcome.failure.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128)}`
-                        : "op_exit",
-                      ...(terminal.outcome.failure
-                        ? {
-                            failure: {
-                              code: terminal.outcome.failure.failureCode
-                                .replace(/[^A-Za-z0-9_-]/g, "_")
-                                .slice(0, 128),
-                              detail: terminal.outcome.failure.failureDetail,
-                              retryable: false as const,
-                            },
-                          }
-                        : {}),
-                    });
-                    this.ownedCommandReaders.delete(adopted.commandId);
-                    if (terminal.outcome.failure)
-                      throw runnerFailureToControlError(terminal.outcome.failure);
-                  }
-                });
-                ownershipTransferPending = false;
-                notifyDurableOpOwnershipTransferred(opId);
-              },
-            })
-          : {
-              status: "completed" as const,
-              outcome: await client.exec(opId, execReq, executionTimeoutMs, wallMs),
-            };
+                  this.ownedCommandReaders.delete(adopted.commandId);
+                  if (terminal.outcome.failure)
+                    throw runnerFailureToControlError(terminal.outcome.failure);
+                }
+              });
+              ownershipTransferPending = false;
+              notifyDurableOpOwnershipTransferred(opId);
+            },
+          })
+        : {
+            status: "completed" as const,
+            outcome: await client.exec(opId, execReq, executionTimeoutMs, wallMs),
+          };
       if (result.status === "running") {
         terminalProof = result.terminal !== undefined;
         if (result.terminal && adoptedCommandId) {

@@ -92,6 +92,42 @@ for (const mode of ["portable", "remote_v2"] as const) {
       expect(replacement.slice(0, -1)).toEqual(updates.slice(1));
     });
 
+    test("goal continuations never crowd out the request a goal names", () => {
+      // An unattended request's automatic goal names "this session's first
+      // message" instead of copying it, so that message must survive
+      // compaction however many continuations followed it.
+      const request: CompactionItem = {
+        type: "message",
+        role: "user",
+        content: "Fix the failing parser tests and commit.",
+      };
+      const continuation = (index: number): CompactionItem =>
+        sessionSystemUpdateBatchHistoryItem(
+          [
+            {
+              id: `55555555-5555-4555-8555-${String(index).padStart(12, "0")}`,
+              kind: "goal_continuation",
+              classification: "info",
+              sourceId,
+              summary: `Continue the goal (${index})`,
+              payload: { type: "goal_continuation" },
+              lineage: {},
+              createdAt: capturedAt,
+            },
+          ] as Parameters<typeof sessionSystemUpdateBatchHistoryItem>[0],
+          goal("active", 1),
+          { deliveredAt: capturedAt },
+        );
+      const continuations = Array.from({ length: 30 }, (_, index) => continuation(index + 1));
+      // Each continuation is charged 9k: without the transient rule only the
+      // newest two would fit the shared 20k and the request would be dropped.
+      const replacement = rebuild([request, ...continuations], (item) =>
+        item === request ? 50 : 9_000,
+      );
+      expect(replacement[0]).toEqual(request);
+      expect(replacement.slice(0, -1)).toHaveLength(2);
+    });
+
     test("keeps operational notices only for the turn running the compaction", () => {
       const notice = (text: string): CompactionItem => ({
         type: "message",

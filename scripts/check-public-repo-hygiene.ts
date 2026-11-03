@@ -156,6 +156,7 @@ export function auditPublicText(file: string, source: string): Finding[] {
   collectMatches(file, source, PRIVATE_ISSUE_REFERENCE, "private issue reference", findings);
   collectMatches(file, source, INTERNAL_WORK_LABEL, "internal work label", findings);
   const reviewedLabels = reviewedUpstreamLabelOffsets(file, source);
+  const pathData = svgPathDataRanges(file, source);
   collectMatches(
     file,
     source,
@@ -164,6 +165,7 @@ export function auditPublicText(file: string, source: string): Finding[] {
     findings,
     (match) =>
       reviewedLabels === "all" ||
+      insideRanges(pathData, match.index ?? -1) ||
       (match[0] === RUST_SIGNED_BYTE_TYPE && reviewedLabels?.includes(match.index ?? -1) === true),
   );
   collectMatches(file, source, MACHINE_NIX_STORE_PATH, "machine-specific Nix store path", findings);
@@ -486,6 +488,27 @@ function collectMatches(
     if (ignore?.(match)) continue;
     findings.push({ file, line: lineAt(source, match.index ?? 0), reason });
   }
+}
+
+// SVG path data is drawing commands: a move-to command followed by its
+// coordinate can read like a retired label (vendored brand marks are full of them).
+// Only the values of a `.svg` file's `d` and `points` attributes are skipped,
+// and only for that rule; text, titles and every other attribute still run.
+const SVG_PATH_DATA_ATTRIBUTE = /\s(?:d|points)\s*=\s*("[^"]*"|'[^']*')/g;
+
+function svgPathDataRanges(file: string, source: string): Array<[number, number]> {
+  if (extname(file).toLowerCase() !== ".svg") return [];
+  const ranges: Array<[number, number]> = [];
+  for (const match of source.matchAll(SVG_PATH_DATA_ATTRIBUTE)) {
+    const value = match[1]!;
+    const start = (match.index ?? 0) + match[0].length - value.length;
+    ranges.push([start, start + value.length]);
+  }
+  return ranges;
+}
+
+function insideRanges(ranges: Array<[number, number]>, index: number): boolean {
+  return ranges.some(([start, end]) => index > start && index < end);
 }
 
 function reviewedUpstreamLabelOffsets(

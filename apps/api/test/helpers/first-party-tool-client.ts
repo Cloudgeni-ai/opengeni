@@ -19,12 +19,16 @@ export const firstPartyToolGrant: AccessGrant = {
   },
 };
 
-export async function withFirstPartyToolClient<T>(run: (client: Client) => Promise<T>) {
+export async function withFirstPartyToolClient<T>(
+  run: (client: Client) => Promise<T>,
+  settingsOverrides: Parameters<typeof testSettings>[0] = {},
+) {
   const server = buildOpenGeniMcpServer(
     {
       settings: testSettings({
         sandboxBackend: "none",
         allowedFirstPartyMcpTools: [...FIRST_PARTY_MCP_TOOL_NAMES],
+        ...settingsOverrides,
       }),
       db: new Proxy(
         {},

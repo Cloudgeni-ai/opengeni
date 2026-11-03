@@ -11,9 +11,28 @@ COPY --from=bun-target /usr/local/bin/bun /out/bun
 RUN --mount=type=bind,source=docker,target=/opt/opengeni-docker \
   bun /opt/opengeni-docker/distrust-embedded-roots.ts /opt/opengeni-docker/distrusted-roots.pem /out/bun
 FROM postgres:${POSTGRES_MAJOR}-bookworm
+ARG TARGETARCH
+# restic stores, deduplicates, compresses and encrypts the dumps. Pinned static
+# release binary, verified against the published SHA-256 per architecture.
+ARG RESTIC_VERSION=0.19.1
+ARG RESTIC_SHA256_AMD64=f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c
+ARG RESTIC_SHA256_ARM64=a5f64aaab53d51e311fa3829124c5b703f2d14cf187d8640b6be3b2b49376465
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends age rclone ca-certificates util-linux \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get install -y --no-install-recommends bzip2 ca-certificates curl rclone util-linux \
+    && case "$TARGETARCH" in \
+         amd64) sha="$RESTIC_SHA256_AMD64" ;; \
+         arm64) sha="$RESTIC_SHA256_ARM64" ;; \
+         *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
+       esac \
+    && curl -fsSL -o /tmp/restic.bz2 \
+         "https://github.com/restic/restic/releases/download/v${RESTIC_VERSION}/restic_${RESTIC_VERSION}_linux_${TARGETARCH}.bz2" \
+    && echo "$sha  /tmp/restic.bz2" | sha256sum -c - \
+    && bunzip2 -c /tmp/restic.bz2 > /usr/local/bin/restic \
+    && chmod 0755 /usr/local/bin/restic \
+    && rm /tmp/restic.bz2 \
+    && apt-get purge -y --auto-remove curl bzip2 \
+    && rm -rf /var/lib/apt/lists/* \
+    && restic version
 COPY --from=bun /out/bun /usr/local/bin/bun
 WORKDIR /app
 COPY scripts/backup.ts scripts/backup.ts

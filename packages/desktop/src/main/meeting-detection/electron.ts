@@ -76,6 +76,10 @@ export interface CreateMeetingDetectionOptions {
  */
 export function createMeetingDetection(options: CreateMeetingDetectionOptions): MeetingDetection {
   const file = options.logDir ? meetingDetectionFileLog(options.logDir) : null;
+  const log = (message: string, error?: unknown) => {
+    file?.(message, error);
+    options.log?.(message, error);
+  };
   let icon: string | null | undefined;
   const iconPath = options.iconPath;
   return new MeetingDetection({
@@ -90,6 +94,7 @@ export function createMeetingDetection(options: CreateMeetingDetectionOptions): 
     store: new MeetingDetectionStore(options.dataDir),
     view: new MeetingPromptCard({
       platform: process.platform,
+      log,
       ...(options.words ? { words: options.words } : {}),
       icon: () => {
         if (icon === undefined) {
@@ -101,9 +106,6 @@ export function createMeetingDetection(options: CreateMeetingDetectionOptions): 
     }),
     reveal: options.reveal,
     ...(options.chooseTarget ? { chooseTarget: options.chooseTarget } : {}),
-    log: (message, error) => {
-      file?.(message, error);
-      options.log?.(message, error);
-    },
+    log,
   });
 }

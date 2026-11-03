@@ -286,6 +286,8 @@ impl<E: Engine, S: Store> Job<E, S> {
                 memory: images.memory(generation),
                 chunks: Some(Arc::new(chunks.0)),
                 runtime: image.meta().runtime.clone(),
+                // As an archive's (see `Job::archive`).
+                vcpus: image.meta().vcpus.or(Some(self.record.config.vcpus)),
             }),
             profile: profile.exists().then_some(profile),
             image: self.record.config.image,

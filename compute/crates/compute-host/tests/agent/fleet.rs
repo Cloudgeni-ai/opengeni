@@ -308,6 +308,150 @@ async fn an_adopted_sandbox_keeps_the_length_of_the_disk_it_was_handed_off_with(
     two.assert_clean();
 }
 
+/// Has `lab` adopt sandbox `id` under `owner_epoch` at the shape `config`
+/// gives, as after a resize, with the copy vouched for as whole or not.
+async fn adopt_as(
+    lab: &Lab,
+    id: Id,
+    owner_epoch: u64,
+    config: SandboxConfig,
+    whole: bool,
+) -> Reply {
+    lab.client
+        .call(&Request::Adopt {
+            id,
+            config,
+            owner_epoch,
+            whole,
+        })
+        .await
+        .unwrap()
+}
+
+/// A sandbox one host saved, programs and files, and handed off.
+async fn saved_and_handed_off(one: &Lab, sandbox: Id) {
+    one.create(sandbox, NEVER).await;
+    one.run(sandbox, &["set kept", "write on-disk"]).await;
+    assert_eq!(one.sleep_to(sandbox, LevelName::Paused).await, Reply::Done);
+    one.wait_level(sandbox, LevelName::Paused).await;
+    assert_eq!(hand_off(one, sandbox, 1).await, Reply::Done);
+}
+
+/// A sandbox resized to other processors or memory is taken up from its
+/// files: its memory image would bring back the machine it was saved
+/// from. Its programs end and its files stay, and the image is gone from
+/// the store too, so no later adopt restores it. The service sends such
+/// an adopt as not whole; the image's recorded shape decides even when an
+/// adopt says it is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_adopt_at_another_machine_shape_boots_from_the_files() {
+    for (n, vcpus, memory_mib) in [(20, 2, 256), (21, 1, 512)] {
+        let (one, two, shelf) = hosts().await;
+        let sandbox = id(n);
+        saved_and_handed_off(&one, sandbox).await;
+        let resized = SandboxConfig {
+            vcpus,
+            memory_mib,
+            ..config(NEVER)
+        };
+        assert_eq!(adopt_as(&two, sandbox, 2, resized, true).await, Reply::Done);
+        assert!(!two.current(sandbox).await.memory_saved);
+        assert!(!shelf.join(sandbox.to_string()).join("memory").exists());
+        assert_eq!(
+            two.run(sandbox, &["get", "disk"]).await,
+            ["", "on-disk"],
+            "its programs ended, its files stayed"
+        );
+        assert_eq!(two.world.restores.load(Ordering::Relaxed), 0);
+        assert_eq!(two.world.boots.load(Ordering::Relaxed), 1);
+        one.assert_clean();
+        two.assert_clean();
+    }
+}
+
+/// A sandbox resized only in what it asks to be guaranteed, or given a
+/// longer disk, keeps its memory image: it wakes with its programs, its
+/// disk made as long as it asks, and its guest told before it runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_adopt_with_new_requests_or_a_longer_disk_keeps_the_programs_and_grows_the_disk() {
+    const MIB: u64 = 1 << 20;
+    let (one, two, _shelf) = hosts().await;
+    let sandbox = id(22);
+    saved_and_handed_off(&one, sandbox).await;
+    let base = std::fs::metadata(two.root.join("base.img")).unwrap().len();
+    let longer = u32::try_from(base / MIB + 4).unwrap();
+    let resized = SandboxConfig {
+        memory_request_mib: Some(128),
+        cpu_request_millis: Some(500),
+        disk_mib: Some(longer),
+        ..config(NEVER)
+    };
+    assert_eq!(adopt_as(&two, sandbox, 2, resized, true).await, Reply::Done);
+    assert!(two.current(sandbox).await.memory_saved);
+    let wanted = u64::from(longer) * MIB;
+    assert_eq!(two.record(sandbox)["allocation"]["disk_bytes"], wanted);
+    // The fake guest reads its whole disk, now longer: the rest is zeros.
+    let ran = two.run(sandbox, &["get", "disk"]).await;
+    let ran: Vec<&str> = ran.iter().map(|s| s.trim_end_matches('\0')).collect();
+    assert_eq!(ran, ["kept", "on-disk"], "programs and files moved with it");
+    assert_eq!(two.world.restores.load(Ordering::Relaxed), 1);
+    assert_eq!(two.world.boots.load(Ordering::Relaxed), 0);
+    let disk = std::fs::metadata(two.sandbox_dir(sandbox).join("root/disk.ext4")).unwrap();
+    assert_eq!(disk.len(), wanted);
+    let resized = two.world.drives_resized.lock().unwrap().clone();
+    assert_eq!(resized.len(), 1, "{resized:?}");
+    assert_eq!(resized[0].1, [wanted], "told before it runs");
+    one.assert_clean();
+    two.assert_clean();
+}
+
+/// A copy stored before memory images recorded their processors says only
+/// how long its memory is. A sandbox resized to other processors alone
+/// still boots from its files at the new count, since the service sends
+/// that adopt as not whole; one given other memory does even from an
+/// adopt that says it is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_copy_that_does_not_say_its_processors_boots_from_its_files_when_resized() {
+    for (n, vcpus, memory_mib, whole) in [(23, 2, 256, false), (24, 1, 512, true)] {
+        let (one, two, shelf) = hosts().await;
+        let sandbox = id(n);
+        saved_and_handed_off(&one, sandbox).await;
+        // As an older release stored it.
+        let stored = shelf.join(sandbox.to_string());
+        std::fs::remove_file(stored.join("vcpus")).unwrap();
+        let contents = std::fs::read_to_string(stored.join("contents")).unwrap();
+        let older: String = contents
+            .lines()
+            .filter(|line| !line.starts_with("vcpus "))
+            .flat_map(|line| [line, "\n"])
+            .collect();
+        assert_ne!(older, contents, "it says its processors");
+        std::fs::write(stored.join("contents"), older).unwrap();
+
+        let resized = SandboxConfig {
+            vcpus,
+            memory_mib,
+            ..config(NEVER)
+        };
+        assert_eq!(
+            adopt_as(&two, sandbox, 2, resized, whole).await,
+            Reply::Done
+        );
+        assert!(!two.current(sandbox).await.memory_saved);
+        assert!(!shelf.join(sandbox.to_string()).join("memory").exists());
+        assert_eq!(
+            two.run(sandbox, &["get", "disk"]).await,
+            ["", "on-disk"],
+            "its programs ended, its files stayed"
+        );
+        assert_eq!(two.world.restores.load(Ordering::Relaxed), 0);
+        assert_eq!(two.world.boots.load(Ordering::Relaxed), 1);
+        assert_eq!(two.record(sandbox)["config"]["vcpus"], vcpus);
+        one.assert_clean();
+        two.assert_clean();
+    }
+}
+
 /// A guest's memory keeps the latest restore notice it applied, and moves
 /// with the sandbox; the new host's record of it starts afresh, with a
 /// fence lower than the old host's. Its notices still come after the old
