@@ -130,6 +130,13 @@ describe("tool names in replayed history", () => {
     expect(withProviderValidToolNames(history, KNOWN)).toBe(history);
     expect(projectHistoryForProvider(history, "responses")).toBe(history);
   });
+
+  test("a request tool's own name is kept even beyond the portable format", () => {
+    const long = `opengeni__${"x".repeat(70)}`;
+    const history = [{ type: "function_call", callId: "c", name: long, arguments: "{}" }];
+    expect(withProviderValidToolNames(history, [long])).toBe(history);
+    expect(withProviderValidToolNames(history, [])[0]!.name).toMatch(/^[a-zA-Z0-9_-]{1,64}$/);
+  });
 });
 
 describe("Responses projection", () => {
@@ -164,11 +171,16 @@ describe("Responses projection", () => {
     });
   });
 
-  test("other provider APIs keep their own projection", () => {
+  test("Chat and Claude replay the same valid names as native calls", () => {
     const history = storedHistory();
-    const chat = projectHistoryForProvider(history, "chat");
-    // Chat replays tool search and invalid calls as historical facts.
+    const chat = projectHistoryForProvider(history, "chat", { knownToolNames: KNOWN });
+    // Chat has no tool search item: it replays as a historical fact.
     expect(chat.some((item) => item.type === "tool_search_output")).toBe(false);
-    expect(chat.some((item) => item.type === "function_call")).toBe(false);
+    // The call keeps its native form, bound to the tool it denotes.
+    expect(chat.find((item) => item.type === "function_call")?.name).toBe(SLACK_SEND);
+    const claude = projectHistoryForProvider(history, "anthropic-messages", {
+      knownToolNames: KNOWN,
+    });
+    expect(claude.find((item) => item.type === "function_call")?.name).toBe(SLACK_SEND);
   });
 });

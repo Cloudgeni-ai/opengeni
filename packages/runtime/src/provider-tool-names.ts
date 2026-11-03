@@ -4,12 +4,13 @@ import { createHash } from "node:crypto";
  * Tool names in replayed history (docs/model-providers.md, "Tool names in
  * history").
  *
- * Responses providers accept only `^[a-zA-Z0-9_-]+$` as a tool name, in the
- * request's tools and in every history item that carries tool definitions
- * (`tool_search_output`, `additional_tools`) or names a tool
- * (`function_call`). Top-level names are valid by construction (MCP names
- * become `mcp_<digest>__<leaf>` aliases), but stored history can hold a name
- * that is not: before tool identities were exempt from secret masking, a
+ * Providers validate tool names in the request's tools and in every history
+ * item that carries tool definitions (`tool_search_output`, `additional_tools`)
+ * or names a tool (`function_call`, a Chat tool call, a Claude `tool_use`).
+ * The one format they all accept, gateways included, is
+ * `^[a-zA-Z0-9_-]{1,64}$`. Top-level names are valid by construction (MCP
+ * names become `mcp_<digest>__<leaf>` aliases), but stored history can hold a
+ * name that is not: before tool identities were exempt from secret masking, a
  * known secret value inside a tool name was stored as its secret reference
  * or credential marker, and an agent can name a tool in its published
  * `server.tool` form. One such item fails every later request of the chat
@@ -23,7 +24,7 @@ import { createHash } from "node:crypto";
  * byte-identical.
  */
 
-const PROVIDER_TOOL_NAME = /^[a-zA-Z0-9_-]+$/;
+const PROVIDER_TOOL_NAME = /^[a-zA-Z0-9_-]{1,64}$/;
 const INVALID_TOOL_NAME_CHARACTER = /[^a-zA-Z0-9_-]/;
 const TOOL_NAME_SEPARATOR = "__";
 const ALIAS_READABLE_LENGTH = 40;
@@ -31,7 +32,7 @@ const ALIAS_DIGEST_LENGTH = 16;
 const NAME_KEYS = ["name", "namespace", "function_name", "functionName"] as const;
 const TOOL_DISCLOSURE_KEY_PREFIX = "opengeni.tool_disclosure";
 
-/** Whether a provider accepts this tool name. */
+/** Whether every provider accepts this tool name. */
 export function isProviderToolName(name: string): boolean {
   return PROVIDER_TOOL_NAME.test(name);
 }
@@ -98,6 +99,17 @@ export function knownToolNameFor(name: string, known: readonly string[]): string
 }
 
 type ToolNameRewrite = (name: string) => string;
+
+/** The model names of a request's function tools, for withProviderValidToolNames. */
+export function requestFunctionToolNames(tools: readonly unknown[] | undefined): string[] {
+  const names: string[] = [];
+  for (const tool of tools ?? []) {
+    if (isRecord(tool) && tool.type === "function" && typeof tool.name === "string") {
+      names.push(tool.name);
+    }
+  }
+  return names;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -204,7 +216,9 @@ export function withProviderValidToolNames<T>(
   items: T[],
   knownToolNames: readonly string[] = [],
 ): T[] {
-  const invalid = invalidHistoryToolNames(items);
+  // A request tool's own name is never rewritten: the history must keep naming it.
+  const known = new Set(knownToolNames);
+  const invalid = invalidHistoryToolNames(items).filter((name) => !known.has(name));
   if (invalid.length === 0) return items;
   const replacements = new Map<string, string>();
   for (const name of invalid) {

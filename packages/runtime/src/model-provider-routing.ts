@@ -27,6 +27,7 @@ import {
   projectHistoryForProvider,
   responsesRouteDeclaresAdditionalTools,
 } from "./provider-history-adapter";
+import { requestFunctionToolNames } from "./provider-tool-names";
 import {
   appendChatReasoningDetails,
   chatReasoning,
@@ -77,6 +78,7 @@ function chatRequest(request: ModelRequest, modelId: string): ModelRequest {
       ? request.input
       : (projectHistoryForProvider(request.input, "chat", {
           hoistsSystemMessages: chatRouteHoistsSystemMessages(modelId),
+          knownToolNames: requestFunctionToolNames(request.tools),
         }) as ModelRequest["input"]);
   return projectChatReasoning(
     projectChatToolImages(input === request.input ? request : { ...request, input }),
@@ -365,9 +367,7 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
           ? request.input
           : (projectHistoryForProvider(request.input, "responses", {
               declaresAdditionalTools: responsesRouteDeclaresAdditionalTools(this.provider.kind),
-              knownToolNames: request.tools.flatMap((tool) =>
-                tool.type === "function" ? [tool.name] : [],
-              ),
+              knownToolNames: requestFunctionToolNames(request.tools),
             }) as ModelRequest["input"]);
       return super._buildResponsesCreateRequest(
         input === request.input ? request : { ...request, input },
