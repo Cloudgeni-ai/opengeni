@@ -34,9 +34,9 @@ export type ProviderHistoryOptions = {
    */
   searchRecordForm?: SearchRecordForm;
   /**
-   * The request's function tool names. A history tool name a provider would
-   * reject becomes the one of these it denotes, else a stable alias (see
-   * withProviderValidToolNames).
+   * The request's function tool names, which history keeps as written. Any
+   * other history tool name a provider would reject gets its stable alias
+   * (see withProviderValidToolNames).
    */
   knownToolNames?: readonly string[];
 };
@@ -348,10 +348,11 @@ export function projectHistoryForProvider(
   // definitions or call a tool, and one invalid name fails the whole request.
   // One provider-neutral naming step runs before any wire projection, so a
   // definition, a disclosure and the calls that name it keep one valid name.
-  const named = withProviderValidToolNames(
-    withWireValidFunctionCallArguments(input),
-    options.knownToolNames,
-  );
+  // The lazy tool transport already bound names to the authorized catalog;
+  // with only the request's tools here, a name is never guessed, only aliased.
+  const named = withProviderValidToolNames(withWireValidFunctionCallArguments(input), {
+    names: options.knownToolNames ?? [],
+  });
   return projectWireHistory(named, providerApi, options);
 }
 

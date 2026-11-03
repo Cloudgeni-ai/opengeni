@@ -119,14 +119,11 @@ function expectPortableNames(body: unknown): string[] {
   const { definitions, calls } = wireToolNames(body);
   for (const name of [...definitions, ...calls]) expect(name).toMatch(PORTABLE_TOOL_NAME);
   expect(calls).toHaveLength(HOSTILE.length);
-  // The dotted form of the request's tool, and its stored masked form (the
-  // one request tool that fits around the reference), bind to it.
-  expect(calls[0]).toBe(KNOWN);
-  expect(calls.at(-1)).toBe(KNOWN);
-  // Every other name keeps one distinct name of its own, collisions included.
-  const others = calls.slice(1, -1);
-  expect(new Set(others).size).toBe(HOSTILE.length - 2);
-  expect(others).not.toContain(KNOWN);
+  // The adapter sees only the request's tools, so nothing is guessed: every
+  // name keeps one distinct name of its own, collisions included.
+  expect(new Set(calls).size).toBe(HOSTILE.length);
+  expect(calls).not.toContain(KNOWN);
+  expect(definitions).toContain(KNOWN);
   return calls;
 }
 

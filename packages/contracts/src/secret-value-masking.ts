@@ -598,7 +598,9 @@ export function maskSecretValuesInText(text: string, masks: CompiledSecretValueM
 
 /**
  * Deep copy of `value` with every known secret value replaced in every string
- * (object keys are kept). Inputs that need no change keep their identity.
+ * (object keys are kept), except a tool's identity in conversation structure
+ * (see SecretMaskableStringsOptions.keepToolIdentities). Inputs that need no
+ * change keep their identity.
  */
 export function maskSecretValues<T>(
   value: T,
@@ -613,6 +615,7 @@ export function maskSecretValues<T>(
     value,
     (text) => maskSecretValuesInText(text, masks),
     masks.skipKey,
+    { keepToolIdentities: true },
   );
 }
 

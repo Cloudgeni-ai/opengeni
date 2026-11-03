@@ -2481,8 +2481,8 @@ function prepareLazyToolRequest(request: ModelRequest, runtime: LazyToolRuntime)
  * replayed `tool_search_output`, disclosure or call names the same tool the
  * request's tools do and a later call binds to it. Deferred tools are only
  * in the catalog once preparation ran, so an affected request prepares
- * first; a preparation failure keeps the current catalog, and the provider
- * projection then gives any unknown name a stable alias.
+ * first. After a preparation failure the catalog is partial, so no name is
+ * bound to a tool: each gets its stable alias.
  */
 async function withAuthorizedHistoryToolNames(
   request: ModelRequest,
@@ -2490,12 +2490,20 @@ async function withAuthorizedHistoryToolNames(
 ): Promise<ModelRequest> {
   if (typeof request.input === "string") return request;
   if (invalidHistoryToolNames(request.input).length === 0) return request;
+  let complete = true;
   try {
     await runtime.ensurePrepared();
   } catch {
-    // The projection's alias still keeps the request valid.
+    complete = false;
   }
-  const input = withProviderValidToolNames(request.input, runtime.knownFunctionToolNames());
+  const input = withProviderValidToolNames(request.input, {
+    names: runtime.knownFunctionToolNames(),
+    denote: complete,
+    parametersOf: (name) => {
+      const tool = runtime.resolveFunctionTool(name);
+      return tool && isFunctionTool(tool) ? tool.parameters : undefined;
+    },
+  });
   return input === request.input ? request : { ...request, input };
 }
 

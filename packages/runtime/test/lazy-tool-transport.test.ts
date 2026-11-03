@@ -3795,14 +3795,13 @@ describe("tool names in replayed history", () => {
     "%s: a stored tool_search_output and call with a masked or dotted name replay with the authorized name and the tool still runs",
     async (transport) => {
       let executed: unknown = null;
-      const agent = agentWith(
-        weatherTool({
-          execute: (input) => {
-            executed = input;
-            return "sunny";
-          },
-        }),
-      );
+      const weather = weatherTool({
+        execute: (input) => {
+          executed = input;
+          return "sunny";
+        },
+      });
+      const agent = agentWith(weather);
       const runtime = installLazyToolRuntime(agent, transport, new Set([SERVER_ID]));
       const model = new ScriptedStreamingModel([
         [
@@ -3819,7 +3818,8 @@ describe("tool names in replayed history", () => {
         type: "function",
         name,
         description: "Look up the current weather for a city",
-        parameters: { type: "object", properties: { city: { type: "string" } } },
+        // As stored when the search loaded it: the tool's own schema.
+        parameters: (weather as { parameters: unknown }).parameters,
       });
       const history = [
         { type: "message", role: "user", content: [{ type: "input_text", text: "Weather?" }] },
@@ -3864,8 +3864,8 @@ describe("tool names in replayed history", () => {
       expect(executed).toEqual({ city: "Oslo" });
       const first = model.requests[0]!.input as Array<Record<string, any>>;
       const replayedSearch = first.find((item) => item.type === "tool_search_output")!;
+      // Both stored definitions denote the same tool, which is declared once.
       expect(replayedSearch.tools.map((entry: { name: string }) => entry.name)).toEqual([
-        WEATHER_TOOL,
         WEATHER_TOOL,
       ]);
       expect(

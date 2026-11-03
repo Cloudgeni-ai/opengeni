@@ -1629,17 +1629,24 @@ before tool identities were exempt from masking
 ([Secrets](secrets.md#matching)), and an agent can name a tool in its
 published `server.tool` form. One provider-neutral step,
 `withProviderValidToolNames` (`provider-tool-names.ts`), gives each such name
-one valid name everywhere in the request: the authorized tool it denotes when
-exactly one does (dotted `server.tool`, a published short name, or the one
-tool that fits around a masked span), so a later call still binds to it, else
-a stable alias with a digest of the whole name, so distinct names never
-collide. A request tool's own name is never rewritten. The lazy tool transport
-applies it against the full authorized catalog, deferred tools included, and
-`projectHistoryForProvider` applies it against the request's tools before
-every wire projection (Responses, Chat Completions with its gateways, and
-Claude Messages). Valid names and unaffected items keep their identity, so
+one valid name everywhere in the request, and a request tool's own name is
+never rewritten. The lazy tool transport applies it against the complete
+authorized catalog, deferred tools included: a flat name becomes the one tool
+it denotes, so a later call still binds to it, when exactly one does (dotted
+`server.tool`, a published short name, or the one tool that fits where a
+masking label stands for at least eight characters) and any stored
+definition of it has that tool's parameters. Every other name, namespaces and
+the names inside a namespace, and every name when the catalog could not be
+prepared, gets a stable alias with a digest of the whole name, so distinct
+names never collide. `projectHistoryForProvider` applies the same step with
+only the request's tools before every wire projection (Responses, Chat
+Completions with its gateways, and Claude Messages), so it aliases and never
+guesses. A definition that comes to repeat an earlier name in the same list
+is dropped. Valid names and unaffected items keep their identity, and a
+rewritten item keeps its identity across requests while the mapping holds, so
 cached prefixes do not change. Stored history is not rewritten; it is repaired
-on every replay, so Retry works on a chat that already failed.
+on every replay, so Retry works on a chat that already failed. Names inside
+text (a disclosure's or search result's text) are not rewritten.
 
 Provider 400 invalid-request answers are counted, for monitoring only, as
 `opengeni_model_invalid_requests_total{provider,path,code}` with the request

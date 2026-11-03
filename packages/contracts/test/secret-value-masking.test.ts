@@ -54,7 +54,6 @@ describe("known-value secret masking", () => {
           { type: "function", name: "opengeni__goal_set", description: "Set a goal" },
           definition,
           { type: "namespace", name: `ns_${word}`, description: "d", tools: [definition] },
-          { type: "tool_reference", function_name: toolName, namespace: `ns_${word}` },
         ],
         providerData: { call_id: "call_search", execution: "client" },
       },
@@ -68,16 +67,45 @@ describe("known-value secret masking", () => {
       "opengeni__goal_set",
       toolName,
       `ns_${word}`,
-      undefined,
     ]);
     expect(search!.tools[1].description).toBe(`Query ${DB_REF}`);
     expect(search!.tools[2].tools[0].name).toBe(toolName);
-    expect(search!.tools[3]).toMatchObject({ function_name: toolName, namespace: `ns_${word}` });
     expect(call).toMatchObject({ name: toolName, arguments: `{"q":"${DB_REF}"}` });
     expect(result).toMatchObject({ name: toolName, output: `rows ${DB_REF}` });
     // A `name` that is not a tool identity is ordinary text.
     expect(message!.content).toBe(`name ${DB_REF}`);
     expect(memory.mask({ name: word })).toEqual({ name: DB_REF });
+  });
+
+  test("a tool-shaped record inside tool data, or a name no tool can have, is still masked", () => {
+    const word = "pelicans";
+    const memory = memoryWith(word);
+    const masked = memory.mask([
+      {
+        type: "function_call_result",
+        callId: "c",
+        name: "opengeni__codemode_call",
+        // An API's own data that happens to look like a tool definition.
+        output: [
+          { type: "custom", name: word },
+          { type: "function_call", name: word },
+          { tools: [{ type: "function", name: word }] },
+        ],
+      },
+      { type: "function_call", callId: "d", name: `query ${word}`, arguments: "{}" },
+      // A definition-shaped record outside a tools list.
+      { type: "function", name: word },
+      { type: "message", role: "user", content: [{ type: "custom", name: word }] },
+    ]) as Array<Record<string, any>>;
+    expect(masked[0]!.name).toBe("opengeni__codemode_call");
+    expect(masked[0]!.output).toEqual([
+      { type: "custom", name: DB_REF },
+      { type: "function_call", name: DB_REF },
+      { tools: [{ type: "function", name: DB_REF }] },
+    ]);
+    expect(masked[1]!.name).toBe(`query ${DB_REF}`);
+    expect(masked[2]!.name).toBe(DB_REF);
+    expect(masked[3]!.content).toEqual([{ type: "custom", name: DB_REF }]);
   });
 
   test("replaces the value with its reference", () => {
