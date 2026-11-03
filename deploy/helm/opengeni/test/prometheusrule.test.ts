@@ -840,3 +840,24 @@ function renderDeploymentScope(
     .replaceAll("{{ .Release.Name | quote }}", JSON.stringify(scope.release))
     .replaceAll("{{ $environment | quote }}", JSON.stringify(scope.environment));
 }
+
+test("platform reliability ratios exclude customer-provider failures consistently", async () => {
+  const template = await readFile(
+    new URL("../templates/prometheusrule.yaml", import.meta.url),
+    "utf8",
+  );
+  for (const name of [
+    "OpenGeniTurnFailureRatioHigh",
+    "OpenGeniModelCallFailureRatioHigh",
+    "OpenGeniTurnStartupFirstByteAvailabilityLow",
+  ]) {
+    const selectors = metricSelectors(alertExpression(template, name));
+    expect(selectors.length).toBeGreaterThan(2);
+    for (const selector of selectors)
+      expect(selector).toContain('failure_origin!="customer_provider"');
+  }
+  // Recovery/exhaustion and other system signals are not suppressed by provider choice.
+  expect(alertExpression(template, "OpenGeniTurnRecoveryRatioHigh")).not.toContain(
+    "failure_origin",
+  );
+});

@@ -899,7 +899,12 @@ export function instrumentedModelFetch(
           });
         }
       }
-      recordModelCallMetric(provider, response.ok ? "completed" : "failed", started);
+      recordModelCallMetric(
+        provider,
+        response.ok ? "completed" : "failed",
+        started,
+        response.status,
+      );
       return response;
     } catch (error) {
       capture.cancel();
@@ -927,10 +932,16 @@ function recordModelCallMetric(
   provider: string,
   outcome: "completed" | "failed",
   started: number,
+  httpStatus?: number,
 ): void {
   const durationSeconds = Math.max(0, (performance.now() - started) / 1000);
   try {
-    runtimeMetricsHooks?.onModelCall?.({ provider, outcome, durationSeconds });
+    runtimeMetricsHooks?.onModelCall?.({
+      provider,
+      outcome,
+      durationSeconds,
+      ...(httpStatus !== undefined ? { httpStatus } : {}),
+    });
   } catch {
     // Metrics emission must never affect a model call.
   }

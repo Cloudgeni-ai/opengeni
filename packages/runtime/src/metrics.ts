@@ -105,6 +105,7 @@ export type RuntimeMetricsHooks = {
     provider: string;
     outcome: "completed" | "failed";
     durationSeconds: number;
+    httpStatus?: number;
   }) => void;
   onSandboxCreate?: (input: {
     backend: string;

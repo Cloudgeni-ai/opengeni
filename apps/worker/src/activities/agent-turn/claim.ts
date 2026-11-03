@@ -1,3 +1,5 @@
+import type { FailureOrigin } from "@opengeni/observability";
+import { settledTurnFailureOrigin } from "./failure-attribution";
 import { assertTurnServingPolicyMatchesConfigV1 } from "@opengeni/config";
 import { claimServingAttempt, type ServingAttempt } from "./subscription-serving-claim";
 import { servingTurnProviders } from "./subscription-serving-providers";
@@ -677,6 +679,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   const emittedModelUsageSourceKeys = new Set<string>();
   const recordCanonicalStartupMilestones = (
     receipts: CanonicalTurnStartupMilestoneReceipt[],
+    origin?: FailureOrigin,
   ): void => {
     for (const receipt of receipts) {
       recordTurnStartupMilestone(observability, {
@@ -684,6 +687,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
         provider: turnExecutionPolicy.providerId,
         backend: sandboxState.startupMilestoneBackend ?? turn.sandboxBackend,
         outcome: receipt.outcome,
+        ...(origin ? { failureOrigin: origin } : {}),
         durationSeconds: receipt.durationMs / 1_000,
       });
     }
@@ -811,7 +815,13 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       control.turnMetricOutcome = "cancelled";
       return false;
     }
-    recordCanonicalStartupMilestones(result.canonicalStartupMilestones);
+    const origin = settledTurnFailureOrigin(
+      turnExecutionPolicy.billing,
+      inputSettlement.turnStatus,
+      inputSettlement.events,
+    );
+    control.turnFailureOrigin = origin;
+    recordCanonicalStartupMilestones(result.canonicalStartupMilestones, origin);
     turnLifecycleMetricsFor(observability).progress({ attemptId: input.attemptId });
     await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, result.events);
     if (inputSettlement.turnStatus === "requires_action") {
