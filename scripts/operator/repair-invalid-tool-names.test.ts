@@ -142,7 +142,7 @@ describe("repair against PostgreSQL", () => {
       (account_id, workspace_id, session_id, state_version, serialized_run_state, serialized_run_state_codec_version)
       values (${accountId}, ${workspaceId}, ${sessionId}, 1,
         ${JSON.stringify({ modelResponses: [{ output: [call(MASKED, "b")] }] })}, 1)`;
-  });
+  }, 180_000);
   afterAll(async () => {
     await client?.close();
     await fixture?.release();
