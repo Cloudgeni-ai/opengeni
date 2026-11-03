@@ -5,12 +5,14 @@ import {
   normalizeTeamsMessage,
   teamsChannelThreadId,
   teamsContextMessage,
+  teamsContextRevision,
   teamsConversationBaseId,
   teamsPlainText,
 } from "../src/integrations/teams-protocol";
 import {
   MAX_TEAMS_CONTEXT_CHARS,
   recordTeamsContext,
+  reviseTeamsContext,
   teamsMentionModelContext,
   teamsSharedConversationAllowed,
 } from "../src/integrations/teams-context";
@@ -136,8 +138,82 @@ describe("Teams context messages", () => {
         }),
       ),
     ).toBeNull();
+    // Another bot without a role, by its Bot Framework id.
+    expect(
+      teamsContextMessage(channelActivity({ from: { id: "28:other", aadObjectId: actor } })),
+    ).toBeNull();
     expect(teamsContextMessage(channelActivity({ text: "<p> </p>" }))).toBeNull();
     expect(teamsContextMessage({ type: "conversationUpdate" })).toBeNull();
+  });
+
+  test("display names are kept on one line", () => {
+    expect(
+      teamsContextMessage(
+        channelActivity({ from: { id: "29:person", aadObjectId: actor, name: " Ada\nLovelace " } }),
+      )?.actorName,
+    ).toBe("Ada Lovelace");
+  });
+
+  test("edits and deletions of shared messages are revisions; others are not", () => {
+    const edit = teamsContextRevision(
+      channelActivity({
+        type: "messageUpdate",
+        text: "<p>The codeword is EGRET</p>",
+        channelData: { tenant: { id: tenant }, channel: { id: channel }, eventType: "editMessage" },
+      }),
+    );
+    expect(edit).toEqual({
+      tenantId: tenant,
+      botId: "28:bot",
+      conversationId: channel,
+      messageId: "1793624796191",
+      edit: { text: "The codeword is EGRET", hasAttachments: false },
+    });
+    const deletion = teamsContextRevision(
+      channelActivity({
+        type: "messageDelete",
+        text: undefined,
+        from: undefined,
+        channelData: {
+          tenant: { id: tenant },
+          channel: { id: channel },
+          eventType: "softDeleteMessage",
+        },
+      }),
+    );
+    expect(deletion?.edit).toBeNull();
+    expect(deletion?.conversationId).toBe(channel);
+    // Undelete and other event types are not revisions; nor are ordinary
+    // messages, personal chats or mismatched tenants.
+    expect(
+      teamsContextRevision(
+        channelActivity({
+          type: "messageUpdate",
+          channelData: {
+            tenant: { id: tenant },
+            channel: { id: channel },
+            eventType: "undeleteMessage",
+          },
+        }),
+      ),
+    ).toBeNull();
+    expect(teamsContextRevision(channelActivity())).toBeNull();
+    expect(
+      teamsContextRevision(
+        channelActivity({
+          type: "messageDelete",
+          conversation: { id: "a:dm", conversationType: "personal" },
+        }),
+      ),
+    ).toBeNull();
+    expect(
+      teamsContextRevision(
+        channelActivity({
+          type: "messageDelete",
+          conversation: { id: channel, conversationType: "channel", tenantId: actor },
+        }),
+      ),
+    ).toBeNull();
   });
 
   test("plain text keeps mentions and line breaks and decodes entities", () => {
@@ -174,6 +250,14 @@ describe("Teams context messages", () => {
     expect(
       await recordTeamsContext({ db, settings }, channelActivity({ recipient: { id: "28:x" } })),
     ).toBe(false);
+    // A revision for another bot is consumed without database access.
+    expect(
+      await reviseTeamsContext(
+        { db, settings },
+        channelActivity({ type: "messageDelete", recipient: { id: "28:x" } }),
+      ),
+    ).toBe(true);
+    expect(await reviseTeamsContext({ db, settings }, channelActivity())).toBe(false);
     expect(
       teamsSharedConversationAllowed(settings, {
         tenantId: tenant,

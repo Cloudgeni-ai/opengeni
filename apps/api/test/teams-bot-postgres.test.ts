@@ -18,6 +18,9 @@ import {
   enableCapabilityInstallation,
   recordTeamsContextMessage,
   listTeamsContextMessages,
+  markTeamsContextMentionAccepted,
+  reviseTeamsContextMessage,
+  clearTeamsContextConversation,
   disconnectTeamsBot,
   TEAMS_CONTEXT_MESSAGES_PER_THREAD,
 } from "@opengeni/db";
@@ -360,6 +363,86 @@ test("a channel thread mention sees the unmentioned messages before it, and a fo
   });
   expect(roots.map((row) => row.text)).toEqual(["Root post: planning the launch"]);
   await disconnectTeamsBot(client.db, f.i);
+  const [left] =
+    await shared.admin`select count(*)::int as n from teams_bot_context_messages where workspace_id=${f.i.workspace_id}`;
+  expect(left!.n).toBe(0);
+});
+test("recorded context follows edits, deletions, accepted mentions, retention and its workspace", async () => {
+  const f = await fixture();
+  const other = await fixture();
+  const keep = (
+    i: typeof f.i,
+    conversationId: string,
+    messageId: string,
+    minute: number,
+    text: string,
+  ) =>
+    recordTeamsContextMessage(client.db, i, {
+      conversationId,
+      threadId: null,
+      messageId,
+      actorId: f.actor,
+      actorName: "Ada Lovelace",
+      text,
+      hasAttachments: false,
+      mentioned: false,
+      occurredAt: `2026-11-02T15:0${minute}:00.000Z`,
+    });
+  const read = (i: typeof f.i, conversationId = "19:group") =>
+    listTeamsContextMessages(client.db, i, {
+      conversationId,
+      threadId: null,
+      beforeMessageId: "none",
+      notAfter: "2026-11-03T00:00:00.000Z",
+      limit: 50,
+    });
+  await keep(f.i, "19:group", "g1", 1, "The password is hunter2");
+  await keep(f.i, "19:group", "g2", 2, "Lunch at noon");
+  await keep(f.i, "19:group", "g3", 3, "@Opengeni summarize");
+  await keep(f.i, "19:elsewhere", "e1", 1, "Another chat");
+  // Another workspace's installation never sees these rows.
+  await keep(other.i, "19:group", "o1", 1, "Other workspace");
+  expect((await read(other.i)).map((row) => row.text)).toEqual(["Other workspace"]);
+
+  // Teams edits replace the text; deletions (and edits to nothing) remove it.
+  await reviseTeamsContextMessage(client.db, f.i, {
+    conversationId: "19:group",
+    messageId: "g2",
+    edit: { text: "Lunch at one", hasAttachments: false },
+  });
+  await reviseTeamsContextMessage(client.db, f.i, {
+    conversationId: "19:group",
+    messageId: "g1",
+    edit: null,
+  });
+  // A revision of a message never recorded records nothing.
+  await reviseTeamsContextMessage(client.db, f.i, {
+    conversationId: "19:group",
+    messageId: "unknown",
+    edit: { text: "new", hasAttachments: false },
+  });
+  // Only an accepted mention is marked.
+  await markTeamsContextMentionAccepted(client.db, f.i, {
+    conversationId: "19:group",
+    messageId: "g3",
+  });
+  expect((await read(f.i)).map((row) => [row.messageId, row.text, row.mentioned])).toEqual([
+    ["g3", "@Opengeni summarize", true],
+    ["g2", "Lunch at one", false],
+  ]);
+
+  // Past retention, a row is no longer offered even before it is pruned.
+  await shared.admin`update teams_bot_context_messages set created_at=now()-interval '8 days' where workspace_id=${f.i.workspace_id} and message_id='g2'`;
+  expect((await read(f.i)).map((row) => row.messageId)).toEqual(["g3"]);
+
+  // Clearing one conversation leaves the others.
+  await clearTeamsContextConversation(client.db, f.i, "19:group");
+  expect(await read(f.i)).toEqual([]);
+  expect((await read(f.i, "19:elsewhere")).map((row) => row.text)).toEqual(["Another chat"]);
+
+  // A write from before a disconnect never lands after it.
+  await disconnectTeamsBot(client.db, f.i);
+  await keep(f.i, "19:group", "late", 4, "Racing the disconnect");
   const [left] =
     await shared.admin`select count(*)::int as n from teams_bot_context_messages where workspace_id=${f.i.workspace_id}`;
   expect(left!.n).toBe(0);

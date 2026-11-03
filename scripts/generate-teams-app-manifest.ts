@@ -56,8 +56,10 @@ export function buildTeamsAppManifest(options: TeamsManifestOptions) {
   const scopes = [
     "personal",
     ...(options.channels ? ["team"] : []),
-    ...(options.groupChats ? ["groupchat"] : []),
+    ...(options.groupChats ? ["groupChat"] : []),
   ];
+  if (options.conversationContext && !options.channels && !options.groupChats)
+    throw new Error("conversationContext needs channels or groupChats");
   const contextPermissions = options.conversationContext
     ? [
         ...(options.channels ? [{ name: "ChannelMessage.Read.Group", type: "Application" }] : []),
@@ -128,6 +130,13 @@ export function teamsManifestOptionsFromEnv(
     if (!value) throw new Error(`Missing ${key}`);
     return value;
   };
+  // Unset, "false" or "0" is off; "true" or "1" is on; anything else is a typo.
+  const flag = (key: string) => {
+    const value = env[key]?.trim().toLowerCase();
+    if (!value || value === "false" || value === "0") return false;
+    if (value === "true" || value === "1") return true;
+    throw new Error(`${key} must be true or false`);
+  };
   return {
     appId: required("OPENGENI_TEAMS_APP_ID"),
     botId: required("OPENGENI_TEAMS_BOT_CLIENT_ID"),
@@ -137,9 +146,9 @@ export function teamsManifestOptionsFromEnv(
     termsOfUseUrl: required("OPENGENI_TEAMS_TERMS_URL"),
     version: env.OPENGENI_TEAMS_APP_VERSION,
     appName: env.OPENGENI_TEAMS_APP_NAME,
-    groupChats: env.OPENGENI_TEAMS_APP_GROUP_CHATS === "true",
-    channels: env.OPENGENI_TEAMS_APP_CHANNELS === "true",
-    conversationContext: env.OPENGENI_TEAMS_APP_CONVERSATION_CONTEXT === "true",
+    groupChats: flag("OPENGENI_TEAMS_APP_GROUP_CHATS"),
+    channels: flag("OPENGENI_TEAMS_APP_CHANNELS"),
+    conversationContext: flag("OPENGENI_TEAMS_APP_CONVERSATION_CONTEXT"),
   };
 }
 

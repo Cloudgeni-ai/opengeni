@@ -320,7 +320,9 @@ export function teamsContextMessage(raw: unknown): TeamsContextMessage | null {
   const parsed = ContextActivity.safeParse(raw);
   if (!parsed.success) return null;
   const a = parsed.data;
-  if (a.from.role === "bot" || a.from.id === a.recipient.id) return null;
+  // Bot Framework ids for bots start with 28:, people's with 29:.
+  if (a.from.role === "bot" || a.from.id === a.recipient.id || a.from.id.startsWith("28:"))
+    return null;
   const type = a.conversation.conversationType;
   if (type === "personal") return null;
   const tenantId = a.channelData.tenant.id.toLowerCase();
@@ -346,7 +348,7 @@ export function teamsContextMessage(raw: unknown): TeamsContextMessage | null {
     threadId: groupChat ? null : teamsChannelThreadId(a),
     messageId: a.id,
     actorId: a.from.aadObjectId.toLowerCase(),
-    actorName: a.from.name?.trim().slice(0, 256) || null,
+    actorName: a.from.name?.replace(/\s+/g, " ").trim().slice(0, 256) || null,
     text: text.slice(0, TEAMS_CONTEXT_MESSAGE_MAX_CHARS),
     hasAttachments,
     mentioned: (a.entities ?? []).some(
@@ -355,6 +357,74 @@ export function teamsContextMessage(raw: unknown): TeamsContextMessage | null {
     occurredAt: new Date(a.timestamp).toISOString(),
   };
 }
+const ContextRevisionActivity = z.object({
+  type: z.enum(["messageUpdate", "messageDelete"]),
+  id: opaque,
+  channelId: z.literal("msteams"),
+  recipient: z.object({ id: opaque }),
+  conversation: z.object({
+    id: opaque,
+    conversationType: z.enum(["personal", "channel", "groupChat"]),
+    tenantId: uuid.optional(),
+  }),
+  channelData: z.object({
+    tenant: z.object({ id: uuid }),
+    channel: z.object({ id: opaque }).optional(),
+    eventType: z.string().max(64).optional(),
+  }),
+  text: z.string().optional(),
+  attachments: z.array(z.unknown()).max(64).optional(),
+});
+
+/** A Teams edit or deletion of a channel or group chat message. */
+export type TeamsContextRevision = {
+  tenantId: string;
+  botId: string;
+  /** The conversation without a thread suffix, as recorded. */
+  conversationId: string;
+  messageId: string;
+  /** The new content of an edit; null for a deletion. */
+  edit: { text: string; hasAttachments: boolean } | null;
+};
+
+/**
+ * Edits (`messageUpdate`/`editMessage`) and deletions
+ * (`messageDelete`/`softDeleteMessage`) of shared-conversation messages, so
+ * recorded context follows them. Other activities return null.
+ */
+export function teamsContextRevision(raw: unknown): TeamsContextRevision | null {
+  const parsed = ContextRevisionActivity.safeParse(raw);
+  if (!parsed.success) return null;
+  const a = parsed.data;
+  if (a.conversation.conversationType === "personal") return null;
+  const tenantId = a.channelData.tenant.id.toLowerCase();
+  if (a.conversation.tenantId && a.conversation.tenantId.toLowerCase() !== tenantId) return null;
+  const eventType = a.channelData.eventType;
+  const base = {
+    tenantId,
+    botId: a.recipient.id,
+    conversationId: teamsConversationBaseId(a.conversation.id),
+    messageId: a.id,
+  };
+  if (a.type === "messageDelete")
+    return !eventType || eventType === "softDeleteMessage" ? { ...base, edit: null } : null;
+  if (eventType && eventType !== "editMessage") return null;
+  return {
+    ...base,
+    edit: {
+      text: teamsPlainText(a.text ?? "").slice(0, TEAMS_CONTEXT_MESSAGE_MAX_CHARS),
+      hasAttachments: (a.attachments ?? []).some(
+        (value) =>
+          !(
+            value &&
+            typeof value === "object" &&
+            (value as { contentType?: unknown }).contentType === "text/html"
+          ),
+      ),
+    },
+  };
+}
+
 const Proof = z
   .object({
     version: z.literal(1),

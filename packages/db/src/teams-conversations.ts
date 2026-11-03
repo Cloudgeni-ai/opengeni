@@ -647,6 +647,14 @@ export async function recordTeamsContextMessage(
 ): Promise<void> {
   const thread = input.threadId ?? "";
   await teamsScoped(db, i, async (tx) => {
+    // Shares the installation row with disconnect, which deletes every
+    // recorded message: a write racing it either lands first and is deleted,
+    // or sees the installation inactive and records nothing.
+    const [current] = await rawRows<{ ok: number }>(
+      tx,
+      sql`select 1 as ok from teams_bot_installations where tenant_id=${i.tenant_id}::uuid and workspace_id=${i.workspace_id}::uuid and generation=${i.generation}::uuid and active for share`,
+    );
+    if (!current) return;
     await tx.execute(sql`insert into teams_bot_context_messages(account_id,workspace_id,tenant_id,conversation_id,thread_id,message_id,actor_id,actor_name,text,has_attachments,mentioned,occurred_at)
       values(${i.account_id}::uuid,${i.workspace_id}::uuid,${i.tenant_id}::uuid,${input.conversationId},${thread},${input.messageId},${input.actorId}::uuid,${input.actorName?.slice(0, 256) ?? null},${input.text.slice(0, 4000)},${input.hasAttachments},${input.mentioned},${input.occurredAt}::timestamptz)
       on conflict(workspace_id,conversation_id,message_id) do nothing`);
@@ -690,8 +698,8 @@ export async function listTeamsContextMessages(
     }>(
       tx,
       input.rootPostsOnly
-        ? sql`select message_id,actor_id,actor_name,text,has_attachments,mentioned,occurred_at from teams_bot_context_messages where workspace_id=${i.workspace_id}::uuid and tenant_id=${i.tenant_id}::uuid and conversation_id=${input.conversationId} and thread_id=message_id and message_id<>${input.beforeMessageId} and occurred_at<=${input.notAfter}::timestamptz order by occurred_at desc, message_id desc limit ${limit}`
-        : sql`select message_id,actor_id,actor_name,text,has_attachments,mentioned,occurred_at from teams_bot_context_messages where workspace_id=${i.workspace_id}::uuid and tenant_id=${i.tenant_id}::uuid and conversation_id=${input.conversationId} and thread_id=${input.threadId ?? ""} and message_id<>${input.beforeMessageId} and occurred_at<=${input.notAfter}::timestamptz order by occurred_at desc, message_id desc limit ${limit}`,
+        ? sql`select message_id,actor_id,actor_name,text,has_attachments,mentioned,occurred_at from teams_bot_context_messages where workspace_id=${i.workspace_id}::uuid and tenant_id=${i.tenant_id}::uuid and conversation_id=${input.conversationId} and thread_id=message_id and message_id<>${input.beforeMessageId} and occurred_at<=${input.notAfter}::timestamptz and created_at>=now()-make_interval(days=>${TEAMS_CONTEXT_RETENTION_DAYS}) order by occurred_at desc, message_id desc limit ${limit}`
+        : sql`select message_id,actor_id,actor_name,text,has_attachments,mentioned,occurred_at from teams_bot_context_messages where workspace_id=${i.workspace_id}::uuid and tenant_id=${i.tenant_id}::uuid and conversation_id=${input.conversationId} and thread_id=${input.threadId ?? ""} and message_id<>${input.beforeMessageId} and occurred_at<=${input.notAfter}::timestamptz and created_at>=now()-make_interval(days=>${TEAMS_CONTEXT_RETENTION_DAYS}) order by occurred_at desc, message_id desc limit ${limit}`,
     ),
   );
   return rows.map((row) => ({
@@ -703,4 +711,63 @@ export async function listTeamsContextMessages(
     mentioned: row.mentioned,
     occurredAt: new Date(row.occurred_at),
   }));
+}
+
+/**
+ * Marks a recorded message as a mention Opengeni accepted, so a later mention
+ * that continues the same chat reads back only to it. Refused mentions stay
+ * ordinary context.
+ */
+export async function markTeamsContextMentionAccepted(
+  db: Database,
+  i: TeamsInstallation,
+  input: { conversationId: string; messageId: string },
+): Promise<void> {
+  await teamsScoped(db, i, (tx) =>
+    tx.execute(
+      sql`update teams_bot_context_messages set mentioned=true where workspace_id=${i.workspace_id}::uuid and conversation_id=${input.conversationId} and message_id=${input.messageId}`,
+    ),
+  );
+}
+
+/**
+ * Applies a Teams edit or deletion to a recorded message: an edit replaces its
+ * text, and a deletion (or an edit that leaves nothing) removes it. Messages
+ * never recorded stay unrecorded.
+ */
+export async function reviseTeamsContextMessage(
+  db: Database,
+  i: TeamsInstallation,
+  input: {
+    conversationId: string;
+    messageId: string;
+    edit: { text: string; hasAttachments: boolean } | null;
+  },
+): Promise<void> {
+  await teamsScoped(db, i, (tx) =>
+    input.edit && (input.edit.text || input.edit.hasAttachments)
+      ? tx.execute(
+          sql`update teams_bot_context_messages set text=${input.edit.text.slice(0, 4000)},has_attachments=${input.edit.hasAttachments} where workspace_id=${i.workspace_id}::uuid and conversation_id=${input.conversationId} and message_id=${input.messageId}`,
+        )
+      : tx.execute(
+          sql`delete from teams_bot_context_messages where workspace_id=${i.workspace_id}::uuid and conversation_id=${input.conversationId} and message_id=${input.messageId}`,
+        ),
+  );
+}
+
+/**
+ * Forgets every recorded message in one conversation: when a group chat's
+ * members change, a newcomer must not get answers built from history Teams
+ * did not share with them.
+ */
+export async function clearTeamsContextConversation(
+  db: Database,
+  i: TeamsInstallation,
+  conversationId: string,
+): Promise<void> {
+  await teamsScoped(db, i, (tx) =>
+    tx.execute(
+      sql`delete from teams_bot_context_messages where workspace_id=${i.workspace_id}::uuid and conversation_id=${conversationId}`,
+    ),
+  );
 }

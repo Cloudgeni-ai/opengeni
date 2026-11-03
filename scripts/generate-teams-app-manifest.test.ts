@@ -27,7 +27,7 @@ describe("Teams app package", () => {
     expect(manifest.bots[0]?.scopes).toEqual(["personal"]);
     expect(buildTeamsAppManifest({ ...options, groupChats: true }).bots[0]?.scopes).toEqual([
       "personal",
-      "groupchat",
+      "groupChat",
     ]);
     expect(manifest.manifestVersion).toBe("1.25");
     expect(manifest.validDomains).toEqual(["pilot.example.com"]);
@@ -62,7 +62,7 @@ describe("Teams app package", () => {
 
   test("adds team scope and the conversation-context RSC permissions only on request", () => {
     const channels = buildTeamsAppManifest({ ...options, channels: true, groupChats: true });
-    expect(channels.bots[0]?.scopes).toEqual(["personal", "team", "groupchat"]);
+    expect(channels.bots[0]?.scopes).toEqual(["personal", "team", "groupChat"]);
     expect(channels).toHaveProperty("supportsChannelFeatures", "tier1");
     expect(buildTeamsAppManifest(options)).not.toHaveProperty("supportsChannelFeatures");
     expect(buildTeamsAppManifest({ ...options, groupChats: true })).not.toHaveProperty(
@@ -92,8 +92,8 @@ describe("Teams app package", () => {
       buildTeamsAppManifest({ ...options, groupChats: true, conversationContext: true })
         .authorization?.permissions.resourceSpecific,
     ).toEqual([{ name: "ChatMessage.Read.Chat", type: "Application" }]);
-    expect(buildTeamsAppManifest({ ...options, conversationContext: true })).not.toHaveProperty(
-      "authorization",
+    expect(() => buildTeamsAppManifest({ ...options, conversationContext: true })).toThrow(
+      "needs channels or groupChats",
     );
 
     const fromEnv = teamsManifestOptionsFromEnv({
@@ -104,13 +104,24 @@ describe("Teams app package", () => {
       OPENGENI_TEAMS_PRIVACY_URL: options.privacyUrl,
       OPENGENI_TEAMS_TERMS_URL: options.termsOfUseUrl,
       OPENGENI_TEAMS_APP_CHANNELS: "true",
-      OPENGENI_TEAMS_APP_CONVERSATION_CONTEXT: "true",
+      OPENGENI_TEAMS_APP_CONVERSATION_CONTEXT: "1",
     });
     expect([fromEnv.channels, fromEnv.groupChats, fromEnv.conversationContext]).toEqual([
       true,
       false,
       true,
     ]);
+    expect(() =>
+      teamsManifestOptionsFromEnv({
+        OPENGENI_TEAMS_APP_ID: options.appId,
+        OPENGENI_TEAMS_BOT_CLIENT_ID: options.botId,
+        OPENGENI_PUBLIC_BASE_URL: options.publicBaseUrl,
+        OPENGENI_TEAMS_WEBSITE_URL: options.websiteUrl,
+        OPENGENI_TEAMS_PRIVACY_URL: options.privacyUrl,
+        OPENGENI_TEAMS_TERMS_URL: options.termsOfUseUrl,
+        OPENGENI_TEAMS_APP_CHANNELS: "yes",
+      }),
+    ).toThrow("OPENGENI_TEAMS_APP_CHANNELS must be true or false");
   });
 
   test("requires explicit legal URLs and never serializes runtime secrets", () => {

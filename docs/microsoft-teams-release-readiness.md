@@ -373,26 +373,35 @@ as a Slack thread mention does. Teams delivers those messages to the bot only
 when the installed package carries resource-specific consent: generate it with
 `OPENGENI_TEAMS_APP_CONVERSATION_CONTEXT=true` (see
 [Generate a package](#generate-a-package)), publish it as a new package version,
-and update the app where it is installed. The installer consents to the RSC
-permissions when adding or updating the app. With an older package nothing
-changes: only the mention itself is visible.
+and update the app in each team where it is installed. Microsoft enables
+all-message delivery in a group chat only after the app is installed into that
+chat again, so remove and re-add it in existing group chats. The installer
+consents to the RSC permissions when adding or updating the app. With an older
+package nothing changes: only the mention itself is visible.
 
 - Every human message Teams delivers in an approved channel or group chat of an
   active installation is kept in `teams_bot_context_messages`: plain text (at
   most 4,000 characters), sender name and Entra object ID, time, thread root and
-  whether it mentioned Opengeni. Attachments are noted, never fetched. Personal
+  whether it was a mention Opengeni accepted. Attachments are noted, never
+  fetched. Teams edits replace the kept text and deletions remove it. Personal
   chats, bots and unapproved conversations are never kept. What starts work is
   unchanged: only a fresh, explicit mention does.
 - The window is bounded: the newest 100 messages per channel thread or group
-  chat, for seven days. Disconnecting the installation deletes all of them.
+  chat, for seven days. Reads ignore older rows; they are deleted as new messages
+  are recorded in the workspace, and all of them when the installation is
+  disconnected. When someone is added to a group chat, its kept messages are
+  deleted, so a newcomer never gets answers built from history Teams did not
+  show them.
+- Context attached to a mention becomes part of that Opengeni chat and stays
+  with the chat's history, like the mention itself.
 - A mention that starts a chat gets up to 30 earlier messages of its thread or
   group chat, oldest to newest, within an 8,000-character budget. A new channel
   post that mentions Opengeni gets up to five earlier channel posts instead. A
   later mention that continues the same chat gets only what was posted since the
-  previous mention. The context is attached to that one user message as model
+  previous accepted mention. The context is attached to that one user message as model
   context, labelled as other people's messages and not instructions.
-- Opengeni's own replies, later edits, deleted messages and file contents are
-  not included. A failed context read never blocks the mention.
+- Opengeni's own replies and file contents are not included. A failed context
+  read never blocks the mention.
 - A channel thread is identified by the root post in the conversation ID
   (`;messageid=<root>`), because Teams can omit `replyToId` on replies. A later
   mention anywhere in the thread continues the same chat.

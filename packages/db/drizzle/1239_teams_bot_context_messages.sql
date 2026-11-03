@@ -14,8 +14,10 @@
 -- * conversation_id is the group chat or channel id without its
 --   ";messageid=" thread suffix; thread_id is the channel thread's root post
 --   id, or '' in a group chat.
--- * mentioned marks a message that mentioned Opengeni: a reader walking back
---   from a mention stops at the previous one.
+-- * mentioned marks a mention Opengeni accepted: a reader walking back from
+--   a mention that continues the same chat stops at the previous one.
+-- * Teams edits replace text and deletions remove the row; a new member in a
+--   group chat clears that chat's rows.
 --
 -- Only a new table, so an older binary keeps working unchanged and never
 -- reads or writes it.
@@ -51,6 +53,10 @@ CREATE TABLE teams_bot_context_messages (
 
 CREATE INDEX teams_bot_context_messages_thread_idx
   ON teams_bot_context_messages (workspace_id, conversation_id, thread_id, occurred_at DESC);
+-- A new channel post that mentions Opengeni reads the channel's root posts.
+CREATE INDEX teams_bot_context_messages_root_post_idx
+  ON teams_bot_context_messages (workspace_id, conversation_id, occurred_at DESC)
+  WHERE thread_id = message_id;
 CREATE INDEX teams_bot_context_messages_created_idx
   ON teams_bot_context_messages (workspace_id, created_at);
 

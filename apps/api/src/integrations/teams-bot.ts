@@ -28,6 +28,7 @@ import {
   resolveNamedManagedPersonalWorkspaceGrant,
   getTeamsInstallation,
   invalidateTeamsGroup,
+  clearTeamsContextConversation,
   teamsGroupRouteActive,
   type TeamsGroupAudience,
   getWorkspaceTeamsInstallation,
@@ -60,6 +61,7 @@ import {
   teamsTenantEnabled,
   teamsServiceUrl,
   normalizeTeamsMessage,
+  teamsConversationBaseId,
   teamsRouteId,
   mintTeamsProof,
   verifyTeamsProof,
@@ -67,7 +69,9 @@ import {
 } from "./teams-protocol";
 import {
   loadTeamsMentionModelContext,
+  markTeamsContextMention,
   recordTeamsContext,
+  reviseTeamsContext,
   teamsSharedConversationAllowed,
 } from "./teams-context";
 
@@ -297,19 +301,44 @@ async function runtime(deps: ApiRouteDeps): Promise<App> {
         );
         if (change) {
           const installation = await getTeamsInstallation(deps.db, change.tenantId);
-          if (installation?.active)
+          if (installation?.active) {
             await invalidateTeamsGroup(deps.db, installation, change.conversationId);
+            // Someone added to the chat must not get answers built from
+            // messages Teams did not show them.
+            const added = (body as { membersAdded?: unknown[] } | null)?.membersAdded;
+            if (Array.isArray(added) && added.length)
+              await clearTeamsContextConversation(
+                deps.db,
+                installation,
+                teamsConversationBaseId(change.conversationId),
+              );
+          }
+          return { status: 200 };
+        }
+        // Edits and deletions update recorded context; they never start work.
+        try {
+          if (await reviseTeamsContext(deps, body)) {
+            observed("context_revised");
+            return { status: 200 };
+          }
+        } catch {
+          observed("context_revise_failed");
           return { status: 200 };
         }
         // Every human message in an approved channel or group chat is kept as
         // bounded context for the next mention there. Only a mention below
         // starts work; a failed write never blocks it.
+        let recorded = false;
         try {
-          if (await recordTeamsContext(deps, body)) observed("context_recorded");
+          recorded = await recordTeamsContext(deps, body);
+          if (recorded) observed("context_recorded");
         } catch {
           observed("context_record_failed");
         }
         const m = normalizeTeamsMessage(body, (diagnostic) => {
+          // With resource-specific consent most recorded messages carry no
+          // mention: that is expected, not worth a log line each.
+          if (recorded && diagnostic.reason === "missing_mention") return;
           deps.observability?.info("Teams authenticated activity ignored", { ...diagnostic });
         });
         if (!m) return { status: 200 };
@@ -391,6 +420,13 @@ async function runtime(deps: ApiRouteDeps): Promise<App> {
           eventId: `${m.identity}:${i.generation}`,
           payload: m,
         });
+        if (recorded) {
+          try {
+            await markTeamsContextMention(deps, i, m);
+          } catch {
+            observed("context_mention_mark_failed");
+          }
+        }
         return { status: 200 };
       };
       return app;
