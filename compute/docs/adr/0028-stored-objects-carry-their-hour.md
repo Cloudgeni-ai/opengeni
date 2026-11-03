@@ -47,6 +47,14 @@ before it began, whatever the period's length.
   it checks an upload. When the earlier object is gone (a sweep took it),
   the copy does not check, or the store cannot copy, it uploads as before.
   The copy is a write of this hour's name, so the rule above covers it.
+- **An archive in flight carries what it stored into each new hour.** It
+  holds every chunk it stored and has not published, by its latest name.
+  Each time an hour begins by its clock, and when a try starts, it copies
+  each one still named for an earlier hour into the new hour, the same
+  way and with the same check. It holds them across its tries until one
+  publishes, or for an hour once no try runs. A chunk it stored this hour
+  is checked, not sent again. The fence is unchanged: every sweep still
+  stops every archive in flight, and the try after it publishes.
 
 ## Consequences
 
@@ -61,17 +69,26 @@ before it began, whatever the period's length.
   where they were once per day. What an archive reuses of the copy before
   it, or of its image, is unaffected.
 - Each sweep fences every pointer, so an archive in flight across a sweep
-  starts again once an hour instead of once a day. Started again, it
-  copies what it stored in an earlier hour and uploads only what a sweep
-  took meanwhile: one copy request per chunk carried across an hour, and
-  on S3 and Azure a read of it to check it (GCS checks it by its
-  checksums). A store with no copy uploads it again. Remembering the
-  chunks costs up to about 20 MB a host.
-- That keeps up only so far. The archive copies a chunk when it reaches
-  it, so what it uploads again first delays the rest; past about two
-  hours of uploads in one try, a sweep has taken those too by then, and
-  the archive never publishes. With a daily sweep that limit was about a
-  day.
+  starts again once an hour instead of once a day. No sweep takes what it
+  stored. A sweep deletes an hour's objects only once the hour ended an
+  hour before, and by then the archive has carried them into a later
+  hour. The try after the fence finds them and uploads nothing again, so
+  an archive of any length publishes. Nothing in this rests on new
+  reasoning: a carried copy is a write of the writer's current hour, the
+  next try reuses only names of its own current hour, and the fence still
+  stops every try a sweep crossed.
+- The cost is one copy request per unpublished chunk per hour, plus a
+  check of the copy. GCS checks it by its checksums; on S3 and Azure the
+  check reads it back. The next try checks each chunk it finds, again a
+  read on S3 and Azure, instead of sending it. A store with no copy
+  uploads the chunk again. An archive held up for hours keeps copying
+  every hour. Every carried copy leaves the earlier one for the sweep.
+  Remembering the chunks costs up to about 20 MB a host. Holding them
+  costs about what the archive's own references to them cost.
+- Carrying starts as the hour begins by the writer's clock. The sweep may
+  take a chunk once that hour ended an hour before by its own clock. So
+  the slack is `CLOCK_SKEW` less the clocks' disagreement, a full hour in
+  a fleet. A chunk carried too late is uploaded again by the next try.
 - Any two clocks must stay within `CLOCK_SKEW` of each other, where a
   day's margin hid a disagreement of two hours. In a fleet every host and
   sweep reads the database's clock.

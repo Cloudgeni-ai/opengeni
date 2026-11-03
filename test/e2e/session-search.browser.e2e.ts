@@ -1402,9 +1402,9 @@ function commandMenu(page: Page): Locator {
 }
 
 async function expectCommandMenuFocused(page: Page): Promise<void> {
+  // "Search chats, Sites and actions", with meetings where the app has Meetings.
   const input = commandMenu(page).getByRole("combobox", {
-    name: "Search chats, Sites and actions",
-    exact: true,
+    name: /^Search chats, Sites(,| and) (meetings and )?actions$/,
   });
   await input.waitFor();
   expect(await input.evaluate((element) => element === document.activeElement)).toBe(true);

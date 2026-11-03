@@ -7261,6 +7261,9 @@ async function deliverSlackSessionEvents(
   };
   let lastSequence = interaction.lastDeliveredSessionEventSequence;
   let terminal: Exclude<SlackInteraction["terminalDeliveryState"], "open"> | null = null;
+  // At most one stop notice per delivery pass: a single cancel can sweep up
+  // the running turn and every queued one.
+  let stopNoticeHandled = false;
   const orderedEvents = page.events
     .filter(
       (event) =>
@@ -7651,14 +7654,26 @@ async function deliverSlackSessionEvents(
       );
       terminal = "failed";
     } else if (event.type === "turn.cancelled") {
+      terminal = "cancelled";
+      if (stopNoticeHandled || !(await slackStopNoticeWarranted(deps, interaction, event))) {
+        continue;
+      }
+      stopNoticeHandled = true;
       await postDelivery(
         client,
         interaction,
         event,
         `${requester.mention}Opengeni stopped this task.`,
         "cancelled",
+        // Keyed on the stopped turn, not the event, so a cancellation recorded
+        // or replayed more than once still posts one notice.
+        deterministicUuid(
+          slackPostSeed(
+            interaction,
+            `slack-delivery:${interaction.id}:turn:${event.turnId}:cancelled`,
+          ),
+        ),
       );
-      terminal = "cancelled";
     }
   }
   if (terminal) {
@@ -7695,6 +7710,51 @@ export function slackDeliveryTextsCoalesce(left: string, right: string): boolean
   if (!longer.startsWith(shorter)) return false;
   const boundary = longer.slice(shorter.length, shorter.length + 1);
   return boundary.length === 0 || /[\s.,;:!?()[\]{}\-–—]/u.test(boundary);
+}
+
+/**
+ * Whether a session control actor is Opengeni itself (an agent attempt or the
+ * system) rather than a person. People act under their own subject from the
+ * app, the API or Slack. `service:` ids are free text that an outside
+ * integration can choose, so they count as people too: any unknown or
+ * unprefixed actor does, and a doubtful stop stays silent.
+ */
+export function slackControlActorIsOpengeni(actor: string | null): boolean {
+  return (
+    actor !== null &&
+    (actor.startsWith("attempt:") || actor.startsWith("system:") || actor.startsWith("opengeni:"))
+  );
+}
+
+/**
+ * Whether a cancelled turn earns the thread "Opengeni stopped this task."
+ *
+ * The notice tells someone waiting in Slack that their running task ended
+ * without them, so it is posted only for the turn that was running
+ * (`turnAssociation: "current"`). Cancelling a session also cancels each queued
+ * turn, and an idle or stopped chat has no running turn, so those never post.
+ * It is not posted when a person paused or cancelled the work (archiving it,
+ * stopping it in the app, through the API or from Slack) either: they already
+ * know.
+ *
+ * Who stopped it is read from the session's control state when the event is
+ * delivered, not when it was cancelled. A late delivery that finds a person's
+ * pause or cancel recorded since then stays silent, which errs toward the
+ * unsolicited post not happening.
+ */
+async function slackStopNoticeWarranted(
+  deps: ApiRouteDeps,
+  interaction: SlackInteraction,
+  event: SessionEvent,
+): Promise<boolean> {
+  if (event.turnAssociation !== "current" || !event.turnId || !interaction.sessionId) {
+    return false;
+  }
+  const session = await getSession(deps.db, interaction.workspaceId, interaction.sessionId);
+  if (!session) return false;
+  return session.effectiveControl.blockers.every((blocker) =>
+    slackControlActorIsOpengeni(blocker.actor),
+  );
 }
 
 function slackTerminalProgressSameTurn(

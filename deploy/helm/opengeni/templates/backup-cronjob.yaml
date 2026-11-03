@@ -1,6 +1,6 @@
 {{- if .Values.backup.enabled }}
-{{- $secret := required "backup.existingSecret is required (config.json, pg_service.conf, rclone.conf, age.key)" .Values.backup.existingSecret }}
-{{- $claim := required "backup.existingClaim is required for the persistent backup lock/checkpoint and encrypted scratch" .Values.backup.existingClaim }}
+{{- $secret := required "backup.existingSecret is required (config.json, pg_service.conf, restic-password, optional restic.env)" .Values.backup.existingSecret }}
+{{- $claim := required "backup.existingClaim is required for the persistent backup lock and restic cache" .Values.backup.existingClaim }}
 {{- $_ := required "backup.image.digest must pin an independently published backup image" .Values.backup.image.digest }}
 {{- range $name, $schedule := dict "run" .Values.backup.schedule "check" .Values.backup.checkSchedule }}
 ---
@@ -46,8 +46,6 @@ spec:
               env:
                 - name: PGSERVICEFILE
                   value: /etc/opengeni-backup/pg_service.conf
-                - name: RCLONE_CONFIG
-                  value: /etc/opengeni-backup/rclone.conf
                 - name: XDG_CACHE_HOME
                   value: /var/lib/opengeni-backup/cache
                 - name: HOME

@@ -154,7 +154,7 @@ describe("session tenancy browser operation state", () => {
       reconcile: false,
     });
     expect(forkPoint("fork_point_boundary_not_retained").message).toContain(
-      "before the conversation was compacted",
+      "can't be matched to a point in the conversation",
     );
     expect(forkPoint("fork_point_unfinished_tool_exchange").message).toContain("tool result");
     expect(forkPoint("fork_point_new_future_reason").message).toContain("fork point");

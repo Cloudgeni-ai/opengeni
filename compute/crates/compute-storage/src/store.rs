@@ -44,6 +44,8 @@ pub const MAX_POINTER_BYTES: usize = 64 * 1024;
 mod carried;
 mod pointers;
 
+pub use carried::{Held, Kept};
+
 #[cfg(test)]
 pub(crate) use crate::pointer_store::unstamped;
 pub use pointers::{Begun, Publication, Rewrite, Stock};
@@ -102,6 +104,9 @@ pub struct ChunkStore {
     /// The chunks this store (and its clones) stored, by the period they
     /// were stored in: what a later period's write copies.
     stored: Arc<Mutex<carried::Stored>>,
+    /// The archive this store stores chunks for, if any, which holds every
+    /// chunk it stores until it publishes ([`Self::holding`]).
+    held: Option<Arc<Held>>,
 }
 
 /// How long a read of a chunk or manifest keeps trying while the store
@@ -185,6 +190,7 @@ impl ChunkStore {
             watch: None,
             settle: Duration::ZERO,
             stored: remembering(carried::REMEMBERED),
+            held: None,
         }
     }
 
@@ -243,6 +249,17 @@ impl ChunkStore {
         }
     }
 
+    /// The same store holding every chunk it stores in `held`, so that
+    /// [`Self::keeping`] carries it into each new hour until the archive
+    /// `held` is for publishes.
+    #[must_use]
+    pub fn holding(self, held: Arc<Held>) -> Self {
+        Self {
+            held: Some(held),
+            ..self
+        }
+    }
+
     #[must_use]
     pub fn now(&self) -> SystemTime {
         self.clock.now()
@@ -273,6 +290,7 @@ impl ChunkStore {
             watch: None,
             settle: Duration::ZERO,
             stored: remembering(carried::REMEMBERED),
+            held: None,
         }
     }
 
@@ -374,6 +392,7 @@ impl ChunkStore {
             watch: None,
             settle: SETTLE,
             stored: remembering(carried::REMEMBERED),
+            held: None,
         }))
     }
 
@@ -392,7 +411,8 @@ impl ChunkStore {
     /// reuses of an earlier copy it names by that copy's references. One
     /// this store stored itself in an earlier period, as an archive a
     /// sweep's fence stopped did, is copied within the store rather than
-    /// uploaded again, when it is still there and the store can copy.
+    /// uploaded again, when it is still there and the store can copy; one
+    /// it stored this period is checked rather than sent again.
     pub async fn put_chunk(&self, chunk: &EncodedChunk) -> Result<Put> {
         // Public structs may have been modified since encoding.
         decode(&chunk.reference, &chunk.bytes)?;
@@ -406,65 +426,82 @@ impl ChunkStore {
         }
         let period = period_of(self.clock.now());
         let reference = chunk.reference.on_day(period);
-        let bytes = Bytes::copy_from_slice(&chunk.bytes);
-        let earlier = self.stored().earlier(&chunk.reference, period);
-        if let Some(earlier) = earlier {
+        let stored = self.stored().period(&chunk.reference);
+        let mut put = None;
+        if stored == Some(period) && self.has_chunk(&reference).await? {
+            // Stored this period by this store, as what an archive keeps
+            // is: no sweep deletes it before the period has ended.
+            put = Some(Put {
+                reference: reference.clone(),
+                new: false,
+                copied: false,
+            });
+        } else if let Some(earlier) = stored.filter(|stored| *stored < period) {
             let from = chunk.reference.on_day(earlier).key();
-            if let Some(copied) = self.carry(&from, &reference.key(), &bytes).await? {
+            if let Some(copied) = self.carry(&from, &reference).await? {
                 if copied {
                     self.stored().remember(&chunk.reference, period);
                 }
-                return Ok(Put {
-                    reference,
+                put = Some(Put {
+                    reference: reference.clone(),
                     new: copied,
                     copied,
                 });
             }
         }
-        let new = self.put_immutable(&reference.key(), bytes).await?;
-        if new {
-            self.stored().remember(&chunk.reference, period);
+        let put = if let Some(put) = put {
+            put
+        } else {
+            let bytes = Bytes::copy_from_slice(&chunk.bytes);
+            let new = self.put_immutable(&reference.key(), bytes).await?;
+            if new {
+                self.stored().remember(&chunk.reference, period);
+            }
+            Put {
+                reference,
+                new,
+                copied: false,
+            }
+        };
+        if let Some(held) = &self.held {
+            held.hold(&put.reference);
         }
-        Ok(Put {
-            reference,
-            new,
-            copied: false,
-        })
+        Ok(put)
     }
 
     fn stored(&self) -> std::sync::MutexGuard<'_, carried::Stored> {
         self.stored.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Writes under `to` the bytes `bytes` this store stored under `from`
-    /// in an earlier period, by a copy within the store, and checks them as
-    /// [`Self::put_immutable`] does. `Some(true)` when it copied them,
-    /// `Some(false)` when another write stored them under `to` already, and
+    /// Writes the chunk `to` names, which this store stored under `from` in
+    /// an earlier period, by a copy within the store, and checks it as
+    /// [`Self::has_chunk`] does. `Some(true)` when it copied it,
+    /// `Some(false)` when another write stored it under `to` already, and
     /// `None` when it could not: `from` is gone (a sweep took it), the store
-    /// does not copy, or what is under `to` is not those bytes. The caller
-    /// then stores them as it would have.
-    async fn carry(&self, from: &str, to: &str, bytes: &Bytes) -> Result<Option<bool>> {
-        let (from, to) = (self.path(from), self.path(to));
-        match self.backend.copy_if_not_exists(&from, &to).await {
+    /// does not copy, or what is under `to` is not that chunk. The caller
+    /// then stores it as it would have.
+    async fn carry(&self, from: &str, to: &ChunkRef) -> Result<Option<bool>> {
+        let (from, path) = (self.path(from), self.path(&to.key()));
+        match self.backend.copy_if_not_exists(&from, &path).await {
             Ok(()) => {}
             Err(object_store::Error::AlreadyExists { .. }) => {
-                return Ok(self.holds(&to, bytes).await?.then_some(false));
+                return Ok(self.has_chunk(to).await?.then_some(false));
             }
             Err(object_store::Error::NotSupported { .. } | object_store::Error::NotImplemented) => {
                 // S3 and most stores like it (Garage) copy with no
                 // condition, over whatever is there. Look first; a write of
                 // the same bytes landing between the look and the copy is
                 // replaced by the same bytes, which the name allows.
-                if self.holds(&to, bytes).await? {
+                if self.has_chunk(to).await? {
                     return Ok(Some(false));
                 }
-                if self.backend.copy(&from, &to).await.is_err() {
+                if self.backend.copy(&from, &path).await.is_err() {
                     return Ok(None);
                 }
             }
             Err(_) => return Ok(None),
         }
-        Ok(self.holds(&to, bytes).await?.then_some(true))
+        Ok(self.has_chunk(to).await?.then_some(true))
     }
 
     /// Writes `bytes` under `key`, a name that allows no other bytes,
