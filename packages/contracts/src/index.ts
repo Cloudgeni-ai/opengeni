@@ -6,6 +6,7 @@ import {
   workspaceControlUtf8Bytes,
 } from "./workspace-control-event";
 export * from "./workspace-control-event";
+export * from "./billing-auto-top-up";
 export * from "./secret-value";
 export * from "./claude-cite-tags";
 export * from "./integration-capability-id";

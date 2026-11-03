@@ -1931,6 +1931,9 @@ export const FORCE_RLS_TABLES = [
   "automation_trigger_events",
   "automation_trigger_revisions",
   "automation_triggers",
+  "billing_auto_top_up_mutations",
+  "billing_auto_top_up_operations",
+  "billing_auto_top_up_settings",
   "billing_credit_alert_settings",
   "billing_credit_notification_deliveries",
   "billing_credit_notification_recipients",
@@ -2847,6 +2850,7 @@ export const RUNTIME_READ_UPDATE_TABLES = ["workspace_session_activity_revisions
 
 /** Append-only evidence/revision tables are insertable and queryable, never mutable. */
 export const RUNTIME_READ_INSERT_TABLES = [
+  "billing_auto_top_up_mutations",
   "browser_revision_components",
   "browser_revisions",
   "company_profile_revisions",
@@ -2915,6 +2919,8 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "attached_browser_devices",
   "attached_browser_inventories",
   "auth_runs",
+  "billing_auto_top_up_operations",
+  "billing_auto_top_up_settings",
   "browser_identities",
   "browser_session_retained_downloads",
   "browser_sessions",

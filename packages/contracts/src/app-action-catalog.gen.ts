@@ -921,6 +921,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "createBillingAutoTopUpSetupSession",
+    "method": "POST",
+    "path": "/v1/billing/auto-top-up/setup",
+    "request": [
+      "CreateBillingAutoTopUpSetupSessionRequest"
+    ],
+    "response": [
+      "CreateBillingAutoTopUpSetupSessionResponse"
+    ]
+  },
+  {
     "id": "createBillingCheckout",
     "method": "POST",
     "path": "/v1/billing/checkout",
@@ -3120,6 +3131,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "BillingAlertSettings"
+    ]
+  },
+  {
+    "id": "getBillingAutoTopUp",
+    "method": "GET",
+    "path": "/v1/billing/auto-top-up",
+    "request": [],
+    "query": [
+      "accountId"
+    ],
+    "response": [
+      "BillingAutoTopUpSettings"
     ]
   },
   {
@@ -9528,6 +9551,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "BillingAlertSettings"
+    ]
+  },
+  {
+    "id": "updateBillingAutoTopUp",
+    "method": "PUT",
+    "path": "/v1/billing/auto-top-up",
+    "request": [
+      "UpdateBillingAutoTopUpRequest"
+    ],
+    "response": [
+      "BillingAutoTopUpSettings"
     ]
   },
   {

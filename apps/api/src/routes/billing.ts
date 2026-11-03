@@ -59,8 +59,13 @@ import { StripeSubscriptions, subscriptionWebhookEvent } from "../billing-subscr
 import { serializedStripeCustomer } from "../billing-stripe-customer";
 import { parseRequestBody, parseRequestQuery } from "../http/request-body";
 import { errorMessage } from "@opengeni/contracts/values";
+import {
+  createBillingAutoTopUpService,
+  registerBillingAutoTopUpRoutes,
+} from "./billing-auto-top-up";
 
 export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
+  registerBillingAutoTopUpRoutes(app, deps);
   registerSubscriptionRoutes(app, deps);
   app.get("/v1/billing/alerts", async (c) => {
     const context = await requireAccessContext(c, deps);
@@ -650,7 +655,7 @@ export function stripeBillingPortalSessionCreateParams(input: {
   };
 }
 
-function checkoutReturnUrl(
+export function checkoutReturnUrl(
   publicBaseUrl: string | undefined,
   webBaseUrl: string | undefined,
   candidate: string | undefined,
@@ -677,7 +682,7 @@ function checkoutReturnUrl(
   return parsed.toString();
 }
 
-async function handleStripeWebhookEvent(
+export async function handleStripeWebhookEvent(
   deps: ApiRouteDeps,
   stripe: Stripe,
   event: Stripe.Event,
@@ -689,16 +694,30 @@ async function handleStripeWebhookEvent(
   switch (event.type) {
     case "checkout.session.completed":
     case "checkout.session.async_payment_succeeded":
+      if (
+        await createBillingAutoTopUpService(deps, stripe).handleSetup(
+          event.data.object as Stripe.Checkout.Session,
+        )
+      )
+        return;
       await handleCheckoutSessionPayment(deps, event);
       return;
     case "checkout.session.async_payment_failed":
       // A delayed payment method failed. Completion reported it `unpaid`, so
       // no credit was granted and there is nothing to reverse.
       return;
-    case "checkout.session.expired":
     case "payment_intent.succeeded":
     case "payment_intent.payment_failed":
     case "payment_intent.canceled":
+      if (
+        await createBillingAutoTopUpService(deps, stripe).handlePaymentIntent(
+          event.data.object as Stripe.PaymentIntent,
+        )
+      )
+        return;
+      await mirrorPaymentIntentCustomer(deps, event);
+      return;
+    case "checkout.session.expired":
       await mirrorPaymentIntentCustomer(deps, event);
       return;
     case "charge.refunded":
@@ -1112,7 +1131,8 @@ async function creditAdjustmentMicros(
   const entry = await getCreditLedgerEntry(deps.db, credit.accountId, credit.idempotencyKey);
   const paidCents = entry?.metadata.stripeAmountTotalCents;
   if (
-    entry?.sourceType !== "stripe_checkout_session" ||
+    (entry?.sourceType !== "stripe_checkout_session" &&
+      entry?.sourceType !== "stripe_auto_top_up") ||
     entry.amountMicros !== credit.amountMicros ||
     typeof paidCents !== "number" ||
     !Number.isSafeInteger(paidCents) ||
@@ -1230,7 +1250,7 @@ function creditMetadata(
   };
 }
 
-async function getOrCreateStripeCustomer(
+export async function getOrCreateStripeCustomer(
   deps: ApiRouteDeps,
   stripe: Stripe,
   context: AccessContext,
@@ -1317,7 +1337,7 @@ export function requireSelectedAccount(
   return accountId;
 }
 
-function stripeClient(deps: ApiRouteDeps): Stripe {
+export function stripeClient(deps: ApiRouteDeps): Stripe {
   if (!deps.settings.stripeSecretKey) {
     throw new HTTPException(500, { message: "Stripe secret key is not configured" });
   }
