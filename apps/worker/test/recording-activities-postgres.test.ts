@@ -711,9 +711,11 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     expect(preparedAtCall).toEqual([2, 2]);
     const prepared = [...storage.objects.keys()].filter((key) => key.includes("/prepared/"));
     expect(prepared.sort()).toEqual([
-      `workspaces/${recording.actor.workspaceId}/recordings/${recording.input.recordingId}/prepared/track-0.timeline.webm`,
-      `workspaces/${recording.actor.workspaceId}/recordings/${recording.input.recordingId}/prepared/track-1.timeline.webm`,
+      `workspaces/${recording.actor.workspaceId}/recordings/${recording.input.recordingId}/prepared/track-0.opus16.m4a`,
+      `workspaces/${recording.actor.workspaceId}/recordings/${recording.input.recordingId}/prepared/track-1.opus16.m4a`,
     ]);
+    // The kept files hold the meeting: the uploaded pieces are gone.
+    expect([...storage.objects.keys()].filter((key) => !key.includes("/prepared/"))).toEqual([]);
     const stored = await getRecording(client.db, {
       ...recording.actor,
       recordingId: recording.input.recordingId,
@@ -744,17 +746,17 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       source: "track",
     });
 
-    // A file prepared under the old name (before tracks kept their timeline)
-    // is built again, and the old file is removed.
+    // A file kept under an older name is written again in the kept format
+    // from itself, its pieces being gone, and the old file is removed.
     const prefix = `workspaces/${recording.actor.workspaceId}/recordings/${recording.input.recordingId}/prepared/`;
-    const current = storage.objects.get(`${prefix}track-1.timeline.webm`)!;
-    storage.objects.delete(`${prefix}track-1.timeline.webm`);
-    storage.objects.set(`${prefix}track-1.webm`, current);
+    const current = storage.objects.get(`${prefix}track-1.opus16.m4a`)!;
+    storage.objects.delete(`${prefix}track-1.opus16.m4a`);
+    storage.objects.set(`${prefix}track-1.timeline.m4a`, current);
     await setRecordingTrackPrepared(client.db, {
       ...recording.actor,
       recordingId: recording.input.recordingId,
       trackNumber: 1,
-      objectKey: `${prefix}track-1.webm`,
+      objectKey: `${prefix}track-1.timeline.m4a`,
       bytes: current.bytes.byteLength,
       durationMilliseconds: 2_000,
     });
@@ -773,8 +775,8 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       }),
     ).toEqual({ outcome: "complete" });
     expect([...storage.objects.keys()].filter((key) => key.startsWith(prefix)).sort()).toEqual([
-      `${prefix}track-0.timeline.webm`,
-      `${prefix}track-1.timeline.webm`,
+      `${prefix}track-0.opus16.m4a`,
+      `${prefix}track-1.opus16.m4a`,
     ]);
 
     // A re-run reuses the prepared audio rather than rebuilding it.
@@ -785,9 +787,6 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       versionId: second,
       transcription: { providerId: "elevenlabs", model: "scribe_v2", options: {} },
     });
-    for (const key of storage.objects.keys()) {
-      if (!key.includes("/prepared/")) storage.objects.delete(key);
-    }
     expect(
       await run.transcribeRecordingVersion({
         ...recording.input,
@@ -1036,7 +1035,7 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     expect(
       await activities(storage, provider, "key", ours).activities.transcribeRecordingVersion(first),
     ).toEqual({ outcome: "complete" });
-    expect(diarized.sort()).toEqual(["track-0.webm", "track-1.webm"]);
+    expect(diarized.sort()).toEqual(["track-0.m4a", "track-1.m4a"]);
     const mine = await page(first.versionId);
     expect(mine.version.diarization).toBe("ours");
     expect(mine.segments.map((segment) => [segment.speakerLabel, segment.text])).toEqual([
@@ -1089,7 +1088,7 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
         processingOwner: fourth,
       }),
     ).toEqual({ outcome: "complete" });
-    expect(diarized.sort()).toEqual(["track-0.webm", "track-1.webm"]);
+    expect(diarized.sort()).toEqual(["track-0.m4a", "track-1.m4a"]);
     expect(await stored(fourth)).toEqual([
       { label: "speaker_0", channel: "call", model: "test-voices" },
       { label: "speaker_1", channel: "call", model: "test-voices" },
@@ -1125,7 +1124,7 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     const ours: RecordingDiarizer = {
       id: "test",
       diarize: async (audio) =>
-        audio.fileName === "track-0.webm"
+        audio.fileName === "track-0.m4a"
           ? {
               turns: [
                 { startMilliseconds: 0, endMilliseconds: 400, speaker: "A" },
@@ -1247,7 +1246,7 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     const ours: RecordingDiarizer = {
       id: "test",
       diarize: async (audio) =>
-        audio.fileName === "track-0.webm"
+        audio.fileName === "track-0.m4a"
           ? {
               turns: [
                 { startMilliseconds: 0, endMilliseconds: 500, speaker: "A" },
@@ -1574,7 +1573,7 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       diarize: async (audio) => ({
         voiceModel: "test-voices",
         turns:
-          audio.fileName === "track-0.webm"
+          audio.fileName === "track-0.m4a"
             ? [{ startMilliseconds: 0, endMilliseconds: 2_000, speaker: "A" }]
             : [
                 { startMilliseconds: 0, endMilliseconds: 700, speaker: "A" },
@@ -1696,13 +1695,15 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       })),
     );
     await run.transcribeRecordingVersion(recording.input);
-    expect(storage.objects.size).toBe(6);
+    // One kept file per track; the uploaded pieces are already gone.
+    expect(storage.objects.size).toBe(2);
     expect(await run.deleteRecordingMedia(recording.input)).toEqual({ deleted: 0, purged: false });
     await markRecordingDeleting(client.db, {
       ...recording.actor,
       recordingId: recording.input.recordingId,
     });
-    // The six, and each audio track's speaker scan, which may still exist.
+    // Deleting a missing object succeeds, so the gone pieces count too, and
+    // so does each audio track's speaker scan, which may still exist.
     expect(await run.deleteRecordingMedia(recording.input)).toEqual({ deleted: 8, purged: true });
     expect(storage.objects.size).toBe(0);
     expect(await run.deleteRecordingMedia(recording.input)).toEqual({ deleted: 0, purged: false });
@@ -2073,6 +2074,95 @@ describe("stalled recording recovery", () => {
 
 // Last: it grants the EXECUTE 0946 withholds.
 describe.skipIf(!hasFfmpeg)("recording retention", () => {
+  test("the sweep brings a meeting kept the earlier way to one compact file per track", async () => {
+    if (!client || !shared) return;
+    const db = client.db;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(storage);
+    const pieces = new Map(storage.objects);
+    const { recordingId, workspaceId } = recording.input;
+    const { activities: run } = activities(
+      storage,
+      fakeProvider(async () => ({
+        languages: ["en"],
+        audioMilliseconds: 1_000,
+        diarized: false,
+        words: [],
+      })),
+    );
+    await run.transcribeRecordingVersion(recording.input);
+    // As an earlier worker left it: a `timeline` file with the pieces beside it.
+    const prefix = `workspaces/${workspaceId}/recordings/${recordingId}/prepared/`;
+    for (const trackNumber of [0, 1]) {
+      const kept = storage.objects.get(`${prefix}track-${trackNumber}.opus16.m4a`)!;
+      storage.objects.delete(`${prefix}track-${trackNumber}.opus16.m4a`);
+      storage.objects.set(`${prefix}track-${trackNumber}.timeline.webm`, kept);
+      await setRecordingTrackPrepared(db, {
+        ...recording.actor,
+        recordingId,
+        trackNumber,
+        objectKey: `${prefix}track-${trackNumber}.timeline.webm`,
+        bytes: kept.bytes.byteLength,
+        durationMilliseconds: 2_000,
+      });
+    }
+    for (const [key, value] of pieces) storage.objects.set(key, value);
+    await shared.admin`
+      UPDATE recording_tracks SET chunk_objects_deleted_at = NULL WHERE recording_id = ${recordingId}
+    `;
+    expect(storage.objects.size).toBe(6);
+
+    // Until a release grants the inventory (1239 withholds it), the sweep
+    // leaves existing meetings as they are.
+    expect((await run.applyRecordingRetention()).compaction).toMatchObject({
+      found: null,
+      compacted: 0,
+    });
+    expect(storage.objects.size).toBe(6);
+    await shared.admin`
+      GRANT EXECUTE ON FUNCTION opengeni_private.list_uncompacted_recording_tracks_v1(integer, text)
+        TO opengeni_app
+    `;
+    const swept = await run.applyRecordingRetention();
+    expect(swept.compaction).toMatchObject({
+      found: 2,
+      compacted: 2,
+      failed: 0,
+    });
+    expect(swept.compaction.bytesAfter).toBeGreaterThan(0);
+    expect([...storage.objects.keys()].sort()).toEqual([
+      `${prefix}track-0.opus16.m4a`,
+      `${prefix}track-1.opus16.m4a`,
+    ]);
+    expect((await getRecording(db, { ...recording.actor, recordingId })).tracks).toMatchObject([
+      { playable: true },
+      { playable: true },
+    ]);
+    // Done: the next sweep finds nothing, and a re-run hears the kept files.
+    expect((await run.applyRecordingRetention()).compaction).toMatchObject({
+      found: 0,
+    });
+    const again = crypto.randomUUID();
+    await createRecordingTranscriptVersion(db, {
+      ...recording.actor,
+      recordingId,
+      versionId: again,
+      transcription: {
+        providerId: "elevenlabs",
+        model: "scribe_v2",
+        options: {},
+      },
+    });
+    expect(
+      await run.transcribeRecordingVersion({
+        ...recording.input,
+        versionId: again,
+        processingOwner: again,
+      }),
+    ).toEqual({ outcome: "complete" });
+    expect(storage.objects.size).toBe(2);
+  });
+
   test("retention deletes old audio and keeps the transcript, then hands old meetings to deletion", async () => {
     if (!client || !shared) return;
     const db = client.db;
@@ -2089,7 +2179,7 @@ describe.skipIf(!hasFfmpeg)("recording retention", () => {
       })),
     );
     await transcribe.transcribeRecordingVersion(recording.input);
-    expect(storage.objects.size).toBe(6);
+    expect(storage.objects.size).toBe(2);
     await shared.admin`
       UPDATE recordings
       SET started_at = now() - interval '10 days', capture_ended_at = now() - interval '10 days'

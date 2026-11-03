@@ -1230,8 +1230,9 @@ export async function acquireSharedTestDatabase(
  * routines (1002), the secret history scrub's reader and cell writer (1091),
  * the agent call and native push v2 routines (1107), the lock-free external
  * identity read (1172), the organization vault list (1218), the names-only
- * member list (1211) and the organization machine and rig list (1224). Tests
- * that exercise them run as they will once they are granted.
+ * member list (1211), the organization machine and rig list (1224) and the
+ * inventory of meeting tracks not yet kept compact (1239). Tests that
+ * exercise them run as they will once they are granted.
  */
 export async function grantDeferredRuntimeAccess(
   admin: postgres.Sql,
@@ -1262,6 +1263,8 @@ export async function grantDeferredRuntimeAccess(
     GRANT EXECUTE ON FUNCTION opengeni_private.list_organization_member_names_v1(uuid)
       TO ${grantee};
     GRANT EXECUTE ON FUNCTION opengeni_private.list_organization_compute_v1(uuid, uuid, text)
+      TO ${grantee};
+    GRANT EXECUTE ON FUNCTION opengeni_private.list_uncompacted_recording_tracks_v1(integer, text)
       TO ${grantee};
   `);
 }

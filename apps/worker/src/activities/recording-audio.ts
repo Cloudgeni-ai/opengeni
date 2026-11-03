@@ -119,18 +119,52 @@ function startsRun(
   return Math.abs(chunk.startMilliseconds - expected) > ADTS_CONTINUITY_MILLISECONDS;
 }
 
-/** The prepared file's container, extension and MIME type for a source container. */
-export function preparedAudioFormat(container: RecordingAudioContainer): {
+export type PreparedAudioFormat = {
   extension: string;
   mimeType: string;
   muxer: string;
   codec: string;
-} {
+  /** Encoder arguments after the codec. */
+  encoderArgs: readonly string[];
+};
+
+/**
+ * How a meeting's audio is kept: one file per track, Opus at 16 kbit/s
+ * mono, tuned for speech. That is about 7 MB an hour, and speech models
+ * and our speaker models (which run at 16 kHz) hear it as well as the
+ * uploaded pieces. It is in MP4, which every browser and both phone
+ * platforms play and seek without loading the whole file.
+ */
+export const ARCHIVAL_AUDIO_FORMAT: PreparedAudioFormat = {
+  extension: "m4a",
+  mimeType: "audio/mp4",
+  muxer: "mp4",
+  codec: "libopus",
+  encoderArgs: ["-b:a", "16k", "-application", "voip", "-ac", "1", "-movflags", "+faststart"],
+};
+
+/**
+ * The prepared file's format for a source container when it is only used
+ * once and not kept (a dictation): the source's own codec, so the models
+ * that take it as it is still can.
+ */
+export function preparedAudioFormat(container: RecordingAudioContainer): PreparedAudioFormat {
   // MP4 (Safari) and ADTS (phones) sources are AAC; everything else is Opus.
-  // The prepared file keeps the source's codec.
   return container === "mp4" || container === "aac"
-    ? { extension: "m4a", mimeType: "audio/mp4", muxer: "ipod", codec: "aac" }
-    : { extension: "webm", mimeType: "audio/webm", muxer: "webm", codec: "libopus" };
+    ? {
+        extension: "m4a",
+        mimeType: "audio/mp4",
+        muxer: "ipod",
+        codec: "aac",
+        encoderArgs: ["-b:a", "64k"],
+      }
+    : {
+        extension: "webm",
+        mimeType: "audio/webm",
+        muxer: "webm",
+        codec: "libopus",
+        encoderArgs: ["-b:a", "32k"],
+      };
 }
 
 export class RecordingAudioError extends Error {
@@ -240,6 +274,8 @@ export async function prepareRecordingTrackAudio(input: {
   mimeType: string;
   readChunk: (chunk: RecordingAudioChunk) => Promise<Uint8Array | null>;
   ffmpegPath: string;
+  /** The file to write; defaults to the source's own codec (`preparedAudioFormat`). */
+  format?: PreparedAudioFormat | undefined;
   tempRoot?: string | undefined;
   signal?: AbortSignal | undefined;
   onProgress?: (() => void) | undefined;
@@ -248,7 +284,7 @@ export async function prepareRecordingTrackAudio(input: {
   if (!container) {
     throw new RecordingAudioError(`Unsupported audio type ${input.mimeType}`, "invalid_audio");
   }
-  const format = preparedAudioFormat(container);
+  const format = input.format ?? preparedAudioFormat(container);
   const ordered = [...input.chunks].sort((left, right) => left.chunkNumber - right.chunkNumber);
   if (ordered.length === 0)
     throw new RecordingAudioError("The track has no audio", "invalid_audio");
@@ -340,8 +376,7 @@ export async function prepareRecordingTrackAudio(input: {
           RECORDING_TIMELINE_FILTER,
           "-c:a",
           format.codec,
-          "-b:a",
-          format.codec === "aac" ? "64k" : "32k",
+          ...format.encoderArgs,
           "-f",
           format.muxer,
           output,
@@ -369,8 +404,7 @@ export async function prepareRecordingTrackAudio(input: {
           "[out]",
           "-c:a",
           format.codec,
-          "-b:a",
-          format.codec === "aac" ? "64k" : "32k",
+          ...format.encoderArgs,
           "-ac",
           "1",
           "-f",
@@ -401,6 +435,78 @@ export async function prepareRecordingTrackAudio(input: {
 
 /** Containers the worker can write for a model that needs a particular one. */
 export type RecordingPieceFormat = "flac" | "wav" | "webm" | "mp4";
+
+/**
+ * Write an already prepared track file again in another format, such as a
+ * kept meeting file made before meetings were kept as `ARCHIVAL_AUDIO_FORMAT`,
+ * once its uploaded pieces are gone. The file already starts at its place
+ * on the timeline, with its holes filled.
+ */
+export async function transcodeRecordingAudio(input: {
+  audio: { bytes: Uint8Array; extension: string };
+  format: PreparedAudioFormat;
+  ffmpegPath: string;
+  tempRoot?: string | undefined;
+  signal?: AbortSignal | undefined;
+}): Promise<{
+  bytes: Uint8Array;
+  mimeType: string;
+  extension: string;
+  durationMilliseconds: number | null;
+}> {
+  const directory = await mkdtemp(
+    join(input.tempRoot ?? tmpdir(), "opengeni-recording-transcode-"),
+  );
+  try {
+    const source = join(directory, `source.${input.audio.extension}`);
+    const output = join(directory, `transcoded.${input.format.extension}`);
+    const handle = await open(source, "wx", 0o600);
+    try {
+      await handle.write(input.audio.bytes);
+    } finally {
+      await handle.close();
+    }
+    const { stderr } = await runFfmpeg(
+      input.ffmpegPath,
+      [
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "info",
+        "-stats",
+        "-stats_period",
+        "30",
+        "-y",
+        "-i",
+        source,
+        "-vn",
+        "-map",
+        "0:a:0",
+        "-af",
+        RECORDING_TIMELINE_FILTER,
+        "-c:a",
+        input.format.codec,
+        ...input.format.encoderArgs,
+        "-f",
+        input.format.muxer,
+        output,
+      ],
+      input.signal,
+    );
+    const bytes = new Uint8Array(await readFile(output));
+    if (bytes.byteLength === 0) {
+      throw new RecordingAudioError("The transcoded audio is empty", "invalid_audio");
+    }
+    return {
+      bytes,
+      mimeType: input.format.mimeType,
+      extension: input.format.extension,
+      durationMilliseconds: ffmpegReportedMilliseconds(stderr),
+    };
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
 
 const PIECE_OUTPUT: Record<
   RecordingPieceFormat,

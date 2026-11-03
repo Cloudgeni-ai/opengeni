@@ -54,14 +54,16 @@ import {
   getWorkspace,
   listDeletingRecordingObjectKeys,
   listDueRecordingRetention,
+  listRecordingChunks,
   listRecordingTranscriptPieceResults,
   listStalledRecordingWork,
+  listUncompactedRecordingTracks,
   loadOrganizationModelProviderApiKey,
   loadWorkspaceProviderApiKey,
   markRecordingDeleting,
+  markRecordingTrackChunkObjectsDeleted,
   memberVoiceprints,
   purgeDeletingRecording,
-  listRecordingChunks,
   recordingPreparedTrackObjectKey,
   recordingSpeakerScanObjectKey,
   RecordingNotFoundError,
@@ -99,6 +101,7 @@ import {
   type RecordingProcessingReport,
 } from "./recording-usage";
 import {
+  ARCHIVAL_AUDIO_FORMAT,
   detectRecordingSound,
   prepareRecordingTrackAudio,
   preparedAudioFormat,
@@ -106,6 +109,7 @@ import {
   RecordingAudioError,
   RECORDING_PIECE_BYTES_PER_SECOND,
   renderRecordingAudioPiece,
+  transcodeRecordingAudio,
   type RecordingPieceFormat,
 } from "./recording-audio";
 import { mapConcurrently } from "./concurrently";
@@ -181,11 +185,19 @@ export function recordingTranscriptBudgetMilliseconds(audioMilliseconds: number)
 }
 
 /**
- * Names this worker's prepared track files (`track-1.timeline.webm`). Bump it
- * when the preparation changes what a model or the player hears, so files
- * made the old way are built again instead of reused.
+ * Names a meeting's kept track files (`track-1.opus16.m4a`). Bump it when
+ * the preparation changes what a model or the player hears, so files made
+ * the old way are built again instead of reused: from the uploaded pieces
+ * while they are kept, else from the old file. Files made before meetings
+ * were kept compact are named `timeline`.
  */
-const PREPARED_AUDIO_REVISION = "timeline";
+const KEPT_AUDIO_REVISION = "opus16";
+/** Revisions whose files are on the recording's timeline, with its holes filled. */
+const TIMELINE_KEPT_REVISIONS = ["timeline", KEPT_AUDIO_REVISION] as const;
+/** How a kept track file's key ends. */
+export const KEPT_AUDIO_SUFFIX = `.${KEPT_AUDIO_REVISION}.${ARCHIVAL_AUDIO_FORMAT.extension}`;
+/** The longest one compaction sweep keeps converting before it leaves the rest for the next. */
+const COMPACTION_SWEEP_MILLISECONDS = 2 * MINUTE_MILLISECONDS;
 
 export type RecordingActivityOptions = {
   /** Providers to offer instead of the deployment's own, such as fakes in tests. */
@@ -472,7 +484,8 @@ export async function transcribeTrack(input: {
           ).then((rendered) => ({
             bytes: rendered.bytes,
             mimeType: rendered.mimeType,
-            fileName: `${input.audio.fileName.replace(/\.[^.]+$/u, "")}-${index}.${rendered.extension}`,
+            // The whole track in another container keeps the track's name.
+            fileName: `${input.audio.fileName.replace(/\.[^.]+$/u, "")}${whole ? "" : `-${index}`}.${rendered.extension}`,
           }));
     // Each piece is its own provider request: a subscription provider sends
     // one request identity at most once, so pieces must not share it.
@@ -551,6 +564,11 @@ function pieceShape(
   if (accepted && !accepted.includes(source)) {
     format = WRITABLE_PIECE_FORMATS.find((candidate) => accepted.includes(candidate)) ?? null;
     if (!format) throw new PermanentRecordingFailure("model_unavailable");
+  } else if (!accepted && source === "mp4") {
+    // A meeting's kept file is Opus in MP4. A model that names no formats
+    // gets the same Opus in WebM, which every speech API that reads Opus
+    // takes; MP4 is mostly expected to hold AAC. Only the container changes.
+    format = "webm";
   }
   const { maxDurationSeconds, maxFileBytes } = spec.capabilities;
   const bytesPerSecond = format ? RECORDING_PIECE_BYTES_PER_SECOND[format] : undefined;
@@ -1653,11 +1671,17 @@ export function createRecordingActivities(
   }
 
   /**
-   * The track's prepared file: reused when an earlier version made it,
-   * otherwise built from the chunks and stored for playback and re-runs.
-   * Without `store` it is only built: a dictation's text is waited for, its
-   * audio is never played back here, and the dictation is deleted soon
-   * after, so a slow or busy object store doesn't hold up the text.
+   * The track's prepared file. A meeting's is its kept audio
+   * (`ARCHIVAL_AUDIO_FORMAT`): reused when an earlier version made it,
+   * otherwise built from the uploaded pieces, or from the old kept file once
+   * those are gone, and stored for playback and re-runs. Once it is stored
+   * the uploaded pieces are deleted, so a meeting keeps one compact file per
+   * track.
+   *
+   * Without `store` it is only built, in the source's codec: a dictation's
+   * text is waited for, its audio is never played back here, and the
+   * dictation is deleted soon after, so a slow or busy object store doesn't
+   * hold up the text.
    */
   async function preparedTrackAudio(input: {
     db: Database;
@@ -1687,25 +1711,40 @@ export function createRecordingActivities(
   }> {
     const container = recordingAudioContainer(input.mimeType);
     if (!container) throw new PermanentRecordingFailure("invalid_audio");
-    const format = preparedAudioFormat(container);
-    // Files made before tracks kept their timeline (holes closed up when a
-    // model decoded them) have the old name and are built again.
+    const fromChunks = (format = preparedAudioFormat(container)) =>
+      prepareRecordingTrackAudio({
+        chunks: input.chunks,
+        mimeType: input.mimeType,
+        format,
+        ffmpegPath: input.settings.voiceInputFfmpegPath,
+        signal: input.signal,
+        onProgress: () => heartbeat({ phase: "preparing", trackNumber: input.trackNumber }),
+        readChunk: async (chunk) =>
+          (await input.objectStorage.getObjectBytes(chunk.objectKey))?.bytes ?? null,
+      });
+    if (!input.store) {
+      heartbeat({ phase: "preparing", trackNumber: input.trackNumber });
+      return { ...(await fromChunks()), storedBytes: 0 };
+    }
+    const format = ARCHIVAL_AUDIO_FORMAT;
+    const track = {
+      ...input.actor,
+      recordingId: input.recordingId,
+      trackNumber: input.trackNumber,
+    };
     const objectKey = recordingPreparedTrackObjectKey({
       workspaceId: input.actor.workspaceId,
       recordingId: input.recordingId,
       trackNumber: input.trackNumber,
-      extension: `${PREPARED_AUDIO_REVISION}.${format.extension}`,
+      extension: `${KEPT_AUDIO_REVISION}.${format.extension}`,
     });
-    const existing = input.store
-      ? await getRecordingTrackPreparedObject(input.db, {
-          ...input.actor,
-          recordingId: input.recordingId,
-          trackNumber: input.trackNumber,
-        })
-      : null;
+    const existing = await getRecordingTrackPreparedObject(input.db, track);
     if (existing?.objectKey === objectKey) {
       const stored = await input.objectStorage.getObjectBytes(existing.objectKey);
       if (stored && stored.bytes.byteLength === existing.bytes) {
+        if (!existing.chunkObjectsDeleted) {
+          await deleteTrackChunkObjects({ ...input, objectKey });
+        }
         return {
           bytes: stored.bytes,
           mimeType: format.mimeType,
@@ -1716,16 +1755,69 @@ export function createRecordingActivities(
       }
     }
     heartbeat({ phase: "preparing", trackNumber: input.trackNumber });
-    const prepared = await prepareRecordingTrackAudio({
-      chunks: input.chunks,
-      mimeType: input.mimeType,
-      ffmpegPath: input.settings.voiceInputFfmpegPath,
-      signal: input.signal,
-      onProgress: () => heartbeat({ phase: "preparing", trackNumber: input.trackNumber }),
-      readChunk: async (chunk) =>
-        (await input.objectStorage.getObjectBytes(chunk.objectKey))?.bytes ?? null,
-    });
-    if (!input.store) return { ...prepared, storedBytes: 0 };
+    /** The old kept file, written again in the kept format, when the pieces are gone. */
+    const fromKept = async (kept: { objectKey: string }) => {
+      const stored = await input.objectStorage.getObjectBytes(kept.objectKey);
+      if (!stored) {
+        throw new RecordingAudioError(
+          `Track ${input.trackNumber}'s kept audio is missing`,
+          "missing_chunk",
+        );
+      }
+      const transcoded = await transcodeRecordingAudio({
+        audio: {
+          bytes: stored.bytes,
+          extension: kept.objectKey.split(".").at(-1) ?? "webm",
+        },
+        format,
+        ffmpegPath: input.settings.voiceInputFfmpegPath,
+        signal: input.signal,
+      });
+      return {
+        ...transcoded,
+        durationMilliseconds: transcoded.durationMilliseconds ?? input.knownDurationMilliseconds,
+      };
+    };
+    let prepared: {
+      bytes: Uint8Array;
+      mimeType: string;
+      extension: string;
+      durationMilliseconds: number;
+    };
+    // A kept file already on the recording's timeline is written again from
+    // itself: one read instead of every piece. Files made before tracks kept
+    // their timeline closed up the capture's holes, so those are built again
+    // from the pieces while they are kept.
+    const keptName = existing?.objectKey.split("/").at(-1) ?? "";
+    const onTimeline =
+      existing !== null &&
+      (existing.chunkObjectsDeleted ||
+        TIMELINE_KEPT_REVISIONS.some((revision) =>
+          keptName.startsWith(`track-${input.trackNumber}.${revision}.`),
+        ));
+    if (existing && onTimeline) {
+      try {
+        prepared = await fromKept(existing);
+      } catch (error) {
+        if (
+          existing.chunkObjectsDeleted ||
+          !(error instanceof RecordingAudioError) ||
+          error.code !== "missing_chunk"
+        )
+          throw error;
+        prepared = await fromChunks(format);
+      }
+    } else {
+      try {
+        prepared = await fromChunks(format);
+      } catch (error) {
+        // Another worker kept the track compact meanwhile and deleted the pieces.
+        if (!(error instanceof RecordingAudioError) || error.code !== "missing_chunk") throw error;
+        const now = await getRecordingTrackPreparedObject(input.db, track);
+        if (!now?.chunkObjectsDeleted) throw error;
+        prepared = await fromKept(now);
+      }
+    }
     await input.objectStorage.putObject({
       key: objectKey,
       contentType: prepared.mimeType,
@@ -1734,9 +1826,7 @@ export function createRecordingActivities(
     });
     try {
       await setRecordingTrackPrepared(input.db, {
-        ...input.actor,
-        recordingId: input.recordingId,
-        trackNumber: input.trackNumber,
+        ...track,
         objectKey,
         bytes: prepared.bytes.byteLength,
         durationMilliseconds: input.offsetMilliseconds + prepared.durationMilliseconds,
@@ -1751,6 +1841,7 @@ export function createRecordingActivities(
     if (existing && existing.objectKey !== objectKey) {
       await input.objectStorage.deleteObject(existing.objectKey).catch(() => undefined);
     }
+    await deleteTrackChunkObjects({ ...input, objectKey });
     return { ...prepared, storedBytes: prepared.bytes.byteLength };
   }
 
@@ -1845,6 +1936,41 @@ export function createRecordingActivities(
     // A recorder that stopped sending without ending the meeting.
     const lastHeard = Math.max(lastArrival, new Date(recording.startedAt).getTime());
     return { again: Date.now() - lastHeard < SPEAKER_SCAN_IDLE_MILLISECONDS };
+  }
+
+  /**
+   * The track's kept file (`objectKey`) is stored and recorded: delete its
+   * uploaded pieces, then note that they are gone. Deleting a missing object
+   * succeeds, so a stop between the two only repeats the deletes next time.
+   * The chunk rows stay; they place the track on the recording's timeline.
+   */
+  async function deleteTrackChunkObjects(input: {
+    db: Database;
+    objectStorage: ObjectStorage;
+    actor: { workspaceId: string; subjectId: string };
+    recordingId: string;
+    trackNumber: number;
+    objectKey: string;
+  }): Promise<number> {
+    const track = {
+      ...input.actor,
+      recordingId: input.recordingId,
+      trackNumber: input.trackNumber,
+    };
+    const chunks = await listRecordingChunks(input.db, track);
+    const prefix = `workspaces/${input.actor.workspaceId}/recordings/${input.recordingId}/`;
+    let deleted = 0;
+    for (const chunk of chunks) {
+      if (!chunk.objectKey.startsWith(prefix)) continue;
+      await input.objectStorage.deleteObject(chunk.objectKey);
+      deleted += 1;
+      if (deleted % 100 === 0) heartbeat({ phase: "compacting", deleted });
+    }
+    await markRecordingTrackChunkObjectsDeleted(input.db, {
+      ...track,
+      objectKey: input.objectKey,
+    });
+    return deleted;
   }
 
   /** Retries ran out on a retryable failure: fail the version with its last cause. */
@@ -1956,13 +2082,16 @@ export function createRecordingActivities(
   /**
    * Apply each workspace's recording retention: delete the audio of meetings
    * past their audio period (the transcript stays), and delete meetings past
-   * their transcript period, as their owner would.
+   * their transcript period, as their owner would. Then bring meetings kept
+   * the earlier way to one compact file per track, for a bounded time.
    */
   async function applyRecordingRetention(): Promise<{
     found: number;
     audioDeleted: number;
     recordingsDeleted: number;
     failed: number;
+    /** Earlier meetings brought to one compact file per track. */
+    compaction: Awaited<ReturnType<typeof compactKeptRecordingAudio>>;
   }> {
     const { db, objectStorage, startRecordingWorkflow, observability } = await services();
     const due = await listDueRecordingRetention(db, 50);
@@ -2014,7 +2143,105 @@ export function createRecordingActivities(
         });
       }
     }
-    return { found: due.length, audioDeleted, recordingsDeleted, failed };
+    const compaction = await compactKeptRecordingAudio(Date.now() + COMPACTION_SWEEP_MILLISECONDS);
+    return {
+      found: due.length,
+      audioDeleted,
+      recordingsDeleted,
+      failed,
+      compaction,
+    };
+  }
+
+  /**
+   * Bring finished meetings kept the earlier way to one compact file per
+   * track: write each track's kept file again in `ARCHIVAL_AUDIO_FORMAT` and
+   * delete its uploaded pieces, as a new transcript does. It starts no
+   * track after `deadline`, so a sweep stays short and the next one goes on.
+   */
+  async function compactKeptRecordingAudio(deadline: number): Promise<{
+    found: number | null;
+    compacted: number;
+    failed: number;
+    bytesBefore: number;
+    bytesAfter: number;
+  }> {
+    const { db, objectStorage, settings, observability } = await services();
+    const result = {
+      found: null as number | null,
+      compacted: 0,
+      failed: 0,
+      bytesBefore: 0,
+      bytesAfter: 0,
+    };
+    if (!objectStorage) return result;
+    const due = await listUncompactedRecordingTracks(db, {
+      keptSuffix: KEPT_AUDIO_SUFFIX,
+    });
+    // Null until the inventory's runtime grant ships (migration 1239).
+    if (due === null) return result;
+    result.found = due.length;
+    for (const item of due) {
+      if (Date.now() >= deadline) break;
+      const actor = {
+        workspaceId: item.workspaceId,
+        subjectId: item.ownerSubjectId,
+      };
+      try {
+        const [recording, chunks, before] = await Promise.all([
+          getRecording(db, { ...actor, recordingId: item.recordingId }),
+          listRecordingChunks(db, {
+            ...actor,
+            recordingId: item.recordingId,
+            trackNumber: item.trackNumber,
+          }),
+          getRecordingTrackPreparedObject(db, {
+            ...actor,
+            recordingId: item.recordingId,
+            trackNumber: item.trackNumber,
+          }),
+        ]);
+        const track = recording.tracks.find((entry) => entry.trackNumber === item.trackNumber);
+        if (!track || track.kind !== "audio" || chunks.length === 0 || !before) continue;
+        const offsetMilliseconds = Math.min(...chunks.map((chunk) => chunk.startMilliseconds));
+        const kept = await preparedTrackAudio({
+          db,
+          objectStorage,
+          settings,
+          actor,
+          recordingId: item.recordingId,
+          trackNumber: item.trackNumber,
+          mimeType: track.mimeType,
+          chunks,
+          offsetMilliseconds,
+          knownDurationMilliseconds: Math.max(0, track.durationMilliseconds - offsetMilliseconds),
+          signal: cancellation(),
+          store: true,
+        });
+        const piecesBytes = before.chunkObjectsDeleted ? 0 : track.totalBytes;
+        result.compacted += 1;
+        result.bytesBefore += before.bytes + piecesBytes;
+        result.bytesAfter += kept.bytes.byteLength;
+        observability.info("recording audio kept compact", {
+          workspaceId: item.workspaceId,
+          recordingId: item.recordingId,
+          trackNumber: item.trackNumber,
+          durationMilliseconds: track.durationMilliseconds,
+          bytesBefore: before.bytes + piecesBytes,
+          bytesAfter: kept.bytes.byteLength,
+        });
+      } catch (error) {
+        if (error instanceof RecordingNotFoundError) continue;
+        result.failed += 1;
+        observability.warn("keeping recording audio compact failed", {
+          workspaceId: item.workspaceId,
+          recordingId: item.recordingId,
+          trackNumber: item.trackNumber,
+          error: error instanceof Error ? error.message.slice(0, 1_000) : String(error),
+        });
+      }
+    }
+    return result;
   }
 
   return {
