@@ -121,12 +121,14 @@ export function SessionCapabilityFrame({
       followAnswer?.(rootRef.current);
     wasComplete.current = complete;
   }, [complete, followAnswer]);
+  // A row without a better name is titled by its domain; never say it twice.
+  const shownSubtitle = subtitle.trim().toLowerCase() === name.trim().toLowerCase() ? "" : subtitle;
   const identity = (
     <>
       <Mark src={logo} name={name} />
       <div className="og-session-capability-identity">
         <h3>{name}</h3>
-        {subtitle ? <span>{subtitle}</span> : null}
+        {shownSubtitle ? <span>{shownSubtitle}</span> : null}
       </div>
       {badge ? <span className="og-session-capability-type">{badge}</span> : null}
     </>
@@ -237,7 +239,7 @@ export function SessionCapabilityFrame({
               <div>
                 <Dialog.Title>{name}</Dialog.Title>
                 <Dialog.Description>
-                  {[typeLabel, subtitle].filter(Boolean).join(" · ")}
+                  {[typeLabel, shownSubtitle].filter(Boolean).join(" · ")}
                 </Dialog.Description>
               </div>
               {!busy ? (

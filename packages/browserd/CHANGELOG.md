@@ -1,5 +1,41 @@
 # @opengeni/browserd
 
+## 0.4.17
+
+### Patch Changes
+
+- de11774: A browser action after which the page closes its own tab, as a finished sign-in or payment popup does, now completes within moments. Before, it waited out the navigation and request settle bounds for a tab that no longer existed and then returned `outcome_unknown`, which invited the agent to check before continuing (or, on a slow machine, ran into the action deadline). The settle waits now end once the tab's attachment is gone. When the tab was not closed by a close-tab call, the receipt is `completed` with no observation and an `observation_unavailable` note saying the tab closed afterwards and to list the current tabs.
+- 0400636: A text field that a page names or labels as a password is now protected like `<input type=password>`, whatever its type. Sites that show a stored password in an ordinary text input labelled "Password" no longer have its value printed in semantic outlines, DOM reads or clipboard copies, and the value is remembered for redaction elsewhere. A field counts when its name, id, `aria-label`, placeholder, `<label for>`, wrapping `<label>` or `aria-labelledby` text, or its accessible name (shadow roots and custom elements included) calls it a password, in English and common European languages. Checkboxes and buttons such as "Show password", and "passwordless" fields, are not affected.
+- 70c726c: A browser session no longer breaks after it meets a short card security code. Known secret values from a page (such as a prefilled three-digit code) are masked wherever their characters appear, which also hit a tab's address when its port contained them (for example `47731` with the code `731`). The tab was then left with an invalid URL, and every later observation, tab list and action on that session failed with a validation error. In browser and desktop results, a text that is a whole address now keeps its scheme, host and port while its user info, path, query and fragment are still masked. Codes and card numbers stay hidden everywhere else, including where other digits touch them.
+- 6db667b: A screenshot of a tab that has not laid out its page yet (one a relaunched browser has just restored) waits for it to lay out instead of failing with "CDP returned invalid page dimensions".
+- Updated dependencies [f1998df]
+- Updated dependencies [3f9ef93]
+- Updated dependencies [ebfd447]
+- Updated dependencies [7a9c492]
+- Updated dependencies [468e8c3]
+- Updated dependencies [e4484f1]
+- Updated dependencies [7f3d037]
+- Updated dependencies [f4f82c0]
+- Updated dependencies [317fb4d]
+- Updated dependencies [033cd63]
+- Updated dependencies [b18bd6c]
+- Updated dependencies [83ccc2b]
+- Updated dependencies [da9b7e5]
+- Updated dependencies [0f7f559]
+- Updated dependencies [0f7f559]
+- Updated dependencies [de8fc61]
+- Updated dependencies [dd7759c]
+- Updated dependencies [70c726c]
+- Updated dependencies [4682263]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [abb4af1]
+- Updated dependencies [86e35f1]
+- Updated dependencies [0f7f559]
+  - @opengeni/contracts@6.5.0
+  - @opengeni/interaction@6.5.0
+
 ## 0.4.16
 
 ### Patch Changes

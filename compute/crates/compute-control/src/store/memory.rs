@@ -369,6 +369,23 @@ impl MemoryStore {
         Write::Done
     }
 
+    fn respec_now(&self, row: &SandboxRow) -> bool {
+        let mut inner = self.lock();
+        let Some(stored) = inner.sandboxes.get_mut(&row.id) else {
+            return false;
+        };
+        if stored.version != row.version
+            || stored.ownership.owner.is_some()
+            || row.ownership.owner.is_some()
+        {
+            return false;
+        }
+        stored.spec = row.spec.clone();
+        stored.ownership = row.ownership;
+        stored.version += 1;
+        true
+    }
+
     fn delete_now(&self, id: Id, version: u64, retire_at: Option<u64>) -> bool {
         let mut inner = self.lock();
         let Some(row) = inner.sandboxes.get(&id) else {
@@ -617,6 +634,10 @@ impl Store for MemoryStore {
 
     fn replace(&self, row: &SandboxRow) -> impl Future<Output = Result<Write>> + Send {
         ready(Ok(self.replace_now(row)))
+    }
+
+    fn respec(&self, row: &SandboxRow) -> impl Future<Output = Result<bool>> + Send {
+        ready(Ok(self.respec_now(row)))
     }
 
     fn delete(&self, id: Id, version: u64) -> impl Future<Output = Result<bool>> + Send {

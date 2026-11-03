@@ -122,7 +122,6 @@ const context = {
   clientConfig: { productAccessMode: "local" },
   personalGitHubStatus: null,
   repositoryGroups: [] as unknown[],
-  githubAppOpen: false,
   githubOrg: "",
   busy: false,
   githubAppBusy: false,
@@ -156,7 +155,7 @@ const session = (extra: Record<string, unknown> = {}) => ({
 
 function mountedSwitch(): HTMLButtonElement | null {
   return document.querySelector<HTMLButtonElement>(
-    'button[role="switch"][aria-label="acme/grocery-bot mounted"]',
+    'button[role="switch"][aria-label="acme/grocery-bot in this chat"]',
   );
 }
 

@@ -1,5 +1,62 @@
 # Modular prompt changelog
 
+Goal completion can carry the final answer. `goal_complete` gains an optional
+`reply`: once the completion succeeds, the runtime ends the turn at that tool
+batch with the reply as its final answer, shown exactly as written, the way
+`wait_for_input` ends a turn with its `reply`. Completion plus answer is one
+model call instead of two. A `reply` passed together with other tool calls in
+one response is refused before anything is completed (at most twice per
+attempt); after that the completion runs but the reply does not end the turn,
+so the model sees those results first. When a reply does not end the turn,
+its receipt tells the model to answer. The goals module's handoff paragraph
+and the goal continuation say so (about 200 bytes more). The goal an API
+create now gives an unattended request carries its own note that it needs no
+restating, in its success criteria, so the instructions gain no unattended
+sentence and the legacy locks do not change. The goal tool schemas drop the
+spacing and ledger boilerplate each text field repeated; each tool
+description states that rule once, and the schemas still enforce the byte
+limits.
+
+Goal pauses name what was tried. The goals module's pause paragraph gains one
+sentence (about 230 bytes): a task that seems infeasible, missing data or a
+result the agent cannot verify is not by itself a reason to pause; it tries
+the plausible in-scope alternatives and, if it still pauses, names the ones it
+tried in the rationale. A definitive missing permission or required human
+decision still justifies an immediate pause. The `goal_pause` tool
+description and the goal continuation's blocked audit say the same, and
+`wait_for_input`'s description is shortened without dropping a rule the
+instructions do not also state.
+
+```diff
+- After goal_complete succeeds, finish the same turn with the requested answer, or a concise summary and retained artifact link.
++ Put the requested answer, or a concise summary and retained artifact link, in goal_complete's reply: it is shown exactly as written and ends the turn, so call goal_complete on its own once you have seen your last results.
++ Without a reply, finish the same turn with that answer after goal_complete succeeds.
++ A task that seems infeasible, missing data or a result you cannot verify is not by itself a reason to pause: try the plausible in-scope alternatives, and if you still pause, name the ones you tried in the rationale.
+```
+
+The sandbox preamble (`sandboxBaseInstructions`, the SDK default that every
+sandbox and Connected Machine agent receives ahead of the modular contract)
+extends two existing lines in place; nothing is added for sessions without a
+sandbox, and the legacy and modular locks are unchanged because they do not
+include the preamble. The "Make changes inside the workspace" line adds that
+the agent keeps its own scratch work (throwaway scripts and tests, and
+browsers, runtimes or libraries installed only for its checks) in a temporary
+directory outside the user's project and removes it when done, while tests the
+user asked for or the project expects stay in the project. The "Verify changes
+when practical" line adds that a change to something already running (a
+service, worker or scheduled job) is checked on the running instance: restart
+or reload the process that serves it, exercise the real entry point and check
+what the user asked about, asking first only when a restart could disrupt
+others or lose work in progress. The preamble grows from 349 to 471 tokens
+(o200k), +122 tokens per call in sandbox sessions, static so the cached prefix
+stays stable. The preamble is in neither the legacy nor the modular prompt, so
+the lines are shown as text, not as a sentence diff:
+
+```text
+- Make changes inside the workspace unless the user explicitly asks for another location. Keep your own scratch work out of the user's project: put throwaway scripts and tests, and browsers, runtimes or libraries installed only for your checks, in a temporary directory outside it, and remove them when done. Tests the user asked for or the project expects belong in it.
+- Verify changes when practical, especially after editing code, tests, build scripts, generated artifacts, or configuration. For a change to something already running, such as a service, worker or scheduled job, restart or reload the process that actually serves it, exercise the real entry point and check what the user asked about; unit tests alone do not show it works. Ask first only if a restart could disrupt others or lose work in progress.
+```
+
 The agent knows both GitHub identities. When personal GitHub sign-in is
 enabled on the deployment (new `personalGitHub` resource fact) and
 `github_connect_link` is available, the admin module adds one sentence (about

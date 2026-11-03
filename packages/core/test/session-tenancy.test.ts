@@ -960,6 +960,95 @@ describe("managed-human session tenancy application service", () => {
     });
   }, 180_000);
 
+  test("a fork cannot copy a session onto a sandbox backend the deployment does not serve", async () => {
+    if (!shared || !client) return;
+    const userId = `core-session-fork-backend-${crypto.randomUUID()}`;
+    const subjectId = `user:${userId}`;
+    const access = await ensureManagedAccessForUser(client.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Core fork backend",
+    });
+    const grant = access.workspaceGrants.find(
+      (candidate) => candidate.workspaceId !== access.defaultWorkspaceId,
+    );
+    if (!grant) throw new Error("managed human has no personal workspace grant");
+    await shared.admin`
+      insert into session_tenancy_activations (
+        account_id, activation_version, inventory_digest, parity_digest, activated_by
+      ) values (
+        ${grant.accountId}, 1, ${"1".repeat(64)}, ${"2".repeat(64)}, 'core-test'
+      )`;
+    // A row on the host backend, as main used to accept on any deployment.
+    const source = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "fork me onto the host",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId },
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "local",
+    });
+    const authorization: AccessGrantAuthorization = {
+      grant,
+      accountGrant: access.accountGrants[0] ?? null,
+      authenticatedSubjectId: subjectId,
+      contextIntegrity: true,
+      canonicalManagedHumanSession: true,
+    };
+    const sessionAuthorization: SessionAuthorizationPort = {
+      authorizeSession: async () => ({ allowed: true, relatedSessionAccess: "root" }),
+      resolveListScope: async () => ({ kind: "all" }),
+    };
+    const request = {
+      idempotencyKey: `fork-backend-${crypto.randomUUID()}`,
+      visibility: "workspace" as const,
+      workspaceSharedAcknowledged: true,
+    };
+    const cloud = testSettings({
+      sandboxBackend: "modal",
+      modalTokenId: "test-modal-token-id",
+      modalTokenSecret: "test-modal-token-secret",
+    });
+    const countSessions = async () => {
+      const [row] = await shared!.admin<{ count: number }[]>`
+        select count(*)::int as count from sessions where workspace_id = ${grant.workspaceId}`;
+      return row?.count ?? 0;
+    };
+    const before = await countSessions();
+    await expect(
+      forkManagedHumanSession(
+        { db: client.db, bus: new MemoryEventBus(), sessionAuthorization, settings: cloud },
+        authorization,
+        grant.workspaceId,
+        source.id,
+        request,
+      ),
+    ).rejects.toMatchObject({
+      status: 422,
+      message: expect.stringContaining('sandboxBackend "local" is not available'),
+    });
+    expect(await countSessions()).toBe(before);
+    // Where the backend is the deployment default, forking is unchanged.
+    const forked = await forkManagedHumanSession(
+      {
+        db: client.db,
+        bus: new MemoryEventBus(),
+        sessionAuthorization,
+        settings: testSettings({ sandboxBackend: "local" }),
+      },
+      authorization,
+      grant.workspaceId,
+      source.id,
+      request,
+    );
+    expect(forked).toMatchObject({ replay: false });
+    expect(await countSessions()).toBe(before + 1);
+  }, 180_000);
+
   test("make private anyway stops a running response and drops another member's authority in one call", async () => {
     if (!shared || !client) return;
     const db = client.db;

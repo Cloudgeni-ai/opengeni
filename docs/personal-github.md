@@ -73,7 +73,8 @@ two named sections, each with one action:
   workspace."): **Install app**, **Install on another account** or **Repair**,
   installed per organization or account. Its shared repositories are listed as
   **Opengeni app repositories**; the sheet header keeps only **Disconnect
-  Opengeni app**.
+  Opengeni app**. With several installations, each has its own row with
+  **Change repositories** and **Unlink** (confirmed first).
 
 Without `connections:write` or `github:manage`, the matching section shows a
 short note instead of its action. After a successful personal connect started
@@ -99,12 +100,23 @@ known, or as the Opengeni app) and says that on personal repositories the agent
 uses plain git and `github_personal__*` tools: the token never reaches the
 sandbox, so `gh` and raw GitHub API calls do not act as the person.
 
-The session repository picker labels personal choices with `@login` and
-**As you**. Choosing one both selects the exact repository and grants this
-workspace reusable access to the connection for that user; the OAuth token is
-not copied into the session. A repository already mounted through one identity
-cannot also be mounted through the other at the same path. Existing-session
-pickers keep mounted choices visible and locked.
+The session repository picker is for picking. With your GitHub connected, each
+switched-on repository says who it acts as: **Acts as You (@login)** or **Acts as
+Opengeni app**, as a choice when both can reach it. Without your GitHub there is
+one identity and the picker does not mention it. Account management lives on
+the GitHub settings page above, behind one **Manage GitHub access** row; with
+nothing connected and nothing to pick, the picker offers **Your GitHub**
+(**Connect**) and **Opengeni app** (**Install**) with the same one-line
+descriptions. The list has no Refresh button: it updates in the background when
+the picker opens (at most once every 30 seconds) and as soon as you come back
+from GitHub or the GitHub settings page; a failed load offers **Try again**.
+Choosing a personal repository both selects the exact repository
+and grants this workspace reusable access to the connection for that user; the
+OAuth token is not copied into the session. A repository already mounted
+through one identity cannot also be mounted through the other at the same path.
+Existing-session pickers keep repositories already in the chat visible as
+**In chat**: people who may change the chat can switch them off, and a new
+chat changes their branch.
 
 ## Authority contract
 
@@ -192,10 +204,14 @@ URLs, or provider credential. Each stable, credential-free broker route is
 separately HMAC-bound to one repository snapshot and remains unchanged when the
 bearer renews. Git persists the canonical `https://github.com/<owner>/<repo>`
 remote; runtime `insteadOf` configuration redirects only the physical smart-Git
-request to the broker. Initial delivery and renewal stage the bearer through a
-private sandbox editor/file ingress; the token-free lifecycle command only
-atomically moves those bytes into the stable binding file, so the bearer never
-enters command text or process arguments.
+request to the broker, for both the `<repo>` and `<repo>.git` spellings. Because
+Git matches `insteadOf` by prefix, the runtime also installs longer identity
+rules for every character that can continue a brokered URL other than `/`, so
+a repository whose URL only starts with the brokered one (for example
+`<repo>-demos`) is never sent to the broker. Initial delivery and renewal stage
+the bearer through a private sandbox editor/file ingress; the token-free
+lifecycle command only atomically moves those bytes into the stable binding
+file, so the bearer never enters command text or process arguments.
 
 The broker permits only smart-HTTP discovery, upload-pack, and receive-pack.
 Before every upstream request it revalidates the exact accepted attempt,

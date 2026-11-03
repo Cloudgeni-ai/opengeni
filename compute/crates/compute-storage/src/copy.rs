@@ -10,8 +10,8 @@ use crate::manifest::ExtentSource;
 use crate::store::ChunkStore;
 use crate::{Error, Result};
 
-/// The format copies are written in: manifests named with the day they
-/// were stored (`<day>/<digest>`, ADR 25).
+/// The format copies are written in: manifests named with the period they
+/// were stored in (`<period>/<digest>`, ADR 25 and 28).
 pub const VERSION: u32 = 4;
 
 /// The format before, whose manifests are named by their digest alone.
@@ -39,6 +39,12 @@ pub struct MemoryHead {
     /// The runtime that made the image, if known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
+    /// How many virtual processors the VM the image was saved from had,
+    /// which a restore brings back whatever the sandbox is given now (its
+    /// memory's length is the memory manifest's). Copies stored before
+    /// releases that record it do not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vcpus: Option<u8>,
 }
 
 impl Head {
@@ -55,7 +61,7 @@ impl Head {
 /// One object a stored copy keeps.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Part {
-    /// A manifest, by its name: `<day>/<digest>`, or a digest alone in the
+    /// A manifest, by its name: `<period>/<digest>`, or a digest alone in the
     /// old layout.
     Manifest(String),
     Chunk(ChunkRef),
@@ -134,4 +140,25 @@ struct PackPart {
 pub async fn pack_parts(store: &ChunkStore, index: &ChunkRef) -> Result<Vec<ChunkRef>> {
     let parts: PackParts = serde_json::from_slice(&store.get_chunk(index).await?)?;
     Ok(parts.parts.into_iter().map(|part| part.chunk).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_memory_head_says_how_many_processors_its_image_was_saved_with_when_it_knows() {
+        let old = br#"{"version":4,"disk":"d","memory":{"state":"s","memory":"m"},
+            "profile":null,"pack":null}"#;
+        let head = Head::parse(old).unwrap();
+        assert_eq!(head.memory.as_ref().unwrap().vcpus, None);
+        let mut head = head;
+        head.memory.as_mut().unwrap().vcpus = Some(4);
+        let bytes = serde_json::to_vec(&head).unwrap();
+        assert_eq!(Head::parse(&bytes).unwrap(), head);
+        assert!(
+            String::from_utf8(bytes).unwrap().contains(r#""vcpus":4"#),
+            "kept beside the runtime"
+        );
+    }
 }

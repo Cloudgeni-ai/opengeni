@@ -167,12 +167,15 @@ test("a request-local mark below the top level is not part of an item's identity
   expect(guard.verify([item])).toEqual(guard.verify([marked]));
 });
 
-test("the history guard still refuses a value no storage can hold", () => {
+test("the history guard identifies a value no JSON can hold by its stored form", () => {
+  const item = (text: unknown) => ({
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text }],
+  });
   const guard = new HistoryPrefixGuard();
-  expect(() =>
-    guard.seed(
-      [{ type: "message", role: "user", content: [{ type: "input_text", text: () => "" }] }],
-      1,
-    ),
-  ).toThrow("cannot contain function");
+  // Storage drops the function, so the item is identified as stored.
+  expect(() => guard.seed([item(() => "")], 1)).not.toThrow();
+  expect(() => guard.verify([item(undefined)])).not.toThrow();
+  expect(() => guard.verify([item("changed")])).toThrow("durable prefix changed at item 0");
 });

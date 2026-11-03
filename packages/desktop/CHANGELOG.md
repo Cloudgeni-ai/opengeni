@@ -1,5 +1,35 @@
 # @opengeni/desktop
 
+## 6.5.1
+
+### Minor Changes
+
+- a977392: Dictation shows in the menu bar (the tray on Windows and Linux). While a dictation starts, listens, transcribes or has failed, the icon changes to match (a microphone, a record button, moving sound bars, a warning sign; a brief check when the text is delivered), and the tooltip and the first menu line say how it is going. The menu starts each dictation shortcut, showing its keys, and copies the last dictation again; while dictating it offers Finish and Cancel, and after a failure Retry (when possible) and Dismiss. The menu bar item now stays while dictation is on, even when this computer isn't connected. `Dictation` adds `activity()`, `onActivity()`, `menu()` and `menuAction()`.
+
+### Patch Changes
+
+- 8811409: The dictation pill and the meeting card no longer stop appearing after their page's process is killed or hangs, for example when the system reclaims memory. A window whose page is gone, hangs, fails to render or doesn't answer within five seconds is thrown away and built again (once) showing the current state, and the failure is logged instead of being swallowed. `DictationHud` and `MeetingPromptCard` take an optional `log`.
+- Updated dependencies [7a9c492]
+- Updated dependencies [e4484f1]
+- Updated dependencies [7f3d037]
+- Updated dependencies [f4f82c0]
+- Updated dependencies [317fb4d]
+- Updated dependencies [033cd63]
+- Updated dependencies [b18bd6c]
+- Updated dependencies [83ccc2b]
+- Updated dependencies [da9b7e5]
+- Updated dependencies [0f7f559]
+- Updated dependencies [0f7f559]
+- Updated dependencies [de8fc61]
+- Updated dependencies [dd7759c]
+- Updated dependencies [4682263]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [abb4af1]
+- Updated dependencies [86e35f1]
+- Updated dependencies [0f7f559]
+  - @opengeni/sdk@6.5.0
+  - @opengeni/agent-host@6.5.0
+
 ## 6.4.0
 
 ### Minor Changes

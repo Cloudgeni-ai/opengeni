@@ -4,11 +4,15 @@
 import { describe, expect, test } from "bun:test";
 import {
   matchSlackAgentAddress,
+  slackTextNamesAgent,
   withinOneEdit,
   type SlackRoutingAgent,
 } from "../src/integrations/slack-agent-address";
 import {
+  buildSlackAgentSuggestionAskedMessage,
+  buildSlackAgentSuggestionMessage,
   renderSlackAgentStartLine,
+  SLACK_AGENT_SUGGESTION_ASK_ACTION_ID,
   slackAgentHintLine,
   slackAgentSessionInstructions,
   slackNoAccessToAgentText,
@@ -17,6 +21,8 @@ import {
 import {
   resolveSlackWorkspaceRoute,
   slackAgentAddressForEntry,
+  slackAgentAddressMayMoveThread,
+  slackRequestTextForAnotherAgent,
   slackRoutedRequestText,
   type SlackRouteInputs,
 } from "../src/integrations/slack-routing";
@@ -416,7 +422,7 @@ describe("what people read", () => {
       "Vault works in the Secret workspace, which you don't have access to. Request access: https://example.test/link. No chat was started.",
     );
     expect(slackUnknownAgentText("nobody", [ANALYTICS, DATA_TEAM])).toBe(
-      "No agent called nobody. Available: +analytics, +data-team. No chat was started.",
+      "No agent called nobody. Available: Analytics, Data Team. No chat was started.",
     );
     expect(slackUnknownAgentText("", [])).toBe("No agent. No chat was started.");
   });
@@ -427,20 +433,75 @@ describe("what people read", () => {
         sessionUrl: "https://app.test/s/1",
         agentName: "Data Team",
         handedOffByName: "Analytics",
-        hint: slackAgentHintLine({ name: "Data Team" }, "U0BOT"),
+        hint: slackAgentHintLine(
+          { name: "Data Team", description: "answers questions about metrics" },
+          "U0BOT",
+        ),
       }),
     ).toBe(
-      "<https://app.test/s/1|Data Team is on it> · Passed on by *Analytics*\n_Data Team · next time: <@U0BOT> +data-team_",
+      "<https://app.test/s/1|Data Team is on it> · Passed on by *Analytics*\n_Data Team: Answers questions about metrics. Next time, ask directly with <@U0BOT> Data Team._",
     );
+    // When the channel's settings chose the agent, it says how to ask Opengeni itself.
+    expect(
+      slackAgentHintLine({ name: "Data Team", description: "Answers questions." }, "U0BOT", {
+        plainOpengeniWorkspace: "Labs",
+      }),
+    ).toBe(
+      "_Data Team: Answers questions. Next time, ask directly with <@U0BOT> Data Team. To ask Opengeni itself here, start with `in Labs:`_",
+    );
+  });
+
+  test("a suggestion is one server-owned line with an Ask button", () => {
+    const message = buildSlackAgentSuggestionMessage({
+      agentName: "Data Team",
+      suggestionId: "suggestion-1",
+    });
+    expect(message.text).toBe("Data Team handles questions like this.");
+    expect(message.blocks).toEqual([
+      {
+        type: "section",
+        block_id: "opengeni_agent_suggestion",
+        text: { type: "mrkdwn", text: "Data Team handles questions like this." },
+      },
+      {
+        type: "actions",
+        block_id: "opengeni_agent_suggestion_actions",
+        elements: [
+          {
+            type: "button",
+            action_id: SLACK_AGENT_SUGGESTION_ASK_ACTION_ID,
+            value: "suggestion-1",
+            text: { type: "plain_text", text: "Ask Data Team", emoji: true },
+          },
+        ],
+      },
+    ]);
+    expect(
+      buildSlackAgentSuggestionAskedMessage({ agentName: "Data Team", slackUserId: "U-SAM1" }).text,
+    ).toBe("Someone asked Data Team.");
+    expect(
+      buildSlackAgentSuggestionAskedMessage({ agentName: "Data Team", slackUserId: "U0SAM" }).text,
+    ).toBe("<@U0SAM> asked Data Team.");
   });
 
   test("the intro is posted as the agent", () => {
     expect(
       slackAgentIntroText(
-        { name: "Analytics", description: "Answers revenue questions." },
-        "U0BOT",
+        { name: "Analytics", description: "answers revenue questions" },
+        { botUserId: "U0BOT", addedBySlackUserId: "U0ADMIN" },
       ),
-    ).toBe("Hi, I'm *Analytics*. Answers revenue questions.\nAsk me with <@U0BOT> +analytics");
+    ).toBe(
+      "Hi, I'm *Analytics*, an Opengeni agent. Answers revenue questions.\nAsk me in any channel: <@U0BOT> Analytics, then your question.\n_Added by <@U0ADMIN>_",
+    );
+    // Without the admin's Slack account, no "Added by" line.
+    expect(
+      slackAgentIntroText(
+        { name: "R&D <team>", description: "Answers questions." },
+        { botUserId: null, addedBySlackUserId: null },
+      ),
+    ).toBe(
+      "Hi, I'm *R&amp;D &lt;team&gt;*, an Opengeni agent. Answers questions.\nAsk me in any channel: @Opengeni R&amp;D &lt;team&gt;, then your question.",
+    );
   });
 
   test("every chat learns its identity, Memory and the other agents", () => {
@@ -478,11 +539,155 @@ describe("what people read", () => {
     expect(text).toContain("You are Analytics");
     expect(text).toContain("groupId 11111111-1111-4111-8111-111111111111");
     expect(text).toContain("slack_agent_chats");
-    expect(text).toContain("- Ops (+ops): Handles incidents. Works in Labs.");
+    expect(text).toContain("- Ops: Handles incidents. Works in Labs.");
+    expect(text).toContain('People ask you in Slack with "@Opengeni Analytics"');
+    expect(text).toContain("Answer yourself by default.");
+    expect(text).toContain("slack_agent_suggest");
+    expect(text).not.toContain("+ops");
     expect(text).toContain("Do not hand it back to Ops.");
     expect(text).not.toContain("- Analytics");
-    const plain = slackAgentSessionInstructions({ loaded, agent: null, handedOffBy: null });
-    expect(plain).toContain("- Analytics (+analytics)");
+    const plain = slackAgentSessionInstructions({
+      loaded,
+      agent: null,
+      handedOffBy: null,
+      source: "installation",
+    });
+    expect(plain).toContain("- Analytics: Answers revenue questions. Works in Acme.");
     expect(plain).not.toContain("You are");
+    // Plain Opengeni knows it was asked without an agent's name.
+    expect(plain).toContain("The person asked Opengeni without naming an agent.");
+    const channel = slackAgentSessionInstructions({
+      loaded,
+      agent: null,
+      handedOffBy: null,
+      source: "channel",
+    });
+    expect(channel).toContain(
+      "This channel's settings sent the message to Opengeni; the person did not name an agent.",
+    );
+    const named = slackAgentSessionInstructions({
+      loaded,
+      agent: analytics,
+      handedOffBy: null,
+      source: "agent_name",
+    });
+    expect(named).not.toContain("without naming");
   });
+});
+
+describe("bare names are safe", () => {
+  const threadTenancy = { accountId: ACCOUNT, workspaceId: ACME.workspaceId };
+  const inThread = (text: string) =>
+    resolveSlackWorkspaceRoute(
+      inputs({ threadTenancy, threadAgentId: ANALYTICS.id, entry: mention(text) }),
+    );
+
+  test("in a thread, a name that starts a sentence doesn't switch agents", () => {
+    expect(inThread("data looks fine now")).toMatchObject({
+      kind: "resolved",
+      source: "thread",
+      workspaceId: ACME.workspaceId,
+    });
+    expect(inThread("Data is wrong on the dashboard")).toMatchObject({ source: "thread" });
+    expect(
+      slackAgentAddressMayMoveThread(
+        slackAgentAddressForEntry(mention("data looks fine now"), AGENTS, "U0BOT"),
+      ),
+    ).toBe(false);
+  });
+
+  test("in a thread, the name alone, or followed by a comma or colon, switches", () => {
+    for (const text of ["Data, take this", "Data: take this", "Data", "+data take this"]) {
+      expect(inThread(text)).toMatchObject({
+        kind: "resolved",
+        source: "agent_name",
+        slackAgentId: DATA.id,
+        switchThread: true,
+      });
+      expect(
+        slackAgentAddressMayMoveThread(slackAgentAddressForEntry(mention(text), AGENTS, "U0BOT")),
+      ).toBe(true);
+    }
+  });
+
+  test("a bare name keeps the whole request; +name is stripped", () => {
+    const bare = mention("Data is wrong on the dashboard");
+    const resolution = resolveSlackWorkspaceRoute(inputs({ entry: bare }));
+    expect(resolution).toMatchObject({ kind: "resolved", slackAgentId: DATA.id });
+    expect(
+      slackRoutedRequestText(
+        bare.text,
+        resolution,
+        "U0BOT",
+        slackAgentAddressForEntry(bare, AGENTS, "U0BOT"),
+      ),
+    ).toBe("<@U0BOT> Data is wrong on the dashboard");
+    const plus = mention("+data is it wrong?");
+    expect(
+      slackRoutedRequestText(
+        plus.text,
+        resolveSlackWorkspaceRoute(inputs({ entry: plus })),
+        "U0BOT",
+        slackAgentAddressForEntry(plus, AGENTS, "U0BOT"),
+      ),
+    ).toBe("<@U0BOT> is it wrong?");
+  });
+
+  test("a request passed to another agent loses only a +name address", () => {
+    expect(
+      slackRequestTextForAnotherAgent(
+        mention("Data, Analytics should check revenue"),
+        AGENTS,
+        "U0BOT",
+      ),
+    ).toBe("<@U0BOT> Data, Analytics should check revenue");
+    expect(
+      slackRequestTextForAnotherAgent(mention("+data how did revenue do?"), AGENTS, "U0BOT"),
+    ).toBe("<@U0BOT> how did revenue do?");
+    expect(slackRequestTextForAnotherAgent(mention("how did revenue do?"), AGENTS, "U0BOT")).toBe(
+      "<@U0BOT> how did revenue do?",
+    );
+  });
+
+  test("the address reports the punctuation after the name", () => {
+    const options = { allowBare: true, allowPlus: true };
+    expect(matchSlackAgentAddress("Data, take this", AGENTS, options)).toMatchObject({
+      end: ",",
+    });
+    expect(matchSlackAgentAddress("Data looks fine", AGENTS, options)).toMatchObject({
+      end: null,
+    });
+  });
+});
+
+describe("a hand-off needs the person to ask for the agent", () => {
+  const TEST_AGENT = agent("agent-test", "Test agent", ACME);
+  const cases: [string, SlackRoutingAgent, boolean][] = [
+    // Greetings, tests and questions about Opengeni name no agent.
+    ["hi", DATA_TEAM, false],
+    ["hello there!", ANALYTICS, false],
+    ["test I am testing the new setup", TEST_AGENT, false],
+    ["what agents are there?", DATA_TEAM, false],
+    ["how do Opengeni agents work?", ANALYTICS, false],
+    // A request that fits an agent but doesn't name it stays with the chat.
+    ["how much revenue did we make last week?", ANALYTICS, false],
+    // Naming it, by team or with a typo, or with +name.
+    ["ask the data team about churn", DATA_TEAM, true],
+    ["can the data tem look at this", DATA_TEAM, true],
+    ["get analytcs to check revenue", ANALYTICS, true],
+    ["+data-team churn?", DATA_TEAM, true],
+    // Mentions and links are not words of the message.
+    ["<@UANALYTICS> hi", ANALYTICS, false],
+    // Short names take no typo, so ordinary words don't count as asking.
+    ["what date is it?", agent("agent-data", "Data", ACME), false],
+    ["data looks fine now", agent("agent-data", "Data", ACME), true],
+    // A generic last word may be left out when the rest is a real name.
+    ["ask the analytics folks", agent("agent-at", "Analytics team", ACME), true],
+    ["the data looks off", DATA_TEAM, false],
+  ];
+  for (const [text, target, expected] of cases) {
+    test(`${JSON.stringify(text)} ${expected ? "names" : "doesn't name"} ${target.name}`, () => {
+      expect(slackTextNamesAgent(text, target)).toBe(expected);
+    });
+  }
 });

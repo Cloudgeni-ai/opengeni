@@ -7,6 +7,7 @@ import {
   getDesktopDictation,
   type DesktopDictation,
   type DesktopDictationAudio,
+  type DesktopDictationModel,
   type DesktopDictationReport,
   type DesktopDictationRequest,
 } from "@opengeni/sdk/desktop-bridge";
@@ -88,6 +89,7 @@ export function DesktopDictationHost(props: DesktopDictationHostProps): null {
     props.enabled,
   );
   const [language, setLanguage] = useState<string | null>(null);
+  const [model, setModel] = useState<DesktopDictationModel | null>(null);
   const [vocabulary, setVocabulary] = useState<readonly string[]>(NO_WORDS);
   const [pending, setPending] = useState<Pending | null>(null);
   const [declined, setDeclined] = useState(0);
@@ -136,6 +138,7 @@ export function DesktopDictationHost(props: DesktopDictationHostProps): null {
     },
     focusInput: noop,
     language,
+    model,
     keyterms: vocabulary,
     beforeStart: props.beforeStart,
     // Dictations an earlier page left are for the composer to offer.
@@ -151,7 +154,7 @@ export function DesktopDictationHost(props: DesktopDictationHostProps): null {
       const active = current.current;
       if (!active || active.again) return;
       if (cancelled) {
-        // The page's own Escape: the dictation ends here.
+        // Cancelled on this page rather than by the app: the dictation ends here.
         current.current = null;
         kept.current = null;
         void readSpeech(audio, durationMilliseconds).then((speech) =>
@@ -173,6 +176,8 @@ export function DesktopDictationHost(props: DesktopDictationHostProps): null {
   const available = Boolean(voiceInput?.capability?.available && voiceInput.enabled);
   const availableRef = useRef(available);
   availableRef.current = available;
+  const capabilityRef = useRef(voiceInput?.capability ?? null);
+  capabilityRef.current = voiceInput?.capability ?? null;
 
   const words = useRef({ t, report });
   words.current = { t, report };
@@ -197,6 +202,7 @@ export function DesktopDictationHost(props: DesktopDictationHostProps): null {
       current.current = { id: request.dictationId, phase: "starting", declined: false, again };
       kept.current = null;
       setLanguage(request.language);
+      setModel(offeredModel(request.model, capabilityRef.current));
       setVocabulary(request.vocabulary ?? NO_WORDS);
       setPending({ id: request.dictationId, audio: again ? request.audio : null });
       return;
@@ -482,4 +488,19 @@ function readSpeech(
     }),
     () => null,
   );
+}
+
+/**
+ * The shortcut's own model when this workspace offers it; otherwise null, so
+ * the workspace's voice input model hears it rather than the dictation failing.
+ */
+function offeredModel(
+  wanted: DesktopDictationModel | null | undefined,
+  capability: ClientVoiceInputConfig | null | undefined,
+): DesktopDictationModel | null {
+  if (!wanted) return null;
+  const offered = capability?.models?.some(
+    (entry) => entry.providerId === wanted.providerId && entry.model === wanted.model,
+  );
+  return offered ? { providerId: wanted.providerId, model: wanted.model } : null;
 }

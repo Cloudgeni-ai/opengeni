@@ -52,6 +52,13 @@ export type RemoteOperationObservation =
 export type RemoteOperationControl = {
   cancelExecCommand?(opId: string): Promise<boolean>;
   observeExecCommand?(opId: string): Promise<RemoteOperationObservation>;
+  /**
+   * End this operation's foreground wait now, as if its yield window ended: a
+   * command that may continue in the background returns its handle and keeps
+   * running. False when the operation has no background yield. Used when a
+   * Steer is waiting; it never cancels or settles the operation.
+   */
+  yieldExecCommand?(opId: string): boolean;
 };
 
 const storage = new AsyncLocalStorage<ToolCallCorrelation>();

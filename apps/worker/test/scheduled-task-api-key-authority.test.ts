@@ -223,6 +223,56 @@ describe("organization API key scheduled tasks", () => {
     expect(runs[0]).toMatchObject({ status: "failed", error: "machine_target_unavailable" });
   }, 180_000);
 
+  test("a sandbox backend the deployment does not serve is refused at save and at admission", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const key = organizationKey(workspace);
+    const cloud = {
+      sandboxBackend: "modal" as const,
+      modalTokenId: "test-modal-token-id",
+      modalTokenSecret: "test-modal-token-secret",
+    };
+    await expect(
+      createWithKey(workspace, key, { type: "manual" }, { sandboxBackend: "local" }, cloud),
+    ).rejects.toMatchObject({
+      status: 422,
+      message: expect.stringContaining('sandboxBackend "local" is not available'),
+    });
+    // Saved while the deployment served it (or before this check existed); the
+    // deployment now serves only modal, so no session may be built on the host.
+    const task = await createWithKey(
+      workspace,
+      key,
+      { type: "manual" },
+      { sandboxBackend: "local" },
+      { sandboxBackend: "local" },
+    );
+    const result = await scheduler(cloud).dispatchScheduledTaskRun({
+      workspaceId: workspace.workspaceId,
+      taskId: task.id,
+      triggerType: "manual",
+      producerKey: `unserved-backend:${crypto.randomUUID()}`,
+      initiator: { kind: "subject", subjectId: key.subjectId },
+    });
+    expect(result).toMatchObject({
+      action: "blocked",
+      reason: "machine_target_unavailable",
+      refusal: { version: 1, reason: "machine_target_unavailable", retryable: false },
+    });
+    const [sessions] = await admin<{ count: number }[]>`
+      select count(*)::int as count from sessions where workspace_id = ${workspace.workspaceId}`;
+    expect(sessions?.count).toBe(0);
+    // The same task on a deployment that serves the backend still runs.
+    const served = await scheduler({ sandboxBackend: "local" }).dispatchScheduledTaskRun({
+      workspaceId: workspace.workspaceId,
+      taskId: task.id,
+      triggerType: "manual",
+      producerKey: `served-backend:${crypto.randomUUID()}`,
+      initiator: { kind: "subject", subjectId: key.subjectId },
+    });
+    expect(served.action).toBe("start");
+  }, 180_000);
+
   test("workspace default resolves for fresh runs while queued recovery keeps accepted placement", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();

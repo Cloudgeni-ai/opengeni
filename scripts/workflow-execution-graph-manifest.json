@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/backup-image.yml",
-      "sha256": "4d6dde41b5f7c61af744a6b9b3b37840b0c3635854538da3d8bc039f204dc01c"
+      "sha256": "e22a85bc802c6e2e5facd973ea6e5884a857d5f3d5c4bd6c092501e8faa94f58"
     },
     {
       "path": ".github/workflows/browser-engine-pins.yml",

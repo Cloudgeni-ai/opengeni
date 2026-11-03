@@ -72,6 +72,7 @@ function settingsView(
     connectionId: settings.connectionId,
     updatesEnabled: settings.updatesEnabled,
     channelPostsOnly: settings.channelPostsOnly,
+    announcementChannelId: settings.announcementChannelId,
     viewerCanManage,
     updatedAt: settings.updatedAt?.toISOString() ?? null,
   });
@@ -138,6 +139,9 @@ export function registerSlackAgentUpdateRoutes(app: Hono, deps: ApiRouteDeps): v
       connectionId: payload.connectionId,
       updatesEnabled: payload.updatesEnabled,
       channelPostsOnly: payload.channelPostsOnly,
+      ...(payload.announcementChannelId !== undefined
+        ? { announcementChannelId: payload.announcementChannelId }
+        : {}),
       subjectId: authorization.grant.subjectId,
     });
     return c.json(settingsView(saved, true));
