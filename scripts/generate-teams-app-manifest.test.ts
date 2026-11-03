@@ -63,6 +63,11 @@ describe("Teams app package", () => {
   test("adds team scope and the conversation-context RSC permissions only on request", () => {
     const channels = buildTeamsAppManifest({ ...options, channels: true, groupChats: true });
     expect(channels.bots[0]?.scopes).toEqual(["personal", "team", "groupchat"]);
+    expect(channels).toHaveProperty("supportsChannelFeatures", "tier1");
+    expect(buildTeamsAppManifest(options)).not.toHaveProperty("supportsChannelFeatures");
+    expect(buildTeamsAppManifest({ ...options, groupChats: true })).not.toHaveProperty(
+      "supportsChannelFeatures",
+    );
     expect(channels).not.toHaveProperty("authorization");
     expect(channels).not.toHaveProperty("webApplicationInfo");
 

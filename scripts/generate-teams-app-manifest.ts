@@ -73,6 +73,10 @@ export function buildTeamsAppManifest(options: TeamsManifestOptions) {
     manifestVersion: "1.25",
     version,
     id: guid(options.appId, "appId"),
+    // Teams admin center rejects 1.25 team-scope packages without it. It only
+    // lets the app be added to shared/private channels; the channel allowlist
+    // still decides which channels are served.
+    ...(options.channels ? { supportsChannelFeatures: "tier1" } : {}),
     developer: {
       name: "Cloudgeni",
       websiteUrl: httpsUrl(options.websiteUrl, "websiteUrl").href,
