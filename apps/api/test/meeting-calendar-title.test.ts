@@ -583,6 +583,7 @@ describe("meetings about to start", () => {
     };
     const result = await upcomingMeetings(value, { subjectId: owner, now });
     expect(result.calendar).toBe("connected");
+    expect(result.complete).toBe(true);
     expect(result.meetings.map((meeting) => [meeting.title, meeting.service])).toEqual([
       ["Weekly sync", "Google Meet"],
     ]);
@@ -599,7 +600,21 @@ describe("meetings about to start", () => {
       { ...value, listConnections: async () => [] },
       { subjectId: owner, now },
     );
-    expect(none).toEqual({ calendar: "none", meetings: [] });
+    expect(none).toEqual({ calendar: "none", complete: true, meetings: [] });
+
+    // One calendar failing leaves the others' meetings, and says the list may miss some.
+    const failing = await upcomingMeetings(
+      {
+        ...value,
+        fetch: (async (url: string, init: RequestInit) =>
+          url.startsWith("https://graph.microsoft.com/")
+            ? new Response("busy", { status: 503 })
+            : value.fetch(url, init)) as unknown as typeof fetch,
+      },
+      { subjectId: owner, now },
+    );
+    expect(failing.complete).toBe(false);
+    expect(failing.meetings.map((meeting) => meeting.title)).toEqual(["Weekly sync"]);
   });
 });
 
@@ -617,13 +632,14 @@ describe("a meeting started for a calendar event", () => {
     expect(meetingEventAt([nearer, chosen], at, { provider: "google", id: "b" })?.title).toBe(
       "Board prep",
     );
-    // Not one on another calendar with the same id, nor a private one.
+    // Not one on another calendar with the same id.
     expect(meetingEventAt([nearer, chosen], at, { provider: "microsoft", id: "b" })?.title).toBe(
       "Previous one running over",
     );
+    // A private or declined one the person chose names nothing, never another meeting.
     const secret = { ...chosen, private: true };
-    expect(meetingEventAt([nearer, secret], at, { provider: "google", id: "b" })?.title).toBe(
-      "Previous one running over",
-    );
+    expect(meetingEventAt([nearer, secret], at, { provider: "google", id: "b" })).toBeNull();
+    const declined = { ...chosen, declined: true };
+    expect(meetingEventAt([nearer, declined], at, { provider: "google", id: "b" })).toBeNull();
   });
 });

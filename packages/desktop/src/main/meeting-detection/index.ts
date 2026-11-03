@@ -787,16 +787,18 @@ export class MeetingDetection {
           upcoming: async (accountId) => parseUpcomingMeetings(await calendar.upcoming(accountId)),
           enabled: () => this.remindersWanted(),
           recordingSince: () => this.recordingSince,
-          // A call that just started is asked about first.
-          busy: () => this.onCard?.prompt.kind === "record",
+          // A call that just started, or one that ended, is asked about first.
+          busy: () => this.onCard?.prompt.kind === "record" || this.onCard?.prompt.kind === "stop",
           present: (reminder, done) => this.showCard(joinPrompt(reminder), done),
           join: (reminder) => {
+            // Recording starts in the background, and the meeting opens last,
+            // in front, so the window doesn't cover it.
+            this.deliver(promptRequest(joinPrompt(reminder)), { quiet: true });
             try {
               calendar.openUrl(reminder.meeting.joinUrl);
             } catch (error) {
               this.options.log("Meeting reminders: couldn't open the meeting's link.", error);
             }
-            this.deliver(promptRequest(joinPrompt(reminder)));
           },
           onCalendar: () => this.changed(),
           log: (message, error) => this.options.log(message, error),
@@ -828,6 +830,11 @@ export class MeetingDetection {
   /** Read the calendar again soon, e.g. after the computer wakes. */
   refreshCalendar(): void {
     this.reminders?.refresh();
+  }
+
+  /** An app window came to the front: without a calendar, check whether one was just connected. */
+  windowFocused(): void {
+    this.reminders?.recheckCalendar();
   }
 
   update(change: unknown): DesktopMeetingDetectionStatus {

@@ -235,7 +235,10 @@ export class MeetingPromptCard implements MeetingPromptView {
     const text = promptText(prompt, words);
     const state = {
       token,
-      title: words.title,
+      title:
+        prompt.kind === "join"
+          ? (words.reminderTitle ?? ENGLISH_MEETING_WORDS.reminderTitle)
+          : words.title,
       ...text,
       icon: this.options.icon?.() ?? null,
       timeoutMs:

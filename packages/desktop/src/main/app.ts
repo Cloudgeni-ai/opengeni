@@ -395,6 +395,9 @@ export class DesktopShell {
             return await client.requestJson(
               "GET",
               `/v1/workspaces/${encodeURIComponent(workspaceId)}/upcoming-meetings`,
+              undefined,
+              {},
+              { timeoutMs: 15_000 },
             );
           } catch (caught) {
             // A server from before reminders has no such route: nothing to remind of.
@@ -559,6 +562,8 @@ export class DesktopShell {
       this.meetings.refreshCalendar();
     });
     powerMonitor.on("unlock-screen", () => this.meetings.refreshCalendar());
+    // Back from connecting a calendar in the browser: settings stop offering it.
+    app.on("browser-window-focus", () => this.meetings.windowFocused());
     app.on("before-quit", (event) => {
       if (this.quitConfirmed) {
         this.quitting = true;

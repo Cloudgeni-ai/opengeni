@@ -136,7 +136,11 @@ const jsonValue: z.ZodType<unknown> = z.lazy(() =>
     z.record(z.string().max(128), jsonValue),
   ]),
 );
-/** Product-owned metadata; Opengeni stores and filters on it but never interprets it. */
+/**
+ * Product-owned metadata; Opengeni stores and filters on it but never
+ * interprets it. One key is Opengeni's: `calendarEvent`, the calendar event
+ * a recording was started for (`calendarEvent` on create), which it writes.
+ */
 const recordingMetadata = z
   .record(z.string().min(1).max(128), jsonValue)
   .refine((value) => JSON.stringify(value).length <= 16_384, "metadata is too large");
@@ -424,6 +428,11 @@ export type UpcomingMeeting = z.infer<typeof UpcomingMeeting>;
 export const UpcomingMeetingsResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     calendar: z.enum(["connected", "none"]),
+    /**
+     * False when a calendar couldn't be read in time: the list may be
+     * missing meetings, so a reminder already showing stays.
+     */
+    complete: z.boolean().optional(),
     meetings: z.array(UpcomingMeeting),
   }),
 );

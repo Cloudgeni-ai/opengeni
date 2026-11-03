@@ -30752,6 +30752,7 @@
       "shape": {
         "$": "object",
         "$.calendar": "enum!=[\"\\\"connected\\\"\",\"\\\"none\\\"\"]",
+        "$.complete": "boolean?",
         "$.meetings": "array!",
         "$.meetings[]": "ref(UpcomingMeeting)"
       }

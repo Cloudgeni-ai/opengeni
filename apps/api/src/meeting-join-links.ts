@@ -18,9 +18,10 @@ function hostIs(url: URL, domain: string): boolean {
 const SERVICES: readonly MeetingService[] = [
   {
     name: "Google Meet",
-    // meet.google.com/abc-defg-hij; the landing page alone is no meeting.
+    // meet.google.com/abc-defg-hij or a lookup link; not /new, /landing or the home page.
     matches: (url) =>
-      url.hostname.toLowerCase() === "meet.google.com" && /^\/[a-z0-9-]{3,}/iu.test(url.pathname),
+      url.hostname.toLowerCase() === "meet.google.com" &&
+      /^\/([a-z]{3}-[a-z]{4}-[a-z]{3}|lookup\/[\w-]+)(\/|$)/iu.test(url.pathname),
   },
   {
     name: "Zoom",
@@ -38,7 +39,10 @@ const SERVICES: readonly MeetingService[] = [
   },
   {
     name: "Webex",
-    matches: (url) => hostIs(url, "webex.com") && url.pathname.length > 1,
+    // A meeting room or join link, not the site's other pages.
+    matches: (url) =>
+      hostIs(url, "webex.com") &&
+      /^\/(meet\/|join\/|[\w-]+\/j\.php|j\.php|wbxmjs\/joinservice\/)/iu.test(url.pathname),
   },
 ];
 
@@ -64,7 +68,9 @@ const LINK = /https:\/\/[^\s<>"'()[\]{}]+/giu;
 /** The first join link in free text, such as an event's location or description. */
 export function meetingJoinLinkIn(text: unknown): MeetingJoinLink | null {
   if (typeof text !== "string") return null;
-  for (const match of text.slice(0, 20_000).matchAll(LINK)) {
+  // Google sends descriptions as HTML, where a link's & is &amp;.
+  const plain = text.slice(0, 20_000).replace(/&amp;/giu, "&");
+  for (const match of plain.matchAll(LINK)) {
     // Trailing punctuation belongs to the sentence, not the link.
     const found = meetingJoinLink(match[0].replace(/[.,;:!?]+$/u, ""));
     if (found) return found;

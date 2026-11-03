@@ -87,8 +87,9 @@ weaker source, in this order:
    once the server has it (`serverTitle` in the upload status). A create
    request with `calendarEvent` (`{ provider: "google" | "microsoft", id }`),
    such as a meeting joined from the desktop app's reminder, prefers that
-   event when it is on the calendar then, under the same rules, and keeps
-   it in `metadata.calendarEvent`.
+   event when it is on the calendar then (a private one names nothing, never
+   another meeting), and keeps it in `metadata.calendarEvent`, the one
+   metadata key Opengeni writes.
 3. `conversation`: written with the meeting's notes. The built-in summary
    (below) passes a short name to `meeting_notes_save` as `title`, in the
    meeting's language; it is kept only while the title is from a weaker
@@ -324,7 +325,9 @@ does. Pass `calendar` to `createMeetingDetection`:
 ```ts
 calendar: {
   account: () => activeAccount(), // { id } of the signed-in account, or null
-  upcoming: (accountId) => client.requestJson(`/v1/workspaces/${workspaceId}/upcoming-meetings`),
+  // The account's own workspace; null (or a throw) when it can't be read now.
+  upcoming: (accountId) =>
+    new OpenGeniRecordingsClient(clientFor(accountId)).listUpcomingMeetings(workspaceOf(accountId)),
   openUrl: (url) => void shell.openExternal(url), // an https join link
 },
 ```
@@ -333,8 +336,10 @@ calendar: {
 meetings from their connected Google Calendar or Outlook Calendar that start
 within twenty minutes (or started up to five minutes ago) and have a Google
 Meet, Zoom, Microsoft Teams or Webex link, skipping declined, cancelled and
-all-day events: `{ calendar: "connected" | "none", meetings: [{ id, provider,
-title, private, startsAt, endsAt, joinUrl, service, unanswered }] }`. About a minute
+all-day events: `{ calendar: "connected" | "none", complete, meetings: [{ id,
+provider, title, private, startsAt, endsAt, joinUrl, service, unanswered }] }`.
+`complete` is false when a calendar couldn't be read in time, so the list may
+miss meetings; the desktop then keeps the ones it knew. About a minute
 before one starts, the card says "<title> · Starts in 1 min · Google Meet"
 with Join and start recording and Not now. Join opens the link and starts a
 recording with that `calendarEvent`, named after it (after the service for a

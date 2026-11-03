@@ -51,6 +51,6 @@ export function connectCalendarPath(workspaceId: string): string {
 export function calendarRemindersDescription(status: DesktopMeetingDetectionStatus): string {
   if (!status.calendarReminders) return "Off.";
   return status.calendar === "none"
-    ? "Connect Google Calendar or Outlook to get a reminder a minute before each meeting."
+    ? "Connect a calendar to get a reminder a minute before each meeting."
     : "A minute before a meeting with a video link, a card offers to join it and start recording.";
 }

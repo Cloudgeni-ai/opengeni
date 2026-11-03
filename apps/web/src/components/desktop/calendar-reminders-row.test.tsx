@@ -43,7 +43,7 @@ describe("Remind me before meetings", () => {
         onConnectCalendar={() => connects.push("connect")}
       />,
     );
-    expect(host.textContent).toContain("Connect Google Calendar or Outlook");
+    expect(host.textContent).toContain("Connect a calendar to get a reminder");
     await act(async () => button("Connect calendar")!.click());
     expect(connects).toEqual(["connect"]);
   });

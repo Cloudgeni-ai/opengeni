@@ -18,6 +18,8 @@ describe("meeting join links", () => {
       "Microsoft Teams",
     );
     expect(meetingJoinLink("https://acme.webex.com/meet/someone")?.service).toBe("Webex");
+    expect(meetingJoinLink("https://acme.webex.com/acme/j.php?MTID=m123")?.service).toBe("Webex");
+    expect(meetingJoinLink("https://meet.google.com/lookup/abcdef")?.service).toBe("Google Meet");
   });
 
   test("never another scheme, a look-alike host, a landing page or credentials in the link", () => {
@@ -31,6 +33,10 @@ describe("meeting join links", () => {
       "https://user:pass@meet.google.com/abc-defg-hij",
       "javascript:alert(1)",
       "https://teams.microsoft.com/",
+      "https://meet.google.com/new",
+      "https://meet.google.com/landing",
+      "https://www.webex.com/pricing/index.html",
+      "https://help.webex.com/en-us/article/123",
       "not a link",
       42,
     ]) {
@@ -46,6 +52,10 @@ describe("meeting join links", () => {
       "https://meet.google.com/abc-defg-hij",
     );
     expect(meetingJoinLinkIn(undefined)).toBeNull();
+    // An HTML description's &amp; is the link's &.
+    expect(
+      meetingJoinLinkIn('<a href="https://zoom.us/j/123?pwd=abc&amp;uname=x">Join</a>')?.url,
+    ).toBe("https://zoom.us/j/123?pwd=abc&uname=x");
     expect(
       firstMeetingJoinLink(
         ["https://example.com/not-a-call", "https://meet.google.com/abc-defg-hij"],

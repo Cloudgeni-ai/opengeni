@@ -10,6 +10,7 @@ mock.module("electron", () => electronStub);
 
 import { DESKTOP_IPC, type DesktopMeetingRequest } from "../src/contract";
 import {
+  ENDED_AFTER_MS,
   joinPrompt,
   MeetingDetection,
   MeetingDetectionStore,
@@ -24,6 +25,7 @@ import {
 import {
   JOIN_LATE_MS,
   parseUpcomingMeetings,
+  RECHECK_CALENDAR_MS,
   REMIND_BEFORE_MS,
   type CalendarMeeting,
   type JoinReminder,
@@ -85,8 +87,12 @@ describe("reading upcoming meetings", () => {
     expect(parsed?.meetings[1]!.service).toBe("Meeting");
     expect(parseUpcomingMeetings({ calendar: "none", meetings: [] })).toEqual({
       calendar: "none",
+      complete: true,
       meetings: [],
     });
+    expect(
+      parseUpcomingMeetings({ calendar: "connected", complete: false, meetings: [] })?.complete,
+    ).toBe(false);
     expect(parseUpcomingMeetings({ meetings: [] })).toBeNull();
     expect(parseUpcomingMeetings(null)).toBeNull();
   });
@@ -276,6 +282,10 @@ function reminders(
     setActive: (id: string | null) => {
       active = id;
     },
+    /** The clock moves, and nothing else happens. */
+    setNow: (time: number) => {
+      now = time;
+    },
     microphone: (users: MicrophoneUser[], time: number) => {
       now = time;
       helper.stdout.emit("data", `${JSON.stringify({ event: "microphone", users })}\n`);
@@ -302,7 +312,8 @@ describe("reminders before calendar meetings", () => {
     );
     card.done("chosen");
     expect(run.opened).toEqual(["https://meet.google.com/abc-defg-hij"]);
-    expect(run.revealed()).toBe(1);
+    // A page records in the background: the window doesn't jump in front of the meeting.
+    expect(run.revealed()).toBe(0);
     expect(page.sent).toEqual([
       {
         kind: "record",
@@ -365,6 +376,80 @@ describe("reminders before calendar meetings", () => {
     expect(fresh.cards.filter((card) => card.prompt.kind === "join")[0]!.closed).toBe(true);
     run.subject.shutdown();
     fresh.subject.shutdown();
+  });
+
+  test("a calendar that couldn't be read doesn't take a showing card for cancelled", async () => {
+    const run = reminders();
+    await run.at(START - 30_000);
+    const card = run.shown()[0]!;
+    run.setBody({ calendar: "connected", complete: false, meetings: [] });
+    await run.at(START - 20_000);
+    expect(card.closed).toBe(false);
+    // A complete answer without it: cancelled.
+    run.setBody({ calendar: "connected", complete: true, meetings: [] });
+    await run.at(START - 10_000);
+    expect(card.closed).toBe(true);
+    run.subject.shutdown();
+  });
+
+  test("a calendar read that finishes after shutdown shows nothing", async () => {
+    const run = reminders();
+    // The first read is still on its way.
+    run.subject.shutdown();
+    await run.at(START - REMIND_BEFORE_MS);
+    expect(run.cards).toHaveLength(0);
+  });
+
+  test("a recording's question to stop isn't covered by a reminder", async () => {
+    const run = reminders();
+    const page = new FakePage(1);
+    run.subject.listen(page, true);
+    await run.at(START - 20 * MINUTE);
+    run.microphone([zoom], START - 20 * MINUTE);
+    run.microphone([zoom], START - 20 * MINUTE + PROMPT_AFTER_MS);
+    run.cards[0]!.done("chosen");
+    run.subject.setRecording(page, true);
+    run.microphone([], START - 2 * MINUTE);
+    run.microphone([], START - 2 * MINUTE + ENDED_AFTER_MS);
+    const stop = run.cards.find((card) => card.prompt.kind === "stop")!;
+    expect(stop.closed).toBe(false);
+    await run.at(START - REMIND_BEFORE_MS);
+    expect(run.shown()).toHaveLength(0);
+    expect(stop.closed).toBe(false);
+    // Once it's answered, the reminder shows.
+    stop.done("chosen");
+    run.subject.setRecording(page, false);
+    await run.at(START - 30_000);
+    expect(run.shown().map((card) => promptText(card.prompt).action)).toEqual([
+      "Join and start recording",
+    ]);
+    run.subject.shutdown();
+  });
+
+  test("without a calendar, a window coming to the front checks again, not too often", async () => {
+    const run = reminders({ calendar: "none", meetings: [] });
+    await run.settle();
+    const reads = run.reads.length;
+    run.subject.windowFocused();
+    await run.settle();
+    expect(run.reads).toHaveLength(reads);
+    await run.at(START - 9 * MINUTE);
+    const after = run.reads.length;
+    run.subject.windowFocused();
+    await run.settle();
+    expect(run.reads).toHaveLength(after);
+    // A while later, a focus reads again; once a calendar is connected, focus doesn't.
+    run.setNow(START - 9 * MINUTE + RECHECK_CALENDAR_MS);
+    run.setBody({ calendar: "connected", meetings: [] });
+    run.subject.windowFocused();
+    await run.settle();
+    expect(run.reads).toHaveLength(after + 1);
+    expect(run.subject.status()).toMatchObject({ calendar: "connected" });
+    run.setNow(START - 8 * MINUTE);
+    run.subject.windowFocused();
+    await run.settle();
+    expect(run.reads).toHaveLength(after + 1);
+    run.subject.shutdown();
   });
 
   test("no calendar: no card, and the status says so", async () => {

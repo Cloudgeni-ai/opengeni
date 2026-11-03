@@ -683,7 +683,7 @@ describe("recording routes", () => {
     // No calendar yet.
     expect(await scope.owner.call("GET", "/upcoming-meetings")).toEqual({
       status: 200,
-      body: { calendar: "none", meetings: [] },
+      body: { calendar: "none", complete: true, meetings: [] },
     });
     expect(asked).toHaveLength(0);
     await createConnection(db.db, {
@@ -704,6 +704,7 @@ describe("recording routes", () => {
       status: 200,
       body: {
         calendar: "connected",
+        complete: true,
         meetings: [
           {
             id: "evt-sync",

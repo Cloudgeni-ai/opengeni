@@ -26,6 +26,8 @@ export interface CalendarMeeting {
 /** Whether the account has a calendar its server can read, and its meetings about to start. */
 export interface UpcomingMeetings {
   calendar: "connected" | "none";
+  /** False when a calendar couldn't be read: meetings may be missing, not cancelled. */
+  complete: boolean;
   meetings: CalendarMeeting[];
 }
 
@@ -45,6 +47,8 @@ export const EARLY_JOIN_MS = 10 * 60_000;
 export const REMINDER_TICK_MS = 15_000;
 /** The shortest a card stays up, however late it shows. */
 const MIN_CARD_MS = 30_000;
+/** Without a calendar, read again at most this often when a window comes to the front. */
+export const RECHECK_CALENDAR_MS = 30_000;
 
 function isHttpsUrl(value: unknown): value is string {
   if (typeof value !== "string" || value.length > 2048) return false;
@@ -64,7 +68,7 @@ function time(value: unknown): number | null {
 /** The server's answer as upcoming meetings, leniently; null when it isn't one. */
 export function parseUpcomingMeetings(body: unknown): UpcomingMeetings | null {
   if (!body || typeof body !== "object") return null;
-  const value = body as { calendar?: unknown; meetings?: unknown };
+  const value = body as { calendar?: unknown; complete?: unknown; meetings?: unknown };
   if (value.calendar !== "connected" && value.calendar !== "none") return null;
   const meetings: CalendarMeeting[] = [];
   for (const entry of Array.isArray(value.meetings) ? value.meetings : []) {
@@ -97,7 +101,7 @@ export function parseUpcomingMeetings(body: unknown): UpcomingMeetings | null {
     });
   }
   meetings.sort((a, b) => a.startsAt - b.startsAt);
-  return { calendar: value.calendar, meetings };
+  return { calendar: value.calendar, complete: value.complete !== false, meetings };
 }
 
 function key(accountId: string, meeting: CalendarMeeting): string {
@@ -186,6 +190,8 @@ export class CalendarReminders {
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    // A read still on its way is for reminders that are off now.
+    this.generation += 1;
     this.close();
   }
 
@@ -193,6 +199,16 @@ export class CalendarReminders {
   refresh(): void {
     this.fetchedAt = 0;
     if (this.timer) this.tick();
+  }
+
+  /**
+   * The person may have just connected a calendar (an app window came to the
+   * front): read again soon, while there is none, so settings stop offering it.
+   */
+  recheckCalendar(): void {
+    if (this.upcoming?.calendar !== "none") return;
+    if (this.now() - this.fetchedAt < RECHECK_CALENDAR_MS) return;
+    this.refresh();
   }
 
   /** The active account may have changed: its card goes, and the new one's calendar is read. */
@@ -225,7 +241,7 @@ export class CalendarReminders {
   /** Show, keep or take back the card for what the calendar says at `now`. */
   evaluate(now: number): void {
     const accountId = this.accountId;
-    if (!this.options.enabled() || !accountId || !this.upcoming) {
+    if (!this.timer || !this.options.enabled() || !accountId || !this.upcoming) {
       this.close();
       return;
     }
@@ -319,6 +335,17 @@ export class CalendarReminders {
       }
       if (generation !== this.generation || upcoming === null) return;
       const before = this.upcoming?.calendar ?? null;
+      // A calendar that couldn't be read now: meetings known before stay, so a
+      // card already showing isn't taken for cancelled.
+      const known = this.upcoming;
+      if (!upcoming.complete && known) {
+        const listed = new Set(upcoming.meetings.map((meeting) => key(accountId, meeting)));
+        const kept = known.meetings.filter((meeting) => !listed.has(key(accountId, meeting)));
+        upcoming = {
+          ...upcoming,
+          meetings: [...upcoming.meetings, ...kept].sort((a, b) => a.startsAt - b.startsAt),
+        };
+      }
       this.upcoming = upcoming;
       if (before !== upcoming.calendar) this.options.onCalendar?.(upcoming.calendar);
       this.evaluate(this.now());

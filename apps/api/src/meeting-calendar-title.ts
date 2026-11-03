@@ -81,10 +81,11 @@ export function meetingEventAt(
   chosen?: MeetingCalendarEventRef,
 ): MeetingCalendarEvent | null {
   if (chosen) {
-    const named = events.find(
-      (event) => event.id === chosen.id && event.provider === chosen.provider && nameable(event),
+    // The person chose this meeting: its own name or none, never another event's.
+    const found = events.find(
+      (event) => event.id === chosen.id && event.provider === chosen.provider,
     );
-    if (named) return named;
+    if (found) return nameable(found) ? found : null;
   }
   const time = at.getTime();
   const fitting = events.filter(
@@ -305,12 +306,13 @@ function eventsRequest(
 /**
  * The events between `from` and `to` on every calendar of the owner's this
  * deployment can read, and whether they have one at all. A calendar that
- * fails or answers too late adds no events; `null` once the time is up.
+ * fails or answers too late adds no events and makes the read incomplete;
+ * `null` once the time is up.
  */
 async function readMeetingCalendars(
   lookup: MeetingCalendarLookup,
   input: { subjectId: string; from: Date; to: Date; join: boolean },
-): Promise<{ connected: boolean; events: MeetingCalendarEvent[] } | null> {
+): Promise<{ connected: boolean; complete: boolean; events: MeetingCalendarEvent[] } | null> {
   const timeout = AbortSignal.timeout(lookup.timeoutMs ?? MEETING_CALENDAR_LOOKUP_TIMEOUT_MS);
   let settled = false;
   const problem = (providerDomain: string, reason: string) => {
@@ -326,28 +328,35 @@ async function readMeetingCalendars(
       subjectId: input.subjectId,
       googleCalendarEnabled: lookup.googleCalendarEnabled,
     });
-    if (connections.length === 0) return { connected: false, events: [] };
+    if (connections.length === 0) return { connected: false, complete: true, events: [] };
+    let complete = true;
     const found = await Promise.all(
       connections.map(async (connection) => {
         try {
           const request = eventsRequest(connection, input);
           const credential = await lookup.credentialHeaders(connection, request.url);
           if (!credential) {
+            complete = false;
             problem(connection.providerDomain, "credential unavailable");
             return [];
           }
-          if (timeout.aborted) return [];
+          if (timeout.aborted) {
+            complete = false;
+            return [];
+          }
           const response = await lookup.fetch(request.url, {
             headers: { ...credential, ...request.headers, Accept: "application/json" },
             redirect: "error",
             signal: timeout,
           });
           if (!response.ok) {
+            complete = false;
             problem(connection.providerDomain, `HTTP ${response.status}`);
             return [];
           }
           return request.parse(await response.json());
         } catch (error) {
+          complete = false;
           // A lookup cut off by the time limit is reported once, below.
           if (!timeout.aborted) {
             problem(connection.providerDomain, error instanceof Error ? error.name : "failed");
@@ -356,7 +365,7 @@ async function readMeetingCalendars(
         }
       }),
     );
-    return { connected: true, events: found.flat() };
+    return { connected: true, complete, events: found.flat() };
   };
   const expired = new Promise<null>((resolve) => {
     timeout.addEventListener(
@@ -472,21 +481,24 @@ export function upcomingMeetingsAt(
 /**
  * The owner's meetings about to start, for a reminder that joins one and
  * starts its recording. `calendar` says whether they have a calendar this
- * deployment can read; a calendar that can't be read now lists nothing.
+ * deployment can read; a calendar that can't be read now lists nothing and
+ * makes the answer incomplete (`complete: false`), so a reminder already
+ * showing isn't taken for cancelled.
  */
 export async function upcomingMeetings(
   lookup: MeetingCalendarLookup,
   input: { subjectId: string; now: Date },
-): Promise<{ calendar: "connected" | "none"; meetings: UpcomingMeeting[] }> {
+): Promise<{ calendar: "connected" | "none"; complete: boolean; meetings: UpcomingMeeting[] }> {
   const read = await readMeetingCalendars(lookup, {
     subjectId: input.subjectId,
     from: input.now,
     to: new Date(input.now.getTime() + UPCOMING_MEETINGS_AHEAD_MS),
     join: true,
   });
-  if (read === null) return { calendar: "connected", meetings: [] };
+  if (read === null) return { calendar: "connected", complete: false, meetings: [] };
   return {
     calendar: read.connected ? "connected" : "none",
+    complete: read.complete,
     meetings: upcomingMeetingsAt(read.events, input.now),
   };
 }
