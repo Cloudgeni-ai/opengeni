@@ -41,7 +41,7 @@ type Fixture = {
 const CLAUDE: Fixture[] = [
   {
     id: "c1",
-    email: "bendik1@cloudgeni.ai",
+    email: "alex.morgan@example.test",
     plan: "claude_pro",
     windows: [
       ["five_hour", 36, 2.4],
@@ -50,7 +50,7 @@ const CLAUDE: Fixture[] = [
   },
   {
     id: "c2",
-    email: "jorgen.sandhaug@gmail.com",
+    email: "sam.longername.lindqvist@example.test",
     plan: "claude_max_20x",
     windows: [
       ["seven_day", 24, 101],
@@ -59,7 +59,7 @@ const CLAUDE: Fixture[] = [
   },
   {
     id: "c3",
-    email: "yorgen0103@gmail.com",
+    email: "research.lab@example.test",
     plan: "claude_max_5x",
     windows: [
       ["five_hour", 100, 1.2],
@@ -69,7 +69,7 @@ const CLAUDE: Fixture[] = [
   },
   {
     id: "c4",
-    email: "bendik2@cloudgeni.ai",
+    email: "kim@example.test",
     plan: "claude_max",
     windows: [
       ["five_hour", 3, 4.6],
@@ -78,7 +78,7 @@ const CLAUDE: Fixture[] = [
   },
   {
     id: "c5",
-    email: "bendik98ny@gmail.com",
+    email: "build.agent.ultra@example.test",
     plan: "claude_pro",
     windows: [],
     status: "needs_relogin",
@@ -88,27 +88,27 @@ const CLAUDE: Fixture[] = [
 const CODEX: Fixture[] = [
   {
     id: "o1",
-    email: "ops@cloudgeni.ai",
+    email: "ops@example.test",
     plan: "plus",
     windows: [
       ["five_hour", 58, 3.1],
       ["seven_day", 33, 96],
     ],
   },
-  { id: "o2", email: "research@cloudgeni.ai", plan: "pro", windows: [["seven_day", 12, 130]] },
-  { id: "o3", email: "intern@cloudgeni.ai", plan: "free", windows: [["seven_day", 91, 40]] },
+  { id: "o2", email: "research@example.test", plan: "pro", windows: [["seven_day", 12, 130]] },
+  { id: "o3", email: "intern@example.test", plan: "free", windows: [["seven_day", 91, 40]] },
 ];
 
 const GROK: Fixture[] = [
   {
     id: "x1",
-    email: "grok@cloudgeni.ai",
+    email: "grok@example.test",
     plan: "SuperGrok Heavy",
     windows: [["billing", 35, 260]],
   },
   {
     id: "x2",
-    email: "grok2@cloudgeni.ai",
+    email: "grok2@example.test",
     plan: "SuperGrok Heavy",
     windows: [["billing", 8, 260]],
   },

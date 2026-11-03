@@ -346,7 +346,7 @@ describe("usage readings", () => {
 
 describe("plans and marks in the account list", () => {
   const claudeAccounts = [
-    account("pro", { plan: "claude_pro", email: "jorgen.sandhaug@gmail.example.test" }),
+    account("pro", { plan: "claude_pro", email: "sam.longername.lindqvist@example.test" }),
     account("max", { plan: "claude_max_5x" }),
     account("ultra", { plan: "claude_max_20x" }),
     account("bare", { plan: "claude_max" }),
@@ -373,7 +373,7 @@ describe("plans and marks in the account list", () => {
     );
     expect(content.accounts[0]).toMatchObject({
       label: "Acme pro",
-      email: "jorgen.sandhaug@gmail.example.test",
+      email: "sam.longername.lindqvist@example.test",
     });
   });
 
