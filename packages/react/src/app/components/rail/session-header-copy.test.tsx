@@ -70,6 +70,16 @@ const session = {
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
 
+/** Waits, a frame at a time, for what the UI does after a menu has closed. */
+async function waitForElement<T extends Element>(find: () => T | null): Promise<T | null> {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const found = find();
+    if (found) return found;
+    await React.act(settle);
+  }
+  return find();
+}
+
 async function renderHeader() {
   const container = document.createElement("div");
   document.body.append(container);
@@ -131,7 +141,7 @@ test("right-clicking the title copies it, copies the chat's link or renames it",
     // Rename opens the field once the menu has closed, with the title in it.
     await openMenu();
     await click(menuItems("[data-session-title-menu]")[2]!);
-    const field = container.querySelector<HTMLInputElement>("input");
+    const field = await waitForElement(() => container.querySelector<HTMLInputElement>("input"));
     expect(field?.value).toBe("Quarterly usage review");
   } finally {
     await unmount();
