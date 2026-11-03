@@ -234,3 +234,57 @@ export function ComposerSendBlockerNotice({
     </div>
   );
 }
+
+/**
+ * A new chat the server refused to start. The chat does not exist yet, so the
+ * line under the composer is the only place that can say why; a toast alone
+ * disappears before it is read and leaves the person looking at nothing. The
+ * line stays until the person changes what they send (text, model, reasoning
+ * level or speed), sends successfully, or dismisses it.
+ */
+export type NewSessionCreateFailure = {
+  workspaceId: string;
+  /** What was sent when the start was refused (see newSessionSendSignature). */
+  signature: string;
+  message: string;
+};
+
+/** What a Send carries that a refusal is about: the text and the model choice. */
+export function newSessionSendSignature(input: {
+  text: string;
+  model: string;
+  reasoningEffort: ReasoningEffort;
+  latencyMode: LatencyMode;
+}): string {
+  return JSON.stringify([input.text, input.model, input.reasoningEffort, input.latencyMode]);
+}
+
+/** The refusal message to show now, or null once the person changed what they send. */
+export function visibleNewSessionCreateFailure(
+  failure: NewSessionCreateFailure | null,
+  current: { workspaceId: string; signature: string },
+): string | null {
+  if (!failure) return null;
+  if (failure.workspaceId !== current.workspaceId) return null;
+  return failure.signature === current.signature ? failure.message : null;
+}
+
+/** The persistent line for a refused new chat. */
+export function NewSessionCreateFailureNotice({
+  message,
+  onDismiss,
+  className,
+}: {
+  message: string | null;
+  onDismiss?: (() => void) | undefined;
+  className?: string | undefined;
+}): ReactNode {
+  if (!message) return null;
+  return (
+    <div role="alert" className={className}>
+      <Notice tone="failed" {...(onDismiss ? { onDismiss } : {})}>
+        {message}
+      </Notice>
+    </div>
+  );
+}

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
 import { UnsupportedLatencyModeError } from "@opengeni/config";
+import { modelUnavailableHttpException } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { SessionTenancyManagedHumanRequiredError } from "@opengeni/core";
 import {
@@ -65,6 +66,19 @@ describe("session create error envelope", () => {
       code: "SESSION_CREATE_REJECTED",
       message: "latency mode fast is not runnable for model scripted-model (allowed: standard)",
       details: { code: "UNSUPPORTED_LATENCY_MODE", allowedLatencyModes: ["standard"] },
+    });
+  });
+  test("an unavailable model keeps its typed code, so the composer can name it", async () => {
+    const app = new Hono();
+    app.post("/rejected", (c) =>
+      sessionCreateErrorResponse(c, modelUnavailableHttpException("codex/gpt-6-sol")),
+    );
+    const response = await app.request("http://x/rejected", { method: "POST" });
+    expect(response.status).toBe(422);
+    expect(await response.json()).toEqual({
+      code: "SESSION_CREATE_REJECTED",
+      message: "model is not available: codex/gpt-6-sol",
+      details: { code: "model_unavailable", modelId: "codex/gpt-6-sol" },
     });
   });
   test("connection selection refusal is actionable without returning its private driver cause", async () => {

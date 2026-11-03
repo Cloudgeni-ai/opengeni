@@ -8,15 +8,21 @@ import {
   composerSendBlockerNotice,
   getComposerSendBlocker,
   getNewSessionSendBlocker,
+  NewSessionCreateFailureNotice,
+  newSessionSendSignature,
   newSessionStartBlockerReason,
   pickerPolicyRunnable,
+  visibleNewSessionCreateFailure,
   type ComposerSendBlocker,
+  type NewSessionCreateFailure,
   type NewSessionSendState,
 } from "../src/app/lib/composer-send-blocking";
 import { coveredModelChoice } from "../src/app/lib/free-credit-gap";
 import { composerFallbackModel } from "../src/app/lib/model-access-onboarding";
 import { findPickerRow, projectPickerRows } from "../src/model-policy";
 import { createOpenGeniText } from "../src/messages/runtime";
+import { composerSubmissionErrorMessage } from "../src/lib/format";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import { registerDom } from "./render-hook";
 
 registerDom();
@@ -328,5 +334,101 @@ describe("every blocker is visible", () => {
     expect(getComposerSendBlocker({ ...ready, personalLoading: true, loadFailed: true })).toBe(
       "personal_loading",
     );
+  });
+});
+
+describe("a refused new chat stays visible", () => {
+  // Production: Codex Luna + Low on a ChatGPT Free connection got a 422 from
+  // POST /sessions; the only signal was a toast, so the chat looked like nothing happened.
+  const sent = newSessionSendSignature({
+    text: "hello",
+    model: "codex/gpt-6-luna",
+    reasoningEffort: "low",
+    latencyMode: "standard",
+  });
+  const refusal = new OpenGeniApiError(
+    422,
+    JSON.stringify({
+      code: "SESSION_CREATE_REJECTED",
+      message: 'model "codex/gpt-6-luna" is not allowed by this workspace\'s model policy',
+    }),
+  );
+  const failure: NewSessionCreateFailure = {
+    workspaceId: "ws-1",
+    signature: sent,
+    message: composerSubmissionErrorMessage(t, refusal),
+  };
+
+  test("the server's reason is shown under the composer, not only in a toast", async () => {
+    const message = visibleNewSessionCreateFailure(failure, {
+      workspaceId: "ws-1",
+      signature: sent,
+    });
+    expect(message).toContain("model policy");
+    const container = await mount(<NewSessionCreateFailureNotice message={message} />);
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("model policy");
+  });
+
+  test("each create refusal names its reason instead of 'check your input'", () => {
+    const generic = "The request could not be accepted. Check your input and try again.";
+    expect(failure.message).toBe(
+      'Model "codex/gpt-6-luna" is not allowed by this workspace\'s model policy.',
+    );
+    const speed = new OpenGeniApiError(
+      422,
+      JSON.stringify({
+        code: "SESSION_CREATE_REJECTED",
+        message: "latency mode fast is not runnable for model codex/gpt-6-luna (allowed: standard)",
+        details: { code: "UNSUPPORTED_LATENCY_MODE", allowedLatencyModes: ["standard"] },
+      }),
+    );
+    expect(composerSubmissionErrorMessage(t, speed)).toBe(t("lib.format.speedUnavailable"));
+    const model = new OpenGeniApiError(
+      422,
+      JSON.stringify({
+        code: "SESSION_CREATE_REJECTED",
+        message: "model is not available: codex/gpt-6-sol",
+        details: { code: "model_unavailable", modelId: "codex/gpt-6-sol" },
+      }),
+    );
+    expect(composerSubmissionErrorMessage(t, model)).toBe(t("lib.format.modelUnavailable"));
+    for (const message of [failure.message, composerSubmissionErrorMessage(t, speed)]) {
+      expect(message).not.toBe(generic);
+    }
+  });
+
+  test("it clears once the person changes the text, model, reasoning level or speed", () => {
+    for (const change of [
+      { text: "hello!" },
+      { model: "codex/gpt-6-sol" },
+      { reasoningEffort: "medium" as const },
+      { latencyMode: "fast" as const },
+    ]) {
+      const signature = newSessionSendSignature({
+        text: "hello",
+        model: "codex/gpt-6-luna",
+        reasoningEffort: "low",
+        latencyMode: "standard",
+        ...change,
+      });
+      expect(
+        visibleNewSessionCreateFailure(failure, {
+          workspaceId: "ws-1",
+          signature,
+        }),
+      ).toBeNull();
+    }
+    expect(
+      visibleNewSessionCreateFailure(failure, {
+        workspaceId: "ws-2",
+        signature: sent,
+      }),
+    ).toBeNull();
+    expect(
+      visibleNewSessionCreateFailure(null, {
+        workspaceId: "ws-1",
+        signature: sent,
+      }),
+    ).toBeNull();
   });
 });

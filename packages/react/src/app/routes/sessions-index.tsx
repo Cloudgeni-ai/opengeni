@@ -115,10 +115,19 @@ import {
   ComposerSendBlockerNotice,
   composerSendBlockerIsLoading,
   getNewSessionSendBlocker,
+  NewSessionCreateFailureNotice,
+  newSessionSendSignature,
   newSessionStartBlockerReason,
+  visibleNewSessionCreateFailure,
+  type NewSessionCreateFailure,
   type NewSessionSendState,
 } from "../lib/composer-send-blocking";
-import { creditRefusalRecord, type CreditRefusalRecord } from "../lib/model-access";
+import {
+  creditRefusalRecord,
+  isPaymentRequiredError,
+  type CreditRefusalRecord,
+} from "../lib/model-access";
+import { composerSubmissionErrorMessage } from "../../lib/format";
 import { isTransientServiceFailure, OPENGENI_UPDATING_NOTICE } from "../lib/transient-retry";
 import { useConnectionAccounts } from "../components/capabilities/use-connection-accounts";
 import { StatusDot } from "../../ui/status-dot";
@@ -690,6 +699,7 @@ function SessionsIndexRouteContent({
   const [createCreditRefusal, setCreateCreditRefusal] = useState<CreditRefusalRecord<{
     workspaceId: string;
   }> | null>(null);
+  const [createFailure, setCreateFailure] = useState<NewSessionCreateFailure | null>(null);
   const [createdSessionAuthority, setCreatedSessionAuthority] =
     useState<CreatedSessionRouteAuthority | null>(null);
   const composerRegionRef = useRef<HTMLDivElement | null>(null);
@@ -1081,6 +1091,29 @@ function SessionsIndexRouteContent({
     void modelCatalog.refresh();
     return true;
   };
+  // What this Send carries; a refused start stays visible until it changes.
+  const sendSignature = newSessionSendSignature({
+    text: message,
+    model: context.model,
+    reasoningEffort: context.reasoningEffort,
+    latencyMode: context.latencyMode,
+  });
+  const createFailureMessage = visibleNewSessionCreateFailure(createFailure, {
+    workspaceId,
+    signature: sendSignature,
+  });
+  // Any other refused start is shown under the composer instead of a toast:
+  // the chat was never created, so nothing else would say why.
+  const noteCreateFailure = (error: Error): boolean => {
+    // A payment refusal keeps its own dialog.
+    if (isPaymentRequiredError(error)) return false;
+    setCreateFailure({
+      workspaceId,
+      signature: sendSignature,
+      message: composerSubmissionErrorMessage(t, error),
+    });
+    return true;
+  };
   const chooseCoveredModel = (id: string) => {
     const row = findPickerRow(modelCatalog.rows, id);
     const choice = row
@@ -1355,7 +1388,8 @@ function SessionsIndexRouteContent({
                       return (
                         draftConflict ||
                         newSessionDraft.reportUnavailable(error) ||
-                        noteCreditRefusal(error, request)
+                        noteCreditRefusal(error, request) ||
+                        noteCreateFailure(error)
                       );
                     },
                   },
@@ -1367,6 +1401,7 @@ function SessionsIndexRouteContent({
                 }
                 setUsageLimitDraft(NO_SESSION_USAGE_LIMIT);
                 setCreateCreditRefusal(null);
+                setCreateFailure(null);
                 setUsageLimitSendBlocked(false);
                 return {
                   sessionId: created.id,
@@ -1436,7 +1471,8 @@ function SessionsIndexRouteContent({
                     return (
                       draftConflict ||
                       newSessionDraft.reportUnavailable(error) ||
-                      noteCreditRefusal(error, request)
+                      noteCreditRefusal(error, request) ||
+                      noteCreateFailure(error)
                     );
                   },
                 },
@@ -1449,6 +1485,7 @@ function SessionsIndexRouteContent({
               // The limit belongs to the chat just created; the next starts with none.
               setUsageLimitDraft(NO_SESSION_USAGE_LIMIT);
               setCreateCreditRefusal(null);
+              setCreateFailure(null);
               setUsageLimitSendBlocked(false);
               return {
                 sessionId: created.id,
@@ -2233,6 +2270,13 @@ function SessionsIndexRouteContent({
               <Notice tone="info">{OPENGENI_UPDATING_NOTICE(t)}</Notice>
             </div>
           ) : null}
+
+          {/* A refused start, until the person changes what they send. */}
+          <NewSessionCreateFailureNotice
+            message={createFailureMessage}
+            onDismiss={() => setCreateFailure(null)}
+            className="mt-3"
+          />
 
           {/* Send's blocker, when no other surface already explains it. */}
           <ComposerSendBlockerNotice

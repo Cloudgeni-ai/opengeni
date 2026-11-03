@@ -59,15 +59,20 @@ function permissionReason(permission: unknown): string | null {
     : null;
 }
 
-/** Classify a parsed `ErrorEnvelope`-shaped body. Unknown shapes still get a code. */
+/**
+ * Classify a parsed `ErrorEnvelope`-shaped body. Unknown shapes still get a code.
+ * A route that answers with its own top-level `{ code, message, details }`
+ * (session create) is read the same way, so its refusals are not all
+ * "unclassified": the reason is its typed `details.code`, else its own route
+ * code, and the message is fingerprinted.
+ */
 export function httpRejectionFactsFromEnvelope(
   envelope: unknown,
   fallbackCode: string,
 ): HttpRejectionFacts {
-  const error =
-    envelope && typeof envelope === "object" && "error" in envelope
-      ? (envelope as { error?: unknown }).error
-      : undefined;
+  const body = envelope && typeof envelope === "object" ? envelope : undefined;
+  const routeShaped = body !== undefined && !("error" in body);
+  const error = routeShaped ? body : (body as { error?: unknown } | undefined)?.error;
   const record = error && typeof error === "object" ? (error as Record<string, unknown>) : {};
   const code =
     typeof record.code === "string" && ERROR_CODES.has(record.code) ? record.code : fallbackCode;
@@ -82,6 +87,13 @@ export function httpRejectionFactsFromEnvelope(
     typeof details?.controlFailureCode === "string" && CONTROL_CODE.test(details.controlFailureCode)
       ? `control:${details.controlFailureCode}`
       : null;
+  const routeCode =
+    routeShaped &&
+    typeof record.code === "string" &&
+    !ERROR_CODES.has(record.code) &&
+    DETAIL_CODE.test(record.code)
+      ? record.code
+      : null;
   return {
     code,
     reason:
@@ -89,6 +101,7 @@ export function httpRejectionFactsFromEnvelope(
       rejectionReasonFromMessage(message) ??
       detailCode ??
       controlCode ??
+      routeCode ??
       UNCLASSIFIED_REJECTION_REASON,
     ...(message ? { fingerprint: rejectionFingerprint(message) } : {}),
   };

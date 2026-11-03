@@ -292,6 +292,31 @@ export function isConnectionAccountSubmissionError(error: unknown): boolean {
 export const MODEL_UNAVAILABLE_DETAIL_CODE = "model_unavailable";
 
 /**
+ * The reason a refused new chat gives, in the server's own words. Session
+ * create answers with a typed top-level body whose message is written for the
+ * person (a model policy, a speed the model can't run, a project that is
+ * gone); the generic "check your input" would hide which one it was.
+ */
+export function sessionCreateRefusalMessage(t: OpenGeniText, error: Error): string | null {
+  if (!(error instanceof OpenGeniApiError) || error.status !== 422) return null;
+  if (error.details?.code === "UNSUPPORTED_LATENCY_MODE") {
+    return t("lib.format.speedUnavailable");
+  }
+  if (error.code !== "SESSION_CREATE_REJECTED") return null;
+  let message: unknown;
+  try {
+    message = (JSON.parse(error.body) as { message?: unknown } | null)?.message;
+  } catch {
+    return null;
+  }
+  if (typeof message !== "string") return null;
+  const text = message.trim().slice(0, 300);
+  if (!text) return null;
+  const sentence = text.charAt(0).toUpperCase() + text.slice(1);
+  return /[.!?]$/.test(sentence) ? sentence : `${sentence}.`;
+}
+
+/**
  * A fresh Send or Steer refused because the task's own usage limit is reached.
  * The draft is kept and an unchanged retry is never offered. The one current
  * recovery action (raise or remove the limit, resume a goal) belongs to the
@@ -379,6 +404,8 @@ export function composerSubmissionErrorMessage(
   if (isModelUnavailableSubmissionError(error)) return t("lib.format.modelUnavailable");
   if (isConnectionAccountSubmissionError(error)) return t("lib.format.accountUnavailable");
   if (isSessionUsageLimitSubmissionError(error)) return t("lib.format.sessionUsageLimitReached");
+  const createRefusal = sessionCreateRefusalMessage(t, error);
+  if (createRefusal) return createRefusal;
   const siteRefusal = siteRefusalCode(error);
   if (siteRefusal) return COMPOSER_SITE_REFUSAL_MESSAGES(t)[siteRefusal]!;
   if (error instanceof OpenGeniApiError && error.code === "allowance_exhausted") {
