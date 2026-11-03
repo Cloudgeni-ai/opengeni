@@ -866,6 +866,20 @@ describe("server effectiveTools environment projection", () => {
     ).toEqual([]);
   });
 
+  test("media on predicts the router before any media provider is attached, as the worker does", () => {
+    const row = session(
+      { from: "none", humanInput: false, skills: false, media: true },
+      { firstPartyMcpTools: [] },
+    );
+    const input = sessionEffectiveToolProjectionInput(
+      row,
+      [{ kind: "mcp", id: "opengeni", eager: true }],
+      context(),
+    );
+    expect(input.environment.hasDeferredTools).toBe(true);
+    expect(input.routerToolNames.length).toBeGreaterThan(0);
+  });
+
   test("configured recovery tools exist even with no first-party selection", () => {
     const row = session("none", { firstPartyMcpTools: [], sandboxBackend: "local" });
     const names = projected(row).effectiveTools!.tools.map((tool) => tool.name);

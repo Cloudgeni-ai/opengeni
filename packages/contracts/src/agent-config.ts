@@ -1364,8 +1364,13 @@ function resolveTopLevel(
   }
   const wanted = applyToggles(base, toggles);
   // Turning human input back on in a workspace that switched it off brings its
-  // notifications with it, as before they were split out.
-  if (from === "all" && toggles.humanInput === true && toggles.notifications === undefined) {
+  // notifications with it, as before they were split out (a saved "none"
+  // request starts with notifications on, so it gets them back too).
+  if (
+    (from === "all" || saved) &&
+    toggles.humanInput === true &&
+    toggles.notifications === undefined
+  ) {
     wanted.notifications = true;
   }
   const explicitGoalsOff = !capabilitiesFromWorkspace && toggles.goals === false;

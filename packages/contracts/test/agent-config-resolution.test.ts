@@ -230,6 +230,20 @@ describe("resolveAgentConfig", () => {
       request: { capabilities: "none" },
     }).config!.capabilities;
     expect(off.notifications).toBe(false);
+    // Turning human input back on there brings notifications with it, as before.
+    const askAgain = resolve({
+      creator: "scheduled",
+      workspace: { defaults: null, humanInputEnabled: false },
+      request: { capabilities: { from: "none", humanInput: true } },
+    }).config!.capabilities;
+    expect(askAgain.humanInput).toBe(true);
+    expect(askAgain.notifications).toBe(true);
+    // A create request under "none" does not.
+    const createdAsking = resolve({
+      workspace: { defaults: null, humanInputEnabled: false },
+      request: { capabilities: { from: "none", humanInput: true } },
+    }).config!.capabilities;
+    expect(createdAsking.notifications).toBe(false);
   });
 
   test("children inherit and may only narrow", () => {

@@ -670,9 +670,15 @@ export function sessionEffectiveToolProjectionInput(
     const server = registry.find((candidate) => candidate.id === ref.id);
     return Boolean(server?.connectionRef);
   };
+  // The worker predicts the router from the media capability, before any media
+  // provider is attached, so the projection does too.
+  const mediaCapability = resolveAgentToolFamilies(session.agent, {
+    ...environment,
+    media: undefined,
+  }).media;
   const deferredBesidesTitle =
     (nativeComputerTools && progressiveDisclosure) ||
-    media.hosted.length + media.runtime.length > 0 ||
+    mediaCapability ||
     toolRefs.some(eagerPreparesLate) ||
     toolRefs.some(
       (ref) => ref.id !== "opengeni" && ref.eager !== true && families.allowsMcpServer(ref.id),
