@@ -34,18 +34,14 @@ import {
   type RecordingTrackWords,
   type RecordingWordAligner,
   type TranscriptionBilling,
-  type TranscriptionSegmenter,
   type TranscriptionService,
 } from "@opengeni/core";
 import {
   asRecordingTranscriptionError,
-  createFfmpegTranscriptionSegmenter,
   createSpeechToTextDeployment,
   createTranscriptionService,
   dictationProviders,
   type SpeechToTextDeployment,
-  TranscriptionSegmenterError,
-  wavDurationSeconds,
 } from "@opengeni/core/transcription-service";
 import {
   beginRecordingAudioExpiry,
@@ -97,7 +93,6 @@ import {
   measureRecordingStage,
   RecordingUsage,
   reportRecordingProcessing,
-  runMeasuredCommand,
   withRecordingUsage,
   type RecordingProcessingReport,
 } from "./recording-usage";
@@ -111,6 +106,14 @@ import {
   renderRecordingAudioPiece,
   type RecordingPieceFormat,
 } from "./recording-audio";
+import {
+  DICTATION_PIECE_CONCURRENCY,
+  dictationPiecePlan,
+  mapConcurrently,
+  pcmWavPiece,
+  planDictationPieces,
+  readPcmWav,
+} from "./dictation-pieces";
 import type { ControlActivityServices } from "./types";
 import { startMeetingSummary } from "./meeting-summary";
 import {
@@ -202,8 +205,6 @@ export type RecordingActivityOptions = {
    * deployment's configured voice input providers, with credit billing.
    */
   dictationTranscription?: (settings: Settings, db: Database) => TranscriptionService;
-  /** Cuts a dictation into provider-sized WAV pieces; defaults to ffmpeg. */
-  dictationSegmenter?: (settings: Settings) => TranscriptionSegmenter;
   /** Credit charges for meetings on deployment-funded models; defaults to voice input billing. */
   billing?: (settings: Settings, db: Database) => TranscriptionBilling;
   /** Starts the built-in meeting summary once a meeting's transcript is ready. */
@@ -658,7 +659,6 @@ export function createRecordingActivities(
   let defaultDictation: {
     settings: Settings;
     service: TranscriptionService;
-    segmenter: TranscriptionSegmenter;
   } | null = null;
   const dictationFor = (settings: Settings, db: Database) => {
     if (defaultDictation?.settings !== settings) {
@@ -667,12 +667,6 @@ export function createRecordingActivities(
         service: options.dictationTranscription
           ? options.dictationTranscription(settings, db)
           : createTranscriptionService({ settings, db, deployment: deploymentFor(settings, db) }),
-        segmenter: options.dictationSegmenter
-          ? options.dictationSegmenter(settings)
-          : createFfmpegTranscriptionSegmenter({
-              ffmpegPath: settings.voiceInputFfmpegPath,
-              runCommand: runMeasuredCommand,
-            }),
       };
     }
     return defaultDictation;
@@ -1294,10 +1288,6 @@ export function createRecordingActivities(
           if (!error.retryable) return await fail(`voice_${error.code}`, error);
           throw ApplicationFailure.retryable(error.message, `voice_${error.code}`);
         }
-        if (error instanceof TranscriptionSegmenterError) {
-          if (!error.retryable) return await fail(error.code, error);
-          throw ApplicationFailure.retryable(error.message, error.code);
-        }
         throw error;
       }
     }
@@ -1316,7 +1306,7 @@ export function createRecordingActivities(
         throw new PermanentRecordingFailure("policy_blocked");
       }
       const voiceInput = WorkspaceVoiceInputSettings.safeParse(workspace?.settings.voiceInput).data;
-      const { service, segmenter } = dictationFor(settings, db);
+      const { service } = dictationFor(settings, db);
       const track = claimed.recording.tracks[0];
       const chunks = claimed.chunks.filter((chunk) => chunk.trackNumber === track?.trackNumber);
       const signal = jobSignal();
@@ -1353,11 +1343,9 @@ export function createRecordingActivities(
           }),
         );
         telemetry.preparedBytes += audio.storedBytes;
-        if (!(await segmenter.available())) throw new PermanentRecordingFailure("unavailable");
-        const providerSegmentSeconds = Math.min(
-          TRANSCRIPTION_PROVIDER_SEGMENT_SECONDS,
-          service.limits().maxDurationSeconds,
-        );
+        const providerSegmentMilliseconds =
+          Math.min(TRANSCRIPTION_PROVIDER_SEGMENT_SECONDS, service.limits().maxDurationSeconds) *
+          1_000;
         const pinned = claimed.version.providerId !== "host" ? claimed.version.providerId : null;
         // A dictation that named its model (a desktop shortcut's own) is heard
         // by exactly that model, never another provider's.
@@ -1366,93 +1354,110 @@ export function createRecordingActivities(
           : null;
         const attribution = claimed.creditAttribution ?? { kind: "unknown" as const };
         heartbeat({ phase: "transcribing", trackNumber: track.trackNumber });
-        const segmented = segmenter.segment({
-          sourceMimeType: audio.mimeType,
-          totalDurationMilliseconds: Math.max(1, Math.round(audio.durationMilliseconds)),
-          providerSegmentSeconds,
-          chunks: (async function* () {
-            yield audio.bytes;
-          })(),
-          signal,
+        // Decoded once to 16 kHz PCM, then cut at the speaker's pauses.
+        const { wav, pieces } = await measureRecordingStage("segment", async () => {
+          const rendered = await renderRecordingAudioPiece({
+            audio: { bytes: audio.bytes, extension: audio.extension },
+            startMilliseconds: 0,
+            endMilliseconds: audio.durationMilliseconds,
+            whole: true,
+            format: "wav",
+            ffmpegPath: settings.voiceInputFfmpegPath,
+            signal,
+          });
+          const decoded = readPcmWav(rendered.bytes);
+          if (!decoded) throw new PermanentRecordingFailure("invalid_audio");
+          const cuts = planDictationPieces(
+            decoded,
+            dictationPiecePlan(providerSegmentMilliseconds),
+          );
+          return {
+            wav: decoded,
+            pieces: cuts.slice(1).flatMap((end, index) => {
+              const start = cuts[index]!;
+              return end > start
+                ? [{ segmentNumber: index, startSample: start, endSample: end }]
+                : [];
+            }),
+          };
         });
-        // Stepped by hand so cutting the pieces is measured apart from hearing them.
-        const pieces = segmented[Symbol.asyncIterator]();
-        try {
-          for (;;) {
-            const next = await measureRecordingStage("segment", () => pieces.next());
-            if (next.done) break;
-            const piece = next.value;
-            const trustedSeconds = wavDurationSeconds(piece.bytes) ?? undefined;
-            const result = await withHeartbeat(() =>
-              measureRecordingStage("transcribe", () =>
-                service.transcribe({
-                  workspaceId: input.workspaceId,
-                  accountId: input.accountId,
-                  subjectId: input.ownerSubjectId,
-                  audio: piece.bytes,
-                  mimeType: piece.mimeType,
-                  durationSeconds: piece.durationMilliseconds / 1_000,
-                  // The language the dictation was started in; detected when none.
-                  ...(claimed.version.options.language
-                    ? { language: claimed.version.options.language }
-                    : {}),
-                  // The person's vocabulary, for a model that takes it.
-                  ...(claimed.version.options.keyterms?.length
-                    ? { keyterms: claimed.version.options.keyterms }
-                    : {}),
-                  // A fresh request per attempt; billing stays per piece below.
-                  requestId: `${input.versionId}:a${claimed.attempt}:${piece.segmentNumber}`,
-                  ...(signal ? { signal } : {}),
-                  ...(named
-                    ? named
-                    : {
-                        preferredProvider: pinned ?? voiceInput?.preferredProvider,
-                        fallbackEnabled: voiceInput?.fallbackEnabled,
-                      }),
-                  billing: {
-                    // One settlement per piece of this version, however many
-                    // attempts the activity takes: a retry that hears it again
-                    // settles the same unit, so the payer is billed once.
-                    sourceId: `${input.recordingId}:${input.versionId}:${piece.segmentNumber}`,
-                    attribution,
-                    trustedDurationSeconds: trustedSeconds,
-                  },
-                }),
-              ),
+        const perMillisecond = wav.sampleRate / 1_000;
+        // Every piece is heard at once, so a long dictation is ready about as
+        // soon as its longest piece is.
+        const heardPieces = await withHeartbeat(() =>
+          mapConcurrently(pieces, DICTATION_PIECE_CONCURRENCY, async (piece) => {
+            const bytes = pcmWavPiece(wav, piece.startSample, piece.endSample);
+            const durationMilliseconds = (piece.endSample - piece.startSample) / perMillisecond;
+            const result = await measureRecordingStage("transcribe", () =>
+              service.transcribe({
+                workspaceId: input.workspaceId,
+                accountId: input.accountId,
+                subjectId: input.ownerSubjectId,
+                audio: bytes,
+                mimeType: "audio/wav",
+                durationSeconds: durationMilliseconds / 1_000,
+                // The language the dictation was started in; detected when none.
+                ...(claimed.version.options.language
+                  ? { language: claimed.version.options.language }
+                  : {}),
+                // The person's vocabulary, for a model that takes it.
+                ...(claimed.version.options.keyterms?.length
+                  ? { keyterms: claimed.version.options.keyterms }
+                  : {}),
+                // A fresh request per attempt; billing stays per piece below.
+                requestId: `${input.versionId}:a${claimed.attempt}:${piece.segmentNumber}`,
+                ...(signal ? { signal } : {}),
+                ...(named
+                  ? named
+                  : {
+                      preferredProvider: pinned ?? voiceInput?.preferredProvider,
+                      fallbackEnabled: voiceInput?.fallbackEnabled,
+                    }),
+                billing: {
+                  // One settlement per piece of this version, however many
+                  // attempts the activity takes: a retry that hears it again
+                  // settles the same unit, so the payer is billed once.
+                  sourceId: `${input.recordingId}:${input.versionId}:${piece.segmentNumber}`,
+                  attribution,
+                  trustedDurationSeconds: durationMilliseconds / 1_000,
+                },
+              }),
             );
-            creditCostMicros += result.creditCostMicros ?? 0;
-            const heard = offered.find((provider) => provider.id === result.providerId);
-            if (heard) {
-              telemetry.provider = heard.id;
-              telemetry.model = heard.model.model;
-              telemetry.funding = heard.provider.funding;
-            }
-            if (
-              heard?.provider.funding === "deployment" &&
-              voiceInputCreditBillingActive(settings)
-            ) {
-              charged = true;
-            }
-            const pieceCost = heard
-              ? estimateRecordingTranscriptionCostMicros(heard.model, piece.durationMilliseconds)
-              : null;
-            if (pieceCost !== null) listCostMicros = (listCostMicros ?? 0) + pieceCost;
-            for (const language of result.languages ?? []) languages.add(language);
-            audioMilliseconds += piece.durationMilliseconds;
-            const text = result.text.trim();
-            if (!text) continue;
-            const startMilliseconds = offsetMilliseconds + piece.startMilliseconds;
-            segments.push({
-              startMilliseconds,
-              endMilliseconds: startMilliseconds + piece.durationMilliseconds,
-              trackNumber: track.trackNumber,
-              speakerLabel: null,
-              text,
-              words: [],
-            });
+            return {
+              result,
+              durationMilliseconds,
+              startMilliseconds: piece.startSample / perMillisecond,
+            };
+          }),
+        );
+        for (const { result, durationMilliseconds, startMilliseconds: pieceStart } of heardPieces) {
+          creditCostMicros += result.creditCostMicros ?? 0;
+          const heard = offered.find((provider) => provider.id === result.providerId);
+          if (heard) {
+            telemetry.provider = heard.id;
+            telemetry.model = heard.model.model;
+            telemetry.funding = heard.provider.funding;
           }
-        } finally {
-          await pieces.return?.();
+          if (heard?.provider.funding === "deployment" && voiceInputCreditBillingActive(settings)) {
+            charged = true;
+          }
+          const pieceCost = heard
+            ? estimateRecordingTranscriptionCostMicros(heard.model, durationMilliseconds)
+            : null;
+          if (pieceCost !== null) listCostMicros = (listCostMicros ?? 0) + pieceCost;
+          for (const language of result.languages ?? []) languages.add(language);
+          audioMilliseconds += durationMilliseconds;
+          const text = result.text.trim();
+          if (!text) continue;
+          const startMilliseconds = offsetMilliseconds + Math.round(pieceStart);
+          segments.push({
+            startMilliseconds,
+            endMilliseconds: startMilliseconds + Math.round(durationMilliseconds),
+            trackNumber: track.trackNumber,
+            speakerLabel: null,
+            text,
+            words: [],
+          });
         }
       }
       telemetry.audioSeconds = audioMilliseconds / 1_000;
