@@ -1,5 +1,99 @@
 # @opengeni/worker-bundle
 
+## 6.5.1
+
+### Minor Changes
+
+- 3f9ef93: The agent knows both GitHub identities, and the GitHub sheet names them. `github_connect_link` adds a `personal` field for the person's own account ("Your GitHub"): `{ enabled, connected, status, login, repositoryCount, connectUrl, manageUrl }`, with links only for `connections:write` and no token; the App fields are unchanged. `capability_catalog_search` offers a new `api:github-personal` capability ("Your GitHub") when personal OAuth is enabled, and `capability_authorization_request` posts its in-chat card (connect, then choose repos). Agent guidance maps "connect my GitHub" or "do it as me" to Your GitHub and "install the GitHub app" to the Opengeni app. The repositories prompt lists each mounted GitHub repository's identity (as the person, with their login, or as the Opengeni app) and says that `gh` and raw API calls do not act as the person. The GitHub sheet shows two sections, "Your GitHub" and "Opengeni app", each with one action; the header's "Connect another account" is gone, and the repository chooser opens right after connecting. New exports: `PERSONAL_GITHUB_CAPABILITY_ID`, `PERSONAL_GITHUB_SETUP_QUERY_VALUE` and `personalGitHubSetupPath` in `@opengeni/contracts/personal-github`; `AgentPromptRepositoryIdentity`, `repositoryIdentitiesFor` and the `personalGitHubLogin` build option in `@opengeni/runtime`; and `IntegrationSection` with `IntegrationViewModel.sections` in `@opengeni/react`.
+
+### Patch Changes
+
+- ab9d32d: Drain completed tool events before context compaction so successful tools do not remain unfinished in the chat timeline.
+- ebfd447: A value that JSON cannot carry (a symbol key, a function, a bigint, a cycle, a class instance such as a Response, Headers, AbortSignal or Error) no longer fails a turn where it is stored or sent. Every protocol JSON boundary (history, tool receipts, run events, approvals, MCP results and custom data, the sandbox envelope) and the database's canonical JSON encoder now convert or drop such a value as `JSON.stringify` would and log the paths and kinds they changed, never the values. A `JSON.stringify` refusal from any other serializer ends the turn with the same clear, recoverable failure instead of stopping the chat.
+- 468e8c3: A meeting's transcript can be told how many people spoke. `transcription.speakers` (1 to 32) on a recording or a transcript re-run makes Opengeni's speaker detection find exactly that many on a recording with one track, and is each track's upper bound when the recording has several. Models with their own diarization get it as their speaker count. The meeting page's "Transcribe again" asks for the "Number of speakers", also for models that rely on Opengeni's speaker detection, and "Wrong number of speakers?" under the speakers list opens it.
+- 7f81248: Older images no longer ride along in every model request. When a turn attempt starts, tool-result images older than the newest three are replaced, five at a time, by a short note, one per tool result. For `view_image` the note names the path to view again; for other tools it asks for a fresh screenshot or observation instead of repeating an action. The model keeps three to seven recent images with their pixels when an attempt starts, plus any it adds during the attempt. The note is fixed for the whole attempt and the omitted set only grows, so the provider's prompt cache stays valid between batches. Stored history is unchanged, omitted images are not read from storage, and user attachments and native `computer_call_result` screenshots are not affected.
+- 1aa4b2d: When a protocol JSON boundary refuses a value a turn prepared (such as "Protocol JSON value at $ cannot contain symbol keys"), the turn now ends with a clear message and the chat takes the next message, instead of the chat stopping with a Retry that fails the same way. A goal does not keep continuing into the same refusal, and a turn whose completed work cannot be saved still stops the chat. As hardening, the history identity check also leaves out request-local marks below the top level of an item.
+- c314c95: A meeting transcript retried after its worker was lost no longer pays the provider again for audio it already transcribed. Each piece of a track is kept with its version as soon as the provider answers (before a text-only model's words are placed), keyed by the model, options, piece and a hash of the audio, and a retry reuses it. Kept pieces are removed when the version completes or fails (migration 1227).
+- 707c444: Creating a session now fails with a clear 422 when it asks for a sandbox backend the deployment does not serve. Previously any `sandboxBackend` value was accepted, so on a cloud deployment an agent's `session_create`, a REST/SDK create or a schedule could ask for `local` and get a box that ran as processes on the worker host. A deployment serves its configured default backend, `none`, `selfhosted` when Connected Machines are enabled, and any provider whose credentials are configured; `local` and `docker` only as the default. Forks of a session on an unserved backend are refused too. Schedules are checked when saved and again when a run is admitted, and `session_create` advertises only the served backends. A keyed retry of an already-created session still returns it. Shared children, Connected Machine targets and `new` boxes on a served backend are unchanged.
+- f866a11: Schedules that start a new chat per run and were saved before the secret permission names were unified run again. Every run of such a schedule was refused with `scheduled_run_authority_proof_rejected`, because its chat stored the current permission names while the run still named the retired ones. A run now names the same canonical permissions as the chat it creates.
+- ce4921e: Recover the same turn when a shared sandbox creator outlasts a sibling's warming wait, preserving the elected owner and crash recovery instead of terminally failing waiting sessions.
+- Updated dependencies [4e4f77e]
+- Updated dependencies [e797d94]
+- Updated dependencies [4b67778]
+- Updated dependencies [7de2adf]
+- Updated dependencies [89eabf0]
+- Updated dependencies [b1f7c2c]
+- Updated dependencies [f1998df]
+- Updated dependencies [564efe9]
+- Updated dependencies [ab9d32d]
+- Updated dependencies [6bdd4d0]
+- Updated dependencies [89eabf0]
+- Updated dependencies [3f9ef93]
+- Updated dependencies [02e68d1]
+- Updated dependencies [8a5a03a]
+- Updated dependencies [ebfd447]
+- Updated dependencies [7a9c492]
+- Updated dependencies [468e8c3]
+- Updated dependencies [d5ce7de]
+- Updated dependencies [e4484f1]
+- Updated dependencies [7f3d037]
+- Updated dependencies [c649c2e]
+- Updated dependencies [f4f82c0]
+- Updated dependencies [317fb4d]
+- Updated dependencies [033cd63]
+- Updated dependencies [05ce0d6]
+- Updated dependencies [b18bd6c]
+- Updated dependencies [83ccc2b]
+- Updated dependencies [da9b7e5]
+- Updated dependencies [0f7f559]
+- Updated dependencies [0f7f559]
+- Updated dependencies [de8fc61]
+- Updated dependencies [dd7759c]
+- Updated dependencies [70c726c]
+- Updated dependencies [a8d1310]
+- Updated dependencies [7b0f510]
+- Updated dependencies [1aa4b2d]
+- Updated dependencies [c314c95]
+- Updated dependencies [707c444]
+- Updated dependencies [6099e32]
+- Updated dependencies [27ac6cd]
+- Updated dependencies [f866a11]
+- Updated dependencies [a6f7072]
+- Updated dependencies [4682263]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [abb4af1]
+- Updated dependencies [86e35f1]
+- Updated dependencies [0f7f559]
+  - @opengeni/db@6.5.0
+  - @opengeni/core@6.5.0
+  - @opengeni/capabilities@6.5.0
+  - @opengeni/runtime@6.5.0
+  - @opengeni/contracts@6.5.0
+  - @opengeni/config@6.5.0
+  - @opengeni/sdk@6.5.0
+  - @opengeni/subscriptions@6.5.0
+  - @opengeni/documents@6.5.0
+  - @opengeni/events@6.5.0
+  - @opengeni/codemode@6.5.0
+  - @opengeni/codex@6.5.0
+  - @opengeni/github@6.5.0
+  - @opengeni/interaction@6.5.0
+  - @opengeni/observability@6.5.0
+  - @opengeni/storage@6.5.0
+  - @opengeni/tool-gateway@6.5.0
+  - @opengeni/vaults@6.5.0
+  - @opengeni/vaults-bitwarden@6.5.0
+  - @opengeni/vaults-keeper@6.5.0
+  - @opengeni/vaults-onepassword@6.5.0
+  - @opengeni/vaults-protonpass@6.5.0
+  - @opengeni/agent-proto@6.5.0
+  - @opengeni/decisions@6.5.0
+  - @opengeni/jev@6.5.0
+  - @opengeni/network@6.5.0
+  - @opengeni/xai-subscription@6.5.0
+
 ## 6.4.0
 
 ### Minor Changes
