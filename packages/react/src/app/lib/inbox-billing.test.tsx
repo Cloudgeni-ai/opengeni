@@ -67,7 +67,12 @@ describe("billing inbox state", () => {
       inboxAttentionCount({ ...response(), billingNotifications: [{ ...notice, read: true }] }),
     ).toBe(0);
     expect(inboxAttentionCount({ items: [], unreadCount: 0, needsYouCount: 0 })).toBe(0);
-    const reply = { id: "chat-reply", kind: "reply", unread: true, snoozedUntil: null } as InboxItem;
+    const reply = {
+      id: "chat-reply",
+      kind: "reply",
+      unread: true,
+      snoozedUntil: null,
+    } as InboxItem;
     store.patchItems(() => [reply]);
     expect(store.snapshot.data?.unreadCount).toBe(1);
     expect(store.snapshot.data?.needsYouCount).toBe(0);
