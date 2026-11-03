@@ -10196,7 +10196,6 @@ export class PrefixedMcpServer implements MCPServer {
         recordOutcome("outcome_uncertain");
         throw error;
       }
-      recordOutcome(mcpThrownToolCallOutcome(error, options?.signal));
       // A generated integration's known-outcome failure goes back to the model
       // as the tool's error, on any server: it says what the provider rejected
       // and the tool stays usable with corrected arguments.
@@ -10204,6 +10203,12 @@ export class PrefixedMcpServer implements MCPServer {
         ? undefined
         : recoverableIntegrationFailure(error);
       if (integrationFailure) {
+        recordOutcome(
+          integrationFailure.code === "connection_required" ||
+            integrationFailure.code === "authorization_rejected"
+            ? "auth_needed"
+            : "provider_declared_error",
+        );
         return boundedMcpToolResult({
           isError: true,
           content: [
@@ -10212,6 +10217,7 @@ export class PrefixedMcpServer implements MCPServer {
           structuredContent: { ok: false, error: integrationFailure },
         });
       }
+      recordOutcome(mcpThrownToolCallOutcome(error, options?.signal));
       // Best-effort INVOCATION isolation (sibling to the listTools guard). When
       // the model calls a best-effort server's tool and the call throws for ANY
       // other reason — a raw transport 401/403 that never became the broker's

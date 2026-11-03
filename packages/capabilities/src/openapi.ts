@@ -1,4 +1,5 @@
 import type { CallToolResultContent, MCPCallToolOptions, MCPServer } from "@openai/agents";
+import { ResponseBodyLimitError } from "@opengeni/network";
 import { load as parseYaml } from "js-yaml";
 
 import { applyCredentialPlacements } from "./auth";
@@ -434,7 +435,8 @@ export async function invokeOpenApiOperation(
       );
     }
   }
-  if (response.status >= 300 && response.status < 400) {
+  const redirected = response.status >= 300 && response.status < 400;
+  if (redirected) {
     response = await followCredentialFreeRedirects(
       options,
       binding,
@@ -444,17 +446,31 @@ export async function invokeOpenApiOperation(
       signal,
     );
   }
-  const payload = await readIntegrationResponse(
-    response,
-    options.maxResponseBytes ?? DEFAULT_INTEGRATION_RESPONSE_BYTES,
-  );
+  let payload: Awaited<ReturnType<typeof readIntegrationResponse>>;
+  try {
+    payload = await readIntegrationResponse(
+      response,
+      options.maxResponseBytes ?? DEFAULT_INTEGRATION_RESPONSE_BYTES,
+    );
+  } catch (error) {
+    if (!(error instanceof ResponseBodyLimitError)) throw error;
+    throw new IntegrationInvocationError(
+      "response_too_large",
+      `The provider's response is larger than the ${error.maxBytes}-byte limit; ask for less, for example a smaller page or fewer fields`,
+      binding.method === "get" || binding.method === "head" ? "failed" : "unknown",
+      false,
+      response.status,
+    );
+  }
   const result = {
     ok: response.ok,
     status: response.status,
     contentType: payload.contentType,
     data: payload.data,
   };
-  if (!response.ok && (response.status === 401 || response.status === 403)) {
+  // A redirect target (a pre-signed URL) answers for itself, not for the
+  // connected account, so its refusal is the provider's result.
+  if (!redirected && !response.ok && (response.status === 401 || response.status === 403)) {
     throw new IntegrationInvocationError(
       "authorization_rejected",
       "The connected account is no longer authorized for this operation",
@@ -582,6 +598,8 @@ async function followCredentialFreeRedirects(
   const credentialQueryNames = (credential?.placements ?? [])
     .filter((placement) => placement.carrier === "query")
     .map((placement) => placement.name);
+  // The hops share the request's deadline rather than each getting a new one.
+  const deadline = Date.now() + (options.timeoutMs ?? DEFAULT_INTEGRATION_TIMEOUT_MS);
   let response = first;
   let current = requestUrl;
   for (let hop = 0; response.status >= 300 && response.status < 400; hop++) {
@@ -590,15 +608,17 @@ async function followCredentialFreeRedirects(
     const target = location && URL.canParse(location, current) ? new URL(location, current) : null;
     const reason = !safe
       ? "Integration attempted to redirect a credential-bearing request"
-      : !FOLLOWED_REDIRECT_STATUSES.has(response.status) || !target
-        ? "Integration answered with a redirect that has no usable Location"
-        : hop >= MAX_INTEGRATION_REDIRECTS
-          ? `Integration redirected more than ${MAX_INTEGRATION_REDIRECTS} times`
-          : (current.protocol === "https:" && target.protocol !== "https:") ||
-              target.username ||
-              target.password
-            ? "Integration redirected to an insecure destination"
-            : undefined;
+      : !FOLLOWED_REDIRECT_STATUSES.has(response.status)
+        ? `Integration answered with HTTP ${response.status}, which is not a redirect it can follow`
+        : !target
+          ? "Integration answered with a redirect that has no usable Location"
+          : hop >= MAX_INTEGRATION_REDIRECTS
+            ? `Integration redirected more than ${MAX_INTEGRATION_REDIRECTS} times`
+            : (current.protocol === "https:" && target.protocol !== "https:") ||
+                target.username ||
+                target.password
+              ? "Integration redirected to an insecure destination"
+              : undefined;
     if (reason || !target) {
       throw new IntegrationInvocationError(
         "redirect_rejected",
@@ -609,17 +629,33 @@ async function followCredentialFreeRedirects(
       );
     }
     target.hash = "";
-    for (const name of credentialQueryNames) target.searchParams.delete(name);
-    response = await fetchWithDeadline(
-      options.transport,
-      target,
-      {
-        method: binding.method.toUpperCase(),
-        headers: new Headers({ accept: "*/*" }),
-        ...(signal ? { signal } : {}),
-      },
-      options.timeoutMs ?? DEFAULT_INTEGRATION_TIMEOUT_MS,
-    );
+    // Deleting re-serializes the whole query, which could break a signed
+    // URL, so only a query that names a credential parameter is touched.
+    for (const name of credentialQueryNames)
+      if (target.searchParams.has(name)) target.searchParams.delete(name);
+    try {
+      response = await fetchWithDeadline(
+        options.transport,
+        target,
+        {
+          method: binding.method.toUpperCase(),
+          headers: new Headers({ accept: "*/*" }),
+          ...(signal ? { signal } : {}),
+        },
+        Math.max(1, deadline - Date.now()),
+      );
+    } catch (error) {
+      if (!(error instanceof IntegrationInvocationError)) throw error;
+      throw new IntegrationInvocationError(
+        error.code === "request_timeout" ? "request_timeout" : "redirect_failed",
+        error.code === "request_timeout"
+          ? "Integration request timed out while following its redirect"
+          : "Following the integration's redirect failed; the destination may be unreachable or not allowed",
+        error.outcome,
+        error.retryable,
+        error.status,
+      );
+    }
     current = target;
   }
   return response;

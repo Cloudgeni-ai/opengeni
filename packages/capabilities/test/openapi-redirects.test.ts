@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { compileOpenApiRevision, directIntegrationTransport, invokeOpenApiOperation } from "../src";
+import { MAX_INLINE_BINARY_BYTES } from "../src/http";
 import { MAX_INTEGRATION_REDIRECTS } from "../src/openapi";
 
 const authority = {
@@ -38,12 +39,14 @@ type Seen = { url: string; method: string; headers: Record<string, string> };
 
 function invoke(
   toolId: string,
-  answer: (url: URL, call: number) => Response,
+  answer: (url: URL, call: number) => Response | Promise<Response>,
   args: Record<string, unknown> = { path: { id: "abc" } },
+  extra: { maxResponseBytes?: number } = {},
 ) {
   const seen: Seen[] = [];
   const invocation = invokeOpenApiOperation(
     {
+      ...extra,
       revision,
       authority,
       credentialResolver: {
@@ -165,5 +168,89 @@ describe("OpenAPI redirects", () => {
         new Response("plain bytes", { headers: { "content-type": "application/octet-stream" } }),
     );
     expect(await utf8.invocation).toMatchObject({ data: "plain bytes" });
+  });
+
+  test("an Office file is binary even though its type names xml", async () => {
+    const docx = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x06, 0x00, 0xff, 0x8c]);
+    const contentType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    const { invocation } = invoke(
+      "items_getcontent",
+      () => new Response(docx, { headers: { "content-type": contentType } }),
+    );
+    expect(await invocation).toMatchObject({
+      ok: true,
+      contentType,
+      data: { encoding: "base64", base64: Buffer.from(docx).toString("base64") },
+    });
+    const xml = invoke(
+      "items_getcontent",
+      () =>
+        new Response(new Uint8Array([0x3c, 0x61, 0x3e, 0xff, 0x3c, 0x2f, 0x61, 0x3e]), {
+          headers: { "content-type": "application/atom+xml" },
+        }),
+    );
+    expect(await xml.invocation).toMatchObject({ data: "<a>\uFFFD</a>" });
+  });
+
+  test("binary past the inline limit reports its size instead of its bytes", async () => {
+    const large = new Uint8Array(MAX_INLINE_BINARY_BYTES + 1).fill(0xff);
+    const { invocation } = invoke(
+      "items_getcontent",
+      () => new Response(large, { headers: { "content-type": "image/png" } }),
+    );
+    expect(await invocation).toMatchObject({
+      ok: true,
+      data: { encoding: "omitted", message: expect.stringContaining(String(large.byteLength)) },
+    });
+  });
+
+  test("a body over the response limit is a recoverable response_too_large failure", async () => {
+    const { invocation } = invoke(
+      "items_getcontent",
+      () => new Response("x".repeat(64), { headers: { "content-type": "text/plain" } }),
+      undefined,
+      { maxResponseBytes: 16 },
+    );
+    await expect(invocation).rejects.toMatchObject({
+      code: "response_too_large",
+      outcome: "failed",
+      retryable: false,
+      status: 200,
+    });
+  });
+
+  test("a redirect target's 401 is the provider's result, not a lost authorization", async () => {
+    const { invocation } = invoke("items_getcontent", (url) =>
+      url.hostname === "api.example.com"
+        ? redirect("https://files.example.net/dl/abc?sig=expired")
+        : Response.json({ error: "expired link" }, { status: 401 }),
+    );
+    expect(await invocation).toMatchObject({
+      ok: false,
+      status: 401,
+      data: { error: "expired link" },
+    });
+  });
+
+  test("a signed query without a credential name is forwarded byte for byte", async () => {
+    const signed = "https://files.example.net/dl/abc?sig=a%20b&exp=10:00";
+    const { invocation, seen } = invoke("items_getcontent", (url) =>
+      url.hostname === "api.example.com" ? redirect(signed) : new Response("ok"),
+    );
+    await invocation;
+    expect(seen[1]!.url).toBe(new URL(signed).toString());
+    expect(seen[1]!.url).toContain("sig=a%20b&exp=10:00");
+  });
+
+  test("a redirect destination that cannot be reached is a recoverable redirect_failed", async () => {
+    const { invocation } = invoke("items_getcontent", (url) => {
+      if (url.hostname === "api.example.com") return redirect("https://files.example.net/dl/abc");
+      throw new Error("destination blocked by network policy");
+    });
+    await expect(invocation).rejects.toMatchObject({
+      code: "redirect_failed",
+      outcome: "not_started",
+      message: expect.stringContaining("redirect"),
+    });
   });
 });
