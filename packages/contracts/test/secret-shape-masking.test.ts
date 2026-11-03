@@ -362,6 +362,33 @@ describe("review regressions", () => {
     ]);
   });
 
+  test("masking JSON-escaped text keeps it valid JSON", () => {
+    const signature = `FAKE${repeat("0a1b", 8)}%3D`;
+    const sasUrl = `https://acct.blob.core.windows.net/c/f?sv=2022-11-02&sig=${signature}`;
+    const connection = `Server=db;Database=app;Password=${FAKE_PASSWORD}`;
+    const value = { tabs: [{ url: sasUrl, title: "Report" }], quoted: `"${sasUrl}"`, connection };
+    // Once and twice encoded: a JSON string holding a JSON document.
+    const once = JSON.stringify(value);
+    const twice = JSON.stringify({ output: once });
+    for (const text of [once, twice]) {
+      const masked = maskSecretShapesInText(text);
+      expect(masked).not.toContain(signature);
+      expect(masked).not.toContain(FAKE_PASSWORD);
+      expect(() => JSON.parse(masked)).not.toThrow();
+    }
+    const parsed = JSON.parse(maskSecretShapesInText(once)) as typeof value;
+    expect(parsed.tabs[0]!.url).toBe(
+      "https://acct.blob.core.windows.net/c/f?sv=2022-11-02&sig=[masked azure sas signature]",
+    );
+    expect(parsed.quoted).toBe(
+      '"https://acct.blob.core.windows.net/c/f?sv=2022-11-02&sig=[masked azure sas signature]"',
+    );
+    const inner = JSON.parse(
+      (JSON.parse(maskSecretShapesInText(twice)) as { output: string }).output,
+    ) as typeof value;
+    expect(inner.quoted).toContain("sig=[masked azure sas signature]");
+  });
+
   test("the rest of a key whose BEGIN line was in an earlier chunk", () => {
     const tail = `${fakeBody(3)}\n-----END RSA PRIVATE KEY-----\nnext line`;
     expect(maskSecretShapesInText(tail)).toBe("[masked private key]\nnext line");

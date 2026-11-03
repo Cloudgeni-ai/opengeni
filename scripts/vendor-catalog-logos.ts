@@ -1,6 +1,6 @@
 import { mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { curatedCatalogEntriesByMcpUrl } from "./catalog-curation";
+import { catalogIdentityEntriesByMcpUrl, curatedCatalogEntriesByMcpUrl } from "./catalog-curation";
 import {
   VENDORED_LOGO_DIRECTORY,
   extensionForContentType,
@@ -22,7 +22,7 @@ import {
 
 /**
  * Regenerates `data/catalog/logos/` from the current snapshot plus curated
- * overlay: one validated asset per curated row whose effective logo source is
+ * overlay: one validated asset per curated or identity row whose effective logo source is
  * published, fetched once here so deployments never fetch it. A curated
  * `logoSourceUrl: null` (no reusable logo licence) is deliberately skipped and
  * keeps the monogram. This is the same PR workflow as `catalog:refresh`: run
@@ -69,7 +69,11 @@ export function vendoredLogoFileName(capabilityId: string, contentType: string):
   return `${safe || "logo"}.${extension}`;
 }
 
-/** Curated rows in import order, split by whether the overlay permits a logo. */
+/**
+ * Curated and identity rows in import order, split by whether the overlay
+ * permits a logo. Identity rows are the reviewed well-known services, so their
+ * marks are self-hosted exactly like a curated connector's.
+ */
 export function curatedLogoCandidates(rows: readonly CatalogIntegrationRow[]): {
   fetchable: Array<{ row: CatalogIntegrationRow; capabilityId: string; sourceUrl: string }>;
   suppressed: Array<{ capabilityId: string; domain: string }>;
@@ -78,7 +82,11 @@ export function curatedLogoCandidates(rows: readonly CatalogIntegrationRow[]): {
     [];
   const suppressed: Array<{ capabilityId: string; domain: string }> = [];
   for (const row of rows) {
-    if (!curatedCatalogEntriesByMcpUrl.has(row.mcpUrl)) continue;
+    if (
+      !curatedCatalogEntriesByMcpUrl.has(row.mcpUrl) &&
+      !catalogIdentityEntriesByMcpUrl.has(row.mcpUrl)
+    )
+      continue;
     const capabilityId = catalogCapabilityId(row.domain, row.mcpUrl);
     if (row.logoSourceUrl) {
       fetchable.push({ row, capabilityId, sourceUrl: row.logoSourceUrl });

@@ -224,10 +224,18 @@ describe("dictation", () => {
     h.dictation.listen(h.target, true);
     tap(h.keys);
     expect(h.sent).toEqual([
-      { kind: "start", dictationId: "d1", profileId: "default", language: null, vocabulary: [] },
+      {
+        kind: "start",
+        dictationId: "d1",
+        profileId: "default",
+        language: null,
+        model: null,
+        vocabulary: [],
+      },
     ]);
     expect(h.last()).toEqual({ kind: "starting", label: null });
-    expect(h.shortcuts.has("Escape")).toBe(true);
+    // Escape stays with the app the person is typing in.
+    expect(h.shortcuts.has("Escape")).toBe(false);
 
     h.dictation.report(h.target, {
       dictationId: "d1",
@@ -287,7 +295,14 @@ describe("dictation", () => {
     h.keys.onDown("default");
     await wait(200);
     expect(h.sent).toEqual([
-      { kind: "start", dictationId: "d1", profileId: "default", language: null, vocabulary: [] },
+      {
+        kind: "start",
+        dictationId: "d1",
+        profileId: "default",
+        language: null,
+        model: null,
+        vocabulary: [],
+      },
     ]);
     h.dictation.report(h.target, {
       dictationId: "d1",
@@ -336,7 +351,14 @@ describe("dictation", () => {
     expect(h.sent).toEqual([]);
     h.dictation.listen(h.target, true);
     expect(h.sent).toEqual([
-      { kind: "start", dictationId: "d1", profileId: "default", language: null, vocabulary: [] },
+      {
+        kind: "start",
+        dictationId: "d1",
+        profileId: "default",
+        language: null,
+        model: null,
+        vocabulary: [],
+      },
     ]);
     h.dictation.stop();
   });
@@ -434,16 +456,57 @@ describe("dictation", () => {
     h.dictation.stop();
   });
 
-  test("Escape cancels a dictation, and is only taken while one runs", async () => {
-    const h = harness();
+  test("only the Cancel button and the cancel shortcut cancel; Escape never does", async () => {
+    const h = harness({
+      settings: { cancelShortcut: { kind: "accelerator", accelerator: "Control+Shift+3" } },
+    });
     h.dictation.start();
     await tick();
     h.dictation.listen(h.target, true);
-    expect(h.shortcuts.has("Escape")).toBe(false);
     tap(h.keys);
-    h.shortcuts.get("Escape")!();
-    expect(h.sent.at(-1)).toEqual({ kind: "cancel", dictationId: "d1" });
+    h.dictation.report(h.target, { dictationId: "d1", phase: "recording", startedAt: 1, level: 0 });
     expect(h.shortcuts.has("Escape")).toBe(false);
+    expect(h.sent.some((request) => request.kind === "cancel")).toBe(false);
+    h.shortcuts.get("Control+Shift+3")!();
+    expect(h.sent.at(-1)).toEqual({ kind: "cancel", dictationId: "d1" });
+    expect(h.last()).toEqual({ kind: "hidden" });
+    tap(h.keys);
+    h.dictation.report(h.target, { dictationId: "d2", phase: "recording", startedAt: 2, level: 0 });
+    h.hudAction("cancel");
+    expect(h.sent.at(-1)).toEqual({ kind: "cancel", dictationId: "d2" });
+    expect(h.shortcuts.has("Escape")).toBe(false);
+    h.dictation.stop();
+  });
+
+  test("each shortcut's dictations are heard by its own model", async () => {
+    const english = { providerId: "openai", model: "gpt-4o-transcribe" };
+    const h = harness({
+      settings: {
+        profiles: [
+          {
+            id: "en",
+            name: "English",
+            shortcut: { kind: "accelerator", accelerator: "Control+Shift+E" },
+            language: "en",
+            model: english,
+          },
+          {
+            id: "nb",
+            name: "Norwegian",
+            shortcut: { kind: "accelerator", accelerator: "Control+Shift+N" },
+            language: "nb",
+          },
+        ],
+      },
+    });
+    h.dictation.start();
+    await tick();
+    h.dictation.listen(h.target, true);
+    h.shortcuts.get("Control+Shift+E")!();
+    expect(h.sent.at(-1)).toMatchObject({ kind: "start", language: "en", model: english });
+    h.hudAction("cancel");
+    h.shortcuts.get("Control+Shift+N")!();
+    expect(h.sent.at(-1)).toMatchObject({ kind: "start", language: "nb", model: null });
     h.dictation.stop();
   });
 
@@ -456,7 +519,7 @@ describe("dictation", () => {
     h.dictation.listen(h.target, true);
     tap(h.keys);
     h.dictation.report(h.target, { dictationId: "d1", phase: "recording", startedAt: 1, level: 0 });
-    h.shortcuts.get("Escape")!();
+    h.hudAction("cancel");
     expect(h.sent.at(-1)).toEqual({ kind: "cancel", dictationId: "d1" });
     expect(h.last()).toEqual({ kind: "hidden" });
     const speech = {
@@ -613,7 +676,14 @@ describe("dictation", () => {
     h.dictation.listen(h.target, true);
     h.shortcuts.get("Control+Shift+Space")!();
     expect(h.sent).toEqual([
-      { kind: "start", dictationId: "d1", profileId: "nb", language: "nb", vocabulary: [] },
+      {
+        kind: "start",
+        dictationId: "d1",
+        profileId: "nb",
+        language: "nb",
+        model: null,
+        vocabulary: [],
+      },
     ]);
     expect(h.last()).toEqual({ kind: "starting", label: "Norwegian" });
     h.dictation.stop();
@@ -688,6 +758,7 @@ describe("dictation", () => {
       dictationId: "d2",
       profileId: "default",
       language: null,
+      model: null,
       vocabulary: ["Kubernetes"],
       audio: speech,
     });
@@ -972,7 +1043,7 @@ describe("dictation settings", () => {
     const english = {
       id: "en",
       name: "English",
-      shortcut: { kind: "accelerator", accelerator: "Control+Alt+Space" },
+      shortcut: { kind: "accelerator" as const, accelerator: "Control+Alt+Space" },
       language: "en",
     };
     expect(mergeDictationSettings(current, { profiles: [profile, english] }).profiles).toHaveLength(
@@ -981,6 +1052,16 @@ describe("dictation settings", () => {
     expect(
       mergeDictationSettings(current, { profiles: [{ ...english, language: "not a code" }] }),
     ).toEqual(current);
+    // A shortcut keeps its own model; a malformed one means the workspace's.
+    const model = { providerId: "azure-speech", model: "MAI-Transcribe-2" };
+    expect(
+      mergeDictationSettings(current, { profiles: [profile, { ...english, model }] }).profiles[1],
+    ).toEqual({ ...english, model });
+    expect(
+      mergeDictationSettings(current, {
+        profiles: [profile, { ...english, model: { providerId: "x y", model: 3 } }],
+      }).profiles[1],
+    ).toEqual(english);
   });
 
   test("vocabulary is trimmed, without repeats, and within the limits", () => {

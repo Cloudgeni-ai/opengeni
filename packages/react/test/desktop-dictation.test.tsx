@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import type { ClientVoiceInputConfig } from "@opengeni/sdk";
 import type {
   DesktopDictation,
   DesktopDictationHistoryEntry,
@@ -142,7 +143,12 @@ const oneShotClient = { transcribeAudio: async () => ({ text: "one-shot", langua
 async function mountHost(
   app: ReturnType<typeof fakeApp>,
   server: FakeServer,
-  options: { enabled?: boolean; chunks?: Uint8Array[]; elapsedMilliseconds?: number } = {},
+  options: {
+    enabled?: boolean;
+    chunks?: Uint8Array[];
+    elapsedMilliseconds?: number;
+    capability?: ClientVoiceInputConfig;
+  } = {},
 ) {
   const { platform, recorders } = fakePlatform(server, {
     ...(options.chunks ? { chunks: options.chunks } : {}),
@@ -152,7 +158,7 @@ async function mountHost(
     <DesktopDictationHost
       client={oneShotClient}
       workspaceId="ws-1"
-      capability={resumableCapability}
+      capability={options.capability ?? resumableCapability}
       enabled={options.enabled ?? true}
       recordings={server.client}
       platform={platform}
@@ -337,6 +343,39 @@ describe("DesktopDictationHost", () => {
     expect(app.last("d1")).toMatchObject({ phase: "failed", retryable: false });
   });
 
+  test("a shortcut's own model hears it where the workspace offers that model", async () => {
+    const app = fakeApp();
+    const server = new FakeServer();
+    const english = { providerId: "openai", model: "gpt-4o-transcribe" } as const;
+    const { recorders } = await mountHost(app, server, {
+      capability: {
+        ...resumableCapability,
+        models: [{ ...english, providerName: "OpenAI", name: "gpt-4o-transcribe" }],
+      },
+    });
+    await app.send({
+      kind: "start",
+      dictationId: "d1",
+      profileId: "en",
+      language: "en",
+      model: english,
+    });
+    await waitFor(() => app.phases("d1").includes("recording"));
+    expect(recorders[0]?.options.transcription).toEqual({ ...english, language: "en" });
+    await app.send({ kind: "stop", dictationId: "d1" });
+    await waitFor(() => app.phases("d1").includes("done"));
+    // A model this workspace doesn't offer: its voice input model hears it instead.
+    await app.send({
+      kind: "start",
+      dictationId: "d2",
+      profileId: "nb",
+      language: "nb",
+      model: { providerId: "elevenlabs", model: "scribe_v2" },
+    });
+    await waitFor(() => app.phases("d2").includes("recording"));
+    expect(recorders[1]?.options.transcription).toEqual({ language: "nb" });
+  });
+
   test("hands the app each dictation's speech with its text, with the vocabulary it heard", async () => {
     const app = fakeApp();
     const server = new FakeServer();
@@ -459,6 +498,51 @@ describe("DesktopDictationSettings", () => {
       },
     ]);
     expect(mounted.container.textContent).toContain("Allowed");
+  });
+
+  test("each shortcut can pick one of the workspace's models, once there are any", async () => {
+    const azure = { providerId: "azure-speech", model: "MAI-Transcribe-2" } as const;
+    const app = fakeApp({
+      settings: {
+        enabled: true,
+        profiles: [
+          { ...SETTINGS.profiles[0]!, id: "nb", name: "Norwegian", language: "nb", model: azure },
+          {
+            id: "en",
+            name: "English",
+            shortcut: { kind: "accelerator", accelerator: "Control+Shift+E" },
+            language: "en",
+          },
+        ],
+      },
+    });
+    mounted = await renderComponent(
+      <DictationSettingsView
+        dictation={app.dictation}
+        models={[
+          { ...azure, providerName: "Azure Speech", name: "MAI-Transcribe-2" },
+          {
+            providerId: "openai",
+            model: "gpt-4o-transcribe",
+            providerName: "OpenAI",
+            name: "gpt-4o-transcribe",
+          },
+        ]}
+      />,
+    );
+    await waitFor(() => mounted!.container.textContent?.includes("Add shortcut") ?? false);
+    const pickers = [...mounted.container.querySelectorAll("[aria-label=Model]")];
+    expect(pickers.map((picker) => picker.textContent)).toEqual([
+      "Azure Speech · MAI-Transcribe-2",
+      "Workspace default",
+    ]);
+  });
+
+  test("without the workspace's models no model is offered", async () => {
+    const app = fakeApp({ settings: { enabled: true } });
+    mounted = await renderComponent(<DictationSettingsView dictation={app.dictation} />);
+    await waitFor(() => mounted!.container.textContent?.includes("Language") ?? false);
+    expect(mounted.container.querySelector("[aria-label=Model]")).toBeNull();
   });
 
   test("shows recent dictations to copy again", async () => {

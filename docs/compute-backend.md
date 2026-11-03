@@ -361,7 +361,8 @@ configured side by side and move new chats between them with one setting:
   their parent's. A schedule that starts a new chat on each run follows the
   setting as it is at that run, unless the schedule names a backend.
 - An API client can still pick a backend for one chat with `sandboxBackend`
-  on session create.
+  on session create, when the deployment serves it: its default or a backend
+  whose settings are configured. Any other value is refused with 422.
 
 Keep both backends' settings in place for as long as chats on either exist:
 removing compute's or Modal's settings stops those chats, not only new ones.

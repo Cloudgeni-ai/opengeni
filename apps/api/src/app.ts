@@ -47,6 +47,7 @@ import {
   normalizeOrganizationAccessPolicy,
   REGION_RESTRICTED,
   REGION_RESTRICTED_MESSAGE,
+  type DictationModelOption,
 } from "@opengeni/contracts";
 import {
   httpRejectionFactsFromEnvelope,
@@ -1560,6 +1561,7 @@ export function createAppComposition(deps: AppDependencies): {
     let requiredModelGeography: "eu" | undefined;
     let voiceInputAvailable = false;
     let voiceInputProviders: string[] = [];
+    let voiceInputModels: DictationModelOption[] = [];
     const requestedWorkspaceId = c.req.query("workspaceId");
     if (
       requestedWorkspaceId !== undefined &&
@@ -1635,6 +1637,7 @@ export function createAppComposition(deps: AppDependencies): {
             // `available` honours the workspace preference and fallback, so
             // the composer never offers a mic every request would refuse.
             voiceInputProviders = (await transcription.availableProviderIds?.(voiceContext)) ?? [];
+            voiceInputModels = (await transcription.availableModels?.(voiceContext)) ?? [];
             voiceInputAvailable =
               voiceInputProviders.length > 0 &&
               (await Promise.resolve(transcription.available(voiceContext)).catch(() => false));
@@ -1733,6 +1736,7 @@ export function createAppComposition(deps: AppDependencies): {
         },
         voiceInput: {
           providers: voiceInputProviders,
+          ...(voiceInputModels.length > 0 ? { models: voiceInputModels } : {}),
           available: voiceInputAvailable,
           maxDurationSeconds: deps.settings.voiceInputMaxDurationSeconds,
           maxSizeBytes: deps.settings.voiceInputMaxSizeBytes,

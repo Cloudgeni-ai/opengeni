@@ -106,7 +106,10 @@ import {
   organizationApiKeyNoun,
 } from "@/components/capabilities/organization-api-key-dialog";
 import { featuredConnectors } from "@/components/capabilities/featured-connectors";
-import { useApiIntegrationOAuthCallback } from "@/components/capabilities/use-api-integration-accounts";
+import {
+  useApiIntegrationOAuthCallback,
+  useFinishUnfinishedConnectSetups,
+} from "@/components/capabilities/use-api-integration-accounts";
 import {
   nativeCatalogItemNotice,
   nativeCatalogItemVisible,
@@ -558,6 +561,9 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   // curated definition here is oauth2-only, so a single shared effect (below)
   // handles the OAuth return for all of them.
   useApiIntegrationOAuthCallback({ workspaceId, refresh, onRuntimeChanged });
+  // A setup interrupted after sign-in (closed dialog, reload, closed app)
+  // finishes here without reopening it.
+  useFinishUnfinishedConnectSetups({ workspaceId, refresh, onRuntimeChanged });
   const teamsBot = useTeamsBotIntegration({ workspaceId, refreshRevision: catalogData.revision });
   const microsoftTeams = useMicrosoftTeamsIntegration({
     workspaceId,

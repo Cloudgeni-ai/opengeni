@@ -112,8 +112,10 @@ pub struct ChunkRef {
     /// them (older manifests) the object must be read to be proven.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checksums: Option<String>,
-    /// The UTC day it was stored under ([`crate::fresh::day_of`]), part of
-    /// its name (ADR 25); `None` in the old layout, named by its content
+    /// The period it was stored in ([`crate::fresh::period_of`]), part of
+    /// its name (ADR 25, 28): an hour, or a day for one stored before
+    /// periods were hours, under the same field and key so that every
+    /// release reads both. `None` in the old layout, named by its content
     /// alone, and for a chunk not yet stored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub day: Option<u32>,
@@ -157,7 +159,7 @@ impl ChunkRef {
         }
     }
 
-    /// The same chunk as stored under day `day`.
+    /// The same chunk as stored under period `day`.
     #[must_use]
     pub fn on_day(&self, day: u32) -> Self {
         Self {
