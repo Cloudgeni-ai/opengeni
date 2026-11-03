@@ -105,13 +105,21 @@ export type AgentPromptExperiments = {
  * Which tool-specific instruction clauses may render for one attempt. A
  * rendering input only: it never grants, withholds, defers or reorders a tool.
  *
- * `unavailable` lists only tool names proven absent for the attempt (see
- * `deriveAgentPromptToolAvailability`). Every other name — deferred or lazily
+ * `unavailable` lists tool names proven absent for the attempt (see
+ * `deriveAgentPromptToolAvailability`), plus save-only tools whose writes the
+ * turn's frozen learning policy refuses. Every other name — deferred or lazily
  * disclosed, external MCP, provider-hosted, local adapter, or unknown — counts
  * as available, so its guidance stays.
  */
 export type AgentPromptToolAvailability = {
   readonly unavailable: readonly FirstPartyMcpToolName[];
+  /**
+   * The session can never have child sessions: its nesting depth, frozen at
+   * create, has reached its frozen maximum, so no child was or will be
+   * admitted. Omitted when that is not proven (for example `session_create`
+   * merely unselected on a turn of a session that may already have children).
+   */
+  readonly childSessionsImpossible?: true;
 };
 
 /** False only when the attempt proved the named tool absent. */

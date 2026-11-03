@@ -1745,6 +1745,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           });
           const toolRuntime = await prepareTurnToolRuntime({
             independentSessionTitles: !!startSessionTitleWorkflow,
+            learningModes: learning.effective,
             vaultAccess,
             runCredentialRenewals: runCredentialResolver ? renewals : undefined,
             runMcpCredentials,
