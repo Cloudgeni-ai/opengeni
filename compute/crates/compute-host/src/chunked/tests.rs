@@ -1349,3 +1349,51 @@ async fn a_chunk_an_image_lost_is_stored_again_once_a_verification_finds_it() {
     archived(&store, b, &b_files).await;
     assert_eq!(backend.take(), (4, 0));
 }
+
+/// What an archive stores is held until it publishes, and carried into each
+/// new hour meanwhile; a published archive leaves nothing held.
+#[tokio::test]
+async fn an_archive_holds_what_it_stores_until_it_publishes() {
+    use compute_storage::fresh::Clock;
+    use compute_storage::store::Kept;
+
+    let now = Arc::new(std::sync::Mutex::new(SystemTime::now()));
+    let clock = {
+        let now = Arc::clone(&now);
+        Clock::from_fn(move || *now.lock().unwrap())
+    };
+    let chunks =
+        ChunkStore::new(Arc::new(InMemory::new()), ObjectPath::from("t")).with_clock(clock);
+    let store = Chunked::new(chunks.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let saved = files(dir.path(), false);
+    sparse(
+        saved.disk.path(),
+        3 * CHUNK_BYTES,
+        &[(0, b"one"), (CHUNK_BYTES, b"two")],
+    );
+    let sandbox = id("0123456789abcdef0123456789abcdef");
+
+    let held = store.held(sandbox);
+    let holding = store.holding(&held);
+    holding
+        .archive_once(sandbox, save(), &saved, &CancellationToken::new())
+        .await
+        .unwrap()
+        .stored()
+        .unwrap();
+    assert_eq!(held.len(), 2, "both chunks, not the zeros");
+    *now.lock().unwrap() += Duration::from_secs(3_600);
+    let kept = chunks.keep(&held).await;
+    assert_eq!((kept.copied, kept.lost, kept.failed), (2, 0, 0), "{kept:?}");
+    assert_eq!(chunks.keep(&held).await, Kept::default(), "carried already");
+    drop((holding, held));
+
+    store
+        .archive(sandbox, save(), &saved, &CancellationToken::new())
+        .await
+        .unwrap()
+        .stored()
+        .unwrap();
+    assert!(store.in_flight.lock().unwrap().is_empty());
+}
