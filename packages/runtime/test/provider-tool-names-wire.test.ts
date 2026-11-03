@@ -233,3 +233,123 @@ describe("hostile history tool names reach every provider wire valid", () => {
     expectPortableNames(bodies[0]);
   });
 });
+
+describe("regressions: tool names the adapters used to send verbatim", () => {
+  const DOTTED = "server.lookup";
+  const calledName = (output: readonly unknown[]) =>
+    (output as Array<Record<string, unknown>>).find((item) => item.type === "function_call")?.name;
+  const responsesReply = (name: string) =>
+    Response.json({
+      id: "response-fixture",
+      object: "response",
+      status: "completed",
+      output: [
+        {
+          id: "call-item",
+          type: "function_call",
+          call_id: "call_new",
+          name,
+          arguments: "{}",
+          status: "completed",
+        },
+      ],
+    });
+  const dottedRequest = (): ModelRequest => ({
+    ...request([
+      { type: "message", role: "user", content: "Use the tool" },
+      {
+        type: "function_call",
+        callId: "call_0",
+        name: DOTTED,
+        arguments: "{}",
+        status: "completed",
+      },
+      {
+        type: "function_call_result",
+        callId: "call_0",
+        name: DOTTED,
+        status: "completed",
+        output: "ok",
+      },
+    ] as ModelRequest["input"]),
+    tools: [definition(DOTTED), definition(KNOWN)],
+    modelSettings: { toolChoice: DOTTED },
+  });
+
+  test("Responses: tools[M].name, input[N].name and tool_choice of a request tool", async () => {
+    const { client, bodies } = openAIClient(responsesProvider, (body) =>
+      responsesReply(body.tools[0].name),
+    );
+    const model = new OpenGeniResponsesModel(client, "fixture-responses", responsesProvider);
+    const response = await getOrCreateTrace(() => model.getResponse(dottedRequest()));
+    const sent = bodies[0];
+    expect(sent.tools[0].name).toMatch(PORTABLE_TOOL_NAME);
+    expect(sent.tools[1].name).toBe(KNOWN);
+    const call = sent.input.find((item: any) => item.type === "function_call");
+    expect(call.name).toBe(sent.tools[0].name);
+    expect(sent.tool_choice.name).toBe(sent.tools[0].name);
+    // The model's call to the name it was shown runs the original tool.
+    expect(calledName(response.output)).toBe(DOTTED);
+  });
+
+  test("Chat Completions: tools[M].function.name and tool_choice of a request tool", async () => {
+    const provider: ResolvedModelProvider = { ...responsesProvider, api: "chat" };
+    const { client, bodies } = openAIClient(provider, (body) =>
+      Response.json({
+        id: "reply-fixture",
+        object: "chat.completion",
+        created: 1,
+        model: "fixture-model",
+        choices: [
+          {
+            index: 0,
+            finish_reason: "tool_calls",
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [
+                {
+                  id: "call_new",
+                  type: "function",
+                  function: { name: body.tools[0].function.name, arguments: "{}" },
+                },
+              ],
+            },
+          },
+        ],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }),
+    );
+    const model = new OpenGeniChatCompletionsModel(client, "fixture-model");
+    const response = await getOrCreateTrace(() => model.getResponse(dottedRequest()));
+    expect(bodies[0].tools[0].function.name).toMatch(PORTABLE_TOOL_NAME);
+    expect(bodies[0].tool_choice.function.name).toBe(bodies[0].tools[0].function.name);
+    expect(calledName(response.output)).toBe(DOTTED);
+  });
+
+  test("a provider that still rejects a tool name gets one strict resend", async () => {
+    const { client, bodies } = openAIClient(responsesProvider, (body) =>
+      bodies.length === 1
+        ? Response.json(
+            {
+              error: {
+                message:
+                  "Invalid 'input[26].tools[1].name': string does not match pattern. Expected a string that matches the pattern '^[a-zA-Z0-9_-]+$'.",
+                type: "invalid_request_error",
+                param: "input[26].tools[1].name",
+                code: "invalid_string",
+              },
+            },
+            { status: 400 },
+          )
+        : responsesReply(body.tools[0].name),
+    );
+    const model = new OpenGeniResponsesModel(client, "fixture-responses", responsesProvider);
+    const response = await getOrCreateTrace(() =>
+      model.getResponse({ ...request(history(true)), tools: [definition(KNOWN)] }),
+    );
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1].tools[0].name).not.toBe(KNOWN);
+    expect(calledName(response.output)).toBe(KNOWN);
+  });
+});

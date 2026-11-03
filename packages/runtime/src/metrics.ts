@@ -111,6 +111,21 @@ export type RuntimeMetricsHooks = {
    * path it names (indices collapsed) and its error code. Monitoring only.
    */
   onModelInvalidRequest?: (input: { provider: string; path: string; code: string }) => void;
+  /**
+   * The outbound tool-name guard changed a tool name a provider could reject,
+   * once per request and field (`tools`, `tool_choice`, `history`).
+   */
+  onModelToolNameRepair?: (input: {
+    provider: string;
+    api: "responses" | "chat" | "anthropic-messages";
+    field: "tools" | "tool_choice" | "history";
+  }) => void;
+  /** The one strict resend after a provider still rejected a tool name, by its outcome. */
+  onModelToolNameRetry?: (input: {
+    provider: string;
+    api: "responses" | "chat" | "anthropic-messages";
+    outcome: "completed" | "failed";
+  }) => void;
   onSandboxCreate?: (input: {
     backend: string;
     imageSource: "logical" | "provider_immutable";

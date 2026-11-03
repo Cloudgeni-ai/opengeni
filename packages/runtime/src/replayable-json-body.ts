@@ -1,5 +1,6 @@
 import OpenAI, { type APIError } from "openai";
 import type { APIPromise } from "openai/core/api-promise";
+import { Stream } from "openai/core/streaming";
 import { types as utilTypes } from "node:util";
 import { hasResponsesTurn, markResponsesPrefixReady } from "@opengeni/network/responses-websocket";
 import {
@@ -11,6 +12,15 @@ import {
   rethrowModelTransportAdmissionRefusal,
   sdkModelTransportAdmissionFetch,
 } from "./model-preparation-diagnostics";
+import {
+  guardRequestToolNames,
+  observeToolNames,
+  responseRejectsToolName,
+  restoreToolNames,
+  type ToolNameAliases,
+  type ToolNameObservers,
+  type ToolNameWireApi,
+} from "./provider-request-tool-names";
 
 const TARGET_CHUNK_CHARS = 64 * 1024;
 const LARGE_STRING_SOURCE_CHARS = 32 * 1024;
@@ -60,10 +70,104 @@ export type ModelJsonRequestPolicy = (request: {
   body: Readonly<Record<string, unknown>>;
 }) => ModelJsonRequestPolicyResult | undefined;
 
-export type ReplayableJsonOpenAIHooks = {
+export type ReplayableJsonOpenAIHooks = ToolNameObservers & {
   /** Synchronous object-stage policy, run exactly once before serialization. */
   modelRequestPolicy?: ModelJsonRequestPolicy;
 };
+
+/**
+ * The tool names of one model request: the body before the outbound guard
+ * and the aliases the provider's answer is mapped back with.
+ */
+type ToolNameRequest = {
+  api: ToolNameWireApi;
+  original: Record<string, unknown>;
+  aliases: ToolNameAliases;
+  /** The strict body, once the provider rejected a tool name; later sends use it. */
+  strict?: Record<string, unknown>;
+};
+
+/** Each guarded request body's tool names, by the body's identity. */
+const toolNameRequests = new WeakMap<object, ToolNameRequest>();
+
+function toolNameApi(path: string): ToolNameWireApi | null {
+  const pathname = path.split("?", 1)[0] ?? path;
+  if (pathname.endsWith("/responses")) return "responses";
+  if (pathname.endsWith("/chat/completions")) return "chat";
+  return null;
+}
+
+/** A fetch init that sends `body` instead, replayable like the original. */
+function withJsonBody(
+  init: RequestInit | undefined,
+  body: Record<string, unknown>,
+): ReplayableRequestInit {
+  const replay = new ReplayableJsonBody(body);
+  return {
+    ...init,
+    body: replay.createStream(),
+    [REPLAYABLE_REQUEST_BODY_FACTORY]: () => replay.createStream(),
+  };
+}
+
+/**
+ * Resend a request once, with every tool name aliased (strict mode), when
+ * the provider answers 400 because of a tool name the outbound guard let
+ * through. Any other answer, and the resend's own answer, is returned as it
+ * is: the resend is a single step, never repeated, and changes nothing but
+ * tool names.
+ */
+type ModelFetch = (...args: Parameters<typeof fetch>) => ReturnType<typeof fetch>;
+
+function toolNameRetryFetch(
+  inner: ModelFetch,
+  onRetry: ReplayableJsonOpenAIHooks["onToolNameRetry"],
+): ModelFetch {
+  return async (input, init) => {
+    const source = replayableJsonBodySource(init?.body)?.source;
+    const names =
+      typeof source === "object" && source !== null ? toolNameRequests.get(source) : undefined;
+    if (!names) return await inner(input, init);
+    // A later send of a request already resent strictly (an SDK retry) stays strict.
+    if (names.strict) return await inner(input, withJsonBody(init, names.strict));
+    const response = await inner(input, init);
+    if (!(await responseRejectsToolName(response))) return response;
+    const strict = guardRequestToolNames(names.api, names.original, { strict: true });
+    names.strict = strict.body;
+    names.aliases = strict.aliases;
+    await response.body?.cancel().catch(() => undefined);
+    let resent: Response;
+    try {
+      resent = await inner(input, withJsonBody(init, strict.body));
+    } catch (error) {
+      observeToolNames(onRetry, { api: names.api, outcome: "failed" });
+      throw error;
+    }
+    observeToolNames(onRetry, { api: names.api, outcome: resent.ok ? "completed" : "failed" });
+    return resent;
+  };
+}
+
+async function* restoredStreamEvents<T>(
+  stream: AsyncIterable<T>,
+  names: ToolNameRequest,
+): AsyncGenerator<T> {
+  for await (const event of stream) yield restoreToolNames(names.api, event, names.aliases);
+}
+
+/** A model answer, or its event stream, with aliased tool names mapped back. */
+function restoredAnswer<T>(data: T, names: ToolNameRequest | undefined, client: OpenAI): T {
+  if (!names || names.aliases.size === 0) return data;
+  if (data instanceof Stream) {
+    const stream = data as Stream<unknown>;
+    return new Stream(
+      () => restoredStreamEvents(stream, names),
+      stream.controller,
+      client,
+    ) as unknown as T;
+  }
+  return restoreToolNames(names.api, data, names.aliases);
+}
 
 /**
  * A JSON request body that can be encoded incrementally and replayed exactly.
@@ -123,13 +227,18 @@ export async function requestBodyText(body: BodyInit | null | undefined): Promis
  */
 export class ReplayableJsonOpenAI extends OpenAI {
   private readonly modelRequestPolicy: ModelJsonRequestPolicy | undefined;
+  private readonly onToolNameRepair: ReplayableJsonOpenAIHooks["onToolNameRepair"];
 
   constructor(options: OpenAIOptions, hooks: ReplayableJsonOpenAIHooks = {}) {
     super({
       ...options,
-      fetch: sdkModelTransportAdmissionFetch(options?.fetch ?? globalThis.fetch),
+      fetch: toolNameRetryFetch(
+        sdkModelTransportAdmissionFetch(options?.fetch ?? globalThis.fetch),
+        hooks.onToolNameRetry,
+      ),
     });
     this.modelRequestPolicy = hooks.modelRequestPolicy;
+    this.onToolNameRepair = hooks.onToolNameRepair;
   }
 
   protected override makeStatusError(
@@ -146,6 +255,7 @@ export class ReplayableJsonOpenAI extends OpenAI {
     if (!isModelRequestPath(path) || opts === undefined) {
       return super.post<Rsp>(path, opts);
     }
+    let names: ToolNameRequest | undefined;
     const wrapped = Promise.resolve(opts).then((resolved) => {
       const body = resolved.body;
       let prepared = resolved;
@@ -161,6 +271,18 @@ export class ReplayableJsonOpenAI extends OpenAI {
           };
         }
       }
+      // The outbound tool-name guard runs last, on the body as it is sent.
+      const api = toolNameApi(path);
+      if (api && isJsonRecordBody(prepared.body)) {
+        const original = prepared.body;
+        const guarded = guardRequestToolNames(api, original);
+        for (const field of guarded.repaired) {
+          observeToolNames(this.onToolNameRepair, { api, field });
+        }
+        names = { api, original, aliases: guarded.aliases };
+        toolNameRequests.set(guarded.body, names);
+        if (guarded.body !== original) prepared = { ...prepared, body: guarded.body };
+      }
       if (path.split("?", 1)[0]?.endsWith("/responses")) {
         markResponsesPrefixReady();
         // The durable worker owns one step budget for sockets and HTTP alike.
@@ -169,7 +291,11 @@ export class ReplayableJsonOpenAI extends OpenAI {
       }
       return wrapJsonRequestOptions(prepared);
     });
-    return super.post<Rsp>(path, wrapped);
+    // The aliases are final once the response arrived (a strict resend
+    // replaces them), so the answer is mapped back with the ones it answers.
+    return super
+      .post<Rsp>(path, wrapped)
+      ._thenUnwrap((data) => restoredAnswer(data, names, this)) as APIPromise<Rsp>;
   }
 
   override async buildRequest(

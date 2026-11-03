@@ -18,7 +18,7 @@ const CODE = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
  * roots count, so no other word of a message is ever taken for a path.
  */
 const EMBEDDED_PATH =
-  /\b((?:input|messages|tools|contents|system|instructions)(?:\[\d+\]|\.\d+|\.[A-Za-z_]\w*)+)/;
+  /\b((?:input|messages|tools|tool_choice|contents|system|instructions)(?:\[\d+\]|\.\d+|\.[A-Za-z_]\w*)+)/;
 
 function record(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -47,31 +47,49 @@ function errorCode(error: Record<string, unknown>): string {
   return "unknown";
 }
 
+function errorRecord(body: unknown): Record<string, unknown> {
+  const envelope = record(body);
+  return record(envelope?.error) ?? envelope ?? {};
+}
+
+/** The message of a parsed provider error body, never recorded. */
+export function invalidRequestMessage(body: unknown): string {
+  const message = errorRecord(body).message;
+  return typeof message === "string" ? message : "";
+}
+
 /** The signature of a parsed provider error body (OpenAI, Claude, gateways). */
 export function invalidRequestSignature(body: unknown): InvalidRequestSignature {
-  const envelope = record(body);
-  const error = record(envelope?.error) ?? envelope ?? {};
+  const error = errorRecord(body);
   const message = typeof error.message === "string" ? error.message : "";
   const raw =
     (typeof error.param === "string" && error.param) || EMBEDDED_PATH.exec(message)?.[1] || null;
   return { path: (raw && normalizedPath(raw)) || "unknown", code: errorCode(error) };
 }
 
+/** A provider error body's text, parsed; text that is not JSON is its message. */
+export function parseInvalidRequestText(text: string): unknown {
+  if (text.length > MAX_BODY_CHARACTERS) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { message: text };
+  }
+}
+
+/** A 400 response's error body, read from a clone; null when unreadable. */
+export async function invalidRequestBodyOfResponse(response: Response): Promise<unknown> {
+  try {
+    return parseInvalidRequestText(await response.clone().text());
+  } catch {
+    return null;
+  }
+}
+
 /** The signature of a 400 response's body, read from a clone; null when unreadable. */
 export async function invalidRequestSignatureOfResponse(
   response: Response,
 ): Promise<InvalidRequestSignature | null> {
-  try {
-    const text = await response.clone().text();
-    if (text.length > MAX_BODY_CHARACTERS) return { path: "unknown", code: "unknown" };
-    let body: unknown;
-    try {
-      body = JSON.parse(text);
-    } catch {
-      body = { message: text };
-    }
-    return invalidRequestSignature(body);
-  } catch {
-    return null;
-  }
+  const body = await invalidRequestBodyOfResponse(response);
+  return body === null ? null : invalidRequestSignature(body);
 }

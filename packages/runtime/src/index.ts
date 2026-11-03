@@ -76,7 +76,7 @@ export {
   type SingleModelCallResult,
   type SingleModelCallTarget,
 } from "./single-model-call";
-import { instrumentedModelFetch } from "./model-provider-client";
+import { instrumentedModelFetch, modelToolNameObservers } from "./model-provider-client";
 import { inferenceResidencyRequirement, sideFeatureRouteRunnable } from "./inference-residency";
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { isRunMcpCredentialError, RunMcpCredentials } from "./mcp-run-credentials";
@@ -1571,6 +1571,7 @@ export async function summarizeForCompaction(
         false,
         inferenceResidencyRequirement(settings),
       ),
+      modelToolNameObservers(provider.id),
     );
     const claudeRequest = (forbidToolCalls: boolean) =>
       anthropicCompactionRequest(input, {
