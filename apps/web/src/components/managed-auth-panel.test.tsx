@@ -742,8 +742,11 @@ test("the Sign up tab uses its solved visible challenge, or runs one in the back
     panel = await mountSocialPanel({ initialMode: "signup" });
     await next.call(0, "callback", "visible-token");
     await panel.click("Continue with Google");
-    expect(next.widgets).toHaveLength(1);
     expect(panel.starts).toEqual([["google", "visible-token"]]);
+    // No background run; the used visible token is cleared and its widget renders afresh.
+    expect(next.executed).toEqual([]);
+    expect(next.widgets).toHaveLength(2);
+    expect(next.widgets[1]!.execution).toBeUndefined();
   } finally {
     await panel.unmount();
   }
@@ -760,5 +763,45 @@ test("while new accounts are paused, or without a site key, social sign-in runs 
     } finally {
       await panel.unmount();
     }
+  }
+});
+
+test("a config change that turns the challenge off mid-click brings the buttons back", async () => {
+  const turnstile = fakeTurnstile();
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const starts: Array<[string, string | undefined]> = [];
+  const render = (newSignupsEnabled: boolean) =>
+    act(async () =>
+      root.render(
+        <ManagedAuthPanel
+          signupChallengeSiteKey="test-key"
+          newSignupsEnabled={newSignupsEnabled}
+          socialProviders={["google", "github"]}
+          onSocialSubmit={async (provider, token) => {
+            starts.push([provider, token]);
+          }}
+          onSubmit={async () => undefined}
+        />,
+      ),
+    );
+  const button = (name: string) =>
+    Array.from(host.querySelectorAll("button")).find((b) => b.textContent?.trim() === name)!;
+  try {
+    await render(true);
+    await act(async () => button("Continue with Google").click());
+    expect(turnstile.executed).toEqual(["1"]);
+    expect(button("Continue with GitHub").disabled).toBe(true);
+    await render(false);
+    expect(starts).toEqual([]);
+    expect(button("Continue with Google").disabled).toBe(false);
+    expect(button("Continue with GitHub").disabled).toBe(false);
+    await act(async () => button("Continue with GitHub").click());
+    expect(starts).toEqual([["github", undefined]]);
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    delete window.turnstile;
   }
 });

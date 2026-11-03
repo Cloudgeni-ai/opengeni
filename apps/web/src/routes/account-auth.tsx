@@ -75,6 +75,7 @@ export function AccountAuthRoute({
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [socialBusy, setSocialBusy] = useState<ManagedSocialProvider | null>(null);
+  const socialClick = useRef(0);
   const [challengeSiteKey, setChallengeSiteKey] = useState<string>();
   // Google or GitHub may sign someone in or create their account, so every
   // click carries a challenge token while new accounts are open.
@@ -205,6 +206,7 @@ export function AccountAuthRoute({
 
   async function submitSocial(provider: ManagedSocialProvider) {
     if (!validTransactionId) return;
+    const click = ++socialClick.current;
     setSocialBusy(provider);
     setError(null);
     try {
@@ -213,7 +215,11 @@ export function AccountAuthRoute({
       if (!attempt) {
         // A retry after an unknown outcome replays its original command instead.
         const challenge = await socialChallenge.run();
-        if (challenge.status === "cancelled") return;
+        if (challenge.status === "cancelled") {
+          // A newer click owns the busy state; otherwise nothing is pending now.
+          if (socialClick.current === click) setSocialBusy(null);
+          return;
+        }
         const projection = await client.getSessionSet();
         attempt = {
           provider,

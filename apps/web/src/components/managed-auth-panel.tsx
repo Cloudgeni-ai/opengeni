@@ -1,6 +1,6 @@
 import { SignupChallenge, useSocialSignupChallenge } from "./signup-challenge";
 import { CheckIcon, KeyRoundIcon, Loader2Icon, RefreshCwIcon, UserIcon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { AuthApiError, requestPasswordReset, sendVerificationEmail } from "@/api";
 import { Button } from "@opengeni/react/ui/button";
@@ -195,6 +195,7 @@ export function ManagedAuthPanel(props: {
   );
   const [busy, setBusy] = useState(false);
   const [socialBusy, setSocialBusy] = useState<ManagedSocialProvider | null>(null);
+  const socialClick = useRef(0);
   const [passkeyBusy, setPasskeyBusy] = useState(false);
   const [resendBusy, setResendBusy] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<ManagedAuthFormErrors>({});
@@ -366,17 +367,24 @@ export function ManagedAuthPanel(props: {
 
   async function submitSocial(provider: ManagedSocialProvider) {
     if (!props.onSocialSubmit) return;
+    const click = ++socialClick.current;
     setSocialBusy(provider);
     setFieldErrors({});
     setFormError(null);
     setFormActionMode(null);
     setSuccessMessage(null);
-    // The Sign up tab may already hold a solved token; otherwise run one now.
-    const visibleToken = challengeRequired ? signupChallengeToken : undefined;
-    let token = visibleToken;
-    if (!token) {
+    // The Sign up tab may already hold a solved token; it is used up here.
+    let token = challengeRequired ? signupChallengeToken : undefined;
+    if (token) {
+      setSignupChallengeToken(undefined);
+      setChallengeReset((value) => value + 1);
+    } else {
       const outcome = await socialChallenge.run();
-      if (outcome.status === "cancelled") return;
+      if (outcome.status === "cancelled") {
+        // A newer click owns the busy state; otherwise nothing is pending now.
+        if (socialClick.current === click) setSocialBusy(null);
+        return;
+      }
       if (outcome.status === "verified") token = outcome.token;
     }
     try {
@@ -387,10 +395,6 @@ export function ManagedAuthPanel(props: {
       );
       setFormActionMode(null);
       setSocialBusy(null);
-      if (visibleToken) {
-        setSignupChallengeToken(undefined);
-        setChallengeReset((value) => value + 1);
-      }
     }
   }
 
@@ -510,7 +514,7 @@ export function ManagedAuthPanel(props: {
         type="button"
         variant="ghost"
         size="sm"
-        disabled={resendBusy || busy || socialBusy !== null}
+        disabled={resendBusy || busy || socialLocked}
         onClick={() => void resendVerification()}
       >
         {resendBusy ? (

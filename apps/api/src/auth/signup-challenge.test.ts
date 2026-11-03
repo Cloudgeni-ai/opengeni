@@ -79,12 +79,20 @@ describe("signup challenge admission", () => {
   });
   test("a social start carries proof only for a verified token and never refuses a sign-in", async () => {
     let calls = 0;
-    const counted = (value: unknown) =>
-      (async () => {
+    const reported: string[] = [];
+    const counted = (value: unknown) => ({
+      fetcher: (async () => {
         calls++;
         return Response.json(value);
-      }) as unknown as typeof fetch;
+      }) as unknown as typeof fetch,
+      onUnverified: (code: string) => {
+        reported.push(code);
+        // A failing reporter never changes the start.
+        throw new Error("telemetry down");
+      },
+    });
     expect(await verifySocialSignupChallenge(settings, "valid", counted(passed()))).toBe(true);
+    expect(reported).toEqual([]);
     for (const reply of [
       { ...passed(), success: false, "error-codes": ["timeout-or-duplicate"] },
       { success: false, "error-codes": ["internal-error"] },
@@ -93,15 +101,26 @@ describe("signup challenge admission", () => {
       expect(await verifySocialSignupChallenge(settings, "token", counted(reply))).toBe(false);
     }
     expect(
-      await verifySocialSignupChallenge(settings, "token", (async () => {
-        throw new Error("timeout");
-      }) as unknown as typeof fetch),
+      await verifySocialSignupChallenge(settings, "token", {
+        fetcher: (async () => {
+          throw new Error("timeout");
+        }) as unknown as typeof fetch,
+        onUnverified: (code) => reported.push(code),
+      }),
     ).toBe(false);
     expect(await verifySocialSignupChallenge(settings, "x".repeat(2049), counted(passed()))).toBe(
       false,
     );
+    expect(reported).toEqual([
+      "SIGNUP_CHALLENGE_FAILED",
+      "SIGNUP_CHALLENGE_UNAVAILABLE",
+      "SIGNUP_CHALLENGE_FAILED",
+      "SIGNUP_CHALLENGE_UNAVAILABLE",
+      "SIGNUP_CHALLENGE_REQUIRED",
+    ]);
     // No token, or the challenge is off: nothing to verify and nothing consumed.
     calls = 0;
+    reported.length = 0;
     expect(await verifySocialSignupChallenge(settings, undefined, counted(passed()))).toBe(false);
     expect(await verifySocialSignupChallenge(settings, "", counted(passed()))).toBe(false);
     expect(
@@ -112,6 +131,7 @@ describe("signup challenge admission", () => {
       ),
     ).toBe(false);
     expect(calls).toBe(0);
+    expect(reported).toEqual([]);
   });
   test("OAuth proof is provider and expiry bound and malformed state denies", () => {
     const now = Date.now();

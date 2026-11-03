@@ -371,11 +371,25 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
         request: body,
       });
       const receiptIdentifier = `opengeni-managed-social-start:${authorityHash}:${body.operationId}`;
+      const authContext = await available.managedAuth.$context;
+      // Verify before the transaction so a slow Siteverify never holds a
+      // pooled connection and the lock. A live receipt means a replay, which
+      // returns its stored start and needs no verification.
+      const replayed = await authContext.internalAdapter.findVerificationValue(receiptIdentifier);
+      const signupVerified =
+        replayed && new Date(replayed.expiresAt).getTime() > Date.now()
+          ? false
+          : await verifySocialSignupChallenge(deps.settings, body.signupChallengeToken, {
+              onUnverified: (managedAuthCode) =>
+                deps.observability?.warn("Social sign-in started without signup challenge proof", {
+                  managedAuthCode,
+                  provider: body.provider,
+                }),
+            });
       const receipt = await deps.db.transaction(async (transaction) => {
         await transaction.execute(
           sql`select pg_advisory_xact_lock(hashtextextended(${receiptIdentifier}, 0))`,
         );
-        const authContext = await available.managedAuth.$context;
         const stored = await authContext.internalAdapter.findVerificationValue(receiptIdentifier);
         if (stored && new Date(stored.expiresAt).getTime() > Date.now()) {
           let parsed: ReturnType<typeof ManagedAuthSocialStartReceipt.safeParse>;
@@ -399,10 +413,6 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
         if (stored) {
           await authContext.internalAdapter.deleteVerificationByIdentifier(receiptIdentifier);
         }
-        const signupVerified = await verifySocialSignupChallenge(
-          deps.settings,
-          body.signupChallengeToken,
-        );
         const result = await available.managedAuth.api.signInSocial({
           body: {
             provider: body.provider,

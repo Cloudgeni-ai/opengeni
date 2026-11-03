@@ -36,7 +36,10 @@ test("email and OAuth creation require a single-use challenge, including direct 
     idempotency: { scope: "test:captcha", retentionSeconds: 86400 },
     send: async () => ({ status: "sent" as const, providerMessageId: null }),
   };
-  const auth = createManagedAuth(settings, client.db, transport)!;
+  let signupsOpen = true;
+  const auth = createManagedAuth(settings, client.db, transport, {
+    newSignupsGate: { signupsOpen: async () => signupsOpen },
+  })!;
   const app = createApp({
     settings,
     db: client.db,
@@ -172,6 +175,15 @@ test("email and OAuth creation require a single-use challenge, including direct 
     expect(new URL(refused.headers.get("location")!).searchParams.get("error")).toBe(
       "signup_challenge_required",
     );
+    // While sign-ups are paused the client skips the challenge; the refusal
+    // says sign-ups are paused rather than asking for verification again.
+    signupsOpen = false;
+    const paused = await oauth();
+    expect(await count()).toBe(0);
+    expect(new URL(paused.headers.get("location")!).searchParams.get("error")).toBe(
+      "signup_disabled",
+    );
+    signupsOpen = true;
     for (const token of ["first", "provider-unavailable"]) {
       const failedToken = await oauth(token);
       expect(await count()).toBe(0);
@@ -363,6 +375,24 @@ test("broker OAuth persists the pass in server state and replays without consumi
     const google = (await auth.$context).socialProviders.find(
       (provider) => provider.id === "google",
     )!;
+    // That login can't create a new person.
+    const refusedId = crypto.randomUUID();
+    const refusedEmail = `${refusedId}@example.test`;
+    google.validateAuthorizationCode = async () => ({ accessToken: "fake", tokenType: "Bearer" });
+    google.getUserInfo = async () => ({
+      user: { name: "Human", email: refusedEmail, emailVerified: true },
+      data: { sub: refusedId },
+    });
+    await app.request(`/v1/auth/callback/google?state=${unverifiedState}&code=simulated`, {
+      headers: { ...headers, cookie: `${headers.cookie}; ${cookies(unverifiedStart)}` },
+    });
+    expect(
+      (
+        await shared.admin<
+          { n: number }[]
+        >`select count(*)::int n from auth_users where email = ${refusedEmail}`
+      )[0]!.n,
+    ).toBe(0);
     const id = crypto.randomUUID();
     const email = `${id}@example.test`;
     google.validateAuthorizationCode = async () => ({ accessToken: "fake", tokenType: "Bearer" });

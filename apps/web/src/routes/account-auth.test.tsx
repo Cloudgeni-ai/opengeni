@@ -288,6 +288,69 @@ describe("isolated browser account authentication", () => {
       delete window.turnstile;
     }
   });
+
+  test("an email sign-in while the challenge waits for a person cancels the Google click", async () => {
+    const originalFetch = globalThis.fetch;
+    const posts: Array<Record<string, unknown>> = [];
+    const widgets: Record<string, unknown>[] = [];
+    window.turnstile = {
+      render: (_element, options) => {
+        widgets.push(options);
+        return String(widgets.length);
+      },
+      execute: () => undefined,
+      remove: () => undefined,
+    };
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url =
+        input instanceof Request ? input.url : input instanceof URL ? input.toString() : input;
+      if (new URL(url, "https://opengeni.test").pathname === "/v1/config/client") {
+        return Response.json({
+          auth: {
+            mode: "managedSession",
+            session: "cookie",
+            socialProviders: ["google"],
+            signupChallengeSiteKey: "test-key",
+          },
+        });
+      }
+      if ((init?.method ?? "GET") === "GET") return Response.json(projection("1"));
+      posts.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return Response.json({ code: "unavailable", message: "unavailable" }, { status: 503 });
+    }) as typeof fetch;
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const google = () =>
+      Array.from(container.querySelectorAll("button")).find((button) =>
+        button.textContent?.includes("Continue with Google"),
+      )!;
+    try {
+      await act(async () => root.render(<AccountAuthRoute transactionId={TRANSACTION_ID} />));
+      await flush();
+      await act(async () => google().click());
+      await act(async () => (widgets[0]!["before-interactive-callback"] as () => void)());
+      // While a person solves the challenge, the email form stays usable.
+      const email = container.querySelector<HTMLInputElement>("#account-auth-email")!;
+      const password = container.querySelector<HTMLInputElement>("#account-auth-password")!;
+      expect(email.disabled).toBe(false);
+      await enter(email, "existing@example.test");
+      await enter(password, "correct horse battery staple");
+      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+      await flush();
+      await act(async () => (widgets[0]!.callback as (token: string) => void)("too-late"));
+      await flush();
+      expect(posts.some((body) => body.provider === "google")).toBe(false);
+      expect(posts.length).toBeGreaterThan(0);
+      expect(google().disabled).toBe(false);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      globalThis.fetch = originalFetch;
+      delete window.turnstile;
+    }
+  });
 });
 
 describe("add-account failure messages", () => {

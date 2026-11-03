@@ -1320,6 +1320,13 @@ export function createAppComposition(deps: AppDependencies): {
         const verified = await verifySocialSignupChallenge(
           deps.settings,
           body.signupChallengeToken,
+          {
+            onUnverified: (managedAuthCode) =>
+              observability.warn("Social sign-in started without signup challenge proof", {
+                managedAuthCode,
+                provider: body.provider,
+              }),
+          },
         );
         body.additionalData = {
           ...body.additionalData,
