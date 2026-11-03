@@ -77,7 +77,7 @@ function review(id: string): ToolActionReview {
     title: "Create email draft",
     effects: [],
     samples: [],
-    fields: [{ path: "/to", label: "To", value: `${id}@example.test` }],
+    fields: [{ path: "/to", label: "To", preview: `${id}@example.test`, truncated: false }],
     moreFields: 0,
     reason: "This action asks first by default.",
     createdAt: "2026-01-01T00:00:00Z",

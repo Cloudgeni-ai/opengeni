@@ -98,6 +98,7 @@ function Harness() {
       id: "agent-1",
       turnId: "turn-1",
       text: agentText,
+      streaming: false,
       occurredAt: new Date(1_750_000_100_000).toISOString(),
     },
   ];
