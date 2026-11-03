@@ -50,6 +50,12 @@ export OPENGENI_EVAL_API_URL=https://app.example.com
 export OPENGENI_EVAL_API_KEY=...            # organization API key
 export OPENGENI_EVAL_CONNECTED_WORKSPACE_ID=...
 export OPENGENI_EVAL_EMPTY_WORKSPACE_ID=...
+# Approvals on personal ("Only me") connections: only the connection's owner
+# may approve their writes. If the main key isn't the owner's personal key,
+# the harness retries a refused (403) approve with this key.
+export OPENGENI_EVAL_OWNER_API_KEY=...
+# A workspace key, used by owner-only rows to check that its approve is refused.
+export OPENGENI_EVAL_WORKSPACE_API_KEY=...
 # Optional service verifiers for write rows; see verify.ts for the names.
 export VERIFY_LINEAR_API_KEY=...
 ```
@@ -116,6 +122,7 @@ Regression rows for specific fixes:
 |---|---|
 | Workspace Slack bot tools only where a bot is installed, and Ask first for interactive bot sends | `slack.write.post` (an approval must be requested), `slack.write.denied`, `slack.not_connected.channel-summary` (no bot tools hide the Slack card) |
 | Connect card for a named integration despite strong matches on installed tools; near-miss integration names | `clickup.not_connected.strong-match` (runs in the connected workspace; keep ClickUp disconnected there), `airtable.not_connected.spacing`, `airtable.not_connected.typo` |
+| Only the owner may approve writes on a personal connection | `slack.write.owner-only-approval` (needs a personal Slack connection on Ask first and `OPENGENI_EVAL_WORKSPACE_API_KEY`; the workspace key's approve must get 403) |
 
 Rerun the same rows, with the same models and efforts, into a new directory:
 

@@ -36,7 +36,7 @@ import { CASES, DEFAULT_SCOPE } from "./catalogue";
 import { gradeCase, ownIntegration, type Verification } from "./grade";
 import { INTEGRATIONS } from "./integrations";
 import { parseReceipts } from "./receipts";
-import type { EvalCase, Grade, RunRecord } from "./types";
+import type { ApprovalAttempt, EvalCase, Grade, RunRecord } from "./types";
 import { verify } from "./verify";
 
 type Cell = { model: string; effort: string };
@@ -203,6 +203,28 @@ export function latestRecords(records: readonly RunRecord[]): RunRecord[] {
   return [...latest.values()];
 }
 
+/**
+ * Extra keys for approvals. Only a personal connection's owner may approve
+ * its writes: when the main key is a workspace key, its approve gets 403 and
+ * the harness retries with the owner's key (`OPENGENI_EVAL_OWNER_API_KEY`).
+ * `OPENGENI_EVAL_WORKSPACE_API_KEY` is a workspace key for rows that check
+ * the 403 itself.
+ */
+const approvalKeys: { owner?: OpengeniApi; workspace?: OpengeniApi } = {};
+
+async function initApprovalKeys(baseUrl: string): Promise<void> {
+  if (process.env.OPENGENI_EVAL_OWNER_API_KEY)
+    approvalKeys.owner = await new OpengeniApi(baseUrl, {
+      apiKey: process.env.OPENGENI_EVAL_OWNER_API_KEY,
+    }).init();
+  if (process.env.OPENGENI_EVAL_WORKSPACE_API_KEY)
+    approvalKeys.workspace = await new OpengeniApi(baseUrl, {
+      apiKey: process.env.OPENGENI_EVAL_WORKSPACE_API_KEY,
+    }).init();
+}
+
+const httpStatus = (error: unknown): number => (error instanceof HttpFailure ? error.status : -1);
+
 function runMarker(): string {
   return Math.random().toString(36).slice(2, 8);
 }
@@ -213,8 +235,15 @@ async function driveSession(
   workspaceId: string,
   sessionId: string,
   testCase: EvalCase,
-): Promise<{ events: SessionEvent[]; timedOut: boolean; complete: boolean }> {
+): Promise<{
+  events: SessionEvent[];
+  timedOut: boolean;
+  complete: boolean;
+  attempts: ApprovalAttempt[];
+}> {
   const decision = testCase.decision ?? "approve";
+  const attempts: ApprovalAttempt[] = [];
+  const workspaceTried = new Set<string>();
   let complete = true;
   const events: SessionEvent[] = [];
   const decided = new Set<string>();
@@ -237,13 +266,65 @@ async function driveSession(
       // (another service, an unattributed tool) is rejected, so a run never
       // writes outside the configured test fixtures; the grader reports it.
       const choice = ownIntegration(testCase, approval.integration) ? decision : "reject";
+      const record = (key: ApprovalAttempt["key"], status: number) =>
+        attempts.push({ approvalId: approval.approvalId, key, decision: choice, status });
+      // Owner-only rows: a workspace key tries first and must be refused.
+      if (
+        testCase.ownerOnlyApproval &&
+        choice === "approve" &&
+        !workspaceTried.has(approval.approvalId)
+      ) {
+        workspaceTried.add(approval.approvalId);
+        if (!approvalKeys.workspace) record("workspace", 0);
+        else {
+          try {
+            await approvalKeys.workspace.decideApproval(
+              workspaceId,
+              sessionId,
+              approval.approvalId,
+              choice,
+            );
+            record("workspace", 200);
+            decided.add(approval.approvalId);
+            continue;
+          } catch (error) {
+            record("workspace", httpStatus(error));
+          }
+        }
+      }
       try {
         await api.decideApproval(workspaceId, sessionId, approval.approvalId, choice);
+        record("main", 200);
         decided.add(approval.approvalId);
       } catch (error) {
-        // Already decided (409) counts as done; anything else retries next poll.
-        if (error instanceof HttpFailure && error.status === 409) decided.add(approval.approvalId);
-        else console.warn(`approval ${approval.approvalId} failed, will retry: ${String(error)}`);
+        const status = httpStatus(error);
+        // Already decided (409) counts as done.
+        if (status === 409) {
+          decided.add(approval.approvalId);
+          continue;
+        }
+        // A personal connection's write: only its owner may approve.
+        if (status === 403 && approvalKeys.owner) {
+          try {
+            await approvalKeys.owner.decideApproval(
+              workspaceId,
+              sessionId,
+              approval.approvalId,
+              choice,
+            );
+            record("owner", 200);
+            decided.add(approval.approvalId);
+            continue;
+          } catch (ownerError) {
+            if (httpStatus(ownerError) === 409) {
+              decided.add(approval.approvalId);
+              continue;
+            }
+            console.warn(`owner approval ${approval.approvalId} failed: ${String(ownerError)}`);
+          }
+        }
+        // Anything else retries next poll.
+        console.warn(`approval ${approval.approvalId} failed, will retry: ${String(error)}`);
       }
     }
 
@@ -288,7 +369,7 @@ async function driveSession(
       !["running", "queued", "requires_action"].includes(snapshot.status);
     if (ended && resting && page.events.length === 0) {
       stableIdlePolls += 1;
-      if (stableIdlePolls >= 2) return { events, timedOut: false, complete };
+      if (stableIdlePolls >= 2) return { events, timedOut: false, complete, attempts };
     } else stableIdlePolls = 0;
   }
   // Stop the chat so it can't keep spending or write after the service check.
@@ -297,7 +378,7 @@ async function driveSession(
   } catch (error) {
     console.warn(`cancel ${sessionId} failed: ${String(error)}`);
   }
-  return { events, timedOut: true, complete };
+  return { events, timedOut: true, complete, attempts };
 }
 
 /** The harness stopped this chat at the run deadline (its cancel left a reason in the events). */
@@ -331,6 +412,7 @@ function gradeEvents(
   verification: Verification | null,
   receiptsFile: string,
   complete = true,
+  attempts: readonly ApprovalAttempt[] = [],
 ): GradedFields {
   mkdirSync(join(receiptsFile, ".."), { recursive: true });
   const receipts = parseReceipts(events);
@@ -351,7 +433,7 @@ function gradeEvents(
         }
       : timedOut
         ? { pass: false, category: "timeout", reasons: ["agent still active at the run deadline"] }
-        : gradeCase(testCase, receipts, verification);
+        : gradeCase(testCase, receipts, verification, attempts);
   if (
     !timedOut &&
     receipts.tools.length === 0 &&
@@ -430,7 +512,7 @@ async function runJob(api: OpengeniApi, job: Job, outDir: string): Promise<RunRe
     });
     base.sessionId = session.id;
     base.chatUrl = `${appUrl}/workspaces/${workspaceId}/sessions/${session.id}`;
-    const { events, timedOut, complete } = await driveSession(
+    const { events, timedOut, complete, attempts } = await driveSession(
       api,
       workspaceId,
       session.id,
@@ -444,6 +526,7 @@ async function runJob(api: OpengeniApi, job: Job, outDir: string): Promise<RunRe
       verification,
       join(outDir, "receipts", `${marker}.json`),
       complete,
+      attempts,
     );
     const finished = Date.now();
     return {
@@ -453,6 +536,7 @@ async function runJob(api: OpengeniApi, job: Job, outDir: string): Promise<RunRe
       verification,
       ...graded,
       error: null,
+      approvalAttempts: attempts,
     };
   } catch (error) {
     const finished = Date.now();
@@ -479,6 +563,7 @@ async function runAll(flags: Map<string, string>) {
   mkdirSync(outDir, { recursive: true });
   const resultsFile = join(outDir, "results.jsonl");
   const api = await new OpengeniApi(env("OPENGENI_EVAL_API_URL"), authFromEnv()).init();
+  await initApprovalKeys(env("OPENGENI_EVAL_API_URL"));
   const skip = (flags.get("skip-integrations") ?? "").split(",").filter(Boolean);
 
   let jobs: Job[];
@@ -647,6 +732,7 @@ async function regradeAll(flags: Map<string, string>) {
         record.verification,
         join(outDir, "receipts", `${record.runId}.json`),
         complete,
+        record.approvalAttempts ?? [],
       );
       if (graded.grade.pass !== record.grade.pass) changed += 1;
       updated.push({ ...record, ...graded, error: graded.grade.pass ? null : record.error });

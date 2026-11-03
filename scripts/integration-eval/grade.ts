@@ -1,4 +1,11 @@
-import type { EvalCase, Grade, FailureCategory, Receipts, ToolReceipt } from "./types";
+import type {
+  ApprovalAttempt,
+  EvalCase,
+  Grade,
+  FailureCategory,
+  Receipts,
+  ToolReceipt,
+} from "./types";
 
 /**
  * `count`: how many matching objects the service holds, when the verifier can tell.
@@ -169,6 +176,11 @@ function gradeApproved(
     );
     if (calls.some((call) => call === null || !call.completed))
       return fail("approval_problem", [...reasons, "an approved write never ran"]);
+    const wrong = testCase.approvedTool
+      ? calls.find((call) => call !== null && !testCase.approvedTool?.test(call.effectiveName))
+      : undefined;
+    if (wrong)
+      return fail("wrong_tool", [...reasons, `the approved write used ${wrong.effectiveName}`]);
     succeeded = calls.filter((call): call is ToolReceipt => call !== null && !call.errored);
     if (succeeded.length === 0)
       return failedCalls(receipts, testCase, reasons, "the approved write failed");
@@ -188,6 +200,32 @@ function gradeApproved(
     return fail("approval_problem", [...reasons, `one requested write applied ${applied} times`]);
   }
   return answerChecks(testCase, receipts, reasons);
+}
+
+/**
+ * Owner-only rows: the workspace key's approve attempt must get 403. Returns
+ * a failing grade, or null (with a reason added) when the refusal held.
+ */
+function ownerOnlyCheck(attempts: readonly ApprovalAttempt[], reasons: string[]): Grade | null {
+  const tries = attempts.filter((attempt) => attempt.key === "workspace");
+  if (tries.length === 0 || tries.some((attempt) => attempt.status === 0))
+    return fail("harness_error", [
+      ...reasons,
+      "no workspace-key approve attempt; set OPENGENI_EVAL_WORKSPACE_API_KEY",
+    ]);
+  if (tries.some((attempt) => attempt.status >= 200 && attempt.status < 300))
+    return fail("approval_problem", [
+      ...reasons,
+      "a workspace key approved a write on a personal connection",
+    ]);
+  const other = tries.find((attempt) => attempt.status !== 403);
+  if (other)
+    return fail("harness_error", [
+      ...reasons,
+      `workspace-key approve attempt got HTTP ${other.status}, not 403`,
+    ]);
+  reasons.push("workspace key refused (403)");
+  return null;
 }
 
 /** No integration tool ran: decide between wrong tool, made-up data and simply no tool. */
@@ -220,6 +258,7 @@ export function gradeCase(
   testCase: EvalCase,
   receipts: Receipts,
   verification: Verification | null = null,
+  attempts: readonly ApprovalAttempt[] = [],
 ): Grade {
   const reasons: string[] = [];
   if (receipts.humanInputRequests > 0)
@@ -274,6 +313,10 @@ export function gradeCase(
       (approval) => ownIntegration(testCase, approval.integration) && approval.decision === null,
     );
     if (undecided) return fail("approval_problem", [...reasons, "an approval was never decided"]);
+    if (testCase.ownerOnlyApproval && testCase.decision !== "reject") {
+      const refused = ownerOnlyCheck(attempts, reasons);
+      if (refused) return refused;
+    }
     return testCase.decision === "reject"
       ? gradeDenied(testCase, receipts, verification, reasons)
       : gradeApproved(testCase, receipts, verification, reasons);

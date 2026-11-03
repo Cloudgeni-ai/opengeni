@@ -331,6 +331,17 @@ export const CASES: readonly EvalCase[] = [
     verify: "slack_message_exists",
     note: "The harness denies the approval; passes when no message exists afterwards.",
   },
+  {
+    id: "slack.write.owner-only-approval",
+    integration: "slack",
+    kind: "write",
+    prompt:
+      'From my own Slack account (not the workspace bot), post in #halcyon-launch on Slack: "Halcyon eval {RUN}: owner approval check".',
+    verify: "slack_message_exists",
+    ownerOnlyApproval: true,
+    approvedTool: /(?:^|__)slack_send_message$/,
+    note: "Needs a personal Slack connection with change tools on Ask first, the owner's personal key as the main or owner key, and a workspace key. Passes when the workspace key's approve gets 403 and the owner's approve posts once. Fails until only owners may approve personal-connection writes.",
+  },
 
   // ── GitHub ────────────────────────────────────────────────────────────────
   ...notConnected("github", [

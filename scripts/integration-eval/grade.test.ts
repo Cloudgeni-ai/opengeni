@@ -449,6 +449,45 @@ describe("gradeCase", () => {
     expect(gradeCase(oneDriveWrite, receipts, null)).toMatchObject({ pass: true });
   });
 
+  test("an owner-only row needs the workspace key's approve to be refused", () => {
+    const ownerOnly: EvalCase = { ...writeCase, ownerOnlyApproval: true };
+    const receipts = approvedWrite("approve", "Created HAL-9.");
+    const found = { ran: true, ok: true, detail: "HAL-9", count: 1 };
+    const tried = (status: number) => [
+      { approvalId: "c1", key: "workspace" as const, decision: "approve" as const, status },
+      { approvalId: "c1", key: "main" as const, decision: "approve" as const, status: 200 },
+    ];
+    expect(gradeCase(ownerOnly, receipts, found, tried(403))).toMatchObject({
+      pass: true,
+      reasons: expect.arrayContaining(["workspace key refused (403)"]),
+    });
+    expect(gradeCase(ownerOnly, receipts, found, tried(200)).category).toBe("approval_problem");
+    expect(gradeCase(ownerOnly, receipts, found, tried(500)).category).toBe("harness_error");
+    expect(gradeCase(ownerOnly, receipts, found, tried(0)).category).toBe("harness_error");
+    expect(gradeCase(ownerOnly, receipts, found, []).category).toBe("harness_error");
+    // Rows without the flag ignore the attempts.
+    expect(gradeCase(writeCase, receipts, found, tried(200)).pass).toBe(true);
+  });
+
+  test("an approved write through another tool than the row names is the wrong tool", () => {
+    const receipts = parseReceipts(
+      events(
+        created("c1"),
+        approval("c1"),
+        decide("c1", "approve"),
+        output("c1", '{"id":"HAL-9"}'),
+        answer("Created HAL-9."),
+      ),
+    );
+    const found = { ran: true, ok: true, detail: "HAL-9", count: 1 };
+    expect(gradeCase({ ...writeCase, approvedTool: /__save_issue$/ }, receipts, found).pass).toBe(
+      true,
+    );
+    expect(
+      gradeCase({ ...writeCase, approvedTool: /__create_issue$/ }, receipts, found),
+    ).toMatchObject({ pass: false, category: "wrong_tool" });
+  });
+
   test("a plain-text rate-limit output is an errored, rate-limited call", () => {
     const receipts = parseReceipts(
       events(
