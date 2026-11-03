@@ -193,6 +193,25 @@ their requests as writers because the replacement attempt resumes the same box;
 the holder clause is defence in depth. The physical quiescence receipt itself
 keeps the strict predicate.
 
+**Platform setup still running at finalization is settled by the writer
+drain.** Lazy and eager owned-box setup (`lazyOwnedSandboxSetup`,
+`eagerOwnedSandboxSetup`) make every sandbox write as a lifecycle command
+through the attempt's tool-cancellation fence. Finalization joins in-flight
+provisioning only briefly, so a setup waiting on an agent that stopped
+answering (for example during a worker-shutdown interruption) can still be
+pending when the proof-bearing release runs. That release used to refuse it,
+drop the holder without proof and leave its admission open for good: the
+closed attempt then kept `writer_pending` true, so neither its recovery nor
+any later turn of the session was ever claimed. A pending mutation registered
+with the exact fence that the attempt's writer drain cancelled and quiesced is
+now covered by that drain: the drain stopped or durably handed off each of
+its commands, and the cancelled fence refuses every later one, so whatever
+the setup still waits on cannot write to the box. The release then settles
+the admission `rejected` as for every other drained writer, on every backend.
+Any other in-flight mutation, a setup whose outcome is unknown, and a release
+without that drain keep the admission fenced. A hard worker crash runs no
+drain, so its setup admission still waits for the existing physical proofs.
+
 **Requests left on a retired box are settled once the box is proven gone.**
 A stopped box's cold commit settles every open request, PTY and process it
 leaves on its exact provider tuple, not only crashed-worker orphans (a
@@ -1059,6 +1078,18 @@ attempt-loss fences still win stale settlement; retained physical writers and
 capture/quiescence proofs keep their independent lifecycle.
 The existing blocked-admission wire kind also parks older workflow workers
 during a rolling deployment; no synthetic physical admission is created.
+
+Owned-box platform setup that fails only because the sandbox's machine agent
+did not answer (offline, reconnecting, draining, timed out or replaced, as a
+typed `SelfhostedControlError`) also recovers the same turn, as
+`sandbox_command_start_unavailable` with the connectivity backoff and the
+five-recovery budget; exhaustion fails the turn as before, without the Modal
+parking above. Setup runs before any model-requested command reaches
+the box, and its credential, client, repository and file hooks are
+idempotent. The one non-idempotent step, a rig setup script that started and
+did not finish, keeps its failure terminal, and an uncertain mutation outcome
+anywhere in the failure still vetoes recovery. The same liveness error from a
+model's own command is never classified this way.
 
 An observation deadline, NOT_FOUND or provider/lease loss is not completion
 proof. Once the exact closed, quiesced attempt's home setup invocation has a
