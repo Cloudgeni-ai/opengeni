@@ -249,6 +249,20 @@ describe("usage readings", () => {
     expect(empty.note).toBeNull();
   });
 
+  test("an account-wide refusal still says until when beside a full Fable week", () => {
+    const now = Date.parse("2026-10-22T09:00:00Z");
+    const reading = snapshot(
+      [
+        { id: "seven_day", usedPercent: 40, resetsAt: null, status: "ok" },
+        { id: "seven_day_fable", usedPercent: 100, resetsAt: null, status: "ok" },
+      ],
+      { exhaustedUntil: "2026-10-22T10:00:00Z", exhaustedKind: "quota" },
+    );
+    expect(subscriptionAccountUsage("claude", reading, now).message).toStartWith(
+      "Limit reached until ",
+    );
+  });
+
   test("partial and unknown windows are never completed, aggregated or given a made-up percent", () => {
     const view = subscriptionAccountUsage(
       "claude",

@@ -177,9 +177,10 @@ export function subscriptionAccountUsage(
   return {
     windows,
     limit,
-    // A limit that no window shows (a refusal) still says until when.
+    // A limit that no account-wide window shows (a refusal) still says until
+    // when; a full model-scoped week (Fable) doesn't show the account's limit.
     message:
-      limit.reached && !windows.some((window) => window.limitReached)
+      limit.reached && !windows.some((window) => window.limitReached && !window.scoped)
         ? `Limit reached${until ? ` until ${until}` : ""}`
         : windows.length === 0
           ? "No usage reading yet"

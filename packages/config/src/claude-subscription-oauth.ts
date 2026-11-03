@@ -60,6 +60,20 @@ export function claudeSubscriptionPlanId(input: {
   return tier ? `claude_max_${tier[1]}x` : plan;
 }
 
+/**
+ * The plan to record when a sign-in reads `read` over a connection that
+ * recorded `recorded`. A bare `claude_max` (tier unresolved) never replaces
+ * a known Max tier; every other read, including a real downgrade, does.
+ */
+export function claudeSubscriptionPlanUpdate(
+  read: string | null,
+  recorded: string | null | undefined,
+): string | null {
+  return read === "claude_max" && recorded && /^claude_max_(5|20)x$/.test(recorded)
+    ? recorded
+    : read;
+}
+
 /** The plan id of a profile body; null for any shape it can't read (never throws). */
 export function claudeSubscriptionProfilePlan(value: unknown): string | null {
   const record = (item: unknown) =>
