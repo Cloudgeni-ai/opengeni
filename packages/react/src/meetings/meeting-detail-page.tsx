@@ -30,6 +30,7 @@ import {
   Trash2Icon,
 } from "lucide-react";
 import { toast } from "sonner";
+import { userErrorText } from "../ui/api-error";
 import type {
   Recording,
   RecordingNote,
@@ -130,7 +131,7 @@ import { StickyBarEdge, useStuckToTop } from "./sticky-bar-edge";
 const defaultText = createOpenGeniText();
 
 function errorText(error: unknown): string | undefined {
-  return error instanceof Error ? error.message : undefined;
+  return error instanceof Error ? userErrorText(error) : undefined;
 }
 
 function isNotFound(error: Error | null): boolean {

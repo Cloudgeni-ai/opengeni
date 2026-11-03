@@ -66,6 +66,12 @@ export type AgentPromptResources = {
    * Gates personal-identity guidance; omitted keeps prompts unchanged.
    */
   personalGitHub?: boolean | undefined;
+  /**
+   * Finished background commands report themselves with their output (with a
+   * later tool result, or as input). Gates the "do not poll" sentence; omitted
+   * keeps prompts unchanged.
+   */
+  commandCompletionDelivery?: boolean | undefined;
   workspaceEnvironment?: WorkspaceEnvironmentContext | undefined;
   rig?: RigInstructionsContext | undefined;
   /**

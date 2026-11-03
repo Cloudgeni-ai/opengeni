@@ -1659,8 +1659,8 @@ immutable receipts, distinct causal claims and live personal-grant admission:
 [lifecycle](run-lifecycle.md).
 
 `session_turns.initiating_human_subject_id` alone never authorizes:
-`artifacts:publish`/archive/restore require exact mutation fences; pure service
-work fails closed. [Lifecycle](run-lifecycle.md).
+`artifacts:publish`/archive/restore require exact mutation fences, which pure
+service work passes like any run. [Lifecycle](run-lifecycle.md).
 
 All model/Codemode calls share current authorized catalogs, execution fences and
 approvals across backends/loading paths.

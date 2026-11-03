@@ -28,6 +28,7 @@ import {
   SquareIcon,
 } from "lucide-react";
 import { toast } from "sonner";
+import { userErrorText } from "../ui/api-error";
 
 import { Button } from "../ui/button";
 import {
@@ -349,7 +350,7 @@ function RecordingTitle({ recorder }: { recorder: MeetingRecorder }) {
         setEditing(false);
       } catch (error) {
         toast.error(msg("meetings.recorderPanel.couldnTRenameThisMeeting"), {
-          description: error instanceof Error ? error.message : undefined,
+          description: error instanceof Error ? userErrorText(error) : undefined,
         });
       } finally {
         setSaving(false);

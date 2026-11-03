@@ -1124,7 +1124,11 @@ import {
   UNATTRIBUTED_LEGACY_INITIATOR,
   type FrozenTurnInitiator,
 } from "./turn-initiator";
-export { frozenInitiatorForCommandActor, type FrozenTurnInitiator } from "./turn-initiator";
+export {
+  frozenInitiatorForCommandActor,
+  sameTurnSender,
+  type FrozenTurnInitiator,
+} from "./turn-initiator";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 import {
   fromPostgresLosslessJson,
@@ -1211,6 +1215,7 @@ import {
 } from "./session-realtime";
 import {
   insertConnectedMachineSessionBackgroundCommandInTransaction,
+  backgroundCommandResultOutputInTransaction,
   boundedSessionBackgroundCommandReason,
   insertManagedSessionBackgroundCommandInTransaction,
   settleClaimedConnectedMachineBackgroundCommandWithMutation,
@@ -61098,6 +61103,13 @@ export async function verifyWorkspaceMutationSettlement(
   },
 ): Promise<void> {
   const routeKind = input.routeKind ?? "home";
+  // Settle the exact admission: without an explicit route epoch, the route
+  // epoch is the one recorded when it was admitted, never the session's
+  // current epoch. A swap during a home-sandbox command moves the session's
+  // active route but changes nothing about where that command ran, so it must
+  // not reject the command's output (an active-route move is still fenced as
+  // route_fenced against the admission's recorded route).
+  const routeEpoch = input.routeEpoch ?? input.admission.routeEpoch;
   await verifyWorkspaceMutationSettlementForAuthority(
     db,
     {
@@ -61114,7 +61126,7 @@ export async function verifyWorkspaceMutationSettlement(
       expectedInstanceId: input.expectedInstanceId,
       routeKind,
       routeTargetId: routeKind === "home" ? null : (input.routeTargetId ?? null),
-      ...(input.routeEpoch === undefined ? {} : { routeEpoch: input.routeEpoch }),
+      routeEpoch,
     },
     input,
   );
@@ -91299,6 +91311,19 @@ function backgroundCommandTerminalMutation(input: {
                   : command.exitCode === 0
                     ? `${commandLabel}: completed successfully.`
                     : `${commandLabel}: exited with code ${command.exitCode ?? "unknown"}.`;
+      // The result carries the start and end of the output, so the turn it
+      // wakes or reaches needs no extra read to learn what the command did.
+      // A lost command (its sandbox gone, or contained) carries none: those
+      // settle in bulk under lease locks, and its output stays readable.
+      const output =
+        command.state === "lost"
+          ? null
+          : await backgroundCommandResultOutputInTransaction(tx, {
+              accountId: session.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              commandId: command.id,
+            });
       const payload = {
         type: "background_command_result" as const,
         commandId: command.id,
@@ -91307,6 +91332,7 @@ function backgroundCommandTerminalMutation(input: {
         reason,
         ...(command.failure ? { failure: command.failure } : {}),
         outputLocator,
+        ...(output !== null ? { output } : {}),
         ...(command.backgroundChildrenStopped
           ? { notice: CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE }
           : {}),

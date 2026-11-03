@@ -17,8 +17,10 @@ next, as soon as the batch that is already running finishes. A running batch is
 never cancelled for one. The oldest ready PRs fill the rest of a priority
 batch, after the priority PRs and without waiting for the batching window, so
 priority PRs that arrive one at a time do not each take a round alone. A
-priority CI or batcher change still runs alone, and while a failed batch is
-being split, priority PRs go without the fill.
+priority CI or batcher change still runs alone. While a failed batch is being
+split, the fill leaves out the PRs its halves hold, and priority batches and
+those halves take turns: after a priority batch goes ahead of a half, that half
+goes next, so priority PRs that keep arriving cannot stall a bisection.
 
 ## Releasing: a Version PR holds main
 

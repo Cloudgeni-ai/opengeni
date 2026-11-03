@@ -1,5 +1,5 @@
-import { errorMessage } from "@opengeni/contracts/values";
 import { toast } from "./toast";
+import { userErrorText } from "../../ui/api-error";
 
 /** Puts text on the clipboard, with a fallback for embeds without the async clipboard. */
 export async function writeClipboard(text: string): Promise<void> {
@@ -29,6 +29,6 @@ export async function copyLink(url: string): Promise<void> {
     await writeClipboard(url);
     toast.success("Link copied");
   } catch (error) {
-    toast.error("Couldn't copy the link.", { description: errorMessage(error) });
+    toast.error("Couldn't copy the link.", { description: userErrorText(error) });
   }
 }

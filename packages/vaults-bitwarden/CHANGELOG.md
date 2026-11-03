@@ -1,5 +1,17 @@
 # @opengeni/vaults-bitwarden
 
+## 6.6.0
+
+### Patch Changes
+
+- Updated dependencies [2c76a2a]
+- Updated dependencies [09bc485]
+- Updated dependencies [2e72a00]
+- Updated dependencies [029497c]
+- Updated dependencies [3cb05f9]
+  - @opengeni/contracts@6.6.0
+  - @opengeni/vaults@6.6.0
+
 ## 6.5.1
 
 ### Patch Changes

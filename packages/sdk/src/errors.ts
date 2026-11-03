@@ -546,7 +546,12 @@ export function formatErrorMessage(
     } else {
       message = fallback;
     }
-    return error.correlationId ? `${message} Reference: ${error.correlationId}.` : message;
+    // A refusal the person can act on (a 4xx) is only what to do; the request
+    // reference is for support, so it stays with unexpected failures.
+    const expected = error.status >= 400 && error.status < 500 && !error.outcomeUnknown;
+    return error.correlationId && !expected
+      ? `${message} Reference: ${error.correlationId}.`
+      : message;
   }
   if (
     error instanceof OpenGeniSecureContextRequiredError ||

@@ -2158,6 +2158,7 @@ export const englishMessages = {
   "lib.providerRecovery.modelStoppedRespondingAt": "{model} stopped responding{at}",
   "lib.providerRecovery.modelStoppedRightAfterCompacting":
     "{model} stopped right after compacting the conversation",
+  "lib.providerRecovery.noSandboxCapacityIsAvailable": "No sandbox capacity is available right now",
   "lib.providerRecovery.opengeniCanTReachAn": "{product} can't reach an upstream service",
   "lib.providerRecovery.opengeniIsApplyingAConfiguration":
     "{product} is applying a configuration update",
@@ -2177,6 +2178,8 @@ export const englishMessages = {
   "lib.providerRecovery.theSandboxIsnTReady": "The sandbox isn't ready yet",
   "lib.providerRecovery.theSandboxReachedItsMaximum":
     "The sandbox reached its maximum lifetime, so {product} is moving the workspace to a fresh sandbox",
+  "lib.providerRecovery.theSandboxServiceIsTemporarily":
+    "The sandbox service is temporarily unavailable",
   "lib.providerRecovery.tryAgainInAFew": "Try again in a few minutes, or switch to another model.",
   "lib.providerRecovery.tryAgainInAFew2": "Try again in a few minutes.",
   "lib.transientRetry.actionMayNotHaveGoneThrough":
