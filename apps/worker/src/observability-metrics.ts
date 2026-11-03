@@ -3216,7 +3216,11 @@ const MODEL_CACHE_HIT_RATIO_BUCKETS = [
  *     A reported cached-token zero records a real 0%; absent/null telemetry remains
  *     unknown and must not fabricate a low-cache signal.
  *   - `opengeni_model_cache_read_telemetry_total{provider,status}` — one bounded
- *     availability observation per authoritative call (`reported` or `missing`).
+ *     availability observation per authoritative call: `reported`, `missing` (the
+ *     call reported token usage but left out the cached-token field) or
+ *     `no_usage` (the call reported no token usage at all, for example a
+ *     terminal response without a usage object, which the SDK turns into zeros).
+ *     A call without any usage says nothing about the provider's cache fields.
  * Invalid, fractional, unsafe, or over-contract token telemetry is rejected. A call
  * with no prompt tokens has no ratio (skipped).
  */
@@ -3227,16 +3231,25 @@ export function recordModelCacheTokens(
     cachedTokens: number | null | undefined;
     cacheWriteTokens?: number | null | undefined;
     promptTokens: number | null | undefined;
+    /**
+     * False when the call reported no token usage at all (no counts, nothing
+     * rejected). Counted as `no_usage`, never as a missing cache field.
+     */
+    usageReported?: boolean;
   },
 ): void {
   const cached = modelUsageTokenCountOrNull(input.cachedTokens);
   const cacheWrite = modelUsageTokenCountOrNull(input.cacheWriteTokens);
   const prompt = modelUsageTokenCountOrNull(input.promptTokens);
+  const noUsage = cached === null && input.usageReported === false;
   incrementBoundedModelCacheCounter(observability, {
     name: "opengeni_model_cache_read_telemetry_total",
-    help: "Authoritative model calls with reported or missing cache-read telemetry, by provider.",
+    help: "Authoritative model calls with reported, missing or no-usage cache-read telemetry, by provider.",
     provider,
-    labels: { provider, status: cached === null ? "missing" : "reported" },
+    labels: {
+      provider,
+      status: noUsage ? "no_usage" : cached === null ? "missing" : "reported",
+    },
     amount: 1,
   });
   if (cached !== null && cached > 0) {
