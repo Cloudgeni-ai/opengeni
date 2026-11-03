@@ -15,6 +15,7 @@ import {
   isDatabaseConnectionLoss,
   SessionUsageLimitUnavailableError,
   nestedPostgresSqlState,
+  SessionApprovalForbiddenError,
   WorkspaceControlBusyError,
   WorkspaceContentFlowRefusedError,
 } from "@opengeni/db";
@@ -62,6 +63,24 @@ export function missingPermissionHttpError(error: unknown): ApiHttpError | null 
     retryable: false,
     outcomeUnknown: false,
     details: error.details,
+  });
+}
+
+/**
+ * Approving an action on someone else's own login: says who can approve, and
+ * keeps the stable code in `details` so clients can tell it from other 403s.
+ */
+export function approvalForbiddenHttpError(error: unknown): ApiHttpError | null {
+  if (!(error instanceof SessionApprovalForbiddenError)) return null;
+  return new ApiHttpError(403, {
+    code: "forbidden",
+    message: error.message,
+    retryable: false,
+    outcomeUnknown: false,
+    details: {
+      code: error.code,
+      ...(error.owner.label ? { accountOwnerLabel: error.owner.label } : {}),
+    },
   });
 }
 

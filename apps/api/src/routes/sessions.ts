@@ -196,7 +196,6 @@ import {
   recordAuditEvent,
   acceptSessionApprovalDecision,
   SessionApprovalAnswerError,
-  SessionApprovalForbiddenError,
   acceptSessionHumanInputResponse,
   clearSessionGoal,
   clearSessionContext,
@@ -440,7 +439,7 @@ import {
   WorkspaceCaptureManifestCache,
 } from "./workspace-capture";
 import { publishSandboxFileArtifact } from "../sandbox-file-artifacts";
-import { ApiHttpError } from "../http/api-error";
+import { ApiHttpError, approvalForbiddenHttpError } from "../http/api-error";
 import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
 import { recordAcceptedApiAdmission } from "../admission-trace";
 import { parseRequestBody, parseRequestJson, parseRequestQuery } from "../http/request-body";
@@ -4605,9 +4604,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         if (error instanceof SessionApprovalAnswerError) {
           throw new HTTPException(422, { message: error.message });
         }
-        if (error instanceof SessionApprovalForbiddenError) {
-          throw new HTTPException(403, { message: error.message });
-        }
+        const forbidden = approvalForbiddenHttpError(error);
+        if (forbidden) throw forbidden;
         throw error;
       }
       if (accepted.action === "conflict") {

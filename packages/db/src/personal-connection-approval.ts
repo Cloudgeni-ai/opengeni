@@ -1,4 +1,4 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { Database } from "./database";
 import * as schema from "./schema";
 import { humanTurnSenderLabel } from "./turn-initiator";
@@ -115,7 +115,6 @@ export async function pendingApprovalAccountOwner(
         eq(schema.connectorActionRequests.approvalId, input.approvalId),
       ),
     )
-    .orderBy(desc(schema.connectorActionRequests.createdAt))
     .limit(1);
   const owner = row ? personalConnectionOwnerForTurn(row) : null;
   return owner ? { subjectId: owner, label: accountOwnerLabelForTurn(owner, row!) } : null;

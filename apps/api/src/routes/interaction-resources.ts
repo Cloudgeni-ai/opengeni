@@ -1,5 +1,6 @@
 import type { z } from "zod";
 import { parseRequestBody } from "../http/request-body";
+import { approvalForbiddenHttpError } from "../http/api-error";
 import {
   AuthRun,
   AuthRunListResponse,
@@ -45,7 +46,6 @@ import {
   listVisibleSessionInvalidationHints,
   sessionListChangesFor,
   resolveInteractionIntervention,
-  SessionApprovalForbiddenError,
   updateNetworkRoute,
   updateSiteAuthConnection,
 } from "@opengeni/db";
@@ -653,9 +653,8 @@ export function interactionResourceRouteError(error: unknown): HTTPException {
   ) {
     return new HTTPException(404, { message: error.message, cause: error });
   }
-  if (error instanceof SessionApprovalForbiddenError) {
-    return new HTTPException(403, { message: error.message, cause: error });
-  }
+  const forbidden = approvalForbiddenHttpError(error);
+  if (forbidden) return forbidden;
   if (
     error instanceof InteractionResourceConflictError ||
     error instanceof InteractionResourceStateError

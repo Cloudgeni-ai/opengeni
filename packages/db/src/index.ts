@@ -92507,9 +92507,9 @@ export async function acceptSessionApprovalDecision(
                 ).length > 0;
           if (!resumable) return approvalConflict(sessionStatus, "not_pending");
         }
-        payload = approvalDecisionPayloadWithAnswer(pendingApproval, payload);
         // The call runs on the turn's frozen accounts, never the approver's:
         // approving one that runs on someone's own account is theirs alone.
+        // Checked before the answer, so a non-owner always learns who decides.
         if (payload.decision === "approve") {
           const owner = await pendingApprovalAccountOwner(tx as unknown as Database, {
             workspaceId: input.workspaceId,
@@ -92521,6 +92521,7 @@ export async function acceptSessionApprovalDecision(
             throw new SessionApprovalForbiddenError(owner);
           }
         }
+        payload = approvalDecisionPayloadWithAnswer(pendingApproval, payload);
         if (input.interactionIntervention) {
           const expectedInteractionDecision =
             input.interactionIntervention.outcome === "completed" ? "approve" : "reject";

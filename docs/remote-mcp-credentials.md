@@ -156,8 +156,9 @@ decision alone. Anyone who can control the chat may decline it, and actions on
 workspace logins keep their ordinary rules. The owner's own requests count as
 the owner: their signed-in session, their personal API key and a token issued
 on their behalf (`asUser`). Another member, a workspace API key with no person
-behind it, or someone else's Slack click gets `403`
-`APPROVAL_REQUIRES_ACCOUNT_OWNER`, whose message names the owner when known
+behind it, or someone else's Slack click gets `403` with
+`details.code: "APPROVAL_REQUIRES_ACCOUNT_OWNER"` (and `details.accountOwnerLabel`
+when known; the SDK's `isApprovalRequiresAccountOwnerError` checks it), whose message names the owner when known
 ("Only Alice can approve this action, because it runs on their own account.").
 A tool review tells each viewer the same: `approvedBy: "account_owner"` with
 `accountOwnerLabel` and only `reject` for everyone else, and

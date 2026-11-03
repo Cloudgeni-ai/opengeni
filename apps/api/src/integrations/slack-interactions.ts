@@ -77,6 +77,7 @@ import {
   enqueueSlackAppHomeRefresh,
   enqueueSlackInteractionInbox,
   getConnectionMetadata,
+  getToolActionAccountOwner,
   getToolActionReview,
   getOrCreateSlackInteraction,
   getLatestSessionModelForSubject,
@@ -6183,8 +6184,6 @@ async function executeSlackAction(
         clientEventId: `slack-action:${handle.id}`,
       });
     } catch (error) {
-      // The MCP server's question needs typed answers, or it asked again
-      // since this card was posted: the person answers in the session.
       // The call runs on someone's own account: only they can approve it.
       if (error instanceof SessionApprovalForbiddenError) {
         return {
@@ -6192,6 +6191,8 @@ async function executeSlackAction(
           text: `${mention}${error.message} ${openSessionText(deps, interaction.workspaceId, handle.sessionId)}`,
         };
       }
+      // The MCP server's question needs typed answers, or it asked again
+      // since this card was posted: the person answers in the session.
       if (!(error instanceof SessionApprovalAnswerError)) throw error;
       return {
         result: "needs_answer",
@@ -6756,6 +6757,27 @@ async function slackApprovalCard(
   const reviewById = new Map(
     reviews.flatMap((review) => (review ? [[review.id, review] as const] : [])),
   );
+  // An action on someone else's own login is theirs to approve: this card
+  // offers only Decline and says who can approve. The owner is frozen with
+  // the action, so the card renders the same bytes on every retry.
+  const owners = await Promise.all(
+    approvals.map((approval) =>
+      getToolActionAccountOwner(deps.db, {
+        accountId: interaction.accountId,
+        workspaceId: interaction.workspaceId,
+        sessionId: interaction.sessionId!,
+        approvalId: approval.id,
+      }),
+    ),
+  );
+  const otherOwnerById = new Map(
+    approvals.flatMap((approval, index) => {
+      const owner = owners[index];
+      return owner && owner.subjectId !== interaction.owningSubjectId
+        ? [[approval.id, owner] as const]
+        : [];
+    }),
+  );
   const actionable = approvals.filter((approval) => {
     // A server's question is the decision itself, so it needs no saved review.
     if (approval.question) return true;
@@ -6764,7 +6786,8 @@ async function slackApprovalCard(
   });
   const specs = actionable
     .flatMap((approval) => [
-      ...(approval.question && !slackServerQuestion(approval.question).answerableInSlack
+      ...((approval.question && !slackServerQuestion(approval.question).answerableInSlack) ||
+      otherOwnerById.has(approval.id)
         ? []
         : [
             {
@@ -6809,6 +6832,8 @@ async function slackApprovalCard(
       }
       const question = slackServerQuestion(approval.question);
       blocks.push(question.block);
+      const questionOwner = otherOwnerById.get(approval.id);
+      if (questionOwner) blocks.push(slackAccountOwnerNote(questionOwner.label));
       if (!question.answerableInSlack && link) {
         blocks.push({
           type: "section",
@@ -6844,6 +6869,23 @@ async function slackApprovalCard(
     }
     if (!review) continue;
     blocks.push(...slackToolReviewBlocks(review, privateAudience));
+    const owner = otherOwnerById.get(approval.id);
+    if (owner && reject) {
+      blocks.push(slackAccountOwnerNote(owner.label));
+      blocks.push({
+        type: "actions",
+        block_id: `opengeni_approval_${event.sequence}_${blocks.length}`,
+        elements: [
+          {
+            type: "button",
+            action_id: SLACK_ACTION_ID_BY_KIND.approval_reject,
+            value: reject.id,
+            text: { type: "plain_text", text: "Decline", emoji: true },
+          },
+        ],
+      });
+      continue;
+    }
     // Render the original event deterministically, even after a decision. The
     // signed handler checks live access and the canonical pending request; a
     // stale button cannot approve again. Changing these bytes breaks replay of
@@ -6880,6 +6922,18 @@ async function slackApprovalCard(
       ...blocks,
     ],
     operationId,
+  };
+}
+
+/** Says who alone can approve an action that runs on their own login. */
+function slackAccountOwnerNote(label: string | null): SlackMessageBlock {
+  const who = label ? escapeSlackMrkdwn(label) : "the person whose own account this runs on";
+  return {
+    type: "section",
+    text: {
+      type: "mrkdwn",
+      text: `Only ${who} can approve this, because it runs on their own account. You can decline it.`,
+    },
   };
 }
 
