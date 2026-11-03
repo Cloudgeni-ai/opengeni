@@ -2506,21 +2506,42 @@ const PAUSE_INTERRUPTION_REASONS: ReadonlySet<unknown> = new Set([
   "workspace_pause",
 ]);
 
-/** The live pause from an effective session control; undefined when it is unknown. */
+type LivePauseBlocker = { changedAt?: string | null | undefined };
+
+/**
+ * The live pause from an effective session control; undefined when it is
+ * unknown. A pause in force since several blockers took hold began with the
+ * earliest of them.
+ */
 export function timelineLivePause(
   control:
     | {
         state: string;
-        primaryBlocker?: { changedAt?: string | null | undefined } | null | undefined;
+        primaryBlocker?: LivePauseBlocker | null | undefined;
+        blockers?: readonly LivePauseBlocker[] | null | undefined;
       }
     | null
     | undefined,
 ): TimelineLivePause | undefined {
   if (!control) return undefined;
-  return control.state === "paused"
-    ? { paused: true, since: control.primaryBlocker?.changedAt ?? null }
-    : { paused: false };
+  if (control.state !== "paused") return { paused: false };
+  let since: string | null = null;
+  for (const blocker of [control.primaryBlocker, ...(control.blockers ?? [])]) {
+    const changedAt = blocker?.changedAt;
+    if (changedAt && (since === null || Date.parse(changedAt) < Date.parse(since)))
+      since = changedAt;
+  }
+  return { paused: true, since };
 }
+
+/** Events that start or end a pause span. */
+const PAUSE_EVENT_TYPES: ReadonlySet<string> = new Set([
+  "session.control.paused",
+  "session.control.resumed",
+  "turn.recovery.requested",
+  "session.status.changed",
+  "turn.started",
+]);
 
 /**
  * When the session's work was paused, from its events and (when the host
@@ -2532,22 +2553,34 @@ export function timelineLivePause(
  * (`turn.recovery.requested` with a pause reason) and the parked idle status.
  * Work resumes with `session.control.resumed`, or when the turn runs again.
  * A wait that a pause held without interrupting anything has no events at
- * all, so the live control decides whether a pause is in force now.
+ * all, so the live control decides whether a pause is in force now, and
+ * `observed` carries pauses the host saw begin and end only through it.
  */
 export function timelinePauseSpans(
   events: readonly SessionEvent[],
   live?: TimelineLivePause | null,
+  observed: readonly TimelinePauseSpan[] = [],
 ): TimelinePauseSpan[] {
-  const ordered = [...events].sort((left, right) => left.sequence - right.sequence);
+  let latest: SessionEvent | undefined;
+  const relevant: SessionEvent[] = [];
+  for (const event of events) {
+    if (!latest || event.sequence > latest.sequence) latest = event;
+    if (PAUSE_EVENT_TYPES.has(event.type)) relevant.push(event);
+  }
+  relevant.sort((left, right) => left.sequence - right.sequence);
   const spans: TimelinePauseSpan[] = [];
   let open: TimelinePauseSpan | null = null;
-  let latest: string | undefined;
-  for (const event of ordered) {
-    latest = event.occurredAt;
+  // Cancel also leaves the control paused while the turn winds down; that is
+  // not a pause of the work, which is ending.
+  let cancelling = false;
+  for (const event of relevant) {
     const payload = asRecord(event.payload);
+    if (event.type === "session.control.paused" && payload.terminal === true) {
+      cancelling = true;
+      continue;
+    }
     const starts =
-      // Cancel records the same control event, marked terminal; it ends the turn.
-      (event.type === "session.control.paused" && payload.terminal !== true) ||
+      event.type === "session.control.paused" ||
       (event.type === "turn.recovery.requested" &&
         PAUSE_INTERRUPTION_REASONS.has(payload.reason)) ||
       (event.type === "session.status.changed" &&
@@ -2558,23 +2591,26 @@ export function timelinePauseSpans(
       continue;
     }
     if (
-      open &&
-      (event.type === "session.control.resumed" ||
-        event.type === "turn.started" ||
-        (event.type === "session.status.changed" && payload.status === "running"))
+      event.type === "session.control.resumed" ||
+      event.type === "turn.started" ||
+      (event.type === "session.status.changed" && payload.status === "running")
     ) {
-      spans.push({ startedAt: open.startedAt, endedAt: event.occurredAt });
-      open = null;
+      cancelling = false;
+      if (open) {
+        spans.push({ startedAt: open.startedAt, endedAt: event.occurredAt });
+        open = null;
+      }
     }
   }
-  if (live?.paused) {
-    const startedAt = open?.startedAt ?? live.since ?? latest;
+  const latestAt = latest?.occurredAt;
+  if (live?.paused && !cancelling) {
+    const startedAt = open?.startedAt ?? live.since ?? latestAt;
     if (startedAt) spans.push({ startedAt });
   } else if (open) {
     if (live) {
       // The host already sees the session running again; its resume events
       // are still on their way. End the pause when the host saw it end.
-      const endedAt = live.resumedAt ?? latest ?? open.startedAt;
+      const endedAt = live.resumedAt ?? latestAt ?? open.startedAt;
       spans.push({
         startedAt: open.startedAt,
         endedAt: Date.parse(endedAt) > Date.parse(open.startedAt) ? endedAt : open.startedAt,
@@ -2583,6 +2619,7 @@ export function timelinePauseSpans(
       spans.push(open);
     }
   }
+  for (const span of observed) if (span.endedAt) spans.push(span);
   return spans;
 }
 
@@ -2977,6 +3014,7 @@ function groupReadableTurns(
                 ? t("timeline.projection.waitingForYou")
                 : t("timeline.projection.waiting"),
             since: item.occurredAt,
+            ...(item.approval === true ? { waitingOn: "you" as const } : {}),
           };
         } else if (
           item.kind === "session-status" &&
@@ -2987,6 +3025,7 @@ function groupReadableTurns(
           current.waiting = {
             label: t("timeline.projection.waitingForYou"),
             since: item.occurredAt,
+            waitingOn: "you",
           };
         } else if (
           item.kind === "session-status" &&
@@ -3029,9 +3068,11 @@ function groupReadableTurns(
     const workEnd = work.endedAt ? Date.parse(work.endedAt) : Number.POSITIVE_INFINITY;
     // A pause still in force over this open turn: the turn is parked for
     // Resume, so it reads as paused and its clock stops when the pause began.
-    const openPause = work.endedAt
-      ? undefined
-      : pauses.find((pause) => !pause.endedAt && Date.parse(pause.startedAt) < workEnd);
+    // A wait on the person (an approval, a question) keeps saying so.
+    const openPause =
+      work.endedAt || work.waiting?.waitingOn === "you"
+        ? undefined
+        : pauses.find((pause) => !pause.endedAt && Date.parse(pause.startedAt) < workEnd);
     const pausedAt = openPause
       ? Math.max(workStart, Date.parse(openPause.startedAt))
       : Number.POSITIVE_INFINITY;
@@ -3039,14 +3080,21 @@ function groupReadableTurns(
       work.pausedAt = new Date(pausedAt).toISOString();
       delete work.waiting;
     }
-    // Capacity waits, failed-attempt gaps and settled pauses can overlap;
-    // their union is time the agent was not working.
+    // Capacity waits, failed-attempt gaps and pauses can overlap; their union
+    // is time the agent was not working. A span still open runs to the end of
+    // the work (a turn cancelled while paused) or to the pause that stopped
+    // its clock; on a turn still running it has no end yet and counts later.
+    const until = Math.min(workEnd, pausedAt);
     const pausedMs = unionLength(
       [...(idleSpans.get(key) ?? []), ...pauses].flatMap((span) =>
-        span.endedAt ? [[Date.parse(span.startedAt), Date.parse(span.endedAt)] as const] : [],
+        span.endedAt
+          ? [[Date.parse(span.startedAt), Date.parse(span.endedAt)] as const]
+          : Number.isFinite(until)
+            ? [[Date.parse(span.startedAt), until] as const]
+            : [],
       ),
       workStart,
-      Math.min(workEnd, pausedAt),
+      until,
     );
     if (pausedMs > 0) work.pausedMs = pausedMs;
   }

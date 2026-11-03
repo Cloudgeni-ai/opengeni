@@ -30,6 +30,7 @@ export {
   toolMatchesLeaf,
 } from "./projection";
 export type { GroupTimelineOptions, TimelineLivePause, TimelinePauseSpan } from "./projection";
+export { useTimelinePauses } from "./use-timeline-pauses";
 
 // item types
 export type {

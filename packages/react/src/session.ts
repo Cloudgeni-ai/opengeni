@@ -141,9 +141,16 @@ export {
   extractSessionRef,
   groupTimeline,
   sessionStatusFromEvents,
+  timelineLivePause,
+  timelinePauseSpans,
   toolDisplayName,
 } from "./timeline/projection";
-export type { GroupTimelineOptions } from "./timeline/projection";
+export type {
+  GroupTimelineOptions,
+  TimelineLivePause,
+  TimelinePauseSpan,
+} from "./timeline/projection";
+export { useTimelinePauses } from "./timeline/use-timeline-pauses";
 export type {
   ActivityItem,
   AgentMessageItem,

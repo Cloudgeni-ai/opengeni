@@ -5,6 +5,7 @@ import {
   personalMachineCopy,
   sessionAdmissionApprovedElsewhereCopy,
   sessionAdmissionCopy,
+  timelineLivePause,
   useSessionStart,
   useSessionStartupTimeline,
   type PendingPrompt,
@@ -375,7 +376,9 @@ function SessionScreenBody({
             : undefined)
         }
         items={items}
+        events={controller.events}
         status={status}
+        pause={timelineLivePause(queue.effectiveControl)}
         emptyState={
           empty && failed ? (
             <LoadFailure

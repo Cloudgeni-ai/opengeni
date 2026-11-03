@@ -185,19 +185,22 @@ function ownRailStatusCounts(
 }
 
 /**
- * Work a pause holds for Resume: a turn still open, queued or running, or a
- * wait for input. A paused chat with nothing in progress shows no marker.
+ * Work a pause holds for Resume: a turn still open, queued or running. A
+ * paused chat with nothing in progress shows no marker, nor does one that
+ * needs the person or is ending (Cancel also pauses while the turn stops).
+ * Matches the server's `treeStats.pausedWorkDescendants`.
  */
 function hasPausedWork(session: Session): boolean {
   return (
     !hasActiveEffectiveControl(session) &&
     session.status !== "requires_action" &&
+    session.status !== "cancelled" &&
+    session.status !== "failed" &&
     (Boolean(session.activeTurnId) ||
       session.status === "running" ||
       session.status === "recovering" ||
       session.status === "queued" ||
-      session.status === "waiting_capacity" ||
-      Boolean(session.inputWait))
+      session.status === "waiting_capacity")
   );
 }
 

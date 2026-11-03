@@ -187,6 +187,74 @@ describe("paused work", () => {
       paused: true,
       since: at(9),
     });
+    // Several blockers: the pause began with the earliest of them.
+    expect(
+      timelineLivePause({
+        state: "paused",
+        primaryBlocker: { changedAt: at(30) },
+        blockers: [{ changedAt: at(30) }, { changedAt: at(12) }],
+      }),
+    ).toEqual({ paused: true, since: at(12) });
+  });
+
+  test("a turn cancelled while paused does not count the paused time", () => {
+    const events = [
+      ...pausedDirectly(),
+      event("session.control.paused", { terminal: true, revision: 3 }, 300, null),
+      event("turn.cancelled", {}, 301),
+    ];
+    // Worked from 1s until the pause at 121s; the rest was paused.
+    expect(liveWork(events)).toEqual({ kind: "worked", durationMs: 120_000 });
+  });
+
+  test("Cancel during a live-only pause ends the paused state", () => {
+    const events = [
+      ...running(),
+      event("session.control.paused", { terminal: true, revision: 2 }, 50, null),
+    ];
+    // Cancel holds the control paused while the turn stops; it is not a pause.
+    expect(timelinePauseSpans(events, { paused: true, since: at(50) })).toEqual([]);
+  });
+
+  test("a capacity wait before a pause is not work either", () => {
+    const events = [
+      ...running(),
+      event("turn.capacity_waiting", { reason: "no_eligible_capacity" }, 61),
+      event("turn.recovery.requested", { reason: "session_pause" }, 91),
+    ];
+    // Worked 1s to 61s, then waited for capacity until the pause at 91s.
+    expect(liveWork(events)).toEqual({ kind: "paused", durationMs: 60_000 });
+  });
+
+  test("a wait for the person still says so under a pause", () => {
+    const events = [
+      ...running(),
+      event("session.status.changed", { status: "requires_action" }, 30, null),
+    ];
+    expect(liveWork(events, { paused: true, since: at(40) })).toMatchObject({
+      kind: "waiting",
+      label: "Waiting for you",
+    });
+  });
+
+  test("pauses seen only live are not work", () => {
+    const spans = timelinePauseSpans(running(), { paused: false }, [
+      { startedAt: at(61), endedAt: at(121) },
+    ]);
+    expect(spans).toEqual([{ startedAt: at(61), endedAt: at(121) }]);
+    const settled = [...running(), event("turn.completed", { output: "" }, 181)];
+    const groups = groupTimeline(englishText, buildTimeline(englishText, settled), {
+      readableTurns: true,
+      pauses: timelinePauseSpans(settled, { paused: false }, spans),
+    });
+    const work = groups.find(
+      (group): group is Extract<TimelineGroup, { kind: "activity" }> =>
+        group.kind === "activity" && group.work !== undefined,
+    );
+    expect(work?.work && readableWorkStatus(englishText, { ...work, work: work.work })).toEqual({
+      kind: "worked",
+      durationMs: 120_000,
+    });
   });
 });
 
@@ -231,6 +299,35 @@ describe("MessageTimeline", () => {
       );
       await flush(50);
       expect(status()?.getAttribute("data-og-exchange-status")).toBe("working");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a pause seen only live does not count as work after Resume", async () => {
+    // The turn has run since 1s, so its clock reads hours without the pause.
+    const events = running();
+    const view = await renderComponent(
+      <MessageTimeline
+        events={events}
+        turnSummary={{ rolling: true }}
+        pause={{ paused: true, since: at(61) }}
+      />,
+    );
+    try {
+      await flush(50);
+      await view.rerender(
+        <MessageTimeline
+          events={events}
+          turnSummary={{ rolling: true }}
+          pause={{ paused: false }}
+        />,
+      );
+      await flush(50);
+      const status = view.container.querySelector("[data-og-exchange-status]");
+      expect(status?.getAttribute("data-og-exchange-status")).toBe("working");
+      // Worked 1s to 61s, then paused until this view saw the resume.
+      expect(status?.textContent).toBe("Working · 1m");
     } finally {
       await view.unmount();
     }

@@ -25,6 +25,7 @@ import {
   type TimelineSearchTarget,
 } from "./timeline-search";
 import { GenieLoadingOptionsContext, type GenieLoadingOptions } from "../timeline/genie-loading";
+import { useTimelinePauses } from "../timeline/use-timeline-pauses";
 import { ChildSessionLink } from "./child-session-link";
 import { useStartupDetails } from "../timeline/startup-preference";
 import {
@@ -134,7 +135,6 @@ import {
   defaultToolRegistry,
   groupTimeline,
   LightboxProvider,
-  timelinePauseSpans,
   type TimelineLivePause,
   type ActivityItem,
   type AgentMessageItem,
@@ -827,34 +827,7 @@ export function MessageTimeline({
   const olderPageBudgetRef = useRef(0);
   const [olderDemand, setOlderDemand] = useState(0);
   const readableTurns = turnSummary?.rolling === true;
-  const livePaused = pause?.paused;
-  const livePausedSince = pause?.since ?? null;
-  // When this view saw a live pause end: a resume's own events can arrive
-  // after the control does, and the paused time must not count as work.
-  const [observedResumeAt, setObservedResumeAt] = useState<string | null>(null);
-  const previousLivePaused = useRef(livePaused);
-  useEffect(() => {
-    if (previousLivePaused.current === true && livePaused === false)
-      setObservedResumeAt(new Date().toISOString());
-    else if (livePaused) setObservedResumeAt(null);
-    previousLivePaused.current = livePaused;
-  }, [livePaused]);
-  const pauses = useMemo(
-    () =>
-      readableTurns
-        ? timelinePauseSpans(
-            events ?? [],
-            livePaused === undefined
-              ? undefined
-              : {
-                  paused: livePaused,
-                  since: livePausedSince,
-                  resumedAt: pause?.resumedAt ?? observedResumeAt,
-                },
-          )
-        : [],
-    [readableTurns, events, livePaused, livePausedSince, pause?.resumedAt, observedResumeAt],
-  );
+  const pauses = useTimelinePauses(events, pause, readableTurns);
   const projectedGroups = useMemo(
     () => groupTimeline(t, resolvedItems, { readableTurns, pauses }),
     [resolvedItems, readableTurns, pauses, t],

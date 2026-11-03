@@ -1087,12 +1087,36 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       direct_pause_revision = case when id = ${pausedChild.id} then 10 else direct_pause_revision end,
       control_version = case when id = ${pausedChild.id} then 10 else control_version end
     `);
+    // The finished child sleeps on an input wait: a pause holds no work there.
+    const sleepingTurnId = crypto.randomUUID();
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`
+      insert into session_turns (
+        id, account_id, workspace_id, session_id, trigger_event_id,
+        temporal_workflow_id, status, position, prompt, model,
+        reasoning_effort, sandbox_backend, resources, tools, metadata,
+        execution_generation
+      ) values (
+        ${sleepingTurnId}, ${workspace.accountId}, ${workspace.workspaceId}, ${finished.id},
+        ${crypto.randomUUID()}, ${`wf-${sleepingTurnId}`}, 'completed',
+        2, 'sleeping prompt', 'test-model',
+        'medium', 'none', '[]'::jsonb, '[]'::jsonb, '{}'::jsonb, 1
+      )`,
+    );
+    await setControls(sql`
+      input_wait_turn_id = case when id = ${finished.id} then ${sleepingTurnId}::uuid else input_wait_turn_id end,
+      input_wait_until = case when id = ${finished.id} then now() + interval '1 hour' else input_wait_until end,
+      input_wait_reason = case when id = ${finished.id} then 'sleep' else input_wait_reason end,
+      input_wait_set_at = case when id = ${finished.id} then now() else input_wait_set_at end
+    `);
     const stats = (rootId: string) =>
       withWorkspaceRls(db, workspace.workspaceId, (scoped) =>
         sessionTreeStatsForSessions(scoped, workspace.workspaceId, [rootId]),
       ).then((byRoot) => byRoot.get(rootId));
 
-    // The finished child is paused but has no work for Resume to continue.
+    // The finished child is paused but has no work for Resume to continue;
+    // its input wait is not work either.
     expect(await stats(root.id)).toMatchObject({
       totalDescendants: 4,
       runningDescendants: 0,

@@ -35793,11 +35793,10 @@ export async function sessionTreeStatsForSessions(
           count(*) filter (where effective_pause_revision is not null)::int as "pausedDescendants",
           count(*) filter (
             where effective_pause_revision is not null
-              and status <> 'requires_action'
+              and status not in ('requires_action', 'cancelled', 'failed')
               and (
                 active_turn_id is not null
                 or status in ('running', 'recovering', 'queued', 'waiting_capacity')
-                or input_wait_until is not null
               )
           )::int as "pausedWorkDescendants",
           count(*) filter (where status = 'failed')::int as "failedDescendants",

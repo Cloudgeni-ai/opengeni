@@ -484,6 +484,7 @@ export {
   timelineLivePause,
   timelinePauseSpans,
   toolDisplayName,
+  useTimelinePauses,
 } from "./timeline";
 export type {
   GroupTimelineOptions,

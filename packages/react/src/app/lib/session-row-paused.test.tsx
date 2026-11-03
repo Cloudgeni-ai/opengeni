@@ -94,6 +94,25 @@ describe("a paused chat in the sidebar", () => {
     expect(summarizeRailRow(row(done)).kind).toBe("neutral");
   });
 
+  test("a paused chat waiting for input, or ending, shows no paused marker", () => {
+    const waiting = session({
+      id: "waiting",
+      status: "idle",
+      inputWait: { deadlineAt: "2026-11-02T14:00:00.000Z", reason: "sleep" },
+      effectiveControl: control("paused"),
+    });
+    expect(summarizeRailRow(row(waiting)).kind).not.toBe("paused");
+    for (const status of ["cancelled", "failed"] as const) {
+      const ending = session({
+        id: status,
+        status,
+        activeTurnId: "turn-1",
+        effectiveControl: control("paused"),
+      });
+      expect(summarizeRailRow(row(ending)).kind).not.toBe("paused");
+    }
+  });
+
   test("a parent of paused workers shows them paused, and working ones first", () => {
     const parent = session({
       id: "manager",
