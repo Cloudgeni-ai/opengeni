@@ -1,5 +1,23 @@
 # @opengeni/sdk
 
+## 6.7.0
+
+### Minor Changes
+
+- cb37e4d: A meeting being recorded shows in the desktop app's menu bar (the tray on Windows and Linux). While one records, the icon becomes a recording badge (a dictation under way still shows its own icon first), and the menu starts with the meeting: whether it records or is paused, for how long, its name (or when it started), and the account it records in when the window shows another. "Open Live Transcript" brings that account up and opens the meeting; "Stop Recording" stops it. Nothing about meetings shows while none records. `DesktopMeetingDetection.setRecording()` takes an optional `DesktopRecordingMeeting` (title, recorded time, paused), and `DesktopMeetingRequest` adds `{ kind: "open" }`, sent only to a page that described its recording. The meeting recorder in `@opengeni/react` describes its recording and opens it on `open`. `MeetingDetection` adds `recording()`, `onRecording()`, `openRecording()` and `stopRecording()`.
+
+### Patch Changes
+
+- c08233e: Background commands that finish while the agent is working now report themselves. Their exit status and the start and end of their output follow the agent's next plain-text tool result (including `apply_patch` edits), and are recorded as read exactly like a terminal `command_read`, so the same result is never delivered again. The agent no longer spends a `command_read` only to learn that a command finished. The `background_command_result` input that wakes a waiting session, or reaches its next turn, now carries the same bounded output, so that turn needs no extra read either. Earlier history never changes, JSON and image tool results are left as they were, and results not delivered during a turn still arrive as ordinary input. The timeline keeps showing each tool's own output. Results only use the room a tool's own output leaves in the model's tool-output budget, and are masked for known secret values. `OPENGENI_EXPERIMENT_CUT_POLLING=false` turns the in-turn delivery off, along with the prompt sentence that tells the agent not to poll.
+- 0d04cf4: Error toasts and messages no longer show "API 409:" or a request reference when a request is refused for a reason you can act on (a 4xx); they say only what to do. Unexpected failures (5xx, network, unknown) keep a short message. In the session UI's toasts, inline error text, notices and field errors their reference sits behind a quiet "Copy details" (or Technical details); toasts that call sonner directly still show it inline, as before. Toasts no longer show an error's raw text. Archiving a chat with "Keep this chat active" on now offers one action, "Turn off and archive", which turns the setting off and archives; Undo, or a failed archive, turns it back on.
+- cf35731: Only the owner of a personal (Only me) login can approve an action that runs on it. An approval runs on the accounts its message froze, so before this any member, workspace API key or Slack click by someone else could make an action happen as another person. The owner's personal API key and `asUser` tokens count as the owner. Approving such an action as anyone else now answers 403 with `details.code: "APPROVAL_REQUIRES_ACCOUNT_OWNER"` and a message naming who can approve (the SDK adds `isApprovalRequiresAccountOwnerError` and `APPROVAL_REQUIRES_ACCOUNT_OWNER_CODE`); declining stays open to anyone who can control the chat, and actions on workspace logins keep their ordinary rules. A tool review adds the optional `approvedBy` ("you" or "account_owner") and `accountOwnerLabel` fields, and the review card says who can approve, or tells the owner in a shared chat that the decision is theirs. Slack cards for anyone else offer only Decline, and the desktop and mobile apps show or route a refused approval instead of failing.
+- Updated dependencies [c08233e]
+- Updated dependencies [57237db]
+- Updated dependencies [cf35731]
+- Updated dependencies [4a7da4c]
+  - @opengeni/contracts@6.7.0
+  - @opengeni/connect@6.7.0
+
 ## 6.6.0
 
 ### Minor Changes

@@ -1,5 +1,20 @@
 # @opengeni/events
 
+## 6.7.0
+
+### Patch Changes
+
+- Updated dependencies [c08233e]
+- Updated dependencies [e764a94]
+- Updated dependencies [b0736b7]
+- Updated dependencies [57237db]
+- Updated dependencies [cf35731]
+- Updated dependencies [af08d2a]
+- Updated dependencies [d7a740f]
+- Updated dependencies [4a7da4c]
+  - @opengeni/db@6.7.0
+  - @opengeni/contracts@6.7.0
+
 ## 6.6.0
 
 ### Patch Changes
