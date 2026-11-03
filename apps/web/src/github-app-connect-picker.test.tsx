@@ -44,7 +44,6 @@ const pickerProps: Omit<RepositoryContextPickerProps, "onConnectWorkspaceApp"> =
   selectedRepoRefs: {},
   manualRepos: [],
   manualOpen: false,
-  githubAppOpen: false,
   org: "",
   pending: false,
   repoBusy: false,
@@ -56,11 +55,8 @@ const pickerProps: Omit<RepositoryContextPickerProps, "onConnectWorkspaceApp"> =
   onManualAdd: () => {},
   onManualUpdate: () => {},
   onManualRemove: () => {},
-  onGitHubAppOpenChange: () => {},
   onOrgChange: () => {},
   onStartGitHubApp: () => {},
-  onConfigureInstallation: async () => {},
-  onDisconnectInstallation: async () => {},
 } as unknown as Omit<RepositoryContextPickerProps, "onConnectWorkspaceApp">;
 
 /** The route shape: the launcher's dialog is hosted beside the menu, not in it. */
@@ -122,7 +118,7 @@ async function openMenuAndConnect(): Promise<void> {
     ),
   ).toEqual([]);
   const connect = [...menu()!.querySelectorAll<HTMLButtonElement>("button")].find(
-    (button) => button.textContent === "Connect workspace App",
+    (button) => button.textContent === "Install",
   );
   expect(connect).toBeTruthy();
   await act(async () => connect!.click());

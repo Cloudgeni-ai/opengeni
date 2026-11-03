@@ -261,6 +261,16 @@ async function fakeApi(request: Request): Promise<Response> {
     });
   }
   if (suffix === "/tools/catalog") return json({ tools: [{ path: "demo.echo" }] });
+  // Site files: a signed-out guest reads shared files of a public Site (the API filters by scope).
+  if (suffix === "/published-artifacts/current/files" && request.method === "GET")
+    return json({ files: [{ id: "file-shared", name: "hero.png", scope: "shared" }] });
+  if (suffix === "/published-artifacts/current/files/file-shared" && request.method === "GET")
+    return json({
+      id: "file-shared",
+      name: "hero.png",
+      scope: "shared",
+      url: "https://blob.example/hero.png?sig=x",
+    });
   if (suffix === "/site/reports") return new Response(null, { status: 202 });
   return json({ error: { code: "not_found" } }, { status: 404 });
 }
@@ -967,6 +977,39 @@ describe("site gateway in workerd", () => {
     expect(tools.status).toBe(200);
     expect(await tools.json()).toEqual({ tools: [{ path: "demo.echo" }] });
     expect(lastTo("/tools/catalog")?.verified).toBe(true);
+  });
+
+  test("a signed-out guest of a public Site reads shared Site files through the gateway", async () => {
+    const shell = await get("pub", "/");
+    await shell.text();
+    const visitorCookie = cookiePair(
+      setCookies(shell).find((cookie) => cookie.startsWith("__Host-og_v="))!,
+    );
+    const visitorId = visitorCookie.slice("__Host-og_v=".length).split(".")[0]!;
+    const headers = { origin: `https://pub.${DOMAIN}`, cookie: visitorCookie };
+    const list = await get("pub", "/_og/api/published-artifacts/current/files", { headers });
+    expect(list.status).toBe(200);
+    expect(await list.json()).toEqual({
+      files: [{ id: "file-shared", name: "hero.png", scope: "shared" }],
+    });
+    const listed = lastTo("/published-artifacts/current/files")!;
+    expect(listed.verified).toBe(true);
+    expect(listed.headers.get(SITE_GATEWAY_VISITOR_HEADER)).toBe(visitorId);
+    expect(listed.headers.get(SITE_GATEWAY_SESSION_HEADER) ?? "").toBe("");
+    expect(listed.headers.get("cookie")).toBeNull();
+
+    const file = await get("pub", "/_og/api/published-artifacts/current/files/file-shared", {
+      headers,
+    });
+    expect(file.status).toBe(200);
+    expect(((await file.json()) as { url: string }).url).toBe(
+      "https://blob.example/hero.png?sig=x",
+    );
+    const fetched = lastTo("/published-artifacts/current/files/file-shared")!;
+    expect(fetched.verified).toBe(true);
+    expect(fetched.headers.get(SITE_GATEWAY_HOST_HEADER)).toBe(`pub.${DOMAIN}`);
+    expect(fetched.headers.get(SITE_GATEWAY_VISITOR_HEADER)).toBe(visitorId);
+    expect(fetched.headers.get(SITE_GATEWAY_SESSION_HEADER) ?? "").toBe("");
   });
 
   test("SSE responses stream through", async () => {

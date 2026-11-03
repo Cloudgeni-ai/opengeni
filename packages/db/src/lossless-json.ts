@@ -1,3 +1,9 @@
+import {
+  createJsonSafeSummary,
+  createJsonSafeWarning,
+  toJsonSafeValue,
+} from "@opengeni/contracts/json-safe";
+
 const JSON_STRING_PREFIX = "opengeni_lossless_json_string_v2_81f06e15:";
 const JSON_KEY_PREFIX = "opengeni_lossless_json_key_v2_7ca6071d:";
 const TEXT_PREFIX = "opengeni_lossless_text_v2_c4100a62:";
@@ -59,11 +65,36 @@ type TransformResult = { value: unknown; changed: boolean };
 /**
  * Preserve JSON structure and SQL-queryable control keys. Only strings that
  * PostgreSQL cannot represent (or that collide with this unshipped v2 tag) are
- * encoded. Non-JSON graph values are rejected instead of silently rewritten.
+ * encoded. A value JSON cannot carry (a symbol key, a function, a bigint, a
+ * cycle, a class instance, ...) never fails the write: the value is first
+ * converted as `JSON.stringify` would (see `toJsonSafeValue`), the change is
+ * logged with its kind and a redacted path (never the value), and the
+ * converted value is stored.
  */
 export function toPostgresLosslessJson(value: unknown): unknown {
-  return encodeJsonValue(value, new Set<object>(), 0).value;
+  try {
+    return encodeJsonValue(value, new Set<object>(), 0).value;
+  } catch {
+    // A value outside JSON (or a hostile proxy) gets here. The converted copy
+    // is built afresh, so nothing of the input (such as a proxy whose traps
+    // change between reads) reaches the encoder again.
+    const summary = createJsonSafeSummary();
+    const safe = toJsonSafeValue(value, { copy: true, onAdjustment: summary.onAdjustment });
+    const adjusted = summary.result();
+    if (adjusted) warnCanonicalJsonAdjusted({ rootPath: "$" }, adjusted);
+    try {
+      return encodeJsonValue(safe, new Set<object>(), 0).value;
+    } catch (error) {
+      // Not expected for a converted value; a write must still never fail.
+      console.warn("Canonical JSON value replaced with null", {
+        error: error instanceof Error ? error.name : typeof error,
+      });
+      return null;
+    }
+  }
 }
+
+const warnCanonicalJsonAdjusted = createJsonSafeWarning("Canonical JSON value adjusted");
 
 /**
  * Whether a JSON string value is stored byte-for-byte as given. False for

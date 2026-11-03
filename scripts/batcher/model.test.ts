@@ -464,6 +464,20 @@ describe("decide", () => {
     expect(actions[1]?.kind === "build" && actions[1].members.map((p) => p.number)).toEqual([1, 2]);
   });
 
+  test("a half whose PRs all left the queue no longer keeps priority batches unfilled", () => {
+    // PR 9 was split out of a failed batch and then left the queue.
+    const pulls = [pull(1), pull(2), pull(5, { priority: true })];
+    const action = nextBatch(pulls, [[9]], NOW, DEFAULT_SETTINGS);
+    expect(action).toMatchObject({ kind: "build", pending: [] });
+    expect(action?.kind === "build" && action.members.map((p) => p.number)).toEqual([5, 1, 2]);
+
+    // A half keeps only its PRs that are still ready.
+    const conflicting = pull(3, { conflict: "conflict" });
+    const kept = nextBatch([pull(1), pull(4), conflicting], [[3, 4]], NOW, DEFAULT_SETTINGS);
+    expect(kept).toMatchObject({ kind: "build", pending: [] });
+    expect(kept?.kind === "build" && kept.members.map((p) => p.number)).toEqual([4]);
+  });
+
   test("a new priority PR goes before the halves of a failed priority batch", () => {
     const urgent = { priority: true };
     const failed = batch([1, 2, 3, 4], {

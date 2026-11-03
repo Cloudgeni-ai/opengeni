@@ -8,6 +8,7 @@ import {
   type DesktopDictationAction,
   type DesktopDictationHistoryEntry,
   type DesktopDictationKeys,
+  type DesktopDictationModel,
   type DesktopDictationModifier,
   type DesktopDictationOutput,
   type DesktopDictationPasteBlocker,
@@ -37,6 +38,8 @@ import { acceleratorFromKey, desktopShortcutLabel, sameDesktopShortcut } from ".
 /** At most this many shortcuts, as the app keeps them. */
 const PROFILES_MAX = 8;
 const DETECT = "auto";
+/** A shortcut without a model of its own: the workspace's voice input model. */
+const WORKSPACE_MODEL = "workspace";
 const CUSTOM = "custom";
 /** Modifier keys held together that make a good shortcut on a Mac, the usual one first. */
 const CHORDS: DesktopDictationModifier[][] = [
@@ -165,7 +168,21 @@ export type DesktopDictationSettingsProps = {
   dictation?: DesktopDictation | null | undefined;
   /** Languages offered for each shortcut, as ISO codes. Common languages by default. */
   languages?: readonly string[] | undefined;
+  /**
+   * The speech-to-text models a shortcut can pick, such as one for English
+   * and another for Norwegian: the signed-in workspace's
+   * `clientConfig.voiceInput.models`. Without them each shortcut uses the
+   * workspace's voice input model and no model is offered.
+   */
+  models?: readonly DictationModelChoice[] | undefined;
   className?: string | undefined;
+};
+
+/** A model a dictation shortcut can pick, as the workspace's voice input lists it. */
+export type DictationModelChoice = DesktopDictationModel & {
+  providerName: string;
+  /** The model's name, such as "MAI-Transcribe-2". */
+  name: string;
 };
 
 /**
@@ -176,6 +193,7 @@ export type DesktopDictationSettingsProps = {
 export function DesktopDictationSettings({
   dictation: given,
   languages = MEETING_LANGUAGES,
+  models = NO_MODELS,
   className,
 }: DesktopDictationSettingsProps) {
   const t = useOpenGeniText();
@@ -265,6 +283,40 @@ export function DesktopDictationSettings({
     );
   };
 
+  const modelOptions = (current: DesktopDictationModel | null | undefined): SelectOption[] => [
+    { value: WORKSPACE_MODEL, label: t("desktopDictation.settings.workspaceModel") },
+    ...(current && !models.some((entry) => sameModel(entry, current))
+      ? [
+          {
+            value: modelValue(current),
+            label: current.model,
+            disabled: true,
+            disabledReason: t("desktopDictation.settings.modelUnavailable"),
+          },
+        ]
+      : []),
+    ...models.map((entry) => ({
+      value: modelValue(entry),
+      label: `${entry.providerName} · ${entry.name}`,
+    })),
+  ];
+
+  const setModel = (id: string, value: string) => {
+    const chosen = models.find((entry) => modelValue(entry) === value);
+    saveProfiles(
+      profiles.map((profile) =>
+        profile.id === id
+          ? {
+              ...profile,
+              model: chosen ? { providerId: chosen.providerId, model: chosen.model } : null,
+            }
+          : profile,
+      ),
+    );
+  };
+  // Offered once there is a choice, and always while a shortcut has one picked.
+  const offerModels = models.length > 0 || profiles.some((profile) => profile.model);
+
   const addProfile = () => {
     const used = new Set(profiles.map((profile) => profile.language));
     const language = [...languages].find((code) => !used.has(code)) ?? null;
@@ -344,6 +396,8 @@ export function DesktopDictationSettings({
                     )
                   }
                   languageOptions={languageOptions(profile.language)}
+                  modelOptions={offerModels ? modelOptions(profile.model) : null}
+                  onModel={(value) => setModel(profile.id, value)}
                   onRecord={(recording) => {
                     setKeysError(null);
                     setRecordingFor(recording ? profile.id : null);
@@ -754,9 +808,11 @@ function ProfileRows({
   recording,
   error,
   languageOptions,
+  modelOptions,
   onRecord,
   onShortcut,
   onLanguage,
+  onModel,
   onRemove,
 }: {
   profile: DesktopDictationProfile;
@@ -767,9 +823,12 @@ function ProfileRows({
   recording: boolean;
   error: string | null;
   languageOptions: SelectOption[];
+  /** Null when there is no model to pick. */
+  modelOptions: SelectOption[] | null;
   onRecord: (recording: boolean) => void;
   onShortcut: (shortcut: DesktopDictationShortcut) => void;
   onLanguage: (value: string) => void;
+  onModel: (value: string) => void;
   onRemove: () => void;
 }) {
   const t = useOpenGeniText();
@@ -847,8 +906,37 @@ function ProfileRows({
           />
         }
       />
+      {modelOptions ? (
+        <SettingRow
+          label={t("desktopDictation.settings.modelLabel")}
+          description={t("desktopDictation.settings.modelDescription")}
+          controlWidth="select"
+          control={
+            <SelectMenu
+              size="sm"
+              className="w-56"
+              align="end"
+              disabled={saving}
+              aria-label={t("desktopDictation.settings.modelLabel")}
+              options={modelOptions}
+              value={profile.model ? modelValue(profile.model) : WORKSPACE_MODEL}
+              onValueChange={onModel}
+            />
+          }
+        />
+      ) : null}
     </>
   );
+}
+
+const NO_MODELS: readonly DictationModelChoice[] = [];
+
+function modelValue(model: DesktopDictationModel): string {
+  return `${model.providerId}::${model.model}`;
+}
+
+function sameModel(a: DesktopDictationModel, b: DesktopDictationModel): boolean {
+  return a.providerId === b.providerId && a.model === b.model;
 }
 
 /** The shortcuts a profile can pick: modifier keys first where they work, then any combination. */

@@ -232,7 +232,9 @@ const DETECTORS: readonly Detector[] = [
   },
   {
     kind: "azure-sas-signature",
-    pattern: /[?&]sig=([^&\s"'<>#]{16,})/gi,
+    // A signature is URL-encoded, so a backslash (the escape before a quote
+    // in JSON-escaped text) ends it.
+    pattern: /[?&]sig=([^&\s"'<>#\\]{16,})/gi,
     secret: (match) => match[1],
   },
   tokenDetector("github-token", "gh[pousr]_[A-Za-z0-9]{30,255}|github_pat_[A-Za-z0-9_]{30,255}"),
@@ -444,9 +446,18 @@ export function detectSecretShapes(text: string): SecretShapeMatch[] {
     for (const detector of DETECTORS) {
       detector.pattern.lastIndex = 0;
       for (const match of scanned.matchAll(detector.pattern)) {
-        const value = detector.secret(match);
+        let value = detector.secret(match);
         if (!value) continue;
-        const end = match.index + match[0].length;
+        let end = match.index + match[0].length;
+        // A part never ends inside an escape sequence: masking the backslash
+        // of an escaped quote in JSON-escaped text would leave the quote
+        // unescaped and break the enclosing JSON. Trailing backslashes stay.
+        const trailing = /\\+$/.exec(value)?.[0].length ?? 0;
+        if (trailing > 0) {
+          value = value.slice(0, -trailing);
+          end -= trailing;
+          if (!value) continue;
+        }
         const start = end - value.length;
         if (scanned.slice(start, end) !== value) continue;
         if (isPlaceholder(value)) continue;

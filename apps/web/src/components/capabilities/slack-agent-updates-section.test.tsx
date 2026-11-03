@@ -47,6 +47,7 @@ function settings(overrides: Partial<SlackAgentUpdateSettings> = {}): SlackAgent
     connectionId: CONNECTION_ID,
     updatesEnabled: false,
     channelPostsOnly: false,
+    announcementChannelId: null,
     viewerCanManage: true,
     updatedAt: null,
     ...overrides,
@@ -90,6 +91,7 @@ describe("Slack update messages settings", () => {
     mutableContext.current = {
       client: {
         getOpenGeniSlackAgentUpdateSettings: async () => settings(),
+        listOpenGeniSlackReactionChannels: async () => ({ channels: [], nextCursor: null }),
         setOpenGeniSlackAgentUpdateSettings: async (
           _workspaceId: string,
           request: { updatesEnabled: boolean; channelPostsOnly: boolean },
@@ -156,6 +158,60 @@ describe("Slack update messages settings", () => {
     await click(updates);
     expect(saved).toBe(false);
     expect(view.host.textContent).not.toContain("Send me a preview");
+    const announce = view.host.querySelector<HTMLButtonElement>(
+      '[data-slot="select-menu-trigger"][aria-label="Announce new agents in"]',
+    );
+    expect(announce?.disabled || announce?.getAttribute("aria-disabled") === "true").toBe(true);
+    await view.unmount();
+  });
+
+  test("an organization admin picks the channel new agents are announced in", async () => {
+    const saves: Record<string, unknown>[] = [];
+    let current = settings();
+    mutableContext.current = {
+      client: {
+        getOpenGeniSlackAgentUpdateSettings: async () => current,
+        listOpenGeniSlackReactionChannels: async () => ({
+          channels: [
+            { id: "C0RANDOM", name: "random", isPrivate: false },
+            { id: "C0ANNOUNCE", name: "announcements", isPrivate: false },
+          ],
+          nextCursor: null,
+        }),
+        setOpenGeniSlackAgentUpdateSettings: async (
+          _workspaceId: string,
+          request: Record<string, unknown>,
+        ) => {
+          saves.push(request);
+          current = settings(request as Partial<SlackAgentUpdateSettings>);
+          return current;
+        },
+      },
+    };
+    const view = await render(<SlackAgentUpdatesSection connection={connection} />);
+    const trigger = () =>
+      view.host.querySelector<HTMLButtonElement>(
+        '[data-slot="select-menu-trigger"][aria-label="Announce new agents in"]',
+      )!;
+    expect(trigger().textContent).toContain("No channel");
+    await click(trigger());
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    const labels = [...document.querySelectorAll('[role="option"]')].map((option) =>
+      option.textContent?.trim(),
+    );
+    // Sorted by name, after "No channel".
+    expect(labels).toEqual(["No channel", "#announcements", "#random"]);
+    const announcements = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find(
+      (option) => option.textContent?.includes("#announcements"),
+    )!;
+    await click(announcements);
+    expect(saves.at(-1)).toEqual({
+      connectionId: CONNECTION_ID,
+      updatesEnabled: false,
+      channelPostsOnly: false,
+      announcementChannelId: "C0ANNOUNCE",
+    });
+    expect(trigger().textContent).toContain("#announcements");
     await view.unmount();
   });
 });

@@ -1039,8 +1039,52 @@ test("Site Data guest rules: none hides, read reads, append adds, own changes on
       ),
     ),
   ).not.toBe("ok");
-  // Files are never reachable by guests.
-  expect(await code(() => store.listFiles(guest("g1"), {}))).toBe("forbidden");
+  // Files: guests read shared files only, and never upload, delete or see private ones.
+  const viewer: SiteDataCaller = {
+    ...a,
+    siteId,
+    role: "viewer",
+    principal: "user:viewer",
+    actor: "user:viewer",
+    framed: true,
+  };
+  const upload = (who: SiteDataCaller, name: string, scope: "shared" | "private") =>
+    store.insertFile(
+      who,
+      {
+        id: crypto.randomUUID(),
+        name,
+        contentType: "image/png",
+        sizeBytes: 10,
+        sha256: "0".repeat(64),
+        objectKey: `objects/${name}`,
+        scope,
+      },
+      { limits },
+    );
+  const sharedFile = await upload(manager, "shared.png", "shared");
+  const managerPrivate = await upload(manager, "manager-private.png", "private");
+  const viewerShared = await upload(viewer, "viewer-shared.png", "shared");
+  const viewerPrivate = await upload(viewer, "viewer-private.png", "private");
+  const listed = await store.listFiles(guest("g1"), {});
+  expect(listed.files.map((file) => file.name).sort()).toEqual(["shared.png", "viewer-shared.png"]);
+  expect((await store.getFile(guest("g1"), sharedFile.id))?.name).toBe("shared.png");
+  expect((await store.getFile(guest("g1"), viewerShared.id))?.objectKey).toBe(
+    "objects/viewer-shared.png",
+  );
+  expect(await store.getFile(guest("g1"), managerPrivate.id)).toBeNull();
+  expect(await store.getFile(guest("g1"), viewerPrivate.id)).toBeNull();
+  expect(await code(() => upload(guest("g1"), "guest.png", "shared"))).toBe("forbidden");
+  expect(await code(() => store.checkFileQuota(guest("g1"), 10, limits))).toBe("forbidden");
+  expect(await code(() => store.deleteFile(guest("g1"), sharedFile.id))).toBe("forbidden");
+  // Viewers keep their own private files; managers see everything.
+  expect((await store.listFiles(viewer, {})).files.map((file) => file.name).sort()).toEqual([
+    "shared.png",
+    "viewer-private.png",
+    "viewer-shared.png",
+  ]);
+  expect((await store.listFiles(manager, {})).files).toHaveLength(4);
+  expect((await store.getFile(manager, viewerPrivate.id))?.name).toBe("viewer-private.png");
   // Redefining without a guest rule keeps it.
   const kept = await store.defineCollection(
     manager,

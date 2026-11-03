@@ -117,6 +117,7 @@ async fn archive(from: &ChunkStore) -> BTreeSet<String> {
             state: disk(from, &[&state]).await,
             memory: disk(from, &[&memory]).await,
             runtime: None,
+            vcpus: Some(2),
         }),
         profile: Some(profile),
         pack: Some(index),

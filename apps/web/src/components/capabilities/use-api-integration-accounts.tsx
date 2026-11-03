@@ -12,6 +12,7 @@ import {
   NativeConnectSetup,
   type NativeConnectRequest,
 } from "@opengeni/react/app/components/capabilities/native-connect-setup";
+import type { ConnectAttempt } from "@opengeni/connect";
 import { toast } from "sonner";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 
@@ -233,6 +234,47 @@ export function useApiIntegrationOAuthCallback({
   }, [workspaceId]);
 }
 
+/**
+ * Finishes, in the background, any built-in integration setup the person
+ * left with a saved account but no tools (the app closed before the last
+ * step), then says so. Mount once in the Capabilities route.
+ */
+export function useFinishUnfinishedConnectSetups({
+  workspaceId,
+  refresh,
+  onRuntimeChanged,
+}: {
+  workspaceId: string;
+  refresh: () => Promise<void>;
+  onRuntimeChanged: () => void;
+}) {
+  const client = useAppContext().client;
+  const latest = useRef({ refresh, onRuntimeChanged });
+  latest.current = { refresh, onRuntimeChanged };
+  useEffect(() => {
+    const transport = client.connectTransport();
+    if (!transport.finishUnfinished) return;
+    // Not cancelled on leaving: the server finishes either way, and the
+    // person still hears that it did. Only this page's refresh stops.
+    let shown = true;
+    void transport
+      .finishUnfinished(workspaceId)
+      .then(async (completed) => {
+        if (completed.length === 0) return;
+        for (const attempt of completed)
+          toast.success(`${attempt.installationTarget?.displayName ?? "Account"} connected`);
+        if (!shown) return;
+        latest.current.onRuntimeChanged();
+        await latest.current.refresh();
+      })
+      // Nothing to tell: anything left stays saved for the next visit.
+      .catch(() => undefined);
+    return () => {
+      shown = false;
+    };
+  }, [client, workspaceId]);
+}
+
 export type ApiIntegrationAccountsController = {
   accounts: ApiIntegrationInstallationSummary[];
   accessItems: IntegrationAccessItem[];
@@ -293,13 +335,24 @@ export function useApiIntegrationAccounts({
   const connectTransport = useMemo(() => client.connectTransport(), [client]);
   const [connectRequest, setConnectRequest] = useState<NativeConnectRequest | null>(null);
   const [newConnection, setNewConnection] = useState<NativeConnectRequest | null>(null);
-  const completeConnect = useCallback(() => {
-    setConnectRequest(null);
-    void refresh?.().catch(() =>
-      toast.error("Account connected, but refreshing the catalog failed"),
-    );
-    onRuntimeChanged?.();
-  }, [refresh, onRuntimeChanged]);
+  const connectName = definitions.find((candidate) => candidate.id === definitionId)?.name;
+  const completeConnect = useCallback(
+    (attempt: ConnectAttempt) => {
+      // Setup can finish after its dialog closed: leave a newer one open.
+      setConnectRequest((current) =>
+        current &&
+        current.installationTarget?.instanceKey !== attempt.installationTarget?.instanceKey
+          ? current
+          : null,
+      );
+      toast.success(
+        `${attempt.installationTarget?.displayName ?? connectName ?? "Account"} connected`,
+      );
+      void refresh?.().catch(() => toast.error("Couldn't refresh integrations"));
+      onRuntimeChanged?.();
+    },
+    [refresh, onRuntimeChanged, connectName],
+  );
   useEffect(() => {
     setConnectRequest(null);
     setNewConnection(null);
