@@ -529,7 +529,14 @@ function signedStateSecret(
   return resolved.secret;
 }
 
-export function createAppComposition(deps: AppDependencies): {
+export function createAppComposition(
+  deps: AppDependencies,
+  lifecycle: {
+    /** A router alone cannot own a background charge loop. Only opt in when
+     * the host will call stopBillingAutoTopUps before closing its database. */
+    startBillingAutoTopUps?: boolean;
+  } = {},
+): {
   app: Hono;
   routeDeps: ApiRouteDeps;
   /** One pass renewing the holds of the browsers agent sessions hold; the
@@ -2707,7 +2714,9 @@ export function createAppComposition(deps: AppDependencies): {
     return c.json(envelope, status as ContentfulStatusCode);
   });
 
-  const billingAutoTopUps = startBillingAutoTopUpMaintenance(routeDeps);
+  const billingAutoTopUps = lifecycle.startBillingAutoTopUps
+    ? startBillingAutoTopUpMaintenance(routeDeps)
+    : null;
   return {
     app,
     routeDeps,

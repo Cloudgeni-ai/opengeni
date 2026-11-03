@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { parseSync } from "oxc-parser";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { testSettings } from "@opengeni/testing/settings";
-import { createAppComposition } from "../src/app";
+import { createApp, createAppComposition } from "../src/app";
 import {
   billingAutoTopUpMaintenance,
   startBillingAutoTopUpMaintenance,
@@ -195,18 +195,21 @@ test("actual API composition exposes a disposer that clears the timer and stops 
     return timer;
   }) as typeof setInterval);
   const clear = spyOn(globalThis, "clearInterval").mockImplementation(() => {});
-  const composition = createAppComposition({
-    settings: testSettings({ billingMode: "stripe", stripeSecretKey: "sk_test_fixture" }),
-    db: {
-      execute: async () => {
-        discoveries++;
-        return [];
-      },
-    } as never,
-    bus: {} as never,
-    workflowClient: {} as never,
-    managedAuth: null,
-  });
+  const composition = createAppComposition(
+    {
+      settings: testSettings({ billingMode: "stripe", stripeSecretKey: "sk_test_fixture" }),
+      db: {
+        execute: async () => {
+          discoveries++;
+          return [];
+        },
+      } as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    },
+    { startBillingAutoTopUps: true },
+  );
   try {
     expect(discoveries).toBe(1);
     expect(ticks).toHaveLength(1);
@@ -230,6 +233,15 @@ test("startApi close stops top-up admission before other drains and awaits it be
     (node: any) =>
       node.type === "ExportNamedDeclaration" && node.declaration?.id?.name === "startApi",
   ) as any;
+  const composition = entry.declaration.body.body.find(
+    (node: any) =>
+      node.type === "VariableDeclaration" &&
+      node.declarations[0]?.init?.callee?.name === "createAppComposition",
+  );
+  const lifecycle = composition.declarations[0].init.arguments[1].properties.find(
+    (node: any) => node.key?.name === "startBillingAutoTopUps",
+  );
+  expect(lifecycle.value.value).toBe(true);
   const returned = entry.declaration.body.body.find((node: any) => node.type === "ReturnStatement");
   const close = returned.argument.properties.find((node: any) => node.key?.name === "close").value;
   const first = close.body.body[0];
@@ -245,4 +257,35 @@ test("startApi close stops top-up admission before other drains and awaits it be
   expect(drain).toBeDefined();
   const closeSource = text.slice(close.start, close.end);
   expect(drain.end - close.start).toBeLessThan(closeSource.indexOf("dbClient.close()"));
+});
+
+test("createApp and default composition never start an ownerless billing timer for an embedded router", async () => {
+  const schedule = spyOn(globalThis, "setInterval");
+  let discoveries = 0;
+  const embedded = {
+    settings: testSettings({
+      billingMode: "stripe",
+      stripeSecretKey: "sk_test_fixture",
+      billingAutoTopUpEnabled: true,
+    }),
+    db: {
+      execute: async () => {
+        discoveries++;
+        return [];
+      },
+    } as never,
+    bus: {} as never,
+    workflowClient: {} as never,
+    managedAuth: null,
+  };
+  try {
+    const router = createApp(embedded);
+    expect(typeof router.fetch).toBe("function");
+    const composition = createAppComposition(embedded);
+    await composition.stopBillingAutoTopUps();
+    expect(discoveries).toBe(0);
+    expect(schedule).not.toHaveBeenCalled();
+  } finally {
+    schedule.mockRestore();
+  }
 });

@@ -133,17 +133,20 @@ for a bounded maintenance pass, `settings`, `handlePaymentIntent`, and `handleSe
 `createBillingAutoTopUpService(deps, stripe?, notifications?)` is the API factory.
 The billing webhook already routes tagged setup/payment events through these
 handlers even when fresh charging is disabled, preserving recovery.
-`apps/api/src/billing-auto-top-up-maintenance.ts` starts with the API, immediately
+`apps/api/src/billing-auto-top-up-maintenance.ts` starts with `startApi`, immediately
 and every 60 seconds. It discovers one keyset page of at most 50 organization IDs
 per pass and calls `process` sequentially. Discovery is advisory, not authority.
 A failed organization does not starve the page; overlapping ticks do not overlap
 within a process, and database fences arbitrate replicas. The cursor resets after
 the final page so earlier failed accounts are retried. One stoppable timer is
 registered per root database handle. API shutdown stops admission before draining
-other pumps and awaits the active pass before closing the database. Embedded
-`createAppComposition` owners must likewise call its `stopBillingAutoTopUps`
-disposer; it stops admission synchronously and returns the drain promise. This
-does not change the control worker loop.
+other pumps and awaits the active pass before closing the database. A mounted
+`createApp` router and the default `createAppComposition` do **not** start this
+background loop. An embedding host can opt in with
+`createAppComposition(deps, { startBillingAutoTopUps: true })` and must call its
+returned `stopBillingAutoTopUps` disposer before closing its database; it stops
+admission synchronously and returns the drain promise. This does not change the
+control worker loop.
 
 Maintenance requires Stripe billing mode and a configured Stripe key, but does
 **not** require the fresh-charge activation flag: disabled deployments still
