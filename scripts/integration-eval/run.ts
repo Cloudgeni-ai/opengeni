@@ -239,6 +239,7 @@ async function driveSession(
   const decision = testCase.decision ?? "approve";
   const attempts: ApprovalAttempt[] = [];
   const workspaceTried = new Set<string>();
+  let mainKeyRefused = false;
   let complete = true;
   const events: SessionEvent[] = [];
   const decided = new Set<string>();
@@ -328,8 +329,11 @@ async function driveSession(
         // connection's write, it isn't the owner's); the grader reports it.
         if (status === 409 || status === 403) decided.add(approval.approvalId);
         else console.warn(`approval ${approval.approvalId} failed, will retry: ${String(error)}`);
+        if (status === 403) mainKeyRefused = true;
       }
     }
+    // Nobody else will answer that approval: stop now rather than at the deadline.
+    if (mainKeyRefused) break;
 
     const snapshot = await api.session(workspaceId, sessionId);
     // The model provider has no capacity (for example a subscription quota):
@@ -408,7 +412,7 @@ type GradedFields = Pick<
 >;
 
 /** Grades one finished chat from its events; shared by `run` and `regrade`. */
-function gradeEvents(
+export function gradeEvents(
   testCase: EvalCase,
   events: SessionEvent[],
   timedOut: boolean,
@@ -422,21 +426,36 @@ function gradeEvents(
   writeFileSync(receiptsFile, JSON.stringify(receipts, null, 2));
   // A run still going at the deadline is the agent's verdict (looping or
   // stalled), not the harness's; an event history cut short is the harness's.
+  // The main key couldn't decide an approval (the harness stopped the chat):
+  // a setup problem, not the agent's verdict.
+  const refused = attempts.find((attempt) => attempt.key === "main" && attempt.status === 403);
   let grade: Grade = !complete
     ? {
         pass: false,
         category: "harness_error",
         reasons: ["session events were cut short or trimmed"],
       }
-    : timedOut && stalledOnCapacity(events)
+    : refused
       ? {
           pass: false,
           category: "harness_error",
-          reasons: ["no model capacity (provider quota or capacity); not a product verdict"],
+          reasons: [
+            `the main key may not decide approvals here (403${refused.detail ? `: ${refused.detail.slice(0, 120)}` : ""}); for a personal connection it must be the owner's key`,
+          ],
         }
-      : timedOut
-        ? { pass: false, category: "timeout", reasons: ["agent still active at the run deadline"] }
-        : gradeCase(testCase, receipts, verification, attempts);
+      : timedOut && stalledOnCapacity(events)
+        ? {
+            pass: false,
+            category: "harness_error",
+            reasons: ["no model capacity (provider quota or capacity); not a product verdict"],
+          }
+        : timedOut
+          ? {
+              pass: false,
+              category: "timeout",
+              reasons: ["agent still active at the run deadline"],
+            }
+          : gradeCase(testCase, receipts, verification, attempts);
   if (
     !timedOut &&
     receipts.tools.length === 0 &&

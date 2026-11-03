@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { CASES } from "./catalogue";
 import { gradeCase } from "./grade";
@@ -6,6 +9,7 @@ import { parseReceipts, type EventLike } from "./receipts";
 import {
   cellsFromConfig,
   countFlag,
+  gradeEvents,
   latestRecords,
   parseCells,
   selectCases,
@@ -488,6 +492,34 @@ describe("gradeCase", () => {
       },
     ];
     expect(gradeCase(writeCase, receipts, null, attempts).category).toBe("harness_error");
+  });
+
+  test("a chat stopped after a main-key 403 is a harness error, not a timeout", () => {
+    const dir = mkdtempSync(join(tmpdir(), "eval-grade-"));
+    try {
+      const stopped = events(created("c1"), approval("c1"), {
+        type: "turn.cancelled",
+        payload: { reason: "integration eval run deadline" },
+      });
+      const attempts: ApprovalAttempt[] = [
+        { approvalId: "c1", key: "main", decision: "approve", status: 403, detail: "Forbidden" },
+      ];
+      const graded = gradeEvents(
+        writeCase,
+        stopped as never,
+        true,
+        null,
+        join(dir, "r.json"),
+        true,
+        attempts,
+      );
+      expect(graded.grade.category).toBe("harness_error");
+      expect(
+        gradeEvents(writeCase, stopped as never, true, null, join(dir, "t.json")).grade.category,
+      ).toBe("timeout");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("an owner-only row with no approval reports the missing approval", () => {
