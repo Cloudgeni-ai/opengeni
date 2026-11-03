@@ -25,6 +25,15 @@ bearer design, but an organization API key belongs on the product server.
 Browser cookies are accepted cross-origin only from operator-configured trusted
 origins; arbitrary embedding origins never receive credentialed CORS responses.
 
+## Billing
+
+API and embedded-product usage spends credits, not plan credit. Connected AI
+subscriptions are available in the Opengeni apps on paid plans, not through the
+API. Omit the model to use an eligible credit-billed default; explicitly selecting
+a connected subscription returns `403` with `subscription_api_unavailable`.
+See [billing origin](../../docs/billing-origin.md) for the internal legacy-account
+exception.
+
 ## Task usage limits
 
 `createSession(workspaceId, { initialMessage, usageLimitMicros })` sets an

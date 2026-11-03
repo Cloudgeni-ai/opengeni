@@ -391,6 +391,10 @@ refusal or paid-plan upgrade action instead of reporting a provider outage.
 Recording workers carry the version's frozen origin through transcription and
 automatic meeting notes.
 
+Connected Codex and SuperGrok realtime voice apply the same admission at call
+start and before every new provider connection. Their model catalog explains
+the API refusal or required upgrade, and eligible app calls never debit credits.
+
 An own-key or own-subscription route is told apart by its billing metadata:
 a model whose credential source or upstream payer is `connected_subscription`
 (or whose provider kind is a subscription) is an own subscription

@@ -427,8 +427,14 @@ export function createSpeechToTextDeployment(
       const provider = registry.get(providerId);
       if (!provider) return false;
       try {
-        if (scope) await assertEligible(providerId, scope);
         if (scope && !(await regionAllowed(providerId, scope, feature))) return false;
+        let providerScope = scope;
+        if (provider.funding === "workspace_subscription" && scope && !scope.accountId && db) {
+          const accountId = (await getWorkspace(db, scope.workspaceId))?.accountId;
+          if (!accountId) return false;
+          providerScope = { ...scope, accountId };
+        }
+        if (providerScope) await assertEligible(providerId, providerScope);
         if (provider.funding === "workspace_key") {
           if (!scope) return true;
           const kind = KEY_PROVIDER_CONNECTIONS[providerId];
@@ -456,7 +462,7 @@ export function createSpeechToTextDeployment(
           ]);
           return own !== null || organization;
         }
-        return provider.available ? await provider.available(scope) : true;
+        return provider.available ? await provider.available(providerScope) : true;
       } catch {
         // A failing readiness probe means the provider is not ready; it
         // never fails the caller.

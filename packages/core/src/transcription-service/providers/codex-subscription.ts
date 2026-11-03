@@ -28,7 +28,6 @@ import {
   withoutFallback,
   assertSubscriptionTranscriptionAllowed,
 } from "./subscription-core";
-import { checkOwnSubscriptionPlan } from "../../billing/limits";
 
 const TRANSCRIBE_URL = "https://chatgpt.com/backend-api/transcribe";
 
@@ -177,7 +176,6 @@ export function createCodexSubscriptionTranscriptionProvider(input: {
         context.accountId ?? (await getWorkspace(input.db, context.workspaceId))?.accountId;
       // An unresolvable account fails closed rather than guessing a path.
       if (!accountId) return false;
-      if (!(await checkOwnSubscriptionPlan(input, accountId)).allowed) return false;
       const candidates = await listSubscriptionCoreCodexOperationCandidates(input.db, {
         kind: "workspace",
         accountId,
