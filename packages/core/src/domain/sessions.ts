@@ -197,6 +197,7 @@ import {
   getSessionLineage,
   getSessionTurn,
   getSessionTurnInitiatingHumanSubjectId,
+  sameTurnSender,
   readTurnBillingOrigin,
   getSessionTurnForAttempt,
   getSessionTurnPersonalConnectionDelegations,
@@ -4738,7 +4739,8 @@ async function acceptSessionUserMessageInFileScope(
         frozenInitiatorForCommandActor(scopedDb, workspaceId, admissionActor, grant.subjectLabel),
     );
     // Re-submitting a checked-out queue edit retains the original turn's
-    // causal human, just as the locked prompt transaction does.
+    // causal human when its own sender resubmits it, just as the locked
+    // prompt transaction does. Anyone else's edit is their own message.
     if (delivery === "send" && input.expectedDraftRevision != null) {
       const draft = await withWorkspaceSubjectSessionActivityRls(
         db,
@@ -4754,7 +4756,7 @@ async function acceptSessionUserMessageInFileScope(
       if (draft?.revision === input.expectedDraftRevision && draft.sourceTurnId) {
         const sourceTurn = await getSessionTurn(db, workspaceId, draft.sourceTurnId);
         if (sourceTurn?.sessionId === sessionId) {
-          frozenAdmissionInitiator = {
+          const sourceInitiator = {
             initiator: sourceTurn.initiator,
             context: sourceTurn.initiatorContext,
             initiatingHumanSubjectId: await getSessionTurnInitiatingHumanSubjectId(
@@ -4763,6 +4765,9 @@ async function acceptSessionUserMessageInFileScope(
               sourceTurn.id,
             ),
           };
+          if (sameTurnSender(sourceInitiator, frozenAdmissionInitiator)) {
+            frozenAdmissionInitiator = sourceInitiator;
+          }
         }
       }
     }

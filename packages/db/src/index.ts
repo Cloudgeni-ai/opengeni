@@ -1124,7 +1124,11 @@ import {
   UNATTRIBUTED_LEGACY_INITIATOR,
   type FrozenTurnInitiator,
 } from "./turn-initiator";
-export { frozenInitiatorForCommandActor, type FrozenTurnInitiator } from "./turn-initiator";
+export {
+  frozenInitiatorForCommandActor,
+  sameTurnSender,
+  type FrozenTurnInitiator,
+} from "./turn-initiator";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 import {
   fromPostgresLosslessJson,
