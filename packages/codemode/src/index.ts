@@ -226,6 +226,12 @@ export function isCodemodeCallerStaleError(error: unknown): error is CodemodeTra
   return error instanceof CodemodeTransportError && error.remoteCode === CODEMODE_CALLER_STALE_CODE;
 }
 
+/** Bearers the API refused as stale, per API base, shared by every client in
+ * this process: a program that builds a fresh client per retry must not reach
+ * the API with a dead bearer either. Only digests are kept, never bearer bytes. */
+const staleCallerRefusals = new Map<string, CodemodeTransportError>();
+const STALE_CALLER_REFUSALS_RETAINED = 64;
+
 /** Persistent, idempotent client for one exact sandbox attempt bearer. */
 export class CodemodeClient {
   private readonly baseUrl: string;
@@ -233,10 +239,6 @@ export class CodemodeClient {
   private readonly pollIntervalMs: number;
   private readonly timeoutMs: number;
   private catalogSnapshot: AttemptToolCatalogValue | null = null;
-  /** Digest of the bearer the API refused as stale, with that refusal. Later
-   * requests with the same bearer fail locally instead of re-asking the API;
-   * a renewed bearer (token file rewritten for a new attempt) is tried again. */
-  private staleRefusal: { bearerDigest: string; error: CodemodeTransportError } | null = null;
 
   constructor(private readonly options: CodemodeClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/u, "");
@@ -544,9 +546,12 @@ export class CodemodeClient {
   private async request(path: string, init: RequestInit, throwOnError = true): Promise<Response> {
     const token =
       typeof this.options.token === "function" ? await this.options.token() : this.options.token;
-    const bearerDigest = createHash("sha256").update(token).digest("hex");
-    if (this.staleRefusal?.bearerDigest === bearerDigest) {
-      const refused = this.staleRefusal.error;
+    // A bearer refused as stale never becomes valid again: fail locally with
+    // the same refusal. A renewed bearer (token file rewritten for a new
+    // attempt) has another digest and is sent normally.
+    const refusalKey = `${this.baseUrl}\u0000${createHash("sha256").update(token).digest("hex")}`;
+    const refused = staleCallerRefusals.get(refusalKey);
+    if (refused) {
       throw new CodemodeTransportError(refused.message, refused.status, {
         ...(refused.remoteCode ? { code: refused.remoteCode } : {}),
         retryable: false,
@@ -586,7 +591,10 @@ export class CodemodeClient {
       }
       const error = new CodemodeTransportError(message, response.status, errorOptions);
       if (isCodemodeCallerStaleError(error)) {
-        this.staleRefusal = { bearerDigest, error };
+        staleCallerRefusals.set(refusalKey, error);
+        if (staleCallerRefusals.size > STALE_CALLER_REFUSALS_RETAINED) {
+          staleCallerRefusals.delete(staleCallerRefusals.keys().next().value!);
+        }
         // The bearer's attempt ended: nothing it could ask for is current.
         this.catalogSnapshot = null;
       }
