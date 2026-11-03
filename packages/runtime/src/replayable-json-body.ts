@@ -2,6 +2,7 @@ import OpenAI, { type APIError } from "openai";
 import type { APIPromise } from "openai/core/api-promise";
 import { Stream } from "openai/core/streaming";
 import { types as utilTypes } from "node:util";
+import { CODEX_REQUEST_ID_HEADER } from "@opengeni/codex";
 import { hasResponsesTurn, markResponsesPrefixReady } from "@opengeni/network/responses-websocket";
 import {
   createJsonSafeSummary,
@@ -15,6 +16,7 @@ import {
 import {
   guardRequestToolNames,
   observeToolNames,
+  RejectedToolNames,
   responseRejectsToolName,
   restoreToolNames,
   type ToolNameAliases,
@@ -85,6 +87,8 @@ type ToolNameRequest = {
   aliases: ToolNameAliases;
   /** The strict body, once the provider rejected a tool name; later sends use it. */
   strict?: Record<string, unknown>;
+  /** The client's memory of names its route rejected. */
+  rejected: RejectedToolNames;
 };
 
 /** Each guarded request body's tool names, by the body's identity. */
@@ -110,6 +114,27 @@ function withJsonBody(
   };
 }
 
+/** Headers whose value identifies one request body to a provider or transport. */
+const REQUEST_IDENTITY_HEADERS = ["idempotency-key", CODEX_REQUEST_ID_HEADER];
+
+/**
+ * The strict resend's init: its own body, and its own request identity, so
+ * an idempotency key never pairs the rejected body's answer with the new one.
+ */
+function withStrictResend(
+  init: RequestInit | undefined,
+  body: Record<string, unknown>,
+): ReplayableRequestInit {
+  const next = withJsonBody(init, body);
+  if (init?.headers === undefined) return next;
+  const headers = new Headers(init.headers);
+  for (const name of REQUEST_IDENTITY_HEADERS) {
+    const value = headers.get(name);
+    if (value !== null) headers.set(name, `${value}:tool-names`);
+  }
+  return { ...next, headers };
+}
+
 /**
  * Resend a request once, with every tool name aliased (strict mode), when
  * the provider answers 400 because of a tool name the outbound guard let
@@ -129,20 +154,23 @@ function toolNameRetryFetch(
       typeof source === "object" && source !== null ? toolNameRequests.get(source) : undefined;
     if (!names) return await inner(input, init);
     // A later send of a request already resent strictly (an SDK retry) stays strict.
-    if (names.strict) return await inner(input, withJsonBody(init, names.strict));
+    if (names.strict) return await inner(input, withStrictResend(init, names.strict));
     const response = await inner(input, init);
     if (!(await responseRejectsToolName(response))) return response;
     const strict = guardRequestToolNames(names.api, names.original, { strict: true });
+    // Without a tool name to alias, a resend would repeat the same request.
+    if (strict.body === names.original) return response;
     names.strict = strict.body;
     names.aliases = strict.aliases;
     await response.body?.cancel().catch(() => undefined);
     let resent: Response;
     try {
-      resent = await inner(input, withJsonBody(init, strict.body));
+      resent = await inner(input, withStrictResend(init, strict.body));
     } catch (error) {
       observeToolNames(onRetry, { api: names.api, outcome: "failed" });
       throw error;
     }
+    if (resent.ok) names.rejected.rememberRequest(names.api, names.original);
     observeToolNames(onRetry, { api: names.api, outcome: resent.ok ? "completed" : "failed" });
     return resent;
   };
@@ -228,6 +256,8 @@ export async function requestBodyText(body: BodyInit | null | undefined): Promis
 export class ReplayableJsonOpenAI extends OpenAI {
   private readonly modelRequestPolicy: ModelJsonRequestPolicy | undefined;
   private readonly onToolNameRepair: ReplayableJsonOpenAIHooks["onToolNameRepair"];
+  /** Names this client's route rejected (see RejectedToolNames). */
+  private readonly rejectedToolNames = new RejectedToolNames();
 
   constructor(options: OpenAIOptions, hooks: ReplayableJsonOpenAIHooks = {}) {
     super({
@@ -275,11 +305,12 @@ export class ReplayableJsonOpenAI extends OpenAI {
       const api = toolNameApi(path);
       if (api && isJsonRecordBody(prepared.body)) {
         const original = prepared.body;
-        const guarded = guardRequestToolNames(api, original);
+        const rejected = this.rejectedToolNames;
+        const guarded = guardRequestToolNames(api, original, { rejected });
         for (const field of guarded.repaired) {
           observeToolNames(this.onToolNameRepair, { api, field });
         }
-        names = { api, original, aliases: guarded.aliases };
+        names = { api, original, aliases: guarded.aliases, rejected };
         toolNameRequests.set(guarded.body, names);
         if (guarded.body !== original) prepared = { ...prepared, body: guarded.body };
       }

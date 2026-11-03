@@ -77,10 +77,50 @@ export function parseInvalidRequestText(text: string): unknown {
   }
 }
 
-/** A 400 response's error body, read from a clone; null when unreadable. */
+const ERROR_BODY_READ_TIMEOUT_MS = 5_000;
+
+/**
+ * A response's text from a clone, or null when it is longer than
+ * MAX_BODY_CHARACTERS bytes or does not arrive within a few seconds.
+ */
+async function boundedCloneText(response: Response): Promise<string | null> {
+  const reader = response.clone().body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), ERROR_BODY_READ_TIMEOUT_MS);
+  });
+  const read = (async (): Promise<string | null> => {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      bytes += next.value.byteLength;
+      if (bytes > MAX_BODY_CHARACTERS) return null;
+      chunks.push(next.value);
+    }
+    const joined = new Uint8Array(bytes);
+    let offset = 0;
+    for (const chunk of chunks) {
+      joined.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return new TextDecoder().decode(joined);
+  })().catch(() => null);
+  try {
+    return await Promise.race([read, deadline]);
+  } finally {
+    clearTimeout(timer);
+    void reader.cancel().catch(() => undefined);
+  }
+}
+
+/** A 400 response's error body, read from a bounded clone; null when unreadable. */
 export async function invalidRequestBodyOfResponse(response: Response): Promise<unknown> {
   try {
-    return parseInvalidRequestText(await response.clone().text());
+    const text = await boundedCloneText(response);
+    return text === null ? null : parseInvalidRequestText(text);
   } catch {
     return null;
   }

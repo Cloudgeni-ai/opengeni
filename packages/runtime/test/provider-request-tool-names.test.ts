@@ -13,6 +13,8 @@ import {
 import {
   guardRequestToolNames,
   isToolNameRejection,
+  RejectedToolNames,
+  responseRejectsToolName,
   restoreChatToolNames,
   restoreClaudeToolNames,
   restoreResponsesToolNames,
@@ -464,6 +466,41 @@ describe("outbound tool-name guard", () => {
       aliases,
     );
     expect(restored.output[0]).toMatchObject({ namespace: "git hub", name: "open.pr" });
+  });
+
+  test("a streamed call event inside a namespace gets its original names back", () => {
+    const { aliases } = guardRequestToolNames("responses", {
+      tools: [{ type: "namespace", name: "git hub", tools: [responsesDefinition("open.pr")] }],
+    });
+    const restored = restoreResponsesToolNames(
+      {
+        type: "response.function_call_arguments.done",
+        namespace: providerToolNameAlias("git hub"),
+        name: providerToolNameAlias("open.pr"),
+        arguments: "{}",
+      },
+      aliases,
+    );
+    expect(restored).toMatchObject({ namespace: "git hub", name: "open.pr" });
+  });
+
+  test("names a route rejected before are aliased; every other name stays", () => {
+    const rejected = new RejectedToolNames();
+    rejected.rememberRequest("responses", {
+      tools: [responsesDefinition("web-search"), responsesDefinition("exec_command")],
+    });
+    // Only names outside the portable form are remembered.
+    expect(rejected.has("web-search")).toBe(true);
+    expect(rejected.has("exec_command")).toBe(false);
+    const { body } = guardRequestToolNames(
+      "responses",
+      { tools: [responsesDefinition("web-search"), responsesDefinition("exec_command")] },
+      { rejected },
+    );
+    expect((body.tools as Array<{ name: string }>).map((tool) => tool.name)).toEqual([
+      providerToolNameAlias("web-search"),
+      "exec_command",
+    ]);
   });
 });
 
@@ -1045,6 +1082,88 @@ describe("the strict resend after a rejected tool name", () => {
     expect(bodies).toHaveLength(1);
   });
 
+  test("the route's rejected names are aliased on later requests, without another rejection", async () => {
+    const retries: unknown[] = [];
+    const { client, bodies } = openAIClient(
+      provider,
+      (body, attempt) =>
+        attempt === 1 ? nameRejection("tools[0].name") : responsesCall(body.tools[0].name),
+      { onToolNameRetry: (observation) => retries.push(observation) },
+    );
+    const model = new OpenGeniResponsesModel(client, "fixture-responses", provider);
+    await getOrCreateTrace(() => model.getResponse(modelRequest(["web-search", "exec_command"])));
+    const later = await getOrCreateTrace(() =>
+      model.getResponse(modelRequest(["web-search", "exec_command"], ["web-search"])),
+    );
+    expect(bodies).toHaveLength(3);
+    expect(bodies[0].tools[0].name).toBe("web-search");
+    expect(bodies[2].tools.map((tool: { name: string }) => tool.name)).toEqual([
+      providerToolNameAlias("web-search"),
+      "exec_command",
+    ]);
+    expect(bodies[2].input[1].name).toBe(providerToolNameAlias("web-search"));
+    expect(calledName(later.output)).toBe("web-search");
+    expect(retries).toEqual([{ api: "responses", outcome: "completed" }]);
+  });
+
+  test("the resend carries its own request identity", async () => {
+    const sent: Array<{ requestId: string | null; idempotencyKey: string | null }> = [];
+    const client = new ReplayableJsonOpenAI(
+      {
+        apiKey: "fixture-key",
+        baseURL: "https://example.test/v1",
+        maxRetries: 0,
+        fetch: async (_url, init) => {
+          const body = JSON.parse(await requestBodyText(init?.body));
+          const headers = new Headers(init?.headers);
+          sent.push({
+            requestId: headers.get("x-opengeni-request-id"),
+            idempotencyKey: headers.get("idempotency-key"),
+          });
+          return sent.length === 1
+            ? nameRejection("tools[0].name")
+            : responsesCall(body.tools[0].name);
+        },
+      },
+      {
+        modelRequestPolicy: () => ({
+          headers: { "x-opengeni-request-id": "request-1", "idempotency-key": "request-1" },
+        }),
+      },
+    );
+    const model = new OpenGeniResponsesModel(client, "fixture-responses", provider);
+    await getOrCreateTrace(() => model.getResponse(modelRequest(["lookup"])));
+    expect(sent).toEqual([
+      { requestId: "request-1", idempotencyKey: "request-1" },
+      { requestId: "request-1:tool-names", idempotencyKey: "request-1:tool-names" },
+    ]);
+  });
+
+  test("a rejection with no tool name to alias is returned without a resend", async () => {
+    const { client, bodies } = openAIClient(provider, () => nameRejection("input[0].name"));
+    const model = new OpenGeniResponsesModel(client, "fixture-responses", provider);
+    const failure = await getOrCreateTrace(() => model.getResponse(modelRequest([]))).catch(
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(Error);
+    expect(bodies).toHaveLength(1);
+  });
+
+  test("an oversized error body is never read as a tool-name rejection", async () => {
+    const oversized = Response.json(
+      {
+        error: {
+          message: `Invalid 'tools[0].name': string does not match pattern. ${"x".repeat(70_000)}`,
+          param: "tools[0].name",
+          code: "invalid_string",
+        },
+      },
+      { status: 400 },
+    );
+    expect(await responseRejectsToolName(oversized)).toBe(false);
+    expect(await responseRejectsToolName(nameRejection("tools[0].name"))).toBe(true);
+  });
+
   test("Chat Completions: resent once with every name aliased", async () => {
     const chatProvider: ResolvedModelProvider = { ...provider, api: "chat" };
     const { client, bodies } = openAIClient(chatProvider, (body, attempt) =>
@@ -1105,5 +1224,47 @@ describe("the strict resend after a rejected tool name", () => {
         expect(retries).toEqual([{ api: "anthropic-messages", outcome: "failed" }]);
       }
     }
+  });
+
+  test("Claude Messages: the rejected names are aliased on the next request without a rejection", async () => {
+    const bodies: any[] = [];
+    const model = new AnthropicMessagesModel(
+      { ...provider, api: "anthropic-messages" },
+      "claude-fixture",
+      (async (_url: unknown, init?: RequestInit) => {
+        const body = JSON.parse(await requestBodyText(init?.body));
+        bodies.push(body);
+        if (bodies.length === 1)
+          return Response.json(
+            {
+              type: "error",
+              error: {
+                type: "invalid_request_error",
+                message: "tools.0.custom.name: String should match pattern '^[a-zA-Z_]{1,64}$'",
+              },
+            },
+            { status: 400 },
+          );
+        return Response.json({
+          id: "message-fixture",
+          type: "message",
+          role: "assistant",
+          content: [{ type: "tool_use", id: "toolu_1", name: body.tools[0].name, input: {} }],
+          stop_reason: "tool_use",
+          usage: { input_tokens: 1, output_tokens: 1 },
+        });
+      }) as typeof fetch,
+    );
+    await getOrCreateTrace(() => model.getResponse(modelRequest(["web-search", "lookup"])));
+    const later = await getOrCreateTrace(() =>
+      model.getResponse(modelRequest(["web-search", "lookup"])),
+    );
+    expect(bodies).toHaveLength(3);
+    expect(bodies[0].tools[0].name).toBe("web-search");
+    expect(bodies[2].tools.map((tool: { name: string }) => tool.name)).toEqual([
+      providerToolNameAlias("web-search"),
+      "lookup",
+    ]);
+    expect(calledName(later.output)).toBe("web-search");
   });
 });

@@ -1650,9 +1650,17 @@ constraints (a `…name` or `…namespace` path, or `tool_choice`, with a
 pattern or length error), the request is sent once more in strict mode:
 every tool name, valid or not, gets its alias, and nothing else changes.
 That resend is a single step and is never repeated; a later send of the
-same request (an SDK retry) stays strict. Its answer is final: if it is
-rejected too, the turn fails with the provider's message, and Retry
-applies the same repair. Any other 400 is returned as it is.
+same request (an SDK retry) stays strict. It carries its own request
+identity (`:tool-names` is appended to `x-opengeni-request-id` and any
+`Idempotency-Key`), so an idempotency cache never answers it with the
+rejection. Its answer is final: if it is rejected too, the turn fails with
+the provider's message, and Retry applies the same repair. Any other 400,
+an unreadable or oversized error body, and a request without a tool name
+to alias are returned as they are. When the resend succeeds, the client
+remembers that request's names outside the strict form (letters, digits and
+`_`, starting with a letter; at most 1,024 names) and aliases them on its
+later requests, so the route does not pay the rejection on every call;
+every other name stays byte for byte.
 
 Stored history can hold an invalid name: a known secret value inside a tool
 name was masked into a reference before tool identities were exempt from

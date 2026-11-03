@@ -32,7 +32,10 @@ import { isProviderToolName, providerToolNameAlias } from "./provider-tool-names
  *
  * Strict mode, used once after a provider still rejects a tool name, aliases
  * every name, valid or not, to a name of letters, digits and `_` that starts
- * with a letter.
+ * with a letter. When that resend succeeds, the request's names outside that
+ * narrow form are remembered for the client (`RejectedToolNames`), so its
+ * later requests alias them straight away instead of paying the rejection
+ * again; every other name stays byte for byte.
  */
 
 export type ToolNameWireApi = "responses" | "chat" | "anthropic-messages";
@@ -74,6 +77,43 @@ export class ToolNameAliases {
 }
 
 const NO_ALIASES = new ToolNameAliases();
+
+/** Letters, digits and `_`, starting with a letter: the form strict aliases take. */
+const PORTABLE_TOOL_NAME = /^[a-zA-Z][a-zA-Z0-9_]{0,63}$/;
+const REJECTED_TOOL_NAMES_LIMIT = 1024;
+
+/**
+ * The tool names one client's route rejected: after a strict resend
+ * succeeded, every name of that request outside the portable form. Later
+ * requests through the client alias these names without a failed attempt
+ * first. Bounded; the oldest name is forgotten first.
+ */
+export class RejectedToolNames {
+  private readonly names = new Set<string>();
+
+  has(name: string): boolean {
+    return this.names.has(name);
+  }
+
+  get size(): number {
+    return this.names.size;
+  }
+
+  /** Remember the names of a request (before the guard) outside the portable form. */
+  rememberRequest(api: ToolNameWireApi, body: Record<string, unknown>): void {
+    WALKERS[api](body, (ref) => {
+      for (const name of ref.kind === "leaf" ? [ref.name, ref.namespace] : [ref.name]) {
+        if (PORTABLE_TOOL_NAME.test(name) || this.names.has(name)) continue;
+        this.names.add(name);
+        if (this.names.size > REJECTED_TOOL_NAMES_LIMIT) {
+          const oldest = this.names.values().next().value;
+          if (oldest !== undefined) this.names.delete(oldest);
+        }
+      }
+      return ref.name;
+    });
+  }
+}
 
 /** Monitoring-only observations of the guard; they never affect a request. */
 export type ToolNameObservers = {
@@ -587,6 +627,8 @@ function scopeKey(ref: NameRef): string {
 export type ToolNameGuardOptions = {
   /** Alias every name, valid or not (the one retry after a rejected name). */
   strict?: boolean;
+  /** Names the client's route rejected before; they are aliased too. */
+  rejected?: RejectedToolNames;
 };
 
 /**
@@ -601,12 +643,14 @@ export function guardRequestToolNames<T extends Record<string, unknown>>(
 ): GuardedToolNames<T> {
   const walk = WALKERS[api];
   const strict = options.strict === true;
+  const rejected = options.rejected;
   const refs: NameRef[] = [];
   walk(body, (ref) => {
     refs.push(ref);
     return ref.name;
   });
-  const renames = (ref: NameRef) => strict || !isProviderToolName(ref.name);
+  const renames = (ref: NameRef) =>
+    strict || !isProviderToolName(ref.name) || rejected?.has(ref.name) === true;
   if (!refs.some(renames)) return { body, aliases: NO_ALIASES, repaired: [] };
 
   // Names that stay as they are, per scope; an alias never takes one.
@@ -691,7 +735,13 @@ export function restoreResponsesToolNames<T>(payload: T, aliases: ToolNameAliase
     payload.type.startsWith("response.") &&
     typeof payload.name === "string"
   ) {
-    next = withValue(next, "name", aliases.restoreFlat(payload.name));
+    if (typeof payload.namespace === "string") {
+      const namespace = aliases.restoreNamespace(payload.namespace);
+      next = withValue(next, "namespace", namespace);
+      next = withValue(next, "name", aliases.restoreLeaf(namespace, payload.name));
+    } else {
+      next = withValue(next, "name", aliases.restoreFlat(payload.name));
+    }
   }
   return next as T;
 }

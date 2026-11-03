@@ -28,6 +28,7 @@ import { isModelPreempted, preemptedResponseDone } from "./model-preemption";
 import { projectHistoryForProvider } from "./provider-history-adapter";
 import {
   guardRequestToolNames,
+  RejectedToolNames,
   observeToolNames,
   rejectsToolName,
   restoreClaudeToolNames,
@@ -1156,6 +1157,8 @@ export class AnthropicMessagesModel implements Model {
   private readonly sizeImage = createModelImageSizer(2000, ANTHROPIC_IMAGE_MAX_ENCODED_BYTES);
   /** The tool-name aliases each response answers (see provider-request-tool-names.ts). */
   private readonly toolNameAliases = new WeakMap<Response, ToolNameAliases>();
+  /** Names this model's route rejected (see RejectedToolNames). */
+  private readonly rejectedToolNames = new RejectedToolNames();
   constructor(
     readonly provider: ResolvedModelProvider,
     readonly model: string,
@@ -1313,6 +1316,7 @@ export class AnthropicMessagesModel implements Model {
     // The outbound tool-name guard runs last, on the body as it is sent.
     const guarded = guardRequestToolNames("anthropic-messages", body, {
       strict: strictToolNames,
+      rejected: this.rejectedToolNames,
     });
     const serialized = JSON.stringify(guarded.body);
     return {
@@ -1321,6 +1325,7 @@ export class AnthropicMessagesModel implements Model {
       serialized,
       size: anthropicRequestSize(guarded.body, serialized),
       toolNames: guarded,
+      unguardedBody: body,
     };
   }
 
@@ -1345,6 +1350,7 @@ export class AnthropicMessagesModel implements Model {
       serialized,
       size,
       toolNames: guardedToolNames,
+      unguardedBody,
     } = await this.prepare(request, stream, strictToolNames);
     if (!strictToolNames) {
       for (const field of guardedToolNames.repaired) {
@@ -1382,7 +1388,10 @@ export class AnthropicMessagesModel implements Model {
       if (
         !strictToolNames &&
         response.status === 400 &&
-        rejectsToolName(parseInvalidRequestText(detail))
+        rejectsToolName(parseInvalidRequestText(detail)) &&
+        // Without a tool name to alias, a resend would repeat the same request.
+        guardRequestToolNames("anthropic-messages", unguardedBody, { strict: true }).body !==
+          unguardedBody
       ) {
         let resent: Response;
         try {
@@ -1398,6 +1407,7 @@ export class AnthropicMessagesModel implements Model {
           api: "anthropic-messages",
           outcome: "completed",
         });
+        this.rejectedToolNames.rememberRequest("anthropic-messages", unguardedBody);
         return resent;
       }
       const contextExceeded =
