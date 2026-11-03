@@ -61098,6 +61098,13 @@ export async function verifyWorkspaceMutationSettlement(
   },
 ): Promise<void> {
   const routeKind = input.routeKind ?? "home";
+  // Settle the exact admission: without an explicit route epoch, the route
+  // epoch is the one recorded when it was admitted, never the session's
+  // current epoch. A swap during a home-sandbox command moves the session's
+  // active route but changes nothing about where that command ran, so it must
+  // not reject the command's output (an active-route move is still fenced as
+  // route_fenced against the admission's recorded route).
+  const routeEpoch = input.routeEpoch ?? input.admission.routeEpoch;
   await verifyWorkspaceMutationSettlementForAuthority(
     db,
     {
@@ -61114,7 +61121,7 @@ export async function verifyWorkspaceMutationSettlement(
       expectedInstanceId: input.expectedInstanceId,
       routeKind,
       routeTargetId: routeKind === "home" ? null : (input.routeTargetId ?? null),
-      ...(input.routeEpoch === undefined ? {} : { routeEpoch: input.routeEpoch }),
+      routeEpoch,
     },
     input,
   );
