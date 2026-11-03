@@ -128,6 +128,11 @@ export type BillingState = {
 export type SandboxRuntimeState = {
   resolvedSandbox: ResumedTurnSandbox | null;
   attemptWritersDrained: boolean;
+  /** The command fence the attempt writer drain cancelled and quiesced. Set
+   * together with `attemptWritersDrained`; a cancelled fence also refuses
+   * every later command, so a workspace mutation that writes only through it
+   * can no longer write once this is set. */
+  drainedCommandFence: TurnToolCancellationFence | null;
   lateSandboxesAwaitingWriterDrain: Set<ResumedTurnSandbox>;
   machinePrimarySession: SelfhostedSession | null;
   lazyOwnedSandbox: EstablishedSandboxSession | null;
@@ -357,6 +362,7 @@ export function createTurnContext(input: {
     sandboxState: {
       resolvedSandbox: null,
       attemptWritersDrained: false,
+      drainedCommandFence: null,
       lateSandboxesAwaitingWriterDrain: new Set(),
       machinePrimarySession: null,
       lazyOwnedSandbox: null,

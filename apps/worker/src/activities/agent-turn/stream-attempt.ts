@@ -124,6 +124,7 @@ import {
 import { programmaticApproval, programmaticContinuationNote } from "../programmatic-approvals";
 import { CodemodeAttemptDispatcher } from "../codemode-dispatcher";
 import { ToolResultSpill } from "./tool-result-spill";
+import type { WorkspaceMutationOptions } from "./sandbox-runtime";
 import { ownedTurnSandboxForAgent } from "./turn-sandbox-access";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
@@ -287,6 +288,7 @@ export type TurnStreamAttemptDeps = {
       outcome: "completed" | "failed";
       durationSeconds: number;
     }) => void,
+    options?: WorkspaceMutationOptions,
   ) => Promise<T>;
   throwIfWorkerShuttingDown: () => void;
   throwIfTurnCancelled: () => void;
