@@ -55,6 +55,33 @@ additions. The final `knowledge_index_claim` replacement pins
 `pg_catalog, <data schema>, pg_temp`, so temporary tables cannot shadow its
 accounting sources. Upgrade consumers before enabling producer writes.
 
+## Removing content masking (1239)
+
+This release stops masking secret values and secret-shaped text in tool
+results, model input and storage (docs/secrets.md, "Agent-visible content").
+`1239_drop_audit_events_secret_used_index.sql` is rolling: it drops the index
+only masking used; a previous-release worker that still loads earlier secret
+uses during the rollout falls back to the workspace audit index.
+
+Each active chat takes about one prompt-cache miss on its first request after
+the upgrade, because the model input is no longer re-masked; later requests
+repeat earlier items byte for byte.
+
+After the rollout, run the one-off tool-name fix with a maintenance
+connection (superuser or `BYPASSRLS`):
+
+```sh
+OPENGENI_MAINTENANCE_DATABASE_URL=... bun run db:repair-invalid-tool-names           # dry run: counts
+OPENGENI_MAINTENANCE_DATABASE_URL=... bun run db:repair-invalid-tool-names --apply   # writes
+```
+
+It gives every stored tool name a provider would reject (a masked name, or a
+dotted `server.tool` call stored as written) one valid name per session in
+model history and saved run states, and changes nothing else. Earlier releases
+repaired these names on every request; this release no longer does, so a chat
+holding one fails with a provider 400 until the fix runs. Rerunning it is a
+no-op.
+
 ## Receiving chat execution context (0608)
 
 `0608_receiver_execution_context.sql` requires maintenance. Stop every API,
