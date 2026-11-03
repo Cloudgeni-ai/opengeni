@@ -296,6 +296,32 @@ describe("fail-closed change impact", () => {
     expect(web.guards).not.toContain("public-api");
   });
 
+  test("published SDK compatibility runs in the service tier for every relevant producer and fixture", () => {
+    const suite = "test/integration/sdk-compatibility.integration.ts";
+    for (const path of [
+      "apps/api/src/app.ts",
+      "packages/sdk/src/client.ts",
+      "packages/contracts/src/index.ts",
+      "packages/core/src/domain/sessions.ts",
+      "packages/db/src/index.ts",
+      "packages/events/src/index.ts",
+      "packages/runtime/src/index.ts",
+      "apps/worker/src/activities.ts",
+      "packages/react/src/index.ts",
+      "packages/storage/src/index.ts",
+      "packages/testing/src/settings.ts",
+      "test/integration/sdk-compatibility/consumer.ts",
+      "test/integration/sdk-compatibility/versions.json",
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.integrationTests, path).toContain(suite);
+      expect(plan.unitTests, path).not.toContain(suite);
+    }
+    expect(createImpactPlan(["test/integration/sdk-compatibility/versions.json"]).guards).toContain(
+      "public-api",
+    );
+  });
+
   test("the subscription contract guard runs on docs-only and focused plans", () => {
     const contract = createImpactPlan(["docs/subscription-accounts.md"]);
     expect(contract.mode).toBe("docs");

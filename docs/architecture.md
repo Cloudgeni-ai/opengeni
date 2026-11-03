@@ -1101,15 +1101,20 @@ identity. Ordinary draining owns termination. See [lifecycle](run-lifecycle.md).
 ### 3.10 Client/server compatibility policy
 
 Canonical policy: [`design/api-compatibility-policy.md`](design/api-compatibility-policy.md).
-The `@opengeni/sdk` major is the API compatibility major. Within a major the
+The `@opengeni/sdk` major identifies package compatibility. Within a major the
 public surface (SDK-reachable `/v1` routes and their shapes, the session event
 envelope and types, `@opengeni/sdk`/`@opengeni/react` exports, public ingress
 routes) evolves additively and both sides are tolerant readers. Breaking
 changes need a deprecation, at least 90 days on the managed service, and a new
-major. `bun run check:public-api` enforces it in CI.
+major. A package major does not retire a supported hosted API contract; an
+incompatible endpoint needs a parallel versioned endpoint until sunset.
+`bun run check:public-api` enforces the static surface and supported-version
+retention gates. The [published SDK integration lane](api-compatibility-testing.md)
+runs current source and pinned npm builds against the current API and worker.
 
 Official builds expose `serverVersion` in health and client config; nothing
-negotiates at runtime.
+negotiates at runtime. `x-opengeni-sdk-version` is optional, content-free
+request/trace metadata, never an admission gate or metric label.
 
 `x-opengeni-api-contract` fences only cookie-authenticated browser mutations
 ([details](product-integration.md#api-contract-revision)).

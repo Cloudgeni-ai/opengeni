@@ -113,6 +113,19 @@ const TEMPORAL_WORKFLOW_DEPENDENCIES = [
 ];
 
 const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
+  "test/integration/sdk-compatibility.integration.ts": [
+    "@opengeni/api-router",
+    "@opengeni/contracts",
+    "@opengeni/sdk",
+    "@opengeni/react",
+    "@opengeni/core",
+    "@opengeni/db",
+    "@opengeni/events",
+    "@opengeni/runtime",
+    "@opengeni/worker-bundle",
+    "@opengeni/storage",
+    "@opengeni/testing",
+  ],
   "test/integration/background-command-wake.integration.ts": [
     "@opengeni/api-router",
     "@opengeni/worker-bundle",
@@ -568,6 +581,12 @@ for (const path of TEMPORAL_WORKFLOW_INTEGRATION_TESTS) {
 }
 
 const ROOT_TEST_HELPER_DEPENDENTS: Record<string, readonly string[]> = {
+  "test/integration/sdk-compatibility/consumer.ts": [
+    "test/integration/sdk-compatibility.integration.ts",
+  ],
+  "test/integration/sdk-compatibility/versions.json": [
+    "test/integration/sdk-compatibility.integration.ts",
+  ],
   "test/e2e/browser-account-read-diagnostics.ts": [
     "test/e2e/browser-accounts-acceptance.e2e.ts",
     "test/e2e/browser-account-read-diagnostics.test.ts",
@@ -1010,7 +1029,10 @@ export function createImpactPlan(
       "migration-immutability",
     );
   }
-  if ([...affected].some((name) => PUBLIC_API_WORKSPACES.has(name))) {
+  if (
+    [...affected].some((name) => PUBLIC_API_WORKSPACES.has(name)) ||
+    changedFiles.includes("test/integration/sdk-compatibility/versions.json")
+  ) {
     guards.push("public-api");
   }
   if (buildPackages.length > 0) guards.push("publish-closure");

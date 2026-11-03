@@ -28,6 +28,7 @@ import { z } from "zod";
 import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../../apps/api/src/app";
+import { SDK_COMPATIBILITY_MATRIX_PATH, sdkCompatibilityFailures } from "./sdk-compatibility";
 import {
   ALLOWLIST_PATH,
   SNAPSHOT_PATH,
@@ -173,6 +174,20 @@ async function main(): Promise<void> {
 
   const base = baseSnapshot();
   const failures: string[] = [];
+  const matrixBase = git([
+    "merge-base",
+    "HEAD",
+    process.env.OPENGENI_PUBLIC_API_BASE_REF?.trim() || "origin/main",
+  ])?.trim();
+  const previousMatrix = matrixBase
+    ? git(["show", `${matrixBase}:${SDK_COMPATIBILITY_MATRIX_PATH}`])
+    : null;
+  failures.push(
+    ...sdkCompatibilityFailures(
+      JSON.parse(readFileSync(join(root, SDK_COMPATIBILITY_MATRIX_PATH), "utf8")),
+      previousMatrix ? JSON.parse(previousMatrix) : undefined,
+    ),
+  );
   let findings: Finding[] = [];
   if (base) {
     findings = diffSnapshots(base.snapshot, generated);

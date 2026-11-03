@@ -27,7 +27,7 @@ On [app.opengeni.ai](https://app.opengeni.ai), usage is paid with prepaid credit
 
 ## Keep SDK and server compatible
 
-SDKs and servers are compatible within a major version; changes within a major are additive. Use the same version for all `@opengeni` packages, and read the server version from `/healthz`. See the [API compatibility policy](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/design/api-compatibility-policy.md).
+Pin the same exact version for all `@opengeni` packages. The hosted API keeps supported published SDK versions working even after a new SDK major is released. Our [tested support matrix](https://github.com/Cloudgeni-ai/opengeni/blob/main/test/integration/sdk-compatibility/versions.json) covers the latest patch of four recent stable minors and known integrator pins. Removing support requires a migration path and at least 90 days' advance notice. Incompatible API behavior needs a parallel versioned endpoint, not a silent change to `/v1`. See the [API compatibility policy](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/design/api-compatibility-policy.md).
 
 ## Keep the tool surface minimal
 

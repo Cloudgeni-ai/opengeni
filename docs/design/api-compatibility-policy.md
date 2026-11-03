@@ -38,6 +38,11 @@ under this policy:
 4. **Ingress formats.** Public routes that no SDK method calls, listed in
    `PUBLIC_INGRESS_ROUTES` (`scripts/public-api/surface.ts`), such as the
    OpenAI-compatible routes a stock OpenAI client calls.
+5. **Embedding protocols.** The SDK session proxy and React client's public
+   REST/SSE protocol, customer-facing workspace/organization webhook envelopes
+   and signatures, credential-provider callbacks, and the public Codemode
+   operation/approval/result envelopes. Provider-owned callbacks below are
+   different from callbacks that Opengeni sends to an integrator.
 
 The following are **internal**. They may change without notice:
 
@@ -45,19 +50,25 @@ The following are **internal**. They may change without notice:
   includes SDK methods whose JSDoc carries `@internal`.
 - Provider callbacks whose format the provider owns: Stripe, GitHub, Slack,
   and OAuth.
-- MCP transports, machine enrollment and NATS auth callout, and install
-  scripts.
+- Internal worker MCP transports, machine enrollment and NATS auth callout,
+  and install scripts. This does not exempt customer-facing tool callbacks or
+  the public Codemode operation protocol above.
 - The worker↔API and web↔API protocols, including the meaning of
   `x-opengeni-api-contract` for cookie sessions.
 - The database schema.
 
 `packages/sdk/README.md` § Compatibility repeats this summary for integrators.
 
-### (b) Versioning: SDK major = API major
+### (b) Package majors and hosted API endpoints
 
-The `@opengeni/sdk` major version **is** the API compatibility major. The
-`/v1` path prefix is not bumped per major. Official servers report their build
-through `serverVersion`.
+The `@opengeni/sdk` major version identifies package compatibility; it does not
+authorize breaking the continuously deployed API for still-supported clients.
+The `/v1` path prefix is not bumped per package major. Official servers report
+their build through `serverVersion`. Keep existing `/v1` behavior throughout a
+supported client's notice period. When incompatible behavior cannot coexist
+additively, introduce a new versioned endpoint (for example `/v2`) and retain
+the old endpoint until its announced sunset. Do not introduce `/v2` merely to
+ship additive changes.
 
 Within a major, changes are **additive only**, and both sides are tolerant
 readers:
@@ -76,9 +87,9 @@ readers:
 
 Tolerance runs in both directions:
 
-- **Servers** accept every request that an SDK of the same major could send.
-  Strict request schemas are fine, provided a field is never removed within a
-  major.
+- **Servers** accept requests from every supported SDK, not just the current
+  major. Strict request schemas are fine, provided supported fields remain
+  accepted throughout their notice period.
 - **Clients** ignore unknown response fields, enum values, and event types.
 
 ### (c) Making a breaking change
@@ -86,7 +97,10 @@ Tolerance runs in both directions:
 A breaking change needs all of the following:
 
 1. **Announce it.** Add a changeset that declares `"@opengeni/sdk": major`,
-   add a changelog/docs entry, and write migration notes.
+   add a changelog/docs entry, and write migration notes. Notify known affected
+   integrators through their established support channels, recording the date,
+   affected SDK versions/paths, replacement and sunset. A private PR alone is
+   not an integrator announcement.
 2. **Keep the old behaviour** on the managed service for **at least 90 days**
    or until the next major ships, whichever is later. Mark the affected SDK
    types and methods `@deprecated`.
@@ -132,6 +146,8 @@ a versioning mechanism for integrations:
 | --- | --- | --- |
 | Public surface snapshot | `bun run check:public-api` (refresh: `bun run public-api:refresh`) | See below |
 | Contract parity | `packages/sdk/test/contract-parity.test.ts` | SDK wire types match `@opengeni/contracts` |
+| Published SDK integration | `bun test --timeout 240000 ./test/integration/sdk-compatibility.integration.ts` | Real npm clients against current HTTP/API, worker, database and storage; current source runs the same scenario |
+| Supported-version retention | `bun run check:public-api` | Exact pinned versions; dropping a pin requires a previously committed retirement notice with at least 90 days and an elapsed sunset |
 
 **Public surface snapshot** (`bun run check:public-api`) regenerates
 `scripts/public-api/surface.gen.json` from source:
@@ -155,7 +171,47 @@ The snapshot check is a CI guard. It runs in full mode and whenever the impact p
 touches `@opengeni/api-router`, `@opengeni/contracts`, `@opengeni/sdk`, or
 `@opengeni/react`, including anything those packages depend on.
 
-### (g) Internal cutovers remain allowed
+### (g) Supported SDK window and executable coverage
+
+The committed [matrix](../../test/integration/sdk-compatibility/versions.json)
+is the executable minimum support baseline. Start with the latest patch of
+each of the four most recent stable minor lines, plus every known customer pin
+(including canaries). On 2026-11-03, npm's `latest` is **4.6.1**, not the
+numerically greatest historical version or the repository's unpublished 6.5.1.
+The stable representatives are 4.3.1, 4.4.1, 4.5.0 and 4.6.1; CloudGeni pins
+5.5.2-canary.41014501986001. Patch releases within those lines remain additive;
+testing a representative does not permit breaking another patch.
+
+On release, review registry publication dates/tags and customer pins, add the
+new representative and retain old entries until retirement is announced and
+the full notice period passes. A new major, an advancing four-minor window or
+a customer upgrading does not automatically remove a supported pin. Record
+retirement notices in `retirementNotices` with `version`, `announcedOn`,
+`sunset`, and `migration` (the public announcement/migration reference). Do not
+backdate announcements. The guard requires the notice on the comparison base
+before a separate PR can remove the test. New known pins join the matrix even
+if they are outside the ordinary stable window. Legacy exceptions below are
+historical, not permission for new unannounced retirements.
+
+The integration lane runs sequentially, installs exact registry releases in
+separate temporary projects with lifecycle scripts disabled, and starts each
+consumer in a clean subprocess outside the monorepo. It never substitutes
+workspace packages for published clients. Current source runs the same flow.
+One disposable API/Postgres/NATS/object-storage stack serves the matrix. Only
+the model and Temporal dispatch are scripted; public request handling,
+authorization, persistence, worker execution and signed file transfer are real.
+The synthetic MCP provider's HTTPS address is mapped to its local HTTP fixture
+only at worker transport preparation. No paid provider or customer resource is
+used. Failures name the SDK version and integration path.
+
+This runs in the existing **integration tier**, not fast PR unit checks: full
+Batch/main CI and focused impact plans for API, SDK/React, contracts, core,
+worker/runtime, database, events, storage and testing changes select it. Changes
+to its fixtures select it too. Do not skip an old client to make a failure green;
+fix the regression or follow the retirement policy. See the
+[coverage audit](../api-compatibility-testing.md) for boundaries and commands.
+
+### (h) Internal cutovers remain allowed
 
 Maintenance migrations, worker/web protocol changes, Temporal or NATS
 changes, and web-only route changes stay allowed if the public surface is
@@ -175,10 +231,12 @@ impact.
   - semantic behaviour changes.
 
   Review still owns these, guided by the PR template.
-- The old-SDK suite covers one embedding flow, not every route. Add steps when
+- The published-SDK suite covers core integration flows, not every route. Add steps when
   an integration pattern becomes load-bearing.
-- SDKs from an older major (for example 6.x, whose contract revision predates
-  this policy) are outside the default run and are expected to be refused.
+- Package major ordering alone does not identify supported releases: the public
+  packages were reset to lockstep 1.x after earlier 7.x publications. Use the
+  explicit matrix and publication history, not a numeric maximum. No new
+  blanket refusal of an older major is introduced by this policy.
 
 ## Follow-ups
 
