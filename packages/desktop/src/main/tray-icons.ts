@@ -1,10 +1,11 @@
-// The menu bar (or tray) icon while dictation is under way: small glyphs drawn
+// The menu bar (or tray) icon while dictation is under way or a meeting
+// records: small glyphs drawn
 // here, so there are no image files to ship. On macOS they are template
 // images (black with transparency; the menu bar colors them for light and
 // dark), elsewhere they are drawn in a color that reads on the taskbar.
 
 /** What the icon shows; "idle" is the app's own icon and is not drawn here. */
-export type TrayGlyph = "starting" | "recording" | "transcribing" | "done" | "failed";
+export type TrayGlyph = "starting" | "recording" | "transcribing" | "done" | "failed" | "meeting";
 
 /** The transcribing icon's frames, shown about nine a second while it lasts. */
 export const TRANSCRIBING_FRAMES = 8;
@@ -89,6 +90,16 @@ function capsule(cx: number, top: number, bottom: number, width: number) {
   return stroke(cx, top + width / 2, cx, bottom - width / 2, width);
 }
 
+/** A rectangle from (left, top) to (right, bottom) with corners of radius `r`. */
+function roundedBox(left: number, top: number, right: number, bottom: number, r: number) {
+  return (x: number, y: number) => {
+    if (x < left || x > right || y < top || y > bottom) return false;
+    const dx = Math.max(left + r - x, 0, x - (right - r));
+    const dy = Math.max(top + r - y, 0, y - (bottom - r));
+    return dx * dx + dy * dy <= r * r;
+  };
+}
+
 function ink(...parts: ((x: number, y: number) => boolean)[]): Shape {
   return (x, y) => (parts.some((part) => part(x, y)) ? "ink" : "none");
 }
@@ -118,6 +129,22 @@ const SHAPES: Record<TrayGlyph, (frame: number) => Shape> = {
       return capsule(cx, 0.5 - height / 2, 0.5 + height / 2, 0.1);
     });
     return ink(...bars);
+  },
+  // A recording badge: a dot and a sound wave in a pill, a meeting being recorded.
+  meeting: () => {
+    const outer = roundedBox(0.03, 0.25, 0.97, 0.75, 0.25);
+    const inner = roundedBox(0.105, 0.325, 0.895, 0.675, 0.175);
+    const dot = circle(0.3, 0.5, 0.105);
+    const wave = ink(
+      capsule(0.53, 0.43, 0.57, 0.07),
+      capsule(0.645, 0.37, 0.63, 0.07),
+      capsule(0.76, 0.43, 0.57, 0.07),
+    );
+    return (x, y) => {
+      if (dot(x, y)) return "accent";
+      if (outer(x, y) && !inner(x, y)) return "ink";
+      return wave(x, y);
+    };
   },
   // A check: the text is where it was going.
   done: () => ink(stroke(0.2, 0.52, 0.41, 0.73, 0.11), stroke(0.41, 0.73, 0.8, 0.29, 0.11)),
