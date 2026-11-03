@@ -819,7 +819,9 @@ export class MeetingDetection {
           account: () => calendar.account(),
           upcoming: async (accountId) => parseUpcomingMeetings(await calendar.upcoming(accountId)),
           enabled: () => this.remindersWanted(),
-          recordingSince: () => this.recordingSince,
+          // Only a recording in the account the meeting would record in is
+          // switched; one in another account goes on.
+          recordingSince: () => (this.targetRecords() ? this.recordingSince : null),
           // A call that just started, or one that ended, is asked about first.
           busy: () => this.onCard?.prompt.kind === "record" || this.onCard?.prompt.kind === "stop",
           present: (reminder, done) => this.showCard(joinPrompt(reminder), done),
@@ -1117,6 +1119,14 @@ export class MeetingDetection {
     if (!page) return false;
     page.send(DESKTOP_IPC.meetingDetectionRequest, request);
     return true;
+  }
+
+  /** Whether the page a choice would go to (the active account's) records. */
+  private targetRecords(): boolean {
+    if (this.recordingPages.size === 0) return false;
+    const pages = this.livePages();
+    const page = this.options.chooseTarget ? this.options.chooseTarget(pages) : pages.at(-1);
+    return page !== undefined && this.recordingPages.has(page);
   }
 
   private livePages(): MeetingPage[] {

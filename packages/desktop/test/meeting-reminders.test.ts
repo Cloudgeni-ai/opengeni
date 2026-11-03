@@ -180,7 +180,12 @@ const zoom: MicrophoneUser = {
 
 /** Detection with reminders from a calendar the test sets, a fake card and a clock it sets. */
 function reminders(
-  options: { calendar?: "connected" | "none"; meetings?: unknown[]; on?: boolean } = {},
+  options: {
+    calendar?: "connected" | "none";
+    meetings?: unknown[];
+    on?: boolean;
+    chooseTarget?: (pages: readonly MeetingPage[]) => MeetingPage | undefined;
+  } = {},
 ) {
   let now = START - 10 * MINUTE;
   let on = options.on ?? true;
@@ -242,6 +247,7 @@ function reminders(
     reveal: () => {
       revealed += 1;
     },
+    ...(options.chooseTarget ? { chooseTarget: options.chooseTarget } : {}),
     calendar: {
       account: () => (active ? { id: active } : null),
       upcoming: async (accountId) => {
@@ -497,6 +503,24 @@ describe("reminders before calendar meetings", () => {
     expect(early.shown()).toHaveLength(0);
     run.subject.shutdown();
     early.subject.shutdown();
+  });
+
+  test("a recording in another account isn't switched: the active account starts its own", async () => {
+    const active = new FakePage(1);
+    const other = new FakePage(2);
+    const run = reminders({ chooseTarget: (pages) => pages.find((page) => page === active) });
+    run.subject.listen(active, true);
+    run.subject.listen(other, true);
+    await run.at(START - 40 * MINUTE);
+    run.subject.setRecording(other, true);
+    await run.at(START - REMIND_BEFORE_MS);
+    const card = run.shown()[0]!;
+    expect(promptText(card.prompt).action).toBe("Join and start recording");
+    card.done("chosen");
+    expect(active.sent.at(-1)).toMatchObject({ kind: "record" });
+    expect(active.sent.at(-1)).not.toHaveProperty("replace");
+    expect(other.sent).toEqual([]);
+    run.subject.shutdown();
   });
 
   test("only the active account reminds: switching takes its card back and reads the new one", async () => {
