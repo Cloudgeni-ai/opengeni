@@ -17,7 +17,7 @@ import {
   guardRequestToolNames,
   observeToolNames,
   RejectedToolNames,
-  responseRejectsToolName,
+  toolNameRejectionOfResponse,
   restoreToolNames,
   type ToolNameAliases,
   type ToolNameObservers,
@@ -156,7 +156,9 @@ function toolNameRetryFetch(
     // A later send of a request already resent strictly (an SDK retry) stays strict.
     if (names.strict) return await inner(input, withStrictResend(init, names.strict));
     const response = await inner(input, init);
-    if (!(await responseRejectsToolName(response))) return response;
+    const rejection = await toolNameRejectionOfResponse(response);
+    if (rejection === null) return response;
+    const sentAliases = names.aliases;
     const strict = guardRequestToolNames(names.api, names.original, { strict: true });
     // Without a tool name to alias, a resend would repeat the same request.
     if (strict.body === names.original) return response;
@@ -170,7 +172,14 @@ function toolNameRetryFetch(
       observeToolNames(onRetry, { api: names.api, outcome: "failed" });
       throw error;
     }
-    if (resent.ok) names.rejected.rememberRequest(names.api, names.original);
+    if (resent.ok && typeof source === "object" && source !== null) {
+      names.rejected.rememberRejection(
+        names.api,
+        source as Record<string, unknown>,
+        sentAliases,
+        rejection,
+      );
+    }
     observeToolNames(onRetry, { api: names.api, outcome: resent.ok ? "completed" : "failed" });
     return resent;
   };
@@ -306,7 +315,9 @@ export class ReplayableJsonOpenAI extends OpenAI {
       if (api && isJsonRecordBody(prepared.body)) {
         const original = prepared.body;
         const rejected = this.rejectedToolNames;
-        const guarded = guardRequestToolNames(api, original, { rejected });
+        const guarded = guardRequestToolNames(api, original, {
+          rejected: rejected.forModel(original.model),
+        });
         for (const field of guarded.repaired) {
           observeToolNames(this.onToolNameRepair, { api, field });
         }

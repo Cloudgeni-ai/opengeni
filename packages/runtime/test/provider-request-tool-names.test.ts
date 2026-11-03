@@ -18,7 +18,7 @@ import {
   restoreChatToolNames,
   restoreClaudeToolNames,
   restoreResponsesToolNames,
-  type ToolNameAliases,
+  ToolNameAliases,
   type ToolNameWireApi,
 } from "../src/provider-request-tool-names";
 import { invalidRequestSignature } from "../src/provider-invalid-request";
@@ -484,23 +484,92 @@ describe("outbound tool-name guard", () => {
     expect(restored).toMatchObject({ namespace: "git hub", name: "open.pr" });
   });
 
-  test("names a route rejected before are aliased; every other name stays", () => {
+  test("only the name a route rejected is remembered, for that model; every other name stays", () => {
     const rejected = new RejectedToolNames();
-    rejected.rememberRequest("responses", {
-      tools: [responsesDefinition("web-search"), responsesDefinition("exec_command")],
+    const sent = {
+      model: "model-a",
+      tools: [
+        responsesDefinition("web-search"),
+        responsesDefinition("github-create_issue"),
+        responsesDefinition("exec_command"),
+      ],
+      input: [{ type: "function_call", call_id: "c", name: "web-search", arguments: "{}" }],
+    };
+    const rejection = (path: string, message = "string does not match pattern") => ({
+      error: { message: `Invalid '${path}': ${message}`, param: path, code: "invalid_string" },
     });
-    // Only names outside the portable form are remembered.
-    expect(rejected.has("web-search")).toBe(true);
-    expect(rejected.has("exec_command")).toBe(false);
-    const { body } = guardRequestToolNames(
-      "responses",
-      { tools: [responsesDefinition("web-search"), responsesDefinition("exec_command")] },
-      { rejected },
-    );
-    expect((body.tools as Array<{ name: string }>).map((tool) => tool.name)).toEqual([
+    expect(
+      rejected.rememberRejection(
+        "responses",
+        sent,
+        new ToolNameAliases(),
+        rejection("tools[0].name"),
+      ),
+    ).toBe("web-search");
+    // A path that names no tool name of the request is ignored.
+    expect(
+      rejected.rememberRejection(
+        "responses",
+        sent,
+        new ToolNameAliases(),
+        rejection("input[0].arguments"),
+      ),
+    ).toBeNull();
+    expect(
+      rejected.rememberRejection(
+        "responses",
+        sent,
+        new ToolNameAliases(),
+        rejection("tools[9].name"),
+      ),
+    ).toBeNull();
+    expect(rejected.size).toBe(1);
+    const names = (model: string) =>
+      (
+        guardRequestToolNames(
+          "responses",
+          { model, tools: sent.tools },
+          { rejected: rejected.forModel(model) },
+        ).body.tools as Array<{ name: string }>
+      ).map((tool) => tool.name);
+    expect(names("model-a")).toEqual([
       providerToolNameAlias("web-search"),
+      "github-create_issue",
       "exec_command",
     ]);
+    // Another model through the same client keeps every valid name.
+    expect(names("model-b")).toEqual(["web-search", "github-create_issue", "exec_command"]);
+  });
+
+  test("Claude's error paths name the rejected tool through its variant", () => {
+    const rejected = new RejectedToolNames();
+    const sent = {
+      model: "claude-fixture",
+      tools: [{ name: "web-search", input_schema: { type: "object" } }],
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "t", name: "web-search", input: {} }],
+        },
+      ],
+    };
+    const error = (message: string) => ({ type: "error", error: { message } });
+    expect(
+      rejected.rememberRejection(
+        "anthropic-messages",
+        sent,
+        new ToolNameAliases(),
+        error("tools.0.custom.name: String should match pattern '^[a-zA-Z_]{1,64}$'"),
+      ),
+    ).toBe("web-search");
+    expect(
+      rejected.rememberRejection(
+        "anthropic-messages",
+        sent,
+        new ToolNameAliases(),
+        error("messages.0.content.0.tool_use.name: String should match pattern"),
+      ),
+    ).toBe("web-search");
   });
 });
 
@@ -1091,14 +1160,19 @@ describe("the strict resend after a rejected tool name", () => {
       { onToolNameRetry: (observation) => retries.push(observation) },
     );
     const model = new OpenGeniResponsesModel(client, "fixture-responses", provider);
-    await getOrCreateTrace(() => model.getResponse(modelRequest(["web-search", "exec_command"])));
+    await getOrCreateTrace(() =>
+      model.getResponse(modelRequest(["web-search", "github-create_issue", "exec_command"])),
+    );
     const later = await getOrCreateTrace(() =>
-      model.getResponse(modelRequest(["web-search", "exec_command"], ["web-search"])),
+      model.getResponse(
+        modelRequest(["web-search", "github-create_issue", "exec_command"], ["web-search"]),
+      ),
     );
     expect(bodies).toHaveLength(3);
     expect(bodies[0].tools[0].name).toBe("web-search");
     expect(bodies[2].tools.map((tool: { name: string }) => tool.name)).toEqual([
       providerToolNameAlias("web-search"),
+      "github-create_issue",
       "exec_command",
     ]);
     expect(bodies[2].input[1].name).toBe(providerToolNameAlias("web-search"));

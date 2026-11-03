@@ -1657,10 +1657,11 @@ rejection. Its answer is final: if it is rejected too, the turn fails with
 the provider's message, and Retry applies the same repair. Any other 400,
 an unreadable or oversized error body, and a request without a tool name
 to alias are returned as they are. When the resend succeeds, the client
-remembers that request's names outside the strict form (letters, digits and
-`_`, starting with a letter; at most 1,024 names) and aliases them on its
-later requests, so the route does not pay the rejection on every call;
-every other name stays byte for byte.
+remembers the one name at the path the provider's error named, for that
+model (at most 1,024 names, oldest first out), and aliases it on later
+requests for that model, so the route does not pay the rejection on every
+call. Every other name, and every name sent to another model through the
+same client, stays byte for byte.
 
 Stored history can hold an invalid name: a known secret value inside a tool
 name was masked into a reference before tool identities were exempt from

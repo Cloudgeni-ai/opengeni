@@ -58,13 +58,26 @@ export function invalidRequestMessage(body: unknown): string {
   return typeof message === "string" ? message : "";
 }
 
-/** The signature of a parsed provider error body (OpenAI, Claude, gateways). */
-export function invalidRequestSignature(body: unknown): InvalidRequestSignature {
+/**
+ * The request path a parsed provider error body names, as written
+ * (`input[26].tools[1].name`), or null. Used to find the rejected value in
+ * the request; never recorded.
+ */
+export function invalidRequestRawPath(body: unknown): string | null {
   const error = errorRecord(body);
   const message = typeof error.message === "string" ? error.message : "";
-  const raw =
-    (typeof error.param === "string" && error.param) || EMBEDDED_PATH.exec(message)?.[1] || null;
-  return { path: (raw && normalizedPath(raw)) || "unknown", code: errorCode(error) };
+  return (
+    (typeof error.param === "string" && error.param) || EMBEDDED_PATH.exec(message)?.[1] || null
+  );
+}
+
+/** The signature of a parsed provider error body (OpenAI, Claude, gateways). */
+export function invalidRequestSignature(body: unknown): InvalidRequestSignature {
+  const raw = invalidRequestRawPath(body);
+  return {
+    path: (raw && normalizedPath(raw)) || "unknown",
+    code: errorCode(errorRecord(body)),
+  };
 }
 
 /** A provider error body's text, parsed; text that is not JSON is its message. */

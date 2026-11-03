@@ -1316,7 +1316,7 @@ export class AnthropicMessagesModel implements Model {
     // The outbound tool-name guard runs last, on the body as it is sent.
     const guarded = guardRequestToolNames("anthropic-messages", body, {
       strict: strictToolNames,
-      rejected: this.rejectedToolNames,
+      rejected: this.rejectedToolNames.forModel(body.model),
     });
     const serialized = JSON.stringify(guarded.body);
     return {
@@ -1407,7 +1407,12 @@ export class AnthropicMessagesModel implements Model {
           api: "anthropic-messages",
           outcome: "completed",
         });
-        this.rejectedToolNames.rememberRequest("anthropic-messages", unguardedBody);
+        this.rejectedToolNames.rememberRejection(
+          "anthropic-messages",
+          guardedToolNames.body,
+          guardedToolNames.aliases,
+          parseInvalidRequestText(detail),
+        );
         return resent;
       }
       const contextExceeded =

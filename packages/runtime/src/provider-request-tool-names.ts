@@ -1,6 +1,7 @@
 import {
   invalidRequestBodyOfResponse,
   invalidRequestMessage,
+  invalidRequestRawPath,
   invalidRequestSignature,
 } from "./provider-invalid-request";
 import { isProviderToolName, providerToolNameAlias } from "./provider-tool-names";
@@ -32,9 +33,9 @@ import { isProviderToolName, providerToolNameAlias } from "./provider-tool-names
  *
  * Strict mode, used once after a provider still rejects a tool name, aliases
  * every name, valid or not, to a name of letters, digits and `_` that starts
- * with a letter. When that resend succeeds, the request's names outside that
- * narrow form are remembered for the client (`RejectedToolNames`), so its
- * later requests alias them straight away instead of paying the rejection
+ * with a letter. When that resend succeeds, the client remembers the one name
+ * the provider's error pointed at, for that model (`RejectedToolNames`), so
+ * its later requests alias it straight away instead of paying the rejection
  * again; every other name stays byte for byte.
  */
 
@@ -78,41 +79,106 @@ export class ToolNameAliases {
 
 const NO_ALIASES = new ToolNameAliases();
 
-/** Letters, digits and `_`, starting with a letter: the form strict aliases take. */
-const PORTABLE_TOOL_NAME = /^[a-zA-Z][a-zA-Z0-9_]{0,63}$/;
 const REJECTED_TOOL_NAMES_LIMIT = 1024;
 
 /**
- * The tool names one client's route rejected: after a strict resend
- * succeeded, every name of that request outside the portable form. Later
- * requests through the client alias these names without a failed attempt
- * first. Bounded; the oldest name is forgotten first.
+ * The tool names a client's route rejected, per model: after a strict
+ * resend succeeded, the one name at the path the provider's 400 named.
+ * Later requests for that model through the client alias it without a
+ * failed attempt first; every other name stays byte for byte. Bounded; the
+ * oldest name is forgotten first.
  */
 export class RejectedToolNames {
-  private readonly names = new Set<string>();
-
-  has(name: string): boolean {
-    return this.names.has(name);
-  }
+  private readonly entries = new Set<string>();
 
   get size(): number {
-    return this.names.size;
+    return this.entries.size;
   }
 
-  /** Remember the names of a request (before the guard) outside the portable form. */
-  rememberRequest(api: ToolNameWireApi, body: Record<string, unknown>): void {
-    WALKERS[api](body, (ref) => {
-      for (const name of ref.kind === "leaf" ? [ref.name, ref.namespace] : [ref.name]) {
-        if (PORTABLE_TOOL_NAME.test(name) || this.names.has(name)) continue;
-        this.names.add(name);
-        if (this.names.size > REJECTED_TOOL_NAMES_LIMIT) {
-          const oldest = this.names.values().next().value;
-          if (oldest !== undefined) this.names.delete(oldest);
-        }
-      }
-      return ref.name;
-    });
+  /** The names rejected for one model, as the guard's `rejected` option. */
+  forModel(model: unknown): RejectedToolNameSet {
+    const scope = typeof model === "string" ? model : "";
+    return { has: (name) => this.entries.has(rejectedKey(scope, name)) };
   }
+
+  /**
+   * Remember the tool name at the path a provider's error names, in the
+   * body that was sent, when it is one of the request's tool names. A path
+   * that names no tool name of the request is ignored.
+   */
+  rememberRejection(
+    api: ToolNameWireApi,
+    sent: Record<string, unknown>,
+    aliases: ToolNameAliases,
+    error: unknown,
+  ): string | null {
+    const name = rejectedToolName(api, sent, error);
+    if (name === null) return null;
+    const flat = aliases.restoreFlat(name);
+    const original = flat !== name ? flat : aliases.restoreNamespace(name);
+    const key = rejectedKey(typeof sent.model === "string" ? sent.model : "", original);
+    this.entries.delete(key);
+    this.entries.add(key);
+    if (this.entries.size > REJECTED_TOOL_NAMES_LIMIT) {
+      const oldest = this.entries.values().next().value;
+      if (oldest !== undefined) this.entries.delete(oldest);
+    }
+    return original;
+  }
+}
+
+export type RejectedToolNameSet = { has(name: string): boolean };
+
+/**
+ * A path segment that names a record's variant rather than a key: its
+ * `type`, or Claude's `custom` for a client tool, which has no `type`.
+ */
+function isVariantSegment(record: Record<string, unknown>, segment: string): boolean {
+  return record.type === segment || (segment === "custom" && record.type === undefined);
+}
+
+function rejectedKey(model: string, name: string): string {
+  return `${model}\u0000${name}`;
+}
+
+/**
+ * The tool name at the path of a provider's error (`input[26].tools[1].name`,
+ * `messages.1.content.0.tool_use.name`, `tools.0.custom.name`,
+ * `tool_choice`), when it is one of the request's tool names. A path
+ * segment that is no key of its record but names its variant (Claude's
+ * `tool_use`, `custom`) is skipped.
+ */
+function rejectedToolName(
+  api: ToolNameWireApi,
+  sent: Record<string, unknown>,
+  error: unknown,
+): string | null {
+  const path = invalidRequestRawPath(error);
+  if (path === null) return null;
+  let current: unknown = sent;
+  for (const match of path.matchAll(/\[(\d+)\]|([^.[\]]+)/g)) {
+    const segment = match[1] ?? match[2] ?? "";
+    if (Array.isArray(current) && /^\d+$/.test(segment)) {
+      current = current[Number(segment)];
+    } else if (isRecord(current) && Object.hasOwn(current, segment)) {
+      current = current[segment];
+    } else if (!(isRecord(current) && isVariantSegment(current, segment))) {
+      return null;
+    }
+  }
+  const candidate =
+    typeof current === "string"
+      ? current
+      : isRecord(current) && typeof current.name === "string"
+        ? current.name
+        : null;
+  if (candidate === null) return null;
+  let known = false;
+  WALKERS[api](sent, (ref) => {
+    if (ref.name === candidate) known = true;
+    return ref.name;
+  });
+  return known ? candidate : null;
 }
 
 /** Monitoring-only observations of the guard; they never affect a request. */
@@ -628,7 +694,7 @@ export type ToolNameGuardOptions = {
   /** Alias every name, valid or not (the one retry after a rejected name). */
   strict?: boolean;
   /** Names the client's route rejected before; they are aliased too. */
-  rejected?: RejectedToolNames;
+  rejected?: RejectedToolNameSet;
 };
 
 /**
@@ -818,9 +884,17 @@ export function rejectsToolName(body: unknown): boolean {
   return isToolNameRejection(invalidRequestSignature(body), invalidRequestMessage(body));
 }
 
+/**
+ * The error body of a 400 response that rejects a tool name, read from a
+ * bounded clone; null for every other response.
+ */
+export async function toolNameRejectionOfResponse(response: Response): Promise<unknown> {
+  if (response.status !== 400) return null;
+  const body = await invalidRequestBodyOfResponse(response);
+  return body !== null && rejectsToolName(body) ? body : null;
+}
+
 /** Whether a 400 response rejects a tool name; its body is read from a clone. */
 export async function responseRejectsToolName(response: Response): Promise<boolean> {
-  if (response.status !== 400) return false;
-  const body = await invalidRequestBodyOfResponse(response);
-  return body !== null && rejectsToolName(body);
+  return (await toolNameRejectionOfResponse(response)) !== null;
 }
