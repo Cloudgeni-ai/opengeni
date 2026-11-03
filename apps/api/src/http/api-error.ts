@@ -24,6 +24,7 @@ import {
   MissingPermissionRefusal,
   SessionUsageLimitHttpError,
   sessionUsageLimitRefusalFromError,
+  TranscriptionServiceError,
 } from "@opengeni/core";
 import { InferenceRegionRestrictedError } from "@opengeni/runtime/model-call";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -106,6 +107,15 @@ export function allowanceExhaustedHttpError(error: unknown): ApiHttpError | null
  * callers can tell it from other 402s without matching message text.
  */
 export function insufficientCreditsHttpError(error: unknown): ApiHttpError | null {
+  if (error instanceof TranscriptionServiceError && error.subscriptionCode) {
+    error = new HTTPException(
+      error.subscriptionCode === SUBSCRIPTION_API_UNAVAILABLE_CODE ? 403 : 402,
+      {
+        message: error.message,
+        cause: { allowed: false, code: error.subscriptionCode },
+      },
+    );
+  }
   if (!(error instanceof HTTPException)) return null;
   const cause = error.cause as { allowed?: unknown; code?: unknown } | null | undefined;
   if (!cause || typeof cause !== "object" || cause.allowed !== false) return null;

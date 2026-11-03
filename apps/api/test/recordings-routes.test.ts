@@ -243,6 +243,37 @@ async function capturedRecording(
 }
 
 describe("recording routes", () => {
+  test("embedded recordings skip a saved subscription default and refuse an explicit subscription", async () => {
+    const scope = await fixture({
+      settings: {
+        codexSubscriptionEnabled: true,
+        voiceInputProviderOrder: "codex-subscription,openai",
+        recordingWordAlignment: true,
+        voiceInputOpenaiModel: "gpt-transcribe",
+        recordingTranscriptionDefault: "openai/gpt-transcribe",
+      },
+    });
+    await shared.admin`update workspaces set settings = settings ||
+      '{"recordings":{"transcription":{"providerId":"codex-subscription","model":"chatgpt-dictation"}}}'::jsonb
+      where id = ${scope.workspaceId}::uuid`;
+    const id = await capturedRecording(scope);
+    const result = await scope.owner.call("POST", `/recordings/${id}/finalize`, {
+      tracks: [{ trackNumber: 0, chunkCount: 1 }],
+    });
+    expect(result.status).toBe(200);
+    expect(result.body.transcript).toMatchObject({
+      providerId: "openai",
+      model: "gpt-transcribe",
+      state: "queued",
+    });
+    const refused = await scope.owner.call("POST", `/recordings/${id}/transcripts`, {
+      transcription: { providerId: "codex-subscription", model: "chatgpt-dictation" },
+    });
+    expect(refused).toMatchObject({
+      status: 403,
+      body: { error: { details: { code: "subscription_api_unavailable" } } },
+    });
+  });
   test("a payer without credits still ends capture: a failed transcript says why, or a free model runs", async () => {
     const transcription: TranscriptionService = {
       limits: () => ({ maxDurationSeconds: 600, maxSizeBytes: 25_000_000, acceptedMimeTypes: [] }),

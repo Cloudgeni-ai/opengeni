@@ -19,6 +19,10 @@ export async function assertSubscriptionTranscriptionAllowed(input: {
   const decision = await checkOwnSubscriptionPlan(input, input.accountId);
   if (!decision.allowed) {
     throw new TranscriptionServiceError({
+      subscriptionCode:
+        decision.code === "subscription_api_unavailable"
+          ? "subscription_api_unavailable"
+          : "subscription_plan_required",
       code: decision.code === "subscription_api_unavailable" ? "permission_denied" : "unavailable",
       message: decision.message,
       status: decision.code === "subscription_api_unavailable" ? 403 : 402,
@@ -47,6 +51,7 @@ export function withoutFallback(error: TranscriptionServiceError): Transcription
     retryable: error.retryable,
     fallbackSafe: false,
     providerCode: error.providerCode,
+    subscriptionCode: error.subscriptionCode,
   });
 }
 

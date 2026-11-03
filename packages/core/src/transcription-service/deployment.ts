@@ -45,6 +45,8 @@ import { createAzureOpenAiTranscriptionProvider } from "./providers/azure-openai
 import { createCodexSubscriptionTranscriptionProvider } from "./providers/codex-subscription";
 import { createOpenAiTranscriptionProvider } from "./providers/openai";
 import { createXaiSubscriptionTranscriptionProvider } from "./providers/xai-subscription";
+import { assertSubscriptionTranscriptionAllowed } from "./providers/subscription-core";
+import { TranscriptionServiceError } from "../transcription";
 
 /** What a transcription is for. Each use has its own default model. */
 export type SpeechToTextUse = "meeting" | "dictation";
@@ -57,6 +59,11 @@ export type SpeechToTextModelRef = { providerId: string; model: string };
  * comes from. The API and the worker both build it from settings.
  */
 export type SpeechToTextDeployment = {
+  /** Admission preserves subscription policy denials; readiness probes remain boolean. */
+  assertEligible?(
+    providerId: string,
+    scope: { accountId?: string; workspaceId: string },
+  ): Promise<void>;
   registry: RecordingTranscriptionProviderRegistry;
   /**
    * The provider ids in the deployment's order, which dictation tries in
@@ -377,8 +384,17 @@ export function createSpeechToTextDeployment(
       sideFeatureRouteAllowed({ ...settings, requiredModelGeography: "eu" }, route)
     );
   };
+  const assertEligible = async (
+    providerId: string,
+    scope: { accountId?: string; workspaceId: string },
+  ) => {
+    if (registry.get(providerId)?.funding !== "workspace_subscription" || !db) return;
+    const accountId = scope.accountId ?? (await getWorkspace(db, scope.workspaceId))?.accountId;
+    if (accountId) await assertSubscriptionTranscriptionAllowed({ db, settings, accountId });
+  };
   return {
     registry,
+    assertEligible,
     order,
     pinned,
     meetingDefault,
@@ -411,6 +427,7 @@ export function createSpeechToTextDeployment(
       const provider = registry.get(providerId);
       if (!provider) return false;
       try {
+        if (scope) await assertEligible(providerId, scope);
         if (scope && !(await regionAllowed(providerId, scope, feature))) return false;
         if (provider.funding === "workspace_key") {
           if (!scope) return true;
@@ -563,9 +580,26 @@ export async function meetingModelFor(
   deployment: SpeechToTextDeployment,
   named: SpeechToTextModelRef | null | undefined,
   scope: { accountId?: string; workspaceId: string; subjectId?: string },
+  namedIsSavedDefault = false,
 ): Promise<SpeechToTextModelRef> {
-  if (deployment.pinned) return deployment.pinned;
-  if (named) return named;
+  if (deployment.pinned) {
+    await deployment.assertEligible?.(deployment.pinned.providerId, scope);
+    return deployment.pinned;
+  }
+  if (named) {
+    try {
+      await deployment.assertEligible?.(named.providerId, scope);
+      return named;
+    } catch (error) {
+      if (
+        !namedIsSavedDefault ||
+        !(error instanceof TranscriptionServiceError) ||
+        !error.subscriptionCode
+      )
+        throw error;
+      // A saved subscription preference is not an explicit request to use it.
+    }
+  }
   const fallback = deployment.meetingDefault;
   const candidates: SpeechToTextModelRef[] = [fallback];
   for (const providerId of deployment.order) {
@@ -591,6 +625,7 @@ export async function meetingModelFor(
     }
     if (await available) return candidate;
   }
+  await deployment.assertEligible?.(fallback.providerId, scope);
   return fallback;
 }
 

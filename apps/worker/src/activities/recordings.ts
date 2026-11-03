@@ -896,6 +896,10 @@ export function createRecordingActivities(
         ) {
           throw new PermanentRecordingFailure("region_restricted");
         }
+        await deployment.assertEligible?.(job.version.providerId, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+        });
         const resolved = await deployment.credentials(job.version.providerId, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
