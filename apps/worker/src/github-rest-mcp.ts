@@ -8,7 +8,9 @@ import {
 } from "@opengeni/contracts";
 import {
   isPersonalGitHubConnection,
+  PERSONAL_GITHUB_RECONNECT_MESSAGE,
   PersonalGitHubConnectionMetadata,
+  personalGitHubConnectionNeedsReconnect,
 } from "@opengeni/contracts/personal-github";
 import { personalGitHubRepositoryResources } from "@opengeni/core";
 import {
@@ -368,11 +370,22 @@ function personalAuthorityResolver(input: {
     repository,
     forceRefresh,
   }): Promise<GitHubRestResolvedAuthority> => {
-    const current = await validatePersonalRepository(
-      input,
-      repository,
-      toolName === "repositories_list",
-    );
+    // A grant GitHub refused bumps the connection out of `active`; tell the
+    // agent the person must reconnect instead of a generic authority error.
+    const reconnectOr = async (error: GitHubRestAuthorityError) =>
+      (await personalConnectionNeedsReconnect(input))
+        ? new GitHubRestAuthorityError(PERSONAL_GITHUB_RECONNECT_MESSAGE)
+        : error;
+    let current: Awaited<ReturnType<typeof validatePersonalRepository>>;
+    try {
+      current = await validatePersonalRepository(
+        input,
+        repository,
+        toolName === "repositories_list",
+      );
+    } catch (error) {
+      throw error instanceof GitHubRestAuthorityError ? await reconnectOr(error) : error;
+    }
     if (toolName === "repositories_list") {
       return {
         headers: {},
@@ -406,7 +419,9 @@ function personalAuthorityResolver(input: {
       forceRefresh,
     });
     if (resolution.status !== "ok" || resolution.connectionId !== repository.connectionId) {
-      throw new GitHubRestAuthorityError("Personal GitHub credential is unavailable");
+      throw await reconnectOr(
+        new GitHubRestAuthorityError("Personal GitHub credential is unavailable"),
+      );
     }
     return {
       headers: githubAuthorizationHeaders(resolution.headers),
@@ -425,6 +440,31 @@ function personalAuthorityResolver(input: {
       },
     };
   };
+}
+
+async function personalConnectionNeedsReconnect(input: {
+  db: Database;
+  accountId: string;
+  turn: SessionTurnForExecution;
+}): Promise<boolean> {
+  try {
+    const delegation = exactPersonalDelegation(input.turn.personalConnectionDelegations);
+    if (!delegation.originWorkspaceId) return false;
+    const connection = await getConnectionMetadata(
+      input.db,
+      delegation.originWorkspaceId,
+      delegation.connectionId,
+      delegation.ownerSubjectId,
+    );
+    return (
+      connection !== null &&
+      connection.accountId === input.accountId &&
+      connection.subjectId === delegation.ownerSubjectId &&
+      personalGitHubConnectionNeedsReconnect(connection)
+    );
+  } catch {
+    return false;
+  }
 }
 
 async function validatePersonalRepository(

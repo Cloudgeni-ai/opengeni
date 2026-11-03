@@ -1272,6 +1272,9 @@ export async function refreshOAuthConnectionCredential(
       ? "json"
       : "form";
   const headers: Record<string, string> = {
+    // GitHub (and other providers) answer form-encoded unless JSON is asked
+    // for, which made every personal GitHub refresh unparseable and silent.
+    accept: "application/json",
     "content-type":
       tokenRequestEncoding === "json" ? "application/json" : "application/x-www-form-urlencoded",
   };
@@ -1329,6 +1332,17 @@ export async function refreshOAuthConnectionCredential(
   );
   const accessToken = stringValue(payload.access_token);
   if (!accessToken) {
+    // GitHub reports a rejected refresh (bad_refresh_token,
+    // incorrect_client_credentials) as HTTP 200 with an OAuth error field.
+    // It is the same permanent rejection as a 400, so the connection must
+    // ask for reconnecting instead of failing every use while staying active.
+    const oauthErrorCode = stringValue(payload.error);
+    if (oauthErrorCode) {
+      throw new ConnectionRefreshHttpError(
+        400,
+        /^[a-z0-9_.-]{1,64}$/i.test(oauthErrorCode) ? oauthErrorCode : null,
+      );
+    }
     throw new Error("connection refresh response did not include access_token");
   }
   const expiresAt = expiresAtFromTokenResponse(payload, cred.expiresAt);

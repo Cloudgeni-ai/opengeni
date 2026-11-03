@@ -540,7 +540,18 @@ async function personalGitHubProviderFetch(
     forceRefresh,
   });
   if (credential.status !== "ok") {
-    throw new PersonalGitHubRepositoryProviderError("connection_inactive");
+    // Only a grant GitHub refused (the connection left `active`) asks the
+    // person to reconnect; a refresh that failed for a passing reason
+    // (network, GitHub 5xx) is "try again", not "reconnect".
+    const current = await getConnectionMetadata(
+      deps.db,
+      connection.workspaceId,
+      connection.id,
+      subjectId,
+    ).catch(() => null);
+    throw new PersonalGitHubRepositoryProviderError(
+      current?.status === "active" ? "provider_unavailable" : "connection_inactive",
+    );
   }
   if (credential.connectionId !== connection.id || credential.connectionVersion === undefined) {
     throw new PersonalGitHubRepositoryProviderError("connection_changed");

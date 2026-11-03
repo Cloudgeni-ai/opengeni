@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
+import { PERSONAL_GITHUB_RECONNECT_MESSAGE } from "@opengeni/contracts/personal-github";
 import { removeSessionResources, type ApiRouteDeps } from "@opengeni/core";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import {
@@ -965,6 +966,33 @@ describe("personal GitHub Git broker", () => {
     });
     expect(staleResponse.status).toBe(401);
     expect(fixture.counter.providerCalls).toBe(3);
+  }, 120_000);
+
+  test("tells Git to reconnect GitHub when GitHub refused the stored grant", async () => {
+    if (!shared || !dbClient) return;
+    const fixture = await acceptedPersonalBrokerFixture();
+    const { app, connection } = fixture;
+    const route = await fixture.brokerFor(fixture.session);
+    const accepted = await app.request(route.brokerUrl, {
+      headers: { authorization: basic(route.brokerBearer) },
+    });
+    expect(accepted.status).toBe(200);
+    const providerCalls = fixture.counter.providerCalls;
+
+    // A refresh GitHub rejected moves the connection to needs_reauth (the
+    // token resolver's permanent-failure transition).
+    await shared.admin`
+        update connections
+        set status = 'needs_reauth', last_error = 'connection refresh failed with HTTP 400',
+          version = version + 1
+        where id = ${connection.id}
+      `;
+    const refused = await app.request(route.brokerUrl, {
+      headers: { authorization: basic(route.brokerBearer) },
+    });
+    expect(refused.status).toBe(403);
+    expect(await refused.text()).toBe(`${PERSONAL_GITHUB_RECONNECT_MESSAGE}\n`);
+    expect(fixture.counter.providerCalls).toBe(providerCalls);
   }, 120_000);
 
   test("refuses the next Git request for a repository removed from the chat, including in a child chat", async () => {
