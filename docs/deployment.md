@@ -3,8 +3,8 @@
 ## Database backup and recovery
 
 The optional standalone [database backup runner](backups.md) provides verified
-encrypted dumps, latest-nightly/weekly retention, freshness checks and isolated
-restoration. Use `bun run deployment:backup --help` or the independent operator
+deduplicated, encrypted restic dumps, daily/weekly retention, freshness checks and
+isolated restoration. Use `bun run deployment:backup --help` or the independent operator
 image. Helm's `backup` settings schedule it without giving backup credentials to
 the application. This is database-only protection, not a snapshot of object files
 or host state; retain provider-native recovery where appropriate.
@@ -3274,9 +3274,11 @@ The runtime secret must provide values such as:
   team's organizations) and `none` lists no account. See
   [billing-origin.md](billing-origin.md#internal-accounts-cloudgeni-and-our-team).
 - `OPENGENI_BYOK_PLATFORM_FEE_BPS` (default `500`, 5%) is the platform fee on
-  calls served by a person's own key or subscription, charged only with
+  calls served by a person's own API key, charged only with
   `OPENGENI_BILLING_MODE=stripe` and only from paid credit; `0` turns it off.
-  See [billing-origin.md](billing-origin.md#platform-fee-on-your-own-keys).
+  Own subscriptions pay no fee; with subscription plans enabled they need a
+  paid plan of at least $20/month. See
+  [billing-origin.md](billing-origin.md#platform-fee-on-your-own-keys).
 - `OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING` (default `true`): on turns whose
   model Opengeni pays for while credit billing is active, hosted web search and
   OpenAI hosted image generation cost credit. Billed provider search replaces

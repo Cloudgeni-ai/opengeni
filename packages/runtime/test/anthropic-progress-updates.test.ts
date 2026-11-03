@@ -5,6 +5,7 @@ import type { ResolvedModelProvider } from "@opengeni/config";
 import {
   AnthropicMessagesModel,
   anthropicResponse,
+  anthropicThinkingIsProgressUpdate,
   anthropicWritesProgressUpdates,
   buildAnthropicRequest,
 } from "../src/anthropic-messages";
@@ -16,11 +17,11 @@ import { projectHistoryForProvider } from "../src/provider-history-adapter";
 import { AssistantMessagePhaseTracker, normalizeSdkEvent } from "../src/run-events";
 
 // Claude Opus 5.5 and Sonnet 5.5 can write a progress update before a tool
-// call as its own signed `thinking` block. Under display "updates" reasoning
-// comes back empty and only progress updates carry text, but that text is
-// Anthropic's summary, not the words the model wrote. It must stay reasoning:
-// shown as a thought, never as the agent's message or as a visible reply. In
-// production such summaries claimed explanations the model never gave.
+// call as its own signed `thinking` block. Requests ask for summarized
+// thinking, so reasoning and progress updates both come back as Anthropic's
+// summary, not the words the model wrote. It must stay reasoning: shown as a
+// thought, never as the agent's message or as a visible reply. In production
+// such summaries claimed explanations the model never gave.
 
 setTracingDisabled(true);
 const provider: ResolvedModelProvider = {
@@ -63,9 +64,17 @@ const response = (content: unknown[], stop = "tool_use") => ({
 
 const UPDATE =
   "Three things need your input before I start: the database, the rollout window and who owns it.";
+// A signature is opaque base64. A progress update's carries the marker
+// "narration" (anthropicThinkingIsProgressUpdate); a reasoning block's does not.
+const signature = (body: string) =>
+  Buffer.from(`\u0012\u000c${body}\u001a\u0008`, "latin1").toString("base64");
 // The shape of the rejected production responses: thinking, thinking, tool_use.
-const reasoning = { type: "thinking", thinking: "", signature: "EqMBCkYICxIMreasoning" };
-const progress = { type: "thinking", thinking: UPDATE, signature: "Es8CCkYICxIMprogress" };
+const reasoning = { type: "thinking", thinking: "", signature: signature("reasoning-block") };
+const progress = {
+  type: "thinking",
+  thinking: UPDATE,
+  signature: signature("progress\u0000narration\u0001"),
+};
 const wait = {
   type: "tool_use",
   id: "toolu_wait",
@@ -165,7 +174,7 @@ const expectedOutput = [
 ];
 
 describe("Claude progress updates before a tool call", () => {
-  test("only models that write progress updates ask for display updates", async () => {
+  test("every model asks for reasoning summaries, so thinking stays readable", async () => {
     expect(anthropicWritesProgressUpdates("claude-opus-5-5")).toBe(true);
     expect(anthropicWritesProgressUpdates("claude-sonnet-5-5")).toBe(true);
     for (const model of ["claude-haiku-5-5", "claude-opus-5", "claude-opus-4-6", "claude-x"])
@@ -182,10 +191,10 @@ describe("Claude progress updates before a tool call", () => {
       }) as typeof fetch);
       await claude.getResponse(request());
     }
-    expect(sent[0]!.body.thinking).toEqual({ type: "adaptive", display: "updates" });
-    expect(sent[0]!.betas).toContain("thinking-display-updates-2026-08-18");
-    expect(sent[1]!.body.thinking).toEqual({ type: "adaptive", display: "summarized" });
-    expect(sent[1]!.betas).not.toContain("thinking-display-updates-2026-08-18");
+    for (const { body, betas } of sent) {
+      expect(body.thinking).toEqual({ type: "adaptive", display: "summarized" });
+      expect(betas).not.toContain("thinking-display-updates-2026-08-18");
+    }
   });
 
   test("thinking, thinking, tool_use: the summarized update stays reasoning, not a visible reply", async () => {
@@ -254,7 +263,7 @@ describe("Claude progress updates before a tool call", () => {
     // back. A worker without #5673 showed that summary as the agent's reply.
     const summary =
       "I confirmed the images weren't actually posted before (known bug #5673, fixed upstream but not in this release), so here are the actual before/A/B comparison pictures across devices and themes, along with a space-usage table. I'd lean toward option B for freeing up the most chat space, especially on phone — let me know which layout (A or B) you want so the worker can finish it, get it reviewed, and merge.\n\n";
-    const update = { type: "thinking", thinking: summary, signature: "EpsEupdate" };
+    const update = { type: "thinking", thinking: summary, signature: signature("narration") };
     const exactWait = {
       type: "tool_use",
       id: "toolu_01BmVpQSRzQAzEiBTn5vY3ah",
@@ -295,12 +304,12 @@ describe("Claude progress updates before a tool call", () => {
     expect(modelResponseHasProgressUpdate(result)).toBe(true);
   });
 
-  test("only display updates marks progress updates; reasoning summaries never are", async () => {
+  test("only models that write progress updates mark them; other summaries never are", async () => {
     const claude = new AnthropicMessagesModel(provider, "claude-opus-5", (async () =>
       Response.json(response(summarizedContent))) as typeof fetch);
     const result = await claude.getResponse(request());
     expect(modelResponseHasProgressUpdate(result)).toBe(false);
-    // Empty reasoning under updates is not an update either.
+    // Empty reasoning is not an update either.
     expect(
       modelResponseHasProgressUpdate({
         output: anthropicResponse(
@@ -316,6 +325,30 @@ describe("Claude progress updates before a tool call", () => {
         ).output,
       }),
     ).toBe(false);
+  });
+
+  test("a readable reasoning summary is not a progress update; the signature tells them apart", async () => {
+    const claude = new AnthropicMessagesModel(provider, "claude-opus-5-5", (async () =>
+      Response.json(response(summarizedContent))) as typeof fetch);
+    const result = await claude.getResponse(request());
+    expect(result.output.map((item: any) => item.providerData?.anthropic?.progressUpdate)).toEqual([
+      undefined,
+      true,
+      undefined,
+    ]);
+    expect(result.output[0]).toMatchObject({
+      content: [{ type: "input_text", text: summarizedContent[0]!.thinking }],
+    });
+
+    // Reasoning alone, however readable, never trips the wait guard.
+    const reasoningOnly = new AnthropicMessagesModel(provider, "claude-opus-5-5", (async () =>
+      Response.json(response([summarizedContent[0], wait]))) as typeof fetch);
+    expect(modelResponseHasProgressUpdate(await reasoningOnly.getResponse(request()))).toBe(false);
+
+    expect(anthropicThinkingIsProgressUpdate(progress.signature)).toBe(true);
+    expect(anthropicThinkingIsProgressUpdate(reasoning.signature)).toBe(false);
+    expect(anthropicThinkingIsProgressUpdate("")).toBe(false);
+    expect(anthropicThinkingIsProgressUpdate("not base64 at all!")).toBe(false);
   });
 
   test("a skipped (empty) progress update stays an empty reasoning item", () => {

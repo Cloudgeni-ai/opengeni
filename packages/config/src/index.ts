@@ -1515,6 +1515,15 @@ const SettingsSchema = z.object({
   azureAuthorityHost: z.string().trim().url().optional(),
   disableOpenaiTracing: EnvBoolean.default(false),
   sandboxBackend: SandboxBackend.default("docker"),
+  /**
+   * The deployment's configured default backend (`OPENGENI_SANDBOX_BACKEND`),
+   * fixed once by getSettings. Per-session code rebinds `sandboxBackend` to a
+   * session's stored backend (`{...settings, sandboxBackend}`); this field
+   * survives that spread, so the host-backend rule can still tell what the
+   * deployment chose. Read it through `deploymentSandboxBackend(settings)`;
+   * hand-built settings without it fall back to `sandboxBackend`.
+   */
+  deploymentSandboxBackend: SandboxBackend.optional(),
   dockerImage: z.string().default("opengeni-sandbox:local"),
   // Explicit deployment contract: the configured base sandbox image contains
   // the verified, self-contained native artifact runtime at its fixed image
@@ -2386,8 +2395,9 @@ const SettingsSchema = z.object({
     z.array(z.string().uuid()).default([...DEFAULT_BILLING_LEGACY_ACCOUNT_IDS]),
   ),
   /**
-   * Platform fee on bring-your-own-key use (own provider keys and connected
-   * subscriptions), in basis points of each call's list-price equivalent.
+   * Platform fee on bring-your-own-key use (own API keys; connected
+   * subscriptions pay no fee and need a paid plan of at least $20/month
+   * instead), in basis points of each call's list-price equivalent.
    * Charged only while credit billing is active, and payable only from paid
    * credit. 0 turns the fee off.
    */
@@ -5690,6 +5700,106 @@ export function requiredSandboxEnvForBackend(backend: z.infer<typeof SandboxBack
   return (SANDBOX_REQUIRED_ENV[backend] ?? []).map((entry) => entry.env);
 }
 
+// Backends whose boxes run directly on the worker or API host (in-process
+// processes, or the host's Docker daemon). They carry no credentials, so the
+// credential table cannot tell whether an operator chose them: only the
+// configured default backend may select one.
+const HOST_SANDBOX_BACKENDS: ReadonlySet<z.infer<typeof SandboxBackend>> = new Set([
+  "local",
+  "docker",
+]);
+
+/**
+ * Whether boxes on `backend` run directly on the worker or API host (as host
+ * processes, or in the host's Docker daemon) rather than on a remote provider.
+ * Such a backend is served only as the deployment default.
+ */
+export function isHostSandboxBackend(backend: z.infer<typeof SandboxBackend>): boolean {
+  return HOST_SANDBOX_BACKENDS.has(backend);
+}
+
+/**
+ * The deployment's configured default backend, even when `settings` has been
+ * rebound to a session's stored backend for one session's work.
+ */
+export function deploymentSandboxBackend(
+  settings: Pick<Settings, "sandboxBackend" | "deploymentSandboxBackend">,
+): z.infer<typeof SandboxBackend> {
+  return settings.deploymentSandboxBackend ?? settings.sandboxBackend;
+}
+
+/**
+ * Whether a box on `backend` must not be built here: it is a host backend
+ * (`local`, `docker`) that this deployment does not serve, judged by
+ * `sandboxBackendServed` against the deployment's own default rather than a
+ * session's rebound `sandboxBackend`. Remote providers are never refused here;
+ * they keep their own credential validation.
+ */
+export function hostSandboxBackendRefused(
+  settings: Settings,
+  backend: z.infer<typeof SandboxBackend>,
+): boolean {
+  if (!HOST_SANDBOX_BACKENDS.has(backend)) return false;
+  const deploymentBackend = deploymentSandboxBackend(settings);
+  return !sandboxBackendServed({ ...settings, sandboxBackend: deploymentBackend }, backend);
+}
+
+/** The user-facing reason a session on a refused host backend gets no box. */
+export const UNSERVED_HOST_SANDBOX_BACKEND_MESSAGE =
+  "This chat is set up to run its sandbox directly on the server, which this deployment " +
+  "does not allow, so no sandbox was started and nothing ran. Start a new chat to use " +
+  "this deployment's sandbox.";
+
+/**
+ * Whether this deployment serves NEW sessions on `backend`. The single source
+ * of truth for every session-creation path (REST/SDK, `session_create`,
+ * scheduled and event-triggered runs):
+ *
+ * - the configured default (`OPENGENI_SANDBOX_BACKEND`) is always served;
+ * - `none` (a boxless session) is always served, it executes nothing;
+ * - `selfhosted` is served when Connected Machines are enabled;
+ * - a provider backend is served when the operator configured its credentials
+ *   (every `SANDBOX_REQUIRED_ENV` entry is set), the same table that boot
+ *   validation requires for the default backend;
+ * - a host backend (`local`, `docker`) is served only as the default.
+ *
+ * Existing sessions and shared-box children keep their stored backend; this
+ * gate only decides what a create request may newly select.
+ */
+export function sandboxBackendServed(
+  settings: Settings,
+  backend: z.infer<typeof SandboxBackend>,
+): boolean {
+  if (backend === settings.sandboxBackend || backend === "none") return true;
+  if (backend === "selfhosted") return settings.sandboxSelfhostedEnabled === true;
+  if (HOST_SANDBOX_BACKENDS.has(backend)) return false;
+  const required = SANDBOX_REQUIRED_ENV[backend];
+  if (!required || required.length === 0) return false;
+  return required.every((entry) => {
+    const value = settings[entry.field];
+    return typeof value === "string"
+      ? value.trim().length > 0
+      : value !== undefined && value !== null;
+  });
+}
+
+/** Every backend this deployment serves for new sessions, in enum order. */
+export function servedSandboxBackends(settings: Settings): z.infer<typeof SandboxBackend>[] {
+  return SandboxBackend.options.filter((backend) => sandboxBackendServed(settings, backend));
+}
+
+/** The actionable create-time error for a backend this deployment does not serve. */
+export function unservedSandboxBackendMessage(
+  settings: Settings,
+  backend: z.infer<typeof SandboxBackend>,
+): string {
+  return (
+    `sandboxBackend "${backend}" is not available in this deployment. ` +
+    `Available: ${servedSandboxBackends(settings).join(", ")}. ` +
+    `Omit sandboxBackend to use the deployment default ("${settings.sandboxBackend}").`
+  );
+}
+
 function objectStorageConfiguredForWorkspaceArchives(settings: Settings): boolean {
   switch (settings.objectStorageBackend) {
     case "azure-blob":
@@ -6467,6 +6577,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
   const parsed = SettingsSchema.parse(raw);
   const settings = {
     ...parsed,
+    deploymentSandboxBackend: parsed.sandboxBackend,
     sandboxIdleGraceMs:
       raw.sandboxIdleGraceMs === undefined && parsed.sandboxBackend === "modal"
         ? Math.min(60_000, Math.floor((parsed.modalTimeoutSeconds * 1000) / 2))
@@ -13434,11 +13545,10 @@ const CLAUDE_NATIVE_MODEL_PROFILES: Readonly<
       autoCompactTokenLimit?: number;
       prefixBoundThinking?: boolean;
       /**
-       * The model writes its notes for the person between tool calls as
+       * The model may write its notes for the person between tool calls as
        * progress-update `thinking` blocks instead of `text` blocks. Requests
-       * use `thinking.display: "updates"` so those blocks, and only those,
-       * carry readable text (Anthropic's documented way to tell them apart
-       * from reasoning).
+       * ask for summarized thinking, so such a note comes back only as a
+       * summary; its signature tells it apart from reasoning.
        */
       progressUpdates?: boolean;
     }>

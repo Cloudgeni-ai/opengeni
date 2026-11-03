@@ -152,8 +152,11 @@ export const BROWSER_LOCATOR_KIND_WORDS: LocatorKindWords = {
 /** A bare string passed where a locator is expected: `role:name` names the
  * element with that role and exact name, anything else is an element ref. */
 function expandLocatorString(value: string, kindWords: LocatorKindWords): Record<string, unknown> {
-  const role = ROLE_SHORTHAND.exec(value);
+  let role = ROLE_SHORTHAND.exec(value);
   if (!role) return { kind: "ref", ref: value };
+  // `role:button:Save` names the kind as the object form does ({kind:'role'}).
+  // No surface has a role called "role", so it means `button:Save`.
+  if (role[1]!.trim().toLowerCase() === "role") role = ROLE_SHORTHAND.exec(role[2]!.trim()) ?? role;
   const word = role[1]!.trim();
   const name = role[2]!.trim();
   const kind = Object.hasOwn(kindWords, word.toLowerCase())

@@ -217,6 +217,26 @@ describe("current browser tab", () => {
     });
   });
 
+  test("role:role:name, the kind spelled out as in the object form, is the same role:name", () => {
+    // A batch once clicked "role:button:Log in with email" and found nothing:
+    // it was read as a role called "role" named "button:Log in with email".
+    expect(expandRefShorthand({ type: "click", locator: "role:button:Log in with email" })).toEqual(
+      {
+        type: "click",
+        locator: { kind: "role", role: "button", name: "Log in with email", exact: true },
+      },
+    );
+    expect(expandRefShorthand({ type: "click", locator: "Role: push button:Save" })).toEqual({
+      type: "click",
+      locator: { kind: "role", role: "push button", name: "Save", exact: true },
+    });
+    // Without a role after it, the text is the name of a role called "role".
+    expect(expandRefShorthand({ type: "click", locator: "role:Save" })).toEqual({
+      type: "click",
+      locator: { kind: "role", role: "role", name: "Save", exact: true },
+    });
+  });
+
   test("kind words name their locator kind where the surface has no such role", () => {
     const kindWords = BROWSER_LOCATOR_KIND_WORDS;
     expect(

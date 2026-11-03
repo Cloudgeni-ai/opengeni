@@ -55,6 +55,7 @@ import {
   type AnthropicRequestSize,
   ToolCallError,
   findInferenceRegionRestrictedError,
+  SandboxBackendNotServedError,
 } from "@opengeni/runtime";
 import {
   mcpTransportRequestFailureDiagnostic,
@@ -1888,8 +1889,46 @@ export function agentRunFailurePayload(
 ): ReturnType<typeof baseAgentRunFailurePayload> {
   return withProviderCondition(
     error,
-    withSandboxProviderAttribution(error, classifyAgentRunFailurePayload(error, options)),
+    withSandboxProviderAttribution(
+      error,
+      withProviderWebPageExplained(classifyAgentRunFailurePayload(error, options)),
+    ),
   );
+}
+
+const PROVIDER_WEB_PAGE = /^(\d{3})\s+(?:<!doctype html|<html)/i;
+const PAGE_TITLE = /<title[^>]*>([^<]{1,120})<\/title>/i;
+
+/**
+ * A provider address that serves a web page (a wrong base URL, a proxy or a
+ * sign-in page) instead of its API surfaces as the SDK's `<status> <html…>`
+ * message. Say what happened instead of showing the page's markup.
+ */
+function withProviderWebPageExplained(
+  failure: ReturnType<typeof baseAgentRunFailurePayload>,
+): ReturnType<typeof baseAgentRunFailurePayload> {
+  const page = PROVIDER_WEB_PAGE.exec(failure.error);
+  if (!page) return failure;
+  const title = PAGE_TITLE.exec(failure.error)?.[1]?.trim();
+  return {
+    ...failure,
+    error: `The model provider's address answered with a web page (HTTP ${page[1]}) instead of an API response. Check the provider's base URL in its settings.`,
+    ...(title && !failure.detail ? { detail: `Page title: ${title}` } : {}),
+  };
+}
+
+/** The typed host-backend refusal anywhere in an error's cause chain. */
+export function findSandboxBackendNotServedError(
+  error: unknown,
+): SandboxBackendNotServedError | null {
+  const seen = new Set<unknown>();
+  for (let current = error; current && typeof current === "object";) {
+    if (current instanceof SandboxBackendNotServedError) return current;
+    if (seen.has(current) || seen.size >= 16) return null;
+    seen.add(current);
+    current = (current as { cause?: unknown }).cause;
+  }
+  return null;
 }
 
 /**
@@ -1994,6 +2033,17 @@ function classifyAgentRunFailurePayload(
       code: regionRestricted.code,
       retryable: false,
       model: regionRestricted.modelName,
+    };
+  }
+  // The deployment does not serve the session's host sandbox backend. Nothing
+  // was built, and every retry gives the same answer, however the
+  // provisioning path wrapped it.
+  const backendNotServed = findSandboxBackendNotServedError(error);
+  if (backendNotServed) {
+    return {
+      error: backendNotServed.message,
+      code: backendNotServed.code,
+      retryable: false,
     };
   }
   // A checkpoint (compaction) request only summarizes history: it runs no

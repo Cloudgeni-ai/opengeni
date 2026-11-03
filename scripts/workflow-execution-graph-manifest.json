@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/backup-image.yml",
-      "sha256": "474f26fa2e86ea63beae0c1a2604401e61f74b350d390b5cebad116bfeb6459e"
+      "sha256": "4b113b52b5b9acef0d35771123644218cf7e11a688e35708954f7ab1f36e365a"
     },
     {
       "path": ".github/workflows/browser-engine-pins.yml",
@@ -34,7 +34,7 @@
     },
     {
       "path": ".github/workflows/compute-ci.yml",
-      "sha256": "0219ab5cf3ea2a1f3beb78c2ab674c4231fe774d71316f59a711b8531327987c"
+      "sha256": "cbc0180146c34b13ba8ffbf99c4295dc05314e329626e7c9381a0e78dfa21858"
     },
     {
       "path": ".github/workflows/compute-release.yml",
@@ -1063,13 +1063,19 @@
       "workflow": ".github/workflows/compute-ci.yml",
       "job": "deploy",
       "step": "shellcheck",
-      "sha256": "beefde52b8bae1aa2c7d010993b6212c825bf417cffae639a74c6c18a0a8a499"
+      "sha256": "1d4576b9c1c37f34795ddec128e287c4b7fbb9aaf7a493857f7ee0576a244473"
     },
     {
       "workflow": ".github/workflows/compute-ci.yml",
       "job": "deploy",
       "step": "Terraform (GCP host fleet)",
       "sha256": "cff12b37177650c612d1bf7fabe8b3fac4c08b8e709521a41c94ba709b93e36a"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "deploy",
+      "step": "what the agent starts with (install.sh restarts it only when that changed)",
+      "sha256": "61bf64e449b9bcd0c7205791c7aba13447435580d620f5482e8024333c7f95e1"
     },
     {
       "workflow": ".github/workflows/compute-ci.yml",

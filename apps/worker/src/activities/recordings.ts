@@ -1359,6 +1359,11 @@ export function createRecordingActivities(
           service.limits().maxDurationSeconds,
         );
         const pinned = claimed.version.providerId !== "host" ? claimed.version.providerId : null;
+        // A dictation that named its model (a desktop shortcut's own) is heard
+        // by exactly that model, never another provider's.
+        const named = claimed.recording.transcription?.providerId
+          ? { providerId: claimed.version.providerId, model: claimed.version.model }
+          : null;
         const attribution = claimed.creditAttribution ?? { kind: "unknown" as const };
         heartbeat({ phase: "transcribing", trackNumber: track.trackNumber });
         const segmented = segmenter.segment({
@@ -1398,8 +1403,12 @@ export function createRecordingActivities(
                   // A fresh request per attempt; billing stays per piece below.
                   requestId: `${input.versionId}:a${claimed.attempt}:${piece.segmentNumber}`,
                   ...(signal ? { signal } : {}),
-                  preferredProvider: pinned ?? voiceInput?.preferredProvider,
-                  fallbackEnabled: voiceInput?.fallbackEnabled,
+                  ...(named
+                    ? named
+                    : {
+                        preferredProvider: pinned ?? voiceInput?.preferredProvider,
+                        fallbackEnabled: voiceInput?.fallbackEnabled,
+                      }),
                   billing: {
                     // One settlement per piece of this version, however many
                     // attempts the activity takes: a retry that hears it again

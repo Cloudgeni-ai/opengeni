@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import * as opengeniDb from "@opengeni/db";
-import { withOrganizationAzureOpenAICredential } from "@opengeni/config";
+import { withCodexCatalogProvider, withOrganizationAzureOpenAICredential } from "@opengeni/config";
 import { ADD_CREDITS_ACTION, UPGRADE_PLAN_ACTION } from "@opengeni/contracts";
 import { requireLimit, type ApiRouteDeps } from "@opengeni/core";
 import { testSettings } from "@opengeni/testing/settings";
@@ -75,4 +75,73 @@ test("on the Free plan the same refusal offers one Upgrade to Pro action", async
     code: "byok_paid_credit_required",
     action: UPGRADE_PLAN_ACTION,
   });
+});
+
+async function subscriptionRun(planKey: "free" | "pro") {
+  const settings = withCodexCatalogProvider(
+    testSettings({
+      billingMode: "stripe",
+      usageLimitsMode: "managed",
+      byokPlatformFeeBps: 500,
+      subscriptionPlansEnabled: true,
+      codexSubscriptionEnabled: true,
+    }),
+  );
+  const standing = spyOn(opengeniDb, "getOrganizationPlanStanding").mockResolvedValue({
+    plan: { key: planKey, status: "active" } as never,
+    monthlyPriceMicros: planKey === "free" ? 0 : 20_000_000,
+  });
+  const balance = spyOn(opengeniDb, "getByokFeeSpendableBalance").mockResolvedValue({
+    accountId: "acct-1",
+    balanceMicros: 0,
+    currency: "usd",
+    updatedAt: new Date().toISOString(),
+  });
+  // The workspace's Codex connection is live, so Codex funds the turn.
+  const codex = spyOn(opengeniDb, "isCodexBilledTurn").mockResolvedValue(true);
+  const allowance = spyOn(opengeniDb, "checkWorkspaceAllowance").mockResolvedValue(null);
+  try {
+    await requireLimit({ settings, db: {} as opengeniDb.Database } as ApiRouteDeps, {
+      accountId: "acct-1",
+      workspaceId: "ws-1",
+      action: "agent_run:create",
+      quantity: 1,
+      model: "codex/gpt-6-luna",
+    });
+    return { failure: undefined, paidCreditReads: balance.mock.calls.length };
+  } catch (error) {
+    return { failure: error, paidCreditReads: balance.mock.calls.length };
+  } finally {
+    standing.mockRestore();
+    balance.mockRestore();
+    codex.mockRestore();
+    allowance.mockRestore();
+  }
+}
+
+test("an own subscription on the Free plan is a 402 with one Upgrade to Pro action", async () => {
+  const { failure, paidCreditReads } = await subscriptionRun("free");
+  expect(failure).toBeInstanceOf(HTTPException);
+  const mapped = insufficientCreditsHttpError(failure);
+  expect(mapped?.status).toBe(402);
+  expect(mapped?.message).toBe("Upgrade to Pro to use your own subscription.");
+  expect(mapped?.details).toEqual({
+    code: "subscription_plan_required",
+    action: UPGRADE_PLAN_ACTION,
+  });
+  // No fee, so paid credit is never consulted.
+  expect(paidCreditReads).toBe(0);
+  expect(
+    siteUnfundedReason({
+      allowed: false,
+      code: "subscription_plan_required",
+      message: "Upgrade to Pro to use your own subscription.",
+    }),
+  ).toBe("no_credits");
+});
+
+test("an own subscription on Pro runs without paid credit", async () => {
+  const { failure, paidCreditReads } = await subscriptionRun("pro");
+  expect(failure).toBeUndefined();
+  expect(paidCreditReads).toBe(0);
 });

@@ -401,6 +401,12 @@ pub trait Store: Send + Sync + 'static {
     /// owner the service has given up on.
     fn replace(&self, row: &SandboxRow) -> impl Future<Output = Result<Write>> + Send;
 
+    /// Writes `row`'s spec and ownership over a sandbox's row, raising its
+    /// version by one, on condition that it is still at `row.version` and
+    /// that neither it nor `row` names an owner: a sandbox's spec changes
+    /// only while no host holds it. False if it was not written.
+    fn respec(&self, row: &SandboxRow) -> impl Future<Output = Result<bool>> + Send;
+
     /// Deletes a sandbox's row on condition that it is at `version`.
     fn delete(&self, id: Id, version: u64) -> impl Future<Output = Result<bool>> + Send;
 

@@ -1244,6 +1244,129 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     }
   });
 
+  test("broker insteadOf rewrites leave repositories that only share a URL prefix untouched", () => {
+    // Regression: a brokered `https://github.com/acme/app` rewrite captured the
+    // app-installation repository `https://github.com/acme/app-demos.git` too,
+    // because Git matches insteadOf by plain prefix. Its fetch then went to
+    // `<broker>-demos.git` and failed with "Git repository route not found".
+    const root = mkdtempSync(join(tmpdir(), "opengeni-git-http-broker-siblings-"));
+    try {
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      const appBroker = "https://broker.example.test/v1/git/personal/route-app";
+      const opsBroker = "https://broker.example.test/v1/git/personal/route-app-ops";
+      const resources = [
+        {
+          kind: "repository" as const,
+          uri: "https://github.com/acme/app",
+          ref: "main",
+          provider: "github" as const,
+          connectionType: "github_personal" as const,
+          credentialBindingId: "personal-binding",
+          repositoryId: "101",
+          access: "write" as const,
+        },
+        {
+          kind: "repository" as const,
+          uri: "https://github.com/acme/app-ops",
+          ref: "main",
+          provider: "github" as const,
+          connectionType: "github_personal" as const,
+          credentialBindingId: "personal-binding",
+          repositoryId: "102",
+          access: "read" as const,
+        },
+        {
+          kind: "repository" as const,
+          uri: "https://github.com/acme/app-demos.git",
+          ref: "main",
+          provider: "github" as const,
+          githubInstallationId: 7,
+          githubRepositoryId: 103,
+        },
+      ];
+      const bindings = [
+        {
+          credentialBindingId: "personal-binding",
+          provider: "github" as const,
+          token: "broker-bearer",
+          providerBindingCount: 2,
+          transport: {
+            kind: "http_broker" as const,
+            repositories: [
+              { repositoryUri: "https://github.com/acme/app", brokerUri: appBroker },
+              { repositoryUri: "https://github.com/acme/app-ops", brokerUri: opsBroker },
+            ],
+          },
+        },
+        {
+          credentialBindingId: "github-installation:7",
+          provider: "github" as const,
+          token: "installation-token",
+          providerBindingCount: 2,
+        },
+      ];
+      const brokerSeedPath = join(root, "sibling-broker-seed");
+      writeFileSync(brokerSeedPath, "broker-bearer", { mode: 0o600 });
+      const refresh = gitCredentialBindingTokenRefreshCommand(bindings, [
+        {
+          bindingHash: gitCredentialBindingHash(bindings[0]!.credentialBindingId),
+          path: brokerSeedPath,
+        },
+      ]);
+      const setup = runScript(`${refresh}\n${setupScript(resources, bindings)}`, { HOME: home });
+      expect(setup.output).toBe("");
+      expect(setup.status).toBe(0);
+
+      const effectiveUrl = (url: string) =>
+        execFileSync("git", ["ls-remote", "--get-url", url], {
+          cwd: root,
+          env: { HOME: home },
+          encoding: "utf8",
+        }).trim();
+      // The brokered repositories, and paths below them, still reach the broker.
+      expect(effectiveUrl("https://github.com/acme/app")).toBe(appBroker);
+      expect(effectiveUrl("https://github.com/acme/app/")).toBe(`${appBroker}/`);
+      expect(effectiveUrl("https://github.com/acme/app-ops")).toBe(opsBroker);
+      // The `.git` clone URL GitHub shows is the same repository and reaches
+      // the same broker route.
+      expect(effectiveUrl("https://github.com/acme/app.git")).toBe(appBroker);
+      expect(effectiveUrl("https://github.com/acme/app.git/")).toBe(`${appBroker}/`);
+      expect(effectiveUrl("https://github.com/acme/app-ops.git")).toBe(opsBroker);
+      // Repositories whose URL merely starts with a brokered one stay put,
+      // whether attached through another binding or cloned by hand.
+      for (const sibling of [
+        "https://github.com/acme/app-demos.git",
+        "https://github.com/acme/app-demos",
+        "https://github.com/acme/app.github.io",
+        "https://github.com/acme/app.git-tools",
+        "https://github.com/acme/app_tools",
+        "https://github.com/acme/app2",
+        "https://github.com/acme/app-ops-archive",
+        'https://github.com/acme/app"quoted\\name',
+      ]) {
+        expect(effectiveUrl(sibling)).toBe(sibling);
+      }
+
+      const fill = (host: string, path: string) =>
+        execFileSync("git", ["credential", "fill"], {
+          env: {
+            HOME: home,
+            GIT_TERMINAL_PROMPT: "0",
+            GIT_ASKPASS: join(home, ".opengeni", "askpass"),
+          },
+          input: `protocol=https\nhost=${host}\npath=${path}\n\n`,
+          encoding: "utf8",
+        });
+      expect(fill("github.com", "acme/app-demos.git")).toContain("password=installation-token");
+      expect(fill("broker.example.test", "v1/git/personal/route-app")).toContain(
+        "password=broker-bearer",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("path-aware Git helper treats custom ports as distinct remote hosts", () => {
     const root = mkdtempSync(join(tmpdir(), "opengeni-git-binding-ports-"));
     try {

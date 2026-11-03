@@ -1,10 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionTurn } from "@opengeni/contracts";
+import { modelResponseClientToolCallCount } from "@opengeni/runtime";
 import {
+  GOAL_COMPLETE_REPLY_MESSAGE_ID,
+  GOAL_COMPLETE_SIBLING_REFUSAL,
   INPUT_WAIT_PROGRESS_UPDATE_REFUSAL,
   INPUT_WAIT_REPLY_REFUSAL,
   MAX_INPUT_WAIT_REPLY_REFUSALS,
   WAIT_REPLY_MESSAGE_ID,
+  goalCompleteReplyMessage,
+  goalCompleteReplyDecision,
   inputWaitReply,
   inputWaitReplyMessage,
   inputWaitReplyRefusal,
@@ -278,5 +283,57 @@ describe("a wait's reply argument is the verbatim answer", () => {
         attemptId: "attempt-1",
       }),
     ).toBeNull();
+  });
+});
+
+describe("a goal completion's reply is the turn's final answer", () => {
+  test("beside other client tool calls it is refused twice, then never ends the turn", () => {
+    expect(goalCompleteReplyDecision({ refusalsSoFar: 0, toolCallCount: 1 })).toBeNull();
+    expect(goalCompleteReplyDecision({ refusalsSoFar: 0, toolCallCount: 2 })).toBe(
+      GOAL_COMPLETE_SIBLING_REFUSAL,
+    );
+    expect(goalCompleteReplyDecision({ refusalsSoFar: 1, toolCallCount: 3 })).toBe(
+      GOAL_COMPLETE_SIBLING_REFUSAL,
+    );
+    // Refusals run out: the completion runs, but its reply keeps the turn open
+    // so the model sees the sibling results and answers afterwards.
+    expect(
+      goalCompleteReplyDecision({
+        refusalsSoFar: MAX_INPUT_WAIT_REPLY_REFUSALS,
+        toolCallCount: 2,
+      }),
+    ).toEqual({ endTurn: false });
+    expect(
+      goalCompleteReplyDecision({ refusalsSoFar: MAX_INPUT_WAIT_REPLY_REFUSALS, toolCallCount: 1 }),
+    ).toBeNull();
+    expect(GOAL_COMPLETE_SIBLING_REFUSAL).toContain("was not run");
+  });
+
+  test("only calls whose results return to the model count as siblings", () => {
+    const response = (types: string[]) => ({
+      output: types.map((type) => ({ type })),
+    });
+    expect(modelResponseClientToolCallCount(response(["function_call"]))).toBe(1);
+    expect(
+      modelResponseClientToolCallCount(
+        response(["reasoning", "message", "function_call", "web_search_call", "hosted_tool_call"]),
+      ),
+    ).toBe(1);
+    expect(
+      modelResponseClientToolCallCount(
+        response(["function_call", "shell_call", "apply_patch_call", "computer_call"]),
+      ),
+    ).toBe(4);
+    for (const unknown of [undefined, null, {}, { output: "x" }])
+      expect(modelResponseClientToolCallCount(unknown)).toBe(0);
+  });
+
+  test("it becomes one final-answer message with its own id per attempt", () => {
+    expect(goalCompleteReplyMessage("Done.", "attempt-1")).toEqual({
+      text: "Done.",
+      messageId: `${GOAL_COMPLETE_REPLY_MESSAGE_ID}:attempt-1`,
+      phase: "final_answer",
+    });
+    expect(GOAL_COMPLETE_REPLY_MESSAGE_ID).not.toBe(WAIT_REPLY_MESSAGE_ID);
   });
 });

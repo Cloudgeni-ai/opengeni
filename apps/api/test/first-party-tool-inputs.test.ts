@@ -46,6 +46,32 @@ describe("first-party tool input discovery and validation", () => {
     });
   });
 
+  test("session_create advertises only the sandbox backends this deployment serves", async () => {
+    await withClient(
+      async (client) => {
+        const tool = (await client.listTools()).tools.find(
+          (item) => item.name === "session_create",
+        )!;
+        const property = (tool.inputSchema.properties as Record<string, { enum?: string[] }>)
+          .sandboxBackend;
+        expect(property?.enum).toEqual(["modal", "none"]);
+        const result = await client.callTool({
+          name: "session_create",
+          arguments: { initialMessage: "Work", sandboxBackend: "local" },
+        });
+        expect(result.isError).toBe(true);
+        const text = JSON.stringify(result.content);
+        expect(text).toContain("sandboxBackend");
+        expect(text).not.toContain("invalid input reached storage");
+      },
+      {
+        sandboxBackend: "modal",
+        modalTokenId: "test-modal-token-id",
+        modalTokenSecret: "test-modal-token-secret",
+      },
+    );
+  });
+
   test("the advertised schedule preserves exact chat and separate-agent intent through the gateway", async () => {
     await withClient(async (client) => {
       const tool = (await client.listTools()).tools.find(

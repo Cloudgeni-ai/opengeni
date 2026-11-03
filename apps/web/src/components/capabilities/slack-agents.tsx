@@ -1,10 +1,11 @@
 /**
- * Slack agents: named teammates people call through the one Opengeni Slack
- * app with `@Opengeni +name`. Each works in one fixed Opengeni workspace.
+ * Slack agents: named teammates people ask through the one Opengeni Slack
+ * app with `@Opengeni Data team`. Each works in one fixed Opengeni workspace.
  * The list shows every agent in the organization to anyone; edit and delete
  * appear only where the reader administers the agent's workspace.
  */
 import { useCallback, useEffect, useState } from "react";
+import { slackAgentCallText } from "@opengeni/contracts";
 import type { SlackAgent } from "@opengeni/sdk";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import { toast } from "sonner";
@@ -25,9 +26,9 @@ import { ErrorMessage } from "@opengeni/react/ui/error-message";
 import { ListRow, ListRowSkeleton, RowList } from "@opengeni/react/ui/list-row";
 import { Notice } from "@opengeni/react/ui/notice";
 
-/** How people call an agent in Slack. */
-export function slackAgentCall(agent: Pick<SlackAgent, "handle">): string {
-  return `@Opengeni +${agent.handle}`;
+/** How people ask an agent in Slack, for example `@Opengeni Data team`. */
+export function slackAgentCall(agent: Pick<SlackAgent, "name">): string {
+  return slackAgentCallText(agent.name);
 }
 
 /** The reason code the API put in a refusal's details, such as `slack_bot_unavailable`. */
@@ -114,7 +115,7 @@ export function SlackAgentsSection({
   return (
     <DetailSection
       title="Slack agents"
-      description="Agents people call in Slack. Each works in one Opengeni workspace."
+      description="Agents people ask in Slack. Each works in one Opengeni workspace."
       action={
         createAction && agents && agents.length > 0 ? (
           <Button size="sm" variant="outline" onClick={onCreate}>

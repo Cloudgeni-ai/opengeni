@@ -3,6 +3,7 @@ import { t } from "../../lib/console-text";
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, StrictMode } from "react";
+import { readFileSync } from "node:fs";
 
 import { CapabilityCatalogItem } from "@opengeni/contracts";
 import type { AuthNeededItem } from "../../../timeline";
@@ -286,6 +287,96 @@ function button(container: HTMLElement, label: string) {
 }
 
 describe("conversation connection card", () => {
+  // The committed catalog overlay names a registry row; the card must show that
+  // name, its vendored mark and "Connect <name>", never the raw provider domain.
+  const searchConsoleIdentity = (
+    JSON.parse(
+      readFileSync(new URL("../../../../../../data/catalog/curated.json", import.meta.url), "utf8"),
+    ) as { identities?: Array<{ mcpUrl: string; name?: string }> }
+  ).identities?.find((entry) => entry.mcpUrl === "https://searchconsole.googleapis.com/mcp");
+  const registryRow = (name: string, logoAssetPath: string | null) =>
+    CapabilityCatalogItem.parse({
+      id: "mcp:integrations-sh:searchconsole-googleapis-com-3e3dfe26964c",
+      kind: "mcp",
+      source: "registry",
+      name,
+      providerDomain: "searchconsole.googleapis.com",
+      mcpUrl: "https://searchconsole.googleapis.com/mcp",
+      authKind: "none",
+      logoAssetPath,
+      metadata: {
+        logoSource: logoAssetPath ? "vendored" : "generic_monogram",
+        originalLogoUrl: null,
+      },
+    });
+  const registryNotice = (name: string) =>
+    ({
+      ...item,
+      providerDomain: "searchconsole.googleapis.com",
+      capability: {
+        ...item.capability!,
+        id: "mcp:integrations-sh:searchconsole-googleapis-com-3e3dfe26964c",
+        name,
+        action: "connect",
+        rationale: "Enable the available Search Console integration.",
+      },
+    }) as AuthNeededItem;
+
+  test("a registry row shows the service's reviewed name, its mark and Connect <name>", async () => {
+    expect(searchConsoleIdentity?.name).toBe("Google Search Console");
+    const name = searchConsoleIdentity!.name!;
+    const logoPath = "catalog-assets/searchconsole.googleapis.com/3e3dfe26964c.svg";
+    const catalogRow = registryRow(name, logoPath);
+    // Served through the API's catalog-asset route; a data URL keeps the test DOM from fetching.
+    const assetUrl = context.client.catalogAssetUrl;
+    const served =
+      "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%2F%3E";
+    context.client.catalogAssetUrl = (path: string) => (path === logoPath ? served : path);
+    // The agent's request may still carry the raw domain; the live catalog wins.
+    const h = await render(
+      false,
+      catalogRow,
+      catalogRow,
+      false,
+      "workspace",
+      registryNotice("searchconsole.googleapis.com"),
+    );
+    try {
+      const card = h.host.querySelector(".og-session-capability-identity");
+      expect(card?.querySelector("h3")?.textContent).toBe("Google Search Console");
+      expect(card?.querySelector("span")?.textContent).toBe("searchconsole.googleapis.com");
+      expect(h.host.querySelector(".og-session-capability-logo img")?.getAttribute("src")).toBe(
+        served,
+      );
+      expect(button(h.host, "Connect Google Search Console")).toBeDefined();
+      expect(h.host.textContent).not.toContain("Connect searchconsole.googleapis.com");
+    } finally {
+      context.client.catalogAssetUrl = assetUrl;
+      await h.close();
+    }
+  });
+
+  test("a row still titled by its domain says it once and falls back to the monogram", async () => {
+    const catalogRow = registryRow("searchconsole.googleapis.com", null);
+    const h = await render(
+      false,
+      catalogRow,
+      catalogRow,
+      false,
+      "workspace",
+      registryNotice(catalogRow.name),
+    );
+    try {
+      const card = h.host.querySelector(".og-session-capability-identity");
+      expect(card?.querySelector("h3")?.textContent).toBe("searchconsole.googleapis.com");
+      expect(card?.querySelector("span")).toBeNull();
+      expect(h.host.querySelector(".og-session-capability-logo img")).toBeNull();
+      expect(h.host.querySelector(".og-session-capability-logo")?.textContent).toBe("SE");
+    } finally {
+      await h.close();
+    }
+  });
+
   test("1Password setup preserves the chat and links to this workspace's protected form", async () => {
     const onePassword = CapabilityCatalogItem.parse({
       id: "api:1password",

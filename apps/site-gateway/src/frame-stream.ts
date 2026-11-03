@@ -7,16 +7,22 @@
  * from one string holds several full copies of the page at once, which a large
  * Site (tens of megabytes of inlined media) turns into more than a Worker's
  * 128 MB and Cloudflare's raw "Error 1102". This module produces the same
- * document while the page streams through: it holds at most a few kilobytes
- * (a partial token, a candidate client tag, or the leading head before its
- * doctype), and hands those bounded pieces to the SDK functions so the
- * rewriting rules stay in one place.
+ * document while the page streams through. Beyond the read in hand (at most
+ * SITE_FRAME_READ_BYTES) and the piece being handed on (about
+ * SITE_FRAME_PIECE_CHARS, plus at most one SITE_FRAME_REWRITE_CHARS slice's
+ * output) it holds a few kilobytes (a partial token or a
+ * candidate client tag) or, until the bootstrap's place is known, the leading
+ * head (at most about SITE_FRAME_HEAD_MAX_CHARS). It hands those bounded
+ * pieces to the SDK functions so the rewriting rules stay in one place. It
+ * reads the page in large pieces in one stage, because per-piece overhead,
+ * not the rewrite itself, is what costs a Worker CPU time.
  *
  * Differences from the whole-string functions, only for documents browsers
  * already treat as broken: an unterminated `<script>` or `<!--` leaves the rest
  * of the page untouched (a browser reads that rest as script text or comment),
  * and a doctype preceded by more than SITE_FRAME_HEAD_MAX_CHARS of leading
- * comments gets the bootstrap at the very start.
+ * comments may get the bootstrap at the very start instead (where exactly
+ * depends on how the page arrived, within one SITE_FRAME_REWRITE_CHARS slice).
  */
 import { injectSiteBridgeBootstrap } from "@opengeni/sdk/site-bridge-host";
 import { resolveSiteClientScript } from "@opengeni/sdk/site-document";
@@ -30,6 +36,29 @@ export const SITE_FRAME_HEAD_MAX_CHARS = 256 * 1024;
  * (its open tag plus a whitespace-only body). The real tag is about 60.
  */
 export const SITE_CLIENT_TAG_MAX_CHARS = 4096;
+/**
+ * Bytes the rewrite reads from the page at once. Every chunk costs the Worker
+ * a fixed amount of CPU, and workerd hands a fetched body to JavaScript in
+ * 4 KB pieces by default: a 65 MB page read that way spent 4 to 9 seconds of
+ * the 10 second CPU limit. Large reads keep it to a few hundred chunks.
+ */
+export const SITE_FRAME_READ_BYTES = 256 * 1024;
+/**
+ * Once the first piece of the document has left (until then reads return as
+ * soon as anything arrives, so the page starts promptly), each read waits for
+ * at least this many bytes (or the end of the page) where the runtime can
+ * (workerd's `readAtLeast`).
+ */
+export const SITE_FRAME_MIN_READ_BYTES = 64 * 1024;
+/**
+ * Characters of decoded page text the rewriter takes at once. Resolving a
+ * client tag inserts the Site runtime (hundreds of kilobytes), so this bounds
+ * what one step can produce from a page full of client tags: about 70 tags,
+ * some 24 MB, as much as one 4 KB piece produced before reads grew.
+ */
+export const SITE_FRAME_REWRITE_CHARS = 4096;
+/** Characters of frame document after which a piece is handed on, the rest of the read kept for the next pull. */
+export const SITE_FRAME_PIECE_CHARS = 1024 * 1024;
 
 /** Thrown into the stream when the page grows past SITE_FRAME_MAX_BYTES. */
 export class SiteFrameTooLargeError extends Error {
@@ -264,50 +293,196 @@ export class SiteBootstrapInjector {
 }
 
 /** Text in, frame document text out (client tag resolved, then the bootstrap inserted). */
-export function siteFrameTextTransform(): TransformStream<string, string> {
-  const resolver = new SiteClientScriptResolver();
-  const injector = new SiteBootstrapInjector();
-  return new TransformStream<string, string>({
-    transform(chunk, controller) {
-      const out: string[] = [];
-      resolver.push(chunk, (text) => injector.push(text, (piece) => out.push(piece)));
-      if (out.length) controller.enqueue(out.join(""));
-    },
-    flush(controller) {
-      const out: string[] = [];
-      const toInjector = (text: string) => injector.push(text, (piece) => out.push(piece));
-      resolver.finish(toInjector);
-      injector.finish((piece) => out.push(piece));
-      if (out.length) controller.enqueue(out.join(""));
-    },
-  });
+export class SiteFrameRewriter {
+  private readonly resolver = new SiteClientScriptResolver();
+  private readonly injector = new SiteBootstrapInjector();
+
+  /** The frame document text that `text` completes (possibly empty while a tag or the head is held). */
+  push(text: string): string {
+    const out: string[] = [];
+    this.resolver.push(text, (piece) => this.injector.push(piece, (done) => out.push(done)));
+    return out.join("");
+  }
+
+  /** The rest of the document once the page has ended. */
+  finish(): string {
+    const out: string[] = [];
+    this.resolver.finish((piece) => this.injector.push(piece, (done) => out.push(done)));
+    this.injector.finish((done) => out.push(done));
+    return out.join("");
+  }
 }
 
-/** Bytes pass through until more than `limit` have; then the stream errors. */
-export function byteLimit(limit: number): TransformStream<Uint8Array, Uint8Array> {
-  let total = 0;
-  return new TransformStream<Uint8Array, Uint8Array>({
-    transform(chunk, controller) {
-      total += chunk.byteLength;
-      if (total > limit) controller.error(new SiteFrameTooLargeError());
-      else controller.enqueue(chunk);
+type ChunkReader = {
+  /**
+   * The next bytes of the page, or null at its end. `eager` returns as soon
+   * as anything arrives; otherwise a byte stream waits for at least
+   * SITE_FRAME_MIN_READ_BYTES (or the end). The bytes stay valid only until
+   * the next read, which reuses their buffer.
+   */
+  read(eager: boolean): Promise<Uint8Array | null>;
+  cancel(reason?: unknown): Promise<void>;
+};
+
+type ReadAtLeast = (
+  minBytes: number,
+  view: Uint8Array,
+) => Promise<ReadableStreamReadResult<Uint8Array>>;
+
+/**
+ * Reads `body` in large chunks where it is a byte stream (a fetched body in
+ * workerd), else chunk by chunk as its source produced them.
+ */
+function largeChunkReader(body: ReadableStream<Uint8Array>): ChunkReader {
+  let byob: ReadableStreamBYOBReader | null = null;
+  try {
+    byob = body.getReader({ mode: "byob" });
+  } catch {
+    // Not a byte stream: its own chunking is all there is.
+  }
+  if (!byob) {
+    const reader = body.getReader();
+    return {
+      async read() {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) return null;
+          if (value.byteLength) return value;
+        }
+      },
+      cancel: (reason) => reader.cancel(reason),
+    };
+  }
+  const reader = byob;
+  const readAtLeast = (reader as { readAtLeast?: ReadAtLeast }).readAtLeast;
+  // A BYOB read hands its buffer back with the bytes; the caller is done
+  // with them by the next read, so that buffer is reused.
+  let spare: ArrayBuffer | null = null;
+  return {
+    async read(eager) {
+      for (;;) {
+        const view = new Uint8Array(spare ?? new ArrayBuffer(SITE_FRAME_READ_BYTES));
+        spare = null;
+        const { done, value } =
+          !eager && typeof readAtLeast === "function"
+            ? await readAtLeast.call(reader, SITE_FRAME_MIN_READ_BYTES, view)
+            : await reader.read(view);
+        if (value) spare = value.buffer as ArrayBuffer;
+        if (value?.byteLength) return value;
+        if (done) return null;
+      }
     },
-  });
+    cancel: (reason) => reader.cancel(reason),
+  };
+}
+
+/** End of a slice of `text` from `start`: about `size` characters, never inside a surrogate pair. */
+function sliceEnd(text: string, start: number, size: number): number {
+  const end = Math.min(text.length, start + size);
+  if (end < text.length) {
+    const last = text.charCodeAt(end - 1);
+    if (last >= 0xd800 && last <= 0xdbff) return end + 1;
+  }
+  return end;
 }
 
 /**
  * The frame document for a Site page body, as UTF-8 bytes, without holding
  * the page in memory. Invalid UTF-8 decodes to U+FFFD, as `Response.text()`.
+ *
+ * One pull-driven stage reads, decodes, rewrites and encodes, so each large
+ * read costs one pass rather than a hop through several streams, and nothing
+ * is read before the viewer (or the cache fill) asks for more. The decoded
+ * text goes to the rewriter in SITE_FRAME_REWRITE_CHARS slices, and a piece
+ * is handed on once it passes SITE_FRAME_PIECE_CHARS, because resolving a
+ * client tag inserts the whole Site runtime: a read full of client tags must
+ * not become one enormous string. Until the first piece has left, reads
+ * return as soon as anything arrives, so the page starts promptly. More than
+ * `limit` bytes error the stream with SiteFrameTooLargeError.
  */
 export function siteFrameStream(
   body: ReadableStream<Uint8Array>,
   limit = SITE_FRAME_MAX_BYTES,
 ): ReadableStream<Uint8Array> {
-  return body
-    .pipeThrough(byteLimit(limit))
-    .pipeThrough(new TextDecoderStream() as unknown as TransformStream<Uint8Array, string>)
-    .pipeThrough(siteFrameTextTransform())
-    .pipeThrough(new TextEncoderStream() as unknown as TransformStream<string, Uint8Array>);
+  const reader = largeChunkReader(body);
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  const rewriter = new SiteFrameRewriter();
+  let total = 0;
+  let started = false;
+  let cancelled = false;
+  let ended = false;
+  /** Decoded text not yet given to the rewriter, from `offset`. */
+  let pending = "";
+  let offset = 0;
+  return new ReadableStream<Uint8Array>(
+    {
+      async pull(controller) {
+        try {
+          for (;;) {
+            if (offset < pending.length) {
+              const out: string[] = [];
+              let size = 0;
+              while (offset < pending.length && size < SITE_FRAME_PIECE_CHARS) {
+                const end = sliceEnd(pending, offset, SITE_FRAME_REWRITE_CHARS);
+                const text = rewriter.push(pending.slice(offset, end));
+                offset = end;
+                if (text) {
+                  out.push(text);
+                  size += text.length;
+                }
+              }
+              if (offset >= pending.length) {
+                pending = "";
+                offset = 0;
+              }
+              // The decoder never splits a character, slices never split a
+              // surrogate pair, and the rewriter only holds back from ASCII
+              // positions, so each piece encodes on its own.
+              if (size) {
+                controller.enqueue(encoder.encode(out.join("")));
+                started = true;
+                return;
+              }
+              continue;
+            }
+            if (ended) {
+              const text = rewriter.finish();
+              if (text) controller.enqueue(encoder.encode(text));
+              controller.close();
+              return;
+            }
+            const chunk = await reader.read(!started);
+            if (cancelled) return;
+            if (chunk === null) {
+              ended = true;
+              pending = decoder.decode();
+              offset = 0;
+              continue;
+            }
+            total += chunk.byteLength;
+            if (total > limit) {
+              const error = new SiteFrameTooLargeError();
+              controller.error(error);
+              reader.cancel(error).catch(() => undefined);
+              return;
+            }
+            pending = decoder.decode(chunk, { stream: true });
+            offset = 0;
+          }
+        } catch (error) {
+          // Something unexpected (the rewrite threw): stop the page too.
+          reader.cancel(error).catch(() => undefined);
+          throw error;
+        }
+      },
+      cancel(reason) {
+        cancelled = true;
+        return reader.cancel(reason);
+      },
+    },
+    { highWaterMark: 0 },
+  );
 }
 
 /**

@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
 import {
   DEFAULT_BILLING_LEGACY_ACCOUNT_IDS,
+  withCodexCatalogProvider,
   withOrganizationAzureOpenAICredential,
 } from "@opengeni/config";
 import { BYOK_PAID_CREDIT_REQUIRED_CODE } from "@opengeni/contracts";
@@ -13,12 +14,13 @@ import { recordModelUsageAndDebitCredits } from "../src/activities/agent-turn";
 import { ensureRunAllowedBetweenModelCalls } from "../src/activities/agent-turn/admission";
 
 // Real PostgreSQL: our own team's organizations are internal accounts, listed
-// by default like CloudGeni's, so their heavy use of the team's own
-// subscriptions and keys never pays the own-key platform fee or meets its
-// paid-credit refusal. Any other account still does.
+// by default like CloudGeni's, so their heavy use of the team's own keys never
+// pays the own-key platform fee or meets its paid-credit refusal. Any other
+// account still does. Own subscriptions never pay the fee for anyone.
 const INTERNAL = "67435f59-7f73-4996-8845-cd7baa2b7268"; // production "Cloudgeni Internal"
 const OWN_KEY_MODEL = "organization-azure-openai/gpt-6.1-sol";
-const SUBSCRIPTION_MODEL = "gpt-6-luna"; // served on the person's own subscription
+const SUBSCRIPTION_MODEL = "codex/gpt-6-luna"; // served on the person's own Codex subscription
+const OWN_KEY_TURN_MODEL = "gpt-6-luna"; // a turn the claim found on the person's own key
 const M = 1_000_000;
 
 let shared: SharedTestDatabase | null = null;
@@ -37,19 +39,22 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-/** Billing on, a 5% fee, the built-in internal list, and an own Azure key. */
-const settings = withOrganizationAzureOpenAICredential(
-  testSettings({
-    billingMode: "stripe",
-    usageLimitsMode: "managed",
-    byokPlatformFeeBps: 500,
-    billingLegacyAccountIds: [...DEFAULT_BILLING_LEGACY_ACCOUNT_IDS],
-  }),
-  "azure-org-key",
-  {
-    endpoint: "https://contoso.openai.azure.com/openai/v1",
-    models: [{ upstreamModelId: "gpt-6.1-sol" }],
-  },
+/** Billing on, a 5% fee, the built-in internal list, an own Azure key and Codex. */
+const settings = withCodexCatalogProvider(
+  withOrganizationAzureOpenAICredential(
+    testSettings({
+      billingMode: "stripe",
+      usageLimitsMode: "managed",
+      byokPlatformFeeBps: 500,
+      codexSubscriptionEnabled: true,
+      billingLegacyAccountIds: [...DEFAULT_BILLING_LEGACY_ACCOUNT_IDS],
+    }),
+    "azure-org-key",
+    {
+      endpoint: "https://contoso.openai.azure.com/openai/v1",
+      models: [{ upstreamModelId: "gpt-6.1-sol" }],
+    },
+  ),
 );
 
 async function workspace(externalId: string) {
@@ -88,7 +93,7 @@ async function admissions(ids: { accountId: string; workspaceId: string }) {
     await ensureRunAllowedBetweenModelCalls({
       ...services,
       ...ids,
-      modelId: SUBSCRIPTION_MODEL,
+      modelId: OWN_KEY_TURN_MODEL,
       isExternallyBilledTurn: true,
       chargesOpenGeniCredits: false,
       countsTowardTokenCap: false,
@@ -108,6 +113,7 @@ async function settleOwnKeyResponses(ids: { accountId: string; workspaceId: stri
   // The usage event needs a real chat; the fee debit and balances stay real.
   const recorded = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
   try {
+    // The caller does not say: the served route decides, as on the API path.
     for (const [model, sourceKey] of [
       [OWN_KEY_MODEL, "own-key"],
       [SUBSCRIPTION_MODEL, "subscription"],
@@ -121,7 +127,6 @@ async function settleOwnKeyResponses(ids: { accountId: string; workspaceId: stri
         externallyBilled: true,
         chargesOpenGeniCredits: false,
         countsTowardTokenCap: false,
-        byok: true,
         usage: { inputTokens: 1_000_000, outputTokens: 100_000, totalTokens: 1_100_000 },
         sourceKey,
       });
@@ -156,7 +161,8 @@ test("our team's internal organization pays no own-key fee and is never refused 
   expect(String(outside.between)).toContain("Add credits to use your own key");
 
   // Settling own-key and subscription responses: no fee for the internal
-  // account even with no credit; the normal account pays it from paid credit.
+  // account even with no credit; the normal account pays it from paid credit
+  // for its own key only, never for its own subscription.
   expect(await settleOwnKeyResponses(internal)).toEqual([]);
   await applyCreditLedgerEntry(client.db, {
     accountId: normal.accountId,
@@ -165,6 +171,6 @@ test("our team's internal organization pays no own-key fee and is never refused 
     idempotencyKey: crypto.randomUUID(),
   });
   const fees = await settleOwnKeyResponses(normal);
-  expect(fees).toHaveLength(2);
+  expect(fees).toHaveLength(1);
   for (const fee of fees) expect(Number(fee.amountMicros)).toBeLessThan(0);
 }, 180_000);

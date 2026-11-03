@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { withResponsesConversation } from "@opengeni/network/responses-websocket";
 import {
   ReplayableJsonBody,
@@ -214,13 +214,24 @@ describe("replayable JSON model requests", () => {
     expect(chunks.length).toBeGreaterThan(2);
   });
 
-  test("preserves native serializer failures", async () => {
-    const cyclic: Record<string, unknown> = {};
-    cyclic.self = cyclic;
-    await expect(encoded(new ReplayableJsonBody({ input: [cyclic] }))).rejects.toThrow(
-      /cyclic|circular/i,
-    );
-    await expect(encoded(new ReplayableJsonBody({ input: [1n] }))).rejects.toThrow(/BigInt/i);
+  test("converts values the native serializer refuses instead of failing the request", async () => {
+    const warn = spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const cyclic: Record<string, unknown> = { id: "c" };
+      cyclic.self = cyclic;
+      const body = { input: [cyclic, 1n, { type: "message", usage: 2n ** 70n }], stream: true };
+      const first = await encoded(new ReplayableJsonBody(body));
+      expect(JSON.parse(first)).toEqual({
+        input: [{ id: "c", self: null }, 1, { type: "message", usage: "1180591620717411303424" }],
+        stream: true,
+      });
+      // A replay sends the same bytes.
+      expect(await encoded(new ReplayableJsonBody(body))).toBe(first);
+      expect(warn).toHaveBeenCalled();
+      expect(JSON.stringify(warn.mock.calls)).not.toContain("1180591620717411303424");
+    } finally {
+      warn.mockRestore();
+    }
 
     const shared = { allowed: true };
     await expectNativeEncoding(() => ({ input: [shared, shared] }));

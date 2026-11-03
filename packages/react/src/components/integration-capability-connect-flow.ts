@@ -219,6 +219,23 @@ export function useIntegrationCapabilityConnect({
     const live = () => !abort.signal.aborted;
     setAvailability({ kind: "loading" });
     void (async () => {
+      // A setup the person signed in to but whose tools were never added (the
+      // app closed before the last step) finishes on the server meanwhile.
+      // The card never waits for it; if it finishes this integration, the
+      // card picks it up as if setup had just completed here.
+      void (
+        controller.transport.finishUnfinished?.(workspaceId, { signal: abort.signal }) ??
+        Promise.resolve([])
+      )
+        .then(async (finishedNow) => {
+          const leftover = finishedNow.find((entry) => entry.providerId === definitionId);
+          if (!leftover || !live()) return;
+          // Never take over a setup the person is going through on this card.
+          const current = controller.getSnapshot().attempt;
+          if (current && current.id !== leftover.id && !RESTARTABLE.has(current.state)) return;
+          await controller.recover(leftover.id);
+        })
+        .catch(() => undefined);
       const [providers, installed] = await Promise.all([
         controller.transport.catalog(workspaceId, { signal: abort.signal }),
         client.listApiIntegrations(workspaceId),
@@ -263,7 +280,8 @@ export function useIntegrationCapabilityConnect({
         });
         return;
       }
-      setAvailability({ kind: "ready" });
+      // A leftover finished meanwhile may already have connected the card.
+      setAvailability((shown) => (shown.kind === "connected" ? shown : { kind: "ready" }));
     })().catch(() => {
       if (live()) setAvailability({ kind: "error" });
     });

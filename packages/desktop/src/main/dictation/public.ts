@@ -11,7 +11,7 @@
 
 export * from "./index";
 export { ENGLISH_DICTATION_WORDS, fillDictationWords, type DictationWords } from "./words";
-export { DictationHud, hudAction } from "./hud";
+export { DictationHud, hudAction, type DictationHudOptions } from "./hud";
 export { handleDictationIpc, parseDictationReport } from "./ipc";
 export { createDesktopDictation, electronClipboard } from "./electron";
 export type { CreateDesktopDictationOptions } from "./electron";

@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   ActiveWorkMark,
   RailTrailingMetadata,
+  SessionRowContent,
 } from "@opengeni/react/app/components/rail/session-row-content";
 
 const neutral = { kind: "neutral", count: 1, total: 1, label: "Idle" } as const;
@@ -177,5 +178,37 @@ describe("RailTrailingMetadata waiting duration", () => {
       />,
     );
     expect(markup).not.toContain("data-session-row-waiting");
+  });
+});
+
+describe("SessionRowContent for a pinned sub-agent chat", () => {
+  const row = (parentTitle?: string) =>
+    renderToStaticMarkup(
+      <SessionRowContent
+        title="Fix flaky test"
+        parentTitle={parentTitle}
+        stateLabel="Idle"
+        mobile={false}
+        summary={neutral}
+        relativeTime="3h"
+      />,
+    );
+
+  test("says quietly which chat it belongs to, after its title", () => {
+    const markup = row("Release lead");
+    expect(markup).toContain('<span class="min-w-0 truncate">Fix flaky test</span>');
+    expect(markup).toMatch(
+      /data-session-row-parent="true" class="[^"]*text-fg-muted[^"]*">in Release lead</,
+    );
+    // The line fades at the column's edge like any title.
+    expect(markup).toMatch(/data-session-row-title="true" class="flex min-w-0/);
+  });
+
+  test("other rows keep their plain title", () => {
+    const markup = row();
+    expect(markup).not.toContain("data-session-row-parent");
+    expect(markup).toContain(
+      '<span data-session-row-title="true" class="block min-w-0 overflow-hidden whitespace-nowrap">Fix flaky test</span>',
+    );
   });
 });

@@ -2050,9 +2050,46 @@ test("guests reach Site Data only through each collection's guest rule", async (
   expect(foreign.status).not.toBe(200);
   // A record the guest does not own is not an audience refusal: it keeps its Site Data code.
   expect(foreign.json.error?.details?.code).not.toBe("not_available_for_viewer");
-  // Files are for signed-in viewers only.
-  const files = await data("GET", "/files");
-  expect(files.status).toBe(403);
+  // Files: guests list and open shared files only; uploads, deletes and private files stay closed.
+  const ownerUpload = async (name: string, scope: "shared" | "private") => {
+    const response = await f.app.request(
+      `${f.sites}/${site.id}/files?name=${encodeURIComponent(name)}&scope=${scope}`,
+      {
+        method: "POST",
+        headers: { ...f.owner.headers, "content-type": "text/plain" },
+        body: `${name} body`,
+      },
+    );
+    expect(response.status, await response.clone().text()).toBe(201);
+    return String(((await response.json()) as { id: string }).id);
+  };
+  const sharedFile = await ownerUpload("shared.txt", "shared");
+  const privateFile = await ownerUpload("private.txt", "private");
+  // Its own visitor and client address, so the guest write limits below start fresh.
+  const fileGuest = { visitor: visitorId(), clientIp: "198.51.100.90" };
+  const guestFiles = (method: string, path: string, body?: unknown) =>
+    f.gateway(site.host, method, `/published-artifacts/current${path}`, {
+      ...fileGuest,
+      ...(body === undefined ? {} : { body }),
+    });
+  const files = await guestFiles("GET", "/files");
+  expect(files.status, JSON.stringify(files.json)).toBe(200);
+  expect(files.json.files.map((file: any) => file.name)).toEqual(["shared.txt"]);
+  const opened = await guestFiles("GET", `/files/${sharedFile}`);
+  expect(opened.status, JSON.stringify(opened.json)).toBe(200);
+  expect(opened.json.file.name).toBe("shared.txt");
+  expect(String(opened.json.url)).toStartWith("https://storage.example.test/");
+  expect((await guestFiles("GET", `/files/${privateFile}`)).status).toBe(404);
+  const guestUpload = await guestFiles("POST", "/files?name=guest.json", { from: "guest" });
+  expect(guestUpload.status, JSON.stringify(guestUpload.json)).toBe(403);
+  expect(guestUpload.json.error.details).toMatchObject({ reason: "guest_access" });
+  const deleted = await guestFiles("DELETE", `/files/${sharedFile}`);
+  expect(deleted.status).toBe(403);
+  expect(deleted.json.error.details).toMatchObject({
+    code: "not_available_for_viewer",
+    reason: "guest_access",
+  });
+  expect((await guestFiles("GET", `/files/${sharedFile}`)).status).toBe(200);
   // A signed-in member reads collections closed to guests.
   const session = await f.signIn(f.member, site.host);
   expect((await data("POST", "/data/query", { collection: "notes" }, { session })).status).toBe(

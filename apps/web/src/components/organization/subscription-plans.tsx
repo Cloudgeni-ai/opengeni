@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { BillingPlanBalance, BillingSubscriptionCatalog } from "@opengeni/sdk";
+import { planIncludesOwnSubscriptions } from "@opengeni/contracts/billing-origin";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { Field, TextInput } from "@opengeni/react/ui/field";
 import { FormDialog } from "@opengeni/react/ui/form-dialog";
@@ -241,6 +242,9 @@ export function SubscriptionPlans({
                     <p className="text-xs text-fg-muted">
                       {item.monthlyCreditMicros / item.monthlyPriceMicros}× prepaid credit
                     </p>
+                  ) : null}
+                  {planIncludesOwnSubscriptions(item) ? (
+                    <p className="text-xs text-fg-muted">Your own AI subscriptions, no fee</p>
                   ) : null}
                   {item.freeCredit ? (
                     <p className="text-xs text-fg-muted">

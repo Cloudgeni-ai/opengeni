@@ -28,6 +28,9 @@ import type { IntegrationAdapter } from "@/components/capabilities/use-api-integ
 import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { PersonalGitHubDialog } from "@/components/capabilities/personal-github-dialog";
 import { useAppContext } from "@opengeni/react/app/app-context";
+import { openGitHubInstallationSettings } from "@opengeni/react/app/lib/github-app-connect";
+import { openBlankTab } from "@opengeni/react/app/lib/navigation";
+import { markGitHubAccessChanged } from "@opengeni/react/app/lib/github-access-return";
 import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import type { GitHubAppInfo } from "@opengeni/react/app/types";
 
@@ -93,6 +96,14 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   const status = context.githubStatus;
   const repositories = context.githubRepos;
   const [disconnectOpen, setDisconnectOpen] = useState(false);
+  // The account name is kept from the click, so the title stays right even if
+  // the installation drops out of the status while the dialog is open.
+  const [unlinkTarget, setUnlinkTarget] = useState<{
+    installationId: number;
+    account: string;
+  } | null>(null);
+  const [openingInstallationId, setOpeningInstallationId] = useState<number | null>(null);
+  const openingInstallation = useRef<number | null>(null);
   const [disconnecting, setDisconnecting] = useState(false);
   const [personalOpen, setPersonalOpen] = useState(false);
   const [personalDisconnectOpen, setPersonalDisconnectOpen] = useState(false);
@@ -121,6 +132,9 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
     personalConnection && personalConnection.status !== "active",
   );
   const bound = status?.status === "bound" && installations.length > 0;
+  // Stored installations stay unlinkable even when none is active (suspended,
+  // deleted or unverified leave the workspace "unbound" but still linked).
+  const linked = status !== null && installations.length > 0;
   const broken = bound && installations.some((installation) => installation.lifecycle !== "active");
   const chip =
     personalNeedsAttention || broken || loadFailed
@@ -325,7 +339,7 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   // its one action, and the header keeps only Disconnect for the App.
   const sectioned = context.personalGitHubStatus?.enabled === true;
   const footer: IntegrationFooter = sectioned
-    ? bound && canManage
+    ? linked && canManage
       ? {
           kind: "actions",
           secondary: {
@@ -342,22 +356,75 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
     (installation) => installation.configureUrl,
   );
   const configureUrl = configurableInstallations[0]?.configureUrl ?? null;
+  // Installation settings links carry ten-minute signed state, so the copy in
+  // the loaded status may be stale: open the tab inside the click, then mint a
+  // fresh link for it. One at a time, so a double-click opens one tab.
+  function openInstallationRepositories(installationId: number) {
+    if (openingInstallation.current !== null) return;
+    const tab = openBlankTab();
+    // Back from GitHub, the composer's repository menu refreshes and syncs.
+    markGitHubAccessChanged(workspaceId);
+    openingInstallation.current = installationId;
+    setOpeningInstallationId(installationId);
+    openGitHubInstallationSettings(context.client, workspaceId, installationId, (url) => {
+      if (tab) tab.location.replace(url);
+      else window.location.assign(url);
+    })
+      .catch((error: unknown) => {
+        tab?.close();
+        toast.error("Couldn't open GitHub", { description: userErrorText(error, "Try again.") });
+      })
+      .finally(() => {
+        openingInstallation.current = null;
+        setOpeningInstallationId(null);
+      });
+  }
 
   // With several installations, one shared "Change repositories" link would
   // silently open only the first installation's GitHub settings; emit one
-  // action per installation instead.
+  // action per installation instead, each with its own Unlink. (One
+  // active installation unlinks with "Disconnect Opengeni app"; installations
+  // that are no longer active are always listed so they stay unlinkable.)
   const installationOptions: IntegrationOption[] =
-    bound && canManage && configurableInstallations.length > 1
-      ? configurableInstallations.map((installation) => ({
-          kind: "link" as const,
-          id: `github-repositories-${installation.installationId}`,
-          label: installation.accountLogin ?? `GitHub installation ${installation.installationId}`,
-          description: "Choose which repositories this installation shares.",
-          action: {
-            label: "Change repositories",
-            onClick: () => window.open(installation.configureUrl!, "_blank", "noopener,noreferrer"),
-          },
-        }))
+    linked && canManage && (installations.length > 1 || !bound)
+      ? installations.map((installation) => {
+          const account =
+            installation.accountLogin ?? `GitHub installation ${installation.installationId}`;
+          const unlink = {
+            label: "Unlink",
+            ariaLabel: `Unlink ${account}`,
+            onClick: () =>
+              setUnlinkTarget({ installationId: installation.installationId, account }),
+            destructive: true,
+          };
+          return {
+            kind: "link" as const,
+            id: `github-repositories-${installation.installationId}`,
+            label: account,
+            disabled: busy || openingInstallationId !== null,
+            ...(installation.lifecycle !== "active"
+              ? { description: "Not active. Unlink it to remove it from this workspace." }
+              : installation.configureUrl
+                ? { description: "Choose which repositories this installation shares." }
+                : {}),
+            ...(installation.configureUrl
+              ? {
+                  action: {
+                    label: "Change repositories",
+                    ariaLabel: `Change repositories for ${account}`,
+                    onClick: () => openInstallationRepositories(installation.installationId),
+                  },
+                  secondaryAction: unlink,
+                }
+              : {
+                  action: {
+                    label: unlink.label,
+                    ariaLabel: unlink.ariaLabel,
+                    onClick: unlink.onClick,
+                  },
+                }),
+          };
+        })
       : [];
   const personalLogin = personalConnection
     ? String(personalConnection.metadata.githubLogin ?? "connected")
@@ -498,10 +565,12 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
             emptyMessage: catalogLoading
               ? "Loading repositories…"
               : githubEmptyRepositoriesMessage(installations),
-            ...(canManage && configureUrl && configurableInstallations.length === 1
+            // Several installations each get their own row instead.
+            ...(canManage && configureUrl && installations.length === 1
               ? {
                   editLabel: "Change repositories",
-                  onEdit: () => window.open(configureUrl, "_blank", "noopener,noreferrer"),
+                  onEdit: () =>
+                    openInstallationRepositories(configurableInstallations[0]!.installationId),
                 }
               : {}),
           },
@@ -559,6 +628,28 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
         confirmLabel={sectioned ? "Disconnect" : "Disconnect GitHub"}
         cancelAutoFocus
         onConfirm={disconnectAll}
+      />
+      <ConfirmDialog
+        open={unlinkTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setUnlinkTarget(null);
+        }}
+        title={`Unlink ${unlinkTarget?.account ?? "this installation"}?`}
+        description="Sessions lose access to its repositories. The app stays installed on GitHub until you remove it there."
+        confirmLabel="Unlink"
+        cancelAutoFocus
+        onConfirm={async () => {
+          if (unlinkTarget === null) return true;
+          setDisconnecting(true);
+          try {
+            return await context.disconnectGitHubInstallation(
+              workspaceId,
+              unlinkTarget.installationId,
+            );
+          } finally {
+            setDisconnecting(false);
+          }
+        }}
       />
       {personalConnection ? (
         <PersonalGitHubDialog

@@ -2,7 +2,7 @@
 // installations and the user's own GitHub. `?state=` picks the scenario:
 //   mixed (default)  selections from both installations and as you, one
 //                    repository reachable both ways expanded with "Acts as"
-//   access           the "GitHub access" footer open
+//   access           one App selection, which says it acts as the Opengeni app
 //   disconnected     your GitHub not connected yet
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -106,7 +106,6 @@ function Fixture() {
     () => new Set(scenario === "mixed" ? ["902"] : []),
   );
   const [personalRefs, setPersonalRefs] = useState<Record<string, string>>({});
-  const [accessOpen, setAccessOpen] = useState(scenario !== "mixed");
   const sameRepository = (left: string, right: string) =>
     left.toLowerCase() === right.toLowerCase();
   const props: RepositoryContextPickerProps = {
@@ -123,11 +122,11 @@ function Fixture() {
     selectedPersonalGitHubRepoIds: selectedPersonal,
     selectedPersonalGitHubRepoRefs: personalRefs,
     personalGitHubManageUrl: "#choose-repos",
+    githubSettingsUrl: "#github-settings",
     selectedRepoIds,
     selectedRepoRefs,
     manualRepos: [],
     manualOpen: false,
-    githubAppOpen: accessOpen,
     org: "",
     pending: false,
     repoBusy: false,
@@ -188,12 +187,9 @@ function Fixture() {
     onManualAdd: () => {},
     onManualUpdate: () => {},
     onManualRemove: () => {},
-    onGitHubAppOpenChange: setAccessOpen,
     onOrgChange: () => {},
     onStartGitHubApp: () => {},
     onConnectWorkspaceApp: () => {},
-    onConfigureInstallation: async () => {},
-    onDisconnectInstallation: async () => {},
   };
   return (
     <TooltipProvider>

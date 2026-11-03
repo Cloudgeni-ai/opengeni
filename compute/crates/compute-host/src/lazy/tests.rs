@@ -101,11 +101,11 @@ async fn start(
         .map(|bytes| compute_storage::chunk::EncodedChunk::encode(bytes, 1).unwrap())
         .collect();
     // Chunk 1 is never stored: only filled pages can bring it back.
-    let day = compute_storage::fresh::day_of(chunks.now());
+    let period = compute_storage::fresh::period_of(chunks.now());
     let mut references = Vec::new();
     for (index, chunk) in encoded.iter().enumerate() {
         references.push(Some(if index == 1 {
-            chunk.reference.on_day(day)
+            chunk.reference.on_day(period)
         } else {
             chunks.put_chunk(chunk).await.unwrap().reference
         }));

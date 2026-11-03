@@ -16,6 +16,7 @@ import type {
 } from "@opengeni/contracts";
 import type {
   EstablishedSandboxSession,
+  InputWaitGuardResult,
   InputWaitRequest,
   InteractionRequestTargetReader,
   OpenGeniRuntime,
@@ -118,8 +119,10 @@ export type BillingState = {
   countsTowardTokenCap: boolean;
   /** The turn's frozen funding origin: API work spends credits only. */
   billingOrigin?: BillingOrigin;
-  /** Served by the person's own key or subscription: pays the platform fee. */
+  /** Served by the person's own API key: pays the platform fee. */
   isByokTurn?: boolean;
+  /** Served by the person's own subscription: no fee, needs a paid plan. */
+  isOwnSubscriptionTurn?: boolean;
 };
 
 export type SandboxRuntimeState = {
@@ -189,7 +192,7 @@ export type EventingState = {
   turnStartedPublished: boolean;
   stream: Awaited<ReturnType<OpenGeniRuntime["runStream"]>> | undefined;
   /** Set by the stream attempt: refuses a wait that would leave a person unanswered. */
-  inputWaitReplyGuard: ((request: InputWaitRequest) => Promise<string | null>) | null;
+  inputWaitReplyGuard: ((request: InputWaitRequest) => Promise<InputWaitGuardResult>) | null;
   /** Reads the target an interaction_request_human pause names, as it is now. */
   interactionRequestTargetReader: InteractionRequestTargetReader | null;
   modelRunSettings: Settings;
