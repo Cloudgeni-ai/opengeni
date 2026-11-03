@@ -102,7 +102,7 @@
     },
     {
       "path": ".github/workflows/publish-packages.yml",
-      "sha256": "ac43d89317db69b4cdf8e07e8231f4e4ad9e526f35d4008c542b611d5caa5f1b"
+      "sha256": "a57642df55f10cec17ae9c485355b21a23ee1492590be1200ab937b6f0c53c37"
     },
     {
       "path": ".github/workflows/publish-stable.yml",
@@ -1621,7 +1621,7 @@
       "workflow": ".github/workflows/publish-packages.yml",
       "job": "publish",
       "step": "Require successful protected source CI",
-      "sha256": "13237f597321e1a7030bc3f8b27e24c50675432f202f2faee9e9f627cb4ec3b5"
+      "sha256": "e7e60563d07547dbbd75973d2ba0e5dd9e5e0e8627f441b323372c9a5c10de9a"
     },
     {
       "workflow": ".github/workflows/publish-packages.yml",
