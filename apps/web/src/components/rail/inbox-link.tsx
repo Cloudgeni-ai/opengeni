@@ -16,7 +16,7 @@ function PersonInboxLink() {
   const rail = useRail();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const active = pathname === `/workspaces/${rail.workspaceId}/inbox`;
-  const { data } = useInbox();
+  const { data } = useInbox({ workspaceId: rail.workspaceId });
   const count = inboxAttentionCount(data);
   const countLabel = count > 99 ? "99+" : String(count);
   return (
