@@ -2454,7 +2454,7 @@ export const englishMessages = {
   "machinesDashboard.retrying": "Retrying…",
   "machineStatusPill.consentRequired": "Consent required",
   "machineStatusPill.enrolling": "Enrolling",
-  "machineStatusPill.noDisplay": "No display",
+  "machineStatusPill.noDisplay": "No screen",
   "machineStatusPill.offline": "Offline",
   "machineStatusPill.online": "Online",
   "machineStatusPill.reconnecting": "Reconnecting",
