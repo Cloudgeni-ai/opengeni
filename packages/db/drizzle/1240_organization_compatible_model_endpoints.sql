@@ -1,4 +1,7 @@
 -- deployment-mode: rolling
+-- online-safety-exception: constraint-validation: organization model provider connections hold one row per organization and provider kind, and their custom models a few per organization, so validating these checks and the foreign key here is instant.
+-- online-safety-exception: table-rewrite: the new UNIQUE (id, account_id) is on organization_model_provider_connections, one row per organization and provider kind, so building it scans only a few rows.
+-- online-safety-exception: nonconcurrent-index: organization_model_provider_connections and organization_model_provider_custom_models hold a few rows per organization, so building these indexes here takes milliseconds.
 -- An organization can connect its own OpenAI-compatible endpoints (a public
 -- HTTPS base URL, an API key and the models it serves) as organization model
 -- accounts, beside its OpenAI, Azure OpenAI and other provider keys. Unlike
