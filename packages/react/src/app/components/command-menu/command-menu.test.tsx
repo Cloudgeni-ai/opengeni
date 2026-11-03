@@ -2,7 +2,9 @@ import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from "bu
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { ComponentType, RefObject } from "react";
 import type { Root } from "react-dom/client";
+import type { Recording } from "@opengeni/contracts";
 import type { ActionEnv } from "../../lib/actions/registry";
+import { meetingDateRange } from "../../lib/actions/meeting-search";
 
 // Register the DOM before React DOM and Radix load: Radix picks a no-op layout
 // effect when it is imported without a document, and the dialog never mounts.
@@ -110,6 +112,7 @@ function env(overrides: Partial<ActionEnv> = {}): ActionEnv {
     workspaces: [{ id: workspaceId, name: "Product", organization: "Acme", personal: false }],
     canForkCurrentChat: false,
     meetings: null,
+    meetingPages: null,
     newChat: noop,
     openChat: noop,
     openSite: (siteId) => opened.push(siteId),
@@ -641,6 +644,153 @@ test("without meetings, neither recording action is listed", async () => {
   const options = groups().flatMap((group) => group.options);
   expect(options).not.toContain("Start recording");
   expect(options).not.toContain("Stop recording");
+});
+
+type MeetingListCall = Parameters<NonNullable<ActionEnv["meetingPages"]>["list"]>[0];
+
+function recording(id: string, title: string, startedAt: Date) {
+  return { id, workspaceId, title, startedAt: startedAt.toISOString() } as unknown as Recording;
+}
+
+function meetingPages(
+  answer: (options: MeetingListCall) => Recording[],
+  overrides: Partial<NonNullable<ActionEnv["meetingPages"]>> = {},
+) {
+  const calls: MeetingListCall[] = [];
+  const openedMeetings: string[] = [];
+  const pages: NonNullable<ActionEnv["meetingPages"]> = {
+    openList: () => openedMeetings.push("list"),
+    open: (recordingId) => openedMeetings.push(recordingId),
+    link: (recordingId) => `https://app.test/workspaces/${workspaceId}/meetings/${recordingId}`,
+    copyLink: () => {},
+    list: async (options) => {
+      calls.push(options);
+      return answer(options);
+    },
+    current: null,
+    ...overrides,
+  };
+  return { pages, calls, openedMeetings };
+}
+
+const hoursAgo = (hours: number) => new Date(Date.now() - hours * 3_600_000);
+
+async function closeMenu() {
+  await act(async () => {
+    root!.render(
+      <CommandMenu
+        open={false}
+        pickWorkspace={false}
+        onOpenChange={(open) => closes.push(open)}
+        returnFocus={{ current: null }}
+      />,
+    );
+  });
+  // Focus goes back on a timer once the dialog unmounts.
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  });
+}
+
+test("where meetings exist, the menu lists the newest and goes to Meetings", async () => {
+  const { pages, calls, openedMeetings } = meetingPages((options) =>
+    options.limit === 4
+      ? [
+          recording("m1", "Pricing workshop", hoursAgo(2)),
+          recording("m2", "Weekly sync", hoursAgo(30)),
+          recording("m3", "Customer call", hoursAgo(60)),
+          recording("m4", "Retro", hoursAgo(90)),
+        ]
+      : [],
+  );
+  currentEnv = env({ meetingPages: pages });
+  await openMenu();
+  expect(input().placeholder).toBe("Search chats, Sites and meetings, or run an action…");
+  expect(calls).toEqual([{ limit: 4, signal: expect.objectContaining({ aborted: false }) }]);
+  expect(groups().find((group) => group.label === "Recent meetings")?.options).toEqual([
+    "Pricing workshop",
+    "Weekly sync",
+    "Customer call",
+  ]);
+  expect(groups().find((group) => group.label === "Go to")?.options).toContain("Meetings");
+  await act(async () => {
+    option("Weekly sync").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  expect(openedMeetings).toEqual(["m2"]);
+});
+
+test("typing finds meetings by who spoke, by words said and by when", async () => {
+  const friday = meetingDateRange("friday")!;
+  const { pages, calls } = meetingPages((options) => {
+    if (options.person === "halvor") return [recording("p1", "Budget review", hoursAgo(5))];
+    if (options.query === "halvor") return [recording("w1", "Planning", hoursAgo(50))];
+    if (options.startedFrom === friday.from.toISOString()) {
+      return [recording("d1", "Kickoff", new Date(friday.from.getTime() + 3_600_000))];
+    }
+    return [];
+  });
+  currentEnv = env({ meetingPages: pages });
+  await openMenu();
+  await type("halvor");
+  expect(groups().find((group) => group.label === "Meetings")?.options).toEqual([
+    "Budget review",
+    "Planning",
+  ]);
+  await type("friday");
+  expect(calls.filter((call) => call.startedFrom)).toEqual([
+    {
+      startedFrom: friday.from.toISOString(),
+      startedTo: friday.to.toISOString(),
+      limit: 8,
+      signal: expect.objectContaining({}),
+    },
+  ]);
+  expect(groups().find((group) => group.label === "Meetings")?.options).toEqual(["Kickoff"]);
+});
+
+test("on a meeting, the menu offers to ask about it, with what was typed", async () => {
+  const asked: Array<string | null> = [];
+  const { pages } = meetingPages(() => [], {
+    current: { recordingId: "m9", ask: (question) => asked.push(question) },
+  });
+  currentEnv = env({ meetingPages: pages });
+  await openMenu();
+  expect(groups().find((group) => group.label === "This meeting")?.options).toEqual([
+    "Ask about this meeting",
+    "Copy meeting link",
+  ]);
+  expect(groups().find((group) => group.label === "Go to")?.options).not.toContain(
+    "Copy meeting link",
+  );
+  await type("what did we decide on pricing");
+  const last = groups()
+    .filter((group) => group.label !== "Messages")
+    .at(-1);
+  expect(last).toEqual({
+    label: "This meeting",
+    options: ["Ask about this meeting: “what did we decide on pricing”"],
+  });
+  await act(async () => {
+    option("Ask about this meeting: “what did we decide on pricing”").dispatchEvent(
+      new MouseEvent("click", { bubbles: true }),
+    );
+  });
+  expect(closes).toEqual([false]);
+  // Asked once the menu has closed and handed focus back.
+  expect(asked).toEqual([]);
+  await closeMenu();
+  expect(asked).toEqual(["what did we decide on pricing"]);
+});
+
+test("a meeting that takes no questions offers only its link", async () => {
+  const { pages } = meetingPages(() => [], { current: { recordingId: "m9", ask: null } });
+  currentEnv = env({ meetingPages: pages });
+  await openMenu();
+  expect(groups().find((group) => group.label === "This meeting")?.options).toEqual([
+    "Copy meeting link",
+  ]);
+  await type("pricing");
+  expect(groups().map((group) => group.label)).not.toContain("This meeting");
 });
 
 describe("sub-agent chats", () => {

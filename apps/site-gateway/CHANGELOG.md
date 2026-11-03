@@ -1,5 +1,38 @@
 # @opengeni/site-gateway
 
+## 0.1.29
+
+### Patch Changes
+
+- f699a4e: Large Sites no longer risk Cloudflare's "Error 1102 Worker exceeded resource limits" from CPU time. The streaming rewrite handled a page in the 4 KB pieces workerd delivers a fetched body in, passing each through several streams, so a 65 MB page cost the gateway 4 to 9 seconds of its 10 second CPU limit on every cache miss. The page is now read in pieces of up to 256 KB and rewritten in a single stage, which cuts that work to a fraction of a second. Pages still start as soon as their first bytes arrive, and a page full of Site client tags is handed on in bounded pieces rather than one huge string.
+- Updated dependencies [f1998df]
+- Updated dependencies [3f9ef93]
+- Updated dependencies [ebfd447]
+- Updated dependencies [7a9c492]
+- Updated dependencies [468e8c3]
+- Updated dependencies [e4484f1]
+- Updated dependencies [7f3d037]
+- Updated dependencies [f4f82c0]
+- Updated dependencies [317fb4d]
+- Updated dependencies [033cd63]
+- Updated dependencies [b18bd6c]
+- Updated dependencies [83ccc2b]
+- Updated dependencies [da9b7e5]
+- Updated dependencies [0f7f559]
+- Updated dependencies [0f7f559]
+- Updated dependencies [de8fc61]
+- Updated dependencies [dd7759c]
+- Updated dependencies [70c726c]
+- Updated dependencies [4682263]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [abb4af1]
+- Updated dependencies [86e35f1]
+- Updated dependencies [0f7f559]
+  - @opengeni/contracts@6.5.0
+  - @opengeni/sdk@6.5.0
+
 ## 0.1.28
 
 ### Patch Changes

@@ -786,6 +786,76 @@ async fn a_returning_host_gets_back_only_what_nobody_took() {
     each(reclaim, reclaim).await;
 }
 
+async fn respec<S: Store>(store: S) {
+    let returning = name();
+    let (host, _) = registered(&store, &register(&returning, random(), Vec::new())).await;
+    let created = sandbox(host);
+    assert_eq!(store.insert(&created).await.unwrap(), Write::Done);
+    let mut resized = created.clone();
+    resized.spec.config.vcpus = 2;
+    resized.ownership = Ownership {
+        owner: None,
+        ..created.ownership
+    };
+    assert!(
+        !store.respec(&resized).await.unwrap(),
+        "never while a host owns it"
+    );
+
+    // Its host given up on, nobody owns it.
+    let count = renewals(&store, host).await.unwrap();
+    store.give_up(host, count, now_ms()).await.unwrap();
+    let lost = store.sandbox(created.id).await.unwrap().unwrap();
+    assert_eq!(lost.ownership.owner, None);
+    let mut resized = lost.clone();
+    resized.spec.config.vcpus = 2;
+    resized.ownership = lost.ownership.retake(false).set;
+    let stale = SandboxRow {
+        version: lost.version - 1,
+        ..resized.clone()
+    };
+    assert!(!store.respec(&stale).await.unwrap(), "a stale write");
+    let owned = SandboxRow {
+        ownership: lost.ownership.give(host).set,
+        ..resized.clone()
+    };
+    assert!(!store.respec(&owned).await.unwrap(), "never to an owner");
+    assert!(store.respec(&resized).await.unwrap());
+    let now = store.sandbox(created.id).await.unwrap().unwrap();
+    assert_eq!(
+        now,
+        SandboxRow {
+            version: lost.version + 1,
+            ..resized.clone()
+        }
+    );
+
+    // Back, the host that held it at its old shape drops its copy.
+    let held = vec![Held {
+        id: created.id,
+        owner_epoch: created.ownership.epoch.0,
+    }];
+    let Admission::Registered { rulings, .. } = store
+        .register(&register(&returning, random(), held))
+        .await
+        .unwrap()
+    else {
+        panic!("a host given up on registers afresh");
+    };
+    assert_eq!(rulings.len(), 1, "{rulings:?}");
+    assert_eq!(rulings[0].verdict, Verdict::Drop);
+    let after = store.sandbox(created.id).await.unwrap().unwrap();
+    assert_eq!(
+        (after.ownership, after.version),
+        (now.ownership, now.version)
+    );
+}
+
+#[tokio::test]
+async fn a_sandboxs_spec_changes_only_while_nobody_owns_it_and_no_old_holder_gets_it_back() {
+    each(respec, respec).await;
+}
+
 async fn reclaim_forgotten<S: Store>(store: S) {
     let returning = name();
     let (host, _) = registered(&store, &register(&returning, random(), Vec::new())).await;
