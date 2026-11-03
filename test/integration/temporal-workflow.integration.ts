@@ -237,6 +237,98 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
+    "resumes when the approval commits and signals while the parking peek is in flight",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const workflowId = `wf-${crypto.randomUUID()}`;
+      const client = new Client({ connection });
+      const calls: Array<{ trigger: unknown }> = [];
+      const admission = createTurnAdmission([queuedTurn("event-1")], async (input) => {
+        calls.push({ trigger: input.trigger });
+        return { status: calls.length === 1 ? "requires_action" : "idle" };
+      });
+      let racedPeeks = 0;
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        ...admission.activities,
+        // The first peek after the turn parks reads durable state before the
+        // decision commits, then the decision commits and its signal reaches
+        // the workflow before this peek's result does: the interleaving that
+        // left a production approval waiting forever.
+        peekSessionWork: async () => {
+          const observed = await admission.activities.peekSessionWork();
+          if (observed.kind === "approval-wait" && racedPeeks === 0) {
+            racedPeeks += 1;
+            admission.approve("approval-event");
+            await client.workflow
+              .getHandle(workflowId)
+              .signal("approvalDecision", "approval-event");
+            // Let the workflow handle the signal before this result arrives.
+            await Bun.sleep(1_000);
+          }
+          return observed;
+        },
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async () => undefined,
+        settleSessionInterruptions: async () => ({
+          action: "continue" as const,
+        }),
+      });
+      const run = worker.run();
+      try {
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          args: [
+            {
+              ...scope,
+              sessionId: crypto.randomUUID(),
+              initialEventId: "event-1",
+            },
+          ],
+        });
+        // No other wake arrives: the decision's own signal must resume it.
+        await handle.result();
+        expect(racedPeeks).toBe(1);
+        expect(calls).toEqual([
+          { trigger: { kind: "next" } },
+          { trigger: { kind: "approval", triggerEventId: "approval-event" } },
+        ]);
+        const history = await handle.fetchHistory();
+        const events = history.events ?? [];
+        const eventId = (event: (typeof events)[number]) => Number(event.eventId);
+        const scheduled = events.filter((event) => event.activityTaskScheduledEventAttributes);
+        const firstTurn = scheduled.find(
+          (event) =>
+            event.activityTaskScheduledEventAttributes?.activityType?.name === "runAgentTurn",
+        );
+        // The peek that parked the turn is the first one scheduled after it.
+        const parkingPeek = scheduled.find(
+          (event) =>
+            eventId(event) > eventId(firstTurn!) &&
+            event.activityTaskScheduledEventAttributes?.activityType?.name === "peekSessionWork",
+        );
+        const parkingPeekCompleted = events.find(
+          (event) =>
+            Number(event.activityTaskCompletedEventAttributes?.scheduledEventId ?? -1) ===
+            eventId(parkingPeek!),
+        );
+        const signal = events.find(
+          (event) =>
+            event.workflowExecutionSignaledEventAttributes?.signalName === "approvalDecision",
+        );
+        // The signal really reached the workflow before the stale peek result.
+        expect(eventId(signal!)).toBeLessThan(eventId(parkingPeekCompleted!));
+        expect(patchIds(history)).toContain("session-approval-wait-pre-peek-baseline-v1");
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
     "backs off and reclaims the same turn when failure happens before attempt claim",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;

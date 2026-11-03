@@ -89,6 +89,18 @@ export const CAPACITY_WAKE_JITTER_PATCH = "session-capacity-wake-jitter-v1";
 export const SCHEDULED_HUMAN_WAIT_TIMEOUT_PATCH = "session-scheduled-human-wait-timeout-v1";
 /** Workflows wait out a recovering turn's durable backoff instead of closing. */
 export const RECOVERY_BACKOFF_WAIT_PATCH = "session-recovery-backoff-wait-v1";
+/**
+ * An approval or human-input wait compares its wake counters against values
+ * taken before the peek that chose the wait, not after it. A decision can
+ * commit after the peek read PostgreSQL but before the workflow handles the
+ * peek result; its signal is then already counted when the peek returns, and
+ * a baseline taken afterwards would wait forever on a decision the workflow
+ * has already received (the wait has no timer when nothing expires). Replay
+ * of a history recorded without the marker keeps the old baseline. As with
+ * every patch, rolling the worker image back past this change fails the tasks
+ * of a workflow that recorded the marker until a patched worker returns.
+ */
+export const APPROVAL_WAIT_PRE_PEEK_BASELINE_PATCH = "session-approval-wait-pre-peek-baseline-v1";
 const RECOVERY_BACKOFF_MIN_WAIT_MS = 1_000;
 
 /**
@@ -756,6 +768,10 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     // race; every terminal return below must observe that arrival and loop.
     const closeSignalVersion = signalVersion;
     const closeNonControlSignalVersion = nonControlSignalVersion;
+    // Wake counters as they stood before the peek below read durable state.
+    // A signal counted after this point may describe a commit the peek did
+    // not see, so a wait chosen by that peek must not baseline it away.
+    const prePeekWakes = { approvalWakeups, wakeups, interruptionWakeups };
     const workflowId = workflowInfo().workflowId;
     // Re-evaluate at the changed command, not only workflow entry. A replay
     // without the marker keeps its old shape; the next live admission cycle
@@ -902,9 +918,14 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       return;
     }
     if (peek.kind === "approval-wait") {
-      const seenApprovalWakeups = approvalWakeups;
-      const seenWakeups = wakeups;
-      const seenInterruptionWakeups = interruptionWakeups;
+      // A decision accepted while the peek was in flight has already bumped a
+      // counter; baselining after the peek would swallow its only wake.
+      const baseline = patched(APPROVAL_WAIT_PRE_PEEK_BASELINE_PATCH)
+        ? prePeekWakes
+        : { approvalWakeups, wakeups, interruptionWakeups };
+      const seenApprovalWakeups = baseline.approvalWakeups;
+      const seenWakeups = baseline.wakeups;
+      const seenInterruptionWakeups = baseline.interruptionWakeups;
       const scheduledRunTimeout =
         peek.scheduledRunTimeout && peek.expiresAt && patched(SCHEDULED_HUMAN_WAIT_TIMEOUT_PATCH)
           ? peek.scheduledRunTimeout
