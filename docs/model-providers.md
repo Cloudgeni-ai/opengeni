@@ -285,14 +285,18 @@ are not enabled implicitly for an arbitrary Azure deployment name.
 
 #### A workspace's own OpenAI-compatible endpoint
 
-**Workspace settings → Models** also offers **Connect an OpenAI-compatible
-endpoint**, for any provider or self-run server whose API follows OpenAI's Chat
-Completions or Responses format. It asks for an optional name, the API's HTTPS
+The web console connects new OpenAI-compatible endpoints for the organization
+(see [Organization OpenAI-compatible endpoints](#organization-openai-compatible-endpoints)).
+Workspace-owned compatible connections made earlier, or through the
+Connections API below, keep working and stay listed on the workspace's Models
+page, where they can be disconnected. Such a connection is for any provider or
+self-run server whose API follows OpenAI's Chat Completions or Responses
+format. It has an optional name, the API's HTTPS
 base URL (such as `https://api.example.com/v1`; a pasted `/chat/completions`
 or `/responses` path is trimmed), an API key, the model ID exactly as the
 provider lists it under `/models` (IDs such as `org/model:tag` are accepted),
-and the API format (Chat Completions by default, or Responses). Connect each
-model you want to use as its own connection.
+and the API format (Chat Completions by default, or Responses). Each model is
+its own connection.
 
 It is the same workspace-owned rail as OpenAI and Azure OpenAI above, with
 `credentialRole: "direct_openai_compatible"` and
@@ -422,6 +426,41 @@ signs in once first and returns a safe 422 if Entra refuses it; the identity
 needs the `Cognitive Services OpenAI User` role on the resource. Ownership,
 reach and administration are the same as for a key connection.
 
+#### Organization OpenAI-compatible endpoints
+
+Organization owners/admins connect their own OpenAI-compatible endpoints from
+**Organization settings → Models → Connect provider → OpenAI-compatible
+endpoint**, the same list as the organization's other accounts, with the same
+**Available in** step (`OrganizationModelProviderKind` `openai_compatible`).
+Unlike the other organization providers, an organization can connect several
+endpoints, for example two model hosts; each is its own connection, addressed
+by its connection id:
+
+```text
+GET    /v1/organizations/:id/model-providers/openai_compatible/endpoints
+POST   /v1/organizations/:id/model-providers/openai_compatible/endpoints
+PUT    …/endpoints/:connectionId/key
+DELETE …/endpoints/:connectionId
+POST   …/endpoints/:connectionId/models
+DELETE …/endpoints/:connectionId/models/:customModelId
+```
+
+Connecting takes the same fields as a workspace endpoint above (HTTPS base URL,
+key, first model ID, API format, optional name); more models can be added
+later. Every key and model is checked with the same short setup request before
+it is saved, and that request and every model request are DNS-pinned to public
+addresses without redirects, exactly as for workspace endpoints. The key is
+stored encrypted and never returned. Products are
+`organization-compatible-<connection id>/<model>` (provider
+`organization-compatible-<connection id>`, kind
+`direct-compatible-organization`) with the conservative capabilities of a
+workspace endpoint, organization billing with no Opengeni credits, unknown
+residency, the same reach into workspaces as the other organization API-key
+rails, and narrowing by
+`/v1/organizations/:id/model-connections/openai_compatible/:connectionId/access`.
+A disconnected endpoint fails closed and never falls back to another
+credential.
+
 Canonical: `packages/contracts/src/direct-model-provider.ts`,
 `packages/core/src/domain/direct-model-provider.ts` for the setup check,
 `withDirectModelProviders` in `packages/config/src/index.ts`,
@@ -435,6 +474,11 @@ Organization OpenAI and Azure: `withOrganizationDirectCatalogProvider` /
 `packages/core/src/model-provider-credentials.ts`,
 `apps/api/src/routes/organization-model-providers.ts`, and the organization
 provider hook `apps/web/src/components/organization-model-provider-connection.tsx`.
+Organization OpenAI-compatible endpoints: `withOrganizationCompatibleProviders`
+in `packages/config/src/index.ts`,
+`packages/db/src/organization-compatible-model-endpoints.ts`,
+`apps/api/src/routes/organization-compatible-model-endpoints.ts`, and
+`apps/web/src/components/models/organization-compatible-endpoints.tsx`.
 
 ### Reviewed overlays — not generic JSON
 
@@ -449,9 +493,8 @@ provider hook `apps/web/src/components/organization-model-provider-connection.ts
 | Codex ChatGPT subscription   | `OPENGENI_CODEX_SUBSCRIPTION_ENABLED`         | Responses        | `codex/…` after the workspace connection is ready                 |
 | SuperGrok / xAI subscription | `OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED`     | Responses        | `supergrok/…` after the workspace connection is ready             |
 
-A workspace connects its own OpenAI-compatible server through the encrypted
-workspace connection described in
-[A workspace's own OpenAI-compatible endpoint](#a-workspaces-own-openai-compatible-endpoint),
+An organization connects its own OpenAI-compatible servers as described in
+[Organization OpenAI-compatible endpoints](#organization-openai-compatible-endpoints),
 not through this registry. Voice input, image, and video use separate provider
 settings.
 
@@ -815,6 +858,7 @@ derives both from the provider kind:
 | Organization Opper                  | organization connection       | organization           | external         |
 | Organization OpenAI                 | organization connection       | organization           | external         |
 | Organization Azure OpenAI           | organization connection       | organization           | external         |
+| Organization OpenAI-compatible      | organization connection       | organization           | external         |
 
 `workspace_connection` is a reserved normalized contract. Generic JSON does
 not enable workspace BYOK; that requires a separately reviewed encrypted

@@ -811,10 +811,11 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         ? getBillingBalance(deps.db, grant.accountId)
         : Promise.resolve(undefined),
       // The organization's own OpenAI-compatible endpoints this workspace can use.
-      listOrganizationCompatibleEndpointsForWorkspace(deps.db, {
-        accountId: grant.accountId,
-        workspaceId,
-      }),
+      catalogInputs?.then((inputs) => inputs.organizationCompatibleEndpoints) ??
+        listOrganizationCompatibleEndpointsForWorkspace(deps.db, {
+          accountId: grant.accountId,
+          workspaceId,
+        }),
     ]);
     const xaiSubscriptionActive = xaiCatalog.active;
     const connectionModelRestrictions = xaiCatalog.core

@@ -66,7 +66,6 @@ import {
   getWorkspaceGatewayCustomModelForExecution,
   getWorkspaceOpenRouterCustomModelForExecution,
   getOrganizationModelProviderCustomModelForExecution,
-  listOrganizationCompatibleEndpointsForWorkspace,
   lockActiveOrganizationModelProviderCustomModelForAdmission,
   type Database,
   type OrganizationClaudeModelAdmissionAuthority,
@@ -534,13 +533,10 @@ export async function resolveWorkspaceCatalogSettings(
           ),
         )
       : Promise.resolve([]),
-    // The organization's own OpenAI-compatible endpoints this workspace can use.
-    supportsOrganizationProviderReads
-      ? listOrganizationCompatibleEndpointsForWorkspace(db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-        })
-      : Promise.resolve([]),
+    // The organization's own OpenAI-compatible endpoints this workspace can
+    // use, read in the same scope as the other public catalog families.
+    publicCatalog?.then((catalog) => catalog.organizationCompatibleEndpoints) ??
+      Promise.resolve([]),
   ]);
   const includeRetainedModels = <T extends { upstreamModelId: string }>(
     activeModels: readonly T[],

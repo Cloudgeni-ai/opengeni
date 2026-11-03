@@ -1018,18 +1018,6 @@ function sessionPath(workspaceId: string, sessionId: string): string {
   return `/v1/workspaces/${workspaceId}/sessions/${sessionId}`;
 }
 
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
-
-function requireUuid(value: string, name: string): string {
-  if (!UUID_PATTERN.test(value)) throw new TypeError(`${name} must be a UUID`);
-  return value;
-}
-
-function compatibleEndpointsPath(organizationId: string, connectionId?: string): string {
-  const base = `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints`;
-  return connectionId === undefined ? base : `${base}/${requireUuid(connectionId, "connectionId")}`;
-}
-
 /**
  * Web-standard fetch response accepted by the SDK.
  *
@@ -6359,7 +6347,7 @@ export class OpenGeniClient {
   ): Promise<OrganizationCompatibleEndpointsResponse> {
     return await this.requestJson<OrganizationCompatibleEndpointsResponse>(
       "GET",
-      compatibleEndpointsPath(organizationId),
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints`,
     );
   }
 
@@ -6370,7 +6358,7 @@ export class OpenGeniClient {
   ): Promise<OrganizationCompatibleEndpoint> {
     return await this.requestJson<OrganizationCompatibleEndpoint>(
       "POST",
-      compatibleEndpointsPath(organizationId),
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints`,
       request,
     );
   }
@@ -6383,7 +6371,7 @@ export class OpenGeniClient {
   ): Promise<OrganizationCompatibleEndpoint> {
     return await this.requestJson<OrganizationCompatibleEndpoint>(
       "PUT",
-      `${compatibleEndpointsPath(organizationId, connectionId)}/key`,
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints/${encodeURIComponent(connectionId)}/key`,
       request,
     );
   }
@@ -6396,7 +6384,7 @@ export class OpenGeniClient {
   ): Promise<OrganizationCompatibleEndpoint> {
     return await this.requestJson<OrganizationCompatibleEndpoint>(
       "DELETE",
-      compatibleEndpointsPath(organizationId, connectionId),
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints/${encodeURIComponent(connectionId)}`,
       request,
     );
   }
@@ -6409,7 +6397,7 @@ export class OpenGeniClient {
   ): Promise<OrganizationProviderCustomModel> {
     return await this.requestJson<OrganizationProviderCustomModel>(
       "POST",
-      `${compatibleEndpointsPath(organizationId, connectionId)}/models`,
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints/${encodeURIComponent(connectionId)}/models`,
       request,
     );
   }
@@ -6423,7 +6411,7 @@ export class OpenGeniClient {
   ): Promise<OrganizationProviderCustomModel> {
     return await this.requestJson<OrganizationProviderCustomModel>(
       "DELETE",
-      `${compatibleEndpointsPath(organizationId, connectionId)}/models/${requireUuid(customModelId, "customModelId")}`,
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints/${encodeURIComponent(connectionId)}/models/${encodeURIComponent(customModelId)}`,
       request,
     );
   }

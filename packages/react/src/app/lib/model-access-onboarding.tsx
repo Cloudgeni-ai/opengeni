@@ -49,8 +49,13 @@ function rowMatchesFamily(row: PickerModelRow, family: ConnectedModelFamily): bo
   switch (family) {
     case "openai":
     case "azure_openai":
-    case "openai_compatible":
       return directModelProviderOfProviderId(row.provider) === family;
+    case "openai_compatible":
+      // A workspace's own endpoint, or one of the organization's.
+      return (
+        directModelProviderOfProviderId(row.provider) === family ||
+        row.provider.startsWith("organization-compatible-")
+      );
     case "codex":
       return row.billingClass === "codex_subscription";
     case "supergrok":
