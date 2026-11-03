@@ -204,21 +204,16 @@ export function latestRecords(records: readonly RunRecord[]): RunRecord[] {
 }
 
 /**
- * Extra keys for approvals. Only a personal connection's owner may approve
- * its writes: when the main key is a workspace key, its approve gets 403 and
- * the harness retries with the owner's key (`OPENGENI_EVAL_OWNER_API_KEY`).
- * `OPENGENI_EVAL_WORKSPACE_API_KEY` is a workspace key for rows that check
- * the 403 itself.
+ * A workspace key for owner-only rows (`OPENGENI_EVAL_WORKSPACE_API_KEY`):
+ * its approve on a personal connection's write must be refused. Personal
+ * connections only run for chats their owner started, so the main key must
+ * be the owner's own (a personal key, or signing in as them).
  */
-const approvalKeys: { owner?: OpengeniApi; workspace?: OpengeniApi } = {};
+let workspaceApprovalKey: OpengeniApi | undefined;
 
 async function initApprovalKeys(baseUrl: string): Promise<void> {
-  if (process.env.OPENGENI_EVAL_OWNER_API_KEY)
-    approvalKeys.owner = await new OpengeniApi(baseUrl, {
-      apiKey: process.env.OPENGENI_EVAL_OWNER_API_KEY,
-    }).init();
   if (process.env.OPENGENI_EVAL_WORKSPACE_API_KEY)
-    approvalKeys.workspace = await new OpengeniApi(baseUrl, {
+    workspaceApprovalKey = await new OpengeniApi(baseUrl, {
       apiKey: process.env.OPENGENI_EVAL_WORKSPACE_API_KEY,
     }).init();
 }
@@ -265,9 +260,31 @@ async function driveSession(
       // Only the row's own integration gets the row's decision. Anything else
       // (another service, an unattributed tool) is rejected, so a run never
       // writes outside the configured test fixtures; the grader reports it.
-      const choice = ownIntegration(testCase, approval.integration) ? decision : "reject";
-      const record = (key: ApprovalAttempt["key"], status: number) =>
-        attempts.push({ approvalId: approval.approvalId, key, decision: choice, status });
+      // On rows that name the approved tool, a different tool (for example the
+      // workspace bot instead of a personal account) is rejected too.
+      const ownTool =
+        ownIntegration(testCase, approval.integration) &&
+        (!testCase.approvedTool || testCase.approvedTool.test(approval.name));
+      const choice = ownTool ? decision : "reject";
+      const recorded = new Set(
+        attempts
+          .filter((attempt) => attempt.approvalId === approval.approvalId)
+          .map((attempt) => `${attempt.key}:${attempt.status}`),
+      );
+      const record = (key: ApprovalAttempt["key"], error?: unknown) => {
+        const status = error === undefined ? 200 : httpStatus(error);
+        // A failure that repeats on every poll is recorded once.
+        if (recorded.has(`${key}:${status}`)) return;
+        recorded.add(`${key}:${status}`);
+        attempts.push({
+          approvalId: approval.approvalId,
+          tool: approval.name,
+          key,
+          decision: choice,
+          status,
+          ...(error instanceof HttpFailure ? { detail: error.body.slice(0, 300) } : {}),
+        });
+      };
       // Owner-only rows: a workspace key tries first and must be refused.
       if (
         testCase.ownerOnlyApproval &&
@@ -275,56 +292,42 @@ async function driveSession(
         !workspaceTried.has(approval.approvalId)
       ) {
         workspaceTried.add(approval.approvalId);
-        if (!approvalKeys.workspace) record("workspace", 0);
+        if (!workspaceApprovalKey)
+          attempts.push({
+            approvalId: approval.approvalId,
+            tool: approval.name,
+            key: "workspace",
+            decision: choice,
+            status: 0,
+          });
         else {
           try {
-            await approvalKeys.workspace.decideApproval(
+            await workspaceApprovalKey.decideApproval(
               workspaceId,
               sessionId,
               approval.approvalId,
               choice,
             );
-            record("workspace", 200);
+            record("workspace");
             decided.add(approval.approvalId);
             continue;
           } catch (error) {
-            record("workspace", httpStatus(error));
+            record("workspace", error);
           }
         }
       }
       try {
         await api.decideApproval(workspaceId, sessionId, approval.approvalId, choice);
-        record("main", 200);
+        record("main");
         decided.add(approval.approvalId);
       } catch (error) {
+        record("main", error);
         const status = httpStatus(error);
-        // Already decided (409) counts as done.
-        if (status === 409) {
-          decided.add(approval.approvalId);
-          continue;
-        }
-        // A personal connection's write: only its owner may approve.
-        if (status === 403 && approvalKeys.owner) {
-          try {
-            await approvalKeys.owner.decideApproval(
-              workspaceId,
-              sessionId,
-              approval.approvalId,
-              choice,
-            );
-            record("owner", 200);
-            decided.add(approval.approvalId);
-            continue;
-          } catch (ownerError) {
-            if (httpStatus(ownerError) === 409) {
-              decided.add(approval.approvalId);
-              continue;
-            }
-            console.warn(`owner approval ${approval.approvalId} failed: ${String(ownerError)}`);
-          }
-        }
-        // Anything else retries next poll.
-        console.warn(`approval ${approval.approvalId} failed, will retry: ${String(error)}`);
+        // Already decided (409) counts as done. A 403 won't change on retry:
+        // the main key may not decide this approval (for a personal
+        // connection's write, it isn't the owner's); the grader reports it.
+        if (status === 409 || status === 403) decided.add(approval.approvalId);
+        else console.warn(`approval ${approval.approvalId} failed, will retry: ${String(error)}`);
       }
     }
 

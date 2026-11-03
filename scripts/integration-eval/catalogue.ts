@@ -340,7 +340,7 @@ export const CASES: readonly EvalCase[] = [
     verify: "slack_message_exists",
     ownerOnlyApproval: true,
     approvedTool: /(?:^|__)slack_send_message$/,
-    note: "Needs a personal Slack connection with change tools on Ask first, the owner's personal key as the main or owner key, and a workspace key. Passes when the workspace key's approve gets 403 and the owner's approve posts once. Fails until only owners may approve personal-connection writes.",
+    note: "Needs the owner's personal key as the main key, their personal Slack connection on Ask first, no shared Slack connection in the workspace, and a workspace key. Passes when the workspace key's approve gets the owner-only 403 and the owner's approve posts once through the personal Slack tool. Fails until only owners may approve personal-connection writes.",
   },
 
   // ── GitHub ────────────────────────────────────────────────────────────────

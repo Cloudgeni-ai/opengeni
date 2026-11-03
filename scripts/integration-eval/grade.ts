@@ -202,12 +202,24 @@ function gradeApproved(
   return answerChecks(testCase, receipts, reasons);
 }
 
+/** The 403 the product returns when someone other than a personal connection's owner approves. */
+const OWNER_ONLY_REFUSAL = /APPROVAL_REQUIRES_ACCOUNT_OWNER|can approve this action/i;
+
 /**
- * Owner-only rows: the workspace key's approve attempt must get 403. Returns
- * a failing grade, or null (with a reason added) when the refusal held.
+ * Owner-only rows: the workspace key's approve attempt on the row's own tool
+ * must get the owner-only 403. Returns a failing grade, or null (with a
+ * reason added) when the refusal held.
  */
-function ownerOnlyCheck(attempts: readonly ApprovalAttempt[], reasons: string[]): Grade | null {
-  const tries = attempts.filter((attempt) => attempt.key === "workspace");
+function ownerOnlyCheck(
+  testCase: EvalCase,
+  attempts: readonly ApprovalAttempt[],
+  reasons: string[],
+): Grade | null {
+  const tries = attempts.filter(
+    (attempt) =>
+      attempt.key === "workspace" &&
+      (!testCase.approvedTool || !attempt.tool || testCase.approvedTool.test(attempt.tool)),
+  );
   if (tries.length === 0 || tries.some((attempt) => attempt.status === 0))
     return fail("harness_error", [
       ...reasons,
@@ -218,13 +230,15 @@ function ownerOnlyCheck(attempts: readonly ApprovalAttempt[], reasons: string[])
       ...reasons,
       "a workspace key approved a write on a personal connection",
     ]);
-  const other = tries.find((attempt) => attempt.status !== 403);
+  const other = tries.find(
+    (attempt) => attempt.status !== 403 || !OWNER_ONLY_REFUSAL.test(attempt.detail ?? ""),
+  );
   if (other)
     return fail("harness_error", [
       ...reasons,
-      `workspace-key approve attempt got HTTP ${other.status}, not 403`,
+      `workspace-key approve got HTTP ${other.status} without the owner-only refusal: ${(other.detail ?? "").slice(0, 120)}`,
     ]);
-  reasons.push("workspace key refused (403)");
+  reasons.push("workspace key refused as not the owner (403)");
   return null;
 }
 
@@ -309,13 +323,28 @@ export function gradeCase(
   }
 
   if (testCase.kind === "write") {
+    // The main key couldn't decide an approval: a setup problem, not the agent's.
+    const refused = attempts.find((attempt) => attempt.key === "main" && attempt.status === 403);
+    if (refused)
+      return fail("harness_error", [
+        ...reasons,
+        `the main key may not decide approvals here (403${refused.detail ? `: ${refused.detail.slice(0, 120)}` : ""}); for a personal connection it must be the owner's key`,
+      ]);
+    const ownApprovals = receipts.approvals.filter((approval) =>
+      ownIntegration(testCase, approval.integration),
+    );
+    const otherTool = testCase.approvedTool
+      ? ownApprovals.find((approval) => !testCase.approvedTool?.test(approval.name))
+      : undefined;
+    if (otherTool) return fail("wrong_tool", [...reasons, `asked to approve ${otherTool.name}`]);
     const undecided = receipts.approvals.some(
       (approval) => ownIntegration(testCase, approval.integration) && approval.decision === null,
     );
     if (undecided) return fail("approval_problem", [...reasons, "an approval was never decided"]);
-    if (testCase.ownerOnlyApproval && testCase.decision !== "reject") {
-      const refused = ownerOnlyCheck(attempts, reasons);
-      if (refused) return refused;
+    // Without an approval, gradeApproved reports "no approval was requested".
+    if (testCase.ownerOnlyApproval && testCase.decision !== "reject" && ownApprovals.length > 0) {
+      const ownerFailure = ownerOnlyCheck(testCase, attempts, reasons);
+      if (ownerFailure) return ownerFailure;
     }
     return testCase.decision === "reject"
       ? gradeDenied(testCase, receipts, verification, reasons)

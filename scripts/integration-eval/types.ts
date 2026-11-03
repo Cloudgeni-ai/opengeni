@@ -115,8 +115,8 @@ export type EvalCase = {
   /**
    * Write on a personal ("Only me") connection: only its owner may approve.
    * The harness first tries to approve with a workspace key
-   * (`OPENGENI_EVAL_WORKSPACE_API_KEY`), which must get 403, then approves
-   * as the owner.
+   * (`OPENGENI_EVAL_WORKSPACE_API_KEY`), which must be refused with the
+   * owner-only 403, then approves with the main key (the owner's).
    */
   ownerOnlyApproval?: boolean;
   /** Write: the approved call's tool name must match, e.g. the personal Slack tool rather than the bot's. */
@@ -214,7 +214,12 @@ export type RunRecord = {
 
 export type ApprovalAttempt = {
   approvalId: string;
-  key: "main" | "owner" | "workspace";
+  /** The tool the approval was for. */
+  tool?: string;
+  key: "main" | "workspace";
   decision: "approve" | "reject";
+  /** HTTP status; 0 when the key wasn't configured, -1 when the request failed. */
   status: number;
+  /** Start of the error body, for refusals. */
+  detail?: string;
 };

@@ -13,7 +13,7 @@ import {
   stoppedAtDeadline,
   wilson,
 } from "./run";
-import type { EvalCase, RunRecord } from "./types";
+import type { ApprovalAttempt, EvalCase, RunRecord } from "./types";
 
 const linearRead: EvalCase = {
   id: "linear.read.test",
@@ -449,24 +449,56 @@ describe("gradeCase", () => {
     expect(gradeCase(oneDriveWrite, receipts, null)).toMatchObject({ pass: true });
   });
 
-  test("an owner-only row needs the workspace key's approve to be refused", () => {
+  test("an owner-only row needs the workspace key's approve to get the owner-only refusal", () => {
     const ownerOnly: EvalCase = { ...writeCase, ownerOnlyApproval: true };
     const receipts = approvedWrite("approve", "Created HAL-9.");
     const found = { ran: true, ok: true, detail: "HAL-9", count: 1 };
-    const tried = (status: number) => [
-      { approvalId: "c1", key: "workspace" as const, decision: "approve" as const, status },
-      { approvalId: "c1", key: "main" as const, decision: "approve" as const, status: 200 },
+    const ownerRefusal = "Only Ada Quill can approve this action because it runs on their account.";
+    const tried = (status: number, detail = ""): ApprovalAttempt[] => [
+      { approvalId: "c1", key: "workspace", decision: "approve", status, detail },
+      { approvalId: "c1", key: "main", decision: "approve", status: 200 },
     ];
-    expect(gradeCase(ownerOnly, receipts, found, tried(403))).toMatchObject({
+    expect(gradeCase(ownerOnly, receipts, found, tried(403, ownerRefusal))).toMatchObject({
       pass: true,
-      reasons: expect.arrayContaining(["workspace key refused (403)"]),
+      reasons: expect.arrayContaining(["workspace key refused as not the owner (403)"]),
     });
     expect(gradeCase(ownerOnly, receipts, found, tried(200)).category).toBe("approval_problem");
+    // A 403 for another reason (no access to the chat, wrong scope) proves nothing.
+    expect(
+      gradeCase(ownerOnly, receipts, found, tried(403, "workspace access denied")).category,
+    ).toBe("harness_error");
     expect(gradeCase(ownerOnly, receipts, found, tried(500)).category).toBe("harness_error");
     expect(gradeCase(ownerOnly, receipts, found, tried(0)).category).toBe("harness_error");
     expect(gradeCase(ownerOnly, receipts, found, []).category).toBe("harness_error");
-    // Rows without the flag ignore the attempts.
+    // Rows without the flag ignore workspace attempts.
     expect(gradeCase(writeCase, receipts, found, tried(200)).pass).toBe(true);
+  });
+
+  test("a main key refused with 403 is a harness error", () => {
+    const receipts = parseReceipts(
+      events(created("c1"), approval("c1"), answer("Waiting for approval.")),
+    );
+    const attempts = [
+      {
+        approvalId: "c1",
+        key: "main" as const,
+        decision: "approve" as const,
+        status: 403,
+        detail: "Only Ada Quill can approve this action.",
+      },
+    ];
+    expect(gradeCase(writeCase, receipts, null, attempts).category).toBe("harness_error");
+  });
+
+  test("an owner-only row with no approval reports the missing approval", () => {
+    const ownerOnly: EvalCase = { ...writeCase, ownerOnlyApproval: true };
+    const receipts = parseReceipts(
+      events(created("c1"), output("c1", '{"id":"HAL-9"}'), answer("Created HAL-9.")),
+    );
+    expect(gradeCase(ownerOnly, receipts, null, [])).toMatchObject({
+      category: "approval_problem",
+      reasons: expect.arrayContaining(["no approval was requested for the write"]),
+    });
   });
 
   test("an approved write through another tool than the row names is the wrong tool", () => {
@@ -486,6 +518,16 @@ describe("gradeCase", () => {
     expect(
       gradeCase({ ...writeCase, approvedTool: /__create_issue$/ }, receipts, found),
     ).toMatchObject({ pass: false, category: "wrong_tool" });
+    // A wrong-tool approval wins over the owner-only check (the harness
+    // rejects it, so no workspace attempt exists for the row's tool).
+    expect(
+      gradeCase(
+        { ...writeCase, approvedTool: /__create_issue$/, ownerOnlyApproval: true },
+        receipts,
+        found,
+        [],
+      ).category,
+    ).toBe("wrong_tool");
   });
 
   test("a plain-text rate-limit output is an errored, rate-limited call", () => {
