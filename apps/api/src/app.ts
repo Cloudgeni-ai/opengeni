@@ -197,6 +197,7 @@ import {
   stampRequestBillingOrigin,
   configureBillingLegacyAccounts,
   fundedBillingOrigin,
+  ownModelFunding,
 } from "@opengeni/core";
 import {
   ManagedAuthActorLeaseOutcomeUnknownError,
@@ -320,6 +321,7 @@ import {
 } from "./http/local-browser-boundary";
 import {
   alongsideAuthorization,
+  billingOriginForAccessGrant,
   requireLiveAgentAttemptGrant,
   withAccessGrantSessionRlsContext,
 } from "./access-grant-rls";
@@ -1610,6 +1612,12 @@ export function createAppComposition(deps: AppDependencies): {
             { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
             { observeAvailability: true },
           );
+          const billingOrigin = await billingOriginForAccessGrant(routeDeps, grant);
+          if (billingOrigin === "api") {
+            selections = selections.filter(
+              ({ model }) => ownModelFunding(model) !== "subscription",
+            );
+          }
           if (!hasPermission(grant.permissions, "sessions:create")) {
             modelSelectionForbidden = true;
             selections = [];
@@ -1648,6 +1656,7 @@ export function createAppComposition(deps: AppDependencies): {
             accountId: grant.accountId,
             workspaceSettings: workspace?.settings ?? {},
             selections,
+            billingOrigin,
           });
         });
       } else if (context) {
