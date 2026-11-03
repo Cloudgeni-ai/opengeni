@@ -99,6 +99,28 @@ Connector-permissions discovery and explicit tool-name updates use the same
 count allowance, so an admitted catalog can be managed without a lower cutoff.
 Duplicate names and repeated pagination cursors remain rejected.
 
+## Account parameters
+
+Some servers require an identifier on most tools that the connected account
+already fixes, such as the Atlassian site (`cloudId`). The runtime fills it in
+(`packages/runtime/src/mcp-account-parameters.ts`). Each server adds only
+declarative data, keyed by exact MCP URL like the account identity verifiers:
+the parameter name, a read-only tool on the same server that lists the
+account's values, and the fields holding each value and its label. Nothing
+adds connector-specific prompt or tool-instruction text.
+
+When the server lists that lookup tool, every tool that required the parameter
+lists it as optional, with the same generic note on every server. A call that
+leaves it unset (missing, empty, or a phrase with spaces, which no identifier
+contains) gets the account's only value. If the account has several values, the
+call isn't sent: the model gets a recoverable error listing each name and id. A
+value matching one of those names picks it. A plausible supplied value is never
+replaced, and a parameter the tool already treats as optional is left alone.
+The values are looked up once per attempt by the wrapper around the physical
+server, with a 10-second limit. A failed or empty lookup sends the call on
+unchanged, so the provider's own error reaches the model. Recoverable
+operations, which dispatch exactly one physical call, are never filled.
+
 ## Attached accounts
 
 An enabled native connector can attach multiple authorized connections, including
