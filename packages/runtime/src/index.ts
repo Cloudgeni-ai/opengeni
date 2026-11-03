@@ -2707,8 +2707,8 @@ export type BuildAgentOptions = {
   /**
    * The attempt's credential profile: variables added to the environment of
    * every sandbox command (exec_command and background commands), resolved
-   * through `secretResolver` (so the values are remembered and masked like
-   * any other resolved value). Omitted: commands get no profile variables.
+   * through `secretResolver` like any other reference. Omitted: commands get
+   * no profile variables.
    */
   credentials?: CredentialEnvironment | null;
   /**

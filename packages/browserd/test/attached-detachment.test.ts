@@ -1276,7 +1276,7 @@ for (const holds of [true, false])
           if (
             payload.method === "Runtime.callFunctionOn" &&
             params.objectId === "field-42" &&
-            String(params.functionDeclaration).includes("site-added grouping")
+            String(params.functionDeclaration).includes("groups digits as they are typed")
           ) {
             this.commands.push(payload);
             const expected = String((params.arguments as Array<{ value: unknown }>)[0]?.value);

@@ -1285,6 +1285,69 @@ describe("generic lazy tool dispatch", () => {
     ]);
   });
 
+  test("a dotted server.tool call is named once when received and replays unchanged", async () => {
+    const received: unknown[] = [];
+    const deferredTool = tool({
+      name: `${SERVER_ID}__history_page`,
+      description: "Read a page of history",
+      parameters: {
+        type: "object",
+        properties: { sessionId: { type: "string" } },
+        required: ["sessionId"],
+        additionalProperties: false,
+      },
+      strict: false,
+      execute: (input) => (received.push(input), "ok"),
+    }) as unknown as Tool;
+    const agent = agentWith(deferredTool);
+    const runtime = installLazyToolRuntime(
+      agent,
+      "generic_dispatch",
+      new Set([SERVER_ID]),
+      Promise.resolve(),
+      new Set([SERVER_ID]),
+    );
+    const model = new ScriptedStreamingModel([
+      [
+        {
+          type: "function_call",
+          callId: "dotted",
+          name: `${SERVER_ID}.history_page`,
+          arguments: JSON.stringify({ sessionId: "42" }),
+        },
+        {
+          type: "function_call",
+          callId: "unknown",
+          name: "no.such tool",
+          arguments: "{}",
+        },
+      ],
+      [finalMessage("first")],
+      [finalMessage("second")],
+    ]);
+    const result = await runStreamed(agent, model, runtime);
+    expect(result.finalOutput).toBe("first");
+    expect(received).toEqual([{ sessionId: "42" }]);
+    const calls = (model.requests[1]!.input as Array<Record<string, unknown>>).filter(
+      (item) => item.type === "function_call",
+    );
+    // The authorized tool it denotes, and a stable valid alias for a name no tool has.
+    expect(calls.map((item) => item.name)).toEqual([
+      `${SERVER_ID}__history_page`,
+      expect.stringMatching(/^no_such_tool_[0-9a-f]{16}$/),
+    ]);
+    // A later request replays the stored items exactly as the first sent them.
+    const runner = new Runner({ modelProvider: new LazyToolModelProvider(providerFor(model), runtime) });
+    const replay = await runner.run(agent, [...(model.requests[1]!.input as never[])], {
+      stream: true,
+      historyOwnership: "external",
+      maxTurns: 2,
+    });
+    for await (const _event of replay.toStream()) void _event;
+    await replay.completed;
+    expect(JSON.stringify(model.requests[2]!.input)).toBe(JSON.stringify(model.requests[1]!.input));
+  });
+
   test("direct deferred restoration preserves validation inputs and leaves other boundaries alone", async () => {
     const parameters = {
       type: "object",

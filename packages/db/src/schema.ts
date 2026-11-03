@@ -14019,10 +14019,6 @@ export const auditEvents = pgTable(
       table.workspaceId,
       table.occurredAt,
     ),
-    // Earlier secret uses of a session tree, for known-value masking (1023).
-    secretUsed: index("audit_events_secret_used_idx")
-      .on(table.workspaceId, table.occurredAt)
-      .where(sql`${table.action} = 'vault.secret.used'`),
   }),
 );
 
