@@ -33,6 +33,53 @@ function memoryWith(value = FAKE, label = DB_REF) {
 }
 
 describe("known-value secret masking", () => {
+  test("keeps tool identities that contain a known value and masks the rest", () => {
+    // A password that is a plain word inside a tool name, as in a chat whose
+    // replayed tool_search_output failed with "tools[1].name does not match
+    // pattern" once the name became `…__query_<reference>`.
+    const word = "pelicans";
+    const memory = memoryWith(word);
+    const toolName = `mcp_0123456789abcdef01234567__query_${word}`;
+    const definition = {
+      type: "function",
+      name: toolName,
+      description: `Query ${word}`,
+      parameters: { type: "object", properties: {} },
+    };
+    const history = [
+      {
+        type: "tool_search_output",
+        status: "completed",
+        tools: [
+          { type: "function", name: "opengeni__goal_set", description: "Set a goal" },
+          definition,
+          { type: "namespace", name: `ns_${word}`, description: "d", tools: [definition] },
+          { type: "tool_reference", function_name: toolName, namespace: `ns_${word}` },
+        ],
+        providerData: { call_id: "call_search", execution: "client" },
+      },
+      { type: "function_call", callId: "call_q", name: toolName, arguments: `{"q":"${word}"}` },
+      { type: "function_call_result", callId: "call_q", name: toolName, output: `rows ${word}` },
+      { type: "message", role: "user", content: `name ${word}` },
+    ];
+    const masked = memory.mask(history) as typeof history;
+    const [search, call, result, message] = masked as Array<Record<string, any>>;
+    expect(search!.tools.map((tool: { name?: string }) => tool.name)).toEqual([
+      "opengeni__goal_set",
+      toolName,
+      `ns_${word}`,
+      undefined,
+    ]);
+    expect(search!.tools[1].description).toBe(`Query ${DB_REF}`);
+    expect(search!.tools[2].tools[0].name).toBe(toolName);
+    expect(search!.tools[3]).toMatchObject({ function_name: toolName, namespace: `ns_${word}` });
+    expect(call).toMatchObject({ name: toolName, arguments: `{"q":"${DB_REF}"}` });
+    expect(result).toMatchObject({ name: toolName, output: `rows ${DB_REF}` });
+    // A `name` that is not a tool identity is ordinary text.
+    expect(message!.content).toBe(`name ${DB_REF}`);
+    expect(memory.mask({ name: word })).toEqual({ name: DB_REF });
+  });
+
   test("replaces the value with its reference", () => {
     const memory = memoryWith();
     expect(memory.maskText(`echo ${FAKE}\n${FAKE}\n`)).toBe(`echo ${DB_REF}\n${DB_REF}\n`);

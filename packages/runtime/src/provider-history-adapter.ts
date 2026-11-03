@@ -7,6 +7,7 @@ import {
   withSearchRecordsAfterOpenCalls,
   type SearchRecordForm,
 } from "./hosted-search-evidence";
+import { withProviderValidToolNames } from "./provider-tool-names";
 
 export type HistoryProviderApi = "responses" | "chat" | "anthropic-messages";
 
@@ -32,6 +33,12 @@ export type ProviderHistoryOptions = {
    * replay them natively.
    */
   searchRecordForm?: SearchRecordForm;
+  /**
+   * The request's tool names. A Responses history tool name the provider
+   * would reject becomes the one of these it denotes, else a stable alias
+   * (see withProviderValidToolNames).
+   */
+  knownToolNames?: readonly string[];
 };
 
 const CHAT_FUNCTION_NAME = /^[a-zA-Z0-9_-]+$/;
@@ -337,7 +344,12 @@ export function projectHistoryForProvider(
     }),
   );
   const input = projected.every((item, index) => item === items[index]) ? items : projected;
-  return projectWireHistory(withWireValidFunctionCallArguments(input), providerApi, options);
+  const wire = projectWireHistory(withWireValidFunctionCallArguments(input), providerApi, options);
+  // Responses validates every tool name in history items that carry tool
+  // definitions or call a tool; one invalid name fails the whole request.
+  return providerApi === "responses"
+    ? withProviderValidToolNames(wire, options.knownToolNames)
+    : wire;
 }
 
 /**

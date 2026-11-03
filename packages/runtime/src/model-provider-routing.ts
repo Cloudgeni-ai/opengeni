@@ -365,6 +365,9 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
           ? request.input
           : (projectHistoryForProvider(request.input, "responses", {
               declaresAdditionalTools: responsesRouteDeclaresAdditionalTools(this.provider.kind),
+              knownToolNames: request.tools.flatMap((tool) =>
+                tool.type === "function" ? [tool.name] : [],
+              ),
             }) as ModelRequest["input"]);
       return super._buildResponsesCreateRequest(
         input === request.input ? request : { ...request, input },

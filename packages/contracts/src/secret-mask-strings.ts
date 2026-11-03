@@ -123,12 +123,51 @@ function mapString(
 }
 
 /**
+ * Records whose `name`, `namespace` or `function_name` is a tool's identity:
+ * tool definitions (in a request's tools, a `tool_search_output` and an
+ * `additional_tools` declaration) and the calls and results that name a tool.
+ */
+const TOOL_IDENTITY_RECORD_TYPES: ReadonlySet<string> = new Set([
+  "function",
+  "namespace",
+  "custom",
+  "tool_reference",
+  "function_call",
+  "function_call_result",
+  "custom_tool_call",
+  "mcp_call",
+  "mcp_approval_request",
+]);
+const TOOL_IDENTITY_KEYS: ReadonlySet<string> = new Set(["name", "namespace", "function_name"]);
+
+/**
+ * Whether a string is a tool's identity, which masking never rewrites. A tool
+ * name is catalog data the provider already receives unmasked in the
+ * request's tools; rewriting a known value that happens to occur inside one
+ * (a password that is a plain word) breaks the provider's tool-name pattern
+ * and the call's mapping back to its tool.
+ */
+export function isToolIdentityString(
+  key: string | null,
+  parent: Record<string, unknown> | null,
+): boolean {
+  return (
+    key !== null &&
+    parent !== null &&
+    TOOL_IDENTITY_KEYS.has(key) &&
+    typeof parent.type === "string" &&
+    TOOL_IDENTITY_RECORD_TYPES.has(parent.type)
+  );
+}
+
+/**
  * Deep copy of `value` with `map` applied to every string a masker may
  * change (object keys are kept; an own `__proto__` key stays data). Binary
  * payloads are skipped and text payloads mapped decoded (see the module
  * comment). Own symbol-keyed properties are copied unmapped: they are
- * request-local marks that never reach a payload. Inputs that need no change
- * keep their identity.
+ * request-local marks that never reach a payload. A tool's identity (see
+ * isToolIdentityString) is kept as written. Inputs that need no change keep
+ * their identity.
  */
 export function mapSecretMaskableStrings<T>(
   value: T,
@@ -143,6 +182,7 @@ export function mapSecretMaskableStrings<T>(
   ): unknown => {
     if (typeof entry === "string") {
       if (key !== null && skipKey?.(key)) return entry;
+      if (isToolIdentityString(key, parent)) return entry;
       return mapString(entry, key, parent, map);
     }
     if (entry === null || typeof entry !== "object" || depth > 200) return entry;
