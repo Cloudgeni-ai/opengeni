@@ -27,7 +27,6 @@ import { ListRow } from "@opengeni/react/ui/list-row";
 import { Input } from "@opengeni/react/ui/input";
 import { Label } from "@opengeni/react/ui/label";
 import { LogoTile } from "@opengeni/react/ui/logo-tile";
-import { Notice } from "@opengeni/react/ui/notice";
 import { validTopupAmount } from "@opengeni/react/app/lib/format";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 import { analyticsAction } from "@opengeni/react/ui/analytics-actions";
@@ -102,12 +101,8 @@ const FAMILY_LABELS: Record<ConnectedModelFamily, string> = {
   openai_compatible: "Your endpoint",
 };
 
-/** ChatGPT keeps device code login behind a per-account (or workspace-admin) setting. */
-export const CHATGPT_SECURITY_SETTINGS_URL = "https://chatgpt.com/#settings/Security";
 /** Codex does not report its device-code lifetime; OpenAI documents 15 minutes. */
 const CODEX_DEVICE_CODE_TTL_MS = 15 * 60 * 1_000;
-/** Show troubleshooting once a device login has waited this long. */
-export const DEVICE_LOGIN_HINT_DELAY_MS = 60 * 1_000;
 
 type DevicePending = {
   kind: "codex" | "supergrok";
@@ -172,7 +167,6 @@ export function ModelAccessOnboardingPanel({
 }) {
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<DevicePending | null>(null);
-  const [pendingSlow, setPendingSlow] = useState(false);
   // The row whose connect step is open: a provider, or buying credits.
   const [open, setOpen] = useState<ModelProviderId | "credits" | null>(
     !startingCredits && !includedModel && billingMode === "stripe" ? "credits" : null,
@@ -214,13 +208,6 @@ export function ModelAccessOnboardingPanel({
       pollAbort.current?.abort();
     };
   }, []);
-
-  useEffect(() => {
-    setPendingSlow(false);
-    if (!pending) return;
-    const timer = setTimeout(() => setPendingSlow(true), DEVICE_LOGIN_HINT_DELAY_MS);
-    return () => clearTimeout(timer);
-  }, [pending]);
 
   function stopDeviceLogin(): void {
     pollAbort.current?.abort();
@@ -595,27 +582,6 @@ export function ModelAccessOnboardingPanel({
                 })
           }
         />
-        {pendingSlow ? (
-          <Notice tone="waiting" title="Still waiting?">
-            {pending.kind === "codex" ? (
-              <>
-                Check that you entered the code exactly as shown. If ChatGPT says device code login
-                is off, turn it on in ChatGPT under Settings, Security (on Business and Enterprise
-                plans a ChatGPT admin allows it), then cancel and try again.{" "}
-                <a
-                  className="font-medium text-fg underline underline-offset-2"
-                  href={CHATGPT_SECURITY_SETTINGS_URL}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  Open ChatGPT security settings
-                </a>
-              </>
-            ) : (
-              "Check that you entered the code exactly as shown and approved access on the xAI page. If the code expired, cancel and try again."
-            )}
-          </Notice>
-        ) : null}
         <Button
           type="button"
           variant="outline"
