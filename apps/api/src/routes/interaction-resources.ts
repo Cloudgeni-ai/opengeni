@@ -45,6 +45,7 @@ import {
   listVisibleSessionInvalidationHints,
   sessionListChangesFor,
   resolveInteractionIntervention,
+  SessionApprovalForbiddenError,
   updateNetworkRoute,
   updateSiteAuthConnection,
 } from "@opengeni/db";
@@ -651,6 +652,9 @@ export function interactionResourceRouteError(error: unknown): HTTPException {
     error instanceof ComputerSessionNotFoundError
   ) {
     return new HTTPException(404, { message: error.message, cause: error });
+  }
+  if (error instanceof SessionApprovalForbiddenError) {
+    return new HTTPException(403, { message: error.message, cause: error });
   }
   if (
     error instanceof InteractionResourceConflictError ||

@@ -6155,6 +6155,12 @@ export const englishMessages = {
   "toolActionReview.reasonItDidNotRun": "{reason} It did not run.",
   "toolActionReview.someOfItRanCheck": "Some of it ran. Check the result before continuing.",
   "toolActionReview.theActionRanButReturned": "The action ran but returned an error.",
+  "toolActionReview.onlyTheAccountOwnerCanApprove":
+    "Only the person whose own account this runs on can approve it. You can decline it.",
+  "toolActionReview.onlyNameCanApprove":
+    "Only {name} can approve this, because it runs on their own account. You can decline it.",
+  "toolActionReview.onlyYouCanApprove":
+    "This runs on your own account, so only you can approve it.",
   "toolActionReview.theDetailsOfThisOlder":
     "The details of this older request couldn't be recovered, so it can't be approved. Decline it to let the agent continue.",
   "toolActionReview.theExactValuesSavedFor":

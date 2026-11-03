@@ -17,6 +17,11 @@ import * as schema from "./schema";
 import { hydrateStoredAttemptToolCatalog } from "./session-content-blobs";
 import { connectorActionFingerprint } from "./connector-action-fingerprint";
 import { fromPostgresLosslessJson } from "./lossless-json";
+import { PERSONAL_WORKSPACE_EXTERNAL_SOURCE } from "./personal-workspace-membership";
+import {
+  accountOwnerLabelForTurn,
+  personalConnectionOwnerForTurn,
+} from "./personal-connection-approval";
 
 type ReviewScope = {
   accountId: string;
@@ -184,9 +189,16 @@ async function catalogReviewContext(
 /** The HTTP/core caller must independently authorize this session. RLS remains active here. */
 export async function getToolActionReview(
   db: Database,
-  input: ReviewScope,
+  input: ReviewScope & {
+    /**
+     * Who is looking. An action that runs on another person's own account
+     * offers this viewer only Decline; omitted, the review is unpersonalized.
+     */
+    viewerSubjectId?: string;
+  },
 ): Promise<ToolActionReview | null> {
-  const record = await reviewSnapshot(db, input);
+  const { viewerSubjectId, ...scope } = input;
+  const record = await reviewSnapshot(db, scope);
   if (!record) return null;
   const { request, operation, turn } = record;
   let status: ToolReviewStatus =
@@ -218,6 +230,25 @@ export async function getToolActionReview(
   const args = request.reviewArguments;
   const context = request.reviewContext ?? undefined;
   const parsed = decodeReviewArguments(args);
+  const accountOwner = personalConnectionOwnerForTurn({
+    connectionId: request.connectionId,
+    mcpAccountBindings: turn.mcpAccountBindings,
+    personalConnectionDelegations: turn.personalConnectionDelegations,
+  });
+  const ownerOnly =
+    waiting &&
+    viewerSubjectId !== undefined &&
+    accountOwner !== null &&
+    accountOwner !== viewerSubjectId;
+  const ownerLabel = ownerOnly ? accountOwnerLabelForTurn(accountOwner!, turn) : null;
+  // In a chat shared with the workspace, the owner is told the decision is
+  // theirs alone; in their own chats that goes without saying.
+  const approvedByViewer =
+    waiting &&
+    accountOwner !== null &&
+    accountOwner === viewerSubjectId &&
+    request.reviewArguments !== null &&
+    (await sessionSharedWithWorkspace(db, scope));
   return ToolActionReview.parse({
     version: 1,
     id: request.approvalId,
@@ -251,11 +282,41 @@ export async function getToolActionReview(
     createdAt: request.createdAt.toISOString(),
     updatedAt: (operation?.updatedAt ?? request.updatedAt).toISOString(),
     availableActions: waiting
-      ? request.reviewArguments !== null
+      ? request.reviewArguments !== null && !ownerOnly
         ? ["approve", "reject"]
         : ["reject"]
       : [],
+    ...(ownerOnly
+      ? { approvedBy: "account_owner", ...(ownerLabel ? { accountOwnerLabel: ownerLabel } : {}) }
+      : approvedByViewer
+        ? { approvedBy: "you" }
+        : {}),
     detailsAvailable: args !== null,
+  });
+}
+
+/** A chat other people can see: shared with a workspace that isn't someone's Personal one. */
+async function sessionSharedWithWorkspace(db: Database, scope: ReviewScope): Promise<boolean> {
+  return await withRlsContext(db, scope, async (scoped) => {
+    const [session] = await scoped
+      .select({
+        visibility: schema.sessions.visibility,
+        workspaceSource: schema.workspaces.externalSource,
+      })
+      .from(schema.sessions)
+      .innerJoin(schema.workspaces, eq(schema.workspaces.id, schema.sessions.workspaceId))
+      .where(
+        and(
+          eq(schema.sessions.accountId, scope.accountId),
+          eq(schema.sessions.workspaceId, scope.workspaceId),
+          eq(schema.sessions.id, scope.sessionId),
+        ),
+      )
+      .limit(1);
+    return (
+      session?.visibility === "workspace_shared" &&
+      session.workspaceSource !== PERSONAL_WORKSPACE_EXTERNAL_SOURCE
+    );
   });
 }
 

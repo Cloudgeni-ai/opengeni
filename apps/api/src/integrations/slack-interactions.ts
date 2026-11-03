@@ -60,6 +60,7 @@ import {
   acceptSessionHumanInputResponse,
   acceptSessionApprovalDecision,
   SessionApprovalAnswerError,
+  SessionApprovalForbiddenError,
   approveSlackUserLinkAccessRequest,
   advanceSlackInteractionDelivery,
   bindSlackInteractionSession,
@@ -6184,6 +6185,13 @@ async function executeSlackAction(
     } catch (error) {
       // The MCP server's question needs typed answers, or it asked again
       // since this card was posted: the person answers in the session.
+      // The call runs on someone's own account: only they can approve it.
+      if (error instanceof SessionApprovalForbiddenError) {
+        return {
+          result: "forbidden",
+          text: `${mention}${error.message} ${openSessionText(deps, interaction.workspaceId, handle.sessionId)}`,
+        };
+      }
       if (!(error instanceof SessionApprovalAnswerError)) throw error;
       return {
         result: "needs_answer",
