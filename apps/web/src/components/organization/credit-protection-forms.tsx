@@ -444,7 +444,7 @@ export function AutoTopUpForm(props: {
                   >
                     {busy ? "Opening Stripe…" : "Set up card"}
                   </RowButton>
-                ) : (
+                ) : draft.enabled || saved.enabled || unconfirmed ? (
                   <RowButton
                     type="submit"
                     variant="default"
@@ -458,7 +458,7 @@ export function AutoTopUpForm(props: {
                           ? "Turn on automatic top-up"
                           : "Save automatic top-up"}
                   </RowButton>
-                )}
+                ) : null}
               </div>
             ) : null}
           </>

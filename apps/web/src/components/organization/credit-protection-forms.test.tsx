@@ -326,6 +326,8 @@ test("turn-off is immediate but does not claim completion before the response", 
   expect(document.body.textContent).not.toContain("Automatic top-up is off.");
   await act(async () => resolve(settings()));
   expect(document.body.textContent).toContain("Automatic top-up is off.");
+  expect(document.querySelector('button[type="submit"]')).toBeNull();
+  expect(document.body.textContent).toContain("Set up");
 });
 
 test("fresh card, spend and failure information is displayed without discarding a dirty amount", async () => {
