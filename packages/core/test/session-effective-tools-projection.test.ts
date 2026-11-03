@@ -815,7 +815,9 @@ describe("server effectiveTools environment projection", () => {
   test("model-facing names and visibility match progressive disclosure", () => {
     const tools = projected().effectiveTools!.tools;
     const named = (name: string) => tools.find((tool) => tool.name === name);
-    expect(named("opengeni__goal_set")?.visibility).toBe("search");
+    // Harness control tools are in the first request on every path.
+    expect(named("opengeni__goal_set")?.visibility).toBe("upfront");
+    expect(named("opengeni__knowledge_search")?.visibility).toBe("search");
     expect(named("request_human_input")?.visibility).toBe("upfront");
     expect(named("skill_read")?.visibility).toBe("upfront");
     expect(named("skill_save")?.visibility).toBe("search");

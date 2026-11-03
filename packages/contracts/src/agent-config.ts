@@ -693,6 +693,32 @@ export const AGENT_RUNTIME_MECHANIC_TOOL_NAMES = [
   "wait_for_input",
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
+/**
+ * First-party tools the harness itself relies on: goal lifecycle, background
+ * command polling, and the session-level wait, plus sandbox_file_publish, the
+ * last step of every task that hands the person a file. Hiding any of them
+ * behind search spends a model round trip to rediscover the same schema (for
+ * a document or spreadsheet the person asked for, one of every six requests).
+ * Tools that only some chats can use stay behind search: excel_run, loaded up
+ * front in every chat, made agents in chats with no workbook read "here" as
+ * an open workbook and probe Excel; an add-in message names the tool, so the
+ * agent loads it by exact name when a workbook is there. This is an exact
+ * per-tool exception, never the whole `opengeni` catalog, and it never widens
+ * authority: only a tool the attempt's prepared server actually listed
+ * (selection and permissions already applied) can be visible.
+ */
+export const HARNESS_CONTROL_FIRST_PARTY_TOOLS = [
+  "goal_set",
+  "goal_update",
+  "goal_complete",
+  "goal_pause",
+  "goal_resume",
+  "command_read",
+  "command_wait",
+  "wait_for_input",
+  "sandbox_file_publish",
+] as const satisfies readonly FirstPartyMcpToolName[];
+
 /** First-party tools a configured agent receives whenever compute is attached. */
 export const AGENT_SANDBOX_MECHANIC_TOOL_NAMES = [
   "command_read",
@@ -1010,6 +1036,21 @@ export function noneAgentCapabilities(): ResolvedAgentCapabilities {
   };
 }
 
+/**
+ * The starting point of a saved request: a workspace default or a schedule's
+ * stored request. Saved requests keep the meaning they had before
+ * `notifications` and `privacyFacts` existed: under "none", notifications came
+ * with human input and privacy facts were always attached. A request sent with
+ * a session create starts from `noneAgentCapabilities()`.
+ */
+export function savedRequestBaseCapabilities(
+  from: AgentCapabilityStartingPoint,
+): ResolvedAgentCapabilities {
+  return from === "all"
+    ? allAgentCapabilities()
+    : { ...noneAgentCapabilities(), notifications: true, privacyFacts: true };
+}
+
 export function agentCapabilityEnabled(
   capabilities: ResolvedAgentCapabilities,
   id: AgentCapabilityId,
@@ -1306,7 +1347,15 @@ function resolveTopLevel(
   capabilitiesFromWorkspace = false,
 ): ResolvedAgentConfig {
   const { from, toggles } = normalizeCapabilities(source.capabilities ?? "all");
-  const base = from === "all" ? allAgentCapabilities() : noneAgentCapabilities();
+  const saved =
+    sourceKind === "workspace_default" ||
+    capabilitiesFromWorkspace ||
+    input.creator === "scheduled";
+  const base = saved
+    ? savedRequestBaseCapabilities(from)
+    : from === "all"
+      ? allAgentCapabilities()
+      : noneAgentCapabilities();
   // "Everything this workspace offers": a workspace that turned structured
   // human input off keeps it off unless a toggle explicitly asks for it.
   if (!input.workspace.humanInputEnabled) {
@@ -1314,6 +1363,11 @@ function resolveTopLevel(
     base.notifications = false;
   }
   const wanted = applyToggles(base, toggles);
+  // Turning human input back on in a workspace that switched it off brings its
+  // notifications with it, as before they were split out.
+  if (from === "all" && toggles.humanInput === true && toggles.notifications === undefined) {
+    wanted.notifications = true;
+  }
   const explicitGoalsOff = !capabilitiesFromWorkspace && toggles.goals === false;
   const config = agentConfigFromCapabilities({
     from,
@@ -1782,6 +1836,7 @@ export function projectAgentEffectiveTools(input: {
       ...capabilities,
       webSearch: families.webSearch,
       humanInput: families.humanInput,
+      notifications: families.notifications,
       media: families.media,
     },
     mediaToolsKnown: media.toolsKnown,
@@ -1794,6 +1849,7 @@ export function projectAgentEffectiveTools(input: {
             (input.environment?.unavailable?.includes(id) ||
               (id === "webSearch" && !families.webSearch) ||
               (id === "humanInput" && !families.humanInput) ||
+              (id === "notifications" && !families.notifications) ||
               (id === "media" && !families.media)),
         ),
       ]),

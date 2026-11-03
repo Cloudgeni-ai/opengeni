@@ -1166,6 +1166,49 @@ describe("effective-tools projection agrees with actual model preparation", () =
       toolsKnown: false,
     });
   });
+
+  // With tool search on, the projection follows the worker's router decision:
+  // no router or title tool when nothing is deferred, and no wait_for_input
+  // when nothing can resume the agent. (The fixture's `opengeni` server is not
+  // first party, so harness control tools cannot join its first request here;
+  // "search visibility matches" covers "all" with tool search on.)
+  test.each([
+    { label: "embedding, API turn", agent: agentConfig("none"), eagerProduct: true, human: false },
+    { label: "none, lazy, API turn", agent: agentConfig("none"), lazy: true, human: false },
+  ])(
+    "$label projects the captured lazy tool surface",
+    async ({ agent, eagerProduct, lazy, human }) => {
+      const captured = await captureWorkerRequest({
+        agent,
+        builtins: false,
+        hasSkills: false,
+        humanRecipient: human,
+        ...(eagerProduct ? { eagerProduct } : {}),
+        ...(lazy ? { lazy } : {}),
+      });
+      const projected = projectAgentEffectiveTools(
+        sessionEffectiveToolProjectionInput(
+          captured.session as Parameters<typeof sessionEffectiveToolProjectionInput>[0],
+          captured.turnTools,
+          {
+            settings: captured.settings,
+            humanInputEnabled: true,
+            hasWorkspaceSkills: false,
+            objectStorageAvailable: true,
+            humanRecipient: human,
+            mediaAttachments: new Map([[captured.session.id, captured.mediaAttachment]]),
+          },
+        ),
+      );
+      const product = `${prefixedMcpToolName("customer-product", "search_documents").split("__")[0]}__`;
+      const upfront = projected.tools.filter((tool) => tool.visibility === "upfront");
+      expect(upfront.map((tool) => tool.name).sort()).toEqual(
+        captured.names.filter((name) => !name.startsWith(product)).sort(),
+      );
+      for (const entry of projected.tools.filter((tool) => tool.visibility === "search"))
+        expect(captured.deferredNames).toContain(entry.name);
+    },
+  );
 });
 
 describe("Skill attachment is distinct from Skill catalog availability", () => {
@@ -1627,9 +1670,9 @@ const INVENTORY = {
     "# Destructive Actions": 547,
     "# Runtime mechanics": 20,
     "## New messages while you work": 805,
-    "## Compaction": 511,
+    "## Compaction": 698,
   },
-  tools: { request_human_input: 2964 },
+  tools: { request_human_input: 2562 },
 };
 
 // Every tool the prompt names must be one the model can reach in that request:

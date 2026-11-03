@@ -411,11 +411,13 @@ neutral identity unless the session shares a workspace; `request_human_input`
 offers the secret kind only with `secrets` and Skill reviews only with
 `skills: "manage"`; `wait_for_input` comes only with a sandbox, `subagents`,
 `goals`, `schedules`, `browser`, `media`, or a user-started turn; tool search
-only when a tool is deferred (list the product server with `eager: true` to
-avoid it); no Skill index without Skills. Prompt sections follow their
-capability. Switch an item back on with its capability, for example
-`{ from: "none", privacyFacts: true }`. `getSessionModelContext` shows the
-exact instructions and tools of the latest request.
+only when a tool is deferred (list the product server with `eager: true`, not
+`optional` and without a `connectionRef`, to avoid it); no Skill index without
+Skills. Prompt sections follow their capability. Switch an item back on with
+its capability, for example `{ from: "none", privacyFacts: true }`. Saved
+workspace defaults and schedules keep notifications and privacy facts under
+`"none"`. `getSessionModelContext` returns the latest request's provider body;
+on the native Anthropic route it also lists the instructions and each tool.
 
 ## Identity, instructions, renderer
 

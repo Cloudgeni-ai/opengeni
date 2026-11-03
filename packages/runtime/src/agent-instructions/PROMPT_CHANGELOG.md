@@ -5,8 +5,8 @@ omitted only when its feature is absent; sessions that have the feature render
 byte for byte as before (`modular-parity-lock.test.ts` pins 58 such
 compositions recorded before this change). Nothing was reworded. For the
 embedding profile (`capabilities: "none"`, no sandbox, one eager product MCP
-server, an API-started turn) the fixed prefix falls from about 3,580 to 1,880
-o200k tokens of instructions and from about 2,530 to 700 of built-in tools.
+server, an API-started turn) the fixed prefix falls from about 3,580 to 1,920
+o200k tokens of instructions and from about 2,530 to 580 of built-in tools.
 
 - Identity: an agent that shares no workspace (no compute, Knowledge, files,
   connectors, artifacts, automations, sessions, browser, secrets or Skill
@@ -30,7 +30,9 @@ o200k tokens of instructions and from about 2,530 to 700 of built-in tools.
   connectors or workspace admin.
 - Rules for getting work done: the `privacy_facts` rule needs the new
   `privacyFacts` capability.
-- Compaction: the goal-audit sentences need `goals`.
+- Compaction: "Always retain the full completion audit and required completion
+  evidence." needs `goals`; audits a user or Skill asked for stay for every
+  session.
 - Using skills and the Skill index need a readable Skill: a configured session
   with an empty index gets neither (the history item is not written either).
 - Workspace governance omits the learning-policy block for an agent that
@@ -47,7 +49,7 @@ listed as text rather than as the legacy diff:
 -  Useful learning follows its accepted policy; it grants no external-action or settings permission.   (without Knowledge or Skill management)
 - Decide the design before building it. …   (without sandbox, artifacts, browser, connectors or workspace admin)
 - - Answer questions about privacy, retention, training, the model or provider, or where data is processed only from `privacy_facts`: …   (without privacyFacts)
--  Preserve full reconciliation or comprehensive audits when requested by the goal, user, or applicable Skill, … Always retain the full completion audit and required completion evidence.   (without goals)
+-  Always retain the full completion audit and required completion evidence.   (without goals)
 - ## Tool discovery …   (nothing deferred)
 - ## Waiting …   (nothing can resume the agent)
 - # Using skills …   (no readable Skill)
@@ -56,16 +58,23 @@ listed as text rather than as the legacy diff:
 ```
 
 Built-in tools follow the same rule. `request_human_input` builds its schema
-from the enabled features (`requestHumanInputToolParameters`): the `secret`
-kind and spec only with secrets, `skillReview` only with Skill management; with
-both on it is the unchanged `RequestHumanInputToolInput`. Its parent-agent
+from the enabled features: the `secret` kind and spec only with secrets,
+`skillReview` only with Skill management; with both on it is the unchanged
+`RequestHumanInputToolInput`. A reduced schema is sent as the full schema in
+the form the Agents SDK converts it, with only those fields removed
+(`human-input-wire-schema.test.ts`), so it is never larger than the full one. Its parent-agent
 sentences render only in a child session, for every session including legacy
 ones. `wait_for_input` is attached only when something can resume the agent
 (compute, subagents, goals, schedules, browser, media, or human input with a
-user-started turn); legacy sessions keep it. Without a router,
-`set_session_title` is not attached (Opengeni titles the session itself).
+turn a person started, including the local-mode person); legacy sessions keep
+it. When the router could be installed but nothing else is deferred,
+`set_session_title` is not attached (Opengeni titles the session itself); an
+eager server prepared best effort (optional, connection-backed or Codex Apps)
+counts as deferred.
 `privacy_facts` and the notification tools moved behind the new `privacyFacts`
-and `notifications` capabilities, on under `"all"`.
+and `notifications` capabilities, on under `"all"`. Saved requests (workspace
+defaults and schedules) keep their earlier meaning: under `"none"` they still
+include both (`savedRequestBaseCapabilities`).
 
 ```text
 -  In a sub-session, your parent agent also sees this request and may answer it; the first answer wins. When what you need is agent work rather than a person's decision (for example starting a reviewer or worker you cannot start yourself), message your parent agent instead if you can; otherwise say in the question that it is for your parent agent.   (top-level sessions)

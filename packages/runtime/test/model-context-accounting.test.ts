@@ -202,6 +202,35 @@ describe("native Anthropic provider snapshots", () => {
     }
   });
 
+  test("without layers the cache split's tail still counts as instructions", () => {
+    const split = [
+      { type: "text", text: "You are a fixture agent.\n\n", cache_control: { type: "ephemeral" } },
+      { type: "text", text: "# Rules\n\nBe precise." },
+    ];
+    const unsplit = [{ type: "text", text: instructions }];
+    for (const [system, folded] of [
+      [split, true],
+      [split, false],
+      [unsplit, true],
+    ] as const) {
+      const blocks = folded
+        ? [...system, { type: "text", text: "<opengeni_skill_catalog>…" }]
+        : system.map((block, index) =>
+            index === system.length - 1
+              ? { ...block, cache_control: { type: "ephemeral" } }
+              : block,
+          );
+      if (folded)
+        (blocks.at(-1) as { cache_control?: unknown }).cache_control = { type: "ephemeral" };
+      const snapshot = buildProviderRequestSnapshot({
+        provider: "anthropic",
+        body: JSON.stringify({ model: "claude-fixture", system: blocks, tools, messages: [] }),
+        requestIndex: 1,
+      });
+      expect(snapshot.instructions).toBe(instructions);
+    }
+  });
+
   test("Responses bodies keep the body as the only copy of their contents", () => {
     const body = JSON.stringify({ instructions, tools: [{ type: "function", name: "x" }] });
     const snapshot = buildProviderRequestSnapshot({

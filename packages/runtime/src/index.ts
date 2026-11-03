@@ -192,6 +192,7 @@ import {
   GetVideoGenerationCapabilitiesToolInput,
   RequestHumanInputToolInput,
   requestHumanInputToolParameters,
+  type HumanInputQuestionFeatures,
   resolveAgentToolFamilies,
   resolveAgentMediaToolSurface,
   type ResolvedAgentConfig,
@@ -2875,6 +2876,54 @@ function gitBindingDiscoveryApplies(
  * attachments deliberately select nothing here: a turn with a file must share
  * the cached instructions of a turn without one.
  */
+type HumanInputWireSchemaNode = {
+  properties?: Record<string, HumanInputWireSchemaNode>;
+  required?: string[];
+  enum?: unknown[];
+  items?: HumanInputWireSchemaNode;
+};
+
+let fullHumanInputWireParameters: unknown;
+
+/**
+ * The model-facing schema of a reduced `request_human_input`: the full
+ * contract exactly as the Agents SDK converts it, with only the disabled
+ * fields removed. Converting a reduced zod schema directly would take the
+ * SDK's other converter, which adds length keywords and can make the reduced
+ * schema larger than the full one. The reduced zod schema still parses calls.
+ */
+function humanInputWireParameters(features: HumanInputQuestionFeatures): unknown {
+  fullHumanInputWireParameters ??= agentTool({
+    name: HUMAN_INPUT_TOOL_NAME,
+    description: "",
+    parameters: RequestHumanInputToolInput,
+    execute: () => "",
+  }).parameters;
+  const schema = structuredClone(fullHumanInputWireParameters) as HumanInputWireSchemaNode;
+  if (features.secrets && features.skillReview) return schema;
+  const question = schema.properties?.questions?.items;
+  if (!question?.properties) throw new Error("request_human_input schema has no question object");
+  const drop = (field: string) => {
+    delete question.properties![field];
+    if (question.required) question.required = question.required.filter((name) => name !== field);
+  };
+  if (!features.secrets) {
+    drop("secret");
+    const kind = question.properties.kind;
+    if (kind?.enum) kind.enum = kind.enum.filter((value) => value !== "secret");
+  }
+  if (!features.skillReview) drop("skillReview");
+  return schema;
+}
+
+function withHumanInputWireParameters<T extends { parameters: unknown }>(
+  features: HumanInputQuestionFeatures,
+  built: T,
+): T {
+  if (features.secrets && features.skillReview) return built;
+  return { ...built, parameters: humanInputWireParameters(features) as T["parameters"] };
+}
+
 /**
  * The tool view the modular composer reads. An attempt that cannot install the
  * search router (see `lazyToolTransportFor`) has no tool search, so the
@@ -3590,90 +3639,94 @@ export function buildOpenGeniAgent(
         },
       })
     : null;
+  const humanInputFeatures: HumanInputQuestionFeatures = {
+    secrets: toolFamilies.secrets,
+    skillReview: toolFamilies.skills === "manage",
+  };
   const humanInputTool = !toolFamilies.humanInput
     ? null
-    : agentTool({
-        name: HUMAN_INPUT_TOOL_NAME,
-        // Built from the enabled features: the parent-agent text only with a
-        // parent, the secret kind and spec only with secrets, the Skill review
-        // reference only with Skill management. Calls are still validated
-        // against the full contract below.
-        description: [
-          HUMAN_INPUT_TOOL_DESCRIPTION,
-          options.subSession !== false && HUMAN_INPUT_PARENT_DESCRIPTION,
-          toolFamilies.secrets && HUMAN_INPUT_SECRET_DESCRIPTION,
-        ]
-          .filter((part): part is string => typeof part === "string")
-          .join(" "),
-        parameters: requestHumanInputToolParameters({
-          secrets: toolFamilies.secrets,
-          skillReview: toolFamilies.skills === "manage",
-        }),
-        needsApproval: true,
-        inputGuardrails: [
-          {
-            name: "validate_human_input_request",
-            run: async ({ toolCall }) => {
-              // Switched to work without a person after the chat started: the
-              // tool stays (its list never changes) but nobody would answer.
-              if (options.unattendedNow) {
-                return ToolGuardrailFunctionOutputFactory.rejectContent(
-                  UNATTENDED_PERSON_REFUSAL_TEXT,
-                );
-              }
-              let input: unknown;
-              try {
-                input = JSON.parse(toolCall.arguments);
-              } catch {
-                return ToolGuardrailFunctionOutputFactory.rejectContent(
-                  "Invalid request_human_input arguments. Call the tool again with valid JSON matching its schema.",
-                );
-              }
-              const parsed = RequestHumanInputToolInput.safeParse(input);
-              if (!parsed.success) {
-                return ToolGuardrailFunctionOutputFactory.rejectContent(
-                  "Invalid request_human_input arguments. Call the tool again with an object matching its schema; questions must be an array, not JSON text.",
-                );
-              }
-              const approvalRejection = secretApprovalQuestionRejection(parsed.data);
-              if (approvalRejection) {
-                return ToolGuardrailFunctionOutputFactory.rejectContent(approvalRejection);
-              }
-              const secretRejection = await secretQuestionRejection(parsed.data, {
-                enabled: toolFamilies.secrets,
-                hasActingHuman: options.secrets?.hasActingHuman ?? false,
-                ...(options.secrets?.validateQuestionVault
-                  ? { validateQuestionVault: options.secrets.validateQuestionVault }
-                  : {}),
-              });
-              if (secretRejection) {
-                return ToolGuardrailFunctionOutputFactory.rejectContent(secretRejection);
-              }
-              return ToolGuardrailFunctionOutputFactory.allow();
+    : withHumanInputWireParameters(
+        humanInputFeatures,
+        agentTool({
+          name: HUMAN_INPUT_TOOL_NAME,
+          // Built from the enabled features: the parent-agent text only with a
+          // parent, the secret kind and spec only with secrets, the Skill review
+          // reference only with Skill management. Calls are still validated
+          // against the full contract below.
+          description: [
+            HUMAN_INPUT_TOOL_DESCRIPTION,
+            options.subSession !== false && HUMAN_INPUT_PARENT_DESCRIPTION,
+            toolFamilies.secrets && HUMAN_INPUT_SECRET_DESCRIPTION,
+          ]
+            .filter((part): part is string => typeof part === "string")
+            .join(" "),
+          parameters: requestHumanInputToolParameters(humanInputFeatures),
+          needsApproval: true,
+          inputGuardrails: [
+            {
+              name: "validate_human_input_request",
+              run: async ({ toolCall }) => {
+                // Switched to work without a person after the chat started: the
+                // tool stays (its list never changes) but nobody would answer.
+                if (options.unattendedNow) {
+                  return ToolGuardrailFunctionOutputFactory.rejectContent(
+                    UNATTENDED_PERSON_REFUSAL_TEXT,
+                  );
+                }
+                let input: unknown;
+                try {
+                  input = JSON.parse(toolCall.arguments);
+                } catch {
+                  return ToolGuardrailFunctionOutputFactory.rejectContent(
+                    "Invalid request_human_input arguments. Call the tool again with valid JSON matching its schema.",
+                  );
+                }
+                const parsed = RequestHumanInputToolInput.safeParse(input);
+                if (!parsed.success) {
+                  return ToolGuardrailFunctionOutputFactory.rejectContent(
+                    "Invalid request_human_input arguments. Call the tool again with an object matching its schema; questions must be an array, not JSON text.",
+                  );
+                }
+                const approvalRejection = secretApprovalQuestionRejection(parsed.data);
+                if (approvalRejection) {
+                  return ToolGuardrailFunctionOutputFactory.rejectContent(approvalRejection);
+                }
+                const secretRejection = await secretQuestionRejection(parsed.data, {
+                  enabled: toolFamilies.secrets,
+                  hasActingHuman: options.secrets?.hasActingHuman ?? false,
+                  ...(options.secrets?.validateQuestionVault
+                    ? { validateQuestionVault: options.secrets.validateQuestionVault }
+                    : {}),
+                });
+                if (secretRejection) {
+                  return ToolGuardrailFunctionOutputFactory.rejectContent(secretRejection);
+                }
+                return ToolGuardrailFunctionOutputFactory.allow();
+              },
             },
+          ],
+          // A missing/mismatched durable response is a protocol integrity failure,
+          // not model-visible tool output the agent may reason past.
+          errorFunction: null,
+          execute: (_input, _context, details) => {
+            const settled = options.humanInputResponse;
+            if (!settled) {
+              throw new Error("Human-input tool resumed without a durable response");
+            }
+            const resumedCallId = details?.toolCall?.callId;
+            if (resumedCallId && resumedCallId !== settled.toolCallId) {
+              throw new Error("Human-input response does not belong to the resumed tool call");
+            }
+            return JSON.stringify({
+              requestId: settled.requestId,
+              ...settled.response,
+              ...(settled.response.outcome === "skipped" && settled.response.agentDecides
+                ? { note: HUMAN_INPUT_AGENT_DECIDES_NOTE }
+                : {}),
+            });
           },
-        ],
-        // A missing/mismatched durable response is a protocol integrity failure,
-        // not model-visible tool output the agent may reason past.
-        errorFunction: null,
-        execute: (_input, _context, details) => {
-          const settled = options.humanInputResponse;
-          if (!settled) {
-            throw new Error("Human-input tool resumed without a durable response");
-          }
-          const resumedCallId = details?.toolCall?.callId;
-          if (resumedCallId && resumedCallId !== settled.toolCallId) {
-            throw new Error("Human-input response does not belong to the resumed tool call");
-          }
-          return JSON.stringify({
-            requestId: settled.requestId,
-            ...settled.response,
-            ...(settled.response.outcome === "skipped" && settled.response.agentDecides
-              ? { note: HUMAN_INPUT_AGENT_DECIDES_NOTE }
-              : {}),
-          });
-        },
-      });
+        }),
+      );
   const agentTools = [
     ...hostedTools,
     ...(providerImageGenerationTool ? [providerImageGenerationTool] : []),

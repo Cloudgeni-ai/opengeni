@@ -15,7 +15,12 @@ import { promptToolAvailabilityForTurn } from "../src/activities/agent-turn/prom
 import { sessionTitleToolPlan } from "../src/activities/agent-turn/session-title";
 import { linkedTurnFirstPartyPermissions } from "../src/activities/agent-turn/tool-environment";
 
-const settings = testSettings({ sandboxBackend: "docker" });
+// Tool search on for every transport, so each can install the search router.
+const settings = testSettings({
+  sandboxBackend: "docker",
+  lazyToolSearchEnabled: true,
+  codexToolSearchEnabled: true,
+});
 
 const agentConfig: ResolvedAgentConfig = {
   version: 1,

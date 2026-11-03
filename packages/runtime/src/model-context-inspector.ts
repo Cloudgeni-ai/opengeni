@@ -147,33 +147,39 @@ function anthropicInstructionsAndTools(
   persistentLayers: readonly PersistentAgentInstructionLayerDraft[] | undefined,
 ): { instructions: string; tools: ModelContextTool[] } | null {
   if (typeof payload.instructions === "string" || payload.system === undefined) return null;
-  const blocks =
+  const textBlocks =
     typeof payload.system === "string"
-      ? [payload.system]
+      ? [{ text: payload.system, breakpoint: false }]
       : Array.isArray(payload.system)
         ? payload.system.flatMap((block) =>
             block &&
             typeof block === "object" &&
             (block as { type?: unknown }).type === "text" &&
             typeof (block as { text?: unknown }).text === "string"
-              ? [(block as { text: string }).text]
+              ? [
+                  {
+                    text: (block as { text: string }).text,
+                    breakpoint: (block as { cache_control?: unknown }).cache_control !== undefined,
+                  },
+                ]
               : [],
           )
         : [];
+  const blocks = textBlocks.map((block) => block.text);
   const composed = persistentLayers?.length
     ? joinPersistentAgentInstructionLayers(persistentLayers)
     : "";
   let instructions = blocks[0] ?? "";
-  // The cache split cuts the instructions into a stable prefix and a tail.
-  if (
-    composed &&
-    blocks.length > 1 &&
-    !instructions.startsWith(composed) &&
-    composed.startsWith(instructions) &&
-    `${instructions}${blocks[1]}`.startsWith(composed)
-  ) {
-    instructions = `${instructions}${blocks[1]}`;
-  }
+  // The cache split cuts the instructions into a stable prefix and a tail. With
+  // the layers the joined text must reproduce them; without, the split is the
+  // only way the first block carries a breakpoint while more blocks follow.
+  const split = composed
+    ? blocks.length > 1 &&
+      !instructions.startsWith(composed) &&
+      composed.startsWith(instructions) &&
+      `${instructions}${blocks[1]}`.startsWith(composed)
+    : blocks.length > 1 && textBlocks[0]!.breakpoint;
+  if (split) instructions = `${instructions}${blocks[1]}`;
   const tools = (Array.isArray(payload.tools) ? payload.tools : []).flatMap((tool) => {
     if (!tool || typeof tool !== "object") return [];
     const record = tool as Record<string, unknown>;

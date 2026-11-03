@@ -16,6 +16,7 @@ import {
   AGENT_CAPABILITY_IDS,
   allAgentCapabilities,
   noneAgentCapabilities,
+  savedRequestBaseCapabilities,
   type AgentCapabilities,
   type AgentCapabilityId,
   type AgentCapabilityStartingPoint,
@@ -136,7 +137,16 @@ export function capabilityAvailability(
   };
 }
 
-export function baseCapabilities(from: AgentCapabilityStartingPoint): ResolvedAgentCapabilities {
+/**
+ * A request's starting capabilities. `saved` is a workspace default or a
+ * schedule's stored request, which keeps its earlier meaning (see
+ * `savedRequestBaseCapabilities`), matching the server.
+ */
+export function baseCapabilities(
+  from: AgentCapabilityStartingPoint,
+  options: { saved?: boolean | undefined } = {},
+): ResolvedAgentCapabilities {
+  if (options.saved) return savedRequestBaseCapabilities(from);
   return from === "all" ? allAgentCapabilities() : noneAgentCapabilities();
 }
 
@@ -171,7 +181,7 @@ function applyToggles(
  */
 export function draftFromRequest(
   capabilities: AgentCapabilities | undefined,
-  options: { legacyHumanInputOff?: boolean | undefined } = {},
+  options: { legacyHumanInputOff?: boolean | undefined; saved?: boolean | undefined } = {},
 ): AgentCapabilityDraft {
   const from: AgentCapabilityStartingPoint =
     capabilities === undefined
@@ -183,7 +193,7 @@ export function draftFromRequest(
     capabilities === undefined || typeof capabilities === "string"
       ? {}
       : (({ from: _from, ...rest }) => rest)(capabilities);
-  const values = applyToggles(baseCapabilities(from), toggles);
+  const values = applyToggles(baseCapabilities(from, { saved: options.saved }), toggles);
   if (options.legacyHumanInputOff && toggles.humanInput === undefined) {
     values.humanInput = false;
     if (toggles.notifications === undefined) values.notifications = false;
@@ -204,8 +214,9 @@ export function draftFromResolved(config: ResolvedAgentConfig): AgentCapabilityD
 export function requestFromDraft(
   draft: AgentCapabilityDraft,
   availability?: CapabilityAvailability,
+  options: { saved?: boolean | undefined } = {},
 ): AgentCapabilities {
-  const base = baseCapabilities(draft.from);
+  const base = baseCapabilities(draft.from, options);
   const toggles: AgentCapabilityToggles = {};
   for (const id of AGENT_CAPABILITY_IDS) {
     const value = draft.values[id];
@@ -277,7 +288,10 @@ export function workspaceAgentDefaultsDraft(input: {
   capabilities: AgentCapabilities | undefined;
   legacyHumanInputOff: boolean;
 }): AgentCapabilityDraft {
-  return draftFromRequest(input.capabilities, { legacyHumanInputOff: input.legacyHumanInputOff });
+  return draftFromRequest(input.capabilities, {
+    legacyHumanInputOff: input.legacyHumanInputOff,
+    saved: true,
+  });
 }
 
 /** Tool owner in product words, for the Technical details list. */

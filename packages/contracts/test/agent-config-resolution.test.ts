@@ -192,6 +192,44 @@ describe("resolveAgentConfig", () => {
       resolve({ workspace: off, request: { capabilities: { from: "all", humanInput: true } } })
         .config!.capabilities.humanInput,
     ).toBe(true);
+    // Notifications come back with it, as before they were split out.
+    expect(
+      resolve({ workspace: off, request: { capabilities: { from: "all", humanInput: true } } })
+        .config!.capabilities.notifications,
+    ).toBe(true);
+  });
+
+  test('saved requests keep their meaning: "none" with notifications and privacy facts', () => {
+    const created = resolve({ request: { capabilities: "none" } }).config!.capabilities;
+    expect(created.notifications).toBe(false);
+    expect(created.privacyFacts).toBe(false);
+    // A workspace default, explicit or behind an explicit agent without capabilities.
+    const defaults = { defaults: { capabilities: "none" as const }, humanInputEnabled: true };
+    for (const config of [
+      resolve({ workspace: defaults }).config!,
+      resolve({ workspace: defaults, request: { renderer: "markdown" } }).config!,
+    ]) {
+      expect(config.capabilities.notifications).toBe(true);
+      expect(config.capabilities.privacyFacts).toBe(true);
+    }
+    // A schedule's stored request.
+    const scheduled = resolve({ creator: "scheduled", request: { capabilities: "none" } }).config!;
+    expect(scheduled.capabilities.notifications).toBe(true);
+    expect(scheduled.capabilities.privacyFacts).toBe(true);
+    // Its toggles still apply, and human input off still takes notifications with it.
+    const quiet = resolve({
+      creator: "scheduled",
+      request: { capabilities: { from: "none", humanInput: false, privacyFacts: false } },
+    }).config!.capabilities;
+    expect(quiet.notifications).toBe(false);
+    expect(quiet.privacyFacts).toBe(false);
+    // A workspace that switched human input off keeps notifications off too.
+    const off = resolve({
+      creator: "scheduled",
+      workspace: { defaults: null, humanInputEnabled: false },
+      request: { capabilities: "none" },
+    }).config!.capabilities;
+    expect(off.notifications).toBe(false);
   });
 
   test("children inherit and may only narrow", () => {

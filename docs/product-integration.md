@@ -286,9 +286,12 @@ without a shared workspace; `request_human_input` with the secret kind only
 under `secrets` and Skill reviews only under `skills: "manage"`;
 `wait_for_input` only with a sandbox, `subagents`, `goals`, `schedules`,
 `browser`, `media` or a user-started turn; tool search only when a tool is
-deferred; no Skill index without Skills. Sessions with a feature render as
-before. `GET .../model-context` returns the exact instructions and tools of
-the latest request on every provider route.
+deferred (an `optional` or connection-backed eager server still counts as
+deferred); no Skill index without Skills. Sessions with a feature get the same
+prompt as before. Saved workspace defaults and schedules keep notifications
+and privacy facts under `"none"`. `GET .../model-context` returns the latest
+request's provider body; on the native Anthropic route it also lists the
+instructions, their layers and each tool.
 
 `identity` replaces only how Opengeni introduces the agent. `instructions` is
 the session `instructions` field. The prompt order is identity, Opengeni's

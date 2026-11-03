@@ -1090,6 +1090,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     agentConfig: session.agent,
     routerInHistory: toolRouterInHistory,
     toolRefs: githubRestMcp.tools,
+    mcpServers: githubRestMcp.settings.mcpServers,
     remoteFirstPartyTools: titleToolPlan.remoteFirstPartyMcpTools,
     functionToolNames: attemptToolDefinitions.map((tool) => tool.modelName),
     preparationIndependentToolNames: titleToolPlan.preparationIndependentToolNames,
@@ -1097,9 +1098,16 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   });
   // With nothing else deferred, the deferred title tool alone would bring the
   // search router back on every titled turn; Opengeni titles the session itself.
-  const remoteFirstPartyMcpTools = toolRouterExpected
-    ? titleToolPlan.remoteFirstPartyMcpTools
-    : titleToolPlan.remoteFirstPartyMcpTools.filter((tool) => tool !== "set_session_title");
+  // Without a router to install the title tool sits in the request for free.
+  const routerInstallable =
+    toolRouterInHistory ||
+    (lazyToolTransport === "codex_native"
+      ? runSettings.codexToolSearchEnabled
+      : runSettings.lazyToolSearchEnabled);
+  const remoteFirstPartyMcpTools =
+    toolRouterExpected || !routerInstallable
+      ? titleToolPlan.remoteFirstPartyMcpTools
+      : titleToolPlan.remoteFirstPartyMcpTools.filter((tool) => tool !== "set_session_title");
   recordTurnStartupPhase(observability, {
     phase: "tool_context_preparation",
     provider: turnExecutionPolicy.providerId,
@@ -1463,8 +1471,9 @@ export type PrepareTurnToolRuntimeOk = Awaited<ReturnType<typeof prepareTurnTool
 
 /**
  * Whether a person can answer this turn: the same subjects the session inbox
- * delivers to (`user:` and `external_user:`), frozen with the turn.
+ * delivers to (`user:` and `external_user:`), or the local-mode person
+ * (`dev`), frozen with the turn.
  */
 export function turnHasHumanRecipient(subjectId: string | null | undefined): boolean {
-  return /^(user|external_user):/.test(subjectId ?? "");
+  return subjectId === "dev" || /^(user|external_user):/.test(subjectId ?? "");
 }

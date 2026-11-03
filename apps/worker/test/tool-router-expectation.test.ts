@@ -20,6 +20,7 @@ function expected(overrides: Partial<Parameters<typeof turnToolRouterExpected>[0
     agentConfig: config,
     routerInHistory: false,
     toolRefs: [eagerProduct, opengeni],
+    mcpServers: [{ id: "customer-product" }, { id: "opengeni" }],
     remoteFirstPartyTools: ["set_session_title", "wait_for_input"],
     functionToolNames: ["request_human_input"],
     preparationIndependentToolNames: ["request_human_input"],
@@ -57,5 +58,39 @@ describe("turnToolRouterExpected", () => {
         remoteFirstPartyTools: ["knowledge_search"],
       }),
     ).toBe(false);
+  });
+
+  test("an eager server prepared best effort may arrive late, so it keeps the router", () => {
+    // Optional refs never join the first-request barrier, even when eager.
+    expect(expected({ toolRefs: [{ ...eagerProduct, optional: true } as ToolRef, opengeni] })).toBe(
+      true,
+    );
+    // A connection-backed server is best effort.
+    expect(
+      expected({
+        mcpServers: [{ id: "customer-product", connectionRef: { connectionId: "c" } }],
+      }),
+    ).toBe(true);
+    // Codex Apps is best effort.
+    expect(
+      expected({
+        toolRefs: [{ kind: "mcp", id: "codex_apps", eager: true } as ToolRef, opengeni],
+        mcpServers: [{ id: "codex_apps" }, { id: "opengeni" }],
+      }),
+    ).toBe(true);
+    // An eager tool list on a best-effort first-party server.
+    expect(
+      expected({
+        toolRefs: [
+          eagerProduct,
+          { kind: "mcp", id: "opengeni", eager: ["knowledge_search"], optional: true } as ToolRef,
+        ],
+        remoteFirstPartyTools: ["knowledge_search"],
+      }),
+    ).toBe(true);
+  });
+
+  test("an unregistered eager ref is never prepared, so it defers nothing", () => {
+    expect(expected({ mcpServers: [{ id: "opengeni" }] })).toBe(false);
   });
 });
