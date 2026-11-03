@@ -291,7 +291,9 @@ export async function prepareGovernanceAndModel(
   const companyProfileIncluded = contextSelection.receipt.companyProfileIncluded;
   const workspaceGovernance = renderWorkspaceGovernanceContext(
     {
-      learningPolicy: deps.learningPolicy,
+      // Learning settings only steer an agent that can save Knowledge,
+      // instructions or Skills; a configured agent without those is not told them.
+      ...(agentCanLearn(session.agent) ? { learningPolicy: deps.learningPolicy } : {}),
       companyProfile: companyProfileSnapshot,
       instructionPolicy: instructionPolicySnapshot,
       preferences: preferenceSnapshot,
@@ -585,4 +587,13 @@ export async function prepareGovernanceAndModel(
       searchRecords,
     },
   };
+}
+
+/**
+ * Whether the agent has any learning tool the frozen learning policy governs:
+ * Knowledge (Knowledge, task notes and instructions) or Skill management.
+ * Sessions without an agent configuration keep every tool.
+ */
+export function agentCanLearn(agent: ClaimTurnOk["session"]["agent"]): boolean {
+  return !agent || agent.capabilities.knowledge || agent.capabilities.skills === "manage";
 }

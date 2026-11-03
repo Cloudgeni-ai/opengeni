@@ -284,22 +284,12 @@ describe("write-through", () => {
     ).toEqual({ tools, toolPolicy: policy });
   });
 
-  test('"none" keeps runtime mechanics and reaching the person', () => {
-    // "none" still lets the agent ask the person, so humanInput's tools stay.
+  test('"none" keeps runtime mechanics; notifications are their own capability', () => {
+    // "none" still lets the agent ask the person (request_human_input), but
+    // phone notifications, calls and inbox tidying are switched on separately.
     expect(
       agentConfigFirstPartyMcpTools(none, DEFAULT_FIRST_PARTY_MCP_TOOLS).sort() as string[],
-    ).toEqual(
-      [
-        "call_user",
-        "command_read",
-        "command_wait",
-        "inbox_tidy",
-        "notification_withdraw",
-        "notify_user",
-        "set_session_title",
-        "wait_for_input",
-      ].sort(),
-    );
+    ).toEqual(["command_read", "command_wait", "set_session_title", "wait_for_input"].sort());
   });
 
   test("each capability keeps exactly its tools", () => {

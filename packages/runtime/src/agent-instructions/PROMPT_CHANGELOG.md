@@ -1,5 +1,72 @@
 # Modular prompt changelog
 
+A configured agent pays only for what it can use. Every section below is
+omitted only when its feature is absent; sessions that have the feature render
+byte for byte as before (`modular-parity-lock.test.ts` pins 58 such
+compositions recorded before this change). Nothing was reworded. For the
+embedding profile (`capabilities: "none"`, no sandbox, one eager product MCP
+server, an API-started turn) the fixed prefix falls from about 3,580 to 1,880
+o200k tokens of instructions and from about 2,530 to 700 of built-in tools.
+
+- Identity: an agent that shares no workspace (no compute, Knowledge, files,
+  connectors, artifacts, automations, sessions, browser, secrets or Skill
+  management) gets `NEUTRAL_AGENT_IDENTITY` instead of the Opengeni workspace
+  agent introduction. A configured `identity` still replaces either.
+- Tool discovery renders only when a tool can be deferred. The worker decides
+  this from frozen per-turn facts (`turnToolRouterExpected`) and passes
+  `toolSearchAbsent`; any doubt keeps the section and the router.
+- Waiting renders only with `wait_for_input`, schedules or subagents. The
+  Progress updates monitoring sentences and the Autonomy "Monitor or wait"
+  bullet need `wait_for_input` or schedules.
+- Progress updates: the web-search sentence needs `webSearch`; "Do not narrate
+  Skill reads or waits." needs readable Skills or a sandbox when
+  `wait_for_input` is absent.
+- Autonomy: the learning-policy sentence needs Knowledge or Skill management;
+  "Decide the design before building it" needs a sandbox, artifacts, browser,
+  connectors or workspace admin.
+- Rules for getting work done: the `privacy_facts` rule needs the new
+  `privacyFacts` capability.
+- Compaction: the goal-audit sentences need `goals`.
+- Using skills and the Skill index need a readable Skill: a configured session
+  with an empty index gets neither (the history item is not written either).
+- Workspace governance omits the learning-policy block for an agent that
+  cannot learn.
+
+These are variants, not changes to the `"all"` composition, so they are
+listed as text rather than as the legacy diff:
+
+```text
+- Web searches take several seconds each, so before searching the web, write the opening update in a few words.   (without webSearch)
+- Monitoring checks and user notifications have separate cadences: choose checks for actionable changes or deadlines, not merely to produce reassurance.   (without wait_for_input or schedules)
+- Do not wake a suspended turn only to repeat an unchanged status unless an explicit update cadence requires it.   (same)
+- - Monitor or wait: use the recurring-monitoring or wait mechanism provided by the product. Unchanged external state is expected and is not by itself a blocker.   (same)
+-  Useful learning follows its accepted policy; it grants no external-action or settings permission.   (without Knowledge or Skill management)
+- Decide the design before building it. …   (without sandbox, artifacts, browser, connectors or workspace admin)
+- - Answer questions about privacy, retention, training, the model or provider, or where data is processed only from `privacy_facts`: …   (without privacyFacts)
+-  Preserve full reconciliation or comprehensive audits when requested by the goal, user, or applicable Skill, … Always retain the full completion audit and required completion evidence.   (without goals)
+- ## Tool discovery …   (nothing deferred)
+- ## Waiting …   (nothing can resume the agent)
+- # Using skills …   (no readable Skill)
+- You are an Opengeni workspace agent: … You and the user share one workspace, …
++ You are a general assistant for questions, writing, research, analysis, and technical work. Your job is to collaborate with the user until their goal is genuinely handled. You are a curious, thoughtful collaborator and a clear communicator.   (no shared workspace)
+```
+
+Built-in tools follow the same rule. `request_human_input` builds its schema
+from the enabled features (`requestHumanInputToolParameters`): the `secret`
+kind and spec only with secrets, `skillReview` only with Skill management; with
+both on it is the unchanged `RequestHumanInputToolInput`. Its parent-agent
+sentences render only in a child session, for every session including legacy
+ones. `wait_for_input` is attached only when something can resume the agent
+(compute, subagents, goals, schedules, browser, media, or human input with a
+user-started turn); legacy sessions keep it. Without a router,
+`set_session_title` is not attached (Opengeni titles the session itself).
+`privacy_facts` and the notification tools moved behind the new `privacyFacts`
+and `notifications` capabilities, on under `"all"`.
+
+```text
+-  In a sub-session, your parent agent also sees this request and may answer it; the first answer wins. When what you need is agent work rather than a person's decision (for example starting a reviewer or worker you cannot start yourself), message your parent agent instead if you can; otherwise say in the question that it is for your parent agent.   (top-level sessions)
+```
+
 Finished background commands report themselves. When a command the agent
 left running finishes during the turn, its exit status and the start and end
 of its output follow the next plain-text tool result, and the durable

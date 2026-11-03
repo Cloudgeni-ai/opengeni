@@ -87,9 +87,16 @@ export function buildProviderRequestSnapshot(input: {
         : {}),
     };
   });
-  const instructionsTokens =
-    parts.find((part) => part.key === "instructions")?.estimatedTokens ?? 0;
-  const wireInstructions = typeof payload.instructions === "string" ? payload.instructions : null;
+  // Native Anthropic Messages bodies carry the instructions as `system` text
+  // blocks and the tools with `input_schema`; Responses bodies use
+  // `instructions` and do not repeat their contents here (the body owns them).
+  const anthropic = anthropicInstructionsAndTools(payload, input.persistentLayers);
+  const instructionsTokens = anthropic
+    ? estimateTextTokens(anthropic.instructions)
+    : (parts.find((part) => part.key === "instructions")?.estimatedTokens ?? 0);
+  const wireInstructions =
+    anthropic?.instructions ??
+    (typeof payload.instructions === "string" ? payload.instructions : null);
   const sectionLayers =
     wireInstructions && input.persistentLayers?.length
       ? splitCapturedInstructions({
@@ -110,9 +117,9 @@ export function buildProviderRequestSnapshot(input: {
     requestIndex: input.requestIndex,
     // Wire body owns the contents. Legacy prefix fields are not reconstructed;
     // `layers` only names sections of the wire instructions.
-    instructions: "",
+    instructions: anthropic?.instructions ?? "",
     layers,
-    tools: [],
+    tools: anthropic?.tools ?? [],
     skills: [],
     tokens: {
       instructions: instructionsTokens,
@@ -126,6 +133,69 @@ export function buildProviderRequestSnapshot(input: {
       parts,
     },
   };
+}
+
+/**
+ * The instructions and tools of an Anthropic Messages body. `system` starts
+ * with the agent instructions (one text block, or the cache-split stable prefix
+ * and its tail, which concatenate back exactly); developer history items folded
+ * in after them are conversation context, as they are in a Responses `input`,
+ * so they are not instructions. Null for any other body shape.
+ */
+function anthropicInstructionsAndTools(
+  payload: Record<string, unknown>,
+  persistentLayers: readonly PersistentAgentInstructionLayerDraft[] | undefined,
+): { instructions: string; tools: ModelContextTool[] } | null {
+  if (typeof payload.instructions === "string" || payload.system === undefined) return null;
+  const blocks =
+    typeof payload.system === "string"
+      ? [payload.system]
+      : Array.isArray(payload.system)
+        ? payload.system.flatMap((block) =>
+            block &&
+            typeof block === "object" &&
+            (block as { type?: unknown }).type === "text" &&
+            typeof (block as { text?: unknown }).text === "string"
+              ? [(block as { text: string }).text]
+              : [],
+          )
+        : [];
+  const composed = persistentLayers?.length
+    ? joinPersistentAgentInstructionLayers(persistentLayers)
+    : "";
+  let instructions = blocks[0] ?? "";
+  // The cache split cuts the instructions into a stable prefix and a tail.
+  if (
+    composed &&
+    blocks.length > 1 &&
+    !instructions.startsWith(composed) &&
+    composed.startsWith(instructions) &&
+    `${instructions}${blocks[1]}`.startsWith(composed)
+  ) {
+    instructions = `${instructions}${blocks[1]}`;
+  }
+  const tools = (Array.isArray(payload.tools) ? payload.tools : []).flatMap((tool) => {
+    if (!tool || typeof tool !== "object") return [];
+    const record = tool as Record<string, unknown>;
+    const name = typeof record.name === "string" && record.name ? record.name : null;
+    if (!name) return [];
+    const { cache_control: _cache, name: _name, description, input_schema, type, ...rest } = record;
+    return [
+      countedTool({
+        name,
+        // Client tools have no type on the wire; server tools name theirs.
+        type: typeof type === "string" && type ? type : "function",
+        visibility: "eager",
+        ...(typeof description === "string" ? { description } : {}),
+        ...(input_schema !== undefined
+          ? { schema: input_schema }
+          : Object.keys(rest).length > 0
+            ? { schema: rest }
+            : {}),
+      }),
+    ];
+  });
+  return { instructions, tools };
 }
 
 export type PersistentAgentInstructionInspection = {

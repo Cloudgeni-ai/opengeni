@@ -38,7 +38,11 @@ export type AgentCapabilityGroup = {
 
 /** Three groups, in the order people scan them. Every capability appears once. */
 export const AGENT_CAPABILITY_GROUPS: readonly AgentCapabilityGroup[] = [
-  { id: "conversation", label: "Conversation", capabilities: ["humanInput", "webSearch", "media"] },
+  {
+    id: "conversation",
+    label: "Conversation",
+    capabilities: ["humanInput", "notifications", "webSearch", "media"],
+  },
   {
     id: "work",
     label: "Work",
@@ -53,6 +57,7 @@ export const AGENT_CAPABILITY_GROUPS: readonly AgentCapabilityGroup[] = [
       "workspaceFiles",
       "workspaceConnectors",
       "workspaceAdmin",
+      "privacyFacts",
     ],
   },
 ];
@@ -151,6 +156,11 @@ function applyToggles(
     if (id === "skills") next.skills = value as AgentSkillsCapability;
     else next[id] = value as boolean;
   }
+  // Matches the server: turning human input off also turns notifications off
+  // unless the toggles name them.
+  if (toggles.humanInput === false && toggles.notifications === undefined) {
+    next.notifications = false;
+  }
   return next;
 }
 
@@ -174,7 +184,10 @@ export function draftFromRequest(
       ? {}
       : (({ from: _from, ...rest }) => rest)(capabilities);
   const values = applyToggles(baseCapabilities(from), toggles);
-  if (options.legacyHumanInputOff && toggles.humanInput === undefined) values.humanInput = false;
+  if (options.legacyHumanInputOff && toggles.humanInput === undefined) {
+    values.humanInput = false;
+    if (toggles.notifications === undefined) values.notifications = false;
+  }
   return { from, values };
 }
 

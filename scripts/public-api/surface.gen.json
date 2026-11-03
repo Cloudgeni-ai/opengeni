@@ -11045,6 +11045,8 @@
         "$|2.humanInput": "boolean?",
         "$|2.knowledge": "boolean?",
         "$|2.media": "boolean?",
+        "$|2.notifications": "boolean?",
+        "$|2.privacyFacts": "boolean?",
         "$|2.schedules": "boolean?",
         "$|2.secrets": "boolean?",
         "$|2.skills": "ref(AgentSkillsCapability)?",
@@ -11060,7 +11062,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"artifacts\\\"\",\"\\\"browser\\\"\",\"\\\"goals\\\"\",\"\\\"humanInput\\\"\",\"\\\"knowledge\\\"\",\"\\\"media\\\"\",\"\\\"schedules\\\"\",\"\\\"secrets\\\"\",\"\\\"skills\\\"\",\"\\\"subagents\\\"\",\"\\\"webSearch\\\"\",\"\\\"workspaceAdmin\\\"\",\"\\\"workspaceConnectors\\\"\",\"\\\"workspaceFiles\\\"\"]"
+        "$": "enum=[\"\\\"artifacts\\\"\",\"\\\"browser\\\"\",\"\\\"goals\\\"\",\"\\\"humanInput\\\"\",\"\\\"knowledge\\\"\",\"\\\"media\\\"\",\"\\\"notifications\\\"\",\"\\\"privacyFacts\\\"\",\"\\\"schedules\\\"\",\"\\\"secrets\\\"\",\"\\\"skills\\\"\",\"\\\"subagents\\\"\",\"\\\"webSearch\\\"\",\"\\\"workspaceAdmin\\\"\",\"\\\"workspaceConnectors\\\"\",\"\\\"workspaceFiles\\\"\"]"
       }
     },
     "AgentCapabilityStartingPoint": {
@@ -25346,6 +25348,8 @@
         "$.humanInput": "boolean!",
         "$.knowledge": "boolean!",
         "$.media": "boolean!",
+        "$.notifications": "boolean!",
+        "$.privacyFacts": "boolean!",
         "$.schedules": "boolean!",
         "$.secrets": "boolean!",
         "$.skills": "ref(AgentSkillsCapability)!",

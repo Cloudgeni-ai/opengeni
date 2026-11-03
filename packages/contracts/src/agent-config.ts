@@ -29,6 +29,7 @@ import type { FirstPartyMcpToolName, SessionToolPolicy, ToolRef } from "./index"
 export const AGENT_CAPABILITY_IDS = [
   "webSearch",
   "humanInput",
+  "notifications",
   "skills",
   "goals",
   "subagents",
@@ -41,6 +42,7 @@ export const AGENT_CAPABILITY_IDS = [
   "workspaceFiles",
   "workspaceConnectors",
   "workspaceAdmin",
+  "privacyFacts",
 ] as const;
 export const AgentCapabilityId = /* @__PURE__ */ defineSchema(() => z.enum(AGENT_CAPABILITY_IDS));
 export type AgentCapabilityId = z.infer<typeof AgentCapabilityId>;
@@ -67,6 +69,7 @@ export const AgentCapabilityToggles = /* @__PURE__ */ defineSchema(() =>
     .object({
       webSearch: primitives.optionalBoolean,
       humanInput: primitives.optionalBoolean,
+      notifications: primitives.optionalBoolean,
       skills: AgentSkillsCapability.optional(),
       goals: primitives.optionalBoolean,
       subagents: primitives.optionalBoolean,
@@ -79,6 +82,7 @@ export const AgentCapabilityToggles = /* @__PURE__ */ defineSchema(() =>
       workspaceFiles: primitives.optionalBoolean,
       workspaceConnectors: primitives.optionalBoolean,
       workspaceAdmin: primitives.optionalBoolean,
+      privacyFacts: primitives.optionalBoolean,
     })
     .strict(),
 );
@@ -151,6 +155,7 @@ export const ResolvedAgentCapabilities = /* @__PURE__ */ defineSchema(() =>
     .object({
       webSearch: primitives.boolean,
       humanInput: primitives.boolean,
+      notifications: primitives.boolean,
       skills: AgentSkillsCapability,
       goals: primitives.boolean,
       subagents: primitives.boolean,
@@ -163,6 +168,7 @@ export const ResolvedAgentCapabilities = /* @__PURE__ */ defineSchema(() =>
       workspaceFiles: primitives.boolean,
       workspaceConnectors: primitives.boolean,
       workspaceAdmin: primitives.boolean,
+      privacyFacts: primitives.boolean,
     })
     .strict(),
 );
@@ -180,27 +186,40 @@ export type ResolvedAgentConfigSource = z.infer<typeof ResolvedAgentConfigSource
  * later without a new resolution).
  */
 /**
- * Configurations frozen before the `secrets` capability existed lack it.
- * They read as `from === "all"` (Q-17); stored rows are never rewritten.
+ * Configurations frozen before a capability existed lack it; stored rows are
+ * never rewritten. `secrets` reads as `from === "all"` (Q-17). `notifications`
+ * was part of `humanInput` until it was split out, so it reads as the stored
+ * `humanInput` and those sessions keep exactly the tools they had.
+ * `privacyFacts` was always attached before it became a capability, so it
+ * reads as on.
  */
-function withStoredSecretsCapability(value: unknown): unknown {
+function withStoredLaterCapabilities(value: unknown): unknown {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
   const config = value as { from?: unknown; capabilities?: unknown };
   const capabilities = config.capabilities;
-  if (
-    capabilities === null ||
-    typeof capabilities !== "object" ||
-    Array.isArray(capabilities) ||
-    Object.hasOwn(capabilities, "secrets")
-  ) {
+  if (capabilities === null || typeof capabilities !== "object" || Array.isArray(capabilities)) {
     return value;
   }
-  return { ...config, capabilities: { ...capabilities, secrets: config.from === "all" } };
+  const hasSecrets = Object.hasOwn(capabilities, "secrets");
+  const hasNotifications = Object.hasOwn(capabilities, "notifications");
+  const hasPrivacyFacts = Object.hasOwn(capabilities, "privacyFacts");
+  if (hasSecrets && hasNotifications && hasPrivacyFacts) return value;
+  return {
+    ...config,
+    capabilities: {
+      ...capabilities,
+      ...(hasSecrets ? {} : { secrets: config.from === "all" }),
+      ...(hasNotifications
+        ? {}
+        : { notifications: (capabilities as { humanInput?: unknown }).humanInput === true }),
+      ...(hasPrivacyFacts ? {} : { privacyFacts: true }),
+    },
+  };
 }
 
 export const ResolvedAgentConfig = /* @__PURE__ */ defineSchema(() =>
   z.preprocess(
-    withStoredSecretsCapability,
+    withStoredLaterCapabilities,
     z
       .object({
         version: z.literal(1),
@@ -294,11 +313,11 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   set_session_title: "runtime",
   wait_for_input: "runtime",
   // Reaching the person: a push to the phones of whoever started the session.
-  notify_user: "humanInput",
-  notification_withdraw: "humanInput",
-  inbox_tidy: "humanInput",
+  notify_user: "notifications",
+  notification_withdraw: "notifications",
+  inbox_tidy: "notifications",
   // Ringing the person's phone for a live voice call.
-  call_user: "humanInput",
+  call_user: "notifications",
   command_wait: "sandbox",
   command_read: "sandbox",
 
@@ -557,7 +576,7 @@ export const AGENT_FUNCTION_TOOL_CAPABILITIES = {
   // Runtime function tools.
   request_human_input: "humanInput",
   list_models: "subagents",
-  privacy_facts: "runtime",
+  privacy_facts: "privacyFacts",
   generate_image: "media",
   generate_video: "media",
   get_video_generation_capabilities: "media",
@@ -658,9 +677,18 @@ export type AgentToolEnvironment = {
    * find a command; undefined means not yet known and keeps them.
    */
   sandboxAttached?: boolean;
+  /**
+   * Whether the turn has a person who can answer: its initiating user or
+   * external user. `false` means proven absent (an API-key turn), which leaves
+   * `wait_for_input` nothing human to wait on; undefined keeps it.
+   */
+  humanRecipient?: boolean;
 };
 
-/** Runtime mechanics every configured agent receives. */
+/**
+ * Runtime mechanics a configured agent receives whenever it has something to
+ * wait for (see `resolveAgentToolFamilies().waitForInput`).
+ */
 export const AGENT_RUNTIME_MECHANIC_TOOL_NAMES = [
   "wait_for_input",
 ] as const satisfies readonly FirstPartyMcpToolName[];
@@ -692,14 +720,34 @@ export function resolveAgentToolFamilies(
   const media = enabled("media") && environment.media !== false;
   const skills = !config ? "manage" : enabled("skills") ? config.capabilities.skills : false;
   const sandboxTools = environment.sandboxAttached !== false;
+  // Notifications reach the same person a question does, so a workspace or
+  // deployment without human input withholds them too.
+  const notifications = enabled("notifications") && humanInput;
+  // `wait_for_input` resumes the agent when something it started settles or a
+  // person answers. With no compute, no children, no goal, no automations, no
+  // browser handoff, no media job and no person to answer, nothing could
+  // resume it except its own timeout, so a configured agent does without it.
+  const waitForInput =
+    !config ||
+    sandboxTools ||
+    enabled("subagents") ||
+    enabled("goals") ||
+    enabled("schedules") ||
+    enabled("browser") ||
+    media ||
+    (humanInput && environment.humanRecipient !== false);
   const allowsFirstPartyTool = (name: FirstPartyMcpToolName): boolean => {
     const owner: AgentFirstPartyToolOwner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[name];
     if (owner === "sandbox") return sandboxTools;
+    if (name === "wait_for_input") return waitForInput;
+    if (owner === "notifications") return notifications;
     return owner === "runtime" || enabled(owner);
   };
   return {
     webSearch,
     humanInput,
+    notifications,
+    waitForInput,
     media,
     subagents: enabled("subagents"),
     /** Secret references resolve, the secret_* tools and the ask-card secret kind exist. */
@@ -716,7 +764,7 @@ export function resolveAgentToolFamilies(
         : [
             ...new Set([
               ...names.filter(allowsFirstPartyTool),
-              ...AGENT_RUNTIME_MECHANIC_TOOL_NAMES,
+              ...(waitForInput ? AGENT_RUNTIME_MECHANIC_TOOL_NAMES : []),
               ...(sandboxTools ? AGENT_SANDBOX_MECHANIC_TOOL_NAMES : []),
             ]),
           ];
@@ -767,7 +815,11 @@ export const AGENT_CAPABILITY_DESCRIPTIONS: Readonly<
   webSearch: { label: "Web search", description: "Search the public web for current information." },
   humanInput: {
     label: "Ask questions",
-    description: "Ask the person for a decision or missing detail, and notify their phone.",
+    description: "Ask the person for a decision or missing detail.",
+  },
+  notifications: {
+    label: "Notifications",
+    description: "Notify the person's phone, call them, and tidy their inbox.",
   },
   skills: {
     label: "Skills",
@@ -804,6 +856,10 @@ export const AGENT_CAPABILITY_DESCRIPTIONS: Readonly<
   workspaceAdmin: {
     label: "Workspace admin",
     description: "Manage projects, rigs, machines, and connector setup.",
+  },
+  privacyFacts: {
+    label: "Privacy facts",
+    description: "Answer privacy, data-handling, and model questions from this deployment's facts.",
   },
 };
 
@@ -915,6 +971,7 @@ export function allAgentCapabilities(): ResolvedAgentCapabilities {
   return {
     webSearch: true,
     humanInput: true,
+    notifications: true,
     skills: "manage",
     goals: true,
     subagents: true,
@@ -927,6 +984,7 @@ export function allAgentCapabilities(): ResolvedAgentCapabilities {
     workspaceFiles: true,
     workspaceConnectors: true,
     workspaceAdmin: true,
+    privacyFacts: true,
   };
 }
 
@@ -935,6 +993,7 @@ export function noneAgentCapabilities(): ResolvedAgentCapabilities {
   return {
     webSearch: false,
     humanInput: true,
+    notifications: false,
     skills: "read",
     goals: false,
     subagents: false,
@@ -947,6 +1006,7 @@ export function noneAgentCapabilities(): ResolvedAgentCapabilities {
     workspaceFiles: false,
     workspaceConnectors: false,
     workspaceAdmin: false,
+    privacyFacts: false,
   };
 }
 
@@ -1005,6 +1065,11 @@ function applyToggles(
     if (value === undefined) continue;
     if (id === "skills") next.skills = value as AgentSkillsCapability;
     else next[id] = value as boolean;
+  }
+  // Notifications were part of human input; switching human input off still
+  // switches them off unless the toggles name them.
+  if (toggles.humanInput === false && toggles.notifications === undefined) {
+    next.notifications = false;
   }
   return next;
 }
@@ -1244,7 +1309,10 @@ function resolveTopLevel(
   const base = from === "all" ? allAgentCapabilities() : noneAgentCapabilities();
   // "Everything this workspace offers": a workspace that turned structured
   // human input off keeps it off unless a toggle explicitly asks for it.
-  if (!input.workspace.humanInputEnabled) base.humanInput = false;
+  if (!input.workspace.humanInputEnabled) {
+    base.humanInput = false;
+    base.notifications = false;
+  }
   const wanted = applyToggles(base, toggles);
   const explicitGoalsOff = !capabilitiesFromWorkspace && toggles.goals === false;
   const config = agentConfigFromCapabilities({
@@ -1532,6 +1600,7 @@ export function legacyEffectiveAgentCapabilities(input: {
   return {
     webSearch: true,
     humanInput: input.humanInputEnabled,
+    notifications: input.humanInputEnabled,
     skills: "manage",
     goals: selected.has("goals"),
     subagents: true,
@@ -1548,6 +1617,8 @@ export function legacyEffectiveAgentCapabilities(input: {
       defaultConnector ||
       [...ids].some((id) => id !== "opengeni" && id !== "files" && id !== "docs"),
     workspaceAdmin: selected.has("workspaceAdmin"),
+    // Legacy sessions always carried privacy_facts.
+    privacyFacts: true,
   };
 }
 
