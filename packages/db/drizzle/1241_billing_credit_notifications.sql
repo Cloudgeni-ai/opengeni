@@ -89,24 +89,6 @@ REVOKE ALL ON FUNCTION opengeni_private.project_billing_credit_recipients() FROM
 CREATE TRIGGER billing_credit_recipients_project AFTER INSERT OR UPDATE OR DELETE ON organization_memberships
   FOR EACH ROW EXECUTE FUNCTION opengeni_private.project_billing_credit_recipients();
 
--- Owner-only lifecycle reads, one organization at a time; no new authority grant.
-DO $backfill$
-DECLARE account uuid; previous_account text := current_setting('opengeni.account_id',true);
-  previous_marker text := current_setting('opengeni.organization_tenancy_lifecycle',true);
-BEGIN
-  PERFORM set_config('opengeni.organization_tenancy_lifecycle','organization_membership_lifecycle',true);
-  FOR account IN SELECT id FROM managed_accounts LOOP
-    PERFORM set_config('opengeni.account_id',account::text,true);
-    INSERT INTO billing_credit_notification_recipients(account_id,subject_id,membership_id,personal_workspace_id)
-      SELECT account_id,subject_id,id,personal_workspace_id FROM organization_memberships
-      WHERE account_id=account AND status='active' AND revoked_at IS NULL
-        AND role IN ('owner','admin') AND subject_id LIKE 'user:%'
-      ON CONFLICT DO NOTHING;
-  END LOOP;
-  PERFORM set_config('opengeni.account_id',coalesce(previous_account,''),true);
-  PERFORM set_config('opengeni.organization_tenancy_lifecycle',coalesce(previous_marker,''),true);
-END $backfill$;
-
 DO $grants$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='opengeni_app') THEN

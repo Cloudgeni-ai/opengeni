@@ -55,8 +55,11 @@ Migration `1241_billing_credit_notifications.sql` adds:
 - `billing_credit_notification_recipients`: read-only runtime projection of
   current active human organization owners/admins. An **invoker** membership
   trigger maintains it inside the existing membership lifecycle transaction.
-  Backfill uses the migration owner's existing lifecycle read, not a new runtime
-  SECURITY DEFINER capability. FORCE RLS and account scope apply to all four tables.
+  Backfill `1242_billing_credit_recipients_backfill.sql` uses the migration owner's
+  existing lifecycle read, not a new runtime SECURITY DEFINER capability. It runs
+  before the new writers start, in committed batches of at most 500 memberships;
+  row locks serialize it with role changes and revocation. FORCE RLS and account
+  scope apply to all four tables.
 
 Enqueue resolves recipients at the original operation, not on replay. Ordinary
 members, external actors, workspace-only admins and organization API keys are not

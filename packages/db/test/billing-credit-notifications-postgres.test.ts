@@ -4,6 +4,7 @@ import {
   type RestrictedRuntimeTestDatabase,
 } from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
+import postgres from "postgres";
 import {
   createDb,
   ensureManagedAccessForUser,
@@ -26,6 +27,7 @@ import {
   unusualCreditSpend,
 } from "../src/billing-credit-notifications";
 import { assertRuntimeDatabasePosture } from "../src/runtime-posture";
+import { executeMigrationFile, parseBatchedBackfillMigration } from "../src/migrate";
 import {
   loadRuntimePostureBaseline,
   readRuntimePostureBaseline,
@@ -366,27 +368,52 @@ test("caller transaction rollback removes the notification and its recipient obl
   expect(await listBillingCreditNotifications(client.db, a)).toEqual([]);
 });
 
-test("migration backfill projects existing memberships under the restricted migration owner", async () => {
+test("bounded backfill projects existing memberships under the restricted migration owner", async () => {
   if (!client || !fixture) return;
   const a = await account();
-  const source = await Bun.file(
-    resolve(import.meta.dir, "../drizzle/1241_billing_credit_notifications.sql"),
-  ).text();
-  const start = source.indexOf("DO $backfill$");
-  const endMarker = "END $backfill$;";
-  const end = source.indexOf(endMarker, start);
-  expect(start).toBeGreaterThan(-1);
-  expect(end).toBeGreaterThan(start);
-  await fixture.admin`delete from billing_credit_notification_recipients where account_id=${a.accountId}`;
+  const migration = "1242_billing_credit_recipients_backfill.sql";
+  const source = await Bun.file(resolve(import.meta.dir, "../drizzle", migration)).text();
+  const parsed = parseBatchedBackfillMigration(migration, source)!;
+  expect(parsed.batchSize).toBe(500);
+  // Recreate a legacy inventory larger than one batch without new-write triggers.
   await fixture.admin.begin(async (tx) => {
-    await tx.unsafe(`SET LOCAL ROLE "${fixture!.ownerRole}"`);
-    const [role] = await tx`select rolsuper,rolbypassrls from pg_roles where rolname=current_user`;
-    expect(role).toMatchObject({ rolsuper: false, rolbypassrls: false });
-    await tx.unsafe(source.slice(start, end + endMarker.length));
+    await tx`set local session_replication_role=replica`;
+    await tx`with seeded as (
+      insert into workspaces(id,account_id,name)
+      select gen_random_uuid(),${a.accountId},'Backfill fixture' from generate_series(1,501)
+      returning id
+    ) insert into organization_memberships(account_id,subject_id,role,status,personal_workspace_id)
+      select ${a.accountId},'user:backfill-' || id,'admin','active',id from seeded`;
   });
+  await fixture.admin`delete from billing_credit_notification_recipients where account_id=${a.accountId}`;
+  const owner = postgres(fixture.ownerUrl, {
+    max: 1,
+    connection: { search_path: fixture.schema },
+  });
+  try {
+    const [role] =
+      await owner`select rolsuper,rolbypassrls from pg_roles where rolname=current_user`;
+    expect(role).toMatchObject({ rolsuper: false, rolbypassrls: false });
+    expect(await owner.unsafe(parsed.statement)).toHaveLength(0); // FORCE RLS without lifecycle marker
+    const firstBatch = await owner.begin(async (tx) => {
+      await tx`select set_config('opengeni.organization_tenancy_lifecycle','organization_membership_lifecycle',true)`;
+      return tx.unsafe(parsed.statement);
+    });
+    expect(firstBatch).toHaveLength(500);
+    await executeMigrationFile(owner, migration, source);
+    await executeMigrationFile(owner, migration, source); // idempotent replay terminates
+    const [settings] =
+      await owner`select current_setting('opengeni.organization_tenancy_lifecycle',true) as marker,
+        current_setting('opengeni.account_id',true) as account_id`;
+    expect(settings?.marker ?? "").toBe("");
+    expect(settings?.account_id ?? "").toBe("");
+  } finally {
+    await owner.end();
+  }
   const rows =
     await fixture.admin`select subject_id from billing_credit_notification_recipients where account_id=${a.accountId}`;
-  expect(rows.map((r) => r.subject_id)).toEqual([a.subjectId]);
+  expect(rows).toHaveLength(502);
+  expect(rows.map((r) => r.subject_id)).toContain(a.subjectId);
 });
 
 test("ordinary members receive nothing and a changed email cannot reuse a frozen message", async () => {
