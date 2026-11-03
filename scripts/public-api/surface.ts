@@ -383,7 +383,7 @@ function routeSegmentIsParam(segment: string): boolean {
 }
 
 /** 2 = SDK dynamic on route param, 1 = SDK dynamic on route literal, 0 = no match. */
-function matchQuality(sdkPath: string, routePath: string): 0 | 1 | 2 {
+export function matchQuality(sdkPath: string, routePath: string): 0 | 1 | 2 {
   const sdk = sdkPath.split("/");
   const route = routePath.split("/");
   if (route.at(-1) === "*") {

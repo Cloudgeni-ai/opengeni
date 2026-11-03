@@ -4,13 +4,15 @@
  *
  * The surface snapshot (`surface.gen.json`) guards the SDK in this repository.
  * Integrators install a *published* `@opengeni/sdk` and keep it pinned, so this
- * inventory records every `/v1` route that a published version calls,
- * extracted from the TypeScript source the package ships (`src/`) with the
- * same extractor the snapshot uses (`@internal` methods excluded).
- * `bun run check:public-api` then fails when the candidate API no longer
- * registers a route that a published SDK calls, unless the call is an
- * accepted gap recorded in the inventory or a security/owner-approved
- * exception in `breaking-changes.json`.
+ * inventory records the `/v1` route calls a published version makes, extracted
+ * from the TypeScript source the package ships (`src/`) with the same
+ * extractor the snapshot uses (`@internal` methods excluded).
+ *
+ * At refresh time each call is resolved to the exact registered routes
+ * (`METHOD /path`) that serve it, and those routes are stored. The check then
+ * requires every stored route to remain registered, exactly. A call that no
+ * registered route served when its version was recorded is an accepted gap
+ * with a reason.
  *
  * Refresh after each stable SDK publication (defaults to npm `latest`):
  *
@@ -26,27 +28,34 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { extractSdkMethods, matchRoutes, sdkSourceFiles } from "./surface";
+import { extractSdkMethods, matchQuality, sdkSourceFiles } from "./surface";
 
 export const PUBLISHED_SDK_PATH = "scripts/public-api/published-sdk.gen.json";
 const PACKAGE_NAME = "@opengeni/sdk";
 
 export type PublishedGap = { call: string; reason: string };
 
+export type PublishedCall = {
+  /** SDK methods that make the call. */
+  sdk: string[];
+  /** Exact registered routes (`METHOD /path`) that served the call when recorded. */
+  routes: string[];
+};
+
 export type PublishedPackage = {
   name: string;
   version: string;
-  /** `VERB[|VERB] /v1/normalized/:p/path` -> SDK methods that make the call. */
-  calls: Record<string, string[]>;
-  /** Calls the API already did not serve when this version was recorded. */
+  /** `VERB[|VERB] /v1/normalized/:p/path` -> the call's methods and resolved routes. */
+  calls: Record<string, PublishedCall>;
+  /** Calls no registered route served when this version was recorded. */
   acceptedGaps: PublishedGap[];
 };
 
-export type PublishedInventory = { schemaVersion: 1; packages: PublishedPackage[] };
+export type PublishedInventory = { schemaVersion: 2; packages: PublishedPackage[] };
 
 type Route = { method: string; path: string };
 
-/** Route calls made by the SDK whose `src/` directory is given. */
+/** Route calls (`VERB[|VERB] path` -> SDK methods) made by the SDK whose `src/` is given. */
 export function publishedSdkCalls(sourceDirectory: string): Record<string, string[]> {
   const methods = extractSdkMethods(sdkSourceFiles(sourceDirectory)).filter(
     (method) => !method.internal,
@@ -69,37 +78,73 @@ export function publishedSdkCalls(sourceDirectory: string): Record<string, strin
   );
 }
 
-/** True when some verb of the call matches a registered route. */
-export function callServed(call: string, registered: readonly Route[]): boolean {
+/**
+ * Whether every literal segment the SDK wrote lines up with a literal route
+ * segment. A loose match (an SDK placeholder standing in for a route literal,
+ * as in `company-brain/${kind}`) only counts when it is structural like this;
+ * otherwise an unrelated route that happens to have the same length (for
+ * example `/v1/workspaces/external/:source/:id/allowance`) would "serve" a
+ * removed call.
+ */
+function literalsAlign(sdkPath: string, routePath: string): boolean {
+  const sdk = sdkPath.split("/");
+  const route = routePath.split("/");
+  for (let index = 0; index < sdk.length; index += 1) {
+    const segment = route[index];
+    if (segment === "*") return true;
+    if (sdk[index]!.includes(":p")) continue;
+    if (segment === undefined || segment.startsWith(":")) return false;
+  }
+  return true;
+}
+
+/** The exact registered routes (`METHOD /path`) that serve a call, sorted. */
+export function resolveCall(call: string, registered: readonly Route[]): string[] {
   const space = call.indexOf(" ");
   const verbs = call.slice(0, space).split("|");
   const path = call.slice(space + 1);
-  const v1 = registered.filter((route) => route.path.startsWith("/v1/"));
-  return verbs.some((verb) => matchRoutes(path, verb, v1).length > 0);
+  const resolved = new Set<string>();
+  for (const verb of verbs) {
+    const candidates = registered
+      .filter((route) => route.method === verb && route.path.startsWith("/v1/"))
+      .map((route) => ({ route, quality: matchQuality(path, route.path) }))
+      .filter((entry) => entry.quality > 0);
+    const exact = candidates.filter((entry) => entry.quality === 2);
+    const chosen =
+      exact.length > 0
+        ? exact
+        : candidates.filter((entry) => literalsAlign(path, entry.route.path));
+    for (const { route } of chosen) resolved.add(`${route.method} ${route.path}`);
+  }
+  return [...resolved].sort();
 }
 
 export type PublishedFinding = { id: string; message: string };
 
-/** Calls of published SDKs that the candidate API no longer serves. */
+/** Routes recorded for published SDKs that the candidate API no longer registers. */
 export function publishedSdkFindings(
   inventory: PublishedInventory,
   registered: readonly Route[],
 ): { breaking: PublishedFinding[]; resolvedGaps: string[] } {
+  const available = new Set(registered.map((route) => `${route.method} ${route.path}`));
   const breaking: PublishedFinding[] = [];
   const resolvedGaps: string[] = [];
   for (const pkg of inventory.packages) {
-    const accepted = new Set(pkg.acceptedGaps.map((gap) => gap.call));
-    for (const [call, methods] of Object.entries(pkg.calls)) {
-      const served = callServed(call, registered);
-      if (served) {
-        if (accepted.has(call)) resolvedGaps.push(`${pkg.name}@${pkg.version}: ${call}`);
-        continue;
+    const reported = new Set<string>();
+    for (const [call, entry] of Object.entries(pkg.calls)) {
+      for (const route of entry.routes) {
+        if (available.has(route) || reported.has(route)) continue;
+        reported.add(route);
+        const callers = Object.entries(pkg.calls)
+          .filter(([, other]) => other.routes.includes(route))
+          .flatMap(([, other]) => other.sdk);
+        breaking.push({
+          id: `published-sdk:${pkg.name}@${pkg.version}:${route}`,
+          message: `published ${pkg.name}@${pkg.version} calls ${route} (${[...new Set(callers)].sort().join(", ")}), which the API no longer registers`,
+        });
       }
-      if (accepted.has(call)) continue;
-      breaking.push({
-        id: `published-sdk:${pkg.name}@${pkg.version}:${call}`,
-        message: `published ${pkg.name}@${pkg.version} calls ${call} (${methods.join(", ")}), which the API no longer registers`,
-      });
+      if (entry.routes.length === 0 && resolveCall(call, registered).length > 0)
+        resolvedGaps.push(`${pkg.name}@${pkg.version}: ${call}`);
     }
   }
   return { breaking, resolvedGaps };
@@ -107,8 +152,8 @@ export function publishedSdkFindings(
 
 export function validatePublishedInventory(value: unknown): PublishedInventory {
   const inventory = value as Partial<PublishedInventory>;
-  if (inventory?.schemaVersion !== 1 || !Array.isArray(inventory.packages))
-    throw new Error(`${PUBLISHED_SDK_PATH} must be { schemaVersion: 1, packages: [...] }`);
+  if (inventory?.schemaVersion !== 2 || !Array.isArray(inventory.packages))
+    throw new Error(`${PUBLISHED_SDK_PATH} must be { schemaVersion: 2, packages: [...] }`);
   for (const [index, pkg] of inventory.packages.entries()) {
     const where = `${PUBLISHED_SDK_PATH} packages[${index}]`;
     if (typeof pkg.name !== "string" || typeof pkg.version !== "string")
@@ -116,11 +161,21 @@ export function validatePublishedInventory(value: unknown): PublishedInventory {
     if (typeof pkg.calls !== "object" || pkg.calls === null)
       throw new Error(`${where}.calls must be an object`);
     if (!Array.isArray(pkg.acceptedGaps)) throw new Error(`${where}.acceptedGaps must be an array`);
+    const gaps = new Set<string>();
     for (const gap of pkg.acceptedGaps) {
       if (typeof gap.call !== "string" || !(gap.call in pkg.calls))
         throw new Error(`${where} accepted gap ${JSON.stringify(gap.call)} is not a recorded call`);
       if (typeof gap.reason !== "string" || gap.reason.trim().length < 10)
         throw new Error(`${where} accepted gap ${gap.call} must explain why it is accepted`);
+      gaps.add(gap.call);
+    }
+    for (const [call, entry] of Object.entries(pkg.calls)) {
+      if (!Array.isArray(entry?.sdk) || !Array.isArray(entry?.routes))
+        throw new Error(`${where} call ${call} needs sdk and routes arrays`);
+      if (entry.routes.length === 0 && !gaps.has(call))
+        throw new Error(`${where} call ${call} resolves to no route and is not an accepted gap`);
+      if (entry.routes.length > 0 && gaps.has(call))
+        throw new Error(`${where} accepted gap ${call} resolves to routes; remove the gap`);
     }
   }
   return inventory as PublishedInventory;
@@ -136,10 +191,13 @@ export function refreshPublishedPackage(input: {
   acceptGapsReason: string | null;
 }): { entry: PublishedPackage; newGaps: string[] } {
   const known = new Map((input.previous?.acceptedGaps ?? []).map((gap) => [gap.call, gap.reason]));
+  const calls: Record<string, PublishedCall> = {};
   const acceptedGaps: PublishedGap[] = [];
   const newGaps: string[] = [];
-  for (const call of Object.keys(input.calls)) {
-    if (callServed(call, input.registered)) continue;
+  for (const [call, sdk] of Object.entries(input.calls)) {
+    const routes = resolveCall(call, input.registered);
+    calls[call] = { sdk, routes };
+    if (routes.length > 0) continue;
     const reason = known.get(call);
     if (reason) acceptedGaps.push({ call, reason });
     else {
@@ -148,7 +206,7 @@ export function refreshPublishedPackage(input: {
     }
   }
   return {
-    entry: { name: input.name, version: input.version, calls: input.calls, acceptedGaps },
+    entry: { name: input.name, version: input.version, calls, acceptedGaps },
     newGaps,
   };
 }
@@ -182,12 +240,15 @@ async function refresh(): Promise<void> {
     const calls = publishedSdkCalls(source);
     const { registeredRoutes } = await import("./registered-routes");
     const file = join(root, PUBLISHED_SDK_PATH);
-    const inventory: PublishedInventory = existsSync(file)
-      ? validatePublishedInventory(JSON.parse(readFileSync(file, "utf8")))
-      : { schemaVersion: 1, packages: [] };
-    const previous = inventory.packages.find(
-      (pkg) => pkg.name === PACKAGE_NAME && pkg.version === version,
-    );
+    const existing = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null;
+    const packages: PublishedPackage[] =
+      existing?.schemaVersion === 2 ? validatePublishedInventory(existing).packages : [];
+    const previous =
+      packages.find((pkg) => pkg.name === PACKAGE_NAME && pkg.version === version) ??
+      // Gap reasons from an older inventory format stay valid for the same version.
+      (existing?.packages as PublishedPackage[] | undefined)?.find(
+        (pkg) => pkg.name === PACKAGE_NAME && pkg.version === version,
+      );
     const { entry, newGaps } = refreshPublishedPackage({
       name: PACKAGE_NAME,
       version,
@@ -206,14 +267,12 @@ async function refresh(): Promise<void> {
       );
       process.exit(1);
     }
-    const packages = inventory.packages.filter(
-      (pkg) => !(pkg.name === PACKAGE_NAME && pkg.version === version),
-    );
-    packages.push(entry);
-    packages.sort((a, b) =>
+    const next = packages.filter((pkg) => !(pkg.name === PACKAGE_NAME && pkg.version === version));
+    next.push(entry);
+    next.sort((a, b) =>
       a.name === b.name ? Bun.semver.order(a.version, b.version) : a.name.localeCompare(b.name),
     );
-    writeFileSync(file, `${JSON.stringify({ schemaVersion: 1, packages }, null, 2)}\n`);
+    writeFileSync(file, `${JSON.stringify({ schemaVersion: 2, packages: next }, null, 2)}\n`);
     process.stdout.write(
       `[published-sdk] recorded ${PACKAGE_NAME}@${version}: ${Object.keys(calls).length} calls, ${entry.acceptedGaps.length} accepted gaps\n`,
     );

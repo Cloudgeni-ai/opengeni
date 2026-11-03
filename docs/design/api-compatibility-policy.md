@@ -135,8 +135,12 @@ Every exception needs all of:
   `"securityException": true` or `"approval": "<link>"`, plus the ids of the
   findings it covers and a reason;
 - a row in the exception log below;
-- a `Compatibility exception: <link>` line in the changeset if it declares a
-  major release of `@opengeni/sdk` or `@opengeni/react`;
+- a `Compatibility exception: <link>` line, outside code blocks, in every
+  changeset that declares a major release of any package (all published
+  packages share one lockstep version, so any major makes `@opengeni/sdk` and
+  `@opengeni/react` majors). The link is a
+  `https://github.com/Cloudgeni-ai/opengeni/...` URL or
+  `docs/design/api-compatibility-policy.md#exception-log`;
 - migration notes, and direct notice to affected integrators.
 
 A security refusal of old contract revisions uses
@@ -162,8 +166,8 @@ a versioning mechanism for integrations:
 | Check | Where | What it proves |
 | --- | --- | --- |
 | Public surface diff | `bun run check:public-api` (refresh: `bun run public-api:refresh`) | The candidate removes or narrows nothing the merge base exposed |
-| Published SDK routes | `bun run check:public-api`, over `scripts/public-api/published-sdk.gen.json` | Every `/v1` route a published `@opengeni/sdk` calls is still registered |
-| Major changesets | `scripts/ci/changeset-plan.ts` (PR fast checks and Batch) | No pending changeset declares an `@opengeni/sdk` or `@opengeni/react` major without a linked exception |
+| Published SDK routes | `bun run check:public-api`, over `scripts/public-api/published-sdk.gen.json` | Every exact registered route (`METHOD /path`) a recorded published `@opengeni/sdk` call resolved to is still registered |
+| Major releases | `scripts/ci/changeset-plan.ts` (PR fast checks and Batch) | The pending release plan does not release `@opengeni/sdk` or `@opengeni/react` as a major (directly or through the lockstep version group) unless every changeset declaring a major links an exception |
 | Contract parity | `packages/sdk/test/contract-parity.test.ts` | SDK wire types match `@opengeni/contracts` |
 | Review | PR template "External API impact" | Behaviour, defaults and payload semantics the static checks cannot see |
 
@@ -185,9 +189,14 @@ admit nothing new.
 
 **Published SDK routes.** `scripts/public-api/published-sdk.gen.json` records,
 per published SDK version, every route call extracted from the TypeScript
-source the package ships (`@internal` methods excluded). The check fails when
-the candidate API no longer registers one of them. Calls the API had already
-dropped before 2026-11-03 are listed as `acceptedGaps` with their reason. After
+source the package ships (`@internal` methods excluded), together with the
+exact registered routes (`METHOD /path`) each call resolved to at refresh. A
+call resolves to the routes that match it exactly for each of its verbs; an
+SDK placeholder may stand in for a route literal only when every literal the
+SDK wrote lines up with a route literal. The check fails when the candidate API
+no longer registers one of the stored routes, by method and path. Calls the
+API had already dropped before 2026-11-03 (26 for 4.6.1) are listed as
+`acceptedGaps` with their reason. After
 each stable SDK publication, record the new version with
 `bun run public-api:published-refresh` (defaults to the npm `latest` tag;
 `-- --version X` for another); it keeps earlier versions and refuses to record

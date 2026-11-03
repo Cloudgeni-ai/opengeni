@@ -160,7 +160,7 @@ Keep these boundaries explicit:
   kind is `"shared"`; Personal workspaces (`"personal"`) are excluded from
   `ensureWorkspace` and must not be selected through a default-workspace
   fallback.
-- Old unscoped operational routes are deleted, not soft-deprecated. Do not add compatibility aliases unless the user explicitly changes that product decision.
+- The old unscoped operational routes were removed before the 2026-11-03 compatibility policy and stay removed; do not reintroduce them. New changes follow Public API compatibility below.
 - Better Auth is only the managed-mode browser human auth resolver. It is not the tenant model and should not appear in core session/file/document/schedule route code.
 - Managed sign-in method changes belong to `apps/api/src/routes/managed-sign-in-methods.ts`
   and its canonical identity/database guards. Discover the current contract in
@@ -282,8 +282,10 @@ documented behaviour, decide how the change stays compatible:
 - The checks cannot see behaviour, defaults or payload semantics; state them in
   the PR template's "External API impact" section and keep them unchanged
   unless the caller opts in.
-- Do not declare an `@opengeni/sdk` or `@opengeni/react` major in a changeset;
-  CI rejects it without a linked exception.
+- Do not declare a major release of any package in a changeset. All published
+  packages share one lockstep version, so any major (including
+  `@opengeni/contracts` or `@opengeni/runtime`) ships `@opengeni/sdk` and
+  `@opengeni/react` majors; CI rejects it without a linked exception.
 - After a stable SDK publication, record it with
   `bun run public-api:published-refresh` so the check covers that version.
 

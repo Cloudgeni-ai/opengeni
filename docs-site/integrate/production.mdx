@@ -27,7 +27,7 @@ On [app.opengeni.ai](https://app.opengeni.ai), usage is paid with prepaid credit
 
 ## Keep SDK and server compatible
 
-Server updates don't break existing integrations: the API only grows, so a pinned SDK keeps working and you upgrade when you want new features. Pin all `@opengeni` packages to the same version, install stable releases (the npm `latest` tag) rather than canaries, and let your code ignore unknown response fields and event types. Deprecated members keep working; their docs name the replacement. Read the server version from `/healthz`. See the [API compatibility policy](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/design/api-compatibility-policy.md).
+Server updates don't break existing integrations: the API only grows, so a pinned SDK keeps working and you upgrade when you want new features. The only exceptions are rare security fixes, announced with migration notes. Pin all `@opengeni` packages to the same version, install stable releases (the npm `latest` tag) rather than canaries, and let your code ignore unknown response fields and event types. Deprecated members keep working; their docs name the replacement. Read the server version from `/healthz`. See the [API compatibility policy](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/design/api-compatibility-policy.md).
 
 ## Keep the tool surface minimal
 

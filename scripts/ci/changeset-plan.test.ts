@@ -12,7 +12,10 @@ afterEach(() => {
 });
 
 /** A tiny workspace with the repository's real ignore semantics, no git needed. */
-function fixture(changesets: Record<string, Record<string, string>>): string {
+function fixture(
+  changesets: Record<string, Record<string, string>>,
+  options: { fixed?: string[][] } = {},
+): string {
   const root = mkdtempSync(join(tmpdir(), "changeset-plan-"));
   directories.push(root);
   const write = (path: string, value: unknown) => {
@@ -21,6 +24,7 @@ function fixture(changesets: Record<string, Record<string, string>>): string {
   };
   write("package.json", { name: "fixture", private: true, workspaces: ["packages/*"] });
   write("packages/sdk/package.json", { name: "@opengeni/sdk", version: "1.0.0" });
+  write("packages/contracts/package.json", { name: "@opengeni/contracts", version: "1.0.0" });
   write("packages/config/package.json", { name: "@opengeni/config", version: "1.0.0" });
   write("packages/deployment/package.json", {
     name: "@opengeni/deployment",
@@ -30,7 +34,7 @@ function fixture(changesets: Record<string, Record<string, string>>): string {
   write(".changeset/config.json", {
     changelog: false,
     commit: false,
-    fixed: [],
+    fixed: options.fixed ?? [],
     linked: [],
     access: "public",
     baseBranch: "main",
@@ -114,4 +118,20 @@ test("a major SDK or React changeset needs a linked compatibility exception", as
     '---\n"@opengeni/sdk": major\n---\n\nRemove a field.\n\nCompatibility exception: https://github.com/Cloudgeni-ai/opengeni/pull/1#issuecomment-1\n',
   );
   expect(await checkChangesetPlan({ cwd })).toBeUndefined();
+});
+
+test("a major on another lockstep package that releases the SDK as a major needs an exception", async () => {
+  const fixed = [["@opengeni/sdk", "@opengeni/contracts", "@opengeni/config"]];
+  const cwd = fixture({ "narrow-shape": { "@opengeni/contracts": "major" } }, { fixed });
+  expect(await checkChangesetPlan({ cwd })).toContain(
+    ".changeset/narrow-shape.md declares a major release of @opengeni/contracts, which releases @opengeni/sdk as a major",
+  );
+  writeFileSync(
+    join(cwd, ".changeset/narrow-shape.md"),
+    '---\n"@opengeni/contracts": major\n---\n\nNarrow a shape.\n\nCompatibility exception: docs/design/api-compatibility-policy.md#exception-log\n',
+  );
+  expect(await checkChangesetPlan({ cwd })).toBeUndefined();
+  // Outside the lockstep group the SDK does not become a major, so nothing fails.
+  const unfixed = fixture({ "internal-major": { "@opengeni/config": "major" } });
+  expect(await checkChangesetPlan({ cwd: unfixed })).toBeUndefined();
 });

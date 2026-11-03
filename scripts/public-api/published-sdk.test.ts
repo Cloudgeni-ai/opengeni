@@ -3,10 +3,10 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  callServed,
   publishedSdkCalls,
   publishedSdkFindings,
   refreshPublishedPackage,
+  resolveCall,
   validatePublishedInventory,
   type PublishedInventory,
 } from "./published-sdk";
@@ -15,25 +15,45 @@ const registered = [
   { method: "GET", path: "/v1/workspaces/:workspaceId/sessions" },
   { method: "POST", path: "/v1/workspaces/:workspaceId/sessions" },
   { method: "GET", path: "/v1/workspaces/:workspaceId/sessions/:sessionId" },
+  { method: "GET", path: "/v1/workspaces/:workspaceId/company-brain/files" },
+  {
+    method: "DELETE",
+    path: "/v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance",
+  },
 ];
 
+const SESSIONS = "GET /v1/workspaces/:workspaceId/sessions";
+const SESSION = "GET /v1/workspaces/:workspaceId/sessions/:sessionId";
+
 function inventory(acceptedGaps: { call: string; reason: string }[] = []): PublishedInventory {
+  const gaps = new Set(acceptedGaps.map((gap) => gap.call));
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     packages: [
       {
         name: "@opengeni/sdk",
         version: "4.6.1",
         calls: {
-          "GET /v1/workspaces/:p/sessions": ["Client.listSessions"],
-          "GET /v1/workspaces/:p/sessions/:p": ["Client.getSession"],
-          "DELETE /v1/workspaces/:p/recordings/:p": ["Client.discardRecording"],
+          "GET /v1/workspaces/:p/sessions": {
+            sdk: ["Client.listSessions"],
+            routes: gaps.has("GET /v1/workspaces/:p/sessions") ? [] : [SESSIONS],
+          },
+          "GET /v1/workspaces/:p/sessions/:p": { sdk: ["Client.getSession"], routes: [SESSION] },
+          "DELETE /v1/workspaces/:p/recordings/:p": {
+            sdk: ["Client.discardRecording"],
+            routes: [],
+          },
         },
         acceptedGaps,
       },
     ],
   };
 }
+
+const RECORDING_GAP = {
+  call: "DELETE /v1/workspaces/:p/recordings/:p",
+  reason: "Removed before the policy.",
+};
 
 describe("published SDK inventory", () => {
   test("extracts route calls from shipped SDK source, excluding @internal methods", () => {
@@ -61,54 +81,63 @@ describe("published SDK inventory", () => {
     });
   });
 
-  test("a call is served when any of its verbs matches a registered route", () => {
-    expect(callServed("GET /v1/workspaces/:p/sessions", registered)).toBe(true);
-    expect(callServed("DELETE|POST /v1/workspaces/:p/sessions", registered)).toBe(true);
-    expect(callServed("DELETE /v1/workspaces/:p/sessions", registered)).toBe(false);
-    expect(callServed("GET /v1/workspaces/:p/recordings", registered)).toBe(false);
-  });
-
-  test("an unserved published call is breaking unless it is an accepted gap", () => {
-    const unaccepted = publishedSdkFindings(inventory(), registered);
-    expect(unaccepted.breaking.map((finding) => finding.id)).toEqual([
-      "published-sdk:@opengeni/sdk@4.6.1:DELETE /v1/workspaces/:p/recordings/:p",
+  test("a call resolves to the exact registered routes for each of its verbs", () => {
+    expect(resolveCall("GET /v1/workspaces/:p/sessions", registered)).toEqual([SESSIONS]);
+    expect(resolveCall("DELETE|GET|POST /v1/workspaces/:p/sessions", registered)).toEqual([
+      SESSIONS,
+      "POST /v1/workspaces/:workspaceId/sessions",
     ]);
-    const accepted = publishedSdkFindings(
-      inventory([
-        { call: "DELETE /v1/workspaces/:p/recordings/:p", reason: "Removed before the policy." },
-      ]),
-      registered,
-    );
-    expect(accepted.breaking).toEqual([]);
+    expect(resolveCall("DELETE /v1/workspaces/:p/sessions", registered)).toEqual([]);
+    expect(resolveCall("GET /v1/workspaces/:p/recordings", registered)).toEqual([]);
   });
 
-  test("removing a route a published SDK calls is caught", () => {
+  test("a loose match counts only when the SDK's literal segments line up with route literals", () => {
+    // `company-brain/${kind}`: the SDK placeholder stands in for a route literal.
+    expect(resolveCall("GET /v1/workspaces/:p/company-brain/:p", registered)).toEqual([
+      "GET /v1/workspaces/:workspaceId/company-brain/files",
+    ]);
+    // A removed call must not be "served" by an unrelated route of the same length.
+    expect(resolveCall("DELETE /v1/workspaces/:p/social/connections/:p", registered)).toEqual([]);
+  });
+
+  test("a removed route a published SDK calls is breaking, exactly by method and path", () => {
     const withoutGet = registered.filter((route) => !route.path.endsWith(":sessionId"));
     expect(
-      publishedSdkFindings(
-        inventory([
-          { call: "DELETE /v1/workspaces/:p/recordings/:p", reason: "Removed before the policy." },
-        ]),
-        withoutGet,
-      ).breaking.map((finding) => finding.message),
+      publishedSdkFindings(inventory([RECORDING_GAP]), withoutGet).breaking.map(
+        (finding) => finding.id,
+      ),
+    ).toEqual([`published-sdk:@opengeni/sdk@4.6.1:${SESSION}`]);
+    // Keeping the path but dropping the verb is also caught.
+    const postOnly = registered.filter((route) => route.path !== SESSIONS.slice(4));
+    expect(
+      publishedSdkFindings(inventory([RECORDING_GAP]), [
+        ...postOnly,
+        { method: "POST", path: "/v1/workspaces/:workspaceId/sessions" },
+      ]).breaking.map((finding) => finding.message),
     ).toEqual([
-      "published @opengeni/sdk@4.6.1 calls GET /v1/workspaces/:p/sessions/:p (Client.getSession), which the API no longer registers",
+      `published @opengeni/sdk@4.6.1 calls ${SESSIONS} (Client.listSessions), which the API no longer registers`,
     ]);
+    expect(publishedSdkFindings(inventory([RECORDING_GAP]), registered).breaking).toEqual([]);
   });
 
   test("an accepted gap that is served again is reported for cleanup", () => {
     const result = publishedSdkFindings(
-      inventory([{ call: "GET /v1/workspaces/:p/sessions", reason: "Temporarily missing." }]),
+      inventory([
+        RECORDING_GAP,
+        { call: "GET /v1/workspaces/:p/sessions", reason: "Temporarily missing." },
+      ]),
       registered,
     );
     expect(result.resolvedGaps).toEqual(["@opengeni/sdk@4.6.1: GET /v1/workspaces/:p/sessions"]);
   });
 
-  test("refresh keeps existing gap reasons and refuses to invent new ones", () => {
-    const previous = inventory([
-      { call: "DELETE /v1/workspaces/:p/recordings/:p", reason: "Removed before the policy." },
-    ]).packages[0]!;
-    const calls = { ...previous.calls, "GET /v1/workspaces/:p/gone": ["Client.gone"] };
+  test("refresh resolves routes, keeps existing gap reasons and refuses to invent new ones", () => {
+    const previous = inventory([RECORDING_GAP]).packages[0]!;
+    const calls = {
+      "GET /v1/workspaces/:p/sessions": ["Client.listSessions"],
+      "DELETE /v1/workspaces/:p/recordings/:p": ["Client.discardRecording"],
+      "GET /v1/workspaces/:p/gone": ["Client.gone"],
+    };
     const refused = refreshPublishedPackage({
       name: previous.name,
       version: previous.version,
@@ -118,7 +147,11 @@ describe("published SDK inventory", () => {
       acceptGapsReason: null,
     });
     expect(refused.newGaps).toEqual(["GET /v1/workspaces/:p/gone"]);
-    expect(refused.entry.acceptedGaps).toEqual(previous.acceptedGaps);
+    expect(refused.entry.acceptedGaps).toEqual([RECORDING_GAP]);
+    expect(refused.entry.calls["GET /v1/workspaces/:p/sessions"]).toEqual({
+      sdk: ["Client.listSessions"],
+      routes: [SESSIONS],
+    });
     const accepted = refreshPublishedPackage({
       name: previous.name,
       version: previous.version,
@@ -131,20 +164,32 @@ describe("published SDK inventory", () => {
       "Removed before the policy.",
       "Approved exception: link.",
     ]);
+    expect(
+      validatePublishedInventory({ schemaVersion: 2, packages: [accepted.entry] }),
+    ).toBeDefined();
   });
 
-  test("validation rejects gaps that are not recorded calls or lack a reason", () => {
-    expect(validatePublishedInventory(inventory())).toBeDefined();
+  test("validation keeps unresolved calls and accepted gaps consistent", () => {
+    expect(validatePublishedInventory(inventory([RECORDING_GAP]))).toBeDefined();
+    expect(() => validatePublishedInventory(inventory())).toThrow(/not an accepted gap/);
     expect(() =>
       validatePublishedInventory(
-        inventory([{ call: "GET /v1/nope", reason: "Not a call at all." }]),
+        inventory([
+          RECORDING_GAP,
+          { call: "GET /v1/workspaces/:p/sessions/:p", reason: "Still served, though." },
+        ]),
+      ),
+    ).toThrow(/remove the gap/);
+    expect(() =>
+      validatePublishedInventory(
+        inventory([RECORDING_GAP, { call: "GET /v1/nope", reason: "Not a call at all." }]),
       ),
     ).toThrow(/not a recorded call/);
-    expect(() =>
-      validatePublishedInventory(
-        inventory([{ call: "DELETE /v1/workspaces/:p/recordings/:p", reason: "" }]),
-      ),
-    ).toThrow(/explain/);
-    expect(() => validatePublishedInventory({ packages: [] })).toThrow(/schemaVersion/);
+    expect(() => validatePublishedInventory(inventory([{ ...RECORDING_GAP, reason: "" }]))).toThrow(
+      /explain/,
+    );
+    expect(() => validatePublishedInventory({ schemaVersion: 1, packages: [] })).toThrow(
+      /schemaVersion: 2/,
+    );
   });
 });

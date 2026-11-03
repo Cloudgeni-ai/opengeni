@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { majorChangesetFailures, type PlannedChangeset } from "../public-api/major-changesets";
+import { majorReleaseFailures, type PlannedChangeset } from "../public-api/major-changesets";
 
 /**
  * Pending changeset release-plan contract, shared by PR fast checks and Batch
@@ -13,8 +13,9 @@ import { majorChangesetFailures, type PlannedChangeset } from "../public-api/maj
  * `baseBranch`; Batch disabled that by pointing main at the candidate, so
  * skipping it here needs no git and never moves a (shared) local main ref.
  *
- * It also fails a changeset that declares a major release of `@opengeni/sdk`
- * or `@opengeni/react` without a linked compatibility exception, because
+ * It also fails a plan that releases `@opengeni/sdk` or `@opengeni/react` as
+ * a major (directly or through the lockstep version group) unless every
+ * changeset declaring a major links a compatibility exception, because
  * Opengeni does not ship breaking public API changes
  * (`scripts/public-api/major-changesets.ts`).
  */
@@ -25,7 +26,7 @@ export function releasePlanError(plan: ReleasePlan): string | undefined {
     return "Changesets returned a malformed release plan";
   if (plan.changesets.some((change) => change.releases.length > 0) && plan.releases.length === 0)
     return "Pending changesets cannot produce a Version PR";
-  const majors = majorChangesetFailures(plan.changesets);
+  const majors = majorReleaseFailures(plan.changesets, plan.releases);
   return majors.length > 0 ? majors.join("\n") : undefined;
 }
 
