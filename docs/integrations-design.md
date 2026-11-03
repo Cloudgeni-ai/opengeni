@@ -389,7 +389,8 @@ provider connecting members to Opengeni's own `/v1/mcp`, is in
   `clientRegistrationMethod: "id_jag"`) and turned on in the workspace. A
   member who already has a working login to that server is left alone.
 - **When.** Before each turn, for at most four auto-connect connectors the turn
-  may use that the person has no login to, best effort; after a refusal that
+  may use that the person has no login to (connectors they already have a
+  login to are left out before the limit applies), best effort; after a refusal that
   person's turns stop asking that app for ten minutes and the usual sign-in
   prompt stands in. A member's own **Connect** calls
   `POST /v1/workspaces/:id/organization-connectors/:connectorId/connect`
@@ -397,7 +398,12 @@ provider connecting members to Opengeni's own `/v1/mcp`, is in
   when the app refuses.
 - **Refresh.** There is no refresh token: the token broker signs and redeems
   a new ID-JAG when the token runs out. The app refusing it is permanent, like
-  a refused refresh token; not reaching it is retried.
+  a refused refresh token; not reaching it is retried. Each renewal first
+  checks that the originating connector (`connector_id` in the credential) is
+  still active with the same authorization server and client ID, and that the
+  person is still an active member; otherwise renewal fails as `invalid_grant`.
+  Only the person's own session can create their login; service principals
+  are refused like any other personal connection.
 
 ## 6. Tool↔connection contract and `tool.auth_needed`
 

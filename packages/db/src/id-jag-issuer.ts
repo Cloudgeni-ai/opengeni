@@ -19,6 +19,7 @@ import { createHash, createPrivateKey, generateKeyPairSync, randomUUID, sign } f
 import { rawRows, type Database } from "./database";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 import {
+  autoConnectLoginStillConnects,
   getOrganizationIdentityIssuerKey,
   type OrganizationIdentityIssuerKey,
 } from "./mcp-auto-connect";
@@ -251,6 +252,8 @@ export async function exchangeIdJag(
 /** What the stored credential of an auto-connected login holds besides its token. */
 export type IdJagCredentialBinding = {
   grant: "id_jag";
+  /** The organization connector it was made through; renewal checks it is still there. */
+  connector_id: string;
   token_endpoint: string;
   client_id: string;
   audience: string;
@@ -266,6 +269,7 @@ export function idJagCredentialBundle(
 ): Record<string, unknown> {
   return {
     grant: "id_jag",
+    connector_id: binding.connector_id,
     access_token: token.accessToken,
     token_type: token.tokenType,
     expires_at: token.expiresAt.toISOString(),
@@ -293,6 +297,7 @@ export async function refreshIdJagConnectionCredential(
   settings: Settings,
   cred: {
     accountId: string;
+    workspaceId: string;
     subjectId: string | null;
     credential: Record<string, unknown>;
   },
@@ -303,8 +308,26 @@ export async function refreshIdJagConnectionCredential(
   const tokenEndpoint = stringValue(credential.token_endpoint);
   const clientId = stringValue(credential.client_id);
   const audience = stringValue(credential.audience);
-  if (!cred.subjectId || !tokenEndpoint || !clientId || !audience)
+  const connectorId = stringValue(credential.connector_id);
+  if (!cred.subjectId || !tokenEndpoint || !clientId || !audience || !connectorId)
     throw new IdJagExchangeError(400, "invalid_request", "This login is missing its setup");
+  // Removed, turned off or changed connectors, and people who left, are
+  // never renewed: permanent, like a revoked refresh token.
+  if (
+    !(await autoConnectLoginStillConnects(db, {
+      accountId: cred.accountId,
+      workspaceId: cred.workspaceId,
+      subjectId: cred.subjectId,
+      connectorId,
+      audience,
+      clientId,
+    }))
+  )
+    throw new IdJagExchangeError(
+      401,
+      "invalid_grant",
+      "Your organization no longer connects you to this app automatically",
+    );
   const resource = ref.resource ?? stringValue(credential.resource) ?? null;
   const scopes = Array.isArray(credential.scopes)
     ? credential.scopes.filter((scope): scope is string => typeof scope === "string")
@@ -335,6 +358,7 @@ export async function refreshIdJagConnectionCredential(
   return {
     credential: idJagCredentialBundle(
       {
+        connector_id: connectorId,
         token_endpoint: tokenEndpoint,
         client_id: clientId,
         audience,

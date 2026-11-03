@@ -21,6 +21,7 @@ import {
   type McpAutoConnectRefusalReason,
   type OrganizationAccessPolicy,
 } from "@opengeni/contracts";
+import { assertPersonalConnectionOwnerPrincipal } from "./connection-ownership";
 import {
   createMcpTrustedIssuer,
   deleteMcpTrustedIssuer,
@@ -322,6 +323,10 @@ export async function resolveMcpOAuthClient(
   }
   remember(metadataDocumentFetchedAt, clientId, Date.now());
   if (!document || document.client_id !== clientId) return stored;
+  // Opengeni authenticates no client: one that says it authenticates (a
+  // secret or a signed key) is refused rather than let in without it.
+  const authMethod = document.token_endpoint_auth_method;
+  if (authMethod !== undefined && authMethod !== "none") return null;
   const redirectUris: string[] = [];
   for (const value of Array.isArray(document.redirect_uris) ? document.redirect_uris : []) {
     if (typeof value !== "string" || redirectUris.length >= 16) continue;
@@ -557,8 +562,6 @@ export async function redeemIdJagGrant(
         : (stringClaim(payload, "email")?.toLowerCase() ?? null);
     const match = await matchMcpAssertionMember(deps.db, {
       accountId: trust.accountId,
-      trustedIssuerId: trust.id,
-      assertionSubject: subject,
       email: usableEmail,
     });
     if (match.status !== "matched")
@@ -976,12 +979,16 @@ function registerConnectorAutoConnectRoutes(app: Hono, deps: ApiRouteDeps): void
     async (c) => {
       c.header("cache-control", "private, no-store");
       const workspaceId = c.req.param("workspaceId");
-      const { grant } = await requireAccessGrantAuthorization(
+      const access = await requireAccessGrantAuthorization(
         c,
         deps,
         workspaceId,
         "connections:write",
       );
+      const { grant } = access;
+      // The login is the person's own: only a signed-in human makes one, never
+      // an API key, service or agent acting for them.
+      assertPersonalConnectionOwnerPrincipal(access);
       if (!grant.subjectId.startsWith("user:"))
         throw new HTTPException(403, { message: "Connect in the Opengeni app as yourself" });
       const parsed = z.string().uuid().safeParse(c.req.param("connectorId"));

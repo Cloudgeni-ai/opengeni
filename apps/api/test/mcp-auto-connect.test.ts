@@ -1,7 +1,12 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
-import { organizationAccessPresetPermissions } from "@opengeni/contracts";
-import { createDb, createManagedOrganization, type DbClient } from "@opengeni/db";
+import { organizationAccessPresetPermissions, signDelegatedAccessToken } from "@opengeni/contracts";
+import {
+  createDb,
+  createManagedOrganization,
+  refreshIdJagConnectionCredential,
+  type DbClient,
+} from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
@@ -30,6 +35,10 @@ import { resetMcpAutoConnectCaches } from "../src/mcp-auto-connect";
 const origin = "http://opengeni.test";
 const claudeIssuer = "https://identity.anthropic.test/issuers/acme-claude";
 const claudeClientId = "https://claude.test/oauth/mcp-client-metadata.json";
+/** A client whose document says it authenticates with a key Opengeni never checks. */
+const confidentialClientId = "https://confidential.test/oauth/client-metadata.json";
+const encryptionKey = randomBytes(32).toString("base64");
+const delegationSecret = "mcp-auto-connect-delegation-secret";
 const JWT_BEARER = "urn:ietf:params:oauth:grant-type:jwt-bearer";
 let shared: SharedTestDatabase;
 let client: DbClient;
@@ -74,21 +83,34 @@ const fakeInternet: typeof fetch = (async (input: string | URL | Request, init?:
       grant_types: ["authorization_code", JWT_BEARER],
       token_endpoint_auth_method: "none",
     });
+  if (request.url === confidentialClientId)
+    return Response.json({
+      client_id: confidentialClientId,
+      client_name: "Confidential",
+      redirect_uris: ["https://confidential.test/callback"],
+      grant_types: [JWT_BEARER],
+      token_endpoint_auth_method: "private_key_jwt",
+    });
   if (outsideApp && url.hostname.endsWith("app.test")) return await outsideApp(request);
   return new Response("not found", { status: 404 });
 }) as typeof fetch;
 
+function appSettings() {
+  return testSettings({
+    databaseUrl: shared.adminUrl,
+    productAccessMode: "managed",
+    betterAuthSecret: "mcp-auto-connect-test-secret-32-bytes-long",
+    publicBaseUrl: origin,
+    mcpOauthEnabled: true,
+    integrationsEnabled: true,
+    environmentsEncryptionKey: encryptionKey,
+    delegationSecret,
+  });
+}
+
 function makeApp(): App {
   return createApp({
-    settings: testSettings({
-      databaseUrl: shared.adminUrl,
-      productAccessMode: "managed",
-      betterAuthSecret: "mcp-auto-connect-test-secret-32-bytes-long",
-      publicBaseUrl: origin,
-      mcpOauthEnabled: true,
-      integrationsEnabled: true,
-      environmentsEncryptionKey: randomBytes(32).toString("base64"),
-    }),
+    settings: appSettings(),
     db: client.db,
     bus: new MemoryEventBus(),
     workflowClient: {} as never,
@@ -299,7 +321,7 @@ describe("auto-connect, inbound: Claude connects members to the organization MCP
         aud_tenant: organizationId,
       }),
     );
-    expect(first.status).toBe(200);
+    expect(first).toMatchObject({ status: 200 });
     expect(first.body).toMatchObject({
       token_type: "Bearer",
       expires_in: 900,
@@ -366,6 +388,13 @@ describe("auto-connect, inbound: Claude connects members to the organization MCP
       ["no subject", idJag({ email: owner.email })],
       ["unknown person", idJag({ sub: "claude-user-2", email: "nobody@example.test" })],
       ["unverified", idJag({ sub: "claude-user-3", email: owner.email, email_verified: false })],
+      // A subject connected before is matched by its email every time, never by itself.
+      ["known subject, other email", idJag({ sub: "claude-user-1", email: "nobody@example.test" })],
+      [
+        "known subject, unverified",
+        idJag({ sub: "claude-user-1", email: owner.email, email_verified: false }),
+      ],
+      ["known subject, no email", idJag({ sub: "claude-user-1" })],
       [
         "other tenant",
         idJag({ sub: "claude-user-1", email: owner.email, aud_tenant: crypto.randomUUID() }),
@@ -381,6 +410,13 @@ describe("auto-connect, inbound: Claude connects members to the organization MCP
       expect({ label, status: result.status }).toEqual({ label, status: 400 });
       expect(typeof result.body.error_description).toBe("string");
     }
+    // A client that says it authenticates is refused, not let in without it.
+    const confidential = await redeem(
+      app,
+      await idJag({ sub: "claude-user-1", email: owner.email, client_id: confidentialClientId }),
+      { client_id: confidentialClientId },
+    );
+    expect(confidential).toMatchObject({ status: 401, body: { error: "invalid_client" } });
 
     // The admin sees who connected and why the others were refused.
     const [summary] = (
@@ -620,6 +656,55 @@ describe("auto-connect, outbound: Opengeni connects members to an outside MCP ap
         select count(*)::int as n from connections
         where workspace_id = ${workspaceId}::uuid and provider_domain = 'mcp.app.test'`;
       expect(count[0]!.n).toBe(1);
+
+      // Only the person makes their own login: not a service acting in their name.
+      const serviceToken = await signDelegatedAccessToken(delegationSecret, {
+        accountId: organizationId,
+        workspaceId,
+        subjectId: owner.subjectId,
+        permissions: ["connections:read", "connections:write"],
+        principalKind: "service",
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      });
+      const byService = await app.request(
+        `/v1/workspaces/${workspaceId}/organization-connectors/${connector.id}/connect`,
+        { method: "POST", headers: { authorization: `Bearer ${serviceToken}` } },
+      );
+      expect(byService.status).toBe(422);
+
+      // Renewal signs a new ID-JAG while the connector is there...
+      const binding = {
+        grant: "id_jag",
+        connector_id: connector.id,
+        token_endpoint: "https://auth.app.test/token",
+        client_id: connector.autoConnect.clientId,
+        audience: "https://auth.app.test",
+        resource: "https://mcp.app.test/mcp",
+      };
+      const renewal = () =>
+        refreshIdJagConnectionCredential(
+          client.db,
+          appSettings(),
+          {
+            accountId: organizationId,
+            workspaceId,
+            subjectId: owner.subjectId,
+            credential: binding,
+          },
+          { resource: "https://mcp.app.test/mcp", scopes: [] },
+          { testFetch: fakeInternet },
+        );
+      const renewed = await renewal();
+      expect(renewed.credential).toMatchObject({ grant: "id_jag", connector_id: connector.id });
+      // ...and never once it is removed.
+      const removed = await app.request(
+        `/v1/organizations/${organizationId}/connectors/${connector.id}`,
+        { method: "DELETE", headers: browser(owner.cookie) },
+      );
+      expect(removed.status).toBe(204);
+      const redeemedBefore = redeemed.length;
+      await expect(renewal()).rejects.toMatchObject({ httpStatus: 401 });
+      expect(redeemed.length).toBe(redeemedBefore);
     } finally {
       outsideApp = null;
     }

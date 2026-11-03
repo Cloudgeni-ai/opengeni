@@ -326,7 +326,7 @@ export async function connectMemberAutomatically(input: {
   accountId: string;
   workspaceId: string;
   subjectId: string;
-  connector: Pick<OrganizationConnectorRow, "config" | "accountId">;
+  connector: Pick<OrganizationConnectorRow, "id" | "config" | "accountId">;
   fetchImpl?: AutoConnectFetch | undefined;
 }): Promise<AutoConnectAttempt> {
   const autoConnect = storedAutoConnect(input.connector.config);
@@ -372,6 +372,7 @@ export async function connectMemberAutomatically(input: {
     JSON.stringify(
       idJagCredentialBundle(
         {
+          connector_id: input.connector.id,
           token_endpoint: autoConnect.tokenEndpoint,
           client_id: autoConnect.clientId,
           audience: autoConnect.authorizationServerIssuer,
@@ -453,14 +454,28 @@ export async function connectAutoConnectLoginsForTurn(input: {
   const now = Date.now();
   let connectors: OrganizationConnectorRow[];
   try {
-    connectors = (await listOrganizationConnectorsReachingWorkspace(input.db, input.workspaceId))
+    const candidates = (
+      await listOrganizationConnectorsReachingWorkspace(input.db, input.workspaceId)
+    )
       .filter((connector) => organizationConnectorLogin(connector.config) === "auto_connect")
       .filter((connector) => {
         const ref = connectorRef(connector.config);
         return !!ref && input.providerDomains.has(ref.providerDomain.toLowerCase());
       })
-      .filter((connector) => !recentlyRefused(connector.id, input.subjectId, now))
-      .slice(0, MAX_CONNECTORS_PER_TURN);
+      .filter((connector) => !recentlyRefused(connector.id, input.subjectId, now));
+    if (candidates.length === 0) return;
+    // Apps the person already has a working login to need nothing, so they
+    // don't use up this turn's few attempts.
+    const working = (
+      await listOwnConnectionMetadata(input.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        reach: "anywhere",
+        includeInactive: false,
+      })
+    ).filter((connection) => connection.kind === "oauth2" && connection.status === "active");
+    connectors = autoConnectConnectorsToTry(candidates, working);
   } catch {
     return;
   }
@@ -507,6 +522,29 @@ export async function connectMemberToOrganizationConnector(input: {
   if (attempt.status === "connected")
     turnRefusals.delete(refusalKey(connector.id, input.subjectId));
   return attempt;
+}
+
+/**
+ * The connectors a turn tries: those the person has no working login to,
+ * at most a few. Logins they already have are left out before the limit, so
+ * apps later in the list are never starved by ones that need nothing.
+ */
+export function autoConnectConnectorsToTry<C extends Pick<OrganizationConnectorRow, "config">>(
+  candidates: readonly C[],
+  working: readonly { providerDomain: string; metadata: { mcpUrl?: unknown } }[],
+): C[] {
+  return candidates
+    .filter((connector) => {
+      const ref = connectorRef(connector.config);
+      const mcpUrl = storedAutoConnect(connector.config)?.mcpUrl;
+      if (!ref || !mcpUrl) return true;
+      return !working.some(
+        (connection) =>
+          connection.providerDomain.toLowerCase() === ref.providerDomain.toLowerCase() &&
+          sameUrl(connection.metadata.mcpUrl, mcpUrl),
+      );
+    })
+    .slice(0, MAX_CONNECTORS_PER_TURN);
 }
 
 function connectorRef(config: Record<string, unknown>): { providerDomain: string } | null {

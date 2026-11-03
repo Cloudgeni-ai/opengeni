@@ -82,6 +82,26 @@ const TRUST_COLUMNS = sql`trust.id, trust.account_id, trust.name, trust.provider
   trust.jwks_uri, trust.allowed_client_ids, trust.organization_access, trust.status,
   trust.created_at, trust.updated_at`;
 
+/**
+ * One issuer's connection lock. Redemptions share it; turning the issuer off,
+ * changing its access or removing it takes it alone. So a connection being
+ * made either finishes first (and is then revoked or updated with the rest)
+ * or waits and reads the change.
+ */
+function trustedIssuerLockKey(trustedIssuerId: string) {
+  return sql`hashtextextended(${`mcp-trusted-issuer:${trustedIssuerId}`}, 0)`;
+}
+
+async function lockTrustedIssuerExclusive(tx: Database, trustedIssuerId: string): Promise<void> {
+  await tx.execute(sql`select pg_advisory_xact_lock(${trustedIssuerLockKey(trustedIssuerId)})`);
+}
+
+async function lockTrustedIssuerShared(tx: Database, trustedIssuerId: string): Promise<void> {
+  await tx.execute(
+    sql`select pg_advisory_xact_lock_shared(${trustedIssuerLockKey(trustedIssuerId)})`,
+  );
+}
+
 /* ------------------------------ Administration ------------------------------ */
 
 export async function listMcpTrustedIssuers(
@@ -155,6 +175,7 @@ export async function updateMcpTrustedIssuer(
     scope.accountId,
     authorize,
     async (tx, subjectId) => {
+      await lockTrustedIssuerExclusive(tx, scope.trustedIssuerId);
       const [row] = await rawRows<{ id: string }>(
         tx,
         sql`update organization_mcp_trusted_issuers set
@@ -199,6 +220,8 @@ export async function deleteMcpTrustedIssuer(
   authorize: AuthorizeOrganizationConnectorAdministration,
 ): Promise<boolean> {
   return await withOrganizationAdministrator(db, scope.accountId, authorize, async (tx) => {
+    // Lock first: a connection being made through it finishes, then is revoked.
+    await lockTrustedIssuerExclusive(tx, scope.trustedIssuerId);
     await revokeTrustedIssuerConnections(tx, scope.accountId, scope.trustedIssuerId);
     const deleted = await rawRows<{ id: string }>(
       tx,
@@ -295,52 +318,38 @@ export async function findActiveMcpTrustedIssuers(
   });
 }
 
-export type McpAssertionMatch =
-  | { status: "matched"; subjectId: string; via: "subject" | "email" }
-  | { status: "unmatched" };
+export type McpAssertionMatch = { status: "matched"; subjectId: string } | { status: "unmatched" };
 
 /**
- * The active member an issuer's subject is: the member it connected before,
- * or else the member whose verified Opengeni email the issuer asserted (only
- * when the issuer says that email is verified).
+ * The active member whose verified Opengeni email the issuer asserted, on
+ * every redemption: an issuer's subject is linked to the member it matched
+ * for the admin's view, never trusted in place of the email (the issuer may
+ * since have said a different or unverified email for it).
  */
 export async function matchMcpAssertionMember(
   db: Database,
   input: {
     accountId: string;
-    trustedIssuerId: string;
-    assertionSubject: string;
     email: string | null;
   },
 ): Promise<McpAssertionMatch> {
+  if (!input.email) return { status: "unmatched" };
+  const email = input.email;
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: null },
     async (tx) => {
-      const [linked] = await rawRows<{ subject_id: string }>(
-        tx,
-        sql`select subject_id from organization_mcp_trusted_issuer_subjects
-          where account_id = ${input.accountId}::uuid
-            and trusted_issuer_id = ${input.trustedIssuerId}::uuid
-            and assertion_subject = ${input.assertionSubject}`,
-      );
-      if (linked) {
-        return (await isActiveMember(tx, input.accountId, linked.subject_id))
-          ? { status: "matched", subjectId: linked.subject_id, via: "subject" }
-          : { status: "unmatched" };
-      }
-      if (!input.email) return { status: "unmatched" };
       const people = await rawRows<{ id: string }>(
         tx,
         sql`select id from auth_users
-          where lower(email) = lower(${input.email}) and email_verified
+          where lower(email) = lower(${email}) and email_verified
           order by created_at, id
           limit 2`,
       );
       if (people.length !== 1) return { status: "unmatched" };
       const subjectId = `user:${people[0]!.id}`;
       return (await isActiveMember(tx, input.accountId, subjectId))
-        ? { status: "matched", subjectId, via: "email" }
+        ? { status: "matched", subjectId }
         : { status: "unmatched" };
     },
     undefined,
@@ -397,7 +406,10 @@ export async function redeemMcpAssertion(
         returning jti_hash`,
       );
       if (!fresh) return { status: "refused", reason: "replayed" };
-      // The trust may have changed since it was read: use the live row.
+      // The trust may have changed since it was read: hold its lock, then use
+      // the live row. Turning it off, changing its access or removing it waits
+      // for this connection and then applies to it, or this waits and reads it.
+      await lockTrustedIssuerShared(tx, trust.id);
       const [live] = await rawRows<TrustedIssuerRow>(
         tx,
         sql`select ${TRUST_COLUMNS} from organization_mcp_trusted_issuers trust
@@ -725,6 +737,45 @@ async function insertEvent(
  * database check raises for a member who is not active, so it runs in a
  * savepoint; the subject context is restored afterwards.
  */
+/**
+ * Whether an auto-connected login may still be renewed: its connector is
+ * still on, still connects people automatically with the same app setup, and
+ * still reaches the login's workspace, and its owner is still an active
+ * member. Read in the login's workspace, as a member sees it.
+ */
+export async function autoConnectLoginStillConnects(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    connectorId: string;
+    audience: string;
+    clientId: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (tx) => {
+      const [connector] = await rawRows<{ config: Record<string, unknown> | null }>(
+        tx,
+        sql`select config from organization_connectors
+          where id = ${input.connectorId}::uuid and account_id = ${input.accountId}::uuid
+            and status = 'active'`,
+      );
+      const autoConnect = connector?.config?.autoConnect;
+      if (!autoConnect || typeof autoConnect !== "object") return false;
+      const setup = autoConnect as Record<string, unknown>;
+      if (setup.authorizationServerIssuer !== input.audience || setup.clientId !== input.clientId)
+        return false;
+      return await isActiveMember(tx, input.accountId, input.subjectId);
+    },
+    undefined,
+    "none",
+  );
+}
+
 async function isActiveMember(
   tx: Database,
   accountId: string,
