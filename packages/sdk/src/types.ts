@@ -5622,6 +5622,11 @@ export type CodexConnectPoll =
       plan?: string | null;
       accountId?: string;
       isActive?: boolean;
+      /**
+       * Opengeni's Codex models this account offers, read once from its live
+       * model list at connect time. Absent when that read failed.
+       */
+      models?: Array<{ id: string; label: string }>;
     };
 
 /**

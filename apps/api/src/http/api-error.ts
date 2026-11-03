@@ -7,6 +7,7 @@ import {
   UPGRADE_PLAN_ACTION,
   byokRefusalAction,
   AllowanceExhaustedRefusal,
+  ModelPolicyRefusedError,
   ModelUnavailableError,
   ScheduledTaskTargetAccessChange,
   type ErrorCode,
@@ -370,6 +371,28 @@ export function modelUnavailableHttpError(error: unknown): ApiHttpError | null {
     retryable: false,
     outcomeUnknown: false,
     details: { code: cause.code, modelId: cause.modelId },
+  });
+}
+
+/**
+ * A model the workspace's model policy refuses. The same request is refused
+ * again until someone changes the model or the policy, so clients get
+ * `details.code: "model_policy"` with the rule (`reason`) instead of a retry.
+ */
+export function modelPolicyRefusedHttpError(error: unknown): ApiHttpError | null {
+  const cause =
+    error instanceof ModelPolicyRefusedError
+      ? error
+      : error instanceof HTTPException && error.cause instanceof ModelPolicyRefusedError
+        ? error.cause
+        : null;
+  if (!cause) return null;
+  return new ApiHttpError(422, {
+    code: "validation_failed",
+    message: cause.message,
+    retryable: false,
+    outcomeUnknown: false,
+    details: { code: cause.code, modelId: cause.modelId, reason: cause.reason },
   });
 }
 

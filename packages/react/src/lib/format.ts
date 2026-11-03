@@ -291,6 +291,44 @@ export function isConnectionAccountSubmissionError(error: unknown): boolean {
 /** `details.code` the API sets on a 422 for a model missing from the live catalog. */
 export const MODEL_UNAVAILABLE_DETAIL_CODE = "model_unavailable";
 
+/** `details.code` the API sets on a 422 for a model the workspace's policy refuses. */
+export const MODEL_POLICY_DETAIL_CODE = "model_policy";
+
+/**
+ * The reason a refused new chat gives. The refusals a person can hit (a model
+ * that isn't available to them, the workspace's model policy, a speed the
+ * model can't run) are typed by `details.code` and worded here; any other
+ * session create refusal shows the server's own reason, which still says more
+ * than the generic "check your input".
+ */
+export function sessionCreateRefusalMessage(t: OpenGeniText, error: Error): string | null {
+  if (!(error instanceof OpenGeniApiError) || error.status !== 422) return null;
+  const detailCode = error.details?.code;
+  if (detailCode === "UNSUPPORTED_LATENCY_MODE") {
+    return t("lib.format.speedUnavailable");
+  }
+  if (error.code !== "SESSION_CREATE_REJECTED") return null;
+  if (detailCode === MODEL_UNAVAILABLE_DETAIL_CODE) {
+    return t("lib.format.newChatModelUnavailable");
+  }
+  if (detailCode === MODEL_POLICY_DETAIL_CODE) {
+    return error.details?.reason === "credits"
+      ? t("lib.format.modelPolicyCredits")
+      : t("lib.format.modelPolicyRefused");
+  }
+  let message: unknown;
+  try {
+    message = (JSON.parse(error.body) as { message?: unknown } | null)?.message;
+  } catch {
+    return null;
+  }
+  if (typeof message !== "string") return null;
+  const text = message.trim().slice(0, 300);
+  if (!text) return null;
+  const sentence = text.charAt(0).toUpperCase() + text.slice(1);
+  return /[.!?]$/.test(sentence) ? sentence : `${sentence}.`;
+}
+
 /**
  * A fresh Send or Steer refused because the task's own usage limit is reached.
  * The draft is kept and an unchanged retry is never offered. The one current
@@ -376,9 +414,14 @@ export function composerSubmissionErrorMessage(
   }
   if (error instanceof ComposerStateError) return error.message;
   if (error instanceof OpenGeniApiError && error.outcomeUnknown) return formatErrorMessage(error);
-  if (isModelUnavailableSubmissionError(error)) return t("lib.format.modelUnavailable");
+  if (isModelUnavailableSubmissionError(error)) {
+    // A refused new chat has no chat yet whose model is "no longer available".
+    return sessionCreateRefusalMessage(t, error) ?? t("lib.format.modelUnavailable");
+  }
   if (isConnectionAccountSubmissionError(error)) return t("lib.format.accountUnavailable");
   if (isSessionUsageLimitSubmissionError(error)) return t("lib.format.sessionUsageLimitReached");
+  const createRefusal = sessionCreateRefusalMessage(t, error);
+  if (createRefusal) return createRefusal;
   const siteRefusal = siteRefusalCode(error);
   if (siteRefusal) return COMPOSER_SITE_REFUSAL_MESSAGES(t)[siteRefusal]!;
   if (error instanceof OpenGeniApiError && error.code === "allowance_exhausted") {
@@ -413,6 +456,8 @@ export function composerSubmissionCanRetry(error: Error): boolean {
   return !(
     isComposerCreditRefusal(error) ||
     isModelUnavailableSubmissionError(error) ||
+    // The policy refuses the same model again until someone changes it.
+    (error instanceof OpenGeniApiError && error.details?.code === MODEL_POLICY_DETAIL_CODE) ||
     isConnectionAccountSubmissionError(error) ||
     isSessionUsageLimitSubmissionError(error) ||
     (error instanceof OpenGeniApiError && error.code === "allowance_exhausted") ||
