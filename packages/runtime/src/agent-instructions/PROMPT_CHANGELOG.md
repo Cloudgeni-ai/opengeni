@@ -6,9 +6,12 @@ every turn before the model ran; it now lists the first 256 in name order and
 ends with one line saying how many more folders exist. An index larger than
 64 KB shortens the longest descriptions to the largest common length that
 fits, says so in one line, and leaves out the last entries only if names
-alone do not fit. An index that fits renders byte-for-byte as before.
+alone do not fit. An index that fits renders byte-for-byte as before. The
+index is built at runtime from the workspace and is in neither the legacy nor
+the modular prompt, so its two new lines are shown as text, not as a sentence
+diff:
 
-```diff
+```text
 + Some descriptions above are shortened to fit; read the SKILL.md for the full text.
 + 44 more repository skill folders are not listed here. They remain in the workspace; read their SKILL.md with filesystem tools.
 ```
