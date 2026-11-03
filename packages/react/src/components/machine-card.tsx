@@ -10,7 +10,12 @@ import {
 } from "lucide-react";
 import { cn } from "../lib/cn";
 import { formatRelativeTime } from "../lib/format";
-import { machineScopeLabel } from "../sandbox-label-model";
+import {
+  machinePlatformLabel,
+  machineScopeLabel,
+  machineScreenLabel,
+  machineSystemDetail,
+} from "../sandbox-label-model";
 import type { MachineView, MetricSample } from "../types/machines";
 import { connectionStatusForState } from "../types/machines";
 import { MachineHealthPill } from "./machine-health-pill";
@@ -47,7 +52,8 @@ function KindIcon({ machine }: { machine: MachineView }) {
 }
 
 /**
- * One machine in the Machines dashboard: name + kind + OS/arch, the fused HEALTH
+ * One machine in the Machines dashboard: name, who can use it, what kind of
+ * computer it is and whether agents can use its screen, the fused HEALTH
  * verdict, latest resource meters, a CPU trend that previews the history, live
  * freshness, and attach/swap. The whole card opens the telemetry detail when
  * `onOpenDetail` is wired. The session's active sandbox carries an accent edge.
@@ -138,19 +144,17 @@ export function MachineCard({
                 {machineScopeLabel(msg, machine.scope)}
               </span>
               <span aria-hidden>·</span>
-              <span className="capitalize">{machine.kind}</span>
-              <span aria-hidden>·</span>
-              <span className="font-og-mono">
-                {machine.os}/{machine.arch}
+              <span data-machine-platform title={machineSystemDetail(machine)}>
+                {machinePlatformLabel(msg, machine.os)}
               </span>
               <span aria-hidden>·</span>
-              <span className="inline-flex items-center gap-1">
-                {machine.hasDisplay ? (
+              <span data-machine-screen className="inline-flex items-center gap-1">
+                {machine.hasDisplay && machine.allowScreenControl ? (
                   <MonitorIcon className="size-3" aria-hidden />
                 ) : (
                   <MonitorOffIcon className="size-3" aria-hidden />
                 )}
-                {machine.hasDisplay ? msg("machineCard.display") : msg("machineCard.headless")}
+                {machineScreenLabel(msg, machine)}
               </span>
             </div>
           </div>
