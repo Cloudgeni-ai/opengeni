@@ -439,7 +439,7 @@ import {
   WorkspaceCaptureManifestCache,
 } from "./workspace-capture";
 import { publishSandboxFileArtifact } from "../sandbox-file-artifacts";
-import { ApiHttpError } from "../http/api-error";
+import { ApiHttpError, approvalForbiddenHttpError } from "../http/api-error";
 import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
 import { recordAcceptedApiAdmission } from "../admission-trace";
 import { parseRequestBody, parseRequestJson, parseRequestQuery } from "../http/request-body";
@@ -1450,7 +1450,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       sessionId: c.req.param("sessionId"),
       approvalId: c.req.param("approvalId"),
     };
-    const review = await getToolActionReview(db, input);
+    const review = await getToolActionReview(db, { ...input, viewerSubjectId: grant.subjectId });
     if (!review) throw new HTTPException(404, { message: "Review not found" });
     c.header("Cache-Control", "private, no-store");
     return c.json(review);
@@ -4604,6 +4604,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         if (error instanceof SessionApprovalAnswerError) {
           throw new HTTPException(422, { message: error.message });
         }
+        const forbidden = approvalForbiddenHttpError(error);
+        if (forbidden) throw forbidden;
         throw error;
       }
       if (accepted.action === "conflict") {

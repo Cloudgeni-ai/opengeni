@@ -2,6 +2,10 @@ import {
   recoverProviderClockAfterDependencyWait,
   PROVIDER_RECOVERY_SUSPENDED_AT,
 } from "./provider-recovery-clock";
+import {
+  pendingApprovalAccountOwner,
+  SessionApprovalForbiddenError,
+} from "./personal-connection-approval";
 export { continueSessionWaitingWork, getSessionMachineAccess } from "./session-machine-access";
 export { canonicalSecretPermissions } from "./canonical-secret-permissions";
 import { listWorkspaceBackgroundCommandsInScope } from "./session-background-commands";
@@ -44,6 +48,7 @@ import {
 } from "./model-call-timing";
 export * from "./human-input-secret-answers";
 export * from "./secret-use-approvals";
+export * from "./personal-connection-approval";
 export * from "./credential-profiles";
 export * from "./secret-value-masking";
 export * from "./secret-use-history";
@@ -92516,6 +92521,20 @@ export async function acceptSessionApprovalDecision(
                     .limit(1)
                 ).length > 0;
           if (!resumable) return approvalConflict(sessionStatus, "not_pending");
+        }
+        // The call runs on the turn's frozen accounts, never the approver's:
+        // approving one that runs on someone's own account is theirs alone.
+        // Checked before the answer, so a non-owner always learns who decides.
+        if (payload.decision === "approve") {
+          const owner = await pendingApprovalAccountOwner(tx as unknown as Database, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: liveTurn.id,
+            approvalId,
+          });
+          if (owner !== null && owner.subjectId !== input.subjectId) {
+            throw new SessionApprovalForbiddenError(owner);
+          }
         }
         payload = approvalDecisionPayloadWithAnswer(pendingApproval, payload);
         if (input.interactionIntervention) {
