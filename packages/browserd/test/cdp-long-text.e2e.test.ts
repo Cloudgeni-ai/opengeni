@@ -96,7 +96,19 @@ e2e(
       });
       expect(noSelection.error?.message).toContain("nothing selected in this element");
       const secret = await copy({ locator: { kind: "ref", ref: ref("Secret") } });
-      expect(secret.error?.code).toBe("permission_denied");
+      // A password field copies, so a key a site shows once can be kept.
+      expect(secret.error ?? null).toBeNull();
+      expect(driver.readClipboard().text).toBe("hunter2");
+      // A page read still withholds it.
+      const secretRead = await driver.readDom(observation.target.id, {
+        expectedTargetGeneration: observation.target.targetGeneration,
+        expectedDocumentGeneration: observation.target.documentGeneration!,
+        expectedFrameId: observation.frameId!,
+        kind: "element",
+        locator: { kind: "ref", ref: ref("Secret") },
+        maxChars: 2_000,
+      });
+      expect(JSON.stringify(secretRead)).not.toContain("hunter2");
 
       // A DOM read pages through the whole value with offset.
       const fences = {
@@ -188,13 +200,14 @@ e2e(
       const label = (text: string) => ({ kind: "label" as const, text });
       const group = (name: string) => ({ kind: "role" as const, role: "group", name, exact: true });
 
-      // Payment and one-time-code fields are withheld whichever way they are copied.
-      for (const field of ["Card", "Code"]) {
-        for (const content of [undefined, "value", "text", "selection"] as const) {
-          const result = await copy(label(field), content);
-          expect(result.error?.code).toBe("permission_denied");
-        }
+      // Payment fields are withheld whichever way they are copied.
+      for (const content of [undefined, "value", "text", "selection"] as const) {
+        const result = await copy(label("Card"), content);
+        expect(result.error?.code).toBe("permission_denied");
       }
+      // A one-time code copies whole, and a clipboard read shows it.
+      expect((await copy(label("Code"))).error ?? null).toBeNull();
+      expect(driver.readClipboard().text).toBe("123456");
       // So is a container holding a hidden or private field.
       expect((await copy(group("Billing"))).error?.code).toBe("permission_denied");
       expect((await copy(group("Account"), "text")).error?.code).toBe("permission_denied");

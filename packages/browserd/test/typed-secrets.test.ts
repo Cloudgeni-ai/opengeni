@@ -39,6 +39,20 @@ describe("TypedSecretMemory", () => {
     );
   });
 
+  test("values found in page password fields show in a clipboard read only", () => {
+    const memory = new TypedSecretMemory();
+    memory.remember({ typed: "typed-from-vault" });
+    memory.remember(
+      { "protected:0": "sk_live_shown_once", "protected:1": "4242424242424242" },
+      "page",
+    );
+    const text = "sk_live_shown_once typed-from-vault 4242 4242 4242 4242";
+    expect(memory.redact(text)).toBe("[secret] [secret] [secret]");
+    expect(memory.redact(text, undefined, { pageValues: false })).toBe(
+      "sk_live_shown_once [secret] [secret]",
+    );
+  });
+
   test("payment values cannot be evicted by later remembered values", () => {
     const id = randomUUID();
     const memory = TypedSecretMemory.forSession("browser", id);

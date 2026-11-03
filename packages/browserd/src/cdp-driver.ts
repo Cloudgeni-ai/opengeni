@@ -3410,7 +3410,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   readClipboard(): BrowserClipboardValue {
-    return this.typedSecrets.redact(this.clipboardValue());
+    // A value copied from the page's own password field shows: copying is how
+    // an agent keeps a key a site shows once. Typed secrets and card data do not.
+    return this.typedSecrets.redact(this.clipboardValue(), undefined, { pageValues: false });
   }
 
   private clipboardValue(): BrowserClipboardValue {
@@ -6105,6 +6107,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (combined.payment) this.typedSecrets.protectPaymentImages(state.targetId);
     this.typedSecrets.remember(
       Object.fromEntries(combined.values.map((value, index) => [`protected:${index}`, value])),
+      "page",
     );
     this.assertCurrentTargetState(state);
     return combined;
@@ -12825,10 +12828,16 @@ const SENSITIVE_REASON_FUNCTION = `function(node) {
 /** Why an element's text or value must not leave the page: it is, sits in, or
  * (as a container) holds a password, one-time code, payment, hidden or
  * explicitly private field. With a range, only the descendants that range
- * touches count, for a copy of selected text. Shared by DOM reads and
- * clipboard copies, so neither can return what the other withholds. */
-const PROTECTED_CONTENT_FUNCTION = `function(element, range) {
-  const sensitiveReason = ${SENSITIVE_REASON_FUNCTION};
+ * touches count, for a copy of selected text. A reason equal to `allowed`
+ * does not count: a clipboard copy may take a password or one-time code (an
+ * agent copies a key a site shows once to keep it), which page reads still
+ * withhold. Payment and private content stay withheld from both. */
+const PROTECTED_CONTENT_FUNCTION = `function(element, range, allowed) {
+  const sensitive = ${SENSITIVE_REASON_FUNCTION};
+  const sensitiveReason = (node) => {
+    const found = sensitive(node);
+    return found && found !== allowed ? found : null;
+  };
   let reason = sensitiveReason(element);
   // Shadow hosts count as ancestors: a field inside a protected component's
   // shadow root is protected too.
@@ -14676,7 +14685,10 @@ function assertSafeDomReadSelector(selector: string): void {
 const COPY_BROWSER_TEXT_FUNCTION = `function(content) {
   const element = this && this.nodeType === 1 ? this : this?.parentElement;
   if (!element || element.nodeType !== 1 || !element.isConnected) return { ok: false, error: "detached" };
-  const protectedContent = ${PROTECTED_CONTENT_FUNCTION};
+  const withheld = ${PROTECTED_CONTENT_FUNCTION};
+  // A password or one-time code copies (page reads still withhold it), so an
+  // agent can keep a key a site shows once; payment and private content do not.
+  const protectedContent = (node, range) => withheld(node, range, "password");
   const tag = String(element.tagName || "").toLowerCase();
   const textField = tag === "input" || tag === "textarea";
   const shown = () => textField
@@ -14691,7 +14703,7 @@ const COPY_BROWSER_TEXT_FUNCTION = `function(content) {
     }
     return { ok: true, text };
   };
-  // A protected text field is refused whatever is asked of it.
+  // A withheld text field is refused whatever is asked of it.
   if (textField && protectedContent(element, null)) return { ok: false, error: "protected" };
   const whole = () => protectedContent(element, null) ? { ok: false, error: "protected" } : copied(shown());
   if (content === "value") {

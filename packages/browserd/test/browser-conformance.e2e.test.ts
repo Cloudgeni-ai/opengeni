@@ -279,22 +279,21 @@ e2e(
         page = await act(driver, page, { type: "clipboard", operation: "copy" });
         expect(driver.readClipboard().text).toBe("same-frame clipboard value");
       }
-      await expectDefiniteError(
-        driver.dispatch(
-          command(page, {
-            type: "clipboard",
-            operation: "copy",
-            locator: lightpandaBinary
-              ? { kind: "css", selector: "#clipboardPassword" }
-              : { kind: "label", text: "Protected clipboard" },
-            content: "value",
-          }),
-        ),
-        "permission_denied",
-      );
+      // A password field copies, and a clipboard read shows it, so a key a
+      // site shows once can be kept; page reads still withhold it.
+      page = await act(driver, page, {
+        type: "clipboard",
+        operation: "copy",
+        locator: lightpandaBinary
+          ? { kind: "css", selector: "#clipboardPassword" }
+          : { kind: "label", text: "Protected clipboard" },
+        content: "value",
+      });
+      expect(driver.readClipboard().text).toBe("shown-once-key");
+      expect(JSON.stringify(page)).not.toContain("shown-once-key");
       page = await act(driver, page, { type: "clipboard", operation: "clear" });
       expect(driver.readClipboard()).toMatchObject({
-        revision: lightpandaBinary ? 3 : 5,
+        revision: lightpandaBinary ? 4 : 6,
         text: "",
         source: "clear",
       });

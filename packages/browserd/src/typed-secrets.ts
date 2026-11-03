@@ -15,6 +15,10 @@ const MAX_REMEMBERED_SECRETS = 256;
  * them again. */
 type SessionSecrets = {
   memory: SecretValueMemory;
+  /** Values found in the page's own password and one-time-code fields. They
+   * stay out of page reads like typed values, but a clipboard read shows
+   * them: copying one is how an agent keeps a key a site shows once. */
+  pageMemory: SecretValueMemory;
   paymentTargets: Set<string>;
   /** Card numbers and security codes must not age out behind other values. */
   paymentValues: Set<string>;
@@ -29,7 +33,12 @@ function newMemory(): SecretValueMemory {
 }
 
 function newSessionSecrets(): SessionSecrets {
-  return { memory: newMemory(), paymentTargets: new Set(), paymentValues: new Set() };
+  return {
+    memory: newMemory(),
+    pageMemory: newMemory(),
+    paymentTargets: new Set(),
+    paymentValues: new Set(),
+  };
 }
 
 /**
@@ -89,10 +98,11 @@ export class TypedSecretMemory {
     return state;
   }
 
-  private entries() {
+  private entries(pageValues = true) {
     const state = this.state(false);
     return [
       ...(state?.memory.entries() ?? []),
+      ...(pageValues ? (state?.pageMemory.entries() ?? []) : []),
       ...[...(state?.paymentValues ?? [])].map((value) => ({
         value,
         label: INTERACTION_REDACTED_SECRET,
@@ -100,14 +110,22 @@ export class TypedSecretMemory {
     ];
   }
 
-  remember(secretValues: InteractionSecretValues | undefined): void {
+  /** `page` marks values found in the page's own protected fields rather
+   * than typed from a secret reference. */
+  remember(
+    secretValues: InteractionSecretValues | undefined,
+    origin: "typed" | "page" = "typed",
+  ): void {
     if (secretValues === undefined) return;
     // One-time codes are remembered too: a code stays valid, and visible in
     // its field, after the action that typed it.
     for (const value of Object.values(secretValues)) {
       if (value.length < INTERACTION_SECRET_MASK_OPTIONS.minChars!) continue;
       const state = this.state(true)!;
-      state.memory.remember(value, INTERACTION_REDACTED_SECRET);
+      (origin === "page" ? state.pageMemory : state.memory).remember(
+        value,
+        INTERACTION_REDACTED_SECRET,
+      );
       // These came from an explicit secret use or primary password/payment
       // field discovery, never from arbitrary hidden/private page metadata.
       const digits = value.replace(/[\s-]/gu, "");
@@ -129,8 +147,10 @@ export class TypedSecretMemory {
     return merged;
   }
 
-  /** Deep copy with every remembered (and every currently supplied) secret replaced. */
-  redact<T>(value: T, current?: InteractionSecretValues): T {
+  /** Deep copy with every remembered (and every currently supplied) secret
+   * replaced. `pageValues: false` keeps values found only in the page's own
+   * password fields, for a clipboard read; typed and payment values stay hidden. */
+  redact<T>(value: T, current?: InteractionSecretValues, options?: { pageValues?: boolean }): T {
     const extra = Object.values(current ?? {}).map((secret) => ({
       value: secret,
       label: INTERACTION_REDACTED_SECRET,
@@ -138,6 +158,10 @@ export class TypedSecretMemory {
     // Browser output is a security boundary: unlike best-effort masking in
     // general telemetry, a masking error must withhold the result, not return
     // the original plaintext. The pure engine propagates such failures.
-    return maskSecretValues(value, [...this.entries(), ...extra], INTERACTION_SECRET_MASK_OPTIONS);
+    return maskSecretValues(
+      value,
+      [...this.entries(options?.pageValues ?? true), ...extra],
+      INTERACTION_SECRET_MASK_OPTIONS,
+    );
   }
 }
