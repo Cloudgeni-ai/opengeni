@@ -56,8 +56,8 @@ use crate::image::{Hash, ZERO, chunk_count, chunk_range, hash_chunks};
 use crate::lanes::Lanes;
 use crate::protocol::{Id, ImageId};
 use crate::store::{
-    Archive, Claimed, FetchInto, FetchedMemory, Owned, OwnerEpoch, Prefilled, Receipt, SavedFiles,
-    Stamp, Store,
+    Archive, Claimed, FetchInto, FetchedMemory, MadeAt, Owned, OwnerEpoch, Prefilled, Receipt,
+    SavedFiles, Stamp, Store,
 };
 use crate::threads::Threads;
 use crate::working_set::{self, WakeProfile};
@@ -623,6 +623,7 @@ impl Chunked {
                 state,
                 memory,
                 runtime: stored.runtime.clone(),
+                vcpus: stored.vcpus,
             });
         };
         let chunks = refs
@@ -644,6 +645,7 @@ impl Chunked {
             manifest: manifest_bytes,
             prefilled,
             runtime: stored.runtime.clone(),
+            vcpus: stored.vcpus,
         })
     }
 
@@ -775,6 +777,7 @@ impl Store for Chunked {
                     state,
                     memory,
                     runtime: image.runtime.clone(),
+                    vcpus: image.vcpus,
                 })),
                 _ => None,
             })
@@ -901,16 +904,30 @@ impl Store for Chunked {
             Err(error) => return Err(storage_error(OP, error)),
         };
         let head = parse_head(OP, &bytes)?;
-        let disk = self
-            .chunks
-            .get_manifest(&head.disk)
-            .await
-            .map_err(|error| storage_error(OP, error))?;
+        // The memory manifest's length is the memory's the image was saved
+        // with.
+        let memory = async {
+            match &head.memory {
+                Some(stored) => self
+                    .chunks
+                    .get_manifest(&stored.memory)
+                    .await
+                    .map(|manifest| MadeAt {
+                        vcpus: stored.vcpus,
+                        memory_bytes: Some(manifest.disk_len),
+                    }),
+                None => Ok(MadeAt::default()),
+            }
+        };
+        let (disk, made_at) = tokio::join!(self.chunks.get_manifest(&head.disk), memory);
+        let disk = disk.map_err(|error| storage_error(OP, error))?;
+        let made_at = made_at.map_err(|error| storage_error(OP, error))?;
         Ok(Owned::Done(Some(Claimed {
             save: stamp.save,
             receipt: receipt_of(&bytes),
             memory: head.memory.is_some(),
             disk_bytes: disk.disk_len,
+            made_at,
         })))
     }
 

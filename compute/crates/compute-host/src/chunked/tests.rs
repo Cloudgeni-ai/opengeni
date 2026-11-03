@@ -33,6 +33,8 @@ fn sparse(path: &Path, length: u64, writes: &[(u64, &[u8])]) {
 
 /// The runtime the test images say made them.
 const RUNTIME: &str = "Firecracker v1.0.0 on a test processor";
+/// The virtual processors the test images say they were saved with.
+const VCPUS: u8 = 3;
 
 fn files(dir: &Path, memory: bool) -> SavedFiles {
     SavedFiles {
@@ -42,6 +44,7 @@ fn files(dir: &Path, memory: bool) -> SavedFiles {
             memory: dir.join("memory"),
             chunks: None,
             runtime: Some(RUNTIME.to_owned()),
+            vcpus: Some(VCPUS),
         }),
         profile: None,
         image: None,
@@ -105,6 +108,11 @@ async fn a_former_owner_writes_nothing_once_a_later_one_claims_the_copy() {
             receipt: receipt.clone(),
             memory: true,
             disk_bytes: CHUNK_BYTES,
+            // What it was saved with: its memory's length from its manifest.
+            made_at: MadeAt {
+                vcpus: Some(VCPUS),
+                memory_bytes: Some(CHUNK_BYTES),
+            },
         }
     );
     assert!(
@@ -558,11 +566,13 @@ async fn a_sandbox_comes_back_byte_for_byte_and_unchanged_chunks_are_not_stored_
         manifest,
         prefilled,
         runtime,
+        vcpus,
     } = store.fetch(sandbox, &into).await.unwrap()
     else {
         panic!("memory should stay in the store");
     };
     assert_eq!(runtime.as_deref(), Some(RUNTIME), "the runtime comes back");
+    assert_eq!(vcpus, Some(VCPUS), "and how many processors it had");
     assert_eq!(memory_len, big);
     assert!(prefilled.is_none(), "an unusable profile packs nothing");
     assert_eq!(
