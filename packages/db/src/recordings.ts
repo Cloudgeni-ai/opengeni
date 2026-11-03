@@ -1350,7 +1350,7 @@ export type UncompactedRecordingTrack = {
 /**
  * Finished meetings' audio tracks, across every workspace, whose kept file
  * is not yet in the kept format (its key does not end in `keptSuffix`) or
- * whose uploaded pieces are still stored beside it (migration 1239).
+ * whose uploaded pieces are still stored beside it (migration 1240).
  * Identity only; the caller acts on each as its owner. Null while the
  * routine's runtime EXECUTE is withheld (runtime-posture
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES). The grant is checked in its own

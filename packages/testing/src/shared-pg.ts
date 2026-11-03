@@ -1231,7 +1231,7 @@ export async function acquireSharedTestDatabase(
  * the agent call and native push v2 routines (1107), the lock-free external
  * identity read (1172), the organization vault list (1218), the names-only
  * member list (1211), the organization machine and rig list (1224) and the
- * inventory of meeting tracks not yet kept compact (1239). Tests that
+ * inventory of meeting tracks not yet kept compact (1240). Tests that
  * exercise them run as they will once they are granted.
  */
 export async function grantDeferredRuntimeAccess(

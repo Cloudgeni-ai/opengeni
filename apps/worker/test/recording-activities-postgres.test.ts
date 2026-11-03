@@ -2112,7 +2112,7 @@ describe.skipIf(!hasFfmpeg)("recording retention", () => {
     `;
     expect(storage.objects.size).toBe(6);
 
-    // Until a release grants the inventory (1239 withholds it), the sweep
+    // Until a release grants the inventory (1240 withholds it), the sweep
     // leaves existing meetings as they are.
     expect((await run.applyRecordingRetention()).compaction).toMatchObject({
       found: null,

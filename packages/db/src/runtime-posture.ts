@@ -63,7 +63,7 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * names-only member list (1211), the Slack agent update sweeper's
  * ids-only inventory of installations that send updates (1153) and the
  * recording compaction sweep's inventory of meeting tracks not yet kept
- * compact (1239). Each is
+ * compact (1240). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -130,7 +130,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * granted, the sweeper finds nothing and sends no update messages.
  * 1224 withholds the organization machine and rig list the same way as the
  * vault list.
- * 1239 withholds the inventory of meeting tracks not yet kept compact; until
+ * 1240 withholds the inventory of meeting tracks not yet kept compact; until
  * it is granted, existing meetings keep their audio as it is and only new
  * transcripts keep it compact.
  */
