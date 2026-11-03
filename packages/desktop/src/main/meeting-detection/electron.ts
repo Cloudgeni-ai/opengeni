@@ -68,7 +68,7 @@ export interface CreateMeetingDetectionOptions {
   chooseTarget?: MeetingDetectionOptions["chooseTarget"];
   /**
    * Reminders before the active account's calendar meetings, with one click
-   * to join and start notes. None by default.
+   * to join and start recording. None by default.
    */
   calendar?: MeetingDetectionOptions["calendar"];
   log?: (message: string, error?: unknown) => void;

@@ -471,7 +471,7 @@ export function upcomingMeetingsAt(
 
 /**
  * The owner's meetings about to start, for a reminder that joins one and
- * starts its notes. `calendar` says whether they have a calendar this
+ * starts its recording. `calendar` says whether they have a calendar this
  * deployment can read; a calendar that can't be read now lists nothing.
  */
 export async function upcomingMeetings(

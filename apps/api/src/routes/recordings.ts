@@ -972,7 +972,7 @@ export function registerRecordingRoutes(
   });
 
   // The caller's own meetings about to start, with the links that join them,
-  // for a reminder that joins one and starts its notes (the desktop app's).
+  // for a reminder that joins one and starts its recording (the desktop app's).
   app.get("/v1/workspaces/:workspaceId/upcoming-meetings", async (c) => {
     const actor = await actorFor(c, "sessions:read");
     const result = await upcomingMeetings(

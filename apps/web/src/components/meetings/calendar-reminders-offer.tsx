@@ -1,6 +1,6 @@
 // In the desktop app, once: a quiet line above Meetings offering to connect a
 // calendar, so a minute before each meeting a card can offer to join it and
-// start notes. Connecting, or closing the line, ends the offer for good on
+// start recording. Connecting, or closing the line, ends the offer for good on
 // this computer; the switch under Computer use > Voice stays for later.
 import { CalendarIcon } from "lucide-react";
 import { useState } from "react";
@@ -81,7 +81,7 @@ export function CalendarRemindersNotice({
       onDismiss={onDismiss}
       dismissLabel="Don't show again"
     >
-      Get a reminder a minute before each meeting, with one click to join and start notes.
+      Get a reminder a minute before each meeting, with one click to join and start recording.
     </Notice>
   );
 }

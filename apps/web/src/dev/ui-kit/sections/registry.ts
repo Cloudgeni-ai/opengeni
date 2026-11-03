@@ -1067,7 +1067,7 @@ export const SECTIONS: readonly SectionMeta[] = [
     group: "Pages",
     title: "Meeting reminders",
     purpose:
-      "A minute before a calendar meeting, the desktop app offers to join it and start notes: the switch, and the one-time offer to connect a calendar.",
+      "A minute before a calendar meeting, the desktop app offers to join it and start recording: the switch, and the one-time offer to connect a calendar.",
     usedOn: "Desktop app: Settings → Computer use, and Meetings",
     load: () => import("./page-meeting-reminders"),
   },

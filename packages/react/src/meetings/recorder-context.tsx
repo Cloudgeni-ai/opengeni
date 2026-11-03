@@ -293,7 +293,7 @@ function useDesktopMeetingRequests(
           ...(request.calendarEvent ? { calendarEvent: request.calendarEvent } : {}),
         };
         // Already recording shows that recording rather than start a second
-        // one, unless the person chose to switch to the next meeting's notes:
+        // one, unless the person chose to switch to recording the next meeting:
         // this one stops and is kept, then the next starts.
         if (canStartRecording(recorder?.state)) {
           store.requestStart(start);

@@ -336,10 +336,10 @@ Meet, Zoom, Microsoft Teams or Webex link, skipping declined, cancelled and
 all-day events: `{ calendar: "connected" | "none", meetings: [{ id, provider,
 title, private, startsAt, endsAt, joinUrl, service, unanswered }] }`. About a minute
 before one starts, the card says "<title> · Starts in 1 min · Google Meet"
-with Join and start notes and Not now. Join opens the link and starts a
+with Join and start recording and Not now. Join opens the link and starts a
 recording with that `calendarEvent`, named after it (after the service for a
 private event). While another meeting is being recorded the button is Join
-and switch notes, which stops and keeps that recording first; a recording
+and record this one, which stops and keeps that recording first; a recording
 started up to ten minutes before the meeting counts as joining it, so there is
 no card. Each meeting is offered once, only for the active account, and a
 reminder never covers a question to record a call that just started. The

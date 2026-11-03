@@ -56,7 +56,7 @@ describe("Remind me before meetings", () => {
         onConnectCalendar={() => undefined}
       />,
     );
-    expect(host.textContent).toContain("join it and start notes");
+    expect(host.textContent).toContain("join it and start recording");
     expect(button("Connect calendar")).toBeUndefined();
     await act(async () =>
       root.render(

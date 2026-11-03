@@ -97,7 +97,7 @@ describe("the reminder's card", () => {
     expect(promptText(joinPrompt(reminder()))).toEqual({
       question: "Weekly sync",
       reason: "Starts in 1 min · Google Meet",
-      action: "Join and start notes",
+      action: "Join and start recording",
       dismiss: "Not now",
     });
     expect(promptText(joinPrompt(reminder({ shownAt: START - 10_000 }))).reason).toBe(
@@ -107,7 +107,7 @@ describe("the reminder's card", () => {
       "Started 3 min ago · Google Meet",
     );
     expect(promptText(joinPrompt(reminder({ replace: true }))).action).toBe(
-      "Join and switch notes",
+      "Join and record this one",
     );
     expect(promptText(joinPrompt(reminder({ meeting: meeting({ title: "" }) }))).question).toBe(
       "Meeting",
@@ -284,7 +284,7 @@ function reminders(
 }
 
 describe("reminders before calendar meetings", () => {
-  test("a minute before, the card offers to join; choosing it opens the link and starts its notes", async () => {
+  test("a minute before, the card offers to join; choosing it opens the link and starts its recording", async () => {
     const run = reminders();
     const page = new FakePage(1);
     run.subject.listen(page, true);
@@ -391,7 +391,7 @@ describe("reminders before calendar meetings", () => {
     run.subject.shutdown();
   });
 
-  test("while an earlier meeting is recorded, joining switches notes; one joined early isn't offered", async () => {
+  test("while an earlier meeting is recorded, joining switches recordings; one joined early isn't offered", async () => {
     const run = reminders();
     const page = new FakePage(1);
     run.subject.listen(page, true);
@@ -399,7 +399,7 @@ describe("reminders before calendar meetings", () => {
     run.subject.setRecording(page, true);
     await run.at(START - REMIND_BEFORE_MS);
     const card = run.shown()[0]!;
-    expect(promptText(card.prompt).action).toBe("Join and switch notes");
+    expect(promptText(card.prompt).action).toBe("Join and record this one");
     card.done("chosen");
     expect(page.sent.at(-1)).toMatchObject({ kind: "record", replace: true });
 

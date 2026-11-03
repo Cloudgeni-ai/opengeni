@@ -1,6 +1,6 @@
 // The "Remind me before meetings" switch under Computer use > Voice: a minute
 // before a calendar meeting with a video link, the desktop app's corner card
-// offers to join it and start notes. Without a calendar it says what it needs,
+// offers to join it and start recording. Without a calendar it says what it needs,
 // with one link to connect one.
 import type { DesktopMeetingDetectionStatus } from "@opengeni/sdk/desktop-bridge";
 

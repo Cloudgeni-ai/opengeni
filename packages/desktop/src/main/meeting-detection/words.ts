@@ -43,7 +43,7 @@ export interface MeetingWords {
   startedAgo?: string;
   /** The reminder's title for an event without one. */
   untitledMeeting?: string;
-  /** Opens the meeting and starts recording its notes. */
+  /** Opens the meeting and starts recording it. */
   joinAndStart?: string;
   /** Opens the meeting, stops the recording going on and starts this one's. */
   joinAndSwitch?: string;
@@ -67,8 +67,8 @@ export const ENGLISH_MEETING_WORDS: Required<MeetingWords> = {
   startingNow: "Starting now",
   startedAgo: "Started {minutes} min ago",
   untitledMeeting: "Meeting",
-  joinAndStart: "Join and start notes",
-  joinAndSwitch: "Join and switch notes",
+  joinAndStart: "Join and start recording",
+  joinAndSwitch: "Join and record this one",
 };
 
 /** `template` with each `{name}` replaced. */

@@ -1,6 +1,6 @@
 // Reminders before calendar meetings: about a minute before a meeting on the
 // signed-in person's own calendar starts, the card in the corner of the
-// screen offers to join it and start its notes in one click, the way a
+// screen offers to join it and start its recording in one click, the way a
 // meeting notes app does. Only the active account's calendar is read (from
 // its server, `GET …/upcoming-meetings`), so only that account reminds, and
 // the meeting is recorded there. Each meeting is offered once: choosing it,
@@ -114,7 +114,7 @@ export function reminderDue(meeting: CalendarMeeting, now: number): boolean {
   );
 }
 
-/** A reminder on the card: the meeting, whose account it is, and whether it switches notes. */
+/** A reminder on the card: the meeting, whose account it is, and whether it switches recordings. */
 export interface JoinReminder {
   accountId: string;
   meeting: CalendarMeeting;
@@ -139,7 +139,7 @@ export interface CalendarReminderOptions {
   busy(): boolean;
   /** Put a reminder on the card; `done` runs once when the person acts or it times out. */
   present(reminder: JoinReminder, done: (outcome: MeetingPromptOutcome) => void): ShownPrompt;
-  /** The person chose to join: open the meeting and start its notes. */
+  /** The person chose to join: open the meeting and start its recording. */
   join(reminder: JoinReminder): void;
   /** Whether the active account has a calendar changed. */
   onCalendar?(calendar: "connected" | "none" | null): void;

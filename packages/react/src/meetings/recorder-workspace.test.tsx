@@ -415,7 +415,7 @@ describe("A recording and the person who made it", () => {
       removeDesktop();
     }
   });
-  test("a reminder's Join and switch notes stops the recording, then starts the next meeting's", async () => {
+  test("a reminder's Join and record this one stops the recording, then starts the next meeting's", async () => {
     events.length = 0;
     const desktop = installDesktop();
     const view = mountProvider();

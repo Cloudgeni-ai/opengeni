@@ -320,7 +320,7 @@ export type MeetingPrompt =
   | { kind: "recording"; app: CallApp }
   /**
    * A calendar meeting about to start: its button joins it and starts its
-   * notes. `app` is the service its link joins.
+   * recording. `app` is the service its link joins.
    */
   | { kind: "join"; app: CallApp; reminder: JoinReminder };
 
@@ -708,7 +708,7 @@ export interface MeetingDetectionOptions {
   chooseTarget?: (pages: readonly MeetingPage[]) => MeetingPage | undefined;
   /**
    * Reminders before the active account's calendar meetings, with one click
-   * to join and start notes. None without it.
+   * to join and start recording. None without it.
    */
   calendar?: MeetingCalendar;
   /** What detection did, a line at a time. Lines name the call app's id, nothing about the call. */

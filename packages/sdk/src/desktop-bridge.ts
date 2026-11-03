@@ -89,7 +89,7 @@ export interface DesktopMeetingDetectionStatus {
   /**
    * The person's switch for reminders before calendar meetings: about a
    * minute before a meeting with a join link starts, a card offers to join it
-   * and start its notes. Absent from apps built before it existed.
+   * and start its recording. Absent from apps built before it existed.
    */
   calendarReminders?: boolean;
   /**
@@ -105,7 +105,7 @@ export interface DesktopMeetingDetectionStatus {
  * What the person chose on the app's meeting card: record the call an app
  * just started, or stop recording because the call ended. `app` is the call
  * app's name ("Zoom", "Google Chrome"); `title` suggests a name for the
- * meeting. From a reminder before a calendar meeting (Join and start notes),
+ * meeting. From a reminder before a calendar meeting (Join and start recording),
  * `calendarEvent` is that event, which names the meeting; with `replace`,
  * a meeting being recorded stops and is kept, and the new one starts.
  */
