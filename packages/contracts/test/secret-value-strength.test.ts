@@ -41,7 +41,6 @@ describe("value strength", () => {
       `${WORD}.example.com`,
       `${WORD}@example.com`,
       `/srv/${WORD}/data`,
-      "aaaaaaaaaaaaaaaaaaaa",
       `${WORD}User`,
       `deploy-${WORD}-01`,
       `${WORD[0]!.toUpperCase()}${WORD.slice(1)} Smith`,
@@ -58,6 +57,9 @@ describe("value strength", () => {
       "Tr0ub4dor&3",
       `ghp_${DISTINCTIVE}${DISTINCTIVE}`,
       "4111111111111111",
+      // A known token format, even a repetitive test value; a repetitive string.
+      `ghp_${"Ab1Cd2Ef3".repeat(4)}`,
+      "aaaaaaaaaaaaaaaaaaaa",
       `https://hooks.example.com/services/${DISTINCTIVE}`,
       // Random passwords that are short, repeat a character or have two kinds of characters.
       "aB3dE5aH7jK3",

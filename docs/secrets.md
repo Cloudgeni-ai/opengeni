@@ -444,9 +444,8 @@ field) reveals both the encoded and the decoded text. Only Opengeni's own
   appear in unrelated text: one or two words with up to four digits and a
   symbol (`admin123`, `Password1!`), a camelCase name, a snake_case or
   kebab-case name of two parts (or three with a number, `deploy-bot-01`), a
-  host, email, URL or path made only of such names and numbers, or a long
-  but repetitive string (entropy under half of what its length and alphabet
-  allow). Letters count as words only when their letter pairs are mostly
+  host, email, URL or path made only of such names and numbers. A value in
+  a known token format is always distinctive. Letters count as words only when their letter pairs are mostly
   common English pairs (at most one uncommon pair in five), so random
   letters such as `qkzvmxbtwe` stay distinctive. A weak value is replaced
   only where it is the credential:

@@ -40,6 +40,7 @@ import type { ResolvedSecretValue, SecretResolver } from "./secret-resolution";
 import { isBase64DataUrl, isTextMediaType, mapSecretMaskableStrings } from "./secret-mask-strings";
 import {
   collectSecretShapes,
+  detectSecretShapes,
   maskSecretShapes,
   maskSecretShapesInText,
   secretShapeMaskLabel,
@@ -296,15 +297,6 @@ const PATH_LIKE = /^(?:\/|\.{1,2}\/|~\/|[A-Za-z]:\\)\S*$/u;
 /** Longer word-shaped values are treated as passphrases. */
 const WORD_SHAPED_MAX_CHARS = 32;
 /**
- * A value of at least this many characters is weak when its entropy is below
- * `WEAK_ENTROPY_SHARE` of the most its length and alphabet allow: a long but
- * repetitive string such as `aaaaaaaabbbbbbbb`. Random keys and passwords,
- * hex and base64 included, stay well above it.
- */
-const WEAK_ENTROPY_MIN_CHARS = 12;
-const WEAK_ENTROPY_SHARE = 0.5;
-
-/**
  * The 254 letter pairs that make up 95% of the pairs in the distinct English
  * words of Opengeni's documentation. A random run of letters has many pairs
  * outside this set (`qk`, `zv`, `xb`); words rarely do.
@@ -356,20 +348,6 @@ function wordShaped(text: string, lenient = false): boolean {
 }
 
 /**
- * The size of the alphabet a value seems drawn from: 16 for hex, otherwise
- * the sizes of the kinds of characters it has.
- */
-function alphabetSize(text: string): number {
-  if (/^[0-9a-f]+$/u.test(text) || /^[0-9A-F]+$/u.test(text)) return 16;
-  return (
-    (/[a-z]/u.test(text) ? 26 : 0) +
-    (/[A-Z]/u.test(text) ? 26 : 0) +
-    (/[0-9]/u.test(text) ? 10 : 0) +
-    (/[^A-Za-z0-9]/u.test(text) ? 32 : 0)
-  );
-}
-
-/**
  * A host, email, URL or path is weak only when every part is a word-shaped
  * name or a number: `db.example.com:5432` is, `bR7.kQ2.mX9.Lp`, a webhook URL
  * or a path with a random segment carries a secret and is not.
@@ -386,17 +364,21 @@ function partsAreWeak(text: string): boolean {
  * of three or more words) almost never appear in unrelated text, so they are
  * searched for anywhere, in every form. Weak values do appear in unrelated
  * text: a word or two with a few digits and a symbol (`admin123`,
- * `Password1!`), a camelCase or snake_case name, a host, email, URL or path
- * made only of such names, or a long but repetitive string. Replacing them
- * everywhere rewrites file names, imports, hosts and identifiers that merely
- * contain the word, so they are replaced only in a credential position (see
- * the module comment). Digit-only values (card and account numbers) stay
- * distinctive: they are matched as exact digits, never as words.
+ * `Password1!`), a camelCase or snake_case name, or a host, email, URL or
+ * path made only of such names. Replacing them everywhere rewrites file
+ * names, imports, hosts and identifiers that merely contain the word, so they
+ * are replaced only in a credential position (see the module comment).
+ * Digit-only values (card and account numbers) and values in a known token
+ * format stay distinctive, however they read.
  */
 export function secretValueStrength(value: string): SecretValueStrength {
   if (typeof value !== "string") return "weak";
   const text = value.trim();
   if (/^[0-9][0-9\s-]*$/u.test(text)) return "distinctive";
+  // A value in a known token or key format is distinctive, however it reads.
+  if (detectSecretShapes(text).some((shape) => shape.start === 0 && shape.end === text.length)) {
+    return "distinctive";
+  }
   if (/\s/u.test(text)) {
     return text.length < WORD_SHAPED_MAX_CHARS && WORD_LIKE.test(text) ? "weak" : "distinctive";
   }
@@ -408,11 +390,6 @@ export function secretValueStrength(value: string): SecretValueStrength {
     PATH_LIKE.test(text)
   ) {
     return partsAreWeak(text) ? "weak" : "distinctive";
-  }
-  const length = [...text].length;
-  if (length >= WEAK_ENTROPY_MIN_CHARS) {
-    const most = length * Math.log2(Math.min(length, alphabetSize(text)));
-    if (secretValueEntropyBits(text) < WEAK_ENTROPY_SHARE * most) return "weak";
   }
   return "distinctive";
 }
