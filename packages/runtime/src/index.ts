@@ -12,6 +12,21 @@ import {
   installToolResultSecretMasking,
   secretMaskedToolResolver,
 } from "./tool-result-secret-masking";
+export {
+  COMMAND_COMPLETION_NOTICE_MAX_BYTES,
+  CommandCompletionDelivery,
+  renderCommandCompletionNotice,
+  withoutAppendedCommandCompletions,
+  withoutAppendedText,
+  type BackgroundCommandCompletion,
+  type CommandCompletionSource,
+} from "./command-completion-delivery";
+import {
+  commandCompletionModelCallFilter,
+  commandCompletionToolResolver,
+  installCommandCompletionDelivery,
+  type CommandCompletionDelivery,
+} from "./command-completion-delivery";
 import { DRIVE_MCP_BRIDGE_ADAPTER, type DriveMcpBridgeContext } from "./drive-mcp";
 import { sharedKnowledgeGuidance } from "./agent-instructions/modules/knowledge";
 import { measureMcpPhase } from "@opengeni/observability";
@@ -2715,6 +2730,12 @@ export type BuildAgentOptions = {
    * result is masked with it before the model, the run state or history sees it.
    */
   secretValueMemory?: SecretValueMemory | null;
+  /**
+   * The session's finished background commands, delivered with the next
+   * plain-text tool result (command-completion-delivery.ts). Applied while
+   * settings.experimentCutPolling is on.
+   */
+  commandCompletionDelivery?: CommandCompletionDelivery | null;
 };
 
 /** @deprecated Persistent display metadata is no longer model-visible. */
@@ -2875,6 +2896,11 @@ export function agentPromptResourcesFor(
     ...(options.secrets?.referencesEnabled ? { secretReferences: true } : {}),
     ...(options.unattended ? { unattended: true } : {}),
     ...(settings.githubPersonalOauthEnabled ? { personalGitHub: true } : {}),
+    // The worker attaches finished commands to later tool results whenever a
+    // sandbox is active and cut polling is on (see installCommandCompletionDelivery).
+    ...(backend !== "none" && settings.experimentCutPolling
+      ? { commandCompletionDelivery: true }
+      : {}),
     ...(repositoryIdentities.length > 0 ? { repositoryIdentities } : {}),
   };
 }
@@ -3716,6 +3742,9 @@ export function buildOpenGeniAgent(
       );
     }
     installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
+    if (options.commandCompletionDelivery && settings.experimentCutPolling) {
+      installCommandCompletionDelivery(agent, options.commandCompletionDelivery);
+    }
     // Last, so it masks exactly what every other wrapper hands to the model.
     if (options.secretValueMemory) {
       installToolResultSecretMasking(agent, options.secretValueMemory);
@@ -3869,6 +3898,9 @@ export function buildOpenGeniAgent(
     );
   }
   installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
+  if (options.commandCompletionDelivery && settings.experimentCutPolling) {
+    installCommandCompletionDelivery(agent, options.commandCompletionDelivery);
+  }
   // Last, so it masks exactly what every other wrapper hands to the model.
   if (options.secretValueMemory) {
     installToolResultSecretMasking(agent, options.secretValueMemory);
@@ -10266,7 +10298,10 @@ export async function restoreInterruptedRunState(
   }
   return await RunState.fromString(agent, serializedRunState, {
     clientToolSearchRehydration: "preserve_history",
-    resolveMissingFunctionTool: secretMaskedToolResolver(agent, mcpToolResolverForAgent(agent)),
+    resolveMissingFunctionTool: secretMaskedToolResolver(
+      agent,
+      commandCompletionToolResolver(agent, mcpToolResolverForAgent(agent)),
+    ),
   });
 }
 
@@ -10848,6 +10883,7 @@ async function runAgentStreamInternal(
     const ownedFilter = composeCallModelInputFilters(
       [
         inputWaitYield?.modelInputFilter,
+        commandCompletionModelCallFilter(agent),
         measuredModelInputFilter(
           "input_filter_base",
           baseModelInputFilterForSettings(settings, {
@@ -11028,6 +11064,7 @@ async function runAgentStreamInternal(
   const callModelInputFilter = composeCallModelInputFilters(
     [
       inputWaitYield?.modelInputFilter,
+      commandCompletionModelCallFilter(agent),
       measuredModelInputFilter(
         "input_filter_base",
         baseModelInputFilterForSettings(settings, {
@@ -11161,7 +11198,10 @@ function lazyToolRunBindings(agent: Agent<any, any>): {
   const runtime = lazyToolRuntimeForAgent(agent);
   return {
     ...(runtime ? { toolNotFoundBehavior: "return_error_to_model" as const } : {}),
-    resolveMissingFunctionTool: secretMaskedToolResolver(agent, mcpToolResolverForAgent(agent)),
+    resolveMissingFunctionTool: secretMaskedToolResolver(
+      agent,
+      commandCompletionToolResolver(agent, mcpToolResolverForAgent(agent)),
+    ),
   };
 }
 
