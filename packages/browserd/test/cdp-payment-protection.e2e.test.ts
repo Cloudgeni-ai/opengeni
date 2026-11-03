@@ -66,17 +66,18 @@ for (const crossOrigin of [false, true]) {
         // own screen and are never refused.
         const screenshot = await driver.captureScreenshot(observation.target.id);
         expect(screenshot.data.byteLength).toBeGreaterThan(100);
-        let frames = 0;
+        const received = { frames: 0 };
         const stop = await driver.recordFrames(
           observation.target.id,
           () => {
-            frames += 1;
+            received.frames += 1;
           },
           () => undefined,
         );
-        for (let waited = 0; frames === 0 && waited < 5_000; waited += 100) await Bun.sleep(100);
+        for (let waited = 0; received.frames === 0 && waited < 5_000; waited += 100)
+          await Bun.sleep(100);
         await stop();
-        expect(frames).toBeGreaterThan(0);
+        expect(received.frames).toBeGreaterThan(0);
       } finally {
         await driver.close();
         server.stop(true);
@@ -86,4 +87,3 @@ for (const crossOrigin of [false, true]) {
     90_000,
   );
 }
-

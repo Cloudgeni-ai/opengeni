@@ -2264,7 +2264,10 @@ async function transformResponseItem(
  * in the catalog once preparation ran; after a preparation failure the
  * catalog is partial, so the call keeps an alias rather than a guess.
  */
-async function withProviderValidCallName(item: unknown, runtime: LazyToolRuntime): Promise<unknown> {
+async function withProviderValidCallName(
+  item: unknown,
+  runtime: LazyToolRuntime,
+): Promise<unknown> {
   if (!isRecord(item) || item.type !== "function_call" || typeof item.name !== "string")
     return item;
   if (isProviderToolName(item.name)) return item;

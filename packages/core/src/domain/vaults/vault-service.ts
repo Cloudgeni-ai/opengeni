@@ -40,7 +40,6 @@ import {
   type VaultFieldKind,
   type VaultFieldVersionMeta,
   type VaultItem,
-  type VaultItemReferences,
   type VaultItemSummary,
   type VaultItemType,
   type VaultPolicy,

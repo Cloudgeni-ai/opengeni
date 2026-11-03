@@ -292,7 +292,8 @@ export async function repairSessionToolNames(
 }
 
 export async function repairInvalidToolNames(sql: Sql, apply: boolean): Promise<RepairCounts> {
-  const [role] = await sql`select rolsuper, rolbypassrls from pg_roles where rolname = current_user`;
+  const [role] =
+    await sql`select rolsuper, rolbypassrls from pg_roles where rolname = current_user`;
   if (!role || !(role.rolsuper || role.rolbypassrls))
     throw Error("Maintenance requires an existing superuser or BYPASSRLS operator connection");
   const counts: RepairCounts = {

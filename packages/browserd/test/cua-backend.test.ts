@@ -5999,6 +5999,5 @@ describe("CUA desktop boundary", () => {
         }
       });
     });
-
   });
 });

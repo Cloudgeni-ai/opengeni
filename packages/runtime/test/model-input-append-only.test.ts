@@ -124,9 +124,7 @@ test("items already sent never change and tool output reaches the model as writt
     const later = inputItems(model.requests[index]!);
     expect(later.length).toBeGreaterThan(earlier.length);
     expect(later.slice(0, earlier.length)).toEqual(earlier);
-    expect(model.requests[index]!.systemInstructions).toBe(
-      model.requests[0]!.systemInstructions,
-    );
+    expect(model.requests[index]!.systemInstructions).toBe(model.requests[0]!.systemInstructions);
   }
   // The user's own text keeps the value it holds.
   expect(inputItems(model.requests[0]!)[0]).toContain(VALUES["Fake/first/password"]);

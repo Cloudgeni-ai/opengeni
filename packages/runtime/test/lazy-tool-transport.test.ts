@@ -1337,7 +1337,9 @@ describe("generic lazy tool dispatch", () => {
       expect.stringMatching(/^no_such_tool_[0-9a-f]{16}$/),
     ]);
     // A later request replays the stored items exactly as the first sent them.
-    const runner = new Runner({ modelProvider: new LazyToolModelProvider(providerFor(model), runtime) });
+    const runner = new Runner({
+      modelProvider: new LazyToolModelProvider(providerFor(model), runtime),
+    });
     const replay = await runner.run(agent, [...(model.requests[1]!.input as never[])], {
       stream: true,
       historyOwnership: "external",

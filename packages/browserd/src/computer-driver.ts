@@ -122,10 +122,10 @@ export class ComputerDriver implements ComputerInteractionDriver {
     this.assertOpen();
     try {
       return (await this.readWithRecovery(async (client) => await client.targets())).map((target) =>
-          // Only the listing marks the current target; observations and
-          // receipts name their own.
-          this.projectTarget(target, target.id === this.current),
-        );
+        // Only the listing marks the current target; observations and
+        // receipts name their own.
+        this.projectTarget(target, target.id === this.current),
+      );
     } catch (error) {
       throw predispatchError(error);
     }
@@ -212,15 +212,13 @@ export class ComputerDriver implements ComputerInteractionDriver {
       const client = await this.activeClient();
       if (!client.callNative)
         throw new InteractionDefiniteDriverError("unsupported", "Native CUA tools are unavailable");
-      return ComputerNativeResult.parse(
-        {
-            target: null,
-            computerSessionId: this.computerSessionId,
-            controllerGeneration: this.controllerGeneration,
-            tool: command.tool,
-            ...(await client.callNative(materialized)),
-          },
-      );
+      return ComputerNativeResult.parse({
+        target: null,
+        computerSessionId: this.computerSessionId,
+        controllerGeneration: this.controllerGeneration,
+        tool: command.tool,
+        ...(await client.callNative(materialized)),
+      });
     } catch (error) {
       if (error instanceof ComputerBackendError) {
         const code = interactionErrorCode(error.code);
@@ -253,10 +251,7 @@ export class ComputerDriver implements ComputerInteractionDriver {
     this.assertOpen();
     const materialized = materializeActionCommandSecrets(command);
     // A stand-in names an element's label, which could show a typed secret.
-    const standIn = trace
-      ? (item: ComputerBackendRoleStandIn) =>
-          trace.record(item)
-      : undefined;
+    const standIn = trace ? (item: ComputerBackendRoleStandIn) => trace.record(item) : undefined;
     const unconfirmed = trace ? () => trace.record(COMPUTER_UNCONFIRMED_INPUT_TRACE) : undefined;
     try {
       const client = await this.activeClient();
@@ -273,9 +268,7 @@ export class ComputerDriver implements ComputerInteractionDriver {
       // An action that opened a window returns that window, and leaves the
       // computer in it.
       this.current = observation?.target.id ?? command.targetId;
-      return observation === null
-        ? null
-        : this.projectObservation(observation);
+      return observation === null ? null : this.projectObservation(observation);
     } catch (error) {
       if (error instanceof ComputerBackendError) {
         const code = interactionErrorCode(error.code);
@@ -350,11 +343,11 @@ export class ComputerDriver implements ComputerInteractionDriver {
     this.assertOpen();
     try {
       return ComputerClipboard.parse({
-          computerSessionId: this.computerSessionId,
-          controllerGeneration: this.controllerGeneration,
-          ...(await this.readWithRecovery(async (client) => await client.clipboard())),
-          observedAt: this.now().toISOString(),
-        });
+        computerSessionId: this.computerSessionId,
+        controllerGeneration: this.controllerGeneration,
+        ...(await this.readWithRecovery(async (client) => await client.clipboard())),
+        observedAt: this.now().toISOString(),
+      });
     } catch (error) {
       throw predispatchError(error);
     }

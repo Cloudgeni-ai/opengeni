@@ -129,12 +129,7 @@ e2e(
       expect(paged).toBe(mixedBody.text!);
 
       // A protected element, and anything inside one, is still refused whole.
-      for (const selector of [
-        "#inside",
-        "#inside-child",
-        "#card-number-editor",
-        "#expiry-field",
-      ]) {
+      for (const selector of ["#inside", "#inside-child", "#card-number-editor", "#expiry-field"]) {
         const refused = await read(mixed.target.id, selector);
         expect(refused).toMatchObject({ text: null, value: null });
         expect(refused.redacted).not.toBeNull();

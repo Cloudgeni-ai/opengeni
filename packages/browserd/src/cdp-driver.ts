@@ -2131,7 +2131,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             `${dialogSummary(state.dialog)} Page reads are unavailable until it is handled. ${DIALOG_GUIDANCE}`,
           );
         }
-        return await this.untilDialog(state, async () => await this.readDomUnlocked(state, request));
+        return await this.untilDialog(
+          state,
+          async () => await this.readDomUnlocked(state, request),
+        );
       },
       { read: true },
     );
@@ -2941,12 +2944,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           else if (action.type !== "wait") onlyCommittedNavigation = false;
           if (state.dialog) {
             if (completedActions < actions.length)
-              throw await this.dialogPause(
-                state,
-                info.targetId,
-                actions.length,
-                completedActions,
-              );
+              throw await this.dialogPause(state, info.targetId, actions.length, completedActions);
             break;
           }
         } catch (thrown) {
@@ -2960,12 +2958,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             // what opened the dialog, or it may have had effects before it.
             if (state.actionEffectCount !== effectsBeforeAction) completedActions += 1;
             if (completedActions < actions.length || state.actionEffectCount === initialEffectCount)
-              throw await this.dialogPause(
-                state,
-                info.targetId,
-                actions.length,
-                completedActions,
-              );
+              throw await this.dialogPause(state, info.targetId, actions.length, completedActions);
             break;
           }
           if (
@@ -2973,13 +2966,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             completedActions === 0 &&
             state.actionEffectCount === initialEffectCount
           )
-            throw await this.withFailureObservation(
-              state,
-              info.targetId,
-              command,
-              error,
-              null,
-            );
+            throw await this.withFailureObservation(state, info.targetId, command, error, null);
           if (
             error instanceof InteractionDefiniteDriverError &&
             action.type === "wait" &&

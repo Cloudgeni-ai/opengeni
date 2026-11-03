@@ -141,7 +141,12 @@ export function secretRedactionMatcherForValue(
 
 /** One URL password or GitHub token found in a text; `value` is
  * `text.slice(start, end)`. */
-type PatternMatch = { kind: "url-password" | "github-token"; start: number; end: number; value: string };
+type PatternMatch = {
+  kind: "url-password" | "github-token";
+  start: number;
+  end: number;
+  value: string;
+};
 
 const QUOTES_AND_SPACE = "\\s\"'`<>";
 /**

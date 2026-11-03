@@ -56,14 +56,18 @@ describe("tool-name mapping", () => {
     // Valid items keep their identity; only the name changes, never content.
     expect(rewritten[0]).toBe(items[0]);
     expect((rewritten[1] as { arguments: string }).arguments).toBe(call(MASKED, "b").arguments);
-    expect((rewritten[2] as { output: unknown }).output).toBe((items[2] as { output: unknown }).output);
+    expect((rewritten[2] as { output: unknown }).output).toBe(
+      (items[2] as { output: unknown }).output,
+    );
   });
 
   test("a run state's model responses and generated items are fixed, outputs untouched", () => {
     const state = {
       currentAgent: { name: "agent with spaces" },
       modelResponses: [{ output: [call(MASKED, "b")] }],
-      generatedItems: [{ type: "tool_call_output_item", rawItem: result(MASKED, "b"), output: MASKED }],
+      generatedItems: [
+        { type: "tool_call_output_item", rawItem: result(MASKED, "b"), output: MASKED },
+      ],
     };
     const { invalid } = collectToolNames([state], rewriteRunStateToolNames);
     const mapping = toolNameMapping(invalid, [KNOWN]);
@@ -124,10 +128,10 @@ describe("repair against PostgreSQL", () => {
       });
     sessionId = (await session()).id;
     cleanSessionId = (await session()).id;
-    const insert = async (session: string, position: number, item: unknown) =>
+    const insert = async (owner: string, position: number, item: unknown) =>
       await fixture.admin`insert into session_history_items
         (account_id, workspace_id, session_id, position, item_ordered, item_codec_version)
-        values (${accountId}, ${workspaceId}, ${session}, ${position}, ${fixture.admin.json(item as never)}, 1)`;
+        values (${accountId}, ${workspaceId}, ${owner}, ${position}, ${fixture.admin.json(item as never)}, 1)`;
     await insert(sessionId, 0, { type: "message", role: "user", content: `use ${SECRET_LABEL}` });
     await insert(sessionId, 1, call(KNOWN, "a"));
     await insert(sessionId, 2, result(KNOWN, "a"));

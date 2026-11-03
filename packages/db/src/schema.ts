@@ -6134,10 +6134,7 @@ export const sessionRealtimeEntries = pgTable(
     turnId: uuid("turn_id"),
     text: losslessText("text"),
     textCodecVersion: losslessCodecVersion("text_codec_version"),
-    payload: losslessJsonb("payload")
-      .$type<Record<string, unknown>>()
-      .notNull()
-      .default({}),
+    payload: losslessJsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
     payloadCodecVersion: losslessCodecVersion("payload_codec_version"),
     // Application context for an exact provider-in delegation or finalized
     // transcript. It is materialized as ordinary user-role message content.
@@ -9418,10 +9415,7 @@ export const sessionSystemUpdates = pgTable(
     dedupeKey: text("dedupe_key").notNull(),
     summary: losslessText("summary").notNull(),
     summaryCodecVersion: losslessCodecVersion("summary_codec_version"),
-    payload: losslessJsonb("payload")
-      .$type<Record<string, unknown>>()
-      .notNull()
-      .default({}),
+    payload: losslessJsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
     payloadCodecVersion: losslessCodecVersion("payload_codec_version"),
     lineage: jsonb("lineage").$type<Record<string, unknown>>().notNull().default({}),
     // Private immutable authority frozen when this machine input is accepted.
@@ -9543,10 +9537,7 @@ export const sessionSystemUpdateOutbox = pgTable(
     sourceId: text("source_id").notNull(),
     summary: losslessText("summary").notNull(),
     summaryCodecVersion: losslessCodecVersion("summary_codec_version"),
-    payload: losslessJsonb("payload")
-      .$type<Record<string, unknown>>()
-      .notNull()
-      .default({}),
+    payload: losslessJsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
     payloadCodecVersion: losslessCodecVersion("payload_codec_version"),
     lineage: jsonb("lineage").$type<Record<string, unknown>>().notNull().default({}),
     // Exact private authority copied from the causal parent turn in the source
@@ -10320,9 +10311,7 @@ export const sessionHistoryItems = pgTable(
     // positions; only the summary uses the half-step. `mode: "number"` maps the
     // postgres.js string back to a JS number so every reader stays numeric.
     position: numeric("position", { mode: "number" }).notNull(),
-    item: losslessOrderedJson("item_ordered")
-      .$type<Record<string, unknown>>()
-      .notNull(),
+    item: losslessOrderedJson("item_ordered").$type<Record<string, unknown>>().notNull(),
     itemCodecVersion: losslessCodecVersion("item_codec_version"),
     // Live-row flag for client-side context compaction. The read path selects
     // only active rows; a compaction supersedes the summarized prefix (sets this
