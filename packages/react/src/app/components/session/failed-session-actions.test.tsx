@@ -471,6 +471,10 @@ test("all draft, delivery, work, permission and deliberate pause guards hide Ret
     "policy",
     "personal_decision",
     "personal_loading",
+    // The open chat's connected accounts failed to load, were denied, or are reconnecting.
+    "accounts",
+    "accounts_denied",
+    "updating",
   ] as const) {
     await act(async () =>
       root!.render(<FailedSessionActions {...actions} composerBlocker={composerBlocker} />),

@@ -29,11 +29,17 @@ export function isProviderToolName(name: string): boolean {
 
 /**
  * The stable alias of a name no authorized tool answers to: its readable
- * part with every other character replaced, and a digest of the whole name,
- * so two different names never share an alias. At most 57 characters.
+ * part with every other character replaced, starting with a letter, and a
+ * digest of the whole name, so two different names never share an alias.
+ * Only letters, digits and `_`, at most 57 characters: narrower than any
+ * provider's own format.
  */
 export function providerToolNameAlias(name: string): string {
-  const readable = name.replace(/[^a-zA-Z0-9_-]+/g, "_").slice(0, ALIAS_READABLE_LENGTH);
+  const replaced = name.replace(/[^a-zA-Z0-9_]+/g, "_");
+  const readable = (/^[a-zA-Z]/.test(replaced) ? replaced : `t${replaced}`).slice(
+    0,
+    ALIAS_READABLE_LENGTH,
+  );
   const digest = createHash("sha256").update(name).digest("hex").slice(0, ALIAS_DIGEST_LENGTH);
   return `${readable}_${digest}`;
 }

@@ -165,11 +165,12 @@ export interface ActiveBackendResolverDeps {
   };
   /**
    * Whether `defaultBackend` IS the session's home box — i.e. whether the null pointer
-   * (== home) may resolve to it. Defaults to TRUE (omitted): a genuine machine-HOME turn
-   * (home IS the machine) and a Modal-home turn established on its group box both pass/omit
-   * true, so null resolves to `defaultBackend` as before. Set explicitly FALSE only for a
-   * machine-primary turn of a Modal-HOME session (pinned to a machine, group box never
-   * established this turn): the null pointer then has nothing to resolve to THIS turn, so
+   * (== home) may resolve to it. Defaults to TRUE (omitted): a turn established on its
+   * group box omits it, so null resolves to `defaultBackend` as before. Set explicitly
+   * FALSE for every machine-primary turn (pinned to a machine, group box never established
+   * this turn). The null pointer is the chat's managed box even when the chat's durable
+   * home label is a machine; turn start never resolves null to a machine. It therefore
+   * has nothing to resolve to THIS turn, so
    * rather than silently keep serving the pinned machine as if the detach never happened,
    * the null branch throws a typed `home_unavailable_this_turn` transition — the detach's
    * pointer commit stands, and worker failure settlement checkpoints completed work before
@@ -285,16 +286,15 @@ export function makeActiveBackendResolver(
 ): (pointer: ActivePointer) => Promise<ResolvedActiveBackend> {
   return async (pointer: ActivePointer): Promise<ResolvedActiveBackend> => {
     // NULL == the session's HOME backend (issue #341 invariant 1). `defaultBackend`
-    // is the already-established home the wiring handed us — the Modal group box for a
-    // Modal-home turn, or the machine itself for a machine-home turn. It is NEVER a
+    // is the already-established home the wiring handed us — the session's group box.
+    // A machine-pinned turn says so with `defaultIsHome: false`. It is NEVER a
     // swap target's SelfhostedSession: a clear-to-null must re-land on the home, never
     // keep serving the machine a prior op swapped to. (The proxy caches by the FULL
     // pointer tuple, so a clear-to-null — epoch-bumped OR a same-epoch FK null —
     // invalidates the cached machine and re-enters this branch.) The lease owns the
     // home box lifecycle; the proxy does not re-establish it.
     if (pointer.activeSandboxId === null) {
-      // A machine-pinned turn (Modal-home session pinned to a machine) never
-      // established its home box, so a mid-turn clear-to-null has no home to resolve
+      // A machine-pinned turn never established its home box, so a mid-turn clear-to-null has no home to resolve
       // THIS attempt. Fail typed-and-specific — the detach was accepted and its pointer
       // commit STANDS, allowing worker failure settlement to checkpoint and continue the
       // same logical turn in a new home-primary attempt — instead of silently serving the

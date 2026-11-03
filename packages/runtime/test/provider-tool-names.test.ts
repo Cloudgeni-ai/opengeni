@@ -32,5 +32,10 @@ describe("model-written tool names", () => {
     expect(providerValidCallName("other.unknown tool", [])).toBe(alias);
     expect(providerToolNameAlias("other.unknown tools")).not.toBe(alias);
     expect(isProviderToolName(providerToolNameAlias("x".repeat(200)))).toBe(true);
+    // Letters, digits and `_` only, starting with a letter: valid on the
+    // narrowest provider format too.
+    for (const name of ["9-lives.tool", "-dash", "über tool", "a-b.c"]) {
+      expect(providerToolNameAlias(name)).toMatch(/^[a-zA-Z][a-zA-Z0-9_]{0,56}$/);
+    }
   });
 });
