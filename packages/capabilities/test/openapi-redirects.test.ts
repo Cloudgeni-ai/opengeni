@@ -39,9 +39,9 @@ type Seen = { url: string; method: string; headers: Record<string, string> };
 
 function invoke(
   toolId: string,
-  answer: (url: URL, call: number) => Response | Promise<Response>,
+  answer: (url: URL, call: number, init?: RequestInit) => Response | Promise<Response>,
   args: Record<string, unknown> = { path: { id: "abc" } },
-  extra: { maxResponseBytes?: number } = {},
+  extra: { maxResponseBytes?: number; timeoutMs?: number } = {},
 ) {
   const seen: Seen[] = [];
   const invocation = invokeOpenApiOperation(
@@ -67,7 +67,7 @@ function invoke(
           headers: Object.fromEntries(new Headers(init?.headers).entries()),
         });
         expect(init?.redirect).toBe("manual");
-        return answer(url, seen.length);
+        return answer(url, seen.length, init);
       }),
     },
     toolId,
@@ -250,7 +250,31 @@ describe("OpenAPI redirects", () => {
     await expect(invocation).rejects.toMatchObject({
       code: "redirect_failed",
       outcome: "not_started",
+      retryable: false,
       message: expect.stringContaining("redirect"),
     });
+  });
+
+  test("redirect hops share the original request's deadline", async () => {
+    const after = (ms: number, init?: RequestInit) =>
+      new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, ms);
+        init?.signal?.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(new Error("aborted"));
+        });
+      });
+    const { invocation } = invoke(
+      "items_getcontent",
+      async (url, _call, init) => {
+        await after(150, init);
+        return url.hostname === "api.example.com"
+          ? redirect("https://files.example.net/dl/abc")
+          : new Response("late");
+      },
+      undefined,
+      { timeoutMs: 250 },
+    );
+    await expect(invocation).rejects.toMatchObject({ code: "request_timeout" });
   });
 });

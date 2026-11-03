@@ -417,12 +417,15 @@ export async function invokeOpenApiOperation(
   assertSearchEntityTypes(binding, args);
   const firstCredential = await resolveOpenApiCredential(options, binding, toolId, args, false);
   let credential = firstCredential;
+  // Redirect hops share the deadline of the request that answered with them.
+  let startedAt = Date.now();
   let response = await sendOpenApiRequest(options, binding, args, firstCredential, signal);
   if (response.status === 401 && options.credentialResolver && options.authority.connectionRef) {
     const refreshed = await resolveOpenApiCredential(options, binding, toolId, args, true);
     if (isReplaySafeMethod(binding.method) && refreshed) {
       await response.body?.cancel().catch(() => undefined);
       credential = refreshed;
+      startedAt = Date.now();
       response = await sendOpenApiRequest(options, binding, args, refreshed, signal);
     } else {
       await response.body?.cancel().catch(() => undefined);
@@ -443,6 +446,7 @@ export async function invokeOpenApiOperation(
       buildOperationUrl(binding, args),
       response,
       credential,
+      startedAt,
       signal,
     );
   }
@@ -592,14 +596,15 @@ async function followCredentialFreeRedirects(
   requestUrl: URL,
   first: Response,
   credential: Awaited<ReturnType<IntegrationCredentialResolver["resolve"]>>,
+  startedAt: number,
   signal?: AbortSignal,
 ): Promise<Response> {
   const safe = binding.method === "get" || binding.method === "head";
   const credentialQueryNames = (credential?.placements ?? [])
     .filter((placement) => placement.carrier === "query")
     .map((placement) => placement.name);
-  // The hops share the request's deadline rather than each getting a new one.
-  const deadline = Date.now() + (options.timeoutMs ?? DEFAULT_INTEGRATION_TIMEOUT_MS);
+  // The hops share the original request's deadline rather than each getting a new one.
+  const deadline = startedAt + (options.timeoutMs ?? DEFAULT_INTEGRATION_TIMEOUT_MS);
   let response = first;
   let current = requestUrl;
   for (let hop = 0; response.status >= 300 && response.status < 400; hop++) {
@@ -646,13 +651,15 @@ async function followCredentialFreeRedirects(
       );
     } catch (error) {
       if (!(error instanceof IntegrationInvocationError)) throw error;
+      const timedOut = error.code === "request_timeout";
       throw new IntegrationInvocationError(
-        error.code === "request_timeout" ? "request_timeout" : "redirect_failed",
-        error.code === "request_timeout"
+        timedOut ? "request_timeout" : "redirect_failed",
+        timedOut
           ? "Integration request timed out while following its redirect"
           : "Following the integration's redirect failed; the destination may be unreachable or not allowed",
         error.outcome,
-        error.retryable,
+        // A destination the network policy refuses fails the same way again.
+        timedOut && error.retryable,
         error.status,
       );
     }
