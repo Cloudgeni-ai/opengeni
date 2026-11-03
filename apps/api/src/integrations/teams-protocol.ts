@@ -232,7 +232,7 @@ export function teamsChannelThreadId(a: {
 }
 
 /** A conversation id without its per-thread `;messageid=` suffix. */
-export function teamsConversationBaseId(conversationId: string): string {
+export function teamsThreadlessConversationId(conversationId: string): string {
   return conversationId.replace(/;messageid=[^;]*/i, "");
 }
 
@@ -344,7 +344,7 @@ export function teamsContextMessage(raw: unknown): TeamsContextMessage | null {
     botId: a.recipient.id,
     groupChat,
     channelId: groupChat ? null : a.channelData.channel!.id,
-    conversationId: teamsConversationBaseId(a.conversation.id),
+    conversationId: teamsThreadlessConversationId(a.conversation.id),
     threadId: groupChat ? null : teamsChannelThreadId(a),
     messageId: a.id,
     actorId: a.from.aadObjectId.toLowerCase(),
@@ -403,7 +403,7 @@ export function teamsContextRevision(raw: unknown): TeamsContextRevision | null 
   const base = {
     tenantId,
     botId: a.recipient.id,
-    conversationId: teamsConversationBaseId(a.conversation.id),
+    conversationId: teamsThreadlessConversationId(a.conversation.id),
     messageId: a.id,
   };
   if (a.type === "messageDelete")

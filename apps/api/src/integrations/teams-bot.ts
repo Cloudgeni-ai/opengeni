@@ -61,7 +61,7 @@ import {
   teamsTenantEnabled,
   teamsServiceUrl,
   normalizeTeamsMessage,
-  teamsConversationBaseId,
+  teamsThreadlessConversationId,
   teamsRouteId,
   mintTeamsProof,
   verifyTeamsProof,
@@ -310,7 +310,7 @@ async function runtime(deps: ApiRouteDeps): Promise<App> {
               await clearTeamsContextConversation(
                 deps.db,
                 installation,
-                teamsConversationBaseId(change.conversationId),
+                teamsThreadlessConversationId(change.conversationId),
               );
           }
           return { status: 200 };

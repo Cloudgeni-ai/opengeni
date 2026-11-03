@@ -6,7 +6,7 @@ import {
   teamsChannelThreadId,
   teamsContextMessage,
   teamsContextRevision,
-  teamsConversationBaseId,
+  teamsThreadlessConversationId,
   teamsPlainText,
 } from "../src/integrations/teams-protocol";
 import {
@@ -74,8 +74,8 @@ describe("Teams channel thread identity", () => {
       "a",
     );
     expect(teamsChannelThreadId({ id: "b", conversation: { id: channel } })).toBe("b");
-    expect(teamsConversationBaseId(`${channel};messageid=42`)).toBe(channel);
-    expect(teamsConversationBaseId("19:chat@thread.v2")).toBe("19:chat@thread.v2");
+    expect(teamsThreadlessConversationId(`${channel};messageid=42`)).toBe(channel);
+    expect(teamsThreadlessConversationId("19:chat@thread.v2")).toBe("19:chat@thread.v2");
   });
 });
 

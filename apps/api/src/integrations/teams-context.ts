@@ -11,7 +11,7 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import {
   teamsContextMessage,
   teamsContextRevision,
-  teamsConversationBaseId,
+  teamsThreadlessConversationId,
   teamsTenantEnabled,
 } from "./teams-protocol";
 
@@ -90,7 +90,7 @@ export async function markTeamsContextMention(
   m: { conversationId: string; eventId: string },
 ): Promise<void> {
   await markTeamsContextMentionAccepted(deps.db, i, {
-    conversationId: teamsConversationBaseId(m.conversationId),
+    conversationId: teamsThreadlessConversationId(m.conversationId),
     messageId: m.eventId,
   });
 }
@@ -193,7 +193,7 @@ export async function loadTeamsMentionModelContext(
   const limit = kind === "channel" ? MAX_TEAMS_CHANNEL_CONTEXT_POSTS : MAX_TEAMS_CONTEXT_MESSAGES;
   try {
     const newestFirst = await listTeamsContextMessages(deps.db, i, {
-      conversationId: teamsConversationBaseId(conversationId),
+      conversationId: teamsThreadlessConversationId(conversationId),
       threadId: groupChat ? null : threadId,
       beforeMessageId: eventId,
       notAfter: occurredAt,
