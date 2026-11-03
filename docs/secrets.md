@@ -454,8 +454,12 @@ field) reveals both the encoded and the decoded text. Only Opengeni's own
   words about once in two thousand at 10 to 12 characters (about once in
   250 at 8), and a random lowercase host, URL or path part about once in
   300 at 10 characters and once in two thousand at 12; such a value is
-  then replaced only in credential positions. A word that fails the test
-  (an unusual name) stays distinctive and is masked everywhere, as before.
+  then replaced only in credential positions. Short word-like values with
+  a tail are weak a little more often by chance: about 1% for seven random
+  letters and a symbol, and 0.6% for six letters and two digits. A word that
+  fails the test (an unusual name), and a value with letters outside A to Z
+  (`Müller`, Cyrillic), stays distinctive and is masked everywhere, as
+  before.
   A weak value is replaced only where it is the credential:
   - alone on its line, or as the password of a URL (`scheme://user:<value>@`);
   - as a whole token that a credential name leads into: `password=…`,
@@ -466,10 +470,15 @@ field) reveals both the encoded and the decoded text. Only Opengeni's own
     `IDENTIFIED BY '…'`. The name is read word by word (`_`, `-`, `.` and
     camelCase separate words; a word may end in a credential word, as in
     `PGPASSWORD`, `DBPWD` or `masterauth`, or start with one, as in
-    `TOKENVALUE`). `session`, `private` and a lone `key` do not count on
-    their own (`--session main`, `--key reports.csv`), nor do ordinary words
-    such as `bypass`, nor names whose last word says the value names
-    something (`rpId`, `SESSION_NAME`). `;`, `,` and `&` end a token;
+    `TOKENVALUE`). `session` and `private` do not count on their own
+    (`--session main`), `key` counts only next to a word that makes it a
+    credential (`API_KEY`, `accessKey`, `LICENSE_KEY`, not `--key
+    reports.csv`, `cacheKey` or `STORAGE_KEY`), and ordinary words such as
+    `bypass` and names whose last word says the value names something
+    (`rpId`, `SESSION_NAME`) do not count. A password word with no `=` or
+    `:` (`requirepass …`, `password …`) counts when the value ends the line
+    or the line is a netrc entry, not in prose. `;`, `,` and `&` end a
+    token;
   - after a password option of a program that takes one: `mysql -p…`,
     `7z -p…`, `sshpass -p …`, `docker login -p …` (also `podman`,
     `nerdctl`, `oc` and `az login`), `mongosh -p …`, `redis-cli -a …`,
@@ -479,14 +488,15 @@ field) reveals both the encoded and the decoded text. Only Opengeni's own
   - as the last field of a `.pgpass` line (`host:5432:db:user:…`);
   - printed into the next command when that command reads a password:
     `echo '…' | docker login --password-stdin`, `echo 'app:…' | chpasswd`,
-    `echo … | sudo -S`. A table row, `||` or a credential word in a comment
-    does not count;
+    `echo … | sudo -S`. Only the next command's name and option names count,
+    so a table row, `||`, `| grep token` or a credential word in a comment
+    does not;
   - as the value of a key whose line follows one naming a credential
     (`- name: DB_PASSWORD` then `value: …`, `credentials:` then `admin: …`),
     unless the key itself names something (`name:`, `host:`);
   - inside a base64 run (a Basic auth header) after a credential word on
     its line. The whole base64 encoding of a weak value (a Kubernetes
-    Secret's data) is replaced anywhere.
+    Secret's data) is replaced wherever it is a base64 run of its own.
 
   A weak value is never replaced inside an identifier, a file name, a path,
   a host or a URL segment, or as a word on a line that only mentions a key or

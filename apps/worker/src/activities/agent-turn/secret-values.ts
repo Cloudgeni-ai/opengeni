@@ -60,6 +60,7 @@ function recordMaskMatch(observability: DiagnosticSink | null | undefined) {
           entropy: event.entropy,
           position: event.position,
         },
+        amount: event.count,
       });
     } catch {
       // Metrics never affect masking.

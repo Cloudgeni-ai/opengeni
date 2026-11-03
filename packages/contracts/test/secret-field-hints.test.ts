@@ -78,6 +78,11 @@ describe("credential names", () => {
       "AUTH_HEADER",
       "JSESSIONID",
       "ADMIN_PW",
+      "API_KEY",
+      "accessKey",
+      "ACCESSKEY",
+      "LICENSE_KEY",
+      "SECRET_KEY",
     ]) {
       expect([name, credentialNameSaysSecret(name)]).toEqual([name, true]);
     }
@@ -104,6 +109,11 @@ describe("credential names", () => {
       "hotkey",
       "rpId",
       "credential_id",
+      // Lookup keys.
+      "cacheKey",
+      "STORAGE_KEY",
+      "sortKey",
+      "foreignKey",
     ]) {
       expect([name, credentialNameSaysSecret(name)]).toEqual([name, false]);
     }

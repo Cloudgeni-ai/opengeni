@@ -167,6 +167,8 @@ export type SecretValueMatchEvent = {
   strength: SecretValueStrength;
   entropy: SecretValueEntropyBucket;
   position: SecretValueMatchPosition;
+  /** Occurrences with these labels in one masked text: one event per text, not per occurrence. */
+  count: number;
 };
 
 export type SecretValueMaskDiagnostic = {
@@ -417,16 +419,19 @@ const LENIENT_TRIPLE_SLACK = 3;
  * inside its words (camelCase and separators split words) are mostly common
  * English ones, so `pelican`, `harborMaster` and `deploy-bot` do and
  * `qkzvmxbtwe`, `rdabaootck`, `CruPjtBwrw` and `FXIOFWLOJA` do not. A word
- * that fails stays distinctive, which only masks it as before. Letters
- * outside A to Z are not judged.
+ * that fails stays distinctive, which only masks it as before, and so does a
+ * word with letters outside A to Z (`Müller`, Cyrillic), which the tables
+ * cannot judge.
  *
  * In a host, URL or path, runs of fewer than four letters are skipped:
  * abbreviations such as `srv`, `npm` and `json` are common there.
  */
 function readsAsWords(text: string, lenient = false): boolean {
   const runs = (text.match(/\p{Lu}?\p{Ll}+|\p{Lu}+/gu) ?? [])
-    .filter((run) => /^[A-Za-z]+$/u.test(run) && run.length >= (lenient ? 4 : 3))
+    .filter((run) => run.length >= (lenient ? 4 : 3))
     .map((run) => run.toLowerCase());
+  // Letters outside A to Z cannot be judged, so the value stays distinctive.
+  if (runs.some((run) => !/^[a-z]+$/u.test(run))) return false;
   // Judged over all runs together, so a value cannot spread rare ones thinly.
   let pairs = 0;
   let uncommonPairs = 0;
@@ -494,7 +499,9 @@ export function secretValueStrength(value: string): SecretValueStrength {
     return "distinctive";
   }
   if (/\s/u.test(text)) {
-    return text.length < WORD_SHAPED_MAX_CHARS && WORD_LIKE.test(text) ? "weak" : "distinctive";
+    return text.length < WORD_SHAPED_MAX_CHARS && WORD_LIKE.test(text) && readsAsWords(text)
+      ? "weak"
+      : "distinctive";
   }
   if (wordShaped(text)) return "weak";
   if (
@@ -701,6 +708,12 @@ type WeakFormInfo = {
    * header), so it is never a whole token of its own.
    */
   inRun: boolean;
+  /**
+   * The whole base64 encoding of the value (a Kubernetes Secret's data): it
+   * is replaced wherever it is a whole base64 run of its own, and inside a
+   * longer run only as an in-run form is.
+   */
+  standalone: boolean;
 };
 
 /** A distinctive start of a form: `form.slice(0, length)`. */
@@ -782,19 +795,11 @@ export function compileSecretValueMasks(
         options.base64 === false
           ? { standalone: [], inRun: [] }
           : base64FormsByPlacement(entry.value);
-      // The whole base64 encoding of a value appears only where someone
-      // encoded exactly that value (a Kubernetes Secret's data), so it is
-      // matched anywhere, as a distinctive value is.
       const standalone = new Set(placement.standalone);
       const inRun = new Set(placement.inRun);
       for (const form of forms) {
-        if (standalone.has(form)) {
-          distinctiveForms.add(form);
-          weakForms.delete(form);
-          continue;
-        }
         if (distinctiveForms.has(form)) continue;
-        weakForms.set(form, { inRun: inRun.has(form) });
+        weakForms.set(form, { inRun: inRun.has(form), standalone: standalone.has(form) });
       }
       // A weak value's start is not distinctive: clipped starts are not indexed.
       continue;
@@ -966,6 +971,10 @@ const PASSWORD_WORD = new RegExp(
   `(?:^|[\\s"'\`(])([A-Za-z0-9_.-]*(?:pass(?:word|wd|phrase|code)?|pwd))\\s+${Q}$`,
   "iu",
 );
+/** Nothing but a closing quote, punctuation or a comment before the end of the line. */
+const LINE_ENDS = /^["'`]?[;,]?\s*(?:#.*)?$/u;
+/** A netrc entry: `machine host login user password …`. */
+const NETRC_LINE = /(?:^|\s)(?:machine|default)\s+\S+.*\s(?:login|password)\s/u;
 /** A config directive at the start of its line: `masterauth …`. */
 const DIRECTIVE = new RegExp(`^\\s*([A-Za-z][A-Za-z0-9_.-]*auth)\\s+${Q}$`, "iu");
 /** `Authorization: Bearer …`, `auth: token …`, a bare `Bearer …`. */
@@ -982,24 +991,24 @@ const COOKIE = /(?:^|[\s"'])(?:set-)?cookie["']?\s*:\s*(?:[^\s;=]+=[^\s;]*;\s*)*
  * Elsewhere `-p`, `-a` and `-u` mean other things (`mkdir -p`, `ls -a`).
  */
 const ATTACHED_P_PROGRAM =
-  /(?:^|[\s/])(?:mysql|mariadb|mysqladmin|mysqldump|mysqlsh|sshpass|7z|7za|7zz|7zr)\s/u;
+  /(?:^|[\s/"'`(])(?:mysql|mariadb|mysqladmin|mysqldump|mysqlsh|sshpass|7z|7za|7zz|7zr)\s/u;
 const SPACED_P_PROGRAM =
-  /(?:^|[\s/])(?:sshpass|(?:docker|podman|nerdctl|oc|az)\s+login|mongo(?:sh|dump|restore|export|import|stat|top|files)?)\s/u;
-const A_PROGRAM = /(?:^|[\s/])(?:redis-cli|keydb-cli)\s/u;
-const U_PROGRAM = /(?:^|[\s/])curl\s/u;
+  /(?:^|[\s/"'`(])(?:sshpass|(?:docker|podman|nerdctl|oc|az)\s+login|mongo(?:sh|dump|restore|export|import|stat|top|files)?)\s/u;
+const A_PROGRAM = /(?:^|[\s/"'`(])(?:redis-cli|keydb-cli)\s/u;
+const U_PROGRAM = /(?:^|[\s/"'`(])curl\s/u;
 const W_PROGRAM =
-  /(?:^|[\s/])ldap(?:search|add|modify|delete|modrdn|compare|passwd|whoami|exop)\s/u;
-const CAPITAL_P_PROGRAM = /(?:^|[\s/])(?:sqlcmd|bcp|zip|unzip)\s/u;
+  /(?:^|[\s/"'`(])ldap(?:search|add|modify|delete|modrdn|compare|passwd|whoami|exop)\s/u;
+const CAPITAL_P_PROGRAM = /(?:^|[\s/"'`(])(?:sqlcmd|bcp|zip|unzip)\s/u;
 /** `smbclient -U user%…`: the password follows a `%`. */
 const PERCENT_USER =
-  /(?:^|[\s/])(?:smbclient|rpcclient|smbcacls|smbget)\s(?:.*\s)?(?:-U\s*|--user[=\s])["']?[^\s%"']+%$/u;
+  /(?:^|[\s/"'`(])(?:smbclient|rpcclient|smbcacls|smbget)\s(?:.*\s)?(?:-U\s*|--user[=\s])["']?[^\s%"']+%$/u;
 const ATTACHED_P = /(?:^|\s)-p$/u;
 const SPACED_P = /(?:^|\s)-p\s+["']?$/u;
 const SPACED_A = /(?:^|\s)-a\s+["']?$/u;
 const SPACED_W = /(?:^|\s)-w\s+["']?$/u;
 const SPACED_CAPITAL_P = /(?:^|\s)-P\s+["']?$/u;
 const USER_COLON = /(?:^|\s)(?:-u|--user)(?:\s+|=)["']?[^\s:"']+:$/u;
-const HTPASSWD = /(?:^|[\s/])htpasswd\s+-\w*b\w*\s+\S+\s+\S+\s+["']?$/u;
+const HTPASSWD = /(?:^|[\s/"'`(])htpasswd\s+-\w*b\w*\s+\S+\s+\S+\s+["']?$/u;
 
 /** The current command of a shell line: after the last `|`, `;`, `&&` or `||`. */
 function commandSegment(before: string): string {
@@ -1038,9 +1047,20 @@ function nameLeadsIn(before: string, after: string): boolean {
   ) {
     return true;
   }
-  for (const pattern of [OPTION, STATED, PASSWORD_WORD, XML_KEY_VALUE]) {
+  for (const pattern of [OPTION, STATED, XML_KEY_VALUE]) {
     const name = pattern.exec(before)?.[1];
     if (name !== undefined && credentialNameSaysSecret(name)) return true;
+  }
+  // `password …` without `=` or `:` is a config line (`requirepass …`) or a
+  // netrc entry, not prose ("the password database"): the value ends the line,
+  // or the line is a netrc entry.
+  const word = PASSWORD_WORD.exec(before)?.[1];
+  if (
+    word !== undefined &&
+    credentialNameSaysSecret(word) &&
+    (LINE_ENDS.test(after) || NETRC_LINE.test(before))
+  ) {
+    return true;
   }
   const element = XML_ELEMENT.exec(before)?.[1];
   if (element !== undefined && after.startsWith("</") && credentialNameSaysSecret(element)) {
@@ -1078,9 +1098,15 @@ function pipedToPasswordReader(before: string, after: string): boolean {
   const next = PIPED_INTO.exec(after)?.[1];
   if (next === undefined) return false;
   if (SUDO_STDIN.test(next)) return true;
-  return next
-    .split(/[\s'"=]+/u)
-    .some((word) => word.length > 0 && credentialNameSaysSecret(word.replace(/^-+/u, "")));
+  // The program (and its subcommand) and the option names, not arguments:
+  // `| grep token` and `| tee password-notes.txt` do not read a password.
+  const words = next.trim().split(/\s+/u);
+  return words.some((word, index) => {
+    const name = word.replace(/^["']|["']$/gu, "");
+    if (name.startsWith("-"))
+      return credentialNameSaysSecret(name.replace(/^-+/u, "").split("=")[0]!);
+    return index === 0 && credentialNameSaysSecret(name.split("/").pop()!);
+  });
 }
 
 /** A line that is only a key before the value: `value: …`, `- admin: …`, `"value": "…`. */
@@ -1205,12 +1231,24 @@ function inUrlPasswordPosition(text: string, start: number, end: number): boolea
  * credential (`- name: DB_PASSWORD` then `value: …`). A base64 form inside a longer run (a Basic auth header)
  * needs only a credential word earlier on the line.
  */
+const BASE64_CHARACTER = /[A-Za-z0-9+/_=-]/u;
+
 function weakValuePositionAllowed(
   text: string,
   start: number,
   end: number,
-  inRun: boolean,
+  form: WeakFormInfo,
 ): boolean {
+  // The whole base64 encoding of the value, as a run of its own: someone
+  // encoded exactly that value (a Kubernetes Secret's data).
+  if (
+    form.standalone &&
+    !BASE64_CHARACTER.test(text[start - 1] ?? "") &&
+    !BASE64_CHARACTER.test(text[end] ?? "")
+  ) {
+    return true;
+  }
+  const inRun = form.inRun || form.standalone;
   const left = lineStartBefore(text, start);
   const right = left === null ? null : lineEndAfter(text, end);
   if (left !== null && right !== null && !(left === "quote" && right === "quote")) return true;
@@ -1248,19 +1286,52 @@ function weakValuePositionAllowed(
 
 const RUN_BREAK = /[\s"'`<>()[\]{}]/u;
 
+/**
+ * Where the run of non-space characters before a position starts, and the
+ * last `://` (or JSON-escaped `:\/\/`) in the text before it. Read forward
+ * once per text, so counting every occurrence stays linear.
+ */
+type RunCursor = { text: string; scanned: number; lastBreak: number; lastScheme: number };
+
+function runCursor(text: string): RunCursor {
+  return { text, scanned: 0, lastBreak: -1, lastScheme: -1 };
+}
+
+/** Whether the run before `start` holds a URL scheme. */
+function runHasScheme(cursor: RunCursor, start: number): boolean {
+  const { text } = cursor;
+  if (start < cursor.scanned) {
+    // Out of order (a clipped tail): read the run backwards, at most 64 characters.
+    const floor = Math.max(0, start - 64);
+    let runStart = start;
+    while (runStart > floor && !RUN_BREAK.test(text[runStart - 1]!)) runStart -= 1;
+    const run = text.slice(runStart, start);
+    return run.includes("://") || run.includes(":\\/\\/");
+  }
+  for (let at = cursor.scanned; at < start; at += 1) {
+    const code = text.charCodeAt(at);
+    if (RUN_BREAK.test(text[at]!)) cursor.lastBreak = at;
+    else if (
+      code === 58 &&
+      (text.startsWith("//", at + 1) || text.startsWith("\\/\\/", at + 1)) &&
+      at + 3 <= start
+    ) {
+      cursor.lastScheme = at;
+    }
+  }
+  cursor.scanned = start;
+  return cursor.lastScheme > cursor.lastBreak;
+}
+
 function matchPosition(
-  text: string,
+  cursor: RunCursor,
   start: number,
   end: number,
   encoded: boolean,
 ): SecretValueMatchPosition {
   if (encoded) return "encoded";
-  // The run of non-space characters before the value, at most 200 back.
-  const floor = Math.max(0, start - 200);
-  let runStart = start;
-  while (runStart > floor && !RUN_BREAK.test(text[runStart - 1]!)) runStart -= 1;
-  const run = text.slice(runStart, start);
-  if (run.includes("://") || run.includes(":\\/\\/")) return "url";
+  const { text } = cursor;
+  if (runHasScheme(cursor, start)) return "url";
   const previous = text[start - 1] ?? "";
   const next = text[end] ?? "";
   if (previous === "/" || previous === "\\" || next === "/" || next === "\\") return "path";
@@ -1269,23 +1340,33 @@ function matchPosition(
   return "token";
 }
 
+/** Match events of one masked text, by their labels, and where its runs start. */
+type MatchTally = { events: Map<string, SecretValueMatchEvent>; cursor: RunCursor | null };
+
 function reportMatch(
   masks: CompiledSecretValueMasks,
+  tally: MatchTally | null,
   form: string,
   outcome: SecretValueMatchEvent["outcome"],
   text: string,
   start: number,
 ): void {
-  const sink = masks.onMatch;
-  if (!sink) return;
+  if (tally === null) return;
   try {
     const info = masks.formInfo.get(form);
-    sink({
-      outcome,
-      strength: info?.strength ?? "distinctive",
-      entropy: info?.entropy ?? "ge128",
-      position: matchPosition(text, start, start + form.length, info?.encoded === true),
-    });
+    const strength = info?.strength ?? "distinctive";
+    const entropy = info?.entropy ?? "ge128";
+    if (tally.cursor?.text !== text) tally.cursor = runCursor(text);
+    const position = matchPosition(
+      tally.cursor,
+      start,
+      start + form.length,
+      info?.encoded === true,
+    );
+    const key = `${outcome} ${strength} ${entropy} ${position}`;
+    const counted = tally.events.get(key);
+    if (counted) counted.count += 1;
+    else tally.events.set(key, { outcome, strength, entropy, position, count: 1 });
   } catch {
     // Match events never affect masking.
   }
@@ -1293,6 +1374,25 @@ function reportMatch(
 
 /** Mask one text with compiled entries. */
 export function maskSecretValuesInText(text: string, masks: CompiledSecretValueMasks): string {
+  const sink = masks.onMatch;
+  if (!sink) return maskOneText(text, masks, null);
+  const tally: MatchTally = { events: new Map(), cursor: null };
+  const out = maskOneText(text, masks, tally);
+  for (const event of tally.events.values()) {
+    try {
+      sink(event);
+    } catch {
+      // Match events never affect masking.
+    }
+  }
+  return out;
+}
+
+function maskOneText(
+  text: string,
+  masks: CompiledSecretValueMasks,
+  tally: MatchTally | null,
+): string {
   if (masks.empty || masks.pattern === null || text.length < masks.minChars) return text;
   if (masks.keepUrlHosts) {
     const address = ABSOLUTE_URL.exec(text);
@@ -1338,7 +1438,7 @@ export function maskSecretValuesInText(text: string, masks: CompiledSecretValueM
     for (const candidate of candidates ?? []) {
       if (at + candidate.length > limit || !text.startsWith(candidate, at)) continue;
       const weak = masks.weakForms.get(candidate);
-      if (weak && !weakValuePositionAllowed(text, at, at + candidate.length, weak.inRun)) {
+      if (weak && !weakValuePositionAllowed(text, at, at + candidate.length, weak)) {
         keptForm ??= candidate;
         continue;
       }
@@ -1347,11 +1447,11 @@ export function maskSecretValuesInText(text: string, masks: CompiledSecretValueM
     }
     if (form === undefined) {
       // One event per position, however many forms of the value start here.
-      if (keptForm !== undefined) reportMatch(masks, keptForm, "kept", text, at);
+      if (keptForm !== undefined) reportMatch(masks, tally, keptForm, "kept", text, at);
       at += 1;
       continue;
     }
-    reportMatch(masks, form, "masked", text, at);
+    reportMatch(masks, tally, form, "masked", text, at);
     out += text.slice(copied, at) + masks.labels.get(form)!;
     at += form.length;
     copied = at;
@@ -1379,7 +1479,7 @@ export function maskSecretValuesInText(text: string, masks: CompiledSecretValueM
     if (!tail) continue;
     const start = cut - tail.length;
     if (overlapsKept(start, cut, keptBefore)) continue;
-    reportMatch(masks, tail.form, "masked", out, start);
+    reportMatch(masks, tally, tail.form, "masked", out, start);
     out = out.slice(0, start) + tail.label + out.slice(cut);
     changedFrom = start;
   }

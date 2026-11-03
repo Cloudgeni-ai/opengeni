@@ -11,20 +11,29 @@
 
 /**
  * A whole word that says the value is a credential. `session` and `private`
- * alone do not (`--session main`, `private: true`), nor does `key` as the
- * only word of a name (`--key reports/q3.csv`); `SESSION_TOKEN`,
+ * alone do not (`--session main`, `private: true`), nor does `key` without a
+ * word that makes it one (`--key reports/q3.csv`, `cacheKey`); `SESSION_TOKEN`,
  * `private_key` and `api_key` do.
  */
 const SECRET_NAME_WORD =
   /^(?:tokens?|secrets?|passwords?|passwd|passphrases?|passcodes?|pass|pwd|pw|keys?|apikeys?|keystore|credentials?|creds|auth|authorization|authentication|cookies?|bearer|signature|jwt)$/iu;
-/** Words that count only next to another word: `api_key`, not `key`. */
+/** Words that count only next to a word that qualifies them: `api_key`, not `key` or `cache_key`. */
 const COMPOUND_ONLY_WORD = /^keys?$/iu;
 /** Ordinary words that end like a credential word: `bypass`, `monkey`, `hotkey`. */
 const BENIGN_WORD =
   /^(?:by|com|encom|over|under|sur|tres|im|mis)pass(?:es)?$|^(?:mon|tur|don|hoc|whis|joc|hot|jer|lac)keys?$/iu;
+/**
+ * Words that make `key` a credential (`API_KEY`, `accessKey`, `LICENSE_KEY`).
+ * Other keys are lookups: `cacheKey`, `STORAGE_KEY`, `sortKey`, `foreignKey`.
+ */
+const KEY_QUALIFIER =
+  "api|access|secret|private|signing|sign|encryption|encrypt|decryption|crypt|master|client|account|license|licence|product|recovery|backup|ssh|gpg|pgp|deploy|service|app|hmac|webhook|shared|admin|root|subscription|auth|consumer|partner|developer|live|aes|rsa|pass|jwt";
+const KEY_QUALIFIER_WORD = new RegExp(`^(?:${KEY_QUALIFIER})$`, "iu");
 /** A compound word that ends with one: `PGPASSWORD`, `ACCESSKEY`, `requirepass`, `OAUTH`. */
-const SECRET_NAME_SUFFIX =
-  /(?:tokens?|secrets?|passwords?|passwd|pass|pwd|pw|keys?|keystore|cookies?|signature|sessionid|auth|credentials?)$/iu;
+const SECRET_NAME_SUFFIX = new RegExp(
+  `(?:tokens?|secrets?|passwords?|passwd|pass|pwd|pw|(?:${KEY_QUALIFIER})keys?|keystore|cookies?|signature|sessionid|auth|credentials?)$`,
+  "iu",
+);
 /** A compound word that starts with one: `TOKENVALUE`, `SECRETDATA`, `PASSWORDHASH`. */
 const SECRET_NAME_PREFIX = /^(?:token|secret|passw|credential|apikey)/iu;
 /**
@@ -50,7 +59,9 @@ function hasCredentialWord(words: readonly string[]): boolean {
   return words.some(
     (word) =>
       !BENIGN_WORD.test(word) &&
-      ((SECRET_NAME_WORD.test(word) && (words.length > 1 || !COMPOUND_ONLY_WORD.test(word))) ||
+      ((SECRET_NAME_WORD.test(word) &&
+        (!COMPOUND_ONLY_WORD.test(word) ||
+          words.some((other) => KEY_QUALIFIER_WORD.test(other)))) ||
         (word.length > 4 && (SECRET_NAME_SUFFIX.test(word) || SECRET_NAME_PREFIX.test(word)))),
   );
 }

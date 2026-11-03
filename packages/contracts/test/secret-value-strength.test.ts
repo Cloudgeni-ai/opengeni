@@ -168,6 +168,15 @@ test("random single-case letters and random host or URL parts are almost never w
   }
   expect(secretValueStrength("rdabaootck")).toBe("distinctive");
   expect(secretValueStrength("kgkelsuschi")).toBe("distinctive");
+  // Random letters with a space, and letters outside A to Z, are judged too.
+  for (const value of [
+    ["qkzvm", "xbtwp"].join(" "),
+    `qkzvm${"\u00e9"}xbtwplj`,
+    "\u041f\u0440\u0438\u0432\u0435\u0442\u043c\u0438\u0440",
+  ]) {
+    expect([value, secretValueStrength(value)]).toEqual([value, "distinctive"]);
+  }
+  expect(secretValueStrength("correct horse")).toBe("weak");
 });
 
 describe("a weak saved value", () => {
@@ -229,6 +238,15 @@ describe("a weak saved value", () => {
       `docker run -p ${WORD} img`,
       `ls -w ${WORD} x`,
       `grep -P ${WORD} log.txt`,
+      // Arguments of the next command, prose after "password", lookup keys.
+      `echo ${WORD} | grep -i token`,
+      `echo ${WORD} | tee password-notes.txt`,
+      `the password ${WORD} database is up`,
+      `const STORAGE_KEY = "${WORD}";`,
+      `cacheKey: ${WORD},`,
+      `sortKey = ${WORD};`,
+      // The weak value's base64 at the start of a longer base64 run.
+      `config: ${base64(`${WORD}-dashboard settings v2`)}`,
     ];
     for (const text of unchanged) expect(memory.maskText(text)).toBe(text);
   });
@@ -305,6 +323,14 @@ describe("a weak saved value", () => {
       [`CREATE USER a IDENTIFIED BY '${WORD}';`, `CREATE USER a IDENTIFIED BY '${LABEL}';`],
       [`echo ${WORD} | sudo -S true`, `echo ${LABEL} | sudo -S true`],
       [`?password=${WORD}&x=1`, `?password=${LABEL}&x=1`],
+      // A program after a quote, a parenthesis or a backtick.
+      [`{"cmd":"mysql -u root -p${WORD} app"}`, `{"cmd":"mysql -u root -p${LABEL} app"}`],
+      [`(mysql -p${WORD})`, `(mysql -p${LABEL})`],
+      ["`sshpass -p " + WORD + " ssh x`", "`sshpass -p " + LABEL + " ssh x`"],
+      [`const API_KEY = "${WORD}";`, `const API_KEY = "${LABEL}";`],
+      [`LICENSE_KEY=${WORD}`, `LICENSE_KEY=${LABEL}`],
+      [`machine h login u password ${WORD} port 1`, `machine h login u password ${LABEL} port 1`],
+      [JSON.stringify({ db: base64(WORD) }), JSON.stringify({ db: LABEL })],
     ];
     for (const [text, masked] of cases) expect(memory.maskText(text)).toBe(masked);
     // Its whole base64 encoding, as in a Kubernetes Secret, is replaced anywhere.
@@ -392,5 +418,15 @@ describe("match metrics", () => {
     expect(serialized).not.toContain(WORD);
     expect(serialized).not.toContain(DISTINCTIVE);
     for (const event of events) expect(event.entropy).toMatch(/^(?:lt32|32_64|64_128|ge128)$/u);
+  });
+
+  test("counts occurrences once per text and labels", () => {
+    const events: SecretValueMatchEvent[] = [];
+    const memory = new SecretValueMemory({ onMatch: (event) => events.push(event) });
+    memory.remember(WORD, LABEL);
+    memory.maskText(`src/${WORD}/a.ts src/${WORD}/b.ts src/${WORD}/c.ts`);
+    expect(events.map(({ outcome, position, count }) => [outcome, position, count])).toEqual([
+      ["kept", "path", 3],
+    ]);
   });
 });
