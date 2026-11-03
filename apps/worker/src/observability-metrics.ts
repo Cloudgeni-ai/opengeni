@@ -1,3 +1,8 @@
+import {
+  failureOrigin,
+  isCustomerManagedMetricProvider,
+  type FailureOrigin,
+} from "@opengeni/observability";
 import { createHash } from "node:crypto";
 import type { ResponsesTransportDiagnostic } from "@opengeni/network/responses-websocket";
 import { errorCodeToJSON } from "@opengeni/agent-proto";
@@ -223,7 +228,7 @@ export function runtimeMetricsHooksForObservability(
   observability: Observability,
 ): RuntimeMetricsHooks {
   return {
-    onModelCall: ({ provider, outcome, durationSeconds }) => {
+    onModelCall: ({ provider, outcome, durationSeconds, httpStatus }) => {
       completedOperationSpan(observability, "worker.model.call", durationSeconds, {
         provider,
         outcome,
@@ -231,7 +236,15 @@ export function runtimeMetricsHooksForObservability(
       observability.incrementCounter({
         name: "opengeni_model_calls_total",
         help: "Total model calls by provider and outcome.",
-        labels: { provider, outcome },
+        labels: {
+          provider,
+          outcome,
+          failure_origin: failureOrigin({
+            customerManaged: isCustomerManagedMetricProvider(provider),
+            outcome,
+            ...(httpStatus !== undefined ? { httpStatus } : {}),
+          }),
+        },
       });
       observability.observeHistogram({
         name: "opengeni_model_call_duration_seconds",
@@ -523,13 +536,19 @@ export function initializeWorkerOutcomeMetrics(observability: Observability): vo
     observability.incrementCounter({
       name: "opengeni_turns_total",
       help: "Total agent turns by terminal outcome.",
-      labels: { outcome },
+      labels: { outcome, failure_origin: failureOrigin({ customerManaged: false, outcome }) },
       amount: 0,
     });
   }
   for (const cause of TURN_RECOVERY_CAUSES) {
     observability.incrementCounter({ ...TURN_RECOVERIES_METRIC, labels: { cause }, amount: 0 });
   }
+  observability.incrementCounter({
+    name: "opengeni_turns_total",
+    help: "Total agent turns by terminal outcome.",
+    labels: { outcome: "failed", failure_origin: "customer_provider" },
+    amount: 0,
+  });
   for (const outcome of WORKER_DEATH_RECOVERY_OUTCOMES) {
     for (const timeoutType of WORKER_DEATH_TIMEOUT_TYPES) {
       observability.incrementCounter({
@@ -587,7 +606,10 @@ export function recordWorkerDeathRecoveryMetrics(
   observability.incrementCounter({
     name: "opengeni_turns_total",
     help: "Total agent turns by terminal outcome.",
-    labels: { outcome: turnOutcome },
+    labels: {
+      outcome: turnOutcome,
+      failure_origin: failureOrigin({ customerManaged: false, outcome: turnOutcome }),
+    },
   });
   if (turnOutcome === "recovering") {
     observability.incrementCounter({ ...TURN_RECOVERIES_METRIC, labels: { cause: "worker" } });
@@ -622,6 +644,7 @@ export class TurnLifecycleMetrics {
   finish(input: {
     attemptId: string;
     outcome: TurnOutcome | null;
+    failureOrigin?: FailureOrigin;
     durationSeconds?: number;
     /** Required in spirit for `recovering`; an unset cause is counted as `other`. */
     recoveryCause?: TurnRecoveryCause | null | undefined;
@@ -637,7 +660,10 @@ export class TurnLifecycleMetrics {
       this.observability.incrementCounter({
         name: "opengeni_turns_total",
         help: "Total agent turns by terminal outcome.",
-        labels: { outcome: input.outcome },
+        labels: {
+          outcome: input.outcome,
+          failure_origin: input.outcome === "failed" ? (input.failureOrigin ?? "platform") : "none",
+        },
       });
       if (input.outcome === "recovering") {
         this.observability.incrementCounter({
@@ -2959,6 +2985,7 @@ export function recordTurnStartupMilestone(
     provider: string;
     backend: string;
     outcome: TurnStartupOutcome;
+    failureOrigin?: FailureOrigin;
     durationSeconds: number;
     /**
      * Seconds from the start of the turn attempt that reached the milestone.
@@ -2977,7 +3004,10 @@ export function recordTurnStartupMilestone(
     name: "opengeni_turn_startup_milestone_duration_seconds",
     help: "Cumulative seconds from durable turn queueing to a bounded startup milestone.",
     buckets: TURN_STARTUP_MILESTONE_BUCKETS,
-    labels,
+    labels: {
+      ...labels,
+      failure_origin: input.outcome === "failed" ? (input.failureOrigin ?? "platform") : "none",
+    },
     value: Math.max(0, input.durationSeconds),
   });
   if (

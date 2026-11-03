@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { withModelTransportStartedObserver } from "../src/model-preparation-diagnostics";
-import { instrumentedModelFetch } from "../src/model-provider-client";
+import { configureRuntimeMetricsHooks, instrumentedModelFetch } from "../src/model-provider-client";
 import { withModelCallLifecycle } from "../src/model-request-capture";
 import { withClaudeUsageObserver } from "../src/claude-subscription-usage";
 import {
@@ -256,4 +256,30 @@ describe("model transport handoff diagnostic", () => {
     );
     expect(observations).toBe(0);
   });
+});
+
+test("model call metrics carry provider HTTP status without consuming the error body", async () => {
+  const observed: Array<{ outcome: string; httpStatus?: number }> = [];
+  configureRuntimeMetricsHooks({ onModelCall: (value) => observed.push(value) });
+  try {
+    for (const status of [200, 400, 429, 503]) {
+      const fetcher = instrumentedModelFetch(
+        "organization-openrouter",
+        (async () => new Response("provider body", { status })) as typeof fetch,
+      );
+      const response = await fetcher("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        body: "{}",
+      });
+      expect(await response.text()).toBe("provider body");
+    }
+    expect(observed.map(({ outcome, httpStatus }) => ({ outcome, httpStatus }))).toEqual([
+      { outcome: "completed", httpStatus: 200 },
+      { outcome: "failed", httpStatus: 400 },
+      { outcome: "failed", httpStatus: 429 },
+      { outcome: "failed", httpStatus: 503 },
+    ]);
+  } finally {
+    configureRuntimeMetricsHooks(null);
+  }
 });

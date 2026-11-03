@@ -105,6 +105,7 @@ export type RuntimeMetricsHooks = {
     provider: string;
     outcome: "completed" | "failed";
     durationSeconds: number;
+    httpStatus?: number;
   }) => void;
   /**
    * A provider's 400 invalid-request answer to a model call, by the request

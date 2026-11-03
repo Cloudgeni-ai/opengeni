@@ -851,6 +851,7 @@ async function finalizeTurnAttemptSteps(
         attemptId: input.attemptId,
         outcome: control.turnMetricOutcome,
         recoveryCause: control.turnRecoveryCause,
+        ...(control.turnFailureOrigin ? { failureOrigin: control.turnFailureOrigin } : {}),
         durationSeconds,
       });
     }
