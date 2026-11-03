@@ -4,7 +4,12 @@
  * runtime.
  */
 import { describe, expect, test } from "bun:test";
-import { credentialNameSaysSecret, looksRandomSecret, plainFieldSecretHint } from "../src";
+import {
+  credentialNameMayHoldSecret,
+  credentialNameSaysSecret,
+  looksRandomSecret,
+  plainFieldSecretHint,
+} from "../src";
 
 const mixed = (length: number) => "Ab1Cd2Ef3Gh4Jk5Lm6Np7Qr8St9Uv0Wx".repeat(4).slice(0, length);
 
@@ -88,5 +93,37 @@ describe("credential names", () => {
     ]) {
       expect([name, credentialNameSaysSecret(name)]).toEqual([name, false]);
     }
+  });
+});
+
+describe("credentials put into an attempt", () => {
+  test("any credential word counts, unless the value is a name or label", () => {
+    for (const name of [
+      "OAUTH",
+      "BASICAUTH",
+      "HTTP_BASICAUTH",
+      "DBPWD",
+      "MYSQLPWD",
+      "KEYSTORE",
+      "ANDROID_KEYSTORE",
+      "CLIENT_SECRET_TYPE",
+      "SECRET_KEY_PREFIX",
+      "AUTH_TOKEN_PROVIDER",
+      "TOKENVALUE",
+      "PGPASSWORD",
+    ]) {
+      expect([name, credentialNameMayHoldSecret(name)]).toEqual([name, true]);
+    }
+    for (const name of ["GIT_AUTHOR_NAME", "SESSION_NAME", "API_KEY_LABEL", "REGION"]) {
+      expect([name, credentialNameMayHoldSecret(name)]).toEqual([name, false]);
+    }
+  });
+});
+
+describe("identifiers of a key", () => {
+  test("a fingerprint is random but is not a secret", () => {
+    const fingerprint = `SHA256:${"Xk9mQ2vLp4Rt8sW1zN3bC7dF".repeat(2).slice(0, 43)}`;
+    expect(plainFieldSecretHint("fingerprint", fingerprint)).toBeNull();
+    expect(plainFieldSecretHint("notes", fingerprint)?.reason).toBe("random");
   });
 });

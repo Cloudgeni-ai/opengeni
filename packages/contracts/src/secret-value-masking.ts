@@ -34,6 +34,7 @@
  * guarantees this for references; `secretCredentialMaskLabel` for Opengeni's
  * own credentials.
  */
+import { credentialNameDescribesValue, credentialNameSaysSecret } from "./credential-names";
 import { formatSecretReference, parseSecretReference } from "./secret-references";
 import type { ResolvedSecretValue, SecretResolver } from "./secret-resolution";
 import { isBase64DataUrl, isTextMediaType, mapSecretMaskableStrings } from "./secret-mask-strings";
@@ -272,8 +273,21 @@ const CAMEL_LIKE = new RegExp(
   `^(?:\\p{Ll}{2,}|\\p{Lu}\\p{Ll}{2,})(?:\\p{Lu}\\p{Ll}{2,})*${WORD_TAIL}$`,
   "u",
 );
-/** A snake_case or kebab-case name of at most three parts: `db_admin`, `deploy-bot-01`. */
-const SNAKE_LIKE = new RegExp(`^(?:${WORD}|[0-9]+)(?:[_-](?:${WORD}|[0-9]+)){1,2}$`, "u");
+/** A part of a snake_case or kebab-case name: a word or a number. */
+const SNAKE_PART = new RegExp(`^(?:${WORD}|[0-9]+)$`, "u");
+
+/**
+ * A snake_case or kebab-case name: two parts (`db_admin`, `deploy-bot`), or
+ * three with a number among them (`deploy-bot-01`). Three or more words
+ * (`wiry-unwound-cable`) are a passphrase.
+ */
+function snakeLike(text: string): boolean {
+  const parts = text.split(/[_-]/u);
+  if (parts.length < 2 || parts.length > 3 || !parts.every((part) => SNAKE_PART.test(part))) {
+    return false;
+  }
+  return parts.length === 2 || parts.some((part) => /^[0-9]+$/u.test(part));
+}
 /** Values shaped like names of places, not secrets. */
 const HOST_LIKE = /^(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?::\d{1,5})?$/u;
 const EMAIL_LIKE = /^[^\s@]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}$/u;
@@ -290,32 +304,55 @@ const WORD_SHAPED_MAX_CHARS = 32;
 const WEAK_ENTROPY_MIN_CHARS = 12;
 const WEAK_ENTROPY_SHARE = 0.5;
 
-/** Letter runs of at least this many letters must read as a word to be word-shaped. */
-const PRONOUNCEABLE_MIN_LETTERS = 6;
-const CONSONANT_RUN = /[b-df-hj-np-tv-xz]{5,}/u;
-const VOWEL = /[aeiouy]/gu;
+/**
+ * The 254 letter pairs that make up 95% of the pairs in the distinct English
+ * words of Opengeni's documentation. A random run of letters has many pairs
+ * outside this set (`qk`, `zv`, `xb`); words rarely do.
+ */
+const COMMON_LETTER_PAIRS = new Set(
+  (
+    "abacadagaiakalamanaparasatauavaybabebiblbobrbsbucacccechcickclcocrctcucydadbdcdddedi" +
+    "dmdodrdsdueaebecedeeefegeielemeneoepeqereseteuevewexeyfafefffiflfofrfugageghgigngogr" +
+    "gsguhahehihohtiaibicidieifigiliminioipirisitivizkekikslalcldlelilllolsltlulymambmemi" +
+    "mmmompmsmunancndnenfngninknlnmnnnonpnrnsntnunvoaobocodofogoiokolomonoooporosotouovow" +
+    "oxpapdpepiplpoppprpsptpuqurarcrdrergrirkrlrmrnrorrrsrtrurvrysascseshsiskslsospssstsu" +
+    "tatctethtitltmtotptrtstttutyuaubucudueuiulumunupurusutvaveviwawewiwnwowsxcxexpxtypysz" +
+    "aze"
+  ).match(/../gu),
+);
+/** At most one uncommon pair in this many pairs still reads as words. */
+const PAIRS_PER_UNCOMMON_PAIR = 5;
 
 /**
- * Whether every longer ASCII letter run reads as a word: no five consonants
- * in a row and at least one vowel in five letters, so `pelican` and
- * `Password` do and a random run such as `qkzvmxbtwe` does not. A word that
- * fails stays distinctive, which only masks it as before.
+ * Whether a value's letters read as words: the letter pairs inside its words
+ * (camelCase and separators split words) are mostly common English pairs, so
+ * `pelican`, `harborMaster` and `deploy-bot` do and `qkzvmxbtwe`,
+ * `CruPjtBwrw` and `FXIOFWLOJA` do not. A word that fails stays distinctive,
+ * which only masks it as before. Letters outside A to Z are not judged.
+ *
+ * Parts of a host, URL or path are judged leniently: abbreviations such as
+ * `srv`, `npm` and `json` are common there, so runs of fewer than four
+ * letters are skipped and one more uncommon pair is allowed.
  */
-function pronounceable(text: string): boolean {
+function readsAsWords(text: string, lenient = false): boolean {
+  let pairs = 0;
+  let uncommon = 0;
   for (const run of text.match(/\p{Lu}?\p{Ll}+|\p{Lu}+/gu) ?? []) {
-    if (run.length < PRONOUNCEABLE_MIN_LETTERS || !/^[A-Za-z]+$/u.test(run)) continue;
+    if (!/^[A-Za-z]+$/u.test(run) || run.length < (lenient ? 4 : 3)) continue;
     const lower = run.toLowerCase();
-    if (CONSONANT_RUN.test(lower)) return false;
-    if ((lower.match(VOWEL)?.length ?? 0) * 5 < lower.length) return false;
+    for (let index = 0; index + 1 < lower.length; index += 1) {
+      pairs += 1;
+      if (!COMMON_LETTER_PAIRS.has(lower.slice(index, index + 2))) uncommon += 1;
+    }
   }
-  return true;
+  return uncommon <= Math.floor((pairs + (lenient ? 2 : 0)) / PAIRS_PER_UNCOMMON_PAIR);
 }
 
 /** A single word-shaped name: a word with a short tail, an identifier or a snake/kebab name. */
-function wordShaped(text: string): boolean {
+function wordShaped(text: string, lenient = false): boolean {
   if (text.length >= WORD_SHAPED_MAX_CHARS) return false;
-  if (!(WORD_LIKE.test(text) || CAMEL_LIKE.test(text) || SNAKE_LIKE.test(text))) return false;
-  return pronounceable(text);
+  if (!(WORD_LIKE.test(text) || CAMEL_LIKE.test(text) || snakeLike(text))) return false;
+  return readsAsWords(text, lenient);
 }
 
 /**
@@ -338,8 +375,8 @@ function alphabetSize(text: string): number {
  * or a path with a random segment carries a secret and is not.
  */
 function partsAreWeak(text: string): boolean {
-  const parts = text.split(/[/\\?#&=:.@]+/u).filter((part) => part.length > 0);
-  return parts.every((part) => /^[0-9]+$/u.test(part) || wordShaped(part));
+  const parts = text.split(/[/\\?#&=:.@~]+/u).filter((part) => part.length > 0);
+  return parts.every((part) => /^[0-9]+$/u.test(part) || wordShaped(part, true));
 }
 
 /**
@@ -650,10 +687,21 @@ export function compileSecretValueMasks(
         weakForms.delete(form);
       }
     } else {
-      const inRun = new Set(
-        options.base64 === false ? [] : base64FormsByPlacement(entry.value).inRun,
-      );
+      const placement =
+        options.base64 === false
+          ? { standalone: [], inRun: [] }
+          : base64FormsByPlacement(entry.value);
+      // The whole base64 encoding of a value appears only where someone
+      // encoded exactly that value (a Kubernetes Secret's data), so it is
+      // matched anywhere, as a distinctive value is.
+      const standalone = new Set(placement.standalone);
+      const inRun = new Set(placement.inRun);
       for (const form of forms) {
+        if (standalone.has(form)) {
+          distinctiveForms.add(form);
+          weakForms.delete(form);
+          continue;
+        }
         if (distinctiveForms.has(form)) continue;
         weakForms.set(form, { inRun: inRun.has(form) });
       }
@@ -793,41 +841,123 @@ const JOINING_CHARACTER = /[\p{L}\p{N}\p{M}_\-./\\+~%@]/u;
 const TRAILING_PUNCTUATION = /[.,;:!?]/u;
 const AFTER_TRAILING_PUNCTUATION = /[\s"'`)\]}>\\]/u;
 /**
- * A credential word near the value on the same line makes the position a
- * credential one: `password=…`, `"token": "…"`, `PGPASSWORD: …`,
- * `Authorization: Basic …`, "the password is …", `echo '…' | docker login
- * --password-stdin`. A false positive only masks as before.
+ * A credential word before a base64 run (`Authorization: Basic …`): the
+ * encoded value inside the run is replaced. The word ends where a lower-case
+ * letter does not continue it, so `PGPASSWORD` and `apiKey` count and
+ * `--author` and `keyboard` do not.
  */
 const CREDENTIAL_CONTEXT =
-  /pass(?:words?|wd|phrases?|codes?)?|pwd|pw|secrets?|tokens?|keys?|auth(?:orization|entication)?|credentials?|creds|bearer/giu;
-/**
- * A credential word starts where a lower-case letter does not precede it
- * (unless it starts a camelCase word) and ends where a lower-case letter does
- * not continue it, so `PGPASSWORD`, `apiKey`, `ADMIN_PW` and `secretName`
- * count and `--author`, `keyboard`, `monkey` and `passenger` do not.
- */
+  /pass(?:words?|wd|phrases?|codes?)?|pwd|secrets?|tokens?|keys?|auth(?:orization|entication)?|credentials?|creds|bearer/giu;
 function hasCredentialWord(text: string): boolean {
   CREDENTIAL_CONTEXT.lastIndex = 0;
   for (const match of text.matchAll(CREDENTIAL_CONTEXT)) {
-    const previous = text[match.index - 1];
-    const startsWord =
-      previous === undefined || !/[a-z]/u.test(previous) || /[A-Z]/u.test(match[0][0]!);
     const next = text[match.index + match[0].length];
-    if (startsWord && (next === undefined || !/[a-z]/u.test(next))) return true;
+    if (next === undefined || !/[a-z]/u.test(next)) return true;
   }
   return false;
 }
-/**
- * Command-line options followed by a password: `mysql -pW`, `mysql -p W`,
- * `redis-cli -a W`, `curl -u user:W`, `--user user:W`.
+
+/*
+ * Names that lead into a weak value. Each pattern ends where the value
+ * starts, and its first group is the name, checked word by word with
+ * `credentialNameSaysSecret`. A quote may be JSON-escaped (`\"`).
  */
-const ATTACHED_PASSWORD_FLAG = /(?:^|[\s"'=])-p$/u;
-const PASSWORD_FLAG = /(?:^|[\s"'])-[pa]\s+$/u;
-const USER_PASSWORD_FLAG = /(?:^|[\s"'])(?:-u|--user)(?:\s+|=)[^\s:"']+:$/u;
+const Q = `(?:\\\\?["'])?`;
+const NAME = "([A-Za-z0-9_.$@-]*[A-Za-z0-9])";
+/** `password=…`, `"token": "…"`, `DB_PASS="…"`, `Password=…;`, `apiKey := …`, `secret => …`. */
+const ASSIGNED = new RegExp(`${NAME}${Q}\\s*(?:=>|:=|[:=])\\s*${Q}$`, "u");
+/** `--password …`, `--db-password=…`, `-token …`. */
+const OPTION = new RegExp(`(?:^|[\\s"'])--?([A-Za-z][A-Za-z0-9_.-]*)(?:\\s+|=)${Q}$`, "u");
+/** "the password is …", "token was: …". */
+const STATED = new RegExp(`${NAME}${Q}\\s+(?:is|was)(?:\\s*:)?\\s+${Q}$`, "iu");
+/** A password word right before the value: `password …` (netrc), `requirepass …`, `with passphrase …`. */
+const PASSWORD_WORD = new RegExp(
+  `(?:^|[\\s"'\`(])([A-Za-z0-9_.-]*(?:pass(?:word|wd|phrase|code)?|pwd))\\s+${Q}$`,
+  "iu",
+);
+/** A config directive at the start of its line: `masterauth …`. */
+const DIRECTIVE = new RegExp(`^\\s*([A-Za-z][A-Za-z0-9_.-]*auth)\\s+${Q}$`, "iu");
+/** `Authorization: Bearer …`, `auth: token …`, a bare `Bearer …`. */
+const AUTH_SCHEME = new RegExp(
+  `(?:(?:authorization|auth)${Q}\\s*[:=]\\s*${Q}(?:bearer|token|basic)|(?:^|[\\s"'(])bearer)\\s+$`,
+  "iu",
+);
+/** `Cookie: sid=…`, `Set-Cookie: a=b; sid=…`. */
+const COOKIE = /(?:^|[\s"'])(?:set-)?cookie["']?\s*:\s*(?:[^\s;=]+=[^\s;]*;\s*)*[^\s;=]+=$/iu;
+
+/**
+ * Programs whose options take a password: `mysql -p…` (attached),
+ * `sshpass -p …`, `redis-cli -a …`, `curl -u user:…`, `htpasswd -b file user …`.
+ * Elsewhere `-p`, `-a` and `-u` mean other things (`mkdir -p`, `ls -a`).
+ */
+const ATTACHED_P_PROGRAM = /(?:^|[\s/])(?:mysql|mariadb|mysqladmin|mysqldump|mysqlsh|sshpass)\s/u;
+const SPACED_P_PROGRAM = /(?:^|[\s/])sshpass\s/u;
+const A_PROGRAM = /(?:^|[\s/])(?:redis-cli|keydb-cli)\s/u;
+const U_PROGRAM = /(?:^|[\s/])curl\s/u;
+const ATTACHED_P = /(?:^|\s)-p$/u;
+const SPACED_P = /(?:^|\s)-p\s+["']?$/u;
+const SPACED_A = /(?:^|\s)-a\s+["']?$/u;
+const USER_COLON = /(?:^|\s)(?:-u|--user)(?:\s+|=)["']?[^\s:"']+:$/u;
+const HTPASSWD = /(?:^|[\s/])htpasswd\s+-\w*b\w*\s+\S+\s+\S+\s+["']?$/u;
+
+/** The current command of a shell line: after the last `|`, `;`, `&&` or `||`. */
+function commandSegment(before: string): string {
+  const parts = before.split(/\|\||&&|[|;]/u);
+  return parts[parts.length - 1] ?? "";
+}
+
+/** Text that may hold a credential name (a cheap test before the patterns). */
+const MAY_NAME_CREDENTIAL =
+  /pass|pwd|pw|secret|token|key|auth|cred|bearer|session|cookie|private|signature|jwt/iu;
+/** Text that may hold a password option. */
+const MAY_HOLD_OPTION = /-[pau]|--user|htpasswd/u;
+
+function nameLeadsIn(before: string): boolean {
+  if (!MAY_NAME_CREDENTIAL.test(before)) return false;
+  for (const pattern of [ASSIGNED, OPTION, STATED]) {
+    const name = pattern.exec(before)?.[1];
+    if (name !== undefined && credentialNameSaysSecret(name)) return true;
+  }
+  return (
+    PASSWORD_WORD.test(before) ||
+    DIRECTIVE.test(before) ||
+    AUTH_SCHEME.test(before) ||
+    COOKIE.test(before)
+  );
+}
+
+function passwordOption(before: string): boolean {
+  if (!MAY_HOLD_OPTION.test(before)) return false;
+  const command = commandSegment(before);
+  if (SPACED_P.test(command)) return SPACED_P_PROGRAM.test(command);
+  if (SPACED_A.test(command)) return A_PROGRAM.test(command);
+  if (USER_COLON.test(command)) return U_PROGRAM.test(command);
+  return HTPASSWD.test(command);
+}
+
+/** Piped into a command that reads a password: `echo '…' | docker login --password-stdin`. */
+function pipedToPasswordReader(after: string): boolean {
+  const pipe = after.indexOf("|");
+  if (pipe < 0) return false;
+  return after
+    .slice(pipe + 1)
+    .split(/[\s|;&'"=]+/u)
+    .some((word) => word.length > 0 && credentialNameSaysSecret(word.replace(/^-+/u, "")));
+}
+
 /** A line that is only a key before the value: `value: …`, `- admin: …`, `"value": "…`. */
-const KEY_ONLY_LINE = /^\s*(?:-\s+)?["']?[\w.-]+["']?\s*[:=]\s*["']?$/u;
+const KEY_ONLY_LINE = new RegExp(`^\\s*(?:-\\s+)?${Q}([\\w.-]+)${Q}\\s*[:=]\\s*${Q}$`, "u");
+/** `- name: DB_PASSWORD`, `"name": "DB_PASSWORD",`, `key: api-token`. */
+const NAMED_ENTRY_LINE = new RegExp(
+  `^\\s*(?:-\\s+)?${Q}(?:name|key)${Q}\\s*:\\s*${Q}([\\w.-]+)${Q}\\s*,?\\s*$`,
+  "u",
+);
+/** `credentials:`, `"secrets": {`. */
+const SECTION_LINE = new RegExp(`^\\s*(?:-\\s+)?${Q}([\\w.-]+)${Q}\\s*:\\s*\\{?\\s*$`, "u");
 /** Characters before a weak value searched for a credential word or a line start. */
 const CREDENTIAL_CONTEXT_CHARS = 80;
+/** The longest key line (`  value: `) searched before a weak value. */
+const KEY_LINE_MAX_CHARS = 120;
 const LINE_SCAN_CHARS = 400;
 
 /** An escape sequence for a line break, tab or quote in JSON-escaped text ends at `at`. */
@@ -886,8 +1016,8 @@ function lineEndAfter(text: string, end: number): "break" | "quote" | null {
 }
 
 /** Where the line holding `start` begins, at most `LINE_SCAN_CHARS` back. */
-function lineStartIndex(text: string, start: number): number {
-  const floor = Math.max(0, start - LINE_SCAN_CHARS);
+function lineStartIndex(text: string, start: number, limit = LINE_SCAN_CHARS): number {
+  const floor = Math.max(0, start - limit);
   for (let at = start; at > floor; at -= 1) {
     const previous = text[at - 1]!;
     if (previous === "\n" || previous === "\r") return at;
@@ -926,12 +1056,15 @@ function inUrlPasswordPosition(text: string, start: number, end: number): boolea
 }
 
 /**
- * Whether a weak value at `start…end` is in a credential position: the whole
- * line (or the whole text), a URL's password, a password option
- * (`-pW`, `-a W`, `-u user:W`), or a whole token with a credential word near
- * it on the same line, or on the line before when its own line is only a key
- * (`- name: DB_PASSWORD` then `value: W`). A base64 form inside a longer run
- * (a Basic auth header) needs only the credential word.
+ * Whether a weak value at `start…end` is in a credential position: the
+ * whole line (or the whole text), a URL's password, or a whole token that a
+ * credential name leads into (`password=…`, `"token": "…"`, `--password …`,
+ * "the password is …", `Authorization: Bearer …`), a password option of a
+ * program that takes one (`mysql -p…`, `redis-cli -a …`, `curl -u user:…`),
+ * piped into a command that reads a password, or the value of a key on a
+ * line after one that names a credential (`- name: DB_PASSWORD` then
+ * `value: …`). A base64 form inside a longer run (a Basic auth header)
+ * needs only a credential word earlier on the line.
  */
 function weakValuePositionAllowed(
   text: string,
@@ -943,19 +1076,29 @@ function weakValuePositionAllowed(
   const right = left === null ? null : lineEndAfter(text, end);
   if (left !== null && right !== null && !(left === "quote" && right === "quote")) return true;
   if (inUrlPasswordPosition(text, start, end)) return true;
-  const lineStart = lineStartIndex(text, start);
+  // Cheap boundary checks first, before any line is scanned.
+  const attachedOption = !inRun && text[start - 1] === "p" && text[start - 2] === "-";
+  if (!inRun && !boundaryAfter(text, end)) return false;
+  if (!inRun && !attachedOption && !boundaryBefore(text, start)) return false;
+  // A line longer than this before the value is not a key line.
+  const lineStart = lineStartIndex(text, start, KEY_LINE_MAX_CHARS);
   const before = text.slice(Math.max(lineStart, start - CREDENTIAL_CONTEXT_CHARS), start);
-  if (!inRun && ATTACHED_PASSWORD_FLAG.test(before) && boundaryAfter(text, end)) return true;
-  if (!inRun && !(boundaryBefore(text, start) && boundaryAfter(text, end))) return false;
-  if (hasCredentialWord(before)) return true;
-  if (!inRun && (PASSWORD_FLAG.test(before) || USER_PASSWORD_FLAG.test(before))) return true;
-  const lineEnd = lineEndIndex(text, end);
-  if (hasCredentialWord(text.slice(end, Math.min(lineEnd, end + CREDENTIAL_CONTEXT_CHARS)))) {
-    return true;
+  if (inRun) return hasCredentialWord(before);
+  if (attachedOption) {
+    const command = commandSegment(before);
+    return ATTACHED_P.test(command) && ATTACHED_P_PROGRAM.test(command);
   }
-  if (inRun || !KEY_ONLY_LINE.test(text.slice(lineStart, start))) return false;
+  if (nameLeadsIn(before) || passwordOption(before)) return true;
+  const after = text.slice(end, Math.min(lineEndIndex(text, end), end + CREDENTIAL_CONTEXT_CHARS));
+  if (pipedToPasswordReader(after)) return true;
+  if (lineStart === start - KEY_LINE_MAX_CHARS) return false;
+  const key = KEY_ONLY_LINE.exec(text.slice(lineStart, start))?.[1];
+  if (key === undefined || credentialNameDescribesValue(key)) return false;
   const previousStart = previousLineStartIndex(text, lineStart);
-  return previousStart !== null && hasCredentialWord(text.slice(previousStart, lineStart));
+  if (previousStart === null) return false;
+  const previous = text.slice(previousStart, lineStart).replace(/(?:\\[nr]|[\r\n])+$/u, "");
+  const named = NAMED_ENTRY_LINE.exec(previous)?.[1] ?? SECTION_LINE.exec(previous)?.[1];
+  return named !== undefined && credentialNameSaysSecret(named);
 }
 
 function matchPosition(

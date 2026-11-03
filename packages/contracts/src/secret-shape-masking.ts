@@ -224,18 +224,23 @@ function mixedCase(value: string): boolean {
   return /[A-Z]/.test(value) && /[a-z]/.test(value);
 }
 
-/** `Basic <base64>` is a credential only when it decodes to `user:password`. */
 /** `YOUR_ACCESS_TOKEN_HERE_123`: a placeholder in docs and examples. */
 const ALL_CAPS_PLACEHOLDER = /^[A-Z0-9]+(?:_[A-Z0-9]+)+$/;
+/** A relative or absolute path, or a file name: `../fixtures/token-2024.json`. */
+const FILE_PATH = /^(?:\.{1,2}\/|\/[a-z][a-z0-9_.-]*\/)/;
+const FILE_EXTENSION =
+  /\.(?:json|ya?ml|toml|ini|cfg|conf|env|txt|md|log|pem|crt|key|xml|html?|[cm]?[jt]sx?|py|rb|go|rs|sh)$/i;
 
 /**
  * Whether the word after `Bearer` or `token` is a token rather than code,
  * a path or prose: `this.session.token2` (unless one part is a long random
  * run), `tokens/session-2024/abcdef12` (a lower-case path of short segments),
- * `YOUR_ACCESS_TOKEN_HERE_123` and `authentication2024spec` (neither mixed
- * case, nor long, nor a quarter digits) are not.
+ * `../fixtures/token-2024.json` (a file path), `YOUR_ACCESS_TOKEN_HERE_123`
+ * and `authentication2024spec` (neither mixed case, nor long, nor a quarter
+ * digits) are not.
  */
 function bearerValue(value: string): boolean {
+  if (FILE_PATH.test(value) || FILE_EXTENSION.test(value)) return false;
   if (MEMBER_ACCESS.test(value) && !value.split(".").some((part) => part.length >= 20)) {
     return false;
   }
@@ -247,6 +252,7 @@ function bearerValue(value: string): boolean {
   return mixedCase(value) || value.length >= 32 || digits * 4 >= value.length;
 }
 
+/** `Basic <base64>` is a credential only when it decodes to `user:password`. */
 function basicCredential(value: string): boolean {
   if (!/^[A-Za-z0-9+/]+={0,2}$/.test(value) || value.length % 4 !== 0) return false;
   try {

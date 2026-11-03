@@ -7,49 +7,12 @@
  * Pure and isomorphic: the web item editor, the vault service and the agent
  * runtime use the same rules.
  */
+import { credentialNameSaysSecret, credentialNameWords } from "./credential-names";
 import { detectSecretShapes, SECRET_SHAPE_KINDS } from "./secret-shape-masking";
 import { secretValueEntropyBits, secretValueStrength } from "./secret-value-masking";
 
-/** A word of a variable, header or field name that says it holds a credential. */
-const SECRET_NAME_WORD =
-  /^(?:tokens?|secrets?|passwords?|passwd|passphrase|passcode|pass|pwd|pw|keys?|apikey|credentials?|creds|auth|authorization|authentication|session|cookies?|bearer|private|signature|jwt)$/iu;
-/**
- * A compound word that ends with one: `PGPASSWORD`, `ACCESSKEY`, `AUTHTOKEN`,
- * `CLIENTSECRET`, `JSESSIONID`.
- */
-const SECRET_NAME_SUFFIX = /(?:token|secret|password|passwd|key|cookie|signature|sessionid)$/iu;
-/**
- * The last word says the value names, locates or describes something:
- * `GIT_AUTHOR_NAME`, `SESSION_NAME`, `TOKEN_ENDPOINT`, `KEY_ALGORITHM`.
- */
-const NON_SECRET_LAST_WORD =
-  /^(?:names?|user|username|email|host|hostname|url|uri|endpoint|region|path|file|dir|type|kind|mode|version|prefix|scopes?|expiry|expires|expiration|ttl|timeout|length|format|algorithm|issuer|audience|domain|port|method|provider|scheme|strategy)$/iu;
 /** Identifiers of a credential, which are not the credential: `api key id`, `key number`. */
 const IDENTIFIER_LAST_WORD = /^(?:ids?|number|no|fingerprint|hint|label)$/iu;
-
-/** The words of a name, trailing digits dropped: `API_KEY2` is `API`, `KEY`. */
-function nameWords(name: string): string[] {
-  return name
-    .replace(/([a-z0-9])([A-Z])/gu, "$1 $2")
-    .split(/[^A-Za-z0-9]+/u)
-    .map((word) => word.replace(/[0-9]+$/u, ""))
-    .filter((word) => word.length > 0);
-}
-
-/**
- * Whether a variable or header name says its value is a credential, word by
- * word (`_`, `-`, `.`, spaces and camelCase separate words), so `AUTH` does
- * not match inside `GIT_AUTHOR_NAME` and `SESSION_NAME` names a session.
- */
-export function credentialNameSaysSecret(name: string): boolean {
-  if (typeof name !== "string") return false;
-  const words = nameWords(name);
-  if (words.length === 0) return false;
-  if (NON_SECRET_LAST_WORD.test(words[words.length - 1]!)) return false;
-  return words.some(
-    (word) => SECRET_NAME_WORD.test(word) || (word.length > 4 && SECRET_NAME_SUFFIX.test(word)),
-  );
-}
 
 export type PlainFieldSecretHint = {
   /** `format`: a known token or key format; `random`: a long random value; `name`: the field's name. */
@@ -146,14 +109,16 @@ export function plainFieldSecretHint(
         message: contains ? `Contains ${withArticle(label)}.` : `Looks like ${withArticle(label)}.`,
       };
     }
-    if (looksRandomSecret(text)) {
+    const words = credentialNameWords(typeof fieldName === "string" ? fieldName : "");
+    const last = words[words.length - 1];
+    // A fingerprint or key id is random but identifies a key; it is not one.
+    const identifier = last !== undefined && IDENTIFIER_LAST_WORD.test(last);
+    if (!identifier && looksRandomSecret(text)) {
       return { reason: "random", message: "Looks like a key or password." };
     }
-    const words = nameWords(typeof fieldName === "string" ? fieldName : "");
-    const last = words[words.length - 1];
     if (
       last &&
-      !IDENTIFIER_LAST_WORD.test(last) &&
+      !identifier &&
       !words.some((word) => /^public$/iu.test(word)) &&
       credentialNameSaysSecret(fieldName)
     ) {

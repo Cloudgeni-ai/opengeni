@@ -37,7 +37,7 @@ describe("value strength", () => {
       `${WORD}2024`,
       `${WORD[0]!.toUpperCase()}${WORD.slice(1)}1!`,
       WORD.toUpperCase(),
-      "abcdefgh",
+      "sunshine",
       `${WORD}.example.com`,
       `${WORD}@example.com`,
       `/srv/${WORD}/data`,
@@ -70,7 +70,10 @@ describe("value strength", () => {
       "./Xk9#mQ2$vLp4Rt8",
       // A passphrase of three or more words, and a run of letters that is not a word.
       "correct horse battery staple",
+      "wiry-unwound-cable",
       "qkzvmxbtwe",
+      "CruPjtBwrw",
+      "FXIOFWLOJA",
       // A saved URL with a password in it.
       `${scheme("postgres")}app:${WORD}@db.example.com/app`,
     ]) {
@@ -104,6 +107,28 @@ describe("value strength", () => {
     }
     expect(weak).toEqual([]);
   });
+
+  test("random letters rarely read as words", () => {
+    let seed = 11;
+    const next = () => {
+      seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
+      return seed / 2_147_483_648;
+    };
+    const lower = "abcdefghijklmnopqrstuvwxyz";
+    for (const alphabet of [lower, `${lower}${lower.toUpperCase()}`, `${lower}0123456789`]) {
+      for (const length of [10, 16, 24]) {
+        let weak = 0;
+        for (let sample = 0; sample < 1_000; sample += 1) {
+          let value = "";
+          for (let index = 0; index < length; index += 1) {
+            value += alphabet[Math.floor(next() * alphabet.length)];
+          }
+          if (secretValueStrength(value) === "weak") weak += 1;
+        }
+        expect([alphabet.length, length, weak <= 30]).toEqual([alphabet.length, length, true]);
+      }
+    }
+  });
 });
 
 describe("a weak saved value", () => {
@@ -125,6 +150,26 @@ describe("a weak saved value", () => {
       `the monkey ate ${WORD} today`,
       `- name: DB_HOST\n  value: ${WORD}.example.com\n`,
       `- name: DB_HOST\n  value: ${WORD}\n`,
+      // Options that do not take a password.
+      `mkdir -p ${WORD}`,
+      `cp -a ${WORD} /backup`,
+      `ls -a ${WORD}`,
+      `grep -a ${WORD} log.txt`,
+      `git add -p ${WORD}`,
+      `docker compose -p ${WORD} up -d`,
+      `docker run --user www:${WORD} img`,
+      // A credential word after the value, with no pipe.
+      `${WORD} token refresh failed`,
+      `cd ${WORD} && npm run token:refresh`,
+      `${WORD}: api key rotated`,
+      // Lines that only mention a key, a token or auth.
+      `id SERIAL PRIMARY KEY, ${WORD} TEXT`,
+      `FOREIGN KEY (x) REFERENCES ${WORD}(id)`,
+      `fix token refresh in ${WORD}`,
+      `the auth service ${WORD} is down`,
+      `PWA build of ${WORD}`,
+      `# rotate the api key\nproject: ${WORD}`,
+      `password_policy:\n  name: ${WORD}`,
     ];
     for (const text of unchanged) expect(memory.maskText(text)).toBe(text);
   });
@@ -153,7 +198,7 @@ describe("a weak saved value", () => {
       [`passwords: ${WORD}`, `passwords: ${LABEL}`],
       // Password options.
       [`mysql -u app -p${WORD} app`, `mysql -u app -p${LABEL} app`],
-      [`mysql -u app -p ${WORD} app`, `mysql -u app -p ${LABEL} app`],
+      [`sshpass -p ${WORD} ssh app@host`, `sshpass -p ${LABEL} ssh app@host`],
       [`redis-cli -a ${WORD} ping`, `redis-cli -a ${LABEL} ping`],
       [`curl -u admin:${WORD} https://x.test`, `curl -u admin:${LABEL} https://x.test`],
       [`curl --user admin:${WORD} https://x.test`, `curl --user admin:${LABEL} https://x.test`],
@@ -168,8 +213,28 @@ describe("a weak saved value", () => {
         `- name: DB_PASSWORD\n  value: ${LABEL}\n- name: DB_HOST`,
       ],
       [`credentials:\n  admin: ${WORD}\nother: 1`, `credentials:\n  admin: ${LABEL}\nother: 1`],
+      [
+        `"env": [\n  {\n    "name": "DB_PASSWORD",\n    "value": "${WORD}"\n  }`,
+        `"env": [\n  {\n    "name": "DB_PASSWORD",\n    "value": "${LABEL}"\n  }`,
+      ],
+      // Compound names, directives, statements, cookies and htpasswd.
+      [`requirepass ${WORD}`, `requirepass ${LABEL}`],
+      [`masterauth ${WORD}`, `masterauth ${LABEL}`],
+      [`$dbpass = '${WORD}';`, `$dbpass = '${LABEL}';`],
+      [`apikey=${WORD}`, `apikey=${LABEL}`],
+      [`clientsecret=${WORD}`, `clientsecret=${LABEL}`],
+      [`accesstoken: ${WORD}`, `accesstoken: ${LABEL}`],
+      [`echo 'app:${WORD}' | chpasswd`, `echo 'app:${LABEL}' | chpasswd`],
+      [`login app password ${WORD}`, `login app password ${LABEL}`],
+      [`the password is ${WORD}.`, `the password is ${LABEL}.`],
+      [`deploy --password ${WORD} --yes`, `deploy --password ${LABEL} --yes`],
+      [`Cookie: theme=dark; sid=${WORD}`, `Cookie: theme=dark; sid=${LABEL}`],
+      [`htpasswd -b .htpasswd admin ${WORD}`, `htpasswd -b .htpasswd admin ${LABEL}`],
     ];
     for (const [text, masked] of cases) expect(memory.maskText(text)).toBe(masked);
+    // Its whole base64 encoding, as in a Kubernetes Secret, is replaced anywhere.
+    const secret = `kind: Secret\ndata:\n  db: ${base64(WORD)}\n`;
+    expect(memory.maskText(secret)).toBe(`kind: Secret\ndata:\n  db: ${LABEL}\n`);
     // Inside a base64 run (Basic auth): the encoded value is replaced in the run.
     const basic = `Authorization: Basic ${base64(`app:${WORD}`)}`;
     expect(memory.maskText(basic)).toContain(LABEL);

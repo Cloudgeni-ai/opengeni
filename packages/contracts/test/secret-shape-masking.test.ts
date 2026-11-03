@@ -707,6 +707,7 @@ describe("more provider formats and authorization headers", () => {
       "auth: token cache/v2/sessions/abc123def456",
       "the Bearer authentication2024spec here",
       "Authorization: Bearer YOUR_ACCESS_TOKEN_HERE_123",
+      "Bearer ../../fixtures/token-2024-abc.json",
     ]) {
       expect([text, kinds(text)]).toEqual([text, []]);
     }

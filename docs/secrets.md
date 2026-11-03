@@ -400,10 +400,12 @@ Each agent attempt keeps one memory of secret values (`SecretValueMemory`):
   (`Authorization`, `Proxy-Authorization`, `Cookie`, and names with a word
   such as token, key, secret, auth, password, session or signature). Names
   are read word by word (`_`, `-`, `.` and camelCase separate words; a word
-  may end in one, as in `PGPASSWORD` or `JSESSIONID`, and trailing digits
-  are ignored, as in `API_KEY2`), so `GIT_AUTHOR_NAME` is not a
-  credential, and a name whose last word says it names or locates something
-  (`SESSION_NAME`, `TOKEN_ENDPOINT`, `AUTH_METHOD`) is not either. Headers
+  may end in one, as in `PGPASSWORD`, `DBPWD`, `OAUTH` or `JSESSIONID`, or
+  start with one, as in `TOKENVALUE`, and trailing digits are ignored, as in
+  `API_KEY2`), so `GIT_AUTHOR_NAME` is not a credential, and neither is a
+  name whose last word says the value is a name or label (`SESSION_NAME`).
+  Names ending in `_FILE`, `_PATH`, `_DIR`, `_URL` or `_ENDPOINT` locate a
+  credential and are skipped. Headers
   such as `Accept` are not remembered. The label is a marker such as
   `[opengeni credential: codemode token]`.
 - Best effort, the hosted vault values of secrets the session's root tree
@@ -436,33 +438,42 @@ field) reveals both the encoded and the decoded text. Only Opengeni's own
 ### Matching
 
 - Each value is first rated by strength. Distinctive values (tokens, keys,
-  random or strong passwords, passphrases of three or more words, digit-only
-  card and account numbers) almost never appear in unrelated text and are
-  searched for anywhere, in every form below. Weak values do appear in
-  unrelated text: one or two words with up to four digits and a symbol
-  (`admin123`, `Password1!`), a camelCase or snake_case name of up to three
-  parts, a host, email, URL or path made only of such names and numbers, or a
-  long but repetitive string (entropy under half of what its length and
-  alphabet allow). A run of six or more letters counts as a word only when it
-  reads as one (no five consonants in a row, a vowel in every five letters),
-  so random letters stay distinctive. A weak value is replaced only where it
-  is the credential: alone on its line; the password of a URL
-  (`scheme://user:<value>@`); after a password option (`-p<value>`,
-  `-p <value>`, `-a <value>`, `-u user:<value>`, `--user user:<value>`); or a
-  whole token with a credential word (password, passcode, pwd, pw, secret,
-  token, key, auth, credential, bearer) at the start of a word earlier on the
-  same line within 80 characters (`password=…`, `PGPASSWORD: …`,
-  `"token": "…"`, `Server=db;Password=…;Database=app`), after it past a pipe
-  (`echo '…' | docker login --password-stdin`), or on the line before when
-  its own line is only a key (`- name: DB_PASSWORD` then `value: …`). `;`,
-  `,` and `&` always end a token. Inside a base64 run (a Basic auth header)
-  the credential word is enough. A weak value is never replaced inside an
-  identifier, a file name, a path, a host or a URL segment, so a saved
-  dictionary word no longer rewrites unrelated paths and code. In tool
-  output, the shape detectors below also catch a weak password inside a URL
-  or a connection string; model input and stored history rely on the
-  positions above. Browser and desktop typed values and the history scrub
-  search weak values anywhere, as before.
+  random or strong passwords, passphrases of three or more words,
+  digit-only card and account numbers) almost never appear in unrelated
+  text and are searched for anywhere, in every form below. Weak values do
+  appear in unrelated text: one or two words with up to four digits and a
+  symbol (`admin123`, `Password1!`), a camelCase name, a snake_case or
+  kebab-case name of two parts (or three with a number, `deploy-bot-01`), a
+  host, email, URL or path made only of such names and numbers, or a long
+  but repetitive string (entropy under half of what its length and alphabet
+  allow). Letters count as words only when their letter pairs are mostly
+  common English pairs (at most one uncommon pair in five), so random
+  letters such as `qkzvmxbtwe` stay distinctive. A weak value is replaced
+  only where it is the credential:
+  - alone on its line, or as the password of a URL (`scheme://user:<value>@`);
+  - as a whole token that a credential name leads into: `password=…`,
+    `PGPASSWORD: …`, `"token": "…"`, `Server=db;Password=…;Database=app`,
+    `--password …`, "the password is …", `requirepass …`, `password …`
+    (netrc), `Authorization: Bearer …`, `Cookie: sid=…`. The name is read
+    word by word, as below; `;`, `,` and `&` end a token;
+  - after a password option of a program that takes one: `mysql -p…`,
+    `sshpass -p …`, `redis-cli -a …`, `curl -u user:…`, `htpasswd -b file
+    user …` (`mkdir -p` and `ls -a` are not);
+  - piped into a command whose name or option names a credential
+    (`echo '…' | docker login --password-stdin`, `| chpasswd`);
+  - as the value of a key whose line follows one naming a credential
+    (`- name: DB_PASSWORD` then `value: …`, `credentials:` then `admin: …`),
+    unless the key itself names something (`name:`, `host:`);
+  - inside a base64 run (a Basic auth header) after a credential word on
+    its line. The whole base64 encoding of a weak value (a Kubernetes
+    Secret's data) is replaced anywhere.
+
+  A weak value is never replaced inside an identifier, a file name, a path,
+  a host or a URL segment, or as a word on a line that only mentions a key or
+  token, so a saved dictionary word no longer rewrites unrelated paths, code
+  and prose. In tool output, the shape detectors below also catch a weak
+  password inside a URL or a connection string. Browser and desktop typed
+  values and the history scrub search weak values anywhere, as before.
 - Each value is searched as written, trimmed, line by line, JSON-escaped (once and twice), percent-encoded (URI
   component, `+` for spaces, form encoding) and base64 (standard and URL-safe,
   standalone and inside a longer base64 run such as a Basic auth header).
@@ -669,6 +680,9 @@ known).
   as written and masked when a later attempt reads it.
 - A weak value alone on a line is still replaced, for example a directory
   name in `ls` output that is the same word as a saved password.
+- A weak value is kept as written in positions not listed above, such as a
+  `.pgpass` line (`host:5432:db:user:…`) or a positional argument
+  (`connect(host, "app", "…")`).
 - Multi-line credential files, values shorter than 8 characters and earlier
   values from connected vaults are not searched.
 - A value the agent read with `secret_get` stays readable for the rest of

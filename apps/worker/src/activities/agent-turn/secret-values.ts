@@ -19,7 +19,7 @@
 import {
   rememberingSecretResolver,
   SecretValueMemory,
-  credentialNameSaysSecret,
+  credentialNameMayHoldSecret,
   secretCredentialMaskLabel,
   type SecretPrincipal,
   type SecretResolver,
@@ -158,7 +158,7 @@ export function rememberRunCredentialMaterial(
       if (
         typeof value === "string" &&
         value.length >= RUN_CREDENTIAL_MIN_CHARS &&
-        credentialNameSaysSecret(name) &&
+        credentialNameMayHoldSecret(name) &&
         !CREDENTIAL_LOCATION_NAME.test(name) &&
         !PATH_VALUE.test(value)
       ) {
@@ -176,7 +176,7 @@ export function rememberRunCredentialMaterial(
         if (
           typeof value === "string" &&
           value.length >= RUN_CREDENTIAL_MIN_CHARS &&
-          credentialNameSaysSecret(name)
+          credentialNameMayHoldSecret(name)
         ) {
           rememberAttemptCredential(memory, value, "mcp header");
         }
