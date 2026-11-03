@@ -568,6 +568,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
             onOp: machineOpObserver.observer,
             onSandboxOperation: sandboxOperationObserver,
             onSandboxCaptureWait: sandboxCaptureWaitMetricObserver(observability),
+            observability,
             opJournal,
           },
           {
@@ -644,6 +645,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
               onOp: machineOpObserver.observer,
               onSandboxOperation: sandboxOperationObserver,
               onSandboxCaptureWait: sandboxCaptureWaitMetricObserver(observability),
+              observability,
               onHomeSandboxRebound,
               ...(runtimeCancellationSignal ? { waitSignal: runtimeCancellationSignal } : {}),
             },
@@ -673,16 +675,6 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                 sandboxId: activeSandboxPointer!.activeSandboxId!,
                 epoch: activeSandboxPointer!.activeEpoch,
               },
-              // HOME semantics for a mid-turn clear-to-null: only a genuine
-              // machine-HOME session (its home IS this machine, session.sandboxBackend
-              // === "selfhosted") resolves null back to the pinned machine. A Modal-HOME
-              // session merely PINNED to a machine this turn never established its group
-              // box, so defaultIsHome:false makes a clear-to-null fail typed
-              // (`home_unavailable_this_turn`) rather than silently serving the machine.
-              // Failure settlement checkpoints the completed detach and continues the same
-              // logical turn in a fresh home-primary attempt; it never serves this machine
-              // after the pointer changed and never invents a cloud lease for machine-only work.
-              defaultIsHome: session.sandboxBackend === "selfhosted",
             },
             established,
           ),
@@ -908,6 +900,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
               opJournal,
               onSandboxOperation: sandboxOperationObserver,
               onSandboxCaptureWait: sandboxCaptureWaitMetricObserver(observability),
+              observability,
               onHomeSandboxLost: publishSandboxLost,
               onHomeSandboxRebound,
               ...(runtimeCancellationSignal ? { waitSignal: runtimeCancellationSignal } : {}),
@@ -1346,6 +1339,7 @@ export async function bindLazySandboxProvisioner(
         onOp: machineOpObserver.observer,
         onSandboxOperation: sandboxOperationObserver,
         onSandboxCaptureWait: sandboxCaptureWaitMetricObserver(observability),
+        observability,
         onHomeSandboxLost: publishSandboxLost,
         onHomeSandboxRebound,
         ...(runtimeCancellationSignal ? { waitSignal: runtimeCancellationSignal } : {}),
