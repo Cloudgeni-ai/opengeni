@@ -26,7 +26,6 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use futures::TryStreamExt as _;
 use object_store::{ClientOptions, ObjectStore, PutMode, PutOptions, path::Path};
 
 use crate::{
@@ -43,8 +42,10 @@ pub const MAX_POINTER_BYTES: usize = 64 * 1024;
 
 mod carried;
 mod pointers;
+mod records;
 
 pub use carried::{Held, Kept};
+pub use records::RECORDS;
 
 #[cfg(test)]
 pub(crate) use crate::pointer_store::unstamped;
@@ -929,26 +930,7 @@ impl ChunkStore {
 
     /// Every object stored in `area`.
     pub async fn list(&self, area: Area) -> Result<Vec<Listed>> {
-        let prefix = self.path(area.prefix());
-        self.backend
-            .list(Some(&prefix))
-            .map_err(Error::from)
-            .and_then(|meta| async move {
-                let key = meta
-                    .location
-                    .prefix_match(&self.prefix)
-                    .map(|parts| parts.map(|part| part.as_ref().to_owned()))
-                    .ok_or(Error::Invalid("listed object outside the store"))?
-                    .collect::<Vec<_>>()
-                    .join("/");
-                Ok(Listed {
-                    key,
-                    stored_at: meta.last_modified.into(),
-                    size: meta.size,
-                })
-            })
-            .try_collect()
-            .await
+        self.list_under(area.prefix()).await
     }
 
     /// Deletes the chunk or manifest at `key` (as a listing gives it), with

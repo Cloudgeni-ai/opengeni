@@ -1,6 +1,8 @@
 # 28. Stored objects carry their hour, and the sweep runs hourly
 
-Status: Accepted, 2026-11-02. Amends
+Status: Accepted, 2026-11-02. Amended by
+[29](0029-a-sweep-lists-each-period-once.md): how a sweep finds what to
+delete. Amends
 [25](0025-pointers-in-the-control-service-and-objects-by-day.md): what a
 name's period is, and how long after it a sweep may delete.
 
@@ -93,5 +95,6 @@ before it began, whatever the period's length.
 - Any two clocks must stay within `CLOCK_SKEW` of each other, where a
   day's margin hid a disagreement of two hours. In a fleet every host and
   sweep reads the database's clock.
-- A sweep lists the whole store each hour: about eight minutes and a few
-  thousand list requests for 2.5 million objects.
+- A sweep listed the whole store each hour, which a large, slow store
+  could not finish. [ADR 29](0029-a-sweep-lists-each-period-once.md)
+  lists each period once instead, and everything once a day.
