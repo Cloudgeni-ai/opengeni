@@ -161,7 +161,7 @@ const EVENTS: McpTrustedIssuerEvent[] = [
     outcome: "refused",
     reason: "no_matching_member",
     person: null,
-    email: "contractor@gmail.com",
+    email: "contractor@outside.example",
     clientName: "Claude",
     at: ago(60 * 26),
   },
