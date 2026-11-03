@@ -39,6 +39,6 @@ export async function copyTitle(title: string): Promise<void> {
     await writeClipboard(title);
     toast.success("Title copied");
   } catch (error) {
-    toast.error("Couldn't copy the title.", { description: errorMessage(error) });
+    toast.error("Couldn't copy the title.", { description: userErrorText(error) });
   }
 }
