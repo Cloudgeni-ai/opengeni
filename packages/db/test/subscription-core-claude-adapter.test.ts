@@ -5,6 +5,7 @@
 // network: the global fetch is denied for the whole file.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
+  CLAUDE_OAUTH_PROFILE_URL,
   CLAUDE_OAUTH_TOKEN_URL,
   claudeSubscriptionCapacity,
   emptyClaudeUsage,
@@ -234,6 +235,16 @@ describe("Claude adapter", () => {
           expires_in: 3600,
           scope: "user:inference user:profile",
         }),
+      // The renewed token reads the plan from the profile: the Max tier
+      // tells Max (5x) from Ultra (20x).
+      () =>
+        json(200, {
+          account: { uuid: identity.accountUuid, has_claude_max: true },
+          organization: {
+            organization_type: "claude_max",
+            rate_limit_tier: "default_claude_max_20x",
+          },
+        }),
       // A response without a refresh token keeps the current one.
       () =>
         json(200, {
@@ -241,11 +252,13 @@ describe("Claude adapter", () => {
           expires_in: 7200,
           scope: "user:profile user:inference",
         }),
+      // A profile outage never fails the renewal: the recorded plan stays.
+      () => json(503, { error: "unavailable" }),
     ]);
     const now = Date.parse("2026-10-11T09:59:30.000Z");
     const { adapter } = subscriptionCoreClaudeProvider({ fetch: endpoint.fetch, now: () => now });
     const first = await adapter.refresh!.rotate(oauthCredential);
-    expect(first.planType).toBeNull();
+    expect(first.planType).toBe("claude_max_20x");
     expect(first.expiresAt?.toISOString()).toBe(new Date(now + 3_600_000).toISOString());
     expect(first.credential).toEqual({
       version: 1,
@@ -262,15 +275,18 @@ describe("Claude adapter", () => {
     expect(second.credential.token).toBe("sk-ant-oat01-access-three");
     // The granted scopes are recorded as the token endpoint reports them.
     expect(second.credential.oauth?.scopes).toEqual(["user:profile", "user:inference"]);
+    expect(second.planType).toBeNull();
     expect(endpoint.calls.map((call) => call.url)).toEqual([
       CLAUDE_OAUTH_TOKEN_URL,
+      CLAUDE_OAUTH_PROFILE_URL,
       CLAUDE_OAUTH_TOKEN_URL,
+      CLAUDE_OAUTH_PROFILE_URL,
     ]);
     expect(endpoint.calls[0]!.body).toMatchObject({
       grant_type: "refresh_token",
       refresh_token: "refresh-one",
     });
-    expect(endpoint.calls[1]!.body).toMatchObject({ refresh_token: "refresh-two" });
+    expect(endpoint.calls[2]!.body).toMatchObject({ refresh_token: "refresh-two" });
   });
 
   test("a revoked grant is a relogin; other refresh failures are not", async () => {
@@ -396,6 +412,34 @@ describe("Claude usage in the shared quota model", () => {
       ["five_hour", "ok"],
       ["seven_day_opus", "unknown"],
       ["seven_day_sonnet", "unknown"],
+    ]);
+  });
+
+  test("a spent weekly Fable limit cools only Fable models, never the account", () => {
+    const decoded = decodeSubscriptionCoreClaudeQuota({
+      observation: parseClaudeUsageResponse(
+        {
+          five_hour: null,
+          seven_day: { utilization: 30, resets_at: new Date(at(86_400) * 1000).toISOString() },
+          seven_day_fable: {
+            utilization: 100,
+            resets_at: new Date(at(7200) * 1000).toISOString(),
+          },
+        },
+        now,
+      )!,
+      refreshGeneration: 4,
+      upstreamModelIds: [...models, "claude-fable-5"],
+    });
+    expect(quotaCapacity(quota(decoded), now.getTime())).toEqual({ kind: "available" });
+    expect(decoded.modelCooldowns).toEqual({
+      "claude/claude-fable-5": at(7200) * 1000,
+      "organization-claude-subscription/claude-fable-5": at(7200) * 1000,
+      "workspace-claude-subscription/claude-fable-5": at(7200) * 1000,
+    });
+    expect(decoded.windows.map((window) => [window.id, window.status])).toEqual([
+      ["seven_day", "ok"],
+      ["seven_day_fable", "unknown"],
     ]);
   });
 

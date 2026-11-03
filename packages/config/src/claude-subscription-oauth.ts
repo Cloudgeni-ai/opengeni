@@ -31,3 +31,52 @@ export function claudeAuthorizationUrl(input: { challenge: string; state: string
   url.searchParams.set("state", input.state);
   return url.toString();
 }
+
+/** The Claude profile endpoint (`user:profile` scope). */
+export const CLAUDE_OAUTH_PROFILE_URL = "https://api.anthropic.com/api/oauth/profile";
+
+/**
+ * The plan id a Claude profile reports. `claude_max` covers both Max tiers
+ * (Max 5x was renamed Max, Max 20x Ultra, in Oct 2026); the organization's
+ * `rate_limit_tier` ("default_claude_max_20x") tells them apart as
+ * `claude_max_20x` or `claude_max_5x`. Without a known tier the id stays
+ * `claude_max`, shown as "Max or Ultra".
+ */
+export function claudeSubscriptionPlanId(input: {
+  organizationType?: string | null | undefined;
+  rateLimitTier?: unknown;
+  hasClaudeMax?: boolean | null | undefined;
+  hasClaudePro?: boolean | null | undefined;
+}): string | null {
+  const plan =
+    input.organizationType?.trim() ||
+    (input.hasClaudeMax === true
+      ? "claude_max"
+      : input.hasClaudePro === true
+        ? "claude_pro"
+        : null);
+  if (plan !== "claude_max" || typeof input.rateLimitTier !== "string") return plan;
+  const tier = /max_?(5|20)x$/i.exec(input.rateLimitTier.trim());
+  return tier ? `claude_max_${tier[1]}x` : plan;
+}
+
+/** The plan id of a profile body; null for any shape it can't read (never throws). */
+export function claudeSubscriptionProfilePlan(value: unknown): string | null {
+  const record = (item: unknown) =>
+    item && typeof item === "object" && !Array.isArray(item)
+      ? (item as Record<string, unknown>)
+      : null;
+  try {
+    const account = record(record(value)?.account);
+    const organization = record(record(value)?.organization);
+    const type = organization?.organization_type;
+    return claudeSubscriptionPlanId({
+      organizationType: typeof type === "string" && type.length <= 128 ? type : null,
+      rateLimitTier: organization?.rate_limit_tier,
+      hasClaudeMax: account?.has_claude_max === true,
+      hasClaudePro: account?.has_claude_pro === true,
+    });
+  } catch {
+    return null;
+  }
+}

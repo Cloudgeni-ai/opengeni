@@ -4771,6 +4771,7 @@ export type ClaudeUsageWindow = {
     | "seven_day"
     | "seven_day_opus"
     | "seven_day_sonnet"
+    | "seven_day_fable"
     | "seven_day_overage_included"
     | "overage";
   usedPercent: number | null;

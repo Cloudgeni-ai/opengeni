@@ -306,16 +306,28 @@ describe("early reset: availability and the claimed blocks a reading ends", () =
     expect(adapter.usageReadingsComplete).toBe(false);
   });
 
-  test("availability needs both account windows reported below the limit", async () => {
+  test("availability needs each account window below the limit or explicitly absent", async () => {
     expect(
       subscriptionCoreClaudeUsageConfirmsAvailability(
         await read({ five_hour: window(3), seven_day: window(99.9) }),
       ),
     ).toBe(true);
+    // A verified Ultra plan has no five-hour limit: the endpoint answers null.
+    expect(
+      subscriptionCoreClaudeUsageConfirmsAvailability(
+        await read({ five_hour: null, seven_day: window(41), seven_day_opus: null }),
+      ),
+    ).toBe(true);
     for (const body of [
+      // An omitted window is not evidence that it has no limit.
       { five_hour: window(3) },
       { seven_day: window(41) },
-      { five_hour: window(3), seven_day: null },
+      // A reached limit stays reached beside a window without a limit.
+      { five_hour: null, seven_day: window(100) },
+      { five_hour: window(100), seven_day: null },
+      // Some window must be reported below the limit.
+      { five_hour: null, seven_day: null },
+      { five_hour: null, seven_day: { utilization: null, resets_at: null } },
       { five_hour: window(100), seven_day: window(41) },
       { five_hour: window(3), seven_day: window(100) },
       {
@@ -333,6 +345,17 @@ describe("early reset: availability and the claimed blocks a reading ends", () =
     ]) {
       expect(subscriptionCoreClaudeUsageConfirmsAvailability(response)).toBe(false);
     }
+  });
+
+  test("an explicitly absent window never ends a block that claims it", async () => {
+    const ultra = await read({ five_hour: null, seven_day: window(41) });
+    const ends = subscriptionCoreClaudeUsageEndsClaimedBlock(ultra);
+    // The weekly limit that refused the account has reset early: it ends.
+    expect(ends(block(ultra, ["seven_day"]))).toBe(true);
+    expect(ends({ ...block(ultra, ["seven_day"]), modelId: null })).toBe(true);
+    // A refusal that named the five-hour limit is not cleared by its null.
+    expect(ends(block(ultra, ["five_hour"]))).toBe(false);
+    expect(ends({ ...block(ultra, ["five_hour", "seven_day"]), modelId: null })).toBe(false);
   });
 
   test("a block ends only when every window it claims is reported below the limit", async () => {

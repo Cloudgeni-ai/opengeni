@@ -42,6 +42,7 @@ import type {
 import {
   claudeRefreshedCredential,
   ClaudeSubscriptionReconnectRequired,
+  requestClaudeProfilePlan,
   requestClaudeTokenRefresh,
 } from "./subscription-core-claude-oauth";
 import { subscriptionCoreDefaultErrors } from "./subscription-core/errors";
@@ -194,8 +195,14 @@ export function subscriptionCoreClaudeAdapter(
         // as ClaudeSubscriptionReconnectRequired, anything else as retryable.
         const tokens = await requestClaudeTokenRefresh(credential, deps.fetch ?? globalThis.fetch);
         const rotated = claudeRefreshedCredential(credential, tokens, now());
-        // Claude's refresh reports no plan; the recorded plan stays.
-        return { ...rotated, planType: null };
+        // Claude's refresh reports no plan: read it from the profile with the
+        // new token. Unknown (no scope, any failure): the recorded plan stays.
+        const planType = await requestClaudeProfilePlan(
+          rotated.credential.token,
+          rotated.credential.oauth?.scopes ?? [],
+          deps.fetch ?? globalThis.fetch,
+        );
+        return { ...rotated, planType };
       },
       reloginMessage(error) {
         return error instanceof ClaudeSubscriptionReconnectRequired ? error.message : null;
@@ -209,8 +216,9 @@ export function subscriptionCoreClaudeAdapter(
     usageReadingsComplete: false,
     // The usage endpoint is authoritative for the plan limits it reports:
     // Anthropic can reset a limit before the reset a refused request
-    // reported. A reading that reports both account windows below the limit
-    // ends, before that stale reset, each stored block whose claimed limits
+    // reported. A reading that reports each account window below the limit,
+    // or explicitly without one (a verified Ultra plan has no five-hour
+    // window), ends, before that stale reset, each stored block whose claimed limits
     // (`QuotaBlockClaim`) it reports below the limit; an unclaimed block
     // runs to its own end.
     usageReadEndsQuotaExhaustion: true,
@@ -245,6 +253,7 @@ const ACCOUNT_WINDOWS = new Set(["five_hour", "seven_day"]);
 const FAMILY_WINDOWS: Record<string, RegExp> = {
   seven_day_opus: /^claude-opus-/,
   seven_day_sonnet: /^claude-sonnet-/,
+  seven_day_fable: /^claude-fable-/,
 };
 const allowed = (status: string | null | undefined) =>
   status === "allowed" || status === "allowed_warning";
@@ -287,7 +296,7 @@ function addClaim(current: Set<string> | null | undefined, claim: string | null)
  * - The account windows (five hours, seven days) decide the connection's
  *   capacity: `rejected`, or full without a status, is `exhausted` until its
  *   reset (a minute when the reset is unknown).
- * - A model-family window (Opus, Sonnet) limits only that family: when full
+ * - A model-family window (Opus, Sonnet, Fable) limits only that family: when full
  *   or rejected it becomes a cooldown of each listed model of the family, and
  *   the window itself is reported with `unknown` status so it never decides
  *   the account's capacity. The paid overage windows never block.

@@ -7,6 +7,8 @@
  * database access and no legacy table.
  */
 import {
+  CLAUDE_OAUTH_PROFILE_URL,
+  claudeSubscriptionProfilePlan,
   CLAUDE_OAUTH_CLIENT_ID,
   CLAUDE_OAUTH_SCOPES,
   CLAUDE_OAUTH_TOKEN_URL,
@@ -110,4 +112,36 @@ export function claudeRefreshedCredential(
     }),
     expiresAt,
   };
+}
+
+/**
+ * The plan a renewed Claude sign-in reports, from the profile endpoint:
+ * Claude's token refresh reports none, so a plan change (or the Max tier,
+ * Max or Ultra) shows after the next renewal instead of only on a new
+ * sign-in. Optional: without the `user:profile` scope, or on any failure, it
+ * is null and the recorded plan stays. Never throws.
+ */
+export async function requestClaudeProfilePlan(
+  token: string,
+  scopes: readonly string[],
+  fetchImpl: typeof fetch = globalThis.fetch,
+): Promise<string | null> {
+  if (!scopes.includes("user:profile")) return null;
+  try {
+    const signal = AbortSignal.timeout(5_000);
+    const response = await fetchImpl(CLAUDE_OAUTH_PROFILE_URL, {
+      headers: { authorization: `Bearer ${token}`, accept: "application/json" },
+      redirect: "error",
+      signal,
+    });
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      return null;
+    }
+    return claudeSubscriptionProfilePlan(
+      await readResponseJsonBounded<unknown>(response, 64 * 1024, "Claude profile", { signal }),
+    );
+  } catch {
+    return null;
+  }
 }

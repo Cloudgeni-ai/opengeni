@@ -29,6 +29,30 @@ test("profile retains provider email and plan while excluding other fields", () 
     parseClaudeSubscriptionProfile({ account: { uuid: accountUuid, email: "invalid" } }),
   ).toBeNull();
 });
+test("the Max tier tells Max from Ultra; an unknown tier stays Max or Ultra", () => {
+  const plan = (organization: Record<string, unknown>, account: Record<string, unknown> = {}) =>
+    parseClaudeSubscriptionProfile({ account: { uuid: accountUuid, ...account }, organization })!
+      .plan;
+  expect(plan({ organization_type: "claude_max", rate_limit_tier: "default_claude_max_20x" })).toBe(
+    "claude_max_20x",
+  );
+  expect(plan({ organization_type: "claude_max", rate_limit_tier: "default_claude_max_5x" })).toBe(
+    "claude_max_5x",
+  );
+  expect(plan({ rate_limit_tier: "default_claude_max_20x" }, { has_claude_max: true })).toBe(
+    "claude_max_20x",
+  );
+  // No tier, or one this build doesn't know: the bare id ("Max or Ultra").
+  expect(plan({ organization_type: "claude_max" })).toBe("claude_max");
+  expect(plan({ organization_type: "claude_max", rate_limit_tier: "default_claude_ai" })).toBe(
+    "claude_max",
+  );
+  expect(plan({ organization_type: "claude_max", rate_limit_tier: 20 })).toBe("claude_max");
+  // A tier never turns another plan into Max.
+  expect(plan({ organization_type: "claude_pro", rate_limit_tier: "default_claude_max_20x" })).toBe(
+    "claude_pro",
+  );
+});
 test("inference-only setup token makes no profile request", async () => {
   let calls = 0;
   const fetchImpl = (async () => {

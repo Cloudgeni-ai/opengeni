@@ -13677,7 +13677,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"five_hour\\\"\",\"\\\"overage\\\"\",\"\\\"seven_day\\\"\",\"\\\"seven_day_opus\\\"\",\"\\\"seven_day_overage_included\\\"\",\"\\\"seven_day_sonnet\\\"\"]"
+        "$": "enum=[\"\\\"five_hour\\\"\",\"\\\"overage\\\"\",\"\\\"seven_day\\\"\",\"\\\"seven_day_fable\\\"\",\"\\\"seven_day_opus\\\"\",\"\\\"seven_day_overage_included\\\"\",\"\\\"seven_day_sonnet\\\"\"]"
       }
     },
     "ClearWorkspaceAllowanceRequest": {
@@ -40791,6 +40791,7 @@
       "UsageReadout": "value",
       "UsageReset": "type",
       "usageResets": "value",
+      "UsageTrack": "value",
       "usageValueText": "value",
       "UsageWindowReading": "type"
     },
