@@ -21,13 +21,80 @@ function stem(word: string): string {
 }
 
 function words(text: string): string[] {
+  return rawWords(text)
+    .filter((w) => w.length > 1 && !STOPWORDS.has(w) && !/^[a-f0-9]{16,}$/.test(w))
+    .map(stem);
+}
+
+/** Lowercased words before stopword removal and stemming. */
+function rawWords(text: string): string[] {
   return text
     .normalize("NFKC")
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
     .toLowerCase()
     .split(/[^\p{L}\p{N}]+/u)
-    .filter((w) => w.length > 1 && !STOPWORDS.has(w) && !/^[a-f0-9]{16,}$/.test(w))
-    .map(stem);
+    .filter(Boolean);
+}
+
+const RAW_OPERATION_WORDS =
+  "get read retrieve fetch inspect show view list browse enumerate search find lookup create make add insert spawn update edit change set modify configure save delete remove destroy pause stop halt resume continue unpause send post deliver run execute trigger";
+const OPERATION_PREFIXES = RAW_OPERATION_WORDS.split(" ").sort((a, b) => b.length - a.length);
+
+/**
+ * Split a name word that runs several words together, as lowercased
+ * operationIds do (`createmessages`, `listlists`, `getitemscontent`), into
+ * words the tool itself uses: operation verbs and words of its own
+ * description and parameters. A word the tool uses whole stays whole, and
+ * nothing is split by a global dictionary, so ordinary names keep their
+ * meaning. A two-letter connective (`getbypath`) may join two pieces but never
+ * starts or ends a name. Falls back to separating a leading operation verb.
+ */
+function segment(token: string, vocabulary: ReadonlySet<string>): string[] {
+  if (token.length < 6 || vocabulary.has(token) || /\d/.test(token)) return [token];
+  const n = token.length;
+  // best[i]: fewest pieces covering token[0, i), with the last piece's start.
+  const best: Array<{ pieces: number; from: number } | undefined> = [{ pieces: 0, from: -1 }];
+  for (let end = 1; end <= n; end++) {
+    for (let start = 0; start < end; start++) {
+      const before = best[start];
+      if (!before) continue;
+      const piece = token.slice(start, end);
+      const connective = piece.length === 2 && STOPWORDS.has(piece) && start > 0 && end < n;
+      if (!connective && (piece.length < 3 || !vocabulary.has(piece))) continue;
+      const pieces = before.pieces + 1;
+      const current = best[end];
+      if (!current || pieces < current.pieces) best[end] = { pieces, from: start };
+    }
+  }
+  if (best[n] && best[n]!.pieces > 1) {
+    const pieces: string[] = [];
+    for (let end = n; end > 0; end = best[end]!.from)
+      pieces.unshift(token.slice(best[end]!.from, end));
+    return pieces;
+  }
+  const verb = OPERATION_PREFIXES.find((op) => token.startsWith(op) && n - op.length >= 3);
+  return verb ? [verb, token.slice(verb.length)] : [token];
+}
+
+/**
+ * A tool name with run-together words separated by the tool's own
+ * vocabulary. `searchable` also keeps each split word whole, so a query that
+ * repeats the exact name still matches it.
+ */
+function segmentedName(
+  name: string,
+  vocabularyText: string,
+): { words: string; searchable: string } {
+  const vocabulary = new Set([...rawWords(vocabularyText), ...OPERATION_PREFIXES]);
+  const separated: string[] = [];
+  const searchable: string[] = [];
+  for (const token of rawWords(name)) {
+    const pieces = segment(token, vocabulary);
+    separated.push(...pieces);
+    searchable.push(...pieces);
+    if (pieces.length > 1) searchable.push(token);
+  }
+  return { words: separated.join(" "), searchable: [...new Set(searchable)].join(" ") };
 }
 
 // Generic operation vocabulary, not per-tool aliases. Exact words retain greater
@@ -117,19 +184,23 @@ function document(tool: Tool): Document {
   if (tool.type !== "function") throw new Error("Only function tools are searchable");
   // Transport routing hashes are not capability words. Keep readable namespaces.
   const separator = tool.name.lastIndexOf("__");
-  const name = separator < 0 ? tool.name : tool.name.slice(separator + 2);
   // Ranking reads past the account line, so the same tool ranks the same
   // whether or not the turn has several accounts of its connector.
   const description = splitAccountLine(tool.description ?? "").own;
   const lead = description.split(/(?<=[.!?])\s|\n/, 1)[0] ?? "";
   const properties = (tool.parameters as { properties?: Record<string, unknown> }).properties;
+  const parameterNames = Object.keys(properties ?? {}).join(" ");
+  const name = segmentedName(
+    separator < 0 ? tool.name : tool.name.slice(separator + 2),
+    `${description} ${parameterNames}`,
+  );
   const fields = [
-    field(name),
+    field(name.searchable),
     field(lead),
     field(description.slice(lead.length)),
-    field(Object.keys(properties ?? {}).join(" ")),
+    field(parameterNames),
   ];
-  const nameWords = words(name);
+  const nameWords = words(name.words);
   const operationWord = [nameWords[0], nameWords.at(-1), ...nameWords].find(
     (word) => word && OPERATIONS.some((group) => group.has(word)),
   );

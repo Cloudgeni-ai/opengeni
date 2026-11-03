@@ -161,6 +161,40 @@ describe("tool discovery ranking", () => {
     expect(index.rank("unmatched qqq", 8)).toEqual([]);
     expect(index.rank("hent faktura", 1)).toEqual([entry]);
   });
+  test("names that run words together, as lowercased operationIds do, rank by their words", () => {
+    // Microsoft Graph tools in the shape the OpenAPI compiler names them.
+    const draft = candidate(
+      "mcp_x__me_createmessages",
+      "Create a draft of a new message. POST /me/messages. Changes external state.",
+    );
+    const send = candidate(
+      "mcp_x__me_messages_message_send",
+      "Send an existing draft message. POST /me/messages/{message-id}/send.",
+    );
+    const lists = candidate(
+      "mcp_x__sites_listlists",
+      "Get the collection of lists for a site. GET /sites/{site-id}/lists. Read-only.",
+    );
+    const items = candidate(
+      "mcp_x__sites_lists_listitems",
+      "Get the items in a list. GET /sites/{site-id}/lists/{list-id}/items. Read-only.",
+    );
+    const byPath = candidate(
+      "mcp_x__sites_site_getbypath",
+      "Resolve a site from its server-relative path. Read-only.",
+    );
+    const pool = [send, draft, items, lists, byPath];
+    const index = new ToolSearchIndex(pool);
+    expect(index.rank("create a draft message", 1)).toEqual([draft]);
+    expect(index.rank("list the lists on a site", 1)).toEqual([lists]);
+    expect(index.rank("list items in a list", 1)).toEqual([items]);
+    expect(index.rank("get a site by path", 1)).toEqual([byPath]);
+    // The run-together name itself still finds its tool.
+    expect(index.rank("me_createmessages", 1)).toEqual([draft]);
+    // A word the tool uses whole is never split.
+    const calendar = candidate("mcp_x__calendarview", "Get the calendarview of events.");
+    expect(new ToolSearchIndex([calendar]).rank("calendar", 1)).toEqual([]);
+  });
   test("ranks a connected account's tools past their account line", () => {
     // With several accounts of one connector every description starts with
     // the same account line; it must not stand in for the capability sentence.
