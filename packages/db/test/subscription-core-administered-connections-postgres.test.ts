@@ -144,7 +144,6 @@ async function organization(): Promise<Org> {
   await shared.admin`
     insert into workspace_memberships (account_id, workspace_id, subject_id, role)
     values (${accountId}::uuid, ${workspace!.id}::uuid, ${ownerSubjectId}, 'owner')`;
-  await setCutover(accountId, true);
   return {
     accountId,
     ownerSubjectId,
@@ -172,13 +171,6 @@ async function member(org: Org, role: "member" | "admin" = "member") {
         ${workspaceId === personal!.id ? "owner" : "member"})
       on conflict do nothing`;
   return { subjectId, membershipId: membership!.id, personalWorkspaceId: personal!.id };
-}
-
-async function setCutover(accountId: string, enabled: boolean): Promise<void> {
-  await shared.admin`
-    insert into subscription_provider_cutovers (account_id, provider, enabled)
-    values (${accountId}::uuid, ${FAKE_API_KEY_PROVIDER}, ${enabled})
-    on conflict (account_id, provider) do update set enabled = excluded.enabled`;
 }
 
 function credential(apiKey: string): string {
@@ -389,6 +381,8 @@ describe("the owner-only routines' predicates (0735)", () => {
   // 1167 adds acceptance's restricted entry for the account a person turned
   // on for their own turns in a shared workspace, on top of 1120's body;
   // subscription-shared-personal-choice-postgres.test.ts exercises it.
+  // 1240 drops the credential target's per-account cutover lookup with the
+  // retired switch table; the provider registry check stays.
   // Every other authorization clause remains byte-identical to its prior body.
   const expectedBodies: Record<string, string> = {
     "opengeni_private.begin_subscription_core_owned_connection_refresh(text, uuid, uuid, text, uuid)":
@@ -408,7 +402,7 @@ describe("the owner-only routines' predicates (0735)", () => {
     "opengeni_private.subscription_core_acceptance_authority_v2(text, uuid, uuid, uuid, text)":
       "c6ae52371a10f9a2aef86cb78a44203350a16f2ea1b7db0996281f89f2a47748",
     "opengeni_subscription_internal.subscription_core_connection_target(text, uuid, uuid, uuid, uuid, uuid, text, bigint)":
-      "03c3db42c92513e7452ba8eedc570bcfe53b38d0cbc605111d0532fb39e66aba",
+      "99f67769b704d8b94aca68c24ff526f7c103ac983680b133b97850059fd16ca4",
   };
   type Routine = { identity: string; name: string; body: string };
   const liveRoutines = () => shared.admin<Routine[]>`

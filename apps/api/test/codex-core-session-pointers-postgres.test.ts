@@ -178,18 +178,6 @@ function expectEverywhere(
   }
 }
 
-async function setCutover(enabled: boolean | null): Promise<void> {
-  if (enabled === null) {
-    await shared!.admin`delete from subscription_provider_cutovers
-      where account_id = ${accountId}::uuid and provider = 'codex'`;
-    return;
-  }
-  await shared!.admin`
-    insert into subscription_provider_cutovers (account_id, provider, enabled)
-    values (${accountId}::uuid, 'codex', ${enabled})
-    on conflict (account_id, provider) do update set enabled = excluded.enabled`;
-}
-
 beforeAll(async () => {
   if (!realDb) return;
   shared = await acquireSharedTestDatabase("codex-core-session-pointers");
@@ -275,12 +263,10 @@ afterAll(async () => {
 const restores: Array<{ mockRestore(): void }> = [];
 afterEach(async () => {
   while (restores.length) restores.pop()!.mockRestore();
-  if (realDb) await setCutover(null);
 });
 
 describe.skipIf(!realDb)("Codex session pointers on every Session response", () => {
   test("every Session response projects the core binding", async () => {
-    await setCutover(true);
     expectEverywhere(
       await everySessionResponse(),
       { codexPinnedCredentialId: connectionId, codexLastCredentialId: connectionId },

@@ -93,13 +93,7 @@ async function organization(): Promise<Org> {
     name: "Core Codex consumers fixture",
   });
   const accountId = access.workspaceGrants[0]!.accountId;
-  // Migration 0680 seeds every organization enabled on the shared core. These
-  // dormant-gate fixtures start from the pre-cutover world (no Codex row) and
-  // enable or disable the gate explicitly.
-  await shared!.admin`
-    delete from subscription_provider_cutovers
-    where account_id = ${accountId}::uuid and provider = 'codex'`;
-  // ...and its seeded organization settings row, which the fixture writes itself.
+  // The seeded organization settings row, which the fixture writes itself.
   await shared!.admin`
     delete from subscription_settings
     where account_id = ${accountId}::uuid and workspace_id is null`;
@@ -133,13 +127,6 @@ async function organization(): Promise<Org> {
     personalWorkspaceId: membership!.personal_workspace_id,
     sharedWorkspaceId: sharedWorkspace!.id,
   };
-}
-
-async function setCutover(accountId: string, enabled: boolean): Promise<void> {
-  await shared!.admin`
-    insert into subscription_provider_cutovers (account_id, provider, enabled)
-    values (${accountId}::uuid, 'codex', ${enabled})
-    on conflict (account_id, provider) do update set enabled = excluded.enabled`;
 }
 
 async function sharedConnection(
@@ -408,7 +395,6 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
 
   test("image operations lease the turn's connection per call, never the chat lease, fenced on generation", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const connectionId = await sharedConnection(org, "ops-image");
     const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
     await placeChat(turn, connectionId);
@@ -531,31 +517,10 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
     expect(await releaseSubscriptionCoreCodexOperationLease(client!.db, scope, first)).toBe(true);
     expect(await releaseSubscriptionCoreCodexOperationLease(client!.db, scope, second)).toBe(true);
     expect(await operationLeases(connectionId)).toEqual([]);
-
-    // Switch-off fails closed mid-operation: a live lease reads nothing.
-    const third = ref(connectionId, {
-      attemptId: turn.attemptId,
-      generation: turn.executionGeneration,
-    });
-    expect((await acquireSubscriptionCoreCodexOperationLease(client!.db, scope, third)).kind).toBe(
-      "acquired",
-    );
-    await setCutover(org.accountId, false);
-    expect(
-      await loadSubscriptionCoreCodexConnectionCredential(
-        client!.db,
-        settings,
-        scope,
-        connectionId,
-        third,
-      ),
-    ).toEqual({ kind: "not_visible" });
-    expect(await renewSubscriptionCoreCodexOperationLease(client!.db, scope, third)).toBeNull();
   });
 
   test("personal connections serve only the owner's private turn under its frozen v2 authority", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const personal = await personalConnection(org, "ops-personal");
     const authorized = await runningTurn(org, {
       workspaceId: org.personalWorkspaceId,
@@ -699,8 +664,6 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
   test("sessionless transcription uses only shared capacity in its workspace scope, isolated by organization and workspace", async () => {
     const org = await organization();
     const other = await organization();
-    await setCutover(org.accountId, true);
-    await setCutover(other.accountId, true);
     const organizationScoped = await sharedConnection(org, "ops-org", { fedramp: true });
     const assignedHere = await sharedConnection(org, "ops-here", {
       scope: "workspaces",
@@ -834,7 +797,6 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
 
   test("under the automatic source, operations use the organization pool when the workspace pool cannot serve, as chat does", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const organizationScoped = await sharedConnection(org, "ops-auto-org");
     // The workspace's own pool holds one paused account, so the automatic
     // source resolves to the workspace pool while chat still admits both.
@@ -855,7 +817,6 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
 
   test("a sessionless completion holds its own lease and reserves each request in workspace scope", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const connectionId = await sharedConnection(org, "ops-completion");
     const scope = workspaceScope(org);
     const lease = ref(connectionId, { operationKind: "completion" });
@@ -890,7 +851,7 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
   // No refresher at all (an API key), or a refresher the credential's format
   // does not use (a setup token next to renewable OAuth credentials).
   test.each(["no refresher", "format does not renew"] as const)(
-    "a connection credential that never renews is marked needs-relogin, only under an enabled cutover (%s)",
+    "a connection credential that never renews is marked needs-relogin (%s)",
     async (shape) => {
       const org = await organization();
       const connectionId = await sharedConnection(
@@ -930,21 +891,6 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
           await shared!.admin<{ status: string; last_error: string | null }[]>`
           select status, last_error from subscription_connections where id = ${connectionId}::uuid`
         )[0];
-      // Without an enabled cutover nothing is written.
-      expect(
-        (
-          await operations.refreshSubscriptionCoreConnectionCredential(
-            client!.db,
-            settings,
-            scope,
-            connectionId,
-            null,
-            1,
-          )
-        ).kind,
-      ).toBe("refused");
-      expect(await statusOf()).toEqual({ status: "active", last_error: null });
-      await setCutover(org.accountId, true);
       const message = codex.adapter.reloginText("");
       expect(
         await operations.refreshSubscriptionCoreConnectionCredential(
@@ -973,7 +919,6 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
 
   test("realtime leases are session-bound: owner context for owned sessions, shared-only for ownerless ones", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const connectionId = await sharedConnection(org, "ops-realtime");
     const owned = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
     const ownedScope: SubscriptionCoreCodexOperationScope = {
@@ -1053,8 +998,6 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
   test("usage observations are fenced on the refresh generation and isolated by organization", async () => {
     const org = await organization();
     const other = await organization();
-    await setCutover(org.accountId, true);
-    await setCutover(other.accountId, true);
     const connectionId = await sharedConnection(org, "ops-usage");
     const observation = (generation: number, percent: number) => ({
       windows: [{ id: "primary", usedPercent: percent, resetsAt: null, status: "ok" as const }],
@@ -1099,7 +1042,6 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
 
   test("a /wham/usage reading is recorded as a complete usage reading: it ends a refusal's window and reports recovery only once nothing is exhausted", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const connectionId = await sharedConnection(org, "ops-usage-complete");
     const [connection] = await shared!.admin<{ generation: number }[]>`
       select refresh_generation::int as generation from subscription_connections
@@ -1192,7 +1134,6 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
 
   test("compaction turns copy the accepted v2 authority; core usage facts carry the connection", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const connectionId = await sharedConnection(org, "ops-compaction");
     const turn = await runningTurn(org, {
       workspaceId: org.personalWorkspaceId,
@@ -1253,7 +1194,6 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
   });
   test("an image operation needs its turn's running attempt, generation and live chat lease", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const connectionId = await sharedConnection(org, "ops-liveness");
     const operation = async (
       turn: TurnFixture,
@@ -1327,7 +1267,6 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
 
   test("a connection not readable in this workspace reports no data, not an error", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const people = await peopleConnection(org, "ops-usage-people");
     const personal = await personalConnection(org, "ops-usage-personal");
     for (const connectionId of [people, personal]) {
@@ -1347,7 +1286,6 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
 
   test("the connection target helper is owner-only", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const connectionId = await sharedConnection(org, "ops-helper");
     const direct = await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
       rawRows(
@@ -1399,7 +1337,6 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
 
 async function personalRevocationCase(): Promise<void> {
   const org = await organization();
-  await setCutover(org.accountId, true);
   const personal = await personalConnection(org, "ops-revocation");
   const turn = await runningTurn(org, {
     workspaceId: org.personalWorkspaceId,

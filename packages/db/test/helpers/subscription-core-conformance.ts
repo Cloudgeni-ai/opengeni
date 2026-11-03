@@ -384,10 +384,6 @@ export function describeSubscriptionCoreConformance<Credential>(
         account_id, organization_membership_id, personal_fallback_opt_in
       ) values (${accountId}::uuid, ${membership!.id}::uuid, true)
       on conflict do nothing`;
-    await admin()`
-      insert into subscription_provider_cutovers (account_id, provider, enabled)
-      values (${accountId}::uuid, ${providerId}, true)
-      on conflict (account_id, provider) do update set enabled = true`;
     // Another provider's connections in the same organization and pool: the
     // quarantined one recovers sooner and is exhausted until sooner than
     // anything this suite creates, so any read that lost its provider filter
@@ -5621,9 +5617,6 @@ export function describeSubscriptionCoreConformance<Credential>(
         await closeBindingRollingWindow();
         const org = await organization();
         const own = await sharedConnection(org, `two-choices-${crypto.randomUUID()}`);
-        await admin()`insert into subscription_provider_cutovers (account_id, provider, enabled)
-          values (${org.accountId}::uuid, ${subject.foreignProvider}, true)
-          on conflict (account_id, provider) do update set enabled = true`;
         const turn = await runningTurn(org);
         const input = { ...turn.identity, subjectId: org.ownerSubjectId };
         const both = [provider, choicePeer!];

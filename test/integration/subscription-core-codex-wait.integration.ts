@@ -126,10 +126,6 @@ describe.skipIf(!realDb)(
         ${accountId}::uuid, ${shared!.admin.json({ codex: { mode: "spread" } })}::jsonb,
         '{}'::jsonb, false, '{}'::jsonb, false, false
       )`;
-      await shared!.admin`
-      insert into subscription_provider_cutovers (account_id, provider, enabled)
-      values (${accountId}::uuid, 'codex', true)
-      on conflict (account_id, provider) do update set enabled = true`;
       const [connectionRow] = await shared!.admin<{ id: string }[]>`
       insert into subscription_connections (
         account_id, provider, kind, credential_encrypted, ownership, scope_kind,

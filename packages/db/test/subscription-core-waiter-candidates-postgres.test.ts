@@ -55,9 +55,6 @@ async function fixture(candidateProviders?: string[]) {
     (provider,migration,committed_at,seed_rotation)
     values ('claude','9999_waiter_fixture.sql',clock_timestamp(),'{}'::jsonb)
     on conflict do nothing`;
-  await shared.admin`insert into subscription_provider_cutovers(account_id,provider,enabled)
-    values (${accountId}::uuid,'codex',true),(${accountId}::uuid,'claude',true)
-    on conflict(account_id,provider) do update set enabled=true`;
   const session = await withSessionRlsActorContext({ subjectId }, () =>
     createSession(client.db, {
       accountId,
