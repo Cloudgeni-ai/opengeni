@@ -1931,6 +1931,10 @@ export const FORCE_RLS_TABLES = [
   "automation_trigger_events",
   "automation_trigger_revisions",
   "automation_triggers",
+  "billing_credit_alert_settings",
+  "billing_credit_notification_deliveries",
+  "billing_credit_notification_recipients",
+  "billing_credit_notifications",
   "billing_customers",
   "billing_subscription_operations",
   "bot_templates",
@@ -2504,6 +2508,9 @@ export const RUNTIME_FULL_DML_TABLES = [
   "automation_trigger_revisions",
   "automation_triggers",
   "automation_webhook_endpoints",
+  "billing_credit_alert_settings",
+  "billing_credit_notification_deliveries",
+  "billing_credit_notifications",
   "billing_customers",
   "bot_templates",
   "browser_session_associations",
@@ -2793,6 +2800,7 @@ export const SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES: Readonly<Record<string, read
 
 /** Configuration and lifecycle-owned audit rows are read-only at runtime. */
 export const RUNTIME_READ_ONLY_TABLES = [
+  "billing_credit_notification_recipients",
   "billing_subscription_operations",
   "codex_turn_source_bindings",
   "company_profile_activation_events",

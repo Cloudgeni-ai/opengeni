@@ -1852,6 +1852,17 @@ Canonical: [`knowledge.md`](knowledge.md),
 
 ### 5.7 Usage, limits, and billing
 
+Organization credit alerts use `packages/db/src/billing-credit-notifications.ts`
+for account-fenced crossing state and durable recipient receipts, and
+`packages/core/src/billing-credit-notifications.ts` for the existing managed-email
+transport. The control worker evaluates canonical general availability and
+settled spend; the API delivers email and projects organization notices through
+the existing inbox and billing-authorized routes. Membership's invoker projection
+keeps recipients current. Billing events never enter workspace feeds merely
+because a recipient is a workspace administrator. See
+[credit notifications](credit-notifications.md) for thresholds, delivery ambiguity,
+API/SDK and the transaction-compatible top-up enqueue seam.
+
 Model-scoped promotions retain offer identity and initial eligibility on each grant.
 Audited `credit_promotion_policy_revisions` can update coverage for existing and
 new scoped grants without a restart. Each paid call retains its admitted revision

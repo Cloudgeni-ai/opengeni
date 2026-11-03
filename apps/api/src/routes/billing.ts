@@ -1,5 +1,8 @@
 import {
   BillingCheckoutStatus,
+  BillingCreditNotification,
+  UpdateBillingAlertSettingsRequest,
+  ListBillingCreditNotificationsResponse,
   BillingSubscriptionCatalog,
   BillingSubscriptionChange,
   CancelBillingSubscriptionRequest,
@@ -22,6 +25,10 @@ import { configuredEntitlements, promotionalCreditScope } from "@opengeni/config
 import { creditScopeMetadata, creditScopeFromMetadata } from "../credit-promotion-snapshot";
 import {
   applyCreditLedgerEntry,
+  getBillingAlertSettings,
+  updateBillingAlertSettings,
+  listBillingCreditNotifications,
+  markBillingCreditNotificationRead,
   applyCreditLedgerEntryOnce,
   getBillingBalance,
   readCreditPromotionPolicy,
@@ -55,6 +62,52 @@ import { errorMessage } from "@opengeni/contracts/values";
 
 export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
   registerSubscriptionRoutes(app, deps);
+  app.get("/v1/billing/alerts", async (c) => {
+    const context = await requireAccessContext(c, deps);
+    const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
+    c.header("cache-control", "private, no-store");
+    return c.json(await getBillingAlertSettings(deps.db, accountId));
+  });
+  app.put("/v1/billing/alerts", async (c) => {
+    const context = await requireAccessContext(c, deps);
+    const body = parseRequestBody(
+      UpdateBillingAlertSettingsRequest,
+      await c.req.json().catch(() => null),
+      {
+        status: 400,
+        message: "Invalid billing alert settings",
+      },
+    );
+    const accountId = requireSelectedAccount(context, body.accountId, "billing:manage");
+    return c.json(await updateBillingAlertSettings(deps.db, { ...body, accountId }));
+  });
+  app.get("/v1/billing/notifications", async (c) => {
+    const context = await requireAccessContext(c, deps);
+    const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
+    c.header("cache-control", "private, no-store");
+    return c.json(
+      ListBillingCreditNotificationsResponse.parse({
+        notifications: await listBillingCreditNotifications(deps.db, {
+          accountId,
+          subjectId: context.subjectId,
+        }),
+      }),
+    );
+  });
+  app.post("/v1/billing/notifications/:notificationId/read", async (c) => {
+    const context = await requireAccessContext(c, deps);
+    const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
+    await markBillingCreditNotificationRead(deps.db, {
+      accountId,
+      subjectId: context.subjectId,
+      notificationId: parseRequestBody(
+        BillingCreditNotification.shape.id,
+        c.req.param("notificationId"),
+        { status: 400, message: "Invalid notification id" },
+      ),
+    });
+    return c.json({ ok: true });
+  });
   app.get("/v1/billing", async (c) => {
     const context = await requireAccessContext(c, deps);
     const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
