@@ -14166,6 +14166,15 @@
 :where(.og-root).toaster [data-sonner-toast] > *,:where(.og-root) .toaster [data-sonner-toast] > * {
   transition: none;
 }
+:where(.og-root).toaster [data-sonner-toast] [data-button].og-toast-details,:where(.og-root) .toaster [data-sonner-toast] [data-button].og-toast-details {
+  background: transparent;
+  color: var(--og-color-fg-muted);
+  padding-inline: 4px;
+}
+:where(.og-root).toaster [data-sonner-toast] [data-button].og-toast-details:hover,:where(.og-root) .toaster [data-sonner-toast] [data-button].og-toast-details:hover {
+  color: var(--og-color-fg);
+  text-decoration: underline;
+}
 :where(.og-root):root[data-og-theme-switching] *,:where(.og-root) :root[data-og-theme-switching] *,:where(.og-root) :root[data-og-theme-switching] *::before,:where(.og-root)  :root[data-og-theme-switching] *::before,:where(.og-root) :root[data-og-theme-switching] *::after,:where(.og-root)  :root[data-og-theme-switching] *::after {
   transition: none !important;
 }

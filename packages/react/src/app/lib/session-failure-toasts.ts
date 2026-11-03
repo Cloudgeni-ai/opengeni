@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 
 import { useCalmServiceFailure } from "../../lib/use-calm-service-failure";
+import { userErrorText } from "../../ui/api-error";
 import { isApiErrorStatus } from "./app-api";
 import { toast } from "./toast";
 
@@ -19,13 +20,13 @@ export function useSessionFailureToasts(loadError: Error | null, streamError: Er
   useEffect(() => {
     if (streamError && !streamCalm && !isApiErrorStatus(streamError, 404)) {
       toast.error("Event stream disconnected", {
-        description: streamError.message,
+        description: userErrorText(streamError),
       });
     }
   }, [streamCalm, streamError]);
   useEffect(() => {
     if (loadError && !loadCalm && !isApiErrorStatus(loadError, 404)) {
-      toast.error("Failed to load session", { description: String(loadError) });
+      toast.error("Failed to load session", { description: userErrorText(loadError) });
     }
   }, [loadCalm, loadError]);
 }
