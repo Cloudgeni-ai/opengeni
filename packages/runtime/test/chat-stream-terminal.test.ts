@@ -3,6 +3,11 @@ import { Agent, Runner, tool, type ModelRequest } from "@openai/agents";
 import OpenAI from "openai";
 import { z } from "zod";
 import { OpenGeniChatCompletionsModel } from "../src/model-provider-routing";
+import {
+  isPreemptedModelResponse,
+  preemptedResponseCutOffText,
+  streamWithPreemption,
+} from "../src/model-preemption";
 
 const request: ModelRequest = {
   input: "fixture",
@@ -38,6 +43,32 @@ function modelFor(chunks: unknown[], done = false) {
   );
 }
 
+function abortableModel() {
+  return new OpenGeniChatCompletionsModel(
+    new OpenAI({
+      apiKey: "fixture",
+      maxRetries: 0,
+      fetch: async (_url, init) =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(
+                new TextEncoder().encode(
+                  `data: ${JSON.stringify(chunk({ content: "partial" }))}\n\n`,
+                ),
+              );
+              const stop = () => controller.error(init?.signal?.reason);
+              if (init?.signal?.aborted) stop();
+              else init?.signal?.addEventListener("abort", stop, { once: true });
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    }),
+    "fixture",
+  );
+}
+
 async function collect(model: OpenGeniChatCompletionsModel) {
   const events = [];
   let error: unknown;
@@ -50,6 +81,63 @@ async function collect(model: OpenGeniChatCompletionsModel) {
 }
 
 describe("Chat stream completion evidence", () => {
+  test("a caller abort retains its exact reason rather than becoming provider failure", async () => {
+    const caller = new AbortController();
+    const reason = new DOMException("fixture cancellation", "AbortError");
+    const events = [];
+    let error: unknown;
+    try {
+      for await (const event of abortableModel().getStreamedResponse({
+        ...request,
+        signal: caller.signal,
+      })) {
+        events.push(event);
+        if (event.type === "output_text_delta") caller.abort(reason);
+      }
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBe(reason);
+    expect(events.some((event) => event.type === "response_done")).toBe(false);
+  });
+
+  test("actual Runner cancellation remains cancellation", async () => {
+    const caller = new AbortController();
+    const run = await new Runner({ tracingDisabled: true }).run(
+      new Agent({ name: "fixture", model: abortableModel() }),
+      "fixture",
+      { stream: true, signal: caller.signal },
+    );
+    let error: unknown;
+    try {
+      for await (const event of run) {
+        if (event.type === "raw_model_stream_event" && event.data.type === "output_text_delta")
+          caller.abort();
+      }
+      await run.completed;
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeUndefined();
+    expect(caller.signal.aborted).toBe(true);
+  });
+
+  test("Steer keeps cut-off text display-only through the actual Chat adapter", async () => {
+    const steer = new AbortController();
+    const model = abortableModel();
+    const events = [];
+    for await (const event of streamWithPreemption(request, steer.signal, (input) =>
+      model.getStreamedResponse(input),
+    )) {
+      events.push(event);
+      if (event.type === "output_text_delta") steer.abort();
+    }
+    const done = events.at(-1);
+    expect(isPreemptedModelResponse(done)).toBe(true);
+    expect(preemptedResponseCutOffText(done)).toBe("partial");
+    expect(done?.type === "response_done" && done.response.output).toEqual([]);
+  });
+
   for (const done of [false, true]) {
     test(`partial text without a finish reason is not completed (DONE=${done})`, async () => {
       const result = await collect(modelFor([chunk({ content: "partial" })], done));

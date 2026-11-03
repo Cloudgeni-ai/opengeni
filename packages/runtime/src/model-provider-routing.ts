@@ -194,6 +194,10 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
           };
       }
       if (event.type === "response_done") {
+        // OpenAI may swallow AbortError and let the SDK synthesize completion.
+        // Intentional cancellation retains its caller-owned reason, not a
+        // misleading provider failure (the Runner handles AbortError itself).
+        request.signal?.throwIfAborted();
         // The SDK emits response_done even when the iterator simply ends.
         // Require the primary choice's terminal evidence before releasing
         // assembled tool calls or treating partial text as a complete answer.
