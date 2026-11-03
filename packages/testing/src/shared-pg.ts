@@ -94,14 +94,21 @@ const PASSWORD = "x";
 const APP_PASSWORD = "apppw";
 const IMAGE = "pgvector/pgvector:pg16";
 const NATIVE_PG_URL = process.env.OPENGENI_TEST_PG_URL?.trim() || undefined;
-const ADMIN_URL = NATIVE_PG_URL ?? `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}/postgres`;
+const ADMIN_URL =
+  NATIVE_PG_URL ?? `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}/postgres`;
 const adminConnection = new URL(ADMIN_URL);
 if (!["postgres:", "postgresql:"].includes(adminConnection.protocol)) {
-  throw new Error("shared-pg: OPENGENI_TEST_PG_URL must be a PostgreSQL connection URL");
+  throw new Error(
+    "shared-pg: OPENGENI_TEST_PG_URL must be a PostgreSQL connection URL",
+  );
 }
 
 /** Replace only the database/role, preserving native TLS and connection options. */
-function databaseUrl(database: string, role?: string, password?: string): string {
+function databaseUrl(
+  database: string,
+  role?: string,
+  password?: string,
+): string {
   const url = new URL(ADMIN_URL);
   url.pathname = `/${database}`;
   if (role !== undefined) url.username = role;
@@ -151,7 +158,9 @@ async function templateDbName(): Promise<string> {
  * up the workspace packages it imports next to it. Same as
  * `checkoutTemplateDbName(dirname(dbPackageDir))`.
  */
-export async function sharedTestTemplateName(dbPackageDir: string): Promise<string> {
+export async function sharedTestTemplateName(
+  dbPackageDir: string,
+): Promise<string> {
   return checkoutTemplateDbName(dirname(dbPackageDir.replace(/[\\/]+$/u, "")));
 }
 
@@ -161,9 +170,13 @@ export async function sharedTestTemplateName(dbPackageDir: string): Promise<stri
  * contents, never on where the checkout lives, so every worktree with the
  * same schema contract shares one template instead of building its own.
  */
-export async function checkoutTemplateDbName(packagesDir: string): Promise<string> {
+export async function checkoutTemplateDbName(
+  packagesDir: string,
+): Promise<string> {
   const migrationsDir = join(packagesDir, "db/drizzle");
-  const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
+  const files = (await readdir(migrationsDir))
+    .filter((file) => file.endsWith(".sql"))
+    .sort();
   const hasher = new Bun.CryptoHasher("sha256");
   for (const file of files) {
     hasher.update(file);
@@ -181,7 +194,10 @@ export async function checkoutTemplateDbName(packagesDir: string): Promise<strin
 }
 
 /** What a template build loads: the migration runner and role provisioning. */
-const TEMPLATE_ENTRY_POINTS = ["db/src/migrate.ts", "db/src/provision-roles.ts"];
+const TEMPLATE_ENTRY_POINTS = [
+  "db/src/migrate.ts",
+  "db/src/provision-roles.ts",
+];
 const SCANNABLE_SOURCE = /\.(?:[cm]?[jt]sx?)$/u;
 
 /**
@@ -194,8 +210,13 @@ const SCANNABLE_SOURCE = /\.(?:[cm]?[jt]sx?)$/u;
  * resolved precisely pulls in that
  * package's whole `src`, erring toward a new template rather than a stale one.
  */
-export async function templateSourceFiles(packagesDir: string): Promise<string[]> {
-  const packages = new Map<string, { directory: string; manifest: PackageManifest }>();
+export async function templateSourceFiles(
+  packagesDir: string,
+): Promise<string[]> {
+  const packages = new Map<
+    string,
+    { directory: string; manifest: PackageManifest }
+  >();
   for (const entry of (await readdir(packagesDir)).sort()) {
     try {
       const manifest = JSON.parse(
@@ -208,7 +229,9 @@ export async function templateSourceFiles(packagesDir: string): Promise<string[]
     }
   }
   const isFile = async (relative: string) =>
-    (await statPath(join(packagesDir, relative)).catch(() => null))?.isFile() === true;
+    (
+      await statPath(join(packagesDir, relative)).catch(() => null)
+    )?.isFile() === true;
   const files = new Set<string>();
   const scanned = new Set<string>();
   const pending: string[] = [];
@@ -219,11 +242,14 @@ export async function templateSourceFiles(packagesDir: string): Promise<string[]
     pending.push(relative);
   };
   const addTree = async (directory: string) => {
-    for (const file of await sourceFiles(join(packagesDir, directory))) add(`${directory}/${file}`);
+    for (const file of await sourceFiles(join(packagesDir, directory)))
+      add(`${directory}/${file}`);
   };
   // Hashed, but only followed where the build actually imports them.
-  for (const file of await sourceFiles(join(packagesDir, "db/src"))) files.add(`db/src/${file}`);
-  for (const entry of TEMPLATE_ENTRY_POINTS) if (await isFile(entry)) add(entry);
+  for (const file of await sourceFiles(join(packagesDir, "db/src")))
+    files.add(`db/src/${file}`);
+  for (const entry of TEMPLATE_ENTRY_POINTS)
+    if (await isFile(entry)) add(entry);
 
   const resolveFile = async (base: string): Promise<string | null> => {
     const candidates = [
@@ -234,7 +260,8 @@ export async function templateSourceFiles(packagesDir: string): Promise<string[]
       base.replace(/\.[cm]?js$/u, ".ts"),
       base.replace(/\.[cm]?js$/u, ".tsx"),
     ];
-    for (const candidate of candidates) if (await isFile(candidate)) return candidate;
+    for (const candidate of candidates)
+      if (await isFile(candidate)) return candidate;
     return null;
   };
   const resolveWorkspace = async (specifier: string): Promise<void> => {
@@ -265,9 +292,14 @@ export async function templateSourceFiles(packagesDir: string): Promise<string[]
     }
     for (const { path: specifier } of imports) {
       if (specifier.startsWith(".")) {
-        const resolved = await resolveFile(posix.join(posix.dirname(file), specifier));
+        const resolved = await resolveFile(
+          posix.join(posix.dirname(file), specifier),
+        );
         if (resolved && !resolved.startsWith("..")) add(resolved);
-      } else if (!specifier.startsWith("node:") && !specifier.startsWith("bun:")) {
+      } else if (
+        !specifier.startsWith("node:") &&
+        !specifier.startsWith("bun:")
+      ) {
         await resolveWorkspace(specifier);
       }
     }
@@ -282,7 +314,10 @@ type PackageManifest = {
 };
 
 /** The file a package export maps `subpath` (`.` or `./x`) to, if declared. */
-function exportTarget(manifest: PackageManifest, subpath: string): string | null {
+function exportTarget(
+  manifest: PackageManifest,
+  subpath: string,
+): string | null {
   const pick = (value: unknown): string | null => {
     if (typeof value === "string") return value;
     if (value && typeof value === "object") {
@@ -300,7 +335,9 @@ function exportTarget(manifest: PackageManifest, subpath: string): string | null
     const picked = pick((exports as Record<string, unknown>)[subpath]);
     if (picked) return picked;
   }
-  return subpath === "." && typeof manifest.main === "string" ? manifest.main : null;
+  return subpath === "." && typeof manifest.main === "string"
+    ? manifest.main
+    : null;
 }
 
 /** Non-test files under `root`, as sorted `/`-separated relative paths. */
@@ -417,8 +454,14 @@ async function dockerOk(args: string[]): Promise<boolean> {
   }
 }
 
-async function startSharedContainer(args: string[], minimumAttempts = 1): Promise<string | null> {
-  const attempts = Math.max(process.env.OPENGENI_REQUIRE_REAL_DB === "1" ? 5 : 1, minimumAttempts);
+async function startSharedContainer(
+  args: string[],
+  minimumAttempts = 1,
+): Promise<string | null> {
+  const attempts = Math.max(
+    process.env.OPENGENI_REQUIRE_REAL_DB === "1" ? 5 : 1,
+    minimumAttempts,
+  );
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     const started = await docker(args).catch(() => null);
     const startedId = started?.stdout.trim() ?? "";
@@ -453,7 +496,9 @@ async function startSharedContainer(args: string[], minimumAttempts = 1): Promis
 
 async function readLockOwner(): Promise<LockOwner | null> {
   try {
-    const parsed = JSON.parse(await readFile(LOCK_OWNER_FILE, "utf8")) as Partial<LockOwner>;
+    const parsed = JSON.parse(
+      await readFile(LOCK_OWNER_FILE, "utf8"),
+    ) as Partial<LockOwner>;
     return typeof parsed.pid === "number" &&
       Number.isSafeInteger(parsed.pid) &&
       parsed.pid > 0 &&
@@ -482,7 +527,10 @@ function processIsAlive(pid: number): boolean {
  * reclaimed. The token also prevents an old holder from deleting a successor's
  * lock during cleanup.
  */
-async function withLock<T>(fn: () => Promise<T>, timeoutMs = 600_000): Promise<T> {
+async function withLock<T>(
+  fn: () => Promise<T>,
+  timeoutMs = 600_000,
+): Promise<T> {
   await mkdir(STATE_DIR, { recursive: true });
   const deadline = Date.now() + timeoutMs;
   const token = crypto.randomUUID();
@@ -495,9 +543,13 @@ async function withLock<T>(fn: () => Promise<T>, timeoutMs = 600_000): Promise<T
       // Reclaim only a lock whose owner is provably gone. A holder can remain
       // healthy past any wall-clock threshold while it builds the template.
       try {
-        const stat = await import("node:fs/promises").then((m) => m.stat(LOCK_DIR));
+        const stat = await import("node:fs/promises").then((m) =>
+          m.stat(LOCK_DIR),
+        );
         const owner = await readLockOwner();
-        const ownerGone = owner ? !processIsAlive(owner.pid) : Date.now() - stat.mtimeMs > 30_000;
+        const ownerGone = owner
+          ? !processIsAlive(owner.pid)
+          : Date.now() - stat.mtimeMs > 30_000;
         if (ownerGone) {
           await rm(LOCK_DIR, { recursive: true, force: true });
           continue;
@@ -508,9 +560,15 @@ async function withLock<T>(fn: () => Promise<T>, timeoutMs = 600_000): Promise<T
     }
     if (acquired) {
       try {
-        await writeFile(LOCK_OWNER_FILE, JSON.stringify({ pid: process.pid, token }), "utf8");
+        await writeFile(
+          LOCK_OWNER_FILE,
+          JSON.stringify({ pid: process.pid, token }),
+          "utf8",
+        );
       } catch (error) {
-        await rm(LOCK_DIR, { recursive: true, force: true }).catch(() => undefined);
+        await rm(LOCK_DIR, { recursive: true, force: true }).catch(
+          () => undefined,
+        );
         throw error;
       }
       break;
@@ -525,7 +583,9 @@ async function withLock<T>(fn: () => Promise<T>, timeoutMs = 600_000): Promise<T
   } finally {
     const owner = await readLockOwner();
     if (owner?.token === token) {
-      await rm(LOCK_DIR, { recursive: true, force: true }).catch(() => undefined);
+      await rm(LOCK_DIR, { recursive: true, force: true }).catch(
+        () => undefined,
+      );
     }
   }
 }
@@ -544,7 +604,9 @@ async function readContainerState(): Promise<ContainerState | null> {
   try {
     parsed = JSON.parse(source) as Partial<ContainerState>;
   } catch (error) {
-    throw new Error("shared-pg: container holder state is malformed", { cause: error });
+    throw new Error("shared-pg: container holder state is malformed", {
+      cause: error,
+    });
   }
   if (
     typeof parsed.generation !== "string" ||
@@ -565,7 +627,9 @@ async function readContainerState(): Promise<ContainerState | null> {
       !Number.isSafeInteger((holder as { pid: number }).pid) ||
       (holder as { pid: number }).pid <= 0
     ) {
-      throw new Error("shared-pg: container holder state has an invalid holder");
+      throw new Error(
+        "shared-pg: container holder state has an invalid holder",
+      );
     }
     holders[token] = { pid: (holder as { pid: number }).pid };
   }
@@ -573,7 +637,10 @@ async function readContainerState(): Promise<ContainerState | null> {
 }
 
 async function writeContainerState(state: ContainerState): Promise<void> {
-  const temporaryPath = join(STATE_DIR, `.container-${process.pid}-${crypto.randomUUID()}.tmp`);
+  const temporaryPath = join(
+    STATE_DIR,
+    `.container-${process.pid}-${crypto.randomUUID()}.tmp`,
+  );
   try {
     await writeFile(temporaryPath, `${JSON.stringify(state)}\n`, "utf8");
     await rename(temporaryPath, CONTAINER_STATE_FILE);
@@ -599,7 +666,9 @@ async function probeContainer(): Promise<ContainerProbe> {
       ]);
       const [id, status, ...extra] = result.stdout.trim().split("\t");
       if (extra.length > 0 || !id || !/^[a-f0-9]{64}$/u.test(id) || !status) {
-        throw new Error("shared-pg: Docker returned an invalid container inspection");
+        throw new Error(
+          "shared-pg: Docker returned an invalid container inspection",
+        );
       }
       return { available: true, id, status };
     } catch (error) {
@@ -626,9 +695,12 @@ async function waitForReady(url: string): Promise<void> {
       }
     } catch (err) {
       if (Date.now() > deadline) {
-        throw new Error(`shared-pg: postgres did not become ready in time: ${String(err)}`, {
-          cause: err,
-        });
+        throw new Error(
+          `shared-pg: postgres did not become ready in time: ${String(err)}`,
+          {
+            cause: err,
+          },
+        );
       }
       await Bun.sleep(500);
     }
@@ -696,10 +768,14 @@ async function ensureTemplateBuilt(): Promise<void> {
   try {
     const scrubbed = await scrubScratchRoleGrants(scrubber);
     if (scrubbed.length > 0) {
-      void reaperNote(`removed scratch role grants from ${TEMPLATE_DB}: ${scrubbed.join(" ")}`);
+      void reaperNote(
+        `removed scratch role grants from ${TEMPLATE_DB}: ${scrubbed.join(" ")}`,
+      );
     }
   } catch (error) {
-    void reaperNote(`could not scrub scratch role grants from ${TEMPLATE_DB}: ${String(error)}`);
+    void reaperNote(
+      `could not scrub scratch role grants from ${TEMPLATE_DB}: ${String(error)}`,
+    );
   } finally {
     await scrubber.end().catch(() => undefined);
   }
@@ -740,7 +816,9 @@ async function ensureContainerAndAcquire(): Promise<ContainerHandle | null> {
         const [vector] = await admin`
           SELECT 1 FROM pg_available_extensions WHERE name = 'vector'`;
         if (!vector) {
-          throw new Error("shared-pg: native PostgreSQL requires the pgvector extension installed");
+          throw new Error(
+            "shared-pg: native PostgreSQL requires the pgvector extension installed",
+          );
         }
       } finally {
         await admin.end().catch(() => undefined);
@@ -761,15 +839,25 @@ async function ensureContainerAndAcquire(): Promise<ContainerHandle | null> {
     let replacedStaleContainer = false;
     if (!native) {
       const liveHolders = priorState
-        ? Object.values(priorState.holders).filter((holder) => processIsAlive(holder.pid)).length
+        ? Object.values(priorState.holders).filter((holder) =>
+            processIsAlive(holder.pid),
+          ).length
         : 0;
       if (liveHolders === 0) {
         const running = await probeContainerSpec();
         if (
           running &&
-          sharedTestContainerNeedsReplacement({ runningSpec: running.spec, liveHolders })
+          sharedTestContainerNeedsReplacement({
+            runningSpec: running.spec,
+            liveHolders,
+          })
         ) {
-          replacedStaleContainer = await dockerOk(["rm", "-f", "-v", running.id]);
+          replacedStaleContainer = await dockerOk([
+            "rm",
+            "-f",
+            "-v",
+            running.id,
+          ]);
         }
       }
     }
@@ -779,7 +867,9 @@ async function ensureContainerAndAcquire(): Promise<ContainerHandle | null> {
     // fingerprinted immutable template proves this is our exact fixture, so a
     // transient `docker inspect` outage must not turn into skipped DB tests.
     let generation = native
-      ? new Bun.CryptoHasher("sha256").update(`native:${ADMIN_URL}`).digest("hex")
+      ? new Bun.CryptoHasher("sha256")
+          .update(`native:${ADMIN_URL}`)
+          .digest("hex")
       : priorState && !replacedStaleContainer && (await templateReady())
         ? priorState.generation
         : null;
@@ -789,7 +879,11 @@ async function ensureContainerAndAcquire(): Promise<ContainerHandle | null> {
         return unavailableSharedTestDatabase();
       }
       generation = probe.id;
-      if (generation && probe.status !== "running" && probe.status !== "restarting") {
+      if (
+        generation &&
+        probe.status !== "running" &&
+        probe.status !== "restarting"
+      ) {
         const resumed =
           probe.status === "paused"
             ? await dockerOk(["unpause", generation])
@@ -842,7 +936,8 @@ async function ensureContainerAndAcquire(): Promise<ContainerHandle | null> {
     await ensureTemplateBuilt();
     await maybeStartReaper();
     const latestState = await readContainerState();
-    const holders = latestState?.generation === generation ? latestState.holders : {};
+    const holders =
+      latestState?.generation === generation ? latestState.holders : {};
     for (const [token, holder] of Object.entries(holders)) {
       if (!processIsAlive(holder.pid)) {
         delete holders[token];
@@ -872,7 +967,11 @@ async function ensureAppRole(): Promise<void> {
             END $$;`);
         break;
       } catch (error) {
-        const details = error as { code?: unknown; message?: unknown; routine?: unknown };
+        const details = error as {
+          code?: unknown;
+          message?: unknown;
+          routine?: unknown;
+        };
         const concurrentCatalogUpdate =
           details.code === "XX000" &&
           details.message === "tuple concurrently updated" &&
@@ -881,7 +980,11 @@ async function ensureAppRole(): Promise<void> {
           details.code === "42710" &&
           typeof details.message === "string" &&
           /^role ".+" already exists$/u.test(details.message);
-        if ((!concurrentCatalogUpdate && !concurrentRoleCreate) || attempt === 20) throw error;
+        if (
+          (!concurrentCatalogUpdate && !concurrentRoleCreate) ||
+          attempt === 20
+        )
+          throw error;
         await Bun.sleep(Math.min(25 * attempt, 250));
       }
     }
@@ -894,7 +997,10 @@ async function releaseContainer(handle: ContainerHandle): Promise<void> {
   if (handle.native) return;
   await withLock(async () => {
     const state = await readContainerState();
-    if (state?.generation !== handle.generation || !state.holders[handle.token]) {
+    if (
+      state?.generation !== handle.generation ||
+      !state.holders[handle.token]
+    ) {
       return;
     }
     delete state.holders[handle.token];
@@ -905,7 +1011,11 @@ async function releaseContainer(handle: ContainerHandle): Promise<void> {
     // PostgreSQL test to report the database unavailable.
     await writeContainerState(state);
     // The last live holder leaving is a good moment to tidy up.
-    if (Object.values(state.holders).every((holder) => !processIsAlive(holder.pid))) {
+    if (
+      Object.values(state.holders).every(
+        (holder) => !processIsAlive(holder.pid),
+      )
+    ) {
       await maybeStartReaper();
     }
   });
@@ -937,9 +1047,12 @@ async function cloneFromTemplate(dbName: string): Promise<void> {
     let rebuilt = false;
     for (;;) {
       try {
-        await root.unsafe(`CREATE DATABASE "${dbName}" TEMPLATE "${await templateDbName()}"`);
+        await root.unsafe(
+          `CREATE DATABASE "${dbName}" TEMPLATE "${await templateDbName()}"`,
+        );
         await recordDatabaseOwner(root, dbName);
-        if (templatePruningEnabled()) await stampTemplateUse(root, await templateDbName());
+        if (templatePruningEnabled())
+          await stampTemplateUse(root, await templateDbName());
         return;
       } catch (err) {
         const message = String((err as { message?: string })?.message ?? err);
@@ -966,9 +1079,14 @@ async function cloneFromTemplate(dbName: string): Promise<void> {
 }
 
 /** Best-effort DROP of this file's database, then release its exact holder. */
-async function dropDatabaseAndRelease(dbName: string, handle: ContainerHandle): Promise<void> {
+async function dropDatabaseAndRelease(
+  dbName: string,
+  handle: ContainerHandle,
+): Promise<void> {
   const dropper = postgres(ADMIN_URL, { max: 1 });
-  await dropper.unsafe(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`).catch(() => undefined);
+  await dropper
+    .unsafe(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`)
+    .catch(() => undefined);
   await dropper.end().catch(() => undefined);
   await releaseContainer(handle);
 }
@@ -978,11 +1096,19 @@ async function dropDatabaseAndRelease(dbName: string, handle: ContainerHandle): 
  * orphan (owner provably dead) from a database a live test is using. Best
  * effort: without the record the reaper falls back to its idle-window rule.
  */
-async function recordDatabaseOwner(root: postgres.Sql, dbName: string): Promise<void> {
+async function recordDatabaseOwner(
+  root: postgres.Sql,
+  dbName: string,
+): Promise<void> {
   await root
-    .unsafe(`COMMENT ON DATABASE ${quoteIdent(dbName)} IS ${quoteLiteral(databaseOwnerComment())}`)
+    .unsafe(
+      `COMMENT ON DATABASE ${quoteIdent(dbName)} IS ${quoteLiteral(databaseOwnerComment())}`,
+    )
     .catch(
-      (error: unknown) => void reaperNote(`could not record owner of ${dbName}: ${String(error)}`),
+      (error: unknown) =>
+        void reaperNote(
+          `could not record owner of ${dbName}: ${String(error)}`,
+        ),
     );
 }
 
@@ -1032,9 +1158,13 @@ export function templatePruningEnabled(
  * Writes only the shared catalog comment; it never connects to the template.
  * Best effort.
  */
-async function stampTemplateUse(root: postgres.Sql, template: string): Promise<void> {
+async function stampTemplateUse(
+  root: postgres.Sql,
+  template: string,
+): Promise<void> {
   const last = templateStampedAt.get(template);
-  if (last !== undefined && Date.now() - last < TEMPLATE_STAMP_REFRESH_MS) return;
+  if (last !== undefined && Date.now() - last < TEMPLATE_STAMP_REFRESH_MS)
+    return;
   templateStampedAt.set(template, Date.now());
   try {
     const [row] = await root`
@@ -1042,7 +1172,10 @@ async function stampTemplateUse(root: postgres.Sql, template: string): Promise<v
         FROM pg_database WHERE datname = ${template} AND datistemplate`;
     if (!row) return;
     const stamp = parseTemplateStamp(row.comment as string | null);
-    if (stamp?.by === "harness" && Date.now() - stamp.lastUsedAt < TEMPLATE_STAMP_REFRESH_MS) {
+    if (
+      stamp?.by === "harness" &&
+      Date.now() - stamp.lastUsedAt < TEMPLATE_STAMP_REFRESH_MS
+    ) {
       return;
     }
     // Never queue behind a clone holding the template: try again next time.
@@ -1086,7 +1219,10 @@ async function maybeStartReaper(): Promise<void> {
   if (ci && ci !== "0" && ci !== "false" && setting !== "1") return;
   try {
     const marker = await readFile(REAPER_MARKER_FILE, "utf8")
-      .then((source) => JSON.parse(source) as { pid?: unknown; startedAt?: unknown })
+      .then(
+        (source) =>
+          JSON.parse(source) as { pid?: unknown; startedAt?: unknown },
+      )
       .catch(() => null);
     if (
       marker &&
@@ -1101,13 +1237,21 @@ async function maybeStartReaper(): Promise<void> {
     ) {
       return;
     }
-    const child = spawn(process.execPath, ["--no-env-file", SHARED_PG_MODULE, "--reap"], {
-      cwd: STATE_DIR,
-      detached: true,
-      stdio: "ignore",
-      env: process.env,
-    });
-    child.on("error", (error) => void reaperNote(`could not start the reaper: ${String(error)}`));
+    const child = spawn(
+      process.execPath,
+      ["--no-env-file", SHARED_PG_MODULE, "--reap"],
+      {
+        cwd: STATE_DIR,
+        detached: true,
+        stdio: "ignore",
+        env: process.env,
+      },
+    );
+    child.on(
+      "error",
+      (error) =>
+        void reaperNote(`could not start the reaper: ${String(error)}`),
+    );
     child.unref();
     await writeFile(
       REAPER_MARKER_FILE,
@@ -1145,7 +1289,11 @@ export async function reapSharedTestDatabases(
     // Never queue behind a long template build: skip pruning this pass instead.
     withTemplateLock: (fn) => withLock(fn, 30_000),
   });
-  const removed = [...result.dropped, ...result.templatesDropped, ...result.rolesDropped];
+  const removed = [
+    ...result.dropped,
+    ...result.templatesDropped,
+    ...result.rolesDropped,
+  ];
   if (!options.dryRun && (removed.length > 0 || result.errors.length > 0)) {
     await reaperNote(
       `reaped ${result.dropped.length} database(s), ${result.templatesDropped.length} template(s) and ${result.rolesDropped.length} role(s), kept ${result.kept}` +
@@ -1160,7 +1308,9 @@ export async function reapSharedTestDatabases(
 
 function unavailableSharedTestDatabase(): null {
   if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
-    throw new Error("OPENGENI_REQUIRE_REAL_DB=1 but disposable PostgreSQL is unavailable");
+    throw new Error(
+      "OPENGENI_REQUIRE_REAL_DB=1 but disposable PostgreSQL is unavailable",
+    );
   }
   return null;
 }
@@ -1230,8 +1380,9 @@ export async function acquireSharedTestDatabase(
  * routines (1002), the secret history scrub's reader and cell writer (1091),
  * the agent call and native push v2 routines (1107), the lock-free external
  * identity read (1172), the organization vault list (1218), the names-only
- * member list (1211) and the organization machine and rig list (1224). Tests
- * that exercise them run as they will once they are granted.
+ * member list (1211), the organization machine and rig list (1224) and the
+ * inventory of meeting tracks not yet kept compact (1239). Tests that
+ * exercise them run as they will once they are granted.
  */
 export async function grantDeferredRuntimeAccess(
   admin: postgres.Sql,
@@ -1263,6 +1414,8 @@ export async function grantDeferredRuntimeAccess(
       TO ${grantee};
     GRANT EXECUTE ON FUNCTION opengeni_private.list_organization_compute_v1(uuid, uuid, text)
       TO ${grantee};
+    GRANT EXECUTE ON FUNCTION opengeni_private.list_uncompacted_recording_tracks_v1(integer, text)
+      TO ${grantee};
   `);
 }
 
@@ -1275,7 +1428,9 @@ export async function grantDeferredRuntimeAccess(
  * OPENGENI_REQUIRE_REAL_DB=1 requires failure; an explicit
  * OPENGENI_TEST_PG_URL selects the native fixture and fails if unavailable.
  */
-export async function acquireBlankTestDatabase(label = "blank"): Promise<BlankTestDatabase | null> {
+export async function acquireBlankTestDatabase(
+  label = "blank",
+): Promise<BlankTestDatabase | null> {
   const acquired = await ensureContainerAndAcquire();
   if (!acquired) {
     return null;
@@ -1355,7 +1510,9 @@ export async function acquireOwnerMigratedTestDatabase(
     admin = postgres(adminUrl, { max: 2 });
     await admin.unsafe(`CREATE EXTENSION IF NOT EXISTS pgcrypto`);
     await admin.unsafe(`CREATE EXTENSION IF NOT EXISTS vector`);
-    await admin.unsafe(`GRANT CREATE, USAGE ON SCHEMA public TO "${ownerRole}"`);
+    await admin.unsafe(
+      `GRANT CREATE, USAGE ON SCHEMA public TO "${ownerRole}"`,
+    );
 
     let released = false;
     return {
@@ -1373,7 +1530,9 @@ export async function acquireOwnerMigratedTestDatabase(
         // The database must go first: a role cannot be dropped while it owns one.
         await dropDatabaseAndRelease(dbName, acquired);
         const dropper = postgres(ADMIN_URL, { max: 1 });
-        await dropper.unsafe(`DROP ROLE IF EXISTS "${ownerRole}"`).catch(() => undefined);
+        await dropper
+          .unsafe(`DROP ROLE IF EXISTS "${ownerRole}"`)
+          .catch(() => undefined);
         await dropper.end().catch(() => undefined);
       },
     };
@@ -1381,8 +1540,12 @@ export async function acquireOwnerMigratedTestDatabase(
     await admin?.end().catch(() => undefined);
     await root.end().catch(() => undefined);
     const cleanup = postgres(ADMIN_URL, { max: 1 });
-    await cleanup.unsafe(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`).catch(() => undefined);
-    await cleanup.unsafe(`DROP ROLE IF EXISTS "${ownerRole}"`).catch(() => undefined);
+    await cleanup
+      .unsafe(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`)
+      .catch(() => undefined);
+    await cleanup
+      .unsafe(`DROP ROLE IF EXISTS "${ownerRole}"`)
+      .catch(() => undefined);
     await cleanup.end().catch(() => undefined);
     await releaseContainer(acquired).catch(() => undefined);
     throw err;
@@ -1413,7 +1576,8 @@ export async function acquireRestrictedRuntimeTestDatabase(
   label = "restricted-runtime",
   schema = "og_data",
 ): Promise<RestrictedRuntimeTestDatabase | null> {
-  if (!/^[a-z_][a-z0-9_]{0,40}$/.test(schema)) throw new Error("Invalid test schema name");
+  if (!/^[a-z_][a-z0-9_]{0,40}$/.test(schema))
+    throw new Error("Invalid test schema name");
   const owner = await acquireOwnerMigratedTestDatabase(label);
   if (!owner) return null;
   let admin: postgres.Sql | null = null;
@@ -1424,7 +1588,9 @@ export async function acquireRestrictedRuntimeTestDatabase(
       `CREATE SCHEMA IF NOT EXISTS ${schema} AUTHORIZATION "${owner.ownerRole}"`,
     );
     await owner.admin.unsafe(`ALTER EXTENSION vector SET SCHEMA ${schema}`);
-    await migrate(owner.ownerUrl, schema, { applicationDatabaseRoles: ["opengeni_app"] });
+    await migrate(owner.ownerUrl, schema, {
+      applicationDatabaseRoles: ["opengeni_app"],
+    });
     await provisionRoles(owner.adminUrl, {
       targetSchema: schema,
       appRole: "opengeni_app",
@@ -1434,7 +1600,10 @@ export async function acquireRestrictedRuntimeTestDatabase(
     const appUrl = new URL(owner.adminUrl);
     appUrl.username = "opengeni_app";
     appUrl.password = owner.appPassword;
-    admin = postgres(owner.adminUrl, { max: 4, connection: { search_path: schema } });
+    admin = postgres(owner.adminUrl, {
+      max: 4,
+      connection: { search_path: schema },
+    });
     const pool = admin;
     return {
       schema,
@@ -1478,12 +1647,23 @@ function sharedTestContainerOptions(): string[] {
   ];
 }
 
-const SHARED_TEST_SERVER_ARGS = ["-c", "max_connections=1000", "-c", "shared_buffers=256MB"];
+const SHARED_TEST_SERVER_ARGS = [
+  "-c",
+  "max_connections=1000",
+  "-c",
+  "shared_buffers=256MB",
+];
 
 /** Fingerprint of everything that shapes the container; stamped on it as a label. */
 export function sharedTestContainerSpec(): string {
   return new Bun.CryptoHasher("sha256")
-    .update(JSON.stringify([sharedTestContainerOptions(), IMAGE, SHARED_TEST_SERVER_ARGS]))
+    .update(
+      JSON.stringify([
+        sharedTestContainerOptions(),
+        IMAGE,
+        SHARED_TEST_SERVER_ARGS,
+      ]),
+    )
     .digest("hex")
     .slice(0, 16);
 }
@@ -1522,7 +1702,10 @@ export function sharedTestContainerNeedsReplacement(input: {
  * The spec label of the running container, "" for a container without one, or
  * null when there is no container or Docker cannot answer (never replace then).
  */
-async function probeContainerSpec(): Promise<{ id: string; spec: string } | null> {
+async function probeContainerSpec(): Promise<{
+  id: string;
+  spec: string;
+} | null> {
   try {
     const result = await docker([
       "inspect",
@@ -1533,7 +1716,12 @@ async function probeContainerSpec(): Promise<{ id: string; spec: string } | null
       CONTAINER,
     ]);
     const [id, labelsJson, ...extra] = result.stdout.trim().split("\t");
-    if (extra.length > 0 || !id || !/^[a-f0-9]{64}$/u.test(id) || labelsJson === undefined) {
+    if (
+      extra.length > 0 ||
+      !id ||
+      !/^[a-f0-9]{64}$/u.test(id) ||
+      labelsJson === undefined
+    ) {
       return null;
     }
     const labels = JSON.parse(labelsJson) as Record<string, unknown> | null;
@@ -1656,16 +1844,20 @@ export function currentDatabaseOwner(): DatabaseOwner {
   };
 }
 
-export function databaseOwnerComment(owner: DatabaseOwner = currentDatabaseOwner()): string {
+export function databaseOwnerComment(
+  owner: DatabaseOwner = currentDatabaseOwner(),
+): string {
   return `${DB_OWNER_COMMENT_PREFIX}${JSON.stringify(owner)}`;
 }
 
-export function parseDatabaseOwnerComment(comment: string | null): DatabaseOwner | null {
+export function parseDatabaseOwnerComment(
+  comment: string | null,
+): DatabaseOwner | null {
   if (!comment?.startsWith(DB_OWNER_COMMENT_PREFIX)) return null;
   try {
-    const value = JSON.parse(comment.slice(DB_OWNER_COMMENT_PREFIX.length)) as Partial<
-      Record<keyof DatabaseOwner, unknown>
-    >;
+    const value = JSON.parse(
+      comment.slice(DB_OWNER_COMMENT_PREFIX.length),
+    ) as Partial<Record<keyof DatabaseOwner, unknown>>;
     if (
       typeof value.host !== "string" ||
       typeof value.boot !== "string" ||
@@ -1699,12 +1891,19 @@ export type OwnerStatus = "alive" | "dead" | "unknown";
 export function ownerStatus(
   owner: DatabaseOwner,
   here: ProcessIdentity = currentProcessIdentity(),
-  probe: { alive: (pid: number) => boolean; startTime: (pid: number) => string } = {
+  probe: {
+    alive: (pid: number) => boolean;
+    startTime: (pid: number) => string;
+  } = {
     alive: processIsAlive,
     startTime: processStartTime,
   },
 ): OwnerStatus {
-  if (owner.host !== here.host || owner.boot !== here.boot || owner.pidns !== here.pidns) {
+  if (
+    owner.host !== here.host ||
+    owner.boot !== here.boot ||
+    owner.pidns !== here.pidns
+  ) {
     return "unknown";
   }
   if (!probe.alive(owner.pid)) return "dead";
@@ -1722,19 +1921,28 @@ export function ownerStatus(
  */
 export type TemplateStamp = { lastUsedAt: number; by: "harness" | "reaper" };
 
-export function templateStampComment(now: number, by: TemplateStamp["by"] = "harness"): string {
+export function templateStampComment(
+  now: number,
+  by: TemplateStamp["by"] = "harness",
+): string {
   return `${TEMPLATE_COMMENT_PREFIX}${JSON.stringify({ lastUsedAt: now, by })}`;
 }
 
-export function parseTemplateStamp(comment: string | null): TemplateStamp | null {
+export function parseTemplateStamp(
+  comment: string | null,
+): TemplateStamp | null {
   if (!comment?.startsWith(TEMPLATE_COMMENT_PREFIX)) return null;
   try {
     const value = JSON.parse(comment.slice(TEMPLATE_COMMENT_PREFIX.length)) as {
       lastUsedAt?: unknown;
       by?: unknown;
     };
-    return typeof value.lastUsedAt === "number" && Number.isFinite(value.lastUsedAt)
-      ? { lastUsedAt: value.lastUsedAt, by: value.by === "harness" ? "harness" : "reaper" }
+    return typeof value.lastUsedAt === "number" &&
+      Number.isFinite(value.lastUsedAt)
+      ? {
+          lastUsedAt: value.lastUsedAt,
+          by: value.by === "harness" ? "harness" : "reaper",
+        }
       : null;
   } catch {
     return null;
@@ -1759,7 +1967,8 @@ export function isPerTestDatabaseName(
   scopePrefix = "og_",
   templatePrefix = "og_test_template_",
 ): boolean {
-  if (!scopePrefix.startsWith("og_") || !name.startsWith(scopePrefix)) return false;
+  if (!scopePrefix.startsWith("og_") || !name.startsWith(scopePrefix))
+    return false;
   if (name.startsWith(templatePrefix)) return false;
   return /^og_[a-z0-9_]{0,24}_[0-9a-f]{12}$/u.test(name);
 }
@@ -1769,14 +1978,20 @@ export function isPerTestDatabaseName(
  * `opengeni_bypass_<32 hex>` and `migration_<4 digits>_<32 hex>`. A PostgreSQL
  * regular expression (also valid in JavaScript).
  */
-export const SCRATCH_ROLE_PATTERN = "^(opengeni_bypass_|migration_[0-9]{4}_)[0-9a-f]{32}$";
+export const SCRATCH_ROLE_PATTERN =
+  "^(opengeni_bypass_|migration_[0-9]{4}_)[0-9a-f]{32}$";
 
 /** The scratch-role pattern, or `<rolePrefix><32 hex>` for a scoped prefix. */
 export function scratchRolePattern(rolePrefix?: string): string {
-  return rolePrefix ? `^${escapeRegExp(rolePrefix)}[0-9a-f]{32}$` : SCRATCH_ROLE_PATTERN;
+  return rolePrefix
+    ? `^${escapeRegExp(rolePrefix)}[0-9a-f]{32}$`
+    : SCRATCH_ROLE_PATTERN;
 }
 
-export function isScratchTestRoleName(name: string, rolePrefix?: string): boolean {
+export function isScratchTestRoleName(
+  name: string,
+  rolePrefix?: string,
+): boolean {
   return new RegExp(scratchRolePattern(rolePrefix), "u").test(name);
 }
 
@@ -1829,11 +2044,17 @@ export async function scrubScratchRoleGrants(
  */
 export async function detachDeadScratchRoles(
   sql: postgres.Sql,
-  options: { rolePrefix?: string; here?: ProcessIdentity; probe?: ReapOptions["probe"] } = {},
+  options: {
+    rolePrefix?: string;
+    here?: ProcessIdentity;
+    probe?: ReapOptions["probe"];
+  } = {},
 ): Promise<string[]> {
   const detached: string[] = [];
   try {
-    const roles = await sql<{ rolname: string; comment: string | null; connections: number }[]>`
+    const roles = await sql<
+      { rolname: string; comment: string | null; connections: number }[]
+    >`
       SELECT r.rolname, shobj_description(r.oid, 'pg_authid') AS comment,
              (SELECT count(*)::int FROM pg_stat_activity a WHERE a.usesysid = r.oid) AS connections
         FROM pg_roles r
@@ -1841,12 +2062,18 @@ export async function detachDeadScratchRoles(
          AND EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.member = r.oid OR m.roleid = r.oid)`;
     const here = options.here ?? currentProcessIdentity();
     for (const role of roles) {
-      if (!isScratchTestRoleName(role.rolname, options.rolePrefix) || role.connections > 0)
+      if (
+        !isScratchTestRoleName(role.rolname, options.rolePrefix) ||
+        role.connections > 0
+      )
         continue;
       const owner = parseDatabaseOwnerComment(role.comment);
-      if (!owner || ownerStatus(owner, here, options.probe) !== "dead") continue;
+      if (!owner || ownerStatus(owner, here, options.probe) !== "dead")
+        continue;
       try {
-        const memberships = await sql<{ granted: string; member: string; grantor: string }[]>`
+        const memberships = await sql<
+          { granted: string; member: string; grantor: string }[]
+        >`
           SELECT g.rolname AS granted, r.rolname AS member, gr.rolname AS grantor
             FROM pg_auth_members m
             JOIN pg_roles g ON g.oid = m.roleid
@@ -1868,7 +2095,9 @@ export async function detachDeadScratchRoles(
             JOIN pg_roles r ON r.rolname = ${role.rolname}
            WHERE m.member = r.oid OR m.roleid = r.oid`;
         if ((left?.n ?? 0) > 0) {
-          void reaperNote(`could not detach ${role.rolname}: ${left?.n} membership(s) remain`);
+          void reaperNote(
+            `could not detach ${role.rolname}: ${left?.n} membership(s) remain`,
+          );
           continue;
         }
         detached.push(role.rolname);
@@ -1880,7 +2109,9 @@ export async function detachDeadScratchRoles(
     void reaperNote(`could not check scratch roles: ${String(error)}`);
   }
   if (detached.length > 0) {
-    void reaperNote(`detached dead scratch role(s) from their memberships: ${detached.join(" ")}`);
+    void reaperNote(
+      `detached dead scratch role(s) from their memberships: ${detached.join(" ")}`,
+    );
   }
   return detached;
 }
@@ -1889,7 +2120,8 @@ let scratchRolesDetached = false;
 
 /** detachDeadScratchRoles once per process on this harness's cluster. */
 async function detachDeadScratchRolesOnce(): Promise<void> {
-  if (scratchRolesDetached || process.env.OPENGENI_TEST_PG_REAP?.trim() === "0") return;
+  if (scratchRolesDetached || process.env.OPENGENI_TEST_PG_REAP?.trim() === "0")
+    return;
   scratchRolesDetached = true;
   const scope = process.env.OPENGENI_TEST_PG_REAP_SCOPE?.trim();
   const scoped = scope && /^og_[a-z0-9_]+$/u.test(scope) ? scope : undefined;
@@ -1899,9 +2131,16 @@ async function detachDeadScratchRolesOnce(): Promise<void> {
       max: 1,
       connect_timeout: 10,
       onnotice: () => undefined,
-      connection: { lock_timeout: 2000, statement_timeout: 30_000, application_name: "og-reaper" },
+      connection: {
+        lock_timeout: 2000,
+        statement_timeout: 30_000,
+        application_name: "og-reaper",
+      },
     });
-    await detachDeadScratchRoles(sql, scoped ? { rolePrefix: `${scoped}bypass_` } : {});
+    await detachDeadScratchRoles(
+      sql,
+      scoped ? { rolePrefix: `${scoped}bypass_` } : {},
+    );
   } catch (error) {
     void reaperNote(`could not check scratch roles: ${String(error)}`);
   } finally {
@@ -1915,12 +2154,19 @@ async function detachDeadScratchRolesOnce(): Promise<void> {
  * drop it, with its memberships, if the test dies before dropping it. Best
  * effort: without the record the reaper falls back to its idle-window rule.
  */
-export async function recordTestRoleOwner(sql: postgres.Sql, roleName: string): Promise<void> {
+export async function recordTestRoleOwner(
+  sql: postgres.Sql,
+  roleName: string,
+): Promise<void> {
   await sql
-    .unsafe(`COMMENT ON ROLE ${quoteIdent(roleName)} IS ${quoteLiteral(databaseOwnerComment())}`)
+    .unsafe(
+      `COMMENT ON ROLE ${quoteIdent(roleName)} IS ${quoteLiteral(databaseOwnerComment())}`,
+    )
     .catch(
       (error: unknown) =>
-        void reaperNote(`could not record owner of ${roleName}: ${String(error)}`),
+        void reaperNote(
+          `could not record owner of ${roleName}: ${String(error)}`,
+        ),
     );
 }
 
@@ -1928,9 +2174,10 @@ export function isTemplateDatabaseName(
   name: string,
   templatePrefix = "og_test_template_",
 ): boolean {
-  return new RegExp(`^${escapeRegExp(templatePrefix)}[0-9a-f]{12}(_w[0-9a-f]{8})?$`, "u").test(
-    name,
-  );
+  return new RegExp(
+    `^${escapeRegExp(templatePrefix)}[0-9a-f]{12}(_w[0-9a-f]{8})?$`,
+    "u",
+  ).test(name);
 }
 
 type Observation = { oid: string; sessions: string; since: number };
@@ -1944,7 +2191,9 @@ async function readObservations(path: string): Promise<ObservationState> {
   const valid = (entries: unknown): Record<string, Observation> => {
     const kept: Record<string, Observation> = {};
     if (!entries || typeof entries !== "object") return kept;
-    for (const [name, entry] of Object.entries(entries as Record<string, Partial<Observation>>)) {
+    for (const [name, entry] of Object.entries(
+      entries as Record<string, Partial<Observation>>,
+    )) {
       if (
         entry &&
         typeof entry.oid === "string" &&
@@ -1957,7 +2206,9 @@ async function readObservations(path: string): Promise<ObservationState> {
     return kept;
   };
   try {
-    const parsed = JSON.parse(await readFile(path, "utf8")) as Partial<ObservationState>;
+    const parsed = JSON.parse(
+      await readFile(path, "utf8"),
+    ) as Partial<ObservationState>;
     return { databases: valid(parsed.databases), roles: valid(parsed.roles) };
   } catch {
     // missing or unreadable: start over (only delays legacy reaping)
@@ -1965,7 +2216,10 @@ async function readObservations(path: string): Promise<ObservationState> {
   return { databases: {}, roles: {} };
 }
 
-async function writeObservations(path: string, state: ObservationState): Promise<void> {
+async function writeObservations(
+  path: string,
+  state: ObservationState,
+): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const temporary = `${path}.${process.pid}.${crypto.randomUUID()}.tmp`;
   try {
@@ -2026,7 +2280,10 @@ export type ReapOptions = {
   deadlineMs?: number;
   now?: () => number;
   here?: ProcessIdentity;
-  probe?: { alive: (pid: number) => boolean; startTime: (pid: number) => string };
+  probe?: {
+    alive: (pid: number) => boolean;
+    startTime: (pid: number) => string;
+  };
 };
 
 export type ReapResult = {
@@ -2069,7 +2326,9 @@ function short(error: unknown): string {
  * One reaping pass. Never throws: every failure (unreachable server, failed
  * drop, lock timeout, missing privilege) is recorded in `errors`.
  */
-export async function reapOrphanedTestDatabases(options: ReapOptions): Promise<ReapResult> {
+export async function reapOrphanedTestDatabases(
+  options: ReapOptions,
+): Promise<ReapResult> {
   const result: ReapResult = {
     dropped: [],
     kept: 0,
@@ -2096,7 +2355,11 @@ export async function reapOrphanedTestDatabases(options: ReapOptions): Promise<R
       connect_timeout: 10,
       onnotice: () => undefined,
       // Never wait on a database someone is creating, cloning or dropping.
-      connection: { lock_timeout: 2000, statement_timeout: 120_000, application_name: "og-reaper" },
+      connection: {
+        lock_timeout: 2000,
+        statement_timeout: 120_000,
+        application_name: "og-reaper",
+      },
     });
     const rows = (await sql`
       SELECT d.oid::text AS oid, d.datname, d.datistemplate,
@@ -2122,8 +2385,14 @@ export async function reapOrphanedTestDatabases(options: ReapOptions): Promise<R
       // A build in progress opens separate connections with short gaps
       // between them, but each one starts a new session, so the idle rule
       // (no new session across the whole window) still never drops it.
-      const unmarkedTemplate = isTemplateDatabaseName(row.datname, templatePrefix);
-      if (!unmarkedTemplate && !isPerTestDatabaseName(row.datname, scopePrefix, templatePrefix)) {
+      const unmarkedTemplate = isTemplateDatabaseName(
+        row.datname,
+        templatePrefix,
+      );
+      if (
+        !unmarkedTemplate &&
+        !isPerTestDatabaseName(row.datname, scopePrefix, templatePrefix)
+      ) {
         continue;
       }
       if (row.connections > 0) {
@@ -2138,7 +2407,9 @@ export async function reapOrphanedTestDatabases(options: ReapOptions): Promise<R
         result.kept += 1;
         continue;
       }
-      const status = owner ? ownerStatus(owner, here, options.probe) : "unknown";
+      const status = owner
+        ? ownerStatus(owner, here, options.probe)
+        : "unknown";
       if (status === "dead") {
         candidates.push(row);
         continue;
@@ -2153,10 +2424,16 @@ export async function reapOrphanedTestDatabases(options: ReapOptions): Promise<R
       const window = owner ? foreignIdleWindowMs : idleWindowMs;
       const previous = observations.databases[row.datname];
       const since =
-        previous && previous.oid === row.oid && previous.sessions === row.sessions
+        previous &&
+        previous.oid === row.oid &&
+        previous.sessions === row.sessions
           ? previous.since
           : now();
-      nextObservations.databases[row.datname] = { oid: row.oid, sessions: row.sessions, since };
+      nextObservations.databases[row.datname] = {
+        oid: row.oid,
+        sessions: row.sessions,
+        since,
+      };
       if (now() - since >= window) {
         candidates.push(row);
       } else {
@@ -2183,7 +2460,9 @@ export async function reapOrphanedTestDatabases(options: ReapOptions): Promise<R
         // Already gone (its owner or another reaper dropped it): not ours.
         if ((error as { code?: unknown })?.code === "3D000") continue;
         result.kept += 1;
-        nextObservations.databases[row.datname] = observations.databases[row.datname] ?? {
+        nextObservations.databases[row.datname] = observations.databases[
+          row.datname
+        ] ?? {
           oid: row.oid,
           sessions: row.sessions,
           since: now(),
@@ -2194,8 +2473,10 @@ export async function reapOrphanedTestDatabases(options: ReapOptions): Promise<R
       // acquireOwnerMigratedTestDatabase's per-database login role.
       const ownerRole = `${row.datname}_owner`.slice(0, 63);
       try {
-        const [role] = await sql`SELECT 1 FROM pg_roles WHERE rolname = ${ownerRole}`;
-        if (role) await sql.unsafe(`DROP ROLE IF EXISTS ${quoteIdent(ownerRole)}`);
+        const [role] =
+          await sql`SELECT 1 FROM pg_roles WHERE rolname = ${ownerRole}`;
+        if (role)
+          await sql.unsafe(`DROP ROLE IF EXISTS ${quoteIdent(ownerRole)}`);
       } catch (error) {
         result.errors.push(`${ownerRole}: ${short(error)}`);
       }
@@ -2228,7 +2509,8 @@ export async function reapOrphanedTestDatabases(options: ReapOptions): Promise<R
     });
 
     try {
-      if (!options.dryRun) await writeObservations(options.observationsPath, nextObservations);
+      if (!options.dryRun)
+        await writeObservations(options.observationsPath, nextObservations);
     } catch (error) {
       result.errors.push(`observations: ${short(error)}`);
     }
@@ -2237,9 +2519,11 @@ export async function reapOrphanedTestDatabases(options: ReapOptions): Promise<R
       await pruneStaleTemplates(sql, rows, {
         templatePrefix,
         protectedTemplates: new Set(options.protectedTemplates ?? []),
-        retentionMs: options.templateRetentionMs ?? DEFAULT_TEMPLATE_RETENTION_MS,
+        retentionMs:
+          options.templateRetentionMs ?? DEFAULT_TEMPLATE_RETENTION_MS,
         reaperStampRetentionMs: Math.min(
-          options.templateReaperStampRetentionMs ?? DEFAULT_TEMPLATE_REAPER_STAMP_RETENTION_MS,
+          options.templateReaperStampRetentionMs ??
+            DEFAULT_TEMPLATE_REAPER_STAMP_RETENTION_MS,
           options.templateRetentionMs ?? DEFAULT_TEMPLATE_RETENTION_MS,
         ),
         maxDrops: options.maxTemplateDrops ?? DEFAULT_MAX_TEMPLATE_DROPS,
@@ -2249,7 +2533,8 @@ export async function reapOrphanedTestDatabases(options: ReapOptions): Promise<R
           options.templateRetentionMs ?? DEFAULT_TEMPLATE_RETENTION_MS,
         ),
         softCap: options.templateSoftCap ?? DEFAULT_TEMPLATE_SOFT_CAP,
-        pressureIdleMs: options.templatePressureIdleMs ?? DEFAULT_TEMPLATE_PRESSURE_IDLE_MS,
+        pressureIdleMs:
+          options.templatePressureIdleMs ?? DEFAULT_TEMPLATE_PRESSURE_IDLE_MS,
         withLock: options.withTemplateLock ?? ((fn) => fn()),
         now,
         deadline,
@@ -2298,7 +2583,12 @@ async function reapScratchRoles(
 ): Promise<void> {
   const { result, now } = context;
   const pattern = scratchRolePattern(context.rolePrefix);
-  let roles: { oid: string; rolname: string; comment: string | null; connections: number }[];
+  let roles: {
+    oid: string;
+    rolname: string;
+    comment: string | null;
+    connections: number;
+  }[];
   try {
     roles = (await sql`
       SELECT r.oid::text AS oid, r.rolname,
@@ -2322,7 +2612,9 @@ async function reapScratchRoles(
       result.kept += 1; // annotated by someone: leave it
       continue;
     }
-    const status = owner ? ownerStatus(owner, context.here, context.probe) : "unknown";
+    const status = owner
+      ? ownerStatus(owner, context.here, context.probe)
+      : "unknown";
     if (status === "alive") {
       result.kept += 1;
       continue;
@@ -2335,14 +2627,22 @@ async function reapScratchRoles(
         ? context.foreignIdleWindowMs
         : Math.max(context.idleWindowMs, context.unownedRoleIdleWindowMs);
       const previous = context.observations.roles[role.rolname];
-      const since = previous && previous.oid === role.oid ? previous.since : now();
-      context.nextObservations.roles[role.rolname] = { oid: role.oid, sessions: "0", since };
+      const since =
+        previous && previous.oid === role.oid ? previous.since : now();
+      context.nextObservations.roles[role.rolname] = {
+        oid: role.oid,
+        sessions: "0",
+        since,
+      };
       if (now() - since < window) {
         result.kept += 1;
         continue;
       }
     }
-    if (result.rolesDropped.length >= context.maxDrops || now() > context.deadline) {
+    if (
+      result.rolesDropped.length >= context.maxDrops ||
+      now() > context.deadline
+    ) {
       result.kept += 1;
       continue;
     }
@@ -2419,7 +2719,9 @@ async function revokeScratchRoleEverywhere(
     .filter((database) => database.owns)
     .map((database) => database.datname ?? "shared objects");
   if (owned.length > 0) {
-    context.result.errors.push(`${role.rolname}: owns objects in ${owned.slice(0, 3).join(", ")}`);
+    context.result.errors.push(
+      `${role.rolname}: owns objects in ${owned.slice(0, 3).join(", ")}`,
+    );
     return false;
   }
   // Only ever connect to the harness's own databases: never `postgres`,
@@ -2428,8 +2730,11 @@ async function revokeScratchRoleEverywhere(
     .map((database) => database.datname ?? "shared objects")
     .filter(
       (name) =>
-        !isPerTestDatabaseName(name, context.scopePrefix, context.templatePrefix) &&
-        !isTemplateDatabaseName(name, context.templatePrefix),
+        !isPerTestDatabaseName(
+          name,
+          context.scopePrefix,
+          context.templatePrefix,
+        ) && !isTemplateDatabaseName(name, context.templatePrefix),
     );
   if (foreign.length > 0) {
     context.result.errors.push(
@@ -2440,7 +2745,9 @@ async function revokeScratchRoleEverywhere(
   for (const database of databases) {
     if (context.now() > context.deadline) return false;
     if (!database.datallowconn) {
-      context.result.errors.push(`${role.rolname}: ${database.datname} refuses connections`);
+      context.result.errors.push(
+        `${role.rolname}: ${database.datname} refuses connections`,
+      );
       return false;
     }
     const revoke = async () => {
@@ -2471,7 +2778,9 @@ async function revokeScratchRoleEverywhere(
     } catch (error) {
       // Dropped meanwhile: nothing left to revoke there.
       if ((error as { code?: unknown })?.code === "3D000") continue;
-      context.result.errors.push(`${role.rolname} in ${database.datname}: ${short(error)}`);
+      context.result.errors.push(
+        `${role.rolname} in ${database.datname}: ${short(error)}`,
+      );
       return false;
     }
   }
@@ -2500,7 +2809,9 @@ async function pruneStaleTemplates(
   const { result } = context;
   const templates = rows
     .filter(
-      (row) => row.datistemplate && isTemplateDatabaseName(row.datname, context.templatePrefix),
+      (row) =>
+        row.datistemplate &&
+        isTemplateDatabaseName(row.datname, context.templatePrefix),
     )
     .map((row) => ({ row, stamp: parseTemplateStamp(row.comment) }));
   // The `keep` most recently cloned templates stay unless unused for the full
@@ -2546,12 +2857,16 @@ async function pruneStaleTemplates(
         : recent.has(row.datname)
           ? context.retentionMs
           : Math.min(harnessMinIdleMs, context.retentionMs);
-    if (idle >= minIdleMs) prunable.push({ row, lastUsedAt: stamp.lastUsedAt, minIdleMs });
+    if (idle >= minIdleMs)
+      prunable.push({ row, lastUsedAt: stamp.lastUsedAt, minIdleMs });
   }
   // Longest idle first, a few per pass: each drop briefly holds the lock that
   // every test acquisition on this machine takes.
   prunable.sort((left, right) => left.lastUsedAt - right.lastUsedAt);
-  for (const { row, lastUsedAt, minIdleMs } of prunable.slice(0, context.maxDrops)) {
+  for (const { row, lastUsedAt, minIdleMs } of prunable.slice(
+    0,
+    context.maxDrops,
+  )) {
     if (context.now() > context.deadline) break;
     try {
       const dropped = await context.withLock(() =>
