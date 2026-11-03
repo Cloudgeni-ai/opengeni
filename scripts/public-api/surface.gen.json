@@ -39500,7 +39500,10 @@
       "LOCAL_SANDBOX_LABEL": "value",
       "machineDisplayName": "value",
       "machineNameTwinLabel": "value",
+      "machinePlatformLabel": "value",
       "machineScopeLabel": "value",
+      "machineScreenLabel": "value",
+      "machineSystemDetail": "value",
       "NO_SANDBOX_LABEL": "value",
       "sessionComputeLabel": "value",
       "sessionSandboxLabel": "value"
