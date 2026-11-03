@@ -307,4 +307,39 @@ for (const status of [401, 403, 404]) {
     await act(async () => resolveSetup({ url: "https://checkout.stripe.com/refused" }));
     expect(navigate).not.toHaveBeenCalled();
   });
+
+  test(`HTTP ${status} blocks setup before React renders the refusal`, async () => {
+    let rejectRefresh!: (failure: Error) => void;
+    let resolveSetup!: (value: { url: string }) => void;
+    let refreshing = false;
+    const navigate = mock((_url: string) => {});
+    const api = client({
+      getBillingAutoTopUp: async () => {
+        if (!refreshing) return { ...auto(), paymentMethod: null };
+        return new Promise((_resolve, reject) => {
+          rejectRefresh = reject;
+        });
+      },
+      createBillingAutoTopUpSetupSession: async () =>
+        new Promise((resolve) => {
+          resolveSetup = resolve;
+        }),
+    });
+    await mount(panel(api, "org-a", { onNavigate: navigate }));
+    await click("Set up");
+    await click("Set up card");
+    refreshing = true;
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    await act(async () => {
+      rejectRefresh(apiFailure(status));
+      // Both responses settle in one React batch. The refusal's catch runs, but
+      // the component has not rerendered its state-derived navigation guard.
+      await Promise.resolve();
+      await Promise.resolve();
+      resolveSetup({ url: "https://checkout.stripe.com/refused-before-render" });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(navigate).not.toHaveBeenCalled();
+  });
 }

@@ -127,7 +127,7 @@ function AutoTopUpSettingsSection(props: {
               successUrl: props.returnUrl,
               cancelUrl: props.returnUrl,
             });
-            if (!alive.current || !mayManage.current) return;
+            if (!alive.current || !mayManage.current || !resource.isAvailable()) return;
             if (props.onNavigate) props.onNavigate(result.url);
             else window.location.assign(result.url);
           }}
@@ -146,6 +146,7 @@ function useBillingSettingsResource<T extends { accountId: string }>(
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<unknown>(null);
   const alive = useRef(false);
+  const available = useRef(false);
   const sequence = useRef(0);
   const pending = useRef(false);
   const checkAccount = useCallback(
@@ -164,6 +165,7 @@ function useBillingSettingsResource<T extends { accountId: string }>(
     try {
       const next = checkAccount(await load());
       if (!alive.current || current !== sequence.current) return;
+      available.current = true;
       setData(next);
       setError(null);
     } catch (failure) {
@@ -171,7 +173,12 @@ function useBillingSettingsResource<T extends { accountId: string }>(
       const status = apiErrorFacts(failure).status;
       setError(status === 404 ? null : failure);
       // Never retain previously authorized content after revocation or a disabled feature.
-      if (isPermissionDenied(failure) || status === 401 || status === 404) setData(null);
+      if (isPermissionDenied(failure) || status === 401 || status === 404) {
+        // Invalidate synchronously: a pending setup may finish before React
+        // commits the state update that removes its form.
+        available.current = false;
+        setData(null);
+      }
     }
   }, [checkAccount, load]);
   useEffect(() => {
@@ -189,6 +196,7 @@ function useBillingSettingsResource<T extends { accountId: string }>(
     const timer = pollMs ? window.setInterval(focused, pollMs) : undefined;
     return () => {
       alive.current = false;
+      available.current = false;
       requests.current++;
       window.removeEventListener("focus", focused);
       window.removeEventListener(CREDIT_BALANCE_CHANGED, changed);
@@ -203,6 +211,7 @@ function useBillingSettingsResource<T extends { accountId: string }>(
     try {
       const next = checkAccount(await write());
       if (alive.current) {
+        available.current = true;
         setData(next);
         setError(null);
       }
@@ -211,7 +220,14 @@ function useBillingSettingsResource<T extends { accountId: string }>(
       pending.current = false;
     }
   }
-  return { data, error, denied: isPermissionDenied(error), refresh, save };
+  return {
+    data,
+    error,
+    denied: isPermissionDenied(error),
+    refresh,
+    save,
+    isAvailable: () => alive.current && available.current,
+  };
 }
 
 function SettingsLoadFailure(props: {
