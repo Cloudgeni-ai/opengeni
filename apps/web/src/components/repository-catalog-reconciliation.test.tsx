@@ -166,7 +166,6 @@ function ComposerRepositories(props: HarnessProps) {
     selectedRepoRefs,
     manualRepos,
     manualOpen: true,
-    githubAppOpen: false,
     org: "",
     pending: false,
     repoBusy: !props.catalogReady,
@@ -209,12 +208,9 @@ function ComposerRepositories(props: HarnessProps) {
         remove: (id) =>
           setManualRepos((current) => current.filter((candidate) => candidate.id !== id)),
       }),
-    onGitHubAppOpenChange: () => {},
     onOrgChange: () => {},
     onStartGitHubApp: () => {},
     onConnectWorkspaceApp: () => {},
-    onConfigureInstallation: async () => {},
-    onDisconnectInstallation: async () => {},
   });
 }
 

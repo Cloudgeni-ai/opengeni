@@ -56,7 +56,6 @@ const context = {
   clientConfig: { productAccessMode: "local" },
   personalGitHubStatus: null,
   repositoryGroups: [],
-  githubAppOpen: false,
   githubOrg: "",
   busy: false,
   githubAppBusy: false,

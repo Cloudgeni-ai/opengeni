@@ -69,7 +69,6 @@ function Fixture() {
     lockedRepoIds: mounted,
     manualRepos: [],
     manualOpen: false,
-    githubAppOpen: false,
     org: "",
     pending: false,
     repoBusy: false,
@@ -85,12 +84,9 @@ function Fixture() {
     onManualAdd: () => {},
     onManualUpdate: () => {},
     onManualRemove: () => {},
-    onGitHubAppOpenChange: () => {},
     onOrgChange: () => {},
     onStartGitHubApp: () => {},
     onConnectWorkspaceApp: () => {},
-    onConfigureInstallation: async () => {},
-    onDisconnectInstallation: async () => {},
   };
   return (
     <TooltipProvider>

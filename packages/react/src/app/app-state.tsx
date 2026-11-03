@@ -426,7 +426,6 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   const [personalGitHubAuthorityCache, setPersonalGitHubAuthorityCache] =
     useState<PersonalGitHubAuthorityCache | null>(null);
   const personalGitHubAuthority = personalGitHubAuthorityCache?.authority ?? null;
-  const [githubAppOpen, setGithubAppOpen] = useState(false);
   const [githubOrg, setGithubOrg] = useState("");
   const [workspaceMcpServers, setWorkspaceMcpServers] = useState<McpServerOption[]>([]);
   const [workspaceCapabilityCatalog, setWorkspaceCapabilityCatalog] = useState<
@@ -638,7 +637,6 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       setSelectedCapabilityToolIds(new Set());
       seenCapabilityToolIds.current = new Set();
       appliedWorkspaceToolDefaultsKey.current = null;
-      setGithubAppOpen(false);
       setGithubOrg("");
       setBusy(false);
       setRepoBusy(false);
@@ -1497,7 +1495,6 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         githubQuietRetry.current.reset();
         setGithubStatus(null);
         setGithubStatusFailed(false);
-        setGithubAppOpen(false);
         setGithubRepos([]);
         setGithubCatalogReady(true);
         setRepoBusy(false);
@@ -1511,7 +1508,6 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         }
         setGithubStatus(status);
         setGithubStatusFailed(false);
-        setGithubAppOpen(status.status !== "bound");
         if (status.status === "bound") {
           // Explicit refreshes re-sync from GitHub (POST /github/repositories/sync)
           // so installations changed after connect show up; passive loads may
@@ -2647,8 +2643,6 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           selectedPersonalGitHubRepoRefs,
           setSelectedPersonalGitHubRepoRefs,
           personalGitHubAuthority,
-          githubAppOpen,
-          setGithubAppOpen,
           githubOrg,
           setGithubOrg,
           selectedCapabilityToolIds,
@@ -2738,7 +2732,6 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     currentResources,
     repositoryValidationError,
     githubAppBusy,
-    githubAppOpen,
     githubOrg,
     githubRepos,
     githubStatus,
