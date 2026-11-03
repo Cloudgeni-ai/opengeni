@@ -149,6 +149,40 @@ describe("tool names in replayed history", () => {
     expect(withProviderValidToolNames(history, { names: [long] })).toBe(history);
     expect(withProviderValidToolNames(history)[0]!.name).toMatch(PROVIDER_TOOL_NAME);
   });
+
+  test("a repeated name is declared once whichever definition was rewritten", () => {
+    const history = [
+      { type: "tool_search_output", tools: [definition(MASKED_QUERY), definition(QUERY)] },
+    ];
+    const replayed = withProviderValidToolNames(history, CATALOG);
+    expect(inputToolNames(replayed)).toEqual([QUERY]);
+    const reversed = [
+      { type: "tool_search_output", tools: [definition(QUERY), definition(MASKED_QUERY)] },
+    ];
+    expect(inputToolNames(withProviderValidToolNames(reversed, CATALOG))).toEqual([QUERY]);
+  });
+
+  test("without aliasUnbound only bound names change; the rest stay for the projection", () => {
+    const unknown = "other.unknown_tool";
+    const history = [
+      { type: "function_call", callId: "a", name: MASKED_QUERY, arguments: "{}" },
+      { type: "function_call", callId: "b", name: unknown, arguments: "{}" },
+      {
+        type: "tool_search_output",
+        tools: [{ type: "namespace", name: unknown, tools: [definition(unknown)] }],
+      },
+    ];
+    const catalog = { ...CATALOG, aliasUnbound: false };
+    const replayed = withProviderValidToolNames(history, catalog);
+    expect(replayed[0]!.name).toBe(QUERY);
+    expect(replayed[1]).toBe(history[1]);
+    expect(replayed[2]).toBe(history[2]);
+    // The memo never serves an item rewritten under the other setting.
+    expect(withProviderValidToolNames(history, CATALOG)[1]!.name).toBe(
+      providerToolNameAlias(unknown),
+    );
+    expect(withProviderValidToolNames(history, catalog)[1]).toBe(history[1]);
+  });
 });
 
 describe("provider projection", () => {

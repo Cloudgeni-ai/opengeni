@@ -108,6 +108,14 @@ export type SecretValueMaskOptions = {
    * Its user info, path, query and fragment are masked as usual. Default false.
    */
   keepUrlHosts?: boolean;
+  /**
+   * Leave a tool's identity in conversation structure unmasked (see
+   * SecretMaskableStringsOptions.keepToolIdentities). Default true, for
+   * model input and stored conversation history. False where the structure
+   * is data rather than conversation: tool output and browser or desktop
+   * results, which are masked in full.
+   */
+  keepToolIdentities?: boolean;
 };
 
 export type SecretValueMaskDiagnostic = {
@@ -599,7 +607,8 @@ export function maskSecretValuesInText(text: string, masks: CompiledSecretValueM
 /**
  * Deep copy of `value` with every known secret value replaced in every string
  * (object keys are kept), except a tool's identity in conversation structure
- * (see SecretMaskableStringsOptions.keepToolIdentities). Inputs that need no
+ * unless `options.keepToolIdentities` is false (see
+ * SecretMaskableStringsOptions.keepToolIdentities). Inputs that need no
  * change keep their identity.
  */
 export function maskSecretValues<T>(
@@ -615,7 +624,7 @@ export function maskSecretValues<T>(
     value,
     (text) => maskSecretValuesInText(text, masks),
     masks.skipKey,
-    { keepToolIdentities: true },
+    { keepToolIdentities: options.keepToolIdentities !== false },
   );
 }
 
@@ -926,6 +935,20 @@ export class SecretValueMemory {
     }
   }
 
+  /**
+   * `mask` for data, such as tool output, where a tool-shaped record is not
+   * conversation structure: a tool's identity is masked too. Never throws.
+   */
+  private maskData<T>(value: T, stage: string): T {
+    if (this.values.size === 0) return value;
+    try {
+      return maskSecretValues(value, this.masks(), { keepToolIdentities: false });
+    } catch (error) {
+      this.report(stage, error);
+      return value;
+    }
+  }
+
   /** `mask` without the values whose label is only a `[masked <kind>]` marker. */
   private maskReferenced<T>(value: T, stage: string): T {
     if (this.values.size === 0) return value;
@@ -1111,7 +1134,7 @@ export class SecretValueMemory {
    * (with its captured reference, or a marker). Never throws.
    */
   maskToolOutput<T>(value: T, stage = "tool_result"): T {
-    const known = this.mask(value, stage);
+    const known = this.maskData(value, stage);
     try {
       return maskSecretShapes(known, this.shapeLabel, this.options.skipKey);
     } catch (error) {

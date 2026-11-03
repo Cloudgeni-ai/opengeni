@@ -21,8 +21,9 @@ import { ALIASED_MCP_TOOL_LEAF_LENGTH, isAliasedMcpToolName } from "./mcp-model-
  * `withProviderValidToolNames` gives each such name one valid name, the same
  * wherever it appears in the request. With the authorized catalog (the lazy
  * tool transport) a flat name becomes the one tool it denotes, so a later call
- * binds to it; any other name, and every name in the provider projection
- * (which sees only the request's tools), becomes a stable alias. A request
+ * binds to it, and every other name is left to the provider projection
+ * (which sees only the request's tools): a stable alias on Responses and
+ * Claude, a historical fact for a Chat call. A request
  * tool's own name is never rewritten. Valid names, and items without an
  * invalid one, are returned unchanged and by identity, and a rewritten item
  * keeps its identity across requests while the mapping is the same, so
@@ -135,6 +136,14 @@ export type ToolNameCatalog = {
    * whose parameters differ is another tool, so the name keeps its alias.
    */
   parametersOf?: (name: string) => unknown;
+  /**
+   * Give a name no tool is bound to its stable alias. Default true. False
+   * replaces only bound names and leaves the rest for the provider
+   * projection, which knows the route: an alias on Responses and Claude, a
+   * historical fact on Chat (a call to an undeclared tool is not replayed as
+   * a native call).
+   */
+  aliasUnbound?: boolean;
 };
 
 /**
@@ -183,25 +192,26 @@ function rewriteNamed(record: unknown, visit: ToolNameVisitor, scoped: boolean):
 }
 
 /**
- * A list of definitions made valid. A definition that now repeats an earlier
- * one's name denotes the same tool and is dropped: providers reject a list
- * that declares one name twice.
+ * A list of definitions made valid. When a name changed, a definition that
+ * repeats an earlier one's name denotes the same tool and is dropped,
+ * whichever of the two was rewritten: providers reject a list that declares
+ * one name twice.
  */
 function rewriteDefinitions(tools: unknown[], visit: ToolNameVisitor, scoped: boolean): unknown[] {
   let changed = false;
+  const rewritten = tools.map((tool) => {
+    const next = rewriteNamed(tool, visit, scoped);
+    if (next !== tool) changed = true;
+    return next;
+  });
+  if (!changed) return tools;
   const seen = new Set<string>();
-  const next: unknown[] = [];
-  for (const tool of tools) {
-    const rewritten = rewriteNamed(tool, visit, scoped);
-    const name = isRecord(rewritten) && typeof rewritten.name === "string" ? rewritten.name : null;
-    if (rewritten !== tool) {
-      changed = true;
-      if (name !== null && seen.has(name)) continue;
-    }
-    if (name !== null) seen.add(name);
-    next.push(rewritten);
-  }
-  return changed ? next : tools;
+  return rewritten.filter((tool) => {
+    if (!isRecord(tool) || typeof tool.name !== "string") return true;
+    if (seen.has(tool.name)) return false;
+    seen.add(tool.name);
+    return true;
+  });
 }
 
 /** The same record with its `tools` definitions rewritten, or the record itself. */
@@ -294,6 +304,7 @@ export function withProviderValidToolNames<T>(
   for (const item of items) rewriteItem(item, collect);
   if (flat.size === 0 && scoped.size === 0) return items;
 
+  const aliasUnbound = catalog.aliasUnbound !== false;
   const flatNames = new Map<string, string>();
   for (const name of flat) {
     let denoted = catalog.denote ? knownToolNameFor(name, catalog.names) : null;
@@ -303,15 +314,14 @@ export function withProviderValidToolNames<T>(
       if (parameters !== undefined && [...stored].some((json) => json !== stableJson(parameters)))
         denoted = null;
     }
-    flatNames.set(name, denoted ?? providerToolNameAlias(name));
+    flatNames.set(name, denoted ?? (aliasUnbound ? providerToolNameAlias(name) : name));
   }
   const rewrite: ToolNameVisitor = (name, position) => {
     if (isProviderToolName(name) || known.has(name)) return name;
-    return position === "flat"
-      ? (flatNames.get(name) ?? providerToolNameAlias(name))
-      : providerToolNameAlias(name);
+    if (position === "flat") return flatNames.get(name) ?? providerToolNameAlias(name);
+    return aliasUnbound ? providerToolNameAlias(name) : name;
   };
-  const mapping = JSON.stringify([[...flatNames], [...scoped]]);
+  const mapping = JSON.stringify([[...flatNames], [...scoped], aliasUnbound]);
   let changed = false;
   const next = items.map((item) => {
     if (item === null || typeof item !== "object") return item;

@@ -2482,7 +2482,8 @@ function prepareLazyToolRequest(request: ModelRequest, runtime: LazyToolRuntime)
  * request's tools do and a later call binds to it. Deferred tools are only
  * in the catalog once preparation ran, so an affected request prepares
  * first. After a preparation failure the catalog is partial, so no name is
- * bound to a tool: each gets its stable alias.
+ * bound to a tool. A name that is not bound is left for the route's
+ * projection: an alias on Responses and Claude, a historical fact on Chat.
  */
 async function withAuthorizedHistoryToolNames(
   request: ModelRequest,
@@ -2499,6 +2500,7 @@ async function withAuthorizedHistoryToolNames(
   const input = withProviderValidToolNames(request.input, {
     names: runtime.knownFunctionToolNames(),
     denote: complete,
+    aliasUnbound: false,
     parametersOf: (name) => {
       const tool = runtime.resolveFunctionTool(name);
       return tool && isFunctionTool(tool) ? tool.parameters : undefined;

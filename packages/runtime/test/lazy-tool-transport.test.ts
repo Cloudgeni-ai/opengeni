@@ -3876,4 +3876,51 @@ describe("tool names in replayed history", () => {
       );
     },
   );
+
+  test("a name no authorized tool answers to stays raw for the route's projection", async () => {
+    const agent = agentWith(weatherTool());
+    const runtime = installLazyToolRuntime(agent, "openai_native", new Set([SERVER_ID]));
+    const model = new ScriptedStreamingModel([[finalMessage("done")]]);
+    const unknown = "other.unknown_tool";
+    const history = [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "Hi" }] },
+      {
+        type: "function_call",
+        callId: "old-call",
+        name: unknown,
+        arguments: "{}",
+        status: "completed",
+      },
+      { type: "function_call_result", callId: "old-call", name: unknown, output: "ok" },
+      {
+        type: "function_call",
+        callId: "masked-call",
+        name: maskedWeather,
+        arguments: JSON.stringify({ city: "Bergen" }),
+        status: "completed",
+      },
+      { type: "function_call_result", callId: "masked-call", name: maskedWeather, output: "rain" },
+      { type: "message", role: "user", content: [{ type: "input_text", text: "And now?" }] },
+    ];
+    const runner = new Runner({
+      modelProvider: new LazyToolModelProvider(providerFor(model), runtime),
+    });
+    const result = await runner.run(agent, history as never, {
+      stream: true,
+      historyOwnership: "external",
+      maxTurns: 2,
+    });
+    for await (const _event of result.toStream()) void _event;
+    await result.completed;
+
+    const first = model.requests[0]!.input as Array<Record<string, any>>;
+    // Chat replays it as a historical fact and Responses gives it an alias;
+    // the lazy layer does not decide that for every route.
+    expect(
+      first.find((item) => item.callId === "old-call" && item.type === "function_call"),
+    ).toMatchObject({ name: unknown });
+    expect(
+      first.find((item) => item.callId === "masked-call" && item.type === "function_call"),
+    ).toMatchObject({ name: WEATHER_TOOL });
+  });
 });

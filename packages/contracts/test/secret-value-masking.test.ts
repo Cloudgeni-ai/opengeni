@@ -9,6 +9,7 @@ import {
   isTextMediaType,
   maskSecretValues,
   maskSecretValuesInError,
+  redactInteractionSecretValues,
   revealSecretGetResult,
   secretGetRevealedValues,
   parseSecretReference,
@@ -106,6 +107,35 @@ describe("known-value secret masking", () => {
     expect(masked[1]!.name).toBe(`query ${DB_REF}`);
     expect(masked[2]!.name).toBe(DB_REF);
     expect(masked[3]!.content).toEqual([{ type: "custom", name: DB_REF }]);
+  });
+
+  test("tool output and interaction results are data: tool-shaped records are masked in full", () => {
+    const word = "pelicans";
+    const memory = memoryWith(word);
+    // Tool output is masked from its root, where a record can look like a call.
+    const outputs = [
+      { type: "function_call", name: word },
+      { tools: [{ type: "custom", name: word }] },
+      { rows: [{ type: "mcp_call", name: word }] },
+    ];
+    expect(memory.maskToolOutput(outputs)).toEqual([
+      { type: "function_call", name: DB_REF },
+      { tools: [{ type: "custom", name: DB_REF }] },
+      { rows: [{ type: "mcp_call", name: DB_REF }] },
+    ]);
+    expect(
+      maskSecretValues({ type: "function_call", name: word }, [{ value: word, label: DB_REF }], {
+        keepToolIdentities: false,
+      }),
+    ).toEqual({ type: "function_call", name: DB_REF });
+    expect(
+      redactInteractionSecretValues({ type: "function_call", name: word }, { field: word }),
+    ).toEqual({ type: "function_call", name: "[secret]" });
+    // Conversation history keeps the identity.
+    expect(memory.mask({ type: "function_call", name: word })).toEqual({
+      type: "function_call",
+      name: word,
+    });
   });
 
   test("replaces the value with its reference", () => {

@@ -434,9 +434,11 @@ field) reveals both the encoded and the decoded text. Only Opengeni's own
   provider already receives unmasked in the request's tools. A known value
   inside one (a password that is a plain word) would otherwise become a
   reference, which providers reject as a tool name and which no longer maps
-  the call to its tool. Arguments, outputs, descriptions and any tool-shaped
-  data inside a tool's output are still masked, and shape detection masks a
-  secret-shaped token everywhere, tool-name positions included. The operator
+  the call to its tool. This applies only to model input and stored
+  conversation history. Tool output and browser or desktop results are data,
+  so they are masked in full even where a record looks like a call.
+  Arguments, outputs and descriptions are still masked, and shape detection
+  masks a secret-shaped token everywhere, tool-name positions included. The operator
   history scrub ([Removing secrets from stored history](#removing-secrets-from-stored-history))
   removes the value everywhere, tool names included. A tool name stored masked
   or scrubbed is repaired on replay (see
