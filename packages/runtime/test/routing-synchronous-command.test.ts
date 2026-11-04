@@ -103,6 +103,7 @@ function fixture(exitCode = 0, sharedTerminal = false) {
     purpose: string | undefined;
   }> = [];
   const adoptedBackground: Array<{ processId: string; command: string | undefined }> = [];
+  const readWaits: number[] = [];
   let failObservation = false;
   let failSettlement = false;
   let activeSandboxId: string | null = null;
@@ -129,8 +130,12 @@ function fixture(exitCode = 0, sharedTerminal = false) {
         starts.push({ cmd: args.cmd, id: command.execId });
         return command;
       },
-      read: async (value) => {
+      read: async (value, waitMs) => {
         if (value.kind !== "modal-router-v1") throw new Error("unexpected legacy command");
+        // The real provider read refuses a wait past its per-read bound.
+        if (!Number.isFinite(waitMs) || waitMs < 0 || waitMs > 50_000)
+          throw new Error("Invalid Modal output read bounds");
+        readWaits.push(waitMs);
         const index = readIndexes.get(value.execId) ?? 0;
         if (failObservation && index > 0)
           throw new Error("same invocation temporarily unobservable");
@@ -264,6 +269,7 @@ function fixture(exitCode = 0, sharedTerminal = false) {
   });
   return {
     route,
+    readWaits,
     starts,
     settled,
     captured,
@@ -369,6 +375,26 @@ test.each([0, 7])(
     expect(f.route.hasRetainedProcess(1)).toBe(false);
   },
 );
+
+test("a long internal command waits past the provider's per-read bound instead of failing", async () => {
+  // A large workspace export asks to wait many minutes for its upload. The
+  // provider caps each read, so the wait must be split into bounded reads.
+  const f = fixture(0);
+  const result = await f.route.execSynchronous({
+    cmd: "filesystem once",
+    yieldTimeMs: 16 * 60_000,
+    maxOutputTokens: 1,
+  });
+  expect(result).toMatchObject({
+    stdout: "__OGF_W__0____OPENGENI_FS_BATCH_OK__ €",
+    stderr: "diagnostic",
+    exitCode: 0,
+  });
+  expect(f.starts).toHaveLength(1);
+  expect(f.settled).toEqual([1]);
+  expect(f.readWaits.length).toBeGreaterThan(0);
+  expect(Math.max(...f.readWaits)).toBeLessThanOrEqual(50_000);
+});
 
 test("observation loss keeps the exact retained writer and committed initial cursor without replay", async () => {
   const f = fixture();

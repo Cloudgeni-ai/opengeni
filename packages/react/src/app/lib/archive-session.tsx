@@ -1,4 +1,5 @@
 import { toast } from "./toast";
+import { apiErrorFacts, userErrorText, userFacingError } from "../../ui/api-error";
 import type { AppContextValue } from "../app-context";
 // Type only. Callers pass the chat's sidebar title: importing title code here
 // changes the web build's chunk graph (eager-page and chunk-cycle checks).
@@ -34,11 +35,123 @@ export function archiveActionLabel(
 /** How long Undo is offered; the server accepts it for a little longer. */
 export const ARCHIVE_UNDO_MS = 10_000;
 
+/** What keeps a chat live on purpose (the server's `session_archive_blocked`). */
+type ArchiveBlocker = { kind: string; sessionId: string };
+
+function archiveBlockers(error: unknown): ArchiveBlocker[] | null {
+  if (apiErrorFacts(error).code !== "session_archive_blocked") return null;
+  const body = (error as { body?: unknown }).body;
+  try {
+    const blockers: unknown = typeof body === "string" ? JSON.parse(body)?.blockers : null;
+    if (!Array.isArray(blockers)) return [];
+    return blockers.filter(
+      (blocker): blocker is ArchiveBlocker =>
+        typeof blocker?.kind === "string" && typeof blocker?.sessionId === "string",
+    );
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Chats whose "Keep this chat active" was turned off by "Turn off and
+ * archive", by workspace and chat, so a failed archive or Undo turns it back
+ * on. Entries outlive the Undo window only briefly.
+ */
+const keptActiveTurnedOff = new Map<string, { sessionIds: string[]; token: symbol }>();
+const KEPT_ACTIVE_MEMORY_MS = 60_000;
+
+function archiveKey(chat: Pick<SessionListRow, "id" | "workspaceId">) {
+  return `${chat.workspaceId}/${chat.id}`;
+}
+
+function takeKeptActive(chat: Pick<SessionListRow, "id" | "workspaceId">) {
+  const key = archiveKey(chat);
+  const entry = keptActiveTurnedOff.get(key);
+  keptActiveTurnedOff.delete(key);
+  return entry?.sessionIds;
+}
+
+function rememberKeptActive(
+  chat: Pick<SessionListRow, "id" | "workspaceId">,
+  sessionIds: string[],
+): symbol {
+  const key = archiveKey(chat);
+  const token = Symbol(key);
+  keptActiveTurnedOff.set(key, { sessionIds, token });
+  setTimeout(() => {
+    if (keptActiveTurnedOff.get(key)?.token === token) keptActiveTurnedOff.delete(key);
+  }, KEPT_ACTIVE_MEMORY_MS);
+  return token;
+}
+
+/**
+ * Turns "Keep this chat active" back on. Resolves false when that failed, so
+ * a caller that needs it to have worked can say so.
+ */
+async function restoreKeepLive(
+  context: AppContextValue,
+  workspaceId: string,
+  sessionIds: readonly string[] | undefined,
+): Promise<boolean> {
+  if (!sessionIds?.length) return true;
+  const results = await Promise.allSettled(
+    sessionIds.map((sessionId) =>
+      context.client.updateSessionRetention(workspaceId, sessionId, { keepLive: true }),
+    ),
+  );
+  return results.every((result) => result.status === "fulfilled");
+}
+
+async function turnOffKeepLiveAndArchive(
+  context: AppContextValue,
+  chat: Pick<SessionListRow, "id" | "workspaceId">,
+  sessionIds: string[],
+  rerun: (archived: boolean) => void,
+  accepted: NonNullable<ReturnType<AppContextValue["captureWorkspaceInvocation"]>>,
+) {
+  // The person may have moved to another workspace since the notice showed.
+  if (!context.ownsWorkspaceInvocation(chat.workspaceId, accepted)) return;
+  const changed: string[] = [];
+  try {
+    for (const sessionId of sessionIds) {
+      await context.client.updateSessionRetention(chat.workspaceId, sessionId, {
+        keepLive: false,
+      });
+      changed.push(sessionId);
+    }
+  } catch (error) {
+    void restoreKeepLive(context, chat.workspaceId, changed);
+    toast.error("Couldn't turn off “Keep this chat active”.", {
+      description: userErrorText(error),
+    });
+    return;
+  }
+  const key = archiveKey(chat);
+  const token = rememberKeptActive(chat, changed);
+  if (!context.ownsWorkspaceInvocation(chat.workspaceId, accepted)) {
+    keptActiveTurnedOff.delete(key);
+    void restoreKeepLive(context, chat.workspaceId, changed);
+    return;
+  }
+  // The caller's archive takes the entry synchronously (requestSessionArchive
+  // reads it before its first await). Still there: that archive didn't start
+  // (one already in flight, or the workspace changed), so nothing was
+  // archived and the setting goes back on.
+  rerun(true);
+  if (keptActiveTurnedOff.get(key)?.token === token) {
+    keptActiveTurnedOff.delete(key);
+    void restoreKeepLive(context, chat.workspaceId, changed);
+  }
+}
+
 /**
  * Archive a chat for everyone, or undo that (`archived: false`) within the
  * few seconds Undo is offered. Archiving shows a notice with Undo; once it
- * closes, the chat moves to long-term storage for good. Errors, including a
- * refusal that says what keeps the chat live, are thrown for the caller.
+ * closes, the chat moves to long-term storage for good. When only "Keep this
+ * chat active" keeps it live, the notice offers one action that turns that
+ * off and archives through `rerun`. Other errors are thrown for the caller;
+ * a refusal that says what keeps the chat live is thrown as that sentence.
  */
 export async function requestSessionArchive(
   context: AppContextValue,
@@ -46,24 +159,77 @@ export async function requestSessionArchive(
   archived: boolean,
   /** The chat's sidebar title (sessionDisplayTitle), named in the notice. */
   chatTitle: string,
-  /** Undo from the notice; the caller archives with `archived: false`. */
-  onUndo?: () => void,
+  /**
+   * Runs the caller's own archive again: `false` for Undo, `true` once
+   * "Keep this chat active" is turned off.
+   */
+  rerun?: (archived: boolean) => void,
 ) {
   const accepted = context.captureWorkspaceInvocation(chat.workspaceId);
   if (!accepted) return null;
-  const updated = await context.client.updateSessionArchive(chat.workspaceId, chat.id, {
-    archived,
-  });
+  const turnedOff = archived ? takeKeptActive(chat) : undefined;
+  let updated: Awaited<ReturnType<AppContextValue["client"]["updateSessionArchive"]>>;
+  try {
+    updated = await context.client.updateSessionArchive(chat.workspaceId, chat.id, {
+      archived,
+    });
+  } catch (error) {
+    // The setting was turned off only to archive; put it back.
+    void restoreKeepLive(context, chat.workspaceId, turnedOff);
+    const blockers = archiveBlockers(error);
+    const keptActive =
+      blockers?.length && blockers.every((blocker) => blocker.kind === "keep_live");
+    if (archived && rerun && !turnedOff && keptActive) {
+      if (!context.ownsWorkspaceInvocation(chat.workspaceId, accepted)) return null;
+      const sessionIds = [...new Set(blockers.map((blocker) => blocker.sessionId))];
+      let chosen = false;
+      toast("Couldn't archive the chat.", {
+        description: sessionIds.includes(chat.id)
+          ? "“Keep this chat active” is on."
+          : "A chat it started has “Keep this chat active” on.",
+        duration: ARCHIVE_UNDO_MS,
+        action: {
+          label: "Turn off and archive",
+          onClick: () => {
+            // Once: a quick second click must not turn it off twice.
+            if (chosen) return;
+            chosen = true;
+            void turnOffKeepLiveAndArchive(context, chat, sessionIds, rerun, accepted);
+          },
+        },
+      });
+      return null;
+    }
+    const { code, serverMessage } = apiErrorFacts(error);
+    if (serverMessage && (blockers || code === "session_archive_final")) {
+      throw userFacingError(error, serverMessage);
+    }
+    throw error;
+  }
   if (!context.ownsWorkspaceInvocation(chat.workspaceId, accepted)) return null;
   if (archived) {
+    if (turnedOff) rememberKeptActive(chat, turnedOff);
     toast(`Archived ${quotedChatName(chatTitle)}`, {
       description:
         "In a few seconds it moves to long-term storage and can't be restored. You can still read and search it under Archived.",
       duration: ARCHIVE_UNDO_MS,
-      ...(onUndo ? { action: { label: "Undo", onClick: onUndo } } : {}),
+      ...(rerun ? { action: { label: "Undo", onClick: () => rerun(false) } } : {}),
     });
   } else {
-    toast.success("Archive undone.");
+    // Undo returns the chat as it was, "Keep this chat active" included. The
+    // chat comes back at once; the setting follows, and only a failure says so.
+    const kept = takeKeptActive(chat);
+    if (!kept?.length) toast.success("Archive undone.");
+    else {
+      void restoreKeepLive(context, chat.workspaceId, kept).then((restored) => {
+        if (restored) toast.success("Archive undone.");
+        else {
+          toast.warning("Archive undone, but “Keep this chat active” is still off.", {
+            description: "Turn it on in the chat's Agent tab.",
+          });
+        }
+      });
+    }
   }
   return updated;
 }

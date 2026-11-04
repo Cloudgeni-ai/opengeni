@@ -444,6 +444,12 @@ export class RigVerificationLeaseUnavailableError extends Error {
 /**
  * Run one verifier against one exactly attributed standalone sandbox.
  *
+ * Every run owns a brand-new lease group. A verification must prove a clean
+ * box, so it can never reuse an earlier run's lease: keying the lease by the
+ * change, version or build request left a cold lease behind after the first
+ * run, and every later verification of the same target then failed at once
+ * as `rearmed`/`attached` instead of creating a fresh sandbox.
+ *
  * Ordering is deliberate and source-of-truth safe:
  *   acquire spawner -> create callback -> warming instance record -> warm commit
  *   -> setup/checks. The canonical sandbox lease, not provider tags, is durable
@@ -462,7 +468,6 @@ export async function runWithOwnedRigVerificationSandbox<T>(
     observability: ControlActivityServices["observability"];
     accountId: string;
     workspaceId: string;
-    sandboxGroupId: string;
     rigVersionId: string;
     sessionIdPrefix: string;
     lifecycle?: RigVerificationActivityLifecycle;
@@ -481,6 +486,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
   }
 
   const holderId = `rig-verification:${dependencies.randomUUID()}`;
+  const sandboxGroupId = dependencies.randomUUID();
   const fallbackController = new AbortController();
   const signal = input.lifecycle?.signal ?? fallbackController.signal;
   const commandController = dependencies.createCancellationController(signal);
@@ -527,7 +533,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
         dependencies.markWarmLost(input.db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
-          sandboxGroupId: input.sandboxGroupId,
+          sandboxGroupId,
           expectedEpoch: cleanupEpoch + 1,
           expectedInstanceId: instanceId,
         }),
@@ -536,7 +542,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
         dependencies.failWarming(input.db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
-          sandboxGroupId: input.sandboxGroupId,
+          sandboxGroupId,
           expectedEpoch: cleanupEpoch,
         }),
       ),
@@ -576,7 +582,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
     const lease = await dependencies.acquire(input.db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
-      sandboxGroupId: input.sandboxGroupId,
+      sandboxGroupId,
       kind: "turn",
       holderId,
       subjectId: null,
@@ -595,7 +601,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
         .touchHolder(input.db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
-          sandboxGroupId: input.sandboxGroupId,
+          sandboxGroupId,
           kind: "turn",
           holderId,
         })
@@ -605,7 +611,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
       holderLivenessTimer.unref();
     }
     if (lease.role !== "spawner") {
-      throw new RigVerificationLeaseUnavailableError(input.sandboxGroupId, lease.role);
+      throw new RigVerificationLeaseUnavailableError(sandboxGroupId, lease.role);
     }
     ownsWarmingEpoch = true;
 
@@ -616,7 +622,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
         createIdentity: {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
-          sandboxGroupId: input.sandboxGroupId,
+          sandboxGroupId,
         },
         environment: {},
         onSandboxCreated: async (created) => {
@@ -628,7 +634,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
           const recorded = await dependencies.recordCreated(input.db, {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
-            sandboxGroupId: input.sandboxGroupId,
+            sandboxGroupId,
             expectedEpoch: lease.lease.leaseEpoch,
             instanceId: created.instanceId,
             resumeBackendId: created.backendId,
@@ -637,7 +643,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
             warmingLeaseTtlMs: RIG_VERIFICATION_OWNER_TTL_MS,
           });
           if (!recorded.recorded) {
-            throw new RigVerificationLeaseUnavailableError(input.sandboxGroupId, "fenced");
+            throw new RigVerificationLeaseUnavailableError(sandboxGroupId, "fenced");
           }
 
           if (created.backendId === "modal" && !signal.aborted) {
@@ -646,7 +652,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
                 dependencies.tag(input.settings, created.instanceId, {
                   leaseId: lease.lease.id,
                   workspaceId: input.workspaceId,
-                  sandboxGroupId: input.sandboxGroupId,
+                  sandboxGroupId,
                 }),
                 signal,
               );
@@ -694,7 +700,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
     const committed = await dependencies.commitWarm(input.db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
-      sandboxGroupId: input.sandboxGroupId,
+      sandboxGroupId,
       expectedEpoch: lease.lease.leaseEpoch,
       instanceId: established.instanceId,
       dataPlaneUrl: null,
@@ -703,7 +709,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
       leaseTtlMs: RIG_VERIFICATION_OWNER_TTL_MS,
     });
     if (!committed.committed || !committed.lease) {
-      throw new RigVerificationLeaseUnavailableError(input.sandboxGroupId, "fenced");
+      throw new RigVerificationLeaseUnavailableError(sandboxGroupId, "fenced");
     }
     const result = await run(established, {
       signal,
@@ -759,7 +765,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
           await dependencies.failWarming(input.db, {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
-            sandboxGroupId: input.sandboxGroupId,
+            sandboxGroupId,
             expectedEpoch,
           });
         }
@@ -790,7 +796,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
         dependencies.releaseHolder(input.db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
-          sandboxGroupId: input.sandboxGroupId,
+          sandboxGroupId,
           kind: "turn",
           holderId,
           idleGraceMs: RIG_VERIFICATION_RELEASE_GRACE_MS,
@@ -950,7 +956,6 @@ export async function verifyRigProviderImageColdBoot(
     observability: ControlActivityServices["observability"];
     accountId: string;
     workspaceId: string;
-    buildRequestId: string;
     rigVersionId: string;
     sessionIdPrefix: string;
     imageId: string;
@@ -974,7 +979,6 @@ export async function verifyRigProviderImageColdBoot(
       observability: input.observability,
       accountId: input.accountId,
       workspaceId: input.workspaceId,
-      sandboxGroupId: input.buildRequestId,
       rigVersionId: input.rigVersionId,
       sessionIdPrefix: input.sessionIdPrefix,
       lifecycle: input.lifecycle,
@@ -1210,7 +1214,6 @@ export async function buildVerifiedRigProviderImage(input: {
         observability: input.observability,
         accountId: input.accountId,
         workspaceId: input.workspaceId,
-        buildRequestId: building.buildRequestId,
         rigVersionId: input.target.id,
         sessionIdPrefix: `rig-provider-image-${input.target.id}`,
         imageId: built.imageId,
@@ -1394,7 +1397,6 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
               observability,
               accountId: rig.accountId,
               workspaceId: input.workspaceId,
-              sandboxGroupId: change.id,
               rigVersionId: candidateVersion.id,
               sessionIdPrefix: `rig-verification-${change.id}`,
               lifecycle,
@@ -1588,7 +1590,6 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
               observability,
               accountId: rig.accountId,
               workspaceId: input.workspaceId,
-              sandboxGroupId: version.id,
               rigVersionId: version.id,
               sessionIdPrefix: `rig-version-verification-${version.id}`,
               lifecycle,

@@ -15,6 +15,7 @@ import { listSessionEventSlices } from "@opengeni/db/session-event-slices";
 import * as sessionPreviewSchema from "@opengeni/db/schema";
 import { and, eq, sql } from "drizzle-orm";
 import { SessionMessageSearchRequest } from "@opengeni/contracts";
+import { ModelPolicyRefusedError, ModelUnavailableError } from "@opengeni/contracts";
 import { ContinueAfterCapabilitySetupRequest } from "@opengeni/contracts";
 import type { ContinueAfterCapabilitySetupResponse } from "@opengeni/contracts";
 import {
@@ -439,7 +440,7 @@ import {
   WorkspaceCaptureManifestCache,
 } from "./workspace-capture";
 import { publishSandboxFileArtifact } from "../sandbox-file-artifacts";
-import { ApiHttpError } from "../http/api-error";
+import { ApiHttpError, approvalForbiddenHttpError } from "../http/api-error";
 import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
 import { recordAcceptedApiAdmission } from "../admission-trace";
 import { parseRequestBody, parseRequestJson, parseRequestQuery } from "../http/request-body";
@@ -1450,7 +1451,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       sessionId: c.req.param("sessionId"),
       approvalId: c.req.param("approvalId"),
     };
-    const review = await getToolActionReview(db, input);
+    const review = await getToolActionReview(db, { ...input, viewerSubjectId: grant.subjectId });
     if (!review) throw new HTTPException(404, { message: "Review not found" });
     c.header("Cache-Control", "private, no-store");
     return c.json(review);
@@ -4604,6 +4605,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         if (error instanceof SessionApprovalAnswerError) {
           throw new HTTPException(422, { message: error.message });
         }
+        const forbidden = approvalForbiddenHttpError(error);
+        if (forbidden) throw forbidden;
         throw error;
       }
       if (accepted.action === "conflict") {
@@ -7103,6 +7106,40 @@ export function sessionCreateErrorResponse(c: Context, error: unknown): Response
         details: {
           code: error.cause.code,
           ...(error.cause.capability ? { capability: error.cause.capability } : {}),
+        },
+      },
+      422,
+    );
+  }
+  if (
+    error instanceof HTTPException &&
+    error.status === 422 &&
+    error.cause instanceof ModelUnavailableError
+  ) {
+    // Typed like every other route's refusal, so the composer can say the
+    // model is unavailable instead of "check your input".
+    return c.json(
+      {
+        code: "SESSION_CREATE_REJECTED",
+        message: error.message,
+        details: { code: error.cause.code, modelId: error.cause.modelId },
+      },
+      422,
+    );
+  }
+  if (
+    error instanceof HTTPException &&
+    error.status === 422 &&
+    error.cause instanceof ModelPolicyRefusedError
+  ) {
+    return c.json(
+      {
+        code: "SESSION_CREATE_REJECTED",
+        message: error.message,
+        details: {
+          code: error.cause.code,
+          modelId: error.cause.modelId,
+          reason: error.cause.reason,
         },
       },
       422,

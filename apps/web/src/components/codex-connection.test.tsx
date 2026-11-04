@@ -117,6 +117,51 @@ async function renderPanel(props: ComponentProps<typeof CodexDeviceCodePanel> = 
 }
 
 describe("CodexDeviceCodePanel", () => {
+  test("a long wait names the ChatGPT setting that refuses device codes", async () => {
+    // ChatGPT refuses the code on its own page and the poll just keeps
+    // waiting, so the Models page must say what blocks it once the wait is long.
+    const hintTimers: Array<() => void> = [];
+    const priorSetTimeout = globalThis.setTimeout;
+    globalThis.setTimeout = ((handler: () => void, delay?: number, ...rest: unknown[]) => {
+      if (delay === 60_000) {
+        hintTimers.push(handler);
+        return 0 as unknown as ReturnType<typeof setTimeout>;
+      }
+      return priorSetTimeout(handler, delay, ...rest);
+    }) as typeof setTimeout;
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(<CodexDeviceCodePanel {...defaultPanelProps} />);
+      });
+      expect(container.textContent).not.toContain("Still waiting?");
+      expect(hintTimers.length).toBeGreaterThan(0);
+
+      await act(async () => hintTimers.at(-1)!());
+      expect(container.textContent).toContain("Still waiting?");
+      expect(container.textContent).toContain("“Enable device code sign-in for Codex”");
+      expect(container.textContent).toContain("Security and login");
+      const settings = Array.from(container.querySelectorAll<HTMLAnchorElement>("a")).filter(
+        (link) => link.textContent === "Open ChatGPT settings",
+      );
+      expect(settings).toHaveLength(1);
+      expect(settings[0]!.href).toBe("https://chatgpt.com/#settings/Security");
+      expect(settings[0]!.target).toBe("_blank");
+
+      // A fresh code starts a fresh wait.
+      await act(async () => {
+        root.render(<CodexDeviceCodePanel {...defaultPanelProps} userCode="WXYZ-9876" />);
+      });
+      expect(container.textContent).not.toContain("Still waiting?");
+    } finally {
+      globalThis.setTimeout = priorSetTimeout;
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("copies the exact device code and confirms the action", async () => {
     const copies: string[] = [];
     let copied!: () => void;

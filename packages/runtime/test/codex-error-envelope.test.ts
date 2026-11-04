@@ -39,6 +39,11 @@ test("unsupported-model detail survives the real OpenAI SDK and preserves the re
   expect(error).toMatchObject({ status: 400, error: { message: detail } });
   expect((error as Error).message).toContain(detail);
   expect((error as Error).message).not.toContain("no body");
-  expect(classifyCodexEntitlementRejection(error)).toBeNull();
+  // The account can't use this model (its plan or workspace settings): a
+  // per-model plan refusal for this connection, not a broken credential.
+  expect(classifyCodexEntitlementRejection(error)).toEqual({
+    status: 400,
+    evidence: "plan_entitlement",
+  });
   expect(wireModel).toBe("gpt-6.1-sol");
 });

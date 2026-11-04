@@ -1379,7 +1379,8 @@ describe("release image workflow contract", () => {
     expect(publish).toContain("expected_packages:");
     expect(publish).not.toContain("OPENGENI_RELEASE_PACKAGE_DERIVE_EXPECTED");
     expect(publish).toContain("checks: read");
-    expect(publish).toContain("filter=latest&per_page=100");
+    expect(publish).toContain('-f check_name="$name" -f filter=latest');
+    expect(publish).not.toContain("check-runs?filter=latest&per_page=100");
     expect(publish).toContain('test "$GITHUB_REF" = "refs/heads/main"');
     expect(publish).toContain('git merge-base --is-ancestor "$SOURCE_SHA" origin/production');
     expect(publish).not.toContain('test "$(git rev-parse origin/production)" = "$SOURCE_SHA"');
@@ -1650,7 +1651,7 @@ ${parser}`,
           typeof step === "object" &&
           step !== null &&
           "uses" in step &&
-          step.uses === "docker/build-push-action@v7.3.0",
+          step.uses === "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a",
       ).map((step) => ({
         jobName,
         name: step.name,
@@ -1662,37 +1663,37 @@ ${parser}`,
       {
         jobName: "api-image",
         name: "Build API image",
-        fingerprint: "826123d1ee6beb68714a6eea9753e7835ac521cdc74888c3010cfedc244c15f3",
+        fingerprint: "d9be49da8de0bf094f36e45a50d107e62fa5a943363677cf3bb57aa3ae78a728",
       },
       {
         jobName: "worker-image",
         name: "Build worker image",
-        fingerprint: "4b2cc84f762ff788fa67a2a485131af0656fb89091f8a355c0e8622ff771c41c",
+        fingerprint: "0c2430cebf299cdd02d0ffb566b99f7784b4836e0875a14a04ed123b7aca6492",
       },
       {
         jobName: "web-image",
         name: "Build web image",
-        fingerprint: "80eb5b15cc4d529a9b3b8cb3582f19465b34a288791f4233d734ebb7f1010e05",
+        fingerprint: "5736dc1b51fcbee06c29956af88027acd2cde555b84553825b44edac1909b0f2",
       },
       {
         jobName: "artifact-materializer-image",
         name: "Build artifact materializer image",
-        fingerprint: "3af7e35304c023f62c66a21f106f8538de597bee36b4b8806b7a993fdd8ba1c7",
+        fingerprint: "d976fef25bf6adeb9a0d0d190f3ca8c47de3be0b05791a8c5bc2979d812e6d68",
       },
       {
         jobName: "artifact-outbox-dispatcher-image",
         name: "Build artifact outbox dispatcher image",
-        fingerprint: "f6b76afe2901d1825bb2e3baaec1497c36e07a373388e680f744ff502f52695d",
+        fingerprint: "e663f1ad4f6b4a7fc9eae122a4e8dd8e04f5bf561e7d98f8eb02ddc2c0fd5270",
       },
       {
         jobName: "relay-image",
         name: "Build relay image",
-        fingerprint: "ad8deda6340ed1085a3c8637fe182c011a76b1d914daa17a8e4bcdd8ca23ac00",
+        fingerprint: "85a84ad374b1d6bd51ba3307f8292a28479c25f4cd3005429a7df002ad68c5de",
       },
       {
         jobName: "sandbox-image",
         name: "Build headless sandbox image",
-        fingerprint: "212673a44eb577c40fb7450605ef2787dcd163879612f722ad209f5921d9ce5d",
+        fingerprint: "dbb5ad8af626207769d4e46c0b10a8c06709d154ab34131378191bf167c6cd45",
       },
     ]);
 

@@ -32,7 +32,19 @@ export type SecretShapeKind =
   | "google-api-key"
   | "opengeni-token"
   | "1password-token"
-  | "jwt";
+  | "jwt"
+  | "aws-secret-access-key"
+  | "google-oauth-client-secret"
+  | "huggingface-token"
+  | "sendgrid-key"
+  | "shopify-token"
+  | "pypi-token"
+  | "databricks-token"
+  | "digitalocean-token"
+  | "linear-key"
+  | "doppler-token"
+  | "atlassian-token"
+  | "authorization-header";
 
 export type SecretShapeKindInfo = {
   /** Plain words for `[masked <label>]`; lower case. */
@@ -68,6 +80,30 @@ export const SECRET_SHAPE_KINDS: Readonly<Record<SecretShapeKind, SecretShapeKin
   "opengeni-token": { label: "opengeni token", itemType: "api_key", field: "value" },
   "1password-token": { label: "1password token", itemType: "api_key", field: "value" },
   jwt: { label: "jwt", itemType: "api_key", field: "value" },
+  "aws-secret-access-key": {
+    label: "aws secret access key",
+    itemType: "api_key",
+    field: "value",
+  },
+  "google-oauth-client-secret": {
+    label: "google oauth client secret",
+    itemType: "api_key",
+    field: "value",
+  },
+  "huggingface-token": { label: "hugging face token", itemType: "api_key", field: "value" },
+  "sendgrid-key": { label: "sendgrid key", itemType: "api_key", field: "value" },
+  "shopify-token": { label: "shopify token", itemType: "api_key", field: "value" },
+  "pypi-token": { label: "pypi token", itemType: "api_key", field: "value" },
+  "databricks-token": { label: "databricks token", itemType: "api_key", field: "value" },
+  "digitalocean-token": { label: "digitalocean token", itemType: "api_key", field: "value" },
+  "linear-key": { label: "linear key", itemType: "api_key", field: "value" },
+  "doppler-token": { label: "doppler token", itemType: "api_key", field: "value" },
+  "atlassian-token": { label: "atlassian token", itemType: "api_key", field: "value" },
+  "authorization-header": {
+    label: "authorization header",
+    itemType: "api_key",
+    field: "value",
+  },
 };
 
 export type SecretShapeMatch = {
@@ -169,13 +205,62 @@ function inConnectionString(text: string, match: RegExpExecArray, value: string)
   return CONNECTION_KEY.test(window);
 }
 
-function tokenDetector(kind: SecretShapeKind, source: string, flags = "g"): Detector {
+function tokenDetector(
+  kind: SecretShapeKind,
+  source: string,
+  options: { needsDigit?: boolean; accept?: Detector["accept"] } = {},
+): Detector {
   return {
     kind,
-    pattern: new RegExp(`(?<![A-Za-z0-9_.-])(${source})(?![A-Za-z0-9_-])`, flags),
+    pattern: new RegExp(`(?<![A-Za-z0-9_.-])(${source})(?![A-Za-z0-9_-])`, "g"),
     secret: (match) => match[1],
-    needsDigit: true,
+    needsDigit: options.needsDigit ?? true,
+    ...(options.accept ? { accept: options.accept } : {}),
   };
+}
+
+/** Both upper- and lower-case letters: random tokens have them, identifiers rarely do. */
+function mixedCase(value: string): boolean {
+  return /[A-Z]/.test(value) && /[a-z]/.test(value);
+}
+
+/** `YOUR_ACCESS_TOKEN_HERE_123`: a placeholder in docs and examples. */
+const ALL_CAPS_PLACEHOLDER = /^[A-Z0-9]+(?:_[A-Z0-9]+)+$/;
+/** A relative or absolute path, or a file name: `../fixtures/token-2024.json`. */
+const FILE_PATH = /^(?:\.{1,2}\/|\/[a-z][a-z0-9_.-]*\/)/;
+const FILE_EXTENSION =
+  /\.(?:json|ya?ml|toml|ini|cfg|conf|env|txt|md|log|pem|crt|key|xml|html?|[cm]?[jt]sx?|py|rb|go|rs|sh)$/i;
+
+/**
+ * Whether the word after `Bearer` or `token` is a token rather than code,
+ * a path or prose: `this.session.token2` (unless one part is a long random
+ * run), `tokens/session-2024/abcdef12` (a lower-case path of short segments),
+ * `../fixtures/token-2024.json` (a file path), `YOUR_ACCESS_TOKEN_HERE_123`
+ * and `authentication2024spec` (neither mixed case, nor long, nor a quarter
+ * digits) are not.
+ */
+function bearerValue(value: string): boolean {
+  if (FILE_PATH.test(value) || FILE_EXTENSION.test(value)) return false;
+  if (MEMBER_ACCESS.test(value) && !value.split(".").some((part) => part.length >= 20)) {
+    return false;
+  }
+  // A path in lower case. Base64 tokens hold `/` too, but mixed case.
+  const lowerPath = value.includes("/") && !/[A-Z]/.test(value);
+  if (lowerPath && value.split("/").every((segment) => segment.length < 16)) return false;
+  if (ALL_CAPS_PLACEHOLDER.test(value)) return false;
+  const digits = value.replace(/[^0-9]/g, "").length;
+  return mixedCase(value) || value.length >= 32 || digits * 4 >= value.length;
+}
+
+/** `Basic <base64>` is a credential only when it decodes to `user:password`. */
+function basicCredential(value: string): boolean {
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(value) || value.length % 4 !== 0) return false;
+  try {
+    const decoded = atob(value);
+    return /^[ -~]+$/.test(decoded) && /^[^:]+:.+$/.test(decoded);
+  } catch {
+    return false;
+  }
 }
 
 // Order matters where two detectors report the same span: the first wins.
@@ -261,11 +346,53 @@ const DETECTORS: readonly Detector[] = [
     "og[kp]_[A-Za-z0-9]{32,256}|og[ders]\\d?_[A-Za-z0-9_-]{16,2048}\\.[A-Za-z0-9_-]{16,512}",
   ),
   tokenDetector("1password-token", "ops_[A-Za-z0-9_.-]{40,4096}"),
+  tokenDetector("google-oauth-client-secret", "GOCSPX-[A-Za-z0-9_-]{28}", {
+    needsDigit: false,
+    accept: (_text, _match, value) => mixedCase(value.slice(7)),
+  }),
+  // Letters only; a real token mixes upper and lower case, identifiers don't.
+  tokenDetector("huggingface-token", "hf_[A-Za-z]{34}", {
+    needsDigit: false,
+    accept: (_text, _match, value) => mixedCase(value.slice(3)),
+  }),
+  tokenDetector("sendgrid-key", "SG\\.[A-Za-z0-9_-]{22}\\.[A-Za-z0-9_-]{43}"),
+  tokenDetector("shopify-token", "shp(?:at|ss|ca|pa)_[a-fA-F0-9]{32}"),
+  tokenDetector("pypi-token", "pypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,1000}"),
+  tokenDetector("databricks-token", "dapi[a-f0-9]{32}(?:-\\d)?"),
+  tokenDetector("digitalocean-token", "do[por]_v1_[a-f0-9]{64}"),
+  tokenDetector("linear-key", "lin_api_[A-Za-z0-9]{40}"),
+  tokenDetector("doppler-token", "dp\\.(?:pt|st|sa|ct|scim|audit)\\.[A-Za-z0-9]{40,44}"),
+  tokenDetector("atlassian-token", "ATATT3[A-Za-z0-9_=-]{150,300}"),
   {
     kind: "jwt",
     pattern:
       /(?<![A-Za-z0-9_-])(eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{16,})(?![A-Za-z0-9_-])/g,
     secret: (match) => match[1],
+  },
+  {
+    kind: "aws-secret-access-key",
+    // Only next to its name: a bare 40-character base64 run is often a digest.
+    pattern:
+      /(?<![A-Za-z0-9])(?:aws_?secret_?access_?key|secret_?access_?key)["']?\s*[:=]\s*["']?([A-Za-z0-9/+]{40})(?![A-Za-z0-9/+=])/gi,
+    secret: (match) => match[1],
+    needsDigit: true,
+  },
+  {
+    kind: "authorization-header",
+    // `Authorization: Bearer <token>`, `-H "Authorization: token <token>"` or a
+    // bare `Bearer <token>`. After the specific token detectors, so a GitHub
+    // or OpenAI token keeps its own kind.
+    pattern:
+      /(?:\bBearer|(?:authorization|auth)["']?\s*[:=]\s*["']?(?:Bearer|token|Token))\s+([A-Za-z0-9._~+/-]{16,4096}={0,2})(?![A-Za-z0-9._~+/=-])/gi,
+    secret: (match) => match[1],
+    needsDigit: true,
+    accept: (_text, _match, value) => bearerValue(value),
+  },
+  {
+    kind: "authorization-header",
+    pattern: /\bBasic\s+([A-Za-z0-9+/]{12,4096}={0,2})(?![A-Za-z0-9+/=])/g,
+    secret: (match) => match[1],
+    accept: (_text, _match, value) => basicCredential(value),
   },
 ];
 

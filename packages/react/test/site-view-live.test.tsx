@@ -215,17 +215,27 @@ test("in full screen, menus opened from the header draw inside the full-screen f
       title="Usage"
       fullScreen={fullScreen}
       headerControls={<Probe />}
+      // The title's own menu (the Site view's Copy title) too.
+      renderTitle={(title) => (
+        <>
+          {title}
+          <Probe />
+        </>
+      )}
     />
   );
   const view = await renderComponent(draw(false));
   try {
-    const portal = () => view.container.querySelector("[data-portal]")?.getAttribute("data-portal");
+    const portals = () =>
+      [...view.container.querySelectorAll("[data-portal]")].map((probe) =>
+        probe.getAttribute("data-portal"),
+      );
     // The page's own target (here, <body>) outside full screen.
-    expect(portal()).toBe("body");
+    expect(portals()).toEqual(["body", "body"]);
     await view.rerender(draw(true));
-    expect(portal()).toBe("DIALOG");
+    expect(portals()).toEqual(["DIALOG", "DIALOG"]);
     await view.rerender(draw(false));
-    expect(portal()).toBe("body");
+    expect(portals()).toEqual(["body", "body"]);
   } finally {
     await view.unmount();
   }

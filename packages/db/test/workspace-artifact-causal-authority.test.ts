@@ -488,15 +488,35 @@ describe("workspace artifact causal authority under FORCE RLS", () => {
     expect(await mutateCreate(grant, child)).toMatchObject({ ok: true, persisted: 1 });
   }, 60_000);
 
-  test("rejects pure service and cross-workspace provenance with no content persistence", async () => {
+  test("accepts an owner-less scheduled run through the same exact fences", async () => {
     const grant = await freshGrant("pure-service");
     const pureService = await seedAttempt(grant, {
       initiatorKind: "service",
-      initiatorSubjectId: "background-maintenance",
+      initiatorSubjectId: "scheduled-automation",
       initiatingHumanSubjectId: null,
     });
-    expect(await mutateCreate(grant, pureService)).toMatchObject({ ok: false, persisted: 0 });
+    expect(await mutateCreate(grant, pureService)).toMatchObject({ ok: true, persisted: 1 });
 
+    const stale = await seedAttempt(grant, {
+      initiatorKind: "service",
+      initiatorSubjectId: "scheduled-automation",
+      initiatingHumanSubjectId: null,
+    });
+    expect(
+      await mutateCreate(grant, stale, { executionGeneration: stale.executionGeneration + 1 }),
+    ).toMatchObject({ ok: false, persisted: 0 });
+
+    const unselected = await seedAttempt(grant, {
+      initiatorKind: "service",
+      initiatorSubjectId: "scheduled-automation",
+      initiatingHumanSubjectId: null,
+      permissions: [],
+    });
+    expect(await mutateCreate(grant, unselected)).toMatchObject({ ok: false, persisted: 0 });
+  });
+
+  test("rejects cross-workspace provenance with no content persistence", async () => {
+    const grant = await freshGrant("cross-workspace-source");
     const targetGrant = await freshGrant("cross-workspace");
     const causalService = await seedAttempt(grant, {
       initiatorKind: "service",

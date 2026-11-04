@@ -7,14 +7,14 @@ export type TimelineSettlement = { element: HTMLElement; top: number };
 export function captureTimelineSettlement(
   scroller: HTMLElement,
   groups: readonly { key: string; group: TimelineGroup }[],
-  answeredCard: HTMLElement | null = null,
 ): TimelineSettlement | null {
   // Selectionchange can arrive after this commit. Inspect ownership directly
-  // as well as the caller's pin latch so that race cannot move selected text.
-  if (timelineHasReader(scroller, answeredCard)) return null;
+  // as well as the caller's pin latch so that race cannot move selected text
+  // or a focused control.
+  if (timelineHasReader(scroller)) return null;
   const live = Array.from(
     scroller.querySelectorAll(
-      '[data-og-exchange-status="working"], [data-og-exchange-status="waiting"]',
+      '[data-og-exchange-status="working"], [data-og-exchange-status="waiting"], [data-og-exchange-status="paused"]',
     ),
   );
   // At the live tip the newest retained answer owns the transition. An older

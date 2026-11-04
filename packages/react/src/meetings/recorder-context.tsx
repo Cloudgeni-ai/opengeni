@@ -42,9 +42,14 @@ export type MeetingRecorder = UseRecorderResult;
  * A recording someone asked for outside the recorder, such as from a desktop
  * call notification. An empty title leaves the name to Opengeni; `app` marks
  * a title the app guessed (the call app's name), which a calendar event or
- * the conversation replaces.
+ * the conversation replaces. `calendarEvent` is the owner's calendar event
+ * the meeting is of, such as one joined from a reminder; it names the meeting.
  */
-export type MeetingStartRequest = { title: string; titleSource?: "person" | "app" };
+export type MeetingStartRequest = {
+  title: string;
+  titleSource?: "person" | "app";
+  calendarEvent?: { provider: "google" | "microsoft"; id: string };
+};
 
 export type MeetingRecorderStore = {
   get: () => MeetingRecorder | null;
@@ -280,16 +285,44 @@ function useDesktopMeetingRequests(
         // Nobody signed in: a start kept for later would record, for whoever
         // signs in next, a call that may be long over.
         if (latest.current.signedOut) return;
-        // Already recording shows that recording rather than start a second one.
-        // The call app's name is only a guess at the meeting's.
+        // The call app's name is only a guess at the meeting's; the calendar
+        // event a reminder joined names it.
+        const start: MeetingStartRequest = {
+          title: request.title,
+          titleSource: "app",
+          ...(request.calendarEvent ? { calendarEvent: request.calendarEvent } : {}),
+        };
+        // Already recording shows that recording rather than start a second
+        // one, unless the person chose to switch to recording the next meeting:
+        // this one stops and is kept, then the next starts.
         if (canStartRecording(recorder?.state)) {
-          store.requestStart({ title: request.title, titleSource: "app" });
+          store.requestStart(start);
+        } else if (
+          request.replace === true &&
+          recorder &&
+          (recorder.state === "recording" || recorder.state === "paused")
+        ) {
+          // A stop that fails leaves that recording showing its error, and starts nothing.
+          void recorder.stop().then(
+            () => store.requestStart(start),
+            () => undefined,
+          );
         }
         latest.current.onOpenMeetings?.();
         return;
       }
       const recordingId = recorder?.recordingId ?? null;
       const recordingWorkspaceId = store.workspaceId?.() ?? null;
+      if (request.kind === "open") {
+        // The app's menu: show the meeting this page records, its live transcript.
+        const opened =
+          recordingId && recordingWorkspaceId && capturing(recorder?.state)
+            ? store.openMeeting?.(recordingId, recordingWorkspaceId)
+            : false;
+        if (!opened) latest.current.onOpenMeetings?.();
+        return;
+      }
+      if (request.kind !== "stop") return;
       if (!recorder || (recorder.state !== "recording" && recorder.state !== "paused")) return;
       void recorder.stop().then(() => {
         if (recordingId && recordingWorkspaceId) {

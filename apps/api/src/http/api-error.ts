@@ -7,6 +7,7 @@ import {
   UPGRADE_PLAN_ACTION,
   byokRefusalAction,
   AllowanceExhaustedRefusal,
+  ModelPolicyRefusedError,
   ModelUnavailableError,
   ScheduledTaskTargetAccessChange,
   type ErrorCode,
@@ -15,6 +16,7 @@ import {
   isDatabaseConnectionLoss,
   SessionUsageLimitUnavailableError,
   nestedPostgresSqlState,
+  SessionApprovalForbiddenError,
   WorkspaceControlBusyError,
   WorkspaceContentFlowRefusedError,
 } from "@opengeni/db";
@@ -62,6 +64,24 @@ export function missingPermissionHttpError(error: unknown): ApiHttpError | null 
     retryable: false,
     outcomeUnknown: false,
     details: error.details,
+  });
+}
+
+/**
+ * Approving an action on someone else's own login: says who can approve, and
+ * keeps the stable code in `details` so clients can tell it from other 403s.
+ */
+export function approvalForbiddenHttpError(error: unknown): ApiHttpError | null {
+  if (!(error instanceof SessionApprovalForbiddenError)) return null;
+  return new ApiHttpError(403, {
+    code: "forbidden",
+    message: error.message,
+    retryable: false,
+    outcomeUnknown: false,
+    details: {
+      code: error.code,
+      ...(error.owner.label ? { accountOwnerLabel: error.owner.label } : {}),
+    },
   });
 }
 
@@ -351,6 +371,28 @@ export function modelUnavailableHttpError(error: unknown): ApiHttpError | null {
     retryable: false,
     outcomeUnknown: false,
     details: { code: cause.code, modelId: cause.modelId },
+  });
+}
+
+/**
+ * A model the workspace's model policy refuses. The same request is refused
+ * again until someone changes the model or the policy, so clients get
+ * `details.code: "model_policy"` with the rule (`reason`) instead of a retry.
+ */
+export function modelPolicyRefusedHttpError(error: unknown): ApiHttpError | null {
+  const cause =
+    error instanceof ModelPolicyRefusedError
+      ? error
+      : error instanceof HTTPException && error.cause instanceof ModelPolicyRefusedError
+        ? error.cause
+        : null;
+  if (!cause) return null;
+  return new ApiHttpError(422, {
+    code: "validation_failed",
+    message: cause.message,
+    retryable: false,
+    outcomeUnknown: false,
+    details: { code: cause.code, modelId: cause.modelId, reason: cause.reason },
   });
 }
 
