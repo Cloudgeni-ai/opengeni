@@ -83,6 +83,7 @@ import {
   losslessText,
 } from "./lossless-columns";
 
+export * from "./agents-schema";
 export * from "./automation-templates-schema";
 export * from "./bot-templates-schema";
 export * from "./editable-artifacts-schema";
@@ -5589,6 +5590,15 @@ export const sessions = pgTable(
     // Frozen agent configuration (migration 0559); NULL means a legacy
     // session. Mid-session updates share the tool_policy_version CAS.
     agentConfig: jsonb("agent_config").$type<ResolvedAgentConfig>(),
+    // Migration 1244: the agent (agents.id) this chat was started for. No
+    // foreign key; recheck the agent on use. Set once from NULL, never
+    // changed (sessions_agent_id_immutable); forks copy it, child workers
+    // never set it. Unrelated to agentConfig and agentAccess.
+    agentId: uuid("agent_id"),
+    // The agent revision whose Instructions are in this chat's system prompt.
+    // NULL is a legacy chat (instructions already in `instructions`): never
+    // add the agent layer to it.
+    agentPromptRevision: integer("agent_prompt_revision"),
     // Migration 1124: hosted web-search records reach the model as runtime
     // input instead of assistant messages. Set once by a worker, never reset.
     searchRecordsAsInput: boolean("search_records_as_input").notNull().default(false),
@@ -5739,6 +5749,16 @@ export const sessions = pgTable(
       table.workspaceId,
       table.rootSessionId,
       table.nestedAgentDepth,
+    ),
+    // Migration 1245 (concurrent): an agent's chats, newest first.
+    agent: index("sessions_agent_idx")
+      .on(table.workspaceId, table.agentId, table.createdAt.desc())
+      .where(sql`${table.agentId} is not null`),
+    // Migration 1244 (NOT VALID; enforced for new and changed rows).
+    agentPromptRevisionValid: check(
+      "sessions_agent_prompt_revision_check",
+      sql`${table.agentPromptRevision} is null
+        or (${table.agentPromptRevision} > 0 and ${table.agentId} is not null)`,
     ),
     initialModelContextValid: check(
       "sessions_initial_model_context_check",
