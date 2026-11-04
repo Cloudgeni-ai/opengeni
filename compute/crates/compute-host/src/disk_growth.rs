@@ -45,6 +45,42 @@ pub(crate) fn retained_disk_len(path: &Path, may_be_open: bool) -> u64 {
     }
 }
 
+/// What removing `path`, a file or a directory with all it holds, frees of
+/// the host's disk at least, on a filesystem that allocates `unit` bytes
+/// at a time: the bytes and inodes of what nothing else keeps. A file
+/// with another link, such as a memory image a sandbox shares with its
+/// template, frees nothing, and of the others only the blocks each holds
+/// alone count (see [`held_alone`]), since a shared extent stays another
+/// file's. Nothing for a path that is missing. Blocks.
+pub(crate) fn freed_by_removing(path: &Path, unit: u64) -> io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok((0, 0)),
+        Err(error) => return Err(error),
+    };
+    if metadata.is_dir() {
+        let mut freed = (0_u64, 1_u64);
+        for entry in std::fs::read_dir(path)? {
+            let (bytes, inodes) = freed_by_removing(&entry?.path(), unit)?;
+            freed = (
+                freed.0.saturating_add(bytes),
+                freed.1.saturating_add(inodes),
+            );
+        }
+        return Ok(freed);
+    }
+    if metadata.nlink() > 1 {
+        return Ok((0, 0));
+    }
+    if !metadata.is_file() {
+        return Ok((0, 1));
+    }
+    let file = std::fs::File::open(path)?;
+    Ok((unshared_bytes(&file, unit)?, 1))
+}
+
 /// What a disk file may take, as [`headroom`] reads it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Headroom {
@@ -246,6 +282,33 @@ mod tests {
             headroom(&path, 4096, true).unwrap().left,
             written,
             "nothing is shared"
+        );
+    }
+
+    /// Removing a directory frees what its files hold alone, and nothing
+    /// of a file another link keeps.
+    #[test]
+    fn removing_frees_only_what_nothing_else_keeps() {
+        let dir = tempfile::tempdir().unwrap();
+        let kept = dir.path().join("kept");
+        std::fs::create_dir(&kept).unwrap();
+        let alone = std::fs::File::create(kept.join("alone")).unwrap();
+        alone.write_all_at(&vec![7; 4 << 20], 0).unwrap();
+        alone.set_len(64 * MIB).unwrap();
+        alone.sync_all().unwrap();
+        let linked = std::fs::File::create(kept.join("linked")).unwrap();
+        linked.write_all_at(&vec![7; 8 << 20], 0).unwrap();
+        linked.sync_all().unwrap();
+        std::fs::hard_link(kept.join("linked"), dir.path().join("elsewhere")).unwrap();
+        let (bytes, inodes) = freed_by_removing(&kept, 4096).unwrap();
+        assert!(
+            (4 * MIB..5 * MIB).contains(&bytes),
+            "only the file held alone counts: {bytes}"
+        );
+        assert_eq!(inodes, 2, "the directory and the file held alone");
+        assert_eq!(
+            freed_by_removing(&dir.path().join("missing"), 4096).unwrap(),
+            (0, 0)
         );
     }
 

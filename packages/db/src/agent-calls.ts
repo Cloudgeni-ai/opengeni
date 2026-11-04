@@ -1,6 +1,5 @@
 import { and, eq, sql } from "drizzle-orm";
 import { rawRows, withRlsContext, type Database } from "./database";
-import { agentCallRoutinesGranted } from "./native-push";
 import { agentCallHostPhones, agentCalls } from "./schema";
 
 // Agents calling people (1107, docs/design/agent-calls.md). A call rings the
@@ -171,13 +170,12 @@ async function hostPhoneCount(
 
 /**
  * How many of a person's Opengeni app phones an agent may ring (for their
- * own agents, or a teammate's). None until the agent call routines are granted.
+ * own agents, or a teammate's).
  */
 export async function countAgentCallDevices(
   db: Database,
   input: { calleeSubjectId: string; member: boolean },
 ): Promise<number> {
-  if (!(await agentCallRoutinesGranted(db))) return 0;
   const [row] = await rawRows<{ devices: number }>(
     db,
     sql`select opengeni_private.agent_call_device_count_v1(
@@ -212,10 +210,6 @@ export async function placeAgentCall(
       await scoped.execute(
         sql`select pg_advisory_xact_lock(hashtextextended(${`opengeni:agent-call:${input.calleeSubjectId}`}::text, 0))`,
       );
-      // Calls need the call routines granted, wherever the phones ring.
-      if (!(await agentCallRoutinesGranted(scoped))) {
-        return { placed: false, refusal: "no_phone" };
-      }
       const hostPhones = await hostPhoneCount(scoped, input);
       if (hostPhones === 0 && (await countAgentCallDevices(scoped, input)) === 0) {
         return { placed: false, refusal: "no_phone" };

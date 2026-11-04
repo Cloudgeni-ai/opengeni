@@ -258,6 +258,8 @@ and switches single capabilities: `{ from: "none", webSearch: true }`.
 | Capability | Lets the agent |
 | --- | --- |
 | `humanInput` | pause and ask the person for a decision or missing detail |
+| `notifications` | notify the person, withdraw notifications, tidy their inbox and call them (off in `"none"`) |
+| `privacyFacts` | answer privacy, retention and provider questions from the deployment's facts (off in `"none"`) |
 | `webSearch` | search the public web |
 | `media` | generate images and videos |
 | `goals` | work toward a goal across many turns |
@@ -277,6 +279,19 @@ tools and runtime mechanics are not capabilities and are never toggled. A
 capability the deployment does not offer is reported off in `agent.unavailable`;
 requesting it returns 422 `agent_capability_unavailable`. Child sessions may
 only narrow their parent (`agent_config_widening`), and a goal needs `goals`.
+
+Every built-in tool and prompt section follows what the session can use, so
+`"none"` pays only for what is relevant on each call: a neutral identity
+without a shared workspace; `request_human_input` with the secret kind only
+under `secrets` and Skill reviews only under `skills: "manage"`;
+`wait_for_input` only with a sandbox, `subagents`, `goals`, `schedules`,
+`browser`, `media` or a user-started turn; tool search only when a tool is
+deferred (an `optional` or connection-backed eager server still counts as
+deferred); no Skill index without Skills. Sessions with a feature get the same
+prompt as before. Saved workspace defaults and schedules keep notifications
+and privacy facts under `"none"`. `GET .../model-context` returns the latest
+request's provider body; on the native Anthropic route it also lists the
+instructions, their layers and each tool.
 
 `identity` replaces only how Opengeni introduces the agent. `instructions` is
 the session `instructions` field. The prompt order is identity, Opengeni's

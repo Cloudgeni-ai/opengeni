@@ -139,6 +139,10 @@ pub(crate) struct LocalDisk {
     /// What it booked on local disk as of its last reconcile, so what it
     /// stops booking is counted until a reading shows it.
     pub booked: DiskSpace,
+    /// What giving up its local copy frees at least, as last measured
+    /// while it slept with no VM (see [`crate::Input::LocalCopy`]);
+    /// nothing until then, and again once it wakes or its copy goes.
+    pub copy: DiskSpace,
 }
 
 /// What can still be done with a sandbox.
@@ -184,6 +188,7 @@ impl Sandbox {
                 growth: size.disk,
                 hydrating: false,
                 booked: DiskSpace::default(),
+                copy: DiskSpace::default(),
             },
             in_flight: None,
             // A copy found in object storage counts as taken at its last

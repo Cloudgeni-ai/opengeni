@@ -88,15 +88,15 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           # The structure check compares the baseline with the base's copy.
           fetch-depth: 0
       - name: Install the Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: compute
       - name: cargo fmt --check
@@ -136,10 +136,10 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U fleet" --health-interval 5s --health-timeout 5s --health-retries 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install the Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: compute
       - name: An XFS directory for the checkpoint tests
@@ -168,7 +168,7 @@ jobs:
       run:
         working-directory: .
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: shellcheck
         run: |
           shellcheck --severity=warning compute/deploy/host/install.sh compute/deploy/host/bundle.sh \
@@ -181,13 +181,13 @@ jobs:
         run: compute/deploy/host/test-compute-host-certificate
       - name: what the agent starts with (install.sh restarts it only when that changed)
         run: compute/deploy/host/test-agent-inputs
-      - uses: hashicorp/setup-terraform@v4
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
       - name: Terraform (GCP host fleet)
         run: |
           terraform -chdir=deploy/terraform/gcp-compute fmt -check
           terraform -chdir=deploy/terraform/gcp-compute init -backend=false -input=false
           terraform -chdir=deploy/terraform/gcp-compute validate
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
@@ -207,12 +207,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install the Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: x86_64-unknown-linux-musl
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: compute
       - name: Room on the runner
@@ -241,7 +241,7 @@ jobs:
           stat -fc %T /sys/fs/cgroup
           free -m
       - name: Cache the prepared lab (Firecracker, guest kernel, base image)
-        uses: actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             /lab/bin
@@ -250,7 +250,7 @@ jobs:
             /lab/ci-artifacts.txt
           key: compute-lab-${{ hashFiles('compute/lab/host-setup.sh', 'compute/deploy/host/pins.env') }}
       - name: Cache the guest build's pinned downloads (Go, bash source)
-        uses: actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/compute-guest
           key: compute-guest-tools-${{ hashFiles('compute/guest/build.sh') }}

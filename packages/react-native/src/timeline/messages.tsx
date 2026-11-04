@@ -32,6 +32,7 @@ export interface NativeTimelineMessages {
   /** An answered secret question: where the value was saved, never the value. */
   humanInputSecretSaved: (vaultName: string, itemName: string) => string;
   working: string;
+  paused: string;
   waiting: string;
   thinking: string;
   thought: string;
@@ -134,6 +135,7 @@ export const defaultNativeTimelineMessages = (t: OpenGeniText): NativeTimelineMe
   humanInputSecretSaved: (vaultName, itemName) =>
     t("native.timeline.messages.savedToVaultnameItemname", { vaultName, itemName }),
   working: t("native.timeline.messages.working"),
+  paused: t("native.timeline.messages.paused"),
   waiting: t("native.timeline.messages.waiting"),
   thinking: t("native.timeline.messages.thinking"),
   thought: t("native.timeline.messages.thought"),

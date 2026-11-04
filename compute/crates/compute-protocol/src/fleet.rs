@@ -195,6 +195,13 @@ pub struct Capacity {
     pub cpu_free_millis: u64,
     /// Disk free for sandboxes, in MiB.
     pub disk_free_mib: u64,
+    /// Disk in MiB beyond [`Capacity::disk_free_mib`] that a new sandbox
+    /// could take now by the host freeing what it keeps without losing
+    /// anything, as its admission counts it (ADR 30). Placement counts it
+    /// as free. Missing from what a host or the service of an earlier
+    /// release wrote, which then counts none.
+    #[serde(default)]
+    pub disk_reclaimable_mib: u64,
     /// Its ready clones, per shape.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ready: Vec<ReadyClones>,

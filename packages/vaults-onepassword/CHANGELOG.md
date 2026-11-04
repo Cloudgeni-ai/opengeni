@@ -1,5 +1,14 @@
 # @opengeni/vaults-onepassword
 
+## 6.9.0
+
+### Patch Changes
+
+- Updated dependencies [8572155]
+- Updated dependencies [54bf495]
+  - @opengeni/contracts@6.9.0
+  - @opengeni/vaults@6.9.0
+
 ## 6.8.0
 
 ### Patch Changes

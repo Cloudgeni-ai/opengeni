@@ -592,6 +592,7 @@ fn capacity(status: &HostStatus, renewer: &Renewer) -> Capacity {
         cpu_millis: status.cpu.as_ref().map_or(0, |cpu| cpu.total),
         cpu_free_millis: status.cpu.as_ref().map_or(0, |cpu| cpu.free),
         disk_free_mib: status.disk.as_ref().map_or(0, |disk| mib(disk.free)),
+        disk_reclaimable_mib: status.disk.as_ref().map_or(0, |disk| mib(disk.reclaimable)),
         ready: status
             .templates
             .iter()

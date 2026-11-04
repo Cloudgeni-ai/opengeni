@@ -1101,12 +1101,15 @@ identity. Ordinary draining owns termination. See [lifecycle](run-lifecycle.md).
 ### 3.10 Client/server compatibility policy
 
 Canonical policy: [`design/api-compatibility-policy.md`](design/api-compatibility-policy.md).
-The `@opengeni/sdk` major is the API compatibility major. Within a major the
-public surface (SDK-reachable `/v1` routes and their shapes, the session event
-envelope and types, `@opengeni/sdk`/`@opengeni/react` exports, public ingress
-routes) evolves additively and both sides are tolerant readers. Breaking
-changes need a deprecation, at least 90 days on the managed service, and a new
-major. `bun run check:public-api` enforces it in CI.
+Existing integrations keep working across every production update. The
+public surface (SDK-reachable `/v1` routes and their shapes, including every
+route a published SDK calls, the session event envelope and types,
+`@opengeni/sdk`/`@opengeni/react` exports, public ingress routes, and their
+documented behaviour) only evolves additively, and both sides are tolerant
+readers. A major release or deprecation period never permits a break; an
+incompatible design ships as a new version beside the old one, with
+version-specific adapters over shared application logic. `bun run
+check:public-api` and the major-changeset guard enforce it in CI.
 
 Official builds expose `serverVersion` in health and client config; nothing
 negotiates at runtime.

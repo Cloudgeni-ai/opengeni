@@ -591,7 +591,13 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
             urgent.length && urgent.length < numbers.length
               ? [urgent, numbers.filter((n) => !urgent.includes(n))]
               : split(numbers);
-          pending = [first, second, ...manifest.pending];
+          // A batch that went ahead of a bisection queues its halves behind
+          // that bisection's halves, so new failures cannot keep pushing older
+          // halves back. Its blame belongs to its own halves, not the older ones.
+          if (manifest.aheadOfBisection === true) {
+            pending = [...manifest.pending, first, second];
+            blame = [];
+          } else pending = [first, second, ...manifest.pending];
         }
       }
     }
