@@ -7,6 +7,7 @@
 
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { Context } from "@temporalio/activity";
+import { sandboxDeadlineMandatoryCaptureLeadMs } from "@opengeni/config";
 import { createDb, type Database, type DbClient } from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -217,6 +218,39 @@ describe("drain snapshot observability", () => {
     expect(provider.commands.find((cmd) => cmd.includes("OPENGENI_WORKSPACE_SIZE_V1"))).toContain(
       "timeout 15 find",
     );
+  }, 60_000);
+
+  test("near the pre-deadline save window a failure is not measured, so no walk competes with the last save", async () => {
+    if (!available) return;
+    const epoch = 7;
+    const instanceId = "sb-window-no-walk";
+    const ids = await drainingModalLease(epoch, instanceId);
+    const leadMs = sandboxDeadlineMandatoryCaptureLeadMs(SETTINGS);
+    // The window opens in 5 s: a walk now could still be running then.
+    await shared!.admin`
+      update sandbox_leases
+      set provider_created_at = now() - interval '23 hours',
+          provider_deadline_at = now() + ${`${leadMs + 5_000} milliseconds`}::interval
+      where sandbox_group_id = ${ids.groupId}`;
+    const provider = modalLikeClient(async () => {
+      throw new Error("Modal snapshot_directory persistence timed out.");
+    });
+    const recorded = recordingServices();
+    const { drainSandboxLease } = createSandboxLeaseActivities(recorded.services, {
+      createClientForBackend: (() => provider.client) as never,
+      probeDrainableProvider: async () => "ready",
+    });
+    currentAttempt += 1;
+    await expect(drainSandboxLease(drainInput(ids, epoch, instanceId))).rejects.toThrow(
+      "persistence timed out",
+    );
+    await Bun.sleep(50);
+    expect(
+      recorded.counters.filter(
+        (entry) => entry.name === "opengeni_sandbox_drain_capture_failures_total",
+      ),
+    ).toHaveLength(1);
+    expect(provider.commands.some((cmd) => cmd.includes("OPENGENI_WORKSPACE_SIZE_V1"))).toBe(false);
   }, 60_000);
 
   test("a portable archive's own tree size is observed when the drain captures it", async () => {

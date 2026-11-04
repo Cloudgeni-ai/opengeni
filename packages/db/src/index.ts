@@ -52907,8 +52907,13 @@ export async function commitWarmingToWarm(
             );
           }),
       );
-    } catch {
+    } catch (error) {
       // The model's restore receipt is durable; only the person's notice is lost.
+      console.warn("sandbox restore: older-save notice write failed (restore unaffected)", {
+        sandboxGroupId: input.sandboxGroupId,
+        operationId: restoredNotice.operationId,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
   return outcome;

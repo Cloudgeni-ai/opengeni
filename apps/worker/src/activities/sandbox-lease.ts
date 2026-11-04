@@ -143,6 +143,7 @@ import {
   captureWorkspaceArchiveForStorage,
   disposeWorkspaceArchive,
   probeRemoteWorkspaceSize,
+  WORKSPACE_SIZE_PROBE_TIMEOUT_SECONDS,
   workspaceSizeFromArchiveDescriptor,
   type VerifiedWorkspaceArchivePayload,
   type VerifiedHostWorkspaceArchive,
@@ -5424,10 +5425,13 @@ export async function terminateProviderBox(
   // drain never waits for it.
   const observeFailedCaptureSize = () => {
     // Inside the pre-deadline save window the next snapshot starts without
-    // backoff; a walk then would compete with the last chance to save.
+    // backoff; a walk then would compete with the last chance to save. Skip
+    // one that could still be running when the window opens, too.
     if (
       lease.providerDeadlineAt &&
-      lease.providerDeadlineAt.getTime() - sandboxDeadlineMandatoryCaptureLeadMs(settings) <=
+      lease.providerDeadlineAt.getTime() -
+        sandboxDeadlineMandatoryCaptureLeadMs(settings) -
+        (WORKSPACE_SIZE_PROBE_TIMEOUT_SECONDS + 10) * 1_000 <=
         Date.now()
     ) {
       return;
