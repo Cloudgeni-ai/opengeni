@@ -253,7 +253,9 @@ describe("process-start failures from the machine agent", () => {
     const rendered = renderSelfhostedFault(error);
     expect(rendered).toContain("the machine could not start the program");
     expect(rendered).toContain("nothing ran; the command never started.");
-    expect(rendered).toContain("the null device /dev/null is missing, so the machine cannot start programs");
+    expect(rendered).toContain(
+      "the null device /dev/null is missing, so the machine cannot start programs",
+    );
     expect(rendered).toContain("Stop running commands");
     expect(renderSelfhostedFault(legacySpawnError(SCRIPT))).not.toContain("node -e");
   });
