@@ -185,8 +185,9 @@ other errors are `failed`. `opengeni_repository_skill_discovery_failures_total{b
 counts failed discovery runs by a closed error class; `handling` is `degraded` or
 `unreachable` when the turn continued without repository skills and `propagated`
 when the error reached turn recovery. A single skipped search path or skill
-folder is not a failed run; it is logged as `Repository skill skipped` with its
-`reason`. The `not_found` rule is shared with the routed metric and applies to
+folder does not fail the run; it counts once as `handling="skipped"` and is
+logged as `Repository skill skipped` with its `reason` (a symlinked folder,
+which is not shown to the model, logs `Repository skill folder skipped`). The `not_found` rule is shared with the routed metric and applies to
 every setup `purpose`; for purposes other than `repository_skills` a miss may
 still matter to its caller.
 

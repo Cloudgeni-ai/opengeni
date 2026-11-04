@@ -2486,18 +2486,25 @@ export function recordTurnStartupPhase(
 const REPOSITORY_SKILL_DISCOVERY_ERROR_CLASS_SET: ReadonlySet<string> = new Set(
   REPOSITORY_SKILL_DISCOVERY_ERROR_CLASSES,
 );
-const REPOSITORY_SKILL_DISCOVERY_HANDLING = new Set(["propagated", "degraded", "unreachable"]);
+const REPOSITORY_SKILL_DISCOVERY_HANDLING = new Set([
+  "propagated",
+  "degraded",
+  "unreachable",
+  "skipped",
+]);
 
 /** Failed repository skill discovery by bounded error class. `handling` says
  * whether the turn continued without repository skills (`degraded`,
- * `unreachable`) or the error reached turn recovery (`propagated`). */
+ * `unreachable`), the error reached turn recovery (`propagated`), or one
+ * unusable search path or skill folder was skipped in a completed run
+ * (`skipped`, one increment per entry). */
 export function recordRepositorySkillDiscoveryFailure(
   observability: Observability,
   input: { backend: string; errorClass: string; handling: string },
 ): void {
   observability.incrementCounter({
     name: "opengeni_repository_skill_discovery_failures_total",
-    help: "Failed repository skill discovery runs by bounded error class and handling (propagated reached turn recovery; degraded and unreachable continued without repository skills).",
+    help: "Failed repository skill discovery by bounded error class and handling (propagated reached turn recovery; degraded and unreachable continued without repository skills; skipped counts one unusable search path or skill folder in a completed run).",
     labels: {
       backend: SandboxBackend.safeParse(input.backend).success ? input.backend : "unknown",
       error_class: REPOSITORY_SKILL_DISCOVERY_ERROR_CLASS_SET.has(input.errorClass)
@@ -2532,6 +2539,12 @@ export function recordModelPreparationPhase(
       backend: input.backend,
       errorClass: measurement.failure.errorClass,
       handling: measurement.failure.handling,
+    });
+  for (const errorClass of measurement.skipped ?? [])
+    recordRepositorySkillDiscoveryFailure(observability, {
+      backend: input.backend,
+      errorClass,
+      handling: "skipped",
     });
 }
 

@@ -54,6 +54,9 @@ export type ModelPreparationMeasurement = {
     errorClass: string;
     handling: "propagated" | "degraded" | "unreachable";
   }>;
+  /** Bounded classes of entries a completed phase skipped (one unusable
+   * repository skill search path or folder each), for the failure counter. */
+  skipped?: readonly string[];
 };
 
 type ModelPreparationObserver = (measurement: ModelPreparationMeasurement) => void;

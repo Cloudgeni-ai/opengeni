@@ -32,7 +32,11 @@ import {
   timeoutAgentError,
 } from "../src/sandbox/selfhosted/control-rpc";
 import { RoutingBackendRecoveryRequiredError } from "../src/sandbox/routing/routing-session";
-import { ChannelAUnavailableError, ChannelAValidationError } from "../src/sandbox/channel-a";
+import {
+  ChannelASymlinkPathError,
+  ChannelAUnavailableError,
+  ChannelAValidationError,
+} from "../src/sandbox/channel-a";
 import { discoverWorkspaceSkills, workspaceSkills } from "../src/workspace-skills";
 
 describe("workspace repository skills", () => {
@@ -908,11 +912,55 @@ description: Prepare a safe release.
       expect(instructions).toContain(
         `### Skipped repository skills\nThese repository entries were omitted because their folders could not be read or their metadata or names conflict. Other skills remain available; correct the source files to use the omitted entries.\n- {"code":"unreadable_search_path","paths":[".claude/skills"],"reason":"${errorClass}"}`,
       );
+      const measurements: ModelPreparationMeasurement[] = [];
+      await withModelPreparationObserver(
+        (measurement) => measurements.push(measurement),
+        () =>
+          discoverWorkspaceSkills(session, [
+            { path: ".claude/skills", source: "claude" },
+            { path: ".agents/skills", source: "agents" },
+          ]),
+      );
+      expect(measurements).toEqual([
+        expect.objectContaining({ outcome: "completed", skipped: [errorClass] }),
+      ]);
       const callsAfterFirst = calls;
       expect(await capability.instructions()).toBe(instructions);
       expect(calls).toBe(callsAfterFirst);
     });
   }
+
+  test("a symlinked search path is skipped without a model-visible warning", async () => {
+    const session = fakeSession({
+      ".agents/skills/example/SKILL.md": "---\nname: example\ndescription: Example\n---\n",
+    });
+    const listDir = session.listDir!;
+    session.listDir = async (args) => {
+      if (args.path === ".claude/skills")
+        throw new ChannelASymlinkPathError("directory path must not be a symbolic link");
+      return listDir(args);
+    };
+    const measurements: ModelPreparationMeasurement[] = [];
+    const instructions = await withModelPreparationObserver(
+      (measurement) => measurements.push(measurement),
+      () =>
+        workspaceSkills([
+          { path: ".claude/skills", source: "claude" },
+          { path: ".agents/skills", source: "agents" },
+        ])
+          .bind(session)
+          .instructions(),
+    );
+    expect(instructions).toContain("repository:.agents/skills/example/SKILL.md");
+    expect(instructions).not.toContain("Skipped repository skills");
+    expect(measurements).toEqual([
+      expect.objectContaining({
+        phase: "repository_skill_discovery",
+        outcome: "completed",
+        skipped: ["symlink"],
+      }),
+    ]);
+  });
 
   test("an unreadable skill folder skips only that skill with a reason", async () => {
     const session = fakeSession({
@@ -1035,9 +1083,9 @@ description: Prepare a safe release.
     [
       "Connected Machine protocol error",
       () => controlError({ code: ErrorCode.ERROR_CODE_PROTOCOL }),
-      "transport",
+      "control_error",
     ],
-    ["unspecified Connected Machine error", () => controlError({}), "transport"],
+    ["unspecified Connected Machine error", () => controlError({}), "control_error"],
     [
       "lost home box",
       () => new RoutingBackendRecoveryRequiredError("listDir", 3, "pending"),

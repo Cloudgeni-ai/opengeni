@@ -76,11 +76,15 @@ describe("repository skill discovery metrics", () => {
         phase: "repository_skill_discovery",
         outcome: "completed",
         durationSeconds: 0.1,
+        skipped: ["permission_denied", "permission_denied"],
       },
     });
     const metrics = await observability.prometheusMetrics();
     expect(metrics).toMatch(
       /opengeni_repository_skill_discovery_failures_total\{[^}]*error_class="workspace_unavailable"[^}]*handling="propagated"[^}]*\} 1/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_repository_skill_discovery_failures_total\{[^}]*error_class="permission_denied"[^}]*handling="skipped"[^}]*\} 2/,
     );
     expect(metrics).toContain("model_prepare_repository_skill_discovery");
     await observability.flush();

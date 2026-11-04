@@ -2370,14 +2370,16 @@ short notice instead of failing instruction preparation; the next run rebinds
 and discovers again. On every backend, including Modal, a failure that proves
 the workspace answered but one search path or skill folder could not be used
 (typed permission or not-a-directory errors, errno codes from a filesystem
-call, a symlinked search path the file API refuses, a machine's consent, OS,
-run-as or payload refusal) skips only that entry, listed with its `reason` under
-"Skipped repository skills"; other skills stay indexed. Discovery bounds, no
-filesystem API, or an unusable folder while comparing duplicate skills degrade
-the whole index to a short notice. Cancellation, fences, route and lease
+call, a machine's consent, OS, run-as or payload refusal) skips only that entry,
+listed with its `reason` under "Skipped repository skills"; other skills stay
+indexed. A symlinked search path the confined file API refuses is skipped the
+same way but not listed, like a symlinked skill entrypoint: its usual target is
+itself a search path. Discovery bounds, no filesystem API, or an unusable folder
+while comparing duplicate skills degrade the whole index to a short notice. Cancellation, fences, route and lease
 transitions, a vanished sandbox (including Modal's bare `NotFoundError`), Channel
 A's `ChannelAUnavailableError`, Connected Machine draining, replaced
-connections, stream, protocol and unspecified control errors, Modal's untyped
+connections and stream errors (`transport`), protocol and unspecified control
+errors (`control_error`), Modal's untyped
 `SandboxFilesystemError` (lost gRPC status or a killed filesystem helper),
 transport loss and unrecognized errors still fail instruction preparation so
 the turn's existing recovery sees them before the model runs

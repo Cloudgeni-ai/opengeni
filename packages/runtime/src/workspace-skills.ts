@@ -28,6 +28,7 @@ import {
 } from "modal";
 import { recordModelPreparationMeasurement } from "./model-preparation-diagnostics";
 import {
+  ChannelASymlinkPathError,
   ChannelAUnavailableError,
   ChannelAUnsupportedError,
   ChannelAValidationError,
@@ -101,6 +102,7 @@ function isMissingSkillPath(error: unknown): boolean {
 const SKIPPABLE_SKILL_PATH_CLASSES = new Set<RepositorySkillDiscoveryErrorClass>([
   "permission_denied",
   "filesystem",
+  "symlink",
   "machine_refused",
 ]);
 
@@ -149,11 +151,13 @@ export const REPOSITORY_SKILL_DISCOVERY_ERROR_CLASSES = [
   "sandbox_gone",
   "workspace_unavailable",
   "transport",
+  "control_error",
   "provider_error",
   "unclassified",
   "unreachable",
   "permission_denied",
   "filesystem",
+  "symlink",
   "machine_refused",
   "unsupported",
   "limit_exceeded",
@@ -259,7 +263,13 @@ export function classifyRepositorySkillDiscoveryFailure(
           MACHINE_REFUSAL_CODES.has(error.code))
       )
         return degraded("machine_refused");
-      return propagated("transport");
+      // Draining, a replaced connection and stream loss are transport; a
+      // protocol, unspecified or other control error is still not an answer.
+      return propagated(
+        error.draining || error.connectionReplaced || error.code === ErrorCode.ERROR_CODE_STREAM
+          ? "transport"
+          : "control_error",
+      );
     }
     if (error instanceof RepositorySkillDiscoveryLimitError) return degraded("limit_exceeded");
     if (
@@ -276,6 +286,7 @@ export function classifyRepositorySkillDiscoveryFailure(
     if (error instanceof ChannelAUnavailableError) return propagated("workspace_unavailable");
     if (classifyProviderSandboxFailure("modal", error).kind === "transient_transport")
       return propagated("transport");
+    if (error instanceof ChannelASymlinkPathError) return degraded("symlink");
     if (error instanceof SandboxFilesystemPermissionError) return degraded("permission_denied");
     if (
       error instanceof SandboxFilesystemNotADirectoryError ||
@@ -547,6 +558,7 @@ export async function discoverWorkspaceSkills(
   const startedAt = performance.now();
   let outcome: "completed" | "failed" = "completed";
   let failure: RepositorySkillDiscoveryFailure | undefined;
+  const skipped: RepositorySkillDiscoveryErrorClass[] = [];
   try {
     return await withSandboxOperationPurpose("repository_skills", () =>
       discoverWorkspaceSkillsUnmeasured(
@@ -559,6 +571,7 @@ export async function discoverWorkspaceSkills(
           console.warn("Repository skill skipped", warning);
           onWarning?.(warning);
         },
+        (errorClass) => skipped.push(errorClass),
       ),
     );
   } catch (error) {
@@ -578,6 +591,7 @@ export async function discoverWorkspaceSkills(
       durationSeconds: (performance.now() - startedAt) / 1_000,
       count: searchPaths.length,
       ...(failure ? { failure } : {}),
+      ...(skipped.length ? { skipped } : {}),
     });
   }
 }
@@ -589,7 +603,25 @@ async function discoverWorkspaceSkillsUnmeasured(
   runAs: string | undefined,
   shadowedNames: ReadonlySet<string>,
   warn: (warning: WorkspaceSkillWarning) => void,
+  onSkip: (errorClass: RepositorySkillDiscoveryErrorClass) => void,
 ): Promise<readonly WorkspaceSkill[]> {
+  type SkippedEntry = Readonly<{
+    code: "unreadable_search_path" | "unreadable_skill";
+    path: string;
+    reason: RepositorySkillDiscoveryErrorClass;
+  }>;
+  const skip = ({ code, path, reason }: SkippedEntry) => {
+    onSkip(reason);
+    // A symlinked folder is excluded like a symlinked skill entrypoint: the
+    // confined file API cannot prove its target stays in the workspace. The
+    // usual target (`.claude/skills -> ../.agents/skills`) is itself a search
+    // path and indexed there, so the model is not told to "fix" the link.
+    if (reason === "symlink") {
+      console.info("Repository skill folder skipped", { code, reason });
+      return;
+    }
+    warn({ code, paths: [path], reason });
+  };
   if (!session.listDir || !session.readFile) {
     throw new RepositorySkillDiscoveryUnsupportedError(
       "Workspace skill discovery requires sandbox listDir() and readFile() support",
@@ -610,15 +642,11 @@ async function discoverWorkspaceSkillsUnmeasured(
       if (!reason) throw error;
       return {
         entries: [],
-        warning: {
-          code: "unreadable_search_path",
-          paths: [searchPath.path],
-          reason,
-        } satisfies WorkspaceSkillWarning,
+        skipped: { code: "unreadable_search_path", path: searchPath.path, reason } as const,
       };
     }
   });
-  for (const { warning } of listed) if (warning) warn(warning);
+  for (const { skipped } of listed) if (skipped) skip(skipped);
   const roots = listed.map(({ entries }) => entries);
   const candidates = roots.flatMap((entries, index) =>
     [...entries]
@@ -656,9 +684,7 @@ async function discoverWorkspaceSkillsUnmeasured(
       if (isMissingSkillPath(error)) return null;
       const reason = skippableSkillPathFailure(error);
       if (!reason) throw error;
-      return {
-        warning: { code: "unreadable_skill", paths: [entry.path], reason } as WorkspaceSkillWarning,
-      };
+      return { skipped: { code: "unreadable_skill", path: entry.path, reason } as const };
     }
     const warning = (code: WorkspaceSkillWarning["code"], name?: string) => ({
       warning: { code, paths: [skillMarkdownPath], ...(name ? { name } : {}) },
@@ -696,6 +722,10 @@ async function discoverWorkspaceSkillsUnmeasured(
   });
   for (const candidate of loaded) {
     if (!candidate) continue;
+    if ("skipped" in candidate) {
+      skip(candidate.skipped);
+      continue;
+    }
     if ("warning" in candidate) {
       warn(candidate.warning);
       continue;
