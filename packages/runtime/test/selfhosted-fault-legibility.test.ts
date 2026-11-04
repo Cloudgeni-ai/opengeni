@@ -36,6 +36,7 @@ import {
   FAULT_FIELD_WHAT_PRESERVED,
   FAULT_FIELD_WHAT_TO_TRY,
 } from "../src/sandbox";
+import { isConnectedMachineOutcomeUnknownOutput } from "@opengeni/sdk";
 import { commandOutcomeUnknownAfterReplacementAgentError } from "../src/sandbox/selfhosted/control-rpc";
 
 const WS = "11111111-1111-1111-1111-111111111111";
@@ -446,14 +447,52 @@ describe("G2 — RoutingSandboxSession.execCommand renders a terminal fault as i
   });
 });
 
-// The person-facing sentence, spelled out here (not imported) so this file
-// fails on code that never says it.
+// The person-facing sentences, spelled out here (not imported) so this file
+// fails on code that never says them.
 const OFFLINE_DURING_COMMAND_NOTICE =
   "Your machine went offline while running a command that may have stopped the Opengeni agent. " +
   "It restarts automatically; if it doesn't come back, open the Opengeni app on that machine (or reinstall).";
+const RECONNECTED_DURING_COMMAND_NOTICE =
+  "The Opengeni agent on your machine reconnected while running a command that may have stopped it. It's back now.";
+
+const reconnectCases = [
+  {
+    name: "start confirmed",
+    error: commandOutcomeUnknownAfterReplacementAgentError({
+      startConfirmed: true,
+      stopRequested: false,
+    }),
+    headline: "reconnected while running this command",
+    known: "while this command was running, so its outcome is unknown",
+  },
+  {
+    name: "start confirmed, stop requested",
+    error: commandOutcomeUnknownAfterReplacementAgentError({
+      startConfirmed: true,
+      stopRequested: true,
+    }),
+    headline: "reconnected while running this command",
+    known: "A stop has been requested for it (control code",
+  },
+  {
+    name: "start unconfirmed",
+    error: commandOutcomeUnknownAfterReplacementAgentError({
+      startConfirmed: false,
+      stopRequested: true,
+    }),
+    headline: "reconnected before this command's outcome was known",
+    known: "the command may not have started",
+  },
+  {
+    name: "request in flight",
+    error: connectionReplacedAgentError(false),
+    headline: "reconnected while running this command",
+    known: "while this request was in flight",
+  },
+];
 
 describe("a Connected Machine that goes offline during a command says the command may have stopped the agent", () => {
-  test("a dropped link after the command was sent names the agent and hands over the notice", () => {
+  test("a dropped link after the command was sent names both causes and hands over the notice", () => {
     const out = renderSelfhostedFault(offlineErr(false), {
       connectedMachine: true,
     });
@@ -461,71 +500,62 @@ describe("a Connected Machine that goes offline during a command says the comman
     expect(out).toContain(
       "[connected machine] the machine went offline while running this command",
     );
-    expect(out).toContain("may have stopped the Opengeni agent");
+    expect(out).toContain("it may have gone to sleep or lost its network");
+    expect(out).toContain("the command may have stopped the Opengeni agent");
+    expect(out).toContain("once the machine is on and connected again");
     expect(out).toContain("don't re-run a command that stops or deletes the Opengeni agent");
     expect(out).toContain(`Tell the person: "${OFFLINE_DURING_COMMAND_NOTICE}"`);
     expect(out).toContain("control code ERROR_CODE_AGENT_OFFLINE");
     expect(out).not.toContain("the machine itself, not your command");
+    // The UI still marks the result as an unknown outcome.
+    expect(isConnectedMachineOutcomeUnknownOutput(out)).toBe(true);
   });
 
-  test.each([
-    [
-      "start confirmed",
-      commandOutcomeUnknownAfterReplacementAgentError({
-        startConfirmed: true,
-        stopRequested: false,
-      }),
-      "while this command was running, so its outcome is unknown",
-    ],
-    [
-      "start unconfirmed",
-      commandOutcomeUnknownAfterReplacementAgentError({
-        startConfirmed: false,
-        stopRequested: false,
-      }),
-      "before this command's outcome was known",
-    ],
-    ["request in flight", connectionReplacedAgentError(false), "while this request was in flight"],
-  ])(
-    "an agent that came back on a new connection (%s) says it reconnected, not that the machine is unreachable",
-    (_name, agentError, known) => {
-      const out = renderSelfhostedFault(agentErrorToControlError(agentError), {
+  test.each(reconnectCases)(
+    "an agent that came back on a new connection ($name) says it reconnected, not that the machine is offline",
+    ({ error, headline, known }) => {
+      const out = renderSelfhostedFault(agentErrorToControlError(error), {
         connectedMachine: true,
       });
       for (const field of ALL_FIELDS) expect(out).toContain(field);
-      expect(out).toContain(
-        "[connected machine] the machine's Opengeni agent reconnected while running this command",
-      );
+      expect(out).toContain(`[connected machine] the machine's Opengeni agent ${headline}`);
       expect(out).toContain(known);
       expect(out).toContain("the agent is connected again");
-      expect(out).toContain(`Tell the person: "${OFFLINE_DURING_COMMAND_NOTICE}"`);
+      expect(out).toContain(`Tell the person: "${RECONNECTED_DURING_COMMAND_NOTICE}"`);
+      expect(out).not.toContain(OFFLINE_DURING_COMMAND_NOTICE);
       expect(out).not.toContain("is unreachable");
       expect(out).not.toContain("appears offline");
+      expect(isConnectedMachineOutcomeUnknownOutput(out)).toBe(true);
     },
   );
 
   test("a command that never reached the machine keeps its 'nothing ran' copy", () => {
-    const out = renderSelfhostedFault(offlineErr(true), {
-      connectedMachine: true,
-    });
-    expect(out).toContain("nothing ran");
-    expect(out).not.toContain(OFFLINE_DURING_COMMAND_NOTICE);
-    const replaced = renderSelfhostedFault(
+    for (const error of [
+      offlineErr(true),
       agentErrorToControlError(connectionReplacedAgentError(true)),
-      { connectedMachine: true },
-    );
-    expect(replaced).toContain("nothing ran");
-    expect(replaced).not.toContain(OFFLINE_DURING_COMMAND_NOTICE);
+    ]) {
+      const out = renderSelfhostedFault(error, { connectedMachine: true });
+      expect(out).toContain("nothing ran");
+      expect(out).not.toContain(OFFLINE_DURING_COMMAND_NOTICE);
+      expect(out).not.toContain(RECONNECTED_DURING_COMMAND_NOTICE);
+    }
   });
 
   test("without a Connected Machine (a compute box, or no context) the copy is unchanged", () => {
-    for (const out of [
-      renderSelfhostedFault(offlineErr(false)),
-      renderSelfhostedFault(offlineErr(false), { connectedMachine: false }),
-    ]) {
-      expect(out).toContain("[connected machine] the machine is unreachable");
-      expect(out).toContain("may or may not have run");
-      expect(out).not.toContain(OFFLINE_DURING_COMMAND_NOTICE);
+    const errors = [
+      offlineErr(false),
+      ...reconnectCases.map((c) => agentErrorToControlError(c.error)),
+    ];
+    for (const error of errors) {
+      for (const out of [
+        renderSelfhostedFault(error),
+        renderSelfhostedFault(error, { connectedMachine: false }),
+      ]) {
+        expect(out).toContain("[connected machine] the machine is unreachable");
+        expect(out).toContain("may or may not have run");
+        expect(out).not.toContain(OFFLINE_DURING_COMMAND_NOTICE);
+        expect(out).not.toContain(RECONNECTED_DURING_COMMAND_NOTICE);
+      }
     }
   });
 

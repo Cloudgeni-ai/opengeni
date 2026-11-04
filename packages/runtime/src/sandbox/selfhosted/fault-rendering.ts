@@ -15,7 +15,11 @@
 // legible fault as their result instead of the misleading wrapper.
 
 import { errorCodeToJSON, ErrorCode } from "@opengeni/agent-proto";
-import { drainingPresentation, SelfhostedControlError } from "./control-rpc";
+import {
+  drainingPresentation,
+  SelfhostedControlError,
+  START_CONFIRMED_DETAIL_KEY,
+} from "./control-rpc";
 
 /**
  * A stable, low-cardinality fault-class string for a `SelfhostedControlError` — the
@@ -82,12 +86,17 @@ export interface SelfhostedFaultContext {
 }
 
 /** What the person is told when their machine went offline mid-command. The
- *  code cannot know what stopped the agent, only that the machine stopped
- *  answering (or its agent came back on a new connection) while the command
- *  ran, so the copy says the command "may have" stopped it. */
+ *  code cannot know what stopped the agent (a command, sleep, a lost
+ *  network), only that the machine stopped answering while the command ran,
+ *  so the copy says the command "may have" stopped it. */
 export const CONNECTED_MACHINE_OFFLINE_DURING_COMMAND_NOTICE =
   "Your machine went offline while running a command that may have stopped the Opengeni agent. " +
   "It restarts automatically; if it doesn't come back, open the Opengeni app on that machine (or reinstall).";
+
+/** What the person is told when the agent came back on a new connection
+ *  mid-command: the machine is answering again, so it is not "offline". */
+export const CONNECTED_MACHINE_AGENT_RECONNECTED_DURING_COMMAND_NOTICE =
+  "The Opengeni agent on your machine reconnected while running a command that may have stopped it. It's back now.";
 
 /** Assemble the four-field block. The typed wire code is folded into "what
  *  happened" so the model has both the plain language and the precise code. */
@@ -272,27 +281,31 @@ export function renderSelfhostedFault(
  * new connection, after the command may have reached it. A command can stop
  * the agent (`pkill -f opengeni`, deleting its files), so the copy says so and
  * hands the model the sentence to tell the person, instead of a bare
- * "unreachable" that reads like a network fault.
+ * "unreachable … not your command".
  */
 function renderConnectedMachineOfflineDuringCommand(error: SelfhostedControlError): string {
   const avoid =
     "check whether the command took effect before re-running it, and don't re-run a command that stops or deletes the Opengeni agent";
   if (error.connectionReplaced) {
+    const startUnconfirmed = error.detail[START_CONFIRMED_DETAIL_KEY] === "0";
     return assemble(error, {
-      headline: "the machine's Opengeni agent reconnected while running this command",
+      headline: startUnconfirmed
+        ? "the machine's Opengeni agent reconnected before this command's outcome was known"
+        : "the machine's Opengeni agent reconnected while running this command",
       happened: error.message.replace(/\.$/, ""),
-      layer: "the Opengeni agent on the machine — the command may have stopped it",
-      preserved:
-        "unknown — the command may still be running, may have finished, or may have stopped with the agent.",
-      tryNext: `the agent is connected again; ${avoid}. Tell the person: "${CONNECTED_MACHINE_OFFLINE_DURING_COMMAND_NOTICE}"`,
+      layer: "the Opengeni agent on the machine, or its connection",
+      preserved: startUnconfirmed
+        ? "unknown — the command may not have started, may still be running, may have finished, or may have stopped with the agent."
+        : "unknown — the command may still be running, may have finished, or may have stopped with the agent.",
+      tryNext: `the agent is connected again; ${avoid}. Tell the person: "${CONNECTED_MACHINE_AGENT_RECONNECTED_DURING_COMMAND_NOTICE}"`,
     });
   }
   return assemble(error, {
     headline: "the machine went offline while running this command",
     happened:
-      "the machine stopped answering while this command was running; the command may have stopped the Opengeni agent",
-    layer: "the Opengeni agent on the machine — the command may have stopped it",
+      "the machine stopped answering while this command was running; it may have gone to sleep or lost its network, or the command may have stopped the Opengeni agent",
+    layer: "the machine or its Opengeni agent",
     preserved: "unknown — the command may have run partly, fully or not at all.",
-    tryNext: `the agent restarts automatically; once the machine answers again, ${avoid}. Tell the person: "${CONNECTED_MACHINE_OFFLINE_DURING_COMMAND_NOTICE}"`,
+    tryNext: `once the machine is on and connected again, ${avoid}. Tell the person: "${CONNECTED_MACHINE_OFFLINE_DURING_COMMAND_NOTICE}"`,
   });
 }

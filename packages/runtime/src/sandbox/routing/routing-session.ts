@@ -2681,30 +2681,23 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   }
 
   async execCommand(args: unknown, options?: RoutingCommandDispatchOptions): Promise<string> {
-    // The backend the failing attempt ran on: a Connected Machine's offline
-    // copy differs from a compute box's.
-    let backendKind: string | undefined;
+    // The backend each provider error came from, keyed by the error itself so
+    // a fault is never attributed to an earlier attempt's backend: a Connected
+    // Machine's offline copy differs from a compute box's.
+    const faultBackendKinds = new WeakMap<object, string>();
     try {
       return await this.dispatch(
         "execCommand",
         true,
         async (s, backend) => {
-          backendKind = backend.kind;
-          notifyRemoteOperationTransportSelected(s);
-          // Secret delivery happens here, below every recorder: connected
-          // machines deliver natively in their own session; every other
-          // backend gets a sourced-then-deleted env file.
-          if (backend.kind === "selfhosted") this.noteNativeSecretScope(args);
-          const providerArgs =
-            backend.kind === "selfhosted" ? args : await this.withSecretEnvFile(s, backend, args);
-          if (s.execCommand) {
-            return s.execCommand(providerArgs);
+          try {
+            return await this.execOnBackend(s, backend, args);
+          } catch (error) {
+            if (typeof error === "object" && error !== null) {
+              faultBackendKinds.set(error, backend.kind);
+            }
+            throw error;
           }
-          if (s.exec) {
-            const r = (await s.exec(providerArgs)) as { stdout?: string; output?: string };
-            return r.stdout ?? r.output ?? "";
-          }
-          throw new RoutingUnsupportedError("execCommand", this.cached?.kind ?? "unknown");
         },
         eligibleForSupervision(args),
         options?.onMutationAdmissionRefused,
@@ -2712,8 +2705,33 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     } catch (error) {
       // Render a terminal selfhosted fault as the tool's result (four fields, correct
       // verdict) instead of letting the SDK mislabel it "Please try again".
-      return this.renderSelfhostedFaultOrThrow(error, backendKind);
+      return this.renderSelfhostedFaultOrThrow(
+        error,
+        typeof error === "object" && error !== null ? faultBackendKinds.get(error) : undefined,
+      );
     }
+  }
+
+  private async execOnBackend(
+    s: RoutableBackendSession,
+    backend: ResolvedActiveBackend,
+    args: unknown,
+  ): Promise<string> {
+    notifyRemoteOperationTransportSelected(s);
+    // Secret delivery happens here, below every recorder: connected
+    // machines deliver natively in their own session; every other
+    // backend gets a sourced-then-deleted env file.
+    if (backend.kind === "selfhosted") this.noteNativeSecretScope(args);
+    const providerArgs =
+      backend.kind === "selfhosted" ? args : await this.withSecretEnvFile(s, backend, args);
+    if (s.execCommand) {
+      return s.execCommand(providerArgs);
+    }
+    if (s.exec) {
+      const r = (await s.exec(providerArgs)) as { stdout?: string; output?: string };
+      return r.stdout ?? r.output ?? "";
+    }
+    throw new RoutingUnsupportedError("execCommand", this.cached?.kind ?? "unknown");
   }
 
   /**
