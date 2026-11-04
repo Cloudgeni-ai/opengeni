@@ -138,6 +138,7 @@ import { githubAppBotIdentityWarnings } from "@opengeni/github";
 import {
   createObservability,
   errorCauseAttributes,
+  errorCauseMessage,
   failureDiagnostic,
   withTraceContext,
   withMcpTelemetry,
@@ -778,6 +779,16 @@ export function createAppComposition(deps: AppDependencies): {
       /* Preserve the original error response if the diagnostic sink fails. */
     }
     try {
+      // An internal error no route mapped to a response says why in the server
+      // log only (scrubbed and bounded); the response stays generic.
+      const causeMessage =
+        status === 500 &&
+        code === "internal_error" &&
+        error !== undefined &&
+        !(error instanceof ApiHttpError) &&
+        !(error instanceof HTTPException)
+          ? errorCauseMessage(error)
+          : undefined;
       observability.error("HTTP request failed", {
         method: c.req.method,
         route,
@@ -789,6 +800,7 @@ export function createAppComposition(deps: AppDependencies): {
         reasonKind: diagnostic?.causes[0]?.kind ?? "Response",
         ...(diagnostic ? { diagnosticId: diagnostic.diagnosticId } : {}),
         ...(error === undefined ? {} : errorCauseAttributes(error)),
+        ...(causeMessage === undefined ? {} : { causeMessage }),
       });
       observability.incrementCounter({
         name: "opengeni_http_errors_total",

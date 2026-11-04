@@ -19,10 +19,12 @@ import {
 } from "./trace-context";
 import { ExportQueue } from "./export-queue";
 import { failureDiagnostic, type FailureDiagnosticInput } from "./failure-diagnostic";
-import { projectErrorCauseAttributes } from "./error-cause";
+import { projectErrorCauseAttributes, projectErrorCauseMessage } from "./error-cause";
 import { operationalErrorDiagnostic } from "./operational-error";
 export {
   errorCauseAttributes,
+  errorCauseMessage,
+  ERROR_CAUSE_MESSAGE_MAX_BYTES,
   PUBLIC_ERROR_CAUSE_NAMES,
   PUBLIC_INTERACTION_ERROR_CODES,
   type ErrorCauseAttributes,
@@ -1984,6 +1986,8 @@ function projectHttpDiagnosticAttributes(attributes: Attributes): Attributes {
       ? { diagnosticId }
       : {}),
     ...projectErrorCauseAttributes(attributes),
+    // Only an unclassified internal error logs its scrubbed cause message.
+    ...(attributes.errorCode === "internal_error" ? projectErrorCauseMessage(attributes) : {}),
   };
 }
 
