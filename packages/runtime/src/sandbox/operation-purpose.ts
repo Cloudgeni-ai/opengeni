@@ -1,4 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { SandboxWorkspaceReadNotFoundError } from "@openai/agents/sandbox";
+import { SandboxFilesystemNotFoundError } from "modal";
+import { isDefinitePathNotFoundError } from "./channel-a";
 
 /**
  * Platform-internal reasons for sandbox provider operations. Setup work runs
@@ -58,7 +61,10 @@ export type SandboxSetupOperationObservation = {
   backend: string;
   op: string;
   purpose: SandboxOperationPurpose;
-  outcome: "completed" | "failed";
+  /** `not_found` is a read-only probe's definite "no such path" answer, such as
+   * repository skill discovery listing an absent `.agents/skills`. The
+   * provider answered; the caller expects and handles the miss. */
+  outcome: "completed" | "not_found" | "failed";
   durationSeconds: number;
 };
 
@@ -71,6 +77,20 @@ const INSTRUMENTED_OPERATIONS = [
   "pathExists",
   "materializeEntry",
 ] as const;
+
+const READ_ONLY_PATH_PROBES = new Set<string>(["readFile", "listDir", "pathExists"]);
+
+/** A read-only probe whose provider proved the path absent. Only typed or
+ * errno-coded not-found evidence counts; "not found" prose (for example a
+ * vanished sandbox) remains a failure. */
+function isReadOnlyPathMiss(op: string, error: unknown): boolean {
+  return (
+    READ_ONLY_PATH_PROBES.has(op) &&
+    (isDefinitePathNotFoundError(error) ||
+      error instanceof SandboxWorkspaceReadNotFoundError ||
+      error instanceof SandboxFilesystemNotFoundError)
+  );
+}
 
 const instrumented = new WeakSet<object>();
 
@@ -103,6 +123,13 @@ export function instrumentSandboxSessionOperations<T>(
           const result = await bound(...args);
           outcome = "completed";
           return result;
+        } catch (error) {
+          try {
+            if (isReadOnlyPathMiss(op, error)) outcome = "not_found";
+          } catch {
+            // Classification is telemetry only.
+          }
+          throw error;
         } finally {
           try {
             observe({

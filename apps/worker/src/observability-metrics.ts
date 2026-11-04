@@ -41,6 +41,7 @@ import {
 } from "./opensandbox-kubernetes-inventory";
 import {
   MCP_TOOL_METRIC_EXTERNAL_LABEL,
+  REPOSITORY_SKILL_DISCOVERY_ERROR_CLASSES,
   SANDBOX_OPERATION_PURPOSES,
   SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES,
   WORKSPACE_CAPTURE_SKIP_REASONS,
@@ -308,7 +309,7 @@ export function runtimeMetricsHooksForObservability(
       });
       observability.observeHistogram({
         name: "opengeni_sandbox_setup_operation_duration_seconds",
-        help: "Platform setup operations on a raw provider session (lifecycle hooks, run credentials, file resources, repository skills), by purpose. Count is the number of provider round trips.",
+        help: "Platform setup operations on a raw provider session (lifecycle hooks, run credentials, file resources, repository skills), by purpose. Count is the number of provider round trips. outcome=not_found is a read-only probe that found no such path (an expected answer, not a failure), as in the routed per-operation metric.",
         buckets: SANDBOX_SETUP_OPERATION_BUCKETS,
         labels: { backend: safeBackend, op: safeOp, purpose: safePurpose, outcome },
         value: durationSeconds,
@@ -2478,6 +2479,31 @@ export function recordTurnStartupPhase(
       cache: input.cache ?? "none",
     },
     value: Math.max(0, input.durationSeconds),
+  });
+}
+
+const REPOSITORY_SKILL_DISCOVERY_ERROR_CLASS_SET: ReadonlySet<string> = new Set(
+  REPOSITORY_SKILL_DISCOVERY_ERROR_CLASSES,
+);
+const REPOSITORY_SKILL_DISCOVERY_HANDLING = new Set(["propagated", "degraded", "unreachable"]);
+
+/** Failed repository skill discovery by bounded error class. `handling` says
+ * whether the turn continued without repository skills (`degraded`,
+ * `unreachable`) or the error reached turn recovery (`propagated`). */
+export function recordRepositorySkillDiscoveryFailure(
+  observability: Observability,
+  input: { backend: string; errorClass: string; handling: string },
+): void {
+  observability.incrementCounter({
+    name: "opengeni_repository_skill_discovery_failures_total",
+    help: "Failed repository skill discovery runs by bounded error class and handling (propagated reached turn recovery; degraded and unreachable continued without repository skills).",
+    labels: {
+      backend: SandboxBackend.safeParse(input.backend).success ? input.backend : "unknown",
+      error_class: REPOSITORY_SKILL_DISCOVERY_ERROR_CLASS_SET.has(input.errorClass)
+        ? input.errorClass
+        : "other",
+      handling: REPOSITORY_SKILL_DISCOVERY_HANDLING.has(input.handling) ? input.handling : "other",
+    },
   });
 }
 

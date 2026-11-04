@@ -2367,7 +2367,20 @@ When discovery meets a typed unreachable workspace (a Connected Machine
 `agentOffline` or control-timeout `SelfhostedControlError`), the bound
 capability memoizes an explicitly unavailable, empty index and contributes a
 short notice instead of failing instruction preparation; the next run rebinds
-and discovers again. Every other discovery failure still fails the turn.
+and discovers again. On every backend, including Modal, a failure that proves
+the workspace answered but its skill folders could not be used (permission or
+not-a-directory errors, a machine's consent/OS refusal, discovery bounds, no
+filesystem API) degrades the same way, with a notice naming the bounded error
+class. Cancellation, fences, route and lease transitions, a vanished sandbox,
+transport loss and unrecognized errors still fail instruction preparation so
+the turn's existing recovery sees them before the model runs
+(`classifyRepositorySkillDiscoveryFailure` in
+`packages/runtime/src/workspace-skills.ts`). Every failed discovery records
+`opengeni_repository_skill_discovery_failures_total{backend, error_class, handling}`
+and a content-free `Repository skill discovery failed` log line. In
+`opengeni_sandbox_setup_operation_duration_seconds`, a read-only probe's
+definite path miss (an absent `.agents/skills`) is `outcome="not_found"`, not
+`failed`.
 
 Host-owned rotating sandbox run credentials split resolution from sandbox
 materialization when lazy provisioning is enabled. The worker binds and resolves

@@ -176,6 +176,16 @@ every turn heartbeat, so a sustained blocker increments it repeatedly. An attemp
 that is not due yet or whose archive already covers the current generation is not
 counted.
 
+`opengeni_sandbox_setup_operation_duration_seconds{backend,op,purpose,outcome}`
+times platform setup operations on the raw provider session. A read-only probe
+(`listDir`, `readFile`, `pathExists`) whose provider proves the path absent, such
+as repository skill discovery listing a missing `.agents/skills`, is
+`outcome="not_found"`, the same label the routed per-operation metric uses; only
+other errors are `failed`. `opengeni_repository_skill_discovery_failures_total{backend,error_class,handling}`
+counts failed discovery runs by a closed error class; `handling` is `degraded` or
+`unreachable` when the turn continued without repository skills and `propagated`
+when the error reached turn recovery.
+
 `opengeni_sandbox_checkpoint_staleness{kind}` (`dirty`, `stale_4h`,
 `stale_12h`) and `opengeni_sandbox_checkpoint_age_max_seconds` are a fresh,
 content-free reaper inventory (`opengeni_private.sandbox_checkpoint_staleness()`,

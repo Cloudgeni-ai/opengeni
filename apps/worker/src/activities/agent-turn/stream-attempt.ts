@@ -102,6 +102,7 @@ import {
   recordContextCompaction,
   recordModelInputTokens,
   recordModelStepPhase,
+  recordRepositorySkillDiscoveryFailure,
   recordTurnStartupPhase,
   recordTurnWorkerPreparationTotal,
   StreamTimingMetrics,
@@ -1252,6 +1253,13 @@ export async function runTurnStreamAttempt(
               durationSeconds: measurement.durationSeconds,
               ...(measurement.count === undefined ? {} : { count: measurement.count }),
             });
+            if (measurement.failure) {
+              recordRepositorySkillDiscoveryFailure(observability, {
+                backend: activeSandboxBackend ?? groupBoxBackend,
+                errorClass: measurement.failure.errorClass,
+                handling: measurement.failure.handling,
+              });
+            }
           },
           ...(!providerPublishesNativeRequestEvents
             ? {

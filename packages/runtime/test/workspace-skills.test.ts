@@ -8,7 +8,11 @@ import {
   SandboxWorkspaceReadNotFoundError,
   type SandboxSessionLike,
 } from "@openai/agents/sandbox";
-import { SandboxFilesystemNotFoundError } from "modal";
+import {
+  SandboxFilesystemError,
+  SandboxFilesystemNotFoundError,
+  SandboxFilesystemPermissionError,
+} from "modal";
 import { ErrorCode } from "@opengeni/agent-proto";
 import { testSettings } from "@opengeni/testing/settings";
 
@@ -25,6 +29,7 @@ import {
   SelfhostedControlError,
   timeoutAgentError,
 } from "../src/sandbox/selfhosted/control-rpc";
+import { RoutingBackendRecoveryRequiredError } from "../src/sandbox/routing/routing-session";
 import { discoverWorkspaceSkills, workspaceSkills } from "../src/workspace-skills";
 
 describe("workspace repository skills", () => {
@@ -530,6 +535,7 @@ description: Prepare a safe release.
       phase: "repository_skill_discovery",
       outcome: "failed",
       count: 1,
+      failure: { errorClass: "unsupported", handling: "degraded" },
     });
   });
 
@@ -709,7 +715,7 @@ description: Prepare a safe release.
   for (const offlineIndex of [0, 1]) {
     for (const offlineSettlesFirst of [true, false]) {
       test(`a concurrent genuine failure outranks an unreachable one (offline at index ${offlineIndex}, ${offlineSettlesFirst ? "offline" : "genuine"} settles first)`, async () => {
-        const genuine = Object.assign(new Error("permission denied"), { code: "EACCES" });
+        const genuine = Object.assign(new Error("connection reset"), { code: "ECONNRESET" });
         const offline = agentErrorToControlError(offlineAgentError(undefined, true));
         const pending = new Map<string, (error: unknown) => void>();
         let bothStarted!: () => void;
@@ -810,26 +816,6 @@ description: Prepare a safe release.
           fenced: true,
         }),
     ],
-    [
-      "consent control error",
-      () =>
-        agentErrorToControlError({
-          code: ErrorCode.ERROR_CODE_CONSENT_REQUIRED,
-          message: "consent required",
-          retryable: false,
-          detail: {},
-        }),
-    ],
-    [
-      "OS control error",
-      () =>
-        agentErrorToControlError({
-          code: ErrorCode.ERROR_CODE_OS,
-          message: "permission denied",
-          retryable: false,
-          detail: {},
-        }),
-    ],
     ["untyped error mentioning offline", () => new Error("agent offline: timed out")],
     [
       "untyped error shaped like an offline control error",
@@ -849,6 +835,207 @@ description: Prepare a safe release.
       await expect(capability.instructions()).rejects.toBe(error);
     });
   }
+
+  // The workspace answered, but its skill folders could not be used. The run
+  // continues without repository skills on every backend, including Modal.
+  const degradableFailures: Array<[string, () => unknown, string]> = [
+    [
+      "Modal permission error",
+      () => new SandboxFilesystemPermissionError("permission denied"),
+      "permission_denied",
+    ],
+    [
+      "errno permission error",
+      () => Object.assign(new Error("EACCES"), { code: "EACCES" }),
+      "permission_denied",
+    ],
+    ["Modal filesystem error", () => new SandboxFilesystemError("ls failed"), "filesystem"],
+    [
+      "errno not-a-directory",
+      () => Object.assign(new Error("ENOTDIR"), { code: "ENOTDIR" }),
+      "filesystem",
+    ],
+    [
+      "Connected Machine consent refusal",
+      () =>
+        agentErrorToControlError({
+          code: ErrorCode.ERROR_CODE_CONSENT_REQUIRED,
+          message: "consent required",
+          retryable: false,
+          detail: {},
+        }),
+      "machine_refused",
+    ],
+    [
+      "Connected Machine OS error",
+      () =>
+        agentErrorToControlError({
+          code: ErrorCode.ERROR_CODE_OS,
+          message: "permission denied",
+          retryable: false,
+          detail: {},
+        }),
+      "machine_refused",
+    ],
+  ];
+  for (const [label, failure, errorClass] of degradableFailures) {
+    test(`${label} degrades repository skills with a notice instead of failing the turn`, async () => {
+      const session = fakeSession({ ".agents/skills/example/SKILL.md": "# Example" });
+      let calls = 0;
+      session.listDir = async () => {
+        calls++;
+        throw failure();
+      };
+      const capability = workspaceSkills([{ path: ".agents/skills", source: "agents" }]).bind(
+        session,
+      );
+      const instructions = await capability.instructions();
+      expect(instructions).toBe(
+        `## Repository skills\n\nRepository skills could not be indexed for this run because the skill folders could not be read (${errorClass}). Other tools are unaffected. If a repository skill matters for the task, read its SKILL.md with the filesystem tools.`,
+      );
+      expect(await capability.instructions()).toBe(instructions);
+      expect(calls).toBe(1);
+      const reader = capability.tools()[0]!;
+      if (reader.type !== "function") throw new Error("missing reader");
+      expect(
+        await reader.invoke(
+          undefined!,
+          JSON.stringify({ skill: "repository:.agents/skills/example/SKILL.md" }),
+        ),
+      ).toContain("Repository Skill is not in this index");
+    });
+  }
+
+  test("too many skill directories degrade instead of failing the turn", async () => {
+    const files = Object.fromEntries(
+      Array.from({ length: 257 }, (_, index) => [`.agents/skills/s${index}/SKILL.md`, "# S"]),
+    );
+    const capability = workspaceSkills([{ path: ".agents/skills", source: "agents" }]).bind(
+      fakeSession(files),
+    );
+    expect(await capability.instructions()).toContain("could not be read (limit_exceeded)");
+  });
+
+  test("a session without a filesystem API degrades instead of failing the turn", async () => {
+    const capability = workspaceSkills([{ path: ".agents/skills", source: "agents" }]).bind({
+      state: { manifest: new Manifest({ root: "/workspace" }) },
+    } as SandboxSessionLike);
+    expect(await capability.instructions()).toContain("could not be read (unsupported)");
+  });
+
+  // The box or its route could not answer. These reach the turn's existing
+  // recovery (lease loss, route re-resolution, retry, cancellation) unmasked.
+  const infrastructureFailures: Array<[string, () => unknown, string]> = [
+    [
+      "cancellation",
+      () => Object.assign(new Error("cancelled"), { code: "ABORT_ERR" }),
+      "cancelled",
+    ],
+    ["abort", () => Object.assign(new Error("aborted"), { name: "AbortError" }), "cancelled"],
+    [
+      "fenced control error",
+      () =>
+        new SelfhostedControlError({
+          message: "fenced",
+          code: ErrorCode.ERROR_CODE_FENCED,
+          reason: null,
+          retryable: true,
+          fenced: true,
+        }),
+      "fenced",
+    ],
+    [
+      "lost home box",
+      () => new RoutingBackendRecoveryRequiredError("listDir", 3, "pending"),
+      "route_changed",
+    ],
+    [
+      "terminated Modal sandbox",
+      () => new Error("Modal sandbox sb-abc123 is no longer running."),
+      "sandbox_gone",
+    ],
+    ["gRPC unavailable", () => Object.assign(new Error("unavailable"), { code: 14 }), "transport"],
+    [
+      "connection reset",
+      () => Object.assign(new Error("reset"), { code: "ECONNRESET" }),
+      "transport",
+    ],
+    ["unrecognized error", () => new Error("exec failed"), "unclassified"],
+  ];
+  for (const [label, failure, errorClass] of infrastructureFailures) {
+    test(`${label} still fails repository skill instructions for turn recovery`, async () => {
+      const error = failure();
+      const session = fakeSession({});
+      session.listDir = async () => {
+        throw error;
+      };
+      const capability = workspaceSkills([{ path: ".agents/skills", source: "agents" }]).bind(
+        session,
+      );
+      const measurements: ModelPreparationMeasurement[] = [];
+      await expect(
+        withModelPreparationObserver(
+          (measurement) => measurements.push(measurement),
+          () => capability.instructions(),
+        ),
+      ).rejects.toBe(error);
+      expect(measurements).toEqual([
+        expect.objectContaining({
+          phase: "repository_skill_discovery",
+          outcome: "failed",
+          failure: { errorClass, handling: "propagated" },
+        }),
+      ]);
+    });
+  }
+
+  test("a concurrent infrastructure failure outranks a degradable one", async () => {
+    const infrastructure = Object.assign(new Error("reset"), { code: "ECONNRESET" });
+    const session = fakeSession({});
+    session.listDir = async ({ path }) => {
+      if (path === "root0") throw new SandboxFilesystemPermissionError("denied");
+      await Bun.sleep(5);
+      throw infrastructure;
+    };
+    const capability = workspaceSkills(
+      ["root0", "root1"].map((path) => ({ path, source: path })),
+    ).bind(session);
+    await expect(capability.instructions()).rejects.toBe(infrastructure);
+  });
+
+  test("a degradable failure outranks an unreachable one", async () => {
+    const session = fakeSession({});
+    session.listDir = async ({ path }) => {
+      if (path === "root0") throw agentErrorToControlError(timeoutAgentError());
+      await Bun.sleep(5);
+      throw new SandboxFilesystemPermissionError("denied");
+    };
+    const capability = workspaceSkills(
+      ["root0", "root1"].map((path) => ({ path, source: path })),
+    ).bind(session);
+    expect(await capability.instructions()).toContain("could not be read (permission_denied)");
+  });
+
+  test("failed discovery telemetry carries the bounded error class and handling", async () => {
+    const measurements: ModelPreparationMeasurement[] = [];
+    const session = fakeSession({});
+    session.listDir = async () => {
+      throw Object.assign(new Error("reset"), { code: "ECONNRESET" });
+    };
+    await expect(
+      withModelPreparationObserver(
+        (measurement) => measurements.push(measurement),
+        () => discoverWorkspaceSkills(session, [{ path: ".agents/skills", source: "agents" }]),
+      ),
+    ).rejects.toThrow("reset");
+    expect(measurements).toEqual([
+      expect.objectContaining({
+        phase: "repository_skill_discovery",
+        outcome: "failed",
+        failure: { errorClass: "transport", handling: "propagated" },
+      }),
+    ]);
+  });
 
   test("an invalid repository skill emits a warning even when no valid skills remain", async () => {
     const capability = workspaceSkills([{ path: ".agents/skills", source: "agents" }]).bind(

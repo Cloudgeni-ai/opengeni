@@ -47,6 +47,13 @@ export type ModelPreparationMeasurement = {
   outcome: "completed" | "failed";
   durationSeconds: number;
   count?: number;
+  /** Bounded failure class for a failed phase that classifies its errors
+   * (currently repository skill discovery). `handling` says whether the turn
+   * continued without the phase's result or the error reached turn recovery. */
+  failure?: Readonly<{
+    errorClass: string;
+    handling: "propagated" | "degraded" | "unreachable";
+  }>;
 };
 
 type ModelPreparationObserver = (measurement: ModelPreparationMeasurement) => void;
