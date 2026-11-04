@@ -2358,6 +2358,14 @@ bounded file inventories. Configured `skill_read` stays sandbox-free and does
 not resolve repository names. Identifiers cannot silently switch between these
 sources, even when names match. Repository metadata uses the same YAML parser as
 portable Skills, retaining multiline description text in the JSON descriptor.
+When that strict parse fails, `parseLenientSkillFrontmatter`
+(`packages/contracts/src/skill-metadata.ts`) recovers the top-level `name` and
+`description` lines of common hand-written headers (an unquoted `: ` in a
+description, tab indentation, unindented continuation lines, values starting
+with a YAML indicator) and logs the bounded parser code plus key names, never
+values. It never invents a name: a header without exactly one usable `name:`
+line is still skipped, and the "Skipped repository skills" notice carries a
+`reason` for every omitted entry. Managed and inline Skill admission stay strict.
 Discovery, inventories, and reading accept ordinary files and directories;
 symlink Skill entrypoints are excluded because portable filesystem APIs cannot
 prove target containment. The repository index remains a separate sandbox-SDK instruction source, outside

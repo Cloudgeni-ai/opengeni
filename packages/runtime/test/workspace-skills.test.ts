@@ -858,22 +858,131 @@ description: Prepare a safe release.
   });
 
   test.each([
-    "---\nname: [invalid\n---\n",
-    "---\nname: first\nname: duplicate\n---\n",
-    "---\n- not a mapping\n---\n",
-  ])("malformed repository metadata is isolated from valid skills: %s", async (markdown) => {
-    const capability = workspaceSkills([{ path: ".agents/skills", source: "agents" }]).bind(
-      fakeSession({
-        ".agents/skills/bad/SKILL.md": markdown,
-        ".agents/skills/good/SKILL.md": "# Good",
-      }),
-    );
-    const instructions = await capability.instructions();
-    expect(instructions).toContain('"name":"good"');
-    expect(instructions).toContain('"code":"invalid_metadata"');
-    expect(instructions).toContain(".agents/skills/bad/SKILL.md");
-    expect(instructions).not.toContain("invalid YAML");
-    expect(await capability.instructions()).toBe(instructions);
+    ["---\nname: [invalid\n---\n", "invalid_name", "name must be 1-64"],
+    ["---\nname: first\nname: duplicate\n---\n", "invalid_metadata", "duplicate_name"],
+    ["---\n- not a mapping\n---\n", "invalid_metadata", "yaml_not_mapping_without_name"],
+    [
+      "---\ndescription: Use when: deploying\n---\n",
+      "invalid_metadata",
+      "yaml_block_as_implicit_key_without_name",
+    ],
+  ])(
+    "still-rejected repository metadata is isolated from valid skills and names its reason: %s",
+    async (markdown, code, reason) => {
+      const capability = workspaceSkills([{ path: ".agents/skills", source: "agents" }]).bind(
+        fakeSession({
+          ".agents/skills/bad/SKILL.md": markdown,
+          ".agents/skills/good/SKILL.md": "# Good",
+        }),
+      );
+      const instructions = await capability.instructions();
+      expect(instructions).toContain('"name":"good"');
+      expect(instructions).toContain(`"code":"${code}"`);
+      expect(instructions).toContain(`"reason":"${reason}`);
+      expect(instructions).toContain(".agents/skills/bad/SKILL.md");
+      expect(instructions).toContain("### Skipped repository skills");
+      expect(instructions).not.toContain("invalid YAML");
+      expect(instructions).not.toContain("deploying");
+      expect(await capability.instructions()).toBe(instructions);
+    },
+  );
+
+  // Hand-written frontmatter as it appears in public Claude Code and agent
+  // Skill folders. Strict YAML rejects each one; the fallback recovers the
+  // advertised name and description instead of skipping the skill.
+  test.each([
+    [
+      "unquoted colon in the description",
+      "---\nname: deploy\ndescription: Use when: shipping to production\n---\n",
+      "Use when: shipping to production",
+    ],
+    [
+      "tab-indented description",
+      "---\nname: deploy\ndescription:\n\tShip safely.\n\tCheck the logs.\n---\n",
+      "Ship safely. Check the logs.",
+    ],
+    [
+      "unindented continuation line",
+      "---\nname: deploy\ndescription: Ship the app\nto production.\nallowed-tools: Bash\n---\n",
+      "Ship the app to production.",
+    ],
+    [
+      "description starting with a bracket",
+      "---\nname: deploy\ndescription: [WIP] Ship the app\n---\n",
+      "[WIP] Ship the app",
+    ],
+    [
+      "description starting with a backtick",
+      "---\nname: deploy\ndescription: `kubectl` rollout helper\n---\n",
+      "`kubectl` rollout helper",
+    ],
+    [
+      "description starting with @",
+      "---\nname: deploy\ndescription: @release-team helper: ship it\n---\n",
+      "@release-team helper: ship it",
+    ],
+    [
+      "quoted prefix followed by more text",
+      '---\nname: deploy\ndescription: "Deploy" the app\n---\n',
+      '"Deploy" the app',
+    ],
+    [
+      "folded block with a colon and unknown keys",
+      "---\nname: deploy\ndescription: >\n  Use when:\n  shipping.\nmetadata:\n\tversion: 1\nlicense: MIT\n---\n",
+      "Use when: shipping.",
+    ],
+    [
+      "CRLF line endings and a trailing name comment",
+      "---\r\nname: deploy # release skill\r\ndescription: Ship: now\r\n---\r\n",
+      "Ship: now",
+    ],
+  ])("lenient repository metadata keeps a skill with %s", async (_label, markdown, description) => {
+    const warnings: unknown[][] = [];
+    const warn = console.warn;
+    console.warn = (...args: unknown[]) => void warnings.push(args);
+    try {
+      const capability = workspaceSkills([{ path: ".claude/skills", source: "claude" }]).bind(
+        fakeSession({ ".claude/skills/deploy/SKILL.md": markdown }),
+      );
+      const instructions = await capability.instructions();
+      const descriptor = JSON.parse(
+        instructions!
+          .split("\n")
+          .find((line) => line.startsWith("- {"))!
+          .slice(2),
+      );
+      expect(descriptor).toMatchObject({ name: "deploy", description });
+      expect(instructions).not.toContain("Skipped repository skills");
+    } finally {
+      console.warn = warn;
+    }
+    // The parse reason is logged with key names only, never values.
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]![0]).toBe("Repository skill metadata read with the lenient fallback");
+    const detail = warnings[0]![1] as { path: string; reason: string; keys: string[] };
+    expect(detail.path).toBe(".claude/skills/deploy/SKILL.md");
+    expect(detail.reason).toMatch(/^yaml_[a-z_]+$/);
+    expect(detail.keys).toContain("name");
+    expect(JSON.stringify(detail)).not.toContain("production");
+    expect(JSON.stringify(detail)).not.toContain("Ship");
+  });
+
+  test("strictly valid repository metadata does not log a fallback", async () => {
+    const warnings: unknown[][] = [];
+    const warn = console.warn;
+    console.warn = (...args: unknown[]) => void warnings.push(args);
+    try {
+      const capability = workspaceSkills([{ path: ".agents/skills", source: "agents" }]).bind(
+        fakeSession({
+          ".agents/skills/deploy/SKILL.md":
+            '---\nname: deploy\ndescription: "Use when: shipping"\nallowed-tools: Bash\n---\n',
+        }),
+      );
+      expect(await capability.instructions()).toContain('"description":"Use when: shipping"');
+    } finally {
+      console.warn = warn;
+    }
+    expect(warnings).toEqual([]);
   });
 
   test("managed inline Skill metadata remains fail-closed", () => {
