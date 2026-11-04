@@ -244,7 +244,7 @@ export class CodemodeClient {
       method: "GET",
       ...(options.signal ? { signal: options.signal } : {}),
     });
-    const catalog = parseVerifiedAttemptToolCatalog(await response.json());
+    const catalog = parseVerifiedAttemptToolCatalog(await responseJson(response, this.baseUrl));
     this.catalogSnapshot = catalog;
     return catalog;
   }
@@ -356,7 +356,9 @@ export class CodemodeClient {
             if (options.signal?.aborted) throw recoveryError;
             throw new CodemodeTransportError(
               `Codemode operation ${operationId} could not be reconciled after its submission response failed${
-                recoveryError instanceof CodemodeConnectionError ? `. ${recoveryError.message}` : ""
+                recoveryError instanceof CodemodeConnectionError
+                  ? `. ${recoveryError.message} ${submittedCallHint(operationId)}`
+                  : ""
               }`,
               null,
               {
@@ -376,7 +378,18 @@ export class CodemodeClient {
           operation = recovered;
         }
       } else {
-        operation = await this.read(operationId, options.signal);
+        try {
+          operation = await this.read(operationId, options.signal);
+        } catch (error) {
+          // The call is already submitted: say so, with its handle, so the
+          // reader checks it instead of calling again with a new operation.
+          if (!(error instanceof CodemodeConnectionError)) throw error;
+          throw new CodemodeConnectionError(
+            `${error.message} ${submittedCallHint(operationId)}`,
+            error.networkCode,
+            { cause: error.cause },
+          );
+        }
       }
       if (operation.state === "waiting_for_approval") {
         throw new CodemodeApprovalPendingError(operation.operationId, operation.approvalRequestId);
@@ -467,7 +480,7 @@ export class CodemodeClient {
           durableApproval: true,
         }),
       });
-      return CodemodeCallSubmission.parse(await response.json()).operation;
+      return CodemodeCallSubmission.parse(await responseJson(response, this.baseUrl)).operation;
     });
   }
 
@@ -516,7 +529,7 @@ export class CodemodeClient {
         method: "GET",
         ...(signal ? { signal } : {}),
       });
-      return CodemodeOperation.parse(await response.json());
+      return CodemodeOperation.parse(await responseJson(response, this.baseUrl));
     });
   }
 
@@ -546,6 +559,8 @@ export class CodemodeClient {
         },
       });
     } catch (error) {
+      // A caller's abort keeps its own reason, whatever code it carries.
+      if (init.signal?.aborted) throw error;
       // "fetch failed" hides why the box cannot reach Opengeni; name the
       // reason (DNS, clock, refused connection) and keep the original as
       // the cause. Unknown reasons keep the transport's own error.
@@ -925,6 +940,22 @@ function parseCodemodeApiError(input: unknown): {
         ...(details ? { details } : {}),
       }
     : null;
+}
+
+/** Where to look before calling again once a call may already have run. */
+function submittedCallHint(operationId: string): string {
+  return `The call may have run; check it with \`ogtool read ${operationId}\` before calling again.`;
+}
+
+/** Read a JSON body; a connection lost mid-body names its cause like a failed request. */
+async function responseJson(response: Response, baseUrl: string): Promise<unknown> {
+  try {
+    return await response.json();
+  } catch (error) {
+    const failure = describeCodemodeConnectionFailure(error, response.url || baseUrl);
+    if (!failure) throw error;
+    throw new CodemodeConnectionError(failure.message, failure.networkCode, { cause: error });
+  }
 }
 
 const CODEMODE_TRANSIENT_RETRY_DELAYS_MS = [100, 250, 500, 1_000, 2_000] as const;

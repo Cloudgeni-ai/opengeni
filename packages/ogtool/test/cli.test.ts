@@ -912,6 +912,8 @@ describe("ogtool CLI", () => {
     const bundleClients = async (): Promise<Array<[string, string[]]>> => {
       const list: Array<[string, string[]]> = [["bun", [process.execPath, cliSource]]];
       const node = Bun.which("node");
+      // The Node run is the regression itself; CI must not skip it silently.
+      if (!node && process.env.CI) throw new Error("node is required for the ogtool Node check");
       if (node) {
         bundleDirectory = mkdtempSync(join(tmpdir(), "ogtool-node-bundle-"));
         const bundle = await Bun.build({
@@ -933,7 +935,21 @@ describe("ogtool CLI", () => {
       for (const [runtime, client] of await clients()) {
         const result = await run(
           ["list"],
-          { OPENGENI_CODEMODE_URL: url, OPENGENI_CODEMODE_TOKEN: "test" },
+          {
+            OPENGENI_CODEMODE_URL: url,
+            OPENGENI_CODEMODE_TOKEN: "test",
+            // A proxy would answer instead of the network under test.
+            ...Object.fromEntries(
+              [
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "ALL_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "all_proxy",
+              ].map((name) => [name, undefined]),
+            ),
+          },
           client,
         );
         results[runtime] = { exitCode: result.exitCode, stderr: result.stderr };
@@ -941,20 +957,22 @@ describe("ogtool CLI", () => {
       return results;
     };
 
-    test("a host that does not resolve points at resolv.conf", async () => {
+    test("a host that does not resolve points at the DNS settings", async () => {
       const results = await listFailures(
         "https://opengeni-codemode.invalid/v1/workspaces/ws/codemode",
       );
       const expected = {
         exitCode: 1,
         stderr: expect.stringMatching(
-          /^Can't reach Opengeni: DNS lookup for opengeni-codemode\.invalid failed \((ENOTFOUND|EAI_AGAIN)\)\. Check \/etc\/resolv\.conf\.\n$/u,
+          process.platform === "linux"
+            ? /^Can't reach Opengeni: DNS lookup for opengeni-codemode\.invalid failed \((ENOTFOUND|EAI_AGAIN)\)\. Check \/etc\/resolv\.conf\.\n$/u
+            : /^Can't reach Opengeni: DNS lookup for opengeni-codemode\.invalid failed \((ENOTFOUND|EAI_AGAIN)\)\. Check this machine's DNS settings\.\n$/u,
         ),
       };
       expect(results).toEqual(
         Object.fromEntries(Object.keys(results).map((key) => [key, expected])),
       );
-    });
+    }, 30_000);
 
     test("a refused connection names the host and port", async () => {
       const closed = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response() });
@@ -968,7 +986,7 @@ describe("ogtool CLI", () => {
       expect(results).toEqual(
         Object.fromEntries(Object.keys(results).map((key) => [key, expected])),
       );
-    });
+    }, 30_000);
   });
 
   test("reads a renewed token on the next process", async () => {

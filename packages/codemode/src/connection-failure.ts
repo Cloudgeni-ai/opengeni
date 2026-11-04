@@ -40,12 +40,10 @@ const TLS_VERIFY_CODES = new Set([
 
 const REFUSED_CODES = new Set(["ECONNREFUSED", "ConnectionRefused"]);
 
-const TIMEOUT_CODES = new Set([
-  "ETIMEDOUT",
-  "UND_ERR_CONNECT_TIMEOUT",
-  "UND_ERR_HEADERS_TIMEOUT",
-  "UND_ERR_BODY_TIMEOUT",
-]);
+const TIMEOUT_CODES = new Set(["ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT"]);
+
+/** The request reached Opengeni but no answer came back in time. */
+const ANSWER_TIMEOUT_CODES = new Set(["UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT"]);
 
 const CLOSED_CODES = new Set(["ECONNRESET", "EPIPE", "UND_ERR_SOCKET", "ConnectionClosed"]);
 
@@ -59,6 +57,7 @@ function isKnownCode(code: string): boolean {
     TLS_VERIFY_CODES.has(code) ||
     REFUSED_CODES.has(code) ||
     TIMEOUT_CODES.has(code) ||
+    ANSWER_TIMEOUT_CODES.has(code) ||
     CLOSED_CODES.has(code) ||
     UNREACHABLE_CODES.has(code)
   );
@@ -108,6 +107,7 @@ export function describeCodemodeConnectionFailure(
   error: unknown,
   url: string,
   now: Date = new Date(),
+  platform: string = process.platform,
 ): { message: string; networkCode: string } | null {
   if (isAbort(error)) return null;
   const code = knownFailureCode(error);
@@ -116,19 +116,23 @@ export function describeCodemodeConnectionFailure(
   const prefix = "Can't reach Opengeni:";
   let message: string;
   if (DNS_CODES.has(code)) {
-    message = `${prefix} DNS lookup for ${hostname} failed (${code}). Check /etc/resolv.conf.`;
+    message = `${prefix} DNS lookup for ${hostname} failed (${code}). ${
+      platform === "linux" ? "Check /etc/resolv.conf." : "Check this machine's DNS settings."
+    }`;
   } else if (code === "CERT_NOT_YET_VALID") {
     message = `${prefix} TLS certificate not yet valid. This machine's clock says ${clockReading(now)}, so it is probably wrong.`;
   } else if (code === "CERT_HAS_EXPIRED") {
-    message = `${prefix} TLS certificate has expired. This machine's clock says ${clockReading(now)}, so it is probably wrong.`;
+    message = `${prefix} the TLS certificate for ${hostname} has expired by this machine's clock (${clockReading(now)}). If that time is wrong, fix the clock; otherwise the server's certificate has expired.`;
   } else if (TLS_VERIFY_CODES.has(code)) {
     message = `${prefix} the TLS certificate of ${hostname} could not be verified (${code}). Check this machine's CA certificates and any HTTPS proxy.`;
   } else if (REFUSED_CODES.has(code)) {
     message = `${prefix} the connection to ${host} was refused (${code}). Check this machine's network, firewall and proxy settings.`;
   } else if (TIMEOUT_CODES.has(code)) {
     message = `${prefix} the connection to ${host} timed out (${code}). Check this machine's network, firewall and proxy settings.`;
+  } else if (ANSWER_TIMEOUT_CODES.has(code)) {
+    message = `${prefix} ${host} did not answer in time (${code}).`;
   } else if (CLOSED_CODES.has(code)) {
-    message = `${prefix} the connection to ${host} closed unexpectedly (${code}). Retry; if it keeps failing, check this machine's network and proxy settings.`;
+    message = `${prefix} the connection to ${host} closed unexpectedly (${code}). If it keeps happening, check this machine's network and proxy settings.`;
   } else {
     message = `${prefix} no network route to ${host} (${code}). Check this machine's network settings.`;
   }
