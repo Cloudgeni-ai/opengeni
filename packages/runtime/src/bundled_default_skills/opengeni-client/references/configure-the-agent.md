@@ -49,8 +49,9 @@ internal operator agent usually starts from `"all"` minus what it must not do.
 neutral identity unless the session shares a workspace; `request_human_input`
 offers the secret kind only with `secrets` and Skill reviews only with
 `skills: "manage"`; `wait_for_input` comes only with a sandbox, `subagents`,
-`goals`, `schedules`, `browser` or `media` (a person needs no wait: an answer
-resumes the turn), and Codemode guidance only with a sandbox; tool search
+`goals`, `schedules`, `browser`, `media` or `workspaceAdmin` (a person needs no
+wait: an answer resumes the turn), and Codemode guidance only with a sandbox or
+`run_on`; tool search
 only when a tool is deferred (list the product server with `eager: true`, not
 `optional` and without a `connectionRef`, to avoid it); no Skill index without
 Skills. Prompt sections follow their capability. Switch an item back on with

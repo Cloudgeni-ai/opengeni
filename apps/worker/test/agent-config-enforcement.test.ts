@@ -907,6 +907,12 @@ describe("agent configuration reaches the production model request", () => {
       machineAttached: true,
     });
     expect(attached.request.systemInstructions).toContain(codemode);
+    // run_on opens a Codemode-enabled shell on another machine.
+    const remote = await captureWorkerRequest({
+      agent: agentConfig("none", "workspaceAdmin", true),
+      codemodeToken: true,
+    });
+    expect(remote.request.systemInstructions).toContain(codemode);
   });
 
   test.each([true, false])(
@@ -927,6 +933,10 @@ describe("agent configuration reaches the production model request", () => {
     const scheduled = agentConfig("none", "schedules", true);
     const withSchedules = await captureWorkerRequest({ agent: scheduled, humanRecipient: false });
     expect(withSchedules.names).toContain("opengeni__wait_for_input");
+    // A run_on command on another machine settles later and wakes the wait.
+    const admin = agentConfig("none", "workspaceAdmin", true);
+    const withRunOn = await captureWorkerRequest({ agent: admin, humanRecipient: false });
+    expect(withRunOn.names).toContain("opengeni__wait_for_input");
   });
 
   test.each(["all", "none", "legacy"] as const)(

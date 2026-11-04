@@ -113,7 +113,14 @@ describe("tool families attach what can be used", () => {
     expect(none.capabilities.humanInput).toBe(true);
     expect(resolveAgentToolFamilies(none, detached).waitForInput).toBe(false);
     expect(resolveAgentToolFamilies(none, { sandboxAttached: true }).waitForInput).toBe(true);
-    for (const id of ["subagents", "goals", "schedules", "browser", "media"] as const) {
+    for (const id of [
+      "subagents",
+      "goals",
+      "schedules",
+      "browser",
+      "media",
+      "workspaceAdmin",
+    ] as const) {
       const caps = { ...noneAgentCapabilities(), [id]: true };
       expect(resolveAgentToolFamilies(configured(caps), detached).waitForInput).toBe(true);
     }

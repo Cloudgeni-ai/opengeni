@@ -744,9 +744,10 @@ export function resolveAgentToolFamilies(
   // deployment without human input withholds them too.
   const notifications = enabled("notifications") && humanInput;
   // `wait_for_input` resumes the agent when something it started settles. With
-  // no compute, no children, no goal, no automations, no browser handoff and no
-  // media job, nothing could resume it except its own timeout, so a configured
-  // agent does without it. A person needs no wait: an answer to
+  // no compute, no children, no goal, no automations, no browser handoff, no
+  // media job and no `run_on` command on another machine (workspaceAdmin),
+  // nothing could resume it except its own timeout, so a configured agent does
+  // without it. A person needs no wait: an answer to
   // `request_human_input` resumes the paused turn, and a new message starts one.
   const waitForInput =
     !config ||
@@ -755,6 +756,7 @@ export function resolveAgentToolFamilies(
     enabled("goals") ||
     enabled("schedules") ||
     enabled("browser") ||
+    enabled("workspaceAdmin") ||
     media;
   const allowsFirstPartyTool = (name: FirstPartyMcpToolName): boolean => {
     const owner: AgentFirstPartyToolOwner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[name];

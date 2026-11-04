@@ -9,18 +9,22 @@ change). Nothing was reworded.
 
 - `wait_for_input` no longer follows human input. An answer to
   `request_human_input` resumes the paused turn, and a new message starts one,
-  so a person needs no wait; compute, subagents, goals, schedules, browser or
-  media still bring it. A configured agent's prefix is therefore the same
+  so a person needs no wait; compute, subagents, goals, schedules, browser,
+  media or workspaceAdmin (a `run_on` command finishes later) still bring it.
+  A configured agent's prefix is therefore the same
   whether the API or a person started the turn. The Waiting section, the
   monitoring sentences and every `wait_for_input` clause already follow the
   tool.
 - The Codemode directive is sent to a configured session only when the turn
-  has a sandbox or Connected Machine to run `ogtool` from (the worker no longer
-  sets `codemodeAvailable` or seeds the token for a session with no compute).
-  Legacy sessions are unchanged.
+  has a sandbox or Connected Machine to run `ogtool` from, or `run_on` to open
+  a Codemode-enabled shell elsewhere (otherwise the worker sets no
+  `codemodeAvailable` and seeds no token). Legacy sessions are unchanged.
 - Final answer: the web-sources sentence needs `webSearch` or `browser`.
 - Formatting rules: "Answer in chat by default …" needs `artifacts`; without
   them there is nowhere else to answer.
+- The three `all-without-artifacts` locked cases are dropped (58 → 55): with
+  artifacts now gating a sentence, they no longer compose the pre-change bytes,
+  and the artifacts removal variant covers that omission instead.
 
 ```text
 - An answer built from web or published sources (research, evidence summaries, product or price comparisons) may be short but not partial: summarize what the sources establish, including the best-supported finding, not only the practical takeaway; give figures in the user's terms, such as a monthly total at their stated size rather than only a starting price or unit rate; and link the source next to each study or figure you cite.   (without webSearch or browser)

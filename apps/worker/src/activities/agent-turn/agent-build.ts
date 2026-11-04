@@ -774,9 +774,12 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         })
       : turnExecutionPolicy.reasoningEffort;
   // Codemode runs from a shell: a configured session with no sandbox or
-  // Connected Machine this turn gets neither the client nor its guidance.
+  // Connected Machine this turn gets neither the client nor its guidance,
+  // unless `run_on` can open a Codemode-enabled shell on another machine.
   const codemodeToken =
-    session.agent && (activeSandboxBackend ?? groupBoxBackend) === "none"
+    session.agent &&
+    (activeSandboxBackend ?? groupBoxBackend) === "none" &&
+    !resolveAgentToolFamilies(session.agent).allowsFirstPartyTool("run_on")
       ? undefined
       : sandboxCodemodeToken;
   // Managed boxes fetch the release's Codemode client in one setup command.
