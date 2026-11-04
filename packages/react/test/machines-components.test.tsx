@@ -220,8 +220,21 @@ describe("MachineMetrics", () => {
     const withGpu = await renderComponent(<MachineMetrics metrics={contended} />);
     await flush();
     expect(withGpu.container.querySelector('[data-metric="gpu"]')).not.toBeNull();
-    expect(withGpu.container.querySelector('[data-metric="runqueue"]')).not.toBeNull();
     await withGpu.unmount();
+  });
+
+  test("load average and run queue show only at full density", async () => {
+    const compact = await renderComponent(<MachineMetrics metrics={contended} />);
+    await flush();
+    expect(compact.container.querySelector('[data-metric="load"]')).toBeNull();
+    expect(compact.container.querySelector('[data-metric="runqueue"]')).toBeNull();
+    await compact.unmount();
+
+    const full = await renderComponent(<MachineMetrics metrics={contended} density="full" />);
+    await flush();
+    expect(full.container.querySelector('[data-metric="load"]')).not.toBeNull();
+    expect(full.container.querySelector('[data-metric="runqueue"]')).not.toBeNull();
+    await full.unmount();
   });
 
   test("null metrics shows the empty placeholder", async () => {
