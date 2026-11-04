@@ -63,6 +63,7 @@ export function useComposerAgent({
   canCreatePrivateChat,
   visibility,
   setVisibility,
+  keepOnlyMe = false,
 }: {
   workspaceId: string;
   /** `?agent=` (or `?botTemplateId=`); undefined for Opengeni. */
@@ -73,6 +74,8 @@ export function useComposerAgent({
   canCreatePrivateChat: boolean | null;
   visibility: Visibility;
   setVisibility: (visibility: Visibility) => void;
+  /** Something else needs the chat Only me (an Only me project): never restore a shared one. */
+  keepOnlyMe?: boolean;
 }): ComposerAgent {
   const { client } = useAppContext();
   const [loaded, setLoaded] = useState<Loaded | null>(null);
@@ -88,10 +91,8 @@ export function useComposerAgent({
         if (live) setLoaded({ id: agentId, kind: "ready", agent });
       },
       (error: unknown) => {
-        if (!live) return;
-        const reason = userErrorText(error);
-        setLoaded({ id: agentId, kind: "error", message: reason });
-        toast.error("Couldn't open the agent", { description: reason });
+        // The chip and the setup strip show why; no toast on top.
+        if (live) setLoaded({ id: agentId, kind: "error", message: userErrorText(error) });
       },
     );
     return () => {
@@ -153,8 +154,8 @@ export function useComposerAgent({
     const restore = restoreVisibilityRef.current;
     if (restore === null) return;
     restoreVisibilityRef.current = null;
-    if (restore !== visibility) setVisibility(restore);
-  }, [canCreatePrivateChat, loading, onlyMe, setVisibility, visibility]);
+    if (restore !== visibility && !(keepOnlyMe && visibility === "private")) setVisibility(restore);
+  }, [canCreatePrivateChat, keepOnlyMe, loading, onlyMe, setVisibility, visibility]);
   const visibilityChosen = useCallback(() => {
     restoreVisibilityRef.current = null;
   }, []);

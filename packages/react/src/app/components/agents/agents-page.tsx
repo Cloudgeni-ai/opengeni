@@ -76,9 +76,20 @@ export function AgentsPage({ workspaceId }: { workspaceId: string }) {
       return;
     }
     try {
-      const created = await client.createAgent(workspaceId, parsed.request);
+      // An Only me agent stays Only me, unless this workspace has no Only me chats.
+      const onlyMeUnavailable =
+        parsed.request.visibility === "private" &&
+        !(await client.getSessionTenancyCreateCapabilities(workspaceId)).canCreatePrivate;
+      const request = onlyMeUnavailable
+        ? { ...parsed.request, visibility: "workspace" as const }
+        : parsed.request;
+      const created = await client.createAgent(workspaceId, request);
       state.replace((current) => [created, ...current]);
-      toast.success("Agent imported", { description: created.name });
+      toast.success("Agent imported", {
+        description: onlyMeUnavailable
+          ? `${created.name} is for everyone here: Only me chats aren't available.`
+          : created.name,
+      });
     } catch (error) {
       toast.error("Couldn't import the agent", { description: userErrorText(error) });
     }

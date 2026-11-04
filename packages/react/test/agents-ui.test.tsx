@@ -50,8 +50,15 @@ const kit = await import("./agents-test-kit");
 const { AgentsPage, BOT_TEMPLATES_MOVED, SLACK_AGENTS_MOVED, duplicateNamesText } =
   await import("../src/app/components/agents/agents-page");
 const { AgentPage } = await import("../src/app/components/agents/agent-page");
-const { NewAgentPage, EditAgentPage, INSTRUCTIONS_LONG_HINT, ONLY_ME_UNAVAILABLE, agentChanges } =
-  await import("../src/app/components/agents/agent-form-page");
+const {
+  NewAgentPage,
+  EditAgentPage,
+  INSTRUCTIONS_LONG_HINT,
+  ONLY_ME_UNAVAILABLE,
+  agentChanges,
+  lengthCount,
+  lengthError,
+} = await import("../src/app/components/agents/agent-form-page");
 const { ComposerAgentChip } = await import("../src/app/components/agents/composer-agent-chip");
 const { agentInitialsAvatarLite } = await import("../src/app/lib/agent-avatar");
 const { duplicateAgentNames, parseAgentFile, agentErrorCode, agentFile, agentFileName } =
@@ -419,6 +426,14 @@ test("a name is the only required field", async () => {
   expect(client.calls.some((call) => call[0] === "createAgent")).toBe(false);
 });
 
+test("the count and the error measure the same text: outer spaces don't count", () => {
+  const padded = `${"x".repeat(120)}   `;
+  expect(lengthCount(padded, 120)).toBe("120 / 120");
+  expect(lengthError(padded, 120)).toBeUndefined();
+  expect(lengthCount("x".repeat(121), 120)).toBe("121 / 120");
+  expect(lengthError("x".repeat(121), 120)).toBe("Shorten it to 120 characters. It has 121.");
+});
+
 test("an agent available in Slack can't be made Only me", async () => {
   const agent = makeAgent({ slack: [slackAvailability()] });
   const container = await render(
@@ -507,6 +522,7 @@ type Harness = {
   setAgentId: (id: string | undefined) => void;
   setMessage: (text: string) => void;
   setDraftLoading: (loading: boolean) => void;
+  setKeepOnlyMe: (keep: boolean) => void;
 };
 
 function ComposerAgentHarness({
@@ -524,6 +540,7 @@ function ComposerAgentHarness({
   const [message, setMessage] = useState("");
   const [draftLoading, setDraftLoading] = useState(initialDraftLoading);
   const [visibility, setVisibility] = useState<Visibility>("workspace");
+  const [keepOnlyMe, setKeepOnlyMe] = useState(false);
   const state = useComposerAgent({
     workspaceId: WORKSPACE_ID,
     agentId,
@@ -531,9 +548,18 @@ function ComposerAgentHarness({
     canCreatePrivateChat,
     visibility,
     setVisibility,
+    keepOnlyMe,
   });
   useAgentFirstMessage(state, { message, setMessage, draftLoading });
-  Object.assign(api, { state, message, visibility, setAgentId, setMessage, setDraftLoading });
+  Object.assign(api, {
+    state,
+    message,
+    visibility,
+    setAgentId,
+    setMessage,
+    setDraftLoading,
+    setKeepOnlyMe,
+  });
   return null;
 }
 
@@ -630,6 +656,16 @@ test("an Only me agent makes the chat Only me, and going back restores the earli
   expect(api.visibility).toBe("private");
 });
 
+test("going back to Opengeni keeps the chat Only me while an Only me project needs it", async () => {
+  const mine = makeAgent({ name: "Notes", visibility: "private" });
+  const api = await harness(fakeAgentsClient([mine]), { agentId: mine.id });
+  expect(api.visibility).toBe("private");
+  // The person then picks an Only me project, which needs an Only me chat.
+  await step(() => api.setKeepOnlyMe(true));
+  await step(() => api.setAgentId(undefined));
+  expect(api.visibility).toBe("private");
+});
+
 test("where Only me chats aren't available, an Only me agent says so and never starts a chat", async () => {
   const mine = makeAgent({ name: "Notes", visibility: "private", firstMessage: "Hi" });
   const api = await harness(fakeAgentsClient([mine]), {
@@ -696,6 +732,8 @@ test("the new-chat page starts chats through the agent hooks, never an ordinary 
     "(!composerAgent.loading && composerAgent.blocker === null)",
     "(createdSessionAuthority === null && composerAgent.loading) ||",
     "if (createdSessionAuthority === null && (composerAgent.loading || composerAgent.blocker)) {",
+    "keepOnlyMe: selectedProjectOnlyMe,",
+    "const firstMessageSaved = !realtimeModel && composerAgent.draftText !== message;",
   ]) {
     expect(source).toContain(wiring);
   }
@@ -776,8 +814,10 @@ test("Export writes an .agent.json that Import reads back with its Instructions"
     instructions: "Check the open PRs first.",
     firstMessage: "Which repositories?",
     memoryEnabled: true,
+    visibility: "workspace",
   });
   expect(agentFileName(agent)).toBe("release-manager.agent.json");
+  expect(agentFileName({ name: "Résumé helper" })).toBe("resume-helper.agent.json");
   const parsed = parseAgentFile(JSON.stringify(file));
   if (!parsed.ok) throw new Error(parsed.error);
   expect(parsed.request).toEqual({
@@ -788,8 +828,34 @@ test("Export writes an .agent.json that Import reads back with its Instructions"
     firstMessage: "Which repositories?",
     memoryEnabled: true,
   });
+  const onlyMe = parseAgentFile(JSON.stringify({ ...file, visibility: "private" }));
+  expect(onlyMe.ok && onlyMe.request.visibility).toBe("private");
+  expect(parseAgentFile(JSON.stringify({ ...file, visibility: "team" })).ok).toBe(false);
   expect(parseAgentFile(JSON.stringify({ ...file, version: 2 })).ok).toBe(false);
   expect(parseAgentFile(JSON.stringify({ ...file, instructions: 3 })).ok).toBe(false);
+});
+
+async function importAgentFile(canCreatePrivate: boolean) {
+  const client = fakeAgentsClient([], { canCreatePrivate });
+  const container = await render(
+    <AgentsTestHost context={appContext(client)}>
+      <AgentsPage workspaceId={WORKSPACE_ID} />
+    </AgentsTestHost>,
+  );
+  const input = container.querySelector<HTMLInputElement>("input[type='file']")!;
+  const text = JSON.stringify(agentFile(makeAgent({ name: "Notes", visibility: "private" })));
+  const file = { name: "notes.agent.json", text: async () => text } as unknown as File;
+  Object.defineProperty(input, "files", { configurable: true, value: [file] });
+  await act(async () => input.dispatchEvent(new Event("change", { bubbles: true })));
+  await flush();
+  await flush();
+  const created = client.calls.find((call) => call[0] === "createAgent");
+  return (created?.[2] as { visibility?: string } | undefined)?.visibility;
+}
+
+test("an imported Only me agent stays Only me, and is shared only where Only me chats aren't available", async () => {
+  expect(await importAgentFile(true)).toBe("private");
+  expect(await importAgentFile(false)).toBe("workspace");
 });
 
 // --- Lists: no stale rows --------------------------------------------------------

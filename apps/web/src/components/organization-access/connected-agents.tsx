@@ -501,7 +501,7 @@ export function ConnectedAgentPage({
     return (
       <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
         {loading ? (
-          <RowList label="Connected agent" busy flush>
+          <RowList label="Connected app" busy flush>
             <ListRowSkeleton count={1} />
           </RowList>
         ) : (

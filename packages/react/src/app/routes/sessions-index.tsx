@@ -796,6 +796,7 @@ function SessionsIndexRouteContent({
     canCreatePrivateChat: tenancyCapabilities === null ? null : canCreatePrivateChat,
     visibility: draft.visibility,
     setVisibility: setDraftVisibility,
+    keepOnlyMe: selectedProjectOnlyMe,
   });
   const newSessionAgent = composerAgent.agent
     ? { id: composerAgent.agent.id, avatar: agentAvatar(composerAgent.agent) }
@@ -1324,7 +1325,10 @@ function SessionsIndexRouteContent({
         },
       );
       const preserveNewerLocalDraft = async () => {
-        if (!newSessionDraft.isCurrentSignature(visibleSignature)) {
+        // Send saved the composer text; an untouched First message goes back
+        // out of the saved draft (it never travels without its agent).
+        const firstMessageSaved = !realtimeModel && composerAgent.draftText !== message;
+        if (!newSessionDraft.isCurrentSignature(visibleSignature) || firstMessageSaved) {
           // A definitive create failure must not leave text typed during the
           // attempt unsaved after a retry persisted the clicked snapshot.
           await (realtimeModel ? newSessionDraft.flush() : newSessionDraft.flushForSend());

@@ -68,8 +68,10 @@ export const ONLY_ME_UNAVAILABLE = "Only me chats aren't available here.";
 
 /** The count beside a field once it is near its limit. */
 export function lengthCount(value: string, max: number): string | undefined {
-  return value.length >= max * 0.9
-    ? `${value.length.toLocaleString("en-US")} / ${max.toLocaleString("en-US")}`
+  // The same measure as lengthError: what is saved, without outer spaces.
+  const length = value.trim().length;
+  return length >= max * 0.9
+    ? `${length.toLocaleString("en-US")} / ${max.toLocaleString("en-US")}`
     : undefined;
 }
 

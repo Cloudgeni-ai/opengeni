@@ -278,6 +278,8 @@ export type AgentFile = {
   instructions: string;
   firstMessage: string;
   memoryEnabled: boolean;
+  /** Who can use it; an import keeps an Only me agent Only me where it can. */
+  visibility: "private" | "workspace";
 };
 
 export function agentFile(agent: Agent): AgentFile {
@@ -290,6 +292,7 @@ export function agentFile(agent: Agent): AgentFile {
     instructions: agent.instructions,
     firstMessage: agent.firstMessage,
     memoryEnabled: agent.memory.enabled,
+    visibility: agent.visibility,
   };
 }
 
@@ -297,6 +300,7 @@ export function agentFileName(agent: Pick<Agent, "name">): string {
   const slug = agent.name
     .toLowerCase()
     .normalize("NFKD")
+    .replace(/\p{M}+/gu, "")
     .replace(/[^\p{L}\p{N}]+/gu, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 60);
@@ -356,6 +360,9 @@ export function parseAgentFile(
         instructions === null ||
         firstMessage === null ||
         (file.memoryEnabled !== undefined && typeof file.memoryEnabled !== "boolean") ||
+        (file.visibility !== undefined &&
+          file.visibility !== "private" &&
+          file.visibility !== "workspace") ||
         (avatar !== null && !avatar.success)
       ) {
         return { ok: false, error: UNREADABLE };
@@ -369,6 +376,7 @@ export function parseAgentFile(
           ...(instructions !== undefined ? { instructions } : {}),
           ...(firstMessage !== undefined ? { firstMessage } : {}),
           ...(typeof file.memoryEnabled === "boolean" ? { memoryEnabled: file.memoryEnabled } : {}),
+          ...(file.visibility === "private" ? { visibility: "private" as const } : {}),
         },
       };
     }
