@@ -313,6 +313,13 @@ export function parseWatchLine(line: string): WatchEvent | null {
 export const PROMPT_AFTER_MS = 3_000;
 /** A call app that lets go of the microphone this long has ended its call. */
 export const ENDED_AFTER_MS = 8_000;
+/**
+ * After Not now, an app off the microphone for less than this is still in
+ * the call the person turned down (a long mute, a rejoin), so it isn't asked
+ * about again. A call during a calendar meeting stays turned down until that
+ * meeting ends.
+ */
+export const DECLINED_GAP_MS = 5 * 60_000;
 
 export type MeetingPrompt =
   | { kind: "record"; app: CallApp }
@@ -388,6 +395,12 @@ export class MeetingPrompter {
   private autoStarted: { at: number; app: CallApp } | null = null;
   /** The recording going on was started without asking. */
   private automatic = false;
+  /**
+   * Apps whose call the person turned down with Not now: until when (the end
+   * of the calendar meeting it was, or null for none) and when they last held
+   * the microphone.
+   */
+  private readonly declinedCalls = new Map<string, { until: number | null; lastSeen: number }>();
 
   constructor(
     private readonly own: OwnApp,
@@ -419,18 +432,25 @@ export class MeetingPrompter {
       if (call.active && !active.has(id)) {
         call.active = false;
         call.lastSeen = now;
+        // Turned down: the gap that ends that runs from when it let go.
+        const declined = this.declinedCalls.get(id);
+        if (declined) declined.lastSeen = now;
       }
     }
     for (const [id, app] of active) {
       const call = this.calls.get(id);
       if (!call) {
-        // A call already going on when recording started isn't asked about.
-        this.calls.set(id, { app, since: now, lastSeen: now, active: true, asked: this.recording });
+        // A call already going on when recording started isn't asked about,
+        // nor is the one the person turned down coming back.
+        const asked = this.recording || this.stillDeclined(id, now);
+        this.calls.set(id, { app, since: now, lastSeen: now, active: true, asked });
       } else {
         // Back within the grace period (a mute, a device switch): the same call.
         call.active = true;
         call.lastSeen = now;
       }
+      const declined = this.declinedCalls.get(id);
+      if (declined) declined.lastSeen = now;
     }
     if (this.recording) for (const id of active.keys()) this.recorded.add(id);
     this.evaluate(now);
@@ -493,9 +513,37 @@ export class MeetingPrompter {
     if (this.shown?.prompt === prompt) this.shown = null;
   }
 
+  /**
+   * The person chose Not now on the question about `app`'s call: it isn't
+   * asked about again during that call. `until` is the end of the calendar
+   * meeting it is, if any; otherwise the call lasts while the app comes back
+   * to the microphone within {@link DECLINED_GAP_MS}.
+   */
+  declined(app: CallApp, now: number, until: number | null = null): void {
+    this.declinedCalls.set(app.id, { until, lastSeen: now });
+  }
+
+  /** Since when the newest call going on has held the microphone; null without one. */
+  callSince(): number | null {
+    let newest: number | null = null;
+    for (const call of this.calls.values()) {
+      if (newest === null || call.since > newest) newest = call.since;
+    }
+    return newest;
+  }
+
   /** The call apps holding the microphone now. */
   activeCalls(): string[] {
     return [...this.calls.values()].filter((call) => call.active).map((call) => call.app.id);
+  }
+
+  private stillDeclined(id: string, now: number): boolean {
+    const declined = this.declinedCalls.get(id);
+    if (!declined) return false;
+    const still =
+      declined.until !== null ? now < declined.until : now - declined.lastSeen < DECLINED_GAP_MS;
+    if (!still) this.declinedCalls.delete(id);
+    return still;
   }
 
   private present(prompt: MeetingPrompt): void {
@@ -822,6 +870,8 @@ export class MeetingDetection {
           // Only a recording in the account the meeting would record in is
           // switched; one in another account goes on.
           recordingSince: () => (this.targetRecords() ? this.recordingSince : null),
+          // A call that started just before a meeting is that meeting, joined early.
+          callSince: () => this.prompter.callSince(),
           // A call that just started, or one that ended, is asked about first.
           busy: () => this.onCard?.prompt.kind === "record" || this.onCard?.prompt.kind === "stop",
           present: (reminder, done) => this.showCard(joinPrompt(reminder), done),
@@ -1049,6 +1099,12 @@ export class MeetingDetection {
     return this.showCard(prompt, (outcome) => {
       this.prompter.dismissed(prompt);
       this.options.log(`Meeting detection: ${OUTCOMES[outcome]} (${app}).`);
+      if (outcome === "dismissed" && prompt.kind === "record") {
+        // Not now: not during this call, and not for the calendar meeting it is.
+        const now = this.now();
+        const meeting = this.reminders?.coverMeetingAt(now) ?? null;
+        this.prompter.declined(prompt.app, now, meeting?.endsAt ?? null);
+      }
       // Stopping a recording that started without asking stays in the background.
       if (outcome === "chosen") {
         this.deliver(promptRequest(prompt), { quiet: prompt.kind === "recording" });

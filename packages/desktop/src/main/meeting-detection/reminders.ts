@@ -4,8 +4,9 @@
 // meeting notes app does. Only the active account's calendar is read (from
 // its server, `GET …/upcoming-meetings`), so only that account reminds, and
 // the meeting is recorded there. Each meeting is offered once: choosing it,
-// closing the card or letting it time out all end the offer, and a meeting
-// already under way for a while is not offered at all.
+// closing the card or letting it time out all end the offer. A meeting
+// already under way for a while, or one the person is on a call for already
+// (and was asked about recording), is not offered at all.
 
 import type { MeetingPromptOutcome, ShownPrompt } from "./index";
 
@@ -139,6 +140,12 @@ export interface CalendarReminderOptions {
   enabled(): boolean;
   /** Since when the page has been recording a meeting, or null when it isn't. */
   recordingSince(): number | null;
+  /**
+   * Since when the newest call going on (an app on the microphone) started,
+   * or null without one. A call that started just before a meeting is that
+   * meeting, joined early: it isn't offered.
+   */
+  callSince?(): number | null;
   /** Another question is on the card that a reminder must not replace (a call just started). */
   busy(): boolean;
   /** Put a reminder on the card; `done` runs once when the person acts or it times out. */
@@ -254,12 +261,15 @@ export class CalendarReminders {
     }
     if (this.options.busy()) return;
     const since = this.options.recordingSince();
+    const call = this.options.callSince?.() ?? null;
     const due = meetings.filter(
       (meeting) =>
         reminderDue(meeting, now) &&
         !this.offered.has(key(accountId, meeting)) &&
         // Recording since just before it started: the person joined it early.
-        !(since !== null && since >= meeting.startsAt - EARLY_JOIN_MS),
+        !(since !== null && since >= meeting.startsAt - EARLY_JOIN_MS) &&
+        // On a call since just before it started: the person is in it already.
+        !(call !== null && call >= meeting.startsAt - EARLY_JOIN_MS),
     );
     const meeting = due[0];
     if (!meeting) return;
@@ -309,6 +319,26 @@ export class CalendarReminders {
   /** The reminder on the card, if any. */
   showing(): JoinReminder | null {
     return this.shown?.reminder ?? null;
+  }
+
+  /**
+   * The person turned down recording the call going on at `now`: the
+   * calendar meeting it is (started, or starting within
+   * {@link EARLY_JOIN_MS}) counts as offered, so its reminder doesn't ask
+   * again. Returns that meeting, or null when none is on now.
+   */
+  coverMeetingAt(now: number): CalendarMeeting | null {
+    const accountId = this.accountId;
+    if (!accountId || !this.upcoming) return null;
+    const current = this.upcoming.meetings.filter(
+      (meeting) => meeting.startsAt - EARLY_JOIN_MS <= now && now < meeting.endsAt,
+    );
+    // The one that started last, or else the next to start.
+    const started = current.filter((meeting) => meeting.startsAt <= now);
+    const meeting = started.at(-1) ?? current[0] ?? null;
+    if (!meeting) return null;
+    this.remember(key(accountId, meeting));
+    return meeting;
   }
 
   private pollInterval(now: number): number {
