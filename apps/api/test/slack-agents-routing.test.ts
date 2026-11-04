@@ -539,12 +539,15 @@ describe("what people read", () => {
     expect(text).toContain("You are Analytics");
     expect(text).toContain("groupId 11111111-1111-4111-8111-111111111111");
     expect(text).toContain("slack_agent_chats");
-    expect(text).toContain("- Ops: Handles incidents. Works in Labs.");
-    expect(text).toContain('People ask you in Slack with "@Opengeni Analytics"');
+    expect(text).toContain("- Ops (Labs): Handles incidents.");
+    expect(text).toContain('People ask you with "@Opengeni Analytics"');
     expect(text).toContain("Answer yourself by default.");
+    expect(text).toContain("make your entire final response exactly NO_REPLY");
     expect(text).toContain("slack_agent_suggest");
+    expect(text).toContain("slack_agent_propose");
     expect(text).not.toContain("+ops");
-    expect(text).toContain("Do not hand it back to Ops.");
+    // The server refuses a hand-back; the chat is only told who passed it on.
+    expect(text).toContain("Ops passed this request on to you.");
     expect(text).not.toContain("- Analytics");
     const plain = slackAgentSessionInstructions({
       loaded,
@@ -552,10 +555,10 @@ describe("what people read", () => {
       handedOffBy: null,
       source: "installation",
     });
-    expect(plain).toContain("- Analytics: Answers revenue questions. Works in Acme.");
+    expect(plain).toContain("- Analytics (Acme): Answers revenue questions.");
     expect(plain).not.toContain("You are");
     // Plain Opengeni knows it was asked without an agent's name.
-    expect(plain).toContain("The person asked Opengeni without naming an agent.");
+    expect(plain).toContain("The person named no agent.");
     const channel = slackAgentSessionInstructions({
       loaded,
       agent: null,
@@ -563,7 +566,7 @@ describe("what people read", () => {
       source: "channel",
     });
     expect(channel).toContain(
-      "This channel's settings sent the message to Opengeni; the person did not name an agent.",
+      "This channel's settings sent the message to Opengeni; the person named no agent.",
     );
     const named = slackAgentSessionInstructions({
       loaded,
@@ -571,7 +574,42 @@ describe("what people read", () => {
       handedOffBy: null,
       source: "agent_name",
     });
-    expect(named).not.toContain("without naming");
+    expect(named).not.toContain("named no agent");
+  });
+
+  test("a long roster describes the first 20 agents and names up to 30 more", () => {
+    const many = Array.from({ length: 60 }, (_, index) => ({
+      id: `agent-${index + 1}`,
+      accountId: ACCOUNT,
+      workspaceId: HOME.workspaceId,
+      connectionId: "connection-1",
+      slackTeamId: "T1",
+      targetAccountId: ACCOUNT,
+      targetWorkspaceId: ACME.workspaceId,
+      name: `Agent ${index + 1}`,
+      nameKey: slackAgentNameKey(`Agent ${index + 1}`),
+      description: `Does job ${index + 1}.`,
+      avatar: { kind: "emoji" as const, emoji: "📊" },
+      instructions: "",
+      knowledgeCollectionId: null,
+      open: false,
+      createdBySubjectId: "user:admin",
+      version: 1,
+      createdAt: new Date(0),
+      updatedAt: new Date(0),
+    }));
+    const text = slackAgentSessionInstructions({
+      loaded: { records: many, routing: [], labels: new Map([[ACME.workspaceId, "Acme"]]) },
+      agent: null,
+      handedOffBy: null,
+    });
+    // The rule comes before the list.
+    expect(text.indexOf("slack_agent_handoff")).toBeLessThan(text.indexOf("- Agent 1 "));
+    expect(text).toContain("- Agent 20 (Acme): Does job 20.");
+    expect(text).not.toContain("Does job 21.");
+    expect(text).toContain("Also: Agent 21, Agent 22,");
+    expect(text).toContain("Agent 50, and 10 more.");
+    expect(text).not.toContain("Agent 51");
   });
 });
 

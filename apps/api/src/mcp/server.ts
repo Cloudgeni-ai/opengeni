@@ -2937,15 +2937,11 @@ function registerSlackBotTools(
     "slack_agent_handoff",
     {
       description:
-        "Pass the Slack request this chat is answering on to another Slack agent the person asked for by name. Name the agent; the chat's own Slack thread and requester are used, never a destination you choose. Only works when the message names that agent (one typo allowed for longer names; a last word like team may be left out); otherwise answer yourself and use slack_agent_suggest. The receiving agent starts a new chat in its own workspace and answers in the same thread. At most one hand-off per message, never to yourself and never back to the agent that passed it to you. If the requester cannot use that agent they are told privately and nothing is passed on. After status passed_on, make your entire final response exactly NO_REPLY.",
+        "Pass the Slack request this chat is answering to the Slack agent the person asked for by name. It works only when the message names that agent; otherwise answer yourself and use slack_agent_suggest. That agent answers in the same thread. After status passed_on, make your entire final response exactly NO_REPLY.",
       inputSchema: {
         agent: z4.string().min(1).max(120),
         note: z4.string().max(1000).optional(),
-        reason: z4
-          .string()
-          .max(500)
-          .optional()
-          .describe("Why you hand off, in a few words. Logged only; nobody sees it."),
+        reason: z4.string().max(500).optional().describe("Why, in a few words. Logged only."),
       },
     },
     async ({ agent, note, reason }) => {
@@ -2959,7 +2955,7 @@ function registerSlackBotTools(
     "slack_agent_suggest",
     {
       description:
-        'After answering a Slack request yourself, suggest a Slack agent that handles requests like it when the person did not ask for one. Name the agent. Opengeni then posts one line under your answer ("<Agent> handles questions like this.") with a button that sends the same message to that agent. Only agents the person can use are shown, and only one suggestion per answer. Do not mention the suggestion in your answer.',
+        "After answering a Slack request yourself, name the Slack agent that handles requests like it when the person did not ask for one. Opengeni adds a button under your answer to ask that agent. Don't mention the suggestion in your answer.",
       inputSchema: { agent: z4.string().min(1).max(120) },
     },
     async ({ agent }) => {
@@ -2973,7 +2969,7 @@ function registerSlackBotTools(
     "slack_agent_chats",
     {
       description:
-        "List this Slack agent's other recent chats in its workspace, newest first, so you can recover context people did not repeat (for example when they do not reply in a thread). Read a relevant chat with session_events. Only chats of this same agent are listed.",
+        "List this Slack agent's other recent chats, newest first, to recover context people did not repeat. Read one with session_events.",
       inputSchema: { limit: z4.number().int().min(1).max(50).optional() },
     },
     async ({ limit }) => {

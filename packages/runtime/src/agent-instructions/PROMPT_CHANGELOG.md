@@ -1,5 +1,17 @@
 # Modular prompt changelog
 
+Slack agent text is shorter. A chat started from Slack in an installation
+with agents keeps the same rules in fewer words: answer yourself by default,
+hand off only to an agent the person names (then exactly `NO_REPLY`), suggest
+a fitting agent without mentioning it, and use Memory and `slack_agent_chats`
+when context is missing. Cut: examples, rationale, "do not hand it back"
+(the server refuses a hand-back), and the propose line's card and icon details
+(the `slack_agent_propose` description has them). The agent roster describes
+the first 20 agents and names up to 30 more. The `slack_agent_handoff`,
+`slack_agent_suggest`, `slack_agent_chats` and `slack_agent_propose`
+descriptions drop what the server enforces or reports (one hop, never back,
+usable agents only, name character rules, the text to tell the person).
+
 A configured agent pays only for what it can use. Every section below is
 omitted only when its feature is absent; sessions that have the feature render
 byte for byte as before (`modular-parity-lock.test.ts` pins 58 such

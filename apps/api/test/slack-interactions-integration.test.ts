@@ -11903,7 +11903,8 @@ describe("Slack agents", () => {
     });
     expect(session!.instructions).toContain("You are Analytics");
     expect(session!.instructions).toContain("Always sign off as Analytics.");
-    expect(session!.instructions).toContain("- Ops Desk: Handles incidents.");
+    expect(session!.instructions).toContain("Handles incidents.");
+    expect(session!.instructions).toContain("- Ops Desk (");
     expect(session!.instructions).not.toContain("+ops-desk");
 
     const first = value.slack.posts.find((post) => post.text.includes("Analytics is on it"));
