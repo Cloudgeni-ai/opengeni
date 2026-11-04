@@ -319,12 +319,12 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       // An unreadable credential opens the sign-in too, but only a missing
       // one marks the account signed out: the read may work next time.
       const read = await readAccountToken(id).then(
-        (token) => ({ token, failed: false }),
-        () => ({ token: null, failed: true }),
+        (credential) => ({ credential, failed: false }),
+        () => ({ credential: null, failed: true }),
       );
       const current = snapshotRef.current;
       if (!current) return "stay";
-      const pick = planAccountPick(current, id, Boolean(read.token));
+      const pick = planAccountPick(current, id, Boolean(read.credential));
       if (pick.kind === "signIn") {
         // Mark it, so the menus and lists show it as signed out from now on.
         if (!pick.account.signedOut && !read.failed) updateAccount(id, { signedOut: true });
