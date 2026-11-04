@@ -96,7 +96,7 @@ export const CONNECTED_MACHINE_OFFLINE_DURING_COMMAND_NOTICE =
 /** What the person is told when the agent came back on a new connection
  *  mid-command: the machine is answering again, so it is not "offline". */
 export const CONNECTED_MACHINE_AGENT_RECONNECTED_DURING_COMMAND_NOTICE =
-  "The Opengeni agent on your machine reconnected while running a command that may have stopped it. It's back now.";
+  "The Opengeni agent on your machine reconnected during a command that may have stopped it. It's back now.";
 
 /** Assemble the four-field block. The typed wire code is folded into "what
  *  happened" so the model has both the plain language and the precise code. */

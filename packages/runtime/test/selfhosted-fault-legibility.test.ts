@@ -453,7 +453,7 @@ const OFFLINE_DURING_COMMAND_NOTICE =
   "Your machine went offline while running a command that may have stopped the Opengeni agent. " +
   "It restarts automatically; if it doesn't come back, open the Opengeni app on that machine (or reinstall).";
 const RECONNECTED_DURING_COMMAND_NOTICE =
-  "The Opengeni agent on your machine reconnected while running a command that may have stopped it. It's back now.";
+  "The Opengeni agent on your machine reconnected during a command that may have stopped it. It's back now.";
 
 const reconnectCases = [
   {
