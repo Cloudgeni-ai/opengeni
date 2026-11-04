@@ -171,6 +171,10 @@ pub(super) fn environment_proxy(
     variable: impl Fn(&str) -> Option<String>,
 ) -> Option<EnvironmentProxy> {
     let host = url.host_str()?;
+    // reqwest takes no proxy from the environment in a CGI process.
+    if variable("REQUEST_METHOD").is_some() {
+        return None;
+    }
     // The first of a pair that is set wins, even when it is empty.
     let first_set = |upper: &'static str, lower: &'static str| {
         variable(upper)
@@ -202,9 +206,6 @@ pub(super) fn environment_proxy(
     }
     let scheme_variable = if url.scheme() == "https" {
         first_set("HTTPS_PROXY", "https_proxy")
-    } else if variable("REQUEST_METHOD").is_some() {
-        // reqwest ignores HTTP_PROXY in a CGI process.
-        None
     } else {
         first_set("HTTP_PROXY", "http_proxy")
     };
@@ -723,17 +724,23 @@ mod tests {
             ),
             None
         );
-        // reqwest ignores HTTP_PROXY in a CGI process.
-        assert_eq!(
-            environment_proxy(
-                &Url::parse("http://app.opengeni.ai/codemode/").unwrap(),
-                environment(&[
-                    ("HTTP_PROXY", "proxy.example:3128"),
-                    ("REQUEST_METHOD", "GET")
-                ])
-            ),
-            None
-        );
+        // reqwest takes no proxy from the environment in a CGI process.
+        for (url, proxy_variable) in [
+            ("http://app.opengeni.ai/codemode/", "HTTP_PROXY"),
+            ("https://app.opengeni.ai/codemode/", "HTTPS_PROXY"),
+            ("https://app.opengeni.ai/codemode/", "ALL_PROXY"),
+        ] {
+            assert_eq!(
+                environment_proxy(
+                    &Url::parse(url).unwrap(),
+                    environment(&[
+                        (proxy_variable, "proxy.example:3128"),
+                        ("REQUEST_METHOD", "GET")
+                    ])
+                ),
+                None
+            );
+        }
     }
 
     #[test]
