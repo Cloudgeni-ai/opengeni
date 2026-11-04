@@ -6,6 +6,7 @@ import {
   captureVerifiedWorkspaceArchive,
   findRebuildableWorkspacePaths,
   fingerprintSandboxWorkspace,
+  parseWorkspaceArchiveDescriptor,
   REBUILDABLE_WORKSPACE_PATHS_MAX,
   type WorkspaceTreeFingerprint,
 } from "../src/sandbox/workspace-archive";
@@ -374,5 +375,28 @@ describe("reduced workspace saves", () => {
     }).catch((caught) => caught);
     expect(error).toMatchObject({ code: "workspace_capture_timeout" });
     expect(fake.manifest.ephemeralPersistencePaths).toBe(fake.ownConfigured);
+  });
+  test("a stored descriptor keeps only well-formed omitted folders and stays readable", async () => {
+    const fake = reducibleSession();
+    const verified = await captureVerifiedWorkspaceArchive(fake.session, 1_900_000_000_005, {
+      requestId: "reduced-parse",
+      omitPaths: ["node_modules"],
+    });
+    expect(parseWorkspaceArchiveDescriptor(verified.descriptor)).toEqual(verified.descriptor);
+    const tampered = {
+      ...verified.descriptor,
+      omittedPaths: ["node_modules", "../etc", "/abs", 7, "a\nb", ""],
+    };
+    expect(parseWorkspaceArchiveDescriptor(tampered)).toEqual({
+      ...verified.descriptor,
+      omittedPaths: ["node_modules"],
+    });
+    const { omittedPaths: _dropped, ...complete } =
+      verified.descriptor as typeof verified.descriptor & {
+        omittedPaths?: string[];
+      };
+    expect(parseWorkspaceArchiveDescriptor({ ...verified.descriptor, omittedPaths: "x" })).toEqual(
+      complete,
+    );
   });
 });
