@@ -381,7 +381,7 @@ describe("the owner-only routines' predicates (0735)", () => {
   // 1167 adds acceptance's restricted entry for the account a person turned
   // on for their own turns in a shared workspace, on top of 1120's body;
   // subscription-shared-personal-choice-postgres.test.ts exercises it.
-  // 1254 drops the credential target's per-account cutover lookup with the
+  // 1267 drops the credential target's per-account cutover lookup with the
   // retired switch table; the provider registry check stays.
   // Every other authorization clause remains byte-identical to its prior body.
   const expectedBodies: Record<string, string> = {

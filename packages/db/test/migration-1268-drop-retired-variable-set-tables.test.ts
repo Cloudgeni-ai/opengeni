@@ -20,7 +20,7 @@ import { provisionRoles } from "../src/provision-roles";
 import { assertRuntimeDatabasePosture } from "../src/runtime-posture";
 import { attachLegacyVariableSets } from "./helpers/legacy-variable-sets";
 
-const migration = "1255_drop_retired_variable_set_tables.sql";
+const migration = "1268_drop_retired_variable_set_tables.sql";
 const tables = [
   "session_variable_set_attachments",
   "workspace_variable_set_variables",
