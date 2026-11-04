@@ -87194,23 +87194,28 @@ export const SANDBOX_PROCESS_START_RESTART_OPERATION = "sandbox.process_start_re
 
 /**
  * How many times this turn already restarted its sandbox because it could not
- * start programs, since the person last asked to retry it. The worker restarts
- * at most once per turn, so a box that stays broken fails the turn instead of
- * restarting in a loop; a human Retry is a new request and may restart again.
+ * start programs, since the person last asked to retry it: restarts begun
+ * (recorded before the restart call, so a crash still counts) and restarts
+ * that completed. The worker begins at most one per turn, so a box that stays
+ * broken fails the turn instead of restarting in a loop; a human Retry is a
+ * new request and may restart again.
  */
 export async function countSessionTurnSandboxProcessStartRestarts(
   db: Database,
   workspaceId: string,
   input: { sessionId: string; turnId: string },
-): Promise<number> {
+): Promise<{ started: number; completed: number }> {
   return await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await rawRows<{ restarts: number | string }>(
+    const [row] = await rawRows<{ started: number | string; completed: number | string }>(
       scopedDb as unknown as Database,
-      sql`select count(*) as restarts from session_events restart
+      sql`select
+          count(*) filter (where restart.type = 'sandbox.operation.started') as started,
+          count(*) filter (where restart.type = 'sandbox.operation.completed') as completed
+        from session_events restart
         where restart.workspace_id = ${workspaceId}
           and restart.session_id = ${input.sessionId}
           and restart.turn_id = ${input.turnId}
-          and restart.type = 'sandbox.operation.started'
+          and restart.type in ('sandbox.operation.started', 'sandbox.operation.completed')
           and restart.payload->>'name' = ${SANDBOX_PROCESS_START_RESTART_OPERATION}
           and restart.sequence > coalesce((
             select max(retry.sequence) from session_events retry
@@ -87221,7 +87226,7 @@ export async function countSessionTurnSandboxProcessStartRestarts(
               and retry.payload->>'reason' = 'human_retry'
           ), 0)`,
     );
-    return Number(row?.restarts ?? 0);
+    return { started: Number(row?.started ?? 0), completed: Number(row?.completed ?? 0) };
   });
 }
 

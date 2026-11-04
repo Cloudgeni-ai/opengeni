@@ -170,17 +170,18 @@ export class SandboxMachineRestartingError extends Error {
 }
 
 /**
- * Platform setup failed because the sandbox could not start programs, but by
- * the time the worker checked, it could again (another session sharing the box
- * had restarted it), so it was not restarted. Nothing the model asked for ran,
- * so the same turn retries within the ordinary sandbox recovery budget.
+ * Platform setup failed because the sandbox could not start programs, but the
+ * worker's check did not show it still broken (it starts programs again, or
+ * its agent is offline or waking, as after another session's restart of a
+ * shared box), so it was not restarted. Nothing the model asked for ran, so
+ * the same turn retries within the ordinary sandbox recovery budget.
  */
 export class SandboxMachineBackError extends Error {
   override readonly name = "SandboxMachineBackError";
 
   constructor(cause: unknown) {
     super(
-      "The workspace machine couldn't start programs for a moment and can again now, and nothing the model asked for ran. The same turn will retry after a short delay.",
+      "The workspace machine couldn't start programs, and nothing the model asked for ran. It wasn't restarted, because it may be starting up again already; the same turn will retry after a short delay.",
       { cause },
     );
   }
@@ -266,23 +267,29 @@ type RestartableMachine = {
 const START_PROBE_TIMEOUT_MS = 30_000;
 
 /**
- * Whether the box starts a trivial program now. Several sessions can share one
- * box, so another session's turn may have restarted it since this setup
+ * Whether the box can start a trivial program now. Several sessions can share
+ * one box, so another session's turn may have restarted it since this setup
  * failed; restarting it again would stop that session's running programs.
- * Anything but a clean start within the bound (a failure, no answer, no way to
- * ask) reads as still broken.
+ * Only a probe that itself fails to start a program shows the box is still
+ * broken ("cannot"). One that starts ("starts"), or that cannot tell (the
+ * agent is offline or reconnecting, the box is still waking from another
+ * session's restart, no answer within the bound), never restarts it.
  */
-async function startsProgramsNow(machine: RestartableMachine): Promise<boolean> {
-  if (typeof machine.exec !== "function") return false;
+async function probeProgramStart(
+  machine: RestartableMachine,
+): Promise<"starts" | "cannot" | "unknown"> {
+  // No way to ask: the restart is the only remedy, as before the probe.
+  if (typeof machine.exec !== "function") return "cannot";
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       machine.exec({ cmd: "true" }).then(
-        () => true,
-        () => false,
+        () => "starts" as const,
+        (probeError: unknown) =>
+          isSandboxProcessStartFailure(probeError) ? ("cannot" as const) : ("unknown" as const),
       ),
-      new Promise<boolean>((resolve) => {
-        timer = setTimeout(() => resolve(false), START_PROBE_TIMEOUT_MS);
+      new Promise<"unknown">((resolve) => {
+        timer = setTimeout(() => resolve("unknown"), START_PROBE_TIMEOUT_MS);
       }),
     ]);
   } finally {
@@ -303,8 +310,9 @@ export type SandboxProcessStartRecovery = {
   session: unknown;
   /** The turn's sandbox backend ("compute", "selfhosted", ...). */
   backend: string | null | undefined;
-  /** Restarts this turn already made for this reason (durable). */
-  restartsThisTurn: () => Promise<number>;
+  /** Restarts this turn already began and completed for this reason
+   * (durable). */
+  restartsThisTurn: () => Promise<{ started: number; completed: number }>;
   /** Publish the restart's `sandbox.operation.*` events (durable). */
   publish: (
     events: Array<{
@@ -354,7 +362,7 @@ export async function recoverSandboxSetupFailure(
       restartFailure: "a setup script had started, so the setup is not replayed",
     });
   }
-  let restarts: number;
+  let restarts: { started: number; completed: number };
   try {
     restarts = await recovery.restartsThisTurn();
   } catch (countError) {
@@ -365,17 +373,19 @@ export async function recoverSandboxSetupFailure(
       restartFailure: `could not read earlier restarts: ${errorText(countError)}`,
     });
   }
-  if (restarts > 0) {
+  if (restarts.started > 0) {
+    // One restart was begun this turn; the copy says it happened only when it
+    // completed (the worker may have stopped before or during it).
     return new SandboxProcessStartFailedError(error, {
       machine: "compute",
-      restartedThisTurn: true,
+      restartedThisTurn: restarts.completed > 0,
     });
   }
   // Checked before the restart: a box another session sharing it already
-  // restarted is retried as it is, never restarted again. Nothing was
-  // restarted, so nothing is recorded; the ordinary sandbox recovery budget
-  // bounds these retries.
-  if (await startsProgramsNow(machine)) return new SandboxMachineBackError(error);
+  // restarted (or is restarting) is retried as it is, never restarted again.
+  // Nothing was restarted, so nothing is recorded; the ordinary sandbox
+  // recovery budget bounds these retries.
+  if ((await probeProgramStart(machine)) !== "cannot") return new SandboxMachineBackError(error);
   const name = recovery.operationName;
   try {
     // Recorded before the restart, so a crash during it still counts.

@@ -1,7 +1,7 @@
 // A machine agent that cannot start a program reports
 // "spawn or apply execution containment for program "<program>": <OS error>",
-// with a null-device note before the OS error when /dev/null is missing or
-// replaced. Agents up to 0.1.150 wrote the first command element there,
+// with a null-device note before the OS error when it had to open a missing
+// /dev/null by path. Agents up to 0.1.150 wrote the first command element there,
 // unquoted, which for a shell command is the whole script, so that text could
 // reach events, tool output and the person's failure banner. Everything here is
 // pure string work on that one stable marker, so older agents get the same
@@ -17,9 +17,8 @@ const TAIL_LIMIT = 300;
 /** The longest OS error kept from an older agent's message. */
 const CAUSE_LIMIT = 200;
 
-/** The null-device notes newer agents add before the OS error. */
-const NULL_DEVICE_NOTE_TEXT =
-  "the null device /dev/null is missing|/dev/null has been replaced by something other than the null device";
+/** The null-device note newer agents add before the OS error. */
+const NULL_DEVICE_NOTE_TEXT = "the null device /dev/null is missing";
 const NULL_DEVICE_NOTE = new RegExp(`\\((${NULL_DEVICE_NOTE_TEXT})\\)`);
 
 /** A newer agent's quoted program: `program "<name>"`, then the end, `: <OS
@@ -100,7 +99,7 @@ function restAfterMarker(message: string): string | null {
 /**
  * Whether a failed process start says the machine itself cannot start
  * programs, rather than that this one program is missing, not permitted or
- * short of resources: a newer agent named a missing or replaced `/dev/null`,
+ * short of resources: a newer agent named a missing `/dev/null`,
  * or an older agent failed to start its shell for a shell command (it
  * reported the script, as in the 4 Nov incident). Only these warrant
  * restarting the machine; brief memory or process pressure never does,

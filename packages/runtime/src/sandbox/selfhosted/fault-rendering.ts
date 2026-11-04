@@ -228,7 +228,7 @@ export function renderSelfhostedFault(error: SelfhostedControlError): string {
       preserved: "nothing ran; the command never started.",
       tryNext: `${
         nullDevice ? `${nullDevice}, so the machine` : "the machine likely"
-      } cannot start programs. Stop running commands and tell the person the machine needs a restart: a connected machine by restarting it or its Opengeni agent; a workspace machine is restarted when a turn's setup finds it broken, or a new chat gets a fresh one.`,
+      } cannot start programs. Stop running commands and tell the person the machine needs a restart: a connected machine by restarting it; a workspace machine is restarted when a turn's setup finds it broken, or a new chat gets a fresh one.`,
     });
   }
 

@@ -666,11 +666,12 @@ describe("intent-preserving failed-session retry", () => {
     const claimed = await f.claim();
     if (claimed.action !== "claimed") throw new Error("not claimed");
     const turn = claimed.turn;
-    const count = () =>
+    const counts = () =>
       countSessionTurnSandboxProcessStartRestarts(client.db, f.workspaceId, {
         sessionId: f.session.id,
         turnId: turn.id,
       });
+    const count = async () => (await counts()).started;
     const append = async (
       events: Parameters<typeof appendSessionEventsForTurnAttempt>[6],
     ): Promise<void> => {
@@ -686,7 +687,7 @@ describe("intent-preserving failed-session retry", () => {
       expect(appended.accepted).toBe(true);
     };
     expect(await count()).toBe(0);
-    // Other operations, and the restart's own completion, do not count.
+    // Other operations do not count.
     await append([
       { type: "sandbox.operation.started", payload: { name: "repository-clone" } },
       { type: "sandbox.operation.failed", payload: { name: "repository-clone", error: "x" } },
@@ -697,19 +698,23 @@ describe("intent-preserving failed-session retry", () => {
         type: "sandbox.operation.started",
         payload: { name: SANDBOX_PROCESS_START_RESTART_OPERATION, reason: "process_start_failed" },
       },
+    ]);
+    // Begun but not (yet) completed: it counts, but nothing says it happened.
+    expect(await counts()).toEqual({ started: 1, completed: 0 });
+    await append([
       {
         type: "sandbox.operation.completed",
         payload: { name: SANDBOX_PROCESS_START_RESTART_OPERATION },
       },
     ]);
-    expect(await count()).toBe(1);
+    expect(await counts()).toEqual({ started: 1, completed: 1 });
     // Another turn has its own budget.
     expect(
       await countSessionTurnSandboxProcessStartRestarts(client.db, f.workspaceId, {
         sessionId: f.session.id,
         turnId: crypto.randomUUID(),
       }),
-    ).toBe(0);
+    ).toEqual({ started: 0, completed: 0 });
 
     // The turn fails; the person's Retry is a new request and may restart again.
     await applySessionTurnSettlement(client.db, f.workspaceId, {

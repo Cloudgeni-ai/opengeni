@@ -51,7 +51,13 @@ function inToolCall(error: unknown): Error {
 type Published = Parameters<SandboxProcessStartRecovery["publish"]>[0][number];
 
 /** A compute box and a turn's event log, as the worker sees them. */
-function computeTurn(options: { restartFails?: boolean; startsProgramsNow?: boolean } = {}) {
+function computeTurn(
+  options: {
+    restartFails?: boolean;
+    /** How the box answers the pre-restart probe; broken by default. */
+    probe?: "starts" | "offline";
+  } = {},
+) {
   const events: Published[] = [];
   let restarts = 0;
   let probes = 0;
@@ -65,20 +71,22 @@ function computeTurn(options: { restartFails?: boolean; startsProgramsNow?: bool
     // session already restarted it.
     exec: async () => {
       probes += 1;
-      if (!options.startsProgramsNow) throw processStartError("/bin/sh", NULL_DEVICE_MISSING);
-      return { exitCode: 0 };
+      if (options.probe === "starts") return { exitCode: 0 };
+      if (options.probe === "offline") throw agentErrorToControlError(offlineAgentError());
+      throw processStartError("/bin/sh", NULL_DEVICE_MISSING);
     },
   };
   const recovery: SandboxProcessStartRecovery = {
     session,
     backend: "compute",
     // Counted from the durable log, as the database helper does.
-    restartsThisTurn: async () =>
-      events.filter(
-        (event) =>
-          event.type === "sandbox.operation.started" &&
-          event.payload.name === "sandbox.process_start_restart",
-      ).length,
+    restartsThisTurn: async () => {
+      const of = (type: Published["type"]) =>
+        events.filter(
+          (event) => event.type === type && event.payload.name === "sandbox.process_start_restart",
+        ).length;
+      return { started: of("sandbox.operation.started"), completed: of("sandbox.operation.completed") };
+    },
     publish: async (published) => {
       events.push(...published);
     },
@@ -108,7 +116,7 @@ describe("a sandbox that cannot start programs", () => {
   });
 
   test("a box another session already restarted is retried as is, never restarted again", async () => {
-    const turn = computeTurn({ startsProgramsNow: true });
+    const turn = computeTurn({ probe: "starts" });
     const error = await recoverSandboxSetupFailure(
       createSandboxSetupReplayGuard(),
       processStartError(INSTALL_SCRIPT),
@@ -121,8 +129,44 @@ describe("a sandbox that cannot start programs", () => {
     expect(turn.events).toEqual([]);
     const failure = agentRunFailurePayload(inToolCall(error));
     expect(failure).toMatchObject({ code: "sandbox_command_start_unavailable", retryable: true });
-    expect(failure.error).not.toContain("restarted");
+    expect(failure.error).toContain("wasn't restarted");
     expect(failure.error).not.toContain("node -e");
+  });
+
+  test("a probe that cannot tell (agent offline, box still waking) never restarts the box", async () => {
+    const offline = computeTurn({ probe: "offline" });
+    expect(
+      await recoverSandboxSetupFailure(
+        createSandboxSetupReplayGuard(),
+        processStartError(INSTALL_SCRIPT),
+        offline.recovery,
+      ),
+    ).toBeInstanceOf(SandboxMachineBackError);
+    expect(offline.restarts()).toBe(0);
+    expect(offline.events).toEqual([]);
+  });
+
+  test("a restart begun but never completed is not claimed in the copy", async () => {
+    const turn = computeTurn();
+    // An earlier attempt recorded the restart, then stopped before it ran.
+    await turn.recovery.publish([
+      {
+        type: "sandbox.operation.started",
+        payload: { name: "sandbox.process_start_restart", reason: "process_start_failed" },
+      },
+    ]);
+    const error = await recoverSandboxSetupFailure(
+      createSandboxSetupReplayGuard(),
+      processStartError("/bin/sh", NULL_DEVICE_MISSING),
+      turn.recovery,
+    );
+    expect(error).toBeInstanceOf(SandboxProcessStartFailedError);
+    expect(turn.restarts()).toBe(0);
+    const copy = agentRunFailurePayload(inToolCall(error)).error;
+    expect(copy).not.toContain("restarted");
+    expect(copy).toBe(
+      "The workspace machine can't start programs, so this turn stopped. Retry, or start a new chat if it keeps failing.",
+    );
   });
 
   test("a box still broken after its restart stops the turn instead of looping", async () => {
@@ -217,7 +261,7 @@ describe("a sandbox that cannot start programs", () => {
     const recovery: SandboxProcessStartRecovery = {
       session: { backendId: "selfhosted" },
       backend: "selfhosted",
-      restartsThisTurn: async () => 0,
+      restartsThisTurn: async () => ({ started: 0, completed: 0 }),
       publish: async (published) => {
         events.push(...published);
       },

@@ -164,12 +164,6 @@ describe("process-start failures from the machine agent", () => {
     expect(
       spawnError("/bin/bash", " (the null device /dev/null is missing)").processStartFailed,
     ).toBe(true);
-    expect(
-      spawnError(
-        "/bin/sh",
-        " (/dev/null has been replaced by something other than the null device)",
-      ).processStartFailed,
-    ).toBe(true);
     // An old agent that could not start its shell reported the script.
     expect(legacySpawnError(SCRIPT).processStartFailed).toBe(true);
   });
