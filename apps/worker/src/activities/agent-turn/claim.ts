@@ -1,7 +1,7 @@
 import { assertTurnServingPolicyMatchesConfigV1 } from "@opengeni/config";
 import { claimServingAttempt, type ServingAttempt } from "./subscription-serving-claim";
 import { servingTurnProviders } from "./subscription-serving-providers";
-import { FILESYSTEM_DISCONTINUITY_PROTOCOL } from "./recovery-warning";
+import { AGENT_INSTRUCTIONS_PROTOCOL, FILESYSTEM_DISCONTINUITY_PROTOCOL } from "./recovery-warning";
 import { measureClaimDatabaseScopes } from "./claim-database-timing";
 import { readSubscriptionLeaseBusyChain } from "./codex-core-claim";
 import {
@@ -275,6 +275,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       measureClaimDatabaseScopes(observability, () =>
         claimSessionWorkForAttempt(db, input.workspaceId, {
           filesystemDiscontinuityProtocol: FILESYSTEM_DISCONTINUITY_PROTOCOL,
+          agentInstructionsProtocol: AGENT_INSTRUCTIONS_PROTOCOL,
           sessionId: input.sessionId,
           workflowId: input.workflowId,
           workflowRunId: input.workflowRunId,
@@ -584,6 +585,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   const attachPendingUpdatesAfterOpenSuffix = async (): Promise<boolean> => {
     const attached = await claimSessionWorkForAttempt(db, input.workspaceId, {
       filesystemDiscontinuityProtocol: FILESYSTEM_DISCONTINUITY_PROTOCOL,
+      agentInstructionsProtocol: AGENT_INSTRUCTIONS_PROTOCOL,
       sessionId: input.sessionId,
       workflowId: input.workflowId,
       workflowRunId: input.workflowRunId,

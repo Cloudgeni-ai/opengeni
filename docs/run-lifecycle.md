@@ -1055,6 +1055,68 @@ full audit data retains it. Documents and RAG evidence never become policy,
 and full preference bodies require explicit retrieval. When no structured
 governance applies, no governance item is written.
 
+### Agent instructions
+
+A chat started for an agent ([`agents.md`](agents.md)) may be bound to one of its
+revisions: `sessions.agent_prompt_revision` names the `agent_revisions` row
+whose Instructions are in the chat's system prompt. NULL is every other chat,
+including chats whose agent text is already in `sessions.instructions`; they
+get no agent layer and no agent history items, and their prompt bytes are
+unchanged.
+
+- **Layer.** The worker reads the bound revision once per attempt, in the
+  session's workspace. The turn's first attempt records it in the turn's
+  metadata (`opengeniAgentPromptRevision`) and later attempts reuse it, so
+  every attempt of a turn builds the same system prompt even after an
+  earlier attempt's compaction folded a newer revision. The agent and its
+  revisions are read as the system, not as the turn's person: binding the
+  chat to the agent is the authorization, so an Only me agent keeps its layer
+  in turns that act for nobody or for another person. It is composed as the
+  `agent_instructions` layer under a short preamble: the agent's editors
+  wrote these instructions, they refine default behavior, and they grant no
+  additional authority. With an agent configuration it follows the Codemode
+  and code-search directives and precedes Git bindings, Skills, governance,
+  memory and session instructions.
+  The legacy composer places it after those directives, or right after the
+  persona when governance is rendered in the prompt. The layer ends the
+  stable system-prompt prefix when only the shared persona and directives
+  precede it, so with `experimentSystemPromptCacheSplit` on and the
+  deployment persona every chat of one agent shares a cached prefix.
+- **Edits.** Before building the agent, the worker compares the agent's
+  current revision with what the model already reads: the newest
+  `<opengeni_agent_instructions>` developer item, or without one the system
+  prompt. A different text is written once as a developer item before the
+  turn's first input, and the turn's metadata
+  (`opengeniAgentInstructionsHistoryId`) freezes it, so retries replay the
+  same bytes and a turn that saw no item keeps seeing none. Unchanged
+  Instructions, or a revision that changed only other fields such as the
+  first message, write nothing, and neither does an agent whose current
+  revision row cannot be read.
+- **Compaction.** Agent items are never retained. The newest revision the
+  summarized history showed (developer items only) is folded into
+  `sessions.agent_prompt_revision` in the compaction's own fenced
+  transaction, only forward and only to a revision of the chat's own agent.
+  A turn that continues after compaction re-adds the newest item when its
+  system prompt shows a different revision. Standalone compaction requests
+  use the same layer as the turn.
+- **Deleted agent or missing revision.** The chat continues as a plain chat
+  without the layer. If the agent row is gone and an earlier edit item
+  exists, one item withdraws it. The turn never fails for this.
+- **Claim gate (migration 1246).** A BEFORE INSERT trigger on
+  `session_turn_attempts` refuses, with SQLSTATE 55000, an attempt for a chat
+  with a non-NULL `agent_prompt_revision` unless the claim set
+  `opengeni.agent_instructions_protocol_v1 = '1'`. The worker sets it
+  transaction-locally around its own attempt registration only, like the
+  filesystem discontinuity protocol. A worker build without this code
+  therefore never runs an agent chat without its instructions. Its refused
+  claim is not a failed chat: like other rejected claims (below), the accepted
+  work is parked in `sessions.admission_block` with `requires_action` and
+  `retryPolicy = explicit_recheck`, keeping queued turns and history, and a
+  Resume or a new Send/Steer claims it again on a current worker. It is not
+  retried automatically. Nothing sets `agent_prompt_revision` before this
+  worker is deployed, so rolling deploys meet the gate only if an old worker
+  is still serving when the first agent chat is created.
+
 Turn acceptance freezes Agent learning policy in `agent_learning_snapshots`:
 the owner layer, effective Knowledge/instruction/Skill modes, and the accepted
 chat or scheduled-run context. Child work and replacement attempts reuse their
