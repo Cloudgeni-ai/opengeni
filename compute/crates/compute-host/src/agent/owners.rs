@@ -736,10 +736,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// the rest, keeping the store's copies, and adopts again those whose
     /// copy here is behind the store's. Answers once every drop is done, so
     /// the new lease lets only what the service gave this host run.
+    ///
+    /// A sandbox whose VM recovery found held frozen (see
+    /// [`Self::frozen_owner`]) is ruled on too: one dropped or adopted
+    /// again has its VM ended before the answer, as any other; one kept
+    /// under any epoch stays blocked, and is taken back once the lease
+    /// lets the guard thaw it. So nothing the service gave another host
+    /// runs here again, and only what it gave this host thaws.
     pub(super) fn reconcile(&mut self, rulings: Vec<Ruling>, reply: Reply<()>) {
-        if let Some((&id, _)) = self.blocked.first_key_value() {
+        if let Some(id) = self.unruled_blocked() {
             let _ = reply.send(Err(HostError::Blocked {
-                id: Id(id),
+                id,
                 reason: "a sandbox the host does not manage may still run a VM another host now \
                          runs; remove it before the host registers"
                     .into(),
@@ -757,12 +764,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
             let id = record.id;
             let (verdict, link) = rulings.remove(&id).unwrap_or((Verdict::Drop, None));
+            let frozen = self.frozen_owner(id.0).is_some();
             let (done, answer) = oneshot::channel();
             match verdict {
                 Verdict::Keep { owner_epoch } => {
                     let owner = OwnerEpoch(owner_epoch);
                     if record.removing {
                         continue;
+                    }
+                    if frozen {
+                        self.take_back_on_thaw(id.0);
                     }
                     if owner == record.owner() {
                         // Kept as it was, unless its link changed.
@@ -790,6 +801,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     } else if let Some(slot) = self.slots.get_mut(&id.0) {
                         slot.removers.push(done);
                         self.drop_copy(id, None);
+                    } else if frozen {
+                        self.hand_away_frozen(&record, vec![done]);
                     } else {
                         continue;
                     }
@@ -804,7 +817,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                         reply: done,
                         under: None,
                     };
-                    self.drop_copy(id, Some(then));
+                    if frozen {
+                        // The adopt goes on once its VM is gone.
+                        self.then_adopt.insert(id.0, then);
+                        self.hand_away_frozen(&record, Vec::new());
+                    } else {
+                        self.drop_copy(id, Some(then));
+                    }
                 }
             }
             waits.push((id, answer));

@@ -1021,6 +1021,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 .map(|(id, problem)| BlockedSandbox {
                     id: Id(*id),
                     problem: problem.clone(),
+                    frozen_owner_epoch: self.frozen_owner(*id).map(|owner| owner.0),
                 })
                 .collect(),
             capacity: self.core.capacity().map(|capacity| CapacityStatus {
