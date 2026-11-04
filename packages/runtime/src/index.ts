@@ -7469,6 +7469,11 @@ async function prepareToolGatewayDefinitionsFromServers(
     }
     return { server, config };
   });
+  // Network listings run within the concurrency bound; ordered admission
+  // happens afterwards, so a slow early server never blocks later listings.
+  await boundedParallelMap(preparedServers, MCP_MAX_CONCURRENT_SERVER_OPERATIONS, ({ server }) =>
+    server.prefetchTools(),
+  );
   const perServerDefinitions = await boundedParallelMap(
     preparedServers,
     MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
@@ -9733,6 +9738,7 @@ export class PrefixedMcpServer implements MCPServer {
   private readonly eagerToolNames: ReadonlySet<string>;
   private readonly firstRequestModelNames = new Set<string>();
   private frozenTools: Promise<RuntimeMcpTool[]> | null = null;
+  private rawToolList: Promise<unknown[]> | null = null;
   private readonly originalToolNames = new Map<string, string>();
   private readonly displayMetadata = new Map<string, ToolDisplayMetadata>();
   /**
@@ -9956,6 +9962,27 @@ export class PrefixedMcpServer implements MCPServer {
     }
   }
 
+  /**
+   * Starts this server's network listing without admitting it. The catalog
+   * build prefetches inside its bounded concurrency so a server waiting for
+   * its admission turn never holds a listing slot.
+   */
+  prefetchTools(): Promise<void> {
+    if (this.frozenTools) return Promise.resolve();
+    return this.rawTools().then(
+      () => undefined,
+      () => undefined,
+    );
+  }
+
+  private rawTools(): Promise<unknown[]> {
+    if (!this.rawToolList) {
+      if (this.listSizeRefusal) this.listSizeRefusal.refused = false;
+      this.rawToolList = this.inner.listTools() as Promise<unknown[]>;
+    }
+    return this.rawToolList;
+  }
+
   freezeTools(): Promise<RuntimeMcpTool[]> {
     return this.listTools();
   }
@@ -10039,8 +10066,7 @@ export class PrefixedMcpServer implements MCPServer {
     try {
       // De-duplicate before any size check: a paginated listing that repeats
       // pages must not count its repeats against the limits.
-      if (this.listSizeRefusal) this.listSizeRefusal.refused = false;
-      const tools = (await this.inner.listTools()) as RuntimeMcpTool[];
+      const tools = (await this.rawTools()) as RuntimeMcpTool[];
       const exposed = uniqueListedMcpTools(this.registryId, tools)
         .filter((tool) => this.isAllowed(tool.name))
         .map((tool) => {

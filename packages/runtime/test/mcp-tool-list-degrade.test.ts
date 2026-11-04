@@ -175,6 +175,38 @@ describe("a required server's tool list over its size limits", () => {
   });
 });
 
+test("a slow early server does not hold back later servers' listings", async () => {
+  // Admission follows the selection order, but listing must not: a server
+  // waiting for its admission turn must not occupy one of the bounded slots.
+  const ids = Array.from({ length: 12 }, (_, index) => `srv_${index}`);
+  const started = new Set<string>();
+  let allStarted!: () => void;
+  const everyListingStarted = new Promise<void>((resolve) => (allStarted = resolve));
+  let startedBeforeFirstFinished = 0;
+  const { prepared } = await prepare(
+    ids.map((id, index) => ({
+      id,
+      list: async () => {
+        started.add(id);
+        if (started.size === ids.length) allStarted();
+        if (index === 0) {
+          await Promise.race([everyListingStarted, Bun.sleep(1_500)]);
+          startedBeforeFirstFinished = started.size;
+        }
+        return [listed("ping")];
+      },
+    })),
+  );
+  try {
+    expect(startedBeforeFirstFinished).toBe(ids.length);
+    expect(prepared.attemptToolCatalog!.entries.map((entry) => entry.identity.serverId)).toEqual(
+      ids,
+    );
+  } finally {
+    await prepared.close();
+  }
+});
+
 describe("two connectors producing one model name", () => {
   // Registry ids may contain "__", so `a__b` + `c` and `a` + `b__c` are both
   // `a__b__c`. Before: the SDK's "Duplicate tool names found across MCP
