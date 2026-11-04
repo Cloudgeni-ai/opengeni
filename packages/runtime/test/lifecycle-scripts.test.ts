@@ -1799,6 +1799,11 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       .map((entry) => join(parent, entry));
   }
 
+  /** Every copy of the target, in place or moved aside, still holding `file`. */
+  function copiesHolding(target: string, file: string): string[] {
+    return [target, ...recoveredSiblings(target)].filter((dir) => existsSync(join(dir, file)));
+  }
+
   const commitEnv = {
     GIT_AUTHOR_NAME: "t",
     GIT_AUTHOR_EMAIL: "t@t",
@@ -1860,6 +1865,8 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       writeFileSync(join(target, ".git", "HEAD"), "not a ref\n");
 
       const run = runScript(script, { HOME: home });
+      // The uncommitted file survives, in the moved copy.
+      expect(copiesHolding(target, "dc-uncommitted.txt")).toHaveLength(1);
       expect(run.status).toBe(0);
       const recovered = recoveredSiblings(target);
       expect(recovered).toHaveLength(1);
@@ -1886,7 +1893,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     }
   });
 
-  test("a pinned repository keeps the agent's commits on the pin and moves any other HEAD aside with its work", () => {
+  test("a pinned repository keeps the agent's commits on the pin in place", () => {
     const root = mkdtempSync(join(tmpdir(), "opengeni-clone-pinned-"));
     try {
       const origin = makeOrigin(root);
@@ -1911,11 +1918,38 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       const agentHead = execFileSync("git", ["-C", target, "rev-parse", "HEAD"]).trim();
       writeFileSync(join(target, "dc-uncommitted.txt"), "uncommitted\n");
       const kept = runScript(pinned(first), { HOME: home });
+      expect(copiesHolding(target, "dc-uncommitted.txt")).toEqual([target]);
       expect(kept.status).toBe(0);
       expect(kept.output).toContain(`Repository resource already present at ${target}`);
       expect(execFileSync("git", ["-C", target, "rev-parse", "HEAD"]).trim()).toBe(agentHead);
       expect(readFileSync(join(target, "dc-uncommitted.txt"), "utf8")).toBe("uncommitted\n");
       expect(recoveredSiblings(target)).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a pinned repository at another commit is moved aside with its work and cloned fresh", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-clone-repinned-"));
+    try {
+      const origin = makeOrigin(root);
+      const first = execFileSync("git", ["-C", origin, "rev-parse", "HEAD"]).trim();
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      const target = join(root, "ws", "repos", "acme", "pinned");
+      const pinned = (expectedCommitSha: string) =>
+        cloneScriptWithTarget(target, `file://${origin}`, {
+          kind: "repository",
+          uri: "https://github.com/opengeni/test-fixture.git",
+          ref: "main",
+          expectedCommitSha,
+        });
+      expect(runScript(pinned(first), { HOME: home }).status).toBe(0);
+      writeFileSync(join(target, "agent.txt"), "committed\n");
+      execFileSync("git", ["-C", target, "add", "agent.txt"]);
+      execFileSync("git", ["-C", target, "commit", "-m", "agent work"], { env: commitEnv });
+      const agentHead = execFileSync("git", ["-C", target, "rev-parse", "HEAD"]).trim();
+      writeFileSync(join(target, "dc-uncommitted.txt"), "uncommitted\n");
 
       // The pin moves to a commit the folder is not built on: the old folder,
       // with its unpushed commit and uncommitted file, is moved aside.
@@ -1923,6 +1957,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       execFileSync("git", ["-C", origin, "commit", "-am", "second"], { env: commitEnv });
       const second = execFileSync("git", ["-C", origin, "rev-parse", "HEAD"]).trim();
       const moved = runScript(pinned(second), { HOME: home });
+      expect(copiesHolding(target, "dc-uncommitted.txt")).toHaveLength(1);
       expect(moved.status).toBe(0);
       expect(moved.output).toContain("does not match expected commit");
       const recovered = recoveredSiblings(target);
