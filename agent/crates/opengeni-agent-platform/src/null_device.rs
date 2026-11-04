@@ -202,10 +202,7 @@ fn repair(path: &Path, _observed: NullDeviceState) -> RepairOutcome {
 #[cfg(target_os = "linux")]
 fn staging_path(path: &Path) -> Option<std::path::PathBuf> {
     let name = path.file_name()?.to_string_lossy();
-    Some(path.with_file_name(format!(
-        ".{name}.opengeni-repair-{}",
-        std::process::id()
-    )))
+    Some(path.with_file_name(format!(".{name}.opengeni-repair-{}", std::process::id())))
 }
 
 /// Sets mode 0666 on the null device just made at `path`, through a handle
