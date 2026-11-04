@@ -20,6 +20,8 @@ pub(super) enum NetworkCause {
     Dns(String),
     CertificateNotYetValid,
     CertificateExpired,
+    /// The certificate is valid but issued for another name.
+    CertificateWrongName,
     /// Any other rejected server certificate; carries rustls's reason.
     CertificateRejected(String),
     Refused,
@@ -76,6 +78,10 @@ fn classify(error: &(dyn StdError + 'static)) -> Option<NetworkCause> {
                 CertificateError::Expired | CertificateError::ExpiredContext { .. } => {
                     NetworkCause::CertificateExpired
                 }
+                CertificateError::NotValidForName
+                | CertificateError::NotValidForNameContext { .. } => {
+                    NetworkCause::CertificateWrongName
+                }
                 other => NetworkCause::CertificateRejected(other.to_string()),
             }),
             _ => None,
@@ -95,6 +101,9 @@ fn classify(error: &(dyn StdError + 'static)) -> Option<NetworkCause> {
         return Some(NetworkCause::Dns(lookup_detail(&text)));
     }
     let io_error = error.downcast_ref::<io::Error>()?;
+    if is_unreachable(io_error) {
+        return Some(NetworkCause::Unreachable);
+    }
     match io_error.kind() {
         io::ErrorKind::ConnectionRefused => Some(NetworkCause::Refused),
         io::ErrorKind::TimedOut => Some(NetworkCause::ConnectTimedOut),
@@ -102,11 +111,32 @@ fn classify(error: &(dyn StdError + 'static)) -> Option<NetworkCause> {
         | io::ErrorKind::ConnectionAborted
         | io::ErrorKind::BrokenPipe
         | io::ErrorKind::UnexpectedEof => Some(NetworkCause::Closed),
-        io::ErrorKind::NetworkUnreachable
-        | io::ErrorKind::HostUnreachable
-        | io::ErrorKind::NetworkDown
-        | io::ErrorKind::AddrNotAvailable => Some(NetworkCause::Unreachable),
         _ => None,
+    }
+}
+
+/// No route to the network or host. Matched by OS error code because the
+/// matching `io::ErrorKind`s need Rust 1.83 and the workspace supports 1.82.
+fn is_unreachable(error: &io::Error) -> bool {
+    let Some(code) = error.raw_os_error() else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use nix::errno::Errno;
+        [Errno::ENETUNREACH, Errno::EHOSTUNREACH, Errno::ENETDOWN]
+            .into_iter()
+            .any(|errno| errno as i32 == code)
+    }
+    #[cfg(windows)]
+    {
+        // WSAENETDOWN, WSAENETUNREACH, WSAEHOSTUNREACH.
+        matches!(code, 10050 | 10051 | 10065)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = code;
+        false
     }
 }
 
@@ -118,7 +148,68 @@ fn lookup_detail(text: &str) -> String {
         .to_string()
 }
 
+/// Nothing came back: the request may never have reached Opengeni.
 const PREFIX: &str = "Can't reach Opengeni:";
+/// An answer had started arriving when the connection failed.
+const LOST_PREFIX: &str = "Lost contact with Opengeni:";
+
+/// The proxy reqwest takes from the environment for a request, named by host
+/// and port only (never its credentials) with the variable that set it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct EnvironmentProxy {
+    pub(super) address: String,
+    pub(super) variable: &'static str,
+}
+
+/// Mirrors reqwest's environment proxy choice closely enough to name the
+/// proxy in a message: the scheme's variable (upper case first), then
+/// ALL_PROXY, unless NO_PROXY covers the host.
+pub(super) fn environment_proxy(
+    url: &Url,
+    variable: impl Fn(&str) -> Option<String>,
+) -> Option<EnvironmentProxy> {
+    let host = url.host_str()?;
+    let set = |name: &str| variable(name).filter(|value| !value.trim().is_empty());
+    let no_proxy = set("NO_PROXY").or_else(|| set("no_proxy")).unwrap_or_default();
+    for entry in no_proxy.split(',').map(str::trim).filter(|entry| !entry.is_empty()) {
+        if entry == "*" {
+            return None;
+        }
+        let domain = entry.trim_start_matches("*.").trim_start_matches('.');
+        if host.eq_ignore_ascii_case(domain)
+            || host
+                .to_ascii_lowercase()
+                .ends_with(&format!(".{}", domain.to_ascii_lowercase()))
+        {
+            return None;
+        }
+    }
+    let candidates: [&'static str; 4] = if url.scheme() == "https" {
+        ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]
+    } else {
+        ["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"]
+    };
+    let (name, value) = candidates
+        .into_iter()
+        .find_map(|name| set(name).map(|value| (name, value)))?;
+    let value = value.trim();
+    let parsed = if value.contains("://") {
+        Url::parse(value)
+    } else {
+        Url::parse(&format!("http://{value}"))
+    };
+    let address = parsed.ok().and_then(|proxy| {
+        let host = proxy.host_str()?.to_string();
+        Some(match proxy.port() {
+            Some(port) => format!("{host}:{port}"),
+            None => host,
+        })
+    })?;
+    Some(EnvironmentProxy {
+        address,
+        variable: name,
+    })
+}
 
 /// One short message naming why a request to `url` got no answer, with what
 /// to check; None when the reason is unknown (the caller keeps reqwest's text).
@@ -133,20 +224,37 @@ pub(super) fn describe_connection_failure(
         None if error.is_timeout() => NetworkCause::AnswerTimedOut,
         None => return None,
     };
+    let proxy = error
+        .url()
+        .and_then(|url| environment_proxy(url, |name| std::env::var(name).ok()));
     Some(describe_cause(
         &cause,
-        error.url(),
+        &Target {
+            url: error.url(),
+            proxy: proxy.as_ref(),
+            answer_started: error.is_body() || error.is_decode(),
+        },
         now,
         cfg!(target_os = "linux"),
     ))
 }
 
+/// Where the failed request was going.
+pub(super) struct Target<'a> {
+    pub(super) url: Option<&'a Url>,
+    /// A proxy from the environment: connection failures are the proxy's.
+    pub(super) proxy: Option<&'a EnvironmentProxy>,
+    /// The failure came while reading an answer that had started.
+    pub(super) answer_started: bool,
+}
+
 pub(super) fn describe_cause(
     cause: &NetworkCause,
-    url: Option<&Url>,
+    target: &Target<'_>,
     now: SystemTime,
     linux: bool,
 ) -> String {
+    let url = target.url;
     let hostname = url
         .and_then(Url::host_str)
         .unwrap_or("the Opengeni host")
@@ -155,6 +263,34 @@ pub(super) fn describe_cause(
         (Some(name), Some(port)) => format!("{name}:{port}"),
         _ => hostname.clone(),
     };
+    let prefix = if target.answer_started {
+        LOST_PREFIX
+    } else {
+        PREFIX
+    };
+    if let Some(proxy) = target.proxy {
+        let (address, variable) = (&proxy.address, proxy.variable);
+        match cause {
+            NetworkCause::Dns(detail) => {
+                let detail = if detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({detail})")
+                };
+                return format!("{prefix} DNS lookup for the proxy {address} (from {variable}) failed{detail}. Check {variable} and this machine's DNS settings.");
+            }
+            NetworkCause::Refused => {
+                return format!("{prefix} the connection to the proxy {address} (from {variable}) was refused. Check {variable} and that the proxy is running.");
+            }
+            NetworkCause::ConnectTimedOut => {
+                return format!("{prefix} the connection to the proxy {address} (from {variable}) timed out. Check {variable} and this machine's network and firewall settings.");
+            }
+            NetworkCause::Unreachable => {
+                return format!("{prefix} no network route to the proxy {address} (from {variable}). Check {variable} and this machine's network settings.");
+            }
+            _ => {}
+        }
+    }
     match cause {
         NetworkCause::Dns(detail) => {
             let detail = if detail.is_empty() {
@@ -167,31 +303,34 @@ pub(super) fn describe_cause(
             } else {
                 "Check this machine's DNS settings."
             };
-            format!("{PREFIX} DNS lookup for {hostname} failed{detail}. {hint}")
+            format!("{prefix} DNS lookup for {hostname} failed{detail}. {hint}")
         }
         NetworkCause::CertificateNotYetValid => format!(
-            "{PREFIX} TLS certificate not yet valid. This machine's clock says {}, so it is probably wrong.",
+            "{prefix} TLS certificate not yet valid. This machine's clock says {}, so it is probably wrong.",
             clock_reading(now)
         ),
         NetworkCause::CertificateExpired => format!(
-            "{PREFIX} the TLS certificate for {hostname} has expired by this machine's clock ({}). If that time is wrong, fix the clock; otherwise the server's certificate has expired.",
+            "{prefix} the TLS certificate for {hostname} has expired by this machine's clock ({}). If that time is wrong, fix the clock; otherwise the server's certificate has expired.",
             clock_reading(now)
         ),
+        NetworkCause::CertificateWrongName => format!(
+            "{prefix} the TLS certificate presented for {hostname} is for a different name. Check the Opengeni URL and any HTTPS proxy that intercepts connections."
+        ),
         NetworkCause::CertificateRejected(reason) => format!(
-            "{PREFIX} the TLS certificate of {hostname} could not be verified ({reason}). Check this machine's CA certificates and any HTTPS proxy."
+            "{prefix} the TLS certificate of {hostname} could not be verified ({reason}). Check this machine's CA certificates and any HTTPS proxy."
         ),
         NetworkCause::Refused => format!(
-            "{PREFIX} the connection to {host} was refused. Check this machine's network, firewall and proxy settings."
+            "{prefix} the connection to {host} was refused. Check this machine's network, firewall and proxy settings."
         ),
         NetworkCause::ConnectTimedOut => format!(
-            "{PREFIX} the connection to {host} timed out. Check this machine's network, firewall and proxy settings."
+            "{prefix} the connection to {host} timed out. Check this machine's network, firewall and proxy settings."
         ),
-        NetworkCause::AnswerTimedOut => format!("{PREFIX} {host} did not answer in time."),
+        NetworkCause::AnswerTimedOut => format!("{prefix} {host} did not answer in time."),
         NetworkCause::Closed => format!(
-            "{PREFIX} the connection to {host} closed unexpectedly. If it keeps happening, check this machine's network and proxy settings."
+            "{prefix} the connection to {host} closed unexpectedly. If it keeps happening, check this machine's network and proxy settings."
         ),
         NetworkCause::Unreachable => format!(
-            "{PREFIX} no network route to {host}. Check this machine's network settings."
+            "{prefix} no network route to {host}. Check this machine's network settings."
         ),
     }
 }
@@ -259,6 +398,14 @@ mod tests {
         }
     }
 
+    fn direct(url: &Url) -> Target<'_> {
+        Target {
+            url: Some(url),
+            proxy: None,
+            answer_started: false,
+        }
+    }
+
     /// tokio-rustls hands rustls's error to hyper inside an `io::Error`.
     fn tls_failure(error: CertificateError) -> Wrapped {
         wrapped(
@@ -280,7 +427,7 @@ mod tests {
         let url = Url::parse("https://app.opengeni.ai/codemode/").unwrap();
         let now = UNIX_EPOCH + Duration::from_secs(978_307_200); // 2001-01-01
         assert_eq!(
-            describe_cause(&NetworkCause::CertificateNotYetValid, Some(&url), now, true),
+            describe_cause(&NetworkCause::CertificateNotYetValid, &direct(&url), now, true),
             "Can't reach Opengeni: TLS certificate not yet valid. This machine's clock says 2001-01-01 00:00:00 UTC, so it is probably wrong."
         );
     }
@@ -295,7 +442,7 @@ mod tests {
         let url = Url::parse("https://app.opengeni.ai/codemode/").unwrap();
         let message = describe_cause(
             &NetworkCause::CertificateExpired,
-            Some(&url),
+            &direct(&url),
             UNIX_EPOCH + Duration::from_secs(4_102_444_800), // 2100-01-01
             true,
         );
@@ -311,7 +458,7 @@ mod tests {
         let cause = network_cause(&failure).expect("classified");
         assert!(matches!(cause, NetworkCause::CertificateRejected(_)));
         let url = Url::parse("https://app.opengeni.ai/codemode/").unwrap();
-        assert!(describe_cause(&cause, Some(&url), SystemTime::now(), true)
+        assert!(describe_cause(&cause, &direct(&url), SystemTime::now(), true)
             .contains("could not be verified"));
     }
 
@@ -333,10 +480,10 @@ mod tests {
         );
         let url = Url::parse("https://app.opengeni.ai/codemode/").unwrap();
         assert_eq!(
-            describe_cause(&cause, Some(&url), SystemTime::now(), true),
+            describe_cause(&cause, &direct(&url), SystemTime::now(), true),
             "Can't reach Opengeni: DNS lookup for app.opengeni.ai failed (Temporary failure in name resolution). Check /etc/resolv.conf."
         );
-        assert!(describe_cause(&cause, Some(&url), SystemTime::now(), false)
+        assert!(describe_cause(&cause, &direct(&url), SystemTime::now(), false)
             .ends_with("Check this machine's DNS settings."));
     }
 
@@ -346,11 +493,136 @@ mod tests {
             (io::ErrorKind::ConnectionRefused, NetworkCause::Refused),
             (io::ErrorKind::TimedOut, NetworkCause::ConnectTimedOut),
             (io::ErrorKind::ConnectionReset, NetworkCause::Closed),
-            (io::ErrorKind::NetworkUnreachable, NetworkCause::Unreachable),
         ] {
             let failure = wrapped("client error (Connect)", io::Error::from(kind));
             assert_eq!(network_cause(&failure), Some(expected), "{kind:?}");
         }
+        // Out of local ports is not "no route".
+        let ports = wrapped(
+            "client error (Connect)",
+            io::Error::from(io::ErrorKind::AddrNotAvailable),
+        );
+        assert_eq!(network_cause(&ports), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_route_is_recognised_by_its_os_error() {
+        for errno in [
+            nix::errno::Errno::ENETUNREACH,
+            nix::errno::Errno::EHOSTUNREACH,
+        ] {
+            let failure = wrapped(
+                "client error (Connect)",
+                io::Error::from_raw_os_error(errno as i32),
+            );
+            assert_eq!(network_cause(&failure), Some(NetworkCause::Unreachable));
+        }
+    }
+
+    #[test]
+    fn a_certificate_for_another_name_points_at_the_url_and_intercepting_proxies() {
+        let failure = tls_failure(CertificateError::NotValidForName);
+        assert_eq!(
+            network_cause(&failure),
+            Some(NetworkCause::CertificateWrongName)
+        );
+        let url = Url::parse("https://app.opengeni.ai/codemode/").unwrap();
+        assert_eq!(
+            describe_cause(&NetworkCause::CertificateWrongName, &direct(&url), SystemTime::now(), true),
+            "Can't reach Opengeni: the TLS certificate presented for app.opengeni.ai is for a different name. Check the Opengeni URL and any HTTPS proxy that intercepts connections."
+        );
+    }
+
+    fn environment(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let pairs: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+            .collect();
+        move |name| {
+            pairs
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        }
+    }
+
+    #[test]
+    fn the_environment_proxy_is_named_without_its_credentials() {
+        let url = Url::parse("https://app.opengeni.ai/codemode/").unwrap();
+        assert_eq!(environment_proxy(&url, environment(&[])), None);
+        assert_eq!(
+            environment_proxy(
+                &url,
+                environment(&[("HTTPS_PROXY", "http://user:secret@corp-proxy.example:3128")])
+            ),
+            Some(EnvironmentProxy {
+                address: "corp-proxy.example:3128".to_string(),
+                variable: "HTTPS_PROXY",
+            })
+        );
+        assert_eq!(
+            environment_proxy(&url, environment(&[("all_proxy", "corp-proxy.example:8080")]))
+                .map(|proxy| proxy.variable),
+            Some("all_proxy")
+        );
+        // Only the scheme's own variable applies.
+        assert_eq!(
+            environment_proxy(&url, environment(&[("HTTP_PROXY", "corp-proxy.example:3128")])),
+            None
+        );
+        for no_proxy in ["*", "app.opengeni.ai", ".opengeni.ai", "localhost, opengeni.ai"] {
+            assert_eq!(
+                environment_proxy(
+                    &url,
+                    environment(&[
+                        ("HTTPS_PROXY", "corp-proxy.example:3128"),
+                        ("NO_PROXY", no_proxy)
+                    ])
+                ),
+                None,
+                "{no_proxy}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_connection_failure_through_a_proxy_names_the_proxy_not_opengeni() {
+        let url = Url::parse("https://app.opengeni.ai/codemode/").unwrap();
+        let proxy = EnvironmentProxy {
+            address: "corp-proxy.example:3128".to_string(),
+            variable: "HTTPS_PROXY",
+        };
+        let target = Target {
+            url: Some(&url),
+            proxy: Some(&proxy),
+            answer_started: false,
+        };
+        assert_eq!(
+            describe_cause(&NetworkCause::Dns("Name or service not known".into()), &target, SystemTime::now(), true),
+            "Can't reach Opengeni: DNS lookup for the proxy corp-proxy.example:3128 (from HTTPS_PROXY) failed (Name or service not known). Check HTTPS_PROXY and this machine's DNS settings."
+        );
+        assert_eq!(
+            describe_cause(&NetworkCause::Refused, &target, SystemTime::now(), true),
+            "Can't reach Opengeni: the connection to the proxy corp-proxy.example:3128 (from HTTPS_PROXY) was refused. Check HTTPS_PROXY and that the proxy is running."
+        );
+        // The certificate is still Opengeni's, tunnelled through the proxy.
+        assert!(describe_cause(&NetworkCause::CertificateExpired, &target, SystemTime::now(), true)
+            .contains("the TLS certificate for app.opengeni.ai has expired"));
+    }
+
+    #[test]
+    fn a_failure_while_reading_an_answer_says_contact_was_lost() {
+        let url = Url::parse("https://app.opengeni.ai/codemode/").unwrap();
+        let target = Target {
+            url: Some(&url),
+            proxy: None,
+            answer_started: true,
+        };
+        assert_eq!(
+            describe_cause(&NetworkCause::Closed, &target, SystemTime::now(), true),
+            "Lost contact with Opengeni: the connection to app.opengeni.ai closed unexpectedly. If it keeps happening, check this machine's network and proxy settings."
+        );
     }
 
     #[test]

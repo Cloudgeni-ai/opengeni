@@ -35,6 +35,10 @@ pub const NATIVE_CLIENT_ENV: &str = "OPENGENI_CODEMODE_NATIVE_CLIENT";
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ERROR_BYTES: usize = 64 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// A connection (TCP and TLS) that is not up by then is blocked or dropped;
+/// failing here names that instead of waiting out the whole request timeout
+/// and reporting a server that did not answer.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const CALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const QUEUED_RENOTIFY_INTERVAL: Duration = Duration::from_secs(2);
@@ -692,6 +696,7 @@ impl CodemodeClient {
                 reqwest::header::HeaderValue::from_static(API_CONTRACT_REVISION),
             )]))
             .timeout(REQUEST_TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT)
             .user_agent(concat!("opengeni-agent/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|error| CodemodeError::Transport(error.to_string()))?;
