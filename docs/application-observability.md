@@ -185,11 +185,13 @@ other errors are `failed`. `opengeni_repository_skill_discovery_failures_total{b
 counts failed discovery runs by a closed error class; `handling` is `degraded` or
 `unreachable` when the turn continued without repository skills and `propagated`
 when the error reached turn recovery. A single skipped search path or skill
-folder does not fail the run; it counts once as `handling="skipped"` and is
-logged as `Repository skill skipped` with its `reason` (a symlinked folder,
-which is not shown to the model, logs `Repository skill folder skipped`). The `not_found` rule is shared with the routed metric and applies to
-every setup `purpose`; for purposes other than `repository_skills` a miss may
-still matter to its caller.
+folder does not fail the run; it counts once in
+`opengeni_repository_skill_entries_skipped_total{backend,error_class}` (entries,
+not runs) and is logged as `Repository skill skipped` with its `reason` (a
+symlinked search path whose sibling search path is indexed is not shown to the
+model and logs `Repository skill folder skipped`). The `not_found` rule is
+shared with the routed metric and applies to every setup `purpose`; for
+purposes other than `repository_skills` a miss may still matter to its caller.
 
 `opengeni_sandbox_checkpoint_staleness{kind}` (`dirty`, `stale_4h`,
 `stale_12h`) and `opengeni_sandbox_checkpoint_age_max_seconds` are a fresh,

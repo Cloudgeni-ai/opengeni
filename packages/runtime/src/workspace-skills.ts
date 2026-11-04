@@ -610,13 +610,9 @@ async function discoverWorkspaceSkillsUnmeasured(
     path: string;
     reason: RepositorySkillDiscoveryErrorClass;
   }>;
-  const skip = ({ code, path, reason }: SkippedEntry) => {
+  const skip = ({ code, path, reason }: SkippedEntry, quiet = false) => {
     onSkip(reason);
-    // A symlinked folder is excluded like a symlinked skill entrypoint: the
-    // confined file API cannot prove its target stays in the workspace. The
-    // usual target (`.claude/skills -> ../.agents/skills`) is itself a search
-    // path and indexed there, so the model is not told to "fix" the link.
-    if (reason === "symlink") {
+    if (quiet) {
       console.info("Repository skill folder skipped", { code, reason });
       return;
     }
@@ -646,7 +642,26 @@ async function discoverWorkspaceSkillsUnmeasured(
       };
     }
   });
-  for (const { skipped } of listed) if (skipped) skip(skipped);
+  // A symlinked search path is excluded like a symlinked skill entrypoint: the
+  // confined file API cannot prove its target stays in the workspace. When a
+  // sibling search path under the same root has skill folders (the usual
+  // `.claude/skills -> ../.agents/skills`), the link's skills are indexed
+  // there, so the model is not told about it. Otherwise it is listed, so
+  // skills behind a link to an unindexed folder never vanish silently.
+  listed.forEach(({ skipped }, index) => {
+    if (!skipped) return;
+    const root = searchPathRoot(searchPaths[index]!.path);
+    const coveredBySibling =
+      skipped.reason === "symlink" &&
+      listed.some(
+        (other, otherIndex) =>
+          otherIndex !== index &&
+          !other.skipped &&
+          searchPathRoot(searchPaths[otherIndex]!.path) === root &&
+          other.entries.some((entry) => entry.type === "dir"),
+      );
+    skip(skipped, coveredBySibling);
+  });
   const roots = listed.map(({ entries }) => entries);
   const candidates = roots.flatMap((entries, index) =>
     [...entries]
@@ -760,6 +775,12 @@ async function discoverWorkspaceSkillsUnmeasured(
   return [...discovered.values()]
     .map(({ name, description, path, source }) => ({ name, description, path, source }))
     .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+/** The workspace or repository folder a search path such as
+ * `repo/.claude/skills` belongs to (`repo`). */
+function searchPathRoot(path: string): string {
+  return path.split("/").filter(Boolean).slice(0, -2).join("/");
 }
 
 async function fingerprintWorkspaceDirectory(

@@ -2373,8 +2373,9 @@ the workspace answered but one search path or skill folder could not be used
 call, a machine's consent, OS, run-as or payload refusal) skips only that entry,
 listed with its `reason` under "Skipped repository skills"; other skills stay
 indexed. A symlinked search path the confined file API refuses is skipped the
-same way but not listed, like a symlinked skill entrypoint: its usual target is
-itself a search path. Discovery bounds, no filesystem API, or an unusable folder
+same way, like a symlinked skill entrypoint; it is left out of the notice only
+when a sibling search path under the same root has skill folders (the usual
+`.claude/skills -> ../.agents/skills`). Discovery bounds, no filesystem API, or an unusable folder
 while comparing duplicate skills degrade the whole index to a short notice. Cancellation, fences, route and lease
 transitions, a vanished sandbox (including Modal's bare `NotFoundError`), Channel
 A's `ChannelAUnavailableError`, Connected Machine draining, replaced

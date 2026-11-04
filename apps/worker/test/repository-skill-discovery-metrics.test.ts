@@ -84,8 +84,9 @@ describe("repository skill discovery metrics", () => {
       /opengeni_repository_skill_discovery_failures_total\{[^}]*error_class="workspace_unavailable"[^}]*handling="propagated"[^}]*\} 1/,
     );
     expect(metrics).toMatch(
-      /opengeni_repository_skill_discovery_failures_total\{[^}]*error_class="permission_denied"[^}]*handling="skipped"[^}]*\} 2/,
+      /opengeni_repository_skill_entries_skipped_total\{[^}]*error_class="permission_denied"[^}]*\} 2/,
     );
+    expect(metrics).not.toContain('handling="skipped"');
     expect(metrics).toContain("model_prepare_repository_skill_discovery");
     await observability.flush();
   });

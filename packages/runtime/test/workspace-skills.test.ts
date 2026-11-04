@@ -962,6 +962,32 @@ description: Prepare a safe release.
     ]);
   });
 
+  test("a symlinked search path without an indexed sibling is listed", async () => {
+    const session = fakeSession({
+      "repo/.claude/skills/example/SKILL.md": "---\nname: example\ndescription: Example\n---\n",
+    });
+    const listDir = session.listDir!;
+    session.listDir = async (args) => {
+      if (args.path === ".agents/skills" || args.path === "repo/.agents/skills")
+        throw new ChannelASymlinkPathError("directory path must not be a symbolic link");
+      return listDir(args);
+    };
+    const instructions = await workspaceSkills([
+      { path: ".agents/skills", source: "agents" },
+      { path: ".claude/skills", source: "claude" },
+      { path: "repo/.agents/skills", source: "agents" },
+      { path: "repo/.claude/skills", source: "claude" },
+    ])
+      .bind(session)
+      .instructions();
+    expect(instructions).toContain("repository:repo/.claude/skills/example/SKILL.md");
+    // The workspace root has no indexed sibling; the repository does.
+    expect(instructions).toContain(
+      '- {"code":"unreadable_search_path","paths":[".agents/skills"],"reason":"symlink"}',
+    );
+    expect(instructions).not.toContain('"paths":["repo/.agents/skills"]');
+  });
+
   test("an unreadable skill folder skips only that skill with a reason", async () => {
     const session = fakeSession({
       ".agents/skills/locked/SKILL.md": "---\nname: locked\n---\n",
