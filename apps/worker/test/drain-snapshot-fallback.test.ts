@@ -181,6 +181,7 @@ async function drainingNativeModalBox(
 function nativeSnapshotsFailingClient(
   tar: "succeeds" | "fails",
   rebuildable: string = REBUILDABLE,
+  tarDelayMs = 0,
 ) {
   const captures: string[][] = [];
   const sessions: Array<{ state: { manifest: { ephemeralPersistencePaths(): Set<string> } } }> = [];
@@ -203,6 +204,7 @@ function nativeSnapshotsFailingClient(
         const excluded = [...session.state.manifest.ephemeralPersistencePaths()];
         captures.push(excluded);
         if (excluded.length === 0) throw new Error("Modal snapshot_directory persistence failed.");
+        if (tarDelayMs > 0) await Bun.sleep(tarDelayMs);
         if (tar === "fails") throw new Error("reduced tar failed");
         return new TextEncoder().encode("reduced workspace tar bytes");
       },
@@ -534,4 +536,33 @@ describe("drain snapshot fallback", () => {
       });
     }, 60_000);
   }
+  test("a reduced save slower than the wait outside the save window is left to finish, not stopped", async () => {
+    if (!available) return;
+    const epoch = 12;
+    const instanceId = "sb-slow-reduced";
+    const ids = await drainingNativeModalBox(
+      epoch,
+      instanceId,
+      { count: 4, failingForMinutes: 90 },
+      priorSave("2026-11-04T00:56:00.000Z"),
+    );
+    const provider = nativeSnapshotsFailingClient("succeeds", REBUILDABLE, WAIT_MS + 1_000);
+    const { drainSandboxLease } = createSandboxLeaseActivities(services(), {
+      createClientForBackend: (() => provider.client) as never,
+      probeDrainableProvider: async () => "ready",
+    });
+    currentAttempt = 2;
+    await expect(drainSandboxLease(drainInput(ids, epoch, instanceId))).rejects.toThrow();
+    // Not stopped at the wait: the box keeps running while the save finishes.
+    expect(provider.deletes).toBe(0);
+    expect(await terminatedEvents(ids.sessionId)).toEqual([]);
+    // It then publishes late under the claim, so nothing was lost.
+    let saved: string[] | null | undefined;
+    for (let poll = 0; poll < 40 && !saved; poll++) {
+      await Bun.sleep(250);
+      const current = (await readLease(db, ids.workspaceId, ids.groupId))?.recovery.archive.current;
+      saved = current?.version === 1 ? current.omittedPaths : null;
+    }
+    expect(saved).toEqual(["apps/web/.next", "node_modules"]);
+  }, 60_000);
 });

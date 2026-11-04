@@ -1083,12 +1083,15 @@ patterns, and the tar is bounded by the drain's provider timeout. The
 descriptor records `omittedPaths`; the timeline says which folders were left
 out, and the next turns' model input carries a workspace note until a full save
 replaces it. The drain stops the box deliberately (`captureAbandoned`) when a
-reduced save fails, times out or cannot be stored inside the save window or
-after an hour of failures, or when no reduced save can be tried inside the save
-window; outside the window a box with nothing to leave out keeps retrying full
-snapshots. The cold commit that records the loss also appends its
-`sandbox.box.terminated` event, naming the last save's time (`unsavedSince`)
-for the timeline notice; the loss record keeps `unsavedSince`, so a later
+reduced save fails or cannot be stored inside the save window or after an hour
+of failures, when one is still running at the end of the wait inside the save
+window, or when no reduced save can be tried inside the save window. Outside the
+window a slow reduced save is left to finish under its own bound, and a box with
+nothing to leave out keeps retrying full snapshots. The cold commit that
+records the loss also appends its
+`sandbox.box.terminated` event (taking the group's session rows before the
+lease, in the canonical lock order), naming the last save's time
+(`unsavedSince`) for the timeline notice; the loss record keeps `unsavedSince`, so a later
 restore of exactly that save adds no second notice while a restore of any other
 save is announced. The model's restore discontinuity is unchanged.
 Only Modal qualifies; other backends keep their existing retry path.

@@ -55049,13 +55049,16 @@ async function linkedLostProviderCommandSessionIdsTx(
 async function lockLostProviderCommandSessionsTx(
   tx: Database,
   input: LostProviderBlockerScope,
+  alsoLockSessionIds: readonly string[] = [],
 ): Promise<Set<string>> {
   const sessionIds = await linkedLostProviderCommandSessionIdsTx(tx, input);
-  if (sessionIds.length) {
+  // One call, so every session row is taken in the same sorted order.
+  const toLock = [...new Set([...sessionIds, ...alsoLockSessionIds])];
+  if (toLock.length) {
     await lockSessionEventWriteRows(tx, {
       workspaceId: input.workspaceId,
       controlLock: "share",
-      sessionIds,
+      sessionIds: toLock,
     });
   }
   return new Set(sessionIds);
@@ -59117,10 +59120,43 @@ export async function confirmDrainCold(
         // lease lock, matching the canonical session -> blocker -> lease lock
         // order used by retained-process settlement. Revalidate the lease after
         // locking the entire exact provider-owned blocker set.
+        // A box the drain stopped itself tells every member session in this
+        // commit (below). Appending locks the workspace and those session rows,
+        // so take them here, before any blocker or the lease, in the canonical
+        // order; the append then finds them already held.
+        const abandonedNoticeSessionIds =
+          input.captureAbandoned === true && input.captureAbandonedNotice
+            ? await withCompleteSandboxGroupScope(tx, async () =>
+                (
+                  await tx
+                    .select({ id: schema.sessions.id })
+                    .from(schema.sessions)
+                    .where(
+                      and(
+                        eq(schema.sessions.workspaceId, input.workspaceId),
+                        eq(schema.sessions.sandboxGroupId, input.sandboxGroupId),
+                      ),
+                    )
+                    .orderBy(asc(schema.sessions.id))
+                ).map((session) => session.id),
+              )
+            : [];
         let lockedCommandSessions: ReadonlySet<string> = new Set();
         if (blockerScope) {
-          lockedCommandSessions = await lockLostProviderCommandSessionsTx(tx, blockerScope);
+          lockedCommandSessions = await lockLostProviderCommandSessionsTx(
+            tx,
+            blockerScope,
+            abandonedNoticeSessionIds,
+          );
           await lockExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
+        } else if (abandonedNoticeSessionIds.length > 0) {
+          await withCompleteSandboxGroupScope(tx, () =>
+            lockSessionEventWriteRows(tx, {
+              workspaceId: input.workspaceId,
+              controlLock: "share",
+              sessionIds: abandonedNoticeSessionIds,
+            }),
+          );
         }
         const locked = await tx.execute<LeaseRow & { reaper_hold_active: boolean }>(sql`
           select *,

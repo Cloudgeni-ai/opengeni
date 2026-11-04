@@ -691,6 +691,9 @@ export type SandboxDrainCaptureFallback = {
   reduced: true;
   abandonOnFailure: boolean;
   abandonWhenUnavailable: boolean;
+  /** The provider ends the box soon: a reduced save that is still running
+   * when the wait ends also stops it, instead of being left to finish. */
+  inSaveWindow: boolean;
 };
 
 export function sandboxDrainCaptureFallback(
@@ -719,6 +722,7 @@ export function sandboxDrainCaptureFallback(
     reduced: true,
     abandonOnFailure: inSaveWindow || failingForMs >= SANDBOX_DRAIN_ABANDON_AFTER_FAILING_MS,
     abandonWhenUnavailable: inSaveWindow,
+    inSaveWindow,
   };
 }
 
@@ -4675,7 +4679,9 @@ async function terminateDrainableBox(
       if (claimed.status === "claimed") {
         captureClaim = claimed.claim;
         captureClaimLease = claimed.lease;
-        drainFallback = sandboxDrainCaptureFallback(lease, settings, backend);
+        // The claim's own read: a re-arm or another worker's failure since the
+        // sweep's read decides this attempt.
+        drainFallback = sandboxDrainCaptureFallback(claimed.lease, settings, backend);
       } else if (claimed.status === "mutation_in_progress") {
         // An admission is normally authoritative proof that a provider
         // operation may still be running. It cannot, however, pin a draining
@@ -5582,6 +5588,8 @@ export async function terminateProviderBox(
     (sessionWorkspacePersistence === "snapshot_filesystem" ||
       sessionWorkspacePersistence === "snapshot_directory");
   let omitPaths: string[] | undefined;
+  // Set once a capture that outlived its wait has published under the claim.
+  let latePublished = false;
   const abandonCapture = async (): Promise<ProviderTerminationOutcome> => {
     // The claim still fences arrivals; this pure CAS proves it is still ours
     // and the lease was not re-armed before anything is stopped.
@@ -5601,6 +5609,14 @@ export async function terminateProviderBox(
       await terminateManagedSandboxSession(client, sessionState, session);
     } catch (error) {
       if (!isProviderSandboxNotFoundError(client.backendId, error)) throw error;
+    }
+    if (latePublished) {
+      // A reduced save that timed out published late, before the stop: the
+      // box was saved after all, so this is an ordinary saved teardown.
+      observability.info("sandbox reaper: late reduced save landed before the stop", {
+        ...logIdentity,
+      });
+      return { terminated: true, providerMissingBeforeCapture: false };
     }
     // Counted as `abandoned` once the cold commit records the stop.
     observability.warn(
@@ -5679,7 +5695,10 @@ export async function terminateProviderBox(
               checkpointBinding,
             );
             // A late capture fenced by a successor is not this box's save.
-            if (result.wrote) recordCapturedSize(archive.descriptor);
+            if (result.wrote) {
+              latePublished = true;
+              recordCapturedSize(archive.descriptor);
+            }
             if (omitPaths && result.wrote) {
               recordSandboxDrainCaptureFallback(observability, {
                 backend,
@@ -5732,12 +5751,18 @@ export async function terminateProviderBox(
       });
       return { terminated: true, providerMissingBeforeCapture: true };
     }
-    // A reduced save past its grace that fails or does not finish within the
-    // wait stops the box: its last chance is spent, and keeping it draining
-    // would only let the provider end it later with the same files unsaved.
-    // Stopping the box also ends the timed-out read; the claim CAS in
-    // abandonCapture fences any late publication of it.
-    if (omitPaths && drainFallback?.abandonOnFailure) {
+    // A reduced save past its grace that fails stops the box: its last chance
+    // is spent, and keeping it draining would only let the provider end it
+    // later with the same files unsaved. One still running when the wait ends
+    // is left to finish under its own hard bound (it publishes late, or its
+    // late failure counts toward the next attempt), except inside the save
+    // window, where the provider ends the box soon anyway; stopping the box
+    // there also ends the read.
+    if (
+      omitPaths &&
+      drainFallback?.abandonOnFailure &&
+      (!(error instanceof SandboxProviderCaptureTimeoutError) || drainFallback.inSaveWindow)
+    ) {
       warnCaptureFailure("sandbox reaper: reduced drain save failed — stopping the box", error);
       if (!(error instanceof SandboxProviderCaptureTimeoutError)) {
         recordSandboxDrainCaptureFallback(observability, { backend, outcome: "reduced_failed" });
