@@ -24,6 +24,7 @@ export const SANDBOX_OPERATION_PURPOSES = [
   "file_resources",
   "lazy_manifest",
   "repository_skills",
+  "box_repair",
 ] as const;
 
 export type SandboxOperationPurpose = (typeof SANDBOX_OPERATION_PURPOSES)[number];
