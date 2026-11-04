@@ -1,5 +1,15 @@
 # @opengeni/site-gateway
 
+## 0.1.33
+
+### Patch Changes
+
+- Updated dependencies [f1c6437]
+- Updated dependencies [8572155]
+- Updated dependencies [54bf495]
+  - @opengeni/sdk@6.9.0
+  - @opengeni/contracts@6.9.0
+
 ## 0.1.32
 
 ### Patch Changes
