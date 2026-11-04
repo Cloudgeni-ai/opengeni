@@ -5976,6 +5976,26 @@ describe("transient provider error classifier", () => {
     expect(isTransientProviderError(new Error("Connection error."))).toBe(true);
   });
 
+  test("a statusless stream error that asks for a retry recovers the same turn", () => {
+    // An OpenAI-compatible server's error event mid-stream, after reasoning deltas.
+    const malformed = new Error("model returned malformed tool_call output; please retry");
+    expect(isTransientProviderError(malformed)).toBe(true);
+    expect(agentRunFailurePayload(malformed)).toEqual({
+      error: "model returned malformed tool_call output; please retry",
+      code: "provider_unavailable",
+      providerCondition: "unavailable",
+      retryable: true,
+    });
+    // The same words with a real 4xx status remain a request fault.
+    expect(
+      isTransientProviderError(
+        Object.assign(new Error("Bad input; please retry"), { status: 400 }),
+      ),
+    ).toBe(false);
+    // Unrelated statusless text does not match.
+    expect(isTransientProviderError(new Error("retry_count must be positive"))).toBe(false);
+  });
+
   test("classifies the exact fresh no-rig pre-model connectivity failure as typed recovery", () => {
     const observed = new Error("Unable to connect. Is the computer able to access the url?");
 
