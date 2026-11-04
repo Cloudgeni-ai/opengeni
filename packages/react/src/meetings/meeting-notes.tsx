@@ -12,6 +12,7 @@ import { useOpenGeniText } from "../messages/runtime";
 import { useEffect, useId, useMemo, useRef, useState, type ComponentProps } from "react";
 import { BotIcon, CheckIcon, CopyIcon, LoaderCircleIcon, PencilIcon } from "lucide-react";
 import { toast } from "sonner";
+import { userErrorText } from "../ui/api-error";
 import type { RecordingNote } from "@opengeni/contracts";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { Markdown } from "../components/markdown";
@@ -47,7 +48,7 @@ function isNotesChanged(error: unknown): boolean {
 }
 
 function errorText(error: unknown): string | undefined {
-  return error instanceof Error ? error.message : undefined;
+  return error instanceof Error ? userErrorText(error) : undefined;
 }
 
 function MeetingNotesContent({

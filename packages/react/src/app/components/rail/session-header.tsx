@@ -34,6 +34,7 @@ import {
   BellOffIcon,
   BotIcon,
   CalendarClockIcon,
+  CopyIcon,
   GaugeIcon,
   LinkIcon,
   LockIcon,
@@ -71,6 +72,13 @@ import {
   type SessionHeaderPart,
 } from "./session-header-overflow";
 import { Button } from "../../../ui/button";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "../../../ui/context-menu";
+import { copyTitle } from "../../lib/copy-link";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -405,7 +413,11 @@ export function SessionHeader({
                 />
               </button>
             ) : null}
-            <SessionTitleEditor session={session} rename={rename} />
+            <SessionTitleEditor
+              session={session}
+              rename={rename}
+              onCopyLink={() => void chatOps.copyLink(session)}
+            />
           </div>
           {/* Below lg (or when the full badge has no room) the lifecycle is a
               dot beside the title. */}
@@ -677,6 +689,10 @@ export function SessionHeader({
               {copyLinkKeys ? (
                 <DropdownMenuShortcut>{copyLinkKeys.label}</DropdownMenuShortcut>
               ) : null}
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => void copyTitle(sessionDisplayTitle(session))}>
+              <CopyIcon />
+              Copy title
             </DropdownMenuItem>
             {canShare ? (
               <DropdownMenuItem
@@ -1065,9 +1081,14 @@ function useSessionPinToggle(
  * reload. The shared `useInlineRename` hook keeps this behaviour identical to
  * the rail row's rename.
  */
-function SessionTitleEditor(props: { session: Session; rename: InlineRename }) {
+function SessionTitleEditor(props: {
+  session: Session;
+  rename: InlineRename;
+  onCopyLink: () => void;
+}) {
   const display = sessionDisplayTitle(props.session);
   const rename = props.rename;
+  const afterMenuClose = useRef<(() => void) | null>(null);
 
   if (rename.editing) {
     return (
@@ -1101,16 +1122,51 @@ function SessionTitleEditor(props: { session: Session; rename: InlineRename }) {
 
   return (
     <div className="group/title flex min-w-0 items-center gap-0.5">
-      <button
-        type="button"
-        onClick={rename.startEditing}
-        title={`${display} · click to rename`}
-        dir="auto"
-        data-session-title-text=""
-        className="min-w-0 shrink truncate rounded-sm text-left text-[15px] font-semibold leading-6 tracking-[-0.01em] text-fg hover:text-fg focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring/40 pointer-coarse:min-h-11 pointer-coarse:px-2"
-      >
-        {display}
-      </button>
+      {/* Right-click (or long-press) the title to copy it or the chat's link. */}
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <button
+            type="button"
+            onClick={rename.startEditing}
+            title={`${display} · click to rename`}
+            dir="auto"
+            data-session-title-text=""
+            className="min-w-0 shrink truncate rounded-sm text-left text-[15px] font-semibold leading-6 tracking-[-0.01em] text-fg hover:text-fg focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring/40 pointer-coarse:min-h-11 pointer-coarse:px-2"
+          >
+            {display}
+          </button>
+        </ContextMenuTrigger>
+        <ContextMenuContent
+          className="min-w-40"
+          data-session-title-menu=""
+          onCloseAutoFocus={(event) => {
+            // Rename starts once the menu has handed focus back, so the
+            // field keeps it.
+            const action = afterMenuClose.current;
+            if (!action) return;
+            afterMenuClose.current = null;
+            event.preventDefault();
+            action();
+          }}
+        >
+          <ContextMenuItem onSelect={() => void copyTitle(display)}>
+            <CopyIcon className="size-4" />
+            Copy title
+          </ContextMenuItem>
+          <ContextMenuItem onSelect={props.onCopyLink}>
+            <LinkIcon className="size-4" />
+            Copy link
+          </ContextMenuItem>
+          <ContextMenuItem
+            onSelect={() => {
+              afterMenuClose.current = rename.startEditing;
+            }}
+          >
+            <PencilIcon className="size-4" />
+            Rename
+          </ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
       {/* The pencil earns its pixels only when relevant: hidden at rest and
           revealed on hover/focus. Touch screens rename by tapping the title
           (or "…" > Rename), so the title keeps the row's width. */}

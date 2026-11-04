@@ -117,10 +117,13 @@ jobs:
           SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
-          checks="$(gh api \
-            --header 'Accept: application/vnd.github+json' \
-            "/repos/${GITHUB_REPOSITORY}/commits/${SOURCE_SHA}/check-runs?filter=latest&per_page=100")"
+          # Ask for each required check by name: a busy merge commit can carry
+          # more than one page of check runs, so one unfiltered page can miss it.
           for name in "Typecheck and unit tests" "Deployment artifacts" "Workload image builds"; do
+            checks="$(gh api -X GET \
+              --header 'Accept: application/vnd.github+json' \
+              "/repos/${GITHUB_REPOSITORY}/commits/${SOURCE_SHA}/check-runs" \
+              -f check_name="$name" -f filter=latest -f per_page=100)"
             jq -e \
               --arg name "$name" \
               '[.check_runs[]

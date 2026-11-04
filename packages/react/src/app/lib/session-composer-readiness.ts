@@ -10,8 +10,8 @@ export type SessionSendState = {
   machineAccessDenied: boolean;
   /** Something Send needs is still loading (the chat's tools, attachments, accounts). */
   loading: boolean;
-  /** One of them failed to load; it shows its own message. */
-  loadFailed: boolean;
+  /** One of them failed to load: a failure Retry may fix, a permission denial, or a brief outage. */
+  loadFailed: false | "failed" | "denied" | "updating";
 };
 
 export type SessionSendGate = {
@@ -38,7 +38,8 @@ export function useSessionSendGate(): SessionSendGate {
         policyValid: committedPolicyValid,
         personalDecision: state.personalDecision,
         machineAccessDenied: state.machineAccessDenied,
-        personalLoading: state.loading || state.loadFailed,
+        personalLoading: state.loading,
+        loadFailed: state.loadFailed,
       }),
     [committedPolicyValid],
   );

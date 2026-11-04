@@ -12,7 +12,7 @@ import { applySessionArchiveProjection } from "../session-pagination";
 import { notifySessionListChanged } from "../session-list-invalidation";
 import { toast } from "../toast";
 import { copyLink as copyLinkWithToast } from "../copy-link";
-import { errorMessage } from "@opengeni/contracts/values";
+import { userErrorText } from "../../../ui/api-error";
 
 export type ChatOperations = {
   /** "Archive" where this person can archive the chat, otherwise null. */
@@ -67,7 +67,7 @@ export function useChatOperations(): ChatOperations {
           chat,
           archived,
           sessionDisplayTitle(chat),
-          () => void setArchivedRef.current?.({ ...chat, archived: true }, false),
+          (next) => void setArchivedRef.current?.({ ...chat, archived: !next }, next),
         );
         if (!updated) return;
         if (!context.ownsWorkspaceInvocation(chat.workspaceId, accepted)) return;
@@ -84,7 +84,7 @@ export function useChatOperations(): ChatOperations {
       } catch (error) {
         if (!context.ownsWorkspaceInvocation(chat.workspaceId, accepted)) return;
         toast.error(archived ? "Couldn't archive the chat." : "Couldn't undo the archive.", {
-          description: errorMessage(error),
+          description: userErrorText(error),
         });
       } finally {
         archiving.current.delete(chat.id);
@@ -115,7 +115,7 @@ export function useChatOperations(): ChatOperations {
         toast.success(unread ? "Marked as unread" : "Marked as read");
       } catch (error) {
         toast.error("Couldn't update the chat.", {
-          description: errorMessage(error),
+          description: userErrorText(error),
         });
       }
     },

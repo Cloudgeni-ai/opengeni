@@ -514,7 +514,7 @@ describe("immutable session turn initiators", () => {
     });
   });
 
-  test("Send and Steer capture their actor while queue Edit preserves the original actor", async () => {
+  test("Send and Steer capture their actor; another person's queue Edit becomes their own message", async () => {
     const grant = await fixture();
     const session = await createSession(client.db, sessionInput(grant));
     const sender = "user:sender";
@@ -610,12 +610,12 @@ describe("immutable session turn initiators", () => {
           reasoningEffort: "low",
           reasoningEffortFallback: "low",
           source: "user",
-          personalConnectionDelegations: [
-            { ...originalDelegations[0]!, connectionId: crypto.randomUUID() },
-          ],
+          personalConnectionDelegations: [],
         }),
       ),
     );
+    // The sender's own accounts never run another person's words: the edit
+    // is the editor's message, with the editor's accounts (here none).
     expect(
       await getSessionTurnPersonalConnectionDelegations(
         client.db,
@@ -623,14 +623,14 @@ describe("immutable session turn initiators", () => {
         session.id,
         resubmitted.turnId,
       ),
-    ).toEqual(originalDelegations);
+    ).toEqual([]);
     expect(
       (await getSessionTurn(client.db, grant.workspaceId!, resubmitted.turnId))?.initiator,
-    ).toEqual(original?.initiator);
-    // The edit names the exact withdrawn turn it copies (0716's edit source).
+    ).toEqual({ kind: "subject", subjectId: editor, label: "Editor" });
+    // A new acceptance, so it names no edit source to copy (0716).
     expect(
       (await getSessionTurn(client.db, grant.workspaceId!, resubmitted.turnId))?.lineage,
-    ).toEqual({ actor: "human", editedFromTurnId: sent.turnId });
+    ).toEqual({ actor: "human" });
     expect((await getSessionTurn(client.db, grant.workspaceId!, sent.turnId))?.lineage).toEqual({
       actor: "human",
     });
@@ -695,7 +695,6 @@ describe("immutable session turn initiators", () => {
     ).toEqual({ kind: "subject", subjectId: editor, label: "Editor" });
     expect((await getSessionTurn(client.db, grant.workspaceId!, steered.turnId))?.lineage).toEqual({
       actor: "human",
-      editedFromTurnId: steerSource.turnId,
     });
   });
 

@@ -22,6 +22,7 @@ import { ModalCommandStartOutcomeUnknownError } from "./modal-command-start-erro
 import { classifyProviderSandboxFailure } from "../provider-errors";
 import { commandControlPlane } from "./modal-command-client";
 import {
+  MODAL_ROUTER_READ_MAX_WAIT_MS,
   ModalCommandRouterWire,
   ModalCommandStartPreDispatchUnavailableError,
   ModalCommandStartRejectedError,
@@ -770,7 +771,7 @@ export class ModalCommandControl {
     const command = structuredClone(ModalRouterProviderCommand.parse(input));
     if (command.sandboxId !== this.sandboxId)
       throw new Error("Modal command does not belong to this sandbox");
-    if (!Number.isFinite(waitMs) || waitMs < 0 || waitMs > 50_000)
+    if (!Number.isFinite(waitMs) || waitMs < 0 || waitMs > MODAL_ROUTER_READ_MAX_WAIT_MS)
       throw new Error("Invalid Modal output read bounds");
     signal?.throwIfAborted();
     const stdout = command.streams.stdout;

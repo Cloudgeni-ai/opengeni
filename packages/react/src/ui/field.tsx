@@ -14,6 +14,7 @@ import { CheckIcon, CircleAlertIcon, MinusIcon } from "lucide-react";
 import { cn } from "../lib/cn";
 import { useMergedRefs } from "../lib/refs";
 import { useOpenGeniText } from "../messages/runtime";
+import { ErrorText } from "./error-text";
 
 /* ----------------------------------------------------------------------------
    Field - one labelled control in a vertical form (brief 7.15).
@@ -149,7 +150,9 @@ export function Field({
             className="mt-1.5 flex min-w-0 items-start gap-1.5 text-xs leading-4.5 text-danger"
           >
             <CircleAlertIcon aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />
-            <span className="min-w-0 break-words">{error}</span>
+            <span className="min-w-0 break-words">
+              <ErrorText>{error}</ErrorText>
+            </span>
           </p>
         ) : showHint ? (
           <p id={hintId} className="mt-1.5 min-w-0 text-xs leading-4.5 break-words text-fg-muted">

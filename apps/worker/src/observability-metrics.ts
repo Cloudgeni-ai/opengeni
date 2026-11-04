@@ -210,6 +210,27 @@ export function runtimeMetricsHooksForObservability(
         value: durationSeconds,
       });
     },
+    onModelInvalidRequest: ({ provider, path, code }) => {
+      observability.incrementCounter({
+        name: "opengeni_model_invalid_requests_total",
+        help: "Provider 400 invalid-request answers to model calls by request path (indices collapsed) and error code. Monitoring only.",
+        labels: { provider, path, code },
+      });
+    },
+    onModelToolNameRepair: ({ provider, api, field }) => {
+      observability.incrementCounter({
+        name: "opengeni_model_tool_name_repairs_total",
+        help: "Model requests in which the outbound guard aliased a tool name a provider could reject, by provider, wire API and field.",
+        labels: { provider, api, field },
+      });
+    },
+    onModelToolNameRetry: ({ provider, api, outcome }) => {
+      observability.incrementCounter({
+        name: "opengeni_model_tool_name_retries_total",
+        help: "Strict resends after a provider rejected a tool name, by provider, wire API and outcome.",
+        labels: { provider, api, outcome },
+      });
+    },
     onSandboxCreate: ({ backend, imageSource, outcome, durationSeconds }) => {
       observability.incrementCounter({
         name: "opengeni_sandbox_creates_total",

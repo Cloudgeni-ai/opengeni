@@ -1379,7 +1379,8 @@ describe("release image workflow contract", () => {
     expect(publish).toContain("expected_packages:");
     expect(publish).not.toContain("OPENGENI_RELEASE_PACKAGE_DERIVE_EXPECTED");
     expect(publish).toContain("checks: read");
-    expect(publish).toContain("filter=latest&per_page=100");
+    expect(publish).toContain('-f check_name="$name" -f filter=latest');
+    expect(publish).not.toContain("check-runs?filter=latest&per_page=100");
     expect(publish).toContain('test "$GITHUB_REF" = "refs/heads/main"');
     expect(publish).toContain('git merge-base --is-ancestor "$SOURCE_SHA" origin/production');
     expect(publish).not.toContain('test "$(git rev-parse origin/production)" = "$SOURCE_SHA"');

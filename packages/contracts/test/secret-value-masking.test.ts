@@ -9,6 +9,7 @@ import {
   isTextMediaType,
   maskSecretValues,
   maskSecretValuesInError,
+  redactInteractionSecretValues,
   revealSecretGetResult,
   secretGetRevealedValues,
   parseSecretReference,
@@ -33,6 +34,122 @@ function memoryWith(value = FAKE, label = DB_REF) {
 }
 
 describe("known-value secret masking", () => {
+  test("keeps tool identities that contain a known value and masks the rest", () => {
+    // A password that is a plain word inside a tool name, as in a chat whose
+    // replayed tool_search_output failed with "tools[1].name does not match
+    // pattern" once the name became `…__query_<reference>`.
+    // Distinctive: a weak word is never searched inside a name at all.
+    const word = "Pel1cansQ8";
+    const memory = memoryWith(word);
+    const toolName = `mcp_0123456789abcdef01234567__query_${word}`;
+    const definition = {
+      type: "function",
+      name: toolName,
+      description: `Query ${word}`,
+      parameters: { type: "object", properties: {} },
+    };
+    const history = [
+      {
+        type: "tool_search_output",
+        status: "completed",
+        tools: [
+          { type: "function", name: "opengeni__goal_set", description: "Set a goal" },
+          definition,
+          { type: "namespace", name: `ns_${word}`, description: "d", tools: [definition] },
+        ],
+        providerData: { call_id: "call_search", execution: "client" },
+      },
+      { type: "function_call", callId: "call_q", name: toolName, arguments: `{"q":"${word}"}` },
+      { type: "function_call_result", callId: "call_q", name: toolName, output: `rows ${word}` },
+      { type: "message", role: "user", content: `name ${word}` },
+    ];
+    const masked = memory.mask(history) as typeof history;
+    const [search, call, result, message] = masked as Array<Record<string, any>>;
+    expect(search!.tools.map((tool: { name?: string }) => tool.name)).toEqual([
+      "opengeni__goal_set",
+      toolName,
+      `ns_${word}`,
+    ]);
+    expect(search!.tools[1].description).toBe(`Query ${DB_REF}`);
+    expect(search!.tools[2].tools[0].name).toBe(toolName);
+    expect(call).toMatchObject({ name: toolName, arguments: `{"q":"${DB_REF}"}` });
+    expect(result).toMatchObject({ name: toolName, output: `rows ${DB_REF}` });
+    // A `name` that is not a tool identity is ordinary text.
+    expect(message!.content).toBe(`name ${DB_REF}`);
+    expect(memory.mask({ name: word })).toEqual({ name: DB_REF });
+  });
+
+  test("a tool-shaped record inside tool data, or a name no tool can have, is still masked", () => {
+    const word = "Pel1cansQ8";
+    const memory = memoryWith(word);
+    const masked = memory.mask([
+      {
+        type: "function_call_result",
+        callId: "c",
+        name: "opengeni__codemode_call",
+        // An API's own data that happens to look like a tool definition.
+        output: [
+          { type: "custom", name: word },
+          { type: "function_call", name: word },
+          { tools: [{ type: "function", name: word }] },
+        ],
+      },
+      { type: "function_call", callId: "d", name: `query ${word}`, arguments: "{}" },
+      // A definition-shaped record outside a tools list.
+      { type: "function", name: word },
+      { type: "message", role: "user", content: [{ type: "custom", name: word }] },
+    ]) as Array<Record<string, any>>;
+    expect(masked[0]!.name).toBe("opengeni__codemode_call");
+    expect(masked[0]!.output).toEqual([
+      { type: "custom", name: DB_REF },
+      { type: "function_call", name: DB_REF },
+      { tools: [{ type: "function", name: DB_REF }] },
+    ]);
+    expect(masked[1]!.name).toBe(`query ${DB_REF}`);
+    expect(masked[2]!.name).toBe(DB_REF);
+    expect(masked[3]!.content).toEqual([{ type: "custom", name: DB_REF }]);
+  });
+
+  test("tool output and interaction results are data: tool-shaped records are masked in full", () => {
+    const word = "pelicans";
+    const memory = memoryWith(word);
+    // Tool output is masked from its root, where a record can look like a call.
+    const outputs = [
+      { type: "function_call", name: word },
+      { tools: [{ type: "custom", name: word }] },
+      { rows: [{ type: "mcp_call", name: word }] },
+    ];
+    expect(memory.maskToolOutput(outputs)).toEqual([
+      { type: "function_call", name: DB_REF },
+      { tools: [{ type: "custom", name: DB_REF }] },
+      { rows: [{ type: "mcp_call", name: DB_REF }] },
+    ]);
+    expect(
+      maskSecretValues({ type: "function_call", name: word }, [{ value: word, label: DB_REF }], {
+        keepToolIdentities: false,
+      }),
+    ).toEqual({ type: "function_call", name: DB_REF });
+    expect(
+      redactInteractionSecretValues({ type: "function_call", name: word }, { field: word }),
+    ).toEqual({ type: "function_call", name: "[secret]" });
+    // Conversation history keeps the identity.
+    expect(memory.mask({ type: "function_call", name: word })).toEqual({
+      type: "function_call",
+      name: word,
+    });
+    expect(memory.maskData({ type: "function_call", name: word })).toEqual({
+      type: "function_call",
+      name: DB_REF,
+    });
+    // A memory made for data masks tool names in every call.
+    const dataMemory = new SecretValueMemory({ keepToolIdentities: false });
+    dataMemory.remember(word, DB_REF);
+    expect(dataMemory.mask({ type: "function_call", name: word })).toEqual({
+      type: "function_call",
+      name: DB_REF,
+    });
+  });
+
   test("replaces the value with its reference", () => {
     const memory = memoryWith();
     expect(memory.maskText(`echo ${FAKE}\n${FAKE}\n`)).toBe(`echo ${DB_REF}\n${DB_REF}\n`);
@@ -436,6 +553,32 @@ describe("known-value secret masking", () => {
     // An unchanged input keeps its identity, marks included.
     expect(maskSecretValues(item, [{ value: "other-secret-value-0002", label: DB_REF }])).toBe(
       item,
+    );
+  });
+});
+
+describe("weak saved values (the corrupted-repository regression)", () => {
+  // A saved username or password that is a dictionary word, assembled at runtime.
+  const WORD = ["beacon", "house"].join("");
+
+  test("a dictionary-word value no longer alters paths and code", () => {
+    const memory = memoryWith(WORD);
+    for (const text of [
+      `packages/${WORD}/src/index.ts`,
+      `import { ${WORD}Client } from "@acme/${WORD}";`,
+      `const ${WORD}_url = "https://${WORD}.example.com/${WORD}/v1";`,
+      `cd /workspace/repos/${WORD} && ls`,
+    ]) {
+      expect(memory.maskText(text)).toBe(text);
+    }
+  });
+
+  test("the same value is still masked where it is the credential", () => {
+    const memory = memoryWith(WORD);
+    expect(memory.maskText(`password: ${WORD}`)).toBe(`password: ${DB_REF}`);
+    expect(memory.maskText(`${WORD}\n`)).toBe(`${DB_REF}\n`);
+    expect(memory.maskText(JSON.stringify({ token: WORD }))).toBe(
+      JSON.stringify({ token: DB_REF }),
     );
   });
 });

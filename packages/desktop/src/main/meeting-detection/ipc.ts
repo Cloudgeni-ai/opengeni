@@ -5,7 +5,7 @@
 import type { IpcMain, IpcMainEvent, IpcMainInvokeEvent, WebContents } from "electron";
 
 import { DESKTOP_IPC } from "../../contract";
-import type { MeetingDetection } from "./index";
+import { recordingMeeting, type MeetingDetection } from "./index";
 
 /**
  * Answer the meeting detection calls with `detection`. `allow` throws for a
@@ -45,21 +45,21 @@ export function handleMeetingDetectionIpc(input: {
       return run(arg);
     });
   };
-  const on = (channel: string, run: (page: WebContents, arg: unknown) => void) => {
-    ipcMain.on(channel, (event, arg: unknown) => {
+  const on = (channel: string, run: (page: WebContents, arg: unknown, more: unknown) => void) => {
+    ipcMain.on(channel, (event, arg: unknown, more: unknown) => {
       try {
         allow(event);
       } catch {
         return;
       }
       watch(event.sender);
-      run(event.sender, arg);
+      run(event.sender, arg, more);
     });
   };
   handle(DESKTOP_IPC.meetingDetectionStatus, () => detection.status());
   handle(DESKTOP_IPC.meetingDetectionUpdate, (change) => detection.update(change));
-  on(DESKTOP_IPC.meetingDetectionRecording, (page, recording) =>
-    detection.setRecording(page, recording === true),
+  on(DESKTOP_IPC.meetingDetectionRecording, (page, recording, meeting) =>
+    detection.setRecording(page, recording === true, recordingMeeting(meeting)),
   );
   on(DESKTOP_IPC.meetingDetectionListen, (page, listening) =>
     detection.listen(page, listening === true),

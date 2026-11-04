@@ -8,7 +8,9 @@ import {
 } from "@opengeni/contracts";
 import {
   isPersonalGitHubConnection,
+  PERSONAL_GITHUB_RECONNECT_MESSAGE,
   PersonalGitHubConnectionMetadata,
+  personalGitHubConnectionNeedsReconnect,
 } from "@opengeni/contracts/personal-github";
 import { personalGitHubRepositoryResources } from "@opengeni/core";
 import {
@@ -368,11 +370,20 @@ function personalAuthorityResolver(input: {
     repository,
     forceRefresh,
   }): Promise<GitHubRestResolvedAuthority> => {
-    const current = await validatePersonalRepository(
-      input,
-      repository,
-      toolName === "repositories_list",
-    );
+    // A grant GitHub refused bumps the connection out of `active`; tell the
+    // agent the person must reconnect instead of a generic authority error.
+    const reconnectOr = (error: GitHubRestAuthorityError) =>
+      personalReconnectOr(error, () => personalConnectionNeedsReconnect(input));
+    let current: Awaited<ReturnType<typeof validatePersonalRepository>>;
+    try {
+      current = await validatePersonalRepository(
+        input,
+        repository,
+        toolName === "repositories_list",
+      );
+    } catch (error) {
+      throw error instanceof GitHubRestAuthorityError ? await reconnectOr(error) : error;
+    }
     if (toolName === "repositories_list") {
       return {
         headers: {},
@@ -406,7 +417,9 @@ function personalAuthorityResolver(input: {
       forceRefresh,
     });
     if (resolution.status !== "ok" || resolution.connectionId !== repository.connectionId) {
-      throw new GitHubRestAuthorityError("Personal GitHub credential is unavailable");
+      throw await reconnectOr(
+        new GitHubRestAuthorityError("Personal GitHub credential is unavailable"),
+      );
     }
     return {
       headers: githubAuthorizationHeaders(resolution.headers),
@@ -425,6 +438,48 @@ function personalAuthorityResolver(input: {
       },
     };
   };
+}
+
+/**
+ * A generic personal authority failure becomes "reconnect" when GitHub refused
+ * the person's stored grant; any other failure keeps its own message.
+ */
+export async function personalReconnectOr(
+  error: GitHubRestAuthorityError,
+  needsReconnect: () => Promise<boolean>,
+): Promise<GitHubRestAuthorityError> {
+  return (await needsReconnect().catch(() => false))
+    ? new GitHubRestAuthorityError(PERSONAL_GITHUB_RECONNECT_MESSAGE)
+    : error;
+}
+
+/** Whether the turn's frozen personal GitHub connection now needs reconnecting. */
+export async function personalConnectionNeedsReconnect(
+  input: {
+    db: Database;
+    accountId: string;
+    turn: Pick<SessionTurnForExecution, "personalConnectionDelegations">;
+  },
+  readConnection: typeof getConnectionMetadata = getConnectionMetadata,
+): Promise<boolean> {
+  try {
+    const delegation = exactPersonalDelegation(input.turn.personalConnectionDelegations);
+    if (!delegation.originWorkspaceId) return false;
+    const connection = await readConnection(
+      input.db,
+      delegation.originWorkspaceId,
+      delegation.connectionId,
+      delegation.ownerSubjectId,
+    );
+    return (
+      connection !== null &&
+      connection.accountId === input.accountId &&
+      connection.subjectId === delegation.ownerSubjectId &&
+      personalGitHubConnectionNeedsReconnect(connection)
+    );
+  } catch {
+    return false;
+  }
 }
 
 async function validatePersonalRepository(

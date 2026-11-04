@@ -673,6 +673,29 @@ describe("GitHub connects two ways", () => {
     }
   });
 
+  test("a selection that has not loaded shows no repo count instead of 0 repos", async () => {
+    // Bendik saw "Connected as @benyhh · 0 repos" while GitHub refused his
+    // stale grant: the repository read failed and left no selection.
+    const rendered = await renderAdapter(
+      personalContext({
+        personalGitHubStatus: {
+          enabled: true,
+          connection: personalConnection(),
+          reviewUrl: null,
+        },
+        personalGitHubSelection: null,
+      }),
+    );
+    try {
+      const personal = section(rendered.model(), "github-personal");
+      expect(personal.status).toBe("Connected as @octocat");
+      expect(personal.action?.label).toBe("Choose repos");
+      expect(personal.action?.primary).toBe(false);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   test("returning from GitHub opens the repository chooser directly", async () => {
     markPersonalGitHubRepositoryChooser(WORKSPACE_ID);
     const rendered = await renderAdapter(
