@@ -295,7 +295,8 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
       const [posted] = await appendOwn([{ type: "session.notification.posted", payload }]);
       // No person owns this session (a key or service started it): Opengeni
       // notifies nobody itself, but an integration subscribed to notifications
-      // through a webhook receives it and delivers it.
+      // through a webhook receives it and delivers it. Runs of an ownerless
+      // scheduled task are not offered this tool at all.
       const handedToIntegration =
         target === null && posted
           ? (await countWebhookDeliveriesForEvent(deps.db, {
