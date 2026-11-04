@@ -77,9 +77,13 @@ export function AgentsPage({ workspaceId }: { workspaceId: string }) {
     }
     try {
       // An Only me agent stays Only me, unless this workspace has no Only me chats.
+      // If that can't be read, the server decides and says why it refuses.
       const onlyMeUnavailable =
         parsed.request.visibility === "private" &&
-        !(await client.getSessionTenancyCreateCapabilities(workspaceId)).canCreatePrivate;
+        (await client.getSessionTenancyCreateCapabilities(workspaceId).then(
+          (capabilities) => !capabilities.canCreatePrivate,
+          () => false,
+        ));
       const request = onlyMeUnavailable
         ? { ...parsed.request, visibility: "workspace" as const }
         : parsed.request;

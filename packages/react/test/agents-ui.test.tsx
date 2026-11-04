@@ -835,8 +835,13 @@ test("Export writes an .agent.json that Import reads back with its Instructions"
   expect(parseAgentFile(JSON.stringify({ ...file, instructions: 3 })).ok).toBe(false);
 });
 
-async function importAgentFile(canCreatePrivate: boolean) {
-  const client = fakeAgentsClient([], { canCreatePrivate });
+async function importAgentFile(canCreatePrivate: boolean | "unreadable") {
+  const client = fakeAgentsClient([], { canCreatePrivate: canCreatePrivate !== false });
+  if (canCreatePrivate === "unreadable") {
+    client.getSessionTenancyCreateCapabilities = async () => {
+      throw new Error("offline");
+    };
+  }
   const container = await render(
     <AgentsTestHost context={appContext(client)}>
       <AgentsPage workspaceId={WORKSPACE_ID} />
@@ -856,6 +861,8 @@ async function importAgentFile(canCreatePrivate: boolean) {
 test("an imported Only me agent stays Only me, and is shared only where Only me chats aren't available", async () => {
   expect(await importAgentFile(true)).toBe("private");
   expect(await importAgentFile(false)).toBe("workspace");
+  // Not knowing never stops the import: the server decides.
+  expect(await importAgentFile("unreadable")).toBe("private");
 });
 
 // --- Lists: no stale rows --------------------------------------------------------
