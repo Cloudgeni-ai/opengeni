@@ -114,10 +114,11 @@ fn classify(error: &(dyn StdError + 'static)) -> Option<NetworkCause> {
 /// "Name or service not known".
 fn lookup_detail(text: &str) -> String {
     text.strip_prefix(LOOKUP_FAILURE_PREFIX)
-        .map(|rest| rest.trim_start_matches(':').trim())
-        .unwrap_or(text)
+        .map_or(text, |rest| rest.trim_start_matches(':').trim())
         .to_string()
 }
+
+const PREFIX: &str = "Can't reach Opengeni:";
 
 /// One short message naming why a request to `url` got no answer, with what
 /// to check; None when the reason is unknown (the caller keeps reqwest's text).
@@ -154,7 +155,6 @@ pub(super) fn describe_cause(
         (Some(name), Some(port)) => format!("{name}:{port}"),
         _ => hostname.clone(),
     };
-    const PREFIX: &str = "Can't reach Opengeni:";
     match cause {
         NetworkCause::Dns(detail) => {
             let detail = if detail.is_empty() {
@@ -202,9 +202,8 @@ pub(super) fn clock_reading(now: SystemTime) -> String {
         return "a time before 1970".to_string();
     };
     let seconds = since_epoch.as_secs();
-    let days = (seconds / 86_400) as i64;
     let of_day = seconds % 86_400;
-    let (year, month, day) = civil_from_days(days);
+    let (year, month, day) = civil_from_days(seconds / 86_400);
     format!(
         "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02} UTC",
         of_day / 3600,
@@ -213,17 +212,18 @@ pub(super) fn clock_reading(now: SystemTime) -> String {
     )
 }
 
-/// Days since 1970-01-01 to a proleptic Gregorian date (Howard Hinnant's algorithm).
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
+/// Days since 1970-01-01 to a proleptic Gregorian date (Howard Hinnant's
+/// algorithm; every value stays non-negative from 1970 on).
+fn civil_from_days(days: u64) -> (u64, u64, u64) {
     let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
+    let era = z / 146_097;
+    let doe = z % 146_097;
     let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
-    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let year = yoe + era * 400 + i64::from(month <= 2);
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + u64::from(month <= 2);
     (year, month, day)
 }
 
