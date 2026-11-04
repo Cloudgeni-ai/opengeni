@@ -60,6 +60,7 @@ import {
   listDueRecordingRetention,
   listRecordingTranscriptPieceResults,
   listStalledRecordingWork,
+  listUntouchedMeetingSummarySessions,
   loadOrganizationModelProviderApiKey,
   loadWorkspaceProviderApiKey,
   markRecordingDeleting,
@@ -67,6 +68,8 @@ import {
   purgeDeletingRecording,
   recordingPreparedTrackObjectKey,
   RecordingNotFoundError,
+  requestSessionArchive,
+  SessionArchiveBlockedError,
   recordingVoiceChannel,
   saveRecordingTranscriptPieceResult,
   setRecordingTrackPrepared,
@@ -1715,6 +1718,48 @@ export function createRecordingActivities(
   }
 
   /**
+   * Archive a deleted meeting's built-in summary chats that nobody wrote in,
+   * as the meeting's owner. A summary chat still waiting to run (for model
+   * capacity, say) would otherwise wake to a meeting that is gone, and a
+   * finished one would keep pointing at it. Returns each Archive, so the
+   * workflow stops the work still running in those chats now; the archiver
+   * stores them later as usual. Repeating it finds nothing new.
+   */
+  async function archiveDeletedMeetingSummaries(input: RecordingWorkInput): Promise<
+    Array<{
+      accountId: string;
+      workspaceId: string;
+      sessionId: string;
+      subjectId: string;
+      archivedAt: string;
+    }>
+  > {
+    const { db } = await services();
+    const sessionIds = await listUntouchedMeetingSummarySessions(db, {
+      workspaceId: input.workspaceId,
+      subjectId: input.ownerSubjectId,
+      recordingId: input.recordingId,
+    });
+    const archived = [];
+    for (const sessionId of sessionIds) {
+      const scope = {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId,
+        subjectId: input.ownerSubjectId,
+      };
+      try {
+        const request = await requestSessionArchive(db, scope);
+        if (request) archived.push({ ...scope, archivedAt: request.archivedAt.toISOString() });
+      } catch (error) {
+        // A chat kept live on purpose stays; the meeting is deleted anyway.
+        if (!(error instanceof SessionArchiveBlockedError)) throw error;
+      }
+    }
+    return archived;
+  }
+
+  /**
    * Remove a deleted recording's audio, then its rows. Deleting a missing
    * object succeeds, so repeating this is harmless.
    */
@@ -1836,6 +1881,7 @@ export function createRecordingActivities(
   return {
     transcribeRecordingVersion,
     failRecordingTranscript,
+    archiveDeletedMeetingSummaries,
     deleteRecordingMedia,
     expireDictation,
     recoverRecordingWorkflows,
