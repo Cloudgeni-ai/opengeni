@@ -1,218 +1,107 @@
-import { createHash, randomUUID } from "node:crypto";
-import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { Transform } from "node:stream";
 import {
+  BACKUP_TAG,
+  COMPLETE_TAG,
+  RUN_TAG_PREFIX,
   checkAge,
   expectedFiles,
-  nextIndex,
-  obsoleteManifests,
-  validateIndex,
-  validateManifest,
+  groupRuns,
+  newRunId,
+  newestComplete,
+  parseEnvironment,
+  retainedRuns,
   type BackupConfig,
-  type BackupFile,
-  type BackupIndex,
-  type Manifest,
+  type ResticSnapshot,
+  type Run,
 } from "./config";
-import { run, type Command } from "./process";
+import { CommandError, fanout, run, type Command } from "./process";
 
-const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
-const pause = () => new Promise((resolve) => setTimeout(resolve, 2000));
-async function readJson(path: string): Promise<unknown | null> {
-  try {
-    return JSON.parse(await readFile(path, "utf8")) as unknown;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw error;
-  }
-}
-async function atomicJson(path: string, value: unknown): Promise<void> {
-  const file = await open(`${path}.tmp`, "w", 0o600);
-  try {
-    await file.writeFile(JSON.stringify(value));
-    await file.sync();
-  } finally {
-    await file.close();
-  }
-  await rename(`${path}.tmp`, path);
-}
-async function remove(path: string): Promise<void> {
-  await unlink(path).catch((error) => {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  });
-}
-async function fileHash(path: string): Promise<string> {
-  const hash = createHash("sha256");
-  for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
-  return hash.digest("hex");
-}
+type Summary = { snapshot_id?: string; data_added?: number; data_added_packed?: number };
+export type RunResult = {
+  status: "COMPLETE";
+  run: string;
+  files: { name: string; snapshot: string; bytes: number; added: number; addedPacked?: number }[];
+  forgottenRuns: number;
+};
+
 function pg(binary: string, service: string, args: string[]): Command {
   return { binary, args, env: { ...process.env, PGSERVICE: service, PGCONNECT_TIMEOUT: "15" } };
 }
 
 export class BackupRunner {
+  private storageEnvironment: Record<string, string> | null = null;
   constructor(readonly config: BackupConfig) {}
-  private path(name: string): string {
-    return join(this.config.stateDirectory, name);
-  }
-  private remote(key: string): string {
-    return `${this.config.remote}/${key}`;
-  }
-  private async rc(...args: string[]): Promise<string> {
-    return run([{ binary: "rclone", args }], { collect: true });
-  }
-  private async remoteJson(key: string): Promise<unknown> {
-    return JSON.parse(await this.rc("cat", this.remote(key))) as unknown;
-  }
-  private async publish(key: string, value: unknown): Promise<void> {
-    const path = this.path("upload.json");
-    await atomicJson(path, value);
-    await this.rc("copyto", path, this.remote(key));
-    for (let attempt = 0; attempt < 15; attempt++) {
-      try {
-        if (same(await this.remoteJson(key), value)) return;
-      } catch (error) {
-        if (attempt === 14) throw error;
-      }
-      await pause();
-    }
-    throw Error(`Publication not confirmed: ${key}`);
-  }
-  async index(): Promise<BackupIndex | null> {
-    const entries = JSON.parse(await this.rc("lsjson", this.remote(""), "--files-only")) as {
-      Path: string;
-    }[];
-    return entries.some((entry) => entry.Path === "CURRENT.json")
-      ? validateIndex(await this.remoteJson("CURRENT.json"), this.config)
-      : null;
-  }
-  private async reconcile(): Promise<BackupIndex | null> {
-    const index = await this.index();
-    const checkpointRaw = await readJson(this.path("checkpoint.json"));
-    const checkpoint = checkpointRaw ? validateIndex(checkpointRaw, this.config) : null;
-    const pending = (await readJson(this.path("pending.json"))) as {
-      previous: unknown;
-      next: unknown;
-    } | null;
-    if (!index && (checkpoint || pending))
-      throw Error("Remote index missing despite local history");
-    if (pending) {
-      const next = validateIndex(pending.next, this.config);
-      const previous = pending.previous ? validateIndex(pending.previous, this.config) : null;
-      if (!same(index, next))
-        throw Error(
-          "Unresolved index publication; retain all runs and investigate before retrying",
-        );
-      // Preserve GC intent even if publication succeeded just before process death.
-      await atomicJson(this.path("cleanup.json"), obsoleteManifests(previous, next));
-      await atomicJson(this.path("checkpoint.json"), next);
-      await remove(this.path("pending.json"));
-    } else if (checkpoint && !same(checkpoint, index)) {
-      throw Error("Remote index differs from local checkpoint; refuse a stale overwrite");
-    }
-    return index;
-  }
-  async verifyFile(file: BackupFile, localPath?: string): Promise<void> {
-    const source = localPath
-      ? { binary: "cat", args: [localPath] }
-      : { binary: "rclone", args: ["cat", this.remote(file.key)] };
-    // One download: hash ciphertext while decrypting/parsing all archive contents.
-    // age/pg_restore never execute SQL during verification.
-    const hash = createHash("sha256");
-    let bytes = 0;
-    const hashPipe = new Transform({
-      transform(chunk: Buffer, _encoding, cb) {
-        bytes += chunk.length;
-        hash.update(chunk);
-        cb(null, chunk);
-      },
-    });
-    const consumers: Command[] = [
-      { binary: "age", args: ["--decrypt", "--identity", this.config.ageIdentityFile] },
-    ];
-    if (file.key.endsWith(".dump.age"))
-      consumers.push({ binary: "pg_restore", args: ["--file=/dev/null"] });
-    // Propagate failure in either half to the other, including checksum sources.
-    try {
-      await Promise.all([
-        run([source], { output: hashPipe }).catch((error) => {
-          hashPipe.destroy(error as Error);
-          throw error;
-        }),
-        run(consumers, { input: hashPipe }).catch((error) => {
-          hashPipe.destroy(error as Error);
-          throw error;
-        }),
-      ]);
-    } finally {
-      hashPipe.destroy();
-    }
-    if (bytes !== file.bytes || hash.digest("hex") !== file.sha256)
-      throw Error(`Checksum mismatch: ${file.key}`);
-  }
-  private async verifyUploaded(file: BackupFile): Promise<void> {
-    for (let attempt = 0; ; attempt++) {
-      try {
-        await this.verifyFile(file);
-        return;
-      } catch (error) {
-        if (attempt === 2) throw error;
-        await pause();
-      }
-    }
-  }
-  async inspect(verify: boolean): Promise<BackupIndex> {
-    const index = await this.reconcile();
-    if (!index) throw Error("No complete backup exists");
-    checkAge(index);
-    for (const manifest of new Map([index.nightly, index.weekly].map((m) => [m.run, m])).values()) {
-      for (const file of manifest.files) {
-        const object = JSON.parse(await this.rc("lsjson", this.remote(file.key), "--stat")) as {
-          Size: number;
-        };
-        if (object.Size !== file.bytes) throw Error(`Missing/truncated backup: ${file.key}`);
-        if (verify) await this.verifyFile(file);
-      }
-    }
-    return index;
-  }
-  private async cleanup(manifests: Manifest[], retained: BackupIndex | null): Promise<void> {
-    for (const raw of manifests) {
-      const manifest = validateManifest(raw, this.config);
-      if ([retained?.nightly.run, retained?.weekly.run].includes(manifest.run))
-        throw Error("Cleanup refers to a retained run");
-      for (const file of manifest.files) await this.rc("deletefile", this.remote(file.key));
-      await this.rc("deletefile", this.remote(`${manifest.run}/COMPLETE.json`));
-    }
-  }
-  async backup(): Promise<BackupIndex> {
-    const previous = await this.reconcile();
-    const retired = (await readJson(this.path("cleanup.json"))) as Manifest[] | null;
-    if (retired) {
-      await this.cleanup(retired, previous);
-      await remove(this.path("cleanup.json"));
-    }
-    const started = new Date();
-    const id = `runs/${started
-      .toISOString()
-      .replace(/[-:]/g, "")
-      .replace(/\.\d{3}Z$/, "Z")}-${randomUUID()}`;
-    const manifest: Manifest = {
-      run: id,
-      startedAt: started.toISOString(),
-      finishedAt: "",
-      files: [],
+
+  private async resticEnv(): Promise<NodeJS.ProcessEnv> {
+    this.storageEnvironment ??= this.config.environmentFile
+      ? parseEnvironment(await readFile(this.config.environmentFile, "utf8"))
+      : {};
+    return {
+      ...process.env,
+      ...this.storageEnvironment,
+      RESTIC_REPOSITORY: this.config.repository,
+      RESTIC_PASSWORD_FILE: this.config.passwordFile,
+      RESTIC_CACHE_DIR: join(this.config.stateDirectory, "cache"),
+      // restic reads snapshot times in local time.
+      TZ: this.config.timeZone,
     };
-    const scratch = this.path("current.dump.age");
-    const attempted: string[] = [];
-    let publishing = false;
+  }
+  private async restic(args: string[]): Promise<Command> {
+    return { binary: "restic", args, env: await this.resticEnv() };
+  }
+  private async resticOutput(args: string[]): Promise<string> {
+    return run([await this.restic(args)], { collect: true });
+  }
+
+  /** Create the repository once. Runs never create one implicitly. */
+  async init(): Promise<void> {
+    await this.resticOutput(["init"]);
+    console.log("Initialized the backup repository; store its password independently.");
+  }
+  private async open(): Promise<void> {
+    try {
+      await this.resticOutput(["cat", "config"]);
+    } catch (error) {
+      if (error instanceof CommandError && error.exitCode === 10)
+        throw Error("The backup repository does not exist; run `init` once", { cause: error });
+      if (error instanceof CommandError && error.exitCode === 12)
+        throw Error("Wrong backup repository password", { cause: error });
+      throw error;
+    }
+  }
+  async runs(): Promise<Run[]> {
+    const snapshots = JSON.parse(
+      await this.resticOutput([
+        "snapshots",
+        "--json",
+        "--host",
+        this.config.host,
+        "--tag",
+        BACKUP_TAG,
+      ]),
+    ) as ResticSnapshot[] | null;
+    return groupRuns(snapshots ?? [], this.config);
+  }
+  private async forget(snapshots: string[]): Promise<void> {
+    for (let i = 0; i < snapshots.length; i += 100)
+      await this.resticOutput(["forget", ...snapshots.slice(i, i + 100)]);
+  }
+
+  async backup(): Promise<RunResult> {
+    await this.open();
+    // Only stale locks (a killed run) are removed; one writer is enforced by flock.
+    await this.resticOutput(["unlock"]);
+    const id = newRunId();
+    const result: RunResult = { status: "COMPLETE", run: id, files: [], forgottenRuns: 0 };
     try {
       for (const name of expectedFiles(this.config)) {
         console.log(`Dumping ${name}`);
-        const db = this.config.databases.find((d) => `${d.name}.dump.age` === name);
-        const command = db
-          ? pg("pg_dump", db.service, ["--format=custom", "--compress=6", "--no-owner"])
+        const db = this.config.databases.find((d) => `${d.name}.dump` === name);
+        // Uncompressed, so unchanged data stays byte-identical between nights
+        // and restic stores it once; restic compresses and encrypts.
+        const source = db
+          ? pg("pg_dump", db.service, ["--format=custom", "--compress=0", "--no-owner"])
           : pg("pg_dumpall", this.config.rolesService!, [
               "--roles-only",
               // Unlike pg_dump, pg_dumpall otherwise chooses postgres/template1
@@ -220,61 +109,103 @@ export class BackupRunner {
               `--database=service=${this.config.rolesService!}`,
               "--no-password",
             ]);
-        await run(
-          [
-            command,
-            { binary: "age", args: ["--encrypt", "--recipient", this.config.ageRecipient] },
-          ],
-          {
-            output: createWriteStream(scratch, { mode: 0o600 }),
-          },
-        );
-        const file = {
-          key: `${id}/${name}`,
-          bytes: (await stat(scratch)).size,
-          sha256: await fileHash(scratch),
-        };
-        attempted.push(file.key);
-        await this.rc("copyto", scratch, this.remote(file.key), "--immutable");
-        await this.verifyUploaded(file);
-        console.log(`Verified ${name}: ${file.bytes} encrypted bytes`);
-        manifest.files.push(file);
-        await remove(scratch);
+        const store = await this.restic([
+          "backup",
+          "--stdin",
+          "--stdin-filename",
+          name,
+          "--host",
+          this.config.host,
+          "--tag",
+          BACKUP_TAG,
+          "--tag",
+          `${RUN_TAG_PREFIX}${id}`,
+          "--json",
+          "--quiet",
+        ]);
+        // Parse the whole archive as it streams in, so a run is complete only
+        // when the stored bytes are a readable archive.
+        const consumers = db
+          ? [store, { binary: "pg_restore", args: ["--file=/dev/null"] }]
+          : [store];
+        const [stored] = await fanout(source, consumers);
+        const summary = stored!
+          .split("\n")
+          .filter((line) => line.startsWith("{"))
+          .map((line) => JSON.parse(line) as Summary & { message_type?: string })
+          .find((message) => message.message_type === "summary");
+        if (!summary?.snapshot_id) throw Error(`No snapshot recorded for ${name}`);
+        result.files.push({
+          name,
+          snapshot: summary.snapshot_id,
+          bytes: 0,
+          added: summary.data_added ?? 0,
+          ...(summary.data_added_packed === undefined
+            ? {}
+            : { addedPacked: summary.data_added_packed }),
+        });
       }
-      manifest.finishedAt = new Date().toISOString();
-      const next = nextIndex(previous, manifest, this.config);
-      await this.publish(`${id}/COMPLETE.json`, manifest);
-      await atomicJson(this.path("pending.json"), { previous, next });
-      publishing = true;
-      await this.publish("CURRENT.json", next);
-      await atomicJson(this.path("checkpoint.json"), next);
-      const displaced = obsoleteManifests(previous, next);
-      await atomicJson(this.path("cleanup.json"), displaced);
-      await remove(this.path("pending.json"));
-      await this.cleanup(displaced, next);
-      await remove(this.path("cleanup.json"));
-      console.log(
-        JSON.stringify({
-          status: "COMPLETE",
-          run: id,
-          bytes: manifest.files.reduce((n, f) => n + f.bytes, 0),
-        }),
-      );
-      return next;
+      await this.resticOutput([
+        "tag",
+        "--add",
+        COMPLETE_TAG,
+        ...result.files.map((file) => file.snapshot),
+      ]);
     } catch (error) {
-      if (!publishing) {
-        for (const key of [...attempted, `${id}/COMPLETE.json`]) {
-          await this.rc("deletefile", this.remote(key)).catch(() =>
-            console.error(`Unreferenced upload needs cleanup: ${key}`),
-          );
-        }
-      }
+      // A partial run is never a recovery point; drop what it stored.
+      const partial = (await this.runs().catch(() => [])).find((entry) => entry.id === id);
+      if (partial)
+        await this.forget(partial.files.map((file) => file.snapshot)).catch(() =>
+          console.error(`Partial run ${id} needs cleanup`),
+        );
       throw error;
-    } finally {
-      await remove(scratch);
     }
+    const runs = await this.runs();
+    const current = runs.find((entry) => entry.id === id);
+    if (!current?.complete) throw Error("The new run is not complete in the repository");
+    // Tagging rewrites snapshot records, so take their current IDs.
+    for (const file of result.files) {
+      const stored = current.files.find((f) => f.name === file.name)!;
+      file.snapshot = stored.snapshot;
+      file.bytes = stored.bytes;
+    }
+    // Retention per run; failed runs from earlier attempts are dropped too.
+    const keep = retainedRuns(runs, this.config);
+    const obsolete = runs.filter((entry) => !keep.has(entry.id));
+    if (obsolete.length > 0) {
+      await this.forget(obsolete.flatMap((entry) => entry.files.map((file) => file.snapshot)));
+      // Repacking rewrites live data; tolerate some unused space instead.
+      await this.resticOutput(["prune", "--max-unused", "20%"]);
+    }
+    result.forgottenRuns = obsolete.length;
+    console.log(JSON.stringify(result));
+    return result;
   }
-  async restore(slot: "nightly" | "weekly", name: string, targetService: string): Promise<void> {
+
+  /** Freshness of the newest complete run plus a structural repository check. */
+  async check(): Promise<Run> {
+    await this.open();
+    const latest = checkAge(newestComplete(await this.runs()));
+    await this.resticOutput(["check"]);
+    return latest;
+  }
+
+  /** Also read the newest run back in full and parse every archive. */
+  async verify(): Promise<Run> {
+    const latest = await this.check();
+    for (const file of latest.files) {
+      const dump = await this.restic(["dump", file.snapshot, `/${file.name}`]);
+      await run(
+        file.name.endsWith(".dump")
+          ? [dump, { binary: "pg_restore", args: ["--file=/dev/null"] }]
+          : [dump],
+      );
+      console.log(`Verified ${file.name}`);
+    }
+    return latest;
+  }
+
+  async restore(runId: string, name: string, targetService: string): Promise<void> {
     if (!/^[a-zA-Z][a-zA-Z0-9_-]{0,62}$/.test(targetService)) throw Error("Invalid target service");
     if (
       this.config.databases.some((db) => db.service === targetService) ||
@@ -282,48 +213,44 @@ export class BackupRunner {
     ) {
       throw Error("Restore target must not be a configured source service");
     }
-    const index = await this.index();
-    if (!index) throw Error("No complete backup exists");
-    const manifest = index[slot];
-    const file = manifest.files.find((f) => f.key === `${manifest.run}/${name}.dump.age`);
+    await this.open();
+    const runs = await this.runs();
+    const selected =
+      runId === "latest" ? newestComplete(runs) : runs.find((r) => r.id === runId && r.complete);
+    if (!selected) throw Error("No such complete recovery point");
+    const file = selected.files.find((f) => f.name === `${name}.dump`);
     if (!file) throw Error("Database not present in selected recovery point");
-    const scratch = this.path("restore.dump.age");
-    try {
-      await this.rc("copyto", this.remote(file.key), scratch);
-      await this.verifyFile(file, scratch);
-      const empty = await run(
-        [
-          pg("psql", targetService, [
-            "-X",
-            "-A",
-            "-t",
-            "-v",
-            "ON_ERROR_STOP=1",
-            "-c",
-            "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema';",
-          ]),
-        ],
-        { collect: true },
-      );
-      if (empty.trim() !== "0") throw Error("Restore requires an empty isolated target database");
-      await run([
-        { binary: "age", args: ["--decrypt", "--identity", this.config.ageIdentityFile, scratch] },
-        pg("pg_restore", targetService, [
-          "--exit-on-error",
-          "--single-transaction",
-          `--dbname=service=${targetService}`,
+    const empty = await run(
+      [
+        pg("psql", targetService, [
+          "-X",
+          "-A",
+          "-t",
+          "-v",
+          "ON_ERROR_STOP=1",
+          "-c",
+          "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema';",
         ]),
-      ]);
-      console.log(
-        `Restored ${name} from ${slot}; validate the application before enabling writers`,
-      );
-    } finally {
-      await remove(scratch);
-    }
+      ],
+      { collect: true },
+    );
+    if (empty.trim() !== "0") throw Error("Restore requires an empty isolated target database");
+    // restic verifies every blob it reads; one transaction rolls back on any error.
+    await run([
+      await this.restic(["dump", file.snapshot, `/${file.name}`]),
+      pg("pg_restore", targetService, [
+        "--exit-on-error",
+        "--single-transaction",
+        `--dbname=service=${targetService}`,
+      ]),
+    ]);
+    console.log(
+      `Restored ${name} from run ${selected.id}; validate the application before enabling writers`,
+    );
   }
 }
 
 export async function prepareState(config: BackupConfig): Promise<void> {
   process.umask(0o077);
-  await mkdir(config.stateDirectory, { recursive: true, mode: 0o700 });
+  await mkdir(join(config.stateDirectory, "cache"), { recursive: true, mode: 0o700 });
 }

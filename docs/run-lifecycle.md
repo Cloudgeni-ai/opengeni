@@ -193,6 +193,83 @@ their requests as writers because the replacement attempt resumes the same box;
 the holder clause is defence in depth. The physical quiescence receipt itself
 keeps the strict predicate.
 
+**Platform setup still running at finalization is settled by the writer
+drain.** Lazy and eager owned-box setup (`lazyOwnedSandboxSetup`,
+`eagerOwnedSandboxSetup`) make every sandbox write as a lifecycle command
+through the attempt's tool-cancellation fence. Finalization joins in-flight
+provisioning only briefly, so a setup waiting on an agent that stopped
+answering (for example during a worker-shutdown interruption) can still be
+pending when the proof-bearing release runs. That release used to refuse it,
+drop the holder without proof and leave its admission open for good: the
+closed attempt then kept `writer_pending` true, so neither its recovery nor
+any later turn of the session was ever claimed. A pending mutation registered
+with the exact fence that the attempt's writer drain cancelled and quiesced is
+now covered by that drain: the drain stopped or durably handed off each of
+its commands, and the cancelled fence refuses every later one, so whatever
+the setup still waits on cannot write to the box. The release then settles
+the admission `rejected` as for every other drained writer, on every backend.
+Any other in-flight mutation, a setup whose outcome is unknown, and a release
+without that drain keep the admission fenced.
+
+**Setup a worker left behind after its shutdown closure is settled once that
+worker has provably exited.** A turn worker that is shutting down cancels its
+turn with WORKER_SHUTDOWN, closes the attempt `interrupted_recoverable`
+through its own `worker_shutdown` recovery request, and then drains its
+writers. If the process dies before that drain (for example a crash in its
+shutdown path), the attempt's setup admission stays open with no provider
+outcome. The reaper removes a closed attempt's holder and no retained process
+adopted it, but the crashed-worker rule above counts only
+`lease_lost_recoverable` and `failed` owners, and even those are rejected only
+in the cold commit after the box stops. A compute box is never drained for
+being idle, so on a warm box nothing ever settled the admission:
+`writer_pending` stayed true, `reconcileSessionAttemptQuiescence` returned
+`pending` on every wake, and the session never claimed another turn, Steer or
+message.
+
+Neither a settled Temporal activity nor a missing holder proves the worker
+exited. The holder of a closed attempt is removed at once, and Temporal reports
+a cancelled activity settled while its code may still be running, which is the
+live-worker case the drain above protects. Time does: the closure follows the
+worker's shutdown signal, and a standalone worker process exits within its
+process-exit deadline of that signal (`processExitDeadlineMs`, the force time
+plus a margin, about two minutes by default) whatever its drain does. So
+`reconcileSessionAttemptQuiescence`, before it evaluates the attempt, settles
+the attempt's owned-box setup admission (`lazyOwnedSandboxSetup` or
+`eagerOwnedSandboxSetup`) `rejected` only when all of these hold:
+
+- the caller proved through Temporal that the attempt's exact activity is
+  settled;
+- the attempt closed `interrupted_recoverable` through its own
+  `worker_shutdown` recovery request, with no Pause/Steer interruption row, at
+  least the turn worker's process-exit deadline ago (the control worker passes
+  `workerProcessExitDeadlineMs` from the turn shutdown timing; without it
+  nothing is settled);
+- the admission is unsettled with no provider outcome, its holder is gone, no
+  retained process adopted it, and its turn has no `sandboxSetupOutcomeUnknown`
+  marker (that turn deliberately waits for the box to be gone).
+
+Setup writes only through its attempt's command fence, which ended with the
+process, and the replacement attempt runs the same setup again on the box
+before any model work. The attempt then quiesces through the ordinary receipt
+transaction in the same call. A wake reaches it: queued input wakes the
+session, and the quiescence-receipt wake repair wakes a recovering session
+whose attempt closed more than two minutes ago and that had no wake for ten
+minutes.
+
+Everything else keeps today's gate: Pause and Steer closures and cancellation,
+whose replacement attempt resumes the same box; a worker-shutdown closure still
+inside the deadline; other recovery reasons (deadline rotation, route
+transition, failover) and `failed`, which a live worker can record; and every
+non-setup request, such as a model's command, which may still be running and
+whose effects the model must observe. An embedded host that runs the worker
+without the standalone process-exit deadline relies on the same bound: its
+shutting-down worker must stop running turn code within that deadline.
+
+Drains, command containment and the deadline backstop keep
+`crashedWorkerOrphanAdmissionSql` unchanged. They cannot see Temporal, and they
+consider only unsettled admissions, so once the reconciliation settled the
+setup it no longer pins the box for any of them.
+
 **Requests left on a retired box are settled once the box is proven gone.**
 A stopped box's cold commit settles every open request, PTY and process it
 leaves on its exact provider tuple, not only crashed-worker orphans (a
@@ -390,12 +467,17 @@ scheduled only after commit and are not response-holding; durable event replay
 and the wake outbox recover their failures.
 
 One narrow Send exception prevents a conversational answer from getting stuck
-behind the question it is answering. When the active, unpaused branch is in
-`requires_action`, a normal human Send is promoted inside that same transaction
-to Steer-equivalent replacement: pending human-input or approval state is
-cancelled, the new prompt is inserted at the head, and its routing is
-`accepted_for_steering`. Running, recovering, and capacity-waiting turns retain
-ordinary Send queue semantics. An explicitly paused branch also remains inert;
+behind a wait that has no live attempt. When the active, unpaused branch is in
+`requires_action` or `waiting_capacity` (a turn parked on a used-up
+subscription or an account to reconnect) and no admission block holds it, a
+normal human or operator Send is promoted inside that same transaction to
+Steer-equivalent replacement: pending human-input or approval state, or the
+capacity waiter with its parked turn, is cancelled, the new prompt is inserted
+at the head, and its routing is `accepted_for_steering`. This applies to any
+caller holding `session.append`, so a follow-up sent during even a short
+capacity wait replaces the parked turn instead of waiting behind it. Running
+and recovering turns, and agent or machine input, retain ordinary Send queue
+semantics. An explicitly paused branch also remains inert;
 only Resume or an explicit Steer activates it. Resubmitting a checked-out queue
 Edit also keeps ordinary queue placement: it is a revision of already accepted
 work, not a new conversational answer to the active wait.
@@ -948,12 +1030,12 @@ memory roles. The bounded, update-immutable
 selector, not a standalone grant or a way for a service to impersonate that
 human. Named human-bound capabilities may consume it only with their own exact
 fences. The generic workspace-artifact mutation family (create, publish,
-rollback, archive, and restore) is one narrow
-attempt-scoped use: a service-initiated turn may proceed only when the field
-retains a human, the request carries worker-signed exact attempt claims, and
-PostgreSQL revalidates their session/turn/attempt/execution generation, current
-live turn and attempt, selected artifact mutation tool, `artifacts:publish`, and
-absence of a pending interruption; pure service work fails closed. Direct human
+rollback, archive, and restore) does not consume it: the request carries
+worker-signed exact attempt claims, and PostgreSQL revalidates their
+session/turn/attempt/execution generation, current live turn and attempt,
+selected artifact mutation tool, `artifacts:publish`, and absence of a pending
+interruption. Pure service work (an owner-less scheduled run) passes the same
+fences and gets workspace-shared artifacts with no Only me owner. Direct human
 artifact API requests instead authorize from their ordinary authenticated access
 grant. Within governance, service-initiated goal continuations and compactions
 use the frozen causal human as the personal-preference subject while retaining
@@ -1054,6 +1136,18 @@ attempt-loss fences still win stale settlement; retained physical writers and
 capture/quiescence proofs keep their independent lifecycle.
 The existing blocked-admission wire kind also parks older workflow workers
 during a rolling deployment; no synthetic physical admission is created.
+
+Owned-box platform setup that fails only because the sandbox's machine agent
+did not answer (offline, reconnecting, draining, timed out or replaced, as a
+typed `SelfhostedControlError`) also recovers the same turn, as
+`sandbox_command_start_unavailable` with the connectivity backoff and the
+five-recovery budget; exhaustion fails the turn as before, without the Modal
+parking above. Setup runs before any model-requested command reaches
+the box, and its credential, client, repository and file hooks are
+idempotent. The one non-idempotent step, a rig setup script that started and
+did not finish, keeps its failure terminal, and an uncertain mutation outcome
+anywhere in the failure still vetoes recovery. The same liveness error from a
+model's own command is never classified this way.
 
 An observation deadline, NOT_FOUND or provider/lease loss is not completion
 proof. Once the exact closed, quiesced attempt's home setup invocation has a
@@ -1493,24 +1587,19 @@ never replays historical work or changes the accepted account selection of a
 capacity-waiting turn. A capacity waiter pinned to an allocator-disabled account
 requires an authorized account change; time or a deploy cannot override it.
 
-Personal sidebar Archive composes native Pause and the member's archive row in
-one transaction, taking the personal-state fence before the control/workspace/
-session prefix. It pauses idle chats too; active work anywhere in the tree
-requires explicit confirmation under the control lock. `sessions:control` governs
-Pause regardless of the chat creator; `hide_for_me` explicitly changes only the
-caller's sidebar visibility. Shared Pause affects everyone. Restore changes only
-personal visibility and never resumes. A stable `clientEventId` replays an archive
-intent without undoing a later explicit Resume; use a new ID for a new intent.
-Native Pause interrupts descendant work and requests background-command
-cancellation through the existing durable settlement protocol. Completion of the
-HTTP request does not mean every external command has already stopped.
-
-Archive does not rewrite schedule ownership or enabled flags. Existing-session
-and reusable-session schedules cannot admit work into an effectively paused chat
-or descendant. Their definitions remain visible and enabled for their owners;
-only an explicit Resume can make the chat executable again. Independent
-new-chat-per-run schedules are not schedules *in* the archived chat and remain
-unaffected. Personal hiding alone makes no execution guarantee.
+The chat Archive action needs `sessions:control`, regardless of the chat
+creator, and applies to everyone. It refuses while something keeps the chat live
+on purpose (keep-live, a repeating automation in it, a site sign-in). Otherwise
+it marks the tree archived at once: new messages, steers and agent sends are
+refused, and machine inputs are settled like input to a cancelled chat. Running
+work is left alone for the ten-second Undo window, so Undo returns the chat
+exactly as it was. When the window ends, a delayed workflow retires the tree's
+one-time automations, pauses active goals, and cancels running work as the
+person who archived it (native cancel, so background commands are asked to stop
+through the existing durable settlement protocol). The idle-session archive
+then stores the chat as soon as nothing runs. Repeating an Archive changes
+nothing. See [session storage
+lifecycle](session-storage-lifecycle.md#archiving-a-chat).
 
 Scheduled admission refuses an effectively paused session under every overlap
 policy (`refusePaused`), not only skip: an occurrence queued behind a Pause
@@ -1763,6 +1852,31 @@ misconfigured local endpoint that refuses connections also waits up to six
 hours instead of failing within two minutes. Workers older than this policy
 treat the reason as an ordinary recovery and exhaust at five.
 
+**A full sandbox fleet is not a model outage.** The compute control service's
+typed `ComputeControlError` (for example `503 no_capacity`, "no host can take
+it now", while creating or waking a sandbox) and E2B's typed
+`ServiceBusyError` ("no capacity to place a sandbox right now") are classified
+before any model provider rule, at any wrapper depth: `cause` chains, the
+agents SDK's `ToolCallError.error` when a lazily provisioned sandbox fails
+inside a tool call, and `AggregateError` members. Capacity records
+`sandbox_capacity_unavailable`; other retryable control service kinds record
+`sandbox_service_unavailable`; non-retryable kinds (unauthorized, invalid,
+not found, request mismatch) record `sandbox_service_refused`. Retry authority
+is the error's own `retryable` flag (its kind), and an uncertain mutation
+outcome anywhere in the same graph (the veto set used by every other same-turn
+recovery) keeps the turn terminal. Capacity retries wait the 60 s backpressure
+delay plus positive jitter; service failures use the connectivity backoff.
+Both use the ordinary five-retry budget, carry no model route or provider
+condition, and their live and exhausted copy name the sandbox, never the model
+or provider. Any other sandbox provider SDK failure wrapped as
+`SandboxProviderError` that the provider rules would label
+`provider_unavailable`, `provider_rate_limited` or `provider_quota_exhausted`
+is relabelled `sandbox_service_unavailable` with the same retry authority.
+Clients show only the authored copy for these codes; the service's own text
+stays in `detail` for diagnostics. Before, the 503 read as a model provider
+5xx (`provider_unavailable`, "<model> is temporarily unavailable at the
+provider"), and the tool-wrapped form failed the turn with no code.
+
 The DB-only checkpoint-outage wire preserves the exact next overload count and
 bounded delay (including Retry-After); it cannot promote another cause to the
 larger budget. Legacy wire results without a delay preserve their prior workflow
@@ -1869,7 +1983,14 @@ another user's account. For SuperGrok, account reconnect,
 allocator/rotation changes, and exact lease release durably advance the same
 waiter plus workflow-wake outbox.
 
-Ordinary prompts queued during the wait remain behind the current turn. Pause
+A human or operator's ordinary Send during the wait takes it over with Steer
+semantics, exactly like a Send during `requires_action`
+(`sendTakesOverActiveWait` in `packages/db/src/session-queue-commands.ts`):
+the parked turn is superseded with its waiter and the new prompt runs next on
+its own accepted model, so a person who switched model or provider after a
+usage limit is never held until the reset. A queue-edit resubmission, agent
+or machine input, and a Send to a paused or admission-blocked branch keep ordinary queue semantics
+and remain behind the current turn. Pause
 leaves the waiter intact and lets the workflow close; Resume's revisioned
 `signalWithStart` wake reconstructs it. Session and workspace Resume, and a
 Steer that automatically resumes a paused branch, register that wake for
@@ -1974,7 +2095,14 @@ context overflow instead of compacting from a whole-request approximation.
 Each authoritative terminal response replaces the durable count with its usable
 input count or null; an omitted count never leaves an older response active.
 Local media-aware estimates remain confined to compaction-request fitting and
-history-only replacement reporting. See
+history-only replacement reporting. When a person's own turn in a root session
+with no active goal or held `wait_for_input` completes with that durable count
+already at the limit, the worker requests the checkpoint immediately after
+settlement, labeled `proactive`; the same workflow claims it as the existing
+standalone `source="compaction"` maintenance execution instead of the next
+message waiting for it (`OPENGENI_IDLE_CONTEXT_COMPACTION_ENABLED`, default on).
+The session counts as running while it compacts, and a capacity deferral drops
+a `proactive` request rather than keeping it. See
 [`context-compaction.md`](context-compaction.md).
 
 Outside the explicit durable compaction transition, model-visible history is
@@ -2712,9 +2840,38 @@ REPL does not hold the turn for minutes, the call still returns once output it
 produced has been quiet for 5 seconds after the ordinary 30-second window, or
 after 2 seconds when that output ends in an input prompt
 (`looksLikeInputPrompt`). A call that produced no output waits for exit or its
-requested window. `OPENGENI_EXPERIMENT_CUT_POLLING=false` restores the
-30-second cap. Connected Machine (op-stream) commands keep their own 30-second
-background yield and are unaffected. Live output still streams to the command card while the call
+requested window. While cut polling and the lean schema
+(settings.experimentOutputCost) are both on, an `exec_command` without a TTY
+that the model did not mark `background: true` waits at least 60 seconds
+(`COMMAND_FINISH_FLOOR_MS`) however short a wait it asked for, still returning
+the moment the command exits; when the requested wait is that short, its
+quiet-output return applies only after those 60 seconds, while the input-prompt
+return still applies at once. A requested wait above the ordinary 30-second window
+keeps the ordinary quiet-output return. Models often ask for a yield of
+a second or less and then poll the handle with `command_read`, although most
+such commands finish within a minute. Servers, watchers and deliberate parallel
+runs pass `background: true` (or use a TTY) to keep the requested short wait;
+the turn-cancellation layer removes the flag before the SDK and providers see
+the arguments. The floor applies only where the schema offers `background`
+(`finishFloor`), so `OPENGENI_EXPERIMENT_OUTPUT_COST=false` or
+`OPENGENI_EXPERIMENT_CUT_POLLING=false` keeps the requested wait, and the
+latter also restores the 30-second cap. Connected Machine (op-stream) commands
+are sent the effective wait as their requested yield (the floor, or the
+30-second cap when cut polling is off) and cap it at 60 seconds
+(`SELFHOSTED_BACKGROUND_MAX_YIELD_MS`, equal to the floor), so a command that
+ends within a minute returns in the same call there too. The machine waits that
+window in one block; when a Steer is waiting, the turn ends the block early
+through the operation's `yieldExecCommand` control (an abort signal on the
+op-stream yield), so the command returns its background handle promptly and
+keeps running, exactly as when the window ends. The early yield waits out
+`OP_STREAM_EARLY_YIELD_GRACE_MS` (1 second) from when the operation is running,
+so a quick command started while a Steer waits still returns its result
+inline. Lifecycle commands and commands without background adoption keep their
+wait; Pause and turn cancellation still cancel the operation at once. Connected
+Machine commands receive an empty, closed stdin, so an input prompt reads
+end-of-file instead of waiting out the window. OpenSandbox remote
+operations have no early yield yet.
+Live output still streams to the command card while the call
 waits, and Pause/Steer cancellation is still checked between slices. The
 model-facing `exec_command` schema is non-strict and requires only `cmd` and
 `max_output_tokens` (settings.experimentOutputCost, on by default;
@@ -3674,7 +3831,15 @@ The exact terminal transition is also the fallback agent-input boundary: changin
 command to `exited|lost` and appending `session.command.finished` commit
 together. For a nonterminal session, one dedupe-keyed
 `background_command_result` and `system.update.pending` join that transaction
-unless command completion was already observed. A command completion registers
+unless command completion was already observed. The result carries the start
+and end of the retained output as text (`output`: at most 8 KiB of output read
+from at most 16 rows, with the command_read marker naming any omitted middle
+and its cursor; the omitted-row count stops at 1,000 rows), so the turn it
+wakes or reaches needs no extra read; a failed or oversized read leaves
+`output` absent and never blocks the settlement. A `lost` result (sandbox gone
+or contained, often settled in bulk) carries no `output`; its output stays
+readable. A
+command completion registers
 a workflow wake only for a current explicit session input wait. Otherwise the
 result stays available without starting a model turn, including failures and
 results queued before the preceding turn finished. Eligible new input can carry
@@ -3691,6 +3856,30 @@ may still arrive once; delivered history and earlier running tool receipts remai
 unchanged. Observation happens while serving the read, without a separate
 worker-history delivery handshake; a crash between observation and receipt
 preservation is an accepted tradeoff.
+A running turn also delivers results itself (`settings.experimentCutPolling`,
+on by default). After each function tool or hosted `apply_patch` edit the
+worker takes the session's still-pending command results, oldest first, each
+that fits the room the tool's own output leaves in the model's tool-output
+budget (at most 16 KiB; nothing below 1 KiB, so a large tool output never has
+its end pushed into the truncated middle), observing each command and superseding its pending result in one
+transaction exactly as a terminal read does, and appends them (summary,
+command ID, output) to that plain-text tool result, which the model reads with
+its next call. The appended text is masked for known secret values first
+(hosted `apply_patch` results bypass the function-tool masking). A cheap
+unlocked probe skips the session lock when nothing is
+pending. JSON, image and structured results are left unchanged, nothing is
+taken once the turn is cancelled, and nothing is taken in a model step after a
+`wait_for_input` started (that wait could otherwise end the turn with a result
+the model has not read and that no longer wakes it). A `wait_for_input` in a
+step whose other results already carried command results is refused with a
+short explanation (its reply was not shown, so the model sends it again), and
+the turn continues. The appended text is part of the
+stored tool result, so history and the prompt-cache prefix never change; the
+timeline shows the tool's own output. The prompt's do-not-poll sentence
+renders only when this delivery is on. Results not taken during the turn stay
+pending and arrive as ordinary input, as above. A crash between taking and
+storing the tool result loses only that copy, as with a terminal read; the
+output stays readable.
 Subsequent retained reads reuse the persisted completion-observation receipt
 without reacquiring session/event write locks. They still perform the same scoped
 command and output reads; the first observation retains settlement/claim locking.
@@ -3705,9 +3894,29 @@ to active with its provider proof intact; the reaper defers that exact proof and
 never repeats provider execution.
 `command_read` returns command-specific bounded retained output and current
 status with a continuation cursor; reads work while running and after settlement,
-subject to explicit retention limits. `command_wait` uses the same read path,
-with output/terminal events as live hints rather than command-state authority.
-Waits also recheck durable state once a second if a hint is missed. Sending
+subject to explicit retention limits. While the command runs, `command_read`
+waits for it to finish (default 30 seconds; `waitSeconds: 0` reads at once) and
+`command_wait` uses the same read path with a 45-second default. `command_wait`
+also accepts `commandIds` (up to eight) with `waitFor: "all"` (default) or
+`"any"`, and an optional cursor per command; the output budget is split across
+them. A wait ends when the commands settle, at its deadline, on a pending Steer
+for the caller's turn, or on abort, never on new output alone; finish events are
+live hints rather than command-state authority, and waits recheck durable
+command state (reauthorizing) once a second if a hint is missed. The output is
+read once at the end. A read without a cursor that exceeds the byte budget
+returns its start (half the budget) as `chunks`, its end as `tail`, and the
+approximate size and cursor of the omitted middle as `omitted`; head and tail
+together stay within one 64-row page, so very many small frames show at most
+64 of them. The size counts the exact parts of the boundary rows plus the
+other rows in between at the average size of the rows the read fetched, from
+the event index alone. `nextCursor` then points at that middle, and a read with
+an explicit cursor pages on from it without repeating the tail, so callers that
+page still receive every byte; `endCursor` follows the newest output for later
+reads of new output only. A malformed cursor fails before any wait. The model
+receives these reads as plain text (state, exit code, output with an
+omitted-middle marker, and the cursor for newer output, with a hint to pass
+`waitSeconds: 0` when paging a running command); Codemode and other
+programmatic callers keep the structured receipt. Sending
 stdin is a separate capability, explicitly unsupported when the provider has no
 interactive transport. A longer wait uses session-level `wait_for_input`,
 whose timeout never cancels the command.
@@ -4148,8 +4357,10 @@ If a live refresh encounters a recognized temporary failure, the runtime
 reauthorizes and rereads the API instead of discarding retained output.
 Recognized temporary failures are transport outages and a provider observation
 that missed its bounded read window when the provider marks another read of the
-same invocation safe. A `command_wait` keeps its requested wait and refreshes
-the same command again on its ordinary one-second cadence; that is a read, never
+same invocation safe. A `command_read` or `command_wait` keeps its requested
+wait (ending, like the API wait, when the commands settle or the API reports a
+yield, not on new output) and refreshes each still-running command again on its
+ordinary one-second cadence; that is a read, never
 a Start or stdin replay. A still-running result whose latest refresh failed
 reports `freshness.status: "refresh_unavailable"` and `retryable: true`; this is
 a freshness warning, not proof of command failure or completion. Authorization,
@@ -4854,6 +5065,27 @@ are unchanged for every requester: a missing row is still `deleted`, a
 non-ready or expired row still fails as before, and bytes that do not match the
 recorded size, SHA-256 or dimensions still fail closed as `invalid_content`.
 
+Only the newest tool-result images reach the model with their pixels. When a
+turn attempt prepares its history from stored history, images older than the
+newest three are replaced, in batches of five, by a short text note (one per
+tool result): for `view_image` it names the path to view again (showing the
+file as it is now); for any other tool it asks the model to take a fresh
+screenshot or observation instead of repeating an action, because tools such as
+`interaction__browser_act` act as well as capture. When an attempt starts, the
+history therefore carries three to seven images; images added during the
+attempt all stay until the next one. The note is computed once per attempt, so
+every model call of a turn sees the same prefix, and the omitted set only grows,
+so the provider's prompt cache stays valid between batches. Each new batch
+makes the provider re-read the history after the first newly omitted image
+once; the batch size spreads that over five images, and the saving grows with
+every later call that no longer resends them. Context compaction's summarizer
+sees the same notes. Omitted images are not read from storage, canonical
+history keeps their markers, and user attachments and native
+`computer_call_result` screenshots are not affected; Opengeni's own
+`interaction__browser_*` and `interaction__computer_*` screenshots are function
+results and are omitted like any other
+(`omitOlderHistoryImages` in `apps/worker/src/activities/retained-screenshots.ts`).
+
 Generated images have a separate permanent workspace-file lifecycle. Adapter
 provider calls first cross a durable prepared/provider-started fence; after the
 provider may have run, recovery may finish an existing deterministic upload but
@@ -5012,7 +5244,10 @@ hides its search evidence behind the stored `ws_` ID even when results are inlin
 When native search is attached, the Azure request policy requests sources and,
 with enabled reasoning, result snippets. `hosted-search-evidence.ts` exposes only
 actually returned URLs/titles/snippets as one bounded, explicitly untrusted
-assistant historical-fact message before model and portable-compaction accounting.
+search record before model and portable-compaction accounting: a user-role
+runtime record for sessions in the `runtime` form, the original assistant-role
+message for older sessions until that changes no sent text (see
+[search record forms](web-search.md#hosted-evidence-across-tool-calls)).
 Canonical hosted records remain unchanged. Missing legacy includes cannot be
 reconstructed; sources alone cannot supply page facts, and native citations are
 not guaranteed. See [hosted evidence across tool calls](web-search.md#hosted-evidence-across-tool-calls).
@@ -5107,6 +5342,28 @@ operation's result. `startup_phase_delivery` measures that batch delivery, and
 `run_git_credential_mint` measures the full prefetched mint, distinct from the
 remaining wait in the visible `credential_mint` row. Shared rig claim/join time
 remains covered by the existing shared-preparation metric.
+
+These startup checkpoints and receipts are progress only: nothing reads them
+back before the first model request, so startup does not wait for their
+delivery. Each attempt writes its events through one ordered lane. A checkpoint
+or receipt starts its append at once, after every append the attempt already
+issued, and the preparation continues; every awaited append (the
+`agent.model.request` started audit among them) and the turn settlement start
+only after the checkpoints issued before them. The event log therefore keeps
+the order the work produced, and the audit still commits before the request
+leaves the worker. A checkpoint that cannot be delivered does not fail the
+turn; a fenced attempt is still refused by its next awaited append. Activity
+finalization waits for any checkpoint still in flight. `startup_phase_delivery`
+measures only the append itself, not time spent queued behind earlier appends.
+
+The managed client download is gzip-compressed under a `.json.gz` object key.
+Its identity remains the digest of the original release JSON, not the compressed
+representation. Installation accepts compressed or legacy plain transfers,
+limits decompression to the expected release size, verifies the original digest,
+and installs the same files into the same digest-addressed directory. Warm reuse
+still verifies installed files without downloading. A failed transfer falls back
+to the existing verified plain editor staging; no client implementation, tool
+catalog, model instruction or prompt-cache prefix changes.
 
 After lazy box establishment, credential mint/join, client publication, and run
 credential materialization overlap. They share no inputs that require serial

@@ -79,7 +79,7 @@ e2e(
           transport: TRANSPORT,
           initialUrl: PAGE,
         })
-      ).observation.target.id;
+      ).observation!.target.id;
       const empty = (await supervisor.openTarget(session)).target.id;
       expect((await bridge.pages()).find((page) => page.id === empty)?.url).toBe("data:text/html,");
       await supervisor.selectTarget(session, work);
@@ -103,8 +103,8 @@ e2e(
         headed: true,
         transport: TRANSPORT,
       });
-      expect(recovered.observation.target.id).toBe(work);
-      expect(recovered.observation.target.title).toBe("Work");
+      expect(recovered.observation!.target.id).toBe(work);
+      expect(recovered.observation!.target.title).toBe("Work");
       expect((await bridge.pages()).length).toBe(person.length + 1);
       await expect(supervisor.observe(session, empty)).rejects.toThrow(
         `this session closed this empty tab after it stopped using it; its current tab is ${work}`,
@@ -114,7 +114,7 @@ e2e(
       const other = reference(2);
       const otherTab = (
         await supervisor.createSession({ ...other, headed: true, transport: TRANSPORT })
-      ).observation.target.id;
+      ).observation!.target.id;
       await supervisor.close();
       const afterShutdown = (await bridge.pages()).map((page) => page.id);
       expect(afterShutdown).not.toContain(otherTab);
@@ -217,7 +217,7 @@ e2e(
           transport: TRANSPORT,
           initialUrl: PAGE,
         })
-      ).observation.target.id;
+      ).observation!.target.id;
 
       // The agent's action opened a confirm; it asks the person and waits.
       await bridge.request({
@@ -256,8 +256,9 @@ e2e(
 
       // While nobody holds the browser, the page opens an alert. No debugger
       // attached later can see or answer it, and the page answers nothing
-      // until the person does. The session's return opens a new tab within a
-      // few seconds instead of waiting on it, and leaves the tab as it is.
+      // until the person does. The session's return gives up on that tab
+      // within a few seconds instead of waiting on it, leaves it as it is,
+      // and opens no other tab in the person's window.
       const { sessionId } = await browser.send<{ sessionId: string }>("Target.attachToTarget", {
         targetId: bridge.targetOf(work),
         flatten: true,
@@ -268,15 +269,20 @@ e2e(
         .catch(() => undefined);
       await Bun.sleep(300);
       await browser.send("Target.detachFromTarget", { sessionId });
+      const pagesBefore = (await bridge.pages()).map((page) => page.id).sort();
+      expect(pagesBefore).toContain(work);
       const started = Date.now();
-      const recovered = await supervisor.createSession({
-        ...session,
-        headed: true,
-        transport: TRANSPORT,
-      });
+      const recovered = await supervisor.createSession(
+        {
+          ...session,
+          headed: true,
+          transport: TRANSPORT,
+        },
+        { acceptsNoObservation: true },
+      );
       expect(Date.now() - started).toBeLessThan(15_000);
-      expect(recovered.observation.target.id).not.toBe(work);
-      expect((await bridge.pages()).map((page) => page.id)).toContain(work);
+      expect(recovered.observation).toBeNull();
+      expect((await bridge.pages()).map((page) => page.id).sort()).toEqual(pagesBefore);
     } finally {
       await supervisor.close().catch(() => undefined);
       browser.close();

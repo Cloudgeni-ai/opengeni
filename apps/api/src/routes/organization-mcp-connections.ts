@@ -7,20 +7,26 @@ import {
   updateOrganizationMcpConnectionAccess,
   type OrganizationMcpConnection,
 } from "@opengeni/db";
-import { hasPermission, requireAccessContext, type ApiRouteDeps } from "@opengeni/core";
+import {
+  holdsOrganizationAdministration,
+  requireAccessContext,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { isAgentActingAsPerson, requireFullAccessIfAgent } from "../http/acting-person";
 import { z } from "zod";
 
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
+import { othersAnAdministratorMayManage } from "../http/organization-owner-protection";
 import { parseRequestBody } from "../http/request-body";
 import { disconnectAuditActor } from "../http/disconnect-audit-actor";
 
 /* ----------------------------------------------------------------------------
    Connected agents: outside MCP clients people signed in to the organization
    server with. Everyone sees and manages their own; owners and admins see and
-   can disconnect everyone's. Only the person who connected an agent changes
+   can disconnect everyone's, except that only an owner disconnects an owner's.
+   Only the person who connected an agent changes
    what it can do. An agent with the person's full access can do this as them;
    an agent with less can't use these routes, so it can never widen its own
    access.
@@ -33,9 +39,17 @@ export function registerOrganizationMcpConnectionRoutes(app: Hono, deps: ApiRout
       accountId: organizationId,
       ...(admin ? {} : { subjectId: context.subjectId }),
     });
+    const mayManage = admin
+      ? await othersAnAdministratorMayManage(deps, context, organizationId)
+      : () => false;
     c.header("cache-control", "no-store");
     return c.json({
-      connections: await projectConnections(deps, connections),
+      connections: (await projectConnections(deps, connections)).map((connection) => ({
+        ...connection,
+        canDisconnect:
+          connection.connectedBy.subjectId === context.subjectId ||
+          mayManage(connection.connectedBy.subjectId),
+      })),
       canManageAll: admin,
     });
   });
@@ -90,6 +104,14 @@ export function registerOrganizationMcpConnectionRoutes(app: Hono, deps: ApiRout
         message: "Only the person who connected this agent, or an admin, can disconnect it.",
       });
     }
+    if (
+      connection.subjectId !== context.subjectId &&
+      !(await othersAnAdministratorMayManage(deps, context, organizationId))(connection.subjectId)
+    ) {
+      throw new HTTPException(403, {
+        message: "Only the organization owner can disconnect the owner's agents.",
+      });
+    }
     await revokeOrganizationMcpConnection(deps.db, {
       accountId: organizationId,
       connectionId: connection.id,
@@ -101,7 +123,9 @@ export function registerOrganizationMcpConnectionRoutes(app: Hono, deps: ApiRout
 
 /**
  * A member of the organization, signed in in this browser, or an agent with
- * their full access. Keys and limited agents are refused.
+ * their full access. Keys and limited agents are refused. `admin` is the
+ * organization's owner or one of its admins, who see and can disconnect
+ * everyone's agents.
  */
 async function requireOrganizationPerson(
   c: Context,
@@ -124,7 +148,11 @@ async function requireOrganizationPerson(
   if (context.mode !== "managed" || !context.subjectId.startsWith("user:") || !grant) {
     throw new HTTPException(404, { message: "organization not found" });
   }
-  return { context, organizationId, admin: hasPermission(grant.permissions, "account:admin") };
+  return {
+    context,
+    organizationId,
+    admin: holdsOrganizationAdministration(context, organizationId),
+  };
 }
 
 async function requireConnection(

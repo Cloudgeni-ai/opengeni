@@ -6,7 +6,7 @@ import {
 } from "@opengeni/contracts";
 import {
   requireAccessGrant,
-  requireAccessGrantAuthorization,
+  requireWorkspaceSettingsAuthorization,
   type AccessGrantAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
@@ -81,12 +81,8 @@ export function registerSlackTaskPolicyRoutes(app: Hono, deps: ApiRouteDeps): vo
 
   app.put(base, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    const access = await requireAccessGrantAuthorization(
-      context,
-      deps,
-      workspaceId,
-      "workspace:admin",
-    );
+    // Workspace admins, and the owner of a Personal workspace.
+    const access = await requireWorkspaceSettingsAuthorization(context, deps, workspaceId);
     requireDirectWorkspaceAdmin(access);
     const parsed = parseRequestBody(
       UpdateSlackTaskPolicyRequest,

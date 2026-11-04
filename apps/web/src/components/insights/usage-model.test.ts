@@ -9,11 +9,23 @@ import {
   parseModelFilterKey,
   type UsageGroup,
   type UsageGroupBy,
+  type UsageRange,
 } from "./usage-contract";
-import { niceScale } from "./usage-chart";
+import { axisLabels, niceScale } from "./usage-chart";
 import { breakdownRows } from "./usage-groups";
-import { cacheHitRate, costMicros, formatMoney, relativeChange } from "./usage-format";
+import {
+  bucketDay,
+  cacheHitRate,
+  costMicros,
+  formatBucket,
+  formatMoney,
+  priorLabel,
+  RANGES,
+  relativeChange,
+} from "./usage-format";
 import { nextUsageSearch, parseUsageSearch, usageQuery } from "./usage-search";
+import { fixtureUsage } from "./usage-fixtures";
+import { loadUsage } from "./usage-source";
 
 describe("model display", () => {
   test("clean names from raw ids, with the connection prefix gone", () => {
@@ -68,6 +80,25 @@ describe("usage search", () => {
     ).toEqual({
       range: "ytd",
     });
+  });
+
+  test("rolling hours parse, and custom instants need one form, order and at most 370 days", () => {
+    for (const range of ["1h", "3h", "24h"] as const)
+      expect(parseUsageSearch({ range })).toEqual({ range });
+    expect(
+      parseUsageSearch({ range: "custom", start: "2026-10-30T09:15Z", end: "2026-10-30T11:00Z" }),
+    ).toEqual({ range: "custom", start: "2026-10-30T09:15Z", end: "2026-10-30T11:00Z" });
+    expect(
+      usageQuery({ range: "custom", start: "2026-10-30T09:15Z", end: "2026-10-30T11:00Z" }),
+    ).toMatchObject({ range: "custom", from: "2026-10-30T09:15Z", to: "2026-10-30T11:00Z" });
+    for (const [start, end] of [
+      ["2026-10-30T11:00Z", "2026-10-30T09:15Z"],
+      ["2026-10-30T09:15Z", "2026-10-30T09:15Z"],
+      ["2026-10-30T09:15Z", "2026-10-31"],
+      ["2026-10-30T25:00Z", "2026-10-31T01:00Z"],
+      ["2025-10-30T00:00Z", "2026-11-05T00:00Z"],
+    ])
+      expect(parseUsageSearch({ range: "custom", start, end })).toEqual({});
   });
 
   test("filters round-trip, models split on the first slash", () => {
@@ -327,5 +358,87 @@ describe("older Insights endpoint adapter", () => {
       scope,
     ).usage.groups[0];
     expect(project?.kind).toBe("private");
+  });
+});
+
+describe("usage ranges", () => {
+  test("the menu lists rolling windows, then calendar periods, then a custom range", () => {
+    expect(RANGES.map((range) => [range.label, range.group ?? null])).toEqual([
+      ["Last hour", null],
+      ["Last 3 hours", null],
+      ["Last 24 hours", null],
+      ["Last 7 days", null],
+      ["Last 30 days", null],
+      ["Last 90 days", null],
+      ["Today", "Calendar"],
+      ["This month", "Calendar"],
+      ["Year to date", "Calendar"],
+      ["Custom range", "Custom"],
+    ]);
+    expect(priorLabel("1h")).toBe("the hour before");
+    expect(priorLabel("3h")).toBe("the 3 hours before");
+    expect(priorLabel("24h")).toBe("the 24 hours before");
+  });
+
+  test("an hourly axis names the day where it crosses midnight", () => {
+    const start = new Date(2026, 9, 29, 20).getTime();
+    const buckets = Array.from({ length: 12 }, (_, index) => {
+      const iso = new Date(start + index * 3_600_000).toISOString();
+      return {
+        key: iso,
+        label: formatBucket(iso, "hour"),
+        day: bucketDay(iso, "hour"),
+        title: "",
+        values: {},
+      };
+    });
+    expect(axisLabels(buckets, 3).map((label) => label.text)).toEqual([
+      "8 PM",
+      "11 PM",
+      "Oct 30",
+      "5 AM",
+      "7 AM",
+    ]);
+    expect(bucketDay(buckets[0]!.key, "day")).toBeUndefined();
+  });
+
+  test("sub-day buckets read in the viewer's time; days stay UTC days", () => {
+    const start = "2026-10-30T10:25:00.000Z";
+    const local = new Date(start);
+    expect(formatBucket(start, "five_minutes")).toBe(
+      local.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }),
+    );
+    expect(formatBucket(start, "hour")).toBe(
+      local.toLocaleTimeString("en-US", { hour: "numeric" }),
+    );
+    expect(formatBucket(start, "five_minutes", true)).toContain(
+      local.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }),
+    );
+    expect(formatBucket("2026-10-30T00:00:00.000Z", "day")).toBe("Oct 30");
+  });
+
+  test("a server's listed ranges are offered; older servers get only what they answer", async () => {
+    const { capabilities: _, ...server } = fixtureUsage();
+    const scope = server.scope;
+    const query = { range: "week" as const, groupBy: "model" as const, filters: {} };
+    const load = async (response: object) =>
+      (
+        await loadUsage(
+          { requestJson: async () => response } as never,
+          scope,
+          query,
+          new AbortController().signal,
+        )
+      ).usage.capabilities.ranges;
+    expect(await load({ ...server, availableRanges: ["1h", "week", "custom", "later"] })).toEqual([
+      "1h",
+      "week",
+      "custom",
+    ]);
+    const presets: UsageRange[] = ["today", "week", "month", "30d", "90d", "ytd"];
+    expect(await load(server)).toEqual([...presets, "custom"]);
+    expect(await load({ ...server, facets: { ...server.facets, sources: undefined } })).toEqual(
+      presets,
+    );
   });
 });

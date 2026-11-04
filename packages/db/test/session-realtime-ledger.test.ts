@@ -1464,6 +1464,38 @@ describe("session realtime ledger", () => {
     expect(admitted.accepted[0]!.entry.turnId).toEqual(expect.any(String));
   });
 
+  test("a person talking ends an automation's unattended default, not an explicit choice", async () => {
+    for (const [setting, expected] of [
+      ["unattended_by_default", "attended"],
+      ["unattended", "unattended"],
+    ] as const) {
+      const value = await privateFixture(true);
+      const where = and(
+        eq(schema.sessions.workspaceId, value.owner.workspaceId),
+        eq(schema.sessions.id, value.owner.sessionId),
+      );
+      await transaction(value.owner.workspaceId, async (tx) => {
+        await tx.update(schema.sessions).set({ unattendedSetting: setting }).where(where);
+      });
+      const connection = await claimInitial(value);
+      await complete(value, connection.claimed.connection);
+      await proveProviderStarted(value, connection.claimed.connection);
+      await transaction(value.owner.workspaceId, (tx) =>
+        syncSessionRealtimeLedgerInTransaction(
+          tx,
+          delegationSyncInput(value, connection.claimed.connection),
+        ),
+      );
+      const [row] = await transaction(value.owner.workspaceId, (tx) =>
+        tx
+          .select({ setting: schema.sessions.unattendedSetting })
+          .from(schema.sessions)
+          .where(where),
+      );
+      expect(row!.setting).toBe(expected);
+    }
+  });
+
   test("voice delegation preserves its frozen connector snapshot through replay", async () => {
     const value = await privateFixture(true);
     const connection = await claimInitial(value);
@@ -1675,6 +1707,55 @@ describe("session realtime ledger", () => {
         sourceTurnId: waiting.turn.id,
       },
     });
+  });
+
+  test("opens the voice call with the reason once after the person answers an agent call", async () => {
+    const value = await fixture();
+    await endMode(value);
+    const [call] = await shared.admin<{ id: string }[]>`
+      insert into agent_calls (
+        account_id, workspace_id, session_id, callee_subject_id, reason, state,
+        devices, ring_until, answered_by, ended_at
+      ) values (
+        ${value.owner.accountId}, ${value.owner.workspaceId}, ${value.owner.sessionId},
+        ${value.owner.ownerSubjectId}, ${"The deploy failed & needs a decision"}, 'answered',
+        1, now() + interval '30 seconds', 'phone-a', now()
+      ) returning id`;
+
+    const answered = await beginReplacementMode(value);
+    const connection = await claimInitial(answered);
+    await complete(answered, connection.claimed.connection);
+    await proveProviderStarted(answered, connection.claimed.connection);
+    const sync = await transaction(answered.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, {
+        ...ownerProof(answered),
+        connectionId: connection.claimed.connection.id,
+        connectionEpoch: connection.claimed.connection.connectionEpoch,
+      }),
+    );
+    const opener = sync.outbound.find((entry) => entry.payload.source === "agent_call");
+    expect(opener).toMatchObject({
+      kind: "session_update",
+      payload: { channel: "speakable", callId: call!.id, trigger: "realtime_start" },
+    });
+    expect(opener?.text).toContain("<reason>The deploy failed &amp; needs a decision</reason>");
+    const [claimed] = await shared.admin<{ realtime_id: string | null }[]>`
+      select realtime_id from agent_calls where id = ${call!.id}`;
+    expect(claimed?.realtime_id).toBe(answered.started.mode.id);
+
+    await endMode(answered);
+    const again = await beginReplacementMode(answered);
+    const againConnection = await claimInitial(again);
+    await complete(again, againConnection.claimed.connection);
+    await proveProviderStarted(again, againConnection.claimed.connection);
+    const againSync = await transaction(again.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, {
+        ...ownerProof(again),
+        connectionId: againConnection.claimed.connection.id,
+        connectionEpoch: againConnection.claimed.connection.connectionEpoch,
+      }),
+    );
+    expect(againSync.outbound.some((entry) => entry.payload.source === "agent_call")).toBe(false);
   });
 
   test("mirrors an accepted structured UI answer without delegating it again", async () => {

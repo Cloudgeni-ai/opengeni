@@ -1,6 +1,7 @@
 import type { z } from "zod";
 import { parseRequestBody } from "../http/request-body";
 import { attachedBrowserViewer } from "../attached-browser-viewer";
+import { computerCursorIdentity } from "./computer-cursor-identity";
 import {
   assertEphemeralBrowserCreateEnabled,
   ephemeralBrowserPartition,
@@ -266,6 +267,8 @@ import { ApiHttpError } from "../http/api-error";
 import {
   interactionActionDeadlineApiError,
   interactionControlApiError,
+  interactionControlRequestFor,
+  type InteractionControlRequest,
   legacyInteractionCapacityError,
   legacyInteractionCapacityFailure,
 } from "../http/interaction-control-error";
@@ -804,7 +807,7 @@ export function registerBrowserSessionRoutes(
           error: interactionFailure(error),
         }).catch(() => undefined);
       }
-      throw browserRouteError(error);
+      throw browserRouteError(error, "open");
     }
   });
 
@@ -894,7 +897,9 @@ export function registerBrowserSessionRoutes(
         "session.control",
         "browser.control",
         async ({ sessionClient }) =>
-          BrowserObservation.parse(await sessionClient.selectTarget(targetId)),
+          BrowserObservation.parse(
+            await sessionClient.selectTarget(targetId, agentObservationNotices(grant)),
+          ),
       );
       return context.json(result);
     },
@@ -1599,7 +1604,7 @@ export function registerBrowserSessionRoutes(
         async ({ sessionClient }) => {
           stages.mark("placement");
           try {
-            return await sessionClient.observe(targetId);
+            return await sessionClient.observe(targetId, agentObservationNotices(grant));
           } finally {
             stages.mark("dispatch");
           }
@@ -1844,6 +1849,7 @@ export function registerBrowserSessionRoutes(
                     ...commandFields,
                     ...(secretValues === undefined ? {} : { secretValues }),
                   }),
+                  agentObservationNotices(grant),
                 );
               } finally {
                 stages.mark("dispatch");
@@ -4763,7 +4769,7 @@ export function registerBrowserSessionRoutes(
         browserSessionStorageMode(record.session) !== "ephemeral_context",
       );
     } catch (error) {
-      throw browserRouteError(error);
+      throw browserRouteError(error, interactionControlRequestFor(channelOperation));
     }
   }
 
@@ -5708,6 +5714,14 @@ async function ensureLinkedComputerController(
   } catch (error) {
     if (!isMissingLinkedComputerControllerSession(error)) throw error;
     await client.createComputerSession({
+      cursorIdentity: await computerCursorIdentity(
+        deps,
+        grant,
+        await getSession(deps.db, browser.workspaceId, record.sourceSessionId).then((session) => {
+          if (!session) throw new BrowserSessionStateError("Associated session not found");
+          return session;
+        }),
+      ),
       ...reference,
       tokenGeneration: record.tokenGeneration,
       ...tokens,
@@ -6101,6 +6115,7 @@ export function withInitialView<
     }) {
   if (
     !launched?.targets ||
+    !launched.observation ||
     response.operation.state !== "completed" ||
     response.operation.replayed ||
     response.session.lifecycle !== "active" ||
@@ -6592,6 +6607,13 @@ function isUuid(value: unknown): value is string {
 
 function requestOrigin(context: Context, settings: ApiRouteDeps["settings"]): string | null {
   return validateInteractionRequestOrigin(context.req.header("origin"), settings);
+}
+
+/** An agent's own browser tools receive a tab's notice (for example that a
+ * browser relaunch reloaded its page), which it is given once. A person's
+ * viewer and other API clients neither see it nor use it up. */
+function agentObservationNotices(grant: AccessGrant): { notices?: true } {
+  return grant.principalKind === "agent_attempt" ? { notices: true } : {};
 }
 
 export function interactionActorForGrant(
@@ -7187,12 +7209,15 @@ type PreservedWorkingCopyCallback<T> = (input: {
   authority: PlacementBrowserWorkingCopyAuthority;
 }) => Promise<T>;
 
-export function browserRouteError(error: unknown): HTTPException {
+export function browserRouteError(
+  error: unknown,
+  request: InteractionControlRequest = "request",
+): HTTPException {
   const actionDeadline = interactionActionDeadlineApiError(error);
   if (actionDeadline) return actionDeadline;
   const tabDiagnosis = browserTabDiagnosisError(error);
   if (tabDiagnosis instanceof ApiHttpError) return tabDiagnosis;
-  const connectedMachineError = interactionControlApiError(error, "browser");
+  const connectedMachineError = interactionControlApiError(error, "browser", request);
   if (connectedMachineError) return connectedMachineError;
   const routeUnavailable = activeRouteUnavailableError(error);
   if (routeUnavailable) return routeUnavailable;

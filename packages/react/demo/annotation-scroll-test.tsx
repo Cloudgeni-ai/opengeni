@@ -32,7 +32,7 @@ function Harness() {
   const [revision, setRevision] = useState(0);
   return (
     <main className="og-root h-screen bg-og-bg p-6 text-og-fg" data-revision={revision}>
-      <h1 className="text-og-lg font-semibold">Annotation scroll regression</h1>
+      <h1 className="text-og-md font-semibold">Annotation scroll regression</h1>
       <p className="mt-2 text-og-sm text-og-fg-muted">
         12 synthetic annotations, each with a long editable note.
       </p>

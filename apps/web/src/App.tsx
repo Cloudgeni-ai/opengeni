@@ -12,7 +12,7 @@
 //   /workspaces/:id/secrets/:vaultId         → one vault (?view=availability|new-item&type)
 //   /workspaces/:id/secrets/:vaultId/:itemId → one item (?view=edit)
 //   /workspaces/:id/rigs                     → rigs list + create
-//   /workspaces/:id/read-only-chats          → chats moved to long-term storage (read-only)
+//   /workspaces/:id/archived                 → archived chats (long-term storage, read-only)
 //   /workspaces/:id/inbox                    → things that need you, from agents (temporary inbox)
 //   /workspaces/:id/rigs/:rigId              → rig detail (overview/setup/versions/changes)
 
@@ -118,8 +118,12 @@ import {
   type OrganizationAdminSection as OrganizationSettingsSection,
 } from "@opengeni/react/app/lib/organization-admin";
 import {
+  connectorLocation,
+  parseConnectorParam,
+  parseConnectorView,
   parseOrganizationRecordId,
   parseOrganizationView,
+  type ConnectorView,
   type OrganizationView,
 } from "@/lib/organization-route";
 import {
@@ -131,6 +135,7 @@ import {
 } from "@opengeni/react/app/lib/workspace-navigation-preference";
 import { navigableWorkspaces } from "@opengeni/react/app/lib/managed-self-context";
 import { installDesktopShell, warmDesktopPages } from "@opengeni/react/app/lib/desktop";
+import { recordFeedbackNavigation } from "@opengeni/react/app/lib/feedback-trail";
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
 
 // Legacy section names (overview, knowledge, recovery, retention) still parse,
@@ -174,6 +179,10 @@ const LazyOrgSettingsRoute = lazyRouteComponent(
 const LazyResetPasswordRoute = lazyRouteComponent(
   () => import("@/routes/reset-password"),
   "ResetPasswordRoute",
+);
+const LazySharedSessionRoute = lazyRouteComponent(
+  () => import("@/routes/shared-session"),
+  "SharedSessionRoute",
 );
 const LazyExcelAddinRoute = lazyRouteComponent(
   () => import("@/routes/excel-addin"),
@@ -399,6 +408,13 @@ const resetPasswordRoute = createRoute({
     typeof search.token === "string" && search.token ? { token: search.token } : {},
   component: ResetPassword,
 });
+// A chat someone shared with a link. PUBLIC, like `/reset-password`: the
+// person opening it usually isn't signed in and may have no account.
+const sharedSessionRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "share/$shareId",
+  component: SharedSession,
+});
 // How to add the Excel add-in. PUBLIC, like `/reset-password`: agents and
 // colleagues send this link to people who may not be signed in.
 const excelAddinRoute = createRoute({
@@ -588,8 +604,14 @@ const workspaceRigsRoute = createRoute({
 });
 const workspaceReadOnlyChatsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
-  path: "read-only-chats",
+  path: "archived",
   component: ReadOnlyChats,
+});
+// The Archived page was called Read-only chats; old links still land on it.
+const workspaceLegacyReadOnlyChatsRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "read-only-chats",
+  component: LegacyReadOnlyChatsRedirect,
 });
 const workspaceInboxRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -929,13 +951,14 @@ const workspaceOrganizationRoute = createRoute({
     checkoutSession?: string;
     section?: OrganizationAdminSection;
     account?: string;
-    view?: ModelsView | OrganizationView | DeveloperView;
+    view?: ModelsView | OrganizationView | DeveloperView | ConnectorView;
     person?: string;
     invitation?: string;
     workspace?: string;
     webhook?: string;
     agent?: string;
     serviceAccount?: string;
+    connector?: string;
   } & InsightsRawSearch &
     ReturnToSearch => {
     const checkout = parseCheckoutOutcome(search);
@@ -957,9 +980,13 @@ const workspaceOrganizationRoute = createRoute({
           ? parseOrganizationView(search.view)
           : section === "developer"
             ? (parseOrganizationView(search.view) ?? parseDeveloperView(search.view))
-            : undefined;
+            : section === "integrations"
+              ? parseConnectorView(search.view)
+              : undefined;
     const webhook = section === "developer" ? parseWebhookParam(search.webhook) : undefined;
     const agent = section === "agents" ? parseAgentParam(search.agent) : undefined;
+    const connector =
+      section === "integrations" ? parseConnectorParam(search.connector) : undefined;
     const serviceAccount =
       section === "developer" ? parseServiceAccountParam(search.serviceAccount) : undefined;
     const person = section === "people" ? parseOrganizationRecordId(search.person) : undefined;
@@ -984,6 +1011,7 @@ const workspaceOrganizationRoute = createRoute({
       ...(webhook ? { webhook } : {}),
       ...(agent ? { agent } : {}),
       ...(serviceAccount ? { serviceAccount } : {}),
+      ...(connector ? { connector } : {}),
       ...(section === "insights"
         ? Object.fromEntries(
             INSIGHTS_SEARCH_KEYS.flatMap((key) =>
@@ -1016,6 +1044,7 @@ const routeTree = rootRoute.addChildren([
   connectAgentRoute,
   teamsConnectRoute,
   resetPasswordRoute,
+  sharedSessionRoute,
   excelAddinRoute,
   desktopReturnRoute,
   identityLinkRoute,
@@ -1049,6 +1078,7 @@ const routeTree = rootRoute.addChildren([
     workspaceRigsRoute,
     workspaceRigDetailRoute,
     workspaceReadOnlyChatsRoute,
+    workspaceLegacyReadOnlyChatsRoute,
     workspaceInboxRoute,
     workspaceMachinesRoute,
     workspaceComputerUseRoute,
@@ -1097,6 +1127,8 @@ const router = createRouter({
   ...routerErrorOptions(() => appRoutePattern()),
 });
 installDesktopShell((path) => router.history.push(path));
+// The screens the person moved through go with their next feedback report.
+router.history.subscribe(({ location }) => recordFeedbackNavigation(location.pathname));
 warmDesktopPages([
   LazySessionRoute,
   LazySessionsIndexRoute,
@@ -1324,6 +1356,11 @@ function BotTemplates() {
   return <LazyBotTemplatesRoute workspaceId={workspaceId} />;
 }
 
+function LegacyReadOnlyChatsRedirect() {
+  const { workspaceId } = workspaceLegacyReadOnlyChatsRoute.useParams();
+  return <Navigate to="/workspaces/$workspaceId/archived" params={{ workspaceId }} replace />;
+}
+
 function LegacySchedulesRedirect() {
   const { workspaceId } = workspaceLegacySchedulesRoute.useParams();
   const search = workspaceLegacySchedulesRoute.useSearch();
@@ -1538,6 +1575,7 @@ function Organization() {
     webhook,
     agent,
     serviceAccount,
+    connector,
     from,
     fromLabel,
   } = workspaceOrganizationRoute.useSearch();
@@ -1562,6 +1600,11 @@ function Organization() {
           : undefined
       }
       connectedAgent={page === "agents" ? agent : undefined}
+      connectors={
+        page === "integrations"
+          ? connectorLocation({ connector, view: parseConnectorView(view) })
+          : undefined
+      }
       person={person}
       invitation={invitation}
       workspace={workspace}
@@ -1618,6 +1661,11 @@ function SiteAuthorize() {
 function ResetPassword() {
   const { token } = resetPasswordRoute.useSearch();
   return <LazyResetPasswordRoute token={token} />;
+}
+
+function SharedSession() {
+  const { shareId } = sharedSessionRoute.useParams();
+  return <LazySharedSessionRoute shareId={shareId} />;
 }
 
 function SetupAccount() {

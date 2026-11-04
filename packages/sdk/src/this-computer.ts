@@ -311,10 +311,7 @@ export type ComputerGrantClient = Pick<
 >;
 
 /** The part of the API client that stops the person's agents using their computer. */
-export type ComputerGrantRevokeClient = Pick<
-  OpenGeniDocumentAuthorityClient,
-  "listUserResourceAuthorities"
-> & {
+export type ComputerGrantRevokeClient = ComputerGrantClient & {
   revokeUserResourceGrant(workspaceId: string, grantId: string): Promise<unknown>;
 };
 
@@ -378,6 +375,11 @@ async function findAuthority(
  * agents there need their consent in each chat again, and the computer stays
  * connected for the other workspaces that use it. Grants given for one chat
  * or one session are left alone. A computer that isn't listed is already done.
+ *
+ * Where it was connected and in the person's Personal workspace, a computer
+ * is on until they turn it off, even before anything is recorded. With nothing
+ * to take back and no earlier turn-off there, standing permission is recorded
+ * and taken back at once, so the workspace remembers that it is off.
  */
 export async function disallowAgentsOnComputer(
   client: ComputerGrantRevokeClient,
@@ -386,17 +388,29 @@ export async function disallowAgentsOnComputer(
 ): Promise<void> {
   const authority = await findAuthority(client, workspaceId, enrollmentId);
   if (!authority) return;
+  let standing = 0;
+  let turnedOffBefore = false;
   for (const grant of authority.grants) {
     if (
-      grant.status === "active" &&
-      grant.mode === "always" &&
-      grant.action === "connected_machine.use" &&
-      grant.targetWorkspaceId === workspaceId &&
-      grant.targetSessionId === null
-    ) {
+      grant.mode !== "always" ||
+      grant.action !== "connected_machine.use" ||
+      grant.targetWorkspaceId !== workspaceId ||
+      grant.targetSessionId !== null
+    )
+      continue;
+    if (grant.status === "active") {
+      standing += 1;
       await client.revokeUserResourceGrant(workspaceId, grant.grantId);
-    }
+    } else if (grant.status === "revoked") turnedOffBefore = true;
   }
+  if (standing > 0 || turnedOffBefore) return;
+  const issued = await client.issueUserResourceGrant(workspaceId, authority.authorityId, {
+    scope: "user",
+    resourceKind: "connected_machine",
+    mode: "always",
+    context: "user_private",
+  });
+  await client.revokeUserResourceGrant(workspaceId, issued.grant.grantId);
 }
 
 function hasStandingGrant(

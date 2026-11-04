@@ -15,7 +15,6 @@ import {
   freezeAgentLearningPolicy,
 } from "@opengeni/db";
 import {
-  projectHistoryForProvider,
   restoreGenericDispatchHistoryItems,
   projectModelInputForCapabilities,
   hasActiveWorkspaceInstructionPolicy,
@@ -30,8 +29,19 @@ import {
 } from "@opengeni/config";
 import { projectReasoningConfigurations, supportsReasoningConfiguration } from "@opengeni/codex";
 import { settingsWithSessionMcpServersForRun } from "../capabilities";
-import { resolveRigProviderImageForRun, settingsWithWorkspaceSandboxImage } from "@opengeni/core";
+import {
+  resolveRigProviderImageForRun,
+  rigProviderImageSourceImage,
+  settingsWithWorkspaceSandboxImage,
+} from "@opengeni/core";
+import { requestStaleRigProviderImageRefresh } from "../rig-provider-image-refresh";
+import type { StartRigProviderImageRefresh } from "../types";
 import { createModelHistoryAttachmentProjector } from "../run-input";
+import {
+  loadTurnSearchRecords,
+  projectTurnHistoryForProvider,
+  type TurnSearchRecords,
+} from "../search-record-form";
 import type {
   TurnActivityServices as ActivityServices,
   RunAgentTurnInput,
@@ -60,6 +70,7 @@ import { codeSearchEnabledForTurn } from "@opengeni/contracts/code-search";
 
 import { assertWorkspaceHumanInputAllowed } from "./admission";
 import {
+  hostedToolsBillCreditsForTurn,
   lazyToolTransportForTurn,
   openAiHostedImageProviderBindingForTurn,
   modelAttachmentInputPolicyForTurn,
@@ -85,6 +96,8 @@ export type GovernanceModelDeps = {
   fileAuthoritySubjectId: ClaimTurnOk["fileAuthoritySubjectId"];
   humanInputResume: ClaimTurnOk["humanInputResume"];
   turnExecutionPolicy: ClaimTurnOk["turnExecutionPolicy"];
+  /** The claim's billing class: the accepted model is billed in Opengeni credits. */
+  chargesOpenGeniCredits: boolean;
   requiredGeneratedVideoFiles: Array<{
     operationId: string;
     artifactId: string;
@@ -94,6 +107,8 @@ export type GovernanceModelDeps = {
     sha256: string;
     filename: string;
   }>;
+  /** Optional background rebuild of a stale sandbox environment image. */
+  startRigProviderImageRefresh?: StartRigProviderImageRefresh | null;
 };
 
 export type GovernanceModelOk = {
@@ -116,6 +131,12 @@ export type GovernanceModelOk = {
   structuredWorkspacePolicyActive: boolean;
   /** False when the workspace turned Opengeni credits off (model policy). */
   workspaceCreditModelsAllowed: boolean;
+  /**
+   * Provider-hosted paid tools would run on Opengeni's bill this turn
+   * ({@link hostedToolsBillCreditsForTurn}); tool preparation and agent
+   * construction both read this one value.
+   */
+  hostedToolsBillCredits: boolean;
   workspaceMemory: string | null | undefined;
   buildCompanyBrainContributionReceiptFor: (
     skillCatalogText: string,
@@ -141,6 +162,8 @@ export type GovernanceModelOk = {
   compactionModelHistoryProjector: (
     items: Array<Record<string, unknown>>,
   ) => Promise<Array<Record<string, unknown>>>;
+  /** The turn's hosted web-search record form; turn input settles it. */
+  searchRecords: TurnSearchRecords;
 };
 
 export type GovernanceModelOutcome = { exit: RunAgentTurnResult } | { ok: GovernanceModelOk };
@@ -329,6 +352,16 @@ export async function prepareGovernanceAndModel(
     turn.sandboxBackend,
   );
   const providerImageSettings = providerImageSelection.settings;
+  requestStaleRigProviderImageRefresh({
+    selection: providerImageSelection,
+    turnUsesDeploymentBase:
+      rigProviderImageSourceImage(logicalSandboxSettings, turn.sandboxBackend) ===
+      rigProviderImageSourceImage(capabilitySettings, turn.sandboxBackend),
+    workspaceId: input.workspaceId,
+    versionId: rigVersion?.id ?? null,
+    start: deps.startRigProviderImageRefresh,
+    warn: (message, context) => observability.warn(message, context),
+  });
   const verifiedRigProviderImageId =
     providerImageSelection.reason === "selected"
       ? (providerImageSelection.imageId ?? undefined)
@@ -378,9 +411,17 @@ export async function prepareGovernanceAndModel(
   // on every attempt, so recovery never adds a tool mid-turn.
   const resolvedModel = resolveAcceptedTurnModel(runtime, capabilitySettings, turnExecutionPolicy);
   const providerApi = resolvedModel?.provider.api ?? "responses";
+  const hostedToolsBillCredits = hostedToolsBillCreditsForTurn(capabilitySettings, {
+    accountId: input.accountId,
+    chargesOpenGeniCredits: deps.chargesOpenGeniCredits,
+  });
   const nativeImageProviderBinding =
     providerApi === "responses"
-      ? openAiHostedImageProviderBindingForTurn(capabilitySettings, resolvedModel)
+      ? openAiHostedImageProviderBindingForTurn(
+          capabilitySettings,
+          resolvedModel,
+          hostedToolsBillCredits,
+        )
       : null;
   const lazyToolTransport = lazyToolTransportForTurn(resolvedModel);
   const modelInputPolicy = modelAttachmentInputPolicyForTurn(resolvedModel);
@@ -432,11 +473,15 @@ export async function prepareGovernanceAndModel(
     collectGeneratedImageReceipts(items, media.generatedImageReceiptsByProviderItemId);
     return projectGeneratedImageHistoryForModel(items);
   };
+  // Compaction reads the same form as the turn's own requests, so its request
+  // shares their cached prefix and the summarizer sees what the model saw.
+  const searchRecords = await loadTurnSearchRecords(db, input.workspaceId, input.sessionId);
   const compactionModelHistoryProjector = async (items: Array<Record<string, unknown>>) =>
     await modelHistoryProjector(
-      projectHistoryForProvider(
+      projectTurnHistoryForProvider(
         await generatedImageHistoryProjector(restoreGenericDispatchHistoryItems(items)),
         providerApi,
+        searchRecords,
       ),
     );
   // Bind the provider/model catalog's context policy to every model-facing
@@ -540,6 +585,7 @@ export async function prepareGovernanceAndModel(
       workspaceGovernance,
       structuredWorkspacePolicyActive,
       workspaceCreditModelsAllowed: workspaceModelPolicy?.allowCreditModels !== false,
+      hostedToolsBillCredits,
       workspaceMemory,
       buildCompanyBrainContributionReceiptFor,
       logicalSandboxSettings,
@@ -554,6 +600,7 @@ export async function prepareGovernanceAndModel(
       modelHistoryProjector,
       generatedImageHistoryProjector,
       compactionModelHistoryProjector,
+      searchRecords,
     },
   };
 }

@@ -139,7 +139,7 @@ export function buildOpenGeniSlackBotManifest(
   const slashCommand = normalizedSlackCommand(options.slashCommand);
   const shortcutName = normalizedSlackManifestText(
     options.shortcutName,
-    "Open in Opengeni",
+    "Ask Opengeni",
     "shortcut name",
     35,
   );

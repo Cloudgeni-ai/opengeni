@@ -32,6 +32,8 @@ export class WebAuthnError extends Error {
       | "bad_attestation"
       | "bad_signature"
       | "counter_regression"
+      | "backup_eligibility_mismatch"
+      | "invalid_backup_flags"
       | "unknown_credential",
     message: string,
   ) {
@@ -57,6 +59,7 @@ export type StoredCredential = {
   publicKeyJwk: JsonWebKey;
   alg: number;
   signCount: number;
+  backupEligibility?: boolean;
   userHandle: string;
   username: string;
   createdAt: string;
@@ -167,6 +170,9 @@ function checkFlags(authData: ParsedAuthData, rpId: string, requireUserVerificat
   if (requireUserVerification && !authData.userVerified) {
     throw new WebAuthnError("user_not_verified", "UV flag not set");
   }
+  if ((authData.flags & 0x10) !== 0 && (authData.flags & 0x08) === 0) {
+    throw new WebAuthnError("invalid_backup_flags", "BS requires BE");
+  }
 }
 
 export type RegistrationResponseJSON = {
@@ -189,6 +195,8 @@ export function verifyRegistration(input: {
   signCount: number;
   fmt: string;
   userVerified: boolean;
+  backupEligibility: boolean;
+  backupState: boolean;
 } {
   const clientDataJSON = b64urlDecode(input.credential.response.clientDataJSON);
   checkClientData(clientDataJSON, {
@@ -237,6 +245,8 @@ export function verifyRegistration(input: {
     signCount: authData.signCount,
     fmt,
     userVerified: authData.userVerified,
+    backupEligibility: (authData.flags & 0x08) !== 0,
+    backupState: (authData.flags & 0x10) !== 0,
   };
 }
 
@@ -273,6 +283,11 @@ export function verifyAuthentication(input: {
   const signature = b64urlDecode(input.credential.response.signature);
   if (!verifySignature(input.stored.alg, input.stored.publicKeyJwk, data, signature)) {
     throw new WebAuthnError("bad_signature", "assertion signature invalid");
+  }
+  // WebAuthn credential backup eligibility is fixed at registration. Check
+  // after the signature so a mismatch also proves the imported key signed.
+  if ((authData.flags & 0x08) !== (input.stored.backupEligibility ? 0x08 : 0)) {
+    throw new WebAuthnError("backup_eligibility_mismatch", "BE changed since registration");
   }
   // WebAuthn §6.1.1: when either counter is non-zero the new one must be strictly greater.
   if (

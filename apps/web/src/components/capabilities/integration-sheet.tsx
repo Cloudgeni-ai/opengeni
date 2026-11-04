@@ -182,6 +182,33 @@ export function IntegrationSheetBody({ model }: { model: IntegrationViewModel })
             ) : null}
           </DetailDisclosure>
         ) : null}
+        {model.sections?.map((section) => (
+          <Block
+            key={section.id}
+            title={section.title}
+            action={
+              section.action ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={section.action.primary ? "default" : "outline"}
+                  data-integration-section-action={section.id}
+                  disabled={section.action.disabled || section.action.busy}
+                  onClick={section.action.onClick}
+                >
+                  {section.action.busy ? <Loader2Icon className="animate-spin" /> : null}
+                  {section.action.label}
+                </Button>
+              ) : undefined
+            }
+          >
+            <p className="text-xs leading-5 text-fg-muted">{section.description}</p>
+            {section.status ? <p className="text-sm leading-6 text-fg">{section.status}</p> : null}
+            {section.note ? (
+              <p className="text-xs leading-5 text-fg-muted">{section.note}</p>
+            ) : null}
+          </Block>
+        ))}
         {!model.presentation && model.connection.length > 0 ? (
           <Block title="Connection">
             <ConnectionFacts facts={model.connection} />
@@ -424,10 +451,25 @@ function OptionRow({ option }: { option: IntegrationOption }) {
             type="button"
             onClick={option.action.onClick}
             disabled={option.disabled || (option.kind !== "link" && option.busy)}
+            aria-label={option.kind === "link" ? option.action.ariaLabel : undefined}
             aria-describedby={describedBy(option.disclosureId)}
             className="mt-1 text-2xs font-medium og-link focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg rounded-sm disabled:cursor-not-allowed disabled:opacity-50 disabled:no-underline"
           >
             {option.action.label}
+          </button>
+        ) : null}
+        {option.kind === "link" && option.secondaryAction ? (
+          <button
+            type="button"
+            onClick={option.secondaryAction.onClick}
+            disabled={option.disabled}
+            aria-label={option.secondaryAction.ariaLabel}
+            className={cn(
+              "mt-1 ml-3 text-2xs font-medium og-link focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg rounded-sm disabled:cursor-not-allowed disabled:opacity-50 disabled:no-underline",
+              option.secondaryAction.destructive && "text-fg-muted hover:text-status-failed",
+            )}
+          >
+            {option.secondaryAction.label}
           </button>
         ) : null}
       </div>

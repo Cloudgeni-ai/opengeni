@@ -106,11 +106,19 @@ describe("SessionList", () => {
       expect(calls).toContain("rename:aaaaaaaa-0000-4000-8000-000000000001:Q3 report");
 
       await actRun(() =>
-        view.container.querySelector<HTMLButtonElement>("[aria-label^='Hide for me:']")!.click(),
+        view.container.querySelector<HTMLButtonElement>("[aria-label^='Archive:']")!.click(),
       );
       await flush(50);
-      expect(calls).toContain("archive:aaaaaaaa-0000-4000-8000-000000000001:true:hide_for_me");
+      expect(calls).toContain("archive:aaaaaaaa-0000-4000-8000-000000000001:true:undefined");
       expect(view.container.textContent).toContain("No chats yet");
+      // Undo is offered for a few seconds and un-archives the same chat.
+      const undo = [...view.container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent === "Undo",
+      );
+      expect(view.container.textContent).toContain("Archived “");
+      await actRun(() => undo!.click());
+      await flush(50);
+      expect(calls).toContain("archive:aaaaaaaa-0000-4000-8000-000000000001:false:undefined");
     } finally {
       await view.unmount();
     }

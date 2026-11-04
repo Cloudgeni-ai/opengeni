@@ -14,7 +14,7 @@ import {
 import {
   inboxSettingsSections,
   useInboxSettings,
-  useNotificationSettingsSection,
+  useNotificationSettingsSections,
 } from "@/notifications";
 import { SettingsList } from "@/settings-list";
 import type { SettingsSection } from "@/settings-model";
@@ -43,7 +43,7 @@ function Settings() {
   const { target: outsideCallTarget, pinned: pinnedCallSession } = useOutsideCallPreferences();
   const { accounts, account, workspace, organizations, switchAccount, signOut } = useAccount();
   const inbox = useInboxSettings();
-  const notifications = useNotificationSettingsSection(inbox);
+  const { notifications, agentCalls } = useNotificationSettingsSections(inbox);
   const inboxSettings = inboxSettingsSections(inbox);
   const org = organizations.find((each) => each.accountId === workspace?.accountId);
   const multipleServers = new Set(accounts.map((each) => each.baseUrl)).size > 1;
@@ -126,6 +126,7 @@ function Settings() {
     });
   }
   if (account && notifications) sections.push(notifications);
+  if (account && agentCalls) sections.push(agentCalls);
   if (account) sections.push(...inboxSettings);
   const appearances: { id: AppearancePreference; title: string }[] = [
     { id: "system", title: "System" },

@@ -500,6 +500,10 @@ export function cipherPasskeys(cipher: Json, ownerKey: SymmetricKey): ProviderPa
       userDisplayName: decryptOptional(credential.userDisplayName, key) || null,
       privateKey: base64url(Buffer.from(privateKey, "base64url")),
       signCount: signCountOf(credential, key),
+      // Bitwarden's authenticator sets BE and BS for both registration and
+      // assertion (also for imported credentials); Vaultwarden uses that client.
+      backupEligibility: true,
+      backupState: true,
     });
   }
   return passkeys;

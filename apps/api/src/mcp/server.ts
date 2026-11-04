@@ -15,6 +15,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { assertGoalResumeAllowed, MissingPermissionRefusal } from "@opengeni/core";
 import { mintEnrollToken } from "../sandbox/enrollment";
 import { enableMachineScreenControl, enrollmentAccess } from "../sandbox/screen-control";
+import { registerAgentCallTools } from "./agent-call-tools";
 import { registerNotificationTools } from "./notification-tools";
 import { excelAddinSetup, registerExcelTools } from "./excel-tools";
 import {
@@ -66,6 +67,7 @@ import {
   type CapabilityCatalogItem,
   type GitHubRepository,
   type FirstPartyMcpToolName,
+  type SandboxBackend,
   Permission,
   type SessionAuthorizationOperation,
   type SessionAuthorizationActor,
@@ -172,9 +174,15 @@ import {
   HumanInputResponseValidationError,
   getWorkspaceGrant,
   readTurnSenderAccess,
+  getPersonalGitHubRepositorySelectionState,
 } from "@opengeni/db";
 import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
-import { allowedFirstPartyMcpToolsForSession, codemodeWorkspaceUrl } from "@opengeni/config";
+import {
+  allowedFirstPartyMcpToolsForSession,
+  canonicalPublicOrigin,
+  codemodeWorkspaceUrl,
+  servedSandboxBackends,
+} from "@opengeni/config";
 import {
   createSignedState,
   GitHubAppConfigurationError,
@@ -190,7 +198,11 @@ import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { HTTPException } from "hono/http-exception";
 import * as z4 from "zod/v4";
 import {
+  AvatarInput,
+  avatarFromToolInput,
+  PROJECT_AVATAR_TOOL_GUIDANCE,
   SESSION_PROFILE_TOOL_GUIDANCE,
+  projectAvatarFromToolInput,
   registerBotTemplateTools,
   sessionProfileToolInputShape,
   setSessionProfileFromTool,
@@ -205,6 +217,7 @@ import { siteSqlGatewayConfig } from "../site-sql/gateway";
 import { resolveSiteAgentDataContext } from "../site-publishing/agent-data-tools";
 import {
   resolveScheduledTaskCreateInput,
+  SCHEDULED_TASK_TOOL_OMITTED_AGENT_CONFIG,
   scheduledTaskCreateToolInput as buildScheduledTaskCreateToolInput,
   scheduledTaskScheduleToolInput,
   scheduledTaskCreateToolValidation,
@@ -268,7 +281,24 @@ import {
 } from "../github-access";
 import { githubBrowserBaseUrl, githubBrowserGrantClaims } from "../github-browser-flow";
 import {
+  canonicalPersonalGitHubConnection,
+  listPersonalGitHubConnections,
+} from "../integrations/personal-github";
+import {
+  GITHUB_IDENTITIES_GUIDANCE,
+  GITHUB_APP_SETTINGS_GUIDANCE,
+  githubSettingsUrl,
+  personalGitHubConsoleBaseUrl,
+  personalGitHubIdentityStatus,
+  personalGitHubSetupProjection,
+  resolvePersonalGitHubPerson,
+  type PersonalGitHubIdentityStatus,
+  type PersonalGitHubPerson,
+} from "./github-identity-status";
+import { PERSONAL_GITHUB_CAPABILITY_ID } from "@opengeni/contracts/personal-github";
+import {
   changeWorkspaceFileVisibility,
+  codemodeCallExecutionMachine,
   publishSandboxFileArtifact,
 } from "../sandbox-file-artifacts";
 import {
@@ -306,6 +336,8 @@ import {
   scheduledTaskViewerForGrant,
   siteViewerForGrant,
   resolveNewSiteAudience,
+  resolveNewProjectAudience,
+  projectSourceSessionId,
   scheduledTaskRunForGrant,
   scheduledTaskToolsProvided,
   scheduledTaskTriggerToken,
@@ -316,6 +348,7 @@ import {
   validateScheduledTaskTarget,
   updateScheduledTaskForApi,
   triggerScheduledTaskForGrant,
+  manualScheduledTaskTriggerBillingOrigin,
   validatedScheduledTaskUpdate,
   withScheduledTaskEvents,
   withScheduledTaskRunEventOccurrences,
@@ -348,13 +381,18 @@ import {
   type RunOnOp,
 } from "@opengeni/core";
 import {
+  getSessionBackgroundCommand,
+  parseCommandOutputCursor,
   readSessionBackgroundCommandOutput,
   COMMAND_OUTPUT_MAX_BYTES,
 } from "@opengeni/db/session-background-commands";
 import {
   readCommandWithWait,
+  readCommandsWithWait,
+  COMMAND_READ_DEFAULT_SECONDS,
   COMMAND_READ_MAX_WAIT_SECONDS,
   COMMAND_WAIT_DEFAULT_SECONDS,
+  COMMAND_WAIT_MAX_COMMANDS,
 } from "./command-read";
 import {
   boundSessionEventCompactResult,
@@ -411,9 +449,20 @@ import {
 } from "../integrations/slack-bot";
 import { uploadSlackTaskFile } from "../integrations/slack-task-file-upload";
 import {
+  handOffSlackAgentChat,
+  suggestSlackAgentForChat,
+  listSlackAgentChatsForSession,
+} from "../integrations/slack-interactions";
+import {
+  proposeSlackAgentFromChat,
+  SLACK_AGENT_PROPOSE_TOOL_DESCRIPTION,
+} from "../integrations/slack-agent-proposals";
+import {
   marketplacePluginCapabilityItem,
   marketplacePluginCapabilityItems,
+  mcpConnectionEndpointKey,
   pluginCapabilitySetup,
+  pluginMcpEndpointKeys,
 } from "../integrations/marketplace-plugin-catalog";
 import { createFikenClient, resolveFikenConnectionForTool } from "../integrations/fiken";
 import {
@@ -421,6 +470,7 @@ import {
   parseAllowanceExhaustedRefusal,
 } from "@opengeni/contracts/allowance-refusal";
 import { inChatCapabilitySetup } from "@opengeni/contracts/personal-integration-setup";
+import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
 import { registerEditableArtifactAgentTools } from "./editable-artifacts";
 import { registerCompanyProfileAgentAdminTools } from "./company-profile-agent-admin";
 import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
@@ -434,6 +484,7 @@ import {
   requireSiteVersionPublishOpen,
 } from "../site-publishing/service";
 import { sitePlatformBrakeToolRefusal } from "../site-publishing/platform-usage";
+import { withSitePageSizeWarnings } from "../site-publishing/page-size";
 
 import {
   createSessionAdminReach,
@@ -741,7 +792,7 @@ const buildScheduledTaskUpdateToolInput = (events: boolean) =>
         action: CreateScheduledTaskRequest.options[1].out.shape.action.optional(),
         agentConfig: z4
           .object(ScheduledTaskAgentConfigInput.shape)
-          .omit({ slackBotChannelId: true, toolPolicy: true })
+          .omit(SCHEDULED_TASK_TOOL_OMITTED_AGENT_CONFIG)
           .strict()
           .optional(),
         ...(events ? { events: scheduledTaskEventsToolInput() } : {}),
@@ -769,18 +820,24 @@ const scheduledTaskUpdateToolInput = (events: boolean) =>
 const sessionCreateToolInputs = new Map<string, ReturnType<typeof buildSessionCreateToolInput>>();
 
 /** Distinct selections are few; cache each built contract for reuse. */
-function sessionCreateToolInput(allowedTools: readonly FirstPartyMcpToolName[]) {
-  const key = allowedTools.join(",");
+function sessionCreateToolInput(
+  allowedTools: readonly FirstPartyMcpToolName[],
+  servedBackends: readonly SandboxBackend[],
+) {
+  const key = `${allowedTools.join(",")}|${servedBackends.join(",")}`;
   let input = sessionCreateToolInputs.get(key);
   if (!input) {
     if (sessionCreateToolInputs.size >= 256) sessionCreateToolInputs.clear();
-    input = buildSessionCreateToolInput(allowedTools);
+    input = buildSessionCreateToolInput(allowedTools, servedBackends);
     sessionCreateToolInputs.set(key, input);
   }
   return input;
 }
 
-function buildSessionCreateToolInput(allowedTools: readonly FirstPartyMcpToolName[]) {
+function buildSessionCreateToolInput(
+  allowedTools: readonly FirstPartyMcpToolName[],
+  servedBackends: readonly SandboxBackend[],
+) {
   const capabilityToggle = z4.boolean().optional();
   const sessionCreateAgentInput = z4
     .object({
@@ -864,7 +921,9 @@ function buildSessionCreateToolInput(allowedTools: readonly FirstPartyMcpToolNam
         .describe(
           "Omit for standard latency, even when model and reasoning are inherited. Fast or priority must be selected explicitly and supported by the model.",
         ),
-      sandboxBackend: CreateSessionRequest.out.shape.sandboxBackend,
+      // Advertise only the backends this deployment serves; core rejects any
+      // other value at create (sandboxBackendServed).
+      sandboxBackend: z4.enum(servedBackends as [SandboxBackend, ...SandboxBackend[]]).optional(),
       // Model-only structural coupling: workingDir cannot exist without a
       // targetSandboxId because both live inside one optional object. The
       // handler maps this back to the stable public REST/SDK request fields.
@@ -1018,7 +1077,8 @@ class PolicyMcpServer extends McpServer {
       if (!memory) return dispatch();
       return withSecretValueMasking(memory, async () => {
         try {
-          return memory.mask(await dispatch(), "first_party_result");
+          // A tool result is data: a tool-shaped record in it is masked in full.
+          return memory.maskData(await dispatch(), "first_party_result");
         } catch (error) {
           throw maskSecretValuesInError(error, memory);
         }
@@ -1287,7 +1347,7 @@ export function buildOpenGeniMcpServer(
     server.registerTool(
       "set_session_title",
       {
-        description: `Name this chat. Give a new chat a concise 3-7 word topic label: a stable noun phrase about the actual task or subject, never a quote/prefix of a prompt, greeting, request boilerplate, URL, identifier, credential, token, or other sensitive value. After that, rename it only when the topic materially changes or the person asks, never as routine setup after a continuation, resume, or interruption, or merely to reassert the same title. ${SESSION_PROFILE_TOOL_GUIDANCE}`,
+        description: `Name this chat. Once a new chat has a task, question or subject (not while it holds only a greeting or small talk), give it a concise 3-7 word topic label in the language the person writes in: a stable noun phrase about the actual task or subject, never a quote/prefix of a prompt, greeting, request boilerplate, URL, identifier, credential, token, or other sensitive value. After that, rename it only when the topic materially changes or the person asks, never as routine setup after a continuation, resume, or interruption, or merely to reassert the same title. ${SESSION_PROFILE_TOOL_GUIDANCE}`,
         inputSchema: {
           title: z4.string().min(1).max(200).optional(),
           ...sessionProfileToolInputShape,
@@ -1316,6 +1376,18 @@ export function buildOpenGeniMcpServer(
   // when new, their phones (see notification-tools.ts).
   if (sessionId !== null) {
     registerNotificationTools({
+      server,
+      deps,
+      grant,
+      sessionId,
+      authorize: async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      attempt: () => exactAgentCommandContext(grant, sessionId),
+      json,
+    });
+    // Calling the person: their phones ring (see agent-call-tools.ts).
+    registerAgentCallTools({
       server,
       deps,
       grant,
@@ -1515,7 +1587,7 @@ export function buildOpenGeniMcpServer(
     registerCapabilityDiscoveryTools(server, deps, grant, sessionId, json);
   }
   if (can("github:use")) {
-    registerGitHubConnectTool(server, deps, grant, options, json);
+    registerGitHubConnectTool(server, deps, grant, options, sessionId, json);
   }
 
   if (can("github:use")) {
@@ -2407,7 +2479,6 @@ export function buildOpenGeniMcpServer(
             runMode: task.runMode,
             reusableSessionId: task.reusableSessionId,
             agentConfig: task.agentConfig,
-            audience: task.visibility === "private" ? "user_private" : "workspace_shared",
             requireOnline: true,
           });
           const taskAuthoritySubjectId = await getScheduledTaskRevisionAuthoritySubject(deps.db, {
@@ -2425,6 +2496,8 @@ export function buildOpenGeniMcpServer(
                 taskAuthoritySubjectId === task.ownerSubjectId ? taskAuthoritySubjectId : null,
               action: "agent_run:create",
               quantity: 1,
+              // The run is API use when the caller or the task is.
+              billingOrigin: await manualScheduledTaskTriggerBillingOrigin(deps.db, grant, task.id),
               model: await resolveScheduledTaskPreflightModel(deps.db, catalogSettings, task),
             },
           );
@@ -2585,7 +2658,7 @@ function registerSandboxFileArtifactTool(
           ),
       },
     },
-    async ({ path, artifactId, visibility }) => {
+    async ({ path, artifactId, visibility }, extra) => {
       await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       if ((path === undefined) === (artifactId === undefined))
         throw new Error("Pass exactly one of path or artifactId.");
@@ -2595,12 +2668,27 @@ function registerSandboxFileArtifactTool(
         return json(await changeWorkspaceFileVisibility(deps, { grant, artifactId, visibility }));
       }
       const session = await requireSession(deps.db, grant.workspaceId, sessionId);
+      // A Codemode call names its operation in the worker's trusted call
+      // metadata; code that a run_on exec runs on another machine publishes
+      // that machine's file (see codemodeCallExecutionMachine).
+      const operationId = extra?._meta?.["opengeniOperationId"];
+      const executionMachine = await codemodeCallExecutionMachine(deps, {
+        grant,
+        sessionId,
+        codemodeOperationId:
+          extra?._meta?.[FIRST_PARTY_MCP_CALLER_META_KEY] === "codemode" &&
+          typeof operationId === "string" &&
+          UUID_TARGET.test(operationId)
+            ? operationId
+            : null,
+      });
       return json(
         await publishSandboxFileArtifact(deps, {
           grant,
           session,
           path: path!,
           visibility,
+          executionMachine,
         }),
       );
     },
@@ -2840,6 +2928,83 @@ function registerSlackBotTools(
               "session.first_party_mcp.call",
             );
           },
+        }),
+      );
+    },
+  );
+
+  server.registerTool(
+    "slack_agent_handoff",
+    {
+      description:
+        "Pass the Slack request this chat is answering on to another Slack agent the person asked for by name. Name the agent; the chat's own Slack thread and requester are used, never a destination you choose. Only works when the message names that agent (one typo allowed for longer names; a last word like team may be left out); otherwise answer yourself and use slack_agent_suggest. The receiving agent starts a new chat in its own workspace and answers in the same thread. At most one hand-off per message, never to yourself and never back to the agent that passed it to you. If the requester cannot use that agent they are told privately and nothing is passed on. After status passed_on, make your entire final response exactly NO_REPLY.",
+      inputSchema: {
+        agent: z4.string().min(1).max(120),
+        note: z4.string().max(1000).optional(),
+        reason: z4
+          .string()
+          .max(500)
+          .optional()
+          .describe("Why you hand off, in a few words. Logged only; nobody sees it."),
+      },
+    },
+    async ({ agent, note, reason }) => {
+      if (!sessionId) throw new Error("Passing a request on requires a chat started from Slack");
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      return json(await handOffSlackAgentChat(deps, { grant, sessionId, agent, note, reason }));
+    },
+  );
+
+  server.registerTool(
+    "slack_agent_suggest",
+    {
+      description:
+        'After answering a Slack request yourself, suggest a Slack agent that handles requests like it when the person did not ask for one. Name the agent. Opengeni then posts one line under your answer ("<Agent> handles questions like this.") with a button that sends the same message to that agent. Only agents the person can use are shown, and only one suggestion per answer. Do not mention the suggestion in your answer.',
+      inputSchema: { agent: z4.string().min(1).max(120) },
+    },
+    async ({ agent }) => {
+      if (!sessionId) throw new Error("Suggesting an agent requires a chat started from Slack");
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      return json(await suggestSlackAgentForChat(deps, { grant, sessionId, agent }));
+    },
+  );
+
+  server.registerTool(
+    "slack_agent_chats",
+    {
+      description:
+        "List this Slack agent's other recent chats in its workspace, newest first, so you can recover context people did not repeat (for example when they do not reply in a thread). Read a relevant chat with session_events. Only chats of this same agent are listed.",
+      inputSchema: { limit: z4.number().int().min(1).max(50).optional() },
+    },
+    async ({ limit }) => {
+      if (!sessionId) throw new Error("Listing agent chats requires a chat started from Slack");
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      return json(await listSlackAgentChatsForSession(deps, { grant, sessionId, limit }));
+    },
+  );
+
+  server.registerTool(
+    "slack_agent_propose",
+    {
+      description: SLACK_AGENT_PROPOSE_TOOL_DESCRIPTION,
+      inputSchema: {
+        name: z4.string().min(1).max(80),
+        description: z4.string().min(1).max(200),
+        instructions: z4.string().max(8000).optional(),
+        workspace: z4.string().min(1).max(200).optional(),
+        avatar: AvatarInput.unwrap().unwrap(),
+      },
+    },
+    async ({ name, description, instructions, workspace, avatar }) => {
+      if (!sessionId) throw new Error("Proposing an agent requires a chat started from Slack");
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      const exactAvatar = avatarFromToolInput(avatar);
+      if (!exactAvatar) throw new Error("An icon is required");
+      return json(
+        await proposeSlackAgentFromChat(deps, {
+          grant,
+          sessionId,
+          proposal: { name, description, instructions, workspace, avatar: exactAvatar },
         }),
       );
     },
@@ -3228,14 +3393,14 @@ function registerGoalTools(
   sessionId: string,
   json: (value: unknown) => { content: Array<{ type: "text"; text: string }> },
 ): void {
+  // Each tool's description states its byte limits and the normal-spacing,
+  // ledger-not-answer rule once; the schema enforces the limit per field.
   const boundedGoalToolString = (maxBytes: number, field: string, purpose: string) =>
     z4
       .string()
       .min(1)
       .max(maxBytes)
-      .describe(
-        `${purpose} At most ${maxBytes} UTF-8 bytes (ASCII characters count as one byte). Use normal spaces and sentences; summarize if needed, never squeeze words together. This is a ledger field, not the final answer.`,
-      )
+      .describe(purpose)
       .refine((value) => sessionGoalUtf8Bytes(value) <= maxBytes, {
         message: `${field} exceeds ${maxBytes} UTF-8 bytes`,
       });
@@ -3257,7 +3422,7 @@ function registerGoalTools(
   const progressNoteSchema = boundedGoalToolString(
     SESSION_GOAL_PROGRESS_MAX_BYTES,
     "goal progress note",
-    "A short human-readable status of concrete progress toward the unchanged goal. Keep only useful milestones; do not pack a deliverable, command transcript, or continuation instructions here.",
+    "A short human-readable status of concrete progress toward the unchanged goal.",
   );
   const inputWaitReasonSchema = boundedGoalToolString(
     2 * 1024,
@@ -3270,7 +3435,7 @@ function registerGoalTools(
     "goal_set",
     {
       description:
-        "Create a goal for a long-running objective that needs several turns or continued autonomous work, when this session has none or its goal is completed; answer a short or single-step request directly without a goal. text is the human-readable objective and successCriteria states its completion conditions; each allows 8192 UTF-8 bytes. Keep normal spaces; summarize, never compress words or put the deliverable in ledger text. Declare user-facing native document reports with reportRequirements before producing them. While active, idle moments synthesize continuation turns until goal_complete or goal_pause. To change an active or paused goal, use goal_update with its objective revision, a change kind, and rationale.",
+        "Create a goal for a long-running objective that needs several turns or continued autonomous work, when this session has none or its goal is completed; answer a short or single-step request directly without a goal. text is the human-readable objective and successCriteria states its completion conditions; each allows 8192 UTF-8 bytes. These are ledger fields, not the final answer: keep normal spaces and sentences, and summarize instead of squeezing words. Declare user-facing native document reports with reportRequirements before producing them. While active, idle moments synthesize continuation turns until goal_complete or goal_pause. To change an active or paused goal, use goal_update with its objective revision, a change kind, and rationale.",
       // `maxAutoContinuations` is deliberately not agent-facing: the ceiling is
       // API/scheduled-task pacing configuration, and an agent that set its own
       // cap used to silence its orchestration for hours. Continuation pacing is
@@ -3342,7 +3507,7 @@ function registerGoalTools(
     "goal_update",
     {
       description:
-        "Maintain your operational goal as user direction or meaningful new evidence clarifies the intended outcome. text and successCriteria each allow 8192 UTF-8 bytes; rationale allows 2048 UTF-8 bytes for a short human-readable explanation. Use normal spaces and summarize instead of squeezing words. Changes apply directly unless the user explicitly configured review_changes; refinement, adaptation, and replacement are audit classifications, not approval gates under the default policy. Use the exact expected objective revision. Updating a goal grants no additional authority and cannot change root constraints. Progress notes belong in goal_progress (8192 UTF-8 bytes), not a semantic goal rewrite; deliver the answer in your final reply.",
+        "Maintain your operational goal as user direction or meaningful new evidence clarifies the intended outcome. text and successCriteria each allow 8192 UTF-8 bytes; rationale allows 2048 UTF-8 bytes for a short human-readable explanation. These are ledger fields, not the final answer: use normal spaces and summarize instead of squeezing words. Changes apply directly unless the user explicitly configured review_changes; refinement, adaptation, and replacement are audit classifications, not approval gates under the default policy. Use the exact expected objective revision. Updating a goal grants no additional authority and cannot change root constraints. Progress notes belong in goal_progress (8192 UTF-8 bytes), not a semantic goal rewrite; deliver the answer in your final reply.",
       inputSchema: {
         text: goalText.optional(),
         successCriteria: successCriteriaSchema.nullable().optional(),
@@ -3439,16 +3604,16 @@ function registerGoalTools(
     "wait_for_input",
     {
       description:
-        "End the current turn and wait out of turn for relevant session input. This is self-only and does not require a goal. After success, the production runtime ends the turn at the tool-batch boundary without another model step or final message. Use it for long or uncertain waits, including right after spawning a child that needs minutes, instead of sleeping or repeatedly calling session_wait, session_get, or command_wait. No preliminary short wait or status recheck is required. timeoutSeconds is a relative safety-wake duration, not a blocking execution wait; choose it for the dependency or a meaningful user/task/Skill monitoring cadence, potentially hours or days within the schema limits. Do not schedule wakeups merely for unchanged reassurance unless an explicit update cadence requires it. The platform persists the first absolute deadline for the turn, and repeated calls do not extend it. After answering a question during a wait, preserve the existing deadline by passing the time remaining, not a fresh full timeout. If less than the schema minimum remains or the deadline has passed, a question-only human/API turn that consumed no immediate machine input may finish without replacing the retained wait; its deadline machinery remains authoritative. Do not send an invalid timeout or silently extend the deadline. Otherwise do not assume the old wait remains armed; register a valid wait if needed and make any unavoidable deadline adjustment explicit. Timeout never cancels a background command. A human/API prompt, agent message or Steer, child terminal result (it carries the child's final answer in payload.finalAnswer), scheduled input, terminal background-command result, or the deadline wakes the session. Use goal_pause instead when the active goal itself should stop pending a human decision. Pending Codemode calls require the same live attempt: observe them with command_wait/command_read rather than ending the turn. When this turn answers a person's message, put your complete answer in reply: it is shown to them exactly as written, while text written just before this call may reach them only as a short summary.",
+        "End this turn and wait out of turn for relevant session input (self-only; no goal needed). On success the Opengeni runtime ends the turn at the tool-batch boundary with no further model step or final message. Use it for long or uncertain waits, such as right after spawning a child that needs minutes, instead of sleeping or polling session_wait, session_get or command_wait; no preliminary short wait or status recheck is required. timeoutSeconds is a relative safety wake, not a blocking wait: pick it for the dependency or a meaningful user/task/Skill monitoring cadence, potentially hours or days within the schema limits, not for unchanged reassurance unless an explicit update cadence requires it. The turn's first absolute deadline persists and repeated calls do not extend it: after answering a question during a wait, keep it by passing the time remaining, not a fresh full timeout. If less than the schema minimum remains or the deadline has passed, a question-only human/API turn that consumed no immediate machine input may finish without replacing the retained wait; otherwise register a valid wait if needed and make any unavoidable deadline adjustment explicit. Timeout never cancels a background command. Wakes on a human/API prompt, agent message or Steer, child terminal result (final answer in payload.finalAnswer), scheduled input, terminal background-command result, or the deadline. Use goal_pause instead when the goal itself should stop pending a human decision. Pending Codemode calls require the same live attempt: observe them with command_wait/command_read instead of ending the turn. When this turn answers a person's message, put the complete answer in reply, shown exactly as written; text written before this call may reach them only as a short summary.",
       inputSchema: {
         reply: z4
           .string()
           .nullish()
           .describe(
-            "Your complete message to the person, shown to them verbatim as your reply (Markdown, tables and artifact images work). Pass it whenever this turn answers a person's message, and then do not also write the answer before this call. Omit it when there is nothing new to tell them.",
+            "Your complete message to the person, shown verbatim (Markdown, tables and artifact images work); do not also write it before this call. Omit it when there is nothing new to tell them.",
           ),
         reason: inputWaitReasonSchema.describe(
-          "Shown directly to the user; at most 2048 UTF-8 bytes. Write one short, natural sentence explaining what you are waiting for, with normal spacing. Exclude internal IDs, cursors, commit hashes, paths, and continuation instructions. Example: Waiting for the build and database checks to finish.",
+          "Shown directly to the user (at most 2048 UTF-8 bytes): one short, natural sentence with normal spacing saying what you are waiting for, without internal IDs, cursors, commit hashes, paths or continuation instructions. Example: Waiting for the build and database checks to finish.",
         ),
         timeoutSeconds: z4
           .number()
@@ -3503,19 +3668,25 @@ function registerGoalTools(
     "goal_complete",
     {
       description:
-        "Mark the session goal as completed with a short concrete proof for the goal ledger (evidence: at most 8192 characters). Evidence is not the deliverable and is not shown as your final chat reply; do not squeeze a report into it or remove spaces to fit. After this tool succeeds, reply to the user with the requested deliverable, or its summary and retained artifact link. Completion stops automatic goal continuations, not the current turn or its final reply. Every persisted report requirement must have a matching reportDeliveries entry containing a native document artifactId and its server-issued inspectionReceiptId from a post-edit body inspection. Missing, stale, inaccessible or summary-only proof fails; inspect again after an edit. Omit reportDeliveries only when no reports were declared.",
+        "Mark the session goal as completed with short concrete proof for the goal ledger (evidence: at most 8192 characters). Evidence is not the deliverable; do not squeeze a report into it or remove spaces to fit. Put your final answer to the user in reply (the requested deliverable, or its summary and retained artifact link): it is shown exactly as written and the Opengeni runtime ends the turn after this tool batch, so call this tool on its own after you have seen your last results. Without reply, reply to the user after this tool succeeds. Completion stops automatic goal continuations. Every persisted report requirement must have a matching reportDeliveries entry with a native document artifactId and its server-issued inspectionReceiptId from a post-edit body inspection; missing, stale, inaccessible or summary-only proof fails, so inspect again after an edit. Omit reportDeliveries only when no reports were declared.",
       inputSchema: {
         evidence: z4
           .string()
           .min(1)
           .max(8192)
+          .describe("Short ledger proof; not the final answer."),
+        // Read by the runtime, which ends the turn with it as the final
+        // answer once the completion succeeds; the ledger never stores it.
+        reply: z4
+          .string()
+          .nullish()
           .describe(
-            "Short ledger proof, at most 8192 characters; not the final answer. Keep normal spaces. Deliver the answer in your final user-facing reply.",
+            "Your final answer, shown verbatim (Markdown, tables and artifact images work); do not also write it before this call.",
           ),
         reportDeliveries: SessionGoalReportDeliveries.optional(),
       },
     },
-    async ({ evidence, reportDeliveries }) => {
+    async ({ evidence, reply, reportDeliveries }) => {
       await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
       await requireSession(deps.db, grant.workspaceId, sessionId);
       const existing = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
@@ -3571,8 +3742,9 @@ function registerGoalTools(
           ...delivery,
           artifactReference: `[Open report](/workspaces/${grant.workspaceId}/artifacts/editable/${delivery.artifactId})`,
         })),
-        handoff:
-          "Now reply to the user with the requested deliverable, or its summary and retained artifact link. The evidence is only ledger proof; this receipt does not deliver your final answer.",
+        handoff: reply?.trim()
+          ? "Your reply is this turn's final answer and ends the turn after this tool batch; if this turn still continues, give that answer as your final reply."
+          : "Now reply to the user with the requested deliverable, or its summary and retained artifact link. The evidence is only ledger proof; this receipt does not deliver your final answer.",
       });
     },
   );
@@ -3581,7 +3753,7 @@ function registerGoalTools(
     "goal_pause",
     {
       description:
-        "Pause the session goal with an evidence-based rationale when no meaningful authorized progress remains. rationale is a short human-readable blocker explanation, at most 2048 UTF-8 bytes; keep normal spaces and summarize instead of compressing words. Investigate recoverable failures and try plausible safe alternatives that could materially help; no fixed turn or retry count is required, and a definitive missing permission or required human decision can justify pausing immediately. State the blocker and what must change to resume. Work already in flight or a meaningful timed recheck uses the available waiting mechanism instead. Tool approvals remain human-only. No further continuation turns are synthesized until the goal is resumed or replaced.",
+        "Pause the session goal with an evidence-based rationale when no meaningful authorized progress remains. rationale (at most 2048 UTF-8 bytes; keep normal spaces and summarize instead of compressing words) states the blocker and what must change to resume. Investigate recoverable failures and try plausible safe alternatives that could materially help; no fixed turn or retry count is required. A task that seems infeasible, missing data or a result you cannot verify is not by itself a reason to pause: if you still pause after trying those alternatives, name the ones you tried. A definitive missing permission or required human decision can justify pausing immediately. Work already in flight or a meaningful timed recheck uses the available waiting mechanism instead. Tool approvals remain human-only. No further continuation turns are synthesized until the goal is resumed or replaced.",
       inputSchema: { rationale: goalRationale },
     },
     async ({ rationale }) => {
@@ -3833,7 +4005,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_create",
     {
       description:
-        'Create and publish a Site from a complete HTML document. Its audience follows this chat unless you set visibility: in an Only me chat it is Only me (just the person you act for can see it; they can share it with the workspace from the Site page, and in a Personal workspace publishing it to the web shares it), otherwise everyone in the workspace can open it. Set visibility to "workspace" or "private" only when the person asks for that audience. The exact HTML runs in an opaque-origin sandboxed iframe with JavaScript, external resources, forms, popups, and downloads enabled, but without parent-origin authority or top-level navigation.',
+        'Create and publish a Site from a complete HTML document. Its audience follows this chat unless you set visibility: in an Only me chat it is Only me (just the person you act for can see it; they can share it with the workspace from the Site page, and in a Personal workspace publishing it to the web shares it), otherwise everyone in the workspace can open it. Set visibility to "workspace" or "private" only when the person asks for that audience. The exact HTML runs in an opaque-origin sandboxed iframe with JavaScript, external resources, forms, popups, and downloads enabled, but without parent-origin authority or top-level navigation. Keep the HTML small: compress images and link video or large media instead of embedding them; the result lists warnings for a heavy page.',
       inputSchema: {
         title: z4.string().min(1).max(120),
         description: z4.string().max(2000).nullable().optional(),
@@ -3895,17 +4067,19 @@ function registerWorkspaceArtifactTools(
       const slugBase = slug ?? (normalizeWorkspaceArtifactSlug(title) || "artifact");
       const resolvedSlug = slug ?? `${slugBase.slice(0, 87)}-${artifactId.slice(0, 8)}`;
       return json(
-        await mutation(
-          await createWorkspaceArtifact(deps.db, {
-            artifactId,
-            slug: resolvedSlug,
-            requestedSlug: slug ?? null,
-            title,
-            description: description ?? null,
-            ...audience,
-            ...(await prepare(html, source, requestedTools, uploadId)),
-            ...provenance(idempotencyKey, "artifacts_create"),
-          }),
+        withSitePageSizeWarnings(
+          await mutation(
+            await createWorkspaceArtifact(deps.db, {
+              artifactId,
+              slug: resolvedSlug,
+              requestedSlug: slug ?? null,
+              title,
+              description: description ?? null,
+              ...audience,
+              ...(await prepare(html, source, requestedTools, uploadId)),
+              ...provenance(idempotencyKey, "artifacts_create"),
+            }),
+          ),
         ),
       );
     },
@@ -3915,7 +4089,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_publish",
     {
       description:
-        "Publish a new immutable HTML version. The exact HTML runs in an opaque-origin sandboxed iframe. First read the current source and pass its version id for optimistic concurrency.",
+        "Publish a new immutable HTML version. The exact HTML runs in an opaque-origin sandboxed iframe. First read the current source and pass its version id for optimistic concurrency. The result lists warnings for a heavy page (embedded images or video): compress or link them instead.",
       inputSchema: {
         artifactId: z4.string().uuid(),
         expectedCurrentVersionId: z4.string().uuid(),
@@ -3971,17 +4145,19 @@ function registerWorkspaceArtifactTools(
       );
       if (braked) return braked;
       return json(
-        await siteMutation(
-          await publishWorkspaceArtifactVersion(deps.db, {
-            artifactId,
-            viewer: await siteViewerForGrant(deps.db, grant),
-            expectedCurrentVersionId,
-            ...(title !== undefined ? { title } : {}),
-            ...(description !== undefined ? { description } : {}),
-            ...(await prepare(html, source, requestedTools, uploadId)),
-            ...provenance(idempotencyKey, "artifacts_publish"),
-          }),
-          true,
+        withSitePageSizeWarnings(
+          await siteMutation(
+            await publishWorkspaceArtifactVersion(deps.db, {
+              artifactId,
+              viewer: await siteViewerForGrant(deps.db, grant),
+              expectedCurrentVersionId,
+              ...(title !== undefined ? { title } : {}),
+              ...(description !== undefined ? { description } : {}),
+              ...(await prepare(html, source, requestedTools, uploadId)),
+              ...provenance(idempotencyKey, "artifacts_publish"),
+            }),
+            true,
+          ),
         ),
       );
     },
@@ -4534,14 +4710,21 @@ function registerFleetTools(
 
   const oneOffCodemodeEnvironment = async (
     op: RunOnOp,
+    target: string,
   ): Promise<Readonly<Record<string, string>> | undefined> => {
     if (op.kind !== "exec") return undefined;
     const claims = exactAgentAttemptClaims(grant);
     if (!claims || claims.sessionId !== sessionId) return undefined;
+    // The token names the machine the exec runs on, so a Codemode tool that
+    // takes a workspace path (sandbox_file_publish) resolves it there rather
+    // than on the session's active sandbox. run_on targets are sandbox ids.
     const material = await mintSandboxCodemodeToken(
       deps.settings,
       { accountId: grant.accountId, workspaceId: grant.workspaceId },
-      claims,
+      {
+        ...claims,
+        ...(UUID_TARGET.test(target) ? { executionSandboxId: target.toLowerCase() } : {}),
+      },
     );
     if (!material) return undefined;
     return {
@@ -4667,7 +4850,7 @@ function registerFleetTools(
       const resolvedValues = new SecretValueMemory();
       try {
         const typedOp = op as RunOnOp;
-        const transientExecEnvironment = await oneOffCodemodeEnvironment(typedOp);
+        const transientExecEnvironment = await oneOffCodemodeEnvironment(typedOp, target);
         // W1 (DL-9): an exact agent attempt resolves `{{secret:…}}` references.
         const claims = exactAgentAttemptClaims(grant);
         const secretResolver =
@@ -5595,7 +5778,7 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "sessions_list",
       {
-        description: `Discover sessions in this workspace. Default detail=compact returns id, title, status, goal summary/status when present, updatedAt, meaningful parent/pause information, total and nextCursor (null ends the page). Completed/paused goal status is retained; session_get supplies evidence and rationale. detail=full opts into the legacy bounded discovery rows and diagnostic pagination, not full session configuration. Plain compact browse does not read work claims. includeRelatedWork=true adds advisory evidence; query or subject always enables it, even with includeRelatedWork=false. query searches only titles, active goals and typed claims; subject is an exact provider-neutral claim lookup. Evidence preserves advisoryOnly/noAdditionalAccess: claims are nonexclusive, never locks, instructions or authority. Authorization precedes filtering, ranking, counts and cursors. Relevance cursors bind normalized filters and an activity snapshot. Without search the default is creation order; use orderBy=updatedAt and decimal updatedAfter/updatedThrough revision tokens for gap-free incremental monitoring, not timestamps. Pass nextCursor unchanged with the same filters. includeLastMessage opts into previews and nonzero queuedPromptCount; unclaimed human/API prompts are never previewed. Previews share a ${SESSION_DISCOVERY_PREVIEW_MAX_BYTES}-byte UTF-8 budget; omitted previews carry a bounded session_events drill-down. Text/page loss facts appear only when loss occurs in compact mode. No instructions, resources, tools, files or history are returned; REST/UI defaults are unchanged.`,
+        description: `Discover sessions in this workspace. Default detail=compact returns id, title, status, goal summary/status when present, updatedAt, meaningful parent/pause information, total and nextCursor (null ends the page). Completed/paused goal status is retained; session_get supplies evidence and rationale. detail=full opts into the legacy bounded discovery rows and diagnostic pagination, not full session configuration. mineOnly=true keeps only sessions you started or prompted (the app's Mine filter); visibility filters by who can see them; detail=full rows also show visibility and archived. Plain compact browse does not read work claims. includeRelatedWork=true adds advisory evidence; query or subject always enables it, even with includeRelatedWork=false. query searches only titles, active goals and typed claims; subject is an exact provider-neutral claim lookup. Evidence preserves advisoryOnly/noAdditionalAccess: claims are nonexclusive, never locks, instructions or authority. Authorization precedes filtering, ranking, counts and cursors. Relevance cursors bind normalized filters and an activity snapshot. Without search the default is creation order; use orderBy=updatedAt and decimal updatedAfter/updatedThrough revision tokens for gap-free incremental monitoring, not timestamps. Pass nextCursor unchanged with the same filters. includeLastMessage opts into previews and nonzero queuedPromptCount; unclaimed human/API prompts are never previewed. Previews share a ${SESSION_DISCOVERY_PREVIEW_MAX_BYTES}-byte UTF-8 budget; omitted previews carry a bounded session_events drill-down. Text/page loss facts appear only when loss occurs in compact mode. No instructions, resources, tools, files or history are returned; REST/UI defaults are unchanged.`,
         inputSchema: {
           limit: z4.number().int().positive().max(100).optional(),
           cursor: z4.string().max(512).optional(),
@@ -5626,6 +5809,18 @@ function registerWorkspaceOrchestrationTools(
             .max(8)
             .optional(),
           activeOnly: z4.boolean().optional(),
+          mineOnly: z4
+            .boolean()
+            .optional()
+            .describe(
+              "true keeps only sessions you started or prompted, with their child sessions. Keep unchanged when paging.",
+            ),
+          visibility: z4
+            .enum(["private", "workspace"])
+            .optional()
+            .describe(
+              "private: only you can see it; workspace: shared with everyone. Keep unchanged when paging.",
+            ),
           originSiteId: z4
             .string()
             .uuid()
@@ -5666,6 +5861,8 @@ function registerWorkspaceOrchestrationTools(
         query,
         statuses,
         activeOnly,
+        mineOnly,
+        visibility,
         originSiteId,
         recentHours,
         rootSessionId,
@@ -5732,6 +5929,8 @@ function registerWorkspaceOrchestrationTools(
             ...(query?.trim() ? { query } : {}),
             ...(statuses ? { statuses: statuses as SessionStatus[] } : {}),
             activeOnly: activeOnly === true,
+            ...(mineOnly === true ? { mineOnly: true } : {}),
+            ...(visibility ? { visibility } : {}),
             ...(originSiteId ? { originSiteId } : {}),
             ...(recentHours !== undefined ? { recentHours } : {}),
             ...(rootSessionId ? { rootSessionId } : {}),
@@ -6289,49 +6488,137 @@ function registerWorkspaceOrchestrationTools(
     );
 
     if (callerSessionId !== null) {
+      const commandReadNotes =
+        "Output larger than maxOutputBytes (default 16384) returns its start and its end, with the size of the omitted middle and a cursor to read it; a read with a cursor pages on from there (pass waitSeconds 0 to page without waiting), and the end cursor continues after the newest output. Output remains readable after the process exits. A terminal read observes completion and suppresses only its still-pending inbox notification; running reads and already claimed history are unchanged. A finished command's result, with its exit status and output, also reaches the session on its own, so there is no need to read only to learn that it finished. These execution-wait limits do not cap wait_for_input: use it for long out-of-turn waits, except pending Codemode calls require observation in the same live attempt. Neither tool sends stdin or cancels the command.";
       for (const toolName of ["command_read", "command_wait"] as const) {
+        const multi = toolName === "command_wait";
         server.registerTool(
           toolName,
           {
-            description: `${toolName === "command_read" ? "Read retained output immediately, or briefly wait" : "Briefly wait using the same read operation as command_read"} for one command owned by the current session, across sandbox and Connected Machine providers. Returns bounded stdout/stderr chunks, durable state and exitCode, nextCursor and hasMore, plus explicit retention limitations. Pass nextCursor to continue; output remains readable after the process exits. A terminal read observes completion and suppresses only its still-pending inbox notification; running reads and already claimed history are unchanged. waitSeconds is at most 50; command_wait defaults to 45, command_read to 0. These execution-wait limits do not cap wait_for_input: use it for long out-of-turn waits, except pending Codemode calls require observation in the same live attempt. Neither tool sends stdin or cancels the command.`,
+            description: multi
+              ? `Wait for background commands owned by the current session to finish, across sandbox and Connected Machine providers, then read them like command_read. Pass commandId, or commandIds (up to ${COMMAND_WAIT_MAX_COMMANDS}) with waitFor "all" (default) or "any", and optionally the cursor of each command. Returns when the commands finish or after waitSeconds (default ${COMMAND_WAIT_DEFAULT_SECONDS}, at most ${COMMAND_READ_MAX_WAIT_SECONDS}); new output alone does not end the wait. Returns each command's state, exit code and output; the output budget is shared across the commands. ${commandReadNotes}`
+              : `Read a background command owned by the current session, across sandbox and Connected Machine providers. While it runs, waits for it to finish for up to waitSeconds (default ${COMMAND_READ_DEFAULT_SECONDS}, at most ${COMMAND_READ_MAX_WAIT_SECONDS}; pass 0 to read at once); new output alone does not end the wait. Returns state, exit code and output. ${commandReadNotes}`,
             inputSchema: {
-              commandId: z4.string().uuid(),
+              commandId: multi ? z4.string().uuid().optional() : z4.string().uuid(),
+              ...(multi
+                ? {
+                    commandIds: z4
+                      .array(z4.string().uuid())
+                      .min(1)
+                      .max(COMMAND_WAIT_MAX_COMMANDS)
+                      .optional(),
+                    waitFor: z4.enum(["all", "any"]).optional(),
+                    cursors: z4
+                      .array(z4.string().max(128))
+                      .max(COMMAND_WAIT_MAX_COMMANDS)
+                      .optional(),
+                  }
+                : {}),
               cursor: z4.string().max(128).optional(),
               waitSeconds: z4.number().int().min(0).max(COMMAND_READ_MAX_WAIT_SECONDS).optional(),
               maxOutputBytes: z4.number().int().min(4).max(COMMAND_OUTPUT_MAX_BYTES).optional(),
             },
           },
-          async ({ commandId, cursor, waitSeconds, maxOutputBytes }, extra) => {
+          async (args, extra) => {
+            const { commandId, cursor, waitSeconds, maxOutputBytes } = args as {
+              commandId?: string;
+              cursor?: string;
+              waitSeconds?: number;
+              maxOutputBytes?: number;
+            };
+            const { commandIds, waitFor, cursors } = args as {
+              commandIds?: string[];
+              waitFor?: "all" | "any";
+              cursors?: string[];
+            };
             await authorizeFirstPartySession(deps, grant, callerSessionId, "session.events.read");
-            let initialRead = true;
+            const identity = {
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              sessionId: callerSessionId,
+            };
+            // Durable checks after the first reauthorize at most once a
+            // second, so a revoked caller stops waiting at its next recheck
+            // however many commands it waits on.
+            let authorizedAt = Date.now();
+            const reauthorize = async () => {
+              if (Date.now() - authorizedAt < 900) return;
+              await authorizeFirstPartySession(deps, grant, callerSessionId, "session.events.read");
+              authorizedAt = Date.now();
+            };
+            const isTerminal = async (id: string) => {
+              await reauthorize();
+              const command = await getSessionBackgroundCommand(deps.db, {
+                ...identity,
+                commandId: id,
+              });
+              if (!command) throw new Error("Background command not found in this session");
+              return command.state === "exited" || command.state === "lost";
+            };
+            const readOutput = async (
+              id: string,
+              idCursor: string | undefined,
+              budget: number | undefined,
+            ) =>
+              await readSessionBackgroundCommandOutput(deps.db, {
+                ...identity,
+                commandId: id,
+                ...(idCursor === undefined ? {} : { cursor: idCursor }),
+                ...(budget === undefined ? {} : { maxOutputBytes: budget }),
+                // A read from the start returns the start and end of the
+                // output; an explicit cursor pages on from there, so paging
+                // through an omitted middle does not repeat the tail.
+                headAndTail: idCursor === undefined,
+              });
+            const controls = {
+              waitSeconds:
+                waitSeconds ??
+                (multi ? COMMAND_WAIT_DEFAULT_SECONDS : COMMAND_READ_DEFAULT_SECONDS),
+              ...(maxOutputBytes === undefined ? {} : { maxOutputBytes }),
+              ...(extra?.signal === undefined ? {} : { signal: extra.signal }),
+              subscribe: (onEvents: Parameters<typeof deps.bus.subscribe>[2]) =>
+                deps.bus.subscribe(grant.workspaceId, callerSessionId, onEvents),
+              yieldTo: async () => await callerTurnSteerPending(callerSessionId),
+            };
+            if (commandIds === undefined && cursors === undefined) {
+              if (commandId === undefined) throw new Error("Pass commandId or commandIds");
+              // A malformed cursor fails before any wait.
+              parseCommandOutputCursor(cursor, commandId);
+              return json(
+                await readCommandWithWait({
+                  ...controls,
+                  commandId,
+                  isTerminal: async () => await isTerminal(commandId),
+                  read: async () => {
+                    await reauthorize();
+                    return await readOutput(commandId, cursor, maxOutputBytes);
+                  },
+                }),
+              );
+            }
+            const ids = [
+              ...new Set([...(commandId === undefined ? [] : [commandId]), ...(commandIds ?? [])]),
+            ];
+            if (ids.length === 0) throw new Error("Pass commandId or commandIds");
+            // Each cursor names its own command; match them up by that prefix.
+            const cursorById = new Map<string, string>();
+            for (const value of [...(cursor === undefined ? [] : [cursor]), ...(cursors ?? [])]) {
+              const owner = ids.find((id) => value.startsWith(`${id}:`));
+              if (owner === undefined)
+                throw new Error("Each cursor must belong to one of the listed commands");
+              parseCommandOutputCursor(value, owner);
+              cursorById.set(owner, value);
+            }
             return json(
-              await readCommandWithWait({
-                commandId,
-                waitSeconds:
-                  waitSeconds ?? (toolName === "command_wait" ? COMMAND_WAIT_DEFAULT_SECONDS : 0),
-                ...(maxOutputBytes === undefined ? {} : { maxOutputBytes }),
-                ...(extra?.signal === undefined ? {} : { signal: extra.signal }),
-                read: async () => {
-                  if (!initialRead)
-                    await authorizeFirstPartySession(
-                      deps,
-                      grant,
-                      callerSessionId,
-                      "session.events.read",
-                    );
-                  initialRead = false;
-                  return await readSessionBackgroundCommandOutput(deps.db, {
-                    accountId: grant.accountId,
-                    workspaceId: grant.workspaceId,
-                    sessionId: callerSessionId,
-                    commandId,
-                    ...(cursor === undefined ? {} : { cursor }),
-                    ...(maxOutputBytes === undefined ? {} : { maxOutputBytes }),
-                  });
+              await readCommandsWithWait({
+                ...controls,
+                commandIds: ids,
+                ...(waitFor === undefined ? {} : { waitFor }),
+                isTerminal,
+                read: async (id, budget) => {
+                  await reauthorize();
+                  return await readOutput(id, cursorById.get(id), budget);
                 },
-                subscribe: (onEvents) =>
-                  deps.bus.subscribe(grant.workspaceId, callerSessionId, onEvents),
-                yieldTo: async () => await callerTurnSteerPending(callerSessionId),
               }),
             );
           },
@@ -6346,7 +6633,12 @@ function registerWorkspaceOrchestrationTools(
       {
         description:
           "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Delegation has setup and coordination overhead: by default, answer directly when the work takes only a few steps, and send a related follow-up to a worker you already spawned with session_send_message instead of spawning another. Explicit user requests and applicable Skill guidance for delegation, independent review, or fresh workers override that default within existing authority. After spawning work that needs minutes, once nothing else can advance, call wait_for_input and end the turn instead of alternating session_wait and session_get; no preliminary short wait or status recheck is required. The worker's terminal result wakes you and carries its final answer (payload.finalAnswer). Do not duplicate a child's implementation; independent review or comparison may intentionally examine the same subject with a distinct deliverable. Track the child and join its actual result before completing dependent work. Give the child a concise semantic title; if omitted, one is derived from its delegated goal or initial message. The child inherits this session's visibility, agent-access scope and end-user label; a private session can only create a same-owner private child, and memoryScope may only narrow this session's selector. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Sandbox Environment or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. Normally omit tools, mcpServers, and firstPartyMcpTools so the worker inherits this session's exact selections; specialize its task through initialMessage rather than a hand-written partial tool list. To create a worker that cannot start, message, or follow other sessions, use agent: { capabilities: { from: 'all', subagents: false } } and keep tool lists omitted; its final answer still reaches you automatically. Explicit tool arrays replace the inherited selection and are only for deliberate restrictions. Do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
-        inputSchema: sessionCreateToolInput(childSelectableTools),
+        // `selfhosted` is reached through machineTarget, so it is not offered
+        // as a bare backend choice.
+        inputSchema: sessionCreateToolInput(
+          childSelectableTools,
+          servedSandboxBackends(deps.settings).filter((backend) => backend !== "selfhosted"),
+        ),
       },
       async (args) => {
         try {
@@ -7000,7 +7292,7 @@ function registerProjectTools(
       "project_get",
       {
         description:
-          "Read one workspace project: name, description, pin state and order. Use sessions_list with projectId to find its visible sessions.",
+          "Read one workspace project: name, description, avatar, pin state and order. Use sessions_list with projectId to find its visible sessions.",
         inputSchema: { projectId: projectIdSchema },
       },
       async ({ projectId }) => {
@@ -7014,35 +7306,54 @@ function registerProjectTools(
     server.registerTool(
       "project_create",
       {
-        description:
-          "Create a workspace-shared sidebar group for related sessions. A project is organizational metadata, not a repository, working directory, or inherited agent configuration.",
-        inputSchema: { name: nameSchema, description: descriptionSchema.optional() },
+        description: `Create a workspace-shared sidebar group for related sessions. A project is organizational metadata, not a repository, working directory, or inherited agent configuration. ${PROJECT_AVATAR_TOOL_GUIDANCE}`,
+        inputSchema: {
+          name: nameSchema,
+          description: descriptionSchema.optional(),
+          avatar: AvatarInput,
+        },
       },
-      async ({ name, description }) =>
-        json({
+      async ({ name, description, avatar }) => {
+        const exactAvatar = await projectAvatarFromToolInput(deps, grant, avatar);
+        // A project made in an Only me chat is Only me, so that chat fits it.
+        const audience = await resolveNewProjectAudience({
+          db: deps.db,
+          settings: deps.settings,
+          grant,
+          requested: undefined,
+          sourceSessionId: projectSourceSessionId(grant),
+        });
+        return json({
           project: await createChannel(deps.db, {
             accountId: grant.accountId,
             workspaceId: grant.workspaceId,
             name,
             description: description ?? null,
+            avatar: exactAvatar ?? null,
             createdBy: grant.subjectId,
+            audience,
           }),
-        }),
+        });
+      },
     );
     server.registerTool(
       "project_update",
       {
-        description:
-          "Rename, describe or pin/unpin a workspace project. Pin state is shared by everyone in the workspace. Omitted fields stay unchanged; null clears the description.",
+        description: `Rename, describe, set the avatar of, or pin/unpin a workspace project. Its name, description, avatar and pin state are shared by everyone in the workspace. Omitted fields stay unchanged; null clears the description. ${PROJECT_AVATAR_TOOL_GUIDANCE}`,
         inputSchema: {
           projectId: projectIdSchema,
           name: nameSchema.optional(),
           description: descriptionSchema.nullable().optional(),
+          avatar: AvatarInput,
           pinned: z4.boolean().optional(),
         },
       },
-      async ({ projectId, ...update }) => {
-        const project = await updateChannel(deps.db, grant.workspaceId, projectId, update);
+      async ({ projectId, avatar, ...update }) => {
+        const exactAvatar = await projectAvatarFromToolInput(deps, grant, avatar);
+        const project = await updateChannel(deps.db, grant.workspaceId, projectId, {
+          ...update,
+          ...(exactAvatar !== undefined ? { avatar: exactAvatar } : {}),
+        });
         if (!project) throw new Error("Project not found");
         return json({ project });
       },
@@ -7133,6 +7444,7 @@ function registerCapabilityDiscoveryTools(
   const recommendations = () =>
     nativeConnectionCapabilityRecommendations({
       connectedMachines: deps.settings.sandboxSelfhostedEnabled,
+      personalGitHub: deps.settings.githubPersonalOauthEnabled,
       browserExtension: browserExtension(deps.settings),
       integrationDefinitions: connectableIntegrationDefinitions(deps.settings, grant.workspaceId),
     });
@@ -7191,20 +7503,22 @@ function registerCapabilityDiscoveryTools(
       items.map((item) =>
         item.id === EXCEL_ADDIN_CAPABILITY_ID
           ? excelAddinSetup(deps, grant, sessionId)
-          : item.kind === "plugin"
-            ? pluginCapabilitySetup(item)
-            : item.surfaceType === "integration_definition"
-              ? integrationDefinitionSetup(item, integrationContext!, availableServerIds)
-              : capabilitySetupProjection(
-                  deps,
-                  grant.workspaceId,
-                  item,
-                  availableServerIds,
-                  acceptedServerIds,
-                  accountSelectionKnown,
-                  availableFirstPartyTools,
-                  new Set((grant.metadata?.firstPartyMcpTools as string[] | undefined) ?? []),
-                ),
+          : item.id === PERSONAL_GITHUB_CAPABILITY_ID
+            ? personalGitHubSetup(deps, grant, sessionId)
+            : item.kind === "plugin"
+              ? pluginCapabilitySetup(item)
+              : item.surfaceType === "integration_definition"
+                ? integrationDefinitionSetup(item, integrationContext!, availableServerIds)
+                : capabilitySetupProjection(
+                    deps,
+                    grant.workspaceId,
+                    item,
+                    availableServerIds,
+                    acceptedServerIds,
+                    accountSelectionKnown,
+                    availableFirstPartyTools,
+                    new Set((grant.metadata?.firstPartyMcpTools as string[] | undefined) ?? []),
+                  ),
       ),
     );
   };
@@ -7224,7 +7538,47 @@ function registerCapabilityDiscoveryTools(
       const [current, pluginItems] = await Promise.all([catalog(), plugins()]);
       const candidates = [...current.items, ...recommendations(), ...pluginItems];
       const ranked = searchCapabilityCatalogItems(candidates, query, limit ?? 8);
-      const setups = await setupProjections(ranked.map(({ item }) => item));
+      // A plugin installs for the whole workspace. When the catalogue also
+      // offers one of its MCP servers as a connection, its setup names that
+      // connection for requests about the person's own account. Matches and
+      // their order are unchanged.
+      const pluginEndpoints = new Set(
+        ranked.flatMap(({ item }) =>
+          item.kind === "plugin" && !item.enabled ? pluginMcpEndpointKeys(item) : [],
+        ),
+      );
+      const connections =
+        pluginEndpoints.size === 0
+          ? []
+          : [
+              ...new Map(
+                candidates
+                  .filter((item) => {
+                    if (item.kind !== "mcp" || !capabilityCatalogItemIsTrustedForExposure(item))
+                      return false;
+                    const key = mcpConnectionEndpointKey(item.mcpUrl ?? item.endpointUrl);
+                    return key !== null && pluginEndpoints.has(key);
+                  })
+                  .map((item) => [item.id, item] as const),
+              ).values(),
+            ];
+      const projected = await setupProjections([...ranked.map(({ item }) => item), ...connections]);
+      const setups = projected.slice(0, ranked.length);
+      const usableConnections = connections.filter(
+        (_, index) => projected[ranked.length + index]!.status !== "unavailable",
+      );
+      for (const [index, { item }] of ranked.entries()) {
+        if (item.kind !== "plugin" || item.enabled) continue;
+        const endpoints = new Set(pluginMcpEndpointKeys(item));
+        setups[index] = pluginCapabilitySetup(
+          item,
+          usableConnections
+            .filter((connection) =>
+              endpoints.has(mcpConnectionEndpointKey(connection.mcpUrl ?? connection.endpointUrl)!),
+            )
+            .map((connection) => ({ capabilityId: connection.id, name: connection.name })),
+        );
+      }
       const matches = ranked.map(({ item, matchedOn, approximate }, index) => ({
         capabilityId: item.id,
         name: item.name,
@@ -7278,7 +7632,9 @@ function registerCapabilityDiscoveryTools(
     "capability_authorization_request",
     {
       description:
-        "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the Opengeni Browser Chrome extension link; never paste an enroll token into the chat yourself." +
+        (deps.settings.githubPersonalOauthEnabled
+          ? "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app), Your GitHub (api:github-personal) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. For 'connect my GitHub' or 'do it as me' use api:github-personal; for 'install the GitHub app' use api:github-app. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the Opengeni Browser Chrome extension link; never paste an enroll token into the chat yourself."
+          : "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the Opengeni Browser Chrome extension link; never paste an enroll token into the chat yourself.") +
         (secretsSelected
           ? ' For a single password, API key or code for a service with no connector here, ask with a kind: "secret" question in request_human_input instead; you get a saved reference back.'
           : ""),
@@ -7302,7 +7658,9 @@ function registerCapabilityDiscoveryTools(
       // GitHub is the one capability whose card stays useful once connected:
       // it lists the shared repositories with a "Use" action that attaches one
       // to this chat, so a ready GitHub still gets its card.
-      const githubCardWhenReady = setup.status === "ready" && item.id === "api:github-app";
+      const githubCardWhenReady =
+        setup.status === "ready" &&
+        (item.id === "api:github-app" || item.id === PERSONAL_GITHUB_CAPABILITY_ID);
       // The machine card likewise lists connected machines with "Use in this
       // chat" and can connect another, so it is shown when machines exist too.
       const machineCardWhenReady =
@@ -7330,8 +7688,17 @@ function registerCapabilityDiscoveryTools(
       // without a membership), else their membership. Without either there is
       // nothing to say beyond the card.
       const person = await connectingPersonGrant(deps.db, grant, sessionId);
+      const memberIntegrationSetup =
+        person === null
+          ? undefined
+          : await withOrganizationIntegrationPolicyFence(
+              deps.db,
+              { accountId: grant.accountId, workspaceId: grant.workspaceId },
+              async (_tx, policy) => policy.personalIntegrationSetup,
+            ).catch(() => undefined);
       const personCannotConnect =
-        person !== null && inChatCapabilitySetup(person, item.id, item).kind === "unavailable";
+        person !== null &&
+        inChatCapabilitySetup(person, item.id, item, memberIntegrationSetup).kind === "unavailable";
       const eventId = await appendCapabilityCardEvent(deps, grant, sessionId, {
         item,
         action: setup.action ?? "connect",
@@ -7350,7 +7717,10 @@ function registerCapabilityDiscoveryTools(
           capabilityId: item.id,
           status: "ready",
           eventId,
-          message: `${setup.detail} The GitHub card is in this chat: the person picks a repository with its "Use" button, which attaches it to this chat.`,
+          message:
+            item.id === PERSONAL_GITHUB_CAPABILITY_ID
+              ? `${setup.detail} The Your GitHub card is in this chat: the person can choose which repositories Opengeni may use as them.`
+              : `${setup.detail} The GitHub card is in this chat: the person picks a repository with its "Use" button, which attaches it to this chat.`,
         });
       }
       return json({
@@ -7503,6 +7873,21 @@ function registerCapabilityDiscoveryTools(
           : "The human review card was posted. No server was added or contacted.",
       });
     },
+  );
+}
+
+/**
+ * "Your GitHub" readiness for the person this agent acts for. Connected means
+ * ready (the card still shows, with its repository chooser); otherwise only
+ * that person can connect, from the card.
+ */
+async function personalGitHubSetup(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  sessionId: string,
+): Promise<CapabilitySetupProjection> {
+  return personalGitHubSetupProjection(
+    await personalGitHubStatusForGrant(deps, grant, sessionId, null).catch(() => null),
   );
 }
 
@@ -7774,25 +8159,112 @@ function capabilityProviderDomain(item: CapabilityCatalogItem): string {
   return "opengeni.local";
 }
 
+/**
+ * The human this agent acts for, as personal GitHub sees them: the initiating
+ * person of the exact live attempt (never the session creator), or the caller
+ * itself for a direct human grant. Null when no person started this work.
+ */
+async function personalGitHubPersonForGrant(
+  db: ApiRouteDeps["db"],
+  grant: AccessGrant,
+  sessionId: string | null,
+): Promise<PersonalGitHubPerson | null> {
+  const isAgentAttempt = Boolean(exactAgentAttemptClaims(grant));
+  if (isAgentAttempt && !sessionId) return null;
+  return await resolvePersonalGitHubPerson({
+    grant,
+    isAgentAttempt,
+    loadInitiator: async () =>
+      (await requireLiveAgentAttemptAuthorization(db, grant, sessionId!))
+        .initiatingHumanSubjectId ?? null,
+    loadSenderGrant: async () => await connectingPersonGrant(db, grant, sessionId!),
+  });
+}
+
+/** The person's own GitHub identity for the status tool and its setup card. */
+async function personalGitHubStatusForGrant(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  sessionId: string | null,
+  requestOrigin: string | null | undefined,
+): Promise<PersonalGitHubIdentityStatus> {
+  return await personalGitHubIdentityStatus({
+    enabled: deps.settings.githubPersonalOauthEnabled,
+    workspaceId: grant.workspaceId,
+    baseUrl: personalGitHubConsoleBaseUrl({
+      webBaseUrl: deps.settings.webBaseUrl,
+      publicOrigin: canonicalPublicOrigin(deps.settings.publicBaseUrl),
+      requestOrigin,
+    }),
+    person: deps.settings.githubPersonalOauthEnabled
+      ? await personalGitHubPersonForGrant(deps.db, grant, sessionId)
+      : null,
+    loadConnection: async (subjectId) =>
+      canonicalPersonalGitHubConnection(
+        await listPersonalGitHubConnections(deps, {
+          workspaceId: grant.workspaceId,
+          subjectId,
+        }),
+      ),
+    loadRepositoryCount: async (subjectId, connection) => {
+      const state = await getPersonalGitHubRepositorySelectionState(deps.db, {
+        accountId: grant.accountId,
+        originWorkspaceId: connection.workspaceId,
+        subjectId,
+        connectionId: connection.id,
+      });
+      return state ? state.repositories.length : null;
+    },
+  });
+}
+
 function registerGitHubConnectTool(
   server: McpServer,
   deps: ApiRouteDeps,
   grant: AccessGrant,
   options: McpServerOptions,
+  sessionId: string | null,
   json: JsonResult,
 ): void {
   server.registerTool(
     "github_connect_link",
     {
-      description:
-        "Report truthful GitHub App workspace binding status and, for a human grant with github:manage, return the fresh GitHub owner-consent link. Server App configuration alone is never reported as a usable binding.",
+      description: deps.settings.githubPersonalOauthEnabled
+        ? `Report both GitHub identities and their setup links. ${GITHUB_IDENTITIES_GUIDANCE} The personal field covers the person's own account: connected, login and repositoryCount, or connectUrl to give them when it is not connected (manageUrl opens their repository chooser). The other fields are the Opengeni app: truthful workspace binding status, installations, and for a caller with github:manage a fresh installUrl (also linkUrl) to install it on another organization or account. ${GITHUB_APP_SETTINGS_GUIDANCE} When unclear, explain the difference in one or two sentences. On personal repositories, use github_personal__* tools and plain git; gh and raw GitHub API calls do not act as the person. Never returns tokens.`
+        : `Report truthful GitHub App workspace binding status and, for a human grant with github:manage, return the fresh GitHub owner-consent link. ${GITHUB_APP_SETTINGS_GUIDANCE} Server App configuration alone is never reported as a usable binding. Personal GitHub sign-in is not enabled on this deployment (personal.status is disabled).`,
       inputSchema: {},
     },
     async () => {
       const { settings } = deps;
+      const personal = await personalGitHubStatusForGrant(
+        deps,
+        grant,
+        sessionId,
+        options.requestOrigin,
+      ).catch(
+        // The App status stays useful when the personal read fails.
+        (): PersonalGitHubIdentityStatus => ({
+          enabled: settings.githubPersonalOauthEnabled,
+          connected: null,
+          status: "unknown",
+          login: null,
+          repositoryCount: null,
+          connectUrl: null,
+          manageUrl: null,
+          note: "Your GitHub status could not be read right now; try again.",
+        }),
+      );
       const missing = githubAppMissingSettings(settings);
       const slug = settings.githubAppSlug?.trim() || null;
       const setupMode = settings.productAccessMode === "managed" ? "platform" : "operator";
+      const settingsUrl = githubSettingsUrl(
+        personalGitHubConsoleBaseUrl({
+          webBaseUrl: settings.webBaseUrl,
+          publicOrigin: canonicalPublicOrigin(settings.publicBaseUrl),
+          requestOrigin: options.requestOrigin,
+        }),
+        grant.workspaceId,
+      );
       if (missing.length > 0 || !slug) {
         return json({
           configured: false,
@@ -7801,7 +8273,9 @@ function registerGitHubConnectTool(
           appSlug: setupMode === "operator" ? slug : null,
           installUrl: null,
           linkUrl: null,
+          settingsUrl: null,
           missing: setupMode === "operator" ? missing : [],
+          personal,
         });
       }
       const installations = await listWorkspaceGitHubInstallationBindings(deps, grant.workspaceId);
@@ -7833,8 +8307,10 @@ function registerGitHubConnectTool(
         appSlug: setupMode === "operator" ? slug : null,
         installUrl: connectUrl,
         linkUrl: connectUrl,
+        settingsUrl,
         installations: installationViews,
         missing: [],
+        personal,
       });
     },
   );
@@ -8264,6 +8740,8 @@ export function capSessionDiscoveryPage(
       ...(session.channelId ? { projectId: session.channelId } : {}),
       title: title.text,
       titleTruncated: title.truncated,
+      visibility: session.visibility,
+      ...(session.archived ? { archived: true } : {}),
       parentSessionId: session.parentSessionId,
       isRoot: session.parentSessionId === null,
       status: session.status,

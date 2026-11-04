@@ -68,7 +68,14 @@ describe("core usage allowance admission", () => {
       };
       allowance.mockResolvedValue(refusal);
       expect(await checkLimit(deps, input)).toEqual({ allowed: false, ...refusal });
-      expect(balance).toHaveBeenCalledWith(deps.db, ACCOUNT, input.model);
+      expect(balance).toHaveBeenCalledWith(
+        deps.db,
+        ACCOUNT,
+        input.model,
+        undefined,
+        undefined,
+        "app",
+      );
       try {
         await requireLimit(deps, input);
         throw new Error("expected allowance refusal");
@@ -168,6 +175,8 @@ describe("core usage allowance admission", () => {
         originalHuman,
       );
       const policy = spyOn(opengeniDb, "getWorkspaceModelPolicy").mockResolvedValue(null);
+      // A retry is billed as the failed turn was.
+      const origin = spyOn(opengeniDb, "readTurnBillingOrigin").mockResolvedValue("app");
       allowance.mockResolvedValue({
         code: "allowance_exhausted",
         scope: originalHuman ? "member" : "workspace",
@@ -209,6 +218,7 @@ describe("core usage allowance admission", () => {
         turn.mockRestore();
         human.mockRestore();
         policy.mockRestore();
+        origin.mockRestore();
       }
     },
   );

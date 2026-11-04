@@ -100,6 +100,35 @@ describe("authNeededPresentation", () => {
   test("provider labels are calm names, not raw domains", () => {
     expect(providerLabel(t, "https://www.notion.so/path")).toBe("Notion");
     expect(providerLabel(t, "")).toBe(t("messageTimeline.thisService"));
+    expect(providerLabel(t, "gmailmcp.googleapis.com")).toBe("Gmail");
+  });
+
+  test("a connected account that needs more access is asked to allow it, in plain words", () => {
+    const view = authNeededPresentation(
+      t,
+      item({
+        providerDomain: "gmailmcp.googleapis.com",
+        connectionId: "conn-1",
+        reason: "insufficient_scope",
+        scopes: ["https://www.googleapis.com/auth/gmail.compose"],
+        toolName: "send_message",
+      }),
+    );
+    expect(view.title).toBe("Give Gmail more access");
+    expect(view.actionLabel).toBe("Allow");
+    expect(view.reasonLine).toBe(
+      "It needs your permission to draft and send email. Everything it can already do stays the same.",
+    );
+    expect(view.footnote).toBe("After you allow it, the agent carries on where it stopped.");
+    expect(view.canRecover).toBe(true);
+    expect(`${view.title} ${view.footnote}`).not.toMatch(/reconnect/i);
+    // Unknown access keeps the generic line; the button still says Allow.
+    const generic = authNeededPresentation(
+      t,
+      item({ connectionId: "conn-1", reason: "insufficient_scope", scopes: ["write"] }),
+    );
+    expect(generic.title).toBe("Give Linear more access");
+    expect(generic.reasonLine).toBe("It needs additional access to continue.");
   });
 });
 

@@ -72,6 +72,34 @@ describe("built-in templates", () => {
     expect(automationTemplateWhenWords(t, notes, NOW)).toBe("When a meeting's transcript is ready");
   });
 
+  test("When an automation fails listens for the person's own automations' failed chats", () => {
+    const failed = byId("automation-failed");
+    expect(failed.name).toBe("When an automation fails");
+    expect(failed.schedule).toBeNull();
+    expect(failed.triggers).toEqual([
+      {
+        source: { kind: "workspace" },
+        eventTypes: ["turn.failed"],
+        // A chat an automation ran is Opengeni's own, so the trigger opts in,
+        // then keeps to automation chats that ran for this person.
+        includeOwnEvents: true,
+        conditions: [
+          { field: "data.automationRunId", op: "exists" },
+          { field: "data.startedByYou", op: "equals", value: true },
+        ],
+      },
+    ]);
+    expect(failed.instructions).toContain("session_events");
+    expect(failed.instructions).toContain("notify_user");
+    expect(automationTemplateWhenWords(t, failed, NOW)).toBe(
+      "When a chat one of your automations ran fails",
+    );
+    // Like Meeting notes, it needs "This workspace".
+    expect(
+      automationTemplatesFor(builtin, { eventTriggers: true }).map((template) => template.id),
+    ).not.toContain("automation-failed");
+  });
+
   test("every built-in template has distinct words and fits the API's limits", () => {
     expect(new Set(builtin.map((template) => template.id)).size).toBe(builtin.length);
     for (const template of builtin) {
@@ -136,7 +164,8 @@ describe("template sources", () => {
   const linear = source({
     id: "a1000000-0000-4000-8000-000000000003",
     kind: "webhook",
-    adapter: "linear",
+    adapter: "custom",
+    format: { preset: "linear" } as EventSource["format"],
     name: "Linear",
   });
 
@@ -151,8 +180,21 @@ describe("template sources", () => {
       ]),
     ).toBe(sharedGithub.id);
     expect(
+      automationTemplateSourceId({ kind: "webhook", adapter: "custom", preset: "linear" }, [
+        github,
+        linear,
+      ]),
+    ).toBe(linear.id);
+    // A template saved before presets names Linear by its older adapter.
+    expect(
       automationTemplateSourceId({ kind: "webhook", adapter: "linear" }, [github, linear]),
     ).toBe(linear.id);
+    // Any other custom webhook is not Linear's.
+    expect(
+      automationTemplateSourceId({ kind: "webhook", adapter: "custom", preset: "linear" }, [
+        { ...linear, format: { preset: "tailscale" } as EventSource["format"] },
+      ]),
+    ).toBe("");
     expect(
       automationTemplateSourceId({ kind: "github" }, [{ ...github, status: "disabled" }]),
     ).toBe("");

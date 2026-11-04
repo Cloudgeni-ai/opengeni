@@ -141,7 +141,10 @@ if (crypto.createHash('sha256').update(JSON.stringify({version: 1, files})).dige
   // installs from a fetched file and from an editor-staged one.
   const install = `
 const fs = require('node:fs'), crypto = require('node:crypto');
-const raw = fs.readFileSync(process.argv[1], 'utf8').trim();
+const transferred = fs.readFileSync(process.argv[1]);
+const raw = (transferred[0] === 0x1f && transferred[1] === 0x8b
+  ? require('node:zlib').gunzipSync(transferred, {maxOutputLength: ${Buffer.byteLength(managedCodemodeClientBytes(client))}})
+  : transferred).toString('utf8').trim();
 if (crypto.createHash('sha256').update(raw).digest('hex') !== ${JSON.stringify(digest)}) throw Error('Codemode client transfer integrity failure');
 const data = JSON.parse(raw), root = ${JSON.stringify(directory)};
 fs.mkdirSync(root, {recursive: true});

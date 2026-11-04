@@ -148,6 +148,7 @@ import type {
   WorkspaceInteractionRevisionEvent,
   VerifyAuthRunRequest,
   WorkspaceRealtimeModelCatalogResponse,
+  SaveComposerDraftRequest,
 } from "@opengeni/sdk";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 import type { SessionClientLike } from "@opengeni/react";
@@ -729,11 +730,16 @@ export class MockOpenGeniClient implements SessionClientLike {
   async saveComposerDraft(
     _workspaceId: string,
     sessionId: string,
-    request: Omit<ComposerDraft, "revision" | "sourceTurnId" | "sourceTurnVersion" | "updatedAt">,
+    request: SaveComposerDraftRequest,
   ): Promise<ComposerDraft> {
     const current = await this.getComposerDraft(_workspaceId, sessionId);
+    const { expectedRevision: _revision, ...content } = request;
     const draft: ComposerDraft = {
-      ...request,
+      ...content,
+      // Like the API: a save without a policy keeps the current settings.
+      model: request.model ?? current.model,
+      reasoningEffort: request.reasoningEffort ?? current.reasoningEffort,
+      latencyMode: request.latencyMode ?? current.latencyMode,
       revision: current.revision + 1,
       sourceTurnId: null,
       sourceTurnVersion: null,

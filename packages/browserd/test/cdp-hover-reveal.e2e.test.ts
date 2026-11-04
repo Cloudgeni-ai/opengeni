@@ -17,7 +17,7 @@ e2e(
     const controllerGeneration = `controller-${randomUUID()}`;
     const runner = await ManagedBrowserRunner.create({
       profileDirectory: join(directory, "profile"),
-      headed: false,
+      headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
       ...(process.env.OPENGENI_BROWSER_EXECUTABLE
         ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
         : {}),
@@ -84,15 +84,16 @@ e2e(
       expect(clicked.state).toBe("completed");
       expect(await evaluate("clicks")).toEqual(["Add resource"]);
 
-      // A control that stays pointer-transparent is still refused. The pointer
-      // moved onto it first, so the outcome is reported as unknown.
+      // A control that shows but stays pointer-transparent is refused before
+      // the pointer moves at all, so the refusal is definite.
       const inert = await controller.run(
         command(initial, {
           type: "click",
           locator: { kind: "role", role: "button", name: "Inert", exact: true },
         }),
       );
-      expect(inert.state).toBe("outcome_unknown");
+      expect(inert.state).toBe("failed");
+      expect(inert.error?.code).toBe("invalid_action");
       expect(await evaluate("clicks")).toEqual(["Add resource"]);
     } finally {
       await cdp?.close();

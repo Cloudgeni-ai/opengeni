@@ -14,11 +14,13 @@ import {
 } from "@opengeni/core";
 import {
   claimEventTriggerDispatch,
+  EVENT_AUTOMATION_MAX_CHAIN_DEPTH,
   listDueEventTriggerTasks,
   markEventOccurrenceStarted,
   pruneEventIntake,
   recordEventOccurrenceStartFailure,
   type Database,
+  type EventChainLimitNotice,
   type EventOccurrenceToStart,
   type EventThrottleNotice,
 } from "@opengeni/db";
@@ -35,7 +37,8 @@ import { errorMessage } from "@opengeni/contracts/values";
 
 export type EventTriggerDispatchDependencies = {
   db: Database;
-  settings: Pick<Settings, "eventTriggersEnabled">;
+  settings: Pick<Settings, "eventTriggersEnabled"> &
+    Partial<Pick<Settings, "automationMaxChainDepth">>;
   bus: EventBus;
   /** Start the run of one occurrence; already-started is success. */
   startRun(occurrence: EventOccurrenceToStart): Promise<void>;
@@ -44,6 +47,10 @@ export type EventTriggerDispatchDependencies = {
 
 export function eventThrottleNoticeKey(taskId: string): string {
   return `automation-throttle-${taskId}`;
+}
+
+export function eventChainLimitNoticeKey(taskId: string): string {
+  return `automation-chain-limit-${taskId}`;
 }
 
 function clip(value: string, max: number): string {
@@ -64,18 +71,34 @@ export function eventThrottleNoticePayload(
   });
 }
 
-async function postThrottleNotice(
+export function eventChainLimitNoticePayload(
+  notice: EventChainLimitNotice,
+): SessionNotificationPostedPayload {
+  const events = notice.limitedEvents === 1 ? "An event" : `${notice.limitedEvents} events`;
+  return SessionNotificationPostedPayload.parse({
+    key: eventChainLimitNoticeKey(notice.taskId),
+    title: "Automation skipped a chain of automations",
+    subtitle: clip(notice.taskName.trim() || "Automation", NOTIFICATION_SUBTITLE_MAX_CHARS),
+    body: `${events} came from automations that were themselves started by other automations, ${notice.maxChainDepth} levels deep. To stop automations from waking each other in a loop, it didn't run for them. Its run history shows a skipped run with reason "chain limit".`,
+    urgency: "normal",
+    replaced: false,
+  });
+}
+
+async function postNotice(
   deps: EventTriggerDispatchDependencies,
   workspaceId: string,
-  notice: EventThrottleNotice,
+  notice: { taskId: string; sessionId: string },
+  payload: SessionNotificationPostedPayload,
+  failure: string,
 ): Promise<void> {
   try {
     await appendAndPublishEvents(deps.db, deps.bus, workspaceId, notice.sessionId, [
-      { type: "session.notification.posted", payload: eventThrottleNoticePayload(notice) },
+      { type: "session.notification.posted", payload },
     ] as Parameters<typeof appendAndPublishEvents>[4]);
   } catch (error) {
-    // The automation page still shows that the guard is holding events.
-    deps.observability?.warn("Automation throttle notice was not posted", {
+    // The automation page and its run history still show what happened.
+    deps.observability?.warn(failure, {
       taskId: notice.taskId,
       error: errorMessage(error),
     });
@@ -88,9 +111,29 @@ export async function dispatchDueEventTriggers(
 ): Promise<void> {
   for (const due of await listDueEventTriggerTasks(deps.db)) {
     try {
-      const dispatch = await claimEventTriggerDispatch(deps.db, due.workspaceId, due.taskId);
+      const dispatch = await claimEventTriggerDispatch(
+        deps.db,
+        due.workspaceId,
+        due.taskId,
+        deps.settings.automationMaxChainDepth ?? EVENT_AUTOMATION_MAX_CHAIN_DEPTH,
+      );
       if (dispatch.throttleNotice) {
-        await postThrottleNotice(deps, due.workspaceId, dispatch.throttleNotice);
+        await postNotice(
+          deps,
+          due.workspaceId,
+          dispatch.throttleNotice,
+          eventThrottleNoticePayload(dispatch.throttleNotice),
+          "Automation throttle notice was not posted",
+        );
+      }
+      if (dispatch.chainLimitNotice) {
+        await postNotice(
+          deps,
+          due.workspaceId,
+          dispatch.chainLimitNotice,
+          eventChainLimitNoticePayload(dispatch.chainLimitNotice),
+          "Automation chain limit notice was not posted",
+        );
       }
       for (const occurrence of dispatch.start) {
         try {

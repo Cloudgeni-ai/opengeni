@@ -82,7 +82,8 @@ export function meetingSummaryModel(input: {
 /**
  * Start the summary for one completed transcript version, at most once: the
  * session is keyed by the version. Re-running a transcript starts another
- * only while the meeting still has no notes.
+ * while the meeting has no notes, or to write again the notes an earlier
+ * summary wrote that nobody has touched since.
  */
 export async function startMeetingSummary(
   service: ControlActivityServices,
@@ -93,7 +94,6 @@ export async function startMeetingSummary(
     subjectId: input.ownerSubjectId,
     recordingId: input.recordingId,
     versionId: input.versionId,
-    eventTriggersEnabled: service.settings.eventTriggersEnabled,
   });
   if (!candidate.start) return { started: false, reason: candidate.reason };
   const { recording } = candidate;
@@ -190,7 +190,12 @@ export async function startMeetingSummary(
     workspaceId: input.workspaceId,
     visibility: recording.visibility === "private" ? "user_private" : "workspace_shared",
     meetingSummary: { recordingId: recording.id, ownerSubjectId: recording.ownerSubjectId },
-    initialMessage: meetingSummaryPrompt({ recordingId: recording.id, title: recording.title }),
+    initialMessage: meetingSummaryPrompt({
+      recordingId: recording.id,
+      title: recording.title,
+      replacesRevision: candidate.replacesRevision,
+      titleSource: recording.titleSource,
+    }),
     surface: "system",
     metrics: service.observability,
     resources: [],

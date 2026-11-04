@@ -19,6 +19,7 @@ import { sandboxModule } from "./modules/sandbox";
 import { secretsModule } from "./modules/secrets";
 import { skillsModule } from "./modules/skills";
 import { subagentsModule } from "./modules/subagents";
+import { unattendedModule } from "./modules/unattended";
 import type {
   AgentPromptContext,
   AgentPromptExperiments,
@@ -31,7 +32,8 @@ import type {
  * Conditional modules in composition order. Every module depends only on
  * session-level facts: per-turn attachments never change the instructions, so
  * a turn with a file shares the cached prefix of a turn without one. Their
- * guidance travels with the turn's attachment notice instead.
+ * guidance travels with the turn's attachment notice instead. The unattended
+ * module comes last because it refines when the guidance above asks.
  */
 export const AGENT_PROMPT_MODULES: readonly AgentPromptModule[] = [
   rendererMarkdownModule,
@@ -47,6 +49,7 @@ export const AGENT_PROMPT_MODULES: readonly AgentPromptModule[] = [
   skillsModule,
   secretsModule,
   adminModule,
+  unattendedModule,
 ];
 
 export type ModularInstructionLayer = {

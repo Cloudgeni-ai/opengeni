@@ -5,7 +5,7 @@ import {
   gitCredentialAuthorityForTurn,
   mintRunGitCredentialBinding,
   mintRunGitCredentials,
-  resolveRunGitIdentity,
+  repositoryCommitIdentity,
   sandboxEnvironmentForRun,
 } from "../src/activities/environment";
 import type { GitCredentialsRequest, ResourceRef } from "@opengeni/contracts";
@@ -100,7 +100,7 @@ describe("sandbox git credentials", () => {
     ).rejects.toThrow("personal GitHub Git broker is unavailable");
   });
 
-  test("fails closed when personal and App repositories require different commit identities", async () => {
+  test("mixes personal and App repositories with one commit identity per binding", async () => {
     const personal = {
       kind: "repository" as const,
       uri: "https://github.com/octocat/private-repository",
@@ -155,8 +155,95 @@ describe("sandbox git credentials", () => {
             identity: { name: "opengeni[bot]", email: "42+opengeni[bot]@users.noreply.github.com" },
           }),
         }),
-      ).rejects.toThrow("different Git commit identities");
+      ).resolves.toMatchObject({
+        bindings: expect.arrayContaining([
+          expect.objectContaining({
+            credentialBindingId: personal.credentialBindingId,
+            identity: { name: "octocat", email: "1+octocat@users.noreply.github.com" },
+          }),
+          expect.objectContaining({
+            credentialBindingId: app.credentialBindingId,
+            identity: { name: "opengeni[bot]", email: "42+opengeni[bot]@users.noreply.github.com" },
+          }),
+        ]),
+      });
     }
+  });
+
+  test("a deployment identity stays the App default but never overrides the person's identity", () => {
+    const deploymentSettings = testSettings({
+      sandboxBackend: "docker",
+      gitAuthorName: "Deploy Bot",
+      gitAuthorEmail: "deploy@example.com",
+      githubAppId: "12345",
+      githubAppSlug: "opengeni-test",
+    });
+    const personalIdentity = { name: "octocat", email: "1+octocat@users.noreply.github.com" };
+    expect(
+      repositoryCommitIdentity(
+        deploymentSettings,
+        { provider: "github", personalGitHub: true },
+        personalIdentity,
+      ),
+    ).toEqual(personalIdentity);
+    // App repositories get the deployment identity in their own config, so
+    // they never depend on what a box's pinned env carries.
+    expect(
+      repositoryCommitIdentity(
+        deploymentSettings,
+        { provider: "github", personalGitHub: false },
+        null,
+      ),
+    ).toEqual({ name: "Deploy Bot", email: "deploy@example.com" });
+    // A separately configured committer travels with the identity.
+    expect(
+      repositoryCommitIdentity(
+        testSettings({
+          sandboxBackend: "docker",
+          gitAuthorName: "Deploy Bot",
+          gitAuthorEmail: "deploy@example.com",
+          gitCommitterName: "Release Bot",
+          gitCommitterEmail: "release@example.com",
+        }),
+        { provider: "github", personalGitHub: false },
+        null,
+      ),
+    ).toEqual({
+      name: "Deploy Bot",
+      email: "deploy@example.com",
+      committer: { name: "Release Bot", email: "release@example.com" },
+    });
+    // A partial deployment identity keeps its half and fills the other.
+    expect(
+      repositoryCommitIdentity(
+        testSettings({
+          sandboxBackend: "docker",
+          gitAuthorName: undefined,
+          gitAuthorEmail: "deploy@example.com",
+          githubAppId: "12345",
+          githubAppSlug: "opengeni-test",
+        }),
+        { provider: "github", personalGitHub: false },
+        null,
+      ),
+    ).toEqual({ name: "opengeni-test[bot]", email: "deploy@example.com" });
+    const appSettings = testSettings({
+      sandboxBackend: "docker",
+      gitAuthorName: undefined,
+      gitAuthorEmail: undefined,
+      githubAppId: "12345",
+      githubAppSlug: "opengeni-test",
+    });
+    expect(
+      repositoryCommitIdentity(appSettings, { provider: "github", personalGitHub: false }, null),
+    ).toEqual({
+      name: "opengeni-test[bot]",
+      email: "12345+opengeni-test[bot]@users.noreply.github.com",
+    });
+    // A personal repository without a broker identity has none (never the bot).
+    expect(
+      repositoryCommitIdentity(appSettings, { provider: "github", personalGitHub: true }, null),
+    ).toBeNull();
   });
 
   test("derives child-session and root-session lineage from the admitted turn", () => {
@@ -413,10 +500,16 @@ describe("sandbox git credentials", () => {
       gitlab: "gitlab-token",
       azure_devops: "azure_devops-token",
     });
-    expect(result.environment.GIT_AUTHOR_NAME).toBe("GitLab Bot");
-    expect(result.environment.GIT_AUTHOR_EMAIL).toBe("gitlab-bot@example.com");
-    expect(result.environment.GIT_COMMITTER_NAME).toBe("GitLab Bot");
-    expect(result.environment.GIT_COMMITTER_EMAIL).toBe("gitlab-bot@example.com");
+    // Commit identity is per binding, never box-wide manifest env.
+    expect(result.environment.GIT_AUTHOR_NAME).toBeUndefined();
+    expect(result.environment.GIT_COMMITTER_EMAIL).toBeUndefined();
+    expect(
+      result.gitCredentialBindings?.find((binding) => binding.provider === "gitlab")?.identity,
+    ).toEqual({ name: "GitLab Bot", email: "gitlab-bot@example.com" });
+    expect(
+      result.gitCredentialBindings?.find((binding) => binding.provider === "azure_devops")
+        ?.identity,
+    ).toBeUndefined();
     expect(result.environment.GIT_ASKPASS).toBe("/workspace/.opengeni/askpass");
     expect(result.environment.OPENGENI_GIT_CREDENTIALS_DIR).toBe(
       "/workspace/.opengeni/git-credentials",
@@ -806,7 +899,7 @@ describe("sandbox git credentials", () => {
     expect(calls[0]?.repositoryRefs).toHaveLength(2);
   });
 
-  test("uses the same immutable authority for deferred identity and later token minting", async () => {
+  test("deferred provisioning needs no identity request; the token mint carries the identity", async () => {
     const calls: GitCredentialsRequest[] = [];
     const resources: ResourceRef[] = [
       {
@@ -827,40 +920,27 @@ describe("sandbox git credentials", () => {
       };
     };
 
-    await resolveRunGitIdentity(provisionedSettings(), resources, {
+    const deferred = await sandboxEnvironmentForRun(provisionedSettings(), resources, {
+      deferGitHubToken: true,
       scope,
       authority,
       gitCredentials,
     });
-    await mintRunGitCredentials(provisionedSettings(), resources, {
+    expect(deferred.environment.GIT_AUTHOR_NAME).toBeUndefined();
+    expect(deferred.environment.GIT_ASKPASS).toBe("/workspace/.opengeni/askpass");
+    const minted = await mintRunGitCredentials(provisionedSettings(), resources, {
       scope,
       authority,
       gitCredentials,
+    });
+    expect(minted?.bindings[0]?.identity).toEqual({
+      name: "Host Bot",
+      email: "host-bot@example.com",
     });
 
     expect(
       calls.map(({ purpose, ...requestAuthority }) => ({ purpose, requestAuthority })),
     ).toEqual([
-      {
-        purpose: "identity",
-        requestAuthority: {
-          accountId: scope.accountId,
-          workspaceId: scope.workspaceId,
-          ...authority,
-          provider: "gitlab",
-          installationId: 0,
-          repositoryIds: [],
-          repositoryRefs: [
-            {
-              provider: "gitlab",
-              uri: "https://gitlab.com/acme/private.git",
-              ref: "main",
-              repositoryId: "gl-456",
-              connectionId: "gitlab-connection",
-            },
-          ],
-        },
-      },
       {
         purpose: "token",
         requestAuthority: {

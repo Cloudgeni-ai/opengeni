@@ -4,6 +4,7 @@ import type { CapabilityCatalogItem, OpenGeniClient } from "@opengeni/sdk";
 import { ConnectController, type ConnectProvider, type ConnectTransport } from "@opengeni/connect";
 import { ConnectAccountIdentity } from "../src/connect-account-identity";
 import { ConnectPanel } from "../src/connect-panel";
+import { connectionServicePresentation } from "../src/connection-service-presentation";
 import { actRun, registerDom, renderComponent } from "./render-hook";
 registerDom();
 const gmail = {
@@ -28,6 +29,21 @@ test("personal Gmail keeps service name and brand without an installation bindin
   expect(html).toContain("<strong>Gmail</strong>");
   expect(html).toContain("gmail.ico");
   expect(html).toContain("Only you");
+});
+
+// The reviewed Microsoft 365 integration definitions (CORE_INTEGRATION_DEFINITIONS).
+// Their chat setup card takes its name and mark from here; a missing mark shows a letter.
+test.each([
+  ["microsoft-outlook-mail", "Outlook Mail", "outlook.ico"],
+  ["microsoft-outlook-calendar", "Outlook Calendar", "outlook.ico"],
+  ["microsoft-outlook-contacts", "Outlook Contacts", "outlook.ico"],
+  ["microsoft-onedrive", "OneDrive", "onedrive.svg"],
+  ["microsoft-sharepoint", "SharePoint", "sharepoint.svg"],
+  ["microsoft-teams", "Microsoft Teams", "microsoft-teams.svg"],
+])("%s shows %s with its bundled %s mark", (id, name, file) => {
+  const presentation = connectionServicePresentation({ id, label: id });
+  expect(presentation.name).toBe(name);
+  expect(presentation.logo).toContain(file.replace(/\.\w+$/, ""));
 });
 test("known service branding survives missing catalog metadata", () => {
   const html = renderToStaticMarkup(

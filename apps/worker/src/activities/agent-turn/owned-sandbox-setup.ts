@@ -10,6 +10,7 @@ import {
   recordTurnStartupPhase,
 } from "../../observability-metrics";
 import { createSharedRigSetupCoordinator } from "./sandbox-shared-preparation";
+import { createSandboxSetupReplayGuard, sandboxSetupFailure } from "./sandbox-setup-agent-failure";
 import type { TurnStreamAttemptDeps } from "./stream-attempt";
 import { ownedTurnSandboxForAgent } from "./turn-sandbox-access";
 import { sandboxStartupPhaseObserver } from "./sandbox-startup-phase";
@@ -77,9 +78,11 @@ export async function runEagerOwnedSandboxSetup(
     provider: deps.turnExecutionPolicy.providerId,
     backend: deps.activeSandboxBackend ?? deps.groupBoxBackend,
     publish: eventing.publish,
+    publishInBackground: eventing.publishInBackground,
   });
   const ownedSandboxSetupStartedAt = performance.now();
   let ownedSandboxSetupOutcome: "completed" | "failed" = "completed";
+  const setupReplayGuard = createSandboxSetupReplayGuard();
   try {
     const eagerSetupSession = sandboxState.setupBoxSession ?? ownedEstablished.session;
     // The worker owns platform setup for owned boxes, so the runtime skips its
@@ -96,6 +99,10 @@ export async function runEagerOwnedSandboxSetup(
     const eagerCredentialSetupSession = deps.initialRunCredentialMaterial
       ? withRunCredentialsSession(eagerSetupSession as object, input.sessionId)
       : eagerSetupSession;
+    // Every setup write runs as a command through this fence, which lets the
+    // attempt writer drain settle the setup admission even when the setup
+    // itself never returns (an unanswered agent).
+    const setupCommandFence = eventing.toolCancellationFenceRef.current;
     await deps.runWorkspaceMutationForSandbox(
       eagerResolvedSandbox,
       "eagerOwnedSandboxSetup",
@@ -117,33 +124,35 @@ export async function runEagerOwnedSandboxSetup(
               }
               await eventing.publish([{ type: event.type, payload: event.payload }], true);
             },
-            ...(eventing.toolCancellationFenceRef.current
+            ...(setupCommandFence
               ? {
-                  commandRunner: eventing.toolCancellationFenceRef.current.runSandboxCommand.bind(
-                    eventing.toolCancellationFenceRef.current,
-                  ),
+                  commandRunner: setupCommandFence.runSandboxCommand.bind(setupCommandFence),
                 }
               : {}),
             ...(sandboxState.sandboxGroupId && sandboxState.sandboxHolderId
               ? {
-                  coordinateSharedRigSetup: createSharedRigSetupCoordinator({
-                    db: deps.db,
-                    accountId: input.accountId,
-                    workspaceId: input.workspaceId,
-                    sandboxGroupId: sandboxState.sandboxGroupId,
-                    attemptId: input.attemptId,
-                    holderId: sandboxState.sandboxHolderId,
-                    sandbox: eagerResolvedSandbox,
-                    ...(deps.runtimeCancellationSignal
-                      ? { signal: deps.runtimeCancellationSignal }
-                      : {}),
-                    observe: (measurement) =>
-                      recordSandboxSharedPreparation(observability, measurement),
-                  }),
+                  coordinateSharedRigSetup: setupReplayGuard.trackRigSetup(
+                    createSharedRigSetupCoordinator({
+                      db: deps.db,
+                      accountId: input.accountId,
+                      workspaceId: input.workspaceId,
+                      sandboxGroupId: sandboxState.sandboxGroupId,
+                      attemptId: input.attemptId,
+                      holderId: sandboxState.sandboxHolderId,
+                      sandbox: eagerResolvedSandbox,
+                      ...(deps.runtimeCancellationSignal
+                        ? { signal: deps.runtimeCancellationSignal }
+                        : {}),
+                      observe: (measurement) =>
+                        recordSandboxSharedPreparation(observability, measurement),
+                    }),
+                  ),
                 }
               : {}),
           },
         ),
+      undefined,
+      setupCommandFence ? { commandFence: setupCommandFence } : {},
     );
     await deps.attachGitCredentialRenewal(
       eagerSetupSession as GitCredentialTokenWriterSession,
@@ -151,7 +160,9 @@ export async function runEagerOwnedSandboxSetup(
     );
   } catch (error) {
     ownedSandboxSetupOutcome = "failed";
-    throw error;
+    // The model stream has not started, and every setup step is idempotent,
+    // so an unanswered agent lets the same turn retry instead of failing it.
+    throw sandboxSetupFailure(setupReplayGuard, error);
   } finally {
     await measure.flush();
     recordTurnStartupPhase(observability, {

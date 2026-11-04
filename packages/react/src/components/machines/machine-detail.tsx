@@ -11,6 +11,7 @@ import {
   BuildingIcon,
   ChevronRightIcon,
   CpuIcon,
+  LayersIcon,
   LaptopIcon,
   PlugIcon,
   RadioIcon,
@@ -38,6 +39,7 @@ import { METRICS, METRIC_WINDOWS, pointsFor, WINDOW_LABEL, type MetricWindow } f
 import { MachineOperationPolicyEditor } from "./machine-operation-policy";
 import type { UpdateMachineOperationPolicyRequest } from "@opengeni/sdk";
 import { useOpenGeniText, type OpenGeniText } from "../../messages/runtime";
+import type { ReactNode } from "react";
 
 export type MachineDetailProps = {
   machine: MachineView;
@@ -56,6 +58,15 @@ export type MachineDetailProps = {
   /** Open "Who can use it?" for a connected machine. Omit when the viewer
    * can't change it; the row then shows the current audience read-only. */
   onChangeAudience?: ((machine: MachineView) => void) | undefined;
+  /** Where an organization machine works ("All workspaces + Personal"), shown
+   * as its "Available in" row. Organization machines only. */
+  reachSummary?: string | undefined;
+  /** Open "Available in" for an organization machine. Omit when the viewer
+   * isn't the organization's owner or an admin; the row is then read-only. */
+  onChangeReach?: ((machine: MachineView) => void) | undefined;
+  /** For your own machine: the workspaces where it runs your own messages.
+   * Shown under "Who can use it?". */
+  whereItWorks?: ReactNode | undefined;
   /** Start, retry or resend the signed agent update. Omit when the viewer can't. */
   onUpdateAgent?: ((machine: MachineView) => void) | undefined;
   updatingAgent?: boolean | undefined;
@@ -78,7 +89,7 @@ const AUDIENCE = (
   },
   organization: {
     label: t("machines.machineDetail.wholeOrganization"),
-    description: t("machines.machineDetail.everyWorkspaceInTheOrganization"),
+    description: t("machines.machineDetail.membersCanUseItWhere"),
     Icon: BuildingIcon,
   },
 });
@@ -129,6 +140,59 @@ function MachineAudienceRow({
     </button>
   ) : (
     <div data-machine-audience={machine.scope} className={frame}>
+      {content}
+    </div>
+  );
+}
+
+/** Where an organization machine works. A navigational row for organization owners and admins. */
+function MachineReachRow({
+  machine,
+  summary,
+  onChange,
+}: {
+  machine: MachineView;
+  summary: string;
+  onChange?: ((machine: MachineView) => void) | undefined;
+}) {
+  const t = useOpenGeniText();
+  const content = (
+    <>
+      <LayersIcon className="size-4 shrink-0 text-og-fg-subtle" aria-hidden />
+      <span className="flex min-w-0 flex-1 flex-col gap-0.5 text-left">
+        <span className="text-og-sm font-medium text-og-fg">
+          {t("machines.machineDetail.availableIn")}
+        </span>
+        <span className="text-og-xs text-og-fg-muted">
+          {t("machines.machineDetail.organizationOwnersChooseWhere")}
+        </span>
+      </span>
+      <span className="shrink-0 text-og-sm text-og-fg-muted">{summary}</span>
+      {onChange ? (
+        <ChevronRightIcon className="size-4 shrink-0 text-og-fg-subtle" aria-hidden />
+      ) : null}
+    </>
+  );
+  const frame =
+    "flex w-full min-h-14 items-center gap-3 rounded-og-lg border border-og-border bg-og-surface-1 px-4 py-3 shadow-og-sm";
+  return onChange ? (
+    <button
+      type="button"
+      data-machine-reach
+      onClick={() => onChange(machine)}
+      aria-label={t("machines.machineDetail.availableInNameLabel", {
+        name: machine.name,
+        summary,
+      })}
+      className={cn(
+        frame,
+        "transition-colors hover:bg-og-surface-2 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/50",
+      )}
+    >
+      {content}
+    </button>
+  ) : (
+    <div data-machine-reach className={frame}>
       {content}
     </div>
   );
@@ -262,6 +326,9 @@ export function MachineDetail({
   onUpdateOperationPolicy,
   updatingOperationPolicy,
   onChangeAudience,
+  reachSummary,
+  onChangeReach,
+  whereItWorks,
   onUpdateAgent,
   updatingAgent,
   now = Date.now(),
@@ -435,6 +502,12 @@ export function MachineDetail({
       {machine.enrollmentId && !machine.isSessionGroup ? (
         <MachineAudienceRow machine={machine} onChange={onChangeAudience} />
       ) : null}
+
+      {machine.scope === "organization" && machine.enrollmentId && reachSummary ? (
+        <MachineReachRow machine={machine} summary={reachSummary} onChange={onChangeReach} />
+      ) : null}
+
+      {whereItWorks}
 
       {onUpdateOperationPolicy && machine.enrollmentId && machine.operationPolicy ? (
         <MachineOperationPolicyEditor

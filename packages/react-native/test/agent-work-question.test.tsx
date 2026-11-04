@@ -10,6 +10,26 @@ import { registerDom, renderComponent } from "../../react/test/render-hook";
  */
 type Recorded = { props: Record<string, unknown>; clears: number };
 const inputs = new Map<string, Recorded>();
+type Layout = { nativeEvent: { layout: { y: number; height: number } } };
+type Scroll = {
+  nativeEvent: {
+    contentOffset: { y: number };
+    contentSize: { height: number };
+    layoutMeasurement: { height: number };
+  };
+};
+type ScrollProps = {
+  children?: ReactNode;
+  onLayout(event: Layout): void;
+  onContentSizeChange(width: number, height: number): void;
+  onScrollBeginDrag(): void;
+  onScroll(event: Scroll): void;
+  onScrollEndDrag(event: Scroll): void;
+  onMomentumScrollEnd(event: Scroll): void;
+};
+let scrollProps: ScrollProps;
+let promptLayout: ((event: Layout) => void) | undefined;
+const scrollOffsets: number[] = [];
 
 function host(tag: string) {
   return function Host(props: {
@@ -17,7 +37,14 @@ function host(tag: string) {
     accessibilityLabel?: string;
     accessibilityRole?: string;
     testID?: string;
+    onLayout?: (event: Layout) => void;
   }) {
+    const child = props.children as {
+      props?: { group?: { kind: string; item?: { kind: string } } };
+    } | null;
+    if (child?.props?.group?.kind === "item" && child.props.group.item?.kind === "user-message") {
+      promptLayout = props.onLayout;
+    }
     return createElement(
       tag,
       {
@@ -71,7 +98,14 @@ mock.module("react-native", () => {
   return {
     View: host("div"),
     Text: host("span"),
-    ScrollView: host("div"),
+    ScrollView: forwardRef(function ScrollView(props: ScrollProps, ref) {
+      scrollProps = props;
+      useImperativeHandle(ref, () => ({
+        scrollTo: ({ y }: { y: number }) => scrollOffsets.push(y),
+        scrollToEnd: () => scrollOffsets.push(Number.POSITIVE_INFINITY),
+      }));
+      return createElement("div", {}, props.children);
+    }),
     ActivityIndicator: () => null,
     Pressable,
     TextInput,
@@ -315,6 +349,124 @@ test("a system skip (a scheduled run's unanswered question) keeps its card", asy
     const text = view.container.textContent ?? "";
     expect(text).toContain("Agent asked");
     expect(text).toContain("Skipped");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("startup disappears on first useful output, not just on turn completion", async () => {
+  sequence = 0;
+  // A start that just happened; one 30 seconds old says it is taking longer.
+  const now = (each: SessionEvent): SessionEvent => ({
+    ...each,
+    occurredAt: new Date().toISOString(),
+  });
+  const events = [
+    event("user.message", { text: "Plan a garden afternoon." }),
+    event("turn.started", {}),
+    event("turn.startup.phase.started", { phase: "model_preparation" }),
+  ].map(now);
+  const view = await renderComponent(<MessageTimeline events={events} />);
+  try {
+    expect(view.container.textContent).toContain("Working");
+    await view.rerender(
+      <MessageTimeline
+        events={[
+          ...events,
+          now(event("agent.message.delta", { text: "Start with a short walk." })),
+        ]}
+      />,
+    );
+    expect(view.container.textContent).toContain("Start with a short walk.");
+    expect(view.container.textContent).not.toContain("Working");
+    expect(view.container.textContent).not.toContain("Waiting for a response");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a start that runs past 30 seconds says it is taking longer than usual", async () => {
+  sequence = 0;
+  const events = [
+    event("user.message", { text: "Plan a garden afternoon." }),
+    event("turn.started", {}),
+    event("turn.startup.phase.started", { phase: "model_preparation" }),
+  ];
+  const view = await renderComponent(<MessageTimeline events={events} />);
+  try {
+    expect(view.container.textContent).toContain("A little longer than usual");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("useful output does not hide a failed preparation row", async () => {
+  sequence = 0;
+  const events = [
+    event("user.message", { text: "Plan a garden afternoon." }),
+    event("turn.started", {}),
+    event("turn.startup.phase.failed", { phase: "tools", durationMs: 100 }),
+  ];
+  const view = await renderComponent(<MessageTimeline events={events} />);
+  try {
+    const failure = view.container.textContent ?? "";
+    expect(failure).toMatch(/failed/i);
+    await view.rerender(
+      <MessageTimeline
+        events={[...events, event("agent.message.delta", { text: "Here is what I can do." })]}
+      />,
+    );
+    expect(view.container.textContent).toMatch(/failed/i);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("layout and programmatic momentum keep the answer start; a reader's scroll releases it", async () => {
+  sequence = 0;
+  scrollOffsets.length = 0;
+  promptLayout = undefined;
+  const events = [
+    event("user.message", { text: "Plan a garden afternoon." }),
+    event("turn.started", {}),
+  ];
+  const view = await renderComponent(<MessageTimeline events={events} />);
+  const scrollEvent = (y: number): Scroll => ({
+    nativeEvent: {
+      contentOffset: { y },
+      contentSize: { height: 2000 },
+      layoutMeasurement: { height: 500 },
+    },
+  });
+  try {
+    await act(async () => {
+      scrollProps.onLayout({ nativeEvent: { layout: { y: 0, height: 500 } } });
+      scrollProps.onContentSizeChange(390, 2000);
+    });
+    expect(scrollOffsets).toHaveLength(0);
+    await act(async () => {
+      promptLayout!({ nativeEvent: { layout: { y: 36, height: 124 } } });
+      scrollProps.onContentSizeChange(390, 2000);
+    });
+    expect(scrollOffsets.at(-1)).toBe(24);
+    // UIKit can report momentum completion for our own scroll, without a drag.
+    await act(async () => {
+      scrollProps.onMomentumScrollEnd(scrollEvent(1500));
+      scrollProps.onContentSizeChange(390, 2300);
+    });
+    expect(scrollOffsets.at(-1)).toBe(24);
+    await act(async () => {
+      scrollProps.onScrollBeginDrag();
+      scrollProps.onScroll(scrollEvent(400));
+      scrollProps.onScrollEndDrag(scrollEvent(400));
+      scrollProps.onMomentumScrollEnd(scrollEvent(600));
+    });
+    const count = scrollOffsets.length;
+    await act(async () => scrollProps.onContentSizeChange(390, 2500));
+    expect(scrollOffsets).toHaveLength(count);
+    // Sending resumes answer-start following rather than tail following.
+    await view.rerender(<MessageTimeline events={events} followLatestSignal={1} />);
+    expect(scrollOffsets.at(-1)).toBe(24);
   } finally {
     await view.unmount();
   }

@@ -2,10 +2,88 @@ import { describe, expect, test } from "bun:test";
 import type { Session } from "@opengeni/contracts";
 import {
   buildSlackAppHomeAccessBlocks,
+  buildSlackAppHomeAgentBlocks,
   buildSlackAppHomeBlocks,
   isSlackAppHomeLinkAction,
+  slackAppHomeAskAction,
   slackAppHomeOpenedEvent,
 } from "../src/integrations/slack-app-home";
+
+describe("Slack App Home agent directory", () => {
+  test("is empty without agents, so Home is unchanged", () => {
+    expect(buildSlackAppHomeAgentBlocks([])).toEqual([]);
+    const sessions: Session[] = [];
+    expect(
+      buildSlackAppHomeBlocks({ sessions, workspaceUrl: null, sessionUrl: () => null, agents: [] }),
+    ).toEqual(buildSlackAppHomeBlocks({ sessions, workspaceUrl: null, sessionUrl: () => null }));
+  });
+
+  test("lists each agent with its icon and how to call it, first on Home", () => {
+    const blocks = buildSlackAppHomeAgentBlocks([
+      {
+        id: "agent-1",
+        name: "Data <Team>",
+        description: "Answers revenue questions.",
+        call: "@Opengeni +data-team",
+        iconUrl: "https://example.test/icon.png",
+      },
+      {
+        id: "agent-2",
+        name: "Ops",
+        description: "Handles incidents.",
+        call: "@Opengeni +ops",
+        iconUrl: null,
+      },
+    ]);
+    expect(blocks[0]).toMatchObject({ type: "header", text: { text: "Agents you can ask" } });
+    expect(blocks[1]).toMatchObject({
+      type: "section",
+      text: { text: "*Data &lt;Team&gt;*\nAnswers revenue questions.\n`@Opengeni +data-team`" },
+      accessory: { type: "image", image_url: "https://example.test/icon.png" },
+    });
+    // Each agent has an Ask button that opens the Ask form with it chosen.
+    expect(blocks[2]).toEqual({
+      type: "actions",
+      block_id: "opengeni_home_agent_ask_agent-1",
+      elements: [
+        {
+          type: "button",
+          action_id: "opengeni.home.ask",
+          text: { type: "plain_text", text: "Ask", emoji: true },
+          value: "agent-1",
+        },
+      ],
+    });
+    expect(blocks[3]).not.toHaveProperty("accessory");
+    expect(blocks[4]).toMatchObject({ type: "actions", elements: [{ value: "agent-2" }] });
+    expect(blocks.at(-1)).toEqual({ type: "divider" });
+  });
+
+  test("reads an Ask press, and only a well-formed one", () => {
+    const agentId = "6f1c2d3e-4b5a-4c6d-8e7f-901234567890";
+    const press = (
+      overrides: Record<string, unknown> = {},
+      action: Record<string, unknown> = {},
+    ) => ({
+      type: "block_actions",
+      trigger_id: "trigger-1",
+      team: { id: "T1" },
+      user: { id: "U1" },
+      actions: [{ action_id: "opengeni.home.ask", value: agentId, ...action }],
+      ...overrides,
+    });
+    expect(slackAppHomeAskAction(press())).toEqual({
+      slackTeamId: "T1",
+      slackUserId: "U1",
+      triggerId: "trigger-1",
+      agentId,
+    });
+    expect(isSlackAppHomeLinkAction(press())).toBe(false);
+    expect(slackAppHomeAskAction(press({}, { value: "not-an-id" }))).toBeNull();
+    expect(slackAppHomeAskAction(press({ trigger_id: undefined }))).toBeNull();
+    expect(slackAppHomeAskAction(press({}, { action_id: "opengeni.home.connect" }))).toBeNull();
+  });
+});
 
 describe("Slack App Home projection", () => {
   test("accepts only bounded home-tab event callbacks", () => {

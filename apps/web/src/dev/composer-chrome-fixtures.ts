@@ -22,7 +22,7 @@ import { FIRST_PARTY_MCP_TOOL_NAMES, type FirstPartyMcpToolName } from "@opengen
 
 import type { SessionToolSelection } from "@opengeni/react/app/components/pickers";
 import {
-  firstPartySessionToolOptions,
+  firstPartySessionToolOptionsFor,
   type McpServerOption,
 } from "@opengeni/react/app/lib/session-tools";
 
@@ -424,7 +424,7 @@ export const galleryModelRows: PickerModelRow[] = projectPickerRows(t, [
   }),
   catalogModel({
     id: "opper/aws/claude-opus-5-5",
-    label: "Claude Opus 5.5 (EU)",
+    label: "Claude Opus 5.5",
     shortLabel: "Opus 5.5",
     provider: "opper",
     providerLabel: "Opper",
@@ -443,7 +443,7 @@ export const galleryToolSelection: SessionToolSelection = {
   ),
 };
 
-export const galleryFirstPartyTools = firstPartySessionToolOptions;
+export const galleryFirstPartyTools = firstPartySessionToolOptionsFor(undefined);
 
 export const screenshotIncomingInputs: SessionPendingInputPreview[] = [
   galleryPendingInput(0, {

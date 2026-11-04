@@ -8,9 +8,22 @@
   <body>
     <div id="root"></div>
     <script>
-      const platform = new URLSearchParams(location.search).get("platform") || "macos";
+      // `?bar=<px>`: the window bar height the shell reports on macOS, 44 as
+      // the current shell does; `?bar=none` for shells that don't report it.
+      // `?zoom=<factor>`: the page zoom the shell reports.
+      const params = new URLSearchParams(location.search);
+      const platform = params.get("platform") || "macos";
+      const bar = params.get("bar") || "44";
+      const zoom = Number(params.get("zoom") || "1");
       if (platform !== "browser")
-        window.opengeniDesktop = { version: 1, platform, capabilities: [] };
+        window.opengeniDesktop = {
+          version: 1,
+          platform,
+          capabilities: [],
+          ...(platform === "macos" && bar !== "none"
+            ? { windowBarHeight: Number(bar), zoomFactor: () => zoom }
+            : {}),
+        };
     </script>
     <script type="module" src="/test/desktop-corner-fixture.tsx"></script>
   </body>

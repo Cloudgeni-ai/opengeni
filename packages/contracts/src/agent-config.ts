@@ -297,6 +297,8 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   notify_user: "humanInput",
   notification_withdraw: "humanInput",
   inbox_tidy: "humanInput",
+  // Ringing the person's phone for a live voice call.
+  call_user: "humanInput",
   command_wait: "sandbox",
   command_read: "sandbox",
 
@@ -464,6 +466,10 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   slack_bot_delete_message: "workspaceConnectors",
   slack_bot_prepare_message: "workspaceConnectors",
   slack_bot_send_prepared_message: "workspaceConnectors",
+  slack_agent_handoff: "workspaceConnectors",
+  slack_agent_suggest: "workspaceConnectors",
+  slack_agent_chats: "workspaceConnectors",
+  slack_agent_propose: "workspaceConnectors",
   fiken_companies_list: "workspaceConnectors",
   fiken_contacts_list: "workspaceConnectors",
   fiken_contact_create: "workspaceConnectors",
@@ -489,6 +495,9 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   scheduled_task_runs_list: "schedules",
   event_sources_list: "schedules",
   events_get: "schedules",
+  event_sources_create_webhook: "schedules",
+  event_sources_update: "schedules",
+  event_sources_delete: "schedules",
 
   artifacts_list: "artifacts",
   artifacts_get_source: "artifacts",
@@ -548,6 +557,7 @@ export const AGENT_FUNCTION_TOOL_CAPABILITIES = {
   // Runtime function tools.
   request_human_input: "humanInput",
   list_models: "subagents",
+  privacy_facts: "runtime",
   generate_image: "media",
   generate_video: "media",
   get_video_generation_capabilities: "media",
@@ -828,6 +838,7 @@ export const AGENT_PROMPT_MODULE_IDS = [
   "secrets",
   "admin",
   "attachments",
+  "unattended",
 ] as const;
 export const AgentPromptModuleId = /* @__PURE__ */ defineSchema(() =>
   z.enum(AGENT_PROMPT_MODULE_IDS),
@@ -852,6 +863,7 @@ export const AGENT_PROMPT_MODULE_TITLES: Readonly<Record<AgentPromptModuleId, st
   secrets: "Secrets",
   admin: "Integration setup",
   attachments: "Attached files",
+  unattended: "Unattended session",
 };
 
 /** The prompt module each capability owns; capabilities absent here own none. */

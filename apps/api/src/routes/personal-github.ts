@@ -33,6 +33,7 @@ import {
   requireLegacyOAuthActor,
 } from "../connection-ownership";
 import {
+  canonicalPersonalGitHubConnection,
   completePersonalGitHubOAuthCallback,
   listPersonalGitHubConnections,
   personalGitHubReviewUrl,
@@ -349,23 +350,4 @@ function personalGitHubRepositoryRouteError(error: unknown): Error {
     return new HTTPException(404, { message: "personal GitHub connection not found" });
   }
   return error instanceof Error ? error : new Error("personal GitHub repository request failed");
-}
-
-function canonicalPersonalGitHubConnection<
-  T extends { status: string; updatedAt: string; id: string },
->(connections: T[]): T | null {
-  const statusRank: Record<string, number> = {
-    active: 0,
-    needs_reauth: 1,
-    error: 2,
-    revoked: 3,
-  };
-  return (
-    [...connections].sort((left, right) => {
-      const rank = (statusRank[left.status] ?? 4) - (statusRank[right.status] ?? 4);
-      if (rank !== 0) return rank;
-      const updated = right.updatedAt.localeCompare(left.updatedAt);
-      return updated !== 0 ? updated : right.id.localeCompare(left.id);
-    })[0] ?? null
-  );
 }

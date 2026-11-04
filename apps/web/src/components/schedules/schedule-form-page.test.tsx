@@ -466,7 +466,7 @@ test("a schedule that posts into an Only me chat stays Only me", async () => {
   await act(async () => root.unmount());
 });
 
-test("a schedule on your own machine is Only me", async () => {
+test("a schedule on your own machine can be shared; it runs as you", async () => {
   privateAllowed = true;
   machines = [
     {
@@ -488,11 +488,15 @@ test("a schedule on your own machine is Only me", async () => {
   } as ScheduledTask;
   const { container, root } = await render();
   expect(audienceOption(container, "Only me")!.getAttribute("aria-checked")).toBe("true");
-  expect(audienceOption(container, "Workspace")!.getAttribute("aria-disabled")).toBe("true");
-  expect(container.textContent).toContain(
-    "It runs on your own machine, so only you can see this automation and its chats.",
-  );
+  expect(audienceOption(container, "Workspace")!.getAttribute("aria-disabled")).not.toBe("true");
+  expect(container.textContent).not.toContain("It runs on your own machine");
   expect(container.textContent).toContain("My laptop");
+  await act(async () => {
+    audienceOption(container, "Workspace")!.click();
+    await flush();
+  });
+  const request = (await save(container)) as { visibility?: string };
+  expect(request.visibility).toBe("workspace");
   await act(async () => root.unmount());
 });
 

@@ -32,7 +32,8 @@ use image::{
 };
 use opengeni_agent_platform::{
     validate_linux_named_key_chord, CapturedFrame, DesktopBackend as _, LinuxDesktop,
-    LinuxRgbaFrame, LinuxWindow, LinuxWindowRect, PlatformError,
+    LinuxPasteOutcome, LinuxPreviousClipboard, LinuxRgbaFrame, LinuxWindow, LinuxWindowRect,
+    PlatformError,
 };
 use opengeni_agent_proto::v1;
 use serde_json::json;
@@ -2193,6 +2194,78 @@ impl AtspiComputerAdapter {
         Ok(None)
     }
 
+    async fn validate_restoring_paste(
+        &self,
+        command: &NativeActionCommand,
+        text: &str,
+    ) -> NativeAdapterResult<()> {
+        if self.desktop.is_none() {
+            return Err(NativeAdapterError::unsupported(
+                "pasting with a clipboard restore needs an X11 desktop",
+            ));
+        }
+        if text.len() > 1024 * 1024 {
+            return Err(invalid_action(
+                "native clipboard text exceeds its UTF-8 byte envelope",
+            ));
+        }
+        Box::pin(self.validate(&plain_paste(command))).await
+    }
+
+    /// Pastes `text` and then puts the previous clipboard text back, once the
+    /// focused client has read the pasted text. The previous clipboard stays
+    /// replaced when it held no text (an image or files), was too large to
+    /// read whole, the target did not read the paste in time, or the person
+    /// copied something new meanwhile (their copy is kept).
+    async fn dispatch_restoring_paste(
+        &self,
+        command: &NativeActionCommand,
+        text: &str,
+    ) -> NativeAdapterResult<Option<NativeObservation>> {
+        let plain = plain_paste(command);
+        self.validate(command).await?;
+        let (desktop, clipboard) = match (self.desktop.as_ref(), self.clipboard.as_ref()) {
+            (Some(desktop), Some(clipboard)) => (desktop.clone(), clipboard.clone()),
+            _ => {
+                return Err(NativeAdapterError::unsupported(
+                    "pasting with a clipboard restore needs an X11 desktop",
+                ))
+            }
+        };
+        let previous = clipboard.read().await.ok();
+        let offer = {
+            let text = text.to_owned();
+            tokio::task::spawn_blocking(move || desktop.offer_paste_text(text)).await
+        };
+        let Ok(Ok(offer)) = offer else {
+            // Without an offer of our own (text too large for one transfer,
+            // or the display refused it) the text is pasted from the shared
+            // clipboard and stays there.
+            clipboard
+                .mutate(NativeClipboardAction::Write, Some(text.to_owned()))
+                .await?;
+            return Box::pin(self.dispatch_on_seat(&plain)).await;
+        };
+        let pasted = Box::pin(self.dispatch_on_seat(&plain)).await;
+        let (offer, outcome) = if matches!(&pasted, Err(error) if !error.dispatched) {
+            (offer, None)
+        } else {
+            let (offer, outcome) = tokio::task::spawn_blocking(move || {
+                let outcome = offer.wait(PASTE_READ_WAIT);
+                (offer, outcome)
+            })
+            .await
+            .map_err(|error| {
+                NativeAdapterError::outcome_unknown(format!(
+                    "X11 paste offer task failed after dispatch: {error}"
+                ))
+            })?;
+            (offer, Some(outcome))
+        };
+        finish_restoring_paste(&clipboard, offer, outcome, previous, text).await;
+        pasted
+    }
+
     async fn dispatch_clipboard_storage(
         &self,
         command: &NativeActionCommand,
@@ -2387,8 +2460,12 @@ impl ComputerAdapter for AtspiComputerAdapter {
             .await
     }
 
+    #[allow(clippy::too_many_lines)] // one route per action kind, checked in dispatch order
     async fn validate(&self, command: &NativeActionCommand) -> NativeAdapterResult<()> {
         command.validate_click_identity().map_err(invalid_action)?;
+        if let Some(text) = restoring_paste_text(&command.action) {
+            return self.validate_restoring_paste(command, text).await;
+        }
         if let Some(screen) = self.screen_target() {
             if screen.id == command.target_id {
                 return self.validate_screen(command, &screen).await;
@@ -2532,6 +2609,9 @@ impl AtspiComputerAdapter {
         // event before the settlement observation. External mutations are
         // invalidated by the registered AT-SPI event stream above.
         self.invalidate_semantic_cache();
+        if let Some(text) = restoring_paste_text(&command.action) {
+            return self.dispatch_restoring_paste(command, text).await;
+        }
         if let Some(result) = self.dispatch_clipboard_storage(command).await {
             return result;
         }
@@ -3292,6 +3372,74 @@ fn pixel_inputs(
         | NativeAction::Launch { .. } => Err(NativeAdapterError::unsupported(
             "action is not an X11 screen input",
         )),
+    }
+}
+
+/// Puts the clipboard in its final state after a restoring paste. `outcome`
+/// is `None` when nothing was pasted.
+async fn finish_restoring_paste(
+    clipboard: &NativeClipboardController,
+    offer: opengeni_agent_platform::LinuxPasteOffer,
+    outcome: Option<LinuxPasteOutcome>,
+    previous: Option<NativeClipboard>,
+    text: &str,
+) {
+    let keep = match outcome {
+        // The person copied something new: theirs stays.
+        Some(LinuxPasteOutcome::Superseded) => None,
+        // A late reader still gets the pasted text.
+        Some(LinuxPasteOutcome::Pending) => Some(Some(text.to_owned())),
+        None | Some(LinuxPasteOutcome::Consumed) => match previous {
+            Some(NativeClipboard {
+                text: Some(previous),
+                truncated: false,
+            }) => Some(Some(previous)),
+            Some(NativeClipboard { text: None, .. })
+                if offer.previous() == LinuxPreviousClipboard::Empty =>
+            {
+                Some(None)
+            }
+            // Contents that are not text, or too large to read whole, cannot
+            // be put back; the pasted text stays instead.
+            _ => Some(Some(text.to_owned())),
+        },
+    };
+    if let Some(Some(contents)) = keep {
+        // Written while the offer still owns the clipboard, so it is never
+        // briefly empty. The paste itself already happened; if this write
+        // fails, the pasted text simply stays.
+        let _ = clipboard
+            .mutate(NativeClipboardAction::Write, Some(contents))
+            .await;
+    }
+    // Dropping the offer gives up its ownership; with nothing written above
+    // an empty previous clipboard is empty again.
+    drop(offer);
+}
+
+/// How long a paste waits for the focused client to read its text before the
+/// text is left on the clipboard instead of restoring the previous one.
+const PASTE_READ_WAIT: Duration = Duration::from_secs(3);
+
+/// The text of a paste that restores the clipboard afterwards. Only the
+/// computer driver sends one; the public paste action carries no text.
+fn restoring_paste_text(action: &NativeAction) -> Option<&str> {
+    match action {
+        NativeAction::Clipboard {
+            operation: NativeClipboardAction::Paste,
+            text: Some(text),
+        } => Some(text),
+        _ => None,
+    }
+}
+
+fn plain_paste(command: &NativeActionCommand) -> NativeActionCommand {
+    NativeActionCommand {
+        action: NativeAction::Clipboard {
+            operation: NativeClipboardAction::Paste,
+            text: None,
+        },
+        ..command.clone()
     }
 }
 

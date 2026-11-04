@@ -14,6 +14,13 @@
  * Properties:
  * - Values shorter than the minimum (8 characters by default) are never
  *   searched for: a short value such as a PIN would mangle unrelated text.
+ * - A distinctive value (random-looking: a token, key or strong password) is
+ *   searched for anywhere, in every form. A weak value (a word, a word with a
+ *   few digits, a host, an email, a path, or a low-entropy string) also
+ *   appears in unrelated names, paths and code, so it is replaced only as a
+ *   whole token in a credential position: the whole line, after a
+ *   credential word on the same line (`password=`, `"token": "…"`), or as a
+ *   URL's password. See `secretValueStrength`.
  * - The longest form wins where several match at one position.
  * - Idempotent: the labels and Opengeni's markers already in the text are
  *   kept, so masking masked text changes nothing. Other reference-shaped text
@@ -27,11 +34,13 @@
  * guarantees this for references; `secretCredentialMaskLabel` for Opengeni's
  * own credentials.
  */
+import { credentialNameDescribesValue, credentialNameSaysSecret } from "./credential-names";
 import { formatSecretReference, parseSecretReference } from "./secret-references";
 import type { ResolvedSecretValue, SecretResolver } from "./secret-resolution";
 import { isBase64DataUrl, isTextMediaType, mapSecretMaskableStrings } from "./secret-mask-strings";
 import {
   collectSecretShapes,
+  detectSecretShapes,
   maskSecretShapes,
   maskSecretShapesInText,
   secretShapeMaskLabel,
@@ -101,6 +110,65 @@ export type SecretValueMaskOptions = {
    * of a text type are searched decoded and encoded again.
    */
   skipKey?: (key: string) => boolean;
+  /**
+   * A text that is a whole absolute address (`https://host:port/path`) keeps
+   * its scheme, host and port: they name where the browser is, not text a
+   * page or a person typed, and masking inside them leaves no usable address.
+   * Its user info, path, query and fragment are masked as usual. Default false.
+   */
+  keepUrlHosts?: boolean;
+  /**
+   * Leave a tool's identity in conversation structure unmasked (see
+   * SecretMaskableStringsOptions.keepToolIdentities). Default true, for
+   * model input and stored conversation history. False where the structure
+   * is data rather than conversation: tool output and browser or desktop
+   * results, which are masked in full.
+   */
+  keepToolIdentities?: boolean;
+  /**
+   * Where weak values (see `secretValueStrength`) are replaced.
+   * "credential-positions" (default): only in a credential position, so the
+   * names, paths and code that merely contain them stay readable.
+   * "anywhere": like distinctive values. For explicit, scoped removals: the
+   * history scrub a person asked for, and values typed into one browser or
+   * desktop session.
+   */
+  weakValues?: "credential-positions" | "anywhere";
+  /**
+   * Called for every candidate occurrence of a known value: replaced, or
+   * (for a weak value outside a credential position) kept. Metadata only:
+   * the event never carries text. Must not throw; errors are ignored.
+   */
+  onMatch?: (event: SecretValueMatchEvent) => void;
+};
+
+/** How a known value is searched for in text (see `secretValueStrength`). */
+export type SecretValueStrength = "distinctive" | "weak";
+
+/** Estimated entropy of a value, in bits (Shannon entropy of its characters times its length). */
+export type SecretValueEntropyBucket = "lt32" | "32_64" | "64_128" | "ge128";
+
+/** Where an occurrence sits in the text around it. */
+export type SecretValueMatchPosition =
+  /** A whole token: surrounded by spaces, quotes, `=`, `,` and the like. */
+  | "token"
+  /** Joined to letters, digits, `_` or `-` (part of an identifier or name). */
+  | "identifier"
+  /** Joined to `/` or `\`, or followed by a file extension (part of a path). */
+  | "path"
+  /** Inside a URL. */
+  | "url"
+  /** An encoded form (JSON-escaped, percent-encoded or base64). */
+  | "encoded";
+
+/** One occurrence of a known value; never carries the value or the text. */
+export type SecretValueMatchEvent = {
+  outcome: "masked" | "kept";
+  strength: SecretValueStrength;
+  entropy: SecretValueEntropyBucket;
+  position: SecretValueMatchPosition;
+  /** Occurrences with these labels in one masked text: one event per text, not per occurrence. */
+  count: number;
 };
 
 export type SecretValueMaskDiagnostic = {
@@ -170,6 +238,284 @@ export function isSecretReferenceMaskLabel(label: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Strength
+// ---------------------------------------------------------------------------
+
+/** Shannon entropy of the characters of `value`, times its length, in bits. */
+export function secretValueEntropyBits(value: string): number {
+  if (typeof value !== "string" || value.length === 0) return 0;
+  const counts = new Map<string, number>();
+  for (const character of value) counts.set(character, (counts.get(character) ?? 0) + 1);
+  const length = [...value].length;
+  let perCharacter = 0;
+  for (const count of counts.values()) {
+    const share = count / length;
+    perCharacter -= share * Math.log2(share);
+  }
+  return perCharacter * length;
+}
+
+function entropyBucket(bits: number): SecretValueEntropyBucket {
+  if (bits < 32) return "lt32";
+  if (bits < 64) return "32_64";
+  if (bits < 128) return "64_128";
+  return "ge128";
+}
+
+/**
+ * A word cased as a word (lower case, Capitalized or ALL CAPS). A random run
+ * of mixed-case letters is not one.
+ */
+const WORD = "(?:\\p{Ll}+|\\p{Lu}\\p{Ll}+|\\p{Lu}+)";
+/** Up to four digits and one symbol after a word: `admin123`, `Password1!`. */
+const WORD_TAIL = "[0-9]{0,4}[^\\p{L}\\p{N}\\s]?";
+/** One word, or two separated by a single space, with an optional tail. */
+const WORD_LIKE = new RegExp(`^${WORD}(?: ${WORD})?${WORD_TAIL}$`, "u");
+/** A camelCase or PascalCase identifier: `adminUser`, `HarborView2`. */
+const CAMEL_LIKE = new RegExp(
+  `^(?:\\p{Ll}{2,}|\\p{Lu}\\p{Ll}{2,})(?:\\p{Lu}\\p{Ll}{2,})*${WORD_TAIL}$`,
+  "u",
+);
+/** A part of a snake_case or kebab-case name: a word or a number. */
+const SNAKE_PART = new RegExp(`^(?:${WORD}|[0-9]+)$`, "u");
+
+/**
+ * A snake_case or kebab-case name: two parts (`db_admin`, `deploy-bot`), or
+ * three with a number among them (`deploy-bot-01`). Three or more words
+ * (`wiry-unwound-cable`) are a passphrase.
+ */
+function snakeLike(text: string): boolean {
+  const parts = text.split(/[_-]/u);
+  if (parts.length < 2 || parts.length > 3 || !parts.every((part) => SNAKE_PART.test(part))) {
+    return false;
+  }
+  return parts.length === 2 || parts.some((part) => /^[0-9]+$/u.test(part));
+}
+/** Values shaped like names of places, not secrets. */
+const HOST_LIKE = /^(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?::\d{1,5})?$/u;
+const EMAIL_LIKE = /^[^\s@]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}$/u;
+const URL_LIKE = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s@]+$/u;
+const PATH_LIKE = /^(?:\/|\.{1,2}\/|~\/|[A-Za-z]:\\)\S*$/u;
+/** Longer word-shaped values are treated as passphrases. */
+const WORD_SHAPED_MAX_CHARS = 32;
+/**
+ * The 254 letter pairs that make up 95% of the pairs in the distinct English
+ * words of Opengeni's documentation. A random run of letters has many pairs
+ * outside this set (`qk`, `zv`, `xb`); words rarely do.
+ */
+const COMMON_LETTER_PAIRS = new Set(
+  (
+    "abacadagaiakalamanaparasatauavaybabebiblbobrbsbucacccechcickclcocrctcucydadbdcdddedi" +
+    "dmdodrdsdueaebecedeeefegeielemeneoepeqereseteuevewexeyfafefffiflfofrfugageghgigngogr" +
+    "gsguhahehihohtiaibicidieifigiliminioipirisitivizkekikslalcldlelilllolsltlulymambmemi" +
+    "mmmompmsmunancndnenfngninknlnmnnnonpnrnsntnunvoaobocodofogoiokolomonoooporosotouovow" +
+    "oxpapdpepiplpoppprpsptpuqurarcrdrergrirkrlrmrnrorrrsrtrurvrysascseshsiskslsospssstsu" +
+    "tatctethtitltmtotptrtstttutyuaubucudueuiulumunupurusutvaveviwawewiwnwowsxcxexpxtypysz" +
+    "aze"
+  ).match(/../gu),
+);
+/**
+ * The 2,402 letter triples that make up 95% of the triples in the same
+ * words. Pairs alone let about one random run of single-case letters in a
+ * hundred through; triples as well, about one in two thousand.
+ */
+const COMMON_LETTER_TRIPLES = new Set(
+  (
+    "abaabeabiablaboabrabsabuaccacdaceachaciackacoacqacractacyadaadbadcaddadeadfadiadjadl" +
+    "admadoadradsadvadwadyafeaffaftagaageaggagiagnagraicaidailaimainairaisaitakeakiaksala" +
+    "albalcaldalealfalgalialkallalmaloalpalralsaltalualvalwamaambameamiammampamsanaancand" +
+    "aneanganiankanmannanoanransantanuanyapaapeaphapiappapsaptaraarbarcardareargariarkarl" +
+    "armarnarrarsartaryasaascaseashasiaskasoassastasuasyataatcateatfathatiatlatoatsattatu" +
+    "audaugaulaunausautavaaveaviavoawaawnaxeaxiaxsayeayiaylaymaysazubacbadbalbanbapbarbas" +
+    "batbeabecbedbefbegbehbelbenberbesbhobidbigbilbinbitbjeblableblibloblybmiboabodboobor" +
+    "botbouboxbrabrebribrobscbsebsobstbtrbufbuibunbusbutbyibypbytcabcaccadcalcamcancapcar" +
+    "cascatcaucceccoccuceacebceccedceecefceicelcemcenceocepcercescetcevcewchachechichmcho" +
+    "chpchrchschtchuciacidciecifcilcincipciscitckackbckcckeckfckgckicklcknckockpckscktcku" +
+    "clacleclicloclucoacodcogcolcomconcoocopcorcoscoucovcpccpscptcpucqucracrecricrocrucry" +
+    "ctactcctecthctictlctmctnctoctpctrctscttctuculcumcurcuscutcyccypdabdacdaedagdaldandap" +
+    "dardasdatdaudaydbadbodbydcadcodcrddaddeddiddlddrdeadebdecdeddeedefdegdeldemdendeodep" +
+    "derdesdetdevdexdfadfedfidfodfrdgediadicdiddiedifdigdindiodirdisditdivdjudledlidlydma" +
+    "dmcdmedmidmodnodocdofdomdondopdordotdoudowdpadpedpodprdradredridrodsadscdsedshdsidsk" +
+    "dstdsudtadtedthdtodtuduaducduldupdurdusdvadvedvidwoeabeaceadeafeageakealeameaneapear" +
+    "easeateaueavebaebhebieboebpebrebsebuebyecaeceechecieckeclecoecrecsectecuecyedaedbedc" +
+    "eddedeedfedgedhediedledmedoedpedredsedteduedweeceedeekeemeeneepeereeseeteeveexefaefe" +
+    "effefieflefoefrefuegaegeegiegmegoegreguehaeheehoehteideigeineipeiteivejeekeekielaelc" +
+    "eldeleelfelielleloelpelrelseltelyemaembemeemiemoempemsemuenaencendeneenfengenienoenr" +
+    "ensentenuenveofeogeoneopeoreoueowepaepeephepieplepoeprepseptepuequeraerbercerdereerf" +
+    "ergerherierlermerneroerperrerserteruerverweryesaesceseesfeshesieskeslesoespesqessest" +
+    "esuesyetaetbetcetdeteetfetgethetietmetoetpetretsettetuetvetwetyeueeuneupeureusevaeve" +
+    "evievoewaewceweewiewoewrewsexaexcexeexfexhexiexpexrexsexteyeeysfabfacfadfaifalfaufea" +
+    "fecfedfeefenferfesfetffefffffifflffoffsficfiefigfilfinfirfitfixflafleflifloflufocfol" +
+    "fooforfoufrafrefrofseftefulfunfusfycfyigacgaggaigangatgchgcogdegeagecgedgeegeggeigel" +
+    "gemgengeogepgergesgetggegglghtgibgicgingisgitglegliglogmagmegnagnegnignognugoagoogor" +
+    "gotgovgprgragregrigrogsegstgsugthguagueguigumgurhabhadhaihalhanhapharhashathauhavhbo" +
+    "hclhcohdrheahechedheeheihelhemhenherheshexhichidhighilhinhiphishithivhmahmehnehoihol" +
+    "homhonhoohorhoshothouhowhpahrahrehrohsehsthtehtmhtshtthubhumhunhwohydhypiabiagialian" +
+    "iariatibeibiiblibribuicaiceichiciickicoicricsicticyidaidciddideidfidgidiidlidridsidt" +
+    "iedielienieriesieviewifaifeiffifiiftifyigaigeiggighigiignigrigsiguiinikeilaildileili" +
+    "illiloilsiltiluilyimaimeimiimmimpimsimuinainbincindineinfinginhiniinkinlinminninpins" +
+    "intinuinvinwiodionioriosiouipaipeipiiplippipripsiptiquireiriirmiroirrirsirtisaiscise" +
+    "isfishisiiskislismisoispisrissistisuitaitciteitfithitiitlitmitoitpitritsittituitwity" +
+    "ivaiveiviiwoixeizaizeizijecjoijoujsojudjumjuskabkackagkbokcokdokedkeekenkepkerkesket" +
+    "keykfikflkgrkilkinkipkitkloknokorkoukpokreksekspkstktiktokuplablaclailamlanlaplarlas" +
+    "latlaulaylbalcalcolculdaldcldeldildoldrldslealeblecledleelefleglellemlenleplerleslet" +
+    "leulevlewlexlfalfolialibliclidlielifligliklimlinlioliplislitlivlizllallbllcllellillm" +
+    "llollpllrllslltllullylmelnaloaloblocloglonlooloplorloslotloulovlowloylpalpelpolprlre" +
+    "lrolsclselsolstlsultaltelthltiltmltoltpltrltslualudlueluglumlunlurluslutlvalvelwolys" +
+    "mabmacmagmaimalmanmapmarmasmatmaumaxmaymbembimblmcomcpmeamebmecmedmeemelmemmenmeomer" +
+    "mesmetmevmicmidmigmilminmismitmizmmammemmimmommumodmonmormosmotmoumovmpampempimplmpo" +
+    "mprmpsmptmpumulmupmutnabnacnadnagnainalnamnannapnarnasnatnaunavnbanbinblnboncancench" +
+    "ncinclnconcrnctncuncyndandbndcndendindlndmndondpndrndsndtneanecnedneenegneinelnemnen" +
+    "neonepnernesnetneunevnewnexnfanfenfinflnfonfrnfungangcngdngengfnghnginglngmngongpngr" +
+    "ngsngtngunhenianicnidnienifnimninnionipnisnitniznkenkinksnlanlenlinlonlynmanmcnmenmo" +
+    "nnannenninnonoanobnodnolnomnonnopnornosnotnounownpanpenplnponprnpunqunrenronrunsansc" +
+    "nsensfnshnsinslnsonspnstnsunswntantbntcntdntentfnthntintlntmntontpntrntsnttntuntwnty" +
+    "nuanuenuinulnumnupnurnusnvanvenvinvonwanwenwinwooadoaloaroasoauobaobeobjoblobsocaocc" +
+    "oceociockocooctocuodaodeodiodsoduodyoesoffofioftogaogeoggogiognogoogrogsoicoidoinois" +
+    "ojeokaokeokioksokuolaolbolcoldoleoliolloloolpolrolsoluolvomaombomcomeomiommomoompoms" +
+    "onaonboncondoneonfongonhonionkonlonmonnonoonponronsontonuonvonwoodookooloomoopooroos" +
+    "ootopaopdopeopioplopmopooppopropsoptopuopyoraorborcordoreorgoriorkorlormornoroorporr" +
+    "orsortoruorworyosaoscoseosiosoospossostosuotaotcoteotfothotiotootsottouboudougouloun" +
+    "oupourousoutovaoveoviowaowcowdoweowiowlownowsoxboxcoxeoxfoxioxsoxyoymozepabpacpadpag" +
+    "paipalpanparpaspatpaupaypcapcopdapeapecpedpeepelpenperpespetpgrphaphephiphophrphypic" +
+    "pidpiepiipikpilpinpippirpisplaplepliplopluplypocpoipolponpoopopporpospotpowppappeppi" +
+    "pplppopprppsprepripropscpsepshpstptaptcpteptiptoptsptuptypubpulpurpusputquaquequiquo" +
+    "rabracradrafragrairalramranraprarrasratrauravrawrbarbirborcarcerchrcirclrcorcurdardc" +
+    "rderdirdrrdsrearebrecredreerefregrehreirejrelremrenreorepreqrerresretreurevrewrexrfa" +
+    "rfirforgargergirgrrgurhoriaribricridrierifrigrimrinrioriprisritrivrizrkbrkdrkerkfrki" +
+    "rksrlarlerlirlorlsrlyrmarmermirmormsrmurnarncrnernirnlrnornrrnsroarobrocrodrofrogroj" +
+    "rokrolromronrooroprorrosrotrourovrowroxrparperplrporprrptrrarrerrirrorrursarscrsersh" +
+    "rsirsorstrsurtartbrtcrterthrtirtmrtortrrtsrttrturtyrucrulrumrunruprusrutrvarvervirwa" +
+    "rworyarycryeryirypryrryssabsacsafsagsalsamsansapsarsatsavscasceschscisclscoscrseasec" +
+    "sedseesefsegseiselsemsensepseqsersessetseusevsfesfosgrshashcsheshishoshpshusibsicsid" +
+    "sifsigsilsimsinsiosissitsivsizskaskeskiskssktslasleslislosluslysmasmismosnasocsofsol" +
+    "somsonsorsouspaspespisplsposprsqlsqusressasscssessfssissksslssnssosspsstssusswstastb" +
+    "stcstdstesthstistlstmstostpstrstssttstustwstysuasubsucsuesufsugsuisulsumsupsursusswa" +
+    "sweswiswosymsynsystabtactadtagtaitaktaltamtantaptartastattautbatbetbitbotbrtbytcatch" +
+    "tcltcotcrtcutdetdoteatebtectedteeteftegtehteitekteltemtenteoteptertestettevtewtextfa" +
+    "tfitfotgrthathcthdthethfthithmthnthothrthsthuthwtiatibtictidtietiftigtiltimtintiotip" +
+    "tirtistittivtiztketlatletlitlotlytmatmetmitmltmotmstnatnetnotoatoctoftogtoktoltomton" +
+    "tootoptortostottoutovtowtpatpetpitpotprtputqutratretritrotrutrytsatsctsetsftshtsitsk" +
+    "tsotsrtsttsuttattettittlttottpttrttuttytuatuntupturtustuttvatvitwatwetwitwotyctyityl" +
+    "tymtyptyrtystyttyvtywuagualuanuaruatubaubjublubmubpubrubsubtuccuceuchuciuckuctudeudg" +
+    "udiuedueiuenueruesueuuffuggughugiuiduieuiluinuiruisuitulaulduleullultumaumbumeummumn" +
+    "umpunaunbuncunduneunfunguniunkunlunmunnunounpunrunsuntunwuotuouupaupcupdupeupgupiupl" +
+    "uppupsupturaurcureurfurguriurlurnurpurrursurvusauseushusiusluspusrustutautbutcutdute" +
+    "utfuthutiutlutmutoutputrutsuttvabvacvaivalvanvarvatvauveavecvedvefvelvemvenvepverves" +
+    "vetvewviavicvidvievigvilvinviovirvisvitvivvocvoivokvolwaiwakwalwanwapwarwaswatwaywde" +
+    "weawebwedweeweiwerweswhewhiwhowidwinwirwitwlewliwnewnlwnsworwrawriwsewstxacxaixamxap" +
+    "xcaxcexchxclxcoxcrxecxedxerxesxflxhaxidximxinxisxitxpaxpexpixplxpoxprxrexsexsuxtaxte" +
+    "xtrxtsxtuyabycayclycoydeydryedyeryexyfoyidyinyleyliyloymcymeymoynayncyntyouypaypeypo" +
+    "ypryptyreyroyseysiysnystysuyteytoywaywozatzedzenzerzeszinzonzoozur"
+  ).match(/.../gu),
+);
+/** At most one uncommon pair (or triple) in this many still reads as words. */
+const GRAMS_PER_UNCOMMON_GRAM = 5;
+const LENIENT_PAIR_SLACK = 2;
+const LENIENT_TRIPLE_SLACK = 3;
+
+/**
+ * Whether a value's letters read as words: the letter pairs and triples
+ * inside its words (camelCase and separators split words) are mostly common
+ * English ones, so `pelican`, `harborMaster` and `deploy-bot` do and
+ * `qkzvmxbtwe`, `rdabaootck`, `CruPjtBwrw` and `FXIOFWLOJA` do not. A word
+ * that fails stays distinctive, which only masks it as before, and so does a
+ * word with letters outside A to Z (`Müller`, Cyrillic), which the tables
+ * cannot judge.
+ *
+ * In a host, URL or path, runs of fewer than four letters are skipped:
+ * abbreviations such as `srv`, `npm` and `json` are common there.
+ */
+function readsAsWords(text: string, lenient = false): boolean {
+  const runs = (text.match(/\p{Lu}?\p{Ll}+|\p{Lu}+/gu) ?? [])
+    .filter((run) => run.length >= (lenient ? 4 : 3))
+    .map((run) => run.toLowerCase());
+  // Letters outside A to Z cannot be judged, so the value stays distinctive.
+  if (runs.some((run) => !/^[a-z]+$/u.test(run))) return false;
+  // Judged over all runs together, so a value cannot spread rare ones thinly.
+  let pairs = 0;
+  let uncommonPairs = 0;
+  let triples = 0;
+  let uncommonTriples = 0;
+  for (const run of runs) {
+    for (let index = 0; index + 1 < run.length; index += 1) {
+      pairs += 1;
+      if (!COMMON_LETTER_PAIRS.has(run.slice(index, index + 2))) uncommonPairs += 1;
+      if (index + 2 < run.length) {
+        triples += 1;
+        if (!COMMON_LETTER_TRIPLES.has(run.slice(index, index + 3))) uncommonTriples += 1;
+      }
+    }
+  }
+  const pairSlack = lenient ? LENIENT_PAIR_SLACK : 0;
+  const tripleSlack = lenient ? LENIENT_TRIPLE_SLACK : 0;
+  return (
+    uncommonPairs <= Math.floor((pairs + pairSlack) / GRAMS_PER_UNCOMMON_GRAM) &&
+    uncommonTriples <= Math.floor((triples + tripleSlack) / GRAMS_PER_UNCOMMON_GRAM)
+  );
+}
+
+/** A single word-shaped name: a word with a short tail, an identifier or a snake/kebab name. */
+function wordShaped(text: string, lenient = false): boolean {
+  if (text.length >= WORD_SHAPED_MAX_CHARS) return false;
+  if (!(WORD_LIKE.test(text) || CAMEL_LIKE.test(text) || snakeLike(text))) return false;
+  return readsAsWords(text, lenient);
+}
+
+/**
+ * A host, email, URL or path is weak only when every part is a word-shaped
+ * name or a number: `db.example.com:5432` is, `bR7.kQ2.mX9.Lp`, a webhook URL
+ * or a path with a random segment carries a secret and is not.
+ */
+function partsAreWeak(text: string): boolean {
+  // The scheme (`https`, `redis`) is not judged.
+  const parts = text
+    .replace(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//u, "")
+    .split(/[/\\?#&=:.@~]+/u)
+    .filter((part) => part.length > 0);
+  return parts.every((part) => /^[0-9]+$/u.test(part) || wordShaped(part, true));
+}
+
+/**
+ * How a known value is searched for in text.
+ *
+ * Distinctive values (tokens, keys, random or strong passwords, passphrases
+ * of three or more words) almost never appear in unrelated text, so they are
+ * searched for anywhere, in every form. Weak values do appear in unrelated
+ * text: a word or two with a few digits and a symbol (`admin123`,
+ * `Password1!`), a camelCase or snake_case name, or a host, email, URL or
+ * path made only of such names. Replacing them everywhere rewrites file
+ * names, imports, hosts and identifiers that merely contain the word, so they
+ * are replaced only in a credential position (see the module comment).
+ * Digit-only values (card and account numbers) and values in a known token
+ * format stay distinctive, however they read.
+ */
+export function secretValueStrength(value: string): SecretValueStrength {
+  if (typeof value !== "string") return "weak";
+  const text = value.trim();
+  if (/^[0-9][0-9\s-]*$/u.test(text)) return "distinctive";
+  // A value in a known token or key format is distinctive, however it reads.
+  if (detectSecretShapes(text).some((shape) => shape.start === 0 && shape.end === text.length)) {
+    return "distinctive";
+  }
+  if (/\s/u.test(text)) {
+    return text.length < WORD_SHAPED_MAX_CHARS && WORD_LIKE.test(text) && readsAsWords(text)
+      ? "weak"
+      : "distinctive";
+  }
+  if (wordShaped(text)) return "weak";
+  if (
+    HOST_LIKE.test(text) ||
+    EMAIL_LIKE.test(text) ||
+    URL_LIKE.test(text) ||
+    PATH_LIKE.test(text)
+  ) {
+    return partsAreWeak(text) ? "weak" : "distinctive";
+  }
+  return "distinctive";
+}
+
+// ---------------------------------------------------------------------------
 // Forms
 // ---------------------------------------------------------------------------
 
@@ -202,24 +548,28 @@ function base64(bytes: Uint8Array): string {
  * depends only on the value at each of the three byte alignments a value can
  * have inside a longer base64 run (for example `user:token` in Basic auth). */
 function base64Forms(value: string): string[] {
+  const { standalone, inRun } = base64FormsByPlacement(value);
+  return [...standalone, ...inRun];
+}
+
+/** `base64Forms`, split into the standalone encodings and the in-run parts. */
+function base64FormsByPlacement(value: string): { standalone: string[]; inRun: string[] } {
   const bytes = utf8Bytes(value);
-  if (bytes === null || bytes.length === 0) return [];
-  const forms: string[] = [];
+  if (bytes === null || bytes.length === 0) return { standalone: [], inRun: [] };
   const whole = base64(bytes);
-  forms.push(whole, whole.replace(/=+$/u, ""));
+  const standalone = [whole, whole.replace(/=+$/u, "")];
+  const inRun: string[] = [];
   for (let offset = 0; offset < 3; offset += 1) {
     const padded = new Uint8Array(offset + bytes.length);
     padded.set(bytes, offset);
     const encoded = base64(padded);
     const start = Math.ceil((offset * 8) / 6);
     const end = Math.floor(((offset + bytes.length) * 8) / 6);
-    if (end > start) forms.push(encoded.slice(start, end));
+    if (end > start) inRun.push(encoded.slice(start, end));
   }
-  const withUrlSafe: string[] = [];
-  for (const form of forms) {
-    withUrlSafe.push(form, form.replaceAll("+", "-").replaceAll("/", "_"));
-  }
-  return withUrlSafe;
+  const withUrlSafe = (forms: string[]) =>
+    forms.flatMap((form) => [form, form.replaceAll("+", "-").replaceAll("/", "_")]);
+  return { standalone: withUrlSafe(standalone), inRun: withUrlSafe(inRun) };
 }
 
 const PEM_BOUNDARY = /^-----(BEGIN|END) [A-Z0-9 ]+-----$/u;
@@ -308,6 +658,9 @@ function escapeRegExp(text: string): string {
 const TRUNCATION_MARK = /\.\.\.|\u2026/gu;
 
 export type CompiledSecretValueMasks = {
+  /** Known long numeric values, allowing only digit-grouping separators. */
+  readonly formattedNumbers: ReadonlyArray<{ pattern: RegExp; label: string }>;
+  readonly keepUrlHosts: boolean;
   readonly empty: boolean;
   readonly minChars: number;
   readonly skipKey: ((key: string) => boolean) | undefined;
@@ -332,6 +685,35 @@ export type CompiledSecretValueMasks = {
    */
   readonly byClippedEnd: ReadonlyMap<string, readonly ClippedStart[]>;
   readonly longestForm: number;
+  /**
+   * Forms of weak values (see `secretValueStrength`), replaced only in a
+   * credential position; every other form is replaced wherever it appears.
+   */
+  readonly weakForms: ReadonlyMap<string, WeakFormInfo>;
+  /** Metadata about each form, for match events. */
+  readonly formInfo: ReadonlyMap<string, FormInfo>;
+  readonly onMatch: ((event: SecretValueMatchEvent) => void) | undefined;
+};
+
+type FormInfo = {
+  strength: SecretValueStrength;
+  entropy: SecretValueEntropyBucket;
+  /** The form differs from the value as written or trimmed. */
+  encoded: boolean;
+};
+
+type WeakFormInfo = {
+  /**
+   * A base64 form that appears inside a longer base64 run (a Basic auth
+   * header), so it is never a whole token of its own.
+   */
+  inRun: boolean;
+  /**
+   * The whole base64 encoding of the value (a Kubernetes Secret's data): it
+   * is replaced wherever it is a whole base64 run of its own, and inside a
+   * longer run only as an in-run form is.
+   */
+  standalone: boolean;
 };
 
 /** A distinctive start of a form: `form.slice(0, length)`. */
@@ -365,16 +747,63 @@ export function compileSecretValueMasks(
     Math.max(0, options.clippedMinShare ?? SECRET_VALUE_CLIPPED_MIN_SHARE),
   );
   const labels = new Map<string, string>();
+  const formattedNumbers: Array<{ pattern: RegExp; label: string }> = [];
   const labelTexts = new Set<string>();
   // Clipped starts are indexed for the forms text usually shows (as written,
   // trimmed, JSON-escaped once), not the encoded variants.
   const clippable = new Set<string>();
+  const formInfo = new Map<string, FormInfo>();
+  const weakForms = new Map<string, WeakFormInfo>();
+  // A form a distinctive value has is never treated as weak, even when a weak
+  // value shares it.
+  const distinctiveForms = new Set<string>();
   for (const entry of entries) {
     if (typeof entry?.value !== "string" || typeof entry.label !== "string") continue;
     const forms = secretValueForms(entry.value, { ...options, minChars });
     if (forms.length === 0) continue;
+    // Payment widgets commonly insert grouping spaces (including nonbreaking
+    // spaces) or hyphens. Match only the exact known digits, never arbitrary
+    // numbers, and never apply this equivalence to passwords or other text.
+    if (/^[0-9\s-]+$/u.test(entry.value)) {
+      const digits = entry.value.replace(/[\s-]/gu, "");
+      if (digits.length >= minChars && digits.length <= 19) {
+        const separator = "(?:[\\s-]|%20|%C2%A0|%E2%80%(?:89|8A|AF)){0,4}";
+        formattedNumbers.push({
+          pattern: new RegExp(digits.split("").join(separator), "giu"),
+          label: entry.label,
+        });
+      }
+    }
     labelTexts.add(entry.label);
     for (const form of forms) if (!labels.has(form)) labels.set(form, entry.label);
+    const strength = secretValueStrength(entry.value);
+    const entropy = entropyBucket(secretValueEntropyBits(entry.value.trim()));
+    const plain = new Set([entry.value, entry.value.trim()]);
+    for (const form of forms) {
+      const existing = formInfo.get(form);
+      if (!existing || (existing.strength === "weak" && strength === "distinctive")) {
+        formInfo.set(form, { strength, entropy, encoded: !plain.has(form) });
+      }
+    }
+    if (strength === "distinctive" || options.weakValues === "anywhere") {
+      for (const form of forms) {
+        distinctiveForms.add(form);
+        weakForms.delete(form);
+      }
+    } else {
+      const placement =
+        options.base64 === false
+          ? { standalone: [], inRun: [] }
+          : base64FormsByPlacement(entry.value);
+      const standalone = new Set(placement.standalone);
+      const inRun = new Set(placement.inRun);
+      for (const form of forms) {
+        if (distinctiveForms.has(form)) continue;
+        weakForms.set(form, { inRun: inRun.has(form), standalone: standalone.has(form) });
+      }
+      // A weak value's start is not distinctive: clipped starts are not indexed.
+      continue;
+    }
     clippable.add(entry.value);
     clippable.add(entry.value.trim());
     clippable.add(JSON.stringify(entry.value).slice(1, -1));
@@ -394,6 +823,7 @@ export function compileSecretValueMasks(
   let indexed = 0;
   for (let index = forms.length - 1; index >= 0; index -= 1) {
     const form = forms[index]!;
+    if (weakForms.has(form)) continue;
     if (options.clippedForms !== "all" && !clippable.has(form)) continue;
     if (form.length <= clippedMinChars || form.length > CLIPPED_INDEX_MAX_FORM_CHARS) continue;
     const shortest = Math.max(clippedMinChars, Math.ceil(form.length * clippedMinShare));
@@ -422,6 +852,8 @@ export function compileSecretValueMasks(
           "gu",
         );
   return {
+    formattedNumbers,
+    keepUrlHosts: options.keepUrlHosts === true,
     empty: forms.length === 0,
     minChars,
     skipKey: options.skipKey,
@@ -438,6 +870,9 @@ export function compileSecretValueMasks(
     ),
     byClippedEnd,
     longestForm: forms[0]?.length ?? 0,
+    weakForms,
+    formInfo,
+    onMatch: options.onMatch,
   };
 }
 
@@ -452,7 +887,7 @@ function clippedSecretTail(
   text: string,
   cut: number,
   masks: CompiledSecretValueMasks,
-): { length: number; label: string } | null {
+): { length: number; label: string; form: string } | null {
   const probe = masks.clippedMinChars;
   if (cut < probe || masks.byClippedEnd.size === 0) return null;
   const candidates = masks.byClippedEnd.get(text.slice(cut - probe, cut));
@@ -464,7 +899,7 @@ function clippedSecretTail(
     if (checked++ >= CLIPPED_MAX_CANDIDATES) break;
     if (!text.startsWith(form.slice(0, length), cut - length)) continue;
     const label = masks.labels.get(form);
-    if (label !== undefined) return { length, label };
+    if (label !== undefined) return { length, label, form };
   }
   return null;
 }
@@ -483,9 +918,501 @@ function keptRanges(text: string, pattern: RegExp): Array<[number, number]> {
   return kept;
 }
 
+/** An absolute address: scheme, optional user info (up to the authority's
+ * last `@`, so a password containing one is all user info), host and port,
+ * then the rest. */
+const ABSOLUTE_URL = /^([A-Za-z][A-Za-z0-9+.-]*:\/\/)(?:([^/?#\s]*)@)?([^/?#@\s]*)([^\s]*)$/u;
+
+// ---------------------------------------------------------------------------
+// Weak values: credential positions only
+// ---------------------------------------------------------------------------
+
+/**
+ * Characters that join a weak value to the text around it, so that it is part
+ * of a longer name: an identifier, a path, a host, an email or a file name.
+ * `:` joins only before a `/` or a digit (a URL scheme, a port, an image
+ * tag); trailing sentence punctuation does not join.
+ */
+const JOINING_CHARACTER = /[\p{L}\p{N}\p{M}_\-./\\+~%@]/u;
+const TRAILING_PUNCTUATION = /[.,;:!?]/u;
+const AFTER_TRAILING_PUNCTUATION = /[\s"'`)\]}>\\]/u;
+/**
+ * A credential word before a base64 run (`Authorization: Basic …`): the
+ * encoded value inside the run is replaced. The word ends where a lower-case
+ * letter does not continue it, so `PGPASSWORD` and `apiKey` count and
+ * `--author` and `keyboard` do not.
+ */
+const CREDENTIAL_CONTEXT =
+  /pass(?:words?|wd|phrases?|codes?)?|pwd|secrets?|tokens?|keys?|auth(?:orization|entication)?|credentials?|creds|bearer/giu;
+function hasCredentialWord(text: string): boolean {
+  CREDENTIAL_CONTEXT.lastIndex = 0;
+  for (const match of text.matchAll(CREDENTIAL_CONTEXT)) {
+    const next = text[match.index + match[0].length];
+    if (next === undefined || !/[a-z]/u.test(next)) return true;
+  }
+  return false;
+}
+
+/*
+ * Names that lead into a weak value. Each pattern ends where the value
+ * starts, and its first group is the name, checked word by word with
+ * `credentialNameSaysSecret`. A quote may be JSON-escaped (`\"`).
+ */
+const Q = `(?:\\\\?["'])?`;
+const NAME = "([A-Za-z0-9_.$@-]*[A-Za-z0-9])";
+/** `password=…`, `"token": "…"`, `DB_PASS="…"`, `Password=…;`, `apiKey := …`, `secret => …`. */
+const ASSIGNED = new RegExp(`${NAME}${Q}\\s*(?:=>|:=|[:=])\\s*${Q}$`, "u");
+/** `--password …`, `--db-password=…`, `-token …`. */
+const OPTION = new RegExp(`(?:^|[\\s"'])--?([A-Za-z][A-Za-z0-9_.-]*)(?:\\s+|=)${Q}$`, "u");
+/** "the password is …", "token was: …". */
+const STATED = new RegExp(`${NAME}${Q}\\s+(?:is|was)(?:\\s*:)?\\s+${Q}$`, "iu");
+/** A password word right before the value: `password …` (netrc), `requirepass …`, `with passphrase …`. */
+const PASSWORD_WORD = new RegExp(
+  `(?:^|[\\s"'\`(])([A-Za-z0-9_.-]*(?:pass(?:word|wd|phrase|code)?|pwd))\\s+${Q}$`,
+  "iu",
+);
+/** Nothing but a closing quote, punctuation or a comment before the end of the line. */
+const LINE_ENDS = /^["'`]?[;,]?\s*(?:#.*)?$/u;
+/** A netrc entry: `machine host login user password …`. */
+const NETRC_LINE = /(?:^|\s)(?:machine|default)\s+\S+.*\s(?:login|password)\s/u;
+/** A config directive at the start of its line: `masterauth …`. */
+const DIRECTIVE = new RegExp(`^\\s*([A-Za-z][A-Za-z0-9_.-]*auth)\\s+${Q}$`, "iu");
+/** `Authorization: Bearer …`, `auth: token …`, a bare `Bearer …`. */
+const AUTH_SCHEME = new RegExp(
+  `(?:(?:authorization|auth)${Q}\\s*[:=]\\s*${Q}(?:bearer|token|basic)|(?:^|[\\s"'(])bearer)\\s+$`,
+  "iu",
+);
+/** `Cookie: sid=…`, `Set-Cookie: a=b; sid=…`. */
+const COOKIE = /(?:^|[\s"'])(?:set-)?cookie["']?\s*:\s*(?:[^\s;=]+=[^\s;]*;\s*)*[^\s;=]+=$/iu;
+
+/**
+ * Programs whose options take a password: `mysql -p…` (attached),
+ * `sshpass -p …`, `redis-cli -a …`, `curl -u user:…`, `htpasswd -b file user …`.
+ * Elsewhere `-p`, `-a` and `-u` mean other things (`mkdir -p`, `ls -a`).
+ */
+const ATTACHED_P_PROGRAM =
+  /(?:^|[\s/"'`(])(?:mysql|mariadb|mysqladmin|mysqldump|mysqlsh|sshpass|7z|7za|7zz|7zr)\s/u;
+const SPACED_P_PROGRAM =
+  /(?:^|[\s/"'`(])(?:sshpass|(?:docker|podman|nerdctl|oc|az)\s+login|mongo(?:sh|dump|restore|export|import|stat|top|files)?)\s/u;
+const A_PROGRAM = /(?:^|[\s/"'`(])(?:redis-cli|keydb-cli)\s/u;
+const U_PROGRAM = /(?:^|[\s/"'`(])curl\s/u;
+const W_PROGRAM =
+  /(?:^|[\s/"'`(])ldap(?:search|add|modify|delete|modrdn|compare|passwd|whoami|exop)\s/u;
+const CAPITAL_P_PROGRAM = /(?:^|[\s/"'`(])(?:sqlcmd|bcp|zip|unzip)\s/u;
+/** `smbclient -U user%…`: the password follows a `%`. */
+const PERCENT_USER =
+  /(?:^|[\s/"'`(])(?:smbclient|rpcclient|smbcacls|smbget)\s(?:.*\s)?(?:-U\s*|--user[=\s])["']?[^\s%"']+%$/u;
+const ATTACHED_P = /(?:^|\s)-p$/u;
+const SPACED_P = /(?:^|\s)-p\s+["']?$/u;
+const SPACED_A = /(?:^|\s)-a\s+["']?$/u;
+const SPACED_W = /(?:^|\s)-w\s+["']?$/u;
+const SPACED_CAPITAL_P = /(?:^|\s)-P\s+["']?$/u;
+const USER_COLON = /(?:^|\s)(?:-u|--user)(?:\s+|=)["']?[^\s:"']+:$/u;
+const HTPASSWD = /(?:^|[\s/"'`(])htpasswd\s+-\w*b\w*\s+\S+\s+\S+\s+["']?$/u;
+
+/** The current command of a shell line: after the last `|`, `;`, `&&` or `||`. */
+function commandSegment(before: string): string {
+  const parts = before.split(/\|\||&&|[|;]/u);
+  return parts[parts.length - 1] ?? "";
+}
+
+/** Text that may hold a credential name (a cheap test before the patterns). */
+const MAY_NAME_CREDENTIAL =
+  /pass|pwd|pw|secret|token|key|auth|cred|bearer|session|cookie|private|signature|jwt/iu;
+/** Text that may hold a password option. */
+const MAY_HOLD_OPTION = /-[pauwP]|--user|htpasswd/u;
+
+/** `<password>…`, `<ns:Secret type="x">…` (the closing tag follows the value). */
+const XML_ELEMENT = /<([A-Za-z_][\w.:-]*)(?:\s[^<>]*)?>$/u;
+/** `<add key="Password" value="…" />` (.NET configuration). */
+const XML_KEY_VALUE = new RegExp(
+  `\\bkey\\s*=\\s*${Q}([^"'<>\\\\]+)${Q}\\s+value\\s*=\\s*${Q}$`,
+  "iu",
+);
+/** SQL `IDENTIFIED BY '…'`, `IDENTIFIED WITH mysql_native_password BY '…'`. */
+const IDENTIFIED_BY = /\bidentified\s+(?:with\s+\S+\s+)?by\s+(?:password\s+)?["']?$/iu;
+/** A `.pgpass` line, whose last field is the password: `host:5432:db:user:…`. */
+const PGPASS_LINE = /^\s*[^\s:#]+:(?:[0-9]+|\*):[^\s:]+:[^\s:]+:$/u;
+/** Before an assignment, a name in a ternary (`? "a" :`) or after a `/` (`@scope/pkg":`) is not a key. */
+const NOT_A_KEY_BEFORE = /(?:\s\?\s+(?:\\?["'])?|\/)$/u;
+
+function nameLeadsIn(before: string, after: string): boolean {
+  if (IDENTIFIED_BY.test(before)) return true;
+  if (!MAY_NAME_CREDENTIAL.test(before)) return false;
+  const assigned = ASSIGNED.exec(before);
+  if (
+    assigned?.[1] !== undefined &&
+    !NOT_A_KEY_BEFORE.test(before.slice(0, assigned.index)) &&
+    credentialNameSaysSecret(assigned[1])
+  ) {
+    return true;
+  }
+  for (const pattern of [OPTION, STATED, XML_KEY_VALUE]) {
+    const name = pattern.exec(before)?.[1];
+    if (name !== undefined && credentialNameSaysSecret(name)) return true;
+  }
+  // `password …` without `=` or `:` is a config line (`requirepass …`) or a
+  // netrc entry, not prose ("the password database"): the value ends the line,
+  // or the line is a netrc entry.
+  const word = PASSWORD_WORD.exec(before)?.[1];
+  if (
+    word !== undefined &&
+    credentialNameSaysSecret(word) &&
+    (LINE_ENDS.test(after) || NETRC_LINE.test(before))
+  ) {
+    return true;
+  }
+  const element = XML_ELEMENT.exec(before)?.[1];
+  if (element !== undefined && after.startsWith("</") && credentialNameSaysSecret(element)) {
+    return true;
+  }
+  return DIRECTIVE.test(before) || AUTH_SCHEME.test(before) || COOKIE.test(before);
+}
+
+function passwordOption(before: string): boolean {
+  if (!MAY_HOLD_OPTION.test(before)) return false;
+  const command = commandSegment(before);
+  if (SPACED_P.test(command)) return SPACED_P_PROGRAM.test(command);
+  if (SPACED_A.test(command)) return A_PROGRAM.test(command);
+  if (SPACED_W.test(command)) return W_PROGRAM.test(command);
+  if (SPACED_CAPITAL_P.test(command)) return CAPITAL_P_PROGRAM.test(command);
+  if (USER_COLON.test(command)) return U_PROGRAM.test(command);
+  return HTPASSWD.test(command);
+}
+
+/** `echo …`, `printf '%s' …`: the value is what a command prints. */
+const PRINTED =
+  /(?:^|[\s;&|(])(?:echo|printf)(?:\s+-[A-Za-z]+)*(?:\s+(["'])%s(?:\\n)?\1)?\s+["']?(?:[^\s:"']+:)?$/u;
+/** A single pipe after the value, and the next command up to a comment or another command. */
+const PIPED_INTO = /^["']?[ \t]*\|(?!\|)([^#;|&]*)/u;
+/** `sudo -S` reads its password from standard input. */
+const SUDO_STDIN = /(?:^|\s)sudo\s+(?:-\w*S\w*)/u;
+
+/**
+ * Printed into a command that reads a password, whose name or options say so:
+ * `echo '…' | docker login --password-stdin`, `echo 'app:…' | chpasswd`,
+ * `echo … | sudo -S true`.
+ */
+function pipedToPasswordReader(before: string, after: string): boolean {
+  if (!PRINTED.test(before)) return false;
+  const next = PIPED_INTO.exec(after)?.[1];
+  if (next === undefined) return false;
+  if (SUDO_STDIN.test(next)) return true;
+  // The program (and its subcommand) and the option names, not arguments:
+  // `| grep token` and `| tee password-notes.txt` do not read a password.
+  const words = next.trim().split(/\s+/u);
+  return words.some((word, index) => {
+    const name = word.replace(/^["']|["']$/gu, "");
+    if (name.startsWith("-"))
+      return credentialNameSaysSecret(name.replace(/^-+/u, "").split("=")[0]!);
+    return index === 0 && credentialNameSaysSecret(name.split("/").pop()!);
+  });
+}
+
+/** A line that is only a key before the value: `value: …`, `- admin: …`, `"value": "…`. */
+const KEY_ONLY_LINE = new RegExp(`^\\s*(?:-\\s+)?${Q}([\\w.-]+)${Q}\\s*[:=]\\s*${Q}$`, "u");
+/** `- name: DB_PASSWORD`, `"name": "DB_PASSWORD",`, `key: api-token`. */
+const NAMED_ENTRY_LINE = new RegExp(
+  `^\\s*(?:-\\s+)?${Q}(?:name|key)${Q}\\s*:\\s*${Q}([\\w.-]+)${Q}\\s*,?\\s*$`,
+  "u",
+);
+/** `credentials:`, `"secrets": {`. */
+const SECTION_LINE = new RegExp(`^\\s*(?:-\\s+)?${Q}([\\w.-]+)${Q}\\s*:\\s*\\{?\\s*$`, "u");
+/** Characters before a weak value searched for a credential word or a line start. */
+const CREDENTIAL_CONTEXT_CHARS = 80;
+/** The longest key line (`  value: `) searched before a weak value. */
+const KEY_LINE_MAX_CHARS = 120;
+const LINE_SCAN_CHARS = 400;
+
+/** An escape sequence for a line break, tab or quote in JSON-escaped text ends at `at`. */
+function escapeEndsAt(text: string, at: number): boolean {
+  return at >= 2 && text[at - 2] === "\\" && /[nrt"]/u.test(text[at - 1]!) && text[at - 3] !== "\\";
+}
+
+function boundaryBefore(text: string, start: number): boolean {
+  if (start === 0) return true;
+  if (escapeEndsAt(text, start)) return true;
+  return !JOINING_CHARACTER.test(text[start - 1]!);
+}
+
+function boundaryAfter(text: string, end: number): boolean {
+  if (end >= text.length) return true;
+  const next = text[end]!;
+  // Separators of connection strings, lists and query strings:
+  // `Password=…;Database=app`, `PWD=…;UID=sa`, `password=…&user=app`.
+  if (next === ";" || next === "," || next === "&") return true;
+  if (next === "\\") return /[nrt"]/u.test(text[end + 1] ?? "");
+  if (next === ":") return !/[/\\0-9]/u.test(text[end + 1] ?? "");
+  if (TRAILING_PUNCTUATION.test(next)) {
+    const after = text[end + 1];
+    return after === undefined || AFTER_TRAILING_PUNCTUATION.test(after);
+  }
+  return !JOINING_CHARACTER.test(next);
+}
+
+/**
+ * How a line starts before `start` (spaces and tabs skipped): a real or
+ * escaped line break (or the start of the text), the opening quote of a JSON
+ * string value, or neither.
+ */
+function lineStartBefore(text: string, start: number): "break" | "quote" | null {
+  let at = start;
+  while (at > 0 && (text[at - 1] === " " || text[at - 1] === "\t")) at -= 1;
+  if (at === 0) return "break";
+  const previous = text[at - 1]!;
+  if (previous === "\n" || previous === "\r") return "break";
+  if (escapeEndsAt(text, at) && (previous === "n" || previous === "r")) return "break";
+  if (previous === '"' && /[:[,{]\s*$/u.test(text.slice(Math.max(0, at - 9), at - 1))) {
+    return "quote";
+  }
+  return null;
+}
+
+function lineEndAfter(text: string, end: number): "break" | "quote" | null {
+  let at = end;
+  while (at < text.length && (text[at] === " " || text[at] === "\t")) at += 1;
+  if (at >= text.length) return "break";
+  const next = text[at]!;
+  if (next === "\n" || next === "\r") return "break";
+  if (next === "\\" && /[nr]/u.test(text[at + 1] ?? "")) return "break";
+  if (next === '"' || (next === "\\" && text[at + 1] === '"')) return "quote";
+  return null;
+}
+
+/** Where the line holding `start` begins, at most `LINE_SCAN_CHARS` back. */
+function lineStartIndex(text: string, start: number, limit = LINE_SCAN_CHARS): number {
+  const floor = Math.max(0, start - limit);
+  for (let at = start; at > floor; at -= 1) {
+    const previous = text[at - 1]!;
+    if (previous === "\n" || previous === "\r") return at;
+    if (escapeEndsAt(text, at) && (previous === "n" || previous === "r")) return at;
+  }
+  return floor;
+}
+
+/** Where the line holding `end` ends, at most `LINE_SCAN_CHARS` on. */
+function lineEndIndex(text: string, end: number, limit = LINE_SCAN_CHARS): number {
+  const ceiling = Math.min(text.length, end + limit);
+  for (let at = end; at < ceiling; at += 1) {
+    const next = text[at]!;
+    if (next === "\n" || next === "\r") return at;
+    if (next === "\\" && /[nr]/u.test(text[at + 1] ?? "") && text[at - 1] !== "\\") return at;
+  }
+  return ceiling;
+}
+
+/** Where the line before the one starting at `lineStart` begins, or `null` at the text start. */
+function previousLineStartIndex(text: string, lineStart: number): number | null {
+  let at = lineStart;
+  if (at === 0) return null;
+  if (text[at - 1] === "\n") at -= 1;
+  if (text[at - 1] === "\r") at -= 1;
+  if (at === lineStart && escapeEndsAt(text, at)) at -= 2;
+  if (at === lineStart) return null;
+  return lineStartIndex(text, at);
+}
+
+/** `scheme://user:` (or `scheme://:`) ends just before `start`, and `@` follows `end`. */
+function inUrlPasswordPosition(text: string, start: number, end: number): boolean {
+  if (text[start - 1] !== ":" || text[end] !== "@") return false;
+  const before = text.slice(Math.max(0, start - 1 - 256), start - 1);
+  return /[A-Za-z][A-Za-z0-9+.-]*:(?:\\?\/){2}[^\s/@:"'\\]*$/u.test(before);
+}
+
+/**
+ * Whether a weak value at `start…end` is in a credential position: the
+ * whole line (or the whole text), a URL's password, or a whole token that a
+ * credential name leads into (`password=…`, `"token": "…"`, `--password …`,
+ * "the password is …", `Authorization: Bearer …`, `<password>…`,
+ * `IDENTIFIED BY '…'`), a password option of a program that takes one
+ * (`mysql -p…`, `docker login -p …`, `smbclient -U user%…`, `curl -u
+ * user:…`), the last field of a `.pgpass` line, printed into a command that
+ * reads a password, or the value of a key on a line after one that names a
+ * credential (`- name: DB_PASSWORD` then `value: …`). A base64 form inside a longer run (a Basic auth header)
+ * needs only a credential word earlier on the line.
+ */
+const BASE64_CHARACTER = /[A-Za-z0-9+/_=-]/u;
+
+function weakValuePositionAllowed(
+  text: string,
+  start: number,
+  end: number,
+  form: WeakFormInfo,
+): boolean {
+  // The whole base64 encoding of the value, as a run of its own: someone
+  // encoded exactly that value (a Kubernetes Secret's data).
+  if (
+    form.standalone &&
+    !BASE64_CHARACTER.test(text[start - 1] ?? "") &&
+    !BASE64_CHARACTER.test(text[end] ?? "")
+  ) {
+    return true;
+  }
+  const inRun = form.inRun || form.standalone;
+  const left = lineStartBefore(text, start);
+  const right = left === null ? null : lineEndAfter(text, end);
+  if (left !== null && right !== null && !(left === "quote" && right === "quote")) return true;
+  if (inUrlPasswordPosition(text, start, end)) return true;
+  // Cheap boundary checks first, before any line is scanned.
+  // `mysql -p…`, `smbclient -U user%…`: the value is attached to the option.
+  const attachedOption =
+    !inRun && ((text[start - 1] === "p" && text[start - 2] === "-") || text[start - 1] === "%");
+  if (!inRun && !boundaryAfter(text, end)) return false;
+  if (!inRun && !attachedOption && !boundaryBefore(text, start)) return false;
+  // A line longer than this before the value is not a key line.
+  const lineStart = lineStartIndex(text, start, KEY_LINE_MAX_CHARS);
+  const before = text.slice(Math.max(lineStart, start - CREDENTIAL_CONTEXT_CHARS), start);
+  if (inRun) return hasCredentialWord(before);
+  if (attachedOption) {
+    const command = commandSegment(before);
+    if (text[start - 1] === "%") return PERCENT_USER.test(command);
+    return ATTACHED_P.test(command) && ATTACHED_P_PROGRAM.test(command);
+  }
+  const after = text.slice(end, lineEndIndex(text, end, CREDENTIAL_CONTEXT_CHARS));
+  if (nameLeadsIn(before, after) || passwordOption(before)) return true;
+  if (pipedToPasswordReader(before, after)) return true;
+  if (lineStart === start - KEY_LINE_MAX_CHARS) return false;
+  if (lineEndAfter(text, end) === "break" && PGPASS_LINE.test(text.slice(lineStart, start))) {
+    return true;
+  }
+  const key = KEY_ONLY_LINE.exec(text.slice(lineStart, start))?.[1];
+  if (key === undefined || credentialNameDescribesValue(key)) return false;
+  const previousStart = previousLineStartIndex(text, lineStart);
+  if (previousStart === null) return false;
+  const previous = text.slice(previousStart, lineStart).replace(/(?:\\[nr]|[\r\n])+$/u, "");
+  const named = NAMED_ENTRY_LINE.exec(previous)?.[1] ?? SECTION_LINE.exec(previous)?.[1];
+  return named !== undefined && credentialNameSaysSecret(named);
+}
+
+const RUN_BREAK = /[\s"'`<>()[\]{}]/u;
+
+/**
+ * Where the run of non-space characters before a position starts, and the
+ * last `://` (or JSON-escaped `:\/\/`) in the text before it. Read forward
+ * once per text, so counting every occurrence stays linear.
+ */
+type RunCursor = { text: string; scanned: number; lastBreak: number; lastScheme: number };
+
+function runCursor(text: string): RunCursor {
+  return { text, scanned: 0, lastBreak: -1, lastScheme: -1 };
+}
+
+/** Whether the run before `start` holds a URL scheme. */
+function runHasScheme(cursor: RunCursor, start: number): boolean {
+  const { text } = cursor;
+  if (start < cursor.scanned) {
+    // Out of order (a clipped tail): read the run backwards, at most 64 characters.
+    const floor = Math.max(0, start - 64);
+    let runStart = start;
+    while (runStart > floor && !RUN_BREAK.test(text[runStart - 1]!)) runStart -= 1;
+    const run = text.slice(runStart, start);
+    return run.includes("://") || run.includes(":\\/\\/");
+  }
+  for (let at = cursor.scanned; at < start; at += 1) {
+    const code = text.charCodeAt(at);
+    if (RUN_BREAK.test(text[at]!)) cursor.lastBreak = at;
+    else if (
+      code === 58 &&
+      (text.startsWith("//", at + 1) || text.startsWith("\\/\\/", at + 1)) &&
+      at + 3 <= start
+    ) {
+      cursor.lastScheme = at;
+    }
+  }
+  cursor.scanned = start;
+  return cursor.lastScheme > cursor.lastBreak;
+}
+
+function matchPosition(
+  cursor: RunCursor,
+  start: number,
+  end: number,
+  encoded: boolean,
+): SecretValueMatchPosition {
+  if (encoded) return "encoded";
+  const { text } = cursor;
+  if (runHasScheme(cursor, start)) return "url";
+  const previous = text[start - 1] ?? "";
+  const next = text[end] ?? "";
+  if (previous === "/" || previous === "\\" || next === "/" || next === "\\") return "path";
+  if (next === "." && /[A-Za-z0-9]/u.test(text[end + 1] ?? "")) return "path";
+  if (/[\p{L}\p{N}_-]/u.test(previous) || /[\p{L}\p{N}_-]/u.test(next)) return "identifier";
+  return "token";
+}
+
+/** Match events of one masked text, by their labels, and where its runs start. */
+type MatchTally = { events: Map<string, SecretValueMatchEvent>; cursor: RunCursor | null };
+
+function reportMatch(
+  masks: CompiledSecretValueMasks,
+  tally: MatchTally | null,
+  form: string,
+  outcome: SecretValueMatchEvent["outcome"],
+  text: string,
+  start: number,
+): void {
+  if (tally === null) return;
+  try {
+    const info = masks.formInfo.get(form);
+    const strength = info?.strength ?? "distinctive";
+    const entropy = info?.entropy ?? "ge128";
+    if (tally.cursor?.text !== text) tally.cursor = runCursor(text);
+    const position = matchPosition(
+      tally.cursor,
+      start,
+      start + form.length,
+      info?.encoded === true,
+    );
+    const key = `${outcome} ${strength} ${entropy} ${position}`;
+    const counted = tally.events.get(key);
+    if (counted) counted.count += 1;
+    else tally.events.set(key, { outcome, strength, entropy, position, count: 1 });
+  } catch {
+    // Match events never affect masking.
+  }
+}
+
 /** Mask one text with compiled entries. */
 export function maskSecretValuesInText(text: string, masks: CompiledSecretValueMasks): string {
+  const sink = masks.onMatch;
+  if (!sink) return maskOneText(text, masks, null);
+  const tally: MatchTally = { events: new Map(), cursor: null };
+  const out = maskOneText(text, masks, tally);
+  for (const event of tally.events.values()) {
+    try {
+      sink(event);
+    } catch {
+      // Match events never affect masking.
+    }
+  }
+  return out;
+}
+
+function maskOneText(
+  text: string,
+  masks: CompiledSecretValueMasks,
+  tally: MatchTally | null,
+): string {
   if (masks.empty || masks.pattern === null || text.length < masks.minChars) return text;
+  if (masks.keepUrlHosts) {
+    const address = ABSOLUTE_URL.exec(text);
+    if (address) {
+      const [, scheme, userInfo, host, rest] = address;
+      const inner = { ...masks, keepUrlHosts: false };
+      return (
+        scheme! +
+        (userInfo === undefined ? "" : `${maskSecretValuesInText(userInfo, inner)}@`) +
+        host! +
+        maskSecretValuesInText(rest!, inner)
+      );
+    }
+  }
+  for (const { pattern, label } of masks.formattedNumbers) {
+    const kept = keptRanges(text, masks.pattern);
+    text = text.replace(pattern, (match, at: number) =>
+      overlapsKept(at, at + match.length, kept) ? match : label,
+    );
+  }
   const size = masks.minChars;
   // Existing labels and markers are skipped; where one starts, it wins, and
   // no match may run into one.
@@ -506,13 +1433,25 @@ export function maskSecretValuesInText(text: string, masks: CompiledSecretValueM
     }
     const candidates = masks.byPrefix.get(text.slice(at, at + size));
     const limit = next < kept.length ? kept[next]![0] : text.length;
-    const form = candidates?.find(
-      (candidate) => at + candidate.length <= limit && text.startsWith(candidate, at),
-    );
+    let form: string | undefined;
+    let keptForm: string | undefined;
+    for (const candidate of candidates ?? []) {
+      if (at + candidate.length > limit || !text.startsWith(candidate, at)) continue;
+      const weak = masks.weakForms.get(candidate);
+      if (weak && !weakValuePositionAllowed(text, at, at + candidate.length, weak)) {
+        keptForm ??= candidate;
+        continue;
+      }
+      form = candidate;
+      break;
+    }
     if (form === undefined) {
+      // One event per position, however many forms of the value start here.
+      if (keptForm !== undefined) reportMatch(masks, tally, keptForm, "kept", text, at);
       at += 1;
       continue;
     }
+    reportMatch(masks, tally, form, "masked", text, at);
     out += text.slice(copied, at) + masks.labels.get(form)!;
     at += form.length;
     copied = at;
@@ -540,6 +1479,7 @@ export function maskSecretValuesInText(text: string, masks: CompiledSecretValueM
     if (!tail) continue;
     const start = cut - tail.length;
     if (overlapsKept(start, cut, keptBefore)) continue;
+    reportMatch(masks, tally, tail.form, "masked", out, start);
     out = out.slice(0, start) + tail.label + out.slice(cut);
     changedFrom = start;
   }
@@ -548,7 +1488,10 @@ export function maskSecretValuesInText(text: string, masks: CompiledSecretValueM
 
 /**
  * Deep copy of `value` with every known secret value replaced in every string
- * (object keys are kept). Inputs that need no change keep their identity.
+ * (object keys are kept), except a tool's identity in conversation structure
+ * unless `options.keepToolIdentities` is false (see
+ * SecretMaskableStringsOptions.keepToolIdentities). Inputs that need no
+ * change keep their identity.
  */
 export function maskSecretValues<T>(
   value: T,
@@ -563,6 +1506,7 @@ export function maskSecretValues<T>(
     value,
     (text) => maskSecretValuesInText(text, masks),
     masks.skipKey,
+    { keepToolIdentities: options.keepToolIdentities !== false },
   );
 }
 
@@ -866,7 +1810,23 @@ export class SecretValueMemory {
   mask<T>(value: T, stage = "mask"): T {
     if (this.values.size === 0) return value;
     try {
-      return maskSecretValues(value, this.masks());
+      return maskSecretValues(value, this.masks(), {
+        keepToolIdentities: this.options.keepToolIdentities !== false,
+      });
+    } catch (error) {
+      this.report(stage, error);
+      return value;
+    }
+  }
+
+  /**
+   * `mask` for data, such as tool output, where a tool-shaped record is not
+   * conversation structure: a tool's identity is masked too. Never throws.
+   */
+  maskData<T>(value: T, stage = "mask"): T {
+    if (this.values.size === 0) return value;
+    try {
+      return maskSecretValues(value, this.masks(), { keepToolIdentities: false });
     } catch (error) {
       this.report(stage, error);
       return value;
@@ -883,7 +1843,8 @@ export class SecretValueMemory {
         break;
       }
     }
-    if (!markers) return this.mask(value, stage);
+    // Only tool output is searched for shapes: it is data.
+    if (!markers) return this.maskData(value, stage);
     try {
       if (this.compiledReferenced?.version !== this.changes) {
         this.compiledReferenced = {
@@ -894,7 +1855,7 @@ export class SecretValueMemory {
           ),
         };
       }
-      return maskSecretValues(value, this.compiledReferenced.masks);
+      return maskSecretValues(value, this.compiledReferenced.masks, { keepToolIdentities: false });
     } catch (error) {
       this.report(stage, error);
       return value;
@@ -1058,7 +2019,7 @@ export class SecretValueMemory {
    * (with its captured reference, or a marker). Never throws.
    */
   maskToolOutput<T>(value: T, stage = "tool_result"): T {
-    const known = this.mask(value, stage);
+    const known = this.maskData(value, stage);
     try {
       return maskSecretShapes(known, this.shapeLabel, this.options.skipKey);
     } catch (error) {

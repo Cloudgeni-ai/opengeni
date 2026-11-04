@@ -1,5 +1,5 @@
 //! The command line of a host in a fleet: `serve`'s fleet options, and the
-//! `guard` command.
+//! `guard`, `guard-stopped` and `hand-over-guard` commands.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 use anyhow::Context as _;
 use clap::Args;
 use compute_fleet::LeaseTerms;
-use compute_host::fleet::{FleetConfig, GuardConfig, TlsFiles};
+use compute_host::fleet::{
+    Fence, FleetConfig, GuardConfig, StopHook, TlsFiles, hand_over_guard, hand_over_mark,
+};
 use compute_protocol::fleet::HostInfo;
 
 /// Joining a fleet ([ADR 18](../../docs/adr/0018-the-control-service-leases-and-fences.md)).
@@ -161,7 +163,10 @@ pub struct GuardArgs {
     #[arg(long, default_value = "/run/compute-host/suspending")]
     suspending: PathBuf,
     /// The watchdog device, set up with the lease terms' timeout and
-    /// `nowayout`; `none` runs without one, for tests only.
+    /// `nowayout`; `service` feeds systemd's watchdog of the guard's own
+    /// service instead, on a machine the host shares (its stop hook,
+    /// `guard-stopped`, then kills the VMs; ADR 26); `none` runs without
+    /// one, for tests only.
     #[arg(long, default_value = "/dev/watchdog0")]
     watchdog: PathBuf,
 }
@@ -169,14 +174,71 @@ pub struct GuardArgs {
 impl GuardArgs {
     /// The guard's settings.
     pub fn config(self) -> GuardConfig {
-        let watchdog = (self.watchdog != Path::new("none"))
-            .then_some((self.watchdog, LeaseTerms::RECOMMENDED.watchdog));
+        let timeout = LeaseTerms::RECOMMENDED.watchdog;
+        let fence = if self.watchdog == Path::new("none") {
+            Fence::None
+        } else if self.watchdog == Path::new("service") {
+            Fence::Service { timeout }
+        } else {
+            Fence::Machine {
+                device: self.watchdog,
+                timeout,
+            }
+        };
         GuardConfig {
             cgroup: self.cgroup,
             lease_file: self.lease_file,
             lock: self.lock,
             suspending: self.suspending,
-            watchdog,
+            fence,
         }
+    }
+}
+
+/// `compute-host guard-stopped`.
+#[derive(Args, Debug)]
+pub struct GuardStoppedArgs {
+    /// The cgroup that holds every VM.
+    #[arg(long, default_value = "/sys/fs/cgroup/compute")]
+    cgroup: PathBuf,
+    /// The guard's lock, beside which an upgrade marks a hand-over.
+    #[arg(long, default_value = "/run/compute-host/guard.lock")]
+    lock: PathBuf,
+    /// The agent's service, restarted if it runs.
+    #[arg(long, default_value = "compute-host.service")]
+    agent: String,
+}
+
+impl GuardStoppedArgs {
+    /// The hook's settings.
+    pub fn hook(self) -> StopHook {
+        StopHook {
+            cgroup: self.cgroup,
+            mark: hand_over_mark(&self.lock),
+            agent: self.agent,
+        }
+    }
+}
+
+/// `compute-host hand-over-guard`.
+#[derive(Args, Debug)]
+pub struct HandOverArgs {
+    /// The guard's lock, beside which the hand-over is marked.
+    #[arg(long, default_value = "/run/compute-host/guard.lock")]
+    lock: PathBuf,
+    /// The guard's service, restarted.
+    #[arg(long, default_value = "compute-guard.service")]
+    unit: String,
+}
+
+impl HandOverArgs {
+    /// Marks the hand-over and restarts the guard's service, waiting for
+    /// systemd to have done so.
+    ///
+    /// # Errors
+    ///
+    /// When the mark cannot be written or systemd fails the restart.
+    pub fn hand_over(self) -> anyhow::Result<()> {
+        hand_over_guard(&self.lock, &self.unit)
     }
 }

@@ -6,6 +6,7 @@ import {
   createDb,
   ensureManagedAccessForUserWithOrganizationMemberships,
   listSelfOrganizationMemberships,
+  updateOrganizationPrivacyPreferences,
   type DbClient,
 } from "@opengeni/db";
 import { synchronizeCanonicalHumanLoginBindings } from "@opengeni/db/canonical-human-identities";
@@ -17,7 +18,8 @@ import { registerEnrollmentRoutes } from "../src/routes/enrollments";
 import { registerMachineRoutes } from "../src/routes/machines";
 
 // A Member of a shared workspace is a full teammate: signed in as themselves
-// with enrollments:read, they connect a machine only they can use, approve or
+// with enrollments:read, they connect a machine only they can use (Only me is
+// their connect command's default), approve or
 // decline its pairing code, and change or remove that machine. They cannot
 // connect a workspace or organization machine, change one, or reach another
 // person's Only me machine. Credentials acting for them without
@@ -262,7 +264,7 @@ afterAll(async () => {
 }, 60_000);
 
 describe("a Member connects and changes their own Only me machine", () => {
-  test("connect command: Only me works, This workspace is refused with a sentence", async () => {
+  test("connect command: Only me works and is the default, This workspace is refused with a sentence", async () => {
     if (!shared || !client || !app) return;
     const team = await teamWithMachines();
     const base = `/v1/workspaces/${team.workspaceId}/enrollments`;
@@ -294,8 +296,18 @@ describe("a Member connects and changes their own Only me machine", () => {
         403,
       ),
     ).toContain("Only workspace admins can connect a machine for the whole workspace.");
-    // Omitting the scope keeps the legacy workspace command, so it is refused too.
-    await refusal(await call(team.member.cookie, "POST", `${base}/token`, {}), 403);
+    // Omitting the scope gives the member an Only me command, never a refusal.
+    const defaulted = await call(team.member.cookie, "POST", `${base}/token`, {});
+    expect(defaulted.status).toBe(201);
+    expect(((await defaulted.json()) as { scope: string }).scope).toBe("user");
+    // Someone who may connect workspace machines keeps the original default.
+    const manager = await joinAsMember(team.accountId, team.workspaceId, "manager", [
+      ...MEMBER_PERMISSIONS,
+      "enrollments:manage",
+    ]);
+    const managerDefault = await call(manager.cookie, "POST", `${base}/token`, {});
+    expect(managerDefault.status).toBe(201);
+    expect(((await managerDefault.json()) as { scope: string }).scope).toBe("workspace");
 
     // The member sees their own machine and the workspace one, never the colleague's.
     const listed = await call(team.member.cookie, "GET", base);
@@ -569,5 +581,182 @@ describe("a Member connects and changes their own Only me machine", () => {
         403,
       ),
     ).toContain("You don't have access to this workspace's machines.");
+  }, 180_000);
+});
+
+describe("an organization that keeps own machines to its owners and admins", () => {
+  const ADMINS_ONLY =
+    "Your organization lets only its owners and admins connect their own machines.";
+
+  async function personalWorkspaceOf(accountId: string, subject: string): Promise<string> {
+    const [row] = await shared!.admin<Array<{ id: string }>>`
+      select personal_workspace_id as id from organization_memberships
+      where account_id = ${accountId} and subject_id = ${subject}`;
+    return row!.id;
+  }
+
+  test("members are refused new own machines; what's connected stays theirs; owners still can", async () => {
+    if (!shared || !client || !app) return;
+    const team = await teamWithMachines();
+    const base = `/v1/workspaces/${team.workspaceId}/enrollments`;
+    const switchTo = (on: boolean) =>
+      updateOrganizationPrivacyPreferences(client!.db, {
+        organizationId: team.accountId,
+        actorSubjectId: team.owner.subject,
+        membersConnectOwnMachines: on,
+      });
+    const canConnectOwn = async (cookie: string, workspaceId: string) => {
+      const listed = await call(cookie, "GET", `/v1/workspaces/${workspaceId}/machines`);
+      expect(listed.status).toBe(200);
+      return ((await listed.json()) as { canConnectOwnMachine?: boolean }).canConnectOwnMachine;
+    };
+    expect(await canConnectOwn(team.member.cookie, team.workspaceId)).toBe(true);
+
+    await switchTo(false);
+    expect(await canConnectOwn(team.member.cookie, team.workspaceId)).toBe(false);
+
+    // A connect command for an Only me machine is refused, pointing at the way left.
+    const refusedMint = await refusal(
+      await call(team.member.cookie, "POST", `${base}/token`, { scope: "user" }),
+      403,
+    );
+    expect(refusedMint).toContain(ADMINS_ONLY);
+    expect(refusedMint).toContain(
+      "A workspace admin can connect a machine for the whole workspace.",
+    );
+
+    // So is approving a pairing code as Only me; declining one always works.
+    const pairing = await startPairing(team.workspaceId, "member-box");
+    expect(
+      await refusal(
+        await call(team.member.cookie, "POST", `${base}/device/approve`, {
+          userCode: pairing.userCode,
+          scope: "user",
+        }),
+        403,
+      ),
+    ).toContain(ADMINS_ONLY);
+    const denied = await call(team.member.cookie, "POST", `${base}/device/deny`, {
+      userCode: pairing.userCode,
+    });
+    expect(denied.status).toBe(200);
+
+    // In their Personal workspace every machine is their own, This workspace too.
+    const memberPersonal = await personalWorkspaceOf(team.accountId, team.member.subject);
+    expect(await canConnectOwn(team.member.cookie, memberPersonal)).toBe(false);
+    for (const scope of ["user", "workspace"] as const) {
+      const text = await refusal(
+        await call(
+          team.member.cookie,
+          "POST",
+          `/v1/workspaces/${memberPersonal}/enrollments/token`,
+          {
+            scope,
+          },
+        ),
+        403,
+      );
+      expect(text, scope).toContain(ADMINS_ONLY);
+      expect(text, scope).not.toContain("workspace admin");
+    }
+
+    // A machine already connected keeps working and stays its owner's to remove.
+    const removed = await call(
+      team.colleague.cookie,
+      "POST",
+      `${base}/${team.colleagueMachine.enrollmentId}/revoke`,
+      {},
+    );
+    expect(removed.status).toBe(200);
+    expect((await enrollmentRow(team.colleagueMachine.enrollmentId)).status).toBe("revoked");
+
+    // The organization's owner still connects their own.
+    const ownerPersonal = await personalWorkspaceOf(team.accountId, team.owner.subject);
+    expect(await canConnectOwn(team.owner.cookie, ownerPersonal)).toBe(true);
+    const ownerMint = await call(
+      team.owner.cookie,
+      "POST",
+      `/v1/workspaces/${ownerPersonal}/enrollments/token`,
+      { scope: "user" },
+    );
+    expect(ownerMint.status).toBe(201);
+
+    // On again, members connect their own as before.
+    await switchTo(true);
+    expect(await canConnectOwn(team.member.cookie, team.workspaceId)).toBe(true);
+    const minted = await call(team.member.cookie, "POST", `${base}/token`, { scope: "user" });
+    expect(minted.status).toBe(201);
+  }, 180_000);
+});
+
+describe("a Personal workspace's owner shares their machine with the workspace", () => {
+  async function machineGeneration(enrollmentId: string): Promise<number> {
+    const [row] = await shared!.admin<Array<{ generation: number }>>`
+      select generation::int as generation from enrollments where id = ${enrollmentId}`;
+    return row!.generation;
+  }
+
+  test("the verified owner may; a shared workspace's machine manager still needs admin", async () => {
+    if (!shared || !client || !app) return;
+    const team = await teamWithMachines();
+    const [ownerPersonal] = await shared.admin<Array<{ id: string }>>`
+      select personal_workspace_id as id from organization_memberships
+      where account_id = ${team.accountId} and subject_id = ${team.owner.subject}`;
+    const personalId = ownerPersonal!.id;
+    const own = await finalizeMachine(team.accountId, personalId, team.owner.subject, "user");
+    const audience = `/v1/workspaces/${personalId}/machines/${own.enrollmentId}/audience`;
+
+    // In Personal, This workspace is still only its owner, so the owner decides.
+    const preview = await call(team.owner.cookie, "POST", `${audience}/preview`, {
+      audience: "workspace",
+    });
+    expect(preview.status, await preview.clone().text()).toBe(200);
+    const changed = await call(team.owner.cookie, "PUT", audience, {
+      audience: "workspace",
+      expectedGeneration: await machineGeneration(own.enrollmentId),
+    });
+    expect(changed.status, await changed.clone().text()).toBe(200);
+    expect((await enrollmentRow(own.enrollmentId)).scope).toBe("workspace");
+    // And back to Only me, theirs again.
+    const narrowed = await call(team.owner.cookie, "PUT", audience, {
+      audience: "only_me",
+      expectedGeneration: await machineGeneration(own.enrollmentId),
+    });
+    expect(narrowed.status, await narrowed.clone().text()).toBe(200);
+    expect(await enrollmentRow(own.enrollmentId)).toMatchObject({
+      scope: "user",
+      owner: team.owner.subject,
+    });
+
+    // A colleague can't reach the owner's Personal machine at all.
+    const colleagueTry = await call(team.colleague.cookie, "POST", `${audience}/preview`, {
+      audience: "workspace",
+    });
+    expect([403, 404]).toContain(colleagueTry.status);
+
+    // In a shared workspace, a member who manages machines still can't share
+    // their own Only me machine with everyone.
+    const manager = await joinAsMember(team.accountId, team.workspaceId, "manager", [
+      ...MEMBER_PERMISSIONS,
+      "enrollments:manage",
+    ]);
+    const managed = await finalizeMachine(
+      team.accountId,
+      team.workspaceId,
+      manager.subject,
+      "user",
+    );
+    expect(
+      await refusal(
+        await call(
+          manager.cookie,
+          "POST",
+          `/v1/workspaces/${team.workspaceId}/machines/${managed.enrollmentId}/audience/preview`,
+          { audience: "workspace" },
+        ),
+        403,
+      ),
+    ).toContain("Only workspace admins can share a machine with the whole workspace.");
+    expect((await enrollmentRow(managed.enrollmentId)).scope).toBe("user");
   }, 180_000);
 });

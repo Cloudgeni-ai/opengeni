@@ -20,7 +20,7 @@ import {
 import { updateManagedHumanSessionVisibility, type ApiRouteDeps } from "@opengeni/core";
 import { teamsRouteId } from "../src/integrations/teams-protocol";
 import { createApp } from "../src/app";
-import { drainTeamsBotOnce } from "../src/integrations/teams-bot";
+import { drainTeamsBotOnce, teamsChatPersonalWorkspace } from "../src/integrations/teams-bot";
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
 beforeAll(async () => {
@@ -103,8 +103,140 @@ async function fixture() {
     await shared.admin`update teams_bot_routes set lease_until=null where route_id=${routeId}`;
     await drainTeamsBotOnce(deps, sender);
   };
-  return { i, actor, subject, deps, input, messages, tick, grant, access };
+  return { i, actor, subject, deps, input, messages, tick, grant, access, personal };
 }
+
+test("a linked person's 1:1 chat lands in their own Personal workspace; channels and Personal-off stay in the installation's", async () => {
+  const f = await fixture();
+  await shared.admin`insert into workspace_inference_controls(workspace_id,account_id) values(${f.personal},${f.i.account_id})`;
+  await shared.admin`insert into session_tenancy_activations(account_id,activation_version,inventory_digest,parity_digest,activated_by) values(${f.i.account_id},1,${"1".repeat(64)},${"2".repeat(64)},'test')`;
+  // Only me chats in shared workspaces are off; a Personal workspace doesn't need them.
+  await shared.admin`insert into organization_private_session_settings(account_id,enabled,version,updated_by_membership_id) values(${f.i.account_id},false,1,null) on conflict(account_id) do update set enabled=false`;
+  expect(await teamsChatPersonalWorkspace(f.deps, f.i, f.subject)).toBe(f.personal);
+  await enqueueTeamsMessage(client.db, f.i, {
+    ...f.input,
+    personal: true,
+    channelId: null,
+    threadId: null,
+    sessionWorkspaceId: f.personal,
+  });
+  await f.tick();
+  const [session] =
+    await shared.admin`select s.id,s.workspace_id,s.visibility,s.owner_subject_id from sessions s join teams_bot_routes r on r.session_id=s.id where r.route_id=${f.input.routeId}`;
+  expect(session!.workspace_id).toBe(f.personal);
+  expect(session!.visibility).toBe("user_private");
+  expect(session!.owner_subject_id).toBe(f.subject);
+  expect(f.messages).toEqual([
+    `Started. Follow progress or approve requests: https://app.example.test/workspaces/${f.personal}/sessions/${session!.id}`,
+  ]);
+  const [shared0] =
+    await shared.admin`select count(*)::int as n from sessions where workspace_id=${f.i.workspace_id}`;
+  expect(shared0!.n).toBe(0);
+  // The native event in the Personal workspace wakes the route and is delivered.
+  await appendSessionEvents(client.db, f.personal, session!.id, [
+    { type: "turn.completed", payload: { output: "Answer from your workspace" } },
+  ]);
+  const [woken] =
+    await shared.admin`select relevant_event_sequence::int as n from teams_bot_routes where route_id=${f.input.routeId}`;
+  expect(woken!.n).toBeGreaterThan(0);
+  await f.tick();
+  expect(f.messages.at(-1)).toBe("Answer from your workspace");
+  // A follow-up continues the same chat there.
+  await enqueueTeamsMessage(client.db, f.i, {
+    ...f.input,
+    personal: true,
+    channelId: null,
+    threadId: null,
+    sessionWorkspaceId: f.personal,
+    eventId: `event:${crypto.randomUUID()}`,
+    payload: { text: "And one more thing" },
+  });
+  await f.tick();
+  const [followUp] =
+    await shared.admin`select count(*)::int as n from session_events where session_id=${session!.id} and type='user.message'`;
+  expect(followUp!.n).toBe(2);
+  // Losing the installation's workspace stops delivery, as for any Teams chat.
+  await removeTeamsLink(client.db, f.i, f.subject);
+  await appendSessionEvents(client.db, f.personal, session!.id, [
+    { type: "turn.completed", payload: { output: "Revoked answer" } },
+  ]);
+  await f.tick();
+  expect(f.messages).not.toContain("Revoked answer");
+  // With Personal workspaces off, new 1:1 chats stay in the installation's workspace.
+  await shared.admin`insert into organization_privacy_preferences(account_id,personal_workspaces_enabled) values(${f.i.account_id},false) on conflict(account_id) do update set personal_workspaces_enabled=false`;
+  expect(await teamsChatPersonalWorkspace(f.deps, f.i, f.subject)).toBeNull();
+});
+
+test("a Personal 1:1 route whose chat hasn't started yet gets the admission notice when Personal workspaces are turned off", async () => {
+  const f = await fixture();
+  await shared.admin`insert into workspace_inference_controls(workspace_id,account_id) values(${f.personal},${f.i.account_id})`;
+  await shared.admin`insert into session_tenancy_activations(account_id,activation_version,inventory_digest,parity_digest,activated_by) values(${f.i.account_id},1,${"1".repeat(64)},${"2".repeat(64)},'test')`;
+  await enqueueTeamsMessage(client.db, f.i, {
+    ...f.input,
+    personal: true,
+    channelId: null,
+    threadId: null,
+    sessionWorkspaceId: f.personal,
+  });
+  await shared.admin`insert into organization_privacy_preferences(account_id,personal_workspaces_enabled) values(${f.i.account_id},false) on conflict(account_id) do update set personal_workspaces_enabled=false`;
+  await f.tick();
+  expect(f.messages).toHaveLength(1);
+  expect(f.messages[0]).toContain("could not start");
+  expect(
+    (await shared.admin`select state from teams_bot_inbox where event_id=${f.input.eventId}`)[0]!
+      .state,
+  ).toBe("failed");
+  expect(
+    (
+      await shared.admin`select count(*)::int as n from sessions where account_id=${f.i.account_id}`
+    )[0]!.n,
+  ).toBe(0);
+  // The message is settled, so later ticks don't retry or resend it.
+  await f.tick();
+  expect(f.messages).toHaveLength(1);
+});
+
+test("a 1:1 route can't take a channel, and its proof doesn't create the chat in the installation's workspace", async () => {
+  const f = await fixture();
+  await expect(
+    enqueueTeamsMessage(client.db, f.i, { ...f.input, sessionWorkspaceId: f.personal }),
+  ).rejects.toThrow("teams_route_unavailable");
+  await enqueueTeamsMessage(client.db, f.i, {
+    ...f.input,
+    personal: true,
+    channelId: null,
+    threadId: null,
+    sessionWorkspaceId: f.personal,
+  });
+  // Even the installation workspace's own grant can't start it there.
+  const route = (await claimTeamsRoute(client.db, f.i))!;
+  const { createSessionForRequest } = await import("@opengeni/core");
+  await expect(
+    createSessionForRequest(
+      f.deps,
+      f.grant,
+      f.i.workspace_id,
+      {
+        requestedSessionId: route.session_id,
+        initialMessage: f.input.payload.text,
+        visibility: "private",
+        idempotencyKey: `teams:${route.route_id}`,
+      },
+      undefined,
+      {
+        teamsConversation: {
+          routeId: route.route_id,
+          eventId: f.input.eventId,
+          leaseToken: route.lease_token!,
+          installationGeneration: f.i.generation,
+        },
+      },
+    ),
+  ).rejects.toMatchObject({ status: 403 });
+  const [count] =
+    await shared.admin`select count(*)::int as n from sessions where id=${route.session_id}`;
+  expect(count!.n).toBe(0);
+});
 test("duplicate channel delivery creates one native session, acknowledges, and publishes asynchronous final once", async () => {
   const f = await fixture();
   await enqueueTeamsMessage(client.db, f.i, f.input);

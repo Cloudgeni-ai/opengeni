@@ -65,6 +65,12 @@ export type UseVoiceInputOptions = {
    */
   keyterms?: readonly string[] | undefined;
   /**
+   * The speech-to-text model to transcribe with, as the workspace's voice
+   * input lists it (`capability.models`). Omitted or null: the workspace's
+   * voice input model. Each dictation keeps the model it was started with.
+   */
+  model?: { providerId: string; model: string } | null | undefined;
+  /**
    * Asked before each new dictation takes the microphone, such as a host's
    * consent prompt. Resolving false (or throwing) keeps the microphone off.
    */
@@ -143,7 +149,7 @@ export type UseVoiceInputResult = {
   /** Insert a saved transcript into the draft. */
   insertSavedTranscript: () => Promise<void>;
   /**
-   * The person's Cancel or Escape: delete the dictation under way, recording
+   * The person's Cancel: delete the dictation under way, recording
    * or transcribing, so nothing offers it again. Its speech goes to `onAudio`
    * first, marked cancelled, for a host that keeps it. A saved dictation an
    * earlier page left only stops being retried and stays offered.
@@ -775,7 +781,7 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
       beginCapture(capture.stream, null);
       return true;
     }
-    const transcription = dictationTranscription(language, current.keyterms);
+    const transcription = dictationTranscription(language, current.keyterms, current.model);
     // One dictation at a time: a copy left by an earlier one is dropped.
     audioCopies.current.clear();
     const copying = Boolean(current.onAudio);
@@ -1009,7 +1015,11 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
       }
       const generation = ++generationRef.current;
       const newId = crypto.randomUUID();
-      const transcription = dictationTranscription(current.language || null, current.keyterms);
+      const transcription = dictationTranscription(
+        current.language || null,
+        current.keyterms,
+        current.model,
+      );
       // Held like a recorded dictation from here on.
       const dictation: Dictation = {
         recordingId: newId,
@@ -1079,28 +1089,6 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
     if (durable) void loadSaved(generation);
   }, [workspaceId, durable, loadSaved, settleIdle]);
 
-  useEffect(() => {
-    // No document (React Native): there is no Escape key to listen for.
-    if (typeof document === "undefined") return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (
-        event.key === "Escape" &&
-        // A dialog, menu, or popover that handled Escape owns it.
-        !event.defaultPrevented &&
-        (status === "requesting-permission" ||
-          status === "recording" ||
-          status === "saving" ||
-          status === "transcribing" ||
-          status === "retrying")
-      ) {
-        event.preventDefault();
-        cancel();
-      }
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [cancel, status]);
-
   const level = useCallback((): number | null => {
     const levels = recorderRef.current?.levels();
     const first = levels?.[0];
@@ -1161,14 +1149,16 @@ function takeCopy(copies: Map<string, AudioCopy>, recordingId: string): Blob | n
   return new Blob(parts as BlobPart[], copy.mimeType ? { type: copy.mimeType } : {});
 }
 
-/** The recording options a dictation sends: its language and the words to listen for. */
+/** The recording options a dictation sends: its model, its language and the words to listen for. */
 function dictationTranscription(
   language: string | null,
   keyterms: readonly string[] | undefined,
-): { language?: string; keyterms?: string[] } | null {
+  model: { providerId: string; model: string } | null | undefined,
+): { providerId?: string; model?: string; language?: string; keyterms?: string[] } | null {
   const terms = (keyterms ?? []).map((term) => term.trim()).filter(Boolean);
-  if (!language && terms.length === 0) return null;
+  if (!model && !language && terms.length === 0) return null;
   return {
+    ...(model ? { providerId: model.providerId, model: model.model } : {}),
     ...(language ? { language } : {}),
     ...(terms.length > 0 ? { keyterms: terms.slice(0, 100) } : {}),
   };
@@ -1318,6 +1308,7 @@ function voiceInputCode(code: string | null): string {
     case "allowance_exhausted":
     case "monthly_model_cost_limit":
     case "policy_blocked":
+    case "region_restricted":
     case "not_supported":
     case "unavailable":
     case "too_large":

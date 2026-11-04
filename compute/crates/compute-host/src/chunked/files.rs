@@ -179,15 +179,19 @@ impl Chunked {
             Prepared::Known(reusable) => Some(reusable.reference),
             Prepared::New(chunk) => {
                 let _permit = self.transfers.acquire().await.map_err(transient)?;
-                let stored = self
+                let put = self
                     .chunks
                     .put_chunk(&chunk)
                     .await
                     .map_err(|error| storage_error(OP, error))?;
-                if stored {
-                    crate::observe::notes::bytes("uploaded", chunk.bytes.len() as u64);
+                if put.new {
+                    // A copy within the store, of what an archive a sweep stopped
+                    // stored an hour before, moves nothing over the network.
+                    let how = if put.copied { "copied" } else { "uploaded" };
+                    crate::observe::notes::bytes(how, chunk.bytes.len() as u64);
                 }
-                Some(chunk.reference)
+                // Named as stored, under the day it was stored on.
+                Some(put.reference)
             }
         })
     }

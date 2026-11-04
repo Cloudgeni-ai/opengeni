@@ -392,7 +392,12 @@ export function personalGitHubRepositoryProviderHttpError(
       });
     case "connection_inactive":
     case "provider_denied":
-      return new HTTPException(401, { message: "personal GitHub must be reconnected" });
+      // Not 401: that status means the person's Opengeni session ended, and
+      // clients answer it with "sign in again". GitHub refused the stored
+      // grant, so the person reconnects GitHub instead.
+      return new HTTPException(409, {
+        message: "Reconnect your GitHub account to keep working as you",
+      });
     case "provider_rate_limited":
       return new HTTPException(503, { message: "GitHub is temporarily rate limited" });
     case "repository_not_found":
@@ -535,6 +540,21 @@ async function personalGitHubProviderFetch(
     forceRefresh,
   });
   if (credential.status !== "ok") {
+    // A refresh that failed for a passing reason (network, GitHub 5xx) left
+    // the connection active: that is "try again", not "reconnect". A grant
+    // GitHub refused has left `active`, and every other failure needs the
+    // person to reconnect too.
+    if (credential.reason === "refresh_failed") {
+      const current = await getConnectionMetadata(
+        deps.db,
+        connection.workspaceId,
+        connection.id,
+        subjectId,
+      );
+      if (current?.status === "active") {
+        throw new PersonalGitHubRepositoryProviderError("provider_unavailable");
+      }
+    }
     throw new PersonalGitHubRepositoryProviderError("connection_inactive");
   }
   if (credential.connectionId !== connection.id || credential.connectionVersion === undefined) {

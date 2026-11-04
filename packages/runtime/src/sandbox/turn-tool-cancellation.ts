@@ -25,6 +25,7 @@ import {
   type RoutedCallScope,
 } from "./routing/routed-call-scope";
 import { createHash } from "node:crypto";
+import { posix } from "node:path";
 import { sendCommandInput } from "./command-input";
 import {
   withPendingCommandSupervision,
@@ -76,6 +77,22 @@ const TURN_MAX_MODEL_WAIT_MS = 30_000;
  * the next request still reads the cached prefix instead of rewriting it.
  */
 const CUT_POLLING_MAX_MODEL_WAIT_MS = 240_000;
+/**
+ * Finish floor (part of cut polling): an `exec_command` without a TTY that the
+ * model did not explicitly background waits at least this long for its exit,
+ * however short a wait it asked for, and still returns the moment it exits.
+ * Models often ask for a wait of a second or less and then poll the
+ * background handle with `command_read`, each poll a full-context model
+ * request, although most such commands (tests, builds, lint) finish within a
+ * minute. Servers, watchers and deliberate parallel runs pass
+ * `background: true` (or use a TTY) to get the requested short wait. A
+ * floored command that printed and then went quiet returns only once the floor
+ * has passed (CUT_POLLING_OUTPUT_QUIET_MS): test runners commonly print a
+ * header and then stay silent for tens of seconds. Output that ends in an input
+ * prompt still returns after a short silence, and a waiting Steer, Pause or
+ * turn cancellation ends the wait at the next slice as before.
+ */
+export const COMMAND_FINISH_FLOOR_MS = 60_000;
 /**
  * With cut polling a long wait must not hold a dev server, watcher, tail or
  * REPL for minutes after it printed what the model needs. Once the ordinary
@@ -290,6 +307,8 @@ type ActiveRemoteExec = {
   releaseCancellationAuthority(opId: string): void;
   settleNotDispatched(opId: string): void;
   bindTransport(transport: RemoteOperationControl): void;
+  /** End the operation's foreground wait now (a Steer is waiting); see yieldExecCommand. */
+  requestYield(): void;
   observe(): Promise<RemoteOperationObservation | null>;
   cancel(): Promise<void>;
 };
@@ -436,9 +455,37 @@ export function looksLikeInputPrompt(output: string): boolean {
 function foregroundWait(
   value: unknown,
   cutPolling: boolean,
+  options: { finishFloor?: boolean } = {},
 ): { waitMs: number; quietReturnAfterMs?: number } {
   if (!cutPolling) return { waitMs: modelWaitMs(value, false) };
+  if (options.finishFloor === true) {
+    const requested = modelWaitMs(value, true);
+    const waitMs = Math.max(requested, COMMAND_FINISH_FLOOR_MS);
+    // A wait the model itself asked to make longer than the ordinary window
+    // keeps its ordinary quiet return; only a raised short wait delays it to
+    // the floor.
+    return requested > TURN_MAX_MODEL_WAIT_MS
+      ? { waitMs, quietReturnAfterMs: modelWaitMs(value, false) }
+      : { waitMs, quietReturnAfterMs: COMMAND_FINISH_FLOOR_MS };
+  }
   return { waitMs: modelWaitMs(value, true), quietReturnAfterMs: modelWaitMs(value, false) };
+}
+
+/**
+ * The model-facing wait of one `exec_command` call. With the finish floor on
+ * (`finishFloor`, set only where the model is offered `background`), a command
+ * without a TTY that is not explicitly backgrounded waits at least
+ * COMMAND_FINISH_FLOOR_MS; `tty: true` and `background: true` keep the
+ * requested wait.
+ */
+export function execCommandForegroundWait(
+  args: { yield_time_ms?: unknown; tty?: unknown; background?: unknown },
+  cutPolling: boolean,
+  finishFloor: boolean,
+): { waitMs: number; quietReturnAfterMs?: number } {
+  return foregroundWait(args.yield_time_ms, cutPolling, {
+    finishFloor: finishFloor && args.tty === false && args.background !== true,
+  });
 }
 
 function execOutput(raw: string): string {
@@ -563,8 +610,11 @@ function singleQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-function shellMarkerPath(token: string): string {
-  return `${SHELL_MARKER_DIR}/${token}`;
+function shellMarkerPath(token: string, directory = SHELL_MARKER_DIR): string {
+  if (!posix.isAbsolute(directory) || directory.includes("\0")) {
+    throw new Error("Sandbox temporary directory must be absolute");
+  }
+  return `${directory}/${token}`;
 }
 
 function shellCancellationPath(markerPath: string): string {
@@ -610,7 +660,7 @@ function processInspectionCommandLines(): string[] {
 
 function cancellableGroupLeaderCommand(command: string, markerPath: string): string {
   const marker = singleQuote(markerPath);
-  const markerDir = singleQuote(SHELL_MARKER_DIR);
+  const markerDir = singleQuote(posix.dirname(markerPath));
   return [
     ...processInspectionCommandLines(),
     `__opengeni_marker=${marker}`,
@@ -740,7 +790,7 @@ export function cancellableSynchronousShellCommand(command: string, markerPath: 
   const sourceVariable = `__opengeni_sync_source_${token}`;
   const bodyVariable = `__opengeni_sync_body_${token}`;
   const marker = singleQuote(markerPath);
-  const markerDir = singleQuote(SHELL_MARKER_DIR);
+  const markerDir = singleQuote(posix.dirname(markerPath));
   const groupLeaderCommand = [
     ...processInspectionCommandLines(),
     `[ "\${${sourceVariable}+x}" = x ] || exit 125`,
@@ -805,7 +855,7 @@ export function cancellableSynchronousShellCommand(command: string, markerPath: 
 function pendingShellCancellationCommand(state: PendingShellStart): string {
   const marker = singleQuote(state.markerPath);
   const cancellation = singleQuote(state.cancellationPath);
-  const markerDir = singleQuote(SHELL_MARKER_DIR);
+  const markerDir = singleQuote(posix.dirname(state.markerPath));
   const token = singleQuote(state.token);
   return [
     ...processInspectionCommandLines(),
@@ -855,7 +905,7 @@ function pendingShellCancellationCommand(state: PendingShellStart): string {
 function retainedShellCancellationCommand(state: ActiveShellSession): string {
   const marker = singleQuote(state.markerPath!);
   const cancellation = singleQuote(shellCancellationPath(state.markerPath!));
-  const markerDir = singleQuote(SHELL_MARKER_DIR);
+  const markerDir = singleQuote(posix.dirname(state.markerPath!));
   const token = singleQuote(state.token!);
   return [
     ...processInspectionCommandLines(),
@@ -1107,6 +1157,8 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   private readonly signal: AbortSignal | undefined;
   private readonly onAbort = (): void => this.cancel(this.signal?.reason);
   private readonly cutPolling: boolean;
+  private readonly finishFloor: boolean;
+  private readonly shellMarkerDirectory: string;
   private readonly secretResolver: SecretResolver | null;
   private readonly credentials: CredentialEnvironment | null;
   private readonly secretFileSessions = new Set<CommandCancellationSession>();
@@ -1115,7 +1167,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
 
   constructor(signal?: AbortSignal, options: TurnToolCancellationControllerOptions = {}) {
     this.signal = signal;
+    const temporaryDirectory = options.sandboxTemporaryDirectory || "/tmp";
+    this.shellMarkerDirectory = posix.join(temporaryDirectory, "opengeni-turn-shell");
     this.cutPolling = options.cutPolling === true;
+    this.finishFloor = this.cutPolling && options.finishFloor === true;
     this.secretResolver = options.secretResolver ?? null;
     this.credentials = options.credentials ?? null;
     if (signal?.aborted) {
@@ -1151,6 +1206,9 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
 
   setForegroundWaitYield(active: boolean): void {
     this.foregroundWaitYield = active;
+    // A remote operation waits in its provider in one block: ask it to return
+    // its background handle now instead of at the end of its window.
+    if (active) for (const remoteExec of this.remoteExecs) remoteExec.requestYield();
   }
 
   settleCommandCallsNotStarted(): string[] {
@@ -1309,9 +1367,15 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       const interactive = args.tty ?? !lossless;
       const remoteExec =
         session.cancelExecCommand && useRemoteOpCancellation
-          ? this.registerRemoteExec(session, `${sanitizeOpIdToken(correlationId)}:0`)
+          ? this.registerRemoteExec(session, `${sanitizeOpIdToken(correlationId)}:0`, {
+              // A lifecycle command always reports its own exit, never a handle.
+              yieldsToSteer: false,
+            })
           : null;
-      const markerPath = shellMarkerPath(crypto.randomUUID());
+      const markerPath = shellMarkerPath(
+        crypto.randomUUID(),
+        useRemoteOpCancellation ? undefined : this.shellMarkerDirectory,
+      );
       const command = useRemoteOpCancellation
         ? args.cmd
         : lossless
@@ -1738,8 +1802,12 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     if (!parsed || typeof parsed.cmd !== "string") {
       return await this.correlatedInvoke(tool.invoke, runContext, input, details);
     }
+    // `background` only selects this call's model-facing wait; no inner layer
+    // reads it, so it is removed before the arguments are forwarded.
+    const execWait = execCommandForegroundWait(parsed, this.cutPolling, this.finishFloor);
+    const backgroundArgumentPresent = Object.hasOwn(parsed, "background");
+    delete parsed.background;
     const token = crypto.randomUUID();
-    const markerPath = shellMarkerPath(token);
     const correlationId = details?.toolCall?.callId ?? `turn_exec_${token}`;
     const cancelExecCommand = cancellationSession?.cancelExecCommand;
     // Connected-machine exec is already a durable process-tree op and
@@ -1747,6 +1815,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     // wrapper and preserves the user's command byte-for-byte. PTY-backed
     // cloud/local sessions use the portable SDK session + POSIX marker.
     const useRemoteOpCancellation = await usesRemoteOperationCancellation(cancellationSession);
+    const markerPath = shellMarkerPath(
+      token,
+      useRemoteOpCancellation ? undefined : this.shellMarkerDirectory,
+    );
     if (this.cancelled) throw cancellationError(this.reason);
     // Secret references: managed sandboxes always parse the command in
     // POSIX sh (the wrapper below), so splice now; connected machines
@@ -1774,7 +1846,9 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     const interactive = parsed.tty !== false;
     const remoteExec =
       cancelExecCommand && useRemoteOpCancellation
-        ? this.registerRemoteExec(cancellationSession!, `${sanitizeOpIdToken(correlationId)}:0`)
+        ? this.registerRemoteExec(cancellationSession!, `${sanitizeOpIdToken(correlationId)}:0`, {
+            yieldsToSteer: true,
+          })
         : null;
     const wrappedCommand = useRemoteOpCancellation
       ? null
@@ -1785,10 +1859,19 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       secret?.carry ?? null,
       wrappedCommand ?? commandText,
     );
+    // A remote operation waits in the provider for its own yield, so it is
+    // sent the effective wait: a finish floor, or the ordinary cap when cut
+    // polling is off. Connected Machines cap it at the floor and end it early
+    // for a Steer (yieldExecCommand); OpenSandbox has no early yield yet.
+    const remoteYieldMs = parsed.yield_time_ms === execWait.waitMs ? null : execWait.waitMs;
     const cancellableInput = useRemoteOpCancellation
-      ? commandText === parsed.cmd
+      ? commandText === parsed.cmd && !backgroundArgumentPresent && remoteYieldMs === null
         ? input
-        : JSON.stringify({ ...parsed, cmd: commandText })
+        : JSON.stringify({
+            ...parsed,
+            cmd: commandText,
+            ...(remoteYieldMs === null ? {} : { yield_time_ms: remoteYieldMs }),
+          })
       : JSON.stringify({
           ...parsed,
           cmd: wrappedCommand,
@@ -1937,7 +2020,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         state,
         initialOutput: output,
         startedAt,
-        ...foregroundWait(parsed.yield_time_ms, this.cutPolling),
+        ...execWait,
         maxOutputTokens:
           typeof parsed.max_output_tokens === "number" ? parsed.max_output_tokens : 20_000,
       });
@@ -2760,7 +2843,11 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     }
   }
 
-  private registerRemoteExec(session: CommandCancellationSession, opId: string): ActiveRemoteExec {
+  private registerRemoteExec(
+    session: CommandCancellationSession,
+    opId: string,
+    options: { yieldsToSteer: boolean },
+  ): ActiveRemoteExec {
     let resolveSettled!: () => void;
     const settledPromise = new Promise<void>((resolve) => {
       resolveSettled = resolve;
@@ -2771,6 +2858,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     let ownershipTransferPending = false;
     let transport: RemoteOperationControl | null =
       session.requiresPinnedRemoteOperationControl?.() === true ? null : session;
+    const requestYield = () => {
+      if (!options.yieldsToSteer || entry.settled || entry.ownershipTransferred) return;
+      transport?.yieldExecCommand?.(opId);
+    };
     const entry: ActiveRemoteExec = {
       settled: false,
       ownershipTransferred: false,
@@ -2784,7 +2875,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       },
       bindTransport: (selected) => {
         if (selected.cancelExecCommand || selected.observeExecCommand) transport = selected;
+        // A Steer that arrived before the provider selected this operation.
+        if (this.foregroundWaitYield) requestYield();
       },
+      requestYield,
       observe: async () => {
         if (entry.observation?.status === "completed") return entry.observation;
         if (ownershipTransferPending) return null;
@@ -3158,12 +3252,23 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
 }
 
 export type TurnToolCancellationControllerOptions = {
+  /** The sandbox manifest's TMPDIR, not the worker's temporary directory.
+   * Resolve once so launch, reads and cancellation retain the same literal
+   * marker identity even if the environment changes later. */
+  sandboxTemporaryDirectory?: string;
   /**
    * Honor long model-requested foreground waits (settings.experimentCutPolling,
    * OPENGENI_EXPERIMENT_CUT_POLLING; on by default in production settings).
    * Omitted means the ordinary 30-second cap.
    */
   cutPolling?: boolean;
+  /**
+   * With cut polling, wait at least COMMAND_FINISH_FLOOR_MS for an
+   * `exec_command` without a TTY or `background: true`. Set only where the
+   * model's `exec_command` schema offers `background` and describes the floor
+   * (the lean schema), so the model always has a way to keep a short wait.
+   */
+  finishFloor?: boolean;
   /**
    * The attempt's secret resolver. Commands, stdin, patches and image paths
    * holding `{{secret:…}}` / `{{secretfile:…}}` references are resolved below

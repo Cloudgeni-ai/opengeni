@@ -28,6 +28,7 @@ const PAGES = new Set([
   "secrets",
   "rigs",
   "playground",
+  "archived",
   "read-only-chats",
   "inbox",
   "sites",
@@ -47,6 +48,7 @@ const TOP_LEVEL_PAGES: ReadonlyArray<readonly [RegExp, string]> = [
   [/^\/native-sign-in$/, "native-sign-in"],
   [/^\/site-auth\/authorize$/, "site-auth"],
   [/^\/reset-password$/, "reset-password"],
+  [/^\/share\/[^/]+$/, "shared-chat"],
   [/^\/setup-account$/, "setup-account"],
   [/^\/account-auth$/, "account-auth"],
   [/^\/settings\/security$/, "personal-security"],
@@ -84,6 +86,9 @@ const SECTIONS = new Set([
   "access",
   "identity",
   "capabilities",
+  "available",
+  "shared",
+  "mine",
 ]);
 
 /** Every `page` value `journeyPage` can report. */

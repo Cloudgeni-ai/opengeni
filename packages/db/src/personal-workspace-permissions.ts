@@ -6,6 +6,11 @@ import type { Permission } from "@opengeni/contracts";
  * workspace administration is a wildcard over member management and API-key
  * delegation, either of which would let the owner create another principal
  * with ambient access to the private workspace.
+ *
+ * The owner's own `workspace_memberships` row carries exactly this list too
+ * (migration 1231, `personal_workspace_owner_permissions()`).
+ * Change both together: a new migration replaces that function and re-syncs
+ * the rows, and a test asserts the two lists are equal.
  */
 export const managedPersonalWorkspacePermissions: Permission[] = [
   "workspace:read",
@@ -30,15 +35,10 @@ export const managedPersonalWorkspacePermissions: Permission[] = [
   "connections:read",
   "connections:write",
   "capabilities:manage",
-  "variable-sets:list",
-  "variable-sets:read",
-  "variable-sets:write",
-  "variable-sets:manage",
-  "variable-sets:attach",
-  "variable-sets:use",
   "secrets:list",
   "secrets:read",
   "secrets:write",
+  "secrets:use",
   "mcp_servers:attach",
   "goals:manage",
   "enrollments:read",

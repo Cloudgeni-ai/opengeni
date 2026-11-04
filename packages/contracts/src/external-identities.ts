@@ -152,9 +152,29 @@ export type UpdateExternalIdentityMembershipRequest = z.infer<
   typeof UpdateExternalIdentityMembershipRequest
 >;
 
+/** The workspace membership an app states for its user on one request. The
+ * same permission list as an external-members grant: on a workspace-scoped
+ * request, the user's member grant in that shared workspace becomes exactly
+ * these permissions before the request is authorized. Without it, the stored
+ * grant applies unchanged. */
+export const ExternalActorStatedMembership = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      permissions: z.array(Permission).min(1).max(Permission.options.length),
+    })
+    .strict(),
+);
+export type ExternalActorStatedMembership = z.infer<typeof ExternalActorStatedMembership>;
+
 export const ExternalActorSelection = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("mode", [
-    z.object({ mode: z.literal("external"), identity: ExternalIdentityReference }).strict(),
+    z
+      .object({
+        mode: z.literal("external"),
+        identity: ExternalIdentityReference,
+        membership: ExternalActorStatedMembership.optional(),
+      })
+      .strict(),
     z
       .object({
         mode: z.literal("linked_native"),

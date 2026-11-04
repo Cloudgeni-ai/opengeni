@@ -155,8 +155,8 @@ describe("catalog connected accounts", () => {
     for (const label of [
       "member@example.test · Community",
       "member · Team",
-      "Only me",
-      "This workspace",
+      "Yours",
+      "Shared",
       "Connected",
       "Needs reconnect",
       "Failed",
@@ -465,10 +465,10 @@ describe("catalog connected accounts", () => {
       const rows = [...view.container.querySelectorAll("li")].map((row) => row.textContent);
       expect(rows[0]).toContain("mia@work.test");
       expect(rows[0]).not.toContain("From");
-      expect(rows[1]).toContain("Only me · From Personal workspace");
-      expect(rows[2]).toContain("Only me · From another workspace");
-      expect(rows[3]).toContain("From another workspace");
-      expect(rows[3]).not.toContain("This workspace");
+      expect(rows[1]).toContain("Yours · From Personal workspace");
+      expect(rows[2]).toContain("Yours · From another workspace");
+      expect(rows[3]).toContain("Shared · From another workspace");
+      expect(rows[3]).not.toContain("Yours");
       // Her own account is removed or reconnected where it was added, so it is
       // offered when she may manage her accounts there. A shared account from
       // another workspace is that workspace's to manage.
@@ -604,6 +604,153 @@ describe("catalog connected accounts", () => {
         { ...enabled, connectionRef: null },
       ] as CapabilityCatalogItem[])
         expect(catalogAddAccountOwnership(blocked, false)).toBeNull();
+    });
+
+    test("your own login lists where it works; nobody else's does", async () => {
+      const mine = account({ metadata: { email: "mine@example.test", resource: item.mcpUrl } });
+      // Only your Personal workspace, where it always works: nothing to choose, no list.
+      const personalOnly = account({
+        metadata: { email: "personal@example.test", resource: item.mcpUrl },
+      });
+      const someoneElse = account({
+        subjectId: "teammate",
+        metadata: { email: "teammate@example.test", resource: item.mcpUrl },
+      });
+      const shared = account({
+        subjectId: null,
+        metadata: { email: "team@example.test", resource: item.mcpUrl },
+      });
+      const personalRow = {
+        workspaceId: "personal",
+        name: "Personal",
+        personal: true,
+        current: false,
+        on: true,
+        alwaysOn: true,
+        canChange: false,
+      };
+      const teamRow = {
+        workspaceId: "team",
+        name: "Team",
+        personal: false,
+        current: true,
+        on: false,
+        alwaysOn: false,
+        canChange: true,
+      };
+      const getOwnResourceReach = mock(
+        async (_workspaceId: string, resource: { resourceKind: string; resourceId: string }) => ({
+          resourceKind: "connection" as const,
+          resourceId: resource.resourceId,
+          workspaces: resource.resourceId === mine.id ? [personalRow, teamRow] : [personalRow],
+        }),
+      );
+      const setOwnResourceReach = mock(async (workspaceId: string, request: { on: boolean }) => ({
+        workspace: { ...teamRow, workspaceId, on: request.on },
+      }));
+      const client = { getOwnResourceReach, setOwnResourceReach };
+      const view = await render(
+        <CatalogConnectedAccounts
+          item={item}
+          connections={[mine, personalOnly, someoneElse, shared]}
+          management={management()}
+          ownReach={{ client, workspaceId: "team" }}
+        />,
+      );
+      await act(async () => {});
+      // Asked only for your own logins, from the workspace being viewed.
+      expect(
+        getOwnResourceReach.mock.calls.map(([workspaceId, resource]) => [
+          workspaceId,
+          resource.resourceId,
+        ]),
+      ).toEqual([
+        ["team", mine.id],
+        ["team", personalOnly.id],
+      ]);
+      expect(view.container.textContent).toContain("Where it works");
+      const switches = [...view.container.querySelectorAll('[role="switch"]')];
+      expect(switches.map((entry) => entry.getAttribute("aria-label"))).toEqual([
+        "Use mine@example.test in Personal",
+        "Use mine@example.test in Team",
+      ]);
+      expect(switches.map((entry) => entry.getAttribute("aria-checked"))).toEqual([
+        "true",
+        "false",
+      ]);
+      // Your Personal workspace can't be turned off; the switch says why.
+      expect(switches[0]?.getAttribute("aria-disabled")).toBe("true");
+      await act(async () => (switches[0] as HTMLButtonElement).click());
+      expect(setOwnResourceReach).not.toHaveBeenCalled();
+      await act(async () => (switches[1] as HTMLButtonElement).click());
+      expect(setOwnResourceReach).toHaveBeenCalledWith("team", {
+        resourceKind: "connection",
+        resourceId: mine.id,
+        on: true,
+      });
+      expect(
+        view.container
+          .querySelector('[aria-label="Use mine@example.test in Team"]')
+          ?.getAttribute("aria-checked"),
+      ).toBe("true");
+      await view.unmount();
+    });
+
+    test("a service that can't identify accounts offers no Add, and says why", async () => {
+      const mine = account({ accountIdentity: "single", metadata: { email: "me@example.test" } });
+      const view = await render(
+        <CatalogConnectedAccounts
+          item={item}
+          connections={[mine]}
+          management={management({ addOwnership: "personal" })}
+        />,
+      );
+      expect(buttons(view.container)).toEqual(["Remove me@example.test"]);
+      expect(view.container.textContent).toContain(
+        "This service doesn't tell us which account you signed in with, so you can connect one account. Disconnect it to use a different one.",
+      );
+      await view.unmount();
+
+      // Someone else's personal account is invisible to the rule.
+      const theirs = account({ subjectId: "someone-else", accountIdentity: "single" });
+      const shared = await render(
+        <CatalogConnectedAccounts
+          item={item}
+          connections={[theirs]}
+          management={management({ addOwnership: "workspace" })}
+        />,
+      );
+      expect(buttons(shared.container)).toEqual(["Add account"]);
+      await shared.unmount();
+    });
+
+    test("an account from before identity is reconnected once before another is added", async () => {
+      const legacy = account({
+        accountIdentity: "reconnect",
+        metadata: { email: "me@example.test" },
+      });
+      const actions = management({ addOwnership: "personal" });
+      const view = await render(
+        <CatalogConnectedAccounts item={item} connections={[legacy]} management={actions} />,
+      );
+      expect(buttons(view.container)).toEqual([
+        "Reconnect me@example.test",
+        "Remove me@example.test",
+      ]);
+      expect(view.container.textContent).toContain(
+        "Reconnect your existing account once, then add another.",
+      );
+      await view.unmount();
+
+      const verified = await render(
+        <CatalogConnectedAccounts
+          item={item}
+          connections={[{ ...legacy, accountIdentity: "verified" }]}
+          management={actions}
+        />,
+      );
+      expect(buttons(verified.container)).toEqual(["Add account", "Remove me@example.test"]);
+      await verified.unmount();
     });
   });
 });

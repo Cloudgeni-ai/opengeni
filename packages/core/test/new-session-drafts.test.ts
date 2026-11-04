@@ -634,6 +634,69 @@ describe("core new-session draft hydration", () => {
     );
     expect(other).toEqual({});
   }, 180_000);
+
+  test("keeps an organization machine connected from another workspace", async () => {
+    if (!available) return;
+    const { grant, subjectId } = await fixture();
+    const workspaceId = grant.workspaceId!;
+    const [home] = await shared!.admin<{ id: string }[]>`
+      insert into workspaces (account_id, name)
+      values (${grant.accountId}, 'machine home workspace') returning id`;
+    const [personal] = await shared!.admin<{ id: string }[]>`
+      insert into workspaces (account_id, name)
+      values (${grant.accountId}, 'personal workspace') returning id`;
+    await shared!.admin`
+      insert into workspace_inference_controls (workspace_id, account_id)
+      values (${home!.id}, ${grant.accountId})`;
+    await shared!.admin`
+      insert into organization_memberships (
+        account_id, subject_id, status, personal_workspace_id, authorization_revision
+      ) values (${grant.accountId}, ${subjectId}, 'active', ${personal!.id}, 1)`;
+    await shared!.admin`
+      insert into workspace_memberships (workspace_id, account_id, subject_id, role)
+      values (${home!.id}, ${grant.accountId}, ${subjectId}, 'owner')`;
+    const machine = await shared!.admin.begin(async (tx) => {
+      await tx`select
+        set_config('opengeni.account_id', ${grant.accountId}, true),
+        set_config('opengeni.workspace_id', ${home!.id}, true),
+        set_config('opengeni.subject_id', ${subjectId}, true),
+        set_config('opengeni.initiating_human_subject_id', ${subjectId}, true)`;
+      const [row] = await tx<{ sandboxId: string }[]>`
+        select sandbox_id as "sandboxId"
+        from finalize_scoped_enrollment(
+          ${grant.accountId}::uuid, ${home!.id}::uuid, 'organization',
+          ${`ed25519:${crypto.randomUUID()}`}, true, true, 'linux', 'x86_64',
+          'organization machine', true
+        )`;
+      return row!;
+    });
+    const options = {
+      sandboxBackend: "selfhosted" as const,
+      targetSandboxId: machine.sandboxId,
+      workingDir: "projects/app",
+    };
+    await withWorkspaceSubjectRls(db, workspaceId, subjectId, (scoped) =>
+      saveNewSessionDraftInTransaction(scoped, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId,
+        expectedRevision: 0,
+        text: "Run it on the organization machine",
+        resources: [],
+        tools: [],
+        toolsProvided: true,
+        model: settings.openaiModel,
+        modelProvided: true,
+        reasoningEffort: settings.openaiReasoningEffort,
+        latencyMode: "standard",
+        selectedProjectChannelId: null,
+        options,
+      }),
+    );
+
+    const hydrated = await getActorNewSessionDraft({ db, settings }, grant, workspaceId);
+    expect(hydrated.options).toEqual(options);
+  }, 180_000);
 });
 
 describe("workspace default Sandbox Environment in the composer flow", () => {

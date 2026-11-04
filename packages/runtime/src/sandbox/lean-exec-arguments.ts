@@ -29,6 +29,21 @@
  * pass through unchanged, so every argument object that is valid today runs
  * exactly as before. `shell` and `workdir` keep their existing absent/null
  * meaning (default shell, turn cwd).
+ *
+ * The `tty` hint names `write_stdin` only when the same tool list offers it.
+ * Sessions whose backend runs commands without stdin (Connected Machines and
+ * several cloud providers) get no `write_stdin`, so the hint there must not
+ * point at a tool the model cannot call. Both variants are fixed strings and
+ * depend only on whether `write_stdin` is in the list, which is stable for a
+ * session's placement, so the tool block changes only when the placement does.
+ *
+ * With the turn-cancellation finish floor (cut polling, see
+ * COMMAND_FINISH_FLOOR_MS), the `yield_time_ms` description states that a
+ * command without a TTY waits at least 60 s for its exit, and an optional
+ * `background` flag keeps the requested short wait for servers, watchers and
+ * deliberate parallel runs. The turn-cancellation layer reads and removes
+ * `background`; the SDK never sees it. Both are fixed strings chosen once per
+ * worker setting, so they do not change the tool block between calls.
  */
 import type { Tool } from "@openai/agents";
 
@@ -39,42 +54,73 @@ export const LEAN_EXEC_COMMAND_DEFAULTS = {
   yield_time_ms: 10_000,
 } as const;
 
-export const LEAN_EXEC_COMMAND_PARAMETERS = {
-  type: "object",
-  properties: {
-    cmd: { type: "string", minLength: 1, description: "Shell command to execute." },
-    max_output_tokens: {
-      type: "integer",
-      minimum: 1,
-      description: "Maximum number of tokens to return. Excess output will be truncated.",
+const YIELD_TIME_DESCRIPTION =
+  "How long to wait (in milliseconds) for output before yielding. Omit for the default of 10000.";
+const FINISH_FLOOR_YIELD_TIME_DESCRIPTION =
+  "How long to wait (in milliseconds) for the command to finish. It returns as soon as the command exits, or with a session ID if it is still running. Omit for 10000. Unless `tty` or `background` is true, it waits at least 60000.";
+const BACKGROUND_DESCRIPTION =
+  "Return after yield_time_ms even if the command is still running, and keep it running while you continue: for servers, watchers and commands you run in parallel. Omit for the default of false.";
+
+function leanExecCommandParameters(ttyDescription: string, finishFloor: boolean) {
+  return {
+    type: "object",
+    properties: {
+      cmd: { type: "string", minLength: 1, description: "Shell command to execute." },
+      max_output_tokens: {
+        type: "integer",
+        minimum: 1,
+        description: "Maximum number of tokens to return. Excess output will be truncated.",
+      },
+      yield_time_ms: {
+        type: "integer",
+        minimum: 0,
+        description: finishFloor ? FINISH_FLOOR_YIELD_TIME_DESCRIPTION : YIELD_TIME_DESCRIPTION,
+      },
+      ...(finishFloor
+        ? { background: { type: "boolean", description: BACKGROUND_DESCRIPTION } }
+        : {}),
+      workdir: {
+        type: "string",
+        description: "Working directory for the command. Omit to use the turn cwd.",
+      },
+      tty: { type: "boolean", description: ttyDescription },
+      login: {
+        type: "boolean",
+        description: "Run the shell with -l/-i (login) semantics. Omit for the default of false.",
+      },
+      shell: {
+        type: "string",
+        description: "Shell binary to launch. Omit to use the default shell.",
+      },
     },
-    yield_time_ms: {
-      type: "integer",
-      minimum: 0,
-      description:
-        "How long to wait (in milliseconds) for output before yielding. Omit for the default of 10000.",
-    },
-    workdir: {
-      type: "string",
-      description: "Working directory for the command. Omit to use the turn cwd.",
-    },
-    tty: {
-      type: "boolean",
-      description:
-        "Allocate a TTY (needed to interrupt the process later with Ctrl-C through write_stdin). Omit for the default of false.",
-    },
-    login: {
-      type: "boolean",
-      description: "Run the shell with -l/-i (login) semantics. Omit for the default of false.",
-    },
-    shell: {
-      type: "string",
-      description: "Shell binary to launch. Omit to use the default shell.",
-    },
-  },
-  required: ["cmd", "max_output_tokens"],
-  additionalProperties: false,
-} as const;
+    required: ["cmd", "max_output_tokens"],
+    additionalProperties: false,
+  } as const;
+}
+
+const TTY_WITH_WRITE_STDIN_DESCRIPTION =
+  "Allocate a TTY (needed to interrupt the process later with Ctrl-C through write_stdin). Omit for the default of false.";
+const TTY_DESCRIPTION = "Allocate a TTY. Omit for the default of false.";
+
+/** The lean schema when the same tool list offers `write_stdin`. */
+export const LEAN_EXEC_COMMAND_PARAMETERS = leanExecCommandParameters(
+  TTY_WITH_WRITE_STDIN_DESCRIPTION,
+  true,
+);
+
+/** The lean schema when the session runs commands without stdin. */
+export const LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_WRITE_STDIN = leanExecCommandParameters(
+  TTY_DESCRIPTION,
+  true,
+);
+
+/** The two lean schemas when the finish floor is off (cut polling disabled). */
+export const LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_FINISH_FLOOR = leanExecCommandParameters(
+  TTY_WITH_WRITE_STDIN_DESCRIPTION,
+  false,
+);
+export const LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_WRITE_STDIN_OR_FINISH_FLOOR =
+  leanExecCommandParameters(TTY_DESCRIPTION, false);
 
 const LEAN_EXEC_COMMAND_DESCRIPTION =
   "Runs a shell command, returning output or a session ID for ongoing interaction. Pass only `cmd`, `max_output_tokens` and any argument whose value differs from its default.";
@@ -109,7 +155,19 @@ export function canonicalizeLeanExecCommandInput(input: string): string {
  * canonicalize its arguments before every inner layer. Apply it outermost so
  * the turn-cancellation and routing wrappers see canonical arguments.
  */
-export function withLeanExecCommandArguments(tools: Tool<unknown>[]): Tool<unknown>[] {
+export function withLeanExecCommandArguments(
+  tools: Tool<unknown>[],
+  options: { finishFloor?: boolean } = {},
+): Tool<unknown>[] {
+  const writeStdin = tools.some((tool) => tool.name === "write_stdin");
+  const parameters =
+    options.finishFloor === false
+      ? writeStdin
+        ? LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_FINISH_FLOOR
+        : LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_WRITE_STDIN_OR_FINISH_FLOOR
+      : writeStdin
+        ? LEAN_EXEC_COMMAND_PARAMETERS
+        : LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_WRITE_STDIN;
   return tools.map((capabilityTool) => {
     if (capabilityTool.type !== "function" || capabilityTool.name !== "exec_command") {
       return capabilityTool;
@@ -118,7 +176,7 @@ export function withLeanExecCommandArguments(tools: Tool<unknown>[]): Tool<unkno
     return {
       ...capabilityTool,
       description: LEAN_EXEC_COMMAND_DESCRIPTION,
-      parameters: LEAN_EXEC_COMMAND_PARAMETERS as unknown as typeof capabilityTool.parameters,
+      parameters: parameters as unknown as typeof capabilityTool.parameters,
       strict: false,
       invoke: (runContext, input, details) =>
         invoke(

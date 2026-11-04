@@ -9,16 +9,31 @@ type Anchor = {
 };
 export type TimelineAnchor = Anchor[];
 
-/** Read ownership synchronously: selectionchange may follow the next React commit. */
+/**
+ * A text selection inside the timeline. Content must not move beneath it, so it
+ * is the one non-scroll signal that hands the view to the reader.
+ */
+export function timelineHasSelection(scroller: HTMLElement | null): boolean {
+  if (!scroller) return false;
+  const selection = scroller.ownerDocument.getSelection();
+  return Boolean(
+    selection &&
+    !selection.isCollapsed &&
+    (scroller.contains(selection.anchorNode) || scroller.contains(selection.focusNode)),
+  );
+}
+
+/**
+ * Read ownership synchronously: selectionchange may follow the next React commit.
+ * Focus inside the timeline protects the focused content from settlement
+ * compaction and motion; it never decides bottom-follow (see message-timeline).
+ */
 export function timelineHasReader(scroller: HTMLElement | null): boolean {
   if (!scroller) return false;
   const focused = scroller.ownerDocument.activeElement;
-  const selection = scroller.ownerDocument.getSelection();
   return Boolean(
     (focused && focused !== scroller && scroller.contains(focused)) ||
-    (selection &&
-      !selection.isCollapsed &&
-      (scroller.contains(selection.anchorNode) || scroller.contains(selection.focusNode))),
+    timelineHasSelection(scroller),
   );
 }
 

@@ -123,6 +123,7 @@ export class EditableArtifactOfficeImportAdapter implements EditableArtifactOffi
       kernelVersion: prepared.snapshot.kernelVersion,
     };
     return Object.freeze({
+      sourcePrivate: file.scope === "personal",
       originalImport: Object.freeze({
         fileId: file.id,
         blobReference: retainedSource.opaqueReference,

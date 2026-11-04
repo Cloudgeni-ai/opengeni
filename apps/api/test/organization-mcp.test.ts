@@ -749,6 +749,43 @@ describe("organization MCP action search", () => {
     expect(first("create session")).toBe("createSession");
     expect(first("github repositories")).toBe("listGitHubRepositories");
   });
+
+  test("finds invitations and chat share links by the words people use", () => {
+    const found = (query: string) =>
+      searchActions({ query, limit: 5, offset: 0 }).actions.map((action) => action.id);
+    // The tool's own example query.
+    expect(found("invite")).toEqual(expect.arrayContaining(["createOrganizationInvitation"]));
+    expect(found("invite people")).toEqual(
+      expect.arrayContaining(["createOrganizationInvitation"]),
+    );
+    expect(found("invitations")).toEqual(
+      expect.arrayContaining(["listOrganizationInvitationsForOrganization"]),
+    );
+    for (const query of ["share", "share chat", "share this chat", "share conversation"]) {
+      expect([query, found(query)]).toEqual([
+        query,
+        expect.arrayContaining(["createSessionShareLink"]),
+      ]);
+    }
+    // Short words keep their final "e", so they don't match other words'
+    // prefixes: "line" is not "link".
+    expect(found("line")).not.toContain("createSessionShareLink");
+    // Adding someone, inviting them or widening a chat's audience each point
+    // to the share link for letting one person read one chat.
+    for (const [query, id] of [
+      ["invite", "createOrganizationInvitation"],
+      ["add workspace member", "addWorkspaceMember"],
+      ["session visibility", "updateSessionVisibility"],
+    ] as const) {
+      const action = searchActions({ query, limit: 5, offset: 0 }).actions.find(
+        (candidate) => candidate.id === id,
+      );
+      expect([id, action?.description]).toEqual([
+        id,
+        expect.stringContaining("use createSessionShareLink"),
+      ]);
+    }
+  });
 });
 
 describe("organization MCP action inputs", () => {

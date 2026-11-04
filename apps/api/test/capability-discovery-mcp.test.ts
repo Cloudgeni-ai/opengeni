@@ -687,6 +687,79 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
       await Promise.all([mcp.close(), server.close()]);
     }
   }, 60_000);
+  test("a plugin whose MCP server the catalog also offers as a connection names that connection", async () => {
+    if (!shared) throw new Error("Real PostgreSQL fixture required");
+    const connectionId = `mcp:personal-mail-${crypto.randomUUID()}`;
+    await upsertCapabilityCatalogItem(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      id: connectionId,
+      kind: "mcp",
+      source: "manual",
+      name: "Personal mail",
+      endpointUrl: "https://gmailmcp.googleapis.com/mcp/v1/",
+      authModel: "oauth2",
+      metadata: { mcpServerId: `personal-mail-${crypto.randomUUID()}` },
+    });
+    const search = async (settings: ReturnType<typeof testSettings>, query: string) => {
+      const attempt = await seedAttempt();
+      const server = buildOpenGeniMcpServer(
+        { settings, db: client.db, bus: new MemoryEventBus() } as ApiRouteDeps,
+        {
+          accountId: workspace.accountId,
+          workspaceId: workspace.workspaceId,
+          subjectId: "worker:first-party-mcp",
+          permissions: ["workspace:read"],
+          principalKind: "agent_attempt",
+          metadata: {
+            ...attempt,
+            firstPartyMcpTools: ["capability_catalog_search", "capability_authorization_request"],
+          },
+        },
+      );
+      const [ct, st] = InMemoryTransport.createLinkedPair();
+      const mcp = new Client({ name: "plugin-connection-test", version: "1" });
+      await server.connect(st);
+      await mcp.connect(ct);
+      try {
+        const result = await mcp.callTool({
+          name: "capability_catalog_search",
+          arguments: { query, limit: 20 },
+        });
+        expect(result.isError).not.toBe(true);
+        return mcpJson(result) as {
+          matches: Array<{ capabilityId: string; setup: { status: string; detail: string } }>;
+        };
+      } finally {
+        await Promise.all([mcp.close(), server.close()]);
+      }
+    };
+    const plugin = (body: Awaited<ReturnType<typeof search>>, id: string) =>
+      body.matches.find((match) => match.capabilityId === id)!;
+
+    const gmail = plugin(
+      await search(testSettings({ googleConnectorSetupEnabled: true }), "email"),
+      "plugin:marketplace/openai/gmail",
+    );
+    expect(gmail.setup.status).toBe("authorization_required");
+    expect(gmail.setup.detail).toContain(
+      `For the person's own account, offer the Personal mail connection (${connectionId}) instead: call capability_authorization_request with its capabilityId. Installing the plugin is for everyone in the workspace.`,
+    );
+    // The named connection is offered on its own with a setup the person can start.
+    const own = plugin(
+      await search(testSettings({ googleConnectorSetupEnabled: true }), "Personal mail"),
+      connectionId,
+    );
+    expect(own.setup.status).toBe("authorization_required");
+    // Plugins without such a connection keep the plain install text.
+    const sentry = plugin(
+      await search(testSettings({ googleConnectorSetupEnabled: true }), "Sentry plugin"),
+      "plugin:marketplace/anthropic/sentry",
+    );
+    expect(sentry.setup.detail).toBe(
+      "Not installed. The person can review what the sentry plugin adds and install it for the workspace from its card.",
+    );
+  }, 60_000);
   test("finds Outlook for a Hotmail request and posts its Connect card; respects availability gates", async () => {
     if (!shared) return;
     const microsoftSettings = (overrides: Parameters<typeof testSettings>[0] = {}) =>

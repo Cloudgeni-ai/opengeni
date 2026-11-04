@@ -47,6 +47,7 @@ import {
   validateEditableArtifactActor,
   type EditableArtifact,
   type EditableArtifactActor,
+  type EditableArtifactAudience,
   type EditableArtifactClientTransactionId,
   type EditableArtifactId,
   type EditableArtifactModality,
@@ -115,7 +116,18 @@ export type EditableArtifactAgentExportReceipt = Readonly<{
 export type PreparedEditableArtifactImport = Readonly<{
   originalImport: EditableArtifactOriginalImport;
   snapshot: ImportEditableArtifactRequest["snapshot"];
+  /** The source file is Only me to its owner, so its copy starts Only me too. */
+  sourcePrivate?: boolean;
 }>;
+
+/**
+ * Decides who can open a new artifact, from where it is made and what it is
+ * made from. Production resolves it from the chat and the person the turn
+ * acts for; without one, artifacts are shared with the workspace.
+ */
+export type EditableArtifactAudienceResolver = (
+  source: Readonly<{ modality: EditableArtifactModality; sourcePrivate: boolean }>,
+) => Promise<EditableArtifactAudience>;
 
 export type EditableArtifactOfficeImportErrorCode =
   | "invalid_source"
@@ -238,10 +250,15 @@ export class EditableArtifactAgentApplication {
         idempotencyKey: EditableArtifactClientTransactionId;
         modality: EditableArtifactModality;
         title: string;
+        resolveAudience?: EditableArtifactAudienceResolver;
         signal?: AbortSignal;
       }>,
   ): Promise<EditableArtifactAgentMetadata> {
     const context = agentContext(input);
+    const audience = await input.resolveAudience?.({
+      modality: input.modality,
+      sourcePrivate: false,
+    });
     const result = await this.dependencies.domain.createArtifact({
       scope: context.scope,
       actor: context.actor,
@@ -249,6 +266,7 @@ export class EditableArtifactAgentApplication {
         idempotencyKey: editableArtifactClientTransactionId(input.idempotencyKey),
         modality: input.modality,
         title: input.title,
+        ...(audience ? { audience } : {}),
       },
       ...(input.signal ? { signal: input.signal } : {}),
     });
@@ -263,6 +281,7 @@ export class EditableArtifactAgentApplication {
         fileId: string;
         modality: EditableArtifactModality;
         title: string;
+        resolveAudience?: EditableArtifactAudienceResolver;
         signal?: AbortSignal;
       }>,
   ): Promise<EditableArtifactAgentMetadata> {
@@ -274,6 +293,10 @@ export class EditableArtifactAgentApplication {
       modality: input.modality,
       ...(input.signal ? { signal: input.signal } : {}),
     });
+    const audience = await input.resolveAudience?.({
+      modality: input.modality,
+      sourcePrivate: prepared.sourcePrivate === true,
+    });
     const result = await this.dependencies.domain.importArtifact({
       scope: context.scope,
       actor: context.actor,
@@ -283,6 +306,7 @@ export class EditableArtifactAgentApplication {
         title: input.title,
         originalImport: prepared.originalImport,
         snapshot: prepared.snapshot,
+        ...(audience ? { audience } : {}),
       },
       ...(input.signal ? { signal: input.signal } : {}),
     });

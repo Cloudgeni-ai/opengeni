@@ -32,6 +32,37 @@ export function sessionDisplayStatus(session: {
   return sessionAdmissionBlocked(session) ? "blocked" : session.status;
 }
 
+/**
+ * Where a person's ordinary Send shows before the server answers. While a
+ * turn is still current or prompts already wait, it joins the queue. A turn
+ * parked on provider capacity (a used-up plan, an account to reconnect) is
+ * not work the Send waits for: the server starts the new message right away
+ * in its place, so it shows in the chat, unless an admission block (used-up
+ * Opengeni allowance or credits) holds every new turn.
+ */
+export function promptSendDestination(input: {
+  status: SessionStatus | null | undefined;
+  activeTurnId: string | null | undefined;
+  queuedPrompts: number;
+  admissionBlock?: unknown;
+}): "chat" | "queue" {
+  if (input.status === "waiting_capacity" && (input.admissionBlock ?? null) === null) return "chat";
+  return input.queuedPrompts > 0 ||
+    input.status === "running" ||
+    (input.activeTurnId ?? null) !== null
+    ? "queue"
+    : "chat";
+}
+
+/**
+ * Whether the session's own turn keeps the composer's run control (Pause)
+ * available: it runs, recovers, or is parked on provider capacity, where
+ * Pause is how a person stops it continuing by itself at the reset.
+ */
+export function sessionTurnKeepsRunControl(status: SessionStatus | null | undefined): boolean {
+  return status === "running" || status === "recovering" || status === "waiting_capacity";
+}
+
 /** Renderer-neutral session status presentation: label, color family and liveness. */
 export const SESSION_STATUS_PRESENTATION = (
   t: OpenGeniText,

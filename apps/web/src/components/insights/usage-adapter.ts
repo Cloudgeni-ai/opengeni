@@ -32,11 +32,10 @@ import { usagePayer } from "./payer";
 const LEGACY_RANGES: readonly InsightsRange[] = ["today", "week", "month", "ytd"];
 
 export function legacyRange(range: UsageQuery["range"]): InsightsRange {
-  return (LEGACY_RANGES as readonly string[]).includes(range)
-    ? (range as InsightsRange)
-    : range === "30d"
-      ? "month"
-      : "ytd";
+  if ((LEGACY_RANGES as readonly string[]).includes(range)) return range as InsightsRange;
+  // Older servers know no rolling hours; today is the closest window they answer.
+  if (range === "1h" || range === "3h" || range === "24h") return "today";
+  return range === "30d" ? "month" : "ytd";
 }
 
 const micros = (usd: number | null | undefined) => Math.round((usd ?? 0) * 1_000_000);

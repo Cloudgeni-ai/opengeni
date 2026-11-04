@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { FileAsset } from "@opengeni/contracts";
 import type { EditableArtifactAgentWorkspaceFilePort } from "@opengeni/core/editable-artifacts";
 import type { ObjectHead, ObjectStorage } from "@opengeni/storage";
+import { currentSessionRlsActorContext } from "@opengeni/db";
 
 import { EditableArtifactWorkspaceFileAdapter } from "../src/editable-artifact-workspace-files";
 
@@ -22,6 +23,7 @@ describe("editable artifact workspace export files", () => {
     let closed = 0;
     const adapter = new EditableArtifactWorkspaceFileAdapter({
       db: {} as never,
+      readAudiences: async () => new Map(),
       objectStorage: storage,
       durableExports: {
         async openMaterializationDownload() {
@@ -109,6 +111,7 @@ describe("editable artifact workspace export files", () => {
     const storage = objectStorageWithConflict();
     const adapter = new EditableArtifactWorkspaceFileAdapter({
       db: {} as never,
+      readAudiences: async () => new Map(),
       objectStorage: storage,
       durableExports: {
         async openMaterializationDownload() {
@@ -143,7 +146,94 @@ describe("editable artifact workspace export files", () => {
       "differs from its durable materialization",
     );
   });
+
+  test("an Only me document exports an Only me file for its owner; a shared one follows its chat", async () => {
+    const owner = "user:owner";
+    const prepared: Array<string | null | undefined> = [];
+    const scopedAs: Array<string | null | undefined> = [];
+    const exportFor = async (audience: "user_private" | "workspace_shared") => {
+      let preparedFile: FileAsset | null = null;
+      const adapter = new EditableArtifactWorkspaceFileAdapter({
+        db: {} as never,
+        readAudiences: async (_db, _scope, ids) =>
+          new Map(
+            ids.map((id) => [
+              id,
+              {
+                id,
+                visibility: audience,
+                ownerSubjectId: audience === "user_private" ? owner : null,
+              },
+            ]),
+          ) as never,
+        objectStorage: emptyObjectStorage(),
+        durableExports: {
+          async openMaterializationDownload() {
+            return {
+              artifactId: "a".repeat(32),
+              jobId: "job-1",
+              format: "xlsx" as const,
+              byteSize: bytes.byteLength,
+              contentHash: `sha256:${sha256}` as never,
+              mimeType,
+              async *chunks() {
+                yield bytes;
+              },
+              async assertUnchanged() {},
+              async close() {},
+            };
+          },
+        } as never,
+        async prepareFile(_db, input) {
+          prepared.push("privateOwnerSubjectId" in input ? input.privateOwnerSubjectId : undefined);
+          scopedAs.push(currentSessionRlsActorContext()?.privateFileOwnerSubjectId);
+          preparedFile = fileAsset(input, "pending_upload");
+          return {
+            file: preparedFile,
+            uploadId: input.uploadId,
+            created: true,
+          };
+        },
+        async completeFile(_db, _workspaceId, _uploadId) {
+          scopedAs.push(currentSessionRlsActorContext()?.privateFileOwnerSubjectId);
+          return { ...preparedFile!, status: "ready" };
+        },
+      });
+      await adapter.ensureMaterializationFile(exportInput());
+    };
+
+    await exportFor("user_private");
+    await exportFor("workspace_shared");
+
+    expect(prepared).toEqual([owner, undefined]);
+    // Written and completed scoped as the owner, so the Only me row is allowed.
+    expect(scopedAs).toEqual([owner, owner, undefined, undefined]);
+  });
 });
+
+function emptyObjectStorage(): ObjectStorage {
+  const stored = new Map<string, ObjectHead>();
+  return {
+    bucket: "test-bucket",
+    backend: "s3-compatible",
+    maxSinglePutSizeBytes: 5_000_000_000,
+    async headObject(key) {
+      return stored.get(key) ?? null;
+    },
+    async putObjectStreamIfAbsent(upload) {
+      const chunks: Uint8Array[] = [];
+      for await (const chunk of upload.chunks) chunks.push(chunk);
+      const body = concat(chunks);
+      stored.set(upload.key, {
+        ContentLength: body.byteLength,
+        ContentType: upload.contentType,
+        Metadata: { sha256: upload.sha256 },
+        VersionToken: "v1",
+      });
+      return true;
+    },
+  } as ObjectStorage;
+}
 
 function exportInput(): Parameters<
   EditableArtifactAgentWorkspaceFilePort["ensureMaterializationFile"]

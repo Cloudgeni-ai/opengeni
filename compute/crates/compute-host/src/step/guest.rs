@@ -8,6 +8,7 @@ use compute_core::{Failure, Outcome};
 use compute_engine::{Engine, EngineError};
 
 use super::Job;
+use crate::image::Verified;
 use crate::restore_notice::{ask_sync, tell_restored};
 use crate::state::{Change, Identity};
 use crate::store::Store;
@@ -29,14 +30,30 @@ const IDENTITY_DEADLINE: Duration = Duration::from_secs(30);
 const SYNC_LIMIT: Duration = Duration::from_secs(10);
 
 impl<E: Engine, S: Store> Job<E, S> {
-    /// Tells a guest restored from its template's memory, before it runs,
-    /// how long its disk is: that memory knows the template's disk, and the
-    /// sandbox's own may have been made longer (see
-    /// [`compute_engine::Engine::resize_drives`]). A guest that has yet to
-    /// learn which sandbox it is still runs on that memory; one that asked
-    /// for no disk length kept the template's.
-    pub(super) async fn tell_disk_length(&self, vm: &E::Vm) -> Result<(), EngineError> {
-        if self.record.identity != Identity::Pending || self.record.config.disk_mib.is_none() {
+    /// Tells a guest restored from `image`, before it runs, how long its
+    /// disk is when that is longer than the image knew: the disk of a
+    /// sandbox resized since it was saved, or of a template's clone, may
+    /// have been made longer (see [`compute_engine::Engine::resize_drives`]).
+    /// An image that does not record its disk's length was made before it
+    /// was recorded: only a template's memory, which a guest that has yet
+    /// to learn which sandbox it is still runs on, knows a shorter disk
+    /// then, unless the sandbox asked for no disk length and kept the
+    /// template's.
+    pub(super) async fn tell_disk_length(
+        &self,
+        vm: &E::Vm,
+        image: &Verified,
+    ) -> Result<(), EngineError> {
+        let longer = match image.meta().disk_len {
+            Some(known) => match tokio::fs::metadata(&self.paths.disk).await {
+                Ok(found) => found.len() > known,
+                Err(error) => return Err(EngineError::io("restore", error)),
+            },
+            None => {
+                self.record.identity == Identity::Pending && self.record.config.disk_mib.is_some()
+            }
+        };
+        if !longer {
             return Ok(());
         }
         self.engine.resize_drives(vm, &self.spec).await
@@ -102,7 +119,18 @@ impl<E: Engine, S: Store> Job<E, S> {
             self.record.generation,
             self.record.revision,
         );
-        match tell_restored(&self.spec.vsock_path(), port, self.id, order, deadline).await {
+        // How long its disk is now: the guest grows its file system to fill
+        // it before it answers, so a disk a claim or a template's clone
+        // lengthened is never used at the length the guest's memory knew.
+        let disk = match tokio::fs::metadata(&self.paths.disk).await {
+            Ok(found) => Some(found.len()),
+            Err(error) => {
+                tracing::warn!(id = %self.id, %error, "could not read its disk's length for the restore notice");
+                None
+            }
+        };
+        let vsock = self.spec.vsock_path();
+        match tell_restored(&vsock, port, self.id, order, disk, deadline).await {
             Ok(told) if must && !told.seeded => {
                 // It took its id but draws the numbers every other clone
                 // of its snapshot draws.

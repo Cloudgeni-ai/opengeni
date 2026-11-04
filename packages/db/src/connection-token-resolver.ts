@@ -30,6 +30,7 @@ import {
   OAUTH_MAX_RESPONSE_BYTES,
   pinnedFetch,
   readResponseJsonBounded,
+  readResponseTextBounded,
   undiciFetch,
   validateHttpUrl,
   type DnsLookup,
@@ -626,9 +627,12 @@ export function buildConnectionTokenResolver(
       ...(material.placements ? { placements: material.placements } : {}),
       connectionId: cred.id,
       connectionVersion: cred.version,
+      // Reviewed bridges gate each tool on the provider's actual OAuth grants.
       ...(cred.providerDomain.toLowerCase() === "slack.com"
         ? { grantedScopes: normalizeSlackScopes(cred.grantedScopes) }
-        : {}),
+        : cred.kind === "oauth2"
+          ? { grantedScopes: [...cred.grantedScopes] }
+          : {}),
       ...(connectionUseAttribution ? { connectionUseAttribution } : {}),
       expiresAt: cred.expiresAt,
     };
@@ -1045,8 +1049,8 @@ export class ConnectionRefreshHttpError extends Error {
   readonly httpStatus: number;
   readonly oauthErrorCode: string | null;
 
-  constructor(httpStatus: number, oauthErrorCode: string | null = null) {
-    super(`connection refresh failed with HTTP ${httpStatus}`);
+  constructor(httpStatus: number, oauthErrorCode: string | null = null, message?: string) {
+    super(message ?? `connection refresh failed with HTTP ${httpStatus}`);
     this.name = "ConnectionRefreshHttpError";
     this.httpStatus = httpStatus;
     this.oauthErrorCode = oauthErrorCode;
@@ -1269,6 +1273,9 @@ export async function refreshOAuthConnectionCredential(
       ? "json"
       : "form";
   const headers: Record<string, string> = {
+    // GitHub (and other providers) answer form-encoded unless JSON is asked
+    // for, which made every personal GitHub refresh unparseable and silent.
+    accept: "application/json",
     "content-type":
       tokenRequestEncoding === "json" ? "application/json" : "application/x-www-form-urlencoded",
   };
@@ -1319,13 +1326,11 @@ export async function refreshOAuthConnectionCredential(
       await readOAuthRefreshErrorCode(response),
     );
   }
-  const payload = await readResponseJsonBounded<Record<string, unknown>>(
-    response,
-    OAUTH_MAX_RESPONSE_BYTES,
-    "OAuth refresh token response",
-  );
+  const payload = await readOAuthTokenResponse(response);
   const accessToken = stringValue(payload.access_token);
   if (!accessToken) {
+    const oauthErrorCode = stringValue(payload.error);
+    if (oauthErrorCode) throw refreshRefusedIn200(oauthErrorCode);
     throw new Error("connection refresh response did not include access_token");
   }
   const expiresAt = expiresAtFromTokenResponse(payload, cred.expiresAt);
@@ -1396,6 +1401,63 @@ export async function refreshOAuthConnectionCredential(
         }
       : {}),
   };
+}
+
+/**
+ * A token endpoint answer, JSON or form-encoded. We ask for JSON, but GitHub
+ * answers form-encoded without that header (or if a proxy drops it), and an
+ * unparseable success used to fail every refresh silently.
+ */
+async function readOAuthTokenResponse(response: Response): Promise<Record<string, unknown>> {
+  const form = /application\/x-www-form-urlencoded/i.test(
+    response.headers.get("content-type") ?? "",
+  );
+  if (!form) {
+    return await readResponseJsonBounded<Record<string, unknown>>(
+      response,
+      OAUTH_MAX_RESPONSE_BYTES,
+      "OAuth refresh token response",
+    );
+  }
+  const text = await readResponseTextBounded(
+    response,
+    OAUTH_MAX_RESPONSE_BYTES,
+    "OAuth refresh token response",
+  );
+  const payload: Record<string, unknown> = {};
+  for (const [key, value] of new URLSearchParams(text)) {
+    const numeric = /^(expires_in|refresh_token_expires_in)$/.test(key) ? Number(value) : NaN;
+    payload[key] = Number.isFinite(numeric) ? numeric : value;
+  }
+  return payload;
+}
+
+// OAuth error codes in a 200 answer that do not mean the person's grant is
+// gone: the provider is busy, or our own client credentials are wrong (a
+// deployment fault that reconnecting cannot fix). They stay transient.
+const TRANSIENT_OAUTH_REFRESH_ERRORS = new Set([
+  "slow_down",
+  "temporarily_unavailable",
+  "server_error",
+  "incorrect_client_credentials",
+  "invalid_client",
+]);
+
+/**
+ * GitHub reports a refused refresh (bad_refresh_token, unauthorized_client) as
+ * HTTP 200 with an OAuth error field. That is the same permanent refusal as a
+ * 400, so the connection asks the person to reconnect instead of failing every
+ * use while it stays active. Unknown codes count as refusals too: a refusal
+ * mistaken for a passing failure is the silent outage this guards against.
+ */
+function refreshRefusedIn200(code: string): ConnectionRefreshHttpError {
+  const safe = /^[a-z0-9_.-]{1,64}$/i.test(code) ? code : null;
+  const transient = safe !== null && TRANSIENT_OAUTH_REFRESH_ERRORS.has(safe);
+  return new ConnectionRefreshHttpError(
+    transient ? 503 : 400,
+    safe,
+    `connection refresh refused by the provider (${safe ?? "unknown error"})`,
+  );
 }
 
 async function readOAuthRefreshErrorCode(response: Response): Promise<string | null> {

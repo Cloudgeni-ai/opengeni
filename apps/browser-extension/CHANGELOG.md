@@ -1,5 +1,34 @@
 # @opengeni/browser-extension
 
+## 0.2.4
+
+### Patch Changes
+
+- 923c161: Keep known numeric secrets masked when payment widgets add digit grouping, and
+  redact complete three-digit security codes without shortening the existing
+  clipped-password prefix threshold. Browser protected-field discovery now covers
+  accessibility as well as DOM reads, including frames and flattened closed
+  shadow roots. Payment fills accept formatting-only grouping, not changed digits.
+  Browser tabs that encounter payment fields or known card data withhold screenshots,
+  live frames and video while preserving semantic controls and unrelated tabs. Privacy-discovery and masking
+  failures withhold output instead of returning unprotected data.
+  The Chrome extension admits the read-only privacy snapshot method. Hidden
+  metadata and expiry options stay protected in place without becoming session
+  secrets; remembered card numbers and security codes cannot age out behind
+  unrelated values.
+  The extension advertises the additive privacy capability to the native agent;
+  older extensions receive the existing update-required refusal and start
+  Chrome's update check before protected reads are allowed.
+
+## 0.2.3
+
+### Patch Changes
+
+- 205b05a: Agents can now set camera, microphone, geolocation and notifications permissions in the person's own Chrome, for the exact top-level origin (scheme, host and port) of a tab the session opened and no other session is using; the person's own tabs are refused. The first such action opens a page in the extension where the person allows it once; until then the action fails with a short message saying so. The extension records every change and lists it in its popup with Remove, Chrome shows the settings as set by an extension in its normal site settings, and setting a permission back to prompt clears it. Other permission types, and extensions without this support, fail with a clear message. The browser_act description no longer says permission actions only work in managed browsers.
+- 8af985d: Attached Chrome keeps working on sign-in pages whose password manager loads its inline menu into a frame it created blank. The extension found other extensions' frames only by their address, and such a frame's address stays blank while it shows the other extension's page, so Chrome kept refusing the tab and every call failed with "it could not be removed". The extension now also removes such a frame when it is the one place the tab can hold that page. Chrome's debugging targets show other extensions' pages only for the whole browser, and Chrome does not list every frame of a page to the extension (it omits other extensions' pages and some of the page's own, such as a data: page loaded by script into a blank frame). So the frame must be the tab's only frame the extension cannot see into and hold no frames of its own, every frame Chrome lists must have run the extension's script and said so, the page must add no frame while the extension searches and hold no other extension's page found by its address, and Chrome's debugging targets must hold another extension's page. A frame that merely does not answer is never removed, so a page's own frames (including error pages, data: frames, frames still loading or posting, and sites the person took the extension's access from) always stay; when the page holds one of those, the menu frame is not removed either, and the tab can be debugged again once the menu closes. This adds the `webNavigation` permission, which brings no new permission warning. A removal that removes nothing no longer counts towards the tab's removal limit, so it is no longer reported as an extension that keeps adding its frame.
+
+  An observation made just before Chrome ended the tab's debugging (as it does whenever another extension adds a frame) now still holds when the new attachment finds the same document. browserd used to give every new attachment a new target, document and frame generation, so an action right after a fresh observation failed with `target_stale` whenever a password manager's menu appeared in between. A new attachment now keeps the ended one's generations and element references when the tab's main frame still has the same frame and loader ids; a new document, a crash or a closed tab still gets fresh ones, and commands of the ended attachment still never reach the new one.
+
 ## 0.2.2
 
 ### Patch Changes

@@ -263,6 +263,9 @@ async function idleSessionWithSecret() {
     await sql`update sessions set created_at = created_at - interval '40 days',
         updated_at = updated_at - interval '40 days'
       where workspace_id = ${scope.workspaceId} and id = ${scope.sessionId}`;
+    // Its workflow got every wake long ago.
+    await sql`update session_workflow_wake_outbox set delivered_revision = wake_revision
+      where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId}`;
   });
   return scope;
 }

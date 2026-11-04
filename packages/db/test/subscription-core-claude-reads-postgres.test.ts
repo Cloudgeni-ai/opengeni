@@ -195,6 +195,13 @@ async function sharedConnection(
   options: {
     /** `workspace`: the workspace's own account, reaching only that workspace. */
     pool?: "organization" | "workspace";
+    /**
+     * With `pool: "workspace"`, whether the workspace manages the account
+     * (default true). False is a login the cutover merged from several
+     * workspaces, or one an administrator shared: it reaches the workspace
+     * with no managing workspace.
+     */
+    managed?: boolean;
     kind?: "oauth" | "setup";
     allowedModelIds?: string[] | null;
   } = {},
@@ -214,7 +221,7 @@ async function sharedConnection(
       })}::jsonb,
       ${new Date(Date.now() + 86_400_000).toISOString()}::timestamptz, ${label},
       ${options.allowedModelIds ?? null}::text[],
-      ${pool === "workspace" ? org.workspaceId : null}::uuid
+      ${pool === "workspace" && options.managed !== false ? org.workspaceId : null}::uuid
     ) returning id::text as id`;
   if (pool === "workspace")
     await shared.admin`
@@ -556,6 +563,7 @@ describe("on the Claude core route", () => {
     // The family window cooled every listed Opus model of the catalog.
     const quota = (await storedQuota(connectionId))!;
     expect(Object.keys(quota.modelCooldowns as object).sort()).toEqual([
+      `claude/${org.opus}`,
       `organization-claude-subscription/${org.opus}`,
       `workspace-claude-subscription/${org.opus}`,
     ]);
@@ -770,7 +778,7 @@ describe("on the Claude core route", () => {
     expect(await storedQuota(connectionId)).toBeNull();
   });
 
-  test("readiness splits the core projection by the legacy prefixes", async () => {
+  test("readiness is one answer for every id form, whoever manages the connection", async () => {
     const org = await organization();
     const read = (workspaceId = org.workspaceId, subjectId: string | null = org.ownerSubjectId) =>
       readSubscriptionCoreClaudeCatalogReadiness(client.db, {
@@ -778,51 +786,85 @@ describe("on the Claude core route", () => {
         workspaceId,
         subjectId,
       });
-    expect(await read()).toEqual({
+    const notReady = {
       workspace: false,
       organization: false,
       restrictions: {
+        "claude/": [],
         "organization-claude-subscription/": [],
         "workspace-claude-subscription/": [],
       },
-    });
-    await sharedConnection(org, "ready-org");
-    expect(await read()).toEqual({
-      workspace: false,
-      organization: true,
-      restrictions: {
-        "organization-claude-subscription/": null,
-        "workspace-claude-subscription/": [],
-      },
-    });
+    };
+    expect(await read()).toEqual(notReady);
+    // A login the cutover merged from two workspaces reaches this workspace
+    // with no managing workspace. It serves every id form here, and its
+    // allowlist (stored in one legacy form) is read in all of them.
     const allowed = `workspace-claude-subscription/${org.sonnet}`;
-    await sharedConnection(org, "ready-ws", { pool: "workspace", allowedModelIds: [allowed] });
+    const sonnetForms = [
+      `claude/${org.sonnet}`,
+      `organization-claude-subscription/${org.sonnet}`,
+      allowed,
+    ].sort();
+    await sharedConnection(org, "ready-merged", {
+      pool: "workspace",
+      managed: false,
+      allowedModelIds: [allowed],
+    });
     expect(await read()).toEqual({
       workspace: true,
       organization: true,
       restrictions: {
+        "claude/": sonnetForms,
+        "organization-claude-subscription/": sonnetForms,
+        "workspace-claude-subscription/": sonnetForms,
+      },
+    });
+    // The workspace's own managed account and an organization account add
+    // to the same answer.
+    await sharedConnection(org, "ready-ws", { pool: "workspace", allowedModelIds: [allowed] });
+    await sharedConnection(org, "ready-org");
+    expect(await read()).toEqual({
+      workspace: true,
+      organization: true,
+      restrictions: {
+        "claude/": null,
         "organization-claude-subscription/": null,
-        "workspace-claude-subscription/": [allowed],
+        "workspace-claude-subscription/": null,
       },
     });
     // Switching the provider off serves neither.
     await setEnabled(org, false);
     expect(await read()).toMatchObject({ workspace: false, organization: false });
     await setEnabled(org, true);
-    // A personal connection counts only for its owner in their own Personal workspace.
-    await personalConnection(org, "ready-personal");
-    expect((await read(org.personalWorkspaceId)).workspace).toBe(true);
-    expect((await read(org.personalWorkspaceId, null)).workspace).toBe(false);
+    // A personal connection counts only for its owner in their own Personal
+    // workspace, for every id form (an organization with no shared account).
+    const alone = await organization();
+    await personalConnection(alone, "ready-personal");
+    const readAlone = (subjectId: string | null) =>
+      readSubscriptionCoreClaudeCatalogReadiness(client.db, {
+        accountId: alone.accountId,
+        workspaceId: alone.personalWorkspaceId,
+        subjectId,
+      });
+    expect(await readAlone(alone.ownerSubjectId)).toMatchObject({
+      workspace: true,
+      organization: true,
+    });
+    expect(await readAlone(null)).toEqual(notReady);
   });
 
-  test("organization admission: the effective source and a live organization-pool connection", async () => {
+  test("organization admission: a live connection serving the workspace allows the model", async () => {
     const org = await organization();
     expect(await admit(org, org.opus, organizationSnapshot)).toBeNull();
-    // A personal connection never admits an organization model.
+    // A personal connection serves only its owner's own Personal workspace,
+    // so it admits nothing in this shared workspace.
     await personalConnection(org, "admission-personal");
     expect(await admit(org, org.opus, organizationSnapshot)).toBeNull();
+    // The workspace's own account admits an organization model: the id form
+    // does not divide capacity, and an allowlist names the model in any form.
     const connectionId = await sharedConnection(org, "admission", {
-      allowedModelIds: [`organization-claude-subscription/${org.opus}`],
+      pool: "workspace",
+      allowedModelIds: [`workspace-claude-subscription/${org.opus}`],
     });
     expect(await admit(org, org.opus, organizationSnapshot)).toBe(org.opus);
     // A human's own new work resolves the current source; the v1 snapshot is
@@ -882,7 +924,8 @@ describe("on the Claude core route", () => {
     const created = await session(org);
     expect(await readCompat(org, initial(created.sessionId))).toEqual({ authority: "none" });
     expect(await admit(org, org.opus, { sessionId: created.sessionId })).toBe(org.opus);
-    // A compatibility record admits only when its shared pool is the organization's.
+    // A compatibility record that accepted shared capacity admits, whichever
+    // legacy pool it named.
     const workspaceRecord = await session(org);
     await compatRecord(org, initial(workspaceRecord.sessionId), "workspace");
     expect(await readCompat(org, initial(workspaceRecord.sessionId))).toMatchObject({
@@ -890,7 +933,7 @@ describe("on the Claude core route", () => {
       sharedPool: "workspace",
       personal: [],
     });
-    expect(await admit(org, org.opus, { sessionId: workspaceRecord.sessionId })).toBeNull();
+    expect(await admit(org, org.opus, { sessionId: workspaceRecord.sessionId })).toBe(org.opus);
     const organizationRecord = await session(org);
     await compatRecord(org, initial(organizationRecord.sessionId), "organization");
     expect(await admit(org, org.opus, { sessionId: organizationRecord.sessionId })).toBe(org.opus);
@@ -918,7 +961,7 @@ describe("on the Claude core route", () => {
     });
     expect(await admit(org, org.opus, edit(edited.turnId!))).toBe(org.opus);
     await compatRecord(org, { kind: "session_turn", id: edited.turnId! }, "workspace");
-    expect(await admit(org, org.opus, edit(edited.turnId!))).toBeNull();
+    expect(await admit(org, org.opus, edit(edited.turnId!))).toBe(org.opus);
     // A turn that froze a v2 entry for Claude: `v2` follows the source rule.
     const frozen = await session(org, { turn: true });
     await freezeClaudeV2(org, frozen.turnId!);
@@ -934,19 +977,19 @@ describe("on the Claude core route", () => {
       ...organizationSnapshot,
       acceptedSource: { kind: "receiving_session" as const, sessionId },
     });
-    expect(await admit(org, org.opus, receiving(edited.sessionId))).toBeNull();
-    expect(await admit(org, org.opus, receiving(workspaceRecord.sessionId))).toBeNull();
+    expect(await admit(org, org.opus, receiving(edited.sessionId))).toBe(org.opus);
+    expect(await admit(org, org.opus, receiving(workspaceRecord.sessionId))).toBe(org.opus);
     expect(await admit(org, org.opus, receiving(organizationRecord.sessionId))).toBe(org.opus);
     expect(await admit(org, org.opus, receiving(before.sessionId))).toBeNull();
     expect(await admit(org, org.opus, receiving(foreign.sessionId))).toBeNull();
     expect(await admit(org, org.opus, receiving(crypto.randomUUID()))).toBeNull();
 
-    // A scheduled task: `none` until it holds a workspace record.
+    // A scheduled task: `none`, then a record that accepted shared capacity.
     const taskId = await scheduledTask(org);
     const task = { ...organizationSnapshot, scheduledTaskId: taskId };
     expect(await admit(org, org.opus, task)).toBe(org.opus);
     await compatRecord(org, { kind: "scheduled_task", id: taskId }, "workspace");
-    expect(await admit(org, org.opus, task)).toBeNull();
+    expect(await admit(org, org.opus, task)).toBe(org.opus);
 
     // A carrier that admits still needs the provider on and a live connection.
     await setEnabled(org, false);
@@ -956,7 +999,7 @@ describe("on the Claude core route", () => {
   test("which accepted authority admits an organization model", () => {
     const admits = subscriptionCoreClaudeAcceptedAuthorityAdmitsOrganization;
     expect(admits({ authority: "record", sharedPool: "organization", personal: [] })).toBe(true);
-    expect(admits({ authority: "record", sharedPool: "workspace", personal: [] })).toBe(false);
+    expect(admits({ authority: "record", sharedPool: "workspace", personal: [] })).toBe(true);
     expect(admits({ authority: "record", sharedPool: "none", personal: [] })).toBe(false);
     expect(admits({ authority: "v2" })).toBe(true);
     expect(admits({ authority: "none" })).toBe(true);
@@ -1107,8 +1150,9 @@ describe("live refresh outside a workspace pool (C2c)", () => {
       "seven_day_opus",
     ]);
     const quota = (await storedQuota(connectionId))!;
-    // The organization's Opus model, under both Claude prefixes (the decoder's rule).
+    // The organization's Opus model, under every Claude id form (the decoder's rule).
     expect(Object.keys(quota.modelCooldowns as object).sort()).toEqual([
+      `claude/${org.opus}`,
       `organization-claude-subscription/${org.opus}`,
       `workspace-claude-subscription/${org.opus}`,
     ]);
@@ -1219,6 +1263,7 @@ describe("live refresh outside a workspace pool (C2c)", () => {
     expect(result.usage.credentialVersion).toBe(await connectionVersion(personal));
     const quota = (await storedQuota(personal))!;
     expect(Object.keys(quota.modelCooldowns as object).sort()).toEqual([
+      `claude/${org.opus}`,
       `organization-claude-subscription/${org.opus}`,
       `workspace-claude-subscription/${org.opus}`,
     ]);

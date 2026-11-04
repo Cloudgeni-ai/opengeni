@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import type postgres from "postgres";
 import { AttemptToolCatalogIntegrityError, createAttemptToolEnvironment } from "@opengeni/codemode";
 import type { AttemptToolCall, McpConnectionAccountBinding } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -39,6 +40,7 @@ import {
   markCodemodeOperationExecutionStarted,
   persistAttemptToolCatalog,
   submitCodemodeOperation,
+  getCodemodeCallExecutionSandboxId,
   createConnection,
   encryptEnvironmentValue,
 } from "../src";
@@ -187,6 +189,40 @@ function codemodeCall(
 }
 
 describe("durable attempt tool catalogs", () => {
+  test("fresh persistence verifies RETURNING without reloading the header; replay reads it", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const first = catalog(scope);
+    const driver = (client.db as unknown as { $client: postgres.Sql }).$client;
+    const prior = driver.options.debug;
+    const queries: string[] = [];
+    driver.options.debug = (_connection, query) => {
+      queries.push(query);
+    };
+    const headerReads = () =>
+      queries.filter(
+        (query) => /^select\b/i.test(query) && query.includes('"session_attempt_tool_catalogs"'),
+      );
+    try {
+      expect(await persistAttemptToolCatalog(client.db, first)).toEqual(first);
+      expect(headerReads()).toHaveLength(0);
+      expect(
+        queries.some(
+          (query) =>
+            /^insert\b/i.test(query) &&
+            query.includes('"session_attempt_tool_catalogs"') &&
+            query.includes("returning"),
+        ),
+      ).toBe(true);
+      queries.length = 0;
+      const replay = catalog(scope, "search", new Date("2026-08-09T13:00:00.000Z"));
+      expect(await persistAttemptToolCatalog(client.db, replay)).toEqual(first);
+      expect(headerReads()).toHaveLength(1);
+    } finally {
+      driver.options.debug = prior;
+    }
+  });
+
   test("persists one exact verified catalog idempotently and reads it under RLS", async () => {
     if (!available) return;
     const scope = await fixture();
@@ -315,6 +351,45 @@ describe("durable attempt tool catalogs", () => {
 
     expect(submissions.map(({ created }) => created).sort()).toEqual([false, true]);
     expect(submissions[0]!.operation).toEqual(submissions[1]!.operation);
+  });
+
+  test("records the machine a run_on exec's Codemode call came from, and only for its session", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const exactCatalog = catalog(scope);
+    await persistAttemptToolCatalog(client.db, exactCatalog);
+    const machine = crypto.randomUUID();
+    const remote = codemodeCall(exactCatalog.digest);
+    const local = codemodeCall(exactCatalog.digest);
+    await submitCodemodeOperation(client.db, {
+      ...scope,
+      call: remote,
+      executionSandboxId: machine,
+    });
+    await submitCodemodeOperation(client.db, { ...scope, call: local, executionSandboxId: null });
+    const lookup = (operationId: string, sessionId = scope.sessionId) =>
+      getCodemodeCallExecutionSandboxId(client.db, {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        sessionId,
+        operationId,
+      });
+    expect(await lookup(remote.operationId)).toBe(machine);
+    // Code on the session's own sandbox, and ids that name no Codemode call
+    // (a model call's operation), resolve paths on the active sandbox.
+    expect(await lookup(local.operationId)).toBeNull();
+    expect(await lookup(crypto.randomUUID())).toBeNull();
+    // Another session cannot borrow the call's machine.
+    expect(await lookup(remote.operationId, crypto.randomUUID())).toBeNull();
+    const other = await fixture();
+    expect(
+      await getCodemodeCallExecutionSandboxId(client.db, {
+        accountId: other.accountId,
+        workspaceId: other.workspaceId,
+        sessionId: scope.sessionId,
+        operationId: remote.operationId,
+      }),
+    ).toBeNull();
   });
 
   test("claims once and records one durable result under the owning claim fence", async () => {

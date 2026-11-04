@@ -31,6 +31,8 @@ import { createActivityTestHarness } from "../src/activities";
 // after turn.started with db_failure 42501 (exec_stmt_raise), before any model
 // call. The learning snapshot derived a Personal destination from the
 // workspace kind and refused it because a guest turn has no initiating human.
+// Since 1095 a personal workspace learns like a shared one: its destination
+// follows the chat, and its Workspace layer is the owner's own.
 
 // The deployed posture: a NOSUPERUSER migration owner, a dedicated data schema
 // and the restricted application role under FORCE RLS.
@@ -251,7 +253,7 @@ for (const posture of ["production", "restricted"] as const) {
       payload: { output: "Hi guest" },
     });
     // The guest's agent never holds the owner's Personal layer.
-    // It reads but saves nothing in the personal workspace's hidden Workspace layer.
+    // It learns to the personal workspace's own Workspace layer, as in a shared one.
     const [snapshot] = await shared.admin<
       Array<{ scope: string; subject: string | null; effective: Record<string, string> }>
     >`
@@ -261,7 +263,7 @@ for (const posture of ["production", "restricted"] as const) {
     expect(snapshot).toEqual({
       scope: "workspace",
       subject: null,
-      effective: { knowledge: "off", instructions: "off", skills: "off" },
+      effective: { knowledge: "automatic", instructions: "automatic", skills: "automatic" },
     });
   }, 120_000);
 
@@ -321,7 +323,7 @@ async function claimForLearning(
   };
 }
 
-test("the owner keeps Personal learning in the personal workspace; a human-less user-memory session still refuses", async () => {
+test("the owner's workspace chat in their personal workspace learns to it as in a shared workspace; a human-less user-memory session still refuses", async () => {
   const site = await personalWorkspaceSite({ funded: true });
   const own = await createSession(app.db, {
     accountId: site.accountId,
@@ -347,7 +349,11 @@ test("the owner keeps Personal learning in the personal workspace; a human-less 
     app.db,
     await claimForLearning(site, own.id, ownStart.temporalWorkflowId),
   );
-  expect(ownPolicy).toMatchObject({ defaultScope: "personal", subjectId: site.owner });
+  expect(ownPolicy).toMatchObject({
+    defaultScope: "workspace",
+    subjectId: null,
+    ownerKey: `workspace:${site.workspaceId}`,
+  });
   expect(ownPolicy.effective.skills).not.toBe("off");
 
   // A session that explicitly chose user memory still needs its verified owner.
@@ -391,7 +397,7 @@ test("human-less work never takes over the owner's private chat", async () => {
   );
 }, 120_000);
 
-test("other human-less work in a personal workspace starts, reads Workspace and saves nothing", async () => {
+test("other human-less work in a personal workspace learns to its Workspace layer and never reads the owner's", async () => {
   const site = await personalWorkspaceSite({ funded: true });
   const subjectId = `api_key:${crypto.randomUUID()}`;
   const session = await withSessionRlsActorContext({ subjectId }, () =>
@@ -423,7 +429,7 @@ test("other human-less work in a personal workspace starts, reads Workspace and 
   expect(policy).toMatchObject({
     defaultScope: "workspace",
     subjectId: null,
-    effective: { knowledge: "off", instructions: "off", skills: "off" },
+    effective: { knowledge: "automatic", instructions: "automatic", skills: "automatic" },
   });
 }, 120_000);
 

@@ -300,6 +300,7 @@ export function OrganizationManagedWorkspaceAccess({
         }
         consequences={[
           `They lose access to ${workspace.name} right away.`,
+          "Schedules they own here stop running. Each one says why on the Automations page.",
           `They stay in ${organizationName}, with their Personal workspace unchanged.`,
         ]}
         confirmLabel="Remove from workspace"

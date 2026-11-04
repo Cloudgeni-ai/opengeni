@@ -29,6 +29,7 @@ import { getCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import {
+  findManagedAuthOAuthState,
   isolatedManagedAuthOAuthCallbackRequest,
   hashManagedAuthPassword,
   verifyManagedAuthPassword,
@@ -45,10 +46,6 @@ import {
   managedPasskeyRelyingParty,
   startManagedPasskeyRegistration,
   verifyManagedPasskeyRegistration,
-} from "../auth/managed-passkeys";
-import {
-  managedPasskeyStorageGranted,
-  refreshManagedPasskeyStorageGrant,
 } from "../auth/managed-passkeys";
 import { admitManagedPasskeyAttempt, managedPasskeySignInOffered } from "./managed-passkeys";
 import { scrubManagedAuthProviderResponse } from "./managed-auth-session-sets";
@@ -211,8 +208,6 @@ export function registerManagedSignInMethodRoutes(app: Hono, deps: ApiRouteDeps)
   const base = "/v1/auth/sign-in-methods";
   app.use(`${base}*`, async (context, next) => {
     context.header("cache-control", "no-store");
-    // Passkey storage stays ungranted until a later migration (see 0998).
-    await refreshManagedPasskeyStorageGrant(deps.db);
     await next();
   });
   app.get(base, async (context) => {
@@ -230,20 +225,18 @@ export function registerManagedSignInMethodRoutes(app: Hono, deps: ApiRouteDeps)
       sql`
       select provider_id as provider, (provider_id <> 'credential' or length(password)>0) as usable from auth_identities where user_id=${actor.authUserId}`,
     );
-    const passkeys = managedPasskeyStorageGranted(deps.db)
-      ? await rows<{
-          id: string;
-          name: string;
-          createdAt: string;
-          lastUsedAt: string | null;
-          backedUp: boolean;
-        }>(
-          deps,
-          sql`
-          select id, name, created_at::text as "createdAt", last_used_at::text as "lastUsedAt", backed_up as "backedUp"
-          from auth_passkeys where user_id=${actor.authUserId} order by created_at, id`,
-        )
-      : [];
+    const passkeys = await rows<{
+      id: string;
+      name: string;
+      createdAt: string;
+      lastUsedAt: string | null;
+      backedUp: boolean;
+    }>(
+      deps,
+      sql`
+      select id, name, created_at::text as "createdAt", last_used_at::text as "lastUsedAt", backed_up as "backedUp"
+      from auth_passkeys where user_id=${actor.authUserId} order by created_at, id`,
+    );
     const passkeyOnly = isPasskeyOnlyAccountEmail(user.email);
     const connected = (provider: string) =>
       accounts.some((a) => a.provider === provider && a.usable) &&
@@ -347,11 +340,6 @@ export function registerManagedSignInMethodRoutes(app: Hono, deps: ApiRouteDeps)
         const actorFence = getManagedAuthRequestActorLeaseStamp(context.req.raw);
         if (deps.settings.managedAuthSessionSetMode !== "legacy" && !actorFence)
           throw new HTTPException(409, { message: "Managed actor fence required" });
-        if (!managedPasskeyStorageGranted(deps.db))
-          return context.json(
-            { code: "SIGN_IN_METHOD_UNAVAILABLE", message: "Passkeys aren't available here" },
-            409,
-          );
         const body = parseRequestBody(
           kind === "register" ? ManagedPasskeyRegisterMutation : ManagedPasskeyRemoveMutation,
           await context.req.json().catch(() => null),
@@ -617,9 +605,7 @@ export async function handleManagedSignInConnectCallback(
 ): Promise<Response | null> {
   const state = context.req.query("state");
   if (!state || !deps.managedAuth) return null;
-  const verification = await (
-    await deps.managedAuth.$context
-  ).internalAdapter.findVerificationValue(state);
+  const verification = await findManagedAuthOAuthState(deps.managedAuth, state);
   if (!verification?.value) return null;
   let rawState: unknown;
   try {

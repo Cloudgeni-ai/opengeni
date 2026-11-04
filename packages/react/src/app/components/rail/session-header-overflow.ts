@@ -19,6 +19,7 @@ export const SESSION_HEADER_PARTS = [
   "find",
   "machine",
   "site",
+  "slackAgent",
   "model",
   "accessKey",
 ] as const;

@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { CallModelInputFilter, ModelRequest } from "@openai/agents";
-import { findCompactionNeededError } from "./context-compaction";
+import { findCompactionNeededError, type CompactionNeededError } from "./context-compaction";
+import { ModelStepHandover } from "./model-step-handover";
 
 /** One owner per run; never share a prefix between sessions or rebuilt agents. */
 const requests = new WeakMap<object, Omit<ModelRequest, "input">>();
@@ -11,17 +12,28 @@ const requests = new WeakMap<object, Omit<ModelRequest, "input">>();
  * every durable item at the moment compaction starts.
  */
 const withheldInputs = new WeakMap<object, Array<Record<string, unknown>>>();
-const dispatch = new AsyncLocalStorage<{ agent: object; pending?: unknown }>();
+const dispatch = new AsyncLocalStorage<{
+  agent: object;
+  pending?: unknown;
+  onCompactionHandover?: (error: CompactionNeededError) => void;
+}>();
 const queued = new WeakMap<object, unknown>();
 
 export function queuePreparedCompaction(agent: object, error: unknown): void {
   queued.set(agent, error);
 }
 
-export function withPreparedCompactionRequest<T>(agent: object, run: () => T): T {
+export function withPreparedCompactionRequest<T>(
+  agent: object,
+  run: () => T,
+  onCompactionHandover?: (error: CompactionNeededError) => void,
+): T {
   const pending = queued.get(agent);
   queued.delete(agent);
-  return dispatch.run({ agent, pending }, run);
+  return dispatch.run(
+    { agent, pending, ...(onCompactionHandover ? { onCompactionHandover } : {}) },
+    run,
+  );
 }
 
 /** Called after SDK sandbox preparation AND lazy-tool filtering, before transport. */
@@ -42,6 +54,13 @@ export function rememberPreparedModelRequest(request: ModelRequest): void {
   if (Array.isArray(request.input))
     withheldInputs.set(scope.agent, [...request.input] as Array<Record<string, unknown>>);
   else withheldInputs.delete(scope.agent);
+  const compaction = findCompactionNeededError(scope.pending);
+  if (compaction && scope.onCompactionHandover) {
+    // A thrown stream error discards already queued tool results. The worker
+    // drains this ordinary SDK handover before raising the original signal.
+    scope.onCompactionHandover(compaction);
+    throw new ModelStepHandover("compaction");
+  }
   throw scope.pending;
 }
 

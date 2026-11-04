@@ -9,6 +9,27 @@ import {
 } from "../src/integrations/slack-mrkdwn";
 
 describe("slackMrkdwnFromMarkdown", () => {
+  test("shows Claude citation tags as their quoted text, linked when resolved, outside code", () => {
+    // Built from escapes so no tool that acts on citation tags rewrites this file.
+    const tag = (index: string, inner: string) =>
+      `\u003ccite index="${index}">${inner}\u003c/cite>`;
+    const markdown = [
+      `Vals describes it as ${tag("23-5", '"a fresh set of 66 tasks"')}.`,
+      "```",
+      tag("1-1", "kept"),
+      "```",
+    ].join("\n");
+    expect(slackMrkdwnFromMarkdown(markdown)).toBe(
+      ['Vals describes it as "a fresh set of 66 tasks".', "```", tag("1-1", "kept"), "```"].join(
+        "\n",
+      ),
+    );
+    // A tag the worker already linked arrives as an ordinary Markdown link.
+    expect(slackMrkdwnFromMarkdown('See ["a quote"](https://www.vals.ai/b).')).toBe(
+      'See <https://www.vals.ai/b|"a quote">.',
+    );
+  });
+
   test("rewrites a typical agent reply into Slack formatting", () => {
     const reply = [
       "## Deploy check",

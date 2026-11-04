@@ -113,6 +113,21 @@ export const OrganizationAdministrationMember = /* @__PURE__ */ defineSchema(() 
 );
 export type OrganizationAdministrationMember = z.infer<typeof OrganizationAdministrationMember>;
 
+/**
+ * Who is in the organization, for every member: an active person's display
+ * name and whether it is you. No email, role, status or workspace access;
+ * owners and admins read those from the administration listing.
+ */
+export const OrganizationMemberName = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    /** The organization membership id. */
+    id: primitives.uuid,
+    name: z.string().min(1).max(1024).nullable(),
+    you: primitives.boolean,
+  }),
+);
+export type OrganizationMemberName = z.infer<typeof OrganizationMemberName>;
+
 export const OrganizationSummary = /* @__PURE__ */ defineSchema(() =>
   z.object({
     id: primitives.uuid,
@@ -156,10 +171,24 @@ export type UpdateOrganizationPrivateSessionSettingsRequest = z.infer<
 export const OrganizationPrivacySettings = /* @__PURE__ */ defineSchema(() =>
   z.object({
     organizationId: primitives.uuid,
+    /**
+     * Whether members can connect machines of their own (Only me machines).
+     * Off: only owners and admins can connect new ones; machines already
+     * connected keep working. Workspace and organization machines keep their
+     * own rules.
+     */
+    membersConnectOwnMachines: z.boolean(),
     /** Who can see new chats and schedules unless the person picks otherwise. */
     defaultVisibility: z.enum(["private", "workspace"]),
     /** Whether people have their own Personal workspace to see and work in. */
     personalWorkspaces: z.boolean(),
+    /**
+     * The most each person can spend from the organization's credits in their
+     * own Personal workspace each calendar month (UTC), in USD micros; null
+     * for no limit. Work paid by their own model plans or keys doesn't count,
+     * and a Personal workspace's own budget wins.
+     */
+    personalWorkspaceMonthlyCredits: primitives.nonnegativeInteger.safe().nullable(),
     /** Whether admins see that other people's Only me schedules exist, and can pause them. */
     adminsSeePrivateSchedules: primitives.boolean,
     limits: z.object({
@@ -178,16 +207,21 @@ export type OrganizationPrivacySettings = z.infer<typeof OrganizationPrivacySett
 export const UpdateOrganizationPrivacySettingsRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
+      membersConnectOwnMachines: z.boolean().optional(),
       defaultVisibility: z.enum(["private", "workspace"]).optional(),
       adminsSeePrivateSchedules: primitives.optionalBoolean,
       personalWorkspaces: z.boolean().optional(),
+      /** USD micros a month per person; null removes the limit. */
+      personalWorkspaceMonthlyCredits: primitives.nonnegativeInteger.safe().nullable().optional(),
     })
     .strict()
     .refine(
       (value) =>
+        value.membersConnectOwnMachines !== undefined ||
         value.defaultVisibility !== undefined ||
         value.adminsSeePrivateSchedules !== undefined ||
-        value.personalWorkspaces !== undefined,
+        value.personalWorkspaces !== undefined ||
+        value.personalWorkspaceMonthlyCredits !== undefined,
       { message: "Change at least one setting." },
     ),
 );
@@ -720,6 +754,19 @@ export const ListOrganizationAdministrationMembersResponse = /* @__PURE__ */ def
     members: z.array(OrganizationAdministrationMember).max(1000),
   }),
 );
+/**
+ * `available` is false until the deployment's database grants the names
+ * list; `members` is then empty.
+ */
+export const ListOrganizationMemberNamesResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    available: primitives.boolean,
+    members: z.array(OrganizationMemberName).max(1000),
+  }),
+);
+export type ListOrganizationMemberNamesResponse = z.infer<
+  typeof ListOrganizationMemberNamesResponse
+>;
 export const ListSelfOrganizationMembershipsResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     memberships: z.array(OrganizationMember),

@@ -1,8 +1,9 @@
 //! A Google Cloud Storage stand-in for tests. It answers both the XML API
 //! the checksummed uploads use and, as an `object_store` backend, listing
-//! and reads, over one set of objects, as a real bucket does. It keeps
-//! each object's generation and the time it was stored, and checks
-//! `x-goog-hash` and `x-goog-if-generation-match` as GCS does.
+//! reads, conditional writes and deletes, over one set of objects, as a
+//! real bucket does. It keeps each object's generation and the time it
+//! was stored, and checks `x-goog-hash` and `x-goog-if-generation-match`
+//! as GCS does; or ignores every condition, as Garage does.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -64,6 +65,12 @@ pub(crate) struct Fake {
     /// Corrupts this many of the next uploads in transit.
     pub(crate) corrupt: Mutex<u32>,
     pub(crate) puts: Mutex<u32>,
+    /// Copies within the bucket, through `object_store`.
+    pub(crate) copies: Mutex<u32>,
+    /// Reads of a whole object, and of only its size and tag, through
+    /// `object_store`.
+    pub(crate) gets: Mutex<u32>,
+    pub(crate) heads: Mutex<u32>,
     /// Answers this many of the next requests through the XML API with
     /// 503, as Cloud Storage does while it scales up to a client's rate.
     pub(crate) unavailable: Mutex<u32>,
@@ -76,14 +83,29 @@ pub(crate) struct Fake {
     /// those that started waiting.
     pub(crate) stall: Mutex<Option<(&'static str, Duration)>>,
     pub(crate) held: Mutex<u32>,
-    /// Asked before every delete through the XML API; the names of deletes
-    /// it refused are kept in `violations` (and deleted all the same).
+    /// Asked before every delete; the names of deletes it refused are kept
+    /// in `violations` (and deleted all the same).
     pub(crate) guard: Mutex<Option<Guard>>,
     pub(crate) violations: Mutex<Vec<String>>,
     /// When set, an object's entity tag is the MD5 of its bytes, as on S3,
     /// so the same bytes stored again have the same tag; otherwise it is
     /// the generation, as on GCS.
     pub(crate) tags_follow_bytes: Mutex<bool>,
+    /// When set, puts through `object_store` ignore their condition and
+    /// always store, as on a store that keeps no single order of writes
+    /// (Garage).
+    pub(crate) ignores_conditions: Mutex<bool>,
+    /// The prefixes listed through `object_store`, in order, by delimiter
+    /// or not.
+    pub(crate) listed: Mutex<Vec<String>>,
+    /// When set, the next this many reads and listings through
+    /// `object_store` of a name or prefix containing the text fail, as
+    /// requests to a store that times out do.
+    pub(crate) failing: Mutex<Option<(&'static str, u32)>>,
+    /// When set, the next listing through `object_store` of a prefix
+    /// containing the text fails after this many objects, as one a store
+    /// drops partway through does.
+    pub(crate) cut: Mutex<Option<(&'static str, usize)>>,
 }
 
 impl Fake {
@@ -143,6 +165,21 @@ impl Fake {
         }
     }
 
+    /// Fails a request for `name` if [`Self::failing`] says so.
+    fn fail(&self, name: &str) -> object_store::Result<()> {
+        let mut failing = self.failing.lock().unwrap();
+        match &mut *failing {
+            Some((part, left)) if *left > 0 && name.contains(*part) => {
+                *left -= 1;
+                Err(object_store::Error::Generic {
+                    store: "fake",
+                    source: "timed out".into(),
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// How long a request for `name` is held up, counting it as held.
     fn stalled(&self, name: &str) -> Option<Duration> {
         let stall = *self.stall.lock().unwrap();
@@ -170,22 +207,18 @@ impl Fake {
         .expect("a held request panicked")
     }
 
-    /// A delete through the XML API, on condition of `generation_match`.
-    fn delete(&self, name: &str, generation_match: Option<u64>) -> HttpResponse {
+    /// Deletes `name`, asking the guard first; whether it was stored.
+    fn remove(&self, name: &str) -> bool {
         let mut objects = self.objects.lock().unwrap();
-        let current = objects.get(name).map(|object| object.generation);
-        match (current, generation_match) {
-            (None, _) => reply(404, ""),
-            (Some(current), Some(wanted)) if current != wanted => reply(412, ""),
-            (Some(_), _) => {
-                let guard = *self.guard.lock().unwrap();
-                if guard.is_some_and(|guard| !guard(&objects, name)) {
-                    self.violations.lock().unwrap().push(name.to_owned());
-                }
-                objects.remove(name);
-                reply(204, "")
-            }
+        if !objects.contains_key(name) {
+            return false;
         }
+        let guard = *self.guard.lock().unwrap();
+        if guard.is_some_and(|guard| !guard(&objects, name)) {
+            self.violations.lock().unwrap().push(name.to_owned());
+        }
+        objects.remove(name);
+        true
     }
 
     /// A put through `object_store`, under `mode`'s condition.
@@ -196,6 +229,11 @@ impl Fake {
         mode: PutMode,
     ) -> object_store::Result<PutResult> {
         let mut objects = self.objects.lock().unwrap();
+        let mode = if *self.ignores_conditions.lock().unwrap() {
+            PutMode::Overwrite
+        } else {
+            mode
+        };
         match mode {
             PutMode::Create if objects.contains_key(location.as_ref()) => {
                 return Err(object_store::Error::AlreadyExists {
@@ -280,12 +318,6 @@ impl HttpService for Service {
             .headers
             .get("x-goog-if-generation-match")
             .map(|value| value.to_str().unwrap().parse::<u64>().unwrap());
-        if parts.method == http::Method::DELETE {
-            let stall = fake.stalled(&name);
-            return Ok(fake
-                .after(stall, move |fake| fake.delete(&name, generation_match))
-                .await);
-        }
         let mut objects = fake.objects.lock().unwrap();
         let current = objects.get(&name).map(|object| object.generation);
         match parts.method {
@@ -394,7 +426,15 @@ impl ObjectStore for Bucket {
         if options.range.is_some() {
             return Err(object_store::Error::NotImplemented);
         }
+        *if options.head {
+            &self.0.heads
+        } else {
+            &self.0.gets
+        }
+        .lock()
+        .unwrap() += 1;
         self.0.wait().await;
+        self.0.fail(location.as_ref())?;
         let object = self
             .0
             .object(location.as_ref())
@@ -411,8 +451,13 @@ impl ObjectStore for Bucket {
 
     async fn delete(&self, location: &Path) -> object_store::Result<()> {
         self.0.wait().await;
-        self.0.objects.lock().unwrap().remove(location.as_ref());
-        Ok(())
+        let stall = self.0.stalled(location.as_ref());
+        let name = location.as_ref().to_owned();
+        if self.0.after(stall, move |fake| fake.remove(&name)).await {
+            Ok(())
+        } else {
+            Err(not_found(location))
+        }
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
@@ -421,7 +466,12 @@ impl ObjectStore for Bucket {
         Box::pin(
             stream::once(async move {
                 fake.wait().await;
-                let listed: Vec<_> = fake
+                let at = prefix.clone().unwrap_or_default();
+                fake.listed.lock().unwrap().push(at.clone());
+                if let Err(error) = fake.fail(&at) {
+                    return stream::iter(vec![Err(error)]);
+                }
+                let mut listed: Vec<_> = fake
                     .objects
                     .lock()
                     .unwrap()
@@ -433,14 +483,52 @@ impl ObjectStore for Bucket {
                     })
                     .map(|(name, object)| Ok(fake.meta(name, object)))
                     .collect();
+                let cut = {
+                    let mut cut = fake.cut.lock().unwrap();
+                    cut.filter(|(part, _)| at.contains(part))
+                        .and_then(|_| cut.take())
+                };
+                if let Some((_, after)) = cut {
+                    listed.truncate(after);
+                    listed.push(Err(object_store::Error::Generic {
+                        store: "fake",
+                        source: "connection reset".into(),
+                    }));
+                }
                 stream::iter(listed)
             })
             .flatten(),
         )
     }
 
-    async fn list_with_delimiter(&self, _: Option<&Path>) -> object_store::Result<ListResult> {
-        Err(object_store::Error::NotImplemented)
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
+        self.0.wait().await;
+        let prefix = prefix
+            .map(|prefix| format!("{prefix}/"))
+            .unwrap_or_default();
+        self.0.listed.lock().unwrap().push(prefix.clone());
+        self.0.fail(&prefix)?;
+        let objects = self.0.objects.lock().unwrap();
+        let mut common_prefixes: Vec<Path> = Vec::new();
+        let mut listed = Vec::new();
+        for (name, object) in objects.iter() {
+            let Some(rest) = name.strip_prefix(&prefix) else {
+                continue;
+            };
+            match rest.split_once('/') {
+                Some((part, _)) => {
+                    let common = Path::from(format!("{prefix}{part}"));
+                    if common_prefixes.last() != Some(&common) {
+                        common_prefixes.push(common);
+                    }
+                }
+                None => listed.push(self.0.meta(name, object)),
+            }
+        }
+        Ok(ListResult {
+            common_prefixes,
+            objects: listed,
+        })
     }
 
     async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
@@ -450,6 +538,7 @@ impl ObjectStore for Bucket {
             .get(from.as_ref())
             .map(|object| object.bytes.clone())
             .ok_or_else(|| not_found(from))?;
+        *self.0.copies.lock().unwrap() += 1;
         self.0.store(&mut objects, to.as_ref(), bytes);
         Ok(())
     }

@@ -9,6 +9,16 @@ import {
 } from "./office-manifest";
 import { SETUP_ACCOUNT_PATH, SETUP_ACCOUNT_RESPONSE_HEADERS } from "./setup-account-token";
 
+/**
+ * A chat share link's page: its address is the key to the conversation, so
+ * it never travels on as a referrer, and search engines never index it.
+ */
+const SHARE_PAGE_PATH = /^\/share\/[^/]+\/?$/u;
+const SHARE_PAGE_RESPONSE_HEADERS = {
+  "referrer-policy": "no-referrer",
+  "x-robots-tag": "noindex, nofollow",
+} as const;
+
 const DEFAULT_PORT = 3000;
 const DEFAULT_HOST = "0.0.0.0";
 const SHUTDOWN_GRACE_MS = 10_000;
@@ -165,6 +175,9 @@ export function createWebHandler(
     }
     if (pathname === SETUP_ACCOUNT_PATH) {
       return serveShellIndex(request, "no-store", SETUP_ACCOUNT_RESPONSE_HEADERS);
+    }
+    if (SHARE_PAGE_PATH.test(pathname)) {
+      return serveShellIndex(request, REVALIDATE_CACHE_CONTROL, SHARE_PAGE_RESPONSE_HEADERS);
     }
     return serveShellIndex(request, REVALIDATE_CACHE_CONTROL);
   }

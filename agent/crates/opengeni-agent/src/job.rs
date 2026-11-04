@@ -183,11 +183,55 @@ pub struct JobParams {
     /// every append, attached or not — the supervisor reads it to answer
     /// `OpQuery`/`OpStatus.next_seq` without reaching into the pump.
     pub watermark: Arc<AtomicU64>,
+    /// When the child last wrote output; see [`OpHeard`].
+    pub heard: Arc<OpHeard>,
     /// Set (once) if POST-EXIT replay fails (spool IO/corruption): the
     /// terminal record survives in the registry, but the retained frames are
     /// unrecoverable — status answers must say so typed rather than let a
     /// consumer wait forever on replay (FAILURE-VISIBILITY two-planes rule).
     pub collection_failure: Arc<OnceLock<JobFailure>>,
+}
+
+/// When a job last showed a sign of life: when it was started (or adopted by
+/// this process image), or when its child last wrote output. Frames other
+/// than output (progress, exit) do not count, so a quiet command that is
+/// only being watched stays quiet.
+///
+/// A running command that has been silent for longer than its sandbox's
+/// silence limit no longer keeps a compute sandbox awake: a dev server or a
+/// `sleep` left in the background must not hold it forever, while CPU or IO
+/// still keep genuinely busy work awake on the host's side.
+#[derive(Debug)]
+pub struct OpHeard {
+    base: Instant,
+    after_base_ms: AtomicU64,
+}
+
+impl Default for OpHeard {
+    /// Heard now.
+    fn default() -> Self {
+        Self {
+            base: Instant::now(),
+            after_base_ms: AtomicU64::new(0),
+        }
+    }
+}
+
+impl OpHeard {
+    /// Records a sign of life now.
+    pub fn touch(&self) {
+        let after = u64::try_from(self.base.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.after_base_ms.fetch_max(after, Ordering::Relaxed);
+    }
+
+    /// How long the job has been silent at `now`.
+    #[must_use]
+    pub fn silent_for(&self, now: Instant) -> Duration {
+        let after = Duration::from_millis(self.after_base_ms.load(Ordering::Relaxed));
+        self.base
+            .checked_add(after)
+            .map_or(Duration::ZERO, |heard| now.saturating_duration_since(heard))
+    }
 }
 
 /// The typed terminal outcome of a job — the engine-side form of the wire
@@ -472,6 +516,7 @@ pub async fn run_job(
         deadline,
         config,
         watermark,
+        heard,
         collection_failure,
     } = params;
 
@@ -490,6 +535,7 @@ pub async fn run_job(
         flow: CreditFlow::new(),
         hooks,
         watermark,
+        heard,
         collection_failure,
         exit_fence: None,
         exit_record: None,
@@ -543,6 +589,8 @@ pub struct ResumeParams {
     pub config: JobConfig,
     /// See [`JobParams::watermark`].
     pub watermark: Arc<AtomicU64>,
+    /// See [`JobParams::heard`].
+    pub heard: Arc<OpHeard>,
     /// See [`JobParams::collection_failure`].
     pub collection_failure: Arc<OnceLock<JobFailure>>,
 }
@@ -573,6 +621,7 @@ pub async fn run_job_resumed(
         spool_dir,
         config,
         watermark,
+        heard,
         collection_failure,
     } = params;
     let restored = (|| -> Result<_, String> {
@@ -629,6 +678,7 @@ pub async fn run_job_resumed(
         flow: CreditFlow::resumed(state.generation),
         hooks,
         watermark,
+        heard,
         collection_failure,
         exit_fence: state.exit_fence,
         exit_record: exit,
@@ -820,6 +870,8 @@ struct Pump {
     hooks: JobHooks,
     /// Mirror of `retention.high_seq()` for supervisor-side status answers.
     watermark: Arc<AtomicU64>,
+    /// See [`JobParams::heard`].
+    heard: Arc<OpHeard>,
     /// See [`JobParams::collection_failure`].
     collection_failure: Arc<OnceLock<JobFailure>>,
     /// The final-ack fence: the terminal frame's seq (or, when the exit frame
@@ -1346,6 +1398,7 @@ impl Pump {
 
     /// Digests + appends one chunk of child output.
     fn on_data(&mut self, channel: Channel, bytes: &[u8]) {
+        self.heard.touch();
         let n = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         match channel {
             Channel::Stdout => {
@@ -1582,6 +1635,7 @@ mod tests {
                 },
             );
             let watermark = Arc::new(AtomicU64::new(0));
+            let heard = Arc::new(OpHeard::default());
             let collection_failure = Arc::new(OnceLock::new());
             let params = JobParams {
                 child,
@@ -1593,6 +1647,7 @@ mod tests {
                 deadline: self.deadline_after.map(|after| Instant::now() + after),
                 config: self.config,
                 watermark: watermark.clone(),
+                heard: heard.clone(),
                 collection_failure: collection_failure.clone(),
             };
             let task = tokio::spawn(run_job(params, cmd_rx, hooks));
@@ -1604,6 +1659,7 @@ mod tests {
                 dir,
                 wait: self.wait,
                 watermark,
+                heard,
                 collection_failure,
             }
         }
@@ -1617,6 +1673,7 @@ mod tests {
         dir: tempfile::TempDir,
         wait: Duration,
         watermark: Arc<AtomicU64>,
+        heard: Arc<OpHeard>,
         collection_failure: Arc<OnceLock<JobFailure>>,
     }
 
@@ -1881,6 +1938,59 @@ mod tests {
         assert_eq!(exit.stdout.digest, blake3::hash(b"stdin-bytes"));
         job.final_ack(1, exit_seq.unwrap(), 1 << 20).await;
         job.join().await;
+    }
+
+    /// A job is heard when it starts and whenever its child writes output.
+    /// The progress frames it appends while silent do not count.
+    #[tokio::test]
+    async fn a_job_is_heard_when_it_writes_output_and_silent_otherwise() {
+        let mut builder = job("sleep 3; printf late; sleep 30");
+        builder.config.progress_interval = Duration::from_millis(50);
+        let mut job = builder.start();
+        assert!(
+            job.heard.silent_for(Instant::now()) < Duration::from_secs(1),
+            "a job is heard when it starts"
+        );
+
+        // Silent but ticking: the pump appends progress frames meanwhile.
+        job.wait_for_watermark_at_least(3).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let quiet = job.heard.silent_for(Instant::now());
+        assert!(
+            quiet >= Duration::from_millis(500),
+            "progress frames are not output: silent for {quiet:?}"
+        );
+
+        timeout(WAIT, async {
+            while job.heard.silent_for(Instant::now()) >= Duration::from_millis(500) {
+                tokio::time::sleep(PRODUCER_POLL).await;
+            }
+        })
+        .await
+        .expect("the late output is heard");
+        job.send(JobCommand::Cancel).await;
+        let _ = job.wait_exit().await;
+    }
+
+    #[test]
+    fn a_fresh_stamp_is_heard_now_and_never_runs_backwards() {
+        let heard = OpHeard::default();
+        let now = Instant::now();
+        assert!(heard.silent_for(now) < Duration::from_secs(1));
+        let later = now + Duration::from_secs(700);
+        assert!(heard.silent_for(later) >= Duration::from_secs(699));
+        heard.after_base_ms.store(5_000, Ordering::Relaxed);
+        heard.touch();
+        assert_eq!(
+            heard.after_base_ms.load(Ordering::Relaxed),
+            5_000,
+            "a stale touch never moves the stamp back"
+        );
+        assert_eq!(
+            heard.silent_for(heard.base),
+            Duration::ZERO,
+            "a stamp ahead of now is silent for zero"
+        );
     }
 
     #[tokio::test]
@@ -2557,6 +2667,7 @@ mod tests {
             spool_dir: job.dir.path().join("spool"),
             config: JobConfig::default(),
             watermark: Arc::new(AtomicU64::new(0)),
+            heard: Arc::default(),
             collection_failure: Arc::new(OnceLock::new()),
         };
         let resumed = tokio::spawn(async move {
@@ -2685,6 +2796,7 @@ mod tests {
             spool_dir: job.dir.path().join("spool"),
             config: JobConfig::default(),
             watermark: Arc::new(AtomicU64::new(0)),
+            heard: Arc::default(),
             collection_failure: Arc::new(OnceLock::new()),
         };
         let resumed = tokio::spawn(run_job_resumed(params, cmd_rx, hooks));

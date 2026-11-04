@@ -1,4 +1,5 @@
 import type { FileAsset, FileStatus, FileUploadStatus } from "@opengeni/contracts";
+import { storedBillingOrigin } from "@opengeni/contracts";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { rawRows, withRlsContext, withWorkspaceRls } from "./database";
@@ -7,9 +8,11 @@ import { lockSessionEventWriteRows } from "./session-control";
 import { checkWorkspaceAllowance } from "./usage-allowances";
 import { creditDebitAttributionForTurn } from "./credit-debit-attribution";
 import {
+  chargeBillingOrigin,
   getBillingBalance,
   getSpendableCreditBalance,
   planPostUseCreditAllocations,
+  toolCreditUsage,
 } from "./credit-balances";
 import { beginPlanCreditSettlement } from "./subscription-plans";
 
@@ -1028,13 +1031,16 @@ async function admitImageGenerationCredits(
       "allowance_exhausted",
     );
   }
-  // Plan and trial grants covering the turn's model pay, as they do for chat.
+  // Plan credit (the Free plan's included) and grants covering the turn's
+  // model pay, as for every paid tool; API work spends credits only.
+  const usageOrigin = attribution.kind === "turn" ? attribution.billingOrigin : undefined;
   const { balanceMicros } = await getSpendableCreditBalance(
     tx,
     operation.accountId,
-    operation.creditUsageModelId ?? undefined,
+    toolCreditUsage(operation.creditUsageModelId),
     undefined,
     settledAt,
+    usageOrigin,
   );
   const [held] = await rawRows<{ micros: string }>(
     tx,
@@ -1048,8 +1054,26 @@ async function admitImageGenerationCredits(
   );
   const available = balanceMicros - Number(held?.micros ?? 0);
   if (!Number.isSafeInteger(available) || available < operation.pricedCostMicros) {
-    throw new ImageGenerationCreditError();
+    throw new ImageGenerationCreditError(
+      chargeBillingOrigin(usageOrigin) === "api"
+        ? "API usage uses credits, not your plan credit, and there aren't enough left for it"
+        : undefined,
+    );
   }
+}
+
+/** The turn's frozen origin, read inside the caller's transaction. */
+async function readTurnBillingOriginInTransaction(
+  tx: Database,
+  operation: { accountId: string; workspaceId: string; turnId: string | null },
+) {
+  const [turn] = await rawRows<{ billingOrigin: string | null }>(
+    tx,
+    sql`SELECT billing_origin AS "billingOrigin" FROM session_turns
+      WHERE account_id=${operation.accountId}::uuid AND workspace_id=${operation.workspaceId}::uuid
+        AND id=${operation.turnId}::uuid`,
+  );
+  return turn ? storedBillingOrigin(turn.billingOrigin) : null;
 }
 
 async function debitImageGenerationCredits(
@@ -1062,15 +1086,19 @@ async function debitImageGenerationCredits(
   }
   await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${operation.accountId}))`);
   const settledAt = await beginPlanCreditSettlement(tx, operation.accountId);
-  // The monthly plan pays first, then grants covering the turn's model, then
-  // general credit, exactly as a settled chat response.
-  const allocations = operation.creditUsageModelId
-    ? planPostUseCreditAllocations(
-        await getBillingBalance(tx, operation.accountId, undefined, settledAt, true),
-        operation.pricedCostMicros,
-        operation.creditUsageModelId,
-      )
-    : [];
+  // The monthly plan pays first (the Free plan's on any model), then grants
+  // covering the turn's model, then general credit. API work: credits only.
+  const usageOrigin = operation.turnId
+    ? ((await readTurnBillingOriginInTransaction(tx, operation)) ?? "app")
+    : "app";
+  const allocations =
+    usageOrigin === "app"
+      ? planPostUseCreditAllocations(
+          await getBillingBalance(tx, operation.accountId, undefined, settledAt, true),
+          operation.pricedCostMicros,
+          toolCreditUsage(operation.creditUsageModelId),
+        )
+      : [];
   const now = new Date();
   const inserted = await tx
     .insert(schema.creditLedgerEntries)
@@ -1081,6 +1109,7 @@ async function debitImageGenerationCredits(
       amountMicros: -operation.pricedCostMicros,
       sourceType: "image_generation_operation",
       sourceId: operation.id,
+      usageOrigin,
       idempotencyKey: `credit:image_generation_debit:${operation.id}`,
       metadata: {
         turnId: operation.turnId,

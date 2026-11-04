@@ -12,6 +12,8 @@ signup credit stays spendable under its original scoped/general terms.
 Coverage
 can change for existing and new promotional balances; issued amounts and spent
 credits stay unchanged. Legacy unrestricted grants remain unrestricted.
+Promotional and plan credit pay for app use only; API use (keys, products on
+the SDK, outside agents) pays from credits. See [billing-origin.md](billing-origin.md).
 
 ## Change models without redeploying
 

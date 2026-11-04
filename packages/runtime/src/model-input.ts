@@ -1,7 +1,12 @@
 import type { Settings } from "@opengeni/config";
 import { canonicalizePersistedHistoryItem } from "@opengeni/codex";
 import type { Agent, AgentInputItem, CallModelInputFilter } from "@openai/agents";
-import { projectHostedSearchEvidence } from "./hosted-search-evidence";
+import { isAnthropicWebSearchItem } from "./anthropic-web-search";
+import {
+  projectHostedSearchEvidence,
+  withSearchRecordForm,
+  type SearchRecordForm,
+} from "./hosted-search-evidence";
 
 import {
   CompactionNeededError,
@@ -543,18 +548,26 @@ export function incrementalModelInputProjectionFilter(
  */
 export function callModelInputFilterForSettings(
   settings: Settings,
-  options: ContextRobustnessFilterOptions = {},
+  options: ContextRobustnessFilterOptions & { searchRecordForm?: SearchRecordForm } = {},
 ): CallModelInputFilter | undefined {
   return composeCallModelInputFilters([
-    baseModelInputFilterForSettings(settings),
+    baseModelInputFilterForSettings(settings, { searchRecordForm: options.searchRecordForm }),
     boundModelToolOutputsFilterForSettings(settings),
     contextRobustnessFilterForSettings(settings, options),
   ]);
 }
 
-/** Rules that normalize history but do not impose final bounds/accounting. */
-export function baseModelInputFilterForSettings(settings: Settings): CallModelInputFilter {
+/**
+ * Rules that normalize history but do not impose final bounds/accounting.
+ * `searchRecordForm` is the session's {@link SearchRecordForm}; callers that
+ * know no session get the original `assistant` form.
+ */
+export function baseModelInputFilterForSettings(
+  settings: Settings,
+  options: { searchRecordForm?: SearchRecordForm | undefined } = {},
+): CallModelInputFilter {
   const stripProviderIds = settings.openaiProviderItemIds === "strip";
+  const form = options.searchRecordForm ?? "assistant";
   const projectItems = memoizedInputItemProjectionFilter(
     (source) => {
       let item = restoreGenericDispatchHistoryItem(source);
@@ -563,10 +576,14 @@ export function baseModelInputFilterForSettings(settings: Settings): CallModelIn
       ) as unknown as AgentInputItem;
       // Claude's own searches stay native here: every model transport then
       // calls projectHistoryForProvider, which replays them verbatim to Claude
-      // and projects their readable facts for any other provider.
+      // and projects their readable facts for any other provider, in the
+      // session's form marked on them here.
       item = projectHostedSearchEvidence(item as unknown as Record<string, unknown>, {
         preserveAnthropicNative: true,
+        form,
       }) as AgentInputItem;
+      if (isAnthropicWebSearchItem(item as unknown as Record<string, unknown>))
+        item = withSearchRecordForm(item, form);
       return stripProviderIds ? stripProviderItemId(item) : item;
     },
     // The SDK's externally-owned run history is immutable and append-only.

@@ -92,7 +92,12 @@ impl<S: Store> Service<S> {
         while Instant::now() < deadline {
             let row = self.get(team, id).await?;
             let Some(host) = row.ownership.owner else {
-                self.adopt(row, None, HashSet::new()).await?;
+                if !self
+                    .adopt_or_wait(row, HashSet::new(), &mut waited_on)
+                    .await?
+                {
+                    tokio::time::sleep(AGAIN_AFTER).await;
+                }
                 continue;
             };
             let epoch = row.ownership.epoch;
@@ -128,8 +133,11 @@ impl<S: Store> Service<S> {
                 let row = now.ok_or(Failure::NotFound)?;
                 if let Some(adopted) = self.send_adopt(&row, &target).await?
                     && let (Next::PlaceElsewhere, Some(now)) = (adopted.next, adopted.row)
+                    && !self
+                        .adopt_or_wait(now, HashSet::from([host]), &mut waited_on)
+                        .await?
                 {
-                    self.adopt(now, None, HashSet::from([host])).await?;
+                    tokio::time::sleep(AGAIN_AFTER).await;
                 }
                 continue;
             }
@@ -153,6 +161,27 @@ impl<S: Store> Service<S> {
             "not reached within {:?}: {waited_on}",
             self.settings.wake_within
         )))
+    }
+
+    /// Places a sandbox nobody owns, as [`Self::adopt`] does, for a wake.
+    /// A fleet with no room for it now is waited on like a host that is
+    /// full: room comes back as other sandboxes sleep or end, so the wake
+    /// keeps trying until its deadline. Returns false when there was no
+    /// room, after noting it in `waited_on`.
+    async fn adopt_or_wait(
+        &self,
+        row: SandboxRow,
+        exclude: HashSet<HostId>,
+        waited_on: &mut String,
+    ) -> Result<bool, Failure> {
+        match self.adopt(row, None, exclude).await {
+            Ok(()) => Ok(true),
+            Err(Failure::NoCapacity) => {
+                *waited_on = Failure::NoCapacity.to_string();
+                Ok(false)
+            }
+            Err(other) => Err(other),
+        }
     }
 
     /// Gives a sandbox nobody owns, or whose owner refused it outright, to

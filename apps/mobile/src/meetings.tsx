@@ -11,9 +11,12 @@
 import {
   MeetingRecorderProvider as SharedRecorderProvider,
   isCapturing,
+  showAudioImportError,
   useMeetingRecorder,
+  useSharedAudioImport,
   type MeetingRecorder,
 } from "@opengeni/react-native/meetings";
+import { useOpenGeniText } from "@opengeni/react/messages";
 import { fontStyle, useNativeTimelineTheme } from "@opengeni/react-native/timeline";
 import { Stack } from "expo-router";
 import type { ReactNode } from "react";
@@ -32,9 +35,22 @@ export function MeetingRecorderProvider({ children }: { children: ReactNode }) {
       workspaceId={account && workspaceId ? workspaceId : null}
       {...(account ? { storeScope: account.id } : {})}
     >
+      <SharedAudioImport />
       {children}
     </SharedRecorderProvider>
   );
+}
+
+/*
+ * A phone call recorded with the Phone app's button (kept in Notes), a voice
+ * memo or any audio file shared to the app becomes a meeting in the current
+ * workspace. The share opens Meetings (app/+native-intent.tsx), where it
+ * shows while it uploads.
+ */
+function SharedAudioImport() {
+  const msg = useOpenGeniText();
+  useSharedAudioImport({ onError: (error) => showAudioImportError(msg, error) });
+  return null;
 }
 
 /**

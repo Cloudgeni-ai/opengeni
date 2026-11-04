@@ -66,7 +66,6 @@ const legacyBrowserUnusedMethods = [
   // this standalone usage read stays available to SDK callers only.
   "organizationCodexAccountUsage",
   "rejectGoalRevision",
-  "revokeUserResourceGrant",
   "rollbackCompanyProfile",
   "rollbackGoalRevision",
   "setAtlassianLifecycle",
@@ -143,12 +142,19 @@ const integrationMethods = [
 // The native app exchanges its sign-in code, signs out and manages its push
 // device through the public client. The web app only starts the authorization.
 const nativeAppMethods = [
+  "answerAgentCall",
+  "declineAgentCall",
   "exchangeNativeAppCode",
+  "getAgentCall",
   "getNativePushDevice",
   "registerNativePushDevice",
   "signOutNativeApp",
   "unregisterNativePushDevice",
 ];
+
+// A product embedding Opengeni states, from its backend as the person, which
+// of their phones it rings for agent calls; no Opengeni browser surface uses it.
+const embeddingProductMethods = ["getAgentCallHostPhones", "setAgentCallHostPhones"];
 
 // #3470 retired the preference editor and learning/onboarding hooks, not their
 // public SDK contracts. Preserve these existing browser methods for old bundles
@@ -164,6 +170,9 @@ const retiredSettingsMethods = [
   "listWorkspaceInstructionPolicyOnboardingProposals",
   "rejectPreferenceRegistryProposal",
   "supersedePreferenceRegistry",
+  // The personal-fallback opt-in is retired (a person turns their own
+  // subscription on per workspace instead); the read stays for SDK callers.
+  "getModelAccountPreferences",
 ];
 
 // The web stopped calling the native Google Drive lifecycle methods when Drive
@@ -178,6 +187,11 @@ const retiredGoogleDriveNativeMethods = [
 // remove each entry when its browser consumer lands (the equality below enforces it).
 const pendingModelAccountMethods = ["getOrganizationModelAccountSettings"];
 
+// Chat share links: the public share page reads a link without the SDK (no
+// credentials, no SDK bundle for someone without an account), and listing a
+// person's links is offered to the agent and SDK callers, not a web screen yet.
+const chatShareLinkMethods = ["getSharedSession", "listSessionShareLinks"];
+
 // #6256 deleted the unreachable web components that called these (the Atlassian
 // source dialog, schedule Slack posting and sandbox artifact download). The
 // public SDK methods stay for existing callers.
@@ -185,6 +199,10 @@ const retiredDeadWebComponentMethods = [
   "listScheduledTaskSlackChannels",
   "publishSandboxFileArtifact",
   "saveAtlassianSources",
+  // Integration Knowledge sync is retired, with its Google Drive source
+  // dialog; these routes now answer 410 for existing callers.
+  "browseGoogleDriveFacetSource",
+  "saveGoogleDriveFacetSource",
 ];
 
 function countIdentifier(source: string, identifier: string): number {
@@ -251,9 +269,11 @@ describe("browser client runtime surface", () => {
         ...agentInteractionMethods,
         ...integrationMethods,
         ...nativeAppMethods,
+        ...embeddingProductMethods,
         ...retiredSettingsMethods,
         ...retiredGoogleDriveNativeMethods,
         ...pendingModelAccountMethods,
+        ...chatShareLinkMethods,
         ...retiredDeadWebComponentMethods,
       ].sort(),
     );

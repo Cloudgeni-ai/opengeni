@@ -660,7 +660,7 @@ describe("ComputerDriver", () => {
     expect(transport.stoppedCaptures).toBe(1);
   });
 
-  test("pastes text the native keymap refused before typing any key", async () => {
+  test("pastes text the native keymap refused before typing any key, restoring the clipboard", async () => {
     const transport = new UntypeableTextTransport();
     const driver = new ComputerDriver({
       computerSessionId,
@@ -671,12 +671,12 @@ describe("ComputerDriver", () => {
     await expect(driver.dispatch(typing)).resolves.toMatchObject({
       observationId: "observation-2",
     });
+    // The Linux helper's paste carries its text and puts the previous
+    // clipboard back once the target has read it.
     expect(transport.calls).toEqual([
       ["dispatch", { type: "keyboard", action: "type", value: "ÆØÅ–π密" }],
-      ["validate", { type: "clipboard", operation: "write", text: "ÆØÅ–π密" }],
-      ["validate", { type: "clipboard", operation: "paste" }],
-      ["dispatch", { type: "clipboard", operation: "write", text: "ÆØÅ–π密" }],
-      ["dispatch", { type: "clipboard", operation: "paste" }],
+      ["validate", { type: "clipboard", operation: "paste", text: "ÆØÅ–π密" }],
+      ["dispatch", { type: "clipboard", operation: "paste", text: "ÆØÅ–π密" }],
     ]);
     expect(transport.dispatched).toMatchObject({
       operationId: typing.operationId,
@@ -684,6 +684,45 @@ describe("ComputerDriver", () => {
       expectedTargetGeneration: typing.expectedTargetGeneration,
       expectedObservationId: typing.expectedObservationId,
     });
+  });
+
+  test("writes then pastes through a helper without the restoring paste, or another backend", async () => {
+    const older = new UntypeableTextTransport();
+    // An older Linux helper accepts text only on a clipboard write.
+    older.refuseRestoringPaste = new ComputerBackendError(
+      "invalid_action",
+      "native clipboard text is required exactly for write",
+      false,
+      false,
+    );
+    const other = new UntypeableTextTransport();
+    Object.defineProperty(other, "identity", {
+      value: { adapterId: "opengeni.cua.linux.v1", platform: "linux" },
+    });
+    for (const [transport, refused] of [
+      [older, true],
+      [other, false],
+    ] as const) {
+      const driver = new ComputerDriver({
+        computerSessionId,
+        controllerGeneration,
+        client: transport,
+      });
+      await expect(driver.dispatch(typeCommand("ÆØÅ"))).resolves.toMatchObject({
+        observationId: "observation-2",
+      });
+      const restoring: UntypeableTextTransport["calls"] = refused
+        ? [["validate", { type: "clipboard", operation: "paste", text: "ÆØÅ" }]]
+        : [];
+      expect(transport.calls).toEqual([
+        ["dispatch", { type: "keyboard", action: "type", value: "ÆØÅ" }],
+        ...restoring,
+        ["validate", { type: "clipboard", operation: "write", text: "ÆØÅ" }],
+        ["validate", { type: "clipboard", operation: "paste" }],
+        ["dispatch", { type: "clipboard", operation: "write", text: "ÆØÅ" }],
+        ["dispatch", { type: "clipboard", operation: "paste" }],
+      ]);
+    }
   });
 
   test("never pastes after possible input, for keys with their own effect, or without a clipboard", async () => {
@@ -821,6 +860,70 @@ describe("ComputerDriver", () => {
     expect(transport.calls).toEqual([
       ["dispatch", { type: "keyboard", action: "type", value: "pÆss密" }],
     ]);
+  });
+
+  test("a secret the layout cannot type is refused without naming a character or the clipboard", async () => {
+    const raw = ["{{", "secret:Desk/password", "}}"].join("");
+    const untypeable =
+      "the desktop keyboard layout cannot type every character of this secret, and secrets are never pasted; nothing was typed, so ask the person to enter it";
+    const refusals: Array<[ComputerBackendError, string]> = [
+      [
+        new ComputerBackendError(
+          "unsupported",
+          "X11 keymap cannot type Unicode scalar U+00F8; use clipboard paste",
+          false,
+          false,
+        ),
+        untypeable,
+      ],
+      [
+        new ComputerBackendError(
+          "unsupported",
+          "the active keyboard layout cannot type U+00F8; use clipboard paste",
+          false,
+          false,
+        ),
+        untypeable,
+      ],
+      [
+        new ComputerBackendError(
+          "timeout",
+          "the keyboard layout is not ready yet; retry, or use clipboard paste",
+          true,
+          false,
+        ),
+        "the keyboard layout is not ready yet; retry",
+      ],
+    ];
+    for (const [refusal, message] of refusals) {
+      const transport = new UntypeableTextTransport();
+      transport.refusal = refusal;
+      const driver = new ComputerDriver({
+        computerSessionId,
+        controllerGeneration,
+        client: transport,
+      });
+      const error = await driver
+        .dispatch({
+          ...typeCommand(raw),
+          secretValues: { [referenceKey(parseSecretReference(raw))]: "Søren1!" },
+        })
+        .then(
+          () => null,
+          (caught: unknown) => caught as Error,
+        );
+      expect(error).toMatchObject({
+        name: "InteractionDefiniteDriverError",
+        code: refusal.code,
+        retryable: refusal.retryable,
+        message,
+      });
+      expect(error?.message).not.toContain("U+");
+      expect(error?.message).not.toContain("clipboard");
+      expect(transport.calls).toEqual([
+        ["dispatch", { type: "keyboard", action: "type", value: "Søren1!" }],
+      ]);
+    }
   });
   test("redacts a typed secret from later observations of the field that holds it", async () => {
     const transport = new EchoingFieldTransport();
@@ -1019,8 +1122,19 @@ class UntypeableTextTransport extends FixtureNativeTransport {
     false,
   );
 
+  refuseRestoringPaste: ComputerBackendError | null = null;
+
   override async validate(nativeCommand: ComputerBackendActionCommand): Promise<void> {
     this.calls.push(["validate", nativeCommand.action]);
+    const action = nativeCommand.action;
+    if (
+      this.refuseRestoringPaste &&
+      action.type === "clipboard" &&
+      action.operation === "paste" &&
+      action.text !== undefined
+    ) {
+      throw this.refuseRestoringPaste;
+    }
     await super.validate(nativeCommand);
   }
 

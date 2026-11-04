@@ -31,6 +31,7 @@ import {
 } from "react-resizable-panels";
 import { cn } from "../lib/cn";
 import { inertProps } from "../lib/inert";
+import { useWindowLayerOpen } from "../lib/window-layer";
 import { useOpenGeniText } from "../messages/runtime";
 
 export type WorkspaceTab = {
@@ -213,6 +214,9 @@ export function WorkspaceDock({
     });
   }, []);
   const collapsed = collapsedProp ?? internalCollapsed;
+  // Maximized, or an open overlay in a narrow window, the dock fills the
+  // window's content: the host's window chrome steps aside.
+  useWindowLayerOpen(maximized || (narrow && !collapsed));
   // The host header remains the stable reopen action. The open panel also owns
   // a local Hide workspace action so a user never has to hunt elsewhere to
   // dismiss it; standalone usage keeps the thin reopen rail as well.

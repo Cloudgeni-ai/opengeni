@@ -74,8 +74,16 @@ export const AutomationTemplateEventSource = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       kind: EventSourceKind,
-      /** For a webhook: how it verifies and reads deliveries. */
+      /**
+       * For a webhook: `standard`, or `custom` with `preset`. The older
+       * `linear` and `sentry` mean `custom` with that preset.
+       */
       adapter: WebhookEventAdapter.optional(),
+      /** For a custom webhook: the app's preset, such as `linear`. */
+      preset: z
+        .string()
+        .regex(/^[a-z0-9][a-z0-9-]{0,63}$/u)
+        .optional(),
       /** For an MCP source: the server, as configured for the workspace. */
       mcpServerId: z.string().min(1).max(256).optional(),
       sourceId: Uuid.optional(),
@@ -87,6 +95,13 @@ export const AutomationTemplateEventSource = /* @__PURE__ */ defineSchema(() =>
           code: "custom",
           path: ["adapter"],
           message: "A webhook source names its adapter, and only a webhook source does",
+        });
+      }
+      if (source.preset !== undefined && source.adapter !== "custom") {
+        context.addIssue({
+          code: "custom",
+          path: ["preset"],
+          message: "Only a custom webhook names a preset",
         });
       }
       if ((source.kind === "mcp") !== (source.mcpServerId !== undefined)) {

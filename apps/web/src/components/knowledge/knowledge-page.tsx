@@ -24,10 +24,10 @@ import { PageHeader } from "@opengeni/react/ui/page-header";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
 import {
-  canManageWorkspaceSettings,
-  hasAccountPermission,
+  canContributeWorkspaceContent,
   hasWorkspacePermission,
 } from "@opengeni/react/app/lib/permissions";
+import { canAdministerOrganization } from "@opengeni/react/app/lib/workspaces";
 
 import { errorText, useArchiveKnowledge } from "./knowledge-data";
 import { AddKnowledgePage, EntryEditPage, EntryPage, NewCollectionDialog } from "./knowledge-entry";
@@ -91,11 +91,12 @@ export function KnowledgePage({
     ? "your Personal workspace"
     : (workspace?.name ?? "this workspace");
   const canEdit = hasWorkspacePermission(context.accessContext, workspaceId, "documents:manage");
-  const canWriteOrganization = Boolean(
-    workspace?.accountId &&
-    hasAccountPermission(context.accessContext, workspace.accountId, "account:admin"),
-  );
-  const canEditInstructions = canManageWorkspaceSettings(
+  const canWriteOrganization = canAdministerOrganization({
+    accessContext: context.accessContext,
+    clientConfig: context.clientConfig,
+    accountId: workspace?.accountId,
+  });
+  const canEditInstructions = canContributeWorkspaceContent(
     context.accessContext,
     workspace,
     context.managedSelfContext,
@@ -107,7 +108,7 @@ export function KnowledgePage({
 
   const nav = useKnowledgeNavigation(workspaceId);
   const navigate = useNavigate();
-  const [library, setLibrary] = useState<LibraryView>(() => initialLibraryView(personal));
+  const [library, setLibrary] = useState<LibraryView>(() => initialLibraryView());
   const [refresh, setRefresh] = useState(0);
   const changed = useCallback(() => setRefresh((value) => value + 1), []);
   const [uploadOpen, setUploadOpen] = useState(false);
@@ -148,18 +149,14 @@ export function KnowledgePage({
       key ? nav.openProposal(key, { replace }) : nav.showTab("review", { replace }),
     onChanged: changed,
   });
-  const shared = useLearningDefaults(workspaceId, personal ? "personal" : "workspace");
+  const shared = useLearningDefaults(workspaceId, "workspace");
   const instructions = useWorkspaceInstructions(workspaceId);
   const archive = useArchiveKnowledge(workspaceId, changed);
 
   const createScope: KnowledgeEntryScope =
-    library.scope !== "all" &&
-    (library.scope !== "organization" || canWriteOrganization) &&
-    !(personal && library.scope !== "personal")
+    library.scope !== "all" && (library.scope !== "organization" || canWriteOrganization)
       ? library.scope
-      : personal
-        ? "personal"
-        : "workspace";
+      : "workspace";
 
   const entryLink = useCallback(
     (id: string) => `/workspaces/${workspaceId}/state?entry=${encodeURIComponent(id)}`,
@@ -333,7 +330,6 @@ export function KnowledgePage({
         <AddKnowledgePage
           workspaceId={workspaceId}
           workspaceName={workspace?.name ?? "this workspace"}
-          personal={personal}
           canWriteOrganization={canWriteOrganization}
           defaultScope={createScope}
           {...(search.collection ? { collectionId: search.collection } : {})}
@@ -500,7 +496,6 @@ export function KnowledgePage({
             onUpload={() => setUploadOpen(true)}
             {...(canEdit ? { onNewCollection: () => setCollectionOpen(true) } : {})}
             onEmptyChange={setLibraryEmpty}
-            personal={personal}
           />
         </LineTabsContent>
         <LineTabsContent value="instructions">
@@ -537,7 +532,6 @@ export function KnowledgePage({
           onOpenChange={setUploadOpen}
           workspaceId={workspaceId}
           workspaceName={workspace?.name ?? "this workspace"}
-          personal={personal}
           canWriteOrganization={canWriteOrganization}
           defaultScope={createScope}
           onUploaded={() => {

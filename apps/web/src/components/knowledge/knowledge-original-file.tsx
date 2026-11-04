@@ -137,7 +137,7 @@ function OriginalFilePreview(props: {
         </details>
       ) : null}
       {error ? (
-        <p role="alert" className="text-sm text-status-error">
+        <p role="alert" className="text-sm text-danger">
           Couldn't open the original file. {error}
         </p>
       ) : null}

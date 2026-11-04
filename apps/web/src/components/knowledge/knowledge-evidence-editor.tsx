@@ -65,7 +65,7 @@ function EvidenceRevision(props: {
       <p className="font-medium">{source?.revision.entry.title ?? "Source"}</p>
       {loading ? <p className="text-fg-muted">Checking cited revision…</p> : null}
       {error ? (
-        <p role="alert" className="text-status-error">
+        <p role="alert" className="text-danger">
           {error}
         </p>
       ) : null}

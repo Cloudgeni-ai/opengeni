@@ -6,9 +6,9 @@
  */
 import {
   ArchiveIcon,
-  ArchiveRestoreIcon,
   ArrowDownIcon,
   ArrowUpIcon,
+  AudioLinesIcon,
   ChevronsUpDownIcon,
   CommandIcon,
   GitForkIcon,
@@ -18,6 +18,7 @@ import {
   LinkIcon,
   MailIcon,
   MailOpenIcon,
+  MessageCircleQuestionIcon,
   MicIcon,
   PanelLeftIcon,
   PanelRightIcon,
@@ -31,6 +32,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { SessionListRow } from "../../../session-list-model";
+import type { Recording } from "@opengeni/contracts";
 import type { RecorderState } from "@opengeni/sdk/recordings";
 import { canStartRecording } from "../../../meetings/recorder-state";
 import type { ActionSurface, Chord, ChordPlatform } from "./chords";
@@ -63,6 +65,37 @@ export type MeetingActions = {
   stop(): void | Promise<void>;
 };
 
+/** What the ⌘K menu asks of the server for meetings; see `MeetingPages.list`. */
+export type MeetingListOptions = {
+  /** Words in titles and current transcripts. */
+  query?: string;
+  /** Someone who spoke, by part of their name. */
+  person?: string;
+  startedFrom?: string;
+  startedTo?: string;
+  limit: number;
+  signal?: AbortSignal;
+};
+
+/** The Meetings pages, where this surface has them (whether or not this browser records). */
+export type MeetingPages = {
+  /** Show Meetings. */
+  openList(): void;
+  /** Open one of this workspace's meetings, as its row on Meetings does. */
+  open(recordingId: string): void;
+  /** A meeting's address, for a new browser tab or to share. */
+  link(recordingId: string): string;
+  copyLink(recordingId: string): void | Promise<void>;
+  /** This workspace's meetings the person can see, newest first. */
+  list(options: MeetingListOptions): Promise<readonly Recording[]>;
+  /** The meeting on screen, if any. */
+  current: {
+    recordingId: string;
+    /** Ask about it, as its Ask field does; with no question, put the cursor there. Null when it takes none. */
+    ask: ((question: string | null) => void) | null;
+  } | null;
+};
+
 export type ActionEnv = {
   workspaceId: string;
   subjectId: string;
@@ -83,6 +116,8 @@ export type ActionEnv = {
   canForkCurrentChat: boolean;
   /** Meetings, when this surface records them and this browser can. */
   meetings: MeetingActions | null;
+  /** The Meetings pages, when this surface has them. */
+  meetingPages: MeetingPages | null;
   newChat(): void;
   /** Opens a chat; one in another workspace switches to that workspace. */
   openChat(chatId: string, workspaceId?: string): void;
@@ -125,6 +160,8 @@ export type AppAction = {
   chordSummary?: (platform: ChordPlatform) => string;
   /** Acts on a chat: the current one, or the one a menu or ⌘K row points at. */
   forChat?: boolean;
+  /** Acts on the meeting on screen; ⌘K lists it under "This meeting". */
+  forMeeting?: boolean;
   /** Listed in the ⌘K menu (some exist only as keys). Default true. */
   inCommandMenu?: boolean;
   /**
@@ -264,6 +301,32 @@ export function appActions(): readonly AppAction[] {
       run: (env) => env.meetings?.stop(),
     },
     {
+      // The meeting on screen's Ask field, from ⌘K. Typing a question first
+      // asks it straight away; see the menu's "Ask about this meeting: …" row.
+      id: "meeting.ask",
+      title: "Ask about this meeting",
+      group: "meetings",
+      icon: MessageCircleQuestionIcon,
+      keywords: ["question", "chat", "agent", "summary", "notes"],
+      forMeeting: true,
+      opensDialog: true,
+      available: (env) => Boolean(env.meetingPages?.current?.ask),
+      run: (env) => env.meetingPages?.current?.ask?.(null),
+    },
+    {
+      id: "meeting.copyLink",
+      title: "Copy meeting link",
+      group: "meetings",
+      icon: LinkIcon,
+      keywords: ["share", "url", "address"],
+      forMeeting: true,
+      available: (env) => Boolean(env.meetingPages?.current),
+      run: (env) => {
+        const current = env.meetingPages?.current;
+        if (current) return env.meetingPages?.copyLink(current.recordingId);
+      },
+    },
+    {
       id: "chat.copyLink",
       title: "Copy link",
       group: "chat",
@@ -331,16 +394,10 @@ export function appActions(): readonly AppAction[] {
     },
     {
       id: "chat.archive",
-      title: (env, chat) =>
-        chat && env.ops.archiveLabel
-          ? env.ops.archiveLabel(chat)
-          : chat?.archived
-            ? "Restore"
-            : "Archive",
+      title: "Archive",
       group: "chat",
       icon: ArchiveIcon,
-      iconFor: (chat) => (chat?.archived ? ArchiveRestoreIcon : ArchiveIcon),
-      keywords: ["restore", "hide", "done"],
+      keywords: ["archive", "done", "storage"],
       // Apple Mail's Archive key; Ctrl+Alt elsewhere, as Pin, since browsers there
       // keep Ctrl+Shift+A for tab search.
       chords: [
@@ -349,8 +406,13 @@ export function appActions(): readonly AppAction[] {
       ],
       forChat: true,
       desktopMenu: "chat",
-      available: (_env, chat) => chat !== null && chat.parentSessionId === null,
-      run: (env, chat) => (chat ? env.ops.setArchived(chat, !chat.archived) : undefined),
+      // Archived chats stay archived; only people who can control a chat archive it.
+      available: (env, chat) =>
+        chat !== null &&
+        chat.parentSessionId === null &&
+        !chat.archived &&
+        (env.ops.archiveLabel ? env.ops.archiveLabel(chat) !== null : true),
+      run: (env, chat) => (chat ? env.ops.setArchived(chat, true) : undefined),
     },
     {
       id: "chat.find",
@@ -379,6 +441,17 @@ export function appActions(): readonly AppAction[] {
       desktopMenu: "go",
       available: ALWAYS,
       run: (env) => env.openInbox(),
+    },
+    {
+      id: "go.meetings",
+      title: "Meetings",
+      group: "navigate",
+      icon: AudioLinesIcon,
+      keywords: ["recordings", "transcripts", "calls", "notes"],
+      suggested: true,
+      desktopMenu: "go",
+      available: (env) => env.meetingPages !== null,
+      run: (env) => env.meetingPages?.openList(),
     },
     {
       id: "go.previousChat",

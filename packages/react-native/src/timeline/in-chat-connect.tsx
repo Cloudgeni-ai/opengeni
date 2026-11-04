@@ -923,21 +923,24 @@ function ScopedConnectSetup({
           ) : null}
           {action.type === "wait" ? (
             <View style={{ gap: 6 }}>
+              {/* In reading order: the code, the page to enter it on, then
+                  what to do there. */}
               {action.userCode ? (
                 <Text selectable style={text.body}>
                   {t("connectSetup.verificationCode")}{" "}
                   <Text style={fontStyle(text.theme, 600, "mono")}>{action.userCode}</Text>
                 </Text>
               ) : null}
-              <Line>{t("connectSetup.completeProviderAuthorizationThenCheck")}</Line>
               {flow.verificationUrl ? (
                 <Button
                   icon="external-link"
+                  variant="primary"
+                  size="form"
                   label={t("connectSetup.openProviderVerificationPageNew")}
                   onPress={() => openLink(options, flow.verificationUrl!)}
-                  style={{ alignSelf: "flex-start" }}
                 />
               ) : null}
+              <Line>{t("connectSetup.completeProviderAuthorizationThenCheck")}</Line>
             </View>
           ) : null}
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>

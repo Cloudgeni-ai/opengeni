@@ -44,6 +44,7 @@ export async function readSkill(
   context: SkillReadContext,
   skillId: string,
   revisionId?: string,
+  options: { includeOrganizationElsewhere?: boolean } = {},
 ) {
   return (
     (
@@ -51,6 +52,7 @@ export async function readSkill(
         skillId,
         ...(revisionId ? { revisionId } : {}),
         limit: 1,
+        ...options,
       })
     )[0] ?? null
   );

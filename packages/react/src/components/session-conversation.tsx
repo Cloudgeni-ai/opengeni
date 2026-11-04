@@ -61,7 +61,7 @@ import {
 } from "./conversation-capability-connect";
 import type { SessionMcpCapabilityCardProps } from "./session-mcp-capability-card";
 import type { SessionIntegrationCapabilityCardProps } from "./session-integration-capability-card";
-import type { AuthNeededItem } from "../timeline";
+import { timelineLivePause, type AuthNeededItem } from "../timeline";
 import { ProviderRecoveryNotice } from "./provider-recovery-notice";
 import { currentProviderRecovery } from "../lib/provider-recovery";
 import {
@@ -718,6 +718,7 @@ function ConversationView({
               emptyState={timelineProps?.emptyState}
               renderMessageSender={timelineProps?.renderMessageSender}
               status={status}
+              pause={timelineLivePause(voiceControl)}
               hasOlder={feed.hasOlder}
               loadingOlder={feed.loadingOlder}
               onLoadOlder={feed.loadOlder}
@@ -736,7 +737,7 @@ function ConversationView({
           </InteractiveAnswerProvider>
         )}
         {importedArchive ? (
-          <p className="shrink-0 px-4 py-2 text-center text-sm text-og-muted" role="status">
+          <p className="shrink-0 px-4 py-2 text-center text-sm text-og-fg-muted" role="status">
             {t("sessionConversation.archivedConversationReadOnly")}
           </p>
         ) : (
@@ -752,8 +753,8 @@ function ConversationView({
                   className="mx-auto max-w-3xl"
                   {...approvalProps}
                   approvals={approvals}
-                  onApprove={async (approval) => {
-                    await control.approve(approval.id);
+                  onApprove={async (approval, answer) => {
+                    await control.approve(approval.id, undefined, answer);
                   }}
                   onReject={async (approval) => {
                     await control.reject(approval.id);

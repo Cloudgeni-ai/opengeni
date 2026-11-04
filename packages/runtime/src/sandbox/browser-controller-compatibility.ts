@@ -12,14 +12,15 @@
  *
  * Add an entry whenever the public browser action contract gains an option or
  * value; `test/browser-controller-compatibility.test.ts` fails until the new
- * public-api surface keys are listed here. Entries stay: machines can run old
- * agents for a long time.
+ * public-api surface keys are listed here. Once every connected agent runs a
+ * release that accepts an option, move the test's baseline fixture to that
+ * release and remove the entry.
  */
 
 export type NewerBrowserActionOption = {
   /** Flattened public-api surface keys (`<schema> <path>`) this option added. */
   readonly surfaceKeys: readonly string[];
-  /** The option as the agent writes it, for example `"exact"`. */
+  /** The option as the agent writes it, for example `type "viewport_reset"`. */
   readonly name: string;
   /** Where the option appears, completing "does not accept <name> on ...". */
   readonly context: string;
@@ -30,18 +31,6 @@ export type NewerBrowserActionOption = {
 };
 
 export const NEWER_BROWSER_ACTION_OPTIONS: readonly NewerBrowserActionOption[] = [
-  {
-    // First accepted by agent 0.1.141.
-    surfaceKeys: ["BrowserLocator $|kind=label.exact", "BrowserLocator $|kind=text.exact"],
-    name: '"exact"',
-    context: "a text or label locator",
-    alternative: "target the element by its ref",
-    usedBy: (action) =>
-      someObject(
-        action,
-        (value) => (value.kind === "text" || value.kind === "label") && value.exact !== undefined,
-      ),
-  },
   {
     // First accepted by the agent release after 0.1.144.
     surfaceKeys: [

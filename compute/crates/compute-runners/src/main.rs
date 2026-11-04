@@ -75,7 +75,8 @@ struct Serve {
     /// Idle runners kept beyond the jobs assigned.
     #[arg(long, default_value_t = 0)]
     min_idle: u32,
-    /// The most runners at once.
+    /// The most sandboxes at once: runners, and a warm template's builder
+    /// while it refreshes.
     #[arg(long, default_value_t = 10)]
     max: u32,
     /// The longest a runner's sandbox lives, in seconds (the longest job).
@@ -258,20 +259,6 @@ async fn run(serve: Serve) -> Result<()> {
     });
 
     let (template_tx, template) = watch::channel(serve.template.clone());
-    if let Some(repo) = &serve.warm_repo {
-        tasks.spawn(warm::keep(
-            warm_settings(&serve, &key, repo),
-            Arc::clone(&github),
-            compute.clone(),
-            template_tx,
-            leading.clone(),
-            stop.clone(),
-        ));
-    }
-    tokio::spawn(stop_on_signal(stop.clone()));
-
-    let owner = std::env::var("HOSTNAME")
-        .unwrap_or_else(|_| format!("compute-runners-{}", std::process::id()));
     let settings = pool::Settings {
         name: serve.name.clone(),
         min_idle: serve.min_idle,
@@ -281,7 +268,28 @@ async fn run(serve: Serve) -> Result<()> {
         standby: pool::STANDBY_EVERY,
         retry: pool::RETRY_EVERY,
     };
-    let pool = Pool::new(Arc::clone(&github), compute, set.id, settings, template);
+    let pool = Pool::new(
+        Arc::clone(&github),
+        compute.clone(),
+        set.id,
+        settings,
+        template,
+    );
+    if let Some(repo) = &serve.warm_repo {
+        tasks.spawn(warm::keep(
+            warm_settings(&serve, &key, repo),
+            Arc::clone(&github),
+            compute,
+            pool.room(),
+            template_tx,
+            leading.clone(),
+            stop.clone(),
+        ));
+    }
+    tokio::spawn(stop_on_signal(stop.clone()));
+
+    let owner = std::env::var("HOSTNAME")
+        .unwrap_or_else(|_| format!("compute-runners-{}", std::process::id()));
     let result = pool::listen(pool, &owner, &leading_tx, &stop).await;
     stop.cancel();
     while tasks.join_next().await.is_some() {}

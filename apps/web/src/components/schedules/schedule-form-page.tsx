@@ -335,7 +335,6 @@ export function ScheduleFormPage({
 function scheduledLearningScope(
   form: ScheduleDraft,
   sessions: Session[],
-  personal: boolean,
 ): "personal" | "workspace" {
   if (
     form.agentLearningBaselineScope &&
@@ -347,7 +346,6 @@ function scheduledLearningScope(
       ? sessions.find((session) => session.id === form.targetSessionId)
       : null;
   return form.knowledgeSource?.destination.kind === "personal" ||
-    personal ||
     target?.tenancy?.visibility === "private" ||
     target?.memoryScope === "user"
     ? "personal"
@@ -731,19 +729,14 @@ function AgentScheduleForm({
       ? sessions.find((session) => session.id === draft.targetSessionId)
       : undefined;
   // A schedule that posts into an Only me chat, or saves to personal
-  // knowledge, is always Only me; the server enforces the same rule.
-  const personalMachineChosen =
-    !inheritsChatSettings &&
-    draft.executionTarget === "machine" &&
-    personalMachines.some((machine) => machine.sandboxId === draft.machineSandboxId);
+  // knowledge, is always Only me; the server enforces the same rule. One on
+  // your own machine can be shared: it runs as you either way.
   const privateReason =
     audienceTarget?.tenancy?.visibility === "private"
       ? "It posts into an Only me chat."
       : draft.knowledgeSource?.destination.kind === "personal"
         ? "It saves to your personal knowledge."
-        : personalMachineChosen
-          ? "It runs on your own machine."
-          : null;
+        : null;
   useEffect(() => {
     if (privateReason)
       setDraft((current) =>
@@ -849,7 +842,7 @@ function AgentScheduleForm({
   };
 
   /* ----- agent learning (edit loads the stored overrides) */
-  const learningScope = scheduledLearningScope(draft, sessions, personal);
+  const learningScope = scheduledLearningScope(draft, sessions);
   const baselineDestinationKey = scheduledLearningDestinationKey(initial);
   const taskId = editing && task ? task.id : undefined;
   const [learningLoading, setLearningLoading] = useState(Boolean(taskId));
@@ -890,13 +883,9 @@ function AgentScheduleForm({
   }, [baselineDestinationKey, client, learningRetry, taskId, workspaceId]);
 
   /* ----- where it runs */
-  // Your own machines are offered whenever the schedule can be Only me.
-  const offerPersonalMachines =
-    personalMachines.length > 0 &&
-    (personal || canCreatePrivate === true || draft.visibility === "private");
-  const scheduledMachines = offerPersonalMachines
-    ? [...sharedMachines, ...personalMachines]
-    : sharedMachines;
+  // Your own machines run your own schedules, Only me or shared: a schedule
+  // runs as its owner.
+  const scheduledMachines = [...sharedMachines, ...personalMachines];
   const selectableMachines = scheduledMachines.filter((machine) =>
     isMachineComputeSelectable(machine.state),
   );
@@ -985,7 +974,7 @@ function AgentScheduleForm({
       }`,
       description:
         machine.scope === "user"
-          ? "Runs on your own computer. Only you can see this automation and its chats."
+          ? "Runs on your own computer, as you."
           : "Runs on this computer, in its code folder.",
       leading: <LaptopIcon className="size-4 text-fg-subtle" />,
       disabled: !isMachineComputeSelectable(machine.state),
@@ -1127,7 +1116,7 @@ function AgentScheduleForm({
               now: submitNow,
               agentLearning: learningChanged
                 ? {
-                    scope: scheduledLearningScope(submitted, sessions, personal),
+                    scope: scheduledLearningScope(submitted, sessions),
                     baselineScope: submitted.agentLearningBaselineScope,
                     operationId: crypto.randomUUID(),
                     expectedVersion: submitted.agentLearningVersion!,
@@ -1157,7 +1146,7 @@ function AgentScheduleForm({
         workspaceId,
         createRequestFromDraft(submitted, {
           now: submitNow,
-          learningScope: scheduledLearningScope(submitted, sessions, personal),
+          learningScope: scheduledLearningScope(submitted, sessions),
         }),
       ),
     );

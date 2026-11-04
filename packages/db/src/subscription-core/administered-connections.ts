@@ -55,7 +55,8 @@
 import { sql } from "drizzle-orm";
 import type { Settings } from "@opengeni/config";
 import type { SubscriptionCoreConnectionRead, SubscriptionQuota } from "@opengeni/subscriptions";
-import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "../database";
+import { rawRows, withRlsContext, type Database } from "../database";
+import { setSubscriptionAdministrationSubject } from "./account-administrator";
 import { nestedPostgresSqlState } from "../persistence-errors";
 import {
   buildSubscriptionCoreCredentialResolver,
@@ -219,7 +220,7 @@ export const subscriptionCoreAdministeredConnections = memoByProvider(
                   if (nestedPostgresSqlState(error) === "55P03") throw new NotVisible();
                   throw error;
                 }
-                await setSubjectRlsContext(tx, scope.subjectId);
+                await setSubscriptionAdministrationSubject(tx, scope);
                 const [admin] = await rawRows<{ admin: boolean }>(
                   tx,
                   sql`select opengeni_private.subscription_organization_admin(${scope.accountId}::uuid) as admin`,
@@ -342,7 +343,7 @@ export const subscriptionCoreAdministeredConnections = memoByProvider(
               db,
               { accountId: scope.accountId, workspaceId: scope.workspaceId },
               async (tx) => {
-                await setSubjectRlsContext(tx, scope.subjectId);
+                await setSubscriptionAdministrationSubject(tx, scope);
                 return await use(tx);
               },
             ),

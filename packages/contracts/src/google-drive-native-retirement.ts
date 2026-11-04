@@ -9,6 +9,7 @@ export function isRetiredNativeGoogleDriveSource(source: unknown): boolean {
   const provider = (connection as { providerDomain?: unknown }).providerDomain;
   return provider === "googleapis.com" || provider === "www.googleapis.com";
 }
+/** @deprecated Use `retiredKnowledgeSourceSyncTask` from `./knowledge-source-sync-retirement`; every source task is retired. */
 export function isRetiredNativeGoogleDriveTask(task: {
   agentConfig?: { knowledgeSource?: unknown } | null;
   action?: { kind?: unknown } | null;

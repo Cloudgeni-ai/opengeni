@@ -242,6 +242,7 @@ async fn every_awake_sandbox_gets_its_cpu_request_when_every_processor_is_busy()
         awake.vcpus, cpu.total,
     );
     if let Some(dir) = std::env::var_os("COMPUTE_TEST_RESULTS") {
+        std::fs::create_dir_all(&dir).unwrap();
         let result = serde_json::json!({
             "sandboxes": count,
             "vcpus": awake.vcpus,

@@ -360,7 +360,8 @@ export function customApiConnectionLabel(connection: ConnectionMetadata): string
 }
 
 export function customApiConnectionRequest(input: {
-  preview: ApiIntegrationPreview | null;
+  /** Only how the API authenticates is read. */
+  preview: Pick<ApiIntegrationPreview, "auth"> | null;
   draft: CustomApiDraft;
   providerDomain: string;
 }): CreateConnectionRequest {
@@ -379,7 +380,7 @@ export function customApiConnectionRequest(input: {
     };
   }
 
-  const placement = credentialPlacement(preview, draft);
+  const placement = customApiCredentialPlacement(preview, draft);
   return {
     providerDomain,
     kind: "api_key",
@@ -394,9 +395,22 @@ export function customApiConnectionRequest(input: {
   };
 }
 
-function credentialPlacement(
-  preview: ApiIntegrationPreview | null,
-  draft: CustomApiDraft,
+/**
+ * Where a key goes and what is sent, as the API's authentication defines it
+ * (or as chosen when the API doesn't say). An organization's key for an API
+ * integration is placed the same way.
+ */
+export function customApiCredentialPlacement(
+  preview: Pick<ApiIntegrationPreview, "auth"> | null,
+  draft: Pick<
+    CustomApiDraft,
+    | "authMethod"
+    | "credentialName"
+    | "credentialCarrier"
+    | "credentialValue"
+    | "username"
+    | "password"
+  >,
 ): { carrier: "header" | "query" | "cookie"; name: string; value: string; prefix?: string } {
   if (preview?.auth.kind === "api_key") {
     return {
@@ -433,7 +447,7 @@ function credentialPlacement(
   };
 }
 
-function basicPlacement(draft: CustomApiDraft) {
+function basicPlacement(draft: Pick<CustomApiDraft, "username" | "password">) {
   const username = draft.username.trim();
   if (!username) throw new Error("Enter the HTTP Basic username.");
   const password = requiredSecret(draft.password, "Enter the HTTP Basic password.");

@@ -35,11 +35,11 @@ function base(env: Record<string, string> = {}) {
 }
 
 describe("deployment Opper rail", () => {
-  test("ships Claude Opus 5.5 (EU) with reasoning, image input and a 128K output cap", () => {
+  test("ships Claude Opus 5.5 with reasoning, image input and a 128K output cap", () => {
     expect(OPENGENI_OPPER_MODELS.map((model) => model.upstreamModelId)).toEqual([OPUS]);
     const [opus] = OPENGENI_OPPER_MODELS;
     expect(opus).toMatchObject({
-      label: "Claude Opus 5.5 (EU)",
+      label: "Claude Opus 5.5",
       shortLabel: "Opus 5.5",
       contextWindowTokens: 1_000_000,
       effectiveContextWindowTokens: 872_000,
@@ -57,6 +57,12 @@ describe("deployment Opper rail", () => {
       defaultEffort: "medium",
     });
     expect(opus!.pricing).toBeDefined();
+  });
+
+  test("no curated label claims a region: EU status comes from residency records", () => {
+    for (const model of OPENGENI_OPPER_MODELS) {
+      expect(`${model.label} ${model.shortLabel ?? ""}`).not.toMatch(/\bEU\b|\(EU\)/u);
+    }
   });
 
   test("sends the configured output cap, a Claude-family floor, or nothing", () => {
@@ -172,7 +178,7 @@ describe("workspace Opper rail", () => {
     const custom = "mistral/mistral-large-eu";
     const claude = "anthropic/claude-sonnet-4-6";
     const catalog = withWorkspaceOpperCatalogProvider(settings, [
-      { upstreamModelId: custom, label: "Mistral Large (EU)" },
+      { upstreamModelId: custom, label: "Mistral Large" },
       { upstreamModelId: claude },
     ]);
     const provider = configuredProviders(catalog).find(
@@ -209,7 +215,7 @@ describe("workspace Opper rail", () => {
     // Custom ids get runnable reasoning (Opper ignores an effort a route does
     // not support) and stay text-only outside the Claude/Gemini families.
     expect(customModel).toMatchObject({
-      label: "Mistral Large (EU)",
+      label: "Mistral Large",
       upstreamModelId: custom,
       capabilities: {
         reasoning: {
@@ -229,7 +235,7 @@ describe("workspace Opper rail", () => {
     expect(policyProviderIdForModel(catalog, customModel.id)).toBe(WORKSPACE_OPPER_PROVIDER_ID);
 
     const runtime = withWorkspaceOpperCredential(catalog, "op-workspace", [
-      { upstreamModelId: custom, label: "Mistral Large (EU)" },
+      { upstreamModelId: custom, label: "Mistral Large" },
     ]);
     expect(
       configuredProviders(runtime).find((p) => p.id === WORKSPACE_OPPER_PROVIDER_ID)?.apiKey,
@@ -245,7 +251,7 @@ describe("workspace Opper rail", () => {
       (m) => m.providerId === WORKSPACE_OPPER_PROVIDER_ID && m.upstreamModelId === OPUS,
     );
     expect(matches).toHaveLength(1);
-    expect(matches[0]!.label).toBe("Claude Opus 5.5 (EU)");
+    expect(matches[0]!.label).toBe("Claude Opus 5.5");
     expect(configuredOpperWorkspaceProductModelIds(base())).toEqual([
       `${WORKSPACE_OPPER_MODEL_ID_PREFIX}${OPUS}`,
     ]);
@@ -293,7 +299,7 @@ describe("organization Opper rail", () => {
     )!;
     expect(model).toMatchObject({
       id: `organization-opper/${OPUS}`,
-      label: "Claude Opus 5.5 (EU)",
+      label: "Claude Opus 5.5",
       contextWindowTokens: 1_000_000,
       effectiveContextWindowTokens: 872_000,
       autoCompactTokenLimit: 300_000,

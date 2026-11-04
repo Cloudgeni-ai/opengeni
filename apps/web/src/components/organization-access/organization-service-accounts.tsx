@@ -12,6 +12,7 @@ export function OrganizationServiceAccounts({
   client,
   organizationId,
   canMakeAdmin,
+  memberLevelOnly = false,
   location,
   onNavigate,
   onCreateKey,
@@ -19,6 +20,8 @@ export function OrganizationServiceAccounts({
   client: OpenGeniBrowserClient;
   organizationId: string;
   canMakeAdmin: boolean;
+  /** An organization admin who isn't the owner: admin service accounts are read-only. */
+  memberLevelOnly?: boolean;
   location: ServiceAccountsLocation;
   onNavigate: (next: ServiceAccountsLocation) => void;
   onCreateKey: (serviceAccountId: string) => void;
@@ -41,6 +44,7 @@ export function OrganizationServiceAccounts({
     <ServiceAccounts
       api={api}
       canMakeAdmin={canMakeAdmin}
+      memberLevelOnly={memberLevelOnly}
       location={location}
       onNavigate={onNavigate}
       onCreateKey={onCreateKey}

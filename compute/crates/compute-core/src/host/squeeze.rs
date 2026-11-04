@@ -1,9 +1,11 @@
 //! Relief from sandboxes in use above their request, once idle ones have
-//! nothing left to give: first their balloons, so their guests give file
-//! cache back, then pausing and saving the one furthest above its request,
-//! which wakes again by itself once there is room. Like all relief it runs
-//! in the background, never inside a request, and never touches a sandbox
-//! within its request.
+//! nothing left to give: their balloons, so their guests give free memory
+//! and file cache back. Like all relief it runs in the background, never
+//! inside a request, and never touches a sandbox within its request. A
+//! sandbox in use is never paused for memory (ADR 24): what it borrowed
+//! beyond what its balloon gives the kernel compresses, and
+//! [`super::outgrowth`] bounds. A sandbox an earlier release paused and
+//! saved for memory still waits for room and wakes by itself.
 
 use super::{Action, Host, Notice, Resource, WakeRoom};
 use crate::ids::{BalloonRequest, SandboxId};
@@ -26,24 +28,15 @@ pub(crate) struct Balloon {
     pub since: At,
 }
 
-/// Whether a sandbox was paused for host memory while in use.
+/// Whether a sandbox waits for host memory after an earlier release paused
+/// it for memory while in use, or claims room it may take back.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Squeeze {
     /// It was not.
     #[default]
     None,
-    /// It is being paused and saved, whoever wants it awake; its VM held
-    /// `bytes`. A sandbox paused while it claimed room as `Returning`
-    /// keeps that claim: its guest may have taken back what its balloon
-    /// held after the last reading, and pausing frees nothing.
-    Leaving {
-        /// Host memory its VM held.
-        bytes: u64,
-        /// Room above the high watermark it still claims.
-        claim: u64,
-    },
     /// It is saved and waits, wanted awake, until `bytes` fit above the
-    /// high watermark.
+    /// high watermark: an earlier release paused it for memory.
     Waiting {
         /// Host memory its VM held.
         bytes: u64,
@@ -63,7 +56,7 @@ impl Squeeze {
     /// Room above the high watermark it claims.
     pub(crate) fn claim(self) -> u64 {
         match self {
-            Self::Returning { bytes } | Self::Leaving { claim: bytes, .. } => bytes,
+            Self::Returning { bytes } => bytes,
             Self::None | Self::Waiting { .. } => 0,
         }
     }
@@ -81,28 +74,16 @@ impl Sandbox {
         }
     }
 
-    /// Whether it is being paused and saved for host memory.
-    pub(crate) fn leaving(&self) -> bool {
-        matches!(self.squeeze, Squeeze::Leaving { .. })
-    }
-
-    /// Whether it runs above its request with nothing in the way of
-    /// pausing and saving it for host memory, nor anything already making
-    /// it sleep. One whose balloon was let go may be paused even before
-    /// its VM confirms that, which a VM may never do.
-    fn pausable(&self) -> bool {
+    /// Whether its balloon may be asked to take memory: it runs above its
+    /// request with no step on it and nothing already making it sleep, and
+    /// claims no room.
+    fn squeezable(&self) -> bool {
         self.state.level == Level::Running
             && self.in_flight.is_none()
             && self.health == Health::Sound
-            && matches!(self.squeeze, Squeeze::None | Squeeze::Returning { .. })
+            && self.squeeze == Squeeze::None
             && self.floor == Level::Running
             && self.above_request() > 0
-    }
-
-    /// Whether its balloon may be asked to take memory: it may be paused
-    /// and claims no room.
-    fn squeezable(&self) -> bool {
-        self.pausable() && self.squeeze == Squeeze::None
     }
 
     /// What its running VM's balloon is to be set to now, if it is not
@@ -177,11 +158,10 @@ impl Host {
 
     /// Frees `needed` bytes that pushing idle sandboxes could not: asks the
     /// guests of sandboxes in use above their request to give memory back
-    /// through their balloons, furthest above first, and when even all of
-    /// that, counted as given, falls short, pauses and saves the sandbox
-    /// furthest above its request, then the next. Balloons asked within
-    /// [`MemoryPolicy::balloon_grace`] count as on their way. Returns
-    /// whether anything changed.
+    /// through their balloons, furthest above first. Balloons asked within
+    /// [`MemoryPolicy::balloon_grace`] count as on their way. What that does
+    /// not free the kernel takes by compressing what they borrowed; none
+    /// is paused. Returns whether anything changed.
     pub(super) fn squeeze_busy(&mut self, now: At, memory: MemoryPolicy, needed: u64) -> bool {
         let coming = |slot: &Sandbox| {
             slot.balloon
@@ -210,33 +190,6 @@ impl Host {
                 since: now,
             });
             needed = needed.saturating_sub(relief);
-            changed = true;
-            self.mark(id);
-        }
-        while needed > 0 {
-            let furthest = self
-                .sandboxes
-                .iter()
-                .filter(|(_, slot)| slot.pausable())
-                .map(|(id, slot)| (slot.above_request(), *id))
-                .max();
-            let Some((_, id)) = furthest else {
-                break;
-            };
-            let Some(slot) = self.sandboxes.get_mut(&id) else {
-                break;
-            };
-            let bytes = slot.resident_bytes();
-            let counted = coming(slot);
-            let claim = match slot.squeeze {
-                Squeeze::Returning { bytes } => bytes,
-                _ => 0,
-            };
-            slot.squeeze = Squeeze::Leaving { bytes, claim };
-            slot.floor = Level::Saved;
-            slot.floor_relief += bytes;
-            self.pending_relief += bytes;
-            needed = needed.saturating_sub(bytes.saturating_sub(counted));
             changed = true;
             self.mark(id);
         }
@@ -318,10 +271,12 @@ impl Host {
 
     /// Takes in a reading of available memory: what earlier claims and
     /// relief stood for is in it now.
-    pub(super) fn memory_read(&mut self, available: u64) {
+    pub(super) fn memory_read(&mut self, now: At, available: u64) {
         self.available_memory = Some(available);
         self.settled_relief = 0;
         self.unread_claims = 0;
+        self.outgrown.read_at = Some(now);
+        self.outgrown.fresh = true;
         self.measured_returns();
     }
 
@@ -362,34 +317,15 @@ impl Host {
         }
     }
 
-    /// Moves `id` along after a pause for host memory: once saved it
-    /// waits, wanted awake, for room, and whoever waits for it hears so;
-    /// once nothing wants it awake nothing waits; a wake given up frees
-    /// the room it claimed. A claim that ends here counts until the next
-    /// reading.
-    pub(super) fn settle_squeeze(&mut self, id: SandboxId, now: At, out: &mut Vec<Action>) {
-        let free = self.free_above_watermark();
+    /// Moves `id` along after a pause for host memory by an earlier
+    /// release: once nothing wants it awake nothing waits; a wake given up
+    /// frees the room it claimed. A claim that ends here counts until the
+    /// next reading.
+    pub(super) fn settle_squeeze(&mut self, id: SandboxId, out: &mut Vec<Action>) {
         let Some(slot) = self.sandboxes.get_mut(&id) else {
             return;
         };
         let claim = slot.squeeze.claim();
-        if let Squeeze::Leaving { bytes, .. } = slot.squeeze
-            && !slot.state.level.has_process()
-            && slot.in_flight.is_none()
-        {
-            slot.squeeze = Squeeze::Waiting { bytes };
-            slot.request_wake(Priority::Background, now);
-            slot.room = WakeRoom::Refused;
-            self.refused.insert(id);
-            out.push(Action::Notify {
-                sandbox: id,
-                notice: Notice::HostFull {
-                    resource: Resource::Memory,
-                    needed: bytes,
-                    free,
-                },
-            });
-        }
         if slot.room == WakeRoom::Refused && !slot.wants_awake() {
             slot.room = WakeRoom::Open;
             slot.squeeze = Squeeze::None;
@@ -401,15 +337,14 @@ impl Host {
         {
             slot.squeeze = Squeeze::None;
         }
-        // Told from before its pause and save start until its VM runs
-        // again, so a host agent that keeps it never finds the sandbox
-        // saved for memory without knowing it waits. So is a wait the
-        // agent kept for a VM found paused.
+        // Told until its VM runs again, so a host agent that keeps it
+        // never finds the sandbox saved for memory without knowing it
+        // waits. So is a wait the agent kept for a VM found paused.
         if slot.state.level == Level::Running {
             slot.kept_wait = None;
         }
         let waiting = match slot.squeeze {
-            Squeeze::Leaving { bytes, .. } | Squeeze::Waiting { bytes } => Some(bytes),
+            Squeeze::Waiting { bytes } => Some(bytes),
             Squeeze::Returning { bytes } if slot.state.level != Level::Running => Some(bytes),
             _ => None,
         }

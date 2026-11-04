@@ -270,9 +270,15 @@ export function searchActions(input: {
   /** Only actions the caller can reach at all, when they can reach fewer than all. */
   reachable?: (entry: ActionCatalogEntry) => boolean;
 }) {
-  // Singular and plural match ("workspace" finds listWorkspaces).
-  const stem = (word: string) =>
-    word.endsWith("ies") ? `${word.slice(0, -3)}y` : word.replace(/(?<!s)s$/u, "");
+  // Singular and plural match ("workspace" finds listWorkspaces), and so do a
+  // verb and its noun ("invite" finds createOrganizationInvitation). Only
+  // longer words lose a final "e", so short words such as "note", "line" or
+  // "theme" don't turn into other words' prefixes ("not", "lin", "them").
+  const stem = (word: string) => {
+    const singular = word.endsWith("ies") ? `${word.slice(0, -3)}y` : word.replace(/(?<!s)s$/u, "");
+    const verb = singular.replace(/(?<=\w{3})ation$/u, "");
+    return verb.length > 5 ? verb.replace(/e$/u, "") : verb;
+  };
   const wanted = words(input.query).map(stem);
   // "workspaces" asks for a list; prefer list actions on a plural query.
   const plural = words(input.query).some((word) => /[^s]s$/u.test(word));

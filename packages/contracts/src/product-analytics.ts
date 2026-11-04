@@ -221,6 +221,7 @@ export const FIRST_PARTY_FUNCTION_TOOL_FAMILY_NAMES = [
   "repository_skill_read",
   "request_human_input",
   "list_models",
+  "privacy_facts",
   "code_search",
   "tool_search",
   "tool_list",

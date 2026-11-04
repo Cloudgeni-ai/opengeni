@@ -6,10 +6,18 @@ import {
   RefreshCwIcon,
   SparklesIcon,
 } from "lucide-react";
-import { useCallback, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactElement,
+  type ReactNode,
+} from "react";
 import type { SiteViewer } from "@opengeni/sdk";
 
 import { cn } from "../../lib/cn";
+import { useWindowLayerOpen } from "../../lib/window-layer";
 import { PortalContainerProvider, usePortalContainer } from "../../ui/portal-container";
 import { ArtifactBadge, ArtifactButton, useArtifactLabels } from "./artifact-chrome";
 import {
@@ -44,6 +52,11 @@ export type ArtifactSandboxProps = {
   title: string;
   /** Hide the visible title/icon while retaining the accessible iframe title. */
   showTitle?: boolean | undefined;
+  /**
+   * Wraps the visible title, so a host can attach its own menu to it (the
+   * Site view's Copy title). Returns the title itself when absent.
+   */
+  renderTitle?: ((title: ReactElement) => ReactNode) | undefined;
   showLiveStatus?: boolean | undefined;
   /**
    * Replaces the "Live" indicator, for example with the host's link to the
@@ -118,6 +131,8 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
     [ownsSiteLocation],
   );
   const focused = props.fullScreen ?? ownFocused;
+  // Full screen, the Site fills the window's content.
+  useWindowLayerOpen(focused);
   const setFocused = (next: boolean) => {
     if (props.fullScreen === undefined) setOwnFocused(next);
     props.onFullScreenChange?.(next);
@@ -197,7 +212,20 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
               <Globe2Icon className="size-3.5" />
             </span>
           ) : null}
-          {props.showTitle !== false && (
+          {props.showTitle === false ? null : props.renderTitle ? (
+            // Its menu opens in front of full screen, as the controls' do; its
+            // words leave a full-screen toolbar's drag region so they can be
+            // right-clicked.
+            <PortalContainerProvider
+              container={focused && frameElement ? frameElement : inheritedPortal}
+            >
+              {props.renderTitle(
+                <span className="truncate text-xs font-semibold text-fg [-webkit-app-region:no-drag] [app-region:no-drag]">
+                  {props.title}
+                </span>,
+              )}
+            </PortalContainerProvider>
+          ) : (
             <span className="truncate text-xs font-semibold text-fg">{props.title}</span>
           )}
           {props.headerControls ? (

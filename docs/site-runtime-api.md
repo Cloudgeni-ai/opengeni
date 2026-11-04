@@ -274,7 +274,9 @@ Operations:
   - Guests follow each collection's guest rule, which defaults to `none`:
     `read`, `append`, or `own` (a guest changes only their own records).
   - Guest writes have their own per-minute limit.
-  - Guests never reach files.
+  - Guests read and open the Site's `shared` files (list and short-lived
+    download URLs, within the same per-visitor and per-address request
+    limits). They never upload or delete files, and never see `private` files.
 - `sessions.*` are Site agent conversations:
   - **Create.** A workspace member runs as their verified native human identity
     in a native private session. The in-process request carries a non-serializable

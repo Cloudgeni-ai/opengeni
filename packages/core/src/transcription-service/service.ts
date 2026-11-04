@@ -1,7 +1,7 @@
 import { voiceInputCreditBillingActive, type Settings } from "@opengeni/config";
 import { speechToTextProcessingResidency } from "./deployment";
 import { sideFeatureRegionRestrictedError } from "@opengeni/runtime";
-import { VOICE_INPUT_ACCEPTED_MIME_TYPES } from "@opengeni/contracts";
+import { VOICE_INPUT_ACCEPTED_MIME_TYPES, type DictationModelOption } from "@opengeni/contracts";
 import { voiceTranscriptionSettlementKeys } from "@opengeni/db";
 import { createVoiceInputBilling } from "../domain/voice-input-billing";
 import {
@@ -203,23 +203,43 @@ export function createTranscriptionService(input: {
         ? { ...context, preferredProvider: deployment.pinned.providerId, fallbackEnabled: false }
         : context,
     );
+  const readyProviderIds = async (context: TranscriptionAvailabilityContext) => {
+    // Every ready provider, for the workspace provider picker. One failing
+    // probe means that provider is not ready; it never fails the caller.
+    const candidates = deployment.pinned
+      ? providers.filter((provider) => provider.id === deployment.pinned?.providerId)
+      : providers;
+    const available = await Promise.all(
+      candidates.map(async (provider) =>
+        (await isAvailable(provider, context)) ? provider.id : null,
+      ),
+    );
+    return available.filter((id): id is string => id !== null);
+  };
   return {
     limits: () => limits,
+    billing,
     async available(context) {
       return Boolean(await firstAvailable(ordered(context ?? {}), context ?? {}));
     },
-    async availableProviderIds(context) {
-      // Every ready provider, for the workspace provider picker. One failing
-      // probe means that provider is not ready; it never fails the caller.
-      const candidates = deployment.pinned
-        ? providers.filter((provider) => provider.id === deployment.pinned?.providerId)
-        : providers;
-      const available = await Promise.all(
-        candidates.map(async (provider) =>
-          (await isAvailable(provider, context)) ? provider.id : null,
-        ),
-      );
-      return available.filter((id): id is string => id !== null);
+    availableProviderIds: readyProviderIds,
+    async availableModels(context) {
+      // Every model a dictation may name, of each ready provider, for the
+      // desktop app's per-shortcut model picker.
+      const ready = new Set(await readyProviderIds(context));
+      return providers
+        .filter((provider) => ready.has(provider.id))
+        .flatMap((provider) =>
+          dictationModels(deployment, provider)
+            // A model the deployment pays for is never served without a price.
+            .filter((model) => !chargeable(provider) || model.creditPricing)
+            .map((model) => ({
+              providerId: provider.id as DictationModelOption["providerId"],
+              providerName: provider.provider.name,
+              model: model.model,
+              name: model.name,
+            })),
+        );
     },
     async selectProvider(context) {
       return (await firstAvailable(ordered(context), context))?.id ?? null;
@@ -262,11 +282,16 @@ export function createTranscriptionService(input: {
       const exactId = preferredProviderId(request.providerId);
       const pinnedAway = deployment.pinned && exactId && exactId !== deployment.pinned.providerId;
       const exact = exactId ? providers.find((candidate) => candidate.id === exactId) : undefined;
-      const provider = request.providerId
+      const selected = request.providerId
         ? !pinnedAway && exact && (await isAvailable(exact, scopeContext))
           ? exact
           : null
         : await firstAvailable(ordered(request), request);
+      // The model a dictation named, on the provider it named.
+      const provider =
+        selected && request.model
+          ? dictationModelOf(deployment, selected, request.model)
+          : selected;
       if (!provider) {
         // EU-only: say so when the region is why nothing can serve the
         // workspace (fallback never leaves the EU; `available` excludes
@@ -281,7 +306,8 @@ export function createTranscriptionService(input: {
           throw sideFeatureRegionRestrictedError("voice_input");
         }
         throw new TranscriptionServiceError({
-          fallbackSafe: true,
+          // A named model never moves to another one.
+          fallbackSafe: !request.model,
           code: "unavailable",
           message: "Transcription is unavailable.",
         });
@@ -478,6 +504,43 @@ export function dictationProviders(deployment: SpeechToTextDeployment): Dictatio
   });
 }
 
+/** The models a dictation may name on a provider: the pinned one, else every file model. */
+function dictationModels(
+  deployment: SpeechToTextDeployment,
+  provider: DictationProvider,
+): RecordingTranscriptionModelSpec[] {
+  if (deployment.pinned) {
+    return deployment.pinned.providerId === provider.id ? [provider.model] : [];
+  }
+  return provider.provider.models.filter((model) => model.capabilities.batch);
+}
+
+/** A provider with the model a dictation named, or null when it doesn't offer it. */
+function dictationModelOf(
+  deployment: SpeechToTextDeployment,
+  provider: DictationProvider,
+  model: string,
+): DictationProvider | null {
+  const spec = dictationModels(deployment, provider).find((entry) => entry.model === model);
+  return spec ? { ...provider, model: spec } : null;
+}
+
+/**
+ * The provider and model a dictation names, when the deployment offers that
+ * model for dictation; the provider's own dictation model when it names only
+ * the provider. Null when it isn't offered.
+ */
+export function dictationChoiceOf(
+  deployment: SpeechToTextDeployment,
+  providerId: string,
+  model?: string | null,
+): DictationProvider | null {
+  const wanted = preferredProviderId(providerId);
+  const provider = dictationProviders(deployment).find((entry) => entry.id === wanted);
+  if (!provider) return null;
+  return model ? dictationModelOf(deployment, provider, model) : provider;
+}
+
 /** The text of a result: the model's own text, or its words joined. */
 export function transcriptText(result: RecordingTranscriptionResult): string {
   if (result.text !== undefined) return result.text;
@@ -506,7 +569,8 @@ function acceptsMimeType(model: RecordingTranscriptionModelSpec, mimeType: strin
 /**
  * Errors from providers that speak the recording error vocabulary become
  * voice input errors. Rejections that mean nothing was transcribed
- * (unauthorized, quota, rate limits) are safe to try another provider with.
+ * (unauthorized, quota, rate limits) are safe to try another provider with,
+ * and keep the provider's own code for a meeting to report.
  */
 export function asTranscriptionServiceError(error: unknown): unknown {
   if (!(error instanceof RecordingTranscriptionError)) return error;
@@ -519,6 +583,7 @@ export function asTranscriptionServiceError(error: unknown): unknown {
         code: "unavailable",
         message: "Transcription is unavailable.",
         retryable: error.retryable,
+        providerCode: error.code,
       });
     case "invalid_audio":
       return new TranscriptionServiceError({
@@ -562,11 +627,13 @@ export function asTranscriptionServiceError(error: unknown): unknown {
 
 /**
  * Errors from the voice input adapters become recording errors, for the
- * meeting pipeline, which speaks that vocabulary.
+ * meeting pipeline, which speaks that vocabulary. The provider's own code,
+ * when the adapter kept it, says why more exactly than voice input's.
  */
 export function asRecordingTranscriptionError(error: unknown): unknown {
   if (!(error instanceof TranscriptionServiceError)) return error;
   const code = ((): RecordingTranscriptionError["code"] => {
+    if (error.providerCode) return error.providerCode;
     switch (error.code) {
       case "invalid_audio":
         return "invalid_audio";

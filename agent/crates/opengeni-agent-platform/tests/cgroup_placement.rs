@@ -3,8 +3,8 @@
 //! Exercises the REAL path — the service manager starts the test in the stable
 //! supervisor subgroup and [`establish_oom_isolation`] verifies the topology
 //! and a real shell `exec` forks a session-detached child — then asserts BOTH the shell
-//! and the descendant land in one `op-<n>` memory leaf with the minimal OOM
-//! victim preference relative to the supervisor while this process stays
+//! and the descendant land in one `op-<n>` memory leaf with the command OOM
+//! victim preference derived from the supervisor while this process stays
 //! in the `supervisor` leaf. It then aborts the owning task and proves the
 //! operation cgroup disappears. Because the child has a different process group,
 //! this is the live regression proof for cgroup-owned cancellation as well as
@@ -555,7 +555,7 @@ mod linux {
         if supervisor < 0 {
             "0".to_string()
         } else {
-            supervisor.saturating_add(1).min(1000).to_string()
+            "1000".to_string()
         }
     }
 

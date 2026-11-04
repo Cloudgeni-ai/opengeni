@@ -2,6 +2,7 @@
 import { type Tool } from "@openai/agents";
 import type { FirstPartyMcpToolName } from "@opengeni/contracts";
 import { ToolSearchIndex } from "./tool-discovery-ranking";
+import { ALIASED_MCP_TOOL_LEAF_LENGTH, isAliasedMcpToolName } from "./mcp-model-tool-name";
 import {
   MCP_MAX_TOOL_DEFINITION_BYTES,
   MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES,
@@ -266,35 +267,34 @@ export function bm25RankTools(tools: Tool[], query: string, limit: number): Tool
 
 /**
  * Tools a free-text query names exactly, in query order. A query token that
- * contains "_" names a tool when it equals the tool's full model name or the
- * part after its last "__" server separator (`goal_complete` and
- * `opengeni__goal_complete` both name `opengeni__goal_complete`). Single words
- * such as "read" are never treated as names. Agents often search by exact name,
- * and BM25 alone ranked a neighbouring tool first for about a fifth of those
+ * contains "_" or "." names a tool when it is the tool's full model name or
+ * its name after the server separator, in any of the forms toolNameMatches
+ * accepts (`goal_complete`, `opengeni__goal_complete` and
+ * `opengeni.goal_complete` all name `opengeni__goal_complete`; `projects.search`
+ * names the tool a server publishes under that name). A dotted token that
+ * names nothing as a whole falls back to its parts. Single words such as
+ * "read" are never treated as names. Agents often search by exact name, and
+ * BM25 alone ranked a neighbouring tool first for about a fifth of those
  * queries (`goal_complete` returned `goal_set` first).
  */
 export function toolsNamedInQuery<T extends Tool & { name: string }>(
   tools: T[],
   query: string,
 ): T[] {
-  const byName = new Map<string, T[]>();
-  for (const tool of tools) {
-    const full = tool.name.toLowerCase();
-    const separator = full.lastIndexOf(MCP_TOOL_NAME_SEPARATOR);
-    const short = separator >= 0 ? full.slice(separator + MCP_TOOL_NAME_SEPARATOR.length) : full;
-    for (const key of new Set([full, short])) {
-      const named = byName.get(key) ?? [];
-      named.push(tool);
-      byName.set(key, named);
-    }
-  }
+  const lowered = tools.map((tool) => ({ tool, name: tool.name.toLowerCase() }));
+  const namedBy = (token: string) =>
+    lowered.filter(({ name }) => toolNameMatches(name, token)).map(({ tool }) => tool);
   const named: T[] = [];
-  for (const raw of query.toLowerCase().split(/[^a-z0-9_]+/)) {
-    const token = raw.replace(/^_+|_+$/g, "");
-    if (!token.includes("_")) continue;
-    for (const tool of byName.get(token) ?? []) {
-      if (!named.includes(tool)) named.push(tool);
-    }
+  for (const raw of query.toLowerCase().split(/[^a-z0-9_.]+/)) {
+    const token = raw.replace(/^[_.]+|[_.]+$/g, "");
+    if (!/[_.]/.test(token)) continue;
+    let matches = namedBy(token);
+    if (!matches.length && token.includes("."))
+      matches = token
+        .split(".")
+        .filter((part) => /^[a-z0-9]+(?:_+[a-z0-9]+)+$/.test(part))
+        .flatMap(namedBy);
+    for (const tool of matches) if (!named.includes(tool)) named.push(tool);
   }
   return named;
 }
@@ -335,15 +335,48 @@ function toolShortName(name: string): string {
   return separator >= 0 ? name.slice(separator + MCP_TOOL_NAME_SEPARATOR.length) : name;
 }
 
+/**
+ * Whether a plain name an agent uses denotes this model tool by its name after
+ * the server separator: exactly, as the name its server publishes
+ * (`projects.search` or `projects-search` for `…__projects_search`), or, for an
+ * aliased MCP name whose part was shortened, a longer name that part begins.
+ * Skills, descriptions and other tools' results often name tools that way.
+ */
+function shortNameMatches(toolName: string, name: string): boolean {
+  const short = toolShortName(toolName);
+  if (short === name) return true;
+  const plain = name.replace(/[^A-Za-z0-9_]/g, "_");
+  if (short === plain) return true;
+  return (
+    isAliasedMcpToolName(toolName) &&
+    short.length === ALIASED_MCP_TOOL_LEAF_LENGTH &&
+    plain.length > short.length &&
+    plain.startsWith(short)
+  );
+}
+
+/**
+ * Whether a name denotes this model tool: its full model name, the dotted
+ * form of it (`opengeni.goal_complete`), or a name after the server separator
+ * that shortNameMatches accepts.
+ */
+function toolNameMatches(toolName: string, name: string): boolean {
+  return (
+    toolName === name ||
+    (name.includes(".") && toolName === name.replaceAll(".", MCP_TOOL_NAME_SEPARATOR)) ||
+    (!name.includes(MCP_TOOL_NAME_SEPARATOR) && shortNameMatches(toolName, name))
+  );
+}
+
 /** The server prefix of Opengeni's own tools, preferred among same-named tools. */
 const FIRST_PARTY_TOOL_PREFIX = "opengeni__";
 
-/** Every tool whose name after its server separator is exactly `name`, first-party first. */
+/** Every tool whose name after its server separator `name` denotes, first-party first. */
 function toolsWithShortName<T extends Tool & { name: string }>(
   tools: readonly T[],
   name: string,
 ): T[] {
-  const matches = tools.filter((tool) => toolShortName(tool.name) === name);
+  const matches = tools.filter((tool) => shortNameMatches(tool.name, name));
   return [
     ...matches.filter((tool) => tool.name.startsWith(FIRST_PARTY_TOOL_PREFIX)),
     ...matches.filter((tool) => !tool.name.startsWith(FIRST_PARTY_TOOL_PREFIX)),
@@ -352,12 +385,14 @@ function toolsWithShortName<T extends Tool & { name: string }>(
 
 /**
  * The tools one exact-name lookup entry names: the tool with that full model
- * name, or else one tool whose name after its server separator is exactly
- * that name. Agents often load a tool by the name it has in a description or
- * another tool's result (`sandboxes_list` for `opengeni__sandboxes_list`),
- * and a lookup that matched only full names returned nothing for it. When
- * several servers share the short name, Opengeni's own tool (else the first)
- * is the one loaded; shortNameAlternatives names the others.
+ * name or its dotted form, or else one tool whose name after its server
+ * separator that name denotes (see shortNameMatches). Agents often load a
+ * tool by the name it has in a description, a Skill or another tool's result
+ * (`sandboxes_list` for `opengeni__sandboxes_list`, `projects.search` for an
+ * aliased `mcp_<digest>__projects_search`), and a lookup that matched only
+ * full names returned nothing for it. When several servers share the short
+ * name, Opengeni's own tool (else the first) is the one loaded;
+ * shortNameAlternatives names the others.
  */
 export function toolsWithExactName<T extends Tool & { name: string }>(
   tools: readonly T[],
@@ -365,6 +400,12 @@ export function toolsWithExactName<T extends Tool & { name: string }>(
 ): T[] {
   const full = tools.filter((tool) => tool.name === name);
   if (full.length > 0 || name.includes(MCP_TOOL_NAME_SEPARATOR)) return full;
+  if (name.includes(".")) {
+    const dotted = tools.filter(
+      (tool) => tool.name === name.replaceAll(".", MCP_TOOL_NAME_SEPARATOR),
+    );
+    if (dotted.length > 0) return dotted;
+  }
   return toolsWithShortName(tools, name).slice(0, 1);
 }
 
@@ -373,7 +414,15 @@ export function shortNameAlternatives<T extends Tool & { name: string }>(
   tools: readonly T[],
   name: string,
 ): T[] {
-  if (name.includes(MCP_TOOL_NAME_SEPARATOR) || tools.some((tool) => tool.name === name)) return [];
+  if (
+    name.includes(MCP_TOOL_NAME_SEPARATOR) ||
+    tools.some(
+      (tool) =>
+        tool.name === name ||
+        (name.includes(".") && tool.name === name.replaceAll(".", MCP_TOOL_NAME_SEPARATOR)),
+    )
+  )
+    return [];
   return toolsWithShortName(tools, name).slice(1);
 }
 

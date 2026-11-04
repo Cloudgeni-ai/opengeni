@@ -91,7 +91,7 @@ function AgentChangesSection({ workspaceId }: { workspaceId: string }) {
         <SettingRowGroup>
           <SettingNavRow
             label={AGENT_LEARNING_TITLE}
-            description="Whether agents may update the identity when an owner asks in a chat. Set with the other Agent learning modes."
+            description="Whether agents may update the identity when an owner or admin asks in a chat. Set with the other Agent learning modes."
             value={LEARNING_MODE_LABEL[IDENTITY_POLICY_MODE[policy.mode]]}
             onOpen={() =>
               void navigate({
@@ -311,7 +311,7 @@ function CurrentIdentitySection({
         description={
           canManage
             ? "Write it yourself, or describe the organization below and Opengeni drafts a short version for you to check."
-            : "An organization owner can add one."
+            : "An organization owner or admin can add one."
         }
       />
     );
@@ -355,7 +355,7 @@ function CurrentIdentitySection({
             given to agents for compatibility.{" "}
             {canManage
               ? "Move them into organization Documents before replacing this identity."
-              : "An owner can move them into organization Documents before replacing this identity."}
+              : "An owner or admin can move them into organization Documents before replacing this identity."}
           </Notice>
         ) : null}
         {inventory.error && inventory.response ? (
@@ -391,9 +391,9 @@ export function OrganizationIdentityPage({
 }: {
   workspaceId: string;
   identityKey: string;
-  /** account:admin: owners edit the identity. */
+  /** Organization administration: the owner and admins edit the identity. */
   canManage: boolean;
-  /** Owner-only: whether agents may change the identity. */
+  /** Owner or admin: whether agents may change the identity. */
   canManageAgentPolicy: boolean;
 }) {
   const navigate = useNavigate();
@@ -412,7 +412,7 @@ export function OrganizationIdentityPage({
         </Section>
       ) : (
         <p className="text-xs leading-[18px] text-fg-muted">
-          Organization identity is read-only for you. An organization owner can update it.
+          Organization identity is read-only for you. An organization owner or admin can update it.
         </p>
       )}
       {canManage ? (
@@ -424,8 +424,8 @@ export function OrganizationIdentityPage({
         ) : (
           <Section title="Agent changes">
             <p className="text-xs leading-[18px] text-fg-muted">
-              Only organization owners can change whether agents may update the identity. Ask an
-              owner.
+              Only organization owners and admins can change whether agents may update the identity.
+              Ask one of them.
             </p>
           </Section>
         )

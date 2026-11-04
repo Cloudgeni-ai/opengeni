@@ -107,12 +107,18 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
   in every workspace that person can use, including their Personal workspace,
   without exposing private workspace inventory to administrators.
   Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
-- **SUB-OWN-04** A workspace's own connection reaches only that workspace
-  and is managed by that workspace's administrators. Organization
-  administrators see it, labelled as that workspace's, and can make it the
-  organization's; only an organization connection reaches other workspaces
-  or chosen people. Verification: `packages/db/test/subscription-core-codex-access-editor-postgres.test.ts`,
-  `packages/db/test/subscription-core-codex-writers-postgres.test.ts`.
+- **SUB-OWN-04** A workspace's own connection is managed by that workspace's
+  administrators and serves that workspace, plus any other shared workspaces
+  chosen for it; sharing never changes its owner (D-52). Its administrators
+  can add workspaces they also administer and remove any; an administrator
+  of a workspace it serves can stop using it there but can't change it.
+  Organization administrators see it, labelled as that workspace's, can
+  choose its workspaces, and can move it to the organization explicitly.
+  Only an organization connection reaches every shared workspace, Personal
+  workspaces or chosen people. Verification: `packages/db/test/subscription-core-codex-access-editor-postgres.test.ts`,
+  `packages/db/test/subscription-core-codex-writers-postgres.test.ts`,
+  `apps/api/test/claude-core-routes.test.ts`,
+  `apps/web/src/components/connection-access-settings.test.tsx`.
 - **SUB-OWN-05** An organization administrator can disable personal
   connections for the whole organization. Disabling stops new selection of
   personal connections; work already running on one moves at its next safe
@@ -134,8 +140,9 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
 - **SUB-OWN-09** A shared workspace's administrator, without being an
   organization administrator, can connect a new account of any provider for
   that workspace and remove it again. It is the workspace's own account
-  (SUB-OWN-01): it serves only that workspace and never Personal workspaces,
-  and the workspace manages it (SUB-OWN-04). An upstream account already
+  (SUB-OWN-01): it serves that workspace, and other shared workspaces only
+  when they are chosen for it, never Personal workspaces, and the workspace
+  manages it (SUB-OWN-04). An upstream account already
   connected elsewhere in the organization is refused, never duplicated or
   taken over.
   Verification: `packages/db/test/subscription-core-codex-writers-postgres.test.ts`,
@@ -144,8 +151,10 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
 ### Settings and overrides
 
 - **SUB-SET-01** Rotation (Primary first or spread), cross-provider failover
-  (on or off, plus the fallback order), personal connections allowed, and
-  personal fallback allowed are organization settings with defaults.
+  (on or off, plus the fallback order) and personal connections allowed are
+  organization settings with defaults. The former "personal fallback allowed"
+  setting and each person's fallback opt-in are retired (D-53): both are
+  still stored and returned for compatibility, but neither changes selection.
   Verification: `packages/db/test/subscription-settings-postgres.test.ts`
   (organization read and write as the application role),
   `apps/api/test/model-account-settings-routes-postgres.test.ts` (routes).
@@ -175,8 +184,9 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
   `packages/db/test/subscription-core-m2-postgres.test.ts` (provider switch
   overrides and SQL/TypeScript parity).
 - **SUB-SET-07** The organization's account lists say who each shared
-  connection reaches (`reach`: its owning workspace, every workspace, a list
-  of workspaces, Personal workspaces, or a number of chosen people), so an
+  connection reaches (`reach`: its owning workspace and any other workspaces
+  it serves, every workspace, a list of workspaces, Personal workspaces, or a
+  number of chosen people), so an
   administrator's overview shows every account once, with its owner, without
   a read per account or per workspace. Verification:
   `packages/db/test/helpers/subscription-core-conformance.ts` and
@@ -202,13 +212,19 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
 - **SUB-ELIG-04** Credential health and allocator eligibility are separate.
   Reconnecting restores health without silently changing allocator
   eligibility. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
-- **SUB-ELIG-05** A personal connection serves only its owner's own work in
-  their private sessions and Personal workspace, or their own newly accepted
-  work after an explicit choice in a shared session they participate in. The
-  account owner need not be the session creator. Shared consent is restricted
-  to the exact session and connection; another sender never inherits it.
-  Live membership, resource generation and effective personal-account policy
-  still apply. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
+- **SUB-ELIG-05** A personal connection serves only its owner's own work: in
+  their Personal workspace, or their own newly accepted turns in another
+  workspace after an explicit choice or where they turned the account on for
+  that workspace (D-53), in shared and private sessions alike. The account
+  owner need not be the session creator. Turned on is the owner's standing
+  `subscription_connection.use` grant for that workspace; acceptance freezes
+  it, or an explicit choice, into the turn as consent restricted to that exact
+  session and connection, so another sender never inherits it. A turn without
+  a signed-in initiating person (scheduled and service turns) gets no such
+  consent. Live membership, resource generation and effective
+  personal-account policy still apply. Verification:
+  `packages/db/test/helpers/subscription-core-conformance.ts`,
+  `packages/db/test/subscription-shared-personal-choice-postgres.test.ts`.
 - **SUB-ELIG-06** Unknown or stale quota stays unknown. Missing metadata never
   manufactures exhaustion: an account with unknown quota is eligible and
   counts as able to serve. Ordinary primary/spread ordering applies equally
@@ -217,16 +233,22 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
 
 ### Selection
 
-- **SUB-SEL-01** Automatic selection prefers organization connections.
+- **SUB-SEL-01** For each model, automatic selection uses included allowance
+  before extra credits. Within that it tries the turn person's own account
+  turned on where the turn runs first (D-53), then the administrators'
+  primary account, then the workspace's own accounts, then the
+  organization's and other workspaces' accounts.
   Verification: `packages/subscriptions/test/reference-conformance.test.ts`.
 - **SUB-SEL-02** A connected personal account participates automatically in
-  its owner's Personal workspace. In other workspaces, private sessions need
-  an explicit account choice or permitted, per-person fallback opt-in (off by
-  default). Live ownership, organization permission and accepted-turn personal
-  authority remain required in every case (D-28). In a shared session a person
-  may explicitly choose their own personal account, but shared visibility
-  never permits automatic personal fallback. Already accepted work keeps its
-  frozen pool; a new choice cannot grant it missing authority.
+  its owner's Personal workspace, and in another workspace only for its
+  owner's own turns where they turned it on (D-53). An account added from a
+  shared workspace starts turned on there. Its page lists **Where it works**,
+  every workspace the owner belongs to in the organization with a switch for
+  each, effective from the next accepted turn. Anywhere else it serves
+  only an explicit account choice. Live ownership, organization permission
+  and accepted-turn personal authority remain required in every case (D-28).
+  Already accepted work keeps its frozen pool; a new choice cannot grant it
+  missing authority.
   Verification: `packages/db/test/helpers/subscription-core-conformance.ts`, `apps/api/test/model-account-choice-routes-postgres.test.ts`.
 - **SUB-SEL-03** Primary first places new work on the primary account while
   it can serve the work (unknown quota counts as able to serve,
@@ -254,7 +276,9 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
 ### Stickiness and the prompt cache
 
 - **SUB-STICK-01** The account belongs to the session, not to whoever sends
-  the message. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
+  the message. The exception is a personal account, which serves only its
+  owner's own turns (SUB-ELIG-05): another sender's turn moves off it.
+  Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-STICK-02** While the prompt cache is warm, a session keeps its account
   across turns, senders, goal continuations, scheduled runs on the same session
   and recovery. Child sessions and new scheduled sessions have their own prompt
@@ -276,9 +300,10 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
 - **SUB-STICK-07** A session that was started on a personal account and is
   later shared stops using that account at once, even while its cache is
   warm: SUB-ELIG-05 takes precedence over stickiness, so the personal account
-  is out of scope for previously accepted private work (SUB-STICK-03). A new
-  human acceptance may capture the owner's explicit shared-session choice
-  under SUB-ELIG-05; merely sharing a session never rewrites an accepted pool.
+  is out of scope for previously accepted private work (SUB-STICK-03). The
+  owner's next own turn may use it again under SUB-ELIG-05 (an explicit
+  choice, or the account turned on in that workspace); merely sharing a
+  session never rewrites an accepted pool.
   Otherwise it moves to an eligible organization account, or waits if none can serve.
   Verification: `packages/subscriptions/test/policy.test.ts`, `packages/db/test/helpers/subscription-core-conformance.ts`.
 
@@ -484,7 +509,7 @@ delivered as separate pull requests in roughly this order.
 | `provider-migration` | Claude and SuperGrok moved onto the core, deleting the generic duplicate paths. |
 | `cache-stickiness` | Session account binding, cache-coldness prediction and re-selection points. |
 | `failover` | Automatic same-provider and cross-provider failover, including mid-turn continuation and Codex remote-compaction sessions. |
-| `personal-connections` | Person-scoped connections for every provider, explicit choice, opt-in fallback and the organization switch. |
+| `personal-connections` | Person-scoped connections for every provider, explicit choice, turning one on per workspace (D-53) and the organization switch. |
 | `consumers` | Compaction, transcription, realtime, media, tool gateway, billing and API-key connectors on the core, plus the no-bypass check. |
 | `product-surface` | Shared account rows, scope and settings screens with effective values, the organization overview, session indicator and waiting states. |
 | `rollout` | Shadow comparison, per-provider switch, rollback and removal of compatibility aliases. |
@@ -531,7 +556,7 @@ by the implementer and recorded here; consequential ones are escalated.
 | D-32 | 2026-10-12 | Supersedes the "of another provider" clause of D-24, following SUB-STICK-06 and the per-provider pins sessions had before the shared core: a session keeps one binding per provider (migration 0733), each provider's explicit choice or automatic placement for that provider's models. Work on one provider's model reads and writes only that provider's binding, so another provider's pin, its clock and its version stay exactly as stored, and switching back to that provider's model uses the pinned account. A session may hold an explicit pin for each provider at once. A Codex "automatic" choice returns only the Codex binding to automatic. An explicit choice whose account was deleted (the reference cleared) still waits as `pinned_account_ineligible` (D-24) and never becomes a choice of the account placement would pick. A binding never changes provider. During the 0733 rolling window a session still holds one binding row, as before; the next drained provider cutover removes that limit. |
 | D-33 | 2026-10-12 | Implementer decision, for SUB-FAIL-02, SUB-FAIL-03 and SUB-WAIT-01: cross-provider failover is one provider-neutral step in new modules, not an edit of each provider's core placement routine. A provider-neutral router runs the placement of the turn's home provider (the provider of its accepted model) first and hands over to the step when that placement waits with `no_eligible_capacity`, `model_not_allowed` or `compaction_provider_locked`. It runs the step first when the session is serving a fallback for the turn's accepted model (D-36) or the turn's lease is on another provider, and before it delegates it settles a lease row of another provider by the per-provider lease rules. The step is a second, full decision in one transaction: the exact accepted-turn gate, unlocked reads of the session, turn, effective settings and every candidate provider's connections, the binding rows of the home and candidate providers `FOR UPDATE` in provider-id order, one `decidePlacement` over every candidate, then one lease. It takes every binding row before any per-connection lock and holds at most one per-connection lock, as in D-31, while every other placement, pin and request locks one row of its own provider (D-32), so it forms no lock cycle with them or with a disconnect. The step does not run while the home provider's binding is explicit or "only this model" (D-46), and `pinned_account_unavailable`, `pinned_account_ineligible` and `accepted_authority_unavailable` waits never move. |
 | D-34 | 2026-10-12 | Implementer decision, strictest reading of SUB-FAIL-03 and SUB-FAIL-04 for a fallback provider that is not on the core: a provider is a failover target only when it is registered in both the code registry (`REGISTERED`) and `opengeni_private.subscription_core_providers`, and its route for the organization is `core`, which requires both its committed cutover receipt and an enabled switch. That is stricter than the per-provider placement's own gate, which reads the switch only, so switch or core connection rows that predate a receipt never make a provider a target. A fallback model of any other provider, including one whose route is `legacy` or `maintenance`, is skipped as if unknown: failover never calls a legacy runtime, never leases from a provider legacy still decides, never counts that provider's accounts as capacity and never reports its resets. A drained cutover commits its receipt and registry row in one transaction, so a concurrent placement sees all of it or none. A session whose own provider is not on the core does not fail over, and a subscription turn never falls back to Opengeni credits. A real-PostgreSQL test covers each case. |
-| D-35 | 2026-10-12 | Implementer decision, reconciling the per-model fallback order of SUB-SET-01 and SUB-FAIL-03 with the owner's adapter-declared equivalence: an explicit effective fallback entry for the preferred model wins, and an explicit empty list means no fallback model. Policy code reads the order through `fallbackOrderFor` and tells a missing entry from an empty one with `hasFallbackOrderEntry`, never by indexing the map. When there is no entry and cross-provider failover is on, the order is derived from adapter-declared tiers: the models of other core providers that declare the preferred model's tier, never a lower or higher one, in registry order (provider ids sorted) and each adapter's declaration order, at most 8. A model without a declared tier is never derived and derives nothing; same-provider model fallback stays explicit only. Reasoning levels map by D-16. The tier is one optional adapter member, `modelTier(modelId)`, so an adapter without it has no derived order and needs no change. Shared code compares tiers and treats provider ids as opaque keys, so it never names a provider. Whether the derived order may step down a tier is open (Q-04). |
+| D-35 | 2026-10-12 | Implementer decision, reconciling the per-model fallback order of SUB-SET-01 and SUB-FAIL-03 with the owner's adapter-declared equivalence: an explicit effective fallback entry for the preferred model wins, and an explicit empty list means no fallback model. Policy code reads the order through `fallbackOrderFor` and tells a missing entry from an empty one with `hasFallbackOrderEntry`, never by indexing the map. When there is no entry and cross-provider failover is on, the order is derived from adapter-declared tiers: the models of other core providers that declare the preferred model's tier, never a lower or higher one, in registry order (provider ids sorted) and each adapter's declaration order, at most 8. A model without a declared tier is never derived and derives nothing; same-provider model fallback stays explicit only. Reasoning levels map by D-16. The tier is one optional adapter member, `modelTier(modelId)`, so an adapter without it has no derived order and needs no change. Shared code compares tiers and treats provider ids as opaque keys, so it never names a provider. The derived order never steps down a tier (Q-04, resolved 2026-10-30). |
 | D-36 | 2026-10-12 | Implementer decision, for SUB-FAIL-06, SUB-FAIL-07 and SUB-STICK-05, on the per-provider bindings of D-32: failover writes only the binding of the provider it places on (the target, or the home provider when the session returns), never the source provider's or any other provider's, and never changes a row's provider. It follows that provider's own commit rules: a new row gets the connection and model, the choice automatic, "only this model" off, the reason `failover_cross_provider` or `return_to_preferred` and the placement time as its cache clock; an existing row keeps its choice and "only this model", and an explicit one is placed only on its pinned account (D-46). Each provider's row keeps its own clock, so no warmth carries across providers (D-31). Which model the session is serving is not stored in a binding: it is the serving model of this turn's latest serving revision (D-37), or else of the session's previous claimed turn when that turn accepted the same model, so it does not depend on the 0733 rolling index. Serving a fallback is not a model change under SUB-STICK-05: re-selection compares the fallback provider's row with the model the session serves there, so a warm fallback is kept, and the session returns to the preferred model only at a placement where that model can serve and the fallback's cache is cold. A person's change of the session's model ends the fallback. Ownerless sessions write no binding, so a fallback is never warm for them. |
 | D-37 | 2026-10-12 | Implementer decision, for SUB-FAIL-08 and SUB-ACCT-02: the accepted turn execution policy stays immutable. A failover-enabled turn records one immutable serving revision at claim per execution generation (a full policy for the serving provider and model with the mapped reasoning level and the session's highest history position, written under the attempt fence). Matching retries return that revision; conflicting same-generation policies are refused. A later selection stages a separate pending target atomically with turn recovery; the next claim consumes it into the next generation's revision. Pending targets are not serving history. All fenced revision, pending-target and switched-event writes occur outside placement's transaction, never while holding its binding locks. The fresh attempt re-checks funding and configuration. Its request copy drops opaque provider artifacts (encrypted reasoning and compaction items) from every history row another provider produced, where a row's provider is that of its turn's latest committed serving revision recorded below the row, or else of the turn's accepted policy. Rows without a turn keep today's projection, and canonical history is unchanged. A turn whose accepted policy carries a `credentialRestriction` never switches. |
 | D-38 | 2026-10-12 | Implementer decision, strictest reading of "without repeating them" in SUB-FAIL-08: a mid-turn switch happens only at the existing failover boundary, after the turn's history is durable and its request ledger is checkpointed. A model request of the turn whose outcome is `unknown`, or `reserved` by another attempt, on another provider blocks the switch even after the source attempt closes and recovery advances the generation. In both `guard_subscription_disconnect_admission` and `reserveTurnRequest`, drop the outer prior-provider predicate and restrict the earlier-generation closed-attempt exemption (`failed`, `interrupted_recoverable`, `lease_lost_recoverable`) to SAME-provider prior requests only. Prior requests still count if their provider is no longer registered. This keeps existing same-provider recovery semantics but makes the database authoritative for cross-provider admission; the worker's all-ledger check is additional protection, not the only fence. Real switch-path tests cover recovery and reclaim, the mirrored typed refusal and direct SQL admission. Completed tools and accounting are kept and never repeated. |
@@ -540,9 +565,9 @@ by the implementer and recorded here; consequential ones are escalated.
 | D-41 | 2026-10-12 | Implementer decision, for SUB-WAIT-01, SUB-WAIT-02 and D-22 across providers: a session's waiter keeps its own provider and records its candidate providers from failover-aware evaluation. Both the wake read and UPDATE predicates match candidate providers, supported by a GIN index. Every arm and reconciliation recomputes candidates from current settings, model permissions, pools and cutover routes without widening accepted authority. Preserve mutation wakes; a later settings change or cutover outside the stored candidates, or a lost wake, is observed by a bounded recheck of at most 15 minutes, even with a known reset. The reported reset remains the true earliest across permitted candidate models and accounts, distinct from that capped check deadline; health retry is the earliest across candidate providers. The session workflow does not change. |
 | D-42 | 2026-10-12 | Implementer decision, for SUB-FAIL-04, SUB-FAIL-05 and SUB-ELIG-05: cross-provider failover adds no authority. Pins and "only this" never move (D-24, D-46). The personal-fallback order is decided: with personal fallback on, the owner's personal account on the chosen model comes before any switch of model or provider on a shared account (D-12), and D-28 is unchanged; failover changes neither. A personal account of the target provider is used only under that provider's own frozen personal entry and the existing explicit-choice and personal-fallback rules (D-27, D-28). The model-order loop of `decidePlacement` belongs to the failover work, while personal eligibility (`authorizationIneligibility`, `personalFallbackActive`) and the explicit-choice path belong to the settings and personal work; any change to the order is one change with a conformance test. Background work keeps its accepted pool, ownerless sessions use shared accounts only and write no binding, workspace restrictions, provider switches and the compaction lock remove candidates (D-17, D-26), and forced re-selection is checked before warmth (D-31). |
 | D-43 | 2026-10-12 | Implementer decision, fail-closed rollout: the organization setting already accepts `true`, so the cross-provider runtime ships behind a deployment setting that is off by default. It is turned on only after staging verification and after the preview-gated session notice ships (D-45). While it is off, placement behaves exactly as the per-provider core placement does. |
-| D-44 | 2026-10-12 | Implementer decision pending Q-02: no failover change alters a default or a stored value. Cross-provider failover stays off for existing and new organizations (the seeded and resolved defaults are `false`) until the owner decides Q-02. |
+| D-44 | 2026-10-12 | Implementer decision pending Q-02: no failover change alters a default or a stored value. Cross-provider failover stays off for existing and new organizations (the seeded and resolved defaults are `false`) until the owner decides Q-02. Superseded for new organizations on 2026-10-30 (OR-4, migration 1144): a new organization starts with it on. Existing organizations keep their stored value, and an organization without a settings row still resolves `false`. |
 | D-45 | 2026-10-12 | Implementer decision, for SUB-FAIL-06 and SUB-COMPAT-02: every serving placement that changes the account or model records `subscription.account.switched` with the provider, both accounts, both models and the reason, referring to that generation's immutable serving revision. The selection hook writes in a separate fenced transaction after placement commits, never while holding binding locks; a retry deduplicates the same selection transition. A pending recovery target emits no switch until the fresh attempt is configured and placed there. `codex.account.switched` stays as the alias for switches within Codex. The runtime changes leave what the web shows unchanged; the serving-model indicator and switch notice ship separately and last, with real-component previews and owner approval (D-08). |
-| D-46 | 2026-10-12 | Implementer decision, for SUB-SEL-04, SUB-FAIL-05 and SUB-WAIT-01, on the per-provider bindings of D-32: the binding of the turn's home provider decides whether the turn may fail over. An explicit choice there, including one whose account was deleted, or "only this model", keeps the turn on its pin or model, and it waits instead of moving. A binding of another provider governs only failover onto that provider: an explicit choice limits it to the pinned account, "only this model" limits it to that row's model, an explicit choice whose account was deleted removes its provider, and a pinned personal account is used only where personal fallback applies (D-12, D-28). Failover never clears or replaces a pin or changes its account, choice or "only this model"; serving through it updates only that row's model and clock, as its provider's placement does. Crossing requires catalog proof that no unique index on the binding table has exactly the workspace/session key attributes, irrespective of name, key order or INCLUDE attributes; matching partial or invalid indexes and catalog uncertainty also block crossing. While 0733's rolling uniqueness remains, only same-provider model fallback is possible. The next drained provider cutover, whichever lands first, must remove it with valid upsert ordering. Whether failover should use a pin on a fallback provider at all is open (Q-06). |
+| D-46 | 2026-10-12 | Implementer decision, for SUB-SEL-04, SUB-FAIL-05 and SUB-WAIT-01, on the per-provider bindings of D-32: the binding of the turn's home provider decides whether the turn may fail over. An explicit choice there, including one whose account was deleted, or "only this model", keeps the turn on its pin or model, and it waits instead of moving. A binding of another provider governs only failover onto that provider: an explicit choice limits it to the pinned account, "only this model" limits it to that row's model, an explicit choice whose account was deleted removes its provider, and a pinned personal account is used only where personal fallback applies (D-12, D-28). Failover never clears or replaces a pin or changes its account, choice or "only this model"; serving through it updates only that row's model and clock, as its provider's placement does. Crossing requires catalog proof that no unique index on the binding table has exactly the workspace/session key attributes, irrespective of name, key order or INCLUDE attributes; matching partial or invalid indexes and catalog uncertainty also block crossing. While 0733's rolling uniqueness remains, only same-provider model fallback is possible. The next drained provider cutover, whichever lands first, must remove it with valid upsert ordering. Failover onto a provider uses the pin on that provider (Q-06, resolved 2026-10-30). |
 
 | ID | Date | Decision |
 | --- | --- | --- |
@@ -550,19 +575,22 @@ by the implementer and recorded here; consequential ones are escalated.
 | D-48 | 2026-10-13 | Finish-line implementation scope: chat-turn renewal is a lease ownership/liveness check, not a second authorization system; operation leases retain their existing extra access check. Selection and every physical request retain live revocation checks (SUB-ACCESS-05). Expiry fencing and generation-based reclaim, not a separate sweeper, provide crash recovery (SUB-LEASE-03). This documents the existing runtime boundary rather than adding heartbeat work. |
 | D-49 | 2026-10-14 | The product owner decided that a workspace administrator connects subscription accounts for their own workspace without being an organization administrator (SUB-OWN-09). Before, only an organization administrator could create any new shared connection, so a workspace administrator saw providers they could not add. The workspace's own account is exactly the shape an organization administrator already created from a workspace route, so selection, pools and settings are unchanged, and organization ownership, visibility and scope changes stay with the organization (SUB-OWN-01/04). |
 | D-50 | 2026-10-22 | The product owner decided that every connection has exactly one owner (the organization, one shared workspace, or one person) and serves exactly where it reaches (SUB-OWN-01, SUB-OWN-04). This retires the per-workspace "inference pool" split, where one connection could sit in a workspace twice, once as the workspace's own copy and once as the organization's, each with its own on/off switch; the per-workspace preference (`providers.<id>.inferenceSource` and the older `useOrganizationAccounts`) that chose between those copies; and the "Set aside" state it produced. A connection has one on/off switch. A workspace's own connection reaches only that workspace; making it serve more workspaces makes it the organization's. Migration 0907 keeps everyone's access exactly as it was: a workspace that used a connection keeps it, a workspace that had it switched off or excluded by its preference loses it from the connection's reach (an organization-wide connection becomes a list of the workspaces that used it, still reaching workspaces created later), and a connection whose only use was as one workspace's own copy becomes that workspace's. A connection that was switched off everywhere keeps its listed reach, so switching it on serves where it was meant to. The assignment-policy table is no longer read or written; it is emptied here and dropped in a later contract step. |
+| D-51 | 2026-10-30 | Supersedes the remaining pool readings of D-42 and D-50: who manages a shared connection never decides which models exist or which shared connections a turn may use. Claude catalog readiness, organization-model admission, the funding check and placement count the same connections (`listSubscriptionCoreServingConnections`: shared connections reaching the workspace, plus the subject's own personal connections in their own Personal workspace) for every Claude model id form (`workspace-claude-subscription/`, `organization-claude-subscription/` and the canonical `claude/`). Background work keeps its accepted carrier: a frozen record that accepted shared capacity under either legacy pool may use every shared connection reaching the workspace, and one without shared capacity keeps personal connections only. Workspace model policy treats every Claude subscription provider id as one provider, allowed when the canonical or the organization id is listed. See `docs/design/subscription-model-ids-without-pools.md`. |
+| D-52 | 2026-10-30 | Supersedes the last clause of D-50 ("making it serve more workspaces makes it the organization's"): sharing never changes a connection's owner. A workspace's own connection may also serve other shared workspaces, chosen one by one, and stays that workspace's: its administrators and the organization's administrators manage it. Organization administrators choose those workspaces from the organization's list. The owning workspace's administrators can add a workspace they also administer, and can remove any. An administrator of a workspace it serves can remove it from that workspace but can't change it. A workspace's own connection never serves a Personal workspace, every shared workspace including later ones, or chosen people: that needs the organization to own it, and an organization administrator moves it there explicitly (`moveToOrganization`), after which the workspace's administrators no longer manage it. Connections that D-50 already gave to the organization stay the organization's. Migration 1166 replaces the owner-reach guard (other workspaces must be shared ones) and adds the managing-workspace and receiving-workspace row policies. |
+| D-53 | 2026-10-30 | The product owner decided that a turn uses its person's own subscription first, where they turned it on (SUB-SEL-01, SUB-SEL-02, SUB-ELIG-05). A person's own Codex, Claude or SuperGrok account is used automatically in their Personal workspace and, in any other workspace, for the turns they themselves send there once they turn it on for that workspace, in shared and Only me chats alike, before the organization's accounts. Other people's turns never use it. Turned on is the owner's standing `subscription_connection.use` user-resource grant for that workspace, so it reuses the existing personal-resource authority, revocation and organization veto instead of a new setting; an account added from a shared workspace starts turned on there. Acceptance freezes it into the turn as consent restricted to that session and connection (the same shape as an explicit shared-session choice, at most one account per provider per turn), and in a shared chat the database refuses an automatic binding to a personal account without it. Turning it off applies from the next accepted turn. Turns without a signed-in initiating person, such as scheduled and service turns, never use it. This supersedes D-03, D-12, D-27 and D-28's opt-in path and D-42's personal-fallback order: the per-person fallback opt-in and the organization's "personal fallback allowed" setting are retired, still stored and returned but read by nothing. Existing opt-ins are deliberately not converted into grants, because that would silently widen where an account is used, from Only me chats after shared accounts ran out to every turn the person sends. |
 
 ### Open decisions
 
-| ID | Question | Recommendation |
-| --- | --- | --- |
-| Q-02 | Is cross-provider failover on by default for new organizations? | Off for new organizations until the owner decides (D-44). The earlier recommendation was on. |
-| Q-04 | When a preferred model has no explicit fallback entry, may the derived order also step down to lower-tier models, or only use the same tier (D-35)? | Same tier only; administrators list lower-tier models explicitly. |
-| Q-06 | Should failover onto a provider use the session's pin on that provider (D-32, D-46), or skip that provider? | Use the pin: failover onto that provider uses only the pinned account, and only that row's model under "only this model". |
+None. Q-02, Q-04 and Q-06 were decided on 2026-10-30 (OR-4 in
+`docs/design/ownership-and-reach.md`); see below.
 
 ### Resolved implementation questions
 
 | ID | Question | Resolution |
 | --- | --- | --- |
+| Q-02 | Is cross-provider failover on by default for new organizations? | Yes, between subscriptions of the same tier, never into credits (OR-4). Until that default ships, D-44 still holds and the seeded and resolved defaults stay `false`. |
+| Q-04 | When a preferred model has no explicit fallback entry, may the derived order also step down to lower-tier models, or only use the same tier (D-35)? | Same tier only; administrators list lower-tier models explicitly. This is the current behaviour. |
+| Q-06 | Should failover onto a provider use the session's pin on that provider (D-32, D-46), or skip that provider? | Use the pin: failover onto that provider uses only the pinned account, and only that row's model under "only this model". This is the current behaviour. |
 | Q-05 | May a Codex remote-compaction session convert to portable compaction at failover on the target provider? | Deferred by the accepted D-47 alternative. `remote_v2` stays Codex-only for now; portable-session failover remains required. |
 
 ## Verification

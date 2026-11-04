@@ -42,6 +42,26 @@ fn cgroup_value(sandbox: Id, file: &str) -> String {
         .to_owned()
 }
 
+/// The out-of-memory score adjustment a VMM requesting `request` bytes
+/// gets (ADR 24): its request in thousandths of what the kernel counts
+/// against at the VMs' wall, that wall plus the host's swap, or -900 for
+/// every VMM when the VMs have no wall.
+fn vmm_oom_score_adj(request: u64) -> String {
+    let wall = std::fs::read_to_string(Path::new(CGROUP).join("memory.max")).unwrap();
+    let Ok(wall) = wall.trim().parse::<u64>() else {
+        return "-900".to_owned();
+    };
+    let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap();
+    let swap_kib: u64 = meminfo
+        .lines()
+        .find_map(|line| line.strip_prefix("SwapTotal:"))
+        .and_then(|rest| rest.trim().trim_end_matches("kB").trim().parse().ok())
+        .unwrap();
+    let total = u128::from(wall + swap_kib * 1024);
+    let thousandths = i64::try_from((u128::from(request) * 999 / total).min(999)).unwrap();
+    (-thousandths).to_string()
+}
+
 /// Connects to `sandbox`, expecting the host to be full.
 async fn refused(client: &Client, sandbox: Id) -> String {
     match connect(client, sandbox).await {
@@ -129,7 +149,7 @@ async fn check_guarantees(agent: &Agent, sandbox: Id) {
                 .to_owned()
         })
         .collect();
-    assert_eq!(vmms, ["-900"]);
+    assert_eq!(vmms, [vmm_oom_score_adj(512 * MIB)]);
     let pid = agent.child.id();
     let adjust = std::fs::read_to_string(format!("/proc/{pid}/oom_score_adj")).unwrap();
     assert_eq!(adjust.trim(), "-999");
@@ -153,17 +173,13 @@ fn proc_value(pid: &str, file: &str) -> i64 {
         .unwrap()
 }
 
-/// The host's out-of-memory killer picks an ordinary process first, then
-/// a VMM or pager, and the agent last, by the scores it reports, not only
-/// the adjustments: older kernels clamped adjusted scores into ties.
+/// Every VMM and pager is lowered by its request (ADR 24), so the
+/// out-of-memory killer weighs what a VM holds above its request, and it
+/// picks the agent last, by the scores it reports, not only the
+/// adjustments: older kernels clamped adjusted scores into ties.
 fn check_oom_order(agent: &Agent) {
     let agent_score = proc_value(&agent.child.id().to_string(), "oom_score");
-    let mut ordinary = Command::new("sleep").arg("30").spawn().unwrap();
-    let pid = ordinary.id().to_string();
-    assert_eq!(proc_value(&pid, "oom_score_adj"), 0);
-    let ordinary_score = proc_value(&pid, "oom_score");
-    let _ = ordinary.kill();
-    let _ = ordinary.wait();
+    let adjust: i64 = vmm_oom_score_adj(512 * MIB).parse().unwrap();
     let mut checked = 0;
     for group in std::fs::read_dir(CGROUP).unwrap() {
         let group = group.unwrap().path();
@@ -178,12 +194,9 @@ fn check_oom_order(agent: &Agent) {
             {
                 continue;
             }
-            assert_eq!(proc_value(pid, "oom_score_adj"), -900, "{pid}");
+            assert_eq!(proc_value(pid, "oom_score_adj"), adjust, "{pid}");
             let score = proc_value(pid, "oom_score");
-            assert!(
-                agent_score < score && score < ordinary_score,
-                "agent {agent_score}, {pid} {score}, ordinary {ordinary_score}"
-            );
+            assert!(agent_score < score, "agent {agent_score}, {pid} {score}");
             checked += 1;
         }
     }

@@ -132,7 +132,7 @@ export async function readSiteToolAccountInventory(
     // Only routes the gateway would actually expose to this viewer.
     const label = routes.accountLabels.get(binding.serverId);
     if (!label || !canonical.has(binding.canonicalServerId)) return [];
-    // "ada@example.com · Only me" -> "ada@example.com"
+    // "ada@example.com · Yours" -> "ada@example.com"
     const account = binding.accountLabel.replace(/ · [^·]+$/u, "");
     return [
       {

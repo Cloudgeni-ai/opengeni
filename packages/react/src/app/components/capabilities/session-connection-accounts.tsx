@@ -102,7 +102,8 @@ export function connectedAccountGroups(
     const serverId = ref.serverId;
     const group = groups.get(serverId) ?? { serverId, name: ref.name, accounts: [] };
     for (const account of matchingConnectionAccounts(ref.connectionRef, connections).filter(
-      (entry) => entry.status === "active",
+      // Your own login works here only where you turned it on (D-54).
+      (entry) => entry.status === "active" && entry.turnedOnHere !== false,
     )) {
       if (!group.accounts.some((existing) => existing.id === account.id))
         group.accounts.push(account);

@@ -1,4 +1,3 @@
-import { ArchiveConfirmationProvider } from "@opengeni/react/app/lib/archive-session";
 import { SiteToolConsentProvider } from "@opengeni/react/app/lib/site-tool-consent";
 import { AppContext } from "@opengeni/react/app/app-context";
 import {
@@ -182,8 +181,8 @@ export function RootRouteComponent() {
         ? "excel"
         : "product",
   });
-  // Public surfaces render ahead of auth/config gates. `/reset-password` is
-  // always public; DEV visual harnesses are public and need no session.
+  // Public surfaces render ahead of auth/config gates. `/reset-password` and
+  // shared chats (`/share/<id>`) are always public; DEV visual harnesses are public and need no session.
   const isPublicDevHarness =
     import.meta.env.DEV &&
     (pathname === "/dev/composer-chrome" ||
@@ -193,6 +192,7 @@ export function RootRouteComponent() {
       pathname === "/dev/ui-kit");
   const isPublicAuthRoute =
     pathname === "/reset-password" ||
+    pathname.startsWith("/share/") ||
     pathname === "/setup-account" ||
     pathname === "/account-auth" ||
     pathname === EXCEL_ADDIN_PATH ||
@@ -475,19 +475,17 @@ export function RootRouteComponent() {
     </Suspense>
   ) : (
     <AppContext.Provider value={appContext}>
-      <ArchiveConfirmationProvider>
-        <SiteToolConsentProvider>
-          <Outlet />
-        </SiteToolConsentProvider>
-        <CreditRequiredGate
-          creditRequired={creditRequired}
-          setCreditRequired={setCreditRequired}
-          accessContext={accessContext}
-        />
-        {import.meta.env.DEV && import.meta.env.VITE_OPENGENI_ROUTER_DEVTOOLS === "true" ? (
-          <TanStackRouterDevtools position="bottom-right" />
-        ) : null}
-      </ArchiveConfirmationProvider>
+      <SiteToolConsentProvider>
+        <Outlet />
+      </SiteToolConsentProvider>
+      <CreditRequiredGate
+        creditRequired={creditRequired}
+        setCreditRequired={setCreditRequired}
+        accessContext={accessContext}
+      />
+      {import.meta.env.DEV && import.meta.env.VITE_OPENGENI_ROUTER_DEVTOOLS === "true" ? (
+        <TanStackRouterDevtools position="bottom-right" />
+      ) : null}
     </AppContext.Provider>
   );
 
@@ -543,7 +541,7 @@ export function RootRouteComponent() {
     // Fixed app canvas: never let the document scroll. Page surfaces own
     // overflow via ContentPage / session panes. `min-h-screen` used to let
     // main grow past the viewport when a child mis-owned scroll.
-    <main className="flex h-dvh max-h-dvh flex-col overflow-hidden bg-bg text-fg">
+    <main data-window-frame className="flex h-dvh max-h-dvh flex-col overflow-hidden bg-bg text-fg">
       <Toaster />
       <div ref={mountApiUpdateNotice} className="shrink-0" />
       <SignInCallbackNotice

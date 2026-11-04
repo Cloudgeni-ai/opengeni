@@ -29,6 +29,9 @@ export type BrowserRelaunchedTabs = {
   /** The idle release time, for idle_release. */
   idleReleaseMinutes?: number;
   tabs: Array<{ targetId: string; replacementId: string | null }>;
+  /** Every tab the relaunched browser reopened, by the browser's own ID.
+   * Chrome loads only the first few of them; the rest wait for first use. */
+  restoredTargetIds?: readonly string[];
 };
 
 /** A tab of a stopped browser. Its page is kept only as a SHA-256 of its URL,

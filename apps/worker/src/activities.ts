@@ -40,8 +40,6 @@ export type {
   ReconcileSessionAttemptQuiescenceResult,
   FailSessionAttemptInput,
   FailSessionAttemptResult,
-  RunKnowledgeSourceSyncBatchInput,
-  RunKnowledgeSourceSyncBatchResult,
   RunAgentTurnInput,
   RunAgentTurnResult,
   VideoGenerationReconcileResult,
@@ -116,7 +114,6 @@ export const expireSessionInteractionIntervention =
 export const expireScheduledRunHumanWait = defaultControlActivities.expireScheduledRunHumanWait;
 export const markSessionIdle = defaultControlActivities.markSessionIdle;
 export const dispatchScheduledTaskRun = defaultControlActivities.dispatchScheduledTaskRun;
-export const runKnowledgeSourceSyncBatch = defaultControlActivities.runKnowledgeSourceSyncBatch;
 export const enqueueGoalRetryWake = defaultControlActivities.enqueueGoalRetryWake;
 export const maybeContinueGoal = defaultControlActivities.maybeContinueGoal;
 export const getCodexCapacityWait = defaultControlActivities.getCodexCapacityWait;
@@ -134,6 +131,8 @@ export const reapExpiredFileUploads = defaultControlActivities.reapExpiredFileUp
 export const deleteTransientObjects = defaultControlActivities.deleteTransientObjects;
 export const maintainSessionStorage = defaultControlActivities.maintainSessionStorage;
 export const archiveIdleSessions = defaultControlActivities.archiveIdleSessions;
+export const stopArchivedSessionWork = defaultControlActivities.stopArchivedSessionWork;
+export const storeArchivedSession = defaultControlActivities.storeArchivedSession;
 export const recoverVideoGenerationWorkflows =
   defaultControlActivities.recoverVideoGenerationWorkflows;
 export const recoverSessionTitleWorkflows = defaultControlActivities.recoverSessionTitleWorkflows;

@@ -95,6 +95,12 @@ describe("one menu for every subscription provider", () => {
       "5h 36% · Week 62% used",
       undefined,
     ]);
+    // Each summarized row also draws its most-used window as a bar.
+    expect(content.accounts.map((row) => row.usageBar)).toEqual([
+      undefined,
+      { label: "Week", usedPercent: 62 },
+      undefined,
+    ]);
     expect(content.accounts[2]).toMatchObject({ status: "Needs reconnect", disabled: true });
     expect(content.accounts[1]?.detail).toBe("Acme b · b@example.test · Pro · This workspace");
   });
@@ -299,16 +305,54 @@ describe("which subscription a chat offers accounts for", () => {
     expect(subscriptionAccountProvider("codex/gpt-6-astra", undefined)).toBe("codex");
     expect(
       subscriptionAccountProvider("organization-claude-subscription/claude-opus-5-5", {
-        kind: "connected_subscription",
-        provider: "claude",
+        id: "organization-claude-subscription/claude-opus-5-5",
+        provider: "organization-claude-subscription",
+        credentialSource: { kind: "connected_subscription", provider: "claude" },
       }),
     ).toBe("claude");
     expect(
       subscriptionAccountProvider("supergrok/grok-4.6", {
-        kind: "connected_subscription",
-        provider: "xai",
+        id: "supergrok/grok-4.6",
+        provider: "supergrok",
+        credentialSource: { kind: "connected_subscription", provider: "xai" },
       }),
     ).toBe("xai");
     expect(subscriptionAccountProvider("gpt-5.6-sol", undefined)).toBeNull();
+  });
+
+  // The workspace catalog never projects `credentialSource`; these are the
+  // rows it actually returns for subscription models.
+  test("catalog rows without a credential source still name their subscription", () => {
+    for (const id of [
+      "organization-claude-subscription/claude-opus-5-5",
+      "workspace-claude-subscription/claude-sonnet-5-5",
+      "claude/claude-haiku-5-5",
+    ]) {
+      expect(subscriptionAccountProvider(id, undefined)).toBe("claude");
+      expect(
+        subscriptionAccountProvider(id, { id, provider: id.split("/")[0]!, source: undefined }),
+      ).toBe("claude");
+    }
+    expect(
+      subscriptionAccountProvider("supergrok/grok-4.7", {
+        id: "supergrok/grok-4.7",
+        provider: "supergrok",
+        source: "supergrok",
+      }),
+    ).toBe("xai");
+    expect(
+      subscriptionAccountProvider("gpt-5.6-sol", {
+        id: "gpt-5.6-sol",
+        provider: "opengeni",
+        source: "opengeni",
+      }),
+    ).toBeNull();
+    expect(
+      subscriptionAccountProvider("organization-anthropic/claude-opus-5-5", {
+        id: "organization-anthropic/claude-opus-5-5",
+        provider: "organization-anthropic",
+        source: undefined,
+      }),
+    ).toBeNull();
   });
 });

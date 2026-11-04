@@ -7,6 +7,8 @@ import {
   filterBundleRows,
   importedSkillBundleRow,
   pluginBundleRow,
+  pluginRemovable,
+  pluginUpdateUnavailable,
   sortBundleRows,
   type BundleRow,
 } from "./bundles";
@@ -138,6 +140,51 @@ describe("bundle rows", () => {
     if (footer.kind !== "actions") throw new Error("expected an actions footer");
     expect(footer.primary?.disabled).toBe(true);
     expect(footer.primary?.unavailableReason).toContain("did not retain a source URL");
+  });
+
+  test("a member removes an installed Plugin, and only an admin updates it", () => {
+    const row = pluginBundleRow(installedPlugin(), {
+      canManage: true,
+      canUpdate: false,
+      busy: false,
+      onUpdate: () => {},
+      onRemove: () => {},
+    });
+    if (row.detail.kind !== "sheet") throw new Error("expected a sheet detail");
+    const footer = row.detail.model.footer;
+    if (footer.kind !== "actions") throw new Error("expected an actions footer");
+    expect(footer.primary?.disabled).toBe(true);
+    expect(footer.primary?.unavailableReason).toBe("Only an admin can update this plugin.");
+    expect(footer.secondary?.label).toBe("Remove");
+    expect(pluginUpdateUnavailable(installedPlugin(), false)).toEqual({
+      updateUnavailableReason: "Only an admin can update this plugin.",
+    });
+    expect(pluginUpdateUnavailable(installedPlugin(), true)).toEqual({});
+  });
+
+  test("the server's canRemove decides who removes a Plugin", () => {
+    const footerFor = (plugin: PluginInstallationSummary, canManage: boolean) => {
+      const row = pluginBundleRow(plugin, {
+        canManage,
+        canUpdate: false,
+        busy: false,
+        onUpdate: () => {},
+        onRemove: () => {},
+      });
+      if (row.detail.kind !== "sheet") throw new Error("expected a sheet detail");
+      return row.detail.model.footer;
+    };
+    // A member's own plugin: Remove, even when the setup policy keeps adding with admins.
+    const own = footerFor(installedPlugin({ canRemove: true }), false);
+    expect(own.kind).toBe("actions");
+    if (own.kind === "actions") expect(own.secondary?.label).toBe("Remove");
+    // An admin's, another person's or an unknown installer's: locked for a member.
+    expect(footerFor(installedPlugin({ canRemove: false }), true).kind).toBe("locked");
+    // An older server without the flag: the viewer's permission stands in.
+    expect(footerFor(installedPlugin(), true).kind).toBe("actions");
+    expect(pluginRemovable(installedPlugin({ canRemove: false }), true)).toBe(false);
+    expect(pluginRemovable(installedPlugin({ canRemove: true }), false)).toBe(true);
+    expect(pluginRemovable(installedPlugin(), false)).toBe(false);
   });
 
   test("every row carries its taxonomy as a spoken accessible detail", () => {

@@ -132,6 +132,8 @@ function asUser(permissions: Permission[] = ["sessions:create", "workspace:read"
     ),
   );
   track(spyOn(db, "lockExternalWorkspaceMembershipLifecycle").mockResolvedValue(undefined));
+  track(spyOn(db, "externalIdentityReadGranted").mockResolvedValue(false));
+  track(spyOn(db, "readExternalWorkspaceRevocationWatermark").mockResolvedValue("0"));
   track(
     spyOn(db, "ensureExternalIdentity").mockResolvedValue({
       id: externalId,

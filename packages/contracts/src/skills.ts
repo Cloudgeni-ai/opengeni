@@ -172,6 +172,27 @@ export const SkillSourceReleaseReceipt = /* @__PURE__ */ defineSchema(() =>
   }),
 );
 export type SkillSourceReleaseReceipt = z.infer<typeof SkillSourceReleaseReceipt>;
+/**
+ * Where an organization Skill works: every shared workspace of the
+ * organization (`allowedWorkspaceIds: null`, new ones too) or the listed ones,
+ * and members' Personal workspaces when `allowPersonalWorkspaces` is on.
+ */
+export const OrganizationSkillReach = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      allowedWorkspaceIds: z.array(primitives.uuid).max(500).nullable(),
+      allowPersonalWorkspaces: primitives.boolean,
+    })
+    .strict(),
+);
+export type OrganizationSkillReach = z.infer<typeof OrganizationSkillReach>;
+/** `PUT .../skills/content/:skillId/reach`: organization Skills only. */
+export const UpdateOrganizationSkillReachRequest = OrganizationSkillReach;
+export type UpdateOrganizationSkillReachRequest = OrganizationSkillReach;
+export const OrganizationSkillReachResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ reach: OrganizationSkillReach }).strict(),
+);
+export type OrganizationSkillReachResponse = z.infer<typeof OrganizationSkillReachResponse>;
 export type SkillRecord = {
   removalOperationId?: string | null;
   activationMode: "workspace_managed" | "session_selected";
@@ -188,4 +209,12 @@ export type SkillRecord = {
   contentHash: string | null;
   files: SkillFile[];
   source: { pluginId: string; facetKey: string; skillFacetId: string } | null;
+  /** Where an organization Skill works; null for workspace and personal Skills. */
+  reach?: OrganizationSkillReach | null;
+  /**
+   * Whether agents in the workspace that was asked use it. False only for an
+   * organization Skill that doesn't work there, which people's Skills pages
+   * still list so its managers can change that.
+   */
+  availableHere?: boolean;
 };

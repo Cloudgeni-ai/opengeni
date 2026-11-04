@@ -22,7 +22,9 @@ restore depend on every earlier link.
 - With no valid image, the sandbox boots fresh from its disk and reports that
   it did. This is what happens when a running VM's process dies.
 - Each image records the runtime that made it: the snapshot format of the
-  VMM that wrote it and the processor model. A VMM records its runtime when
+  VMM that wrote it, the processor model and the host kernel (the processor
+  state KVM saves depends on the kernel: an image made under a newer one can
+  hold registers an older one refuses). A VMM records its runtime when
   it launches, so a VM started before an upgrade still labels its images
   with the older one. Releases that write the same format count as one
   runtime, so most upgrades keep every image. After an upgrade that changes
@@ -31,9 +33,16 @@ restore depend on every earlier link.
   under one that reads its format (Firecracker reads its own major version
   up to its own minor one). A refusal alone proves nothing (the host may
   have run short of memory), so the sandbox gives an image up only when the
-  VMM refused it and no binary the host keeps reads its format. An image
-  made on another processor model is kept even when refused: it still wakes
-  on a host like the one that made it.
+  VMM refused it and no binary the host keeps reads its format, or when it
+  was made on another kind of host (another processor model or host
+  kernel, or a kernel its label made before labels named one leaves open)
+  and the VMM refused it several wakes in a row: the host does not
+  change while it runs, and nothing sends the sandbox to a host like the
+  one that made it, so retrying would never end. The sandbox then boots
+  from its disk and reports that its programs were lost.
+- A warm template depends on the runtime too: one saved under another, as
+  after the host's kernel changed, is rebuilt, since every sandbox made from
+  it would start with its image.
 
 ## Consequences
 

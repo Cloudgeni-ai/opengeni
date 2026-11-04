@@ -14,11 +14,13 @@ import {
   createWorkspace,
   ensureManagedAccessForUser,
   finalizeRecording,
+  getRecording,
   listRecordingNotes,
   markRecordingChunksUploaded,
   reserveRecordingChunks,
   saveRecordingNote,
   startRecordingLiveTrack,
+  updateRecording,
   updateRecordingSpeakers,
   type DbClient,
 } from "@opengeni/db";
@@ -96,7 +98,8 @@ async function fixture() {
   const actor = { workspaceId, subjectId: owner };
 
   async function meeting(input: {
-    title: string;
+    /** Unnamed, as a meeting nobody named, when not given. */
+    title?: string;
     visibility: "private" | "workspace";
     segments?: Array<{ at: number; label: string; text: string }>;
     /** Another workspace (and its organization) to store it in; this one by default. */
@@ -108,7 +111,7 @@ async function fixture() {
       ...storedIn,
       accountId: input.in?.accountId ?? accountId,
       recordingId,
-      title: input.title,
+      ...(input.title === undefined ? {} : { title: input.title }),
       visibility: input.visibility,
       tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
     });
@@ -341,7 +344,7 @@ describe("meeting tools", () => {
       recordingId: live,
       trackNumber: 0,
       streamedMilliseconds: 5_000,
-      costUsdMicros: null,
+      pricing: () => ({ listPriceMicros: null, charge: null }),
       segments: [
         { segmentNumber: 0, startMilliseconds: 1_000, endMilliseconds: 3_000, text: "Hello all." },
         {
@@ -369,7 +372,7 @@ describe("meeting tools", () => {
       recordingId: live,
       trackNumber: 0,
       streamedMilliseconds: 1_200_000,
-      costUsdMicros: null,
+      pricing: () => ({ listPriceMicros: null, charge: null }),
       segments: later,
     });
     const tools = toolsFor(scope.grantFor(scope.owner));
@@ -444,6 +447,75 @@ describe("meeting tools", () => {
     ).toMatchObject({ found: false });
   });
 
+  test("saving notes with a name names a meeting nobody named, never one a person named", async () => {
+    if (!client) return;
+    const scope = await fixture();
+    const tools = toolsFor(scope.grantFor(scope.owner), crypto.randomUUID());
+    const titleOf = async (recordingId: string) =>
+      await getRecording(client!.db, { ...scope.actor, recordingId });
+
+    const unnamed = await scope.meeting({ visibility: "workspace" });
+    expect((await titleOf(unnamed)).titleSource).toBe("default");
+    expect(
+      await tools("meeting_notes_save", {
+        meetingId: unnamed,
+        notes: "## Decisions\n\n- Ship it.",
+        expectedRevision: 0,
+        title: "Launch go/no-go",
+      }),
+    ).toEqual({ saved: true, revision: 1, titleUsed: true, isError: false });
+    expect(await titleOf(unnamed)).toMatchObject({
+      title: "Launch go/no-go",
+      titleSource: "conversation",
+    });
+
+    const named = await scope.meeting({ title: "Budget", visibility: "workspace" });
+    expect(
+      await tools("meeting_notes_save", {
+        meetingId: named,
+        notes: "Notes.",
+        expectedRevision: 0,
+        title: "Something generated",
+      }),
+    ).toEqual({ saved: true, revision: 1, titleUsed: false, isError: false });
+    expect(await titleOf(named)).toMatchObject({ title: "Budget", titleSource: "person" });
+
+    // A refused save names nothing.
+    const stale = await scope.meeting({ visibility: "workspace" });
+    await tools("meeting_notes_save", { meetingId: stale, notes: "a", expectedRevision: 0 });
+    expect(
+      await tools("meeting_notes_save", {
+        meetingId: stale,
+        notes: "b",
+        expectedRevision: 0,
+        title: "Too late",
+      }),
+    ).toMatchObject({ isError: true, error: { code: "notes_changed" } });
+    expect((await titleOf(stale)).titleSource).toBe("default");
+
+    // A name that can't be used never costs the notes: blank is ignored and
+    // a long one is shortened.
+    const blank = await scope.meeting({ visibility: "workspace" });
+    expect(
+      await tools("meeting_notes_save", {
+        meetingId: blank,
+        notes: "Notes.",
+        expectedRevision: 0,
+        title: "   ",
+      }),
+    ).toEqual({ saved: true, revision: 1, titleUsed: false, isError: false });
+    const long = await scope.meeting({ visibility: "workspace" });
+    expect(
+      await tools("meeting_notes_save", {
+        meetingId: long,
+        notes: "Notes.",
+        expectedRevision: 0,
+        title: "Roadmap ".repeat(60),
+      }),
+    ).toMatchObject({ saved: true, titleUsed: true });
+    expect((await titleOf(long)).title.length).toBeLessThanOrEqual(300);
+  });
+
   test("the person's own Only me meetings from their other workspaces of the organization, never another organization's", async () => {
     if (!client) return;
     const scope = await fixture();
@@ -465,6 +537,17 @@ describe("meeting tools", () => {
       in: sales,
     });
     const tools = toolsFor(scope.grantFor(scope.owner));
+
+    // A new one works only where it was recorded, and in their Personal
+    // workspace, until they turn it on here too.
+    expect((await tools("meetings_search", { query: "pipeline" })).meetings).toEqual([]);
+    expect(await tools("meeting_read", { meetingId: own })).toMatchObject({ found: false });
+    await updateRecording(client.db, {
+      workspaceId: sales.workspaceId,
+      subjectId: scope.owner,
+      recordingId: own,
+      reachWorkspaceIds: [scope.workspaceId],
+    });
 
     const found = await tools("meetings_search", { query: "pipeline" });
     expect(found.meetings).toMatchObject([
@@ -510,7 +593,8 @@ describe("meeting tools", () => {
     expect(await tools("meeting_read", { meetingId: foreign })).toMatchObject({ found: false });
     expect(JSON.stringify(await tools("meetings_search", {}))).not.toContain("board");
 
-    // Only allowed to read in Finance: the agent can read it there, never write.
+    // Only allowed to read in Finance: the agent can read it there, never
+    // write. From before meetings had a list, it works in all their workspaces.
     const finance = await scope.workspace("Finance", {
       accountId: scope.accountId,
       permissions: ["sessions:read"],
@@ -521,6 +605,7 @@ describe("meeting tools", () => {
       segments: [{ at: 0, label: "speaker_0", text: "Budget holds." }],
       in: finance,
     });
+    await shared!.admin`update recordings set reach_workspace_ids = null where id = ${budget}`;
     expect((await tools("meeting_read", { meetingId: budget })).lines).toContain("Budget holds.");
     expect(
       await tools("meeting_notes_save", { meetingId: budget, notes: "x", expectedRevision: 0 }),
@@ -532,6 +617,21 @@ describe("meeting tools", () => {
     expect((await tools("meetings_search", {})).meetings.map((m: { id: string }) => m.id)).toEqual([
       budget,
     ]);
+
+    // Turned off here again, it leaves this workspace.
+    const quarterly = await scope.meeting({
+      title: "Quarterly",
+      visibility: "private",
+      segments: [{ at: 0, label: "speaker_0", text: "Quarter closes." }],
+      in: finance,
+    });
+    await shared!.admin`update recordings set reach_workspace_ids = ${[scope.workspaceId]}::uuid[]
+      where id = ${quarterly}`;
+    expect((await tools("meeting_read", { meetingId: quarterly })).lines).toContain(
+      "Quarter closes.",
+    );
+    await shared!.admin`update recordings set reach_workspace_ids = '{}' where id = ${quarterly}`;
+    expect(await tools("meeting_read", { meetingId: quarterly })).toMatchObject({ found: false });
   });
 
   test("a meeting-summary chat reaches only its own meeting", async () => {

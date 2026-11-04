@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
+import type { SlackAgent } from "@opengeni/sdk";
 import { toast } from "sonner";
 import { useAppContext } from "@opengeni/react/app/app-context";
+import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
 import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { clearSlackInstallResult, slackInstallFeedback } from "@/lib/slack-install-feedback";
 import { userErrorText } from "@opengeni/react/ui/api-error";
@@ -25,6 +27,7 @@ import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { CapabilityPage, CapabilityMark } from "./capability-page";
 import { SlackChannelRoutingDialogBody } from "./slack-channel-routing-dialog";
 import { SlackBotAccessSection } from "./slack-bot-access-section";
+import { SlackAgentUpdatesSection } from "./slack-agent-updates-section";
 import { ConnectorToolPermissions } from "@opengeni/react/app/components/capabilities/connector-tool-permissions";
 import { Disclosure } from "@opengeni/react/ui/disclosure";
 import { IntegrationPage, OptionRow } from "./integration-page";
@@ -34,6 +37,16 @@ import {
 } from "@opengeni/react/app/components/capabilities/native-connect-setup";
 import { useSlackInstallationDiscovery } from "./use-slack-installation-discovery";
 import { useSlackIntegration, SLACK_LOGO_URL } from "./use-slack-integration";
+import { SlackAgentsSection, useSlackAgents } from "./slack-agents";
+import { SlackAgentFormPage, SlackAgentIntroPage, type SlackAgentSeed } from "./slack-agent-form";
+
+/** Opens the Slack page's create form prefilled from this bot template (a one-time copy). */
+export const SLACK_AGENT_TEMPLATE_PARAM = "slackAgentTemplate";
+
+type SlackAgentPage =
+  | { kind: "create"; seed?: SlackAgentSeed | undefined }
+  | { kind: "edit"; agent: SlackAgent }
+  | { kind: "intro"; agent: SlackAgent; justCreated: boolean };
 
 /** One inventory in every workspace. Selecting a connection does not navigate
  * away or grant access to its storage workspace; every request keeps its real scope. */
@@ -41,6 +54,8 @@ export function SlackConnectionsPage(props: {
   workspaceId: string;
   items: CapabilityCatalogItem[];
   connections: ConnectionMetadata[] | null;
+  /** This workspace's connections couldn't load; `connections` may stay null. */
+  connectionsLoadFailed?: boolean | undefined;
   bindings: SlackInstallationBinding[];
   refresh: () => Promise<void>;
   onRuntimeChanged: () => void;
@@ -52,6 +67,8 @@ export function SlackConnectionsPage(props: {
   const [available, setAvailable] = useState<ConnectionMetadata[]>([]);
   const [sharedIds, setSharedIds] = useState<string[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // The bots shared with this workspace by the organization arrive separately.
+  const [availableLoaded, setAvailableLoaded] = useState(false);
   const [revision, setRevision] = useState(0);
   const [installFailure, setInstallFailure] = useState(() => {
     const params = new URLSearchParams(window.location.search);
@@ -60,12 +77,15 @@ export function SlackConnectionsPage(props: {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [request, setRequest] = useState<NativeConnectRequest | null>(null);
   const [remove, setRemove] = useState<ConnectionMetadata | null>(null);
+  const [agentPage, setAgentPage] = useState<SlackAgentPage | null>(null);
+  const slackAgents = useSlackAgents(props.workspaceId);
   const transport = useMemo(() => client.connectTransport(), [client]);
   useEffect(() => {
     let live = true;
     setAvailable([]);
     setSharedIds([]);
     setLoadError(null);
+    setAvailableLoaded(false);
     void client
       .listAvailableOpenGeniSlackBots(props.workspaceId)
       .then((result) => {
@@ -75,6 +95,9 @@ export function SlackConnectionsPage(props: {
       })
       .catch((error) => {
         if (live) setLoadError(userErrorText(error));
+      })
+      .finally(() => {
+        if (live) setAvailableLoaded(true);
       });
     return () => {
       live = false;
@@ -102,6 +125,62 @@ export function SlackConnectionsPage(props: {
   );
   const selectedPersonal = personal.find((row) => row.id === selectedId);
   const personalCapability = personalSlackCapability(props.items);
+  const currentWorkspace = context.workspaces.find((row) => row.id === props.workspaceId) ?? null;
+  // Agents work in a shared workspace its admins look after; a Personal one has nobody else.
+  const canCreateAgent =
+    hasWorkspacePermission(accessContext, props.workspaceId, "workspace:admin") &&
+    currentWorkspace !== null &&
+    !isPersonalWorkspace(currentWorkspace, context.managedSelfContext);
+  const activeBots = bots.filter((bot) => bot.status === "active");
+  const botsHere = activeBots.filter(
+    (bot) => bot.workspaceId === props.workspaceId || sharedIds.includes(bot.id),
+  );
+  // With none available here, creating still tries the organization's bot and
+  // offers to turn it on for this workspace when the API says it is off.
+  const agentConnections = botsHere.length > 0 ? botsHere : activeBots;
+  const connectionsLoadFailed = props.connectionsLoadFailed === true;
+  const botsLoaded =
+    (props.connections !== null || connectionsLoadFailed) && !discovery.loading && availableLoaded;
+  const connectionsError =
+    loadError ??
+    (discovery.failed || connectionsLoadFailed ? "Some connections could not be checked." : null);
+  function retryConnections() {
+    if (connectionsLoadFailed) void props.refresh();
+    discovery.retry();
+    setRevision((value) => value + 1);
+  }
+  // "Use in Slack" on a bot template lands here with the template to copy.
+  const templateParamHandled = useRef(false);
+  useEffect(() => {
+    if (templateParamHandled.current) return;
+    const url = new URL(window.location.href);
+    const templateId = url.searchParams.get(SLACK_AGENT_TEMPLATE_PARAM);
+    if (!templateId) return;
+    templateParamHandled.current = true;
+    url.searchParams.delete(SLACK_AGENT_TEMPLATE_PARAM);
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `${url.pathname}${url.search}${url.hash}`,
+    );
+    if (!canCreateAgent) return;
+    void client
+      .getBotTemplate(props.workspaceId, templateId)
+      .then((template) =>
+        setAgentPage({
+          kind: "create",
+          seed: {
+            name: template.name,
+            description: template.description,
+            avatar: template.avatar,
+            instructions: template.setupInstructions,
+          },
+        }),
+      )
+      .catch((error) =>
+        toast.error("Couldn't open the bot template", { description: userErrorText(error) }),
+      );
+  }, [canCreateAgent, client, props.workspaceId]);
   async function refresh() {
     await props.refresh();
     discovery.retry();
@@ -136,6 +215,47 @@ export function SlackConnectionsPage(props: {
   }
   const workspaceName =
     context.workspaces.find((row) => row.id === props.workspaceId)?.name ?? "this workspace";
+  if (agentPage?.kind === "intro") {
+    return (
+      <SlackAgentIntroPage
+        key={agentPage.agent.id}
+        agent={agentPage.agent}
+        justCreated={agentPage.justCreated}
+        onClose={() => setAgentPage(null)}
+      />
+    );
+  }
+  if (agentPage) {
+    const agent = agentPage.kind === "edit" ? agentPage.agent : undefined;
+    return (
+      <SlackAgentFormPage
+        key={agent?.id ?? "new"}
+        agent={agent}
+        seed={agentPage.kind === "create" ? agentPage.seed : undefined}
+        workspaceId={props.workspaceId}
+        workspaceName={workspaceName}
+        connections={agentConnections}
+        connectionsLoaded={botsLoaded}
+        connectionsError={connectionsError}
+        onRetryConnections={retryConnections}
+        onClose={() => setAgentPage(null)}
+        onSaved={(saved, created) => {
+          slackAgents.replace((current) =>
+            created
+              ? [...current, saved]
+              : current.map((entry) => (entry.id === saved.id ? saved : entry)),
+          );
+          if (created) {
+            toast.success(`Created ${saved.name}`);
+            setAgentPage({ kind: "intro", agent: saved, justCreated: true });
+          } else {
+            toast.success(`Saved ${saved.name}`);
+            setAgentPage(null);
+          }
+        }}
+      />
+    );
+  }
   return (
     <>
       {selectedPersonal ? (
@@ -211,24 +331,17 @@ export function SlackConnectionsPage(props: {
               {installFailure.description}
             </Notice>
           ) : null}
-          {loadError || discovery.failed ? (
+          {connectionsError ? (
             <Notice
               tone="failed"
               title="Couldn't load all Slack connections"
               action={
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    discovery.retry();
-                    setRevision((value) => value + 1);
-                  }}
-                >
+                <Button variant="outline" size="sm" onClick={retryConnections}>
                   Retry
                 </Button>
               }
             >
-              {loadError ?? "Some connections could not be checked."}
+              {connectionsError}
             </Notice>
           ) : null}
           <DetailSection
@@ -245,7 +358,7 @@ export function SlackConnectionsPage(props: {
             <RowList
               label="Slack bot workspaces"
               flush
-              busy={props.connections === null || discovery.loading}
+              busy={(props.connections === null && !connectionsLoadFailed) || discovery.loading}
             >
               {bots.map((bot) => {
                 const metadata = openGeniSlackBotUiMetadata(bot)!;
@@ -292,6 +405,19 @@ export function SlackConnectionsPage(props: {
               <p className="text-sm text-fg-muted">No Slack workspaces connected.</p>
             ) : null}
           </DetailSection>
+          <SlackAgentsSection
+            workspaceId={props.workspaceId}
+            state={slackAgents}
+            canCreate={canCreateAgent}
+            createUnavailable={
+              botsLoaded && activeBots.length === 0 && !connectionsError
+                ? "Add a Slack workspace to create Slack agents."
+                : null
+            }
+            onCreate={() => setAgentPage({ kind: "create" })}
+            onEdit={(agent) => setAgentPage({ kind: "edit", agent })}
+            onIntroduce={(agent) => setAgentPage({ kind: "intro", agent, justCreated: false })}
+          />
           <DetailSection
             title="Your accounts"
             description="Reads and sends messages as you."
@@ -447,6 +573,7 @@ function SlackBotDetails(props: {
     <>
       <IntegrationPage model={model} onBack={props.onBack} backLabel="Slack" compactSettings>
         <SlackBotAccessSection connection={props.connection} onSaved={props.refresh} />
+        <SlackAgentUpdatesSection connection={props.connection} />
       </IntegrationPage>
       {adapter.dialogs}
     </>

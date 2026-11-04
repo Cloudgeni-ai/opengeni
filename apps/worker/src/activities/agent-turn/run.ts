@@ -1,4 +1,4 @@
-import { withClaudeConnectionCredential } from "@opengeni/config";
+import { unboundGitHubRepositoryResources } from "@opengeni/core";
 import {
   getSessionAuthorityProjection,
   canSpendSubscriptionCoreCodexExtraCredits,
@@ -9,9 +9,9 @@ import {
   markSessionTurnModelTransportHttpOnly,
 } from "@opengeni/db";
 import { routingEnabled } from "../../sandbox-routing";
+import { gitTokensMintedByOpengeni } from "../../standalone-git-credentials";
 import { createAttemptVaultAccess } from "./secret-resolver";
 import { resolveAgentToolFamilies } from "@opengeni/contracts";
-import { createKnowledgeSourceSyncActivities } from "../knowledge-source-sync";
 import {
   freezeAgentLearningPolicy,
   recoverLegacyKnowledgeConfirmations,
@@ -52,6 +52,7 @@ import {
 import { codexUpstreamModelSlugs } from "@opengeni/config";
 import { withClaudeUsageObserver, withInferenceResidency } from "@opengeni/runtime";
 import { settingsWithTurnInferenceResidency } from "./inference-residency-gate";
+import { sessionTitlePromptFor } from "./session-title";
 import { createCodexCreditGuard, assertCodexDispatchAdmission } from "./codex-credit-policy";
 import { recordCoreCodexUsageReading } from "./codex-core-settlement";
 import {
@@ -80,12 +81,14 @@ import {
 } from "../../observability-metrics";
 import { summarizeCompanyBrainContributions } from "../../model-context-contributions";
 import { ToolResultSpill } from "./tool-result-spill";
+import { attendanceChangeNote } from "./unattended";
 import { createEagerOwnedSandboxSetup, hasEagerOwnedSandboxSetup } from "./owned-sandbox-setup";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { createTurnHistorySink } from "./history-sink";
 import {
   ActiveRouteDispatchBoundary,
+  activeRouteSessionForBoundary,
   checkpointHistoryBeforeProviderDispatch,
 } from "./provider-dispatch-barrier";
 import {
@@ -131,11 +134,11 @@ import {
 import {
   buildClaudeCoreRequestAuthorization,
   claudeCoreSettingsCredential,
-  claudeCoreModelScope,
   claudeCoreRequestPreparer,
   claudeSubscriptionProviderIds,
   claudeSubscriptionUpstreamModelIds,
   selectClaudeTurnCapacity,
+  withClaudeCoreConnectionCredential,
   type ClaudeCoreRequestAuthorization,
 } from "./claude-core";
 import {
@@ -150,6 +153,7 @@ import { prepareTurnToolPolicy, prepareTurnToolRuntime } from "./tool-environmen
 import { applyTurnGitHubRepositoryBindings } from "./github-repository-bindings";
 import { dropUnavailableOptionalRepositories } from "./optional-repositories";
 import { buildTurnAgent } from "./agent-build";
+import { assertTurnSandboxBackendServed } from "./sandbox-route";
 import { createAttemptSecretValueMemory, runWithAttemptSecretValues } from "./secret-values";
 import { runAuxiliaryProviderDispatch } from "../auxiliary-provider-dispatch";
 
@@ -258,13 +262,6 @@ export function sessionTitleXaiRequestContext(
 
 /** Lifecycle orchestrator: claim → capacity → governance → sandbox → tools → stream. */
 export function createRunAgentTurnActivity(services: () => Promise<ActivityServices>) {
-  let documents: Promise<import("@opengeni/documents").DocumentServices> | undefined;
-  const sourceActivities = createKnowledgeSourceSyncActivities(services, async () => {
-    documents ??= import("@opengeni/documents").then(async ({ createDocumentServices }) =>
-      createDocumentServices((await services()).settings),
-    );
-    return documents;
-  });
   const modelCheckpointMemoryCollector = createModelCheckpointMemoryCollector();
   // Keep a distinct cooldown for terminal collection. A collection at the
   // final model checkpoint happens while the activity still owns its complete
@@ -294,6 +291,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       personalGitHubCredentials,
       startVideoGenerationWorkflow,
       startSessionTitleWorkflow,
+      startRigProviderImageRefresh,
     } = resolvedServices;
     const activityContext = currentActivityContext();
     const cancellationSignal = activityContext?.cancellationSignal;
@@ -499,10 +497,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         recoveryStartedAt: attempt.providerRecoveryStartedAt,
       });
     const activeRoute = new ActiveRouteDispatchBoundary({
-      session: () =>
-        sandboxState.resolvedSandbox?.established.session as
-          | { assertActiveRouteContinuable?: () => Promise<void> }
-          | undefined,
+      session: () => activeRouteSessionForBoundary(sandboxState),
       isRouteTransition: (error) => sandboxRouteTransitionCode(error) !== null,
     });
     const checkpointBeforeProviderDispatch = async () => {
@@ -588,6 +583,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         claimedModelUsageSourceKeys,
         emittedModelUsageSourceKeys,
       } = claimed.ok;
+      // A stored session (or a shared-box child inheriting its parent's backend)
+      // may name a host backend this deployment does not serve. Refuse it here,
+      // against the worker's own settings, before any phase below can build a
+      // box, run a clone/setup/Rig/hydration hook or materialize credentials.
+      assertTurnSandboxBackendServed(settings, turn.sandboxBackend);
       // EU-ONLY INFERENCE — read the workspace's setting again on every
       // attempt, before any model call: a setting turned on after the claim
       // still applies. Every later phase uses these settings, so resolution,
@@ -742,11 +742,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // The settings carry the account identity but never the live
             // bearer: every core request gets it from its custody, so a
             // request outside a custody wrapper fails closed upstream.
-            selectedCapabilitySettings = withClaudeConnectionCredential(
+            selectedCapabilitySettings = withClaudeCoreConnectionCredential(
               capabilitySettings,
-              "claude_subscription",
               claudeCoreSettingsCredential(token, claudeCore.connectionId),
-              claudeCoreModelScope(turnExecutionPolicy.productModelId),
               { connectionId: claudeCore.connectionId, credentialVersion: token.credentialVersion },
             );
           } else if (billingState.isClaudeTurn) {
@@ -770,7 +768,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             fileAuthoritySubjectId,
             humanInputResume,
             turnExecutionPolicy,
+            chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
             requiredGeneratedVideoFiles,
+            startRigProviderImageRefresh: startRigProviderImageRefresh ?? null,
           });
           if ("exit" in governance) return governance.exit;
           await assertTurnModelConnection(db, providerTurn, {
@@ -790,6 +790,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             workspaceGovernance,
             structuredWorkspacePolicyActive,
             workspaceCreditModelsAllowed,
+            hostedToolsBillCredits,
             workspaceMemory,
             buildCompanyBrainContributionReceiptFor,
             logicalSandboxSettings,
@@ -804,6 +805,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             modelHistoryProjector,
             generatedImageHistoryProjector,
             compactionModelHistoryProjector,
+            searchRecords,
           } = governance.ok;
 
           // A codex-subscription turn resolves the bearer for THIS turn's effective
@@ -1437,6 +1439,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const {
             turnResources: claimedTurnResources,
             runtimeResources: claimedRuntimeResources,
+            repositoryRemoval,
             mcpAvailabilityNote,
             turnTools,
             connectionScope,
@@ -1513,6 +1516,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // an unusable bound repository stays bare and is reported visibly.
           const hasCredentialProvider =
             activeSandboxBackend !== "selfhosted" &&
+            // This flag only controls inferred bindings for bare GitHub
+            // repositories. No matching resource means no consumer of the
+            // provider configuration; actual credential minting keeps its
+            // own live provider/authority checks below.
+            unboundGitHubRepositoryResources(claimedTurnResources).length > 0 &&
             (
               await waitForTurnOperation(
                 getWorkspaceCredentialProvider(db, {
@@ -1739,8 +1747,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           });
           const toolRuntime = await prepareTurnToolRuntime({
             independentSessionTitles: !!startSessionTitleWorkflow,
+            learningModes: learning.effective,
             vaultAccess,
-            fetchKnowledgeSource: sourceActivities.runKnowledgeSourceSyncBatch,
             runCredentialRenewals: runCredentialResolver ? renewals : undefined,
             runMcpCredentials,
             input,
@@ -1769,6 +1777,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             resolvedModel,
             lazyToolTransport,
             workspaceCreditModelsAllowed,
+            hostedToolsBillCredits,
             turnTools,
             connectionScope,
             sandboxArtifactRuntime,
@@ -1830,12 +1839,22 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             workspaceGovernance,
             structuredWorkspacePolicyActive,
             workspaceCreditModelsAllowed,
+            hostedToolsBillCredits,
             workspaceMemory,
             rigVersion,
             rigName,
             buildCompanyBrainContributionReceiptFor,
             promptCacheKey,
             runtimeResources,
+            // Revoke a removed repository's dedicated token only when
+            // Opengeni's own GitHub App minted it, never a token a host
+            // credential callback supplied.
+            repositoryRemoval: repositoryRemoval
+              ? {
+                  ...repositoryRemoval,
+                  revokeDedicatedGitHubAppTokens: gitTokensMintedByOpengeni(connectionCredentials),
+                }
+              : null,
             sandboxEnvironment,
             sandboxArtifactRuntime,
             sandboxGitToken,
@@ -2198,6 +2217,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               unavailableSandboxFilesNote,
               runCredentialsNote,
               mcpAvailabilityNote,
+              attendanceNote: attendanceChangeNote(session),
               knowledgeSourcePreparationNote,
               fileAuthoritySubjectId,
               activeSandboxBackend,
@@ -2213,14 +2233,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               runSettings,
               turnTools,
               generateSessionTitleInParallel,
-              sessionTitlePrompt: session.initialMessage.trim()
-                ? session.initialMessage
-                : turn.prompt,
+              sessionTitlePrompt: sessionTitlePromptFor(session.initialMessage, turn.prompt),
               compactSummarizer,
               settleDeferredSteerAfterCompaction,
               compactionModelHistoryProjector,
               generatedImageHistoryProjector,
               modelHistoryProjector,
+              searchRecords,
               compactionModeOptions,
               initialRunCredentialMaterial,
               initialGitCredentials,

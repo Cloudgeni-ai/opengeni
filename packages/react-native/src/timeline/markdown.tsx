@@ -336,9 +336,34 @@ function MarkdownTable({
   );
   return (
     <View
-      style={{ marginTop: 12, marginBottom: 10 }}
+      style={{ marginTop: onCopy ? 4 : 12, marginBottom: 10 }}
       onLayout={(event) => setAvailable(Math.round(event.nativeEvent.layout.width))}
     >
+      {/* Copy sits on its own line above the table, so it never covers a
+          header cell, whether the table fits or scrolls sideways. */}
+      {onCopy ? (
+        <View style={{ flexDirection: "row", justifyContent: "flex-end" }}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={m.copyTable}
+            hitSlop={8}
+            onPress={() => {
+              onCopy(rows.map((row) => row.join("\t")).join("\n"));
+              setCopied(true);
+              setTimeout(() => setCopied(false), 1400);
+            }}
+            style={{
+              width: 28,
+              height: 28,
+              alignItems: "center",
+              justifyContent: "center",
+              borderRadius: 8,
+            }}
+          >
+            <Icon name={copied ? "check" : "copy"} size={14} color={theme.colors["fg-subtle"]} />
+          </Pressable>
+        </View>
+      ) : null}
       {scrolls ? (
         <View>
           <ScrollView
@@ -377,31 +402,6 @@ function MarkdownTable({
       ) : (
         body
       )}
-      {onCopy ? (
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={m.copyTable}
-          hitSlop={8}
-          onPress={() => {
-            onCopy(rows.map((row) => row.join("\t")).join("\n"));
-            setCopied(true);
-            setTimeout(() => setCopied(false), 1400);
-          }}
-          style={{
-            position: "absolute",
-            top: 2,
-            right: 0,
-            width: 28,
-            height: 28,
-            alignItems: "center",
-            justifyContent: "center",
-            borderRadius: 8,
-            backgroundColor: scrolls ? theme.colors.bg : "transparent",
-          }}
-        >
-          <Icon name={copied ? "check" : "copy"} size={14} color={theme.colors["fg-subtle"]} />
-        </Pressable>
-      ) : null}
     </View>
   );
 }

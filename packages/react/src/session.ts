@@ -33,6 +33,7 @@ export { useSession, isTitleEvent } from "./hooks/use-session";
 export { useRetainedReads } from "./hooks/shared-query";
 export { readClientConfig } from "./lib/client-config-read";
 export { useSessionConversation } from "./hooks/use-session-conversation";
+export { useSessionStartupTimeline } from "./lib/session-startup-timeline";
 export {
   useSessionReadAcknowledgement,
   type SessionAttentionClientLike,
@@ -118,7 +119,11 @@ export type {
   UseSessionMcpApprovalPolicyResult,
 } from "./hooks/use-session-mcp-approval-policy";
 
-export { approvalsFromRequiresAction, projectPendingApprovals } from "./approvals";
+export {
+  approvalsDecidable,
+  approvalsFromRequiresAction,
+  projectPendingApprovals,
+} from "./approvals";
 export type { PendingApproval } from "./approvals";
 
 export { humanInputRequestFromEvent, projectPendingHumanInputRequests } from "./human-input";
@@ -132,12 +137,20 @@ export type {
 export {
   buildTimeline,
   creditExhaustedFromEvents,
+  creditRefusalFromEvents,
   extractSessionRef,
   groupTimeline,
   sessionStatusFromEvents,
+  timelineLivePause,
+  timelinePauseSpans,
   toolDisplayName,
 } from "./timeline/projection";
-export type { GroupTimelineOptions } from "./timeline/projection";
+export type {
+  GroupTimelineOptions,
+  TimelineLivePause,
+  TimelinePauseSpan,
+} from "./timeline/projection";
+export { useTimelinePauses } from "./timeline/use-timeline-pauses";
 export type {
   ActivityItem,
   AgentMessageItem,

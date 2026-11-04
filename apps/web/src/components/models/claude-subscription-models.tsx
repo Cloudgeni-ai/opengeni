@@ -268,10 +268,12 @@ export function ClaudeAccountPage({
 export function ClaudeAccessPage({
   claude,
   accountId,
+  organizationName,
   onClose,
 }: {
   claude: ClaudeSubscriptions;
   accountId: string;
+  organizationName?: string | undefined;
   onClose: () => void;
 }) {
   const account = claude.accounts.find((candidate) => candidate.id === accountId);
@@ -286,6 +288,7 @@ export function ClaudeAccessPage({
     <ConnectionAccessFormPage
       access={access}
       organization={!!claude.organizationId}
+      organizationName={organizationName}
       canManage={account ? managesSubscriptionAccount(claude, account) : claude.canManageAccounts}
       name={account ? subscriptionAccountName(account) : "this account"}
       onClose={onClose}
