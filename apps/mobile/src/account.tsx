@@ -195,9 +195,13 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   );
   // Reads of one account can overlap; only the newest one may mark it.
   const readGenerations = useRef(new Map<string, number>());
+  // Bumped only when an account signs in or out: a credential read from
+  // before that must not set the token either.
+  const signIns = useRef(new Map<string, number>());
   /** Reads of an account still in flight no longer count (it signed in or out). */
   const supersedeReads = useCallback((id: string) => {
     readGenerations.current.set(id, (readGenerations.current.get(id) ?? 0) + 1);
+    signIns.current.set(id, (signIns.current.get(id) ?? 0) + 1);
   }, []);
   /**
    * Read accounts' saved sign-ins. A missing one marks the account signed
@@ -242,10 +246,13 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!accountId) return;
     let live = true;
+    const signIn = signIns.current.get(accountId);
     // A failed read settles too: the account's sign-in screen offers a retry
-    // instead of loading forever.
+    // instead of loading forever. A sign-in meanwhile already set the token.
     void checkCredential(accountId).then(({ credential }) => {
-      if (live) setToken({ id: accountId, value: credential });
+      if (live && signIns.current.get(accountId) === signIn) {
+        setToken({ id: accountId, value: credential });
+      }
     });
     return () => {
       live = false;
@@ -383,19 +390,25 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       await writeAccountToken(id, result.accessToken);
       supersedeReads(id);
       noteRead(id, false);
+      // Other writers (the launch check) may have saved meanwhile.
+      const latest = snapshotRef.current ?? current;
+      const known = latest.accounts.some((each) => each.id === id);
       const stored: StoredAccount = {
         id,
         baseUrl: serverUrl,
         subjectId: context.subjectId,
         email: context.subjectLabel ?? context.subjectId,
-        workspaceId: existing?.workspaceId ?? null,
+        workspaceId:
+          latest.accounts.find((each) => each.id === id)?.workspaceId ??
+          existing?.workspaceId ??
+          null,
       };
       setToken({ id, value: result.accessToken });
-      rememberWayBack(current, id);
+      rememberWayBack(latest, id);
       await persist({
-        accounts: existing
-          ? current.accounts.map((each) => (each.id === id ? stored : each))
-          : [...current.accounts, stored],
+        accounts: known
+          ? latest.accounts.map((each) => (each.id === id ? stored : each))
+          : [...latest.accounts, stored],
         activeId: id,
       });
       return result;
@@ -435,7 +448,10 @@ export function AccountProvider({ children }: { children: ReactNode }) {
 
   const retrySignIn = useCallback(
     async (id: string): Promise<"ready" | "signIn" | "unreadable"> => {
+      const signIn = signIns.current.get(id);
       const read = await checkCredential(id);
+      // Signed in or out while the read ran: that settled it.
+      if (signIns.current.get(id) !== signIn) return "signIn";
       if (read.failed) return "unreadable";
       if (!read.credential) return "signIn";
       const current = snapshotRef.current;
@@ -470,10 +486,12 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       await forgetAccountToken(id);
       supersedeReads(id);
       noteRead(id, false);
-      const accounts = current.accounts.filter((each) => each.id !== id);
+      // Other writers (the launch check) may have saved meanwhile.
+      const latest = snapshotRef.current ?? current;
+      const accounts = latest.accounts.filter((each) => each.id !== id);
       await persist({
         accounts,
-        activeId: current.activeId === id ? (accounts[0]?.id ?? null) : current.activeId,
+        activeId: latest.activeId === id ? (accounts[0]?.id ?? null) : latest.activeId,
       });
     },
     [noteRead, persist, supersedeReads],

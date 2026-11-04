@@ -188,6 +188,8 @@ test("the sign-in sheet over an account keeps Cancel as its way back, without a 
 });
 
 test("a signed-out account says so; an unreadable one offers a retry instead", async () => {
+  // Signed out wins: a retry could only bring back a revoked credential.
+  state = { ...state, unreadable: new Set(["picked"]) };
   const signedOut = await renderComponent(createElement(SignInScreen, { target: picked }));
   try {
     expect(signedOut.container.textContent).toContain(

@@ -39,6 +39,8 @@ let pushFails = false;
 let heldReads: Array<{ id: string; settle(value: string | null | Error): void }> | null = null;
 let webSignIn: unknown = { kind: "cancelled" };
 let signedInSubject = "user:work";
+// When set, saving a credential waits for it.
+let writeGate: Promise<void> | null = null;
 
 mock.module("@/account-store", () => ({
   loadAccounts: async () => structuredClone(stored),
@@ -59,10 +61,14 @@ mock.module("@/account-store", () => ({
     return tokens.get(id) ?? null;
   },
   writeAccountToken: async (id: string, value: string) => {
+    if (writeGate) await writeGate;
     tokenWrites.push(`write:${id}`);
     tokens.set(id, value);
   },
-  forgetAccountToken: async (id: string) => tokenWrites.push(`forget:${id}`),
+  forgetAccountToken: async (id: string) => {
+    if (writeGate) await writeGate;
+    tokenWrites.push(`forget:${id}`);
+  },
   sameIdentity: (a: StoredAccount, b: { baseUrl: string; subjectId: string }) =>
     a.baseUrl === b.baseUrl && a.subjectId === b.subjectId,
 }));
@@ -90,6 +96,10 @@ mock.module("@opengeni/react/organization-model", () => ({
 mock.module("@opengeni/sdk", () => ({
   OpenGeniApiError: class extends Error {},
   OpenGeniClient: class {
+    apiKey?: string;
+    constructor(options: { apiKey?: string }) {
+      this.apiKey = options.apiKey;
+    }
     getAccessContext = async () => ({ subjectId: signedInSubject, defaultAccountId: null });
     listWorkspaces = async () => [{ id: "workspace", accountId: "org", name: "Work" }];
     getClientConfig = async () => null;
@@ -112,7 +122,7 @@ type Probe = { state: ReturnType<typeof useAccount>; pick: ReturnType<typeof use
 async function mount(
   snapshot: AccountsSnapshot,
   credentials: Record<string, string>,
-  options: { unreadable?: boolean } = {},
+  options: { unreadable?: boolean; holdReads?: boolean } = {},
 ) {
   stored = snapshot;
   tokens = new Map(Object.entries(credentials));
@@ -122,7 +132,8 @@ async function mount(
   pathname = "/";
   unreadable = options.unreadable ?? false;
   pushFails = false;
-  heldReads = null;
+  heldReads = options.holdReads ? [] : null;
+  writeGate = null;
   webSignIn = { kind: "cancelled" };
   signedInSubject = "user:work";
   const probe = {} as Probe;
@@ -316,6 +327,157 @@ test("only the newest read of an account may mark it", async () => {
     expect(probe.state.accounts.find((each) => each.id === "personal")?.signedOut).toBeUndefined();
   } finally {
     heldReads = null;
+    await view.unmount();
+  }
+});
+
+const clientKey = (probe: Probe) => (probe.state.client as unknown as { apiKey?: string }).apiKey;
+
+test("a credential read from before a sign-in never replaces the new token", async () => {
+  const { probe, view } = await mount(
+    { accounts: [staging, work], activeId: "staging" },
+    { work: "ogapp_work" },
+    { holdReads: true },
+  );
+  const held = heldReads ?? [];
+  try {
+    // The launch read of the account in use is still out; so is a retry's.
+    let retry: Promise<string> = Promise.resolve("");
+    await act(async () => {
+      retry = probe.state.retrySignIn("staging");
+      await flush();
+    });
+    const stale = held.filter((each) => each.id === "staging");
+    expect(stale).toHaveLength(2);
+    webSignIn = { kind: "signedIn", accessToken: "ogapp_staging" };
+    signedInSubject = "user:staging";
+    await act(async () => {
+      await probe.state.addAccount("https://staging.app.opengeni.ai");
+      await flush();
+    });
+    expect(clientKey(probe)).toBe("ogapp_staging");
+    let outcome = "";
+    await act(async () => {
+      for (const each of stale) each.settle("ogapp_revoked");
+      outcome = await retry;
+      await flush();
+    });
+    expect(outcome).toBe("signIn");
+    expect(clientKey(probe)).toBe("ogapp_staging");
+    expect(probe.state.account?.id).toBe("staging");
+    expect(probe.state.status).toBe("ready");
+  } finally {
+    heldReads = null;
+    await view.unmount();
+  }
+});
+
+test("signing in or out clears an account's unreadable mark", async () => {
+  const { probe, view } = await mount(
+    { accounts: [work, personal], activeId: "work" },
+    { work: "ogapp_work", personal: "ogapp_personal" },
+    { unreadable: true },
+  );
+  try {
+    expect(probe.state.status).toBe("signedOut");
+    expect([...probe.state.unreadable].sort()).toEqual(["personal", "work"]);
+    unreadable = false;
+    await act(async () => {
+      await probe.state.signOut("personal");
+      await flush();
+    });
+    expect([...probe.state.unreadable]).toEqual(["work"]);
+    webSignIn = { kind: "signedIn", accessToken: "ogapp_work_again" };
+    await act(async () => {
+      await probe.state.addAccount("https://app.opengeni.ai");
+      await flush();
+    });
+    expect(probe.state.unreadable.size).toBe(0);
+    expect(probe.state.status).toBe("ready");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a sign-in that saves while the launch check marks another account keeps the mark", async () => {
+  const { probe, view } = await mount(
+    { accounts: [work, personal], activeId: "work" },
+    { work: "ogapp_work" },
+    { holdReads: true },
+  );
+  const held = heldReads ?? [];
+  try {
+    let open: () => void = () => undefined;
+    writeGate = new Promise((resolve) => {
+      open = resolve;
+    });
+    webSignIn = { kind: "signedIn", accessToken: "ogapp_new" };
+    signedInSubject = "user:new";
+    let adding: Promise<unknown> = Promise.resolve();
+    await act(async () => {
+      adding = probe.state.addAccount("https://app.opengeni.ai");
+      await flush();
+    });
+    // The launch check finds personal's credential missing while the new one saves.
+    await act(async () => {
+      held.find((each) => each.id === "personal")?.settle(null);
+      await flush();
+    });
+    expect(probe.state.accounts.find((each) => each.id === "personal")?.signedOut).toBe(true);
+    await act(async () => {
+      open();
+      await adding;
+      await flush();
+    });
+    expect(probe.state.accounts.map((each) => each.email)).toEqual([
+      "work@example.com",
+      "personal@example.com",
+      "user:new",
+    ]);
+    expect(probe.state.accounts.find((each) => each.id === "personal")?.signedOut).toBe(true);
+    expect(saved.at(-1)?.accounts.find((each) => each.id === "personal")?.signedOut).toBe(true);
+  } finally {
+    heldReads = null;
+    writeGate = null;
+    await view.unmount();
+  }
+});
+
+test("a sign-out that saves while the launch check marks another account keeps the mark", async () => {
+  const home = account("home");
+  const { probe, view } = await mount(
+    { accounts: [work, personal, home], activeId: "work" },
+    { work: "ogapp_work", home: "ogapp_home" },
+    { holdReads: true },
+  );
+  const held = heldReads ?? [];
+  try {
+    let open: () => void = () => undefined;
+    writeGate = new Promise((resolve) => {
+      open = resolve;
+    });
+    let signingOut: Promise<unknown> = Promise.resolve();
+    await act(async () => {
+      signingOut = probe.state.signOut("home");
+      await flush();
+    });
+    // Sign-out's own read of home's credential, then the launch check's verdicts.
+    await act(async () => {
+      held.filter((each) => each.id === "home").forEach((each) => each.settle("ogapp_home"));
+      held.find((each) => each.id === "personal")?.settle(null);
+      await flush();
+    });
+    expect(probe.state.accounts.find((each) => each.id === "personal")?.signedOut).toBe(true);
+    await act(async () => {
+      open();
+      await signingOut;
+      await flush();
+    });
+    expect(probe.state.accounts.map((each) => each.id)).toEqual(["work", "personal"]);
+    expect(probe.state.accounts.find((each) => each.id === "personal")?.signedOut).toBe(true);
+  } finally {
+    heldReads = null;
+    writeGate = null;
     await view.unmount();
   }
 });
