@@ -273,7 +273,10 @@ mod tests {
             RepairOutcome::Repaired
         );
         assert_eq!(inspect(&missing), NullDeviceState::Healthy);
-        let mode = std::fs::metadata(&missing).expect("metadata").permissions().mode();
+        let mode = std::fs::metadata(&missing)
+            .expect("metadata")
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o666, "{mode:o}");
 
         // What `> /dev/null` leaves once the device is gone: a regular file.

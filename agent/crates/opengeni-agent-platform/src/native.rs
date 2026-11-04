@@ -2028,9 +2028,8 @@ mod tests {
     /// namespace's (which may not create device nodes).
     #[cfg(target_os = "linux")]
     fn in_initial_user_namespace() -> bool {
-        std::fs::read_to_string("/proc/self/uid_map").is_ok_and(|map| {
-            map.split_whitespace().collect::<Vec<_>>() == ["0", "0", "4294967295"]
-        })
+        std::fs::read_to_string("/proc/self/uid_map")
+            .is_ok_and(|map| map.split_whitespace().collect::<Vec<_>>() == ["0", "0", "4294967295"])
     }
 
     #[test]

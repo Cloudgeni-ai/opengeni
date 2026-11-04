@@ -26,6 +26,9 @@ const transferred = fs.readFileSync(process.argv[1]);
 if (crypto.createHash('\\''sha256'\\'').update(raw).digest('\\''hex'\\'') !== "f52d") throw Error('\\''Codemode client transfer integrity failure'\\'');
 ' '/workspace/.opengeni/codemode-clients/stage-1.json'`;
 
+/** A newer agent names the missing device. */
+const NULL_DEVICE_MISSING = " (the null device /dev/null is missing)";
+
 /** The agent's answer when it cannot start a program. */
 function processStartError(program: string, note = "") {
   return agentErrorToControlError({
@@ -88,7 +91,7 @@ describe("a sandbox that cannot start programs", () => {
     ]);
     const failure = agentRunFailurePayload(inToolCall(error));
     expect(failure).toMatchObject({ code: "sandbox_machine_restarting", retryable: true });
-    expect(failure.error).toContain("stopped being able to start programs");
+    expect(failure.error).toContain("couldn't start programs, so it was restarted");
     expect(failure.error).toContain("Your files are kept");
   });
 
@@ -96,15 +99,19 @@ describe("a sandbox that cannot start programs", () => {
     const turn = computeTurn();
     const guard = createSandboxSetupReplayGuard();
     // Attempt 1 restarts; attempt 2 of the same turn finds that restart.
-    await recoverSandboxSetupFailure(guard, processStartError("/bin/sh"), turn.recovery);
+    await recoverSandboxSetupFailure(
+      guard,
+      processStartError("/bin/sh", NULL_DEVICE_MISSING),
+      turn.recovery,
+    );
     const second = await recoverSandboxSetupFailure(
       createSandboxSetupReplayGuard(),
-      processStartError("/bin/sh"),
+      processStartError("/bin/sh", NULL_DEVICE_MISSING),
       turn.recovery,
     );
     const third = await recoverSandboxSetupFailure(
       createSandboxSetupReplayGuard(),
-      processStartError("/bin/sh"),
+      processStartError("/bin/sh", NULL_DEVICE_MISSING),
       turn.recovery,
     );
     expect(turn.restarts()).toBe(1);
@@ -123,7 +130,7 @@ describe("a sandbox that cannot start programs", () => {
     };
     const error = await recoverSandboxSetupFailure(
       createSandboxSetupReplayGuard(),
-      processStartError("/bin/sh"),
+      processStartError("/bin/sh", NULL_DEVICE_MISSING),
       turn.recovery,
     );
     expect(error).toBeInstanceOf(SandboxProcessStartFailedError);
@@ -134,7 +141,7 @@ describe("a sandbox that cannot start programs", () => {
     const turn = computeTurn({ restartFails: true });
     const error = await recoverSandboxSetupFailure(
       createSandboxSetupReplayGuard(),
-      processStartError("/bin/sh"),
+      processStartError("/bin/sh", NULL_DEVICE_MISSING),
       turn.recovery,
     );
     expect(error).toBeInstanceOf(SandboxProcessStartFailedError);
@@ -158,12 +165,12 @@ describe("a sandbox that cannot start programs", () => {
       specHash: "sha256:rig",
       timeoutMs: 1_000,
       execute: async () => {
-        throw processStartError("/bin/sh");
+        throw processStartError("/bin/sh", NULL_DEVICE_MISSING);
       },
     }).catch(() => undefined);
     const error = await recoverSandboxSetupFailure(
       guard,
-      processStartError("/bin/sh"),
+      processStartError("/bin/sh", NULL_DEVICE_MISSING),
       turn.recovery,
     );
     expect(error).toBeInstanceOf(SandboxProcessStartFailedError);

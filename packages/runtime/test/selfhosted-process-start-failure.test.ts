@@ -104,9 +104,9 @@ describe("process-start failures from the machine agent", () => {
       detail: { errno: "11" },
     });
     expect(exhausted.processStartFailed).toBe(true);
-    expect(spawnError("/bin/bash", " (the null device /dev/null is missing)").processStartFailed).toBe(
-      true,
-    );
+    expect(
+      spawnError("/bin/bash", " (the null device /dev/null is missing)").processStartFailed,
+    ).toBe(true);
   });
 
   test("an old agent's command text is removed from the error's detail too", () => {

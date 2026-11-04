@@ -182,8 +182,7 @@ export class SelfhostedControlError extends Error {
     // command text reaches events, tool output or the person; only one that
     // says the machine itself cannot start programs is flagged as such.
     const startFailure = isProcessStartFailureMessage(input.message);
-    const processStartFailed =
-      startFailure && isMachineProcessStartFailureMessage(input.message);
+    const processStartFailed = startFailure && isMachineProcessStartFailureMessage(input.message);
     super(startFailure ? sanitizeProcessStartFailureMessage(input.message) : input.message);
     this.code = input.code;
     this.reason = input.reason;
