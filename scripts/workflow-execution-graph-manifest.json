@@ -34,7 +34,7 @@
     },
     {
       "path": ".github/workflows/compute-ci.yml",
-      "sha256": "1c75627a71eee7b99696fa15dcfac524d984a0d99729fb2d5bdcf5e55316c7ec"
+      "sha256": "a32fdc7fcf7442eb5a8861bfdb4eba084d698685ee0fa0ed271cba07ccbe48dd"
     },
     {
       "path": ".github/workflows/compute-release.yml",
@@ -1153,7 +1153,7 @@
       "workflow": ".github/workflows/compute-ci.yml",
       "job": "test",
       "step": "cargo test --workspace",
-      "sha256": "7720250bac9a13e634839d616a7274b06b8d8b0c1870fd8d3cc7bceccf4f34f0"
+      "sha256": "db623f05b43f1abd04e80c5b212d8f84eb3d4897eb9b6e5441ba635e76b6b98f"
     },
     {
       "workflow": ".github/workflows/compute-ci.yml",
