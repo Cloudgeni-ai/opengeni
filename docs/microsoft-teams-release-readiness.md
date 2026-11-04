@@ -751,10 +751,12 @@ Before offering conversation context to customer tenants:
   account types to multiple organizations (`signInAudience`
   `AzureADMultipleOrgs`). Leave the Azure Bot resource single-tenant. Entra's
   option to allow only listed tenants is useful for a pilot; it is in preview.
-  Changing the audience changes nothing else on the registration. To undo it,
-  set it back to single tenant (`AzureADMyOrg`).
+  Changing the audience changes nothing else on the registration, but Entra
+  rejects the change if the registration has an App ID URI other than
+  `api://<appId>` or one on a verified domain. To undo it, set it back to single
+  tenant (`AzureADMyOrg`).
 - **Publisher verification.** Tenants that allow consent only to apps from
-  verified publishers block an unverified app. Verify the publisher on the
+  verified publishers can block an unverified app. Verify the publisher on the
   production app registration first;
   see [Publisher verification and Store submission](#publisher-verification-and-store-submission).
 - **A certificate, not a client secret.** Once the registration is
@@ -769,16 +771,19 @@ Before offering conversation context to customer tenants:
   > Opengeni asks for two resource-specific permissions. In a team where it is
   > installed, `ChannelMessage.Read.Group` lets it receive the messages posted in
   > that team's channels. In a group chat where it is installed,
-  > `ChatMessage.Read.Chat` lets it receive that chat's messages. A team owner
-  > or chat member grants them when adding the app, and only for that team or
-  > chat; removing the app removes the grant. Your admin can turn this consent
-  > off in Entra's consent settings. The grant would also allow app-only
-  > Microsoft Graph reads of those messages; Opengeni does not make any.
+  > `ChatMessage.Read.Chat` lets it receive that chat's messages. The team
+  > member or chat member who adds the app grants them, only for that team or
+  > chat; removing the app ends the grant. Admins control this with the Team RSC
+  > and Chat RSC consent settings. The grant would also allow app-only Microsoft
+  > Graph reads of those messages; Opengeni does not make any.
   >
-  > Opengeni only answers when someone mentions it. It keeps text from channels
-  > and group chats your workspace has approved, nothing from personal chats or
-  > other bots, and never fetches attachments. It keeps at most the newest 100
-  > messages per thread or group chat, for at most seven days. Edits and
-  > deletions in Teams are applied, and everything is deleted when the
-  > workspace disconnects Teams. Messages attached to a mention as context stay
-  > in that Opengeni chat's history, like the mention itself.
+  > Opengeni only answers when someone mentions it. From channels and group
+  > chats approved for your Opengeni deployment, it stores each message's text,
+  > the sender's display name and Entra object ID, and the time. It stores
+  > nothing from personal chats or other bots, and never fetches attachments.
+  > It keeps at most the newest 100 messages per thread or group chat, uses only
+  > the last seven days, and deletes older messages as new ones arrive. Edits
+  > and deletions in Teams are applied. Removing the app stops new messages but
+  > does not delete stored ones; disconnecting Teams from the workspace deletes
+  > them all. Messages attached to a mention as context stay in that Opengeni
+  > chat's history, like the mention itself.
