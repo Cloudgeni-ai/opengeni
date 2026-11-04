@@ -9,7 +9,7 @@ use bytes::Bytes;
 use compute_fleet::{OwnerEpoch, Stamp};
 use compute_protocol::fleet::{
     Capacity, POINTER_READ_PATH, POINTER_WRITE_PATH, PointerFound, PointerRead, PointerWrite,
-    PointerWritten, REGISTER_PATH,
+    PointerWritten, READS_PACKS_HEADER, REGISTER_PATH,
 };
 use compute_storage::pointer_store::PointerStore as _;
 use compute_storage::store::ChunkStore;
@@ -21,6 +21,7 @@ const NAME: &str = "s-kept-by-an-earlier-host";
 fn earlier() -> Capacity {
     Capacity {
         pointers_in_service: false,
+        reads_packs: false,
         ..roomy()
     }
 }
@@ -155,4 +156,57 @@ async fn pointers_an_earlier_release_kept_move_into_the_service_once_none_of_its
         status, 409,
         "an earlier host registered after the move: {body}"
     );
+}
+
+/// Whether `host`'s fleet tells it to write copies in packs, asking as a
+/// host that reads them; and the answer as an earlier release sees it.
+async fn told_packs(fleet: &Fleet, host: &FakeHost, name: &str) -> (bool, String) {
+    let asked = PointerRead {
+        epoch: host.epoch(),
+        name: NAME.into(),
+    };
+    let mut found = String::new();
+    until(Duration::from_secs(20), "pointers are read", async || {
+        let (status, body) = fleet
+            .post_as_host_with(
+                name,
+                POINTER_READ_PATH,
+                &asked,
+                &[(READS_PACKS_HEADER, "1")],
+            )
+            .await;
+        found = body;
+        status == 200
+    })
+    .await;
+    let packs = serde_json::from_str::<PointerFound>(&found).unwrap().packs;
+    let (status, plain) = read(fleet, name, host.epoch()).await;
+    assert_eq!(status, 200, "{plain}");
+    (packs, plain)
+}
+
+/// Hosts may write copies in packs (ADR 31) once every live host reads
+/// them, and are told so only when they ask: the answer to a host that
+/// does not is as an earlier release parses it, without the field.
+#[tokio::test(flavor = "multi_thread")]
+async fn hosts_are_told_to_write_packs_only_once_every_live_host_reads_them() {
+    let fleet = Fleet::start().await;
+    let host = FakeHost::start(&fleet, "host-packs", roomy()).await;
+    let (packs, plain) = told_packs(&fleet, &host, "host-packs").await;
+    assert!(packs, "every live host reads packs");
+    assert!(!plain.contains("packs"), "an unasked answer: {plain}");
+
+    let fleet = Fleet::start().await;
+    let host = FakeHost::start(&fleet, "host-packs", roomy()).await;
+    let _earlier = FakeHost::start(
+        &fleet,
+        "host-no-packs",
+        Capacity {
+            reads_packs: false,
+            ..roomy()
+        },
+    )
+    .await;
+    let (packs, _) = told_packs(&fleet, &host, "host-packs").await;
+    assert!(!packs, "a live host does not read packs");
 }

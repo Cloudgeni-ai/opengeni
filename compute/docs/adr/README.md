@@ -35,6 +35,7 @@ old one; old records stay as history.
 | 27 | [Resizing a sandbox](0027-resizing-a-sandbox.md) | Accepted |
 | 28 | [Stored objects carry their hour, and the sweep runs hourly](0028-stored-objects-carry-their-hour.md) | Accepted |
 | 29 | [A sweep lists each period once](0029-a-sweep-lists-each-period-once.md) | Accepted |
+| 31 | [An archive stores its chunks in packs](0031-an-archive-stores-its-chunks-in-packs.md) | Accepted |
 
 ## Format
 

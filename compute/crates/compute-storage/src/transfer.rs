@@ -81,7 +81,7 @@ pub async fn copy(from: &ChunkStore, to: &ChunkStore, at_once: usize) -> Result<
     // Listed first: what an archive stores in `to` meanwhile is copied
     // again, which writes the same bytes.
     let mut held: HashMap<String, u64> = HashMap::new();
-    for area in [Area::Manifests, Area::Chunks] {
+    for area in Area::ALL {
         held.extend(
             to.list(area)
                 .await?
