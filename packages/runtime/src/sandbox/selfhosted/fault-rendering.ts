@@ -15,7 +15,11 @@
 // legible fault as their result instead of the misleading wrapper.
 
 import { errorCodeToJSON, ErrorCode } from "@opengeni/agent-proto";
-import { drainingPresentation, SelfhostedControlError } from "./control-rpc";
+import {
+  COMPUTE_WAKE_TIMEOUT_SECONDS_DETAIL_KEY,
+  drainingPresentation,
+  SelfhostedControlError,
+} from "./control-rpc";
 
 /**
  * A stable, low-cardinality fault-class string for a `SelfhostedControlError` — the
@@ -126,21 +130,37 @@ export function renderSelfhostedFault(
   placement: SelfhostedFaultPlacement = "connected_machine",
 ): string {
   if (placement === "connected_machine") return renderConnectedMachineFault(error);
-  // A cloud computer that stops answering restarted or is restarting (its
-  // agent or the whole box) and comes back on its own within seconds; it is
-  // never "offline" the way a person's own computer can be.
   if (error.agentOffline || error.code === ErrorCode.ERROR_CODE_AGENT_OFFLINE) {
+    // The box did not come back while waking, before anything was sent.
+    const wakeSeconds = error.detail[COMPUTE_WAKE_TIMEOUT_SECONDS_DETAIL_KEY];
+    if (wakeSeconds) {
+      return onCloudComputer(
+        assemble(error, {
+          headline: "the cloud computer this chat runs on did not come back",
+          happened: `the cloud computer this chat runs on did not answer within ${wakeSeconds}s of being woken`,
+          layer: "the cloud computer itself, not your command",
+          preserved: "nothing ran; the command was never sent.",
+          tryNext:
+            "retry once; if it still does not answer, stop and tell the person the cloud computer is not starting.",
+        }),
+      );
+    }
+    // A cloud computer that stops answering is most likely restarting (its
+    // agent or the whole box) and comes back on its own within seconds; it is
+    // not "offline" the way a person's own computer can be.
     return onCloudComputer(
       assemble(error, {
-        headline: "this chat's cloud computer restarted or is restarting",
-        happened: "this chat's cloud computer did not answer while it restarted",
-        layer: "this chat's cloud computer itself, not your command",
+        headline:
+          "the cloud computer this chat runs on stopped answering; it is most likely restarting",
+        happened:
+          "the cloud computer this chat runs on did not answer, most likely because it is restarting",
+        layer: "the cloud computer itself, not your command",
         preserved: error.neverSent
           ? "nothing ran; the command never reached the cloud computer."
-          : "unknown — the cloud computer restarted while the command was in flight, so it may or may not have run.",
+          : "unknown — the command was in flight when the cloud computer stopped answering, so it may not have run, or may have run fully or partly.",
         tryNext: error.neverSent
           ? "retry the command; the cloud computer is usually back within seconds."
-          : "retry the command once the cloud computer is back (usually within seconds); if it changes state, first check whether it already took effect.",
+          : "once the cloud computer is back (usually within seconds), check whether a command that changes state took effect, fully or partly, before re-running it; programs started earlier may have stopped.",
       }),
     );
   }

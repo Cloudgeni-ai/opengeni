@@ -410,6 +410,11 @@ export function execDeadlineHint(seconds: number): string {
  *  `SelfhostedControlError.neverSent`. Reserved (never sent by the agent). */
 export const NEVER_SENT_DETAIL_KEY = "_never_sent";
 
+/** The `detail` key a compute box's wake gate sets, to the seconds it waited,
+ *  when the box did not come back after a wake: no request was dispatched. A
+ *  detail rather than `neverSent`, which drives retry and abandon decisions. */
+export const COMPUTE_WAKE_TIMEOUT_SECONDS_DETAIL_KEY = "compute_wake_timeout_seconds";
+
 /** The reserved `detail` key the transport sets to "1" when the agent
  *  connection a request was sent to was replaced by a new one.
  *  `agentErrorToControlError` reads it into

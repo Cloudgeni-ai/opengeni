@@ -9,7 +9,9 @@
 
 import { describe, expect, test } from "bun:test";
 import { type ControlRequest, ErrorCode } from "@opengeni/agent-proto";
+import { isConnectedMachineOutcomeUnknownOutput } from "@opengeni/sdk";
 import {
+  ComputeWakeGate,
   type ControlRpc,
   FakeOpRunner,
   InMemoryOpStreamTransport,
@@ -447,7 +449,7 @@ describe("G2 — RoutingSandboxSession.execCommand renders a terminal fault as i
 // ── The chat's own cloud computer is named as such, never a Connected Machine ───
 
 describe("a compute box's fault names this chat's cloud computer", () => {
-  test("a restart while the command was dispatched says the cloud computer restarted", async () => {
+  test("a box that stops answering mid-command is named as a cloud computer that is most likely restarting", async () => {
     for (const neverSent of [true, false]) {
       const backend: RoutableBackendSession = {
         execCommand: async () => {
@@ -457,12 +459,11 @@ describe("a compute box's fault names this chat's cloud computer", () => {
       const out = await proxyOverBackend(backend, "compute").execCommand({ cmd: "sleep 30" });
       const lines = out.split("\n");
       expect(lines[0]).toBe(
-        "[cloud computer] this chat's cloud computer restarted or is restarting",
+        "[cloud computer] the cloud computer this chat runs on stopped answering; it is most likely restarting",
       );
       expect(lines[1]).toBe(
-        "What happened: this chat's cloud computer did not answer while it restarted (control code ERROR_CODE_AGENT_OFFLINE).",
+        "What happened: the cloud computer this chat runs on did not answer, most likely because it is restarting (control code ERROR_CODE_AGENT_OFFLINE).",
       );
-      expect(lines[4]).toStartWith("What to try: retry the command");
       for (const field of ALL_FIELDS) expect(out).toContain(field);
       expect(out).not.toContain("connected machine");
       expect(out).not.toContain("enrolled machine");
@@ -471,10 +472,54 @@ describe("a compute box's fault names this chat's cloud computer", () => {
     }
   });
 
-  test("an ambiguous restart still says the command may have run", () => {
+  test("a command that never reached the box says nothing ran and to retry", () => {
+    const out = renderSelfhostedFault(offlineErr(true), "cloud_computer");
+    expect(out).toContain(
+      "What was preserved: nothing ran; the command never reached the cloud computer.",
+    );
+    expect(out).toContain(
+      "What to try: retry the command; the cloud computer is usually back within seconds.",
+    );
+  });
+
+  test("an in-flight command leads with checking its effects before any re-run", () => {
     const out = renderSelfhostedFault(offlineErr(false), "cloud_computer");
     expect(out).toContain("What was preserved: unknown — ");
-    expect(out).toContain("first check whether it already took effect");
+    expect(out).toContain(
+      "What to try: once the cloud computer is back (usually within seconds), check whether a command that changes state took effect, fully or partly, before re-running it; programs started earlier may have stopped.",
+    );
+  });
+
+  test("a box that does not come back after a wake says nothing ran, without 'within seconds'", async () => {
+    let clock = 0;
+    const gate = new ComputeWakeGate({
+      control: { wake: async () => undefined },
+      sandboxId: "sandbox-1",
+      enrollmentId: "enrollment-1",
+      resolveConnection: async () => null,
+      probe: async () => false,
+      readyTimeoutMs: 120_000,
+      now: () => clock,
+      sleep: async (ms) => {
+        clock += Math.max(ms, 1);
+      },
+    });
+    const backend: RoutableBackendSession = {
+      execCommand: async () => {
+        await gate.admit();
+        return "unreachable";
+      },
+    };
+    const out = await proxyOverBackend(backend, "compute").execCommand({ cmd: "ls" });
+    expect(out.split("\n")).toEqual([
+      "[cloud computer] the cloud computer this chat runs on did not come back",
+      "What happened: the cloud computer this chat runs on did not answer within 120s of being woken (control code ERROR_CODE_AGENT_OFFLINE).",
+      "Which layer: the cloud computer itself, not your command",
+      "What was preserved: nothing ran; the command was never sent.",
+      "What to try: retry once; if it still does not answer, stop and tell the person the cloud computer is not starting.",
+    ]);
+    // Not an outcome-unknown receipt: the command provably never started.
+    expect(isConnectedMachineOutcomeUnknownOutput(out)).toBe(false);
   });
 
   test("every other fault keeps its fields under the cloud computer's name", () => {

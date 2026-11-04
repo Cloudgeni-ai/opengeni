@@ -33,11 +33,11 @@ const BEFORE = [
 ].join("\n");
 
 const AFTER = [
-  "[cloud computer] this chat's cloud computer restarted or is restarting",
-  "What happened: this chat's cloud computer did not answer while it restarted (control code ERROR_CODE_AGENT_OFFLINE).",
-  "Which layer: this chat's cloud computer itself, not your command",
-  "What was preserved: unknown — the cloud computer restarted while the command was in flight, so it may or may not have run.",
-  "What to try: retry the command once the cloud computer is back (usually within seconds); if it changes state, first check whether it already took effect.",
+  "[cloud computer] the cloud computer this chat runs on stopped answering; it is most likely restarting",
+  "What happened: the cloud computer this chat runs on did not answer, most likely because it is restarting (control code ERROR_CODE_AGENT_OFFLINE).",
+  "Which layer: the cloud computer itself, not your command",
+  "What was preserved: unknown — the command was in flight when the cloud computer stopped answering, so it may not have run, or may have run fully or partly.",
+  "What to try: once the cloud computer is back (usually within seconds), check whether a command that changes state took effect, fully or partly, before re-running it; programs started earlier may have stopped.",
 ].join("\n");
 
 const SESSION = "cloud-computer-restart";
