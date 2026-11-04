@@ -139,15 +139,18 @@ export function MachineCard({
                 </span>
               ) : null}
             </div>
-            <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-og-xs text-og-fg-subtle">
-              <span data-machine-scope={machine.scope}>
-                {machineScopeLabel(msg, machine.scope)}
+            {/* Who and what on one line, the screen sentence on its own line, so no
+                separator is left dangling when the card is narrow. */}
+            <div className="mt-0.5 flex flex-col gap-0.5 text-og-xs text-og-fg-subtle">
+              <span className="flex flex-wrap items-center gap-x-2">
+                <span data-machine-scope={machine.scope}>
+                  {machineScopeLabel(msg, machine.scope)}
+                </span>
+                <span aria-hidden>·</span>
+                <span data-machine-platform title={machineSystemDetail(machine)}>
+                  {machinePlatformLabel(msg, machine.os)}
+                </span>
               </span>
-              <span aria-hidden>·</span>
-              <span data-machine-platform title={machineSystemDetail(machine)}>
-                {machinePlatformLabel(msg, machine.os)}
-              </span>
-              <span aria-hidden>·</span>
               <span data-machine-screen className="inline-flex items-center gap-1">
                 {machine.hasDisplay && machine.allowScreenControl ? (
                   <MonitorIcon className="size-3" aria-hidden />
