@@ -1247,8 +1247,13 @@ symlink is replaced, never a file or directory). With no shell at all, the start
 fails with the note "the shell /bin/sh is missing and no dash or bash was found",
 which Opengeni reports as a machine that cannot start programs. A missing
 workspace root or home directory used as a command's working directory is
-created again (mode 0755, handed to the run-as user when there is one) and the
-command runs; any other missing working directory is still a not-found error.
+created again and the command runs. The workspace root gets mode 0755 and stays
+owned by the agent; a home gets mode 0700 inside an existing parent and belongs
+to its user. Placeholder homes such as `/nonexistent` and `/var/empty` are never
+created, and any other missing working directory is still a not-found error.
+When the agent uses a fallback shell, it passes the shell's path to commands as
+`OPENGENI_SYSTEM_SHELL`, and Opengeni's own command wrappers start it instead of
+`/bin/sh`.
 
 ### Streaming exec (op-stream)
 

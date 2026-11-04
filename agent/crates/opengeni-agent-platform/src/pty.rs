@@ -153,6 +153,38 @@ impl PtyProcess {
     }
 }
 
+/// The program and arguments a terminal starts: the request's command, else
+/// the run-as user's login shell, else the default shell. A missing `/bin/sh`
+/// is replaced by a fallback shell, as for exec.
+fn pty_argv(
+    req: &v1::PtyOpenRequest,
+    identity: Option<&crate::run_as::RunAsIdentity>,
+    default_shell: &[String],
+) -> Vec<String> {
+    if let (true, Some(identity)) = (req.command.is_empty(), identity) {
+        // The account's login shell, or a fallback when it cannot start.
+        #[cfg(unix)]
+        let shell = crate::system_shell::usable_shell(&identity.shell);
+        #[cfg(not(unix))]
+        let shell = identity.shell.clone();
+        vec![shell.to_string_lossy().into_owned()]
+    } else if req.command.is_empty() {
+        default_shell.to_vec()
+    } else {
+        let mut argv = req.command.clone();
+        // An explicitly requested `/bin/sh` starts a fallback shell when it
+        // is gone, like exec does.
+        #[cfg(unix)]
+        if let Some(shell) = argv
+            .first()
+            .and_then(|program| crate::system_shell::substitute(std::ffi::OsStr::new(program)))
+        {
+            argv[0] = shell.to_string_lossy().into_owned();
+        }
+        argv
+    }
+}
+
 /// Allocates a PTY, spawns the requested command (or the default login shell when
 /// `command` is empty), and returns the live [`PtyProcess`].
 ///
@@ -178,18 +210,7 @@ pub fn spawn_pty(req: &v1::PtyOpenRequest, default_shell: &[String]) -> Platform
         .openpty(size)
         .map_err(|e| PlatformError::os(format!("openpty: {e}")))?;
 
-    let argv: Vec<String> = if let (true, Some(identity)) = (req.command.is_empty(), &identity) {
-        // The account's login shell, or a fallback when it cannot start.
-        #[cfg(unix)]
-        let shell = crate::system_shell::usable_shell(&identity.shell);
-        #[cfg(not(unix))]
-        let shell = identity.shell.clone();
-        vec![shell.to_string_lossy().into_owned()]
-    } else if req.command.is_empty() {
-        default_shell.to_vec()
-    } else {
-        req.command.clone()
-    };
+    let argv = pty_argv(req, identity.as_ref(), default_shell);
     if argv.is_empty() {
         return Err(PlatformError::os("pty: no command and no default shell"));
     }
@@ -212,6 +233,10 @@ pub fn spawn_pty(req: &v1::PtyOpenRequest, default_shell: &[String]) -> Platform
         for (k, v) in identity.login_env() {
             cmd.env(k, v);
         }
+    }
+    #[cfg(unix)]
+    if let Some(shell) = crate::system_shell::fallback_in_use() {
+        cmd.env(crate::system_shell::SYSTEM_SHELL_ENV, shell);
     }
     for (k, v) in &req.env {
         cmd.env(k, v);

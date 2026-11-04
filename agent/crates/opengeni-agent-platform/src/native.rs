@@ -200,12 +200,11 @@ impl NativePlatform {
     ) -> PlatformResult<PathBuf> {
         let path = self.resolve_path(cwd, identity)?;
         let mut metadata = Self::cwd_metadata(&path, identity)?;
-        if metadata
+        let missing = metadata
             .as_ref()
-            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
-            && self.is_recreatable_cwd(&path, identity)
-        {
-            match recreate_directory(&path, identity) {
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+        if let Some(kind) = self.recreatable_cwd(&path, identity).filter(|_| missing) {
+            match recreate_directory(&path, kind) {
                 Ok(()) => {
                     tracing::warn!(
                         path = %path.display(),
@@ -256,33 +255,70 @@ impl NativePlatform {
         }
     }
 
-    /// Whether `path` is a directory the agent puts back when it is missing:
-    /// the workspace root, the agent's home, or the requested user's home.
-    fn is_recreatable_cwd(&self, path: &Path, identity: Option<&RunAsIdentity>) -> bool {
-        path == self.workspace_root
-            || self.home_dir.as_deref() == Some(path)
-            || identity.is_some_and(|identity| identity.home == path)
+    /// Which directory the agent puts back when `path` is missing: the
+    /// workspace root, the agent's home, or the requested user's home. A
+    /// placeholder home such as `/nonexistent` is never created.
+    fn recreatable_cwd<'a>(
+        &self,
+        path: &Path,
+        identity: Option<&'a RunAsIdentity>,
+    ) -> Option<RecreatedCwd<'a>> {
+        if path == self.workspace_root {
+            Some(RecreatedCwd::WorkspaceRoot)
+        } else if is_placeholder_home(path) {
+            None
+        } else if self.home_dir.as_deref() == Some(path) {
+            Some(RecreatedCwd::AgentHome)
+        } else {
+            identity
+                .filter(|identity| identity.home == path)
+                .map(RecreatedCwd::UserHome)
+        }
     }
 }
 
-/// Creates the missing working directory `path` (and any missing parent) with
-/// mode 0755. For a command running as another user the agent creates it and
-/// hands the directory itself to that user, who needs to work in it.
-fn recreate_directory(path: &Path, identity: Option<&RunAsIdentity>) -> std::io::Result<()> {
+/// A missing working directory the agent creates again.
+#[derive(Clone, Copy)]
+enum RecreatedCwd<'a> {
+    /// The workspace root, created with any missing parent, mode 0755 and
+    /// owned by the agent so every user the agent runs commands as can enter
+    /// it.
+    WorkspaceRoot,
+    /// The agent's home: mode 0700, owned by the agent, parent must exist.
+    AgentHome,
+    /// The requested user's home: mode 0700, handed to that user, parent must
+    /// exist.
+    UserHome(&'a RunAsIdentity),
+}
+
+/// Home directories that exist only as a placeholder for system accounts
+/// (Debian's `nobody` uses `/nonexistent`, BSD and macOS daemons use
+/// `/var/empty`). They must stay absent or empty, so they are never created.
+fn is_placeholder_home(path: &Path) -> bool {
+    path.parent().is_none()
+        || ["/nonexistent", "/var/empty", "/dev/null"]
+            .iter()
+            .any(|placeholder| path == Path::new(placeholder))
+}
+
+/// Creates the missing working directory `path` as `kind` describes. The mode
+/// is set explicitly afterwards, so the agent's umask does not narrow it.
+fn recreate_directory(path: &Path, kind: RecreatedCwd<'_>) -> std::io::Result<()> {
     let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt as _;
-        builder.mode(0o755);
-    }
+    builder.recursive(matches!(kind, RecreatedCwd::WorkspaceRoot));
     builder.create(path)?;
     #[cfg(unix)]
-    if let Some(identity) = identity {
-        std::os::unix::fs::chown(path, Some(identity.uid), Some(identity.gid))?;
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = match kind {
+            RecreatedCwd::WorkspaceRoot => 0o755,
+            RecreatedCwd::AgentHome | RecreatedCwd::UserHome(_) => 0o700,
+        };
+        if let RecreatedCwd::UserHome(identity) = kind {
+            std::os::unix::fs::chown(path, Some(identity.uid), Some(identity.gid))?;
+        }
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
     }
-    #[cfg(not(unix))]
-    let _ = identity;
     Ok(())
 }
 
@@ -1323,6 +1359,12 @@ impl Platform for NativePlatform {
         } else {
             cmd.current_dir(cwd);
         }
+        // Scripts that start `/bin/sh` by path (Opengeni's own command
+        // wrappers among them) read the fallback from here while it is gone.
+        #[cfg(unix)]
+        if let Some(shell) = crate::system_shell::fallback_in_use() {
+            cmd.env(crate::system_shell::SYSTEM_SHELL_ENV, shell);
+        }
         for (k, v) in &req.env {
             cmd.env(k, v);
         }
@@ -2197,6 +2239,9 @@ mod tests {
         let fallback_bytes =
             std::fs::read(std::fs::canonicalize(fallback).expect("fallback")).expect("read it");
         let fallback_name = fallback.file_name().expect("a file name");
+        // Opengeni's command wrappers re-execute the shell through setsid.
+        let setsid_bytes = std::fs::read(std::fs::canonicalize(which("setsid")).expect("setsid"))
+            .expect("read setsid");
         // `mount` itself is usually in the hidden directory: keep a copy.
         let tools = tempfile::tempdir().expect("tempdir");
         let mount = tools.path().join("mount");
@@ -2226,6 +2271,10 @@ mod tests {
             std::fs::write(&kept, &fallback_bytes).expect("put the fallback back");
             std::fs::set_permissions(&kept, std::fs::Permissions::from_mode(0o755)).expect("chmod");
             assert!(executable_file(fallback));
+            let setsid = bin.join("setsid");
+            std::fs::write(&setsid, &setsid_bytes).expect("put setsid back");
+            std::fs::set_permissions(&setsid, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
         }
         if mode == "ro" {
             let remounted = std::process::Command::new(&mount)
@@ -2297,6 +2346,26 @@ mod tests {
             String::from_utf8_lossy(&response.stdout).trim(),
             "explicit-sh"
         );
+        // A wrapper that starts the shell by path, as Opengeni's command
+        // wrappers do, gets the fallback from the agent while /bin/sh is gone.
+        let response = platform
+            .exec(&ExecRequest {
+                command: vec![
+                    r#"exec setsid "${OPENGENI_SYSTEM_SHELL:-/bin/sh}" -c 'echo via-setsid'"#
+                        .to_string(),
+                ],
+                shell: true,
+                ..Default::default()
+            })
+            .await
+            .expect("a setsid re-exec runs after /bin/sh was moved away");
+        assert_eq!(
+            String::from_utf8_lossy(&response.stdout).trim(),
+            "via-setsid",
+            "exit {:?}, stderr {}",
+            response.exit_code,
+            String::from_utf8_lossy(&response.stderr)
+        );
 
         let link = std::fs::read_link(system).ok();
         if mode == "ro" {
@@ -2341,7 +2410,7 @@ mod tests {
     async fn exec_recreates_a_missing_workspace_root_or_home() {
         let parent = tempfile::tempdir().expect("tempdir");
         let root = parent.path().join("workspace");
-        let home = parent.path().join("home").join("agent");
+        let home = parent.path().join("agent-home");
         let mut platform = NativePlatform::with_root(&root);
         platform.home_dir = Some(home.clone());
         let pwd = |cwd: &str| ExecRequest {
@@ -2378,7 +2447,7 @@ mod tests {
             assert_eq!(mode & 0o777, 0o755, "{mode:o}");
         }
 
-        // The home directory (and its missing parent), through `~`.
+        // The home directory, through `~`: private to its owner.
         let request = pwd("~");
         let response = retry_transient_spawn(|| platform.exec(&request))
             .await
@@ -2388,6 +2457,22 @@ mod tests {
             reported(&response),
             std::fs::canonicalize(&home).expect("home")
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&home).expect("home").permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "{mode:o}");
+        }
+
+        // A home is only created inside an existing parent.
+        let nested = parent.path().join("homes").join("agent");
+        platform.home_dir = Some(nested.clone());
+        let error = platform
+            .exec(&pwd("~"))
+            .await
+            .expect_err("a home whose parent is gone is not created");
+        assert!(matches!(error, PlatformError::NotFound(_)), "{error}");
+        assert!(!nested.exists());
 
         // Any other missing directory is still not found, and not created.
         let other = root.join("missing-project");

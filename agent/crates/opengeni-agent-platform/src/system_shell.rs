@@ -111,8 +111,11 @@ fn may_restore() -> bool {
     }
 }
 
-/// The first fallback or missing shell is a warning; repeats are debug logs.
-static WARNED: AtomicBool = AtomicBool::new(false);
+/// The first start with a fallback that changes nothing is a warning, and so
+/// is the first start with no shell at all; repeats are debug logs. A restore
+/// that changes the filesystem is always a warning.
+static FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
+static MISSING_WARNED: AtomicBool = AtomicBool::new(false);
 
 /// The test seam behind [`system_shell`]: `system` and `fallbacks` are the
 /// paths to check, `restore` whether `system` may be pointed back at a
@@ -126,25 +129,39 @@ pub(crate) fn resolve(system: &Path, fallbacks: &[&Path], restore: bool) -> Path
             } else {
                 RestoreOutcome::NotRestored("the agent is not running as root on Linux".into())
             };
-            if WARNED.swap(true, Ordering::Relaxed) {
-                tracing::debug!(
-                    system = %system.display(),
-                    fallback = %shell.display(),
-                    ?outcome,
-                    "the system shell was missing again; commands start with a fallback shell"
-                );
-            } else {
-                tracing::warn!(
-                    system = %system.display(),
-                    fallback = %shell.display(),
-                    ?outcome,
-                    "the system shell was missing or not executable; commands start with a fallback shell"
-                );
+            match &outcome {
+                RestoreOutcome::Restored { replaced } => {
+                    tracing::warn!(
+                        system = %system.display(),
+                        fallback = %shell.display(),
+                        replaced_link = ?replaced,
+                        "the system shell was missing or not executable; the agent pointed it at a fallback shell"
+                    );
+                    return system.to_path_buf();
+                }
+                RestoreOutcome::RestoredElsewhere => return system.to_path_buf(),
+                RestoreOutcome::NotRestored(reason) => {
+                    if FALLBACK_WARNED.swap(true, Ordering::Relaxed) {
+                        tracing::debug!(
+                            system = %system.display(),
+                            fallback = %shell.display(),
+                            reason,
+                            "the system shell is still missing; commands start with a fallback shell"
+                        );
+                    } else {
+                        tracing::warn!(
+                            system = %system.display(),
+                            fallback = %shell.display(),
+                            reason,
+                            "the system shell was missing or not executable; commands start with a fallback shell"
+                        );
+                    }
+                }
             }
             shell
         }
         ShellChoice::Missing => {
-            if WARNED.swap(true, Ordering::Relaxed) {
+            if MISSING_WARNED.swap(true, Ordering::Relaxed) {
                 tracing::debug!(system = %system.display(), "no shell can be started");
             } else {
                 tracing::warn!(
@@ -160,8 +177,12 @@ pub(crate) fn resolve(system: &Path, fallbacks: &[&Path], restore: bool) -> Path
 /// The result of one restore attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RestoreOutcome {
-    /// The system shell path starts a shell again.
-    Restored,
+    /// This attempt pointed the system shell path at the fallback, replacing
+    /// a symlink to `replaced` when there was one.
+    Restored { replaced: Option<PathBuf> },
+    /// The path starts a shell again without this attempt changing it
+    /// (another start, or something on the machine, put it back).
+    RestoredElsewhere,
     /// It was left as it is, and why.
     NotRestored(String),
 }
@@ -170,46 +191,75 @@ pub(crate) enum RestoreOutcome {
 static RESTORE: Mutex<()> = Mutex::new(());
 
 /// Points `system` at `shell` with a symlink. Only an empty path or a symlink
-/// (dangling, or to a shell that no longer starts) is replaced, atomically by a
-/// rename; a file or directory someone put there is left alone, since it may
-/// hold data.
+/// (dangling, or to a shell that no longer starts) is replaced; a file or
+/// directory someone put there is left alone, since it may hold data. An empty
+/// path gets the link directly, which fails rather than replaces anything that
+/// appears meanwhile; a symlink is replaced atomically by a rename.
 fn restore_link(system: &Path, shell: &Path) -> RestoreOutcome {
     let _guard = RESTORE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     // Another start may have restored it while this one waited.
     if is_executable(system) {
-        return RestoreOutcome::Restored;
+        return RestoreOutcome::RestoredElsewhere;
     }
-    match std::fs::symlink_metadata(system) {
-        Ok(meta) if meta.file_type().is_symlink() => {}
+    let replaced = match std::fs::symlink_metadata(system) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            Some(std::fs::read_link(system).unwrap_or_default())
+        }
         Ok(meta) if meta.is_dir() => {
             return RestoreOutcome::NotRestored("a directory is at the path".to_string());
         }
         Ok(_) => return RestoreOutcome::NotRestored("a file is at the path".to_string()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return RestoreOutcome::NotRestored(format!("inspect the path: {error}")),
-    }
-    let (Some(parent), Some(name)) = (system.parent(), system.file_name()) else {
-        return RestoreOutcome::NotRestored("the path has no parent directory".to_string());
     };
-    let mut staged_name = std::ffi::OsString::from(".");
-    staged_name.push(name);
-    staged_name.push(format!(".opengeni-{}", std::process::id()));
-    let staged = parent.join(staged_name);
-    let _ = std::fs::remove_file(&staged);
-    if let Err(error) = std::os::unix::fs::symlink(shell, &staged) {
-        return RestoreOutcome::NotRestored(format!("create the link: {error}"));
-    }
-    if let Err(error) = std::fs::rename(&staged, system) {
+    if replaced.is_none() {
+        match std::os::unix::fs::symlink(shell, system) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return if is_executable(system) {
+                    RestoreOutcome::RestoredElsewhere
+                } else {
+                    RestoreOutcome::NotRestored("something else appeared at the path".to_string())
+                };
+            }
+            Err(error) => return RestoreOutcome::NotRestored(format!("create the link: {error}")),
+        }
+    } else {
+        let (Some(parent), Some(name)) = (system.parent(), system.file_name()) else {
+            return RestoreOutcome::NotRestored("the path has no parent directory".to_string());
+        };
+        let mut staged_name = std::ffi::OsString::from(".");
+        staged_name.push(name);
+        staged_name.push(format!(".opengeni-{}", std::process::id()));
+        let staged = parent.join(staged_name);
         let _ = std::fs::remove_file(&staged);
-        return RestoreOutcome::NotRestored(format!("put the link in place: {error}"));
+        if let Err(error) = std::os::unix::fs::symlink(shell, &staged) {
+            return RestoreOutcome::NotRestored(format!("create the link: {error}"));
+        }
+        if let Err(error) = std::fs::rename(&staged, system) {
+            let _ = std::fs::remove_file(&staged);
+            return RestoreOutcome::NotRestored(format!("put the link in place: {error}"));
+        }
     }
     if is_executable(system) {
-        RestoreOutcome::Restored
+        RestoreOutcome::Restored { replaced }
     } else {
         RestoreOutcome::NotRestored("the path still does not start a shell".to_string())
     }
+}
+
+/// The environment variable that tells a command which shell to start instead
+/// of `/bin/sh` while `/bin/sh` cannot be started. Opengeni's own command
+/// wrappers read it; it is only set while a fallback is in use.
+pub(crate) const SYSTEM_SHELL_ENV: &str = "OPENGENI_SYSTEM_SHELL";
+
+/// The fallback shell in use, when [`SYSTEM_SHELL`] cannot be started and
+/// could not be restored.
+pub(crate) fn fallback_in_use() -> Option<PathBuf> {
+    let shell = system_shell();
+    (shell != Path::new(SYSTEM_SHELL)).then_some(shell)
 }
 
 /// A short note for a failed process start when no shell exists, so the error
@@ -285,16 +335,32 @@ mod tests {
         let dash = real_shell();
 
         let missing = dir.path().join("sh");
-        assert_eq!(resolve(&missing, &[dash.as_path()], true), dash);
+        assert_eq!(
+            restore_link(&missing, &dash),
+            RestoreOutcome::Restored { replaced: None }
+        );
         assert_eq!(std::fs::read_link(&missing).expect("a link"), dash);
         assert!(is_executable(&missing));
         // Once restored, the system shell is started again.
+        assert_eq!(
+            restore_link(&missing, &dash),
+            RestoreOutcome::RestoredElsewhere
+        );
         assert_eq!(resolve(&missing, &[dash.as_path()], true), missing);
 
         let dangling = dir.path().join("dangling-sh");
-        std::os::unix::fs::symlink(dir.path().join("moved-away"), &dangling).expect("symlink");
-        assert_eq!(resolve(&dangling, &[dash.as_path()], true), dash);
+        let moved_away = dir.path().join("moved-away");
+        std::os::unix::fs::symlink(&moved_away, &dangling).expect("symlink");
+        assert_eq!(resolve(&dangling, &[dash.as_path()], true), dangling);
         assert_eq!(std::fs::read_link(&dangling).expect("a link"), dash);
+        let relinked = dir.path().join("relinked-sh");
+        std::os::unix::fs::symlink(&moved_away, &relinked).expect("symlink");
+        assert_eq!(
+            restore_link(&relinked, &dash),
+            RestoreOutcome::Restored {
+                replaced: Some(moved_away)
+            }
+        );
         // No staging link is left behind.
         let leftovers: Vec<_> = std::fs::read_dir(dir.path())
             .expect("read dir")
@@ -322,6 +388,8 @@ mod tests {
             restore_link(&directory, &dash),
             RestoreOutcome::NotRestored("a directory is at the path".to_string())
         );
+        // Without restore, the fallback is reported for commands to start.
+        assert_eq!(resolve(&directory, &[dash.as_path()], false), dash);
         assert!(directory.is_dir());
     }
 

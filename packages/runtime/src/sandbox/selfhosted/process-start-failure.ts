@@ -18,13 +18,16 @@ const TAIL_LIMIT = 300;
 /** The longest OS error kept from an older agent's message. */
 const CAUSE_LIMIT = 200;
 
-/** The notes newer agents add before the OS error when the machine itself
- * cannot start programs: a missing `/dev/null`, or no shell at all. */
 /** The note an agent adds when neither `/bin/sh` nor a dash or bash
  * fallback can be started. A restart does not bring a shell back. */
 export const MISSING_SHELL_NOTE = "the shell /bin/sh is missing and no dash or bash was found";
+
+/** The notes newer agents add before the OS error when the machine itself
+ * cannot start programs: a missing `/dev/null`, or no shell at all. */
 const MACHINE_NOTE_TEXTS = ["the null device /dev/null is missing", MISSING_SHELL_NOTE] as const;
-const MACHINE_NOTE_ALTERNATIVES = MACHINE_NOTE_TEXTS.join("|");
+const MACHINE_NOTE_ALTERNATIVES = MACHINE_NOTE_TEXTS.map((note) =>
+  note.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+).join("|");
 const MACHINE_NOTE = new RegExp(`\\((${MACHINE_NOTE_ALTERNATIVES})\\)`);
 
 /** A newer agent's quoted program: `program "<name>"`, then the end, `: <OS

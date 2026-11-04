@@ -2,7 +2,16 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { Tool } from "@openai/agents";
 import { Manifest, shell } from "@openai/agents/sandbox";
 import { UnixLocalSandboxClient } from "@openai/agents/sandbox/local";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -792,6 +801,62 @@ describe("turn sandbox-tool physical cancellation fence", () => {
         expect(synchronousRefused.exitCode).toBe(125);
         expect(synchronousRefused.stdout).toBe("");
         expect(existsSync(`${markerPath}-sync`)).toBe(false);
+      } finally {
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.skipIf(Bun.which("setsid") === null || Bun.which("python3") === null)(
+    "starts the agent's fallback shell from OPENGENI_SYSTEM_SHELL in a new session",
+    async () => {
+      const binDir = mkdtempSync(join(tmpdir(), "opengeni-fallback-shell-"));
+      const markerPath = `/tmp/opengeni-turn-shell/test-${crypto.randomUUID()}`;
+      const fallback = join(binDir, "fallback-sh");
+      const started = join(binDir, "started");
+      // Stands in for the dash the agent found: records each start, then runs
+      // the real shell.
+      writeFileSync(fallback, `#!/bin/sh\nprintf x >> '${started}'\nexec /bin/sh "$@"\n`);
+      chmodSync(fallback, 0o755);
+      try {
+        for (const executable of ["mkdir", "rm", "ps", "tr", "setsid", "python3"]) {
+          symlinkSync(Bun.which(executable)!, join(binDir, executable));
+        }
+        const run = async (cmd: string) => {
+          const child = Bun.spawn(["/bin/sh", "-c", cmd], {
+            env: { ...process.env, PATH: binDir, OPENGENI_SYSTEM_SHELL: fallback },
+            stdin: "ignore",
+            stdout: "pipe",
+            stderr: "pipe",
+          });
+          const [stdout, stderr, exitCode] = await Promise.all([
+            new Response(child.stdout).text(),
+            new Response(child.stderr).text(),
+            child.exited,
+          ]);
+          return { stdout, stderr, exitCode };
+        };
+        const command = "printf isolated";
+        for (const [wrapper, marker] of [
+          [cancellableShellCommand, markerPath],
+          [cancellableSynchronousShellCommand, `${markerPath}-sync`],
+        ] as const) {
+          const viaSetsid = await run(wrapper(command, marker));
+          expect(viaSetsid.exitCode, viaSetsid.stderr).toBe(0);
+          expect(viaSetsid.stdout).toBe("isolated");
+        }
+        expect(readFileSync(started, "utf8")).toBe("xx");
+        // macOS has no setsid executable; the Python fallback reads it too.
+        rmSync(join(binDir, "setsid"));
+        for (const [wrapper, marker] of [
+          [cancellableShellCommand, markerPath],
+          [cancellableSynchronousShellCommand, `${markerPath}-sync`],
+        ] as const) {
+          const viaPython = await run(wrapper(command, marker));
+          expect(viaPython.exitCode, viaPython.stderr).toBe(0);
+          expect(viaPython.stdout).toBe("isolated");
+        }
+        expect(readFileSync(started, "utf8")).toBe("xxxx");
       } finally {
         rmSync(binDir, { recursive: true, force: true });
       }
