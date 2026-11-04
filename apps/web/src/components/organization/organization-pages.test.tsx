@@ -1228,7 +1228,9 @@ describe("Workspace page", () => {
     await flush();
     expect(listOpenGeniSlackAgents).toHaveBeenCalledWith("workspace-a");
     const confirm = view.container.querySelector('[data-testid="confirm"]');
-    expect(confirm?.textContent).toContain("Its Slack agents are deleted too: Data team, Release.");
+    expect(confirm?.textContent).toContain(
+      "Its agents stop answering in Slack: Data team, Release.",
+    );
     expect(confirm?.textContent).not.toContain("Elsewhere");
     await view.unmount();
   });
@@ -1252,7 +1254,7 @@ describe("Workspace page", () => {
     await act(async () => remove.click());
     await flush();
     const confirm = view.container.querySelector('[data-testid="confirm"]');
-    expect(confirm?.textContent).toContain("Its chats, files, automations and knowledge");
+    expect(confirm?.textContent).toContain("Its chats, files, automations, agents and knowledge");
     expect(confirm?.textContent).not.toContain("Slack agents");
     await view.unmount();
   });

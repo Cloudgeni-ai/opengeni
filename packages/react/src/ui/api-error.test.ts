@@ -146,12 +146,12 @@ describe("api errors in product words", () => {
     // The toast Bendik saw, from the archive refusal.
     const archive = apiError(
       409,
-      "This chat can't be archived. \"Keep this chat active\" is on. Turn it off in the chat's Agent tab first.",
+      "This chat can't be archived. \"Keep this chat active\" is on. Turn it off in the chat's Settings tab first.",
       "session_archive_blocked",
     );
     expect(archive.message).toStartWith("API 409: ");
     expect(userErrorText(archive)).toBe(
-      "This chat can't be archived. \"Keep this chat active\" is on. Turn it off in the chat's Agent tab first.",
+      "This chat can't be archived. \"Keep this chat active\" is on. Turn it off in the chat's Settings tab first.",
     );
     for (const status of [400, 401, 403, 404, 422, 429]) {
       expect(userErrorText(apiError(status, "nope"))).not.toContain(REFERENCE);

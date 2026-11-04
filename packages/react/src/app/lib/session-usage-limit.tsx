@@ -1,6 +1,6 @@
 // Per-task usage limits in the console: whether the server offers them, the
 // dollar input, save-error wording, and one shared read of a task's limit so
-// the composer notice and the Agent tab never disagree.
+// the composer notice and the Settings tab never disagree.
 //
 // Amounts are API-equivalent model usage in USD micros (a list-price
 // estimate), not the bill. The server enforces the limit before each model
@@ -172,7 +172,7 @@ export function classifySessionUsageLimitSaveError(error: unknown): SessionUsage
 
 /* ----------------------------------------------------------------------------
    Opening the editor. The header's overflow menu and the composer notice ask
-   for it without owning the Agent tab: the session route listens and opens
+   for it without owning the Settings tab: the session route listens and opens
    the tab at Usage limit.
    -------------------------------------------------------------------------- */
 

@@ -7,9 +7,10 @@
  * agents became agents with the same ids, so `?botTemplateId=` links still
  * start a chat with one.
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   BotTemplateFile,
+  PortableSessionAvatar,
   type Agent,
   type AgentChat,
   type AgentChatsFilter,
@@ -49,6 +50,15 @@ export function useAgents(
   const [supported, setSupported] = useState(true);
   const [error, setError] = useState<Error | null>(null);
   const [attempt, setAttempt] = useState(0);
+  // Another list (All or Yours, another workspace) starts empty rather than
+  // showing the previous one under the new heading.
+  const listKey = `${workspaceId}:${filter}`;
+  const [shownKey, setShownKey] = useState(listKey);
+  if (shownKey !== listKey) {
+    setShownKey(listKey);
+    setAgents(undefined);
+    setError(null);
+  }
   useEffect(() => {
     if (!enabled) return;
     let live = true;
@@ -150,10 +160,16 @@ export function useAgentChats(
   const [error, setError] = useState<Error | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  // Each read of the first page starts a generation; a "Show more" from an
+  // earlier one (another filter) is dropped when it answers.
+  const generation = useRef(0);
   useEffect(() => {
     let live = true;
+    generation.current += 1;
     setChats(undefined);
+    setCursor(null);
     setError(null);
+    setLoadingMore(false);
     client.listAgentChats(workspaceId, agentId, { filter, limit: AGENT_CHATS_PAGE }).then(
       (page) => {
         if (!live) return;
@@ -175,17 +191,23 @@ export function useAgentChats(
   const loadMore =
     cursor && !loadingMore
       ? () => {
+          const started = generation.current;
           setLoadingMore(true);
           client
             .listAgentChats(workspaceId, agentId, { filter, cursor, limit: AGENT_CHATS_PAGE })
             .then(
               (page) => {
+                if (generation.current !== started) return;
                 setChats((current) => [...(current ?? []), ...page.chats]);
                 setCursor(page.nextCursor);
               },
-              (reason: unknown) => setError(asError(reason)),
+              (reason: unknown) => {
+                if (generation.current === started) setError(asError(reason));
+              },
             )
-            .finally(() => setLoadingMore(false));
+            .finally(() => {
+              if (generation.current === started) setLoadingMore(false);
+            });
         }
       : null;
   return { chats, error, loadMore, loadingMore, reload };
@@ -240,7 +262,74 @@ export function agentErrorCode(error: unknown): string | null {
   return typeof code === "string" ? code : null;
 }
 
-/** The create request in a `.bot.json` file, or why it isn't one. Its setup text becomes the First message. */
+export const AGENT_FILE_FORMAT = "opengeni.agent";
+
+/**
+ * An agent as a file, to bring it to another workspace: what it is and what it
+ * follows, without ids, owner, chats, Memory contents or Slack. An image
+ * icon becomes the name's initials.
+ */
+export type AgentFile = {
+  format: typeof AGENT_FILE_FORMAT;
+  version: 1;
+  name: string;
+  description: string;
+  avatar: CreateAgentRequest["avatar"];
+  instructions: string;
+  firstMessage: string;
+  memoryEnabled: boolean;
+};
+
+export function agentFile(agent: Agent): AgentFile {
+  return {
+    format: AGENT_FILE_FORMAT,
+    version: 1,
+    name: agent.name,
+    description: agent.description,
+    avatar: agent.avatar && agent.avatar.kind !== "image" ? agent.avatar : null,
+    instructions: agent.instructions,
+    firstMessage: agent.firstMessage,
+    memoryEnabled: agent.memory.enabled,
+  };
+}
+
+export function agentFileName(agent: Pick<Agent, "name">): string {
+  const slug = agent.name
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[^\p{L}\p{N}]+/gu, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60);
+  return `${slug || "agent"}.agent.json`;
+}
+
+/** Download an agent as a file someone can import into their workspace. */
+export function downloadAgentFile(agent: Agent): void {
+  const blob = new Blob([`${JSON.stringify(agentFile(agent), null, 2)}\n`], {
+    type: "application/json",
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = agentFileName(agent);
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+const NOT_AN_AGENT = "This file isn't an agent. Choose an .agent.json or .bot.json file.";
+const UNREADABLE = "This version can't read this file. Export it again, then import that file.";
+
+function optionalText(value: unknown): string | undefined | null {
+  return value === undefined ? undefined : typeof value === "string" ? value : null;
+}
+
+/**
+ * The create request in an `.agent.json` file, or in an older bot template's
+ * `.bot.json` (its setup text becomes the First message), or why it isn't one.
+ * Lengths are left to the server, which says what it can't take.
+ */
 export function parseAgentFile(
   text: string,
 ): { ok: true; request: CreateAgentRequest } | { ok: false; error: string } {
@@ -248,13 +337,47 @@ export function parseAgentFile(
   try {
     raw = JSON.parse(text);
   } catch {
-    return { ok: false, error: "This file isn't an agent. Choose a .bot.json file." };
+    return { ok: false, error: NOT_AN_AGENT };
+  }
+  if (raw !== null && typeof raw === "object" && "format" in raw) {
+    const file = raw as Record<string, unknown>;
+    if (file.format === AGENT_FILE_FORMAT) {
+      if (file.version !== 1) return { ok: false, error: UNREADABLE };
+      const description = optionalText(file.description);
+      const instructions = optionalText(file.instructions);
+      const firstMessage = optionalText(file.firstMessage);
+      const avatar =
+        file.avatar === undefined || file.avatar === null
+          ? null
+          : PortableSessionAvatar.safeParse(file.avatar);
+      if (
+        typeof file.name !== "string" ||
+        description === null ||
+        instructions === null ||
+        firstMessage === null ||
+        (file.memoryEnabled !== undefined && typeof file.memoryEnabled !== "boolean") ||
+        (avatar !== null && !avatar.success)
+      ) {
+        return { ok: false, error: UNREADABLE };
+      }
+      return {
+        ok: true,
+        request: {
+          name: file.name,
+          ...(description !== undefined ? { description } : {}),
+          avatar: avatar?.success ? avatar.data : null,
+          ...(instructions !== undefined ? { instructions } : {}),
+          ...(firstMessage !== undefined ? { firstMessage } : {}),
+          ...(typeof file.memoryEnabled === "boolean" ? { memoryEnabled: file.memoryEnabled } : {}),
+        },
+      };
+    }
   }
   const parsed = BotTemplateFile.safeParse(raw);
   if (!parsed.success) {
     return {
       ok: false,
-      error: "This version can't read this file. Export it again, then import that file.",
+      error: raw !== null && typeof raw === "object" && "format" in raw ? UNREADABLE : NOT_AN_AGENT,
     };
   }
   const file = parsed.data;
@@ -284,29 +407,4 @@ export function duplicateAgentNames(agents: readonly Pick<AgentSummary, "name">[
     else seen.set(key, { name: agent.name.trim(), count: 1 });
   }
   return [...seen.values()].filter((entry) => entry.count > 1).map((entry) => entry.name);
-}
-
-/**
- * The First message this page put in a new chat's composer, kept per
- * workspace for the browser session. After a reload without the agent in the
- * URL, a composer that still holds exactly that text is cleared instead of
- * starting an ordinary chat with it.
- */
-const PREFILL_KEY = "opengeni.agentFirstMessage.";
-
-export function rememberAgentPrefill(workspaceId: string, text: string | null): void {
-  try {
-    if (text === null) window.sessionStorage.removeItem(PREFILL_KEY + workspaceId);
-    else window.sessionStorage.setItem(PREFILL_KEY + workspaceId, text);
-  } catch {
-    // Storage can be unavailable (private mode); the prefill just isn't remembered.
-  }
-}
-
-export function rememberedAgentPrefill(workspaceId: string): string | null {
-  try {
-    return window.sessionStorage.getItem(PREFILL_KEY + workspaceId);
-  } catch {
-    return null;
-  }
 }

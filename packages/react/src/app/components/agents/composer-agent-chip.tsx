@@ -19,6 +19,7 @@ import {
 } from "../../../ui/dropdown-menu";
 import { Skeleton } from "../../../ui/skeleton";
 import { agentAvatar } from "../../lib/agent-avatar";
+import { AGENT_ONLY_ME_UNAVAILABLE } from "../../lib/composer-agent";
 import { cn } from "../../lib/utils";
 import { BrandMark } from "../brand-mark";
 import { SessionAvatar } from "../session/session-avatar";
@@ -27,7 +28,14 @@ import { SessionAvatar } from "../session/session-avatar";
 export type ComposerAgentSelection =
   | { kind: "loading"; id: string }
   | { kind: "ready"; id: string; name: string; avatar: SessionAvatarValue }
-  | { kind: "error"; id: string; message: string };
+  /** It can't start a chat: not found, not loaded, or not usable here (then with its name). */
+  | {
+      kind: "error";
+      id: string;
+      message: string;
+      name?: string | undefined;
+      avatar?: SessionAvatarValue | undefined;
+    };
 
 /** How many agents the menu lists; Browse agents opens the rest. */
 const LISTED = 8;
@@ -39,6 +47,7 @@ export function ComposerAgentChip({
   disabled,
   onSelect,
   onBrowse,
+  onlyMeUnavailable = false,
   className,
 }: {
   workspaceId: string;
@@ -49,6 +58,8 @@ export function ComposerAgentChip({
   disabled: boolean;
   onSelect: (agentId: string | null) => void;
   onBrowse: () => void;
+  /** Only me chats aren't available here, so Only me agents can't be chosen. */
+  onlyMeUnavailable?: boolean | undefined;
   className?: string | undefined;
 }) {
   const selectedId = selection?.id ?? null;
@@ -65,8 +76,10 @@ export function ComposerAgentChip({
       : selection.kind === "ready"
         ? selection.name
         : selection.kind === "error"
-          ? "Agent unavailable"
+          ? (selection.name ?? "Agent unavailable")
           : "Agent";
+  const avatar =
+    selection?.kind === "ready" || selection?.kind === "error" ? selection.avatar : undefined;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -81,15 +94,16 @@ export function ComposerAgentChip({
           className={cn(
             "h-8 min-w-0 max-w-[14rem] shrink gap-1.5 overflow-hidden rounded-full border border-transparent px-2.5 text-xs text-fg-muted hover:border-border hover:bg-surface-2 hover:text-fg data-[state=open]:border-border data-[state=open]:bg-surface-2 data-[state=open]:text-fg",
             selection !== null && "border-border bg-surface text-fg",
+            selection?.kind === "error" && "border-danger/40 text-danger",
             className,
           )}
         >
           {selection === null ? (
             <BrandMark className="w-3.5" />
-          ) : selection.kind === "ready" ? (
+          ) : avatar ? (
             <SessionAvatar
-              avatar={selection.avatar}
-              name={selection.name}
+              avatar={avatar}
+              name={label}
               workspaceId={workspaceId}
               seed={selection.id}
               size="xs"
@@ -120,7 +134,12 @@ export function ComposerAgentChip({
             <DropdownMenuItem
               key={agent.id}
               onSelect={() => onSelect(agent.id)}
-              title={agent.description || undefined}
+              disabled={onlyMeUnavailable && agent.visibility === "private"}
+              title={
+                onlyMeUnavailable && agent.visibility === "private"
+                  ? AGENT_ONLY_ME_UNAVAILABLE
+                  : agent.description || undefined
+              }
             >
               <SessionAvatar
                 avatar={agentAvatar(agent)}

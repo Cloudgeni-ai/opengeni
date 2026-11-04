@@ -78,14 +78,14 @@ describe("session control surface architecture", () => {
     expect(plus).not.toContain("setSettingsOpen");
   });
 
-  test("an existing chat's Chat settings opens the dock's Agent tab at Agent learning", async () => {
+  test("an existing chat's Chat settings opens the dock's Settings tab at Agent learning", async () => {
     const route = await source("../../../packages/react/src/app/routes/session.tsx");
     // The composer hands the click to the route, which opens the dock...
     expect(route).toContain("onOpen: props.onOpenAgentSettings,");
-    // (Only where the dock exists: an embed without it has no Agent tab to open.)
+    // (Only where the dock exists: an embed without it has no Settings tab to open.)
     expect(route).toContain("onOpenAgentSettings={dockEnabled ? openAgentSettings : undefined}");
     expect(route).toContain("openAgentSettingsRequest={");
-    // ...on its Agent tab (always present for a loaded chat), focused on Agent learning.
+    // ...on its Settings tab (always present for a loaded chat), focused on Agent learning.
     expect(route).toContain('tab: "agent",');
     expect(route).toContain("openTabRequest={currentTabRequest}");
     expect(route).toContain("learningFocusRequest={agentLearningFocus}");

@@ -5,7 +5,7 @@
  * Slack integration's own pieces.
  */
 import { useState, type ReactNode } from "react";
-import { MessageSquareIcon, PencilIcon } from "lucide-react";
+import { DownloadIcon, MessageSquareIcon, PencilIcon } from "lucide-react";
 import type { Agent, AgentChat, AgentChatsFilter } from "@opengeni/contracts";
 
 import { apiErrorDetails, userErrorText } from "../../../ui/api-error";
@@ -22,7 +22,7 @@ import { SettingDangerRow, SettingRow } from "../../../ui/setting-row";
 import { Switch } from "../../../ui/switch";
 import { useAppContext } from "../../app-context";
 import { agentAvatar } from "../../lib/agent-avatar";
-import { agentErrorCode, useAgent, useAgentChats } from "../../lib/agents";
+import { agentErrorCode, downloadAgentFile, useAgent, useAgentChats } from "../../lib/agents";
 import { useNavigate } from "../../lib/navigation";
 import { forgetSessionAgent } from "../../lib/session-agent";
 import { toast } from "../../lib/toast";
@@ -311,6 +311,17 @@ export function AgentPage({
         meta={agent.description ? [agent.description] : undefined}
         actions={
           <>
+            <Button
+              type="button"
+              variant="outline"
+              size="icon-sm"
+              className="pointer-coarse:size-11"
+              aria-label="Export"
+              title="Export as a file to import in another workspace"
+              onClick={() => downloadAgentFile(agent)}
+            >
+              <DownloadIcon />
+            </Button>
             {agent.viewer.canEdit ? (
               <Button
                 type="button"

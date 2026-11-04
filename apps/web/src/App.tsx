@@ -28,6 +28,7 @@
 //   /workspaces/:id/agents/new               → new agent (?sourceSessionId: Make this an agent)
 //   /workspaces/:id/agents/:agentId          → one agent (chats, instructions, memory, Slack)
 //   /workspaces/:id/agents/:agentId/edit     → edit agent
+//   /workspaces/:id/agents/:agentId/introduce/:connectionId → introduce it in Slack channels
 //   /workspaces/:id/bot-templates            → old links, redirect to agents
 //   /workspaces/:id/schedules[/…]            → old links, redirect to the same automation page
 //   /workspaces/:id/meetings                 → meetings list with the recorder
@@ -272,6 +273,10 @@ const LazyAgentsRoute = lazyRouteComponent(() => import("@/routes/agents"), "Age
 const LazyAgentRoute = lazyRouteComponent(() => import("@/routes/agents"), "AgentRoute");
 const LazyNewAgentRoute = lazyRouteComponent(() => import("@/routes/agents"), "NewAgentRoute");
 const LazyEditAgentRoute = lazyRouteComponent(() => import("@/routes/agents"), "EditAgentRoute");
+const LazyAgentSlackIntroRoute = lazyRouteComponent(
+  () => import("@/routes/agents"),
+  "AgentSlackIntroRoute",
+);
 const LazySessionRoute = lazyRouteComponent(() => import("@/routes/session-route"), "SessionRoute");
 const LazyPlaygroundRoute = lazyRouteComponent(
   () => import("@/routes/playground"),
@@ -807,6 +812,11 @@ const workspaceAgentEditRoute = createRoute({
   path: "agents/$agentId/edit",
   component: AgentEdit,
 });
+const workspaceAgentIntroRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "agents/$agentId/introduce/$connectionId",
+  component: AgentIntro,
+});
 // Bot templates became agents; old links land on Agents.
 const workspaceBotTemplatesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -1125,6 +1135,7 @@ const routeTree = rootRoute.addChildren([
     workspaceAgentNewRoute,
     workspaceAgentDetailRoute,
     workspaceAgentEditRoute,
+    workspaceAgentIntroRoute,
     workspaceBotTemplatesRoute,
     workspaceLegacySchedulesRoute,
     workspaceLegacyScheduleNewRoute,
@@ -1402,6 +1413,17 @@ function AgentDetail() {
 function AgentEdit() {
   const { workspaceId, agentId } = workspaceAgentEditRoute.useParams();
   return <LazyEditAgentRoute workspaceId={workspaceId} agentId={agentId} />;
+}
+
+function AgentIntro() {
+  const { workspaceId, agentId, connectionId } = workspaceAgentIntroRoute.useParams();
+  return (
+    <LazyAgentSlackIntroRoute
+      workspaceId={workspaceId}
+      agentId={agentId}
+      connectionId={connectionId}
+    />
+  );
 }
 
 function BotTemplatesRedirect() {

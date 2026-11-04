@@ -104,7 +104,7 @@ export function AgentsPage({ workspaceId }: { workspaceId: string }) {
         variant="outline"
         size="sm"
         className="pointer-coarse:h-11"
-        title="Import a .bot.json file"
+        title="Import an .agent.json or .bot.json file"
         onClick={() => fileInput.current?.click()}
       >
         <UploadIcon />

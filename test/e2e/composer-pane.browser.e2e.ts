@@ -173,7 +173,7 @@ describe("console composer in a split desktop pane", () => {
     }
   }, 60_000);
 
-  test("existing-chat settings open the Agent tab instead of a duplicate popover", async () => {
+  test("existing-chat settings open the Settings tab instead of a duplicate popover", async () => {
     await page.setViewportSize({ width: 1000, height: 900 });
     await page.goto(page.url().split("?")[0], { waitUntil: "networkidle" });
     const plus = page.getByRole("button", { name: "More composer actions" });
@@ -181,7 +181,7 @@ describe("console composer in a split desktop pane", () => {
     const settings = page.getByRole("menuitem", { name: /^Chat settings\b/ });
     await settings.waitFor();
     expect(await settings.count()).toBe(1);
-    expect(await settings.textContent()).toContain("Agent tab");
+    expect(await settings.textContent()).toContain("Settings tab");
     expect(await page.getByRole("menuitem", { name: /Voice model/ }).count()).toBe(0);
     await settings.click();
     await page.getByRole("menu").waitFor({ state: "hidden" });

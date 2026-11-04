@@ -311,7 +311,7 @@ export async function requestSessionArchive(
         if (restored) toast.success("Archive undone.");
         else {
           toast.warning("Archive undone, but “Keep this chat active” is still off.", {
-            description: "Turn it on in the chat's Agent tab.",
+            description: "Turn it on in the chat's Settings tab.",
           });
         }
       });

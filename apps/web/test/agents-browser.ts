@@ -79,6 +79,23 @@ const shots: Shot[] = [
     ready: (page) => page.getByRole("button", { name: /^Chat with:/ }).waitFor(),
   },
   {
+    name: "composer-only-me-agent",
+    view: "composer-only-me",
+    height: 700,
+    ready: (page) => page.getByRole("button", { name: "Visibility: Only me" }).waitFor(),
+    act: async (page) => {
+      await page.getByRole("button", { name: "Visibility: Only me" }).click();
+      await page.getByText("Only me agents have Only me chats.").waitFor();
+    },
+  },
+  {
+    name: "composer-agent-unavailable-mobile",
+    view: "composer-only-me&private=off",
+    width: 390,
+    height: 700,
+    ready: text("Only me agents need Only me chats"),
+  },
+  {
     name: "agent-chat-header",
     view: "header",
     height: 200,

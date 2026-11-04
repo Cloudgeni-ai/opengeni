@@ -64,6 +64,32 @@ const EMPTY: AgentFormValues = {
   visibility: "workspace",
 };
 
+export const ONLY_ME_UNAVAILABLE = "Only me chats aren't available here.";
+
+/** The count beside a field once it is near its limit. */
+export function lengthCount(value: string, max: number): string | undefined {
+  return value.length >= max * 0.9
+    ? `${value.length.toLocaleString("en-US")} / ${max.toLocaleString("en-US")}`
+    : undefined;
+}
+
+/** Why a field is too long, in words; undefined when it fits. */
+export function lengthError(value: string, max: number): string | undefined {
+  const length = value.trim().length;
+  return length > max
+    ? `Shorten it to ${max.toLocaleString("en-US")} characters. It has ${length.toLocaleString("en-US")}.`
+    : undefined;
+}
+
+type FormErrors = {
+  name?: string;
+  description?: string;
+  instructions?: string;
+  firstMessage?: string;
+  emoji?: string;
+  letters?: string;
+};
+
 /** What a refusal means here, in words; null for errors the form shows as they come. */
 export function agentSaveErrorText(error: unknown): string | null {
   switch (agentErrorCode(error)) {
@@ -94,11 +120,41 @@ export function agentChanges(agent: Agent, values: AgentFormValues): UpdateAgent
   return change;
 }
 
+function optionalError<K extends keyof FormErrors>(
+  key: K,
+  error: string | undefined,
+): Partial<FormErrors> {
+  return error ? { [key]: error } : {};
+}
+
+/** Whether this workspace can start Only me chats; undefined until known. */
+function usePrivateChatsAvailable(workspaceId: string): boolean | undefined {
+  const { client } = useAppContext();
+  const [available, setAvailable] = useState<boolean | undefined>(undefined);
+  useEffect(() => {
+    let live = true;
+    client.getSessionTenancyCreateCapabilities(workspaceId).then(
+      (capabilities) => {
+        if (live) setAvailable(capabilities.canCreatePrivate);
+      },
+      // Unknown: the server says so if it refuses.
+      () => {
+        if (live) setAvailable(undefined);
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [client, workspaceId]);
+  return available;
+}
+
 function AgentForm({
   workspaceId,
   agent,
   initial,
   sourceSessionId,
+  sourceTitle,
   onClose,
   onSaved,
 }: {
@@ -107,10 +163,13 @@ function AgentForm({
   agent?: Agent | undefined;
   initial: AgentFormValues;
   sourceSessionId?: string | null | undefined;
+  /** The chat it is made from, for the back link. */
+  sourceTitle?: string | undefined;
   onClose: () => void;
   onSaved: (agent: Agent) => void;
 }) {
   const { client, workspaces } = useAppContext();
+  const privateChats = usePrivateChatsAvailable(workspaceId);
   const seedKey = agent?.id ?? sourceSessionId ?? "new-agent";
   const [name, setName] = useState(initial.name);
   const [description, setDescription] = useState(initial.description);
@@ -126,7 +185,7 @@ function AgentForm({
     ),
   );
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [errors, setErrors] = useState<{ name?: string; emoji?: string; letters?: string }>({});
+  const [errors, setErrors] = useState<FormErrors>({});
   const workspaceName =
     workspaces.find((row) => row.id === (agent?.workspaceId ?? workspaceId))?.name ?? null;
   const inSlack = (agent?.slack.length ?? 0) > 0;
@@ -143,13 +202,17 @@ function AgentForm({
   });
 
   function validate(): boolean {
-    const next = {
-      ...(name.trim() ? {} : { name: "Give it a name." }),
+    const nameError = name.trim() ? lengthError(name, AGENT_NAME_MAX_LENGTH) : "Give it a name.";
+    const next: FormErrors = {
+      ...(nameError ? { name: nameError } : {}),
+      ...optionalError("description", lengthError(description, AGENT_DESCRIPTION_MAX_LENGTH)),
+      ...optionalError("instructions", lengthError(instructions, AGENT_INSTRUCTIONS_MAX_LENGTH)),
+      ...optionalError("firstMessage", lengthError(firstMessage, AGENT_FIRST_MESSAGE_MAX_LENGTH)),
       ...sessionAvatarDraftErrors(draft, name, null),
     };
     setErrors(next);
     if (!next.name && (next.emoji || next.letters)) setPickerOpen(true);
-    return !next.name && !next.emoji && !next.letters;
+    return Object.values(next).every((value) => !value);
   }
 
   async function save(): Promise<boolean> {
@@ -191,10 +254,13 @@ function AgentForm({
         agent
           ? undefined
           : sourceSessionId
-            ? "Starts from this chat's name, icon and description. Its history isn't included."
+            ? "Starts from this chat's name, icon, description and instructions. Its history isn't included."
             : undefined
       }
-      back={{ label: agent ? agent.name : "Agents", onClick: onClose }}
+      back={{
+        label: agent ? agent.name : sourceSessionId ? sourceTitle || "Chat" : "Agents",
+        onClick: onClose,
+      }}
       onCancel={onClose}
       submitLabel={agent ? "Save" : "Create agent"}
       pendingLabel={agent ? "Saving…" : "Creating…"}
@@ -210,7 +276,7 @@ function AgentForm({
             draft={draft}
             onChange={(next) => {
               setDraft(next);
-              setErrors((current) => (current.name ? { name: current.name } : {}));
+              setErrors(({ emoji: _emoji, letters: _letters, ...rest }) => rest);
             }}
             name={name}
             image={null}
@@ -221,10 +287,13 @@ function AgentForm({
             onOpenChange={setPickerOpen}
           />
           <div className="min-w-0 flex-1">
-            <Field label="Name" error={errors.name}>
+            <Field
+              label="Name"
+              error={errors.name}
+              aside={lengthCount(name, AGENT_NAME_MAX_LENGTH)}
+            >
               <TextInput
                 value={name}
-                maxLength={AGENT_NAME_MAX_LENGTH}
                 autoComplete="off"
                 placeholder="Release manager"
                 onChange={(event) => {
@@ -235,18 +304,28 @@ function AgentForm({
             </Field>
           </div>
         </div>
-        <Field label="What it helps with" optional hint="Shown with its name. One sentence.">
+        <Field
+          label="What it helps with"
+          optional
+          hint="Shown with its name. One sentence."
+          error={errors.description}
+          aside={lengthCount(description, AGENT_DESCRIPTION_MAX_LENGTH)}
+        >
           <TextInput
             value={description}
-            maxLength={AGENT_DESCRIPTION_MAX_LENGTH}
             autoComplete="off"
             placeholder="Plans and checks our weekly releases"
-            onChange={(event) => setDescription(event.target.value)}
+            onChange={(event) => {
+              setDescription(event.target.value);
+              setErrors(({ description: _drop, ...rest }) => rest);
+            }}
           />
         </Field>
         <Field
           label="Instructions"
           optional
+          error={errors.instructions}
+          aside={lengthCount(instructions, AGENT_INSTRUCTIONS_MAX_LENGTH)}
           hint={
             <span data-agent-instructions-hint={long ? "long" : undefined}>
               {long ? INSTRUCTIONS_LONG_HINT : INSTRUCTIONS_HINT}
@@ -256,18 +335,28 @@ function AgentForm({
           <TextArea
             value={instructions}
             rows={10}
-            maxLength={AGENT_INSTRUCTIONS_MAX_LENGTH}
             placeholder="You manage our releases. Check the open pull requests first, then write the release notes in our usual format."
-            onChange={(event) => setInstructions(event.target.value)}
+            onChange={(event) => {
+              setInstructions(event.target.value);
+              setErrors(({ instructions: _drop, ...rest }) => rest);
+            }}
           />
         </Field>
-        <Field label="First message" optional hint={FIRST_MESSAGE_HINT}>
+        <Field
+          label="First message"
+          optional
+          hint={FIRST_MESSAGE_HINT}
+          error={errors.firstMessage}
+          aside={lengthCount(firstMessage, AGENT_FIRST_MESSAGE_MAX_LENGTH)}
+        >
           <TextArea
             value={firstMessage}
             rows={4}
-            maxLength={AGENT_FIRST_MESSAGE_MAX_LENGTH}
             placeholder="Which repositories should I look after?"
-            onChange={(event) => setFirstMessage(event.target.value)}
+            onChange={(event) => {
+              setFirstMessage(event.target.value);
+              setErrors(({ firstMessage: _drop, ...rest }) => rest);
+            }}
           />
         </Field>
         <CheckboxField
@@ -284,8 +373,10 @@ function AgentForm({
               {
                 value: "private",
                 label: "Only me",
-                disabled: inSlack && visibility !== "private",
-                disabledReason: "It's available in Slack. Turn Slack off first.",
+                disabled: visibility !== "private" && (inSlack || privateChats === false),
+                disabledReason: inSlack
+                  ? "It's available in Slack. Turn Slack off first."
+                  : ONLY_ME_UNAVAILABLE,
               },
               { value: "workspace", label: workspacePeopleLabel(workspaceName) },
             ]}
@@ -309,6 +400,7 @@ export function NewAgentPage({
   const { client } = useAppContext();
   const navigate = useNavigate();
   const [initial, setInitial] = useState<AgentFormValues | null>(sourceSessionId ? null : EMPTY);
+  const [sourceTitle, setSourceTitle] = useState<string | undefined>(undefined);
   useEffect(() => {
     if (!sourceSessionId) {
       setInitial(EMPTY);
@@ -318,11 +410,13 @@ export function NewAgentPage({
     client.getSession(workspaceId, sourceSessionId).then(
       (session) => {
         if (!live) return;
+        setSourceTitle(session.title?.trim() || undefined);
         setInitial({
           ...EMPTY,
           name: session.title?.trim() ?? "",
           description: session.description?.trim() ?? "",
           avatar: session.avatar ?? null,
+          instructions: session.instructions?.trim() ?? "",
           // Shared like the chat, so an Only me chat makes an Only me agent.
           visibility: session.tenancy?.visibility === "private" ? "private" : "workspace",
         });
@@ -358,6 +452,7 @@ export function NewAgentPage({
       workspaceId={workspaceId}
       initial={initial}
       sourceSessionId={sourceSessionId}
+      sourceTitle={sourceTitle}
       onClose={close}
       onSaved={(agent) => {
         toast.success(`Created ${agent.name}`);

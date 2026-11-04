@@ -7,9 +7,21 @@ import { ChatComposer } from "@opengeni/react";
 import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import type { AppContextValue } from "@opengeni/react/app/app-context";
 import { ComposerAgentChip } from "@opengeni/react/app/components/agents/composer-agent-chip";
-import { SessionSetupStrip } from "@opengeni/react/app/components/session/new-session-setup-strip";
+import {
+  SessionSetupStrip,
+  visibilitySetupIcon,
+  type SessionSetupSetting,
+} from "@opengeni/react/app/components/session/new-session-setup-strip";
+import {
+  VisibilityMenuBody,
+  visibilitySummary,
+} from "@opengeni/react/app/components/session/new-session-settings-menu";
 import { SessionHeader } from "@opengeni/react/app/components/rail/session-header";
-import { agentAvatar } from "../../../packages/react/src/app/lib/agent-avatar";
+import {
+  AGENT_ONLY_ME_CHAT,
+  useAgentFirstMessage,
+  useComposerAgent,
+} from "@opengeni/react/app/lib/composer-agent";
 import {
   AgentsTestHost,
   WORKSPACE_ID,
@@ -22,7 +34,10 @@ import { emptyAttachments, idleComposer } from "../src/dev/composer-chrome-fixtu
 import { AgentRoute, AgentsRoute, NewAgentRoute } from "../src/routes/agents";
 import "../src/styles.css";
 
-const view = new URLSearchParams(location.search).get("view") ?? "agents";
+const params = new URLSearchParams(location.search);
+const view = params.get("view") ?? "agents";
+// `&private=off`: a workspace where Only me chats aren't available.
+const privateChats = params.get("private") !== "off";
 const SLACK_CONNECTION = "55555555-5555-4555-8555-555555555555";
 const SECOND_CONNECTION = "66666666-6666-4666-8666-666666666666";
 const SESSION_ID = "77777777-7777-4777-8777-777777777777";
@@ -132,9 +147,12 @@ const client = fakeAgentsClient(agents, {
     title: "Weekly metrics review",
     description: "Pulls the weekly KPIs and flags anything unusual",
     avatar: { kind: "emoji", emoji: "📈", hue: 280 },
+    instructions:
+      "Pull the weekly KPIs from the metrics dashboards every Monday. Flag anything more than 10% off last week, with a link.",
     visibility: "workspace",
   },
   yours: (agent) => agent.createdBySubjectId === "user-me",
+  canCreatePrivate: privateChats,
 });
 // Only Release manager is in Slack, and Meeting notes has only its owner's chat.
 const listInstalls = client.listAgentSlackInstalls.bind(client);
@@ -209,12 +227,51 @@ function Header({ agentChat }: { agentChat: boolean }) {
   );
 }
 
-function Composer() {
-  const [selected, setSelected] = useState<string | null>(onboarding.id);
-  const agent = agents.find((row) => row.id === selected) ?? null;
-  const [message, setMessage] = useState(onboarding.firstMessage);
+/**
+ * The new-chat composer's agent part, wired as the new-chat page wires it:
+ * the same hooks for loading the agent, its First message and who can see
+ * the chat. `data-draft-text` is what the saved draft would keep.
+ */
+function Composer({ initialAgentId }: { initialAgentId?: string | undefined }) {
+  const [agentId, setAgentId] = useState<string | undefined>(initialAgentId);
+  const [message, setMessage] = useState("");
+  const [visibility, setVisibility] = useState<"private" | "workspace">("workspace");
+  const composerAgent = useComposerAgent({
+    workspaceId: WORKSPACE_ID,
+    agentId,
+    message,
+    canCreatePrivateChat: privateChats,
+    visibility,
+    setVisibility,
+  });
+  useAgentFirstMessage(composerAgent, { message, setMessage, draftLoading: false });
+  const canSend = message.trim().length > 0 && !composerAgent.loading && !composerAgent.blocker;
+  const visibilitySetting: SessionSetupSetting | null = privateChats
+    ? {
+        label: "Visibility",
+        summary: visibilitySummary(visibility),
+        icon: visibilitySetupIcon(visibility),
+        disabled: false,
+        renderMenu: (close) => (
+          <VisibilityMenuBody
+            value={visibility}
+            disabled={false}
+            workspaceUnavailable={composerAgent.onlyMe ? AGENT_ONLY_ME_CHAT : null}
+            onChange={(next) => {
+              composerAgent.visibilityChosen();
+              setVisibility(next);
+              close();
+            }}
+          />
+        ),
+      }
+    : null;
   return (
-    <main className="mx-auto w-full max-w-3xl px-4 pt-16">
+    <main
+      className="mx-auto w-full max-w-3xl px-4 pt-16"
+      data-draft-text={composerAgent.draftText}
+      data-can-send={String(canSend)}
+    >
       <h1 className="mb-6 text-center text-2xl font-semibold tracking-tight">
         What should we work on?
       </h1>
@@ -223,7 +280,7 @@ function Composer() {
           value: message,
           setValue: setMessage,
           hasDraftContent: () => message.length > 0,
-          canSend: message.trim().length > 0,
+          canSend,
         })}
         attachments={emptyAttachments()}
         header={
@@ -233,22 +290,17 @@ function Composer() {
               <ComposerAgentChip
                 workspaceId={WORKSPACE_ID}
                 agents={agents.map(summary)}
-                selection={
-                  agent
-                    ? { kind: "ready", id: agent.id, name: agent.name, avatar: agentAvatar(agent) }
-                    : null
-                }
+                selection={composerAgent.selection}
                 disabled={false}
-                onSelect={(id) => {
-                  setSelected(id);
-                  setMessage(agents.find((row) => row.id === id)?.firstMessage ?? "");
-                }}
+                onlyMeUnavailable={!privateChats}
+                onSelect={(id) => setAgentId(id ?? undefined)}
                 onBrowse={() => undefined}
               />
             }
+            agentError={composerAgent.blocker}
             project={null}
             runsOn={null}
-            visibility={null}
+            visibility={visibilitySetting}
           />
         }
       />
@@ -265,7 +317,9 @@ function Screen() {
     case "make-agent":
       return <NewAgentRoute workspaceId={WORKSPACE_ID} sourceSessionId={SESSION_ID} />;
     case "composer":
-      return <Composer />;
+      return <Composer initialAgentId={onboarding.id} />;
+    case "composer-only-me":
+      return <Composer initialAgentId={notes.id} />;
     case "header":
       return <Header agentChat />;
     case "header-menu":

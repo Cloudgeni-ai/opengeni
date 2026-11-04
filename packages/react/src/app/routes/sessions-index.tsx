@@ -237,13 +237,10 @@ import {
 } from "./sessions-index-hydration";
 import type { SandboxBackend, Session } from "../types";
 import { useUiEventTarget } from "../lib/ui-events";
-import {
-  ComposerAgentChip,
-  type ComposerAgentSelection,
-} from "../components/agents/composer-agent-chip";
+import { ComposerAgentChip } from "../components/agents/composer-agent-chip";
 import { agentAvatar } from "../lib/agent-avatar";
-import { rememberAgentPrefill, rememberedAgentPrefill, useAgents } from "../lib/agents";
-import type { Agent } from "@opengeni/sdk";
+import { useAgents } from "../lib/agents";
+import { AGENT_ONLY_ME_CHAT, useAgentFirstMessage, useComposerAgent } from "../lib/composer-agent";
 import { useWindowBarTitle } from "../../ui/window-bar-title";
 
 const useCommitSynchronousEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
@@ -361,54 +358,10 @@ function SessionsIndexRouteContent({
   const { resetSessionView } = context;
   const [message, setMessage] = useState("");
   // ?agent= (or an older ?botTemplateId= link) starts this chat with an
-  // agent: its First message fills the composer (to read and change before
-  // sending), and the chat follows the agent's Instructions and shows its icon.
+  // agent (useComposerAgent, after the draft below): its First message fills
+  // the composer, and the chat follows its Instructions and shows its icon.
   const launchAgentId = composerLaunchAgentId(launch);
   const workspaceAgents = useAgents(workspaceId);
-  const [agentLaunch, setAgentLaunch] = useState<
-    | { id: string; state: { kind: "loading" } }
-    | { id: string; state: { kind: "ready"; agent: Agent } }
-    | { id: string; state: { kind: "error"; message: string } }
-    | null
-  >(null);
-  useEffect(() => {
-    if (!launchAgentId) {
-      setAgentLaunch(null);
-      return;
-    }
-    let live = true;
-    setAgentLaunch({ id: launchAgentId, state: { kind: "loading" } });
-    context.client.getAgent(workspaceId, launchAgentId).then(
-      (agent) => {
-        if (live) setAgentLaunch({ id: launchAgentId, state: { kind: "ready", agent } });
-      },
-      (error: unknown) => {
-        if (!live) return;
-        const reason = userErrorText(error);
-        setAgentLaunch({ id: launchAgentId, state: { kind: "error", message: reason } });
-        toast.error("Couldn't open the agent", { description: reason });
-      },
-    );
-    return () => {
-      live = false;
-    };
-  }, [context.client, launchAgentId, workspaceId]);
-  const launchedAgent = agentLaunch?.state.kind === "ready" ? agentLaunch.state.agent : null;
-  const newSessionAgent = launchedAgent
-    ? { id: launchedAgent.id, avatar: agentAvatar(launchedAgent) }
-    : undefined;
-  const agentSelection: ComposerAgentSelection | null = !agentLaunch
-    ? null
-    : agentLaunch.state.kind === "ready"
-      ? {
-          kind: "ready",
-          id: agentLaunch.id,
-          name: agentLaunch.state.agent.name,
-          avatar: agentAvatar(agentLaunch.state.agent),
-        }
-      : agentLaunch.state.kind === "error"
-        ? { kind: "error", id: agentLaunch.id, message: agentLaunch.state.message }
-        : { kind: "loading", id: agentLaunch.id };
   const [creditTopupOpen, setCreditTopupOpen] = useState(false);
   const [draft, setDraft] = useState<SessionDraft>(() =>
     emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend),
@@ -829,15 +782,24 @@ function SessionsIndexRouteContent({
     );
   }, [canCreatePrivateChat, selectProject, selectedProjectOnlyMe, tenancyCapabilities]);
 
-  // An Only me agent's chats are Only me, so choosing one makes the new chat
-  // Only me (the server refuses a shared one).
-  const launchedAgentOnlyMe = launchedAgent?.visibility === "private";
-  useEffect(() => {
-    if (!launchedAgentOnlyMe || !canCreatePrivateChat) return;
-    setDraft((current) =>
-      current.visibility === "private" ? current : { ...current, visibility: "private" },
-    );
-  }, [canCreatePrivateChat, launchedAgentOnlyMe]);
+  const setDraftVisibility = useCallback(
+    (visibility: "private" | "workspace") =>
+      setDraft((current) =>
+        current.visibility === visibility ? current : { ...current, visibility },
+      ),
+    [],
+  );
+  const composerAgent = useComposerAgent({
+    workspaceId,
+    agentId: launchAgentId,
+    message,
+    canCreatePrivateChat: tenancyCapabilities === null ? null : canCreatePrivateChat,
+    visibility: draft.visibility,
+    setVisibility: setDraftVisibility,
+  });
+  const newSessionAgent = composerAgent.agent
+    ? { id: composerAgent.agent.id, avatar: agentAvatar(composerAgent.agent) }
+    : undefined;
 
   useEffect(() => {
     const onRequest = (event: Event) => {
@@ -890,7 +852,8 @@ function SessionsIndexRouteContent({
   );
   const persistedValue = useMemo(
     () => ({
-      text: message,
+      // An untouched First message stays out of the saved draft (useComposerAgent).
+      text: composerAgent.draftText,
       resources: [
         ...(draft.compute.kind === "machine" ? [] : context.currentResources),
         ...attachments.readyResources,
@@ -921,7 +884,7 @@ function SessionsIndexRouteContent({
       context.currentResources,
       draft,
       defaultFirstPartyMcpTools,
-      message,
+      composerAgent.draftText,
       modelProvided,
       createVisibility,
       persistedToolPolicy,
@@ -1244,6 +1207,10 @@ function SessionsIndexRouteContent({
     uploadPending: attachments.hasUnresolved,
     computeLoading: draft.compute.kind === "machine" && fleet.loading,
     computeReady,
+    // A chosen agent that hasn't loaded, or can't start a chat here, never
+    // becomes an ordinary chat.
+    agentLoading: composerAgent.loading,
+    agentBlocked: composerAgent.blocker !== null,
   };
   const sendBlocker = getNewSessionSendBlocker(sendState);
   // Voice skips the connected-tool accounts; its control and URL launch read
@@ -1615,64 +1582,11 @@ function SessionsIndexRouteContent({
     },
   );
 
-  // An agent's First message fills an empty composer once its saved draft has
-  // loaded, so the remote draft cannot overwrite it. Text the person already
-  // typed stays; they can still start the chat with it.
-  const prefilledAgentRef = useRef<string | null>(null);
-  // The text this page put in the composer, so switching agents or going back
-  // to Opengeni replaces or takes it out instead of leaving it behind.
-  const prefilledTextRef = useRef<string | null>(null);
-  const fillAgentFirstMessage = useCallback(
-    (text: string) => {
-      prefilledTextRef.current = text || null;
-      rememberAgentPrefill(workspaceId, text || null);
-      setMessage(text);
-    },
-    [workspaceId],
-  );
-  useEffect(() => {
-    if (!launchedAgent || newSessionDraft.loading) return;
-    if (prefilledAgentRef.current === launchedAgent.id) return;
-    prefilledAgentRef.current = launchedAgent.id;
-    const firstMessage = launchedAgent.firstMessage;
-    if (
-      message.trim().length === 0 ||
-      message === firstMessage ||
-      message === prefilledTextRef.current
-    ) {
-      if (firstMessage || prefilledTextRef.current !== null) fillAgentFirstMessage(firstMessage);
-    } else if (firstMessage) {
-      toast.info("Kept your unsent message", {
-        description: `Clear it to use ${launchedAgent.name}'s first message instead.`,
-        action: {
-          label: "Use first message",
-          onClick: () => fillAgentFirstMessage(firstMessage),
-        },
-      });
-    }
-  }, [fillAgentFirstMessage, launchedAgent, message, newSessionDraft.loading]);
-  useEffect(() => {
-    if (launchAgentId) return;
-    prefilledAgentRef.current = null;
-    const prefilled = prefilledTextRef.current;
-    prefilledTextRef.current = null;
-    if (prefilled !== null) {
-      rememberAgentPrefill(workspaceId, null);
-      setMessage((current) => (current === prefilled ? "" : current));
-    }
-  }, [launchAgentId, workspaceId]);
-  // After a reload the page no longer knows it filled the composer, but the
-  // saved draft still holds the First message. Untouched, without the agent
-  // in the URL, it is taken out the same way.
-  const leftoverPrefillCheckedRef = useRef(false);
-  useEffect(() => {
-    if (leftoverPrefillCheckedRef.current || newSessionDraft.loading) return;
-    leftoverPrefillCheckedRef.current = true;
-    const remembered = rememberedAgentPrefill(workspaceId);
-    if (launchAgentId || remembered === null) return;
-    rememberAgentPrefill(workspaceId, null);
-    if (message === remembered) setMessage("");
-  }, [launchAgentId, message, newSessionDraft.loading, workspaceId]);
+  useAgentFirstMessage(composerAgent, {
+    message,
+    setMessage,
+    draftLoading: newSessionDraft.loading,
+  });
   // ?continueSessionId= (an archived chat's "Continue in a new chat") starts
   // the composer with a link to that chat once the saved draft has loaded,
   // ahead of anything the person already typed, then leaves the URL.
@@ -1938,12 +1852,12 @@ function SessionsIndexRouteContent({
           <VisibilityMenuBody
             value={draft.visibility}
             disabled={setupDisabled}
+            workspaceUnavailable={composerAgent.onlyMe ? AGENT_ONLY_ME_CHAT : null}
             onChange={(visibility) => {
               visibilityChosenRef.current = true;
+              composerAgent.visibilityChosen();
               // A shared chat can't go in an Only me project.
               if (visibility === "workspace" && selectedProjectOnlyMe) selectProject(null);
-              // Nor can an Only me agent's chat.
-              if (visibility === "workspace" && launchedAgentOnlyMe) selectComposerAgent(null);
               setDraft((current) => ({ ...current, visibility }));
               close();
             }}
@@ -1955,13 +1869,14 @@ function SessionsIndexRouteContent({
   // Who answers: Opengeni or one of the workspace's agents. Shown once there
   // is an agent to pick (or one is already in the URL).
   const agentChip =
-    agentSelection !== null ||
+    composerAgent.selection !== null ||
     (workspaceAgents.supported && (workspaceAgents.agents?.length ?? 0) > 0) ? (
       <ComposerAgentChip
         workspaceId={workspaceId}
         agents={workspaceAgents.agents}
-        selection={agentSelection}
+        selection={composerAgent.selection}
         disabled={setupDisabled}
+        onlyMeUnavailable={tenancyCapabilities !== null && !canCreatePrivateChat}
         onSelect={selectComposerAgent}
         onBrowse={() =>
           void navigate({ to: "/workspaces/$workspaceId/agents", params: { workspaceId } })
@@ -2268,7 +2183,9 @@ function SessionsIndexRouteContent({
                         ? "Choose supported model settings before starting voice."
                         : voiceSendBlocker === "compute"
                           ? "Choose where this session should run first."
-                          : voiceSendBlocker !== null &&
+                          : voiceSendBlocker === "agent"
+                            ? composerAgent.blocker
+                            : voiceSendBlocker !== null &&
                               composerSendBlockerIsLoading(voiceSendBlocker)
                             ? "Wait for the chat to finish loading."
                             : voiceSendBlocker !== null
@@ -2286,6 +2203,7 @@ function SessionsIndexRouteContent({
                 <SessionSetupStrip
                   disabled={busy || newSessionDraft.loading}
                   agent={agentChip}
+                  agentError={composerAgent.blocker}
                   project={
                     chatList
                       ? {

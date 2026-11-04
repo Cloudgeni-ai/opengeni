@@ -24,30 +24,41 @@ mock.module("../src/ui/dropdown-menu", () => {
       children,
       onSelect,
       title,
+      disabled,
     }: {
       children?: ReactNode;
       onSelect?: () => void;
       title?: string;
+      disabled?: boolean;
     }) => (
-      <button type="button" role="menuitem" title={title} onClick={() => onSelect?.()}>
+      <button
+        type="button"
+        role="menuitem"
+        title={title}
+        disabled={disabled}
+        onClick={() => onSelect?.()}
+      >
         {children}
       </button>
     ),
   };
 });
 
-const { act } = await import("react");
+const { act, useState } = await import("react");
 const { createRoot } = await import("react-dom/client");
 const kit = await import("./agents-test-kit");
 const { AgentsPage, BOT_TEMPLATES_MOVED, SLACK_AGENTS_MOVED, duplicateNamesText } =
   await import("../src/app/components/agents/agents-page");
 const { AgentPage } = await import("../src/app/components/agents/agent-page");
-const { NewAgentPage, EditAgentPage, INSTRUCTIONS_LONG_HINT, agentChanges } =
+const { NewAgentPage, EditAgentPage, INSTRUCTIONS_LONG_HINT, ONLY_ME_UNAVAILABLE, agentChanges } =
   await import("../src/app/components/agents/agent-form-page");
 const { ComposerAgentChip } = await import("../src/app/components/agents/composer-agent-chip");
 const { agentInitialsAvatarLite } = await import("../src/app/lib/agent-avatar");
-const { duplicateAgentNames, parseAgentFile, agentErrorCode } =
+const { duplicateAgentNames, parseAgentFile, agentErrorCode, agentFile, agentFileName } =
   await import("../src/app/lib/agents");
+const { useComposerAgent, useAgentFirstMessage, AGENT_ONLY_ME_UNAVAILABLE } =
+  await import("../src/app/lib/composer-agent");
+const { buildCreateSessionRequest } = await import("../src/app/lib/session-create");
 const { composerLaunchAgentId, parseComposerLaunchSearch } =
   await import("../src/app/lib/composer-launch");
 const { sessionAgentRef, sessionAgentSourceLine } = await import("../src/app/lib/session-agent");
@@ -136,7 +147,7 @@ test("a .bot.json file imports as an agent whose setup text is its First message
   });
   expect(parseAgentFile("not json")).toEqual({
     ok: false,
-    error: "This file isn't an agent. Choose a .bot.json file.",
+    error: "This file isn't an agent. Choose an .agent.json or .bot.json file.",
   });
   expect(parseAgentFile("{}").ok).toBe(false);
 });
@@ -453,4 +464,374 @@ test("the composer chip lists agents to chat with and Browse agents", async () =
   await act(async () => items[3]!.click());
   expect(picked).toEqual([agents[0]!.id]);
   expect(browsed).toBe(1);
+});
+
+test("the chip names an agent that can't start a chat here, and Only me agents are off where Only me chats are", async () => {
+  const shared = makeAgent({ name: "Data team" });
+  const mine = makeAgent({ name: "Notes", visibility: "private" });
+  const container = await render(
+    <AgentsTestHost context={appContext(fakeAgentsClient([]))}>
+      <ComposerAgentChip
+        workspaceId={WORKSPACE_ID}
+        agents={[shared, mine].map(kit.summary)}
+        selection={{
+          kind: "error",
+          id: mine.id,
+          name: "Notes",
+          avatar: agentInitialsAvatar("Notes", mine.id),
+          message: AGENT_ONLY_ME_UNAVAILABLE,
+        }}
+        disabled={false}
+        onlyMeUnavailable
+        onSelect={() => undefined}
+        onBrowse={() => undefined}
+      />
+    </AgentsTestHost>,
+  );
+  const chip = container.querySelector("[data-composer-agent]")!;
+  expect(chip.getAttribute("aria-label")).toBe("Chat with: Notes");
+  expect(chip.getAttribute("title")).toBe(AGENT_ONLY_ME_UNAVAILABLE);
+  const items = [...container.querySelectorAll<HTMLButtonElement>("[role='menuitem']")];
+  const row = (name: string) => items.find((item) => item.textContent?.includes(name))!;
+  expect(row("Notes").disabled).toBe(true);
+  expect(row("Data team").disabled).toBe(false);
+});
+
+// --- New chat with an agent (the hooks the new-chat page uses) -----------------
+
+type Visibility = "private" | "workspace";
+type Harness = {
+  state: ReturnType<typeof useComposerAgent>;
+  message: string;
+  visibility: Visibility;
+  setAgentId: (id: string | undefined) => void;
+  setMessage: (text: string) => void;
+  setDraftLoading: (loading: boolean) => void;
+};
+
+function ComposerAgentHarness({
+  api,
+  agentId: initialAgentId,
+  draftLoading: initialDraftLoading = false,
+  canCreatePrivateChat = true,
+}: {
+  api: Partial<Harness>;
+  agentId?: string | undefined;
+  draftLoading?: boolean;
+  canCreatePrivateChat?: boolean | null;
+}) {
+  const [agentId, setAgentId] = useState(initialAgentId);
+  const [message, setMessage] = useState("");
+  const [draftLoading, setDraftLoading] = useState(initialDraftLoading);
+  const [visibility, setVisibility] = useState<Visibility>("workspace");
+  const state = useComposerAgent({
+    workspaceId: WORKSPACE_ID,
+    agentId,
+    message,
+    canCreatePrivateChat,
+    visibility,
+    setVisibility,
+  });
+  useAgentFirstMessage(state, { message, setMessage, draftLoading });
+  Object.assign(api, { state, message, visibility, setAgentId, setMessage, setDraftLoading });
+  return null;
+}
+
+async function harness(
+  client: object,
+  props: Omit<Parameters<typeof ComposerAgentHarness>[0], "api"> = {},
+): Promise<Harness> {
+  const api: Partial<Harness> = {};
+  await render(
+    <AgentsTestHost context={appContext(client)}>
+      <ComposerAgentHarness api={api} {...props} />
+    </AgentsTestHost>,
+  );
+  return api as Harness;
+}
+
+async function step(action: () => void) {
+  await act(async () => action());
+  await flush();
+}
+
+test("a chosen agent's First message fills the composer once the draft loads, and stays out of the saved draft", async () => {
+  const agent = makeAgent({ name: "Onboarding", firstMessage: "Set me up." });
+  const api = await harness(fakeAgentsClient([agent]), { agentId: agent.id, draftLoading: true });
+  expect(api.state.loading).toBe(false);
+  expect(api.state.agent?.id).toBe(agent.id);
+  expect(api.state.selection).toMatchObject({ kind: "ready", name: "Onboarding" });
+  // The saved draft is still loading: nothing is put in yet.
+  expect(api.message).toBe("");
+  await step(() => api.setDraftLoading(false));
+  expect(api.message).toBe("Set me up.");
+  // Untouched, it isn't saved: another tab or device never sees it without the agent.
+  expect(api.state.draftText).toBe("");
+  await step(() => api.setMessage("Set me up for the data team."));
+  expect(api.state.draftText).toBe("Set me up for the data team.");
+});
+
+test("switching agents replaces an untouched First message, Opengeni takes it out, and typed text stays", async () => {
+  const a = makeAgent({ name: "A", firstMessage: "A first" });
+  const b = makeAgent({ name: "B", firstMessage: "B first" });
+  const none = makeAgent({ name: "None", firstMessage: "" });
+  const api = await harness(fakeAgentsClient([a, b, none]), { agentId: a.id });
+  expect(api.message).toBe("A first");
+  await step(() => api.setAgentId(b.id));
+  expect(api.message).toBe("B first");
+  await step(() => api.setAgentId(none.id));
+  expect(api.message).toBe("");
+  await step(() => api.setAgentId(b.id));
+  expect(api.message).toBe("B first");
+  await step(() => api.setAgentId(undefined));
+  expect(api.message).toBe("");
+  expect(api.state.selection).toBeNull();
+  // What the person typed is theirs: neither an agent nor Opengeni replaces it.
+  await step(() => api.setMessage("My own question"));
+  await step(() => api.setAgentId(a.id));
+  expect(api.message).toBe("My own question");
+  await step(() => api.setAgentId(undefined));
+  expect(api.message).toBe("My own question");
+});
+
+test("Send waits while the agent loads, and an agent that can't be read blocks it with the reason", async () => {
+  const agent = makeAgent({ name: "Slow", firstMessage: "Hi" });
+  const client = fakeAgentsClient([agent], { holdGetAgent: true });
+  const api = await harness(client, { agentId: agent.id });
+  expect(api.state.loading).toBe(true);
+  expect(api.state.agent).toBeNull();
+  expect(api.state.blocker).toBeNull();
+  expect(api.state.selection).toMatchObject({ kind: "loading" });
+  await step(() => client.releaseGetAgent());
+  expect(api.state.loading).toBe(false);
+  expect(api.state.agent?.id).toBe(agent.id);
+
+  const missing = await harness(fakeAgentsClient([]), {
+    agentId: "aaaaaaaa-aaaa-4aaa-8aaa-ffffffffffff",
+  });
+  expect(missing.state.loading).toBe(false);
+  expect(missing.state.agent).toBeNull();
+  expect(missing.state.blocker).toBeTruthy();
+  expect(missing.state.selection).toMatchObject({ kind: "error" });
+});
+
+test("an Only me agent makes the chat Only me, and going back restores the earlier choice unless the person chose", async () => {
+  const mine = makeAgent({ name: "Notes", visibility: "private" });
+  const shared = makeAgent({ name: "Team" });
+  const api = await harness(fakeAgentsClient([mine, shared]), { agentId: mine.id });
+  expect(api.state.onlyMe).toBe(true);
+  expect(api.visibility).toBe("private");
+  await step(() => api.setAgentId(shared.id));
+  expect(api.visibility).toBe("workspace");
+  await step(() => api.setAgentId(mine.id));
+  expect(api.visibility).toBe("private");
+  await step(() => api.state.visibilityChosen());
+  await step(() => api.setAgentId(undefined));
+  expect(api.visibility).toBe("private");
+});
+
+test("where Only me chats aren't available, an Only me agent says so and never starts a chat", async () => {
+  const mine = makeAgent({ name: "Notes", visibility: "private", firstMessage: "Hi" });
+  const api = await harness(fakeAgentsClient([mine]), {
+    agentId: mine.id,
+    canCreatePrivateChat: false,
+  });
+  expect(api.state.agent).toBeNull();
+  expect(api.state.blocker).toBe(AGENT_ONLY_ME_UNAVAILABLE);
+  expect(api.state.selection).toMatchObject({ kind: "error", name: "Notes" });
+  expect(api.visibility).toBe("workspace");
+  expect(api.message).toBe("");
+  // Not known yet: Send waits rather than failing.
+  const unknown = await harness(fakeAgentsClient([mine]), {
+    agentId: mine.id,
+    canCreatePrivateChat: null,
+  });
+  expect(unknown.state.loading).toBe(true);
+  expect(unknown.state.blocker).toBeNull();
+});
+
+test("a chat started with an agent is created with its agentId and icon", () => {
+  const request = buildCreateSessionRequest({
+    currentResources: [],
+    submission: { text: "Set me up." },
+    selectedTools: [],
+    defaultModel: "gpt-5.4",
+    defaultReasoningEffort: "medium",
+    defaultLatencyMode: "standard",
+    clientEventId: "event-1",
+    idempotencyKey: "create-1",
+    agent: {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-000000000001",
+      avatar: { kind: "emoji", emoji: "🚀", hue: 210 },
+    },
+  });
+  expect(request.agentId).toBe("aaaaaaaa-aaaa-4aaa-8aaa-000000000001");
+  expect(request.profile).toEqual({ avatar: { kind: "emoji", emoji: "🚀", hue: 210 } });
+  expect(
+    buildCreateSessionRequest({
+      currentResources: [],
+      submission: { text: "Hi" },
+      selectedTools: [],
+      defaultModel: "gpt-5.4",
+      defaultReasoningEffort: "medium",
+      defaultLatencyMode: "standard",
+      clientEventId: "event-2",
+      idempotencyKey: "create-2",
+    }).agentId,
+  ).toBeUndefined();
+});
+
+test("the new-chat page starts chats through the agent hooks, never an ordinary chat in an agent's place", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(
+    new URL("../src/app/routes/sessions-index.tsx", import.meta.url),
+    "utf8",
+  );
+  for (const wiring of [
+    "useComposerAgent({",
+    "useAgentFirstMessage(composerAgent, {",
+    "text: composerAgent.draftText,",
+    "agentError={composerAgent.blocker}",
+    "workspaceUnavailable={composerAgent.onlyMe ? AGENT_ONLY_ME_CHAT : null}",
+    "(!composerAgent.loading && composerAgent.blocker === null)",
+    "(createdSessionAuthority === null && composerAgent.loading) ||",
+    "if (createdSessionAuthority === null && (composerAgent.loading || composerAgent.blocker)) {",
+  ]) {
+    expect(source).toContain(wiring);
+  }
+  // Both the text and the voice start send the agent.
+  expect(source.split("agent: newSessionAgent,").length - 1).toBe(2);
+});
+
+// --- Form: lengths, Only me, Make this an agent --------------------------------
+
+test("long text is never cut: a count shows near the limit and Save says what to shorten", async () => {
+  const client = fakeAgentsClient([]);
+  const container = await render(
+    <AgentsTestHost context={appContext(client)}>
+      <NewAgentPage workspaceId={WORKSPACE_ID} />
+    </AgentsTestHost>,
+  );
+  const name = container.querySelector<HTMLInputElement>("input[placeholder='Release manager']")!;
+  await act(async () => setValue(name, "Long one"));
+  const instructions = container.querySelectorAll<HTMLTextAreaElement>("textarea")[0]!;
+  expect(instructions.hasAttribute("maxlength")).toBe(false);
+  await act(async () => setValue(instructions, "x".repeat(20_001)));
+  expect(instructions.value.length).toBe(20_001);
+  expect(container.textContent).toContain("20,001 / 20,000");
+  await act(async () => button(container, "Create agent").click());
+  await flush();
+  expect(container.textContent).toContain("Shorten it to 20,000 characters. It has 20,001.");
+  expect(client.calls.some((call) => call[0] === "createAgent")).toBe(false);
+});
+
+test("Only me is off with a reason where Only me chats aren't available", async () => {
+  const container = await render(
+    <AgentsTestHost context={appContext(fakeAgentsClient([], { canCreatePrivate: false }))}>
+      <NewAgentPage workspaceId={WORKSPACE_ID} />
+    </AgentsTestHost>,
+  );
+  const onlyMe = [...container.querySelectorAll<HTMLElement>("[role='radio']")].find(
+    (element) => element.textContent?.trim() === "Only me",
+  );
+  expect(onlyMe?.getAttribute("aria-disabled") ?? onlyMe?.getAttribute("disabled")).not.toBeNull();
+  expect(ONLY_ME_UNAVAILABLE).toBe("Only me chats aren't available here.");
+});
+
+test("Make this an agent takes the chat's instructions, and its back link names the chat", async () => {
+  const sessionId = "dddddddd-dddd-4ddd-8ddd-000000000010";
+  const client = fakeAgentsClient([], {
+    session: { title: "Release check", instructions: "Check the open release PRs first." },
+  });
+  let path = "";
+  const container = await render(
+    <AgentsTestHost context={appContext(client)} onLocation={(location) => (path = location.href)}>
+      <NewAgentPage workspaceId={WORKSPACE_ID} sourceSessionId={sessionId} />
+    </AgentsTestHost>,
+  );
+  const instructions = container.querySelectorAll<HTMLTextAreaElement>("textarea")[0]!;
+  expect(instructions.value).toBe("Check the open release PRs first.");
+  await act(async () => button(container, "Release check").click());
+  expect(path).toBe(`/workspaces/${WORKSPACE_ID}/sessions/${sessionId}`);
+});
+
+// --- Export and Import -----------------------------------------------------------
+
+test("Export writes an .agent.json that Import reads back with its Instructions", () => {
+  const agent = makeAgent({
+    name: "Release manager",
+    description: "Plans releases",
+    avatar: { kind: "image", artifactId: "f".repeat(32) } as never,
+    instructions: "Check the open PRs first.",
+    firstMessage: "Which repositories?",
+    memory: { enabled: true, collectionId: "c1", scope: "workspace", reviewFirst: false },
+  });
+  const file = agentFile(agent);
+  expect(file).toEqual({
+    format: "opengeni.agent",
+    version: 1,
+    name: "Release manager",
+    description: "Plans releases",
+    avatar: null,
+    instructions: "Check the open PRs first.",
+    firstMessage: "Which repositories?",
+    memoryEnabled: true,
+  });
+  expect(agentFileName(agent)).toBe("release-manager.agent.json");
+  const parsed = parseAgentFile(JSON.stringify(file));
+  if (!parsed.ok) throw new Error(parsed.error);
+  expect(parsed.request).toEqual({
+    name: "Release manager",
+    description: "Plans releases",
+    avatar: null,
+    instructions: "Check the open PRs first.",
+    firstMessage: "Which repositories?",
+    memoryEnabled: true,
+  });
+  expect(parseAgentFile(JSON.stringify({ ...file, version: 2 })).ok).toBe(false);
+  expect(parseAgentFile(JSON.stringify({ ...file, instructions: 3 })).ok).toBe(false);
+});
+
+// --- Lists: no stale rows --------------------------------------------------------
+
+test("a Show more from the previous filter never lands in the new list", async () => {
+  const agent = makeAgent({ name: "Data team" });
+  const chat = (id: number, title: string) => ({
+    sessionId: `dddddddd-dddd-4ddd-8ddd-${String(id).padStart(12, "0")}`,
+    title,
+    visibility: "workspace" as const,
+    createdBySubjectId: "user-me",
+    source: "app" as const,
+    slack: null,
+    createdAt: "2026-10-30T09:00:00.000Z",
+    updatedAt: "2026-10-30T09:00:00.000Z",
+  });
+  const client = fakeAgentsClient([agent]);
+  let releaseMore: () => void = () => undefined;
+  client.listAgentChats = async (_workspace: string, _id: string, request) => {
+    const { filter, cursor } = request as { filter: string; cursor?: string };
+    if (cursor) {
+      await new Promise<void>((resolve) => (releaseMore = resolve));
+      return { chats: [chat(3, "Older mine")], nextCursor: null };
+    }
+    return filter === "yours"
+      ? { chats: [chat(1, "Mine")], nextCursor: "more" }
+      : { chats: [chat(2, "Everyone's chat")], nextCursor: null };
+  };
+  const container = await render(
+    <AgentsTestHost context={appContext(client)}>
+      <AgentPage workspaceId={WORKSPACE_ID} agentId={agent.id} />
+    </AgentsTestHost>,
+  );
+  await act(async () => button(container, "Show more").click());
+  const everyone = [...container.querySelectorAll<HTMLElement>("[role='radio'], button")].find(
+    (element) => element.textContent?.trim() === "Everyone's",
+  )!;
+  await act(async () => everyone.click());
+  await flush();
+  await act(async () => releaseMore());
+  await flush();
+  expect(container.textContent).toContain("Everyone's chat");
+  expect(container.textContent).not.toContain("Older mine");
+  expect(container.textContent).not.toContain("Mine");
 });

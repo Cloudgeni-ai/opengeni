@@ -50,6 +50,7 @@ export type SessionSetupSetting = {
 export function SessionSetupStrip({
   disabled,
   agent,
+  agentError,
   project,
   runsOn,
   visibility,
@@ -57,6 +58,8 @@ export function SessionSetupStrip({
   disabled: boolean;
   /** Who answers: the agent chip, first in the strip. */
   agent?: ReactNode | undefined;
+  /** Why the chosen agent can't start this chat, under the chips. */
+  agentError?: string | null | undefined;
   project: {
     channels: Channel[];
     selectedChannelId: string | null;
@@ -86,6 +89,15 @@ export function SessionSetupStrip({
       ) : null}
       {runsOn ? <SessionSetupChip setting={runsOn} /> : null}
       {visibility ? <SessionSetupChip setting={visibility} /> : null}
+      {agentError ? (
+        <p
+          role="alert"
+          className="m-0 basis-full text-xs leading-4 text-danger"
+          data-agent-error=""
+        >
+          {agentError}
+        </p>
+      ) : null}
     </div>
   );
 }

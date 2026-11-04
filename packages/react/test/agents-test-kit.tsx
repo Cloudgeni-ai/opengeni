@@ -76,10 +76,15 @@ export function fakeAgentsClient(
     slack?: ListAgentSlackInstallsResponse;
     session?: Record<string, unknown>;
     yours?: (agent: Agent) => boolean;
+    /** Whether Only me chats are available here (default yes). */
+    canCreatePrivate?: boolean;
+    /** Holds getAgent until the test releases it. */
+    holdGetAgent?: boolean;
   } = {},
 ) {
   const agents = new Map(initial.map((agent) => [agent.id, agent]));
   const calls: unknown[][] = [];
+  const held: Array<() => void> = [];
   const find = (id: string) => {
     const agent = agents.get(id);
     if (!agent) throw Object.assign(new Error("Not found"), { status: 404 });
@@ -97,7 +102,21 @@ export function fakeAgentsClient(
     },
     async getAgent(workspaceId: string, id: string) {
       calls.push(["getAgent", workspaceId, id]);
+      if (options.holdGetAgent) await new Promise<void>((resolve) => held.push(resolve));
       return find(id);
+    },
+    /** Answers every held getAgent. */
+    releaseGetAgent() {
+      for (const resolve of held.splice(0)) resolve();
+    },
+    async getSessionTenancyCreateCapabilities(workspaceId: string) {
+      calls.push(["getSessionTenancyCreateCapabilities", workspaceId]);
+      const canCreatePrivate = options.canCreatePrivate ?? true;
+      return {
+        activated: canCreatePrivate,
+        canCreatePrivate,
+        reason: canCreatePrivate ? "available" : "not_activated",
+      };
     },
     async createAgent(workspaceId: string, request: CreateAgentRequest) {
       calls.push(["createAgent", workspaceId, request]);
@@ -136,7 +155,7 @@ export function fakeAgentsClient(
     },
     async listAgentChats(workspaceId: string, id: string, request: Record<string, unknown>) {
       calls.push(["listAgentChats", workspaceId, id, request]);
-      return { chats: options.chats ?? [], nextCursor: null };
+      return { chats: options.chats ?? [], nextCursor: null as string | null };
     },
     async listAgentSlackInstalls(workspaceId: string, id: string) {
       calls.push(["listAgentSlackInstalls", workspaceId, id]);

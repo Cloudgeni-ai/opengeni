@@ -188,3 +188,30 @@ test("without a connected Slack workspace, admins get one way to connect it", as
   expect(container.textContent).toContain("No Slack workspace is connected here.");
   expect(container.textContent).toContain("Connect Slack");
 });
+
+test("while it is on in one Slack workspace, the other's switch says to turn that off first", async () => {
+  const agent = makeAgent({ name: "Data team", slack: [availability()] });
+  const client = {
+    listAgentSlackInstalls: async () => ({
+      installs: [
+        {
+          connectionId: CONNECTION_ID,
+          slackTeamId: "T1",
+          slackTeamName: "Acme",
+          availability: availability(),
+        },
+        {
+          connectionId: "cccccccc-cccc-4ccc-8ccc-000000000002",
+          slackTeamId: "T2",
+          slackTeamName: "Acme Support",
+          availability: null,
+        },
+      ],
+      routingEnabled: true,
+    }),
+  };
+  const container = await render(agent, client);
+  expect(toggle(container, "Available in Acme").getAttribute("aria-disabled")).not.toBe("true");
+  expect(toggle(container, "Available in Acme Support").getAttribute("aria-disabled")).toBe("true");
+  expect(container.textContent).toContain("It's available in Acme. Turn that off first.");
+});

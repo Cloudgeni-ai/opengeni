@@ -815,7 +815,7 @@ export function sessionArchiveBlockedMessage(blockers: SessionArchiveBlocker[]):
   const kinds = new Set(blockers.map((blocker) => blocker.kind));
   const reasons: string[] = [];
   if (kinds.has("keep_live"))
-    reasons.push('"Keep this chat active" is on. Turn it off in the chat\'s Agent tab first.');
+    reasons.push('"Keep this chat active" is on. Turn it off in the chat\'s Settings tab first.');
   if (kinds.has("scheduled_task"))
     reasons.push(
       "A scheduled task runs in this chat. Delete the task or let it start new chats first.",

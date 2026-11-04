@@ -77,9 +77,11 @@ describe("agents in the browser", () => {
     await page.getByText("@Opengeni +releases").waitFor();
     const acme = page.getByRole("switch", { name: "Available in Acme", exact: true });
     expect(await acme.isChecked()).toBe(true);
-    expect(await page.getByRole("switch", { name: "Available in Acme Support" }).isChecked()).toBe(
-      false,
-    );
+    const support = page.getByRole("switch", { name: "Available in Acme Support" });
+    expect(await support.isChecked()).toBe(false);
+    // On in one Slack workspace at a time: the other says why it's off.
+    expect(await support.getAttribute("aria-disabled")).toBe("true");
+    await page.getByText("It's available in Acme. Turn that off first.").first().waitFor();
     await page.getByRole("button", { name: "Introduce" }).waitFor();
     await page.close();
   }, 60_000);
@@ -92,14 +94,56 @@ describe("agents in the browser", () => {
     await page.close();
   }, 60_000);
 
-  test("choosing an agent in the composer fills in its First message", async () => {
+  test("choosing an agent in the composer fills in its First message, kept out of the saved draft", async () => {
     const page = await open("composer", 390);
+    const main = page.locator("main");
     const composer = page.getByRole("textbox").first();
-    expect(await composer.inputValue()).toContain("Set me up");
-    await page.getByRole("button", { name: /^Chat with:/ }).click();
-    await page.getByRole("menuitem", { name: /Browse agents/ }).waitFor();
-    await page.getByRole("menuitem", { name: /^Opengeni/ }).click();
+    const chip = page.getByRole("button", { name: /^Chat with:/ });
+    const choose = async (name: RegExp) => {
+      await chip.click();
+      await page.getByRole("menuitem", { name: /Browse agents/ }).waitFor();
+      await page.getByRole("menuitem", { name }).click();
+    };
+    await page.waitForFunction(() =>
+      document.querySelector("textarea")?.value.startsWith("Set me up"),
+    );
+    // Untouched, the First message isn't what the saved draft keeps.
+    expect(await main.getAttribute("data-draft-text")).toBe("");
+    expect(await main.getAttribute("data-can-send")).toBe("true");
+
+    // An Only me agent: its chat is Only me, and Workspace says why it's off.
+    await choose(/^Meeting notes/);
     expect(await composer.inputValue()).toBe("");
+    await page.getByRole("button", { name: "Visibility: Only me" }).click();
+    const workspace = page.getByRole("menuitemradio", { name: /Workspace/ });
+    expect(await workspace.getAttribute("aria-disabled")).toBe("true");
+    expect(await workspace.textContent()).toContain("Only me agents have Only me chats.");
+    await page.keyboard.press("Escape");
+    // Back to Opengeni restores who can see it.
+    await choose(/^Opengeni/);
+    await page.getByRole("button", { name: "Visibility: Workspace" }).waitFor();
+
+    // Text the person changed is theirs: it is saved and stays.
+    await choose(/^Onboarding buddy/);
+    await page.waitForFunction(() =>
+      document.querySelector("textarea")?.value.startsWith("Set me up"),
+    );
+    await composer.press("End");
+    await composer.pressSequentially(" Thanks.");
+    const edited = await composer.inputValue();
+    expect(await main.getAttribute("data-draft-text")).toBe(edited);
+    await choose(/^Opengeni/);
+    expect(await composer.inputValue()).toBe(edited);
+    await page.close();
+  }, 60_000);
+
+  test("where Only me chats aren't available, an Only me agent says so and Send stays off", async () => {
+    const page = await open("composer-only-me&private=off", 390);
+    await page.getByRole("alert").getByText("Only me agents need Only me chats").waitFor();
+    expect(await page.locator("main").getAttribute("data-can-send")).toBe("false");
+    await page.getByRole("button", { name: "Chat with: Meeting notes" }).click();
+    const notes = page.getByRole("menuitem", { name: /^Meeting notes/ });
+    expect(await notes.getAttribute("aria-disabled")).toBe("true");
     await page.close();
   }, 60_000);
 
