@@ -153,8 +153,12 @@ describe("installed API Integration worker adapters", () => {
       expect(await call()).toMatchObject({ isError: false });
       expect(requests).toEqual(["https://127.0.0.1/v1/items?api_key=org-key"]);
       status = 401;
-      // A rejected organization key is not refreshed or retried: the call fails once.
-      await expect(call()).rejects.toMatchObject({ code: "authorization_rejected", status: 401 });
+      // A rejected organization key is not refreshed or retried: the call fails
+      // once, as a tool error the model can read.
+      expect(await call()).toMatchObject({
+        isError: true,
+        structuredContent: { ok: false, error: { code: "authorization_rejected", status: 401 } },
+      });
       expect(requests).toHaveLength(2);
     } finally {
       await prepared.close();

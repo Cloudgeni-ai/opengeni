@@ -114,8 +114,8 @@ export async function readIntegrationResponse(
   const contentType =
     response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
   if (body.byteLength === 0) return { data: null, contentType, bytes: 0 };
-  const text = new TextDecoder("utf-8", { fatal: false }).decode(body);
   if (contentType === "application/json" || contentType.endsWith("+json")) {
+    const text = new TextDecoder("utf-8", { fatal: false }).decode(body);
     try {
       return { data: JSON.parse(text), contentType, bytes: body.byteLength };
     } catch {
@@ -128,5 +128,36 @@ export async function readIntegrationResponse(
       );
     }
   }
-  return { data: text, contentType, bytes: body.byteLength };
+  // UTF-8 stays text, and so does a declared text type. Other bytes (a PDF,
+  // an image, an Office file) are returned as base64 rather than as
+  // replacement characters, so the content survives for code that decodes
+  // or saves it; past a size the result could carry, only their size is.
+  const bytes = body.byteLength;
+  try {
+    return { data: new TextDecoder("utf-8", { fatal: true }).decode(body), contentType, bytes };
+  } catch {
+    if (TEXT_CONTENT_TYPE.test(contentType)) {
+      return { data: new TextDecoder("utf-8", { fatal: false }).decode(body), contentType, bytes };
+    }
+    if (bytes > MAX_INLINE_BINARY_BYTES) {
+      return {
+        data: {
+          encoding: "omitted",
+          message: `Binary content of ${bytes} bytes is larger than the ${MAX_INLINE_BINARY_BYTES}-byte inline limit.`,
+        },
+        contentType,
+        bytes,
+      };
+    }
+    return {
+      data: { encoding: "base64", base64: Buffer.from(body).toString("base64") },
+      contentType,
+      bytes,
+    };
+  }
 }
+
+/** Types that are text even when their bytes are not valid UTF-8. */
+const TEXT_CONTENT_TYPE = /^text\/|[/+](?:xml|yaml|x-yaml|csv|javascript|x-www-form-urlencoded)$/;
+/** Binary bytes returned inline as base64, which grows them by a third. */
+export const MAX_INLINE_BINARY_BYTES = 2 * 1024 * 1024;
