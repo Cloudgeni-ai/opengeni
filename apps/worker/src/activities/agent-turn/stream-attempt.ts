@@ -913,14 +913,28 @@ export async function runTurnStreamAttempt(
     if (usage.status === "rejected") throw usage.reason;
     creditPolicyRevision = usage.value;
     if (pendingSteer.status === "rejected") throw pendingSteer.reason;
-    if (pendingSteer.value) {
+    // The Steer read ran alongside the slower checks, so the watch may have
+    // seen a Steer committed after it. Such a watch is not proof of a
+    // withdrawn Steer: read again before re-arming it, or the request would
+    // go out unpreemptible and the Steer would wait a whole further step.
+    const steerPending =
+      pendingSteer.value ||
+      (checkSteer &&
+        steerWatch?.signal().aborted === true &&
+        (await hasPendingSteerForTurn(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: activeTurnId,
+        })));
+    if (steerPending) {
       // The request has not left the worker. The SDK finishes the run at
       // this boundary after delivering every event of the completed step.
       steerHandover = true;
       throw new ModelStepHandover("steer");
     }
-    // The watch noticed a Steer that no longer waits (withdrawn, or the
-    // automation run that steered was paused) before this boundary. Listen
+    // The watch noticed a Steer that, read again just now, no longer waits
+    // (withdrawn, or the automation run that steered was paused). Listen
     // again, or every later request would be cut short at once.
     if (checkSteer && steerWatch?.signal().aborted) steerWatch.rearm();
   };

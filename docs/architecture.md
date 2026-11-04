@@ -1445,7 +1445,11 @@ The turn does not wait for that boundary on its own schedule. A Steer watch
 per attempt (`steer-watch.ts`) subscribes to the session's live events
 (`session.control.steer_requested`, `session.queue.changed`,
 `system.update.pending`), re-reads the same predicate on each one, and rechecks
-every 10 seconds in case a live event is lost. When a Steer waits it does two
+every 10 seconds in case a live event is lost. Admission's own Steer read runs
+alongside its slower checks, so when the watch has already fired, a negative
+admission read is read again before the watch is re-armed as withdrawn, and a
+re-armed watch reads at once (events that arrived while it was tripped were
+not acted on). When a Steer waits it does two
 things. A model request that is still generating is cut short: its abort
 signal fires with `ModelPreemption`, and the transport ends the stream with a
 `response_done` (`providerData.opengeniPreempted`) that keeps only the
