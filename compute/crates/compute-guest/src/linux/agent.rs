@@ -13,7 +13,7 @@
 use std::fs;
 use std::io::{self, Write as _};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
-use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _};
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -26,7 +26,7 @@ use super::program::{FileId, PROVEN, Program};
 use super::supervise::{self, Children};
 use super::sys::Exit;
 use super::vsock::Stream;
-use super::{log, spawn, sys, system};
+use super::{log, log_change, spawn, sys, system};
 use crate::AGENT_LINK_PORT;
 use crate::agent::{self, ACTIVITY_DIR, LINK_DIR, LINK_FILE, NATS_PORT};
 use crate::envd::AgentInit;
@@ -37,13 +37,20 @@ use crate::resume::relay::{self as resume, Ended};
 const QUICK: Duration = Duration::from_secs(10);
 
 /// After this many quick ends in a row of a program that is not the one
-/// kept, the kept one is put back in its place.
+/// kept, the kept one is put back in its place. Only ends of its own
+/// count (see [`ended_at_once`]).
 const QUICK_ENDS: u32 = 3;
 
 /// Keeps the agent running from the moment the sandbox wants it, with
 /// back-off between starts. Never returns.
 pub fn supervise(guest: &Arc<Guest>, children: &Children) {
     let program = Program::agent();
+    // Kept before anything a sandbox runs can move it, so the agent can
+    // always start again (see `program`): here, before the sandbox wants
+    // the agent, rather than on PID 1's own thread.
+    if let Err(error) = program.keep(true) {
+        log(&format!("keeping the agent's program: {error}"));
+    }
     let mut forwarding = false;
     let mut pause = Duration::from_millis(200);
     let mut quick_ends = 0;
@@ -61,7 +68,8 @@ pub fn supervise(guest: &Arc<Guest>, children: &Children) {
         // The agent, its commands and its link's port need what is there.
         system::keep_dev();
         let started = Instant::now();
-        let spawned = start_program(&program, quick_ends >= QUICK_ENDS, |path| {
+        let replace = quick_ends >= QUICK_ENDS;
+        let spawned = start_program(&program, replace, |path| {
             let mut command = supervise::command(&path.to_string_lossy());
             command
                 .args(agent::args(&wanted))
@@ -71,17 +79,25 @@ pub fn supervise(guest: &Arc<Guest>, children: &Children) {
                 .stdin(Stdio::null());
             children.spawn(&mut command)
         });
-        match spawned {
+        if replace {
+            // Put back (or already the kept one): counted afresh.
+            quick_ends = 0;
+        }
+        let exit = match spawned {
             Ok(((pid, exited), file)) => {
                 guest.agent_started(pid, wanted);
                 log(&format!("the agent runs as pid {pid}"));
-                let exit = wait_keeping(&program, file, &exited);
+                let exit = wait_keeping(&program, pid, file, &exited, PROVEN);
                 guest.agent_stopped(pid);
                 log(&format!("the agent (pid {pid}) ended: {exit:?}"));
+                exit
             }
-            Err(error) => log(&format!("the agent did not start: {error}")),
-        }
-        if started.elapsed() < QUICK {
+            Err(error) => {
+                log(&format!("the agent did not start: {error}"));
+                None
+            }
+        };
+        if ended_at_once(exit, started.elapsed()) {
             quick_ends += 1;
         } else {
             quick_ends = 0;
@@ -94,12 +110,31 @@ pub fn supervise(guest: &Arc<Guest>, children: &Children) {
     }
 }
 
+/// Whether an agent that ended with `exit` after running for `ran` ended at
+/// once of its own: a program that cannot run. Being stopped from outside
+/// (the init stopping an agent with old settings, a `pkill`) and not
+/// starting at all (no memory or process to spare) say nothing about the
+/// program, and do not count.
+pub(super) fn ended_at_once(exit: Option<Exit>, ran: Duration) -> bool {
+    ran < QUICK
+        && match exit {
+            Some(Exit::Code(_)) => true,
+            Some(Exit::Signal(signal)) => !matches!(
+                signal,
+                libc::SIGKILL | libc::SIGTERM | libc::SIGINT | libc::SIGHUP
+            ),
+            None => false,
+        }
+}
+
 /// Starts `program` with `spawn`, from its usual path: first the kept
 /// program is put back there when the path holds no program (or, with
-/// `replace`, one that is not the kept one), and when what is there does
-/// not start, the kept one is put back and started; where it cannot be put
-/// back (a directory is in its place), it starts where it is kept. Returns
-/// what `spawn` returned and the file it started from its usual path.
+/// `replace`, one that is not the kept one), and when what is there cannot
+/// be run, the kept one is put back and started; where it cannot be put
+/// back (a directory is in its place), it starts where it is kept. Any
+/// other failure to start (no memory or process to spare) is returned, to
+/// be tried again, with the program left as it is. Returns what `spawn`
+/// returned and the file it started from its usual path.
 pub(super) fn start_program<T>(
     program: &Program,
     replace: bool,
@@ -115,6 +150,9 @@ pub(super) fn start_program<T>(
         "the agent's program {} did not start: {error}",
         program.path().display()
     ));
+    if !about_the_program(&error) {
+        return Err(error);
+    }
     match program.restore(true) {
         Ok(true) => {
             log(&format!(
@@ -133,6 +171,24 @@ pub(super) fn start_program<T>(
             Ok((spawn(program.kept())?, None))
         }
     }
+}
+
+/// Whether `error`, from starting a program, is about the program file
+/// itself: missing, not a program, not allowed to run, or its interpreter
+/// or loader missing.
+fn about_the_program(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(
+            libc::ENOENT
+                | libc::ENOEXEC
+                | libc::EACCES
+                | libc::EISDIR
+                | libc::ENOTDIR
+                | libc::ELIBBAD
+                | libc::ELOOP
+        )
+    )
 }
 
 /// Puts the kept program back when the usual path holds none, or, with
@@ -156,25 +212,91 @@ fn put_back(program: &Program, replace: bool) {
     }
 }
 
-/// Waits for the agent to end. Once it has run for [`PROVEN`] from the
-/// file still at its usual path, that file is the one kept from then on.
-fn wait_keeping(program: &Program, file: Option<FileId>, exited: &Receiver<Exit>) -> Option<Exit> {
-    match exited.recv_timeout(PROVEN) {
-        Ok(exit) => return Some(exit),
-        Err(RecvTimeoutError::Disconnected) => return None,
-        Err(RecvTimeoutError::Timeout) => {}
-    }
-    if file.is_some() && program.current() == file {
+/// Waits for the agent `pid`, started from `started_from`, to end. Every
+/// `every` it looks at the program the agent runs: one that ran a whole
+/// period and is still the file at the usual path is the one kept from
+/// then on. So is a self-update the agent replaced its program with and
+/// went on running (it execs the new one, as the same process), and the
+/// program a reboot starts.
+pub(super) fn wait_keeping(
+    program: &Program,
+    pid: i32,
+    started_from: Option<FileId>,
+    exited: &Receiver<Exit>,
+    every: Duration,
+) -> Option<Exit> {
+    let mut proving = Proving::new(started_from);
+    loop {
+        match exited.recv_timeout(every) {
+            Ok(exit) => return Some(exit),
+            Err(RecvTimeoutError::Disconnected) => return None,
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+        let Some(file) = proving.proven(running_file(pid), program.current()) else {
+            continue;
+        };
         match program.keep(false) {
-            Ok(true) => log(&format!(
-                "keeping the agent's program now at {}",
-                program.path().display()
-            )),
-            Ok(false) => {}
-            Err(error) => log(&format!("keeping the agent's program: {error}")),
+            Ok(kept) => {
+                proving.kept(file);
+                if kept {
+                    log(&format!(
+                        "keeping the agent's program now at {}",
+                        program.path().display()
+                    ));
+                }
+                log_change("keep-agent", None);
+            }
+            Err(error) => log_change(
+                "keep-agent",
+                Some(&format!("keeping the agent's program: {error}")),
+            ),
         }
     }
-    exited.recv().ok()
+}
+
+/// The file process `pid` runs, while it runs.
+fn running_file(pid: i32) -> Option<FileId> {
+    fs::metadata(format!("/proc/{pid}/exe"))
+        .ok()
+        .map(|meta| (meta.dev(), meta.ino()))
+}
+
+/// Which program the agent has run for a whole period, looked at once a
+/// period.
+#[derive(Debug)]
+pub(super) struct Proving {
+    seen: Option<FileId>,
+    kept: Option<FileId>,
+}
+
+impl Proving {
+    /// For an agent just started from `started_from`.
+    pub(super) fn new(started_from: Option<FileId>) -> Self {
+        Self {
+            seen: started_from,
+            kept: None,
+        }
+    }
+
+    /// After another period in which the agent ran `running`, with
+    /// `current` at the program's usual path: the file to keep, when it
+    /// ran the whole period from there and is not kept already.
+    pub(super) fn proven(
+        &mut self,
+        running: Option<FileId>,
+        current: Option<FileId>,
+    ) -> Option<FileId> {
+        let whole = running.is_some() && running == self.seen;
+        self.seen = running;
+        (whole && running == current && running != self.kept)
+            .then_some(running)
+            .flatten()
+    }
+
+    /// `file` is the one kept.
+    pub(super) fn kept(&mut self, file: FileId) {
+        self.kept = Some(file);
+    }
 }
 
 /// Writes the file the agent starts with, root's only, in one step.

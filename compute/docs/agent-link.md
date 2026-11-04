@@ -127,11 +127,16 @@ Opengeni creates a sandbox with the native API (`POST /v1/sandboxes`,
 - A command in the sandbox runs as root and may move, remove or overwrite
   the agent's program or the device nodes in `/dev`, then end the agent.
   The guest copies the agent's program at boot to
-  `/opengeni/kept/opengeni-agent` (a directory only root may enter), and
-  keeps a program that has run for a minute as the new copy, so a verified
-  self-update is kept. Before each start it puts the copy back at the usual
-  path when that holds no program, does not start, or keeps ending at once
-  (three times within ten seconds of starting), and logs that it did. It
+  `/opengeni/kept/opengeni-agent` (a directory only root may enter). Once
+  a minute it looks at the program the agent runs, and keeps it as the new
+  copy once it has run a whole minute from the file still at the usual
+  path, so a self-update the agent execs, and the program a reboot starts,
+  is kept a minute or two later. Before each start it puts the copy back
+  at the usual path when that holds no program, holds one that cannot be
+  run (missing, not a program, not allowed, no interpreter; not for a lack
+  of memory or processes), or holds one other than the copy that ended of
+  its own (not by a stop signal) within ten seconds of starting three
+  starts in a row, and logs that it did. It
   recreates missing core nodes in `/dev` (`null`, `zero`, `full`,
   `random`, `urandom`, `tty`, the `ptmx`, `fd` and standard stream links,
   and the `pts` and `shm` mounts) before each start and every ten seconds,

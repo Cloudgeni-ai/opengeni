@@ -262,30 +262,6 @@ pub fn device_numbers(rdev: u64) -> (u32, u32) {
     (libc::major(rdev), libc::minor(rdev))
 }
 
-/// `chroot(2)` into `path`, then the new root as the working directory.
-#[cfg(test)]
-pub fn enter_root(path: &str) -> io::Result<()> {
-    let path = c_string(path)?;
-    let root = c_string("/")?;
-    // SAFETY: valid NUL-terminated strings that outlive the calls.
-    check(unsafe { libc::chroot(path.as_ptr()) })?;
-    // SAFETY: as above.
-    check(unsafe { libc::chdir(root.as_ptr()) })
-}
-
-/// `unshare(2)` into a new user and mount namespace, mapping this user to
-/// root in it, so a test that is not root may still `chroot`.
-#[cfg(test)]
-pub fn become_root_in_namespace() -> io::Result<()> {
-    // SAFETY: `getuid` and `getgid` take nothing and cannot fail.
-    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
-    // SAFETY: no pointers.
-    check(unsafe { libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS) })?;
-    std::fs::write("/proc/self/setgroups", "deny")?;
-    std::fs::write("/proc/self/uid_map", format!("0 {uid} 1"))?;
-    std::fs::write("/proc/self/gid_map", format!("0 {gid} 1"))
-}
-
 /// Whether this process is root.
 #[cfg(test)]
 #[must_use]

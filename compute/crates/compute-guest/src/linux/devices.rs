@@ -17,7 +17,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
 use std::path::Path;
 
-use super::{log, sys};
+use super::{log, log_change, sys};
 
 /// What belongs at one name in `/dev`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,18 +154,27 @@ fn set_mode(path: &Path, node: Node) -> io::Result<()> {
 
 /// Puts back every core node under `dev` that is missing, replaced or has
 /// another mode, and returns the names it put back. One it cannot put back
-/// is logged and left.
+/// is logged (once while it stays so) and left.
 pub fn keep_in(dev: &Path) -> Vec<&'static str> {
     let mut repaired = Vec::new();
     for &(name, node) in CORE {
         let path = dev.join(name);
+        let key = path.to_string_lossy();
         let state = inspect(&path, node);
         if state == State::Healthy {
+            log_change(&key, None);
             continue;
         }
         match repair(&path, node, state) {
-            Ok(()) => repaired.push(name),
-            Err(error) => log(&format!("{} ({state:?}): {error}", path.display())),
+            Ok(()) => {
+                repaired.push(name);
+                log_change(&key, None);
+            }
+            // Once, not every few seconds, while it stays so.
+            Err(error) => log_change(
+                &key,
+                Some(&format!("{} ({state:?}): {error}", path.display())),
+            ),
         }
     }
     repaired
@@ -255,11 +264,13 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// `mknod` needs root: skipped, and says so, otherwise.
+    /// `mknod` needs root: run again with `sudo` where it asks for no
+    /// password (CI), or skipped, and says so, otherwise.
     #[test]
     fn removed_or_replaced_devices_are_made_again_with_their_numbers_and_modes() {
-        if !sys::is_root() {
-            eprintln!("skipping: mknod needs root");
+        if !crate::linux::tests::as_root(
+            "linux::devices::tests::removed_or_replaced_devices_are_made_again_with_their_numbers_and_modes",
+        ) {
             return;
         }
         let dir = scratch("devices");

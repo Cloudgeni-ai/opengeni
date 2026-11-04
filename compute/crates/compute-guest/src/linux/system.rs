@@ -4,8 +4,9 @@ use std::fs::{self, OpenOptions, Permissions};
 use std::io::{self, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
-use super::{devices, log, sys};
+use super::{devices, log, log_change, sys};
 use crate::agent::STATE_DIR;
 use crate::cmdline::Network;
 use crate::given::GIVEN_FILE;
@@ -93,6 +94,9 @@ const DEV_MOUNTS: &[&str] = &["/dev/pts", "/dev/shm"];
 /// shared memory file system when one is no longer mounted. Cheap enough
 /// to run every few seconds.
 pub fn keep_dev() {
+    // PID 1's loop, both supervisors and a reseed may all ask at once.
+    static KEEPING: Mutex<()> = Mutex::new(());
+    let _keeping = KEEPING.lock().unwrap_or_else(PoisonError::into_inner);
     let dev = fs::metadata("/dev").map(|meta| meta.dev()).ok();
     for &(source, target, kind, flags, data) in MOUNTS {
         if !DEV_MOUNTS.contains(&target) {
@@ -105,12 +109,16 @@ pub fn keep_dev() {
             (_, Err(_)) => false,
         };
         if mounted {
+            log_change(target, None);
             continue;
         }
         let _ = fs::create_dir_all(target);
         match sys::mount(source, target, kind, flags, data) {
-            Ok(()) => log(&format!("{target} was not mounted; mounted it again")),
-            Err(error) => log(&format!("mount {target}: {error}")),
+            Ok(()) => {
+                log(&format!("{target} was not mounted; mounted it again"));
+                log_change(target, None);
+            }
+            Err(error) => log_change(target, Some(&format!("mount {target}: {error}"))),
         }
     }
     devices::keep();
@@ -332,7 +340,7 @@ pub fn renew_identity(sandbox: &str, seed_hex: &str) -> io::Result<()> {
 /// from it at once. Returns whether it did.
 pub fn reseed(seed: &[u8]) -> bool {
     // Writing to the pool and asking for a reseed need the device node.
-    devices::keep();
+    keep_dev();
     let result = (|| {
         let mut pool = OpenOptions::new().write(true).open("/dev/urandom")?;
         pool.write_all(seed)?;

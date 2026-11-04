@@ -12,13 +12,14 @@ mod sys;
 mod system;
 mod vsock;
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
 use std::process::Stdio;
-use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -35,6 +36,25 @@ use crate::{ENVD_PORT, GATEWAY_PORT, NOTICE_PORT, READY_PORT};
 /// Writes one line to the console.
 pub(crate) fn log(message: &str) {
     eprintln!("compute-guest: {message}");
+}
+
+/// Writes `message` to the console under `key` only when it is not the
+/// last one written under `key`, so that what goes wrong every few seconds
+/// is written once; `None` forgets the last, as what went wrong is right
+/// again.
+pub(crate) fn log_change(key: &str, message: Option<&str>) {
+    static LAST: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
+    let mut last = LAST.lock().unwrap_or_else(PoisonError::into_inner);
+    match message {
+        Some(message) if last.get(key).map(String::as_str) != Some(message) => {
+            log(message);
+            last.insert(key.to_owned(), message.to_owned());
+        }
+        Some(_) => {}
+        None => {
+            last.remove(key);
+        }
+    }
 }
 
 /// Starts a thread with a small stack; `None` if it could not start.
@@ -128,13 +148,7 @@ pub fn run() -> ! {
         // Nothing to wait for: template builders may snapshot it now.
         listen(READY_PORT, "ready", drop);
     }
-    // Kept before anything a sandbox runs can move it, so the agent can
-    // always start again (see `program`).
-    let agent_program = Program::agent();
-    if let Err(error) = agent_program.keep(true) {
-        log(&format!("keeping the agent's program: {error}"));
-    }
-    if agent_program.available() {
+    if Program::agent().available() {
         spawn("agent", {
             let (guest, children) = (Arc::clone(&guest), Arc::clone(&children));
             move || agent::supervise(&guest, &children)

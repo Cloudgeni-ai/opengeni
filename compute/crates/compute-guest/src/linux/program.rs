@@ -10,9 +10,14 @@
 //! reboot finds it. Before it starts the agent, the init puts the kept
 //! program back at the usual path when that holds no program (or one that
 //! does not start, or keeps ending at once), in one rename, and starts it
-//! from there, the path the agent's own self-update replaces. A program
-//! that runs for [`PROVEN`] is the one kept from then on, so a verified
-//! self-update is kept once it has run.
+//! from there, the path the agent's own self-update replaces. The program
+//! the agent has run for a whole [`PROVEN`] period, from the file still at
+//! the usual path, is the one kept from then on: a verified self-update
+//! (which the agent execs as the same process) is kept once it has run
+//! that long, and so is what a reboot starts. An agent started from the
+//! kept path itself (a directory took the usual one) replaces the kept
+//! copy when it updates itself. The copy costs one agent-sized file on
+//! each sandbox's disk.
 
 use std::fs::{self, DirBuilder, File};
 use std::io::{self, Read as _};
@@ -26,7 +31,8 @@ use crate::agent::AGENT_PATH;
 /// sandbox's disk, in a directory only root may enter.
 pub const KEPT_AGENT_PATH: &str = "/opengeni/kept/opengeni-agent";
 
-/// How long a program runs before it is the one kept.
+/// How often the init looks at which program the agent runs: one that ran
+/// a whole period is the one kept.
 pub const PROVEN: Duration = Duration::from_secs(60);
 
 /// One file, by its device and inode.
