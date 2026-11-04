@@ -335,7 +335,9 @@ export function readyAt(pull: QueuedPull): number {
  * batch is being split, priority batches and its halves take turns: after a
  * priority batch went ahead of a half, that half goes next, so a steady stream
  * of priority PRs cannot hold a bisection back. Then ready PRs in queue order.
- * CI and batcher changes run alone. A priority PR already in a failed batch's
+ * CI and batcher changes run alone; while a failed batch is being split, the
+ * oldest one outside its halves takes turns with them when no priority PR
+ * waits. A priority PR already in a failed batch's
  * halves keeps its place there: building every priority PR again would retest
  * the batch that just failed, unsplit, on every pass.
  */
@@ -392,6 +394,17 @@ export function nextBatch(
     );
     return { kind: "build", members, pending, ...ahead };
   }
+
+  // A CI or batcher change outside the halves runs alone, so no priority fill
+  // can carry it, and new failures can keep a bisection going for as long as PRs
+  // keep arriving. When no priority PR is waiting, the oldest such change takes
+  // the turn a priority batch would: it goes ahead of the next half, and that
+  // half goes after it, so the two take turns.
+  const starved =
+    pending.length && !halvesFirst
+      ? ready.find((p) => alone(p) && !bisecting.has(p.number))
+      : undefined;
+  if (starved) return { kind: "build", members: [starved], pending, aheadOfBisection: true };
 
   // A half holding a priority PR runs before the other halves; the halves are
   // independent, so their order only decides which PRs land sooner.
