@@ -532,14 +532,8 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   );
   // Background-command tools need compute: the effective route of this turn,
   // a managed sandbox or an attached Connected Machine, not the durable home.
-  // A person who can answer is the turn's initiating user or external user
-  // (the inbox recipient rule); an API-key turn has none to wait on.
   const toolFamilies = resolveAgentToolFamilies(session.agent, {
     sandboxAttached: (activeSandboxBackend ?? groupBoxBackend) !== "none",
-    humanRecipient: turnHasHumanRecipient(
-      turn.initiatingHumanSubjectId ??
-        (turn.initiator?.kind === "subject" ? turn.initiator.subjectId : null),
-    ),
   });
   const bundledSkillIds = bundledSkillSelectionForAgentConfig(
     session.bundledSkillIds,
@@ -1468,12 +1462,3 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
 
 export type PrepareTurnToolPolicyOk = Awaited<ReturnType<typeof prepareTurnToolPolicy>>;
 export type PrepareTurnToolRuntimeOk = Awaited<ReturnType<typeof prepareTurnToolRuntime>>;
-
-/**
- * Whether a person can answer this turn: the same subjects the session inbox
- * delivers to (`user:` and `external_user:`), or the local-mode person
- * (`dev`), frozen with the turn.
- */
-export function turnHasHumanRecipient(subjectId: string | null | undefined): boolean {
-  return subjectId === "dev" || /^(user|external_user):/.test(subjectId ?? "");
-}

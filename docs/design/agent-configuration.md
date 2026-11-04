@@ -184,9 +184,10 @@ Rules:
    neither, and no `set_session_title` (Opengeni titles the session itself).
    A product MCP server attached ⇒ selected (upfront by default).
    `wait_for_input` and the waiting guidance need something that can resume
-   the agent: compute, `subagents`, `goals`, `schedules`, `browser`, `media`,
-   or `humanInput` with a person who can answer (a user-started turn). Legacy
-   sessions keep both unconditionally.
+   the agent: compute, `subagents`, `goals`, `schedules`, `browser` or
+   `media`. A person needs no wait: an answer to `request_human_input` resumes
+   the paused turn and a new message starts one. Legacy sessions keep both
+   unconditionally. The Codemode directive needs compute as well.
 2. **Selectable capabilities** (each owns its tools and, where it has one, its
    prompt module). The single source of truth is the registry in
    `packages/contracts/src/agent-config.ts`; a test maps every first-party tool.

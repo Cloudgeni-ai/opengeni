@@ -129,6 +129,8 @@ type FixtureOptions = {
   credentialRestrictionSource?: "accepted" | "initial" | "spoof" | "none";
   /** Route this turn to an attached Connected Machine (home stays `none`). */
   machineAttached?: boolean;
+  /** The turn minted a Codemode bearer. */
+  codemodeToken?: boolean;
   /** The stored bundled selection; `"omit"` leaves it undefined. Default `[]`. */
   bundledSkillIds?: BundledSkillId[] | "omit";
   /** Rendered workspace governance for this turn. */
@@ -554,6 +556,8 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       modelInputPolicy: { inputFileMediaTypes: [], supportsImageInput: true },
       groupBoxBackend: "none",
       lazyToolTransport: options.lazy || options.eagerProduct ? "generic_dispatch" : undefined,
+      ...(options.machineAttached ? { activeSandboxBackend: "selfhosted" as const } : {}),
+      ...(options.codemodeToken ? { sandboxCodemodeToken: "fixture-codemode-token" } : {}),
     } as BuildTurnAgentDeps);
     const visibleTools = await built.agent.getAllTools(new RunContext());
     const result = await runAgentStream(
@@ -648,9 +652,8 @@ function expectedFirstPartyTools(
   config: ResolvedAgentConfig | null,
   settings: Settings,
   sandboxAttached = false,
-  humanRecipient = true,
 ) {
-  const families = resolveAgentToolFamilies(config, { sandboxAttached, humanRecipient });
+  const families = resolveAgentToolFamilies(config, { sandboxAttached });
   return allowedFirstPartyMcpToolsForSession(settings, [...FIRST_PARTY_MCP_TOOL_NAMES]).filter(
     (name) => families.allowsFirstPartyTool(name),
   );
@@ -702,9 +705,9 @@ function assertCapabilitySurface(
   expect(captured.selectedServerIds.includes("files")).toBe(enabled("workspaceFiles"));
   expect(captured.selectedServerIds.includes("docs")).toBe(enabled("knowledge"));
   expect(captured.names).toContain(prefixedMcpToolName("customer-product", "search_documents"));
-  // The fixture turn has a person who can answer: waiting follows the families.
+  // Waiting follows the families: something must be able to resume the agent.
   expect(captured.names.includes("opengeni__wait_for_input")).toBe(
-    resolveAgentToolFamilies(config, { sandboxAttached: false, humanRecipient: true }).waitForInput,
+    resolveAgentToolFamilies(config, { sandboxAttached: false }).waitForInput,
   );
   // No sandbox or Connected Machine is attached, so no command can exist.
   expect(captured.names).not.toContain("opengeni__command_read");
@@ -883,21 +886,43 @@ describe("agent configuration reaches the production model request", () => {
     assertCapabilitySurface(captured, config);
     expect(captured.names).toContain("request_human_input");
     expect(captured.names).toContain("skill_read");
-    expect(captured.names).toContain("opengeni__wait_for_input");
+    // Nothing can resume a none agent without compute: it has no wait.
+    expect(captured.names).not.toContain("opengeni__wait_for_input");
     expect(captured.names).not.toContain("privacy_facts");
     expect(captured.names).not.toContain("web_search");
     expect(captured.names).not.toContain("list_models");
     expect(captured.names).not.toContain("skill_search");
   });
 
-  test("none with no person to answer leaves out wait_for_input and keeps questions", async () => {
-    const config = agentConfig("none");
-    const captured = await captureWorkerRequest({ agent: config, humanRecipient: false });
-    expect(captured.preparation.firstPartyTools).toEqual(
-      expectedFirstPartyTools(config, captured.settings, false, false),
-    );
-    expect(captured.names).not.toContain("opengeni__wait_for_input");
-    expect(captured.names).toContain("request_human_input");
+  test("Codemode guidance needs a sandbox or Connected Machine to run it from", async () => {
+    const codemode = "Every tool in the Codemode catalog";
+    const detached = await captureWorkerRequest({
+      agent: agentConfig("none"),
+      codemodeToken: true,
+    });
+    expect(detached.request.systemInstructions).not.toContain(codemode);
+    const attached = await captureWorkerRequest({
+      agent: agentConfig("none"),
+      codemodeToken: true,
+      machineAttached: true,
+    });
+    expect(attached.request.systemInstructions).toContain(codemode);
+  });
+
+  test.each([true, false])(
+    "none leaves out wait_for_input and keeps questions (a person started the turn: %s)",
+    async (human) => {
+      const config = agentConfig("none");
+      const captured = await captureWorkerRequest({ agent: config, humanRecipient: human });
+      expect(captured.preparation.firstPartyTools).toEqual(
+        expectedFirstPartyTools(config, captured.settings),
+      );
+      expect(captured.names).not.toContain("opengeni__wait_for_input");
+      expect(captured.names).toContain("request_human_input");
+    },
+  );
+
+  test("anything that can resume a none agent brings waiting back", async () => {
     // Turning on anything that can resume the agent brings waiting back.
     const scheduled = agentConfig("none", "schedules", true);
     const withSchedules = await captureWorkerRequest({ agent: scheduled, humanRecipient: false });
@@ -912,7 +937,8 @@ describe("agent configuration reaches the production model request", () => {
       expect(detached.preparation.firstPartyTools).toEqual(
         expectedFirstPartyTools(config, detached.settings),
       );
-      expect(detached.names).toContain("opengeni__wait_for_input");
+      // Waiting needs something that can resume the agent: compute does.
+      expect(detached.names.includes("opengeni__wait_for_input")).toBe(from !== "none");
       expect(detached.names).not.toContain("opengeni__command_read");
       expect(detached.names).not.toContain("opengeni__command_wait");
 
@@ -1195,7 +1221,6 @@ describe("effective-tools projection agrees with actual model preparation", () =
             humanInputEnabled: true,
             hasWorkspaceSkills: false,
             objectStorageAvailable: true,
-            humanRecipient: human,
             mediaAttachments: new Map([[captured.session.id, captured.mediaAttachment]]),
           },
         ),
@@ -1603,17 +1628,17 @@ test("a configured retained router survives deployment search disabled", async (
 
 /**
  * The embedding profile: capabilities "none", no sandbox, one eager product
- * MCP server, no goal, identity or instructions, started through the API (no
- * person to answer). Everything in its first request except the product's own
- * tools is a fixed per-call cost.
+ * MCP server, no goal, identity or instructions, started through the API or by
+ * a person. Everything in its first request except the product's own tools is
+ * a fixed per-call cost.
  */
-async function embeddingFixedPrefix() {
+async function embeddingFixedPrefix(human = false) {
   const captured = await captureWorkerRequest({
     agent: agentConfig("none"),
     builtins: false,
     eagerProduct: true,
     hasSkills: false,
-    humanRecipient: false,
+    humanRecipient: human,
   });
   const productTool = prefixedMcpToolName("customer-product", "search_documents");
   const system = captured.request.systemInstructions ?? "";
@@ -1638,13 +1663,22 @@ async function embeddingFixedPrefix() {
 
 describe("embedding profile fixed prefix", () => {
   // Raise only with a reviewed reason: every byte here is paid on every call.
-  const BUDGET_BYTES = 13_000;
+  const BUDGET_BYTES = 12_000;
 
   test("stays within its budget", async () => {
     const prefix = await embeddingFixedPrefix();
     const toolBytes = Object.values(prefix.tools).reduce((sum, size) => sum + size, 0);
     expect(prefix.developer).toEqual([]);
     expect(Buffer.byteLength(prefix.system) + toolBytes).toBeLessThanOrEqual(BUDGET_BYTES);
+  });
+
+  // Who started the turn never changes the prefix, so mixed API and person
+  // turns share one prompt cache.
+  test("is the same whether the API or a person started the turn", async () => {
+    const api = await embeddingFixedPrefix(false);
+    const person = await embeddingFixedPrefix(true);
+    expect(person.system).toBe(api.system);
+    expect(person.tools).toEqual(api.tools);
   });
 
   // A reviewed inventory: a change to any section or built-in tool shows up
@@ -1663,8 +1697,8 @@ const INVENTORY = {
     "# Working with the user": 128,
     "## Match effort to the request": 733,
     "## Progress updates": 747,
-    "## Final answer": 866,
-    "### Formatting rules": 240,
+    "## Final answer": 434,
+    "### Formatting rules": 127,
     "# Rules for getting work done": 682,
     "## Autonomy and persistence": 3089,
     "# Destructive Actions": 547,

@@ -773,9 +773,15 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           effort: turnExecutionPolicy.reasoningEffort,
         })
       : turnExecutionPolicy.reasoningEffort;
+  // Codemode runs from a shell: a configured session with no sandbox or
+  // Connected Machine this turn gets neither the client nor its guidance.
+  const codemodeToken =
+    session.agent && (activeSandboxBackend ?? groupBoxBackend) === "none"
+      ? undefined
+      : sandboxCodemodeToken;
   // Managed boxes fetch the release's Codemode client in one setup command.
   const codemodeClientDownload =
-    activeSandboxBackend !== "selfhosted" && sandboxCodemodeToken
+    activeSandboxBackend !== "selfhosted" && codemodeToken
       ? await withSandboxStartupPhases(
           {
             observability,
@@ -964,14 +970,14 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         ...(activeSandboxBackend !== "selfhosted" && !sandboxGitTokens && sandboxGitToken
           ? { gitTokenSeed: sandboxGitToken }
           : {}),
-        ...(sandboxCodemodeToken ? { codemodeAvailable: true } : {}),
+        ...(codemodeToken ? { codemodeAvailable: true } : {}),
         ...(codeSearchAvailable ? { codeSearchAvailable: true } : {}),
         // Managed boxes receive the bearer through their protected per-session
         // token file. Connected Machines use transient per-exec delivery above,
         // so they must not run the file-seeding lifecycle hook.
-        ...(activeSandboxBackend !== "selfhosted" && sandboxCodemodeToken
+        ...(activeSandboxBackend !== "selfhosted" && codemodeToken
           ? {
-              codemodeTokenSeed: sandboxCodemodeToken,
+              codemodeTokenSeed: codemodeToken,
               codemodeTokenSessionId: input.sessionId,
               ...(codemodeClientDownload ? { codemodeClientDownload } : {}),
             }
