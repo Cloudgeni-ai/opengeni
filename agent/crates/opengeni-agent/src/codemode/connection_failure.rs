@@ -162,17 +162,27 @@ pub(super) struct EnvironmentProxy {
 }
 
 /// Mirrors reqwest's environment proxy choice closely enough to name the
-/// proxy in a message: the scheme's variable (upper case first), then
-/// ALL_PROXY, unless NO_PROXY covers the host.
+/// proxy in a message: the scheme's variable (the first of upper and lower
+/// case that is set), then ALL_PROXY, unless NO_PROXY covers the host. When
+/// unsure (an IP address with NO_PROXY set, which reqwest may match by
+/// range) it names no proxy rather than the wrong one.
 pub(super) fn environment_proxy(
     url: &Url,
     variable: impl Fn(&str) -> Option<String>,
 ) -> Option<EnvironmentProxy> {
     let host = url.host_str()?;
-    let set = |name: &str| variable(name).filter(|value| !value.trim().is_empty());
-    let no_proxy = set("NO_PROXY")
-        .or_else(|| set("no_proxy"))
+    // The first of a pair that is set wins, even when it is empty.
+    let first_set = |upper: &'static str, lower: &'static str| {
+        variable(upper)
+            .map(|value| (upper, value))
+            .or_else(|| variable(lower).map(|value| (lower, value)))
+    };
+    let no_proxy = first_set("NO_PROXY", "no_proxy")
+        .map(|(_, value)| value)
         .unwrap_or_default();
+    if !no_proxy.trim().is_empty() && url.domain().is_none() {
+        return None;
+    }
     for entry in no_proxy
         .split(',')
         .map(str::trim)
@@ -181,7 +191,7 @@ pub(super) fn environment_proxy(
         if entry == "*" {
             return None;
         }
-        let domain = entry.trim_start_matches("*.").trim_start_matches('.');
+        let domain = entry.trim_start_matches('.');
         if host.eq_ignore_ascii_case(domain)
             || host
                 .to_ascii_lowercase()
@@ -190,30 +200,46 @@ pub(super) fn environment_proxy(
             return None;
         }
     }
-    let candidates: [&'static str; 4] = if url.scheme() == "https" {
-        ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]
+    let scheme_variable = if url.scheme() == "https" {
+        first_set("HTTPS_PROXY", "https_proxy")
+    } else if variable("REQUEST_METHOD").is_some() {
+        // reqwest ignores HTTP_PROXY in a CGI process.
+        None
     } else {
-        ["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"]
+        first_set("HTTP_PROXY", "http_proxy")
     };
-    let (name, value) = candidates
-        .into_iter()
-        .find_map(|name| set(name).map(|value| (name, value)))?;
-    let value = value.trim();
-    let parsed = if value.contains("://") {
-        Url::parse(value)
-    } else {
-        Url::parse(&format!("http://{value}"))
-    };
-    let address = parsed.ok().and_then(|proxy| {
-        let host = proxy.host_str()?.to_string();
-        Some(match proxy.port() {
-            Some(port) => format!("{host}:{port}"),
-            None => host,
-        })
-    })?;
+    let (name, address) = scheme_variable
+        .and_then(|(name, value)| proxy_address(&value).map(|address| (name, address)))
+        .or_else(|| {
+            first_set("ALL_PROXY", "all_proxy")
+                .and_then(|(name, value)| proxy_address(&value).map(|address| (name, address)))
+        })?;
     Some(EnvironmentProxy {
         address,
         variable: name,
+    })
+}
+
+/// A proxy setting's host and port, never its credentials; None when empty,
+/// unparsable or of a scheme reqwest does not use.
+fn proxy_address(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let proxy = if value.contains("://") {
+        Url::parse(value)
+    } else {
+        Url::parse(&format!("http://{value}"))
+    }
+    .ok()?;
+    if !matches!(proxy.scheme(), "http" | "https" | "socks5" | "socks5h") {
+        return None;
+    }
+    let host = proxy.host_str()?.to_string();
+    Some(match proxy.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host,
     })
 }
 
@@ -221,6 +247,7 @@ pub(super) fn environment_proxy(
 /// to check; None when the reason is unknown (the caller keeps reqwest's text).
 pub(super) fn describe_connection_failure(
     error: &reqwest::Error,
+    request_url: Option<&Url>,
     now: SystemTime,
 ) -> Option<String> {
     let cause = match network_cause(error) {
@@ -230,13 +257,13 @@ pub(super) fn describe_connection_failure(
         None if error.is_timeout() => NetworkCause::AnswerTimedOut,
         None => return None,
     };
-    let proxy = error
-        .url()
-        .and_then(|url| environment_proxy(url, |name| std::env::var(name).ok()));
+    // reqwest leaves the URL off errors raised while reading a body.
+    let url = error.url().or(request_url);
+    let proxy = url.and_then(|url| environment_proxy(url, |name| std::env::var(name).ok()));
     Some(describe_cause(
         &cause,
         &Target {
-            url: error.url(),
+            url,
             proxy: proxy.as_ref(),
             answer_started: error.is_body() || error.is_decode(),
         },
@@ -289,7 +316,7 @@ pub(super) fn describe_cause(
                 return format!("{prefix} the connection to the proxy {address} (from {variable}) was refused. Check {variable} and that the proxy is running.");
             }
             NetworkCause::ConnectTimedOut => {
-                return format!("{prefix} the connection to the proxy {address} (from {variable}) timed out. Check {variable} and this machine's network and firewall settings.");
+                return format!("{prefix} connecting through the proxy {address} (from {variable}) timed out. Check {variable}, the proxy, and this machine's network and firewall settings.");
             }
             NetworkCause::Unreachable => {
                 return format!("{prefix} no network route to the proxy {address} (from {variable}). Check {variable} and this machine's network settings.");
@@ -331,6 +358,9 @@ pub(super) fn describe_cause(
         NetworkCause::ConnectTimedOut => format!(
             "{prefix} the connection to {host} timed out. Check this machine's network, firewall and proxy settings."
         ),
+        NetworkCause::AnswerTimedOut if target.answer_started => {
+            format!("{prefix} the answer from {host} stopped arriving.")
+        }
         NetworkCause::AnswerTimedOut => format!("{prefix} {host} did not answer in time."),
         NetworkCause::Closed => format!(
             "{prefix} the connection to {host} closed unexpectedly. If it keeps happening, check this machine's network and proxy settings."
@@ -635,6 +665,63 @@ mod tests {
             true
         )
         .contains("the TLS certificate for app.opengeni.ai has expired"));
+        // The connect limit also covers the tunnel and handshake.
+        assert_eq!(
+            describe_cause(&NetworkCause::ConnectTimedOut, &target, SystemTime::now(), true),
+            "Can't reach Opengeni: connecting through the proxy corp-proxy.example:3128 (from HTTPS_PROXY) timed out. Check HTTPS_PROXY, the proxy, and this machine's network and firewall settings."
+        );
+    }
+
+    #[test]
+    fn the_proxy_follows_reqwest_in_edge_cases_or_is_not_named() {
+        let url = Url::parse("https://app.opengeni.ai/codemode/").unwrap();
+        // A leading "*." is literal for reqwest, so it does not bypass the proxy.
+        assert!(environment_proxy(
+            &url,
+            environment(&[("HTTPS_PROXY", "proxy.example:3128"), ("NO_PROXY", "*.opengeni.ai")])
+        )
+        .is_some());
+        // The first of a pair that is set wins, even empty; ALL_PROXY still applies.
+        assert_eq!(
+            environment_proxy(
+                &url,
+                environment(&[
+                    ("HTTPS_PROXY", ""),
+                    ("https_proxy", "ignored.example:1"),
+                    ("ALL_PROXY", "all.example:2")
+                ])
+            ),
+            Some(EnvironmentProxy {
+                address: "all.example:2".to_string(),
+                variable: "ALL_PROXY",
+            })
+        );
+        // An unsupported scheme is skipped in favour of ALL_PROXY.
+        assert_eq!(
+            environment_proxy(
+                &url,
+                environment(&[("HTTPS_PROXY", "ftp://x.example:21"), ("ALL_PROXY", "all.example:2")])
+            )
+            .map(|proxy| proxy.variable),
+            Some("ALL_PROXY")
+        );
+        // An IP address with NO_PROXY set may match a range: name no proxy.
+        let ip = Url::parse("http://127.0.0.2:9/codemode/").unwrap();
+        assert_eq!(
+            environment_proxy(
+                &ip,
+                environment(&[("HTTP_PROXY", "proxy.example:3128"), ("NO_PROXY", "127.0.0.0/8")])
+            ),
+            None
+        );
+        // reqwest ignores HTTP_PROXY in a CGI process.
+        assert_eq!(
+            environment_proxy(
+                &Url::parse("http://app.opengeni.ai/codemode/").unwrap(),
+                environment(&[("HTTP_PROXY", "proxy.example:3128"), ("REQUEST_METHOD", "GET")])
+            ),
+            None
+        );
     }
 
     #[test]
@@ -648,6 +735,10 @@ mod tests {
         assert_eq!(
             describe_cause(&NetworkCause::Closed, &target, SystemTime::now(), true),
             "Lost contact with Opengeni: the connection to app.opengeni.ai closed unexpectedly. If it keeps happening, check this machine's network and proxy settings."
+        );
+        assert_eq!(
+            describe_cause(&NetworkCause::AnswerTimedOut, &target, SystemTime::now(), true),
+            "Lost contact with Opengeni: the answer from app.opengeni.ai stopped arriving."
         );
     }
 

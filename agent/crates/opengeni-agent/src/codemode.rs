@@ -946,9 +946,19 @@ fn unescape_secret_references(raw: &str) -> String {
 }
 
 fn transport_error(error: &reqwest::Error) -> CodemodeError {
+    transport_error_for(error, None)
+}
+
+/// `request_url` names the host when reqwest leaves the URL off the error,
+/// as it does for failures while reading a body.
+fn transport_error_for(error: &reqwest::Error, request_url: Option<&Url>) -> CodemodeError {
     // reqwest's display omits Authorization headers. The URL is non-secret; the
     // attempt bearer never becomes part of it.
-    match connection_failure::describe_connection_failure(error, std::time::SystemTime::now()) {
+    match connection_failure::describe_connection_failure(
+        error,
+        request_url,
+        std::time::SystemTime::now(),
+    ) {
         Some(message) => CodemodeError::Unreachable(message),
         None => CodemodeError::Transport(error.to_string()),
     }
@@ -958,6 +968,7 @@ async fn decode_json_response<T: for<'de> Deserialize<'de>>(
     mut response: Response,
 ) -> Result<T, CodemodeError> {
     let status = response.status();
+    let url = response.url().clone();
     let limit = if status.is_success() {
         MAX_RESPONSE_BYTES
     } else {
@@ -967,7 +978,7 @@ async fn decode_json_response<T: for<'de> Deserialize<'de>>(
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|error| transport_error(&error))?
+        .map_err(|error| transport_error_for(&error, Some(&url)))?
     {
         if bytes.len().saturating_add(chunk.len()) > limit {
             return Err(CodemodeError::InvalidResponse(format!(
