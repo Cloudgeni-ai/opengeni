@@ -1,0 +1,5 @@
+---
+"@opengeni/agent-host": patch
+---
+
+The native Codemode client on Connected Machines (`opengeni-agent codemode`, the `$OPENGENI_CODEMODE_NATIVE_CLIENT` path) now says why it can't reach Opengeni instead of "Codemode request failed: error sending request for url (…)". A failed DNS lookup names the host, the resolver's reason and where to look; a TLS certificate that is not yet valid or has expired names this machine's clock reading, so a wrong clock is easy to spot; a refused, timed-out, closed or unroutable connection says so. The machine's own settings are never changed: on a person's own computer the message says what to check. Unknown causes keep the previous text. Takes effect with the next machine agent release (0.1.151).

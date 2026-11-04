@@ -20,6 +20,8 @@ use crate::cli::{
 };
 use opengeni_agent_proto::v1::{self, ControlRequest, ExecRequest};
 
+mod connection_failure;
+
 const URL_ENV: &str = "OPENGENI_CODEMODE_URL";
 const TOKEN_ENV: &str = "OPENGENI_CODEMODE_TOKEN";
 const TOKEN_FILE_ENV: &str = "OPENGENI_CODEMODE_TOKEN_FILE";
@@ -143,6 +145,10 @@ pub enum CodemodeError {
     InvalidArguments(String),
     #[error("Codemode request failed: {0}")]
     Transport(String),
+    /// A request got no HTTP answer for a known network reason; the message
+    /// names it and what to check.
+    #[error("{0}")]
+    Unreachable(String),
     #[error("Codemode request failed with HTTP {status}: {message}")]
     Http { status: StatusCode, message: String },
     #[error("Codemode response was invalid: {0}")]
@@ -937,7 +943,10 @@ fn unescape_secret_references(raw: &str) -> String {
 fn transport_error(error: &reqwest::Error) -> CodemodeError {
     // reqwest's display omits Authorization headers. The URL is non-secret; the
     // attempt bearer never becomes part of it.
-    CodemodeError::Transport(error.to_string())
+    match connection_failure::describe_connection_failure(error, std::time::SystemTime::now()) {
+        Some(message) => CodemodeError::Unreachable(message),
+        None => CodemodeError::Transport(error.to_string()),
+    }
 }
 
 async fn decode_json_response<T: for<'de> Deserialize<'de>>(
@@ -2445,6 +2454,98 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("connection closed"));
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_is_named_instead_of_a_bare_send_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listen");
+        let address = listener.local_addr().expect("address");
+        drop(listener);
+        let client =
+            CodemodeClient::new(&format!("http://{address}/codemode"), "fixture".into()).unwrap();
+        let message = client.catalog().await.unwrap_err().to_string();
+        assert_eq!(
+            message,
+            format!(
+                "Can't reach Opengeni: the connection to {address} was refused. Check this machine's network, firewall and proxy settings."
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_dns_lookup_names_the_host_and_the_resolver() {
+        let client = CodemodeClient::new(
+            "http://opengeni-codemode-test.invalid/codemode",
+            "fixture".into(),
+        )
+        .unwrap();
+        let message = client.catalog().await.unwrap_err().to_string();
+        assert!(
+            message.starts_with(
+                "Can't reach Opengeni: DNS lookup for opengeni-codemode-test.invalid failed"
+            ),
+            "{message}"
+        );
+        let hint = if cfg!(target_os = "linux") {
+            "Check /etc/resolv.conf."
+        } else {
+            "Check this machine's DNS settings."
+        };
+        assert!(message.ends_with(hint), "{message}");
+        assert!(!message.contains("fixture"));
+    }
+
+    #[tokio::test]
+    async fn a_call_that_loses_opengeni_after_the_catalog_names_the_cause_and_its_operation() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listen");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("catalog");
+            read_request(&mut stream).await;
+            // Close the port before answering, so the submission and its
+            // read-back that follow the catalog are refused.
+            drop(listener);
+            write_response(
+                &mut stream,
+                &json!({
+                    "attemptId": "11111111-1111-4111-8111-111111111111",
+                    "digest": "d".repeat(64), "entries": [{
+                        "identity": {"serverId":"demo","toolName":"write"},
+                        "modelName":"demo__write", "codemodePath":["demo","write"],
+                        "inputSchema":{"type":"object"}, "source":"mcp", "approval":"none"
+                    }]
+                }),
+            )
+            .await;
+        });
+        let client =
+            CodemodeClient::new(&format!("http://{address}/codemode"), "fixture".into()).unwrap();
+        let error = client
+            .call_as(
+                CodemodeCallArgs {
+                    tool: "demo.write".into(),
+                    arguments: "{}".into(),
+                    full: false,
+                    save_image: None,
+                },
+                "operation-refused".to_string(),
+            )
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "Codemode operation operation-refused: Can't reach Opengeni: the connection to {address} was refused. Check this machine's network, firewall and proxy settings."
+            )
+        );
+        let receipt = error.receipt();
+        assert_eq!(receipt["error"]["operationId"], "operation-refused");
+        assert!(receipt["error"]["state"].is_null());
+        assert!(receipt["error"]["recovery"]
+            .as_str()
+            .unwrap()
+            .contains("Do not automatically start another call"));
     }
 
     async fn read_request(stream: &mut TcpStream) -> String {

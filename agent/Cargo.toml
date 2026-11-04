@@ -23,7 +23,7 @@ members = [
 # we lean on clippy::pedantic at the workspace level and silence only the few
 # lints that fight generated code or add no value here.
 [workspace.package]
-version = "0.1.150"
+version = "0.1.151"
 edition = "2021"
 rust-version = "1.82"
 license = "Apache-2.0"
@@ -58,6 +58,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# The TLS error type reqwest's rustls backend reports, so the native Codemode
+# client can name an expired or not-yet-valid certificate. No default features:
+# reqwest already selects the crypto provider.
+rustls = { version = "0.23", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
