@@ -2552,6 +2552,24 @@ compaction/internal-update obligation), session, events, maintenance, and child
 terminal outbox without fabricating an attempt row or looping. Raw SQL and
 invariant messages never enter workflow history.
 
+The workflow's approval/human-input wait (`approval-wait` peek) baselines its
+wake counters from before the peek that chose it, behind
+`session-approval-wait-pre-peek-baseline-v1`. A decision can commit after the
+peek read PostgreSQL but before the workflow handles the peek result; its
+signal is then already counted, and a post-peek baseline would wait forever on
+an untimed wait (the API's signal marks that wake revision delivered, so the
+outbox does not resend it). A signal that lands mid-peek now costs one extra
+peek. Histories recorded without the marker keep the post-peek baseline, so a
+workflow already parked that way stays parked until its next wake.
+
+The two other peek-chosen waits with a far deadline use the same pre-peek
+snapshot: a `capacity-wait` (until the provider's reset; its interruption
+baseline too, so Pause/Steer wins at once) behind
+`session-capacity-wait-pre-peek-baseline-v1`, and the recovering turn's
+durable backoff behind `session-recovery-backoff-pre-peek-baseline-v1`. The
+short waits (input-wait, sandbox lifecycle, unavailable attempt) already close
+against the pre-peek `closeSignalVersion` and are bounded.
+
 Migration 0483 is additive rolling storage. Its attempt-insert trigger prevents
 old binaries from claiming through a stored block, but old workers can still
 retry that rejection and old API workers do not implement explicit recheck.
