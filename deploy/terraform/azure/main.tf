@@ -158,7 +158,8 @@ resource "azurerm_kubernetes_cluster" "this" {
     outbound_type     = "loadBalancer"
 
     load_balancer_profile {
-      outbound_ip_address_ids = [azurerm_public_ip.aks_egress.id]
+      outbound_ip_address_ids  = [azurerm_public_ip.aks_egress.id]
+      outbound_ports_allocated = var.aks_outbound_ports_allocated
     }
   }
 
