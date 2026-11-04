@@ -49,7 +49,10 @@ fn chain_cause(error: &(dyn StdError + 'static), depth: usize) -> Option<Network
         if let Some(cause) = classify(error) {
             return Some(cause);
         }
-        if let Some(inner) = error.downcast_ref::<io::Error>().and_then(io::Error::get_ref) {
+        if let Some(inner) = error
+            .downcast_ref::<io::Error>()
+            .and_then(io::Error::get_ref)
+        {
             if let Some(cause) = chain_cause(inner, depth + 1) {
                 return Some(cause);
             }
@@ -129,7 +132,12 @@ pub(super) fn describe_connection_failure(
         None if error.is_timeout() => NetworkCause::AnswerTimedOut,
         None => return None,
     };
-    Some(describe_cause(&cause, error.url(), now, cfg!(target_os = "linux")))
+    Some(describe_cause(
+        &cause,
+        error.url(),
+        now,
+        cfg!(target_os = "linux"),
+    ))
 }
 
 pub(super) fn describe_cause(
@@ -280,7 +288,10 @@ mod tests {
     #[test]
     fn an_expired_certificate_names_the_host_and_hedges_the_clock() {
         let failure = tls_failure(CertificateError::Expired);
-        assert_eq!(network_cause(&failure), Some(NetworkCause::CertificateExpired));
+        assert_eq!(
+            network_cause(&failure),
+            Some(NetworkCause::CertificateExpired)
+        );
         let url = Url::parse("https://app.opengeni.ai/codemode/").unwrap();
         let message = describe_cause(
             &NetworkCause::CertificateExpired,
@@ -288,7 +299,9 @@ mod tests {
             UNIX_EPOCH + Duration::from_secs(4_102_444_800), // 2100-01-01
             true,
         );
-        assert!(message.contains("for app.opengeni.ai has expired by this machine's clock (2100-01-01 00:00:00 UTC)"));
+        assert!(message.contains(
+            "for app.opengeni.ai has expired by this machine's clock (2100-01-01 00:00:00 UTC)"
+        ));
         assert!(message.contains("otherwise the server's certificate has expired"));
     }
 
