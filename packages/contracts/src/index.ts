@@ -212,6 +212,8 @@ export * from "./vault-provider-wire";
 export * from "./secret-references";
 export * from "./secret-value-masking";
 export * from "./secret-shape-masking";
+export * from "./credential-names";
+export * from "./secret-field-hints";
 export * from "./secret-resolution";
 export * from "./secret-use-approvals";
 export * from "./secret-generator";
@@ -11431,6 +11433,12 @@ export const SessionSystemUpdatePayload = /* @__PURE__ */ defineSchema(() =>
             commandId: primitives.uuid,
           })
           .strict(),
+        /**
+         * The start and end of the retained output as text, with a marker
+         * naming any omitted middle and its command_read cursor. Absent on
+         * results recorded before results carried output.
+         */
+        output: boundedUtf8String(16 * 1024).optional(),
         notice: z.string().optional(),
       })
       .passthrough(),
@@ -16729,6 +16737,11 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
         waitingDescendants: z.number().int().nonnegative().optional(),
         attentionDescendants: primitives.nonnegativeInteger,
         pausedDescendants: primitives.nonnegativeInteger,
+        /**
+         * Paused descendants whose work is parked for Resume: a turn still
+         * open, queued or running. Absent from older servers.
+         */
+        pausedWorkDescendants: z.number().int().nonnegative().optional(),
         /** Historical failed lifecycle states, including already-reviewed failures. */
         failedDescendants: primitives.nonnegativeInteger,
         unreadDescendants: z.number().int().nonnegative().optional(),

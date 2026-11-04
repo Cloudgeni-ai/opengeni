@@ -34,6 +34,8 @@ export const englishMessages = {
   "approvalSurface.sendingAnswer": "Sending answer…",
   /** Above an MCP server's question in the middle of a tool call, e.g. "Linear asks". */
   "approvalSurface.serverAsks": "{server} asks",
+  /** A waiting action whose review offers no decision yet; a Try again button follows. */
+  "approvalSurface.thisActionCanTBeDecided": "This action can't be decided yet.",
   "approvalSurface.tryAgain": "Try again",
   "approvalSurface.viewFullDetails": "View full details",
   "approvalSurface.youDonTHaveAccess":
@@ -2104,7 +2106,15 @@ export const englishMessages = {
     "A selected connector account is unavailable. Review accounts in + → Connectors, then edit and send your saved message.",
   "lib.format.modelUnavailable":
     "This chat's model is no longer available. Choose another model to continue. Your message is saved.",
+  "lib.format.newChatModelUnavailable":
+    "This model isn't available to you. Choose another model. Your message is saved.",
+  "lib.format.modelPolicyCredits":
+    "This model uses credits, which are off in this workspace. Choose a model paid by a subscription or API key. Your message is saved.",
+  "lib.format.modelPolicyRefused":
+    "This workspace's model policy doesn't allow this model. Choose another model. Your message is saved.",
   "lib.format.now": "now",
+  "lib.format.speedUnavailable":
+    "This model can't run at the selected speed. Choose another speed. Your message is saved.",
   "lib.format.outOfCreditsThisWorkspace":
     "There aren't enough credits for this model. Add credits, or choose another model. The conversation is preserved.",
   "lib.format.providerBlockedRequest": "The model provider blocked this request.",
@@ -3730,6 +3740,7 @@ export const englishMessages = {
   "native.timeline.messages.onAMachine": "On a machine",
   "native.timeline.messages.output": "Output",
   "native.timeline.messages.pauseGoal": "Pause goal",
+  "native.timeline.messages.paused": "Paused",
   "native.timeline.messages.pin": "Pin",
   "native.timeline.messages.pinned": "Pinned",
   "native.timeline.messages.proposedKnowledge": "Proposed knowledge",
@@ -5562,6 +5573,7 @@ export const englishMessages = {
   "timeline.screenshotLightbox.zoomOut": "Zoom out",
   "timeline.shared.bytesOmitted_one": "{bytes} byte omitted",
   "timeline.shared.bytesOmitted_other": "{bytes} bytes omitted",
+  "timeline.shared.copyStep": "Copy step",
   "timeline.shared.expandScreenshot": "Expand screenshot",
   "timeline.shared.fullEvidence": "full evidence",
   "timeline.shared.imageUnavailable": "image unavailable",
@@ -6070,6 +6082,7 @@ export const englishMessages = {
   "timeline.turnSummary.contextCompactedExpandForDetails": "Context compacted; expand for details",
   "timeline.turnSummary.copyTurn": "Copy turn",
   "timeline.turnSummary.interrupted": "· interrupted",
+  "timeline.turnSummary.paused": "Paused",
   "timeline.turnSummary.preparation": "Preparation",
   "timeline.turnSummary.steps": "Steps",
   "timeline.turnSummary.waiting": "Waiting",
@@ -6155,6 +6168,12 @@ export const englishMessages = {
   "toolActionReview.reasonItDidNotRun": "{reason} It did not run.",
   "toolActionReview.someOfItRanCheck": "Some of it ran. Check the result before continuing.",
   "toolActionReview.theActionRanButReturned": "The action ran but returned an error.",
+  "toolActionReview.onlyTheAccountOwnerCanApprove":
+    "Only the person whose own account this runs on can approve it. You can decline it.",
+  "toolActionReview.onlyNameCanApprove":
+    "Only {name} can approve this, because it runs on their own account. You can decline it.",
+  "toolActionReview.onlyYouCanApprove":
+    "This runs on your own account, so only you can approve it.",
   "toolActionReview.theDetailsOfThisOlder":
     "The details of this older request couldn't be recovered, so it can't be approved. Decline it to let the agent continue.",
   "toolActionReview.theExactValuesSavedFor":

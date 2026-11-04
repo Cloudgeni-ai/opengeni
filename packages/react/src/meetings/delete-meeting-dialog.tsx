@@ -1,6 +1,7 @@
 import type { ComponentProps } from "react";
 import { useOpenGeniText } from "../messages/runtime";
 import { toast } from "sonner";
+import { userErrorText } from "../ui/api-error";
 import type { Recording } from "@opengeni/contracts";
 
 import { ConfirmDialog } from "../ui/confirm-dialog";
@@ -38,7 +39,7 @@ function DeleteMeetingDialogContent({
           await onDelete(recording.id);
         } catch (error) {
           toast.error(msg("meetings.deleteDialog.couldnTDeleteThisMeeting"), {
-            description: error instanceof Error ? error.message : undefined,
+            description: error instanceof Error ? userErrorText(error) : undefined,
           });
           return false;
         }

@@ -7,6 +7,7 @@ import { useOpenGeniText } from "../messages/runtime";
 import { useEffect, useId, useRef, useState } from "react";
 import { ArrowUpIcon, LoaderCircleIcon } from "lucide-react";
 import { toast } from "sonner";
+import { userErrorText } from "../ui/api-error";
 
 import { Button } from "../ui/button";
 import { TextInput } from "../ui/field";
@@ -48,7 +49,7 @@ export function MeetingAsk({
       if ((await onAsk(text)) !== false) setQuestion("");
     } catch (error) {
       toast.error(msg("meetings.ask.couldNotAsk"), {
-        description: error instanceof Error ? error.message : undefined,
+        description: error instanceof Error ? userErrorText(error) : undefined,
       });
     } finally {
       setAsking(false);

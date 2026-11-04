@@ -1,8 +1,10 @@
 import {
   PERSONAL_GITHUB_API_ORIGIN,
   PERSONAL_GITHUB_PROVIDER_DOMAIN,
+  PERSONAL_GITHUB_RECONNECT_MESSAGE,
   PersonalGitHubConnectionMetadata,
   isPersonalGitHubConnection,
+  personalGitHubConnectionNeedsReconnect,
   type PersonalGitHubRepositoryPermissions,
 } from "@opengeni/contracts/personal-github";
 import {
@@ -277,10 +279,31 @@ class BrokerRepositoryRemovedError extends Error {
   }
 }
 
+/** GitHub refused the stored grant; only the person reconnecting fixes it. */
+class BrokerReconnectRequiredError extends Error {
+  constructor() {
+    super("personal GitHub connection must be reconnected");
+  }
+}
+
+/** The token refresh failed for a passing reason (GitHub 5xx, timeout). */
+class BrokerProviderUnavailableError extends Error {
+  constructor() {
+    super("personal GitHub token refresh is temporarily unavailable");
+  }
+}
+
 function brokerAuthorityError(error: unknown): Response {
-  return error instanceof BrokerRepositoryRemovedError
-    ? brokerError(403, "This repository was removed from this chat.")
-    : brokerError(401, "Git broker authorization is no longer current.");
+  if (error instanceof BrokerRepositoryRemovedError) {
+    return brokerError(403, "This repository was removed from this chat.");
+  }
+  if (error instanceof BrokerReconnectRequiredError) {
+    return brokerError(403, PERSONAL_GITHUB_RECONNECT_MESSAGE);
+  }
+  if (error instanceof BrokerProviderUnavailableError) {
+    return brokerError(502, "GitHub is temporarily unavailable. Try again.");
+  }
+  return brokerError(401, "Git broker authorization is no longer current.");
 }
 
 async function resolveBrokerAuthority(
@@ -369,6 +392,13 @@ async function authorizeBrokerProviderRequest(
     credential.connectionUseAttribution.ownerSubjectId !== claims.ownerSubjectId ||
     credential.connectionUseAttribution.workspaceId !== claims.workspaceId
   ) {
+    // A refused refresh has just moved the connection to needs_reauth; say so.
+    await assertCurrentConnectionAndSelection(deps, claims, repository);
+    // Still current and active: the refresh failed for a passing reason, so
+    // Git hears "try again", not that its authorization ended.
+    if (credential.status !== "ok" && credential.reason === "refresh_failed") {
+      throw new BrokerProviderUnavailableError();
+    }
     throw new Error("personal GitHub credential resolution was denied");
   }
   await assertCurrentConnectionAndSelection(deps, claims, repository);
@@ -471,6 +501,17 @@ async function assertCurrentConnectionAndSelection(
     claims.connectionId,
     claims.ownerSubjectId,
   );
+  if (
+    connection &&
+    connection.accountId === claims.accountId &&
+    connection.workspaceId === claims.originWorkspaceId &&
+    connection.subjectId === claims.ownerSubjectId &&
+    personalGitHubConnectionNeedsReconnect(connection) &&
+    PersonalGitHubConnectionMetadata.safeParse(connection.metadata).data?.credentialBindingId ===
+      claims.credentialBindingId
+  ) {
+    throw new BrokerReconnectRequiredError();
+  }
   if (
     !connection ||
     connection.accountId !== claims.accountId ||

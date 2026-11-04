@@ -14,6 +14,7 @@ import {
 import { ArrowRightIcon, ChevronRightIcon, CircleAlertIcon } from "lucide-react";
 import { cn } from "../lib/cn";
 import { ReasonTooltip } from "./disabled-reason";
+import { ErrorText } from "./error-text";
 
 /* ----------------------------------------------------------------------------
    Field wiring. A SettingRow owns the label and description; the one control
@@ -239,7 +240,9 @@ export const SettingRow = /* @__PURE__ */ forwardRef<HTMLDivElement, SettingRowP
           {hasError ? (
             <p id={errorId} className="flex items-start gap-1.5 text-xs leading-4.5 text-danger">
               <CircleAlertIcon aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />
-              <span className="min-w-0">{error}</span>
+              <span className="min-w-0">
+                <ErrorText>{error}</ErrorText>
+              </span>
             </p>
           ) : null}
         </div>

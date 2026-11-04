@@ -24,7 +24,6 @@ test("bundled selection uses configured names, not prepared schemas or optional 
     "visualize",
     "document-parsing",
     "skill-management",
-    "projects",
     "documents",
     "spreadsheets",
     "presentations",
@@ -43,7 +42,6 @@ test("Sites, video and artifact defaults have independent inclusion conditions",
     "visualize",
     "document-parsing",
     "skill-management",
-    "projects",
   ]);
   expect(
     configuredBundledSkillNames({ firstPartyTools: [], videoGenerationEnabled: true }),
@@ -53,7 +51,6 @@ test("Sites, video and artifact defaults have independent inclusion conditions",
     "visualize",
     "document-parsing",
     "skill-management",
-    "projects",
     "video-generation",
   ]);
   expect(
@@ -67,7 +64,6 @@ test("Sites, video and artifact defaults have independent inclusion conditions",
     "visualize",
     "document-parsing",
     "skill-management",
-    "projects",
     "sites",
   ]);
   expect(
@@ -81,7 +77,6 @@ test("Sites, video and artifact defaults have independent inclusion conditions",
     "visualize",
     "document-parsing",
     "skill-management",
-    "projects",
   ]);
 });
 
@@ -109,6 +104,27 @@ test("host selection narrows every bundled source without forcing unavailable wo
       bundledSkillIds: ["builtin:documents", "builtin:sites", "builtin:video-generation"],
     }),
   ).toEqual([]);
+});
+
+test("project guidance appears only where the session can list projects", () => {
+  const context = { videoGenerationEnabled: false };
+  const withProjects = loadConfiguredBundledSkills({
+    ...context,
+    firstPartyTools: ["project_list", "project_create", "session_set_project"],
+  });
+  expect(withProjects.map((entry) => entry.id)).toContain("builtin:projects");
+  for (const configuration of [
+    { ...context, firstPartyTools: [] },
+    { ...context, firstPartyTools: ["project_create", "session_set_project"] },
+    {
+      ...context,
+      firstPartyTools: ["project_list"],
+      bundledSkillIds: ["builtin:opengeni-help" as const],
+    },
+  ])
+    expect(loadConfiguredBundledSkills(configuration).map((entry) => entry.id)).not.toContain(
+      "builtin:projects",
+    );
 });
 
 test("schedule creation discovers readable guidance without optional dependencies or lazy setup", () => {

@@ -4262,7 +4262,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ToolActionReview"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "getToolReviewDetails",

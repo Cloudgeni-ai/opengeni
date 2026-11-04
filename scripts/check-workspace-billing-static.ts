@@ -271,6 +271,9 @@ const billingPortalSurfaceFiles = new Set([
   "packages/sdk/test/client-coverage.test.ts",
   // Generated public API inventory: records the canonical route, never serves it.
   "scripts/public-api/surface.gen.json",
+  // Published-SDK route inventory: records the routes a published SDK calls,
+  // never serves them.
+  "scripts/public-api/published-sdk.gen.json",
   // Generated organization MCP action metadata likewise records, never serves,
   // the billing route; calls dispatch through the canonical route's own guards.
   "packages/contracts/src/app-action-catalog.gen.ts",
