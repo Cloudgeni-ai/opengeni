@@ -1,6 +1,8 @@
 # 28. Stored objects carry their hour, and the sweep runs hourly
 
-Status: Accepted, 2026-11-02. Amends
+Status: Accepted, 2026-11-02. Amended by
+[29](0029-a-sweep-lists-each-period-once.md): how a sweep finds what to
+delete. Amends
 [25](0025-pointers-in-the-control-service-and-objects-by-day.md): what a
 name's period is, and how long after it a sweep may delete.
 
@@ -78,13 +80,14 @@ before it began, whatever the period's length.
   next try reuses only names of its own current hour, and the fence still
   stops every try a sweep crossed.
 - The cost is one copy request per unpublished chunk per hour, plus a
-  check of the copy. GCS checks it by its checksums; on S3 and Azure the
-  check reads it back. The next try checks each chunk it finds, again a
-  read on S3 and Azure, instead of sending it. A store with no copy
-  uploads the chunk again. An archive held up for hours keeps copying
-  every hour. Every carried copy leaves the earlier one for the sweep.
-  Remembering the chunks costs up to about 20 MB a host. Holding them
-  costs about what the archive's own references to them cost.
+  check of the copy. GCS checks it by its checksums, and S3 by its size
+  and entity tag (the MD5 of its bytes), with one request each; on Azure,
+  or when the tag is not that MD5, the check reads it back. The next try
+  checks each chunk it finds the same way instead of sending it. A store
+  with no copy uploads the chunk again. An archive held up for hours keeps
+  copying every hour. Every carried copy leaves the earlier one for the
+  sweep. Remembering the chunks costs up to about 20 MB a host. Holding
+  them costs about what the archive's own references to them cost.
 - Carrying starts as the hour begins by the writer's clock. The sweep may
   take a chunk once that hour ended an hour before by its own clock. So
   the slack is `CLOCK_SKEW` less the clocks' disagreement, a full hour in
@@ -92,5 +95,6 @@ before it began, whatever the period's length.
 - Any two clocks must stay within `CLOCK_SKEW` of each other, where a
   day's margin hid a disagreement of two hours. In a fleet every host and
   sweep reads the database's clock.
-- A sweep lists the whole store each hour: about eight minutes and a few
-  thousand list requests for 2.5 million objects.
+- A sweep listed the whole store each hour, which a large, slow store
+  could not finish. [ADR 29](0029-a-sweep-lists-each-period-once.md)
+  lists each period once instead, and everything once a day.

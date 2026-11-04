@@ -250,10 +250,14 @@ computeControl:
       iam.gke.io/gcp-service-account: opengeni-compute-control@example.iam.gserviceaccount.com
 ```
 
-The hourly sweep of the store (ADR 17, 25, 28) runs as a CronJob from the same
-image, identity and database (`computeControl.sweep`), as `compute-control
-sweep`: it reads the pointers the service keeps. It deletes on any archive,
-`gs://`, `az://` or `s3://`.
+The hourly sweep of the store (ADR 17, 25, 28, 29) runs as a CronJob from the
+same image, identity and database (`computeControl.sweep`), as
+`compute-control sweep`: it reads the pointers the service keeps. It deletes on
+any archive, `gs://`, `az://` or `s3://`. Each run lists only the hours that
+became old enough since the last run, and deletes what replaced copies alone
+named; once a day it lists everything. It keeps its progress under `sweep/` in
+the store, gives up starting new listings after 40 minutes, leaves what failed
+to the next run, and logs each step, so a run that is slow shows where it is.
 
 ### Hosts
 

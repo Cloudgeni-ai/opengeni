@@ -37,12 +37,12 @@ jobs:
       unit_count: ${{ steps.plan.outputs.unit_count }}
       web_bundle: ${{ steps.plan.outputs.web_bundle }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event.pull_request.head.sha || inputs.head_sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
       - id: identity
@@ -61,7 +61,7 @@ jobs:
           bun scripts/ci/pr-fast-plan.ts --plan "$RUNNER_TEMP/pr-impact.json" --output "$RUNNER_TEMP/pr-plan.json"
           echo "unit_count=$(jq '.unitTests | length' "$RUNNER_TEMP/pr-plan.json")" >> "$GITHUB_OUTPUT"
           echo "web_bundle=$(jq '.prWebBundle == true' "$RUNNER_TEMP/pr-plan.json")" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: pr-impact-plan
           path: ${{ runner.temp }}/pr-plan.json
@@ -73,12 +73,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ needs.plan.outputs.head }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
       - name: Install contract dependencies
@@ -96,7 +96,7 @@ jobs:
           bun scripts/workflow-execution-graph.ts --git-tree 'HEAD^{tree}'
       - name: Fast lint gate
         run: bun run lint
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: pr-impact-plan
           path: ${{ runner.temp }}/pr-plan

@@ -2099,6 +2099,8 @@ export type Session = {
         waitingDescendants?: number | undefined;
         attentionDescendants: number;
         pausedDescendants: number;
+        /** Paused descendants whose work is parked for Resume. Absent from older servers. */
+        pausedWorkDescendants?: number | undefined;
         failedDescendants: number;
         unreadDescendants?: number | undefined;
         unreadFailedDescendants?: number | undefined;
@@ -5622,6 +5624,11 @@ export type CodexConnectPoll =
       plan?: string | null;
       accountId?: string;
       isActive?: boolean;
+      /**
+       * Opengeni's Codex models this account offers, read once from its live
+       * model list at connect time. Absent when that read failed.
+       */
+      models?: Array<{ id: string; label: string }>;
     };
 
 /**

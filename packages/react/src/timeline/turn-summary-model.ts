@@ -81,10 +81,11 @@ export type TurnSummaryOptions = Readonly<{
 
 /**
  * Exchange status shown in place of the plain facet line. `working` and
- * `waiting` run a live clock from `since`; `worked` shows the settled span.
+ * `waiting` run a live clock from `since`; `worked` shows the settled span;
+ * `paused` shows the work done before the pause, with its clock stopped.
  */
 export type TurnSummaryStatus = Readonly<{
-  kind: "working" | "waiting" | "worked";
+  kind: "working" | "waiting" | "worked" | "paused";
   /** Replaces the default "Working" / "Waiting" wording. */
   label?: string | undefined;
   /** Who the wait is on: `you` when it needs the reader. */
@@ -93,7 +94,7 @@ export type TurnSummaryStatus = Readonly<{
   updates?: number | undefined;
   /** Live clock start for `working` and `waiting`. */
   since?: string | undefined;
-  /** Settled span for `worked`. */
+  /** Settled span for `worked`; work done before the pause for `paused`. */
   durationMs?: number | undefined;
   /** Live step preview under the row while it is collapsed. */
   preview?: ReactNode;

@@ -11480,6 +11480,11 @@
       position: static;
     }
   }
+:where(.og-root).pointer-coarse\:top-2\.5,:where(.og-root) .pointer-coarse\:top-2\.5 {
+    @media (pointer: coarse) {
+      top: calc(var(--spacing) * 2.5);
+    }
+  }
 :where(.og-root).pointer-coarse\:top-13,:where(.og-root) .pointer-coarse\:top-13 {
     @media (pointer: coarse) {
       top: calc(var(--spacing) * 13);

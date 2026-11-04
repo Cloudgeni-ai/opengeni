@@ -61,7 +61,7 @@ import {
 } from "./conversation-capability-connect";
 import type { SessionMcpCapabilityCardProps } from "./session-mcp-capability-card";
 import type { SessionIntegrationCapabilityCardProps } from "./session-integration-capability-card";
-import type { AuthNeededItem } from "../timeline";
+import { timelineLivePause, type AuthNeededItem } from "../timeline";
 import { ProviderRecoveryNotice } from "./provider-recovery-notice";
 import { currentProviderRecovery } from "../lib/provider-recovery";
 import {
@@ -718,6 +718,7 @@ function ConversationView({
               emptyState={timelineProps?.emptyState}
               renderMessageSender={timelineProps?.renderMessageSender}
               status={status}
+              pause={timelineLivePause(voiceControl)}
               hasOlder={feed.hasOlder}
               loadingOlder={feed.loadingOlder}
               onLoadOlder={feed.loadOlder}

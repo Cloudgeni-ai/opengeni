@@ -635,9 +635,16 @@ test("PG: turning Opengeni credits off blocks every credit model but keeps subsc
     tools: [],
   });
   expect(refused.status).toBe(422);
-  const refusal = (await refused.json()).message;
+  const refusedBody = await refused.json();
+  const refusal = refusedBody.message;
   expect(refusal).toContain("uses credits, which are turned off in this workspace");
   expect(refusal).not.toMatch(/opengeni/i);
+  // Typed, so a refused new chat words the rule instead of showing this text.
+  expect(refusedBody.details).toEqual({
+    code: "model_policy",
+    modelId: expect.any(String),
+    reason: "credits",
+  });
 
   // An omitted model never falls back to a credit model.
   const implicit = await f.request(`/v1/workspaces/${f.grant.workspaceId}/sessions`, {

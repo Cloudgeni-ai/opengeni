@@ -89,26 +89,38 @@ export default function PlatformActivityRow({
   // A failed step's recorded error is diagnostic detail: behind the row, never
   // its title, and absent where the host hides raw technical detail.
   const detail = failed && !plainDetails ? item.detail : undefined;
+  const note =
+    item.phase === "model_preparation"
+      ? msg("timeline.platformActivityRow.includesOverlappingSandboxStartupCustom")
+      : undefined;
   return j(ActivityDisclosure, {
     icon: j(BotIcon, { className: "size-3.5" }),
     iconTone: failed ? "failed" : running ? "running" : "muted",
     title: item.blockedReason
       ? STARTUP_WAIT_TITLES(msg)[item.blockedReason]
       : startupPhaseTitle(msg, item.phase, item.status, item.outcome),
-    preview:
-      item.phase === "model_preparation"
-        ? msg("timeline.platformActivityRow.includesOverlappingSandboxStartupCustom")
-        : undefined,
+    preview: note,
     running,
     failed,
     cancelled: item.status === "cancelled",
     chip: duration ? { tone: failed ? "bad" : "muted", text: duration } : undefined,
     expandable: Boolean(detail),
     children: detail
-      ? j(PayloadBlock, {
-          label: msg("timeline.platformActivityRow.details"),
-          value: detail,
-        })
+      ? [
+          // Open, the note leaves the row; it stays readable above the details.
+          note
+            ? j(
+                "p",
+                { className: "text-og-sm leading-5 text-og-fg-subtle", children: note },
+                "note",
+              )
+            : null,
+          j(
+            PayloadBlock,
+            { label: msg("timeline.platformActivityRow.details"), value: detail },
+            "detail",
+          ),
+        ]
       : undefined,
   });
 }
