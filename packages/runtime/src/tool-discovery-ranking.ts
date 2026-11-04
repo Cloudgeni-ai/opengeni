@@ -191,6 +191,11 @@ export class ToolSearchIndex {
     return result;
   }
 
+  /** Whether some tool in this pool uses the word (in any inflection), or it is a stop word. */
+  knowsWord(word: string): boolean {
+    return words(word).every((term) => this.documentFrequency.has(term));
+  }
+
   /**
    * A deterministic fast path, not a probability or execution decision. Require
    * resource evidence in the name/capability sentence and separation from the

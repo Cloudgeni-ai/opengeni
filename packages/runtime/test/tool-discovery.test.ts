@@ -37,6 +37,7 @@ import {
   LazyToolModelProvider,
   transformGenericDispatchResponse,
   type ConnectableIntegrationLookup,
+  type ConnectableIntegration,
   type ConnectedToolAccount,
 } from "../src/lazy-tool-transport";
 import { baseModelInputFilterForSettings } from "../src/model-input";
@@ -1287,7 +1288,7 @@ describe("searches that name an integration the person can connect", () => {
     expect(connectableIntegrationNotice([GMAIL])).toBe(GMAIL_NOTICE);
   });
 
-  test("reads only exact catalog matches whose next step is a Connect card", () => {
+  test("reads catalog matches whose next step is a Connect card, spelling-approximate ones too", () => {
     const text = JSON.stringify({
       query: "gmail",
       matches: [
@@ -1309,8 +1310,16 @@ describe("searches that name an integration the person can connect", () => {
       ],
     });
     const content = [{ type: "text", text }];
-    expect(connectableIntegrationsFromCatalogResult({ content })).toEqual([GMAIL]);
-    expect(connectableIntegrationsFromCatalogResult(content)).toEqual([GMAIL]);
+    const gmall = { capabilityId: "registry:gmall", name: "Gmall" };
+    expect(connectableIntegrationsFromCatalogResult({ content })).toEqual([GMAIL, gmall]);
+    expect(connectableIntegrationsFromCatalogResult(content)).toEqual([GMAIL, gmall]);
+    // Whether the query names one is decided by its spelling, not the catalog's.
+    expect(
+      connectableIntegrationsNamedIn(
+        "check my gmail",
+        connectableIntegrationsFromCatalogResult(content),
+      ),
+    ).toEqual([GMAIL]);
     expect(connectableIntegrationsFromCatalogResult({ content, isError: true })).toEqual([]);
     expect(
       connectableIntegrationsFromCatalogResult({ content: [{ type: "text", text: "no" }] }),
@@ -1330,7 +1339,7 @@ describe("searches that name an integration the person can connect", () => {
     });
     expect(await lookup("x".repeat(600))).toEqual([]);
     expect(calls[0]!.name).toBe(CATALOG);
-    expect(calls[0]!.args).toEqual({ query: "x".repeat(500), limit: 3 });
+    expect(calls[0]!.args).toEqual({ query: "x".repeat(500), limit: 5 });
     expect(calls[0]!.signal).toBeDefined();
   });
 
@@ -1351,7 +1360,7 @@ describe("searches that name an integration the person can connect", () => {
       expect(result.notice).toBe(transport === "generic_dispatch" ? undefined : GMAIL_NOTICE);
     });
 
-    test(`${transport}: installed-tool searches never look up or change`, async () => {
+    test(`${transport}: installed-tool searches that name no integration change nothing`, async () => {
       const { queries, lookup } = fakeLookup();
       for (const args of [
         { query: "create a scheduled message in this chat" },
@@ -1364,19 +1373,23 @@ describe("searches that name an integration the person can connect", () => {
         const without = await runtimeWith(transport).prepareSearch(args);
         expect(withLookup).toEqual(without);
       }
-      expect(queries).toEqual([]);
+      // Strong first-party matches belong to no integration, so a query that
+      // could name an uninstalled one (a capitalised word mid-sentence) is
+      // still looked up. One made of the installed tools' own lower-case
+      // words, or that names a tool or loads names, never is.
+      expect(queries).toEqual(["Search workspace Knowledge by subject"]);
     });
 
     test(`${transport}: unnamed matches, lookup failures and chats without setup tools change nothing`, async () => {
       const { queries, lookup } = fakeLookup();
-      // "read my outlook inbox" strongly matches the installed inbox tool, so it
-      // never looks up; "read the meeting summary" looks up and names nothing.
+      // Both look up ("read my outlook inbox" strongly matches only a
+      // first-party tool) and name nothing.
       for (const query of ["read the meeting summary", "read my outlook inbox"]) {
         expect(await runtimeWith(transport, lookup).prepareSearch({ query })).toEqual(
           await runtimeWith(transport).prepareSearch({ query }),
         );
       }
-      expect(queries).toEqual(["read the meeting summary"]);
+      expect(queries).toEqual(["read the meeting summary", "read my outlook inbox"]);
       const failing = async () => {
         throw new Error("catalog offline");
       };
@@ -1688,6 +1701,424 @@ describe("searches that name an integration the person can connect", () => {
       }
     },
   );
+});
+
+describe("searches that name an integration their strong matches do not belong to", () => {
+  const CATALOG = "opengeni__capability_catalog_search";
+  const CARD = "opengeni__capability_authorization_request";
+  const SLACK_BOT = "opengeni__slack_bot_list_channels";
+  const MEETINGS = "opengeni__meetings_search";
+  const LINEAR_ISSUES = "mcp__linear__list_issues";
+  // Real production catalog entries (ids, names and provider domains).
+  const SLACK = {
+    capabilityId: "mcp:integrations-sh:slack-com-5a15dccc0dc0",
+    name: "Slack",
+    providerDomain: "slack.com",
+  };
+  const LINEAR = {
+    capabilityId: "mcp:integrations-sh:linear-app-4b4a9f349c60",
+    name: "Linear",
+    providerDomain: "linear.app",
+  };
+  const HUBSPOT = {
+    capabilityId: "mcp:integrations-sh:hubspot-com-5fed89a78d64",
+    name: "HubSpot",
+    providerDomain: "hubspot.com",
+  };
+  const ATLASSIAN = {
+    capabilityId: "mcp:integrations-sh:jira-com-e526db80ea55",
+    name: "Atlassian",
+    providerDomain: "jira.com",
+  };
+  // Not in the production catalog; a workspace adds it as a custom MCP.
+  const WISPR_FLOW = { capabilityId: "mcp:wispr-flow", name: "Wispr Flow" };
+  const notice = (integration: { capabilityId: string; name: string }) =>
+    `Not connected yet: ${integration.name} (capabilityId ${JSON.stringify(integration.capabilityId)}). If the task needs it, call capability_authorization_request with that capabilityId and a short rationale to show the person its Connect card.`;
+  const pool = (withLinear: boolean, extra: readonly ReturnType<typeof candidate>[] = []) => [
+    candidate(
+      SLACK_BOT,
+      "List public and bot-visible private Slack channels through the workspace-shared Slack bot. isMember identifies channels the bot may read/post in; the bot never joins channels automatically.",
+    ),
+    candidate(
+      MEETINGS,
+      "Find recorded meetings the person you act for can see: those shared with the workspace and their own, including their own Only me meetings from their other workspaces of this organization (marked recordedIn). Filter by words said or in the title, a named speaker, when they started, or a product's reference. Newest first, with each meeting's speakers and, when searching for words, the first transcript lines that contain them. Read a meeting with meeting_read.",
+    ),
+    candidate(
+      "opengeni__knowledge_search",
+      "Find Knowledge by subject or entity name. Omit scope to search all authorized scopes.",
+    ),
+    ...(withLinear
+      ? [candidate(LINEAR_ISSUES, "List Linear issues in the workspace's projects and cycles.")]
+      : []),
+    candidate(
+      CATALOG,
+      "Find integrations in the reviewed workspace catalog when the user asks to add one or needed access is missing. Search by integration name or task outcome.",
+    ),
+    candidate(
+      CARD,
+      "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction.",
+    ),
+    ...extra,
+  ];
+  const LINEAR_ACCOUNT: ConnectedToolAccount = {
+    source: "linear",
+    label: "Linear",
+    connector: "Linear",
+    providerDomain: "linear.app",
+  };
+  const runtimeWith = (
+    transport: "generic_dispatch" | "openai_native" | "codex_native",
+    options: {
+      lookup?: ConnectableIntegrationLookup;
+      withLinear?: boolean;
+      extra?: readonly ReturnType<typeof candidate>[];
+      servers?: ReadonlyMap<string, string>;
+      accounts?: ReadonlyMap<string, ConnectedToolAccount>;
+    } = {},
+  ) => {
+    const runtime = new LazyToolRuntime(
+      transport,
+      new Set(),
+      undefined,
+      undefined,
+      undefined,
+      options.servers ? () => options.servers! : undefined,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      options.lookup,
+      options.accounts ? () => options.accounts! : undefined,
+    );
+    runtime.refresh(pool(options.withLinear ?? false, options.extra));
+    return runtime;
+  };
+  const recording = (matches: readonly ConnectableIntegration[]) => {
+    const queries: string[] = [];
+    const lookup: ConnectableIntegrationLookup = async (query) => {
+      queries.push(query);
+      return matches;
+    };
+    return { queries, lookup };
+  };
+  const loaded = (result: { tools?: { name?: unknown }[] }) =>
+    result.tools?.map((t) => t.name) ?? [];
+  const strongly = (
+    query: string,
+    withLinear = false,
+    extra: readonly ReturnType<typeof candidate>[] = [],
+  ) => names(new ToolSearchIndex(pool(withLinear, extra)).strongMatches(query));
+
+  // Each matches one first-party tool strongly in this pool, as the original
+  // queries did in a full one.
+  const SLACK_QUERY = "read the posts in the Slack channel #halcyon-launch";
+  const LINEAR_QUERY = "Search Linear issues from recorded meetings";
+
+  for (const transport of ["generic_dispatch", "openai_native", "codex_native"] as const) {
+    test(`${transport}: a strong unrelated match does not hide the named integration's card`, async () => {
+      // The installed tools that match strongly are first-party, not Slack's
+      // or Linear's own: the query still names an integration to connect.
+      expect(strongly(SLACK_QUERY)).toContain(SLACK_BOT);
+      expect(strongly(LINEAR_QUERY)).toContain(MEETINGS);
+      for (const [query, integration, matched] of [
+        [SLACK_QUERY, SLACK, SLACK_BOT],
+        [LINEAR_QUERY, LINEAR, MEETINGS],
+      ] as const) {
+        const { queries, lookup } = recording([HUBSPOT, integration]);
+        const result = await runtimeWith(transport, { lookup }).prepareSearch({ query });
+        expect(queries).toEqual([query]);
+        expect(loaded(result)[0]).toBe(matched);
+        expect(loaded(result).at(-1)).toBe(CARD);
+        expect(JSON.parse(result.output).notConnected).toBe(notice(integration));
+        expect(result.notice).toBe(
+          transport === "generic_dispatch" ? undefined : notice(integration),
+        );
+      }
+    });
+
+    test(`${transport}: a strong match that is the named integration's own tool skips the lookup`, async () => {
+      expect(strongly("list my Linear issues", true)).toContain(LINEAR_ISSUES);
+      const accounts = new Map([[LINEAR_ISSUES, LINEAR_ACCOUNT]]);
+      for (const query of ["list my Linear issues", "list my linear.app issues"]) {
+        const { queries, lookup } = recording([LINEAR]);
+        const withLookup = await runtimeWith(transport, {
+          lookup,
+          withLinear: true,
+          accounts,
+        }).prepareSearch({ query });
+        expect(queries).toEqual([]);
+        expect(withLookup).toEqual(
+          await runtimeWith(transport, { withLinear: true, accounts }).prepareSearch({ query }),
+        );
+        expect(loaded(withLookup)).not.toContain(CARD);
+      }
+    });
+  }
+
+  test("an installed server's own catalog entry is never offered as a card", async () => {
+    // A server that carries no account route belongs to the catalog entry it
+    // was installed from; that entry is dropped even when the lookup runs.
+    const servers = new Map([[LINEAR_ISSUES, LINEAR.capabilityId]]);
+    const { queries, lookup } = recording([LINEAR]);
+    const query = "list the Linear issues in this cycle";
+    expect(strongly(query, true)).toContain(LINEAR_ISSUES);
+    const result = await runtimeWith("generic_dispatch", {
+      lookup,
+      withLinear: true,
+      servers,
+    }).prepareSearch({ query });
+    expect(queries).toEqual([query]);
+    expect(loaded(result)).not.toContain(CARD);
+    expect(JSON.parse(result.output).notConnected).toBeUndefined();
+  });
+
+  test("near-miss spellings name the integration", () => {
+    for (const [query, integration] of [
+      ["dictate this note with whisperflow", WISPR_FLOW],
+      ["dictate with Whisper Flow", WISPR_FLOW],
+      ["use wisprflow to transcribe", WISPR_FLOW],
+      ["send it to WisprFlow", WISPR_FLOW],
+      ["send it to wipsr flow", WISPR_FLOW],
+      ["dictate with Whisprflow", WISPR_FLOW],
+      ["add the new lead to hub spot", HUBSPOT],
+      ["update the deal in HUBSPOT", HUBSPOT],
+      ["find my jira tickets", ATLASSIAN],
+      ["open the atlasian board", ATLASSIAN],
+    ] as const)
+      expect(connectableIntegrationsNamedIn(query, [SLACK, integration])).toEqual([integration]);
+  });
+
+  for (const transport of ["generic_dispatch", "openai_native"] as const)
+    test(`${transport}: a near-miss name gets its Connect card through search`, async () => {
+      const query = "dictate this note with whisperflow";
+      const result = await runtimeWith(transport, {
+        lookup: recording([HUBSPOT, WISPR_FLOW]).lookup,
+      }).prepareSearch({ query });
+      expect(loaded(result).at(-1)).toBe(CARD);
+      expect(JSON.parse(result.output).notConnected).toBe(notice(WISPR_FLOW));
+    });
+
+  test("a common word close to an integration's name names nothing", async () => {
+    const close = (capabilityId: string, name: string, providerDomain?: string) => ({
+      capabilityId,
+      name,
+      ...(providerDomain ? { providerDomain } : {}),
+    });
+    for (const [query, integration] of [
+      // Short names must be spelled exactly: one letter from a common word.
+      ["search my email for invoices", close("registry:gmail", "Gmail", "gmail.com")],
+      ["check my mail", close("registry:gmail", "Gmail", "gmail.com")],
+      ["send a slick reply", SLACK],
+      ["strike through the old line", close("registry:stripe", "Stripe", "stripe.com")],
+      ["discard the draft", close("registry:discord", "Discord", "discord.com")],
+      ["find my motion videos", close("registry:notion", "Notion", "notion.com")],
+      // Long names: a replaced letter, or only the start or end of the name.
+      ["find the conference notes", close("registry:confluence", "Confluence")],
+      ["automation rules for the team", close("registry:automotion", "AutoMotion")],
+      ["fix the grammar in this paragraph", close("registry:grammarly", "Grammarly")],
+      ["add context to the summary", close("registry:context7", "Context7")],
+      ["track my interest payments", close("registry:pinterest", "Pinterest")],
+      ["book a calendar slot", close("registry:calendly", "Calendly", "calendly.com")],
+      ["whisper this to me", WISPR_FLOW],
+      // A domain word that is also a word of the name adds nothing.
+      ["bump the version", close("registry:bump", "bump.sh", "bump.sh")],
+    ] as const)
+      expect(connectableIntegrationsNamedIn(query, [integration])).toEqual([]);
+    // Through search: a strong first-party match plus a catalog near miss.
+    const { queries, lookup } = recording([close("registry:confluence", "Confluence")]);
+    const query = "search the conference meetings for action items";
+    const result = await runtimeWith("generic_dispatch", { lookup }).prepareSearch({ query });
+    expect(queries).toEqual([query]);
+    expect(loaded(result)).not.toContain(CARD);
+    expect(JSON.parse(result.output).notConnected).toBeUndefined();
+  });
+
+  test("compound words and subdomain words name nothing", () => {
+    for (const [query, integration] of [
+      [
+        "summarise the issues linked in this PR",
+        { capabilityId: "mcp:linkedin", name: "LinkedIn" },
+      ],
+      ["fix the typos on the last pass", { capabilityId: "mcp:lastpass", name: "LastPass" }],
+      ["plan my work day", { capabilityId: "mcp:workday", name: "Workday" }],
+      ["add one note per meeting", { capabilityId: "mcp:onenote", name: "OneNote" }],
+      ["follow up work from the retro", { capabilityId: "mcp:upwork", name: "Upwork" }],
+      [
+        "read the docs for this API",
+        {
+          capabilityId: "mcp:synthflow",
+          name: "Voice Agents",
+          providerDomain: "docs.synthflow.ai",
+        },
+      ],
+      [
+        "ask the developers about the release",
+        {
+          capabilityId: "mcp:intercom",
+          name: "Help Desk",
+          providerDomain: "developers.intercom.com",
+        },
+      ],
+    ] as const)
+      expect(connectableIntegrationsNamedIn(query, [integration])).toEqual([]);
+  });
+
+  test("swapped neighbouring letters name the integration", () => {
+    const NOTION = { capabilityId: "mcp:notion", name: "Notion", providerDomain: "notion.com" };
+    for (const [query, integration] of [
+      ["update the deal in hubsopt", HUBSPOT],
+      ["post it in slakc", SLACK],
+      ["open the page in notoin", NOTION],
+    ] as const)
+      expect(connectableIntegrationsNamedIn(query, [LINEAR, integration])).toEqual([integration]);
+  });
+
+  test("beside strong matches an ordinary word that is a name adds no card", async () => {
+    const entry = (name: string, providerDomain: string) => ({
+      capabilityId: `mcp:${providerDomain}`,
+      name,
+      providerDomain,
+    });
+    for (const [query, integration] of [
+      ["search recorded meetings where we said close the ticket", entry("Close", "close.com")],
+      ["search recorded meetings about linear regression on the data", LINEAR],
+      ["search recorded meetings where the box is empty", entry("Box", "box.com")],
+      ["search recorded meetings about front page news", entry("Front", "front.com")],
+      ["search recorded meetings about the new lead from hub spot", HUBSPOT],
+    ] as const) {
+      expect(strongly(query)).toContain(MEETINGS);
+      const { queries, lookup } = recording([integration]);
+      const result = await runtimeWith("generic_dispatch", { lookup }).prepareSearch({ query });
+      expect(queries).toEqual([query]);
+      expect(loaded(result)).not.toContain(CARD);
+      expect(JSON.parse(result.output).notConnected).toBeUndefined();
+    }
+  });
+
+  test("a sibling on the same vendor domain is not the strong match's own integration", async () => {
+    const TEAMS_SEND = "mcp__teams__send_message";
+    const microsoft = (capabilityId: string, name: string) => ({
+      capabilityId,
+      name,
+      providerDomain: "microsoft.com",
+    });
+    // Live catalog names of products on microsoft.com.
+    const TEAMS = microsoft("mcp:microsoft-teams", "Microsoft Teams");
+    const EXCEL = microsoft("mcp:microsoft-excel", "Microsoft Excel");
+    const ONEDRIVE = microsoft("mcp:onedrive", "OneDrive");
+    const SHAREPOINT = microsoft("mcp:sharepoint", "SharePoint");
+    const OUTLOOK_MAIL = microsoft("mcp:outlook-mail", "Outlook Mail");
+    const OUTLOOK_CALENDAR = microsoft("mcp:outlook-calendar", "Outlook Calendar");
+    const products = [TEAMS, EXCEL, ONEDRIVE, SHAREPOINT, OUTLOOK_MAIL, OUTLOOK_CALENDAR];
+    // The shared vendor word "microsoft" names none of them.
+    for (const [query, expected] of [
+      ["post the update in Microsoft Teams", [TEAMS]],
+      ["open the Microsoft Excel sheet", [EXCEL]],
+      ["check my Microsoft account settings", []],
+    ] as const) {
+      expect(connectableIntegrationsNamedIn(query, products)).toEqual([...expected]);
+      expect(connectableIntegrationsNamedIn(query, products, true)).toEqual([...expected]);
+    }
+    const extra = [candidate(TEAMS_SEND, "Send a message to a Microsoft Teams channel.")];
+    const accounts = new Map<string, ConnectedToolAccount>([
+      [
+        TEAMS_SEND,
+        {
+          source: "microsoft-teams",
+          label: "Microsoft Teams",
+          connector: "Microsoft Teams",
+          providerDomain: "microsoft.com",
+        },
+      ],
+    ]);
+    const query = "send the Microsoft Excel totals as a message to the Teams channel";
+    expect(strongly(query, false, extra)).toContain(TEAMS_SEND);
+    // The Teams entry is the strong match's own; the others still show that
+    // microsoft.com is shared.
+    const { queries, lookup } = recording([TEAMS, EXCEL, ONEDRIVE, SHAREPOINT, OUTLOOK_MAIL]);
+    const result = await runtimeWith("generic_dispatch", { lookup, extra, accounts }).prepareSearch(
+      { query },
+    );
+    expect(queries).toEqual([query]);
+    expect(loaded(result)[0]).toBe(TEAMS_SEND);
+    expect(loaded(result).at(-1)).toBe(CARD);
+    expect(JSON.parse(result.output).notConnected).toBe(notice(EXCEL));
+  });
+
+  test("a connected earlier version of the named integration adds no card", async () => {
+    // Atlassian (v1) is connected; the current Atlassian entry is not.
+    const JIRA_SEARCH = "mcp__atlassian_v1__search_issues";
+    const extra = [candidate(JIRA_SEARCH, "Search Jira issues in Atlassian projects with JQL.")];
+    const accounts = new Map<string, ConnectedToolAccount>([
+      [
+        JIRA_SEARCH,
+        {
+          source: "atlassian-v1",
+          label: "Atlassian (v1)",
+          connector: "Atlassian (v1)",
+          providerDomain: "jira.com",
+        },
+      ],
+    ]);
+    for (const [query, looksUp] of [
+      // The connected integration is named (by its vendor's word): no lookup.
+      ["search Jira issues for the release", false],
+      // Not named as the connected one, so the catalog is read, but the
+      // current entry belongs to the same vendor and name.
+      ["search issues in the Atlassian sprint", true],
+    ] as const) {
+      expect(strongly(query, false, extra)).toContain(JIRA_SEARCH);
+      const { queries, lookup } = recording([ATLASSIAN]);
+      const result = await runtimeWith("generic_dispatch", {
+        lookup,
+        extra,
+        accounts,
+      }).prepareSearch({ query });
+      expect(queries).toEqual(looksUp ? [query] : []);
+      expect(loaded(result)).not.toContain(CARD);
+      expect(JSON.parse(result.output).notConnected).toBeUndefined();
+    }
+  });
+
+  test("beside strong matches only a word the installed tools do not use reads the catalog", async () => {
+    // "whisperflow" is no installed tool's word: looked up, and named.
+    const unknown = "search recorded meetings about whisperflow";
+    expect(strongly(unknown)).toContain(MEETINGS);
+    const first = recording([WISPR_FLOW]);
+    const named = await runtimeWith("generic_dispatch", { lookup: first.lookup }).prepareSearch({
+      query: unknown,
+    });
+    expect(first.queries).toEqual([unknown]);
+    expect(JSON.parse(named.output).notConnected).toBe(notice(WISPR_FLOW));
+    // Only the installed tools' own lower-case words: no catalog read.
+    const known = "search recorded meetings by speaker";
+    expect(strongly(known)).toContain(MEETINGS);
+    const second = recording([WISPR_FLOW]);
+    await runtimeWith("generic_dispatch", { lookup: second.lookup }).prepareSearch({
+      query: known,
+    });
+    expect(second.queries).toEqual([]);
+  });
+
+  test("beside strong matches the search waits at most 1.5 seconds for the catalog", async () => {
+    let lookupSignal: AbortSignal | undefined;
+    // A catalog read that never answers, and ignores its signal.
+    const lookup: ConnectableIntegrationLookup = (_query, signal) => {
+      lookupSignal = signal;
+      return new Promise(() => undefined);
+    };
+    const startedAt = performance.now();
+    const result = await runtimeWith("generic_dispatch", { lookup }).prepareSearch({
+      query: LINEAR_QUERY,
+    });
+    expect(performance.now() - startedAt).toBeLessThan(1_900);
+    expect(lookupSignal?.aborted).toBe(true);
+    expect(loaded(result)[0]).toBe(MEETINGS);
+    expect(loaded(result)).not.toContain(CARD);
+  });
 });
 
 describe("searches that reach one of several connected accounts", () => {

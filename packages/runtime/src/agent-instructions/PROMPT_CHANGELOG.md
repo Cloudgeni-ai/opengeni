@@ -198,6 +198,19 @@ the lines are shown as text, not as a sentence diff:
 - Verify changes when practical, especially after editing code, tests, build scripts, generated artifacts, or configuration. For a change to something already running, such as a service, worker or scheduled job, restart or reload the process that actually serves it, exercise the real entry point and check what the user asked about; unit tests alone do not show it works. Ask first only if a restart could disrupt others or lose work in progress.
 ```
 
+Connect cards despite unrelated strong matches. No prompt or tool description
+text changes. `tool_search` used to skip its integration catalog lookup
+whenever any installed tool matched strongly, so "posts on Slack" (matching a
+Slack bot tool) or "Linear issues" (matching meeting search) got no Connect
+card. It now skips the lookup only when a strong match is the named
+integration's own tool (beside strong matches reading the catalog only for a
+capitalised or unfamiliar word, waiting at most 1.5 seconds, and naming only
+distinctive mentions), and also recognises an
+integration's name with different spacing or case, a near spelling, or its
+vendor domain word. Catalog search ranks entries a query names first. The
+`notConnected` text is unchanged, and it appears on more searches than
+before.
+
 The agent knows both GitHub identities. When personal GitHub sign-in is
 enabled on the deployment (new `personalGitHub` resource fact) and
 `github_connect_link` is available, the admin module adds one sentence (about

@@ -4106,6 +4106,7 @@ function maybeInstallLazyToolTransport(
           label: route.account ? `${route.connector} (${route.account})` : route.connector,
           connector: route.connector,
           ...(route.kind ? { kind: route.kind } : {}),
+          ...(route.providerDomain ? { providerDomain: route.providerDomain } : {}),
         };
         for (const name of server.modelToolNames()) accounts.set(name, account);
       }
@@ -11484,6 +11485,7 @@ export { restoreGenericDispatchHistoryItems } from "./lazy-tool-transport";
 export { isOpeningToolLoadResponse } from "./lazy-tool-transport";
 export { isAlwaysVisibleBaseToolName } from "./lazy-tool-transport";
 export { HARNESS_CONTROL_FIRST_PARTY_TOOLS } from "./codex-tool-search";
+export { connectableIntegrationsNamedIn } from "./lazy-tool-transport";
 export type { LazyToolTransport } from "./lazy-tool-transport";
 export { createToolSelector } from "./tool-discovery-decision";
 export type {
