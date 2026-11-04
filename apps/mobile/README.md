@@ -26,6 +26,10 @@ workspaces, settings and notifications.
 - **Several accounts**, on one or more deployments, are kept in the platform
   keychain. Each keeps its own last workspace, drafts and session cache.
   Sign-out revokes that account's credential on the server.
+- **Switching** to a signed-in account is immediate. Picking one that is
+  signed out opens its sign-in over the account in use, so Cancel returns to
+  it. When the account in use is signed out, the sign-in screen lists the
+  other accounts, so one tap goes back to a signed-in one.
 - **Organizations and workspaces** use the same rules as the web rail
   (`@opengeni/react/organization-model`).
 - Administration stays on the web: Settings links to workspace, organization

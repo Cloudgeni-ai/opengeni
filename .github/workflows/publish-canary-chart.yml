@@ -58,10 +58,28 @@ jobs:
       - name: Install frozen dependencies
         run: bun install --frozen-lockfile
 
+      # The chart's default Modal desktop pin is the desktop image protected
+      # main CI built from this exact source (canary-images receipt
+      # images.desktop), resolved anonymously as Modal pulls it.
+      - name: Resolve exact-source desktop image
+        id: desktop
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/cloudgeni-ai/opengeni-desktop"
+          digest="$(bun scripts/resolve-optional-oci-manifest.ts "${image}:canary-sha-${SOURCE_SHA}")"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "no exact-source desktop image ${image}:canary-sha-${SOURCE_SHA}; publish main CI images for this SHA first" >&2
+            exit 1
+          }
+          echo "image_ref=${image}@${digest}" >> "$GITHUB_OUTPUT"
+
       - name: Package exact chart
         id: chart
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
+          DESKTOP_IMAGE_REF: ${{ steps.desktop.outputs.image_ref }}
         run: |
           set -euo pipefail
           version="$(bun -e '
@@ -74,7 +92,8 @@ jobs:
           ')"
           bun scripts/package-release-chart.ts --chart deploy/helm/opengeni \
             --output ".release/opengeni-${version}.tgz" --version "$version" \
-            --app-version "canary-sha-${SOURCE_SHA}"
+            --app-version "canary-sha-${SOURCE_SHA}" \
+            --desktop-image-ref "$DESKTOP_IMAGE_REF"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Authenticate publishing authority

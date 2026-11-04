@@ -646,6 +646,111 @@ describe("recording routes", () => {
     expect(asked).toHaveLength(2);
   });
 
+  test("upcoming meetings: the caller's own calendar, with join links; a chosen event names the meeting", async () => {
+    const soon = new Date(Date.now() + 60_000);
+    const later = new Date(Date.now() + 31 * 60_000);
+    const asked: string[] = [];
+    const scope = await fixture({
+      settings: { googleCalendarEnabled: true },
+      meetingCalendarFetch: (async (input: RequestInfo | URL) => {
+        const url = new URL(String(input));
+        asked.push(url.searchParams.get("fields") ?? "");
+        return Response.json({
+          items: [
+            {
+              id: "evt-sync",
+              summary: "Weekly sync",
+              hangoutLink: "https://meet.google.com/abc-defg-hij",
+              start: { dateTime: soon.toISOString() },
+              end: { dateTime: later.toISOString() },
+            },
+            {
+              id: "evt-now",
+              summary: "Running over",
+              start: { dateTime: new Date(Date.now() - 30 * 60_000).toISOString() },
+              end: { dateTime: new Date(Date.now() + 5 * 60_000).toISOString() },
+            },
+            {
+              id: "evt-room",
+              summary: "Lunch in the canteen",
+              start: { dateTime: soon.toISOString() },
+              end: { dateTime: later.toISOString() },
+            },
+          ],
+        });
+      }) as typeof fetch,
+    });
+    // No calendar yet.
+    expect(await scope.owner.call("GET", "/upcoming-meetings")).toEqual({
+      status: 200,
+      body: { calendar: "none", complete: true, meetings: [] },
+    });
+    expect(asked).toHaveLength(0);
+    await createConnection(db.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      subjectId: scope.owner.subjectId,
+      providerDomain: "calendarmcp.googleapis.com",
+      kind: "oauth2",
+      credentialEncrypted: encryptEnvironmentValue(
+        encryptionKey,
+        JSON.stringify({ access_token: "calendar-token", token_type: "Bearer" }),
+      ),
+      metadata: { mcpUrl: "https://calendarmcp.googleapis.com/mcp/v1" },
+      createdBySubjectId: scope.owner.subjectId,
+    });
+    const upcoming = await scope.owner.call("GET", "/upcoming-meetings");
+    expect(upcoming).toMatchObject({
+      status: 200,
+      body: {
+        calendar: "connected",
+        complete: true,
+        meetings: [
+          {
+            id: "evt-sync",
+            provider: "google",
+            title: "Weekly sync",
+            joinUrl: "https://meet.google.com/abc-defg-hij",
+            service: "Google Meet",
+            private: false,
+            unanswered: false,
+          },
+        ],
+      },
+    });
+    expect(upcoming.body.meetings).toHaveLength(1);
+    expect(asked.at(-1)).toContain("hangoutLink");
+    // Someone else in the workspace never sees the owner's calendar.
+    expect(await scope.other.call("GET", "/upcoming-meetings")).toMatchObject({
+      status: 200,
+      body: { calendar: "none", meetings: [] },
+    });
+    // Joined from the reminder: named after that event, not the one running over.
+    const recordingId = crypto.randomUUID();
+    const created = await scope.owner.call("POST", "/recordings", {
+      recordingId,
+      title: "Google Meet",
+      titleSource: "app",
+      calendarEvent: { provider: "google", id: "evt-sync" },
+      tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+    });
+    expect(created.status).toBe(201);
+    expect(created.body.recording ?? created.body).toMatchObject({
+      title: "Weekly sync",
+      titleSource: "calendar",
+      metadata: { calendarEvent: { provider: "google", id: "evt-sync" } },
+    });
+    expect(
+      (
+        await scope.owner.call("POST", "/recordings", {
+          recordingId: crypto.randomUUID(),
+          calendarEvent: { provider: "yahoo", id: "x" },
+          tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+        })
+      ).status,
+    ).toBe(400);
+  });
+
   test("a meeting whose calendar can't be read still starts, named for when it began", async () => {
     const scope = await fixture({
       settings: { googleCalendarEnabled: true },

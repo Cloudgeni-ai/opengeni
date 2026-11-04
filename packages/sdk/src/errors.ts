@@ -323,6 +323,23 @@ export function isMaintenanceError(error: unknown): boolean {
   );
 }
 
+/**
+ * Stable `details.code` of the 403 for approving an action that runs on
+ * another person's own (Only me) login: only that person, through their own
+ * session, personal API key or `asUser` token, can approve it. Anyone who can
+ * control the chat may still decline it. The message names who can approve.
+ */
+export const APPROVAL_REQUIRES_ACCOUNT_OWNER_CODE = "APPROVAL_REQUIRES_ACCOUNT_OWNER";
+
+/** True when an approval was refused because only the account's owner can approve it. */
+export function isApprovalRequiresAccountOwnerError(error: unknown): error is OpenGeniApiError {
+  return (
+    error instanceof OpenGeniApiError &&
+    error.status === 403 &&
+    error.details?.code === APPROVAL_REQUIRES_ACCOUNT_OWNER_CODE
+  );
+}
+
 function decodeApiErrorBody(body: string): {
   code: string | undefined;
   message: string | undefined;

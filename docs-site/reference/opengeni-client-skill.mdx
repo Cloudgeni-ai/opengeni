@@ -67,9 +67,10 @@ merge, or deploy without the user's permission.
 
 ## Default integration
 
-Install `@opengeni/sdk` and `@opengeni/react` at the same version. Put
-`OPENGENI_API_KEY` in the server's git-ignored env. Self-hosted deployments
-also pass `baseUrl: process.env.OPENGENI_API_BASE_URL`.
+Install `@opengeni/sdk` and `@opengeni/react` at the same exact version, the
+current npm `latest` (see [Versions and upgrades](references/versions-and-upgrades.md)).
+Put `OPENGENI_API_KEY` in the server's git-ignored env. Self-hosted
+deployments also pass `baseUrl: process.env.OPENGENI_API_BASE_URL`.
 
 Server, one catch-all route at `/api/opengeni/*` (Next.js App Router shown):
 
@@ -229,8 +230,10 @@ Before production, and for the handoff, read the
 - The API key is used only by the server (the proxy); it never goes in browser
   code.
 - Never replace the proxy with a raw passthrough to the Opengeni API.
-- Keep every `@opengeni/*` package at one version. The SDK is ESM-only; from
-  CommonJS, use `await import("@opengeni/sdk")`.
+- Keep every `@opengeni/*` package at one pinned version. Server updates keep
+  that version working; upgrade all packages together when you want new
+  features ([Versions and upgrades](references/versions-and-upgrades.md)). The
+  SDK is ESM-only; from CommonJS, use `await import("@opengeni/sdk")`.
 - With cookie auth, pass the product's existing CSRF check as
   `authorizeMutation`. If it has none, keep the default (it refuses cross-site
   mutations by `Sec-Fetch-Site`); a hand-written Origin/Host check breaks
@@ -384,6 +387,8 @@ needs no empty `tools`, `firstPartyMcpTools`, or `bundledSkillIds` lists.
 | Capability            | Lets the agent                                          |
 | --------------------- | ------------------------------------------------------- |
 | `humanInput`          | ask the user a question (on in `"none"`)                |
+| `notifications`       | notify, call, and tidy the inbox of the user            |
+| `privacyFacts`        | answer privacy questions from the deployment's facts    |
 | `skills`              | `"read"` Skills (default in `"none"`), or `"manage"`    |
 | `webSearch`           | search the web                                          |
 | `knowledge`           | search and save workspace Knowledge                     |
@@ -403,6 +408,19 @@ tools come from the sandbox; `sandboxBackend: "none"` removes them.
 
 A customer-facing assistant usually starts from `"none"` plus what it needs. An
 internal operator agent usually starts from `"all"` minus what it must not do.
+
+`"none"` pays only for what the session can use on every call. It gets a
+neutral identity unless the session shares a workspace; `request_human_input`
+offers the secret kind only with `secrets` and Skill reviews only with
+`skills: "manage"`; `wait_for_input` comes only with a sandbox, `subagents`,
+`goals`, `schedules`, `browser`, `media`, or a user-started turn; tool search
+only when a tool is deferred (list the product server with `eager: true`, not
+`optional` and without a `connectionRef`, to avoid it); no Skill index without
+Skills. Prompt sections follow their capability. Switch an item back on with
+its capability, for example `{ from: "none", privacyFacts: true }`. Saved
+workspace defaults and schedules keep notifications and privacy facts under
+`"none"`. `getSessionModelContext` returns the latest request's provider body;
+on the native Anthropic route it also lists the instructions and each tool.
 
 ## Identity, instructions, renderer
 
@@ -521,9 +539,9 @@ is a runnable starting point.
 - Set `OPENGENI_TOOL_SERVER_URL` to the production tool endpoint. The proxy and
   `verifyToolRequest` must see the same URL and the same `OPENGENI_API_KEY`.
 - Self-hosted: set `OPENGENI_API_BASE_URL` and pass it as `baseUrl`.
-- Pin every `@opengeni/*` package to one version. If the repository enforces a
-  minimum release age, pin an older shared version or ask the user; do not
-  bypass the policy.
+- Pin every `@opengeni/*` package to one exact stable version; see
+  [Versions and upgrades](versions-and-upgrades.md) for choosing and
+  upgrading it.
 - Private chats need the organization's private-session setting. Organizations
   created at signup have it on, so don't ask the user to check it. Without it
   the SDK throws `OpenGeniSetupError`, whose message says who can enable it.
@@ -842,6 +860,56 @@ credential callback: a stored item does not replace expiry/renewal, Git/MCP
 transport bindings or cleanup. See the product's external-vault and credential
 provider documentation before implementing either path.
 ````
+
+## `references/versions-and-upgrades.md`
+
+```markdown
+# Versions and upgrades
+
+## Pick a version
+
+- Install the current stable release: `npm view @opengeni/sdk version` prints
+  the npm `latest` version. Pin `@opengeni/sdk`, `@opengeni/react` and any
+  other `@opengeni/*` package to that exact version (no `^` or `~` ranges).
+- Do not use canary versions (`-canary.` in the version) in production.
+- Source code, changelogs or docs can mention a newer version than npm
+  `latest`. That version is not published yet; use npm `latest`.
+- If the repository enforces a minimum release age, pin an older shared
+  version or ask the user; do not bypass the policy.
+
+## What stays compatible
+
+Opengeni server updates do not break existing integrations. The routes,
+fields, event types and documented behaviour that a published SDK uses keep
+working, so a pinned version keeps working against app.opengeni.ai. Upgrade
+for new features or fixes, not to stay compatible. Rare exceptions (an
+emergency security fix or an explicit product-owner decision) are announced
+with migration notes. Policy:
+[api-compatibility-policy.md](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/design/api-compatibility-policy.md).
+
+Write code that keeps it that way:
+
+- Ignore unknown event types, enum values and response fields. Give every
+  `switch` over an Opengeni union a default branch.
+- Branch on error codes and typed SDK errors, not on message text.
+- Members marked `@deprecated` keep working. Use the replacement their docs
+  name in new code; existing calls need no urgent migration.
+
+Self-hosted: run a server at least as new as the SDK. An older SDK works with
+a newer server, but a newer SDK can call routes an older server does not have
+yet. `/healthz` reports the server's `serverVersion`.
+
+## Upgrade
+
+1. Move every `@opengeni/*` package to the same new version in one change.
+2. Read the `CHANGELOG.md` entries of `@opengeni/sdk` and `@opengeni/react`
+   between the two versions.
+3. Run the typecheck and tests, then send a real chat turn through the proxy.
+
+If something that worked stops working after an Opengeni server update, that
+is an Opengeni bug. Report the SDK version, `serverVersion`, route and error;
+do not work around it by calling the HTTP API directly.
+```
 
 ## `references/website-widget.md`
 

@@ -43,6 +43,7 @@ import {
 } from "./tool-discovery-meaning";
 import { toolDescriptor, toolGroup, toolGroups } from "./tool-discovery-catalog";
 import { toolDisclosureItem } from "./provider-history-adapter";
+import { isProviderToolName, providerValidCallName } from "./provider-tool-names";
 import { restoreDeferredToolArgumentTypes } from "./deferred-tool-arguments";
 import { isAliasedMcpToolName, prefixedMcpToolName } from "./mcp-model-tool-name";
 import {
@@ -122,6 +123,10 @@ const ALWAYS_VISIBLE_BASE_TOOL_NAMES: ReadonlySet<string> = new Set([
   "web_search",
   "web_fetch",
 ]);
+/** True for a base runtime tool that is in the first request on every transport. */
+export function isAlwaysVisibleBaseToolName(name: string): boolean {
+  return ALWAYS_VISIBLE_BASE_TOOL_NAMES.has(name);
+}
 const DISPATCH_MARKER_KEY = "opengeni.lazy_dispatch.v1";
 const SEARCH_MARKER_KEY = "opengeni.lazy_search.v1";
 /** Frozen companion schemas an entry-tool call disclosed, kept on the call itself. */
@@ -566,6 +571,12 @@ export class LazyToolRuntime {
      * siblings a tool is; the decision model reads the full name instead.
      */
     private readonly mcpToolNames: () => ReadonlyMap<string, string> = () => new Map(),
+    /**
+     * False when the host proved nothing this attempt attaches is deferred: a
+     * pending preparation then exposes no router on its own. Tools that turn
+     * out searchable once prepared still expose it.
+     */
+    private readonly pendingPreparationDefers = true,
   ) {
     this.routerWasExposed = routerInHistory;
     this.controlTools =
@@ -608,7 +619,9 @@ export class LazyToolRuntime {
     this.routerWasExposed ||=
       !this.conditionalRouter ||
       this.searchableToolNames.size > 0 ||
-      (this.hasPendingPreparation() && this.pendingMcpServerIds.size > 0);
+      (this.pendingPreparationDefers &&
+        this.hasPendingPreparation() &&
+        this.pendingMcpServerIds.size > 0);
     return this.routerWasExposed ? this.controlTools : [];
   }
 
@@ -764,6 +777,11 @@ export class LazyToolRuntime {
 
   resolveFunctionTool(name: string): Tool | undefined {
     return this.functionTools.get(name);
+  }
+
+  /** Model names of every authorized function tool, deferred ones included. */
+  knownFunctionToolNames(): string[] {
+    return [...this.functionTools.keys()];
   }
 
   /** True for a tool disclosed through search rather than sent on every request. */
@@ -1935,6 +1953,7 @@ export function installLazyToolRuntime(
   connectedAccounts?: () => ReadonlyMap<string, ConnectedToolAccount>,
   meaningRanker?: ToolMeaningRanker,
   mcpToolNames?: () => ReadonlyMap<string, string>,
+  pendingPreparationDefers = true,
 ): LazyToolRuntime {
   const runtime = new LazyToolRuntime(
     transport,
@@ -1954,6 +1973,7 @@ export function installLazyToolRuntime(
     connectedAccounts,
     meaningRanker,
     mcpToolNames,
+    pendingPreparationDefers,
   );
   installLazyToolRuntimeOnAgent(agent, runtime);
   return runtime;
@@ -2205,10 +2225,11 @@ export function transformGenericDispatchResponse(
 
 /** Apply the transport's response rewrites to one model output item. */
 async function transformResponseItem(
-  item: unknown,
+  received: unknown,
   runtime: LazyToolRuntime,
   signal?: AbortSignal,
 ): Promise<unknown[]> {
+  const item = await withProviderValidCallName(received, runtime);
   if (isRecord(item) && item.type === "tool_search_call") {
     const providerData = isRecord(item.providerData) ? item.providerData : {};
     if ((item.execution ?? providerData.execution) === "client") {
@@ -2247,6 +2268,32 @@ async function transformResponseItem(
     search ? await runtime.prepareSearch(item.arguments, signal) : undefined,
   );
   return items.map((candidate) => withFamilyDisclosure(candidate, runtime));
+}
+
+/**
+ * A model-written call whose name a provider would reject (a published
+ * `server.tool` form) named, once and before it is stored, as the authorized
+ * tool it denotes or by its stable alias, so the history replays valid on
+ * every later request (see provider-tool-names.ts). Deferred tools are only
+ * in the catalog once preparation ran; after a preparation failure the
+ * catalog is partial, so the call keeps an alias rather than a guess.
+ */
+async function withProviderValidCallName(
+  item: unknown,
+  runtime: LazyToolRuntime,
+): Promise<unknown> {
+  if (!isRecord(item) || item.type !== "function_call" || typeof item.name !== "string")
+    return item;
+  if (isProviderToolName(item.name)) return item;
+  let known: string[] = [];
+  try {
+    await runtime.ensurePrepared();
+    known = runtime.knownFunctionToolNames();
+  } catch {
+    known = [];
+  }
+  const name = providerValidCallName(item.name, known);
+  return name === item.name ? item : { ...item, name };
 }
 
 async function transformResponseOutput(

@@ -1618,6 +1618,33 @@ existing route-specific projection: the verified Codex route accepts
 `additional_tools`; other Responses routes use text plus native exact-name loading.
 No new live-provider compatibility claim is made.
 
+**Tool names in history.** Providers validate tool names in the request's
+tools and in every history item that carries definitions (`tool_search_output`,
+`additional_tools`) or names a tool (a Responses `function_call`, a Chat tool
+call, a Claude `tool_use`); one invalid name fails the whole request. The one
+format every provider and gateway accepts is `^[a-zA-Z0-9_-]{1,64}$`, and
+top-level names already use it, but a model can call a tool by its published
+`server.tool` form. The lazy tool transport names such a call once, when the
+model's output item is received and before it is stored
+(`providerValidCallName` in `provider-tool-names.ts`): the one authorized
+tool it denotes (dotted `server.tool`, or a published short name), deferred
+tools included, else a stable alias with a digest of the whole name, so
+distinct names never collide. The call is stored and replayed with that name,
+and history is never rewritten later, so every later request repeats the
+earlier items byte for byte. Chat Completions routes keep their own treatment
+of any other invalid name: such a call replays as a historical fact rather
+than as a native call to a tool the request never declares. Names stored
+invalid by earlier releases (secret masking once rewrote a value inside a tool
+name, and dotted calls were stored as written) are fixed once with
+`bun run db:repair-invalid-tool-names`, a dry-run count by default and
+`--apply` to write.
+
+Provider 400 invalid-request answers are counted, for monitoring only, as
+`opengeni_model_invalid_requests_total{provider,path,code}` with the request
+path the provider names and every index collapsed (`input[].tools[].name`).
+A new path is a new class of malformed request; the Runtime Failures
+dashboard shows it. Nothing is blocked or retried because of it.
+
 Static prompt/control-schema changes at upgrade invalidate the old cached prefix
 once for existing sessions; this is not a zero-cache-miss deployment. After that
 upgrade, catalogs/results never rewrite earlier items or grow the tool block.

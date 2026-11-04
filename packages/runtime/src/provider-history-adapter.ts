@@ -34,7 +34,8 @@ export type ProviderHistoryOptions = {
   searchRecordForm?: SearchRecordForm;
 };
 
-const CHAT_FUNCTION_NAME = /^[a-zA-Z0-9_-]+$/;
+/** The one tool-name format every Chat route and gateway accepts. */
+const CHAT_FUNCTION_NAME = /^[a-zA-Z0-9_-]{1,64}$/;
 const HISTORICAL_FACT_MAX_CHARS = 32_000;
 
 /** Marks a request-local item that declares tools newly available to the model. */

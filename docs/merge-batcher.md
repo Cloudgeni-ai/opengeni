@@ -149,7 +149,10 @@ and members of the running batch are never regenerated.
 5. **Failures.** A failed batch is split in half and each half is tested in
    turn until the failing PR is found and removed from the queue. A failed
    batch with both priority and other PRs is split into its priority PRs, tested
-   first, and the rest, so a broken fill delays them one round. Priority PRs in
+   first, and the rest, so a broken fill delays them one round. When the rest
+   has at least two PRs and at least as many as the priority PRs, it is halved
+   at once: it is then at least as likely to hold what broke the batch, and
+   testing it whole again would usually only fail once more first. Priority PRs in
    those halves keep their place in them, so a failed batch of only priority PRs
    is split in half too; a priority PR queued since goes first. A half of
    several PRs that fails only in jobs (by name, ignoring jobs cancelled

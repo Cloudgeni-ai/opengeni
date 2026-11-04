@@ -393,12 +393,20 @@ export function nextBatch(
     return { kind: "build", members, pending, ...ahead };
   }
 
-  for (let index = 0; index < pending.length; index++) {
+  // A half holding a priority PR runs before the other halves; the halves are
+  // independent, so their order only decides which PRs land sooner.
+  const holdsPriority = (group: number[]) =>
+    group.some((n) => ready.find((p) => p.number === n)?.priority);
+  const order = [
+    ...pending.flatMap((group, index) => (holdsPriority(group) ? [index] : [])),
+    ...pending.flatMap((group, index) => (holdsPriority(group) ? [] : [index])),
+  ];
+  for (const index of order) {
     const group = pending[index]!.map((n) => ready.find((p) => p.number === n)).filter(
       (p): p is QueuedPull => p !== undefined,
     );
     if (!group.length) continue;
-    const rest = pending.slice(index + 1);
+    const rest = pending.filter((_, other) => other !== index);
     // Only a group of the bisection is judged against what it blamed; a
     // priority or Version PR in between drops it, which costs only retries.
     const carried = blame.length ? { blame } : {};
@@ -578,12 +586,27 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
           // Bisect: test the first half now and keep the second half next in
           // line. Priority PRs among others are tested on their own first, so
           // a broken fill delays them one round and a broken one is found in one.
+          // The fill is halved too once it has at least two PRs and at least as
+          // many as the priority group: it is then at least as likely to hold
+          // what broke the batch, and testing it whole again would usually only
+          // fail once more (with a retry when no blame is carried) before the
+          // same split.
           const urgent = numbers.filter((n) => byNumber.get(n)?.priority);
-          const [first, second] =
-            urgent.length && urgent.length < numbers.length
-              ? [urgent, numbers.filter((n) => !urgent.includes(n))]
+          const fill = numbers.filter((n) => !urgent.includes(n));
+          const halves =
+            urgent.length && fill.length
+              ? [
+                  urgent,
+                  ...(fill.length >= 2 && fill.length >= urgent.length ? split(fill) : [fill]),
+                ]
               : split(numbers);
-          pending = [first, second, ...manifest.pending];
+          // A batch that went ahead of a bisection queues its halves behind
+          // that bisection's halves, so new failures cannot keep pushing older
+          // halves back. Its blame belongs to its own halves, not the older ones.
+          if (manifest.aheadOfBisection === true) {
+            pending = [...manifest.pending, ...halves];
+            blame = [];
+          } else pending = [...halves, ...manifest.pending];
         }
       }
     }

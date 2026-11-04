@@ -122,9 +122,8 @@ Rules that hold across the table:
   `github.com`, and the provider CLI wrappers keep the profile's token. Host
   run credentials are applied after the profile and win for the same names.
   An entry that cannot be resolved is skipped with a note; it never fails the
-  command. Profile values are known secret values, so a command that prints
-  one shows its reference in the tool result instead, within the masking
-  limits ([`secrets.md`](secrets.md#masking)).
+  command. A command that prints a profile value shows it in its output like any
+  other output ([`secrets.md`](secrets.md#agent-visible-content)).
 - **The perimeter is not identity.** The deployment access key admits ordinary
   callers and deployment-only surfaces. A cryptographically valid first-party
   delegated bearer may instead enter `/v1`; the normal access resolver still

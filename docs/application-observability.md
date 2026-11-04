@@ -358,6 +358,20 @@ rising `rate_limited` series as either a real incident or abuse. See
 `apps/web/docs/browser-analytics.md` for the browser side, the `chunk_load`
 semantics and the coverage limits.
 
+## Unclassified API errors
+
+An API request that fails with an internal error no route mapped to a response
+(status 500, `errorCode` `internal_error`, not an `ApiHttpError` or
+`HTTPException`) adds `causeMessage` to its `HTTP request failed` line: the
+message of the first error under any response wrapper, or for a query-builder
+error the database error under it (never the query or its parameters). This is
+the second deliberate free-text exception, so that an unexpected 500 says why
+and not only `causeName: Error`. The message gets the same scrubbing and 1 KiB
+bound as a web client error message, and the log projection admits
+`causeMessage` only on `internal_error` HTTP lines whose value is already
+exactly that projection. It is server-log only: the response, metrics and
+failure diagnostics are unchanged.
+
 ### Web client failure and health signals
 
 The same route admits closed operational signals, discriminated by a `signal`

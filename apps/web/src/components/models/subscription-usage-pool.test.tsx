@@ -46,7 +46,7 @@ test("shows weekly utilization and one weighted total bar without an account bre
     "At this pace you'll use about 50% of this week's included usage.",
   );
   expect(container.textContent).toContain("Last 7 days, adjusted to this week's pace.");
-  expect(container.textContent).toContain("Team Plus is at its 5-hour limit until");
+  expect(container.textContent).toContain("Team Plus is at its 5h limit until");
   expect(container.textContent).not.toContain("Team Pro 1");
   expect(container.textContent).not.toContain("Team Pro 2");
   expect(container.querySelectorAll('[role="meter"]')).toHaveLength(1);

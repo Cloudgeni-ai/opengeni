@@ -1,5 +1,63 @@
 # @opengeni/react
 
+## 6.9.0
+
+### Minor Changes
+
+- 8572155: The desktop app can remind you about a minute before a calendar meeting with a Google Meet, Zoom, Teams or Webex link: a card in the corner says "<title> · Starts in 1 min" with Join and start recording, which opens the meeting and records it, named after the calendar event. While another meeting is being recorded it offers Join and record this one. Only the active account reminds, each meeting once, and Settings → Computer use → Voice has a switch for it, with a link to connect a calendar when none is.
+
+  New `GET /v1/workspaces/:workspaceId/upcoming-meetings` lists the caller's own meetings about to start with their join links (`listUpcomingMeetings` in the SDK). Creating a recording accepts `calendarEvent` (`{ provider, id }`), which names it after that event and is kept in `metadata.calendarEvent`. `createMeetingDetection` takes a `calendar` option and has `accountChanged()`, `refreshCalendar()` and `shutdown()`.
+
+### Patch Changes
+
+- 331bc5e: Scrolling the chat with the mouse wheel now works over a message with four or more annotations. The annotation stack no longer stops the scroll from reaching the timeline, so once the stack is at its edge, or has nothing to scroll, the conversation scrolls as usual.
+- 54bf495: A paused chat no longer says it is working. Its turn row reads "Paused" with the clock stopped where the pause began, and switches back to working on Resume; paused time is not counted as work. This covers a chat's own Pause, a parent's and the workspace's. Sidebar rows mark paused work with a pause icon instead of the spinner, including a parent whose workers are paused, through the new `treeStats.pausedWorkDescendants` count. A sub-chat's descendant counts now also respect its ancestors' pauses. `MessageTimeline` in both `@opengeni/react` and `@opengeni/react-native` takes the live pause through its new `pause` prop (`timelineLivePause(session.effectiveControl)`); custom timelines can use `useTimelinePauses`.
+- Updated dependencies [f1c6437]
+- Updated dependencies [8572155]
+- Updated dependencies [54bf495]
+  - @opengeni/sdk@6.9.0
+  - @opengeni/contracts@6.9.0
+  - @opengeni/connect@6.9.0
+
+## 6.8.0
+
+### Patch Changes
+
+- fbb70bc: The chat now stays at the bottom while you work through approvals. Clicking a button, such as Create draft, no longer unpins the view, so the next approval card and any later growth stay in sight. Scrolling up, selecting text or opening an in-place disclosure still lets you read without being pulled down, and finishing a connect card no longer pulls a reader who scrolled up back to the bottom. Each waiting approval also keeps its Decline and approve buttons while the turn resumes, and a card that can't be decided yet says so and retries instead of showing an empty footer.
+- feaecf8: Send never does nothing without saying why. The new chat and open chat composers share one Send guard; whenever it blocks Send and no other notice already explains it, one short line under the composer says why, with at most one action. A model choice whose reasoning level or speed the account can't run (for example a saved Ultrafast speed after connecting a ChatGPT Free account, which offers GPT-6 Luna only) shows "This model can't run with the selected reasoning level or speed." with "Use supported settings". When an unavailable model is replaced automatically, the speed now follows the replacement. A Codex refusal of a model the ChatGPT account can't use ("not supported when using Codex with a ChatGPT account") is now treated as a plan refusal: that account skips the model for a while and the chat shows the plan error. Connecting a Codex account now lists the Opengeni models it offers, and warns when it offers none (`CodexConnectPoll.models`). A new chat the server refuses to start now keeps the reason under the composer until the message, model, reasoning level or speed changes, instead of only a passing toast, and the reason is specific (the model policy, an unavailable model, or a speed the model can't run) rather than "Check your input and try again". Session create refusals keep a typed `details.code` for an unavailable model and are logged with their reason and a message fingerprint instead of "unclassified". A device-code sign-in that has waited a minute now shows "Still waiting?" on every Codex and SuperGrok connect surface, not only onboarding; for ChatGPT it names the "Enable device code sign-in for Codex" setting under Settings → Security and login, which ChatGPT checks on its own page without telling Opengeni. A refused new chat words the refusals a person can hit instead of showing developer text: a model that isn't available to them (including "model is not selectable", now typed `details.code: "model_unavailable"`), and the workspace model policy (new `details.code: "model_policy"` with `reason` "credits", "provider" or "model", from the new `ModelPolicyRefusedError` in `@opengeni/contracts`). A refusal that arrives after the composer changed (more typing, or a voice link that set the model) falls back to the toast, so it is never silent, and a model policy refusal no longer offers a retry that would be refused again: every API route now types it as a nonretryable 422 with `details.code: "model_policy"`, including Send in an open chat.
+- b393cac: Work-log steps whose text is cut off now open to show it in full, selecting their text no longer toggles them, and an open step has a Copy button. A chat's or Site's title can be copied by right-clicking it in the top bar (or a Site's title in the macOS window bar), and from the chat's "…" menu. Site rows and the Site page now offer what fits from a chat's actions plus the Site's own: Copy link, Copy title, Pin, Duplicate, Site details, Archive, Open published Site (once it is on the web) and Move to project on the row, and Copy title, Duplicate and Site details in a new "…" on the Site page, with Pin and Archive there too while the sidebar is open.
+- Updated dependencies [58b04d1]
+- Updated dependencies [feaecf8]
+  - @opengeni/contracts@6.8.0
+  - @opengeni/sdk@6.8.0
+  - @opengeni/connect@6.8.0
+
+## 6.7.0
+
+### Minor Changes
+
+- cb37e4d: A meeting being recorded shows in the desktop app's menu bar (the tray on Windows and Linux). While one records, the icon becomes a recording badge (a dictation under way still shows its own icon first), and the menu starts with the meeting: whether it records or is paused, for how long, its name (or when it started), and the account it records in when the window shows another. "Open Live Transcript" brings that account up and opens the meeting; "Stop Recording" stops it. Nothing about meetings shows while none records. `DesktopMeetingDetection.setRecording()` takes an optional `DesktopRecordingMeeting` (title, recorded time, paused), and `DesktopMeetingRequest` adds `{ kind: "open" }`, sent only to a page that described its recording. The meeting recorder in `@opengeni/react` describes its recording and opens it on `open`. `MeetingDetection` adds `recording()`, `onRecording()`, `openRecording()` and `stopRecording()`.
+
+### Patch Changes
+
+- 0d04cf4: Error toasts and messages no longer show "API 409:" or a request reference when a request is refused for a reason you can act on (a 4xx); they say only what to do. Unexpected failures (5xx, network, unknown) keep a short message. In the session UI's toasts, inline error text, notices and field errors their reference sits behind a quiet "Copy details" (or Technical details); toasts that call sonner directly still show it inline, as before. Toasts no longer show an error's raw text. Archiving a chat with "Keep this chat active" on now offers one action, "Turn off and archive", which turns the setting off and archives; Undo, or a failed archive, turns it back on.
+- 57237db: Your GitHub keeps working past its token's 8-hour lifetime. Opengeni now asks GitHub for a JSON reply when it renews the token. Without that, GitHub answered form-encoded and every renewal failed silently. The connection still showed as connected, while Git and the `github_personal__*` tools failed with "authorization is no longer current" or "credential is unavailable".
+
+  When GitHub refuses a renewal, which it reports as a successful response carrying an error, the connection is now marked as needing a reconnect instead of staying "connected". Temporary GitHub errors, such as `slow_down` or a server error, leave the connection connected and Git and the tools say GitHub is temporarily unavailable. The GitHub settings page shows "needs to reconnect" with a Reconnect button. A Reconnect toast stays until the person acts on it or closes it, and appears once per stale connection. Git and the GitHub tools say the person must reconnect. A repository list that couldn't load no longer reads "0 repos", and a background read that needs nothing from the person no longer shows a toast.
+
+  Disconnecting Your GitHub always works for its owner. If the connection changed while the dialog was open, for example after a reconnect, Opengeni reads it again and disconnects the current one instead of asking the person to refresh.
+
+- cf35731: Only the owner of a personal (Only me) login can approve an action that runs on it. An approval runs on the accounts its message froze, so before this any member, workspace API key or Slack click by someone else could make an action happen as another person. The owner's personal API key and `asUser` tokens count as the owner. Approving such an action as anyone else now answers 403 with `details.code: "APPROVAL_REQUIRES_ACCOUNT_OWNER"` and a message naming who can approve (the SDK adds `isApprovalRequiresAccountOwnerError` and `APPROVAL_REQUIRES_ACCOUNT_OWNER_CODE`); declining stays open to anyone who can control the chat, and actions on workspace logins keep their ordinary rules. A tool review adds the optional `approvedBy` ("you" or "account_owner") and `accountOwnerLabel` fields, and the review card says who can approve, or tells the owner in a shared chat that the decision is theirs. Slack cards for anyone else offer only Decline, and the desktop and mobile apps show or route a refused approval instead of failing.
+- Updated dependencies [c08233e]
+- Updated dependencies [cb37e4d]
+- Updated dependencies [0d04cf4]
+- Updated dependencies [57237db]
+- Updated dependencies [cf35731]
+- Updated dependencies [4a7da4c]
+  - @opengeni/contracts@6.7.0
+  - @opengeni/sdk@6.7.0
+  - @opengeni/connect@6.7.0
+
 ## 6.6.0
 
 ### Minor Changes

@@ -6,20 +6,73 @@ import {
   ExternalLinkIcon,
   LoaderCircleIcon,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import { Button } from "@opengeni/react/ui/button";
+import { Notice } from "@opengeni/react/ui/notice";
 
 /* ----------------------------------------------------------------------------
    Signing in to a subscription with a device code (ChatGPT for Codex, xAI for
    SuperGrok), as one calm step: one instruction, the code with Copy code and
    Open sign-in page, and one waiting line. The connect pages and onboarding
-   share it, so the step reads the same everywhere.
+   share it, so the step reads the same everywhere, including the "Still
+   waiting?" notice that names what can block the code.
    -------------------------------------------------------------------------- */
 
 type Provider = "codex" | "supergrok";
 
 const SIGN_IN_SITE: Record<Provider, string> = { codex: "ChatGPT", supergrok: "xAI" };
+
+/** ChatGPT keeps device code sign-in behind a per-account (or workspace-admin) setting. */
+export const CHATGPT_SECURITY_SETTINGS_URL = "https://chatgpt.com/#settings/Security";
+/** Show troubleshooting once a device sign-in has waited this long. */
+export const DEVICE_LOGIN_HINT_DELAY_MS = 60 * 1_000;
+
+/**
+ * The provider refuses a code on its own page and never tells the poll, which
+ * keeps waiting. So once the wait is long, say what usually blocks it.
+ */
+function StillWaitingNotice({ provider }: { provider: Provider }) {
+  if (provider === "supergrok") {
+    return (
+      <Notice tone="waiting" title="Still waiting?">
+        Check that you entered the code exactly as shown and approved access on the xAI page. If the
+        code expired, try again.
+      </Notice>
+    );
+  }
+  return (
+    <Notice
+      tone="waiting"
+      title="Still waiting?"
+      actionLayout="responsive"
+      action={
+        <a
+          className="text-sm font-medium text-fg underline underline-offset-2"
+          href={CHATGPT_SECURITY_SETTINGS_URL}
+          target="_blank"
+          rel="noreferrer"
+        >
+          Open ChatGPT settings
+        </a>
+      }
+    >
+      If ChatGPT refused the code, turn on “Enable device code sign-in for Codex” in Settings →
+      Security and login (on Business and Enterprise, a ChatGPT admin allows it), then try again.
+    </Notice>
+  );
+}
+
+/** True once this code has waited `DEVICE_LOGIN_HINT_DELAY_MS`; a new code starts over. */
+function useWaitedLong(userCode: string): boolean {
+  // Remember which code waited long, so a new code never shows the old notice.
+  const [slowCode, setSlowCode] = useState<string | null>(null);
+  useEffect(() => {
+    const timer = setTimeout(() => setSlowCode(userCode), DEVICE_LOGIN_HINT_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [userCode]);
+  return slowCode === userCode;
+}
 
 /** Native subscription styling over the shared clipboard and URL-validation behavior. */
 export function SubscriptionDeviceCodePanel({
@@ -32,6 +85,7 @@ export function SubscriptionDeviceCodePanel({
   provider: Provider;
 }) {
   const site = SIGN_IN_SITE[provider];
+  const waitedLong = useWaitedLong(props.userCode);
   return (
     <DeviceAuthorization
       {...props}
@@ -90,6 +144,7 @@ export function SubscriptionDeviceCodePanel({
             />
             Waiting for you to sign in…
           </p>
+          {waitedLong ? <StillWaitingNotice provider={provider} /> : null}
         </section>
       )}
     />

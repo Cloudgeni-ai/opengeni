@@ -7,6 +7,7 @@ import {
   ClaudeOAuthTokenResponse,
   ClaudeSubscriptionCredential,
   claudeAuthorizationUrl,
+  claudeSubscriptionPlanUpdate,
 } from "@opengeni/config";
 import {
   ClaudeSubscriptionOAuthStartResponse,
@@ -316,7 +317,10 @@ export async function completeClaudeSubscriptionOAuth(
         credential: bundle,
         providerAccountId,
         accountEmail: profile?.email ?? direct?.email ?? null,
-        planType: profile?.plan ?? direct?.plan ?? null,
+        planType: claudeSubscriptionPlanUpdate(
+          profile?.plan ?? direct?.plan ?? null,
+          current?.account.planType,
+        ),
         label: current?.account.label ?? null,
         connectedBySubjectId: core.connectedBySubjectId,
         ...(current

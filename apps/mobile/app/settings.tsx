@@ -3,7 +3,7 @@ import { useNativeTimelineTheme } from "@opengeni/react-native/timeline";
 import Constants from "expo-constants";
 import { Stack, router } from "expo-router";
 import { Alert } from "react-native";
-import { useAccount } from "@/account";
+import { useAccount, usePickAccount } from "@/account";
 import { setAppearance, useAppearancePreference, type AppearancePreference } from "@/appearance";
 import { serverLabel } from "@/account-store";
 import {
@@ -41,7 +41,8 @@ function Settings() {
   const appearance = useAppearancePreference();
   const shakeToSendFeedback = useShakeToSendFeedback();
   const { target: outsideCallTarget, pinned: pinnedCallSession } = useOutsideCallPreferences();
-  const { accounts, account, workspace, organizations, switchAccount, signOut } = useAccount();
+  const { accounts, account, workspace, organizations, signOut } = useAccount();
+  const pickAccount = usePickAccount();
   const inbox = useInboxSettings();
   const { notifications, agentCalls } = useNotificationSettingsSections(inbox);
   const inboxSettings = inboxSettingsSections(inbox);
@@ -81,10 +82,8 @@ function Settings() {
               ? serverLabel(each.baseUrl)
               : undefined,
           selected: each.id === account?.id,
-          onPress: () => {
-            switchAccount(each.id);
-            dismissToHome();
-          },
+          // A signed-out account opens its sign-in over Settings instead.
+          onPress: () => pickAccount(each.id, dismissToHome),
         })),
         {
           kind: "action" as const,

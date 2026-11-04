@@ -74,8 +74,11 @@ export function TimelineAnnotationCards({
       data-og-annotation-cards=""
       className={cn(
         "grid gap-2",
+        // Inside the timeline, let the wheel chain to the timeline once this
+        // stack is at its edge. Containing overscroll here made the whole
+        // message a dead zone for scrolling, even when the stack fit.
         annotations.length >= ANNOTATION_CARD_STACK_SCROLL_AT &&
-          "max-h-[min(28rem,55vh)] overflow-x-hidden overflow-y-auto overscroll-contain pr-1",
+          "max-h-[min(28rem,55vh)] overflow-x-hidden overflow-y-auto pr-1",
         className,
       )}
     >

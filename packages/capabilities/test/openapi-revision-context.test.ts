@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { compileOpenApiRevision } from "../src";
+import { compileOpenApiRevision, stableToolId } from "../src";
 
 const document = {
   openapi: "3.1.0",
@@ -15,6 +15,46 @@ const document = {
 const options = { definitionId: "revision-context" };
 
 describe("OpenAPI immutable executable context", () => {
+  test("numbered repeats never take an ID another operation normalizes to", () => {
+    const seen = new Map<string, number>();
+    const ids = ["get items", "get-items", "get_items_2", "GET items", "get items 2"].map((value) =>
+      stableToolId(value, seen),
+    );
+    expect(ids).toEqual([
+      "get_items",
+      "get_items_2",
+      "get_items_2_2",
+      "get_items_3",
+      "get_items_2_3",
+    ]);
+    expect(new Set(ids).size).toBe(ids.length);
+    // Without such overlaps, IDs are exactly as before.
+    const plain = new Map<string, number>();
+    expect(["a", "a", "b", "a"].map((value) => stableToolId(value, plain))).toEqual([
+      "a",
+      "a_2",
+      "b",
+      "a_3",
+    ]);
+  });
+
+  test("an operation named like a numbered repeat keeps its own binding", () => {
+    const revision = compileOpenApiRevision(
+      {
+        ...document,
+        paths: {
+          "/a": { get: { operationId: "items", responses: { "200": { description: "OK" } } } },
+          "/b": { get: { operationId: "Items", responses: { "200": { description: "OK" } } } },
+          "/c": { get: { operationId: "items_2", responses: { "200": { description: "OK" } } } },
+        },
+      },
+      options,
+    );
+    expect(revision.tools.map((tool) => tool.id)).toEqual(["items", "items_2", "items_2_2"]);
+    expect(revision.bindings.items_2?.pathTemplate).toBe("/b");
+    expect(revision.bindings.items_2_2?.pathTemplate).toBe("/c");
+  });
+
   test("a changed effective base URL changes the digest without changing tool identity", () => {
     const first = compileOpenApiRevision(document, options);
     const rotated = compileOpenApiRevision(document, {
