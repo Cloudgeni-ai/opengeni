@@ -1601,6 +1601,8 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
                   from: "none",
                   humanInput: false,
                   skills: false,
+                  // A visitor may ask how the chat processes their data.
+                  privacyFacts: true,
                   ...(dataTools.length > 0 ? { artifacts: true } : {}),
                 },
               },

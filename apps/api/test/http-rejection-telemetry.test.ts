@@ -52,6 +52,68 @@ describe("HTTP rejection telemetry", () => {
     expect(freeText.reason).toBe("unclassified");
   });
 
+  test("a refused session create names its guard instead of logging unclassified", () => {
+    // The create route answers with its own top-level body, not the envelope.
+    const latency = httpRejectionFactsFromEnvelope(
+      {
+        code: "SESSION_CREATE_REJECTED",
+        message: `latency mode fast is not runnable for model codex/${sentinel}`,
+        details: {
+          code: "UNSUPPORTED_LATENCY_MODE",
+          modelId: `codex/${sentinel}`,
+        },
+      },
+      "validation_failed",
+    );
+    expect(latency.code).toBe("validation_failed");
+    expect(latency.reason).toBe("UNSUPPORTED_LATENCY_MODE");
+    expect(latency.fingerprint).toMatch(/^m_[0-9a-f]{10}$/);
+    expect(JSON.stringify(latency)).not.toContain(sentinel);
+
+    const policy = httpRejectionFactsFromEnvelope(
+      {
+        code: "SESSION_CREATE_REJECTED",
+        message: `model "codex/${sentinel}" is not allowed by this workspace's model policy`,
+      },
+      "validation_failed",
+    );
+    const unavailable = httpRejectionFactsFromEnvelope(
+      {
+        code: "SESSION_CREATE_REJECTED",
+        message: `model "codex/${sentinel}" is not available`,
+      },
+      "validation_failed",
+    );
+    expect(policy.reason).toBe("SESSION_CREATE_REJECTED");
+    expect(policy.fingerprint).toMatch(/^m_[0-9a-f]{10}$/);
+    // Two different guards behind the same route code stay distinguishable.
+    expect(policy.fingerprint).not.toBe(unavailable.fingerprint);
+    expect(JSON.stringify(policy)).not.toContain(sentinel);
+
+    expect(
+      httpRejectionFactsFromEnvelope(
+        {
+          code: "INVALID_SESSION_CREATE_REQUEST",
+          message: "Invalid session create request",
+        },
+        "validation_failed",
+      ).reason,
+    ).toBe("INVALID_SESSION_CREATE_REQUEST");
+    // A free-text route code is never echoed.
+    expect(
+      httpRejectionFactsFromEnvelope({ code: `has spaces ${sentinel}` }, "validation_failed")
+        .reason,
+    ).toBe("unclassified");
+    // A passed-through upstream body (lowercase code, its own details) is not
+    // one of our route bodies, so it can't add reason values.
+    expect(
+      httpRejectionFactsFromEnvelope(
+        { code: "model_not_found", details: { code: "upstream_detail" } },
+        "validation_failed",
+      ).reason,
+    ).toBe("unclassified");
+  });
+
   test("fingerprints ignore identifiers, quoted values, and numbers", () => {
     expect(
       rejectionFingerprint('Session 3f0c8a47-1d2e-4b6f-9a10-0123456789ab not found in "Acme"'),

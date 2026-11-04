@@ -31,6 +31,7 @@ import {
   getSessionTitleOperation,
   listSandboxGroupRepositoryResources,
   settleSessionRepositoryCleanup,
+  sessionHasToolRouterHistory,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -101,12 +102,14 @@ import {
 import { ToolResultSpill } from "./tool-result-spill";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { promptToolAvailabilityForTurn } from "./prompt-tool-availability";
+import { turnToolRouterExpected } from "./tool-router-expectation";
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import { decisionModelProcessingResidency, videoGenerationRoute } from "./side-feature-gates";
 import {
   bundledSkillSelectionForAgentConfig,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   resolveAgentToolFamilies,
+  type AgentLearningDefaults,
   type ResourceRef,
   type Permission,
   type ToolAuthNeededPayload,
@@ -249,6 +252,8 @@ export type PrepareTurnToolRuntimeDeps = {
   /** Present when this turn resolves host-managed run credentials. */
   runCredentialRenewals?: RenewalState | undefined;
   runMcpCredentials?: RunMcpCredentials;
+  /** The accepted turn's frozen effective learning modes (instructions rendering only). */
+  learningModes?: AgentLearningDefaults | undefined;
 };
 
 export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
@@ -527,8 +532,14 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   );
   // Background-command tools need compute: the effective route of this turn,
   // a managed sandbox or an attached Connected Machine, not the durable home.
+  // A person who can answer is the turn's initiating user or external user
+  // (the inbox recipient rule); an API-key turn has none to wait on.
   const toolFamilies = resolveAgentToolFamilies(session.agent, {
     sandboxAttached: (activeSandboxBackend ?? groupBoxBackend) !== "none",
+    humanRecipient: turnHasHumanRecipient(
+      turn.initiatingHumanSubjectId ??
+        (turn.initiator?.kind === "subject" ? turn.initiator.subjectId : null),
+    ),
   });
   const bundledSkillIds = bundledSkillSelectionForAgentConfig(
     session.bundledSkillIds,
@@ -585,6 +596,9 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     agentConfig: session.agent,
     selectedFirstPartyMcpTools,
     firstPartyPermissions: effectiveFirstPartyPermissions,
+    nestedAgentDepth: session.nestedAgentDepth,
+    effectiveMaxNestedAgentDepth: session.effectiveMaxNestedAgentDepth,
+    learning: deps.learningModes,
   });
   const needsTitle = shouldRequestMissingSessionTitle({
     agentConfig: session.agent,
@@ -1063,6 +1077,37 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     ...codeSearchTools,
     ...webSearchTools,
   ].filter((tool) => attemptToolFamilies.allowsFunctionTool(tool.modelName));
+  // Frozen per turn: router history, the prepared refs, the first-party
+  // selection and the function tools. Decides whether anything is deferred.
+  const toolRouterInHistory = session.agent
+    ? await sessionHasToolRouterHistory(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+      })
+    : false;
+  const toolRouterExpected = turnToolRouterExpected({
+    agentConfig: session.agent,
+    routerInHistory: toolRouterInHistory,
+    toolRefs: githubRestMcp.tools,
+    mcpServers: githubRestMcp.settings.mcpServers,
+    remoteFirstPartyTools: titleToolPlan.remoteFirstPartyMcpTools,
+    functionToolNames: attemptToolDefinitions.map((tool) => tool.modelName),
+    preparationIndependentToolNames: titleToolPlan.preparationIndependentToolNames,
+    mediaTools: toolFamilies.media,
+  });
+  // With nothing else deferred, the deferred title tool alone would bring the
+  // search router back on every titled turn; Opengeni titles the session itself.
+  // Without a router to install the title tool sits in the request for free.
+  const routerInstallable =
+    toolRouterInHistory ||
+    (lazyToolTransport === "codex_native"
+      ? runSettings.codexToolSearchEnabled
+      : runSettings.lazyToolSearchEnabled);
+  const remoteFirstPartyMcpTools =
+    toolRouterExpected || !routerInstallable
+      ? titleToolPlan.remoteFirstPartyMcpTools
+      : titleToolPlan.remoteFirstPartyMcpTools.filter((tool) => tool !== "set_session_title");
   recordTurnStartupPhase(observability, {
     phase: "tool_context_preparation",
     provider: turnExecutionPolicy.providerId,
@@ -1317,7 +1362,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         ...(effectiveFirstPartyPermissions
           ? { firstPartyPermissions: effectiveFirstPartyPermissions }
           : {}),
-        firstPartyTools: titleToolPlan.remoteFirstPartyMcpTools,
+        firstPartyTools: remoteFirstPartyMcpTools,
         nestedAgentDepth: session.nestedAgentDepth,
         effectiveMaxNestedAgentDepth: session.effectiveMaxNestedAgentDepth,
         attemptToolDefinitions,
@@ -1411,10 +1456,24 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       "skill_read",
     ],
     codeSearchAvailable: codeSearchTools.length > 0,
-    promptToolAvailability,
+    promptToolAvailability:
+      promptToolAvailability && !toolRouterExpected
+        ? { ...promptToolAvailability, toolSearchAbsent: true as const }
+        : promptToolAvailability,
+    toolRouterInHistory,
+    toolRouterExpected,
     skillCatalog,
   };
 }
 
 export type PrepareTurnToolPolicyOk = Awaited<ReturnType<typeof prepareTurnToolPolicy>>;
 export type PrepareTurnToolRuntimeOk = Awaited<ReturnType<typeof prepareTurnToolRuntime>>;
+
+/**
+ * Whether a person can answer this turn: the same subjects the session inbox
+ * delivers to (`user:` and `external_user:`), or the local-mode person
+ * (`dev`), frozen with the turn.
+ */
+export function turnHasHumanRecipient(subjectId: string | null | undefined): boolean {
+  return subjectId === "dev" || /^(user|external_user):/.test(subjectId ?? "");
+}

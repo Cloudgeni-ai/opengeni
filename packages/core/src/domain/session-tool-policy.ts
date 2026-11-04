@@ -9,6 +9,7 @@ import {
   type Settings,
 } from "@opengeni/config";
 import {
+  HARNESS_CONTROL_FIRST_PARTY_TOOLS,
   AGENT_SKILL_MANAGE_TOOL_NAMES,
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   bundledSkillSelectionForAgentConfig,
@@ -332,6 +333,11 @@ export type SessionEffectiveToolsContext = {
   mediaAttachments?: ReadonlyMap<string, AgentMediaAttachment>;
   routerInHistory?: boolean;
   routerHistorySessionIds?: ReadonlySet<string>;
+  /**
+   * Whether a person can answer the turn being projected (see the worker's
+   * `turnHasHumanRecipient`). Omitted projects a turn a person started.
+   */
+  humanRecipient?: boolean;
   /** Resolved once per distinct model in this response page, using its catalog settings. */
   modelProviders?: ReadonlyMap<string, ReturnType<typeof resolveModelProviderForTurn>>;
 };
@@ -447,6 +453,8 @@ function sessionHasSkills(session: Session, context: SessionEffectiveToolsContex
   });
 }
 
+const HARNESS_CONTROL_TOOLS: ReadonlySet<string> = new Set(HARNESS_CONTROL_FIRST_PARTY_TOOLS);
+
 /** The server can prove attachment policy, not successful future provider calls. */
 export function sessionEffectiveToolProjectionInput(
   session: Session & { agent: NonNullable<Session["agent"]> },
@@ -541,7 +549,12 @@ export function sessionEffectiveToolProjectionInput(
     : [];
   const firstPartyMcpTools =
     context && toolRefs.some((ref) => ref.id === "opengeni")
-      ? resolveAgentToolFamilies(session.agent, { sandboxAttached: sandboxAvailable })
+      ? resolveAgentToolFamilies(session.agent, {
+          sandboxAttached: sandboxAvailable,
+          ...(context.humanRecipient === undefined
+            ? {}
+            : { humanRecipient: context.humanRecipient }),
+        })
           .firstPartyTools(selectedFirstPartyMcpTools)
           .filter((name) => name !== "set_session_title" || !needsTitle)
       : [];
@@ -619,6 +632,8 @@ export function sessionEffectiveToolProjectionInput(
     // Interaction entry tools stay visible even with progressive disclosure;
     // the remaining authorized family tools are disclosed after opening.
     ...firstPartyMcpTools.filter((name) => name === "browser_open" || name === "computer_open"),
+    // The harness control tools are in the first request on every path.
+    ...firstPartyMcpTools.filter((name) => HARNESS_CONTROL_TOOLS.has(name)),
     ...(toolRefs.some((ref) => ref.id === "opengeni" && ref.eager === true) ||
     !progressiveDisclosure
       ? firstPartyMcpTools.filter((name) => !interactionNames.has(name) || !progressiveDisclosure)
@@ -645,16 +660,48 @@ export function sessionEffectiveToolProjectionInput(
     ...(context ? { sandboxAttached: sandboxAvailable } : {}),
   };
   const families = resolveAgentToolFamilies(session.agent, environment);
-  environment.hasDeferredTools =
+  // Same rule as the worker's `turnToolRouterExpected`: an eager server the
+  // runtime prepares best effort may list its tools after the first request.
+  const registry = [...session.mcpServers, ...(context?.settings.mcpServers ?? [])];
+  const eagerPreparesLate = (ref: ToolRef): boolean => {
+    const eager = ref.eager === true || (Array.isArray(ref.eager) && ref.eager.length > 0);
+    if (!eager || !families.allowsMcpServer(ref.id)) return false;
+    if (ref.optional === true || ref.id === "codex_apps") return true;
+    const server = registry.find((candidate) => candidate.id === ref.id);
+    return Boolean(server?.connectionRef);
+  };
+  // The worker predicts the router from the media capability, before any media
+  // provider is attached, so the projection does too.
+  const mediaCapability = resolveAgentToolFamilies(session.agent, {
+    ...environment,
+    media: undefined,
+  }).media;
+  const deferredBesidesTitle =
     (nativeComputerTools && progressiveDisclosure) ||
+    mediaCapability ||
+    toolRefs.some(eagerPreparesLate) ||
     toolRefs.some(
       (ref) => ref.id !== "opengeni" && ref.eager !== true && families.allowsMcpServer(ref.id),
     ) ||
     firstPartyMcpTools.some(
-      (name) => families.allowsFirstPartyTool(name) && !upfrontToolNames.has(name),
+      (name) =>
+        name !== "set_session_title" &&
+        families.allowsFirstPartyTool(name) &&
+        !upfrontToolNames.has(name),
     ) ||
     runtimeToolNames.some(
       (name) => families.allowsFunctionTool(name) && !upfrontToolNames.has(name),
+    );
+  // The worker leaves the title tool out when it alone would bring the router
+  // back; Opengeni titles the session itself.
+  if (progressiveDisclosure && !retainedRouter && !deferredBesidesTitle) {
+    const index = firstPartyMcpTools.indexOf("set_session_title");
+    if (index >= 0) firstPartyMcpTools.splice(index, 1);
+  }
+  environment.hasDeferredTools =
+    deferredBesidesTitle ||
+    firstPartyMcpTools.some(
+      (name) => families.allowsFirstPartyTool(name) && !upfrontToolNames.has(name),
     );
   const provider = model?.provider;
   const native =

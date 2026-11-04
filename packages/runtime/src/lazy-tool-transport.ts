@@ -43,6 +43,7 @@ import {
 } from "./tool-discovery-meaning";
 import { toolDescriptor, toolGroup, toolGroups } from "./tool-discovery-catalog";
 import { toolDisclosureItem } from "./provider-history-adapter";
+import { invalidHistoryToolNames, withProviderValidToolNames } from "./provider-tool-names";
 import { restoreDeferredToolArgumentTypes } from "./deferred-tool-arguments";
 import { isAliasedMcpToolName, prefixedMcpToolName } from "./mcp-model-tool-name";
 import {
@@ -122,6 +123,10 @@ const ALWAYS_VISIBLE_BASE_TOOL_NAMES: ReadonlySet<string> = new Set([
   "web_search",
   "web_fetch",
 ]);
+/** True for a base runtime tool that is in the first request on every transport. */
+export function isAlwaysVisibleBaseToolName(name: string): boolean {
+  return ALWAYS_VISIBLE_BASE_TOOL_NAMES.has(name);
+}
 const DISPATCH_MARKER_KEY = "opengeni.lazy_dispatch.v1";
 const SEARCH_MARKER_KEY = "opengeni.lazy_search.v1";
 /** Frozen companion schemas an entry-tool call disclosed, kept on the call itself. */
@@ -566,6 +571,12 @@ export class LazyToolRuntime {
      * siblings a tool is; the decision model reads the full name instead.
      */
     private readonly mcpToolNames: () => ReadonlyMap<string, string> = () => new Map(),
+    /**
+     * False when the host proved nothing this attempt attaches is deferred: a
+     * pending preparation then exposes no router on its own. Tools that turn
+     * out searchable once prepared still expose it.
+     */
+    private readonly pendingPreparationDefers = true,
   ) {
     this.routerWasExposed = routerInHistory;
     this.controlTools =
@@ -608,7 +619,9 @@ export class LazyToolRuntime {
     this.routerWasExposed ||=
       !this.conditionalRouter ||
       this.searchableToolNames.size > 0 ||
-      (this.hasPendingPreparation() && this.pendingMcpServerIds.size > 0);
+      (this.pendingPreparationDefers &&
+        this.hasPendingPreparation() &&
+        this.pendingMcpServerIds.size > 0);
     return this.routerWasExposed ? this.controlTools : [];
   }
 
@@ -764,6 +777,11 @@ export class LazyToolRuntime {
 
   resolveFunctionTool(name: string): Tool | undefined {
     return this.functionTools.get(name);
+  }
+
+  /** Model names of every authorized function tool, deferred ones included. */
+  knownFunctionToolNames(): string[] {
+    return [...this.functionTools.keys()];
   }
 
   /** True for a tool disclosed through search rather than sent on every request. */
@@ -1935,6 +1953,7 @@ export function installLazyToolRuntime(
   connectedAccounts?: () => ReadonlyMap<string, ConnectedToolAccount>,
   meaningRanker?: ToolMeaningRanker,
   mcpToolNames?: () => ReadonlyMap<string, string>,
+  pendingPreparationDefers = true,
 ): LazyToolRuntime {
   const runtime = new LazyToolRuntime(
     transport,
@@ -1954,6 +1973,7 @@ export function installLazyToolRuntime(
     connectedAccounts,
     meaningRanker,
     mcpToolNames,
+    pendingPreparationDefers,
   );
   installLazyToolRuntimeOnAgent(agent, runtime);
   return runtime;
@@ -2469,6 +2489,40 @@ function prepareLazyToolRequest(request: ModelRequest, runtime: LazyToolRuntime)
   };
 }
 
+/**
+ * The request with every history tool name a provider would reject mapped to
+ * the authorized tool it denotes (see withProviderValidToolNames), so a
+ * replayed `tool_search_output`, disclosure or call names the same tool the
+ * request's tools do and a later call binds to it. Deferred tools are only
+ * in the catalog once preparation ran, so an affected request prepares
+ * first. After a preparation failure the catalog is partial, so no name is
+ * bound to a tool. A name that is not bound is left for the route's
+ * projection: an alias on Responses and Claude, a historical fact on Chat.
+ */
+async function withAuthorizedHistoryToolNames(
+  request: ModelRequest,
+  runtime: LazyToolRuntime,
+): Promise<ModelRequest> {
+  if (typeof request.input === "string") return request;
+  if (invalidHistoryToolNames(request.input).length === 0) return request;
+  let complete = true;
+  try {
+    await runtime.ensurePrepared();
+  } catch {
+    complete = false;
+  }
+  const input = withProviderValidToolNames(request.input, {
+    names: runtime.knownFunctionToolNames(),
+    denote: complete,
+    aliasUnbound: false,
+    parametersOf: (name) => {
+      const tool = runtime.resolveFunctionTool(name);
+      return tool && isFunctionTool(tool) ? tool.parameters : undefined;
+    },
+  });
+  return input === request.input ? request : { ...request, input };
+}
+
 /** Whether a request starts its turn: nothing but instructions after the last user message. */
 function startsTurn(input: ModelRequest["input"]): boolean {
   if (typeof input === "string") return true;
@@ -2502,7 +2556,10 @@ class LazyToolModel implements Model {
     const opening = await this.openingToolLoad(request);
     if (opening) return opening;
     await beforeModelRequest("model_entry");
-    const prepared = prepareLazyToolRequest(request, this.runtime);
+    const prepared = prepareLazyToolRequest(
+      await withAuthorizedHistoryToolNames(request, this.runtime),
+      this.runtime,
+    );
     rememberPreparedModelRequest(prepared);
     void notifyModelRequestCapture(prepared);
     const response = await this.inner.getResponse(prepared);
@@ -2531,7 +2588,10 @@ class LazyToolModel implements Model {
       return;
     }
     await beforeModelRequest("model_entry");
-    const prepared = prepareLazyToolRequest(request, this.runtime);
+    const prepared = prepareLazyToolRequest(
+      await withAuthorizedHistoryToolNames(request, this.runtime),
+      this.runtime,
+    );
     rememberPreparedModelRequest(prepared);
     void notifyModelRequestCapture(prepared);
     let responseStartedPreparation = false;

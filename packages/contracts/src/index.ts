@@ -216,6 +216,8 @@ export * from "./vault-provider-wire";
 export * from "./secret-references";
 export * from "./secret-value-masking";
 export * from "./secret-shape-masking";
+export * from "./credential-names";
+export * from "./secret-field-hints";
 export * from "./secret-resolution";
 export * from "./secret-use-approvals";
 export * from "./secret-generator";
@@ -16811,6 +16813,11 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
         waitingDescendants: z.number().int().nonnegative().optional(),
         attentionDescendants: primitives.nonnegativeInteger,
         pausedDescendants: primitives.nonnegativeInteger,
+        /**
+         * Paused descendants whose work is parked for Resume: a turn still
+         * open, queued or running. Absent from older servers.
+         */
+        pausedWorkDescendants: z.number().int().nonnegative().optional(),
         /** Historical failed lifecycle states, including already-reviewed failures. */
         failedDescendants: primitives.nonnegativeInteger,
         unreadDescendants: z.number().int().nonnegative().optional(),
@@ -20738,116 +20745,160 @@ export const HumanInputOption = /* @__PURE__ */ defineSchema(() =>
 );
 export type HumanInputOption = z.infer<typeof HumanInputOption>;
 
+/**
+ * Optional parts of a human-input question. The full contract (every feature)
+ * is `HumanInputQuestion`; a host that cannot honor a feature may offer the
+ * model a schema without it (see `requestHumanInputToolParameters`).
+ */
+export type HumanInputQuestionFeatures = {
+  /** The `secret` kind and its secret spec (the secrets capability). */
+  secrets: boolean;
+  /** The `skillReview` reference (Skill management reviews). */
+  skillReview: boolean;
+};
+
+const HumanInputQuestionKindWithoutSecret = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["text", "single_select", "multi_select"]),
+);
+
+function refineHumanInputQuestion(
+  question: {
+    kind: string;
+    options: Array<{ id: string }>;
+    secret?: unknown;
+    confirm?: boolean | null | undefined;
+    allowOther: boolean;
+    validation?:
+      | { minSelections?: number | null | undefined; maxSelections?: number | null | undefined }
+      | null
+      | undefined;
+  },
+  ctx: z.RefinementCtx,
+): void {
+  const optionIds = new Set(question.options.map((option) => option.id));
+  if (optionIds.size !== question.options.length) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["options"],
+      message: "option ids must be unique",
+    });
+  }
+  if (question.kind === "secret") {
+    if (question.secret == null) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["secret"],
+        message: "secret questions require a secret spec",
+      });
+    }
+    // Options and Other mean nothing for a secret. Strict tool schemas make
+    // models send them anyway, so they are tolerated here and dropped when
+    // the request is persisted (`normalizeSecretQuestion`), never failing
+    // the turn.
+  } else if (question.secret != null) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["secret"],
+      message: "only secret questions take a secret spec",
+    });
+  }
+  if (question.kind === "secret") {
+    // Validated above.
+  } else if (question.kind === "text") {
+    if (question.options.length > 0) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["options"],
+        message: "text questions cannot have options",
+      });
+    }
+    if (question.allowOther) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["allowOther"],
+        message: "text questions do not use Other",
+      });
+    }
+  } else if (question.options.length === 0) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["options"],
+      message: "select questions require options",
+    });
+  }
+  if (
+    question.confirm === true &&
+    (question.kind !== "single_select" || question.options.length !== 2)
+  ) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["confirm"],
+      message: "confirm questions are single_select with exactly two options",
+    });
+  }
+  const validation = question.validation;
+  if (
+    validation?.minSelections != null &&
+    validation?.maxSelections != null &&
+    validation.minSelections > validation.maxSelections
+  ) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["validation"],
+      message: "minSelections exceeds maxSelections",
+    });
+  }
+}
+
+function humanInputQuestionShape() {
+  return {
+    id: z.string().min(1).max(64),
+    kind: HumanInputQuestionKind,
+    prompt: z.string().min(1).max(4096),
+    label: z.string().min(1).max(128).nullable().optional(),
+    helpText: z.string().max(2048).nullable().optional(),
+    // Strict model tool schemas encode an absent optional object as null.
+    // A real review reference still requires every authority-bearing field.
+    skillReview: SkillReviewReference.nullable().optional(),
+    options: z.array(HumanInputOption).max(20).default([]),
+    /** Required exactly when `kind` is "secret"; null otherwise (strict tool schemas). */
+    secret: HumanInputSecretSpec.nullable().optional(),
+    required: primitives.boolean.default(true),
+    /**
+     * A yes/no decision: a single_select with exactly two options, the
+     * action first and the way out second, answered with two buttons in the
+     * agent's own words. Hosts that predate it show the two options.
+     */
+    confirm: primitives.boolean.nullable().optional(),
+    // Retained on the wire for older hosts. Opengeni's stock runtime and
+    // surfaces always expose Other for choice questions, including requests
+    // that were persisted before that became the default behavior.
+    allowOther: primitives.boolean.default(false),
+    // Selection bounds only — agents invent useless text char mins/maxes.
+    // Answer strings stay platform-capped on HumanInputAnswer (~8192).
+    validation: z
+      .object({
+        minSelections: z.number().int().nonnegative().max(20).nullable().optional(),
+        maxSelections: z.number().int().positive().max(20).nullable().optional(),
+      })
+      .nullable()
+      .optional(),
+  };
+}
+
+/** The question schema with only the enabled features, in the full schema's key order. */
+export function humanInputQuestionSchema(features: HumanInputQuestionFeatures) {
+  const shape: Record<string, z.ZodType> = {};
+  for (const [key, value] of Object.entries(humanInputQuestionShape())) {
+    if (key === "skillReview" && !features.skillReview) continue;
+    if (key === "secret" && !features.secrets) continue;
+    shape[key] = key === "kind" && !features.secrets ? HumanInputQuestionKindWithoutSecret : value;
+  }
+  return z.object(shape).superRefine(refineHumanInputQuestion as never);
+}
+
 export const HumanInputQuestion = /* @__PURE__ */ defineSkillContractSchema(() =>
-  z
-    .object({
-      id: z.string().min(1).max(64),
-      kind: HumanInputQuestionKind,
-      prompt: z.string().min(1).max(4096),
-      label: z.string().min(1).max(128).nullable().optional(),
-      helpText: z.string().max(2048).nullable().optional(),
-      // Strict model tool schemas encode an absent optional object as null.
-      // A real review reference still requires every authority-bearing field.
-      skillReview: SkillReviewReference.nullable().optional(),
-      options: z.array(HumanInputOption).max(20).default([]),
-      /** Required exactly when `kind` is "secret"; null otherwise (strict tool schemas). */
-      secret: HumanInputSecretSpec.nullable().optional(),
-      required: primitives.boolean.default(true),
-      /**
-       * A yes/no decision: a single_select with exactly two options, the
-       * action first and the way out second, answered with two buttons in the
-       * agent's own words. Hosts that predate it show the two options.
-       */
-      confirm: primitives.boolean.nullable().optional(),
-      // Retained on the wire for older hosts. Opengeni's stock runtime and
-      // surfaces always expose Other for choice questions, including requests
-      // that were persisted before that became the default behavior.
-      allowOther: primitives.boolean.default(false),
-      // Selection bounds only — agents invent useless text char mins/maxes.
-      // Answer strings stay platform-capped on HumanInputAnswer (~8192).
-      validation: z
-        .object({
-          minSelections: z.number().int().nonnegative().max(20).nullable().optional(),
-          maxSelections: z.number().int().positive().max(20).nullable().optional(),
-        })
-        .nullable()
-        .optional(),
-    })
-    .superRefine((question, ctx) => {
-      const optionIds = new Set(question.options.map((option) => option.id));
-      if (optionIds.size !== question.options.length) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["options"],
-          message: "option ids must be unique",
-        });
-      }
-      if (question.kind === "secret") {
-        if (question.secret == null) {
-          ctx.addIssue({
-            code: "custom",
-            path: ["secret"],
-            message: "secret questions require a secret spec",
-          });
-        }
-        // Options and Other mean nothing for a secret. Strict tool schemas make
-        // models send them anyway, so they are tolerated here and dropped when
-        // the request is persisted (`normalizeSecretQuestion`), never failing
-        // the turn.
-      } else if (question.secret != null) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["secret"],
-          message: "only secret questions take a secret spec",
-        });
-      }
-      if (question.kind === "secret") {
-        // Validated above.
-      } else if (question.kind === "text") {
-        if (question.options.length > 0) {
-          ctx.addIssue({
-            code: "custom",
-            path: ["options"],
-            message: "text questions cannot have options",
-          });
-        }
-        if (question.allowOther) {
-          ctx.addIssue({
-            code: "custom",
-            path: ["allowOther"],
-            message: "text questions do not use Other",
-          });
-        }
-      } else if (question.options.length === 0) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["options"],
-          message: "select questions require options",
-        });
-      }
-      if (
-        question.confirm === true &&
-        (question.kind !== "single_select" || question.options.length !== 2)
-      ) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["confirm"],
-          message: "confirm questions are single_select with exactly two options",
-        });
-      }
-      const validation = question.validation;
-      if (
-        validation?.minSelections != null &&
-        validation?.maxSelections != null &&
-        validation.minSelections > validation.maxSelections
-      ) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["validation"],
-          message: "minSelections exceeds maxSelections",
-        });
-      }
-    }),
+  z.object(humanInputQuestionShape()).superRefine(refineHumanInputQuestion),
 );
 export type HumanInputQuestion = z.infer<typeof HumanInputQuestion>;
 
@@ -20908,6 +20959,24 @@ export const RequestHumanInputToolInput = /* @__PURE__ */ defineSkillContractSch
   }),
 );
 export type RequestHumanInputToolInput = z.infer<typeof RequestHumanInputToolInput>;
+
+/**
+ * The model-facing `request_human_input` parameters for the enabled features.
+ * With every feature it is exactly `RequestHumanInputToolInput`; without one,
+ * that field (and for secrets the `secret` kind) is left out of the schema the
+ * model sees. Calls are still validated against the full contract.
+ */
+export function requestHumanInputToolParameters(features: HumanInputQuestionFeatures) {
+  if (features.secrets && features.skillReview) return RequestHumanInputToolInput;
+  return z.object({
+    questions: z.array(humanInputQuestionSchema(features)).min(1).max(20),
+    allowSkip: primitives.boolean.default(false),
+    expiresInSeconds: primitives.positiveInteger
+      .max(30 * 24 * 60 * 60)
+      .nullable()
+      .optional(),
+  });
+}
 
 /** Secret questions never carry options or Other; drop what a model sent. */
 export function normalizeSecretQuestion<

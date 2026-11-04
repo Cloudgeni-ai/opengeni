@@ -41,7 +41,7 @@ import {
   CompatibleEndpointView,
   type OrganizationCompatibleEndpoints,
 } from "@/components/models/organization-compatible-endpoints";
-import { codexAccountName, codexUsageReadings, planLabel } from "@/components/codex-connection";
+import { codexAccountName, codexUsageWindows, planLabel } from "@/components/codex-connection";
 import { useConnectionAccess } from "@/components/connection-access-settings";
 import {
   AllowedModelsRow,
@@ -93,7 +93,7 @@ import { Section, SectionStack } from "@opengeni/react/ui/section";
 import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { SettingNavRow, SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
-import { UsageReadout, usageResets } from "@opengeni/react/ui/usage-meter";
+import { SubscriptionUsageCell } from "@opengeni/react/app/components/models/subscription-usage";
 import { billingClassForModel } from "@opengeni/react/app/lib/model-policy";
 import {
   accountKey,
@@ -1046,21 +1046,14 @@ function OrganizationDefaultsSection({
 
 export { possessive };
 
-/** Cached weekly usage an account carries, for a row with no live reading. */
+/** The cached usage an account carries, for a row with no live reading. */
 function cachedCodexUsage(account: CodexAccount): ReactNode {
-  const readings = codexUsageReadings(
+  const windows = codexUsageWindows(
     { weekly: account.weekly ?? null, fiveHour: account.fiveHour ?? null },
     Date.now(),
   );
-  const weekly = readings[0]!;
-  if (weekly.percent === null) return null;
-  return (
-    <UsageReadout
-      percent={weekly.percent}
-      window="this week"
-      resets={usageResets(readings, weekly.label)}
-    />
-  );
+  if (windows.length === 0) return null;
+  return <SubscriptionUsageCell windows={windows} />;
 }
 
 type AccountGroupId = "codex" | "claude" | "supergrok";
@@ -1185,7 +1178,7 @@ function OrganizationCodexRow({
     account,
     !workspaceOwned,
   );
-  const readings = codexUsageReadings(live.data?.usage, Date.now());
+  const windows = codexUsageWindows(live.data?.usage, Date.now());
   const primary = codex.accounts.length > 1 && account.id === codex.activeAccountId;
   const reconnect = account.status !== "active";
   return (
@@ -1204,15 +1197,11 @@ function OrganizationCodexRow({
         ) : workspaceOwned ? (
           usage
         ) : live.loading ? (
-          <UsageReadout percent={null} window="this week" loading />
+          <SubscriptionUsageCell windows={[]} loading />
         ) : live.error || live.data?.status === "error" ? (
           <span className="text-xs text-fg-muted">Usage unavailable</span>
         ) : live.data ? (
-          <UsageReadout
-            percent={readings[0]!.percent}
-            window="this week"
-            resets={usageResets(readings, readings[0]!.label)}
-          />
+          <SubscriptionUsageCell windows={windows} />
         ) : (
           usage
         ),

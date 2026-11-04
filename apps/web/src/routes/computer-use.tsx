@@ -1,9 +1,11 @@
 // Settings > Computer use: what Opengeni may do on the computer the desktop
 // app runs on. Only inside the desktop app; elsewhere it says where to find it.
+import { useNavigate, useParams } from "@tanstack/react-router";
 import { MonitorIcon } from "lucide-react";
 
 import { AppShotsSettings } from "@/components/desktop/app-shots-settings";
 import {
+  connectCalendarPath,
   ThisComputerAgentSettings,
   ThisComputerMicrophoneSettings,
 } from "@/components/desktop/this-computer-settings";
@@ -17,6 +19,8 @@ import { PageHeader } from "@opengeni/react/ui/page-header";
 export function ComputerUseRoute() {
   // Each dictation shortcut can pick one of the workspace's voice input models.
   const dictationModels = useAppContext().clientConfig.voiceInput?.models;
+  const navigate = useNavigate();
+  const { workspaceId } = useParams({ strict: false }) as { workspaceId?: string };
   return (
     <ContentPage width="standard">
       <PageHeader
@@ -30,7 +34,13 @@ export function ComputerUseRoute() {
             <ThisComputerAgentSettings />
             <AppShotsSettings />
             <DesktopDictationSettings models={dictationModels} />
-            <ThisComputerMicrophoneSettings />
+            <ThisComputerMicrophoneSettings
+              onConnectCalendar={
+                workspaceId
+                  ? () => void navigate({ href: connectCalendarPath(workspaceId) })
+                  : undefined
+              }
+            />
           </>
         ) : (
           <Notice tone="muted">These settings are in the Opengeni desktop app.</Notice>

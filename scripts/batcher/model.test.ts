@@ -546,6 +546,47 @@ describe("decide", () => {
     expect(plain?.kind === "build" && plain.members.map((p) => p.number)).toEqual([6, 1]);
   });
 
+  test("a failed batch that went ahead of a bisection queues its halves behind the older halves", () => {
+    const urgent = (n: number) => pull(n, { priority: true });
+    // The older half [1, 2] holds a priority PR too, so only queue order decides.
+    const older = [1, 2];
+    const failedAhead = batch(
+      [5, 6, 7, 8],
+      { runs: [run({ conclusion: "failure", attempt: 2 })] },
+      [older, [3]],
+    );
+    failedAhead.manifest.aheadOfBisection = true;
+    const pulls = [urgent(1), pull(2), pull(3), urgent(5), urgent(6), urgent(7), urgent(8)];
+    const actions = decide(observe(pulls, [failedAhead]));
+    expect(actions.map((a) => a.kind)).toEqual(["abandon", "build"]);
+    expect(actions[1]).toMatchObject({
+      kind: "build",
+      pending: [[3], [5, 6], [7, 8]],
+    });
+    expect(actions[1]).not.toHaveProperty("blame");
+    expect(actions[1]?.kind === "build" && actions[1].members.map((p) => p.number)).toEqual(older);
+  });
+
+  test("a half holding a priority PR runs before the other halves, which keep their order", () => {
+    const pulls = [pull(1), pull(2), pull(3, { priority: true }), pull(4), pull(5)];
+    const pending = [[1], [2, 3], [4], [5]];
+    const first = nextBatch(pulls, pending, NOW, DEFAULT_SETTINGS, [], true);
+    expect(first).toMatchObject({ kind: "build", pending: [[1], [4], [5]] });
+    expect(first?.kind === "build" && first.members.map((p) => p.number)).toEqual([2, 3]);
+
+    // Without a priority PR in any half, the halves run in order.
+    const plain = nextBatch(
+      pulls.map((p) => ({ ...p, priority: false })),
+      pending,
+      NOW,
+      DEFAULT_SETTINGS,
+      [],
+      true,
+    );
+    expect(plain).toMatchObject({ kind: "build", pending: [[2, 3], [4], [5]] });
+    expect(plain?.kind === "build" && plain.members.map((p) => p.number)).toEqual([1]);
+  });
+
   test("ejects a PR that fails alone, keeping the rest of the bisection", () => {
     const failed = batch([3], { runs: [run({ conclusion: "failure", attempt: 2 })] }, [[4]]);
     const actions = decide(observe([pull(3), pull(4), pull(5)], [failed]));

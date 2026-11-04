@@ -6,6 +6,7 @@ import {
   ACTIVE_SESSION_HISTORY_COMPACTION_RATIO,
   hasPendingSteerAfterContextCompaction,
   sessionCompactionRequestTrigger,
+  sessionHasToolRouterHistory,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -151,6 +152,7 @@ export type CompactionPrepDeps = {
   workspaceAgentIdentity: GovernanceModelOk["workspaceAgentIdentity"];
   structuredWorkspacePolicyActive: GovernanceModelOk["structuredWorkspacePolicyActive"];
   workspaceMemory: GovernanceModelOk["workspaceMemory"];
+  lazyToolTransport: GovernanceModelOk["lazyToolTransport"];
   rigVersion: GovernanceModelOk["rigVersion"];
   rigName: GovernanceModelOk["rigName"];
   compactionModelHistoryProjector: GovernanceModelOk["compactionModelHistoryProjector"];
@@ -210,6 +212,10 @@ export function standaloneCompactionInstructions(input: {
   structuredWorkspacePolicyActive: boolean;
   workspaceMemory: string | null | undefined;
   rig: { name: string; version: number } | undefined;
+  /** The turn's search-router transport and router history: without them the
+   * composer would assume no router and leave out Tool discovery. */
+  lazyToolTransport?: GovernanceModelOk["lazyToolTransport"];
+  toolRouterInHistory?: boolean;
 }): string {
   // The instructions the chat started with, as the turn composes them.
   const unattended = sessionStartedUnattended({ metadata: input.session.metadata ?? {} });
@@ -222,6 +228,8 @@ export function standaloneCompactionInstructions(input: {
       ...(input.workspaceMemory ? { workspaceMemory: input.workspaceMemory } : {}),
       ...(input.session.instructions ? { sessionInstructions: input.session.instructions } : {}),
       ...(input.rig ? { rig: input.rig } : {}),
+      ...(input.lazyToolTransport ? { lazyToolTransport: input.lazyToolTransport } : {}),
+      ...(input.toolRouterInHistory ? { toolRouterInHistory: true } : {}),
       agentPromptResources: agentPromptResourcesFor(input.settings, input.session.resources, {
         ...(input.rig ? { rig: input.rig } : {}),
         ...(unattended ? { unattended: true } : {}),
@@ -272,6 +280,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
     workspaceAgentIdentity,
     structuredWorkspacePolicyActive,
     workspaceMemory,
+    lazyToolTransport,
     rigVersion,
     rigName,
     compactionModelHistoryProjector,
@@ -547,6 +556,14 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
       structuredWorkspacePolicyActive,
       workspaceMemory,
       rig: rigVersion && rigName ? { name: rigName, version: rigVersion.version } : undefined,
+      lazyToolTransport,
+      toolRouterInHistory: session.agent
+        ? await sessionHasToolRouterHistory(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+          })
+        : false,
     });
     const requestTrigger = await sessionCompactionRequestTrigger(
       db,

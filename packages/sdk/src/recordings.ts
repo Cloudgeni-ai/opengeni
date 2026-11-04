@@ -22,6 +22,7 @@ import type {
   CreateRecordingLiveSessionRequest,
   CreateRecordingPersonRequest,
   CreateRecordingRequest,
+  UpcomingMeetingsResponse,
   RecordingCreateTitleSource,
   CreateRecordingTranscriptRequest,
   CreateRecordingUploadsRequest,
@@ -130,6 +131,26 @@ export class OpenGeniRecordingsClient {
           : {}),
         ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
       },
+      options.signal ? { signal: options.signal } : {},
+    );
+  }
+
+  /**
+   * The caller's own meetings with a join link that start in the next 20
+   * minutes (or started in the last 5), from their connected Google Calendar
+   * or Outlook, soonest first. `calendar` is `none` when they have none
+   * connected. Pass a meeting's `{ provider, id }` as `calendarEvent` when
+   * recording it.
+   */
+  async listUpcomingMeetings(
+    workspaceId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<UpcomingMeetingsResponse> {
+    return await this.client.requestJson<UpcomingMeetingsResponse>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/upcoming-meetings`,
+      undefined,
+      undefined,
       options.signal ? { signal: options.signal } : {},
     );
   }
@@ -949,16 +970,16 @@ export class RecordingUploader {
       const sent = recording.create;
       const made = await guarded(() => client.createRecording(workspaceId, sent)).catch(
         async (error: unknown) => {
-          // A server from before titleSource refuses the field: the title
-          // is sent without it, as every title was then.
+          // A server from before titleSource (or calendarEvent) refuses the
+          // field: the recording is sent without them, as every one was then.
           if (
             !(error instanceof PermanentRecordingError) ||
             error.status !== 400 ||
-            sent.titleSource === undefined
+            (sent.titleSource === undefined && sent.calendarEvent === undefined)
           ) {
             throw error;
           }
-          const { titleSource: _unknownThere, ...older } = sent;
+          const { titleSource: _unknownThere, calendarEvent: _unknownToo, ...older } = sent;
           return await guarded(() => client.createRecording(workspaceId, older));
         },
       );
@@ -1588,6 +1609,11 @@ export type RecorderOptions = {
   visibility?: RecordingVisibility;
   externalRef?: string;
   metadata?: CreateRecordingRequest["metadata"];
+  /**
+   * The owner's calendar event the meeting is of, such as one from
+   * `listUpcomingMeetings` that the person joined; it names the meeting.
+   */
+  calendarEvent?: CreateRecordingRequest["calendarEvent"];
   transcription?: RecordingTranscriptionRequest;
   /**
    * The person recording's name, as your app knows it: their microphone's
@@ -2254,6 +2280,7 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
           startedAt: new Date().toISOString(),
           ...(options.externalRef ? { externalRef: options.externalRef } : {}),
           ...(options.metadata ? { metadata: options.metadata } : {}),
+          ...(options.calendarEvent ? { calendarEvent: options.calendarEvent } : {}),
           ...(options.transcription ? { transcription: options.transcription } : {}),
           ...ownerNameField(options.ownerName, captures),
           tracks: captures.map((capture) => ({

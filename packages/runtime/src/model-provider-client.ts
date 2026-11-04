@@ -66,6 +66,7 @@ import {
 } from "./model-provider-request-policy";
 import { isModelCallFetch, vercelGatewayRoutingFetch } from "./model-provider-transport";
 import { ReplayableJsonOpenAI } from "./replayable-json-body";
+import type { ToolNameObservers } from "./provider-request-tool-names";
 import {
   recordModelTransportDispatched,
   recordModelTransportStarted,
@@ -75,6 +76,7 @@ import { captureProviderRequestBody } from "./model-request-capture";
 import { observePromptCacheRequestBody } from "./prompt-cache-fingerprint";
 import { streamIdleTimeoutModelFetch } from "./model-stream-idle-timeout";
 import { withoutQuotaExhaustedRetries } from "./provider-quota";
+import { invalidRequestSignatureOfResponse } from "./provider-invalid-request";
 import {
   captureClaudeRequestToken,
   prepareClaudeSubscriptionRequest,
@@ -85,6 +87,16 @@ let runtimeMetricsHooks: RuntimeMetricsHooks | null = null;
 
 export function configureRuntimeMetricsHooks(hooks: RuntimeMetricsHooks | null | undefined): void {
   runtimeMetricsHooks = hooks ?? null;
+}
+
+/** The outbound tool-name guard's observations for one provider, as metrics. */
+export function modelToolNameObservers(provider: string): ToolNameObservers {
+  return {
+    onToolNameRepair: ({ api, field }) =>
+      runtimeMetricsHooks?.onModelToolNameRepair?.({ provider, api, field }),
+    onToolNameRetry: ({ api, outcome }) =>
+      runtimeMetricsHooks?.onModelToolNameRetry?.({ provider, api, outcome }),
+  };
 }
 
 export function recordRuntimeMcpToolCallMetric(
@@ -175,6 +187,7 @@ export function buildOpenAIClientFromSettings(
         ),
       },
       {
+        ...modelToolNameObservers(providerId),
         modelRequestPolicy: (request) =>
           chatModelRequestPolicy(request) ?? azureModelRequestPolicy(request),
       },
@@ -200,6 +213,7 @@ export function buildOpenAIClientFromSettings(
       ),
     },
     {
+      ...modelToolNameObservers(providerId),
       // Only the OpenAI platform; a compatible server keeps its own contract.
       modelRequestPolicy: isDirectOpenAiApiBaseUrl(settings.openaiBaseUrl)
         ? withStorelessResponses(chatModelRequestPolicy)
@@ -685,6 +699,7 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
             ),
           },
           {
+            ...modelToolNameObservers(provider.id),
             modelRequestPolicy: modelRequestPolicyForProvider(
               provider,
               gatewayPolicies,
@@ -711,6 +726,7 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
               ),
             },
             {
+              ...modelToolNameObservers(provider.id),
               modelRequestPolicy: modelRequestPolicyForProvider(
                 provider,
                 gatewayPolicies,
@@ -794,6 +810,7 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
               ),
             },
             {
+              ...modelToolNameObservers(provider.id),
               modelRequestPolicy: modelRequestPolicyForProvider(
                 provider,
                 gatewayPolicies,
@@ -907,6 +924,7 @@ export function instrumentedModelFetch(
         }
       }
       recordModelCallMetric(provider, response.ok ? "completed" : "failed", started);
+      if (response.status === 400) recordModelInvalidRequestMetric(provider, response);
       return response;
     } catch (error) {
       capture.cancel();
@@ -941,6 +959,24 @@ function recordModelCallMetric(
   } catch {
     // Metrics emission must never affect a model call.
   }
+}
+
+/**
+ * Count a provider's 400 by the request path it names. The body is read from
+ * a clone taken before the response is returned, and the call never waits
+ * for it.
+ */
+function recordModelInvalidRequestMetric(provider: string, response: Response): void {
+  const hook = runtimeMetricsHooks?.onModelInvalidRequest;
+  if (!hook) return;
+  void invalidRequestSignatureOfResponse(response).then((signature) => {
+    if (!signature) return;
+    try {
+      hook({ provider, ...signature });
+    } catch {
+      // Metrics emission must never affect a model call.
+    }
+  });
 }
 
 function azureDeploymentBaseUrl(settings: Settings): string {

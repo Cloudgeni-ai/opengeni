@@ -291,6 +291,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       personalGitHubCredentials,
       startVideoGenerationWorkflow,
       startSessionTitleWorkflow,
+      startRigProviderImageRefresh,
     } = resolvedServices;
     const activityContext = currentActivityContext();
     const cancellationSignal = activityContext?.cancellationSignal;
@@ -769,6 +770,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnExecutionPolicy,
             chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
             requiredGeneratedVideoFiles,
+            startRigProviderImageRefresh: startRigProviderImageRefresh ?? null,
           });
           if ("exit" in governance) return governance.exit;
           await assertTurnModelConnection(db, providerTurn, {
@@ -1403,6 +1405,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             workspaceAgentIdentity,
             structuredWorkspacePolicyActive,
             workspaceMemory,
+            lazyToolTransport,
             rigVersion,
             rigName,
             compactionModelHistoryProjector,
@@ -1745,6 +1748,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           });
           const toolRuntime = await prepareTurnToolRuntime({
             independentSessionTitles: !!startSessionTitleWorkflow,
+            learningModes: learning.effective,
             vaultAccess,
             runCredentialRenewals: runCredentialResolver ? renewals : undefined,
             runMcpCredentials,
@@ -1865,6 +1869,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             preparationIndependentToolNames,
             codeSearchAvailable: toolRuntime.codeSearchAvailable,
             promptToolAvailability: toolRuntime.promptToolAvailability,
+            toolRouterInHistory: toolRuntime.toolRouterInHistory,
+            toolRouterExpected: toolRuntime.toolRouterExpected,
             videoGenerationAcceptancesByCallId,
             activeSandboxBackend,
             groupBoxBackend,
@@ -1977,6 +1983,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             workspaceAgentIdentity,
             structuredWorkspacePolicyActive,
             workspaceMemory,
+            lazyToolTransport,
             rigVersion,
             rigName,
             compactionModelHistoryProjector,

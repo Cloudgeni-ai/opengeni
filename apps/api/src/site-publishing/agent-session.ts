@@ -70,6 +70,7 @@ export async function normalizeSiteAgentSession(
         from: "none",
         humanInput: false,
         skills: false,
+        privacyFacts: true,
         ...(dataTools.length ? { artifacts: true } : {}),
       },
     },

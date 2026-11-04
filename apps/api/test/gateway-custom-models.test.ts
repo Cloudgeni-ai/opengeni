@@ -560,6 +560,7 @@ describe("workspace Gateway custom model API", () => {
           body: {
             code: "SESSION_CREATE_REJECTED",
             message: `model is not selectable: ${model}`,
+            details: { code: "model_unavailable", modelId: model },
           },
         });
         return;

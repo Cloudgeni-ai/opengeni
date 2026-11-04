@@ -36,7 +36,7 @@ import {
   useProviderConnection,
   type ProviderConnection,
 } from "@/components/ai-gateway-connection";
-import { codexUsageReadings, useCodexSubscriptions } from "@/components/codex-connection";
+import { codexUsageWindows, useCodexSubscriptions } from "@/components/codex-connection";
 import { useConnectionAccess } from "@/components/connection-access-settings";
 import { DefaultSessionModelPreferenceRow } from "@/components/default-session-model";
 import {
@@ -127,7 +127,7 @@ import { ListRow, RowList } from "@opengeni/react/ui/list-row";
 import { RowButton } from "@opengeni/react/ui/page-actions";
 import { Section, SectionStack } from "@opengeni/react/ui/section";
 import { SettingRowGroup } from "@opengeni/react/ui/setting-row";
-import { UsageReadout, usageResets } from "@opengeni/react/ui/usage-meter";
+import { SubscriptionUsageCell } from "@opengeni/react/app/components/models/subscription-usage";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { billingClassForModel, payerSummaryForModel } from "@opengeni/react/app/lib/model-policy";
 import {
@@ -1675,22 +1675,15 @@ export function WorkspaceModelsPageBody({
   );
 }
 
-/** A Codex account's weekly usage, as a workspace that uses it reads it. */
+/** A Codex account's reported usage windows, as a workspace that uses it reads them. */
 function codexUsageReadout(
   codex: ReturnType<typeof useCodexSubscriptions>,
   accountId: string,
 ): ReactNode {
   const live = codex.usageMap[accountId];
   if (!live?.usage) return null;
-  const readings = codexUsageReadings(live.usage, codex.now);
-  const weekly = readings[0]!;
-  return weekly.percent === null ? null : (
-    <UsageReadout
-      percent={weekly.percent}
-      window="this week"
-      resets={usageResets(readings, weekly.label)}
-    />
-  );
+  const windows = codexUsageWindows(live.usage, codex.now);
+  return windows.length === 0 ? null : <SubscriptionUsageCell windows={windows} now={codex.now} />;
 }
 
 function modelCount(count: number): string {

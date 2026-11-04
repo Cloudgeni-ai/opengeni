@@ -99,6 +99,7 @@ export function createSharedActivityServices(
         startSandboxReaperWorkflow: dependencies.startSandboxReaperWorkflow ?? null,
         startVideoGenerationWorkflow: dependencies.startVideoGenerationWorkflow ?? null,
         startRecordingWorkflow: dependencies.startRecordingWorkflow ?? null,
+        startRigProviderImageRefresh: dependencies.startRigProviderImageRefresh ?? null,
         startSessionTitleWorkflow: environmentsEncryptionKeyBytes(settings)
           ? (dependencies.startSessionTitleWorkflow ?? null)
           : null,

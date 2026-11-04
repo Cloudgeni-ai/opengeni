@@ -1712,7 +1712,7 @@ describe("One Models page for the organization and the workspace", () => {
   );
 
   test.each([
-    { saved: true, row: "60% left this week" },
+    { saved: true, row: "Week60% left" },
     { saved: false, row: "Usage unavailable" },
   ])(
     "a failed live check shows the last saved reading on the row and the page alike: %j",
@@ -1747,7 +1747,7 @@ describe("One Models page for the organization and the workspace", () => {
         await flush();
         const page = view.container.textContent ?? "";
         expect(page).toContain("Couldn't check usage. Try again in a moment.");
-        if (saved) expect(page).toContain("Weekly60% left");
+        if (saved) expect(page).toContain("Week60% left");
       } finally {
         await cleanup(view);
       }

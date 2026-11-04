@@ -9,6 +9,7 @@ import type {
   RecordingPerson,
   RecordingVoiceprintConsent,
   RecordingSpeaker,
+  RecordingCalendarEventRef,
   RecordingTranscriptionRequest,
   RecordingTranscriptPage,
   RecordingTranscriptSegment,
@@ -172,6 +173,8 @@ export type UseRecorderOptions = RecordingsClientOverride & {
   /** Your own id for what this recording belongs to, to find it again with `useRecordings`. */
   externalRef?: string;
   metadata?: Record<string, unknown>;
+  /** The owner's calendar event the meeting is of, such as one they joined; it names the meeting. */
+  calendarEvent?: RecordingCalendarEventRef;
   transcription?: RecordingTranscriptionRequest;
   /**
    * The person recording's name, as your app knows it: their microphone's
@@ -241,6 +244,7 @@ export type UseRecorderResult = RecorderSnapshot & {
       | "transcription"
       | "externalRef"
       | "metadata"
+      | "calendarEvent"
       | "ownerName"
     >,
   ) => Promise<void>;
@@ -473,6 +477,7 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
         ...(merged.visibility ? { visibility: merged.visibility } : {}),
         ...(merged.externalRef ? { externalRef: merged.externalRef } : {}),
         ...(merged.metadata ? { metadata: merged.metadata as never } : {}),
+        ...(merged.calendarEvent ? { calendarEvent: merged.calendarEvent } : {}),
         ...(merged.transcription ? { transcription: merged.transcription } : {}),
         ...(merged.ownerName?.trim() ? { ownerName: merged.ownerName } : {}),
         ...(merged.microphone !== undefined ? { microphone: merged.microphone } : {}),

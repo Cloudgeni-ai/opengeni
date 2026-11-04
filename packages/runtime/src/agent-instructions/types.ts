@@ -72,6 +72,11 @@ export type AgentPromptResources = {
    * keeps prompts unchanged.
    */
   commandCompletionDelivery?: boolean | undefined;
+  /**
+   * `false` when the session's Skill index is empty, so with Skills read-only
+   * there is no Skill to read. Omitted keeps Skill guidance unchanged.
+   */
+  skillsReadable?: boolean | undefined;
   workspaceEnvironment?: WorkspaceEnvironmentContext | undefined;
   rig?: RigInstructionsContext | undefined;
   /**
@@ -105,14 +110,55 @@ export type AgentPromptExperiments = {
  * Which tool-specific instruction clauses may render for one attempt. A
  * rendering input only: it never grants, withholds, defers or reorders a tool.
  *
- * `unavailable` lists only tool names proven absent for the attempt (see
- * `deriveAgentPromptToolAvailability`). Every other name — deferred or lazily
+ * `unavailable` lists tool names proven absent for the attempt (see
+ * `deriveAgentPromptToolAvailability`), plus save-only tools whose writes the
+ * turn's frozen learning policy refuses. Every other name — deferred or lazily
  * disclosed, external MCP, provider-hosted, local adapter, or unknown — counts
  * as available, so its guidance stays.
  */
 export type AgentPromptToolAvailability = {
   readonly unavailable: readonly FirstPartyMcpToolName[];
+  /**
+   * The session can never have child sessions: its nesting depth, frozen at
+   * create, has reached its frozen maximum, so no child was or will be
+   * admitted. Omitted when that is not proven (for example `session_create`
+   * merely unselected on a turn of a session that may already have children).
+   */
+  readonly childSessionsImpossible?: true;
+  /**
+   * Nothing the attempt attaches is deferred, so it has no tool search router
+   * (`tool_search`, `tool_list`, `tool_invoke`) and tool discovery guidance is
+   * omitted. Omitted keeps that guidance.
+   */
+  readonly toolSearchAbsent?: true;
 };
+
+/** False only when the attempt proved it has no tool search router. */
+export function toolSearchAvailable(context: AgentPromptContext): boolean {
+  return context.toolAvailability?.toolSearchAbsent !== true;
+}
+
+/** The agent can save Knowledge, instructions or Skills, which learning policy governs. */
+export function canLearn(context: AgentPromptContext): boolean {
+  return context.capabilities.knowledge || context.capabilities.skills === "manage";
+}
+
+/**
+ * The agent can read a Skill this turn: Skill management is on, or reading is
+ * on and the Skill index is not proven empty.
+ */
+export function skillsReadable(context: AgentPromptContext): boolean {
+  const { skills } = context.capabilities;
+  return skills === "manage" || (skills !== false && context.resources.skillsReadable !== false);
+}
+
+/**
+ * Something can resume the agent after a wait or on a timer: `wait_for_input`
+ * may exist, or automations can be scheduled.
+ */
+export function canWaitOrSchedule(context: AgentPromptContext): boolean {
+  return toolAvailable(context, "wait_for_input") || context.capabilities.schedules;
+}
 
 /** False only when the attempt proved the named tool absent. */
 export function toolAvailable(context: AgentPromptContext, name: FirstPartyMcpToolName): boolean {
