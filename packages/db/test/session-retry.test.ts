@@ -24,6 +24,8 @@ import {
   requestSessionTurnRecovery,
   readSessionTurnToolProgressRecoveryState,
   appendSessionEventsForTurnAttempt,
+  countSessionTurnSandboxProcessStartRestarts,
+  SANDBOX_PROCESS_START_RESTART_OPERATION,
 } from "../src/index";
 import { NOT_STARTED_TOOL_CALL_EVENT_TEXT } from "../src/session-tool-call-settlement";
 import type { SessionRetryRequest } from "@opengeni/contracts";
@@ -655,6 +657,62 @@ describe("intent-preserving failed-session retry", () => {
       },
     ]);
     expect((await f.retry()).outcome).toBe("accepted");
+  });
+
+  test("a turn's process-start restarts are counted from its own events until a human retry", async () => {
+    const f = await fixture(true);
+    const claimed = await f.claim();
+    if (claimed.action !== "claimed") throw new Error("not claimed");
+    const turn = claimed.turn;
+    const count = () =>
+      countSessionTurnSandboxProcessStartRestarts(client.db, f.workspaceId, {
+        sessionId: f.session.id,
+        turnId: turn.id,
+      });
+    const append = async (
+      events: Parameters<typeof appendSessionEventsForTurnAttempt>[6],
+    ): Promise<void> => {
+      const appended = await appendSessionEventsForTurnAttempt(
+        client.db,
+        f.workspaceId,
+        f.session.id,
+        turn.id,
+        turn.executionGeneration,
+        turn.activeAttemptId!,
+        events,
+      );
+      expect(appended.accepted).toBe(true);
+    };
+    expect(await count()).toBe(0);
+    // Other operations, and the restart's own completion, do not count.
+    await append([
+      { type: "sandbox.operation.started", payload: { name: "repository-clone" } },
+      { type: "sandbox.operation.failed", payload: { name: "repository-clone", error: "x" } },
+    ]);
+    expect(await count()).toBe(0);
+    await append([
+      {
+        type: "sandbox.operation.started",
+        payload: { name: SANDBOX_PROCESS_START_RESTART_OPERATION, reason: "process_start_failed" },
+      },
+      {
+        type: "sandbox.operation.completed",
+        payload: { name: SANDBOX_PROCESS_START_RESTART_OPERATION },
+      },
+    ]);
+    expect(await count()).toBe(1);
+    // Another turn of the same session has its own budget.
+    expect(
+      await countSessionTurnSandboxProcessStartRestarts(client.db, f.workspaceId, {
+        sessionId: f.session.id,
+        turnId: crypto.randomUUID(),
+      }),
+    ).toBe(0);
+    // A person's Retry is a new request: the turn may restart again.
+    await append([
+      { type: "turn.recovery.requested", payload: { reason: "human_retry" } } as never,
+    ]);
+    expect(await count()).toBe(0);
   });
 
   test("tool-call command-start recovery is bounded by tool progress and stays retryable when exhausted", async () => {
