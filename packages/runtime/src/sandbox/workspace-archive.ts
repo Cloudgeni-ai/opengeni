@@ -424,6 +424,77 @@ printf "OPENGENI_WORKSPACE_FINGERPRINT_V1 %s %s %s %s\n" "$digest" "$entries" "$
 }
 
 const SDK_LOCAL_ARCHIVE_PROJECTION = "sdk_local_archive_v1" as const;
+
+export type WorkspaceSizeProbe = { fileCount: number; totalFileBytes: number };
+
+/** Default bound for the size probe's own `timeout`; the caller's wait adds
+ * a small margin for the provider's exec round trip. */
+export const WORKSPACE_SIZE_PROBE_TIMEOUT_SECONDS = 15;
+
+/**
+ * Count regular files and their bytes under /workspace on a live remote box,
+ * for observability only. The walk is bounded by `timeout` inside the box and
+ * by a wall-clock race here; a walk that does not finish, a session that
+ * cannot exec, or any error yields null rather than a partial count.
+ */
+export async function probeRemoteWorkspaceSize(
+  session: unknown,
+  timeoutSeconds = WORKSPACE_SIZE_PROBE_TIMEOUT_SECONDS,
+): Promise<WorkspaceSizeProbe | null> {
+  const target = session as WorkspaceSession | null | undefined;
+  const run = target?.exec ?? target?.execCommand;
+  if (!target || !run) return null;
+  const seconds = Math.max(1, Math.floor(timeoutSeconds));
+  // Same exclusions as the archive and its fingerprint, so a failed
+  // snapshot's size compares with a captured one. An unreadable folder makes
+  // find exit 1 with the rest counted, which still measures the workspace;
+  // only a timeout (124) or a missing tool discards the walk.
+  const prune = findPruneExpression(workspaceFingerprintExcludes(target));
+  const script = String.raw`set -u
+cd /workspace 2>/dev/null || exit 0
+out=$(timeout ${seconds} find . -xdev ${prune}-type f -printf "%s\n" 2>/dev/null | awk "{n+=1; s+=\$1} END {printf \"%d %.0f\", n, s}")
+rc=$?
+[ "$rc" -le 1 ] || exit 0
+printf "OPENGENI_WORKSPACE_SIZE_V1 %s\n" "$out"`;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      run.call(target, {
+        cmd: `bash -o pipefail -c ${shellQuote(script)}`,
+        yieldTimeMs: (seconds + 5) * 1_000,
+        maxOutputTokens: 1_000,
+      }),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), (seconds + 10) * 1_000);
+      }),
+    ]);
+    const match = stdoutFromExecResult(result)
+      .trim()
+      .match(/^OPENGENI_WORKSPACE_SIZE_V1 ([0-9]+) ([0-9]+)$/m);
+    if (!match) return null;
+    const fileCount = Number(match[1]);
+    const totalFileBytes = Number(match[2]);
+    return Number.isSafeInteger(fileCount) && Number.isFinite(totalFileBytes)
+      ? { fileCount, totalFileBytes }
+      : null;
+  } catch {
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/** The tree size a portable archive already measured, or null for provider
+ * snapshots, which carry no tree fingerprint. */
+export function workspaceSizeFromArchiveDescriptor(
+  descriptor: WorkspaceArchiveDescriptor | undefined,
+): WorkspaceSizeProbe | null {
+  if (!descriptor || !("workspace" in descriptor) || !descriptor.workspace) return null;
+  const { fileCount, totalFileBytes } = descriptor.workspace;
+  return Number.isFinite(fileCount) && Number.isFinite(totalFileBytes)
+    ? { fileCount, totalFileBytes }
+    : null;
+}
 const HOST_FINGERPRINT_READ_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW;
 
 function hostBackedWorkspaceRoot(session: WorkspaceSession): string | null {
