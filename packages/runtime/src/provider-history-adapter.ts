@@ -338,11 +338,6 @@ export function projectHistoryForProvider(
     }),
   );
   const input = projected.every((item, index) => item === items[index]) ? items : projected;
-  // Tool names a provider would reject are made valid on the wire by the
-  // outbound guard (provider-request-tool-names.ts), one alias per name in
-  // every position. Chat keeps its own treatment of history: a call with an
-  // invalid name replays as a historical fact (isChatIncompatibleCall) rather
-  // than as a native call to a tool the request never declares.
   return projectWireHistory(withWireValidFunctionCallArguments(input), providerApi, options);
 }
 

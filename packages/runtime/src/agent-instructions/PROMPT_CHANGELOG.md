@@ -29,8 +29,20 @@ change). Nothing was reworded.
 ```text
 - An answer built from web or published sources (research, evidence summaries, product or price comparisons) may be short but not partial: summarize what the sources establish, including the best-supported finding, not only the practical takeaway; give figures in the user's terms, such as a monthly total at their stated size rather than only a starting price or unit rate; and link the source next to each study or figure you cite.   (without webSearch or browser)
 - - Answer in chat by default, including summaries, reports, briefs, letters and plans the user asks you to write.   (without artifacts)
-- Every tool in the Codemode catalog (what `ogtool list` shows) is also callable programmatically from the sandbox … inspect actual state before any separately authorized retry.   (configured session with no sandbox or Connected Machine)
+- Every tool in the Codemode catalog (what `ogtool list` shows) is also callable programmatically from the sandbox … inspect actual state before any separately authorized retry.   (configured session with no sandbox, Connected Machine or `run_on`)
 ```
+
+Slack agent text is shorter. A chat started from Slack in an installation
+with agents keeps the same rules in fewer words: answer yourself by default,
+hand off only to an agent the person names (then exactly `NO_REPLY`), suggest
+a fitting agent without mentioning it, and use Memory and `slack_agent_chats`
+when context is missing. Cut: examples, rationale, "do not hand it back"
+(the server refuses a hand-back), and the propose line's card and icon details
+(the `slack_agent_propose` description has them). The agent roster describes
+the first 20 agents and names up to 30 more. The `slack_agent_handoff`,
+`slack_agent_suggest`, `slack_agent_chats` and `slack_agent_propose`
+descriptions drop what the server enforces or reports (one hop, never back,
+usable agents only, name character rules, the text to tell the person).
 
 A configured agent pays only for what it can use. Every section below is
 omitted only when its feature is absent; sessions that have the feature render
@@ -229,6 +241,19 @@ the lines are shown as text, not as a sentence diff:
 - Make changes inside the workspace unless the user explicitly asks for another location. Keep your own scratch work out of the user's project: put throwaway scripts and tests, and browsers, runtimes or libraries installed only for your checks, in a temporary directory outside it, and remove them when done. Tests the user asked for or the project expects belong in it.
 - Verify changes when practical, especially after editing code, tests, build scripts, generated artifacts, or configuration. For a change to something already running, such as a service, worker or scheduled job, restart or reload the process that actually serves it, exercise the real entry point and check what the user asked about; unit tests alone do not show it works. Ask first only if a restart could disrupt others or lose work in progress.
 ```
+
+Connect cards despite unrelated strong matches. No prompt or tool description
+text changes. `tool_search` used to skip its integration catalog lookup
+whenever any installed tool matched strongly, so "posts on Slack" (matching a
+Slack bot tool) or "Linear issues" (matching meeting search) got no Connect
+card. It now skips the lookup only when a strong match is the named
+integration's own tool (beside strong matches reading the catalog only for a
+capitalised or unfamiliar word, waiting at most 1.5 seconds, and naming only
+distinctive mentions), and also recognises an
+integration's name with different spacing or case, a near spelling, or its
+vendor domain word. Catalog search ranks entries a query names first. The
+`notConnected` text is unchanged, and it appears on more searches than
+before.
 
 The agent knows both GitHub identities. When personal GitHub sign-in is
 enabled on the deployment (new `personalGitHub` resource fact) and

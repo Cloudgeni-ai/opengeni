@@ -69,7 +69,6 @@ import {
 import { objectStorageForSandboxDownloads } from "./file-resources";
 import {
   allowedFirstPartyMcpToolsForSession,
-  environmentsEncryptionKeyBytes,
   resolveSessionFirstPartyMcpTools,
   type Settings,
 } from "@opengeni/config";
@@ -154,16 +153,7 @@ import {
 import { loadConfiguredBundledSkills } from "./skill-selection";
 import { guardSkillFilesystem } from "./skill-transfer";
 import { turnCredentialRestriction } from "./credential-restriction";
-import {
-  attemptSecretResolver,
-  taskVaultSecretCaptureEnabled,
-  type AttemptVaultAccess,
-} from "./secret-resolver";
-import {
-  attachSessionTreeSecretValues,
-  attachTaskVaultSecretCapture,
-  currentAttemptSecretValues,
-} from "./secret-values";
+import { attemptSecretResolver, type AttemptVaultAccess } from "./secret-resolver";
 
 /**
  * The largest personal SKILL.md the Skill index reads for showing in full: a
@@ -1190,33 +1180,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     cancellationSignal,
     undefined,
   );
-  const maskingPrincipal = {
-    kind: "attempt",
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    sessionId: input.sessionId,
-    turnId: turn.id,
-    attemptId: input.attemptId,
-    executionGeneration: attempt.executionGeneration,
-  } as const;
-  const maskingKey = environmentsEncryptionKeyBytes(githubRestMcp.settings) ?? null;
-  // Best effort: values this session tree used before are masked too.
-  attachSessionTreeSecretValues({
-    memory: currentAttemptSecretValues(),
-    db,
-    encryptionKey: maskingKey,
-    principal: maskingPrincipal,
-    observability,
-  });
-  // Secrets that show up in tool output are saved to the task vault.
-  attachTaskVaultSecretCapture({
-    memory: currentAttemptSecretValues(),
-    db,
-    encryptionKey: maskingKey,
-    principal: maskingPrincipal,
-    enabled: taskVaultSecretCaptureEnabled(session.agent, session.firstPartyMcpPermissions),
-    observability,
-  });
   try {
     eventing.preparedTools = await waitForTurnOperation(
       runtime.prepareTools(githubRestMcp.settings, githubRestMcp.tools, {

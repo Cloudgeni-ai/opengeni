@@ -133,6 +133,9 @@ Settlement is first-writer-wins under a database lock and compare-and-set:
   worker restart or `continueAsNew`. A stale early timer caused by bounded
   workflow/database clock skew re-arms with an interruptible floor instead of
   spinning the workflow and database;
+- a decision that commits while the workflow's parking peek is in flight still
+  resumes the turn: the wait baselines its wakes from before that peek (see
+  [run-lifecycle.md](./run-lifecycle.md), `approval-wait`);
 
 `session_events` remains the exact audit/live projection for accepted payloads.
 The request table

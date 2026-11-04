@@ -146,7 +146,7 @@ describe("turn claim organization-membership fence", () => {
     }
   }, 180_000);
 
-  test("membership-key triggers are confined to authority, membership and Site creation writes", async () => {
+  test("membership-key triggers are confined to authority, membership, billing and Site creation writes", async () => {
     // The claim can stay fence-free only while no trigger it can fire takes
     // the membership key. Pin the complete trigger set so a new one is a
     // deliberate review of the claim's lock order, not a silent inversion.
@@ -154,6 +154,10 @@ describe("turn claim organization-membership fence", () => {
     // claim writes; the blocking controls above keep that separation proven.
     // The Site audience trigger returns before taking the key for every UPDATE,
     // including claim transitions; its fence applies only to Site creation.
+    // Automatic top-up settings/reservations are billing-only writes. Their
+    // store takes the membership fence before journal/credit locks; turn claims
+    // never write these tables. The live exclusive-holder tests above must
+    // continue to pass with these triggers installed.
     if (!available) return;
     const admin = postgres(shared!.adminUrl, { max: 1, onnotice: () => undefined });
     try {
@@ -164,6 +168,8 @@ describe("turn claim organization-membership fence", () => {
         where not t.tgisinternal and p.prosrc like '%organization-membership:%'
         order by 1`;
       expect(rows.map((row) => row.trigger)).toEqual([
+        "billing_auto_top_up_operations.billing_auto_top_up_operations_guard",
+        "billing_auto_top_up_settings.billing_auto_top_up_settings_guard",
         "host_mcp_task_authorities.host_mcp_task_authority_guard",
         "host_mcp_turn_authorities.host_mcp_child_turn_authority_guard",
         "host_mcp_turn_authorities.host_mcp_inherited_turn_authority_guard",

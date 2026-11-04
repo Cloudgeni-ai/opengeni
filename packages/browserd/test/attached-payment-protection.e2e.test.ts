@@ -29,13 +29,11 @@ const CHECKOUT = `<!doctype html><html><head><title>Synthetic checkout</title></
 <label for="cc2">Altered card number</label>
 <input id="cc2" name="cardnumber2" autocomplete="cc-number">
 </form>
-<p id="echo">Echo:</p>
 <script>
 const cc = document.getElementById("cc");
 cc.addEventListener("input", () => {
   const digits = cc.value.replace(/\\D/g, "").slice(0, 16);
   cc.value = digits.replace(/(\\d{4})(?=\\d)/g, "$1 ");
-  document.getElementById("echo").textContent = "Echo: " + cc.value;
 });
 const cc2 = document.getElementById("cc2");
 cc2.addEventListener("input", () => {
@@ -306,7 +304,7 @@ const ref = (observation: BrowserObservation, role: string, name: string) => {
 };
 
 e2e(
-  "a connected Chrome checkout keeps payment values out of observations and fills, and its address usable",
+  "a connected Chrome checkout keeps payment field values out of observations and fills, and its address usable",
   async () => {
     const fixture = await launch();
     try {

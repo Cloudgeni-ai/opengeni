@@ -33,6 +33,7 @@ import {
   MEETING_SUMMARY_TOOLS,
   meetingSummaryCandidate,
   requireWorkspace,
+  chargeBillingOrigin,
 } from "@opengeni/db";
 import type { ControlActivityServices } from "./types";
 
@@ -204,6 +205,7 @@ export async function startMeetingSummary(
       titleSource: recording.titleSource,
     }),
     surface: "system",
+    billingOrigin: chargeBillingOrigin(),
     metrics: service.observability,
     resources: [],
     tools: written.tools,

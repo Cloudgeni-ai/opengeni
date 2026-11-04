@@ -8,6 +8,15 @@ product owns its users, tenant admission, business data, navigation, and Skill
 catalog. Opengeni owns durable agent sessions, turns, events, approvals, files,
 tools, and execution.
 
+API and SDK/embedded requests use credits, not monthly app-plan credit.
+Connected AI subscriptions are for paid-plan app work and cannot serve API
+requests; an explicit selection returns `subscription_api_unavailable` (403),
+and an omitted model skips subscription defaults. Own provider API keys remain
+supported. Their platform fee is configuration-driven; at
+`OPENGENI_BYOK_PLATFORM_FEE_BPS=0` there is no fee or paid-credit admission
+requirement for it. See [billing-origin.md](billing-origin.md) for funding and
+the existing internal-account legacy terms.
+
 The canonical server-side integration uses:
 
 - one **organization API key** held only by the external backend;

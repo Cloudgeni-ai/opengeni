@@ -8,6 +8,29 @@ import { HTTPException } from "hono/http-exception";
 import { insufficientCreditsHttpError } from "../src/http/api-error";
 import { siteUnfundedReason } from "../src/site-publishing/agent-model";
 
+test("API subscription refusal is a clear 403, with no upgrade or credit-purchase action", async () => {
+  const settings = withCodexCatalogProvider(testSettings({ codexSubscriptionEnabled: true }));
+  let failure: unknown;
+  try {
+    await requireLimit(
+      { settings, db: {} as opengeniDb.Database },
+      {
+        accountId: "acct-1",
+        workspaceId: "ws-1",
+        action: "agent_run:create",
+        model: "codex/gpt-6-luna",
+        billingOrigin: "api",
+      },
+    );
+  } catch (error) {
+    failure = error;
+  }
+  const mapped = insufficientCreditsHttpError(failure);
+  expect(mapped?.status).toBe(403);
+  expect(mapped?.details).toEqual({ code: "subscription_api_unavailable" });
+  expect(mapped?.message).toContain("Choose a credit-billed model for API use.");
+});
+
 function ownKeySettings() {
   return withOrganizationAzureOpenAICredential(
     testSettings({ billingMode: "stripe", usageLimitsMode: "managed", byokPlatformFeeBps: 500 }),

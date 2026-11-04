@@ -25,6 +25,10 @@ import { InitialTile } from "@/ui";
  * `target` is an account to sign in to again. Shown full screen (no Cancel),
  * the screen also lists the device's other accounts, so the person can always
  * go back to one they are signed in to.
+ *
+ * When the target's saved sign-in exists but couldn't be read (a locked or
+ * failing keychain), it is not signed out: the screen says so and offers to
+ * try again first, with signing in again as the fallback.
  */
 export function SignInScreen({
   target,
@@ -38,14 +42,32 @@ export function SignInScreen({
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const insets = useSafeAreaInsets();
-  const { account, accounts, previousAccountId, addAccount, switchAccount } = useAccount();
-  const expired = target ?? (account?.signedOut ? account : null);
+  const {
+    account,
+    accounts,
+    previousAccountId,
+    unreadable,
+    addAccount,
+    switchAccount,
+    retrySignIn,
+  } = useAccount();
+  // A sheet passes its target (null to add an account); only the full
+  // screen without one falls back to the account in use.
+  const expired =
+    target !== undefined
+      ? target
+      : account && (account.signedOut || unreadable.has(account.id))
+        ? account
+        : null;
+  const cantRead = Boolean(expired && !expired.signedOut && unreadable.has(expired.id));
   const choices = onCancel
     ? []
     : signInSwitchChoices(accounts, account?.id ?? null, previousAccountId);
   const [server, setServer] = useState(expired?.baseUrl ?? DEFAULT_SERVER_URL);
   const [editingServer, setEditingServer] = useState(false);
-  const [busy, setBusy] = useState(false);
+  // The action in progress, so its own button shows it.
+  const [running, setRunning] = useState<"signIn" | "retry" | null>(null);
+  const busy = running !== null;
   const [problem, setProblem] = useState<string | null>(null);
   // A successful sign-in replaces this screen before the flow settles.
   const mounted = useRef(true);
@@ -62,14 +84,28 @@ export function SignInScreen({
       setProblem("Enter the address you open Opengeni at, like app.opengeni.ai.");
       return;
     }
-    setBusy(true);
+    setRunning("signIn");
     setProblem(null);
     try {
       const result = await addAccount(baseUrl);
       if (result.kind === "signedIn") onDone?.();
       else if (result.kind === "failed" && mounted.current) setProblem(result.message);
     } finally {
-      if (mounted.current) setBusy(false);
+      if (mounted.current) setRunning(null);
+    }
+  };
+
+  const retry = async () => {
+    if (!expired) return;
+    setRunning("retry");
+    setProblem(null);
+    try {
+      const outcome = await retrySignIn(expired.id);
+      if (!mounted.current) return;
+      if (outcome === "ready") onDone?.();
+      else if (outcome === "unreadable") setProblem("Still couldn't read it.");
+    } finally {
+      if (mounted.current) setRunning(null);
     }
   };
 
@@ -102,7 +138,13 @@ export function SignInScreen({
               textAlign: "center",
             }}
           >
-            {expired ? "Sign in again" : onCancel ? "Add an account" : "Sign in to Opengeni"}
+            {cantRead
+              ? "Couldn't read your sign-in"
+              : expired
+                ? "Sign in again"
+                : onCancel
+                  ? "Add an account"
+                  : "Sign in to Opengeni"}
           </Text>
           <Text
             style={{
@@ -115,9 +157,13 @@ export function SignInScreen({
               maxWidth: 320,
             }}
           >
-            {expired
-              ? `${expired.email} was signed out on ${serverLabel(expired.baseUrl)}.`
-              : "Continue in your browser with any sign-in you use on the web."}
+            {!expired
+              ? "Continue in your browser with any sign-in you use on the web."
+              : cantRead
+                ? `This device couldn't read the saved sign-in for ${expired.email} on ${serverLabel(expired.baseUrl)}.`
+                : expired.signedOut
+                  ? `${expired.email} was signed out on ${serverLabel(expired.baseUrl)}.`
+                  : `Sign in to ${expired.email} on ${serverLabel(expired.baseUrl)}.`}
           </Text>
         </View>
 
@@ -147,17 +193,45 @@ export function SignInScreen({
               }}
             />
           ) : null}
-          <Button
-            variant="primary"
-            size="form"
-            label={busy ? "Waiting for the browser…" : "Continue with web sign-in"}
-            busy={busy}
-            disabled={busy}
-            onPress={() => void start()}
-            style={{ height: 44 }}
-          />
+          {cantRead ? (
+            <>
+              <Button
+                variant="primary"
+                size="form"
+                label="Try again"
+                busy={running === "retry"}
+                disabled={busy}
+                onPress={() => void retry()}
+                style={{ height: 44 }}
+              />
+              <Button
+                variant="ghost"
+                size="form"
+                label={running === "signIn" ? "Waiting for the browser…" : "Sign in again"}
+                disabled={busy}
+                onPress={() => void start()}
+              />
+            </>
+          ) : (
+            <Button
+              variant="primary"
+              size="form"
+              label={busy ? "Waiting for the browser…" : "Continue with web sign-in"}
+              busy={busy}
+              disabled={busy}
+              onPress={() => void start()}
+              style={{ height: 44 }}
+            />
+          )}
           {onCancel ? (
-            <Button variant="ghost" size="form" label="Cancel" onPress={onCancel} />
+            // A retry that succeeds switches accounts, so it finishes first.
+            <Button
+              variant="ghost"
+              size="form"
+              label="Cancel"
+              disabled={running === "retry"}
+              onPress={onCancel}
+            />
           ) : null}
           {problem ? (
             <Text
@@ -175,7 +249,7 @@ export function SignInScreen({
           ) : null}
         </View>
 
-        {editingServer ? null : (
+        {editingServer || cantRead ? null : (
           <Text
             accessibilityRole="button"
             onPress={() => setEditingServer(true)}

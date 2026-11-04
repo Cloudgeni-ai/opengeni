@@ -21,7 +21,7 @@ use compute_engine::{CancellationToken, EngineError, ErrorKind};
 use compute_storage::Error as StorageError;
 use compute_storage::store::{Begun, Held};
 
-use super::{Chunked, Head, OwnerEpoch, Stamp, copy, parse_head, storage_error};
+use super::{Chunked, Head, OwnerEpoch, Stamp, copy_version, parse_head, storage_error};
 use crate::protocol::ImageId;
 
 /// The stamp every image pointer is published under. Images are named by
@@ -90,18 +90,20 @@ impl Chunked {
                     ));
                 }
             };
+            let packing = self.chunks.writes_packs();
             let disk = self
                 .put_file(
                     path,
                     File::open(path),
                     HashMap::new(),
                     None,
+                    packing,
                     &CancellationToken::new(),
                 )
                 .await?
                 .ok_or_else(|| EngineError::new(ErrorKind::Fatal, OP, "not stored"))?;
             let head = Head {
-                version: copy::VERSION,
+                version: copy_version(packing),
                 disk,
                 memory: None,
                 profile: None,

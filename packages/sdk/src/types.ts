@@ -867,12 +867,14 @@ export type UpdateSessionToolPolicyRequest =
   | {
       mode: "workspace_default";
       excludedMcpServerIds?: string[] | undefined;
+      firstPartyMcpPermissions?: Permission[] | undefined;
       expectedVersion: number;
     }
   | {
       mode: "explicit";
       tools: ToolRef[];
       firstPartyMcpTools: FirstPartyMcpToolName[];
+      firstPartyMcpPermissions?: Permission[] | undefined;
       expectedVersion: number;
     };
 
@@ -10401,6 +10403,10 @@ export type {
   SubscriptionPlan,
   SubscriptionPlanCatalog,
   BillingSubscriptionCatalog,
+  BillingAutoTopUpSettings,
+  UpdateBillingAutoTopUpRequest,
+  CreateBillingAutoTopUpSetupSessionRequest,
+  CreateBillingAutoTopUpSetupSessionResponse,
   CreateSubscriptionCheckoutRequest,
   CreateSubscriptionCheckoutResponse,
   ChangeBillingSubscriptionRequest,

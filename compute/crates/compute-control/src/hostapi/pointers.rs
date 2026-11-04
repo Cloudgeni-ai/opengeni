@@ -3,10 +3,10 @@
 
 use axum::Json;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use compute_fleet::{OwnerEpoch, Stamp};
 use compute_protocol::fleet::{
-    KeptPointer, PointerFound, PointerRead, PointerWrite, PointerWritten,
+    KeptPointer, PointerFound, PointerRead, PointerWrite, PointerWritten, READS_PACKS_HEADER,
 };
 use compute_storage::pointer_store::check_name;
 use compute_storage::store::MAX_POINTER_BYTES;
@@ -50,14 +50,25 @@ fn unanswered(error: Unanswered) -> Refused {
     unavailable(error)
 }
 
+/// What to answer as [`PointerFound::packs`]: nothing to a host that does
+/// not read it.
+async fn packs<S: Store>(pointers: &Pointers<S>, headers: &HeaderMap) -> Result<bool, Refused> {
+    if !headers.contains_key(READS_PACKS_HEADER) {
+        return Ok(false);
+    }
+    pointers.packs().await.map_err(unanswered)
+}
+
 pub(super) async fn read<S: Store>(
     State(api): State<HostApi<S>>,
     peer: Peer,
+    headers: HeaderMap,
     Json(read): Json<PointerRead>,
 ) -> Result<Json<PointerFound>, Refused> {
     let pointers = pointers_for(&api, &peer, read.epoch, &read.name).await?;
     let kept = pointers.read(&read.name).await.map_err(unanswered)?;
     let now_ms = pointers.now_ms().await.map_err(unanswered)?;
+    let packs = packs(pointers, &headers).await?;
     Ok(Json(PointerFound {
         kept: kept.map(|row| KeptPointer {
             owner_epoch: row.owner.epoch.0,
@@ -66,12 +77,14 @@ pub(super) async fn read<S: Store>(
             version: row.version,
         }),
         now_ms,
+        packs,
     }))
 }
 
 pub(super) async fn write<S: Store>(
     State(api): State<HostApi<S>>,
     peer: Peer,
+    headers: HeaderMap,
     Json(write): Json<PointerWrite>,
 ) -> Result<Json<PointerWritten>, Refused> {
     if write.pointer.len() > MAX_POINTER_BYTES {
@@ -84,9 +97,14 @@ pub(super) async fn write<S: Store>(
     };
     // Read first, so a write that lands is never answered as failed.
     let now_ms = pointers.now_ms().await.map_err(unanswered)?;
+    let packs = packs(pointers, &headers).await?;
     let version = pointers
         .write(&write.name, owner, &write.pointer, write.on)
         .await
         .map_err(unanswered)?;
-    Ok(Json(PointerWritten { version, now_ms }))
+    Ok(Json(PointerWritten {
+        version,
+        now_ms,
+        packs,
+    }))
 }

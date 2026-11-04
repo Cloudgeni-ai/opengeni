@@ -66,6 +66,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         self.remove_recorded_as(record, vm, removers, holds, false);
     }
 
+    /// Ends the VM of blocked sandbox `id`, held frozen, and removes the
+    /// sandbox here, keeping the store's copy, as a hand-off does: the
+    /// service gave it to another host, or will adopt it here afresh.
+    /// `removers` are answered once its VM is gone and its record with it.
+    pub(super) fn hand_away_frozen(&mut self, record: &Record, removers: Vec<Reply<()>>) {
+        let id = record.id;
+        self.blocked.remove(&id.0);
+        self.retrying.remove(&id.0);
+        self.remove_recorded_as(record, None, removers, None, true);
+    }
+
     /// [`Self::remove_recorded`], keeping the store's copy if `hand_off`.
     fn remove_recorded_as(
         &mut self,
