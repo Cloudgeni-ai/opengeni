@@ -24,7 +24,7 @@ afterAll(async () => {
 const EVENTS = 5000;
 const FIRST_SEQUENCE = 1000;
 
-test("every inlined session visibility probe stays a keyed per-row lookup", async () => {
+test("child visibility probes retain their fences except the command backlog read", async () => {
   const policies = await shared.admin<{ relname: string; expression: string }[]>`
     select c.relname, concat_ws(' ', pg_get_expr(p.polqual, p.polrelid),
       pg_get_expr(p.polwithcheck, p.polrelid)) as expression
@@ -40,7 +40,9 @@ test("every inlined session visibility probe stays a keyed per-row lookup", asyn
     const perRow = policy.expression.match(/OFFSET 0/g)?.length ?? 0;
     expect({ relname: policy.relname, perRow }).toEqual({
       relname: policy.relname,
-      perRow: probes,
+      // Commands alone allow a hashed read probe for large backlogs;
+      // their WITH CHECK remains fenced. All other tables retain both.
+      perRow: probes - (policy.relname === "session_background_commands" ? 1 : 0),
     });
   }
 });

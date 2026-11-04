@@ -5,7 +5,8 @@ import type { InboxAction } from "./inbox-model";
 /**
  * Answer an item from its notification, exactly as the inbox would. Returns
  * false when the item needs the full session view instead: the question
- * changed, was already answered, or asks for more than one plain answer.
+ * changed, was already answered, or asks for more than one plain answer, or
+ * the action is another person's to approve (it runs on their own login).
  */
 export async function actOnInboxItem(
   client: OpenGeniClient,
@@ -14,10 +15,15 @@ export async function actOnInboxItem(
 ): Promise<boolean> {
   if (action.kind === "approve" || action.kind === "deny") {
     if (item.kind !== "approval") return false;
-    await client.sendApprovalDecision(item.workspaceId, item.sessionId, {
-      approvalId: item.sourceKey,
-      decision: action.kind === "approve" ? "approve" : "reject",
-    });
+    try {
+      await client.sendApprovalDecision(item.workspaceId, item.sessionId, {
+        approvalId: item.sourceKey,
+        decision: action.kind === "approve" ? "approve" : "reject",
+      });
+    } catch (error) {
+      if ((error as { status?: number }).status === 403) return false;
+      throw error;
+    }
     return true;
   }
   if (item.kind !== "question") return false;

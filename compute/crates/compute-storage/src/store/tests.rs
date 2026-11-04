@@ -3,7 +3,7 @@ use object_store::memory::InMemory;
 
 use super::*;
 
-/// When the chunk and manifest tests store: none of them crosses a day.
+/// When the chunk and manifest tests store: none of them crosses an hour.
 fn stored_at() -> SystemTime {
     UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000)
 }
@@ -15,7 +15,7 @@ fn store_at(backend: Arc<dyn ObjectStore>, prefix: &str) -> ChunkStore {
 
 /// What names `chunk` once a store on [`stored_at`]'s clock stored it.
 fn stored(chunk: &EncodedChunk) -> ChunkRef {
-    chunk.reference.on_day(day_of(stored_at()))
+    chunk.reference.on_day(period_of(stored_at()))
 }
 
 #[tokio::test]
@@ -365,7 +365,7 @@ async fn keys_nest_under_the_prefix_so_they_can_be_listed() {
     );
     assert_eq!(
         written(&put.reference.key()),
-        Some(Written::On(day_of(stored_at())))
+        Some(Written::On(period_of(stored_at())))
     );
 }
 
@@ -522,6 +522,8 @@ async fn gcs_checksums_prove_a_chunk_without_reading_it() {
         clock: Clock::from_fn(stored_at),
         watch: None,
         settle: Duration::ZERO,
+        stored: remembering(carried::REMEMBERED),
+        held: None,
     };
     let chunk = EncodedChunk::encode(&[9; 16384], 1).unwrap();
     let reference = stored(&chunk);
@@ -545,6 +547,57 @@ async fn gcs_checksums_prove_a_chunk_without_reading_it() {
         store.put_chunk(&forged).await,
         Err(Error::Integrity)
     ));
+}
+
+/// The whole-object reads and the size-and-tag requests `fake` served
+/// since this was last asked.
+fn reads(fake: &crate::fake::Fake) -> (u32, u32) {
+    let gets = std::mem::take(&mut *fake.gets.lock().unwrap());
+    let heads = std::mem::take(&mut *fake.heads.lock().unwrap());
+    (gets, heads)
+}
+
+/// On S3 one request for a chunk's size and entity tag, the MD5 of its
+/// bytes, proves it without reading it. Damage of the same length shows
+/// as another tag, and is read to be sure; another length, or nothing
+/// stored, needs no read. A reference without checksums, or a store whose
+/// tags are not MD5s, is read in full as before.
+#[tokio::test]
+async fn s3_entity_tags_prove_a_chunk_without_reading_it() {
+    use crate::fake::Fake;
+    let fake = Fake::new(Clock::from_fn(stored_at));
+    let store = ChunkStore::over_fake_s3(&fake, "p");
+    let chunk = EncodedChunk::encode(&[9; 16384], 1).unwrap();
+    let reference = stored(&chunk);
+    assert!(!store.has_chunk(&reference).await.unwrap());
+    assert_eq!(reads(&fake), (0, 1), "nothing stored: one HEAD");
+    assert!(store.put_chunk(&chunk).await.unwrap().new);
+    reads(&fake);
+    assert!(store.has_chunk(&reference).await.unwrap());
+    assert_eq!(reads(&fake), (0, 1), "stored: one HEAD, no GET");
+
+    let key = format!("p/{}", reference.key());
+    let mut damaged = chunk.bytes.clone();
+    damaged[1] ^= 0x10;
+    fake.put_raw(&key, Bytes::from(damaged));
+    assert!(!store.has_chunk(&reference).await.unwrap());
+    assert_eq!(reads(&fake), (1, 1), "another tag: read to be sure");
+    fake.put_raw(&key, Bytes::copy_from_slice(&chunk.bytes[1..]));
+    assert!(!store.has_chunk(&reference).await.unwrap());
+    assert_eq!(reads(&fake), (0, 1), "another length");
+    assert!(store.put_chunk(&chunk).await.unwrap().new, "repaired");
+    reads(&fake);
+
+    let unchecked = ChunkRef {
+        checksums: None,
+        ..reference.clone()
+    };
+    assert!(store.has_chunk(&unchecked).await.unwrap());
+    assert_eq!(reads(&fake), (1, 0), "no checksums: read");
+    // Tagged by generation, as a store that does not use MD5s may.
+    *fake.tags_follow_bytes.lock().unwrap() = false;
+    assert!(store.has_chunk(&reference).await.unwrap());
+    assert_eq!(reads(&fake), (1, 1), "a tag that is no MD5: read");
 }
 
 #[tokio::test]
@@ -621,8 +674,8 @@ async fn manifest_round_trip_rejects_corruption_and_invalid_digest() {
         }],
     };
     let name = store.put_manifest(&manifest).await.unwrap();
-    let (day, digest) = name.split_once('/').unwrap();
-    assert_eq!(day, day_of(stored_at()).to_string());
+    let (period, digest) = name.split_once('/').unwrap();
+    assert_eq!(period, period_of(stored_at()).to_string());
     assert_eq!(store.get_manifest(&name).await.unwrap(), manifest);
     assert_eq!(store.put_manifest(&manifest).await.unwrap(), name);
     assert!(store.get_manifest("../unexpected").await.is_err());
@@ -674,14 +727,24 @@ fn manifest_names_are_a_day_and_a_digest_or_a_digest_alone() {
 fn keys_say_when_they_were_written() {
     let digest = "0f".repeat(32);
     let chunk = EncodedChunk::encode(&[1; 64], 1).unwrap();
+    // A day, as names written before periods were hours carry, and an
+    // hour, under the same layout.
     assert_eq!(
         written(&chunk.reference.on_day(20_833).key()),
         Some(Written::On(20_833))
+    );
+    assert_eq!(
+        written(&chunk.reference.on_day(500_000).key()),
+        Some(Written::On(500_000))
     );
     assert_eq!(written(&chunk.reference.key()), Some(Written::Legacy));
     assert_eq!(
         written(&format!("manifests/v2/20833/{digest}.json")),
         Some(Written::On(20_833))
+    );
+    assert_eq!(
+        written(&format!("manifests/v2/500000/{digest}.json")),
+        Some(Written::On(500_000))
     );
     assert_eq!(
         written(&format!("manifests/v1/{digest}.json")),
@@ -778,7 +841,7 @@ async fn a_read_waits_while_the_store_catches_up_then_gives_up() {
         }],
     };
     let reference = stored(&chunk);
-    let name = format!("{}/{}", day_of(stored_at()), {
+    let name = format!("{}/{}", period_of(stored_at()), {
         let bytes = manifest.encode().unwrap();
         blake3::hash(&bytes).to_hex().to_string()
     });

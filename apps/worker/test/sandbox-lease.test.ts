@@ -61,6 +61,8 @@ import {
   claimSessionWorkForAttempt,
   commitWarmingToWarm,
   confirmDrainCold,
+  createEnrollment,
+  createSandbox,
   createSession,
   createDb,
   deferRetainedProcessReconciliation,
@@ -78,6 +80,7 @@ import {
   releaseLeaseHolder,
   releaseWorkspaceArchiveCapture,
   replaceWorkspaceArchiveCaptureAfterProof,
+  readActiveSandbox,
   readLease,
   readRecentSandboxRecoveryObservations,
   reconcileColdLostLeaseInstanceBlockers,
@@ -86,6 +89,7 @@ import {
   SandboxRetainedProcessPromotionFencedError,
   SandboxWorkspaceMutationFencedError,
   SandboxWorkspaceMutationOutputRejectedError,
+  setActiveSandbox,
   settleRetainedProcess,
   touchLeaseHolder,
   verifyWorkspaceMutationSettlement,
@@ -732,6 +736,90 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(spy.calls).toContainEqual({ group: ids.groupId, epoch: 1 });
     expect(result.terminated).toBeGreaterThanOrEqual(1);
     expect((await readRow(ids.workspaceId, ids.groupId))?.liveness).toBe("cold");
+  }, 60_000);
+
+  test("reaping a chat's idle box during a turn on its Connected Machine leaves the machine selected", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const session = await createSession(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      initialMessage: "work on my desktop",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "selfhosted",
+      sandboxGroupId: ids.groupId,
+    });
+    const enrollment = await createEnrollment(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      pubkey: `ed25519:${crypto.randomUUID()}`,
+      exposure: "whole-machine",
+      hasDisplay: true,
+      allowScreenControl: true,
+      os: "windows",
+      arch: "x86_64",
+    });
+    const machine = await createSandbox(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      kind: "selfhosted",
+      name: "desktop",
+      enrollmentId: enrollment.id,
+    });
+    const moved = await setActiveSandbox(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: session.id,
+      targetSandboxId: machine.id,
+      expectedEpoch: session.activeEpoch,
+    });
+    expect(moved.swapped).toBe(true);
+    await initializeSessionStartAtomically(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: session.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const claim = await claimSessionWorkForAttempt(db, ids.workspaceId, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: `machine-turn-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(claim.action).toBe("claimed");
+    // The chat's own managed box, opened by a viewer, sits idle past its grace
+    // while the turn works on the machine.
+    await insertLease(ids, {
+      liveness: "draining",
+      refcount: 0,
+      leaseEpoch: 1,
+      expiresInMs: -1_000,
+      instanceId: "box-idle-beside-machine",
+      backend: "local",
+      resumeBackendId: "local",
+      resumeState: { backendId: "local", sessionState: {} },
+    });
+    const spy = makeTerminateSpy();
+    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(), {
+      terminateBox: spy.fn,
+    });
+
+    await reapSandboxLeases();
+
+    expect(spy.calls).toContainEqual({ group: ids.groupId, epoch: 1 });
+    expect((await readRow(ids.workspaceId, ids.groupId))?.liveness).toBe("cold");
+    // The turn keeps the machine: same pointer, same route epoch.
+    expect(await readActiveSandbox(db, ids.workspaceId, session.id)).toMatchObject({
+      activeSandboxId: machine.id,
+      activeEpoch: moved.pointer!.activeEpoch,
+    });
   }, 60_000);
 
   test("(1) one pass reaps stale holders and bounded subsequent passes terminate every due box", async () => {
@@ -3210,6 +3298,66 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         liveness: "draining",
       }),
     ).toMatchObject({ workspaceGeneration: admission.workspaceGeneration });
+  }, 60_000);
+
+  test("(1b-home-route) a home command's output survives the session moving to another machine", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const attempt = await freshWarmSnapshotAttempt(ids);
+    ids.groupId = attempt.sandboxGroupId;
+    const leaseId = await insertLease(ids, {
+      liveness: "warm",
+      refcount: 1,
+      turnHolders: 1,
+      leaseEpoch: 11,
+      expiresInMs: 600_000,
+      instanceId: "box-home-swap",
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "box-home-swap" } },
+      },
+    });
+    await insertHolder(ids, leaseId, "turn", attempt.holderId, 0, attempt.sessionId);
+
+    // A command admitted on the session's own home sandbox, the way routed
+    // home mutations are admitted: no explicit route, so the route epoch is
+    // the session's epoch at admission.
+    const admission = await advanceWorkspaceGeneration(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 11,
+      expectedInstanceId: "box-home-swap",
+      operation: "execCommand",
+    });
+    expect(admission.routeKind).toBe("home");
+    expect(admission.routeEpoch).toBe(0);
+    // While it runs, the same turn moves the session to another machine.
+    await admin`
+      update sessions set active_epoch = active_epoch + 1
+      where workspace_id = ${ids.workspaceId} and id = ${attempt.sessionId}`;
+
+    // The home command still settles with its output accepted: moving the
+    // session's active route does not touch what ran on its home sandbox.
+    await verifyWorkspaceMutationSettlement(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 11,
+      expectedInstanceId: "box-home-swap",
+      admission,
+      operation: "execCommand",
+      outcome: "resolved",
+    });
+    const [settled] = await admin<{ providerOutcome: string | null; settledAt: Date | null }[]>`
+      select provider_outcome as "providerOutcome", settled_at as "settledAt"
+      from sandbox_workspace_mutation_admissions where id = ${admission.id}`;
+    expect(settled?.providerOutcome).toBe("resolved");
+    expect(settled?.settledAt).toBeInstanceOf(Date);
   }, 60_000);
 
   test("(1b-settlement-race) provider success settles once before a stale-route rejection", async () => {

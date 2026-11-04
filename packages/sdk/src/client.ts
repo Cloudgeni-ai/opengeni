@@ -7043,6 +7043,14 @@ export class OpenGeniClient {
         this.requestJson("GET", `${root(workspaceId)}/accounts`, undefined, undefined, options),
       pending: (workspaceId, options) =>
         this.requestJson("GET", `${root(workspaceId)}/attempts`, undefined, undefined, options),
+      finishUnfinished: (workspaceId, options) =>
+        this.requestJson(
+          "POST",
+          `${root(workspaceId)}/attempts/finish`,
+          undefined,
+          undefined,
+          options,
+        ),
       begin: (workspaceId, input, options) =>
         this.requestJson("POST", `${root(workspaceId)}/attempts`, input, undefined, options),
       get: (workspaceId, id, options) =>

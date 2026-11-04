@@ -144,7 +144,7 @@ if [[ "$*" == "run test:effective-dependency-exports" ]]; then exit 37; fi
     expect(guard).toBeGreaterThan(install);
     expect(restore).toBeGreaterThan(guard);
     expect(effective).toBeGreaterThan(restore);
-    expect(steps[checkout]!.uses).toBe("actions/checkout@v6");
+    expect(steps[checkout]!.uses).toBe("actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803");
     expect(steps[checkout]!.with).toEqual({
       ref: "${{ github.workflow_sha }}",
       path: ".ci/registry-export-guard",

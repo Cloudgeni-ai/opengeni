@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   ListPersonalGitHubRepositoriesResponse,
   PersonalGitHubRepository,
+  personalGitHubConnectionNeedsReconnect,
   ReplacePersonalGitHubRepositorySelectionsRequest,
 } from "../src/personal-github";
 import { McpPersonalConnectionDelegation } from "../src";
@@ -156,6 +157,41 @@ describe("personal GitHub repository contracts", () => {
           ],
         },
       }).success,
+    ).toBe(false);
+  });
+});
+
+describe("personal GitHub reconnect state", () => {
+  const personal = {
+    providerDomain: "github.com",
+    kind: "oauth2" as const,
+    metadata: {
+      credentialRole: "opengeni_github_personal",
+      providerFamily: "github",
+      providerPrincipalId: "59779138",
+      githubUserId: "59779138",
+      githubLogin: "benyhh",
+      oauthEnvironment: "staging",
+      oauthClientMarker: "a".repeat(32),
+      credentialBindingId: "6acc52e1-2952-4da4-9e0e-f45872f661b2",
+      connectedAt: "2026-11-02T09:19:18.000Z",
+      lastVerifiedAt: "2026-11-02T09:19:18.000Z",
+    },
+  };
+
+  test("only a refused grant on the person's own GitHub needs reconnecting", () => {
+    expect(personalGitHubConnectionNeedsReconnect({ ...personal, status: "needs_reauth" })).toBe(
+      true,
+    );
+    expect(personalGitHubConnectionNeedsReconnect({ ...personal, status: "error" })).toBe(true);
+    expect(personalGitHubConnectionNeedsReconnect({ ...personal, status: "active" })).toBe(false);
+    expect(personalGitHubConnectionNeedsReconnect({ ...personal, status: "revoked" })).toBe(false);
+    expect(
+      personalGitHubConnectionNeedsReconnect({
+        ...personal,
+        status: "needs_reauth",
+        metadata: { credentialRole: "test_oauth" },
+      }),
     ).toBe(false);
   });
 });

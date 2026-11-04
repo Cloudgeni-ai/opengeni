@@ -481,10 +481,15 @@ export {
   extractSessionRef,
   groupTimeline,
   sessionStatusFromEvents,
+  timelineLivePause,
+  timelinePauseSpans,
   toolDisplayName,
+  useTimelinePauses,
 } from "./timeline";
 export type {
   GroupTimelineOptions,
+  TimelineLivePause,
+  TimelinePauseSpan,
   ActivityItem,
   AgentMessageItem,
   AuthNeededItem,

@@ -75,7 +75,7 @@ import {
 } from "./linux-integration";
 import { LOCAL_ORIGIN } from "./local-pages";
 import { macLoginAgentName } from "./mac-login-agent";
-import type { MeetingDetection } from "./meeting-detection";
+import type { MeetingDetection, MeetingRecording } from "./meeting-detection";
 import { createMeetingDetection } from "./meeting-detection/electron";
 import { handleMeetingDetectionIpc } from "./meeting-detection/ipc";
 import { registerLocalScheme, serveLocalPages } from "./local-protocol";
@@ -84,7 +84,7 @@ import { flushMarks, mark, measuring, privateMemoryMb } from "./perf";
 import { retryDelayMs } from "./reachability";
 import { nativeSignInUrl, parseSignInCallback, pkcePair, randomState } from "./pkce";
 import { handleSystemAudioIpc, SystemAudioCaptures } from "./system-audio";
-import { AppTray } from "./tray";
+import { AppTray, type TrayMeeting, type TrayMeetingAction } from "./tray";
 import { AppUpdates } from "./updates";
 import { refuseAllPermissions } from "./web-permissions";
 import { MainWindow, openExternalSafely } from "./window";
@@ -381,6 +381,34 @@ export class DesktopShell {
         const shown = accountId ? this.window?.contentsFor(accountId) : null;
         return pages.find((page) => page === shown);
       },
+      // Reminders before the active account's calendar meetings; that account records.
+      calendar: {
+        account: () => {
+          const active = this.store.active();
+          return active && !active.signedOut && active.workspaceId ? { id: active.id } : null;
+        },
+        upcoming: async (accountId) => {
+          const workspaceId = this.store.get(accountId)?.workspaceId;
+          const client = workspaceId ? await this.client(accountId) : null;
+          if (!client || !workspaceId) return null;
+          try {
+            return await client.requestJson(
+              "GET",
+              `/v1/workspaces/${encodeURIComponent(workspaceId)}/upcoming-meetings`,
+              undefined,
+              {},
+              { timeoutMs: 15_000 },
+            );
+          } catch (caught) {
+            // A server from before reminders has no such route: nothing to remind of.
+            if ((caught as { status?: number }).status === 404) return null;
+            throw caught;
+          }
+        },
+        openUrl: (url) => {
+          if (new URL(url).protocol === "https:") void shell.openExternal(url);
+        },
+      },
       log: (message, caught) => console.warn(message, caught ?? ""),
     });
     this.appShots = new AppShots({
@@ -522,6 +550,17 @@ export class DesktopShell {
       if (activity.phase === "done") this.tray?.dictationDone();
       else this.tray?.setDictation(this.dictation.menu());
     });
+    // And a meeting being recorded, from any account, with a way back to it.
+    let recordingMeeting = false;
+    this.meetings.onRecording(() => {
+      const recording = this.meetings.recording() !== null;
+      if (recording !== recordingMeeting) {
+        recordingMeeting = recording;
+        void this.refreshTray();
+      } else {
+        this.tray?.setMeeting(this.trayMeeting());
+      }
+    });
     const hidden =
       (openedAtLogin() || this.reopenedWithoutWindow()) && this.store.active() !== null;
     if (!hidden) this.openWindow();
@@ -529,7 +568,13 @@ export class DesktopShell {
       setTimeout(() => migrateMacLoginItem(this.config.appId), 5_000);
     }
     app.on("activate", () => this.reveal());
-    powerMonitor.on("resume", () => this.retryUnreachable());
+    powerMonitor.on("resume", () => {
+      this.retryUnreachable();
+      this.meetings.refreshCalendar();
+    });
+    powerMonitor.on("unlock-screen", () => this.meetings.refreshCalendar());
+    // Back from connecting a calendar in the browser: settings stop offering it.
+    app.on("browser-window-focus", () => this.meetings.windowFocused());
     app.on("before-quit", (event) => {
       if (this.quitConfirmed) {
         this.quitting = true;
@@ -555,7 +600,7 @@ export class DesktopShell {
       this.appShots.stop();
       this.systemAudio.stopAll();
       this.dictation.stop();
-      this.meetings.stop();
+      this.meetings.shutdown();
       this.computer.shutdownNow();
     });
     app.on("window-all-closed", () => {
@@ -1391,6 +1436,8 @@ export class DesktopShell {
   }
 
   private accountsChanged(): void {
+    // Only the active account reminds of its meetings.
+    this.meetings.accountChanged();
     this.broadcast(DESKTOP_IPC.accountsChanged, this.accountsSnapshot());
     Menu.setApplicationMenu(this.menu());
     void this.refreshTray();
@@ -1478,10 +1525,12 @@ export class DesktopShell {
       if (change) setOpenAtLogin(this.config, change === "open");
     }
     // macOS keeps running without a window anyway; the menu bar item is for the
-    // computer and for dictation. Elsewhere the tray is how a closed window
-    // comes back.
+    // computer, for dictation and for a meeting being recorded. Elsewhere the
+    // tray is how a closed window comes back.
     const wanted =
-      (process.platform === "darwin" ? summary.connected : hasAccounts) || this.dictation.enabled;
+      (process.platform === "darwin" ? summary.connected : hasAccounts) ||
+      this.dictation.enabled ||
+      this.meetings.recording() !== null;
     if (!wanted) {
       this.tray?.destroy();
       this.tray = null;
@@ -1495,9 +1544,51 @@ export class DesktopShell {
         void this.computer.requestPermission(permission).catch(() => undefined),
       quit: () => app.quit(),
       dictation: (action) => this.dictation.menuAction(action),
+      meeting: (action) => this.meetingAction(action),
     });
     this.tray.setDictation(this.dictation.menu());
+    this.tray.setMeeting(this.trayMeeting());
     this.tray.update(summary);
+  }
+
+  /** The meeting being recorded, for the menu: the newest, in whichever account records it. */
+  private trayMeeting(): TrayMeeting | null {
+    const recording = this.meetings.recording();
+    if (!recording) return null;
+    const accountId = this.recordingAccount(recording);
+    const shown = this.window?.accountId ?? this.store.snapshot().activeId;
+    const other = accountId && accountId !== shown ? this.store.get(accountId) : null;
+    return {
+      title: recording.title,
+      paused: recording.paused,
+      elapsedMilliseconds: recording.elapsedMilliseconds,
+      at: recording.at,
+      canOpen: recording.canOpen,
+      otherAccount: other ? other.email : null,
+    };
+  }
+
+  private recordingAccount(recording: MeetingRecording): string | null {
+    const page = recording.page as WebContents;
+    return this.window?.accountFor(page) ?? null;
+  }
+
+  /**
+   * The menu's meeting items. Opening shows the account that records, switching
+   * to it first, then asks its page to show the meeting's live transcript.
+   */
+  private meetingAction(action: TrayMeetingAction): void {
+    const recording = this.meetings.recording();
+    if (!recording) return;
+    if (action === "stop") {
+      this.meetings.stopRecording();
+      return;
+    }
+    const accountId = this.recordingAccount(recording);
+    if (accountId && accountId !== this.window?.accountId) this.showAccount(accountId);
+    else this.reveal();
+    app.focus({ steal: true });
+    this.meetings.openRecording(recording);
   }
 }
 

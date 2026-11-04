@@ -2,6 +2,10 @@ import {
   recoverProviderClockAfterDependencyWait,
   PROVIDER_RECOVERY_SUSPENDED_AT,
 } from "./provider-recovery-clock";
+import {
+  pendingApprovalAccountOwner,
+  SessionApprovalForbiddenError,
+} from "./personal-connection-approval";
 export { continueSessionWaitingWork, getSessionMachineAccess } from "./session-machine-access";
 export { canonicalSecretPermissions } from "./canonical-secret-permissions";
 import { listWorkspaceBackgroundCommandsInScope } from "./session-background-commands";
@@ -44,6 +48,7 @@ import {
 } from "./model-call-timing";
 export * from "./human-input-secret-answers";
 export * from "./secret-use-approvals";
+export * from "./personal-connection-approval";
 export * from "./credential-profiles";
 export * from "./secret-value-masking";
 export * from "./secret-use-history";
@@ -1124,7 +1129,11 @@ import {
   UNATTRIBUTED_LEGACY_INITIATOR,
   type FrozenTurnInitiator,
 } from "./turn-initiator";
-export { frozenInitiatorForCommandActor, type FrozenTurnInitiator } from "./turn-initiator";
+export {
+  frozenInitiatorForCommandActor,
+  sameTurnSender,
+  type FrozenTurnInitiator,
+} from "./turn-initiator";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 import {
   fromPostgresLosslessJson,
@@ -1211,6 +1220,7 @@ import {
 } from "./session-realtime";
 import {
   insertConnectedMachineSessionBackgroundCommandInTransaction,
+  backgroundCommandResultOutputInTransaction,
   boundedSessionBackgroundCommandReason,
   insertManagedSessionBackgroundCommandInTransaction,
   settleClaimedConnectedMachineBackgroundCommandWithMutation,
@@ -7960,6 +7970,13 @@ export type RegistryCapabilityCatalogItemInput = {
   tier: "verified" | "community";
   provenance: string;
   logoAssetPath?: string | null;
+  /**
+   * The row has no logo by policy (an overlay `logoSourceUrl: null`, or a
+   * screened letter placeholder): clear any asset an earlier import stored.
+   * Without it a null `logoAssetPath` keeps the existing asset, because a
+   * skipped or failed fetch must not erase a good logo.
+   */
+  clearLogoAsset?: boolean;
   importBatchId: string;
   scopesHint?: string[];
   homepageUrl?: string | null;
@@ -10569,7 +10586,9 @@ export async function upsertRegistryCapabilityCatalogItem(
     credentialFacts: values.credentialFacts,
     tier: values.tier,
     provenance: values.provenance,
-    logoAssetPath: sql`coalesce(excluded.logo_asset_path, ${schema.capabilityCatalogItems.logoAssetPath})`,
+    logoAssetPath: input.clearLogoAsset
+      ? null
+      : sql`coalesce(excluded.logo_asset_path, ${schema.capabilityCatalogItems.logoAssetPath})`,
     importBatchId: values.importBatchId,
     stale: false,
     staleAt: null,
@@ -33369,6 +33388,8 @@ export async function getInitializedSessionCreateReplay(
     deferInitialTurn?: boolean;
     /** Resolved agent configuration of the retry; omitted skips the comparison. */
     agentConfig?: ResolvedAgentConfig | null;
+    /** The retry's `unattended: true`; a keyed replay must agree with the winner. */
+    unattended?: boolean;
   },
 ): Promise<InitializedSessionCreateReplay | null> {
   return await withWorkspaceSubjectSessionActivityRls(
@@ -35423,6 +35444,7 @@ type SessionTreeStatsRow = {
   waitingDescendants: number | string;
   attentionDescendants: number | string;
   pausedDescendants: number | string;
+  pausedWorkDescendants: number | string;
   failedDescendants: number | string;
   unreadFailedDescendants: number | string;
   unreadDescendants: number | string;
@@ -35444,6 +35466,7 @@ const EMPTY_SESSION_TREE_STATS: SessionTreeStats = {
   waitingDescendants: 0,
   attentionDescendants: 0,
   pausedDescendants: 0,
+  pausedWorkDescendants: 0,
   failedDescendants: 0,
   unreadFailedDescendants: 0,
   unreadDescendants: 0,
@@ -35575,6 +35598,7 @@ export async function sessionTreeStatsForSessions(
         stats."waitingDescendants",
         stats."attentionDescendants",
         stats."pausedDescendants",
+        stats."pausedWorkDescendants",
         stats."failedDescendants",
         stats."unreadFailedDescendants",
         stats."unreadDescendants",
@@ -35588,6 +35612,44 @@ export async function sessionTreeStatsForSessions(
        and root_cursor.session_id = root.id
       join ${schema.workspaceInferenceControls} workspace_control
         on workspace_control.workspace_id = root.workspace_id
+      cross join lateral (
+        -- A sub-chat root inherits its ancestors' pauses. An ancestor's pause
+        -- reaches it unless a subtree resume newer than that pause sits below
+        -- the ancestor; the workspace pause unless one sits anywhere above.
+        with recursive ancestors(id, parent_session_id, override_revision, pause_revision, below, depth) as (
+          select
+            parent.id,
+            parent.parent_session_id,
+            parent.subtree_run_override_revision,
+            case when parent.direct_control_state = 'paused' then parent.direct_pause_revision end,
+            coalesce(root.subtree_run_override_revision, 0),
+            1
+          from ${schema.sessions} parent
+          where parent.workspace_id = ${workspaceId}
+            and parent.id = root.parent_session_id
+            and parent.id <> root.id
+
+          union all
+
+          select
+            parent.id,
+            parent.parent_session_id,
+            parent.subtree_run_override_revision,
+            case when parent.direct_control_state = 'paused' then parent.direct_pause_revision end,
+            greatest(ancestors.below, coalesce(ancestors.override_revision, 0)),
+            ancestors.depth + 1
+          from ancestors
+          join ${schema.sessions} parent
+            on parent.workspace_id = ${workspaceId}
+           and parent.id = ancestors.parent_session_id
+          where ancestors.depth < ${SESSION_TREE_STATS_MAX_DEPTH}
+            and parent.id <> root.id
+        )
+        select
+          max(pause_revision) filter (where pause_revision >= below) as pause_revision,
+          coalesce(max(coalesce(override_revision, 0)), 0) as override_revision
+        from ancestors
+      ) root_lineage
       cross join lateral (
         -- Every node has exactly one parent, so a walk down child links can
         -- only revisit its own start node (when that start sits on a legacy
@@ -35614,13 +35676,14 @@ export async function sessionTreeStatsForSessions(
               case
                 when workspace_control.workspace_state = 'paused'
                   and workspace_control.workspace_pause_revision is not null
-                  and (
-                    root.subtree_run_override_revision is null
-                    or root.subtree_run_override_revision <= workspace_control.workspace_pause_revision
-                  )
+                  and greatest(
+                    coalesce(root.subtree_run_override_revision, 0),
+                    root_lineage.override_revision
+                  ) <= workspace_control.workspace_pause_revision
                   then workspace_control.workspace_pause_revision
                 else null
               end,
+              root_lineage.pause_revision,
               case
                 when root.direct_control_state = 'paused' then root.direct_pause_revision
                 else null
@@ -35734,6 +35797,14 @@ export async function sessionTreeStatsForSessions(
           )::int as "waitingDescendants",
           count(*) filter (where status = 'requires_action')::int as "attentionDescendants",
           count(*) filter (where effective_pause_revision is not null)::int as "pausedDescendants",
+          count(*) filter (
+            where effective_pause_revision is not null
+              and status not in ('requires_action', 'cancelled', 'failed')
+              and (
+                active_turn_id is not null
+                or status in ('running', 'recovering', 'queued', 'waiting_capacity')
+              )
+          )::int as "pausedWorkDescendants",
           count(*) filter (where status = 'failed')::int as "failedDescendants",
           count(*) filter (where status = 'failed' and unread)::int as "unreadFailedDescendants",
           count(*) filter (where unread)::int as "unreadDescendants",
@@ -35792,6 +35863,7 @@ export async function sessionTreeStatsForSessions(
         waitingDescendants: Number(row.waitingDescendants),
         attentionDescendants: Number(row.attentionDescendants),
         pausedDescendants: Number(row.pausedDescendants),
+        pausedWorkDescendants: Number(row.pausedWorkDescendants),
         failedDescendants: Number(row.failedDescendants),
         unreadFailedDescendants: Number(row.unreadFailedDescendants),
         unreadDescendants: Number(row.unreadDescendants),
@@ -38434,10 +38506,16 @@ export type SessionDiscoveryCursor = {
 };
 export const SESSION_DISCOVERY_GOAL_MAX_CHARS = 600;
 export const SESSION_DISCOVERY_MESSAGE_MAX_CHARS = 600;
+/** Who can see a session: only its owner, or everyone in the workspace. */
+export type SessionDiscoveryVisibility = "private" | "workspace";
+
 export type SessionDiscoverySummary = {
   id: string;
   title: string | null;
   titleOriginalChars: number | null;
+  visibility: SessionDiscoveryVisibility;
+  /** Archived to long-term storage: read-only, still readable. */
+  archived: boolean;
   channelId?: string | null;
   parentSessionId: string | null;
   rootSessionId: string;
@@ -38506,12 +38584,17 @@ type NormalizedSessionDiscoveryFilters = {
   channelId: string | null | undefined;
   parentSessionId: string | null | undefined;
   subject: WorkClaimSubjectFilter | null;
+  /** The app's Mine filter: chats the caller started or prompted. */
+  mineOnly: boolean;
+  visibility: SessionDiscoveryVisibility | null;
 };
 
 type SessionDiscoveryPageRow = {
   id: string | null;
   title: string | null;
   titleOriginalChars: number | string | null;
+  visibility: string | null;
+  archived: boolean | null;
   channelId?: string | null;
   parentSessionId: string | null;
   rootSessionId: string | null;
@@ -38586,6 +38669,8 @@ function normalizeSessionDiscoveryFilters(options: {
   channelId?: string | null;
   parentSessionId?: string | null;
   subject?: WorkClaimSubjectFilter;
+  mineOnly?: boolean;
+  visibility?: SessionDiscoveryVisibility;
 }): NormalizedSessionDiscoveryFilters {
   const query = normalizeSessionDiscoveryQuery(options.query ?? options.search);
   if (
@@ -38625,6 +38710,11 @@ function normalizeSessionDiscoveryFilters(options: {
       ? (options.parentSessionId ?? null)
       : undefined,
     subject,
+    mineOnly: options.mineOnly === true,
+    visibility:
+      options.visibility === undefined
+        ? null
+        : z.enum(["private", "workspace"]).parse(options.visibility),
   };
 }
 
@@ -38642,6 +38732,9 @@ function sessionDiscoveryFilterHash(filters: NormalizedSessionDiscoveryFilters):
           filters.parentSessionId === undefined ? { any: true } : filters.parentSessionId,
         ...(filters.channelId !== undefined ? { channelId: filters.channelId } : {}),
         subject: filters.subject,
+        // Added later: present only when set, so earlier relevance cursors keep their hash.
+        ...(filters.mineOnly ? { mineOnly: true } : {}),
+        ...(filters.visibility ? { visibility: filters.visibility } : {}),
       }),
     )
     .digest("hex");
@@ -38715,6 +38808,18 @@ async function selectSessionDiscoveryPageRows(
   }
   if (options.filters.activeOnly) {
     authorizationFilters.push(notInArray(schema.sessions.status, ["failed", "cancelled"]));
+  }
+  if (options.filters.mineOnly) {
+    if (!options.subjectId) throw new Error("sessions_list mineOnly requires a caller identity");
+    authorizationFilters.push(sessionMineSql(options.subjectId));
+  }
+  if (options.filters.visibility) {
+    authorizationFilters.push(
+      eq(
+        schema.sessions.visibility,
+        options.filters.visibility === "private" ? "user_private" : "workspace_shared",
+      ),
+    );
   }
   if (options.filters.recentHours !== null) {
     authorizationFilters.push(
@@ -39041,6 +39146,8 @@ async function selectSessionDiscoveryPageRows(
         select
           ${schema.sessions.id} as id,
           ${schema.sessions.title} as title,
+          ${schema.sessions.visibility} as visibility,
+          ${schema.sessions.archivedAt} is not null as archived,
           ${schema.sessions.channelId} as channel_id,
           ${schema.sessions.parentSessionId} as parent_session_id,
           ${schema.sessions.rootSessionId} as root_session_id,
@@ -39061,6 +39168,8 @@ async function selectSessionDiscoveryPageRows(
         page.id,
         page.title,
         page."titleOriginalChars",
+        page.visibility,
+        page.archived,
         page."channelId",
         page."parentSessionId",
         page."rootSessionId",
@@ -39083,6 +39192,8 @@ async function selectSessionDiscoveryPageRows(
           ranked_sessions.id,
           left(ranked_sessions.title, ${SESSION_DISCOVERY_CONTROL_TITLE_MAX_CHARS}) as title,
           char_length(ranked_sessions.title)::integer as "titleOriginalChars",
+          ranked_sessions.visibility,
+          ranked_sessions.archived,
           ranked_sessions.channel_id as "channelId",
           ranked_sessions.parent_session_id as "parentSessionId",
           ranked_sessions.root_session_id as "rootSessionId",
@@ -39277,6 +39388,9 @@ export async function listSessionDiscoverySummaries(
     activeOnly?: boolean;
     recentHours?: number;
     subject?: WorkClaimSubjectFilter;
+    /** The app's Mine filter (chats the caller started or prompted); needs subjectId. */
+    mineOnly?: boolean;
+    visibility?: SessionDiscoveryVisibility;
     claimLimit?: number;
     /** Skip advisory claim reads on plain MCP browse or an operator-disabled rollout.
      * Omitted retains the REST/UI legacy evidence default. */
@@ -39522,6 +39636,8 @@ export async function listSessionDiscoverySummaries(
         id: sessionId,
         title: row.title,
         titleOriginalChars: row.titleOriginalChars === null ? null : Number(row.titleOriginalChars),
+        visibility: row.visibility === "user_private" ? "private" : "workspace",
+        archived: row.archived === true,
         channelId: row.channelId ?? null,
         parentSessionId: relatedAccess === "root" ? row.parentSessionId : null,
         rootSessionId: relatedAccess === "root" ? row.rootSessionId! : sessionId,
@@ -61043,6 +61159,13 @@ export async function verifyWorkspaceMutationSettlement(
   },
 ): Promise<void> {
   const routeKind = input.routeKind ?? "home";
+  // Settle the exact admission: without an explicit route epoch, the route
+  // epoch is the one recorded when it was admitted, never the session's
+  // current epoch. A swap during a home-sandbox command moves the session's
+  // active route but changes nothing about where that command ran, so it must
+  // not reject the command's output (an active-route move is still fenced as
+  // route_fenced against the admission's recorded route).
+  const routeEpoch = input.routeEpoch ?? input.admission.routeEpoch;
   await verifyWorkspaceMutationSettlementForAuthority(
     db,
     {
@@ -61059,7 +61182,7 @@ export async function verifyWorkspaceMutationSettlement(
       expectedInstanceId: input.expectedInstanceId,
       routeKind,
       routeTargetId: routeKind === "home" ? null : (input.routeTargetId ?? null),
-      ...(input.routeEpoch === undefined ? {} : { routeEpoch: input.routeEpoch }),
+      routeEpoch,
     },
     input,
   );
@@ -81002,6 +81125,11 @@ export async function getSessionAttemptActivityRef(
  * and every writer it did admit (including retained-process child writes) must
  * carry a physical settlement before the ordinary receipt transaction is
  * allowed to run.
+ *
+ * With that proof, owned-box setup that the attempt's provably exited worker
+ * left unsettled is settled first (`settleCrashedWorkerSetupAdmissions`).
+ * `workerProcessExitDeadlineMs` is the turn worker's process-exit deadline
+ * after a shutdown signal; without it a worker-shutdown closure keeps its gate.
  */
 export async function reconcileSessionAttemptQuiescence(
   db: Database,
@@ -81014,8 +81142,10 @@ export async function reconcileSessionAttemptQuiescence(
     temporalWorkflowRunId: string;
     temporalActivityId: string;
     activitySettled: boolean;
+    workerProcessExitDeadlineMs?: number;
   },
 ): Promise<ReconcileSessionAttemptQuiescenceResult> {
+  if (input.activitySettled) await settleCrashedWorkerSetupAdmissions(db, input);
   const eligibility = await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -81152,6 +81282,113 @@ export async function reconcileSessionAttemptQuiescence(
     temporalActivityId: input.temporalActivityId,
   });
   return { action: "quiesced", events };
+}
+
+/**
+ * Reject the owned-box setup requests that a worker-shutdown closure left
+ * behind once the closing worker's process provably no longer exists. Nothing
+ * else settles them: the worker closed the attempt `interrupted_recoverable`
+ * and exited before its writer drain released them, and a box that stays warm
+ * (compute is never drained for being idle) never reaches the cold commit that
+ * rejects crashed-worker requests. The closed attempt then never quiesced and
+ * its session never claimed another turn, Steer or message.
+ *
+ * A settled activity and a missing holder do not prove the worker exited (a
+ * closed attempt's holder is removed at once, and Temporal reports a cancelled
+ * activity settled while its code still runs). Time does: the closure came
+ * from the attempt's own `worker_shutdown` recovery request, which follows the
+ * worker's shutdown signal, and a standalone worker process exits within its
+ * process-exit deadline of that signal whatever its drain does. So the attempt
+ * must have closed at least that deadline ago, with no Pause/Steer interruption
+ * row.
+ *
+ * The request must be the attempt's own owned-box setup, unsettled, without a
+ * holder or retained process, on a turn whose setup Start outcome is not
+ * recorded unknown (that turn waits for the box to be gone). Setup writes only
+ * through its attempt's command fence, and the replacement attempt runs the same
+ * setup again before any model work. Pause, Steer, cancellation, other recovery
+ * reasons, other closures and every other request keep today's gate.
+ */
+async function settleCrashedWorkerSetupAdmissions(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    attemptId: string;
+    temporalWorkflowId: string;
+    temporalWorkflowRunId: string;
+    temporalActivityId: string;
+    workerProcessExitDeadlineMs?: number;
+  },
+): Promise<void> {
+  const exitDeadlineMs = input.workerProcessExitDeadlineMs;
+  if (exitDeadlineMs === undefined || !Number.isSafeInteger(exitDeadlineMs) || exitDeadlineMs < 0)
+    return;
+  await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await scopedDb.execute(sql`
+        update sandbox_workspace_mutation_admissions admission
+        set provider_outcome = 'rejected', settled_at = now()
+        from session_turn_attempts attempt
+        join session_turns turn
+          on turn.workspace_id = attempt.workspace_id
+         and turn.session_id = attempt.session_id
+         and turn.id = attempt.turn_id
+        where attempt.account_id = ${input.accountId}
+          and attempt.workspace_id = ${input.workspaceId}
+          and attempt.session_id = ${input.sessionId}
+          and attempt.id = ${input.attemptId}
+          and attempt.temporal_workflow_id = ${input.temporalWorkflowId}
+          and attempt.temporal_workflow_run_id = ${input.temporalWorkflowRunId}
+          and attempt.temporal_activity_id = ${input.temporalActivityId}
+          and attempt.state = 'closed'
+          and attempt.quiesced_at is null
+          and attempt.outcome = 'interrupted_recoverable'
+          and attempt.closed_at <= now() - (${exitDeadlineMs}::integer * interval '1 millisecond')
+          and not exists (
+            select 1 from session_attempt_interruptions interruption
+            where interruption.workspace_id = attempt.workspace_id
+              and interruption.session_id = attempt.session_id
+              and interruption.attempt_id = attempt.id
+          )
+          and exists (
+            select 1 from session_events recovery
+            where recovery.account_id = attempt.account_id
+              and recovery.workspace_id = attempt.workspace_id
+              and recovery.session_id = attempt.session_id
+              and recovery.turn_id = attempt.turn_id
+              and recovery.turn_attempt_id = attempt.id
+              and recovery.type = 'turn.recovery.requested'
+              and recovery.payload ->> 'reason' = 'worker_shutdown'
+          )
+          and (turn.metadata -> 'sandboxSetupOutcomeUnknown') is null
+          and admission.account_id = attempt.account_id
+          and admission.workspace_id = attempt.workspace_id
+          and admission.session_id = attempt.session_id
+          and admission.turn_id = attempt.turn_id
+          and admission.attempt_id = attempt.id
+          and admission.actor_kind = 'turn'
+          and admission.actor_id = attempt.id
+          and admission.holder_kind = 'turn'
+          and admission.execution_generation = attempt.execution_generation
+          and admission.operation in ('lazyOwnedSandboxSetup', 'eagerOwnedSandboxSetup')
+          and admission.settled_at is null
+          and admission.provider_outcome is null
+          and not exists (
+            select 1 from sandbox_retained_processes retained
+            where retained.parent_admission_id = admission.id
+          )
+          and not exists (
+            select 1 from sandbox_lease_holders holder
+            where holder.lease_id = admission.lease_id
+              and holder.holder_id = admission.holder_id
+          )
+      `);
+    },
+  );
 }
 
 /**
@@ -91111,10 +91348,14 @@ function backgroundCommandTerminalMutation(input: {
           `Session ${input.sessionId} does not belong to account ${input.accountId}`,
         );
       }
+      // Terminal settlement only needs pause/admission state. Recounting all
+      // stopping commands here makes draining a backlog quadratic, while each
+      // count holds the session write lock and blocks unrelated lifecycle work.
       controlActive =
         (
-          await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
+          await evaluateSessionWriteAdmissionControl(tx, input.workspaceId, input.sessionId, {
             workspaceControl: locks.control,
+            lockedSession: session,
           })
         ).state === "active";
     },
@@ -91240,6 +91481,19 @@ function backgroundCommandTerminalMutation(input: {
                   : command.exitCode === 0
                     ? `${commandLabel}: completed successfully.`
                     : `${commandLabel}: exited with code ${command.exitCode ?? "unknown"}.`;
+      // The result carries the start and end of the output, so the turn it
+      // wakes or reaches needs no extra read to learn what the command did.
+      // A lost command (its sandbox gone, or contained) carries none: those
+      // settle in bulk under lease locks, and its output stays readable.
+      const output =
+        command.state === "lost"
+          ? null
+          : await backgroundCommandResultOutputInTransaction(tx, {
+              accountId: session.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              commandId: command.id,
+            });
       const payload = {
         type: "background_command_result" as const,
         commandId: command.id,
@@ -91248,6 +91502,7 @@ function backgroundCommandTerminalMutation(input: {
         reason,
         ...(command.failure ? { failure: command.failure } : {}),
         outputLocator,
+        ...(output !== null ? { output } : {}),
         ...(command.backgroundChildrenStopped
           ? { notice: CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE }
           : {}),
@@ -92431,6 +92686,20 @@ export async function acceptSessionApprovalDecision(
                     .limit(1)
                 ).length > 0;
           if (!resumable) return approvalConflict(sessionStatus, "not_pending");
+        }
+        // The call runs on the turn's frozen accounts, never the approver's:
+        // approving one that runs on someone's own account is theirs alone.
+        // Checked before the answer, so a non-owner always learns who decides.
+        if (payload.decision === "approve") {
+          const owner = await pendingApprovalAccountOwner(tx as unknown as Database, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: liveTurn.id,
+            approvalId,
+          });
+          if (owner !== null && owner.subjectId !== input.subjectId) {
+            throw new SessionApprovalForbiddenError(owner);
+          }
         }
         payload = approvalDecisionPayloadWithAnswer(pendingApproval, payload);
         if (input.interactionIntervention) {

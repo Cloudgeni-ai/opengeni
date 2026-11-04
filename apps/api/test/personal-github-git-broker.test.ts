@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
+import { PERSONAL_GITHUB_RECONNECT_MESSAGE } from "@opengeni/contracts/personal-github";
 import { removeSessionResources, type ApiRouteDeps } from "@opengeni/core";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import {
@@ -23,6 +24,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -672,7 +674,11 @@ describe("personal GitHub Git broker", () => {
     expect(isApiContractProtectedMutation("POST", receivePath)).toBe(false);
   });
 
-  async function acceptedPersonalBrokerFixture() {
+  /**
+   * `refresh` stores an expired token whose refresh GitHub answers with that
+   * OAuth error in an HTTP 200, the way github.com reports refresh errors.
+   */
+  async function acceptedPersonalBrokerFixture(options: { refresh?: string } = {}) {
     if (!shared || !dbClient) throw new Error("PostgreSQL test database unavailable");
     const client = dbClient;
     const userId = `git-broker-${crypto.randomUUID()}`;
@@ -701,8 +707,11 @@ describe("personal GitHub Git broker", () => {
 
     const signingSecret = "git-broker-signing-secret";
     const encryptionKey = Buffer.alloc(32, 11).toString("base64");
+    const oauthClientId = "Ov23broker-client";
     const settings: Settings = testSettings({
       githubPersonalOauthEnabled: true,
+      githubPersonalOauthClientId: oauthClientId,
+      githubPersonalOauthClientSecret: "broker-client-secret",
       integrationsEnabled: true,
       integrationsStateSecret: signingSecret,
       environmentsEncryptionKey: encryptionKey,
@@ -721,18 +730,33 @@ describe("personal GitHub Git broker", () => {
       status: "active",
       credentialEncrypted: encryptEnvironmentValue(
         key,
-        JSON.stringify({ access_token: "provider-secret", token_type: "Bearer", scope: "repo" }),
+        JSON.stringify({
+          access_token: "provider-secret",
+          token_type: "Bearer",
+          scope: "repo",
+          ...(options.refresh
+            ? {
+                refresh_token: "ghr_current",
+                token_endpoint: "https://github.com/login/oauth/access_token",
+                client_id: oauthClientId,
+                token_endpoint_auth_method: "client_secret_post",
+                scope_parameter_supported: false,
+              }
+            : {}),
+        }),
       ),
       grantedScopes: ["repo"],
-      expiresAt: null,
+      expiresAt: options.refresh ? new Date(Date.now() - 60_000) : null,
       metadata: {
         credentialRole: "opengeni_github_personal",
         providerFamily: "github",
         providerPrincipalId: "9876543210987654321",
         githubUserId: "9876543210987654321",
         githubLogin: "octocat",
-        oauthEnvironment: "test",
-        oauthClientMarker: "a".repeat(32),
+        oauthEnvironment: settings.environment,
+        oauthClientMarker: options.refresh
+          ? createHash("sha256").update(oauthClientId).digest("hex").slice(0, 32)
+          : "a".repeat(32),
         credentialBindingId,
         connectedAt: now,
         lastVerifiedAt: now,
@@ -838,10 +862,14 @@ describe("personal GitHub Git broker", () => {
       reasoningEffortFallback: "medium",
       createdEventPayload: {},
     });
-    const counter = { providerCalls: 0 };
+    const counter = { providerCalls: 0, tokenRefreshes: 0 };
     const providerFetch = (async (input: string | URL | Request) => {
-      counter.providerCalls += 1;
       const url = String(input);
+      if (url === "https://github.com/login/oauth/access_token") {
+        counter.tokenRefreshes += 1;
+        return Response.json({ error: options.refresh ?? "bad_refresh_token" });
+      }
+      counter.providerCalls += 1;
       return url === "https://api.github.com/user"
         ? liveUserResponse()
         : url.startsWith("https://api.github.com/repositories/")
@@ -965,6 +993,84 @@ describe("personal GitHub Git broker", () => {
     });
     expect(staleResponse.status).toBe(401);
     expect(fixture.counter.providerCalls).toBe(3);
+  }, 120_000);
+
+  test("tells Git to reconnect GitHub when GitHub refused the stored grant", async () => {
+    if (!shared || !dbClient) return;
+    const fixture = await acceptedPersonalBrokerFixture();
+    const { app, connection } = fixture;
+    const route = await fixture.brokerFor(fixture.session);
+    const accepted = await app.request(route.brokerUrl, {
+      headers: { authorization: basic(route.brokerBearer) },
+    });
+    expect(accepted.status).toBe(200);
+    const providerCalls = fixture.counter.providerCalls;
+
+    // A refresh GitHub rejected moves the connection to needs_reauth (the
+    // token resolver's permanent-failure transition).
+    await shared.admin`
+        update connections
+        set status = 'needs_reauth', last_error = 'connection refresh failed with HTTP 400',
+          version = version + 1
+        where id = ${connection.id}
+      `;
+    const refused = await app.request(route.brokerUrl, {
+      headers: { authorization: basic(route.brokerBearer) },
+    });
+    expect(refused.status).toBe(403);
+    expect(await refused.text()).toBe(`${PERSONAL_GITHUB_RECONNECT_MESSAGE}\n`);
+    expect(fixture.counter.providerCalls).toBe(providerCalls);
+  }, 120_000);
+
+  // The staging incident: the stored token expired, and GitHub refused its
+  // refresh with HTTP 200 and an OAuth error. Git used to hear "authorization
+  // is no longer current" while the connection stayed active forever.
+  test("an expired grant GitHub refuses to refresh moves to needs_reauth and Git hears reconnect", async () => {
+    if (!shared || !dbClient) return;
+    const fixture = await acceptedPersonalBrokerFixture({ refresh: "bad_refresh_token" });
+    const route = await fixture.brokerFor(fixture.session);
+    const [before] = await shared.admin<{ authority_generation: string }[]>`
+        select authority_generation from connections where id = ${fixture.connection.id}
+      `;
+
+    const refused = await fixture.app.request(route.brokerUrl, {
+      headers: { authorization: basic(route.brokerBearer) },
+    });
+
+    expect(refused.status).toBe(403);
+    expect(await refused.text()).toBe(`${PERSONAL_GITHUB_RECONNECT_MESSAGE}\n`);
+    expect(fixture.counter.tokenRefreshes).toBe(1);
+    const [after] = await shared.admin<
+      { status: string; last_error: string | null; authority_generation: string }[]
+    >`
+        select status, last_error, authority_generation from connections
+        where id = ${fixture.connection.id}
+      `;
+    expect(after!.status).toBe("needs_reauth");
+    expect(after!.last_error).toBe(
+      "connection refresh refused by the provider (bad_refresh_token)",
+    );
+    // Every bearer frozen before the refusal is fenced off.
+    expect(Number(after!.authority_generation)).toBeGreaterThan(
+      Number(before!.authority_generation),
+    );
+  }, 120_000);
+
+  test("a refresh GitHub cannot serve right now tells Git to try again and keeps the grant", async () => {
+    if (!shared || !dbClient) return;
+    const fixture = await acceptedPersonalBrokerFixture({ refresh: "temporarily_unavailable" });
+    const route = await fixture.brokerFor(fixture.session);
+
+    const busy = await fixture.app.request(route.brokerUrl, {
+      headers: { authorization: basic(route.brokerBearer) },
+    });
+
+    expect(busy.status).toBe(502);
+    expect(await busy.text()).toBe("GitHub is temporarily unavailable. Try again.\n");
+    const [after] = await shared.admin<{ status: string }[]>`
+        select status from connections where id = ${fixture.connection.id}
+      `;
+    expect(after!.status).toBe("active");
   }, 120_000);
 
   test("refuses the next Git request for a repository removed from the chat, including in a child chat", async () => {

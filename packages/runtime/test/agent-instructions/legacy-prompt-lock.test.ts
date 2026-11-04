@@ -12,7 +12,8 @@ import { LEGACY_PROMPT_CASES } from "./legacy-cases";
  * Codemode approval guidance and the secrets overhaul's removal of the retired
  * variable_set_list / variableSetIds wording, and proceeding past blocked
  * routine, reversible steps, the Skill index reading Skills by name, and
- * answering privacy questions from `privacy_facts`; `unattended` pins the
+ * answering privacy questions from `privacy_facts`, and the shorter Codemode
+ * directive; `unattended` pins the
  * unattended-session CORE paragraph, which no other case carries. Reviewed
  * instruction changes update their locks; Modular composition must never
  * change legacy bytes as a side effect.
@@ -39,14 +40,14 @@ const LOCKED: Record<string, { chars: number; sha256: string; layers: string }> 
     layers: "operational_contract,persona_and_core",
   },
   extras_without_governance: {
-    chars: 39843,
-    sha256: "837218a365fce3af928e94ac533e269d6a9d9bcd1587caff2cf9bd7301928385",
+    chars: 39220,
+    sha256: "702be8183a5831000936560a709de96df18a82460be5ddd82ae49f8e25ac5599",
     layers:
       "operational_contract,persona_and_core,codemode,code_search,git_bindings,workspace_memory,skill_catalog,session_instructions",
   },
   extras_with_governance: {
-    chars: 38857,
-    sha256: "a0c773225131776df57fc1ea66da3fd12b2bce7c6c3ee652b57f8f9065a11dcf",
+    chars: 38234,
+    sha256: "b590b1eb656abba2b43ead2be26096dc76f8604f096f6a6a30cc6caa7bf4c02b",
     layers:
       "operational_contract,persona_and_core,workspace_governance,session_instructions,codemode,code_search,workspace_memory",
   },

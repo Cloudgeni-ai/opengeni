@@ -11,7 +11,6 @@
 import type {
   DesktopComputerCapabilities,
   DesktopComputerSettings,
-  DesktopMeetingDetectionStatus,
   ThisComputerPermission,
   ThisComputerPermissionId,
   ThisComputerStatus,
@@ -33,6 +32,10 @@ import { desktopBridge, desktopCapability } from "@opengeni/react/app/lib/deskto
 import { useDesktopThisComputer } from "@opengeni/react/app/components/desktop/this-computer";
 import { ComputerUseRow } from "@opengeni/react/app/components/desktop/computer-use";
 import { EXCEL_ADDIN_PATH } from "@/lib/excel-addin";
+import { CalendarRemindersRow } from "./calendar-reminders-row";
+import { useMeetingDetection } from "./use-meeting-detection";
+
+export { connectCalendarPath } from "./use-meeting-detection";
 
 /** What each screen-control permission is for, in a few words. */
 const SCREEN_PERMISSION_ROWS: Record<
@@ -457,44 +460,15 @@ export function ThisComputerAgentSettings({ className }: { className?: string })
   );
 }
 
-/** Whether the app offers to record when a call starts, kept current while the page is open. */
-function useMeetingDetection() {
-  const bridge = desktopCapability("meetingDetection")?.meetingDetection ?? null;
-  const [status, setStatus] = useState<DesktopMeetingDetectionStatus | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [failed, setFailed] = useState<string | null>(null);
-  const refresh = useCallback(() => {
-    if (!bridge) return;
-    void bridge
-      .status()
-      .then(setStatus)
-      .catch(() => undefined);
-  }, [bridge]);
-  useEffect(() => {
-    if (!bridge) return;
-    refresh();
-    return bridge.onChange(refresh);
-  }, [bridge, refresh]);
-  const update = useCallback(
-    async (change: { enabled?: boolean; autoRecord?: boolean }) => {
-      if (!bridge) return;
-      setSaving(true);
-      setFailed(null);
-      try {
-        setStatus(await bridge.update(change));
-      } catch {
-        setFailed("Couldn't save the change. Try again.");
-      } finally {
-        setSaving(false);
-      }
-    },
-    [bridge],
-  );
-  return { bridge, status, saving, failed, update };
-}
-
 /** The app's own use of the microphone, for dictation, voice chats and meeting recordings. */
-export function ThisComputerMicrophoneSettings({ className }: { className?: string }) {
+export function ThisComputerMicrophoneSettings({
+  className,
+  onConnectCalendar,
+}: {
+  className?: string;
+  /** Opens where a calendar is connected; without it the row doesn't offer to. */
+  onConnectCalendar?: (() => void) | undefined;
+}) {
   const caps = useComputerCapabilities();
   const meetings = useMeetingDetection();
   const platform = desktopBridge?.platform ?? "macos";
@@ -577,6 +551,14 @@ export function ThisComputerMicrophoneSettings({ className }: { className?: stri
             />
           ) : null}
         </SettingRow>
+      ) : null}
+      {meetings.bridge && detection && detection.calendarReminders !== undefined ? (
+        <CalendarRemindersRow
+          status={{ ...detection, calendarReminders: detection.calendarReminders }}
+          saving={meetings.saving}
+          onChange={(next) => void meetings.update({ calendarReminders: next })}
+          onConnectCalendar={onConnectCalendar}
+        />
       ) : null}
     </Section>
   );

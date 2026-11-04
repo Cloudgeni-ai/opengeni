@@ -3785,3 +3785,142 @@ describe("opening tool load", () => {
     expect(JSON.stringify((await run(["unknown_tool"], false))[0])).toBe(JSON.stringify(plain[0]));
   });
 });
+
+describe("tool names in replayed history", () => {
+  // The form stored before tool identities were exempt from secret masking:
+  // a known value inside the tool name replaced by its reference.
+  const maskedWeather = `${SERVER_ID}__\u007B\u007Bsecret:Vault/db/password}}`;
+
+  test.each(["openai_native", "codex_native"] as const)(
+    "%s: a stored tool_search_output and call with a masked or dotted name replay with the authorized name and the tool still runs",
+    async (transport) => {
+      let executed: unknown = null;
+      const weather = weatherTool({
+        execute: (input) => {
+          executed = input;
+          return "sunny";
+        },
+      });
+      const agent = agentWith(weather);
+      const runtime = installLazyToolRuntime(agent, transport, new Set([SERVER_ID]));
+      const model = new ScriptedStreamingModel([
+        [
+          {
+            type: "function_call",
+            callId: "call-now",
+            name: WEATHER_TOOL,
+            arguments: JSON.stringify({ city: "Oslo" }),
+          },
+        ],
+        [finalMessage("done")],
+      ]);
+      const definition = (name: string) => ({
+        type: "function",
+        name,
+        description: "Look up the current weather for a city",
+        // As stored when the search loaded it: the tool's own schema.
+        parameters: (weather as { parameters: unknown }).parameters,
+      });
+      const history = [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "Weather?" }] },
+        {
+          type: "tool_search_call",
+          call_id: "old-search",
+          execution: "client",
+          status: "completed",
+          arguments: { query: "weather" },
+        },
+        {
+          type: "tool_search_output",
+          call_id: "old-search",
+          execution: "client",
+          status: "completed",
+          tools: [definition(maskedWeather), definition(`${SERVER_ID}.weather_lookup`)],
+        },
+        {
+          type: "function_call",
+          callId: "old-call",
+          name: maskedWeather,
+          arguments: JSON.stringify({ city: "Bergen" }),
+          status: "completed",
+        },
+        { type: "function_call_result", callId: "old-call", name: maskedWeather, output: "rain" },
+        { type: "message", role: "user", content: [{ type: "input_text", text: "And now?" }] },
+      ];
+      const runner = new Runner({
+        modelProvider: new LazyToolModelProvider(providerFor(model), runtime),
+      });
+      const result = await runner.run(agent, history as never, {
+        stream: true,
+        historyOwnership: "external",
+        maxTurns: 4,
+        toolNotFoundBehavior: "return_error_to_model",
+        resolveMissingFunctionTool: createResolveMissingFunctionTool(runtime),
+      });
+      for await (const _event of result.toStream()) void _event;
+      await result.completed;
+
+      expect(result.finalOutput).toBe("done");
+      expect(executed).toEqual({ city: "Oslo" });
+      const first = model.requests[0]!.input as Array<Record<string, any>>;
+      const replayedSearch = first.find((item) => item.type === "tool_search_output")!;
+      // Both stored definitions denote the same tool, which is declared once.
+      expect(replayedSearch.tools.map((entry: { name: string }) => entry.name)).toEqual([
+        WEATHER_TOOL,
+      ]);
+      expect(
+        first.find((item) => item.callId === "old-call" && item.type === "function_call"),
+      ).toMatchObject({ name: WEATHER_TOOL });
+      expect(JSON.stringify(model.requests.map((request) => request.input))).not.toContain(
+        "\u007B\u007Bsecret:",
+      );
+    },
+  );
+
+  test("a name no authorized tool answers to stays raw for the route's projection", async () => {
+    const agent = agentWith(weatherTool());
+    const runtime = installLazyToolRuntime(agent, "openai_native", new Set([SERVER_ID]));
+    const model = new ScriptedStreamingModel([[finalMessage("done")]]);
+    const unknown = "other.unknown_tool";
+    const history = [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "Hi" }] },
+      {
+        type: "function_call",
+        callId: "old-call",
+        name: unknown,
+        arguments: "{}",
+        status: "completed",
+      },
+      { type: "function_call_result", callId: "old-call", name: unknown, output: "ok" },
+      {
+        type: "function_call",
+        callId: "masked-call",
+        name: maskedWeather,
+        arguments: JSON.stringify({ city: "Bergen" }),
+        status: "completed",
+      },
+      { type: "function_call_result", callId: "masked-call", name: maskedWeather, output: "rain" },
+      { type: "message", role: "user", content: [{ type: "input_text", text: "And now?" }] },
+    ];
+    const runner = new Runner({
+      modelProvider: new LazyToolModelProvider(providerFor(model), runtime),
+    });
+    const result = await runner.run(agent, history as never, {
+      stream: true,
+      historyOwnership: "external",
+      maxTurns: 2,
+    });
+    for await (const _event of result.toStream()) void _event;
+    await result.completed;
+
+    const first = model.requests[0]!.input as Array<Record<string, any>>;
+    // Chat replays it as a historical fact and Responses gives it an alias;
+    // the lazy layer does not decide that for every route.
+    expect(
+      first.find((item) => item.callId === "old-call" && item.type === "function_call"),
+    ).toMatchObject({ name: unknown });
+    expect(
+      first.find((item) => item.callId === "masked-call" && item.type === "function_call"),
+    ).toMatchObject({ name: WEATHER_TOOL });
+  });
+});

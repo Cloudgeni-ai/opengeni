@@ -250,10 +250,14 @@ computeControl:
       iam.gke.io/gcp-service-account: opengeni-compute-control@example.iam.gserviceaccount.com
 ```
 
-The daily sweep of the store (ADR 17, 25) runs as a CronJob from the same
-image, identity and database (`computeControl.sweep`), as `compute-control
-sweep`: it reads the pointers the service keeps. It deletes on any archive,
-`gs://`, `az://` or `s3://`.
+The hourly sweep of the store (ADR 17, 25, 28, 29) runs as a CronJob from the
+same image, identity and database (`computeControl.sweep`), as
+`compute-control sweep`: it reads the pointers the service keeps. It deletes on
+any archive, `gs://`, `az://` or `s3://`. Each run lists only the hours that
+became old enough since the last run, and deletes what replaced copies alone
+named; once a day it lists everything. It keeps its progress under `sweep/` in
+the store, gives up starting new listings after 40 minutes, leaves what failed
+to the next run, and logs each step, so a run that is slow shows where it is.
 
 ### Hosts
 
@@ -542,6 +546,18 @@ to hosts that offer them; other pools' teams reach none.
   on meanwhile (its lease lapsed, or it was fenced) and registers again:
   it comes back draining, so a host on its way out never takes new
   sandboxes.
+- **Resizing a sandbox.** A deployment that creates sandboxes at a new
+  shape leaves older ones at theirs. `POST /v1/sandboxes/<id>/resize`
+  with any of `vcpus`, `memory_mib`, `memory_request_mib`,
+  `cpu_request_millis` and `disk_mib` (each omitted stays) moves the
+  sandbox off its host as `/move` does and gives it the new shape, which
+  its next wake places and books (ADR 27). Its files stay. A new `vcpus`
+  or `memory_mib` ends its running programs: it boots afresh from its
+  disk. New requests or a longer disk keep them; its file system grows to
+  fill the disk as it wakes. `disk_mib` may only grow. A sandbox held
+  awake is refused as `busy` unless the body has `"awake": true`; one
+  woken again each time it is handed off answers `unavailable`, and
+  asking again is safe.
 - **Removing a host.** Drain it to zero, then delete the machine (on GCP,
   `gcloud compute instance-groups managed delete-instances` so the group
   does not replace it). Never delete a host that still owns sandboxes: the
@@ -843,10 +859,12 @@ before users move to compute from Modal:
 - **Deleting a sandbox: its pointer goes last, its bytes later.** Removal
   records the intent, stops the VM, removes its network and then deletes
   its pointer; a step that fails is tried again, and the sandbox shows as
-  removing (or blocked) until all are done. A daily sweep then deletes the
-  chunks and manifests no pointer names whose day ended at least a whole
-  day before it began, two to three days after the last pointer naming
-  them went ([ADR 25](adr/0025-pointers-in-the-control-service-and-objects-by-day.md)).
+  removing (or blocked) until all are done. An hourly sweep then deletes
+  the chunks and manifests no pointer names whose hour ended at least an
+  hour before it began, two to three hours after the last pointer naming
+  them went ([ADR 25](adr/0025-pointers-in-the-control-service-and-objects-by-day.md),
+  [28](adr/0028-stored-objects-carry-their-hour.md)); one named with a day,
+  by a host of an earlier release, once its day ended an hour before.
   Objects in the old layout (`chunks/v1`, `manifests/v1`) go once they
   were last stored more than a week before the sweep. A chunk another
   sandbox still names stays: identical content is shared.
@@ -913,8 +931,8 @@ before users move to compute from Modal:
   their pointer entry together with their working-set pack, and their
   chunks go at a following sweep under the same rule.
 - **Every store's sweep deletes.** No delete is conditional: a host writes
-  only names of its current day, so a late delete of an older day's name
-  never takes a newer write.
+  only names of its current hour (a day on an earlier release), so a late
+  delete of an older name never takes a newer write.
 - **Provider retention comes on top.** GCS soft delete keeps deleted
   objects 7 days by default; set the bucket's policy to what we promise.
 - **Quarantined objects** (stored copies that failed their checksum, kept
@@ -922,8 +940,9 @@ before users move to compute from Modal:
   lifecycle rule, for example deletion after 30 days.
 - **Watch the sweep.** It stops before deleting anything when a pointer or
   manifest cannot be read, by design: deleting around an unreadable entry
-  could take chunks it names. Alert when no sweep has succeeded for two
-  days; its error names the key that stopped it.
+  could take chunks it names. Alert when no sweep has succeeded for three
+  hours: what replaced copies named piles up meanwhile. Its error names
+  the key that stopped it.
 
 ## Observing
 

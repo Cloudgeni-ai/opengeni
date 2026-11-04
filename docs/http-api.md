@@ -88,6 +88,11 @@ ignores a caller-supplied value for it). It is not inherited by child
 sessions, a fork of the session is attended (a person makes it to continue the
 work), and a keyed retry that changes it is an idempotency conflict. Omitted or
 `false` keeps the ordinary interactive behavior.
+A top-level `unattended: true` create with an `initialMessage` and no `goal`
+also gets a goal to complete that message, so the run keeps going until the
+agent completes or pauses it, within the deployment's continuation and budget
+limits like any goal (see [goals](goals.md#unattended-single-requests)). Pass
+`goal: null` to create it without one.
 
 Session reads include `unattended`, whether the next turns run unattended.
 `PUT /v1/workspaces/:workspaceId/sessions/:id/unattended` with

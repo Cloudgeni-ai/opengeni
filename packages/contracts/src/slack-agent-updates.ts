@@ -13,6 +13,8 @@ export const SlackAgentUpdateSettings = /* @__PURE__ */ defineSchema(() =>
     updatesEnabled: z.boolean(),
     /** Opengeni announces agents only through channel intro posts and never sends direct messages. */
     channelPostsOnly: z.boolean(),
+    /** Where new agents are introduced by default; null until an admin picks one. */
+    announcementChannelId: z.string().nullable().default(null),
     /** The reader is an organization admin and may change these settings. */
     viewerCanManage: z.boolean(),
     updatedAt: z.string().nullable(),
@@ -26,6 +28,12 @@ export const UpdateSlackAgentUpdateSettingsRequest = /* @__PURE__ */ defineSchem
       connectionId: z.string().uuid(),
       updatesEnabled: z.boolean(),
       channelPostsOnly: z.boolean(),
+      /** Omitted keeps the current channel; null clears it. */
+      announcementChannelId: z
+        .string()
+        .regex(/^[CG][A-Z0-9]{1,63}$/u)
+        .nullable()
+        .optional(),
     })
     .strict(),
 );

@@ -113,6 +113,39 @@ describe("Codex plan entitlement rejection classification", () => {
     });
   });
 
+  test("classifies the backend's refusal of a model this ChatGPT account cannot use", () => {
+    // openai/codex#47784: HTTP 400 with a `detail` body.
+    expect(
+      classifyCodexEntitlementRejection(
+        codexApiError(400, {
+          detail:
+            "The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account.",
+        }),
+      ),
+    ).toEqual({ status: 400, evidence: "plan_entitlement" });
+    // openai/codex#35904: a 404 "Model not found" can also mean an old client
+    // version or a rollout, so it never cools the model down for the account.
+    expect(
+      classifyCodexEntitlementRejection(
+        codexApiError(404, { detail: "Model not found gpt-6-sol" }),
+      ),
+    ).toBeNull();
+    expect(
+      classifyCodexEntitlementRejection(codexApiError(404, { detail: "Not Found" })),
+    ).toBeNull();
+    // Only the Codex transport's own errors qualify.
+    expect(
+      classifyCodexEntitlementRejection(
+        Object.assign(
+          new Error(
+            "The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account.",
+          ),
+          { status: 400 },
+        ),
+      ),
+    ).toBeNull();
+  });
+
   test("leaves quota, auth, content, and malformed-request failures on their existing paths", () => {
     const quota = codexApiError(429, {
       type: "usage_limit_reached",

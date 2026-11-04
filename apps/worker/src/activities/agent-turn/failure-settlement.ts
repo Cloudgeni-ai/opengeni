@@ -1,5 +1,8 @@
 import { FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE } from "./provider-recovery-policy";
-import { unsupportedProtocolValueFailure } from "./protocol-value-failure";
+import {
+  findJsonStringifyRefusal,
+  unsupportedProtocolValueFailure,
+} from "./protocol-value-failure";
 import { recordSessionUsageLimitEvent } from "@opengeni/core";
 import { reportSessionPersistenceFailure } from "./persistence-diagnostic";
 import { shouldFallbackModelSocket } from "./persistent-transport-recovery";
@@ -1112,7 +1115,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   // completed work. The goal does not continue into the same refusal: it waits
   // for new input.
   const protocolValueFailure = unsupportedProtocolValueFailure(
-    findInCauseChain(error, UnsupportedProtocolJsonValueError),
+    findInCauseChain(error, UnsupportedProtocolJsonValueError) ?? findJsonStringifyRefusal(error),
   );
   let protocolValueHistorySaved = false;
   if (

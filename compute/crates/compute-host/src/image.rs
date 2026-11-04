@@ -118,6 +118,28 @@ pub(crate) struct Meta {
     /// image unreadable when no VMM the host keeps reads its format.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
+    /// How many virtual processors the VM it was saved from had, which a
+    /// restore brings back whatever the sandbox's shape is now (its memory
+    /// is [`Self::memory_len`]). Images made before it was recorded do not
+    /// say, and are taken to be at the shape of the record they belong to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vcpus: Option<u8>,
+    /// How long the VM's root disk was when it was saved, which its guest
+    /// still takes it to be when restored: a disk made longer since is
+    /// told to it again. Images made before it was recorded do not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_len: Option<u64>,
+}
+
+/// What an image was made by and from, as its [`Meta`] records it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Made<'a> {
+    /// See [`Meta::runtime`].
+    pub runtime: Option<&'a str>,
+    /// See [`Meta::vcpus`].
+    pub vcpus: Option<u8>,
+    /// See [`Meta::disk_len`].
+    pub disk_len: Option<u64>,
 }
 
 /// Per-chunk hashes of a memory image.
@@ -438,17 +460,13 @@ impl Images {
     /// points `current` at it. Blocking: run off the async executor.
     #[cfg(test)]
     pub fn publish(&self, parts: Parts<'_>) -> Result<Verified, Suspect> {
-        self.publish_made_by(parts, None)
+        self.publish_made_by(parts, Made::default())
     }
 
     /// Builds, checks and publishes a new generation from `parts`, made
-    /// under `runtime` (see [`Meta::runtime`]), then points `current` at
-    /// it. Blocking: run off the async executor.
-    pub fn publish_made_by(
-        &self,
-        parts: Parts<'_>,
-        runtime: Option<&str>,
-    ) -> Result<Verified, Suspect> {
+    /// as `made` says, then points `current` at it. Blocking: run off the
+    /// async executor.
+    pub fn publish_made_by(&self, parts: Parts<'_>, made: Made<'_>) -> Result<Verified, Suspect> {
         // The record vouches for what is published here, so the directory
         // itself must survive a crash too.
         crate::layout::create_dir_durably(&self.dir)?;
@@ -487,9 +505,12 @@ impl Images {
             chunks_hash: blake3::hash(&chunk_bytes).to_hex().to_string(),
             remote: remote.is_some(),
             filled_hash: filled.map(|filled| blake3::hash(&filled).to_hex().to_string()),
-            runtime: runtime
+            runtime: made
+                .runtime
                 .filter(|runtime| !runtime.is_empty())
                 .map(str::to_owned),
+            vcpus: made.vcpus,
+            disk_len: made.disk_len,
         };
         write_synced(
             &staging.join(META),

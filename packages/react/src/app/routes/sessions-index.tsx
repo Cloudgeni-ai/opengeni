@@ -7,7 +7,6 @@ import { ANALYTICS_COLLECTION_ENABLED_EVENT } from "../lib/analytics-consent";
 import { useWorkspaceRigs } from "../lib/use-workspace-rigs";
 import { useRepositoryCatalogRefresh } from "../lib/use-follow-up-repositories";
 import { useGitHubAppConnectLauncher } from "../components/github-app-connect-launcher";
-import { openGitHubInstallationSettings } from "../lib/github-app-connect";
 import { captureAnalyticsEvent } from "../lib/analytics-observer";
 import { useWorkspaceMachines } from "../lib/use-workspace-machines";
 import { useSessionListHintRefresh } from "../lib/use-session-list-hint-refresh";
@@ -52,7 +51,7 @@ import {
   type Rig,
   type SessionRealtimeModel,
 } from "@opengeni/sdk";
-import { Link, type PageHost, useNavigate, usePage } from "../lib/navigation";
+import { Link, useNavigate, usePage } from "../lib/navigation";
 import { CreditCardIcon, LockIcon } from "lucide-react";
 import {
   createElement,
@@ -111,7 +110,26 @@ import { sessionDisplayTitle } from "../lib/session-rename";
 import { Notice } from "../../ui/notice";
 import { CreditRefusalNotice } from "../components/credits/credit-refusal-notice";
 import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
-import { creditRefusalRecord, type CreditRefusalRecord } from "../lib/model-access";
+import {
+  pickerPolicyRunnable,
+  ComposerSendBlockerNotice,
+  composerSendBlockerIsLoading,
+  composerSendBlockerNotice,
+  getNewSessionSendBlocker,
+  NewSessionCreateFailureNotice,
+  newSessionCreateFailureRecord,
+  newSessionSendSignature,
+  newSessionStartBlockerReason,
+  visibleNewSessionCreateFailure,
+  type NewSessionCreateFailure,
+  type NewSessionSendState,
+} from "../lib/composer-send-blocking";
+import {
+  creditRefusalRecord,
+  isPaymentRequiredError,
+  type CreditRefusalRecord,
+} from "../lib/model-access";
+import { composerSubmissionErrorMessage } from "../../lib/format";
 import { isTransientServiceFailure, OPENGENI_UPDATING_NOTICE } from "../lib/transient-retry";
 import { useConnectionAccounts } from "../components/capabilities/use-connection-accounts";
 import { StatusDot } from "../../ui/status-dot";
@@ -135,13 +153,7 @@ import {
   isMachineComputeSelectable,
   resolveSelectableMachineSandboxId,
 } from "../lib/machine-selectability";
-import {
-  effortOptionsForModel,
-  findPickerRow,
-  modelUsesCredits,
-  runnableLatencyModesForModel,
-  type PickerModelRow,
-} from "../lib/model-policy";
+import { findPickerRow, modelUsesCredits, type PickerModelRow } from "../lib/model-policy";
 import { isPersonalWorkspace } from "../lib/managed-self-context";
 import { attachManualRepository } from "../lib/manual-repositories";
 import { hasAccountPermission, hasWorkspacePermission } from "../lib/permissions";
@@ -689,6 +701,7 @@ function SessionsIndexRouteContent({
   const [createCreditRefusal, setCreateCreditRefusal] = useState<CreditRefusalRecord<{
     workspaceId: string;
   }> | null>(null);
+  const [createFailure, setCreateFailure] = useState<NewSessionCreateFailure | null>(null);
   const [createdSessionAuthority, setCreatedSessionAuthority] =
     useState<CreatedSessionRouteAuthority | null>(null);
   const composerRegionRef = useRef<HTMLDivElement | null>(null);
@@ -1080,6 +1093,33 @@ function SessionsIndexRouteContent({
     void modelCatalog.refresh();
     return true;
   };
+  // What this Send carries; a refused start stays visible until it changes.
+  const sendSignature = newSessionSendSignature({
+    text: message,
+    model: context.model,
+    reasoningEffort: context.reasoningEffort,
+    latencyMode: context.latencyMode,
+  });
+  const createFailureMessage = visibleNewSessionCreateFailure(createFailure, {
+    workspaceId,
+    signature: sendSignature,
+  });
+  const currentSendSignature = useLatestCallback(() => sendSignature);
+  // Any other refused start is shown under the composer instead of a toast:
+  // the chat was never created, so nothing else would say why.
+  const noteCreateFailure = (error: Error, sentSignature: string): boolean => {
+    // A payment refusal keeps its own dialog.
+    if (isPaymentRequiredError(error)) return false;
+    const failure = newSessionCreateFailureRecord({
+      workspaceId,
+      sent: sentSignature,
+      current: currentSendSignature(),
+      message: composerSubmissionErrorMessage(t, error),
+    });
+    if (!failure) return false;
+    setCreateFailure(failure);
+    return true;
+  };
   const chooseCoveredModel = (id: string) => {
     const row = findPickerRow(modelCatalog.rows, id);
     const choice = row
@@ -1091,11 +1131,10 @@ function SessionsIndexRouteContent({
     context.setReasoningEffort(choice.effort);
     if (choice.latencyMode !== null) context.setLatencyMode(choice.latencyMode);
   };
-  const newSessionPolicyValid = Boolean(
-    selectedPolicyRow?.selectable &&
-    effortOptionsForModel(selectedPolicyRow.catalog).includes(context.reasoningEffort) &&
-    (context.latencyMode === "standard" ||
-      runnableLatencyModesForModel(selectedPolicyRow.catalog).includes(context.latencyMode)),
+  const newSessionPolicyValid = pickerPolicyRunnable(
+    selectedPolicyRow,
+    context.reasoningEffort,
+    context.latencyMode,
   );
   const noRunnableModel =
     !modelCatalog.loading &&
@@ -1133,34 +1172,63 @@ function SessionsIndexRouteContent({
     if (!next) return;
     setModel(next.id);
     setReasoningEffort(next.effort);
+    // The replacement keeps the speed only where it runs it (a Free ChatGPT
+    // plan's GPT-6 Luna has no Ultrafast), so the swap never leaves a choice
+    // that cannot send.
+    const row = findPickerRow(modelCatalog.rows, next.id);
+    const fitted = row ? coveredModelChoice(row, next.effort, context.latencyMode) : null;
+    if (fitted?.latencyMode) setLatencyMode(fitted.latencyMode);
     // An automatic replacement is not the person's choice.
     setModelProvided((current) => (current === undefined ? current : false));
-  }, [pendingFallbackModel, setModel, setReasoningEffort]);
+  }, [
+    context.latencyMode,
+    modelCatalog.rows,
+    pendingFallbackModel,
+    setLatencyMode,
+    setModel,
+    setReasoningEffort,
+  ]);
   const codexConnected = modelCatalog.models.some(
     (candidate) =>
       candidate.provider === "codex-subscription" &&
       candidate.credentialReadiness.status === "ready",
   );
-  const startBlocker =
-    modelCatalog.loading || newSessionDraft.loading
-      ? null
-      : modelCatalog.error
-        ? "model_catalog_unavailable"
-        : !newSessionPolicyValid
-          ? !modelCatalog.rows.some((row) => row.selectable)
-            ? "no_model_connected"
-            : selectedPolicyRow &&
-                selectedPolicyRow.billingClass !== "opengeni_credits" &&
-                selectedPolicyRow.catalog.credentialReadiness.status !== "ready"
-              ? "selected_model_not_connected"
-              : "model_policy_unavailable"
-          : privateCreateUnavailable
-            ? "private_session_unavailable"
-            : attachments.hasUnresolved
-              ? "attachments_pending"
-              : !computeReady
-                ? "compute_unavailable"
-                : null;
+  // Send's one guard: its enabled state, the early-Send hold, the guard Send
+  // runs and the visible line below the composer all read it.
+  const sendState: NewSessionSendState = {
+    created: createdSessionAuthority !== null,
+    draftLoading: newSessionDraft.loading,
+    catalogLoading: modelCatalog.loading,
+    catalogFailed: Boolean(modelCatalog.error),
+    replacingModel: pendingFallbackModel !== null,
+    policyValid: newSessionPolicyValid,
+    anyModelSelectable: modelCatalog.rows.some((row) => row.selectable),
+    selectedModelNotConnected: Boolean(
+      selectedPolicyRow &&
+      selectedPolicyRow.billingClass !== "opengeni_credits" &&
+      selectedPolicyRow.catalog.credentialReadiness.status !== "ready",
+    ),
+    selectedModelSelectable: selectedPolicyRow?.selectable === true,
+    // Null capabilities only mean the request is still in flight.
+    privateSessionLoading:
+      tenancyCapabilities === null && (personalWorkspace || draft.visibility === "private"),
+    privateSessionUnavailable: privateCreateUnavailable,
+    toolsLoading: !context.workspaceMcpCatalogReady || personalResourceCatalogRefreshPending,
+    accountsLoading: connectionAccounts.loading,
+    accountsFailed: connectionAccounts.error !== null,
+    accountChoice: connectionAccounts.requiresAccountChoice,
+    resourcesLoading:
+      fixedResourceCatalogEnabled && (rigs.loading || !personalResourceEligibilitySettled),
+    resourcesResolved: fixedResourceSelection.selectionResolved,
+    uploadPending: attachments.hasUnresolved,
+    computeLoading: draft.compute.kind === "machine" && fleet.loading,
+    computeReady,
+  };
+  const sendBlocker = getNewSessionSendBlocker(sendState);
+  // Voice skips the connected-tool accounts; its control and URL launch read
+  // the same guard so a voice start can't be dropped silently either.
+  const voiceSendBlocker = getNewSessionSendBlocker({ ...sendState, voice: true });
+  const startBlocker = newSessionStartBlockerReason(sendBlocker);
   useEffect(() => {
     const record = () => {
       if (startBlocker)
@@ -1203,20 +1271,9 @@ function SessionsIndexRouteContent({
         : attachments.readyResources.length > 0
           ? FILE_ONLY_MESSAGE_TEXT(t)
           : "";
-      if (
-        busy ||
-        !context.workspaceMcpCatalogReady ||
-        newSessionDraft.loading ||
-        !newSessionPolicyValid ||
-        privateCreateUnavailable ||
-        personalResourceCatalogRefreshPending ||
-        (!realtimeModel &&
-          createdSessionAuthority === null &&
-          (connectionAccounts.loading ||
-            connectionAccounts.error !== null ||
-            connectionAccounts.requiresAccountChoice)) ||
-        (createdSessionAuthority === null && !fixedResourceSelection.selectionResolved)
-      )
+      // The same guard as Send's enabled state and the visible line, so a
+      // Send that runs here was shown as available and a refusal is explained.
+      if (busy || getNewSessionSendBlocker({ ...sendState, voice: realtimeModel !== null }))
         return false;
       if (createdSessionAuthority === null) {
         const unavailable = unavailableSessionMcpServerIds(
@@ -1244,12 +1301,7 @@ function SessionsIndexRouteContent({
         });
         return false;
       }
-      if (
-        createdSessionAuthority === null &&
-        ((!text && !realtimeModel) || attachments.hasUnresolved || !computeReady)
-      ) {
-        return false;
-      }
+      if (createdSessionAuthority === null && !text && !realtimeModel) return false;
       // A chosen limit must be a valid amount; an older server never gets one.
       const usageLimit =
         usageLimitCapability === "enabled" ? parseSessionUsageLimitDraft(usageLimitDraft) : null;
@@ -1264,6 +1316,13 @@ function SessionsIndexRouteContent({
       const model = policy?.model ?? persistedValue.model;
       const reasoningEffort = policy?.effort ?? persistedValue.reasoningEffort;
       const latencyMode = policy?.latency ?? persistedValue.latencyMode;
+      // What this request carries, so its refusal is matched to the composer.
+      const sentSignature = newSessionSendSignature({
+        text: persistedValue.text,
+        model,
+        reasoningEffort,
+        latencyMode,
+      });
       // One Send always refers to one visible snapshot, even if a sibling edit
       // forces a draft save or create retry while the user continues typing.
       const visibleSignature = stableJson(persistedValue);
@@ -1348,7 +1407,8 @@ function SessionsIndexRouteContent({
                       return (
                         draftConflict ||
                         newSessionDraft.reportUnavailable(error) ||
-                        noteCreditRefusal(error, request)
+                        noteCreditRefusal(error, request) ||
+                        noteCreateFailure(error, sentSignature)
                       );
                     },
                   },
@@ -1360,6 +1420,7 @@ function SessionsIndexRouteContent({
                 }
                 setUsageLimitDraft(NO_SESSION_USAGE_LIMIT);
                 setCreateCreditRefusal(null);
+                setCreateFailure(null);
                 setUsageLimitSendBlocked(false);
                 return {
                   sessionId: created.id,
@@ -1429,7 +1490,8 @@ function SessionsIndexRouteContent({
                     return (
                       draftConflict ||
                       newSessionDraft.reportUnavailable(error) ||
-                      noteCreditRefusal(error, request)
+                      noteCreditRefusal(error, request) ||
+                      noteCreateFailure(error, sentSignature)
                     );
                   },
                 },
@@ -1442,6 +1504,7 @@ function SessionsIndexRouteContent({
               // The limit belongs to the chat just created; the next starts with none.
               setUsageLimitDraft(NO_SESSION_USAGE_LIMIT);
               setCreateCreditRefusal(null);
+              setCreateFailure(null);
               setUsageLimitSendBlocked(false);
               return {
                 sessionId: created.id,
@@ -1663,15 +1726,7 @@ function SessionsIndexRouteContent({
       });
       return;
     }
-    if (
-      busy ||
-      !computeReady ||
-      !newSessionPolicyValid ||
-      !context.workspaceMcpCatalogReady ||
-      attachments.hasUnresolved
-    ) {
-      return;
-    }
+    if (busy || voiceSendBlocker !== null) return;
     handledLaunchKeyRef.current = launchKey;
     void submitNewSession(launchRealtime, {
       model: launchModel,
@@ -1681,10 +1736,7 @@ function SessionsIndexRouteContent({
       if (!ok) handledLaunchKeyRef.current = null;
     });
   }, [
-    attachments.hasUnresolved,
     busy,
-    computeReady,
-    context.workspaceMcpCatalogReady,
     launchEffort,
     launchFollowDefault,
     launchLatency,
@@ -1696,11 +1748,11 @@ function SessionsIndexRouteContent({
     launch.channelId,
     navigate,
     newSessionDraft.loading,
-    newSessionPolicyValid,
     setLatencyMode,
     setModel,
     setReasoningEffort,
     submitNewSession,
+    voiceSendBlocker,
     workspaceId,
   ]);
 
@@ -1722,26 +1774,11 @@ function SessionsIndexRouteContent({
         message.trim().length > 0 ||
         attachments.readyResources.length > 0) &&
       !busy &&
-      !newSessionDraft.loading &&
-      newSessionPolicyValid &&
-      !personalResourceCatalogRefreshPending &&
-      (createdSessionAuthority !== null ||
-        (!connectionAccounts.loading &&
-          connectionAccounts.error === null &&
-          !connectionAccounts.requiresAccountChoice)) &&
-      (createdSessionAuthority !== null || fixedResourceSelection.selectionResolved) &&
-      (createdSessionAuthority !== null || (!attachments.hasUnresolved && computeReady)),
+      sendBlocker === null,
     // What Send needs right after the page opens is still loading: an early
-    // Send waits for it instead of doing nothing.
-    preparing:
-      modelCatalog.loading ||
-      newSessionDraft.loading ||
-      pendingFallbackModel !== null ||
-      personalResourceCatalogRefreshPending ||
-      (createdSessionAuthority === null &&
-        (connectionAccounts.loading ||
-          (fixedResourceCatalogEnabled && (rigs.loading || !personalResourceEligibilitySettled)) ||
-          (draft.compute.kind === "machine" && fleet.loading))),
+    // Send waits for it instead of doing nothing. Any other blocker shows its
+    // line below the composer.
+    preparing: composerSendBlockerIsLoading(sendBlocker),
     pause: async () => {},
     pausing: false,
     resume: async () => {},
@@ -2167,27 +2204,22 @@ function SessionsIndexRouteContent({
                       : voiceSelection.loadState
                   }
                   modelMenu="split"
-                  disabled={
-                    busy ||
-                    newSessionDraft.loading ||
-                    attachments.hasUnresolved ||
-                    !newSessionPolicyValid ||
-                    !computeReady ||
-                    personalMachineSelected ||
-                    !context.workspaceMcpCatalogReady
-                  }
+                  disabled={busy || voiceSendBlocker !== null || personalMachineSelected}
                   disabledReason={
-                    attachments.hasUnresolved
+                    voiceSendBlocker === "upload"
                       ? "Wait for attachments to finish before starting voice."
-                      : !newSessionPolicyValid
+                      : voiceSendBlocker === "policy"
                         ? "Choose supported model settings before starting voice."
-                        : !computeReady
+                        : voiceSendBlocker === "compute"
                           ? "Choose where this session should run first."
-                          : personalMachineSelected
-                            ? "Start with a message so personal machine access can attach to an accepted turn."
-                            : !context.workspaceMcpCatalogReady
-                              ? "Wait for session tools to finish loading."
-                              : null
+                          : voiceSendBlocker !== null &&
+                              composerSendBlockerIsLoading(voiceSendBlocker)
+                            ? "Wait for the chat to finish loading."
+                            : voiceSendBlocker !== null
+                              ? (composerSendBlockerNotice(voiceSendBlocker)?.message ?? null)
+                              : personalMachineSelected
+                                ? "Start with a message so personal machine access can attach to an accepted turn."
+                                : null
                   }
                   onStart={async (model) => await submitNewSession(model)}
                 />
@@ -2241,6 +2273,29 @@ function SessionsIndexRouteContent({
               <Notice tone="info">{OPENGENI_UPDATING_NOTICE(t)}</Notice>
             </div>
           ) : null}
+
+          {/* A refused start, until the person changes what they send. */}
+          <NewSessionCreateFailureNotice
+            message={createFailureMessage}
+            onDismiss={() => setCreateFailure(null)}
+            className="mt-3"
+          />
+
+          {/* Send's blocker, when no other surface already explains it. */}
+          <ComposerSendBlockerNotice
+            blocker={sendBlocker}
+            explained={
+              fixedResourceCatalogError
+                ? [...NEW_SESSION_EXPLAINED_BLOCKERS, "resources"]
+                : NEW_SESSION_EXPLAINED_BLOCKERS
+            }
+            className="mt-3"
+            onAction={(action) => {
+              if (action === "fix_model_settings") chooseCoveredModel(context.model);
+              else if (sendBlocker === "model_catalog") void modelCatalog.refresh();
+              else if (sendBlocker === "accounts") void connectionAccounts.refresh();
+            }}
+          />
 
           {/* Accounts load quietly with the composer: only a problem shows here,
               never a loading line behind an open menu. */}
@@ -2502,6 +2557,9 @@ function RecentSessionRow({
   );
 }
 
+/** The accounts notice below the new-chat composer explains these itself. */
+const NEW_SESSION_EXPLAINED_BLOCKERS = ["accounts", "account_choice"] as const;
+
 /** Keep model policy adjacent to voice/send in the bottom action row. */
 function SessionModelControl({
   hasImageAttachments,
@@ -2557,8 +2615,8 @@ function workspaceRepositoryPickerProps(
   workspaceId: string,
   disabled: boolean,
   onConnectWorkspaceApp: () => void,
-  page: PageHost,
 ): RepositoryContextPickerProps {
+  const githubSettingsUrl = `/workspaces/${encodeURIComponent(workspaceId)}/plugins?open=integration:github`;
   return {
     setupMode:
       context.githubStatus?.setupMode ??
@@ -2574,17 +2632,18 @@ function workspaceRepositoryPickerProps(
     selectedPersonalGitHubRepoIds: context.selectedPersonalGitHubRepoIds,
     selectedPersonalGitHubRepoRefs: context.selectedPersonalGitHubRepoRefs,
     personalGitHubBusy: context.personalGitHubBusy,
-    personalGitHubManageUrl: `/workspaces/${encodeURIComponent(workspaceId)}/plugins?open=integration:github`,
+    personalGitHubManageUrl: `${githubSettingsUrl}&github=personal`,
+    githubSettingsUrl,
     groups: context.repositoryGroups,
     selectedRepoIds: context.selectedRepoIds,
     selectedRepoRefs: context.selectedRepoRefs,
     manualRepos: context.manualRepos,
     manualOpen: context.manualReposOpen,
-    githubAppOpen: context.githubAppOpen,
     org: context.githubOrg,
     pending: context.busy || disabled,
     repoBusy: context.repoBusy,
     githubLoadFailed: context.githubStatusFailed && !context.githubCatalogReady,
+    githubUpdateFailed: context.githubStatusFailed && context.githubCatalogReady,
     githubAppBusy: context.githubAppBusy,
     onRefresh: async () => {
       await Promise.all([
@@ -2730,15 +2789,9 @@ function workspaceRepositoryPickerProps(
       });
     },
     validationError: context.repositoryValidationError,
-    onGitHubAppOpenChange: context.setGithubAppOpen,
     onOrgChange: context.setGithubOrg,
     onStartGitHubApp: () => void context.startGitHubAppManifestFlow(workspaceId),
     onConnectWorkspaceApp,
-    onConfigureInstallation: (installationId: number) =>
-      openGitHubInstallationSettings(context.client, workspaceId, installationId, page.assign),
-    onDisconnectInstallation: async (installationId: number) => {
-      await context.disconnectGitHubInstallation(workspaceId, installationId);
-    },
   };
 }
 
@@ -2755,17 +2808,10 @@ function WorkspaceRepositoryMenuBody({
   catalogRefresh: ReturnType<typeof useRepositoryCatalogRefresh>;
   onConnectWorkspaceApp: () => void;
 }) {
-  const page = usePage();
   const context = useAppContext();
   return (
     <RepositoryContextMenuBody
-      {...workspaceRepositoryPickerProps(
-        context,
-        workspaceId,
-        disabled,
-        onConnectWorkspaceApp,
-        page,
-      )}
+      {...workspaceRepositoryPickerProps(context, workspaceId, disabled, onConnectWorkspaceApp)}
       {...catalogRefresh}
       {...(leading ? { leading } : {})}
     />

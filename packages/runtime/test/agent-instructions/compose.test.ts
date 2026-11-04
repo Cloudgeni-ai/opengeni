@@ -129,9 +129,12 @@ describe("modular composer: module selection (AC12)", () => {
     const disabled = compose({ ...allAgentCapabilities(), goals: false }, NO_RESOURCES).composed;
     for (const sentence of [
       "Goal completion records short ledger proof, not the user-facing deliverable.",
-      "After goal_complete succeeds, finish the same turn with the requested answer, or a concise summary and retained artifact link.",
+      "Put the requested answer, or a concise summary and retained artifact link, in goal_complete's reply: it is shown exactly as written and ends the turn, so call goal_complete on its own once you have seen your last results.",
+      "Without a reply, finish the same turn with that answer after goal_complete succeeds.",
       "Never use evidence as the final reply.",
       "A later child result after completion is context to integrate, not a reason to stay silent or restart the completed goal.",
+      "A task that seems infeasible, missing data or a result you cannot verify is not by itself a reason to pause: try the plausible in-scope alternatives, and if you still pause, name the ones you tried in the rationale.",
+      "A definitive missing permission or required human decision can justify an immediate goal pause with evidence and the change needed to resume.",
     ]) {
       expect(enabled).toContain(sentence);
       expect(disabled).not.toContain(sentence);
@@ -232,6 +235,35 @@ describe("modular composer: module selection (AC12)", () => {
         expect(attached).toContain("`command_wait`");
       }
     }
+  });
+
+  test("the do-not-poll sentence renders only when finished commands are delivered", () => {
+    const sentence = "reports its exit status and output on its own";
+    const withoutDelivery = { ...NO_RESOURCES, managedSandbox: true };
+    const withDelivery = { ...withoutDelivery, commandCompletionDelivery: true };
+    for (const capabilities of [allAgentCapabilities(), noneAgentCapabilities()]) {
+      expect(compose(capabilities, withoutDelivery).composed).not.toContain(sentence);
+      const delivered = compose(capabilities, withDelivery).composed;
+      expect(delivered).toContain(sentence);
+      // Follows the terminal-read sentence in the same paragraph.
+      expect(delivered).toContain(
+        "a running read does not. A command that finishes while you work reports",
+      );
+    }
+    expect(
+      compose(allAgentCapabilities(), { ...NO_RESOURCES, commandCompletionDelivery: true })
+        .composed,
+    ).not.toContain(sentence);
+    expect(
+      agentPromptResourcesFor(testSettings({ sandboxBackend: "docker" }), [], {}),
+    ).toHaveProperty("commandCompletionDelivery", true);
+    expect(
+      agentPromptResourcesFor(
+        testSettings({ sandboxBackend: "docker", experimentCutPolling: false }),
+        [],
+        {},
+      ),
+    ).not.toHaveProperty("commandCompletionDelivery");
   });
 
   test("sandbox guidance appears for a Connected Machine alone", () => {
@@ -549,6 +581,7 @@ describe("modular composer: prompt-cache stability", () => {
       connectedMachine: false,
       repositories: true,
       gitCredentials: true,
+      commandCompletionDelivery: true,
     });
     expect(
       agentPromptResourcesFor(settings, [{ kind: "repository", uri: "x" }] as never, {
@@ -559,6 +592,7 @@ describe("modular composer: prompt-cache stability", () => {
       connectedMachine: true,
       repositories: false,
       gitCredentials: false,
+      commandCompletionDelivery: true,
     });
     expect(
       agentPromptResourcesFor(settings, [{ kind: "repository", uri: "x" }] as never, {}),

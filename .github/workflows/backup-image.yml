@@ -25,22 +25,34 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v6
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
+      - name: Install restic
+        timeout-minutes: 2
+        env:
+          RESTIC_VERSION: 0.19.1
+          RESTIC_SHA256: f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/restic.bz2" \
+            "https://github.com/restic/restic/releases/download/v${RESTIC_VERSION}/restic_${RESTIC_VERSION}_linux_amd64.bz2"
+          echo "$RESTIC_SHA256  $RUNNER_TEMP/restic.bz2" | sha256sum -c -
+          bunzip2 -c "$RUNNER_TEMP/restic.bz2" > "$RUNNER_TEMP/restic"
+          sudo install -m 0755 "$RUNNER_TEMP/restic" /usr/local/bin/restic
+          restic version
       - name: Test operator runner
         timeout-minutes: 5
-        run: bun test scripts/backup/backup.test.ts --timeout 60000
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+        run: bun test scripts/backup/backup.test.ts --timeout 120000
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and publish exact revision
         id: image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: docker/backup.Dockerfile
@@ -57,7 +69,7 @@ jobs:
           test -n "$IMAGE_DIGEST"
           jq -n --arg revision "$GITHUB_SHA" --arg digest "$IMAGE_DIGEST" \
             '{sourceRevision: $revision, repository: "ghcr.io/cloudgeni-ai/opengeni-backup", digest: $digest, platforms: ["linux/amd64"]}' > backup-image-receipt.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: backup-image-receipt
           path: backup-image-receipt.json
