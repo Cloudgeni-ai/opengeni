@@ -1,5 +1,28 @@
 # @opengeni/runtime
 
+## 6.8.0
+
+### Patch Changes
+
+- 15606f6: A turn working on a Connected Machine no longer keeps sending commands to that machine after the chat is moved to its own managed box mid-turn. Every later tool call used to fail with a raw database query error, because the machine's per-operation authority (correctly) refuses a machine that is no longer the chat's active sandbox. The turn now hands off typed to the chat's managed box and continues there in a fresh attempt, as chats that started on a managed box already did. When a Connected Machine authority check is refused, the worker now logs the database's SQLSTATE, its raised reason and the refusing function, so the next such failure is diagnosable from logs. The tool result text the model sees is unchanged.
+- 3cd5677: Turns no longer fail because a provider rejects a tool name. Just before each model request is sent (OpenAI Responses including the Codex websocket, Chat Completions and gateways, and Anthropic Messages), every tool name in the request is checked: valid names are sent unchanged, and any other name gets a stable alias used consistently across the tools list, tool choice and history. Calls to an alias are mapped back to the original tool. If a provider still rejects a tool name, the request is resent once with portable names, and later requests to that model alias the rejected name straight away. New metrics count these repairs and resends.
+- Updated dependencies [58b04d1]
+- Updated dependencies [feaecf8]
+  - @opengeni/contracts@6.8.0
+  - @opengeni/sdk@6.8.0
+  - @opengeni/codex@6.8.0
+  - @opengeni/capabilities@6.8.0
+  - @opengeni/codemode@6.8.0
+  - @opengeni/config@6.8.0
+  - @opengeni/interaction@6.8.0
+  - @opengeni/observability@6.8.0
+  - @opengeni/tool-gateway@6.8.0
+  - @opengeni/vaults@6.8.0
+  - @opengeni/agent-proto@6.8.0
+  - @opengeni/decisions@6.8.0
+  - @opengeni/network@6.8.0
+  - @opengeni/xai-subscription@6.8.0
+
 ## 6.7.0
 
 ### Patch Changes
