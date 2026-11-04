@@ -2038,19 +2038,30 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       throw this.closedBlankTargetError(targetId);
     if (!info && this.goneTargets.has(tabId)) throw this.missingTargetError(targetId);
     if (!info || !isVisibleTarget(info)) return null;
-    const state = await this.ensureTargetState(info);
+    let state = await this.ensureTargetState(info);
     // A JavaScript dialog blocks ordinary page-domain inspection. Keep the
     // event-derived target/document/frame generations authoritative until the
     // dialog is handled; otherwise the controller's generic pre-dispatch
     // target validation can fail before `handle_dialog` reaches Chromium.
     // A dialog can open just before its event arrives (the person's own
     // Chrome reports events by polling): a read that meets one reports it.
-    if (!state.dialog) {
+    const readFrame = async (current: TargetState) => {
+      if (current.dialog) return;
       try {
-        await this.untilDialog(state, async () => await this.refreshFrame(state));
+        await this.untilDialog(current, async () => await this.refreshFrame(current));
       } catch (error) {
         if (!(error instanceof DialogBlockedError)) throw error;
       }
+    };
+    try {
+      await readFrame(state);
+    } catch (error) {
+      // Like any read, one whose tab debugging ended since the last
+      // observation (another extension's frame ends it) reads again on a new
+      // attachment, once.
+      if (!(await this.attachmentEndedUnder(state, error))) throw error;
+      state = await this.ensureTargetState(await this.requireTargetInfo(connection, targetId));
+      await readFrame(state);
     }
     return this.typedSecrets.redact(this.targetFromInfo(info, state));
   }
@@ -2906,7 +2917,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (command.observationMode === "none" || command.observationMode === "input") return null;
       return await this.observe(this.tabIdOf(targetId));
     }
-    const observation = await this.withTarget(targetId, async (state, info) => {
+    const act = async (state: TargetState, info: TargetInfo) => {
       effects = { state, before: state.actionEffectCount };
       if (!state.dialog) await this.refreshFrame(state);
       this.assertExpectedGenerations(command, state);
@@ -3181,21 +3192,31 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           "Browser input was sent, but the resulting page could not be observed. Check the current tabs before continuing; do not repeat the action automatically.",
         );
       }
-    }).catch(async (error: unknown) => {
-      const failure = await this.actionFailure(error, effects);
-      if (effects) {
-        await this.observeOnNewAttachment(failure, effects.state, command, secretValues);
-        // The fill's field holds the requested value on the new attachment:
-        // the fill completed, and the receipt shows the page as it left it.
-        if (
-          failure instanceof InteractionOutcomeUnknownDriverError &&
-          failure.observation &&
-          (await this.fillHeldOnNewAttachment(failure, effects.state, command))
-        )
-          return failure.observation as BrowserObservationValue;
-      }
-      throw failure;
-    });
+    };
+    // The tab's debugging can end between the caller's observation and this
+    // action (Chrome ends it when another extension adds a frame, as a
+    // password manager does for a focused field), and the extension may
+    // refuse the action's first read before that detach reaches us. Until
+    // input was sent, nothing ran: start again on a new attachment.
+    const retryBeforeInput = () =>
+      effects === undefined || effects.state.actionEffectCount === effects.before;
+    const observation = await this.withTarget(targetId, act, { retryBeforeInput }).catch(
+      async (error: unknown) => {
+        const failure = await this.actionFailure(error, effects);
+        if (effects) {
+          await this.observeOnNewAttachment(failure, effects.state, command, secretValues);
+          // The fill's field holds the requested value on the new attachment:
+          // the fill completed, and the receipt shows the page as it left it.
+          if (
+            failure instanceof InteractionOutcomeUnknownDriverError &&
+            failure.observation &&
+            (await this.fillHeldOnNewAttachment(failure, effects.state, command))
+          )
+            return failure.observation as BrowserObservationValue;
+        }
+        throw failure;
+      },
+    );
     this.refreshSubscribedFrame(targetId);
     return redactInteractionSecretValues(observation, secretValues);
   }
@@ -3969,7 +3990,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private async withTarget<T>(
     targetId: string,
     operation: (state: TargetState, info: TargetInfo) => Promise<T>,
-    options: { read?: boolean } = {},
+    options: { read?: boolean; retryBeforeInput?: () => boolean } = {},
   ): Promise<T> {
     const connection = await this.ensureConnection();
     let info = await this.requireTargetInfo(connection, targetId);
@@ -4003,8 +4024,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       // A read changes nothing, so one whose tab debugging ended under it
       // (Chrome detaches when another extension adds a frame to the page, as
       // password managers do for their inline menu) reads again on a new
-      // attachment. A tab that closed meanwhile then says so.
-      if (options.read && (await this.attachmentEndedUnder(state, error)))
+      // attachment, as does an action that has not sent input yet. A tab
+      // that closed meanwhile then says so.
+      if (
+        (options.read || options.retryBeforeInput?.() === true) &&
+        (await this.attachmentEndedUnder(state, error))
+      )
         return await this.withTarget(targetId, operation);
       throw error;
     }

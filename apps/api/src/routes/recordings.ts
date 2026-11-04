@@ -4,6 +4,7 @@ import {
   CreateRecordingLiveSessionRequest,
   CreateRecordingPersonRequest,
   CreateRecordingRequest,
+  UpcomingMeetingsResponse,
   CreateRecordingTranscriptRequest,
   CreateRecordingUploadsRequest,
   RecordingCapturePurpose,
@@ -100,7 +101,11 @@ import {
   type SpeechToTextDeployment,
 } from "@opengeni/core/transcription-service";
 import { creditDebitAttributionForGrant } from "../access-grant-rls";
-import { meetingCalendarLookup, meetingCalendarTitle } from "../meeting-calendar-title";
+import {
+  meetingCalendarLookup,
+  meetingCalendarTitle,
+  upcomingMeetings,
+} from "../meeting-calendar-title";
 import { errorMessage } from "@opengeni/contracts/values";
 
 const UPLOAD_URL_SECONDS = 15 * 60;
@@ -925,7 +930,11 @@ export function registerRecordingRoutes(
                   reason: problem.reason,
                 }),
             }),
-            { subjectId: actor.subjectId, at: startedAt },
+            {
+              subjectId: actor.subjectId,
+              at: startedAt,
+              ...(body.calendarEvent ? { event: body.calendarEvent } : {}),
+            },
           )
         : null,
     ]);
@@ -942,7 +951,10 @@ export function registerRecordingRoutes(
         visibility: body.visibility ?? settings.defaultVisibility ?? "private",
         startedAt,
         externalRef: body.externalRef,
-        metadata: body.metadata,
+        // The calendar event it was started for stays with it.
+        metadata: body.calendarEvent
+          ? { ...body.metadata, calendarEvent: body.calendarEvent }
+          : body.metadata,
         tracks: body.tracks,
         transcription,
         ownerName,
@@ -957,6 +969,30 @@ export function registerRecordingRoutes(
       });
     }
     return c.json(result.recording, result.created ? 201 : 200);
+  });
+
+  // The caller's own meetings about to start, with the links that join them,
+  // for a reminder that joins one and starts its recording (the desktop app's).
+  app.get("/v1/workspaces/:workspaceId/upcoming-meetings", async (c) => {
+    const actor = await actorFor(c, "sessions:read");
+    const result = await upcomingMeetings(
+      meetingCalendarLookup({
+        db,
+        settings: deps.settings,
+        workspaceId: actor.workspaceId,
+        subjectId: actor.subjectId,
+        ...(deps.meetingCalendarFetch ? { fetch: deps.meetingCalendarFetch } : {}),
+        onProblem: (problem) =>
+          observability?.warn("couldn't read the caller's calendar for upcoming meetings", {
+            workspaceId: actor.workspaceId,
+            providerDomain: problem.providerDomain,
+            reason: problem.reason,
+          }),
+      }),
+      { subjectId: actor.subjectId, now: new Date() },
+    );
+    c.header("Cache-Control", "no-store");
+    return c.json(UpcomingMeetingsResponse.parse(result));
   });
 
   app.get(`${base}/:recordingId`, async (c) => {

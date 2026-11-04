@@ -40,6 +40,10 @@ export function secretRedactionReferenceLabel(reference: Pick<SecretReference, "
  * so a run with a one-character or all-blank "secret" can never rewrite
  * everything. Also null for a value holding marker-shaped text, which the
  * scrub could never find.
+ *
+ * A person asked for this value to be removed from stored history, so a
+ * weak value (a word, a host) is removed wherever it appears too, not only
+ * in credential positions as live masking does.
  */
 export function secretRedactionMatcherForValue(
   value: string,
@@ -49,7 +53,7 @@ export function secretRedactionMatcherForValue(
   if (containsSecretRedactionMarker(value)) return null;
   if (secretValueForms(value, { minChars: SECRET_VALUE_MASK_MIN_CHARS }).length === 0) return null;
   const marker = secretRedactionMarker(label);
-  const masks = compileSecretValueMasks([{ value, label: marker }]);
+  const masks = compileSecretValueMasks([{ value, label: marker }], { weakValues: "anywhere" });
   return { marker, redact: (text) => maskSecretValuesInText(text, masks) };
 }
 

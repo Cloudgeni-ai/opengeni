@@ -6274,7 +6274,7 @@ describe("runtime event normalization", () => {
     expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("ogtool show <tool-path>");
     expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("list --json");
     expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("list --full");
-    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("same list, show, and call commands");
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("same list, show, call, and read commands");
     expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("same public Codemode operation journal");
   });
 

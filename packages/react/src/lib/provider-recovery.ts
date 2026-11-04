@@ -60,6 +60,8 @@ const RECOVERY_CODES: ReadonlySet<string> = new Set([
   "mcp_transport_unavailable",
   "first_party_mcp_setup_unavailable",
   "sandbox_command_start_unavailable",
+  "sandbox_capacity_unavailable",
+  "sandbox_service_unavailable",
   "retained_attachment_unavailable",
   "turn_execution_policy_definition_mismatch",
 ]);
@@ -164,6 +166,10 @@ export function providerRecoverySubject(t: OpenGeniText, facts: ProviderRecovery
       return t("lib.providerRecovery.aRequiredMcpServerIs");
     case "sandbox_command_start_unavailable":
       return t("lib.providerRecovery.theSandboxIsnTReady");
+    case "sandbox_capacity_unavailable":
+      return t("lib.providerRecovery.noSandboxCapacityIsAvailable");
+    case "sandbox_service_unavailable":
+      return t("lib.providerRecovery.theSandboxServiceIsTemporarily");
     case "retained_attachment_unavailable":
       return t("lib.providerRecovery.anImageFromEarlierIn");
     case "turn_execution_policy_definition_mismatch":

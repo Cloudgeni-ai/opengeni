@@ -77,6 +77,8 @@ type HarnessOptions = {
   markError?: Error;
   failError?: Error;
   controllerFactory?: RigVerificationOwnershipDependencies["createCancellationController"];
+  /** Lease groups minted for successive runs (default: always GROUP_ID). */
+  groupIds?: string[];
 };
 
 function harness(options: HarnessOptions = {}) {
@@ -87,6 +89,8 @@ function harness(options: HarnessOptions = {}) {
   const releaseGrace: number[] = [];
   const establishInputs: Array<Parameters<RigVerificationOwnershipDependencies["establish"]>[2]> =
     [];
+  const acquiredGroups: string[] = [];
+  let uuidCalls = 0;
 
   const observability = {
     warn: (message: string, context: Record<string, unknown>) => {
@@ -112,10 +116,15 @@ function harness(options: HarnessOptions = {}) {
   })) as unknown as RigVerificationOwnershipDependencies["createCancellationController"];
 
   const dependencies = {
-    randomUUID: () => HOLDER_UUID,
+    // Each run mints its holder id, then its own lease group.
+    randomUUID: () => {
+      uuidCalls += 1;
+      if (uuidCalls % 2 === 1) return HOLDER_UUID;
+      return options.groupIds?.[uuidCalls / 2 - 1] ?? GROUP_ID;
+    },
     acquire: async (_db, input) => {
       events.push("acquire");
-      expect(input.sandboxGroupId).toBe(GROUP_ID);
+      acquiredGroups.push(input.sandboxGroupId);
       expect(input.image).toBe(settings.modalImageRef);
       expect(input.rigVersionId).toBe(VERSION_ID);
       return {
@@ -214,7 +223,6 @@ function harness(options: HarnessOptions = {}) {
         observability,
         accountId: ACCOUNT_ID,
         workspaceId: WORKSPACE_ID,
-        sandboxGroupId: GROUP_ID,
         rigVersionId: VERSION_ID,
         sessionIdPrefix: "rig-verification-test",
         ...(lifecycle ? { lifecycle } : {}),
@@ -223,10 +231,30 @@ function harness(options: HarnessOptions = {}) {
       dependencies,
     );
 
-  return { run, events, warnings, markEpochs, failEpochs, releaseGrace, establishInputs };
+  return {
+    run,
+    events,
+    warnings,
+    markEpochs,
+    failEpochs,
+    releaseGrace,
+    establishInputs,
+    acquiredGroups,
+  };
 }
 
 describe("rig verification canonical lease ownership", () => {
+  test("every run of the same target acquires its own new lease group", async () => {
+    const second = "66666666-6666-4666-8666-666666666666";
+    const state = harness({ groupIds: [GROUP_ID, second] });
+    await expect(state.run(async () => true)).resolves.toBe(true);
+    await expect(state.run(async () => true)).resolves.toBe(true);
+    // A re-verify of the same version never re-enters the first run's lease,
+    // which is cold afterwards and could only be rearmed, not freshly spawned.
+    expect(state.acquiredGroups).toEqual([GROUP_ID, second]);
+    expect(state.acquiredGroups).not.toContain(VERSION_ID);
+  });
+
   test("passes the exact lease scope to provider creation", async () => {
     const state = harness();
     await expect(state.run(async () => true)).resolves.toBe(true);

@@ -1632,7 +1632,8 @@ describe("goal_complete with a reply ends the turn with that reply", () => {
       await consumeStream(stream);
       expect(stream.error).toBeNull();
       expect(model.calls).toBe(2);
-      expect(f.calls).toEqual(["sibling", "goal_complete"]);
+      // The two calls run in parallel, so either may reach the server first.
+      expect(f.calls.toSorted()).toEqual(["goal_complete", "sibling"]);
       expect(f.prepared.inputWaitYield?.requested).toBe(false);
       expect(f.prepared.inputWaitYield?.finalReply).toBeNull();
       expect(stream.finalOutput).toBe("The parser handles empty input.");

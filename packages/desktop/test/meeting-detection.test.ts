@@ -22,6 +22,8 @@ import {
   PROMPT_AFTER_MS,
   promptRequest,
   promptText,
+  recordedMilliseconds,
+  recordingMeeting,
   type MeetingPage,
   type MeetingPrompt,
   type MeetingPromptOutcome,
@@ -652,6 +654,119 @@ describe("MeetingDetection", () => {
   });
 });
 
+describe("the meeting being recorded, for the menu", () => {
+  test("a page that describes its recording shows in the menu, opens and stops it", () => {
+    const { subject, microphone } = detection();
+    const other = new FakePage(1);
+    const page = new FakePage(2);
+    subject.listen(other, true);
+    subject.listen(page, true);
+    let changes = 0;
+    subject.onRecording(() => {
+      changes += 1;
+    });
+    expect(subject.recording()).toBeNull();
+    microphone([], 10_000);
+    subject.setRecording(page, true, {
+      title: "Weekly sync",
+      elapsedMilliseconds: 4_000,
+      paused: false,
+    });
+    const recording = subject.recording()!;
+    expect(recording).toMatchObject({ page, title: "Weekly sync", paused: false, canOpen: true });
+    expect(recordedMilliseconds(recording, 70_000)).toBe(64_000);
+    expect(changes).toBe(1);
+    // A pause freezes the time.
+    microphone([], 20_000);
+    subject.setRecording(page, true, {
+      title: "Weekly sync",
+      elapsedMilliseconds: 14_000,
+      paused: true,
+    });
+    expect(recordedMilliseconds(subject.recording()!, 90_000)).toBe(14_000);
+    expect(changes).toBe(2);
+
+    expect(subject.openRecording(subject.recording()!)).toBe(true);
+    expect(page.sent).toEqual([{ kind: "open" }]);
+    expect(subject.stopRecording()).toBe(true);
+    // Stopping goes only to the page that records.
+    expect(page.sent.at(-1)).toEqual({ kind: "stop", app: "" });
+    expect(other.sent).toEqual([]);
+
+    subject.setRecording(page, false);
+    expect(subject.recording()).toBeNull();
+    expect(changes).toBe(3);
+    expect(subject.stopRecording()).toBe(false);
+    subject.stop();
+  });
+
+  test("a page built before it described its meetings counts from when the app heard, and isn't asked to open it", () => {
+    const { subject, microphone } = detection();
+    const page = new FakePage(1);
+    subject.listen(page, true);
+    microphone([], 5_000);
+    subject.setRecording(page, true);
+    const recording = subject.recording()!;
+    expect(recording).toMatchObject({ title: null, canOpen: false });
+    expect(recordedMilliseconds(recording, 65_000)).toBe(60_000);
+    // Saying it again doesn't restart the time.
+    microphone([], 30_000);
+    subject.setRecording(page, true);
+    expect(subject.recording()!.at).toBe(5_000);
+    // Its page would take an unknown request for Stop, so it gets none.
+    expect(subject.openRecording(subject.recording()!)).toBe(false);
+    expect(page.sent).toEqual([]);
+    subject.stop();
+  });
+
+  test("describing it again doesn't end the recording the card knows about", () => {
+    const { subject, cards, call, microphone } = detection();
+    const page = new FakePage(1);
+    subject.listen(page, true);
+    call();
+    cards[0]!.done("chosen");
+    subject.setRecording(page, true, { title: null, elapsedMilliseconds: 0, paused: false });
+    subject.setRecording(page, true, {
+      title: "Renamed",
+      elapsedMilliseconds: 9_000,
+      paused: false,
+    });
+    // The call ends: the card offers to stop the recording, as before.
+    microphone([], 20_000);
+    microphone([], 20_000 + ENDED_AFTER_MS + 1_000);
+    expect(cards.at(-1)!.prompt.kind).toBe("stop");
+    subject.stop();
+  });
+
+  test("the newest recording shows; a closed page's goes", () => {
+    const { subject } = detection();
+    const first = new FakePage(1);
+    const second = new FakePage(2);
+    subject.setRecording(first, true, { title: "A", elapsedMilliseconds: 0, paused: false });
+    subject.setRecording(second, true, { title: "B", elapsedMilliseconds: 0, paused: false });
+    expect(subject.recording()!.title).toBe("B");
+    second.destroyed = true;
+    expect(subject.recording()!.title).toBe("A");
+    subject.pageGone(first);
+    expect(subject.recording()).toBeNull();
+    subject.stop();
+  });
+
+  test("only a well-formed description is taken", () => {
+    expect(
+      recordingMeeting({ title: "  Standup ", elapsedMilliseconds: 1_000, paused: true }),
+    ).toEqual({ title: "Standup", elapsedMilliseconds: 1_000, paused: true });
+    expect(recordingMeeting({ title: "", elapsedMilliseconds: -5 })).toEqual({
+      title: null,
+      elapsedMilliseconds: 0,
+      paused: false,
+    });
+    expect(recordingMeeting(undefined)).toBeNull();
+    expect(recordingMeeting({ title: "x" })).toBeNull();
+    expect(recordingMeeting({ elapsedMilliseconds: Number.NaN })).toBeNull();
+  });
+});
+
 describe("the card", () => {
   test("the page's answer names the outcome and the question it answers", () => {
     expect(cardAnswer("act/3")).toEqual({ outcome: "chosen", token: 3 });
@@ -756,7 +871,15 @@ describe("handleMeetingDetectionIpc", () => {
     // A closed page records nothing.
     handlers.get(DESKTOP_IPC.meetingDetectionUpdate)!({ sender: page }, { enabled: true });
     handlers.get(DESKTOP_IPC.meetingDetectionRecording)!({ sender: page }, true);
+    expect(subject.recording()).toMatchObject({ title: null, canOpen: false });
+    (handlers.get(DESKTOP_IPC.meetingDetectionRecording) as (...args: unknown[]) => void)(
+      { sender: page },
+      true,
+      { title: "Planning", elapsedMilliseconds: 2_000, paused: false },
+    );
+    expect(subject.recording()).toMatchObject({ title: "Planning", canOpen: true });
     page.emit("destroyed");
+    expect(subject.recording()).toBeNull();
     call(chrome, 50_000);
     expect(cards.at(-1)!.prompt).toMatchObject({ kind: "record", app: { id: "chrome" } });
     subject.stop();
@@ -790,6 +913,11 @@ describe("meetingDetectionBridge", () => {
     ]);
     bridge.setRecording(true);
     expect(ipc.sent.at(-1)).toEqual([DESKTOP_IPC.meetingDetectionRecording, true]);
+    const meeting = { title: "Planning", elapsedMilliseconds: 1_000, paused: false };
+    const described: unknown[][] = [];
+    ipc.send = (...args: unknown[]) => void described.push(args);
+    bridge.setRecording(true, meeting);
+    expect(described).toEqual([[DESKTOP_IPC.meetingDetectionRecording, true, meeting]]);
   });
 });
 

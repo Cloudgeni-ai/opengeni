@@ -10,25 +10,30 @@ type Anchor = {
 export type TimelineAnchor = Anchor[];
 
 /**
- * Read ownership synchronously: selectionchange may follow the next React commit.
- * Focus left on a card the person just answered is not reading: that answer
- * handed the view back to the conversation's tip.
+ * A text selection inside the timeline. Content must not move beneath it, so it
+ * is the one non-scroll signal that hands the view to the reader.
  */
-export function timelineHasReader(
-  scroller: HTMLElement | null,
-  answeredCard: HTMLElement | null = null,
-): boolean {
+export function timelineHasSelection(scroller: HTMLElement | null): boolean {
   if (!scroller) return false;
-  const focused = scroller.ownerDocument.activeElement;
   const selection = scroller.ownerDocument.getSelection();
   return Boolean(
-    (focused &&
-      focused !== scroller &&
-      scroller.contains(focused) &&
-      !answeredCard?.contains(focused)) ||
-    (selection &&
-      !selection.isCollapsed &&
-      (scroller.contains(selection.anchorNode) || scroller.contains(selection.focusNode))),
+    selection &&
+    !selection.isCollapsed &&
+    (scroller.contains(selection.anchorNode) || scroller.contains(selection.focusNode)),
+  );
+}
+
+/**
+ * Read ownership synchronously: selectionchange may follow the next React commit.
+ * Focus inside the timeline protects the focused content from settlement
+ * compaction and motion; it never decides bottom-follow (see message-timeline).
+ */
+export function timelineHasReader(scroller: HTMLElement | null): boolean {
+  if (!scroller) return false;
+  const focused = scroller.ownerDocument.activeElement;
+  return Boolean(
+    (focused && focused !== scroller && scroller.contains(focused)) ||
+    timelineHasSelection(scroller),
   );
 }
 

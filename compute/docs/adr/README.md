@@ -34,6 +34,7 @@ old one; old records stay as history.
 | 26 | [A host that shares its machine](0026-a-host-that-shares-its-machine.md) | Accepted |
 | 27 | [Resizing a sandbox](0027-resizing-a-sandbox.md) | Accepted |
 | 28 | [Stored objects carry their hour, and the sweep runs hourly](0028-stored-objects-carry-their-hour.md) | Accepted |
+| 29 | [A sweep lists each period once](0029-a-sweep-lists-each-period-once.md) | Accepted |
 
 ## Format
 

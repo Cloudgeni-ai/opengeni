@@ -16,6 +16,67 @@ diff:
 + 44 more repository skill folders are not listed here. They remain in the workspace; read their SKILL.md with filesystem tools.
 ```
 
+Finished background commands report themselves. When a command the agent
+left running finishes during the turn, its exit status and the start and end
+of its output follow the next plain-text tool result, and the durable
+`background_command_result` input now carries the same output, so the agent
+no longer needs a `command_read` only to learn that a command finished.
+When a sandbox is active and cut polling is on (new `commandCompletionDelivery`
+resource fact), Background commands gains one sentence (about 170 bytes)
+saying so, in every tool-availability variant; with
+`OPENGENI_EXPERIMENT_CUT_POLLING=false` the section is unchanged. The
+`command_read` and `command_wait` descriptions say that a finished command's
+result reaches the session on its own. The legacy text is unchanged.
+
+```diff
++ A command that finishes while you work reports its exit status and output on its own, after a later tool result or as input, so do not poll only to learn that it finished.
+```
+
+Fixed guidance that rides on every request is shorter where it cannot help:
+
+- The Codemode directive (legacy and modular, about 630 to 520 o200k tokens)
+  says the same things more compactly: catalog scope, when to prefer Codemode,
+  which client to run (native client, a compatible `ogtool` from PATH, or
+  the pinned package), the list/show/call/declarations commands, the Bun module import,
+  and the approval-pending and outcome-unknown rules. It drops the misplaced
+  "Keep ordinary running commands alive with `command_wait`/`command_read`"
+  sentence (command guidance lives in Runtime mechanics) and the
+  `environmentCodemodeClient()` method names (`ogtool read` observes the same
+  operation from any authorized attempt of the same turn). The legacy locks for the two cases with Codemode change.
+- With Knowledge learning Off, which refuses every Knowledge write, the
+  guidance for the save-only Knowledge tools is omitted; with
+  workspace-instruction learning Off, the instruction-change clause is omitted
+  (see Tool-availability variants). The learning-mode rule, retrieval and
+  grounding stay. Skills learning Off changes nothing: it does not disable
+  installed Skills, so the Skill index and reading guidance stay.
+- The `browser_open` description keeps what matters before opening (placement,
+  the user's Chrome, headed or headless, storage, screenshots, Code Mode for
+  bulk work with its browser API, the CAPTCHA rule). How to work with the
+  open session (act on the outline, the family tools, the dedicated attached
+  tab) now follows the first `browser_open` result the model reads in an
+  attempt (`BROWSER_OPEN_RESULT_GUIDANCE`); later opens and Code Mode callers
+  get the plain result.
+
+A session that cannot spawn children no longer reads how to delegate to them.
+When the session's nesting depth has reached its frozen maximum, the
+first-party MCP server already hides `session_create`; the prompt's tool
+availability now proves it absent too and records `childSessionsImpossible`
+(the worker passes the session's `nestedAgentDepth` and
+`effectiveMaxNestedAgentDepth`, both frozen on the session, so the prefix stays
+stable across turns). Without `session_create`, Session coordination drops the
+delegation-judgment sentences. When the session can never have children, it
+also drops the "After spawning" child-integration paragraph and the
+`child_requires_action` paragraph (together about 470 o200k tokens for a
+session at its maximum depth). A turn that merely lacks `session_create` (for
+example a scheduled turn with a narrower selection) keeps the integration
+rules, because the session may already own children. Session coordination
+keeps the child-session delivery rule, session management, session links,
+targets, Send/Steer receipt and supervision rules, the "do not repurpose" and
+"handle what you can in this session" sentences, and the short-wait guidance.
+Sessions that can still spawn render byte for byte as before. The bundled
+`projects` Skill is listed only when `project_list` is selected, because it
+only explains the project tools.
+
 Goal completion can carry the final answer. `goal_complete` gains an optional
 `reply`: once the completion succeeds, the runtime ends the turn at that tool
 batch with the reply as its final answer, shown exactly as written, the way
@@ -877,6 +938,10 @@ When a named tool is proven absent, only the clauses naming it change:
   `session_send_message` follow-up clause, the `wait_for_input` long-wait and
   `finalAnswer` sentences, the `session_wait` join and short-wait sentences,
   and the `session_get` contrasts each need their tools.
+  Without `session_create` the delegation-judgment sentences are dropped; the
+  "After spawning" paragraph and the `child_requires_action` paragraph are
+  dropped only with `childSessionsImpossible` (a session at its maximum
+  nesting depth, which can have no children).
 - Runtime mechanics and base behavior: without `wait_for_input` the in-flight
   and already-waiting sentences and the three base-behavior `wait_for_input`
   clauses are dropped, and `## Waiting` keeps only its tool-neutral sentence
@@ -901,9 +966,16 @@ Tool discovery, media, accepted user/workspace/Skill instructions, active-goal
 continuation input, and the Codemode/code-search/Git-binding attempt
 directives are unchanged.
 
-Known exception: the Codemode directive's observation clause still names
-`command_wait`/`command_read` when those tools are proven absent; a test pins
-it as the only surviving prompt-named tool.
+The Codemode directive no longer names `command_wait`/`command_read`, so with
+every prompt-named tool proven absent no instruction layer names one (pinned by
+a test).
+
+Learning modes: with the accepted turn's effective Knowledge learning mode Off,
+the Knowledge authoring tools (`knowledge_save`, `knowledge_prepare_save`,
+`knowledge_retain_message`, `knowledge_retain_file`, `knowledge_archive`,
+`task_note_promote_knowledge`) render as absent, and with workspace-instruction
+learning Off so does `instruction_policy_save`. Their tools stay in the catalog
+and still refuse; only the guidance for calls that cannot succeed is omitted.
 
 Linked turns: the permission ceiling of a turn acting for a linked external
 identity is that turn's own snapshot. A session mixing linked and unlinked

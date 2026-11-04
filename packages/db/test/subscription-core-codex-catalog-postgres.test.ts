@@ -181,7 +181,7 @@ function serving(org: Org, workspaceId: string, subjectId: string | null) {
 }
 
 describe.skipIf(!realDb)("Codex readiness on the shared core after the cutover", () => {
-  test("shared catalog reuse is scoped, expires, and is fenced by credential generation", async () => {
+  test("shared catalog reuse is scoped, kept once expired, and fenced by credential generation", async () => {
     const org = await organization();
     const connectionId = await sharedConnection(org, `fresh-${crypto.randomUUID()}`);
     const scope = {
@@ -226,10 +226,12 @@ describe.skipIf(!realDb)("Codex readiness on the shared core after the cutover",
         read,
       ),
     ).toEqual(beforeActor);
+    // An expired list is still returned, with its expiry, for display reads
+    // that must not wait for a slow provider; readers check freshness.
     expect(
       (await read(new Date(observedAt + 60_000))).find((c) => c.connectionId === connectionId)
         ?.modelCatalog,
-    ).toBeNull();
+    ).toEqual({ slugs: ["test-model"], observedAt, expiresAt: observedAt + 60_000 });
     expect(
       (await read(new Date(observedAt - 1))).find((c) => c.connectionId === connectionId)
         ?.modelCatalog,

@@ -128,6 +128,11 @@ export type BillingState = {
 export type SandboxRuntimeState = {
   resolvedSandbox: ResumedTurnSandbox | null;
   attemptWritersDrained: boolean;
+  /** The command fence the attempt writer drain cancelled and quiesced. Set
+   * together with `attemptWritersDrained`; a cancelled fence also refuses
+   * every later command, so a workspace mutation that writes only through it
+   * can no longer write once this is set. */
+  drainedCommandFence: TurnToolCancellationFence | null;
   lateSandboxesAwaitingWriterDrain: Set<ResumedTurnSandbox>;
   machinePrimarySession: SelfhostedSession | null;
   lazyOwnedSandbox: EstablishedSandboxSession | null;
@@ -209,6 +214,12 @@ export type EventingState = {
    * same.
    */
   appActionApprovalCards: Map<string, AppActionApprovalCard>;
+  /**
+   * Finished-command text appended to tool results for the model and not yet
+   * matched to its result event; the timeline shows each tool's own output.
+   * Absent means nothing was appended.
+   */
+  commandCompletionNotices?: Set<string> | undefined;
 };
 
 /** Rig telemetry: set once the session loads; empty string for a rig-less
@@ -351,6 +362,7 @@ export function createTurnContext(input: {
     sandboxState: {
       resolvedSandbox: null,
       attemptWritersDrained: false,
+      drainedCommandFence: null,
       lateSandboxesAwaitingWriterDrain: new Set(),
       machinePrimarySession: null,
       lazyOwnedSandbox: null,
@@ -408,6 +420,7 @@ export function createTurnContext(input: {
       companyBrainContextContributions: null,
       modelVisibleSkillIds: null,
       appActionApprovalCards: new Map(),
+      commandCompletionNotices: new Set(),
     },
     workspaceRefs: {
       rigId: "",

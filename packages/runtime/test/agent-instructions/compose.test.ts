@@ -237,6 +237,35 @@ describe("modular composer: module selection (AC12)", () => {
     }
   });
 
+  test("the do-not-poll sentence renders only when finished commands are delivered", () => {
+    const sentence = "reports its exit status and output on its own";
+    const withoutDelivery = { ...NO_RESOURCES, managedSandbox: true };
+    const withDelivery = { ...withoutDelivery, commandCompletionDelivery: true };
+    for (const capabilities of [allAgentCapabilities(), noneAgentCapabilities()]) {
+      expect(compose(capabilities, withoutDelivery).composed).not.toContain(sentence);
+      const delivered = compose(capabilities, withDelivery).composed;
+      expect(delivered).toContain(sentence);
+      // Follows the terminal-read sentence in the same paragraph.
+      expect(delivered).toContain(
+        "a running read does not. A command that finishes while you work reports",
+      );
+    }
+    expect(
+      compose(allAgentCapabilities(), { ...NO_RESOURCES, commandCompletionDelivery: true })
+        .composed,
+    ).not.toContain(sentence);
+    expect(
+      agentPromptResourcesFor(testSettings({ sandboxBackend: "docker" }), [], {}),
+    ).toHaveProperty("commandCompletionDelivery", true);
+    expect(
+      agentPromptResourcesFor(
+        testSettings({ sandboxBackend: "docker", experimentCutPolling: false }),
+        [],
+        {},
+      ),
+    ).not.toHaveProperty("commandCompletionDelivery");
+  });
+
   test("sandbox guidance appears for a Connected Machine alone", () => {
     const result = compose(allAgentCapabilities(), { ...NO_RESOURCES, connectedMachine: true });
     expect(moduleIds(result)).toEqual(expect.arrayContaining(["sandbox", "connected_machine"]));
@@ -552,6 +581,7 @@ describe("modular composer: prompt-cache stability", () => {
       connectedMachine: false,
       repositories: true,
       gitCredentials: true,
+      commandCompletionDelivery: true,
     });
     expect(
       agentPromptResourcesFor(settings, [{ kind: "repository", uri: "x" }] as never, {
@@ -562,6 +592,7 @@ describe("modular composer: prompt-cache stability", () => {
       connectedMachine: true,
       repositories: false,
       gitCredentials: false,
+      commandCompletionDelivery: true,
     });
     expect(
       agentPromptResourcesFor(settings, [{ kind: "repository", uri: "x" }] as never, {}),
