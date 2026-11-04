@@ -619,6 +619,50 @@ describe("reminders before calendar meetings", () => {
     run.subject.shutdown();
   });
 
+  test("a mute just before the next meeting doesn't lose that meeting's reminder", async () => {
+    const run = reminders();
+    await run.at(START - 40 * MINUTE);
+    run.microphone([zoom], START - 40 * MINUTE);
+    run.microphone([zoom], START - 40 * MINUTE + PROMPT_AFTER_MS);
+    run.cards[0]!.done("dismissed");
+    // Muted long enough to end a call, 8 minutes before the next meeting.
+    run.microphone([], START - 8 * MINUTE);
+    run.microphone([], START - 8 * MINUTE + ENDED_AFTER_MS + 1);
+    run.microphone([zoom], START - 8 * MINUTE + 20_000);
+    await run.at(START - REMIND_BEFORE_MS);
+    expect(run.shown()).toHaveLength(1);
+    expect(run.cards.filter((card) => card.prompt.kind === "record")).toHaveLength(1);
+    run.subject.shutdown();
+  });
+
+  test("Not now on a short call before a meeting: the call ended, so the meeting's reminder shows", async () => {
+    const run = reminders();
+    await run.at(START - 6 * MINUTE);
+    run.microphone([zoom], START - 6 * MINUTE);
+    run.microphone([zoom], START - 6 * MINUTE + PROMPT_AFTER_MS);
+    run.cards[0]!.done("dismissed");
+    run.microphone([], START - 4 * MINUTE);
+    run.microphone([], START - 4 * MINUTE + ENDED_AFTER_MS + 1);
+    await run.at(START - REMIND_BEFORE_MS);
+    expect(run.shown()).toHaveLength(1);
+    run.subject.shutdown();
+  });
+
+  test("Not now on a meeting that runs over: a mute after its scheduled end doesn't ask again", async () => {
+    const run = reminders();
+    await run.at(START + MINUTE);
+    run.microphone([zoom], START + MINUTE);
+    run.microphone([zoom], START + MINUTE + PROMPT_AFTER_MS);
+    run.cards.find((card) => card.prompt.kind === "record")!.done("dismissed");
+    // The meeting was booked until START + 30 minutes; at 35 the person mutes.
+    run.microphone([], START + 35 * MINUTE);
+    run.microphone([], START + 35 * MINUTE + ENDED_AFTER_MS + 1);
+    run.microphone([zoom], START + 35 * MINUTE + 20_000);
+    run.microphone([zoom], START + 35 * MINUTE + 20_000 + PROMPT_AFTER_MS);
+    expect(run.cards.filter((card) => card.prompt.kind === "record")).toHaveLength(1);
+    run.subject.shutdown();
+  });
+
   test("a call from long before still gets the next meeting's reminder", async () => {
     const run = reminders();
     await run.at(START - 40 * MINUTE);

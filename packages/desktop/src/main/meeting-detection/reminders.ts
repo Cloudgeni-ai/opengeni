@@ -5,8 +5,8 @@
 // its server, `GET …/upcoming-meetings`), so only that account reminds, and
 // the meeting is recorded there. Each meeting is offered once: choosing it,
 // closing the card or letting it time out all end the offer. A meeting
-// already under way for a while, or one the person is on a call for already
-// (and was asked about recording), is not offered at all.
+// already under way for a while is not offered at all, nor is one whose call
+// the person already turned down recording (Not now) and is still on.
 
 import type { MeetingPromptOutcome, ShownPrompt } from "./index";
 
@@ -44,6 +44,8 @@ export const POLL_SOON_MS = 60_000;
 const SOON_MS = 3 * 60_000;
 /** A recording started this long before a meeting's start is of that meeting, joined early. */
 export const EARLY_JOIN_MS = 10 * 60_000;
+/** A calendar entry longer than this is a block of time, not the call going on. */
+export const LONGEST_CALL_MS = 4 * 60 * 60_000;
 /** Run about this often: the cards depend on the time. */
 export const REMINDER_TICK_MS = 15_000;
 /** The shortest a card stays up, however late it shows. */
@@ -141,11 +143,11 @@ export interface CalendarReminderOptions {
   /** Since when the page has been recording a meeting, or null when it isn't. */
   recordingSince(): number | null;
   /**
-   * Since when the newest call going on (an app on the microphone) started,
-   * or null without one. A call that started just before a meeting is that
-   * meeting, joined early: it isn't offered.
+   * Whether `appId`'s call (an app on the microphone, allowing for a short
+   * mute) is still going on. A meeting whose call the person turned down
+   * recording is offered only once that call has ended.
    */
-  callSince?(): number | null;
+  inCall?(appId: string): boolean;
   /** Another question is on the card that a reminder must not replace (a call just started). */
   busy(): boolean;
   /** Put a reminder on the card; `done` runs once when the person acts or it times out. */
@@ -174,6 +176,8 @@ export class CalendarReminders {
   /** Bumped when the account changes, so a read for the one before is ignored. */
   private generation = 0;
   private readonly offered = new Set<string>();
+  /** Meetings whose call the person turned down recording: the call's app, by meeting. */
+  private readonly declined = new Map<string, string>();
   private shown: { key: string; reminder: JoinReminder; handle: ShownPrompt } | null = null;
 
   constructor(private readonly options: CalendarReminderOptions) {}
@@ -261,15 +265,21 @@ export class CalendarReminders {
     }
     if (this.options.busy()) return;
     const since = this.options.recordingSince();
-    const call = this.options.callSince?.() ?? null;
+    for (const meeting of meetings) {
+      const meetingKey = key(accountId, meeting);
+      const app = this.declined.get(meetingKey);
+      if (app === undefined || !reminderDue(meeting, now)) continue;
+      // Turned down and still on that call: the person is in it and said no.
+      // Ended (a short call before the meeting): the reminder is offered.
+      this.declined.delete(meetingKey);
+      if (this.options.inCall?.(app)) this.remember(meetingKey);
+    }
     const due = meetings.filter(
       (meeting) =>
         reminderDue(meeting, now) &&
         !this.offered.has(key(accountId, meeting)) &&
         // Recording since just before it started: the person joined it early.
-        !(since !== null && since >= meeting.startsAt - EARLY_JOIN_MS) &&
-        // On a call since just before it started: the person is in it already.
-        !(call !== null && call >= meeting.startsAt - EARLY_JOIN_MS),
+        !(since !== null && since >= meeting.startsAt - EARLY_JOIN_MS),
     );
     const meeting = due[0];
     if (!meeting) return;
@@ -322,22 +332,30 @@ export class CalendarReminders {
   }
 
   /**
-   * The person turned down recording the call going on at `now`: the
-   * calendar meeting it is (started, or starting within
-   * {@link EARLY_JOIN_MS}) counts as offered, so its reminder doesn't ask
-   * again. Returns that meeting, or null when none is on now.
+   * The person turned down recording `appId`'s call at `now`. Returns the
+   * calendar meeting that call is (started, or starting within
+   * {@link EARLY_JOIN_MS}; not a long block), or null. While that call goes
+   * on, the meeting's reminder doesn't ask again.
    */
-  coverMeetingAt(now: number): CalendarMeeting | null {
+  declinedCall(now: number, appId: string): CalendarMeeting | null {
     const accountId = this.accountId;
     if (!accountId || !this.upcoming) return null;
     const current = this.upcoming.meetings.filter(
-      (meeting) => meeting.startsAt - EARLY_JOIN_MS <= now && now < meeting.endsAt,
+      (meeting) =>
+        meeting.startsAt - EARLY_JOIN_MS <= now &&
+        now < meeting.endsAt &&
+        meeting.endsAt - meeting.startsAt <= LONGEST_CALL_MS,
     );
     // The one that started last, or else the next to start.
     const started = current.filter((meeting) => meeting.startsAt <= now);
     const meeting = started.at(-1) ?? current[0] ?? null;
     if (!meeting) return null;
-    this.remember(key(accountId, meeting));
+    this.declined.set(key(accountId, meeting), appId);
+    // Only today's matter; keep the map small.
+    if (this.declined.size > 50) {
+      const oldest = this.declined.keys().next().value;
+      if (oldest !== undefined) this.declined.delete(oldest);
+    }
     return meeting;
   }
 

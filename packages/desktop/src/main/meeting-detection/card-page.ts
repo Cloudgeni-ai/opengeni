@@ -103,6 +103,8 @@ let settle = null;
 let answered = Promise.resolve(null);
 // Every way a question ends (a button, Escape, the time running out) goes
 // through here; the main process hides the card when it hears the answer.
+// (The card's window takes no focus, so Escape only reaches it if something
+// focuses it, such as an accessibility tool.)
 function report(action) {
   clearTimeout(timer);
   timer = null;
@@ -128,7 +130,10 @@ document.getElementById("dismiss").addEventListener("click", () => report("dismi
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && settle) report("dismiss");
 });
-// The pointer came onto the card (true) or left it (false), as the main process sees it.
+// The pointer left the page. A window shown again may get the pointer
+// replayed onto it, but never off it, so leaving is believed.
+document.body.addEventListener("mouseleave", () => hold(false));
+// The pointer is on the card (true) or left it (false), as the main process sees it.
 function hold(on) {
   if (on === hovering || !settle) return;
   hovering = on;

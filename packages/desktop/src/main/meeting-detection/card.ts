@@ -285,7 +285,8 @@ export class MeetingPromptCard implements MeetingPromptView {
    * events can't say: a window shown again gets the pointer replayed where it
    * last was, on the Not now pressed before. Where the system's cursor is
    * only known from the app's own windows (Linux), it is stale the same way,
-   * so the card is held only once the pointer moves onto it.
+   * so the card is held only while the pointer moves on it; the page lets go
+   * itself when the pointer leaves it (a replay only ever fakes arriving).
    */
   private watchPointer(window: BrowserWindow, token: number): void {
     this.stopPointer();
@@ -305,7 +306,8 @@ export class MeetingPromptCard implements MeetingPromptView {
         point.x < bounds.x + bounds.width &&
         point.y >= bounds.y &&
         point.y < bounds.y + bounds.height;
-      if (on === inside || (on && !moved)) return;
+      // Moving on the card holds it (again, if the page let go); leaving lets go.
+      if (on ? !moved : !inside) return;
       inside = on;
       window.webContents.executeJavaScript(`hold(${on})`).catch(() => undefined);
     };

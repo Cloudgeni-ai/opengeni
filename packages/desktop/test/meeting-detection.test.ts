@@ -1035,8 +1035,12 @@ describe("the card outlives its page", () => {
 });
 
 /** The card's page script, run against just enough of a document to press its buttons. */
-function cardPage() {
-  const script = /<script>([\s\S]*)<\/script>/u.exec(MEETING_CARD_HTML)![1]!;
+function cardPage(options: { afterHoverMs?: number } = {}) {
+  let script = /<script>([\s\S]*)<\/script>/u.exec(MEETING_CARD_HTML)![1]!;
+  // How long the card stays once the pointer leaves it, shortened for a test.
+  if (options.afterHoverMs !== undefined) {
+    script = script.replace(/const AFTER_HOVER_MS = \d+;/u, `const AFTER_HOVER_MS = ${options.afterHoverMs};`);
+  }
   class Element extends EventTarget {
     textContent = "";
     hidden = false;
@@ -1089,6 +1093,8 @@ function cardPage() {
       }
     },
     key: (key: string) => document.dispatchEvent(Object.assign(new Event("keydown"), { key })),
+    /** The pointer leaves the page, as the page itself sees it. */
+    leave: () => body.dispatchEvent(new Event("mouseleave")),
   };
 }
 
@@ -1136,6 +1142,17 @@ describe("the card's page", () => {
     page.press("dismiss");
     expect(await held).toBe("dismiss/7");
   });
+
+  test("the pointer leaving lets the card go, even where the app can't see it leave", async () => {
+    // Under Wayland the app knows the cursor only over its own windows, so
+    // the main process never sees it leave; the page does.
+    const page = cardPage({ afterHoverMs: 20 });
+    const held = page.ask(8);
+    page.hold(true);
+    expect(await after(held, 60)).toBe("pending");
+    page.leave();
+    expect(await after(held, 80)).toBe("expire/8");
+  });
 });
 
 describe("the card watches the real pointer", () => {
@@ -1160,13 +1177,17 @@ describe("the card watches the real pointer", () => {
       cursor.x = bounds.x + 20;
       cursor.y = bounds.y + 20;
       await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(sent).toEqual(["hold(true)"]);
+      // Moving on it again holds it again, in case the page let go meanwhile.
+      cursor.x += 1;
+      await new Promise((resolve) => setTimeout(resolve, 10));
       cursor.x = 0;
       await new Promise((resolve) => setTimeout(resolve, 10));
-      expect(sent).toEqual(["hold(true)", "hold(false)"]);
+      expect(sent).toEqual(["hold(true)", "hold(true)", "hold(false)"]);
       handle.close();
       cursor.x = bounds.x + 20;
       await new Promise((resolve) => setTimeout(resolve, 10));
-      expect(sent).toHaveLength(2);
+      expect(sent).toHaveLength(3);
 
       // A card that shows where the cursor rests (or where a stale cursor
       // says it is) isn't held until the pointer moves on it.
@@ -1175,10 +1196,10 @@ describe("the card watches the real pointer", () => {
         () => undefined,
       );
       await new Promise((resolve) => setTimeout(resolve, 10));
-      expect(sent).toHaveLength(2);
+      expect(sent).toHaveLength(3);
       cursor.y += 1;
       await new Promise((resolve) => setTimeout(resolve, 10));
-      expect(sent).toEqual(["hold(true)", "hold(false)", "hold(true)"]);
+      expect(sent).toEqual(["hold(true)", "hold(true)", "hold(false)", "hold(true)"]);
     } finally {
       view.destroy();
       electronStub.screen.getCursorScreenPoint = real;

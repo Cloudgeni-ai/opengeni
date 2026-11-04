@@ -316,8 +316,8 @@ export const ENDED_AFTER_MS = 8_000;
 /**
  * After Not now, an app off the microphone for less than this is still in
  * the call the person turned down (a long mute, a rejoin), so it isn't asked
- * about again. A call during a calendar meeting stays turned down until that
- * meeting ends.
+ * about again. A call during a calendar meeting also stays turned down until
+ * that meeting ends.
  */
 export const DECLINED_GAP_MS = 5 * 60_000;
 
@@ -523,13 +523,9 @@ export class MeetingPrompter {
     this.declinedCalls.set(app.id, { until, lastSeen: now });
   }
 
-  /** Since when the newest call going on has held the microphone; null without one. */
-  callSince(): number | null {
-    let newest: number | null = null;
-    for (const call of this.calls.values()) {
-      if (newest === null || call.since > newest) newest = call.since;
-    }
-    return newest;
+  /** Whether `appId`'s call is going on: on the microphone, or off it only briefly (a mute). */
+  inCall(appId: string): boolean {
+    return this.calls.has(appId);
   }
 
   /** The call apps holding the microphone now. */
@@ -540,8 +536,9 @@ export class MeetingPrompter {
   private stillDeclined(id: string, now: number): boolean {
     const declined = this.declinedCalls.get(id);
     if (!declined) return false;
+    // A meeting running over keeps its call turned down through a mute too.
     const still =
-      declined.until !== null ? now < declined.until : now - declined.lastSeen < DECLINED_GAP_MS;
+      now - declined.lastSeen < DECLINED_GAP_MS || (declined.until !== null && now < declined.until);
     if (!still) this.declinedCalls.delete(id);
     return still;
   }
@@ -870,8 +867,8 @@ export class MeetingDetection {
           // Only a recording in the account the meeting would record in is
           // switched; one in another account goes on.
           recordingSince: () => (this.targetRecords() ? this.recordingSince : null),
-          // A call that started just before a meeting is that meeting, joined early.
-          callSince: () => this.prompter.callSince(),
+          // A meeting whose call the person turned down isn't offered while it goes on.
+          inCall: (appId) => this.prompter.inCall(appId),
           // A call that just started, or one that ended, is asked about first.
           busy: () => this.onCard?.prompt.kind === "record" || this.onCard?.prompt.kind === "stop",
           present: (reminder, done) => this.showCard(joinPrompt(reminder), done),
@@ -1102,7 +1099,7 @@ export class MeetingDetection {
       if (outcome === "dismissed" && prompt.kind === "record") {
         // Not now: not during this call, and not for the calendar meeting it is.
         const now = this.now();
-        const meeting = this.reminders?.coverMeetingAt(now) ?? null;
+        const meeting = this.reminders?.declinedCall(now, prompt.app.id) ?? null;
         this.prompter.declined(prompt.app, now, meeting?.endsAt ?? null);
       }
       // Stopping a recording that started without asking stays in the background.
