@@ -1639,6 +1639,15 @@ export function buildTimeline(
           finalizeOpen(turnId, "complete", event.occurredAt);
           takeAgentResponse(turnId);
           takePendingWaitOutcome(turnId);
+          // Its startup rows (including the expected "compact first" model
+          // preparation stop) are part of that same maintenance. Left behind,
+          // they would form a work row no turn-end ever settles.
+          if (turnId) {
+            for (let index = items.length - 1; index >= 0; index -= 1) {
+              const item = items[index]!;
+              if (item.kind === "startup-phase" && item.turnId === turnId) items.splice(index, 1);
+            }
+          }
           break;
         }
         // Credit exhaustion arrives as a NOMINALLY completed turn (`detail:
