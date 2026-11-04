@@ -682,7 +682,7 @@ public base URL. Opengeni's own per-organization issuer, for auto-connect
 organization connectors, is served under `/v1` and signs with a key encrypted
 by the same stable `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` that protects other
 connection material. Keep the public base URL stable: it is part of each organization's issuer URL that
-outside apps trust. Migrations `1260`, `1261` and `1262` are rolling.
+outside apps trust. Migrations `1263`, `1264` and `1265` are rolling.
 
 Dynamic client registration is durably limited to 20 registrations per source
 and 600 registrations globally per ten-minute window. Registrations that are

@@ -210,7 +210,7 @@ their refusal reason (`McpAutoConnectRefusalReason`, for example
 `no_matching_member` or `wrong_audience`) so an admin can fix a setup without
 logs. The web app shows them under Organization settings → Connected agents →
 Auto-connect. The routes answer `404` unless MCP OAuth and a public base URL
-are configured. Migrations `1260`, `1261` and `1262` are rolling.
+are configured. Migrations `1263`, `1264` and `1265` are rolling.
 
 The other direction, Opengeni connecting members to an outside MCP app the
 same way, is an organization connector with `login: "auto_connect"`; see

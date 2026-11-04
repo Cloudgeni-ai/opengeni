@@ -16,7 +16,7 @@ import {
 import { nestedPostgresSqlState } from "./persistence-errors";
 
 /* ----------------------------------------------------------------------------
-   MCP auto-connect, inbound (packages/db/drizzle/1260_mcp_auto_connect.sql).
+   MCP auto-connect, inbound (packages/db/drizzle/1263_mcp_auto_connect.sql).
 
    An organization trusts an identity issuer: Claude's per-organization
    issuer, or its own identity provider. When an MCP client redeems an ID-JAG
