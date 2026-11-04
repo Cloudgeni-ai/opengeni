@@ -29,7 +29,13 @@ import {
 } from "@opengeni/config";
 import { projectReasoningConfigurations, supportsReasoningConfiguration } from "@opengeni/codex";
 import { settingsWithSessionMcpServersForRun } from "../capabilities";
-import { resolveRigProviderImageForRun, settingsWithWorkspaceSandboxImage } from "@opengeni/core";
+import {
+  resolveRigProviderImageForRun,
+  rigProviderImageSourceImage,
+  settingsWithWorkspaceSandboxImage,
+} from "@opengeni/core";
+import { requestStaleRigProviderImageRefresh } from "../rig-provider-image-refresh";
+import type { StartRigProviderImageRefresh } from "../types";
 import { createModelHistoryAttachmentProjector } from "../run-input";
 import {
   loadTurnSearchRecords,
@@ -101,6 +107,8 @@ export type GovernanceModelDeps = {
     sha256: string;
     filename: string;
   }>;
+  /** Optional background rebuild of a stale sandbox environment image. */
+  startRigProviderImageRefresh?: StartRigProviderImageRefresh | null;
 };
 
 export type GovernanceModelOk = {
@@ -344,6 +352,16 @@ export async function prepareGovernanceAndModel(
     turn.sandboxBackend,
   );
   const providerImageSettings = providerImageSelection.settings;
+  requestStaleRigProviderImageRefresh({
+    selection: providerImageSelection,
+    turnUsesDeploymentBase:
+      rigProviderImageSourceImage(logicalSandboxSettings, turn.sandboxBackend) ===
+      rigProviderImageSourceImage(capabilitySettings, turn.sandboxBackend),
+    workspaceId: input.workspaceId,
+    versionId: rigVersion?.id ?? null,
+    start: deps.startRigProviderImageRefresh,
+    warn: (message, context) => observability.warn(message, context),
+  });
   const verifiedRigProviderImageId =
     providerImageSelection.reason === "selected"
       ? (providerImageSelection.imageId ?? undefined)
