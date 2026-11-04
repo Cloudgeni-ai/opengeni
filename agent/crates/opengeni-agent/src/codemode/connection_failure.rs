@@ -170,8 +170,14 @@ pub(super) fn environment_proxy(
 ) -> Option<EnvironmentProxy> {
     let host = url.host_str()?;
     let set = |name: &str| variable(name).filter(|value| !value.trim().is_empty());
-    let no_proxy = set("NO_PROXY").or_else(|| set("no_proxy")).unwrap_or_default();
-    for entry in no_proxy.split(',').map(str::trim).filter(|entry| !entry.is_empty()) {
+    let no_proxy = set("NO_PROXY")
+        .or_else(|| set("no_proxy"))
+        .unwrap_or_default();
+    for entry in no_proxy
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
         if entry == "*" {
             return None;
         }
@@ -458,8 +464,10 @@ mod tests {
         let cause = network_cause(&failure).expect("classified");
         assert!(matches!(cause, NetworkCause::CertificateRejected(_)));
         let url = Url::parse("https://app.opengeni.ai/codemode/").unwrap();
-        assert!(describe_cause(&cause, &direct(&url), SystemTime::now(), true)
-            .contains("could not be verified"));
+        assert!(
+            describe_cause(&cause, &direct(&url), SystemTime::now(), true)
+                .contains("could not be verified")
+        );
     }
 
     #[test]
@@ -483,8 +491,10 @@ mod tests {
             describe_cause(&cause, &direct(&url), SystemTime::now(), true),
             "Can't reach Opengeni: DNS lookup for app.opengeni.ai failed (Temporary failure in name resolution). Check /etc/resolv.conf."
         );
-        assert!(describe_cause(&cause, &direct(&url), SystemTime::now(), false)
-            .ends_with("Check this machine's DNS settings."));
+        assert!(
+            describe_cause(&cause, &direct(&url), SystemTime::now(), false)
+                .ends_with("Check this machine's DNS settings.")
+        );
     }
 
     #[test]
@@ -562,16 +572,27 @@ mod tests {
             })
         );
         assert_eq!(
-            environment_proxy(&url, environment(&[("all_proxy", "corp-proxy.example:8080")]))
-                .map(|proxy| proxy.variable),
+            environment_proxy(
+                &url,
+                environment(&[("all_proxy", "corp-proxy.example:8080")])
+            )
+            .map(|proxy| proxy.variable),
             Some("all_proxy")
         );
         // Only the scheme's own variable applies.
         assert_eq!(
-            environment_proxy(&url, environment(&[("HTTP_PROXY", "corp-proxy.example:3128")])),
+            environment_proxy(
+                &url,
+                environment(&[("HTTP_PROXY", "corp-proxy.example:3128")])
+            ),
             None
         );
-        for no_proxy in ["*", "app.opengeni.ai", ".opengeni.ai", "localhost, opengeni.ai"] {
+        for no_proxy in [
+            "*",
+            "app.opengeni.ai",
+            ".opengeni.ai",
+            "localhost, opengeni.ai",
+        ] {
             assert_eq!(
                 environment_proxy(
                     &url,
@@ -607,8 +628,13 @@ mod tests {
             "Can't reach Opengeni: the connection to the proxy corp-proxy.example:3128 (from HTTPS_PROXY) was refused. Check HTTPS_PROXY and that the proxy is running."
         );
         // The certificate is still Opengeni's, tunnelled through the proxy.
-        assert!(describe_cause(&NetworkCause::CertificateExpired, &target, SystemTime::now(), true)
-            .contains("the TLS certificate for app.opengeni.ai has expired"));
+        assert!(describe_cause(
+            &NetworkCause::CertificateExpired,
+            &target,
+            SystemTime::now(),
+            true
+        )
+        .contains("the TLS certificate for app.opengeni.ai has expired"));
     }
 
     #[test]
