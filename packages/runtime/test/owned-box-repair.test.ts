@@ -196,7 +196,7 @@ describe("owned setup repairs only the chat's own cloud computer", () => {
       model: new ScriptedModel([]),
       sandboxEnvironment: environment,
       activeSandboxBackend: backend,
-      ...(backend === "selfhosted" ? { sandboxWorkspaceRoot: "/Users/person" } : {}),
+      ...(backend === "selfhosted" ? { sandboxWorkspaceRoot: "/Users/me" } : {}),
     });
     const commands: string[] = [];
     const session = {
