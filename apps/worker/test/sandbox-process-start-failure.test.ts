@@ -55,7 +55,7 @@ function computeTurn(
   options: {
     restartFails?: boolean;
     /** How the box answers the pre-restart probe; broken by default. */
-    probe?: "starts" | "offline";
+    probe?: "starts" | "offline" | "old-agent-broken";
   } = {},
 ) {
   const events: Published[] = [];
@@ -73,6 +73,16 @@ function computeTurn(
       probes += 1;
       if (options.probe === "starts") return { exitCode: 0 };
       if (options.probe === "offline") throw agentErrorToControlError(offlineAgentError());
+      if (options.probe === "old-agent-broken") {
+        // An older agent's real reply to the probe on a box without /dev/null.
+        throw agentErrorToControlError({
+          code: ErrorCode.ERROR_CODE_NOT_FOUND,
+          message:
+            "not found: spawn or apply execution containment for true: No such file or directory (os error 2)",
+          retryable: false,
+          detail: {},
+        });
+      }
       throw processStartError("/bin/sh", NULL_DEVICE_MISSING);
     },
   };
@@ -134,6 +144,18 @@ describe("a sandbox that cannot start programs", () => {
     expect(failure).toMatchObject({ code: "sandbox_command_start_unavailable", retryable: true });
     expect(failure.error).toContain("wasn't restarted");
     expect(failure.error).not.toContain("node -e");
+  });
+
+  test("an older agent's box (the 4 Nov incident) is restarted: its probe reply names `true`", async () => {
+    const turn = computeTurn({ probe: "old-agent-broken" });
+    const error = await recoverSandboxSetupFailure(
+      createSandboxSetupReplayGuard(),
+      processStartError(INSTALL_SCRIPT),
+      turn.recovery,
+    );
+    expect(error).toBeInstanceOf(SandboxMachineRestartingError);
+    expect(turn.probes()).toBe(1);
+    expect(turn.restarts()).toBe(1);
   });
 
   test("a probe that cannot tell (agent offline, box still waking) never restarts the box", async () => {

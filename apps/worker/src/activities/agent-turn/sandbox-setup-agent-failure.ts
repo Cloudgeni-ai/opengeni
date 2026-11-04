@@ -1,5 +1,6 @@
 import {
   isMachineProcessStartFailureMessage,
+  isProcessStartFailureMessage,
   processStartFailureNullDeviceNote,
   sanitizeProcessStartFailureMessage,
   SelfhostedControlError,
@@ -131,6 +132,28 @@ export function isSandboxProcessStartFailure(error: unknown): boolean {
 }
 
 function findProcessStartFailure(error: unknown): Error | null {
+  return findInCauseGraph(error, (node) =>
+    node instanceof SelfhostedControlError
+      ? node.processStartFailed
+      : isMachineProcessStartFailureMessage(node.message),
+  );
+}
+
+/** The probe ran the shell builtin `true` in the default working directory,
+ * so any process start that failed with ENOENT means the machine cannot start
+ * programs, whatever the agent named: an older agent reports `for true`,
+ * which elsewhere would read as one missing program. */
+function probeCannotStartPrograms(error: unknown): boolean {
+  return (
+    findInCauseGraph(
+      error,
+      (node) =>
+        isProcessStartFailureMessage(node.message) && /\(os error 2\)\s*$/.test(node.message),
+    ) !== null
+  );
+}
+
+function findInCauseGraph(error: unknown, matches: (node: Error) => boolean): Error | null {
   const queue: unknown[] = [error];
   const seen = new Set<object>();
   try {
@@ -138,11 +161,7 @@ function findProcessStartFailure(error: unknown): Error | null {
       const node = queue[index];
       if (!node || typeof node !== "object" || seen.has(node)) continue;
       seen.add(node);
-      if (node instanceof SelfhostedControlError) {
-        if (node.processStartFailed) return node;
-      } else if (node instanceof Error && isMachineProcessStartFailureMessage(node.message)) {
-        return node;
-      }
+      if (node instanceof Error && matches(node)) return node;
       const record = node as { cause?: unknown; error?: unknown; errors?: unknown };
       queue.push(record.cause, record.error);
       if (Array.isArray(record.errors)) queue.push(...record.errors.slice(0, 16));
@@ -181,7 +200,7 @@ export class SandboxMachineBackError extends Error {
 
   constructor(cause: unknown) {
     super(
-      "The workspace machine couldn't start programs, and nothing the model asked for ran. It wasn't restarted, because it may be starting up again already; the same turn will retry after a short delay.",
+      "The workspace machine couldn't start programs, and nothing the model asked for ran. It wasn't restarted, because a check didn't confirm it is still broken; the same turn will retry after a short delay.",
       { cause },
     );
   }
@@ -286,7 +305,9 @@ async function probeProgramStart(
       machine.exec({ cmd: "true" }).then(
         () => "starts" as const,
         (probeError: unknown) =>
-          isSandboxProcessStartFailure(probeError) ? ("cannot" as const) : ("unknown" as const),
+          isSandboxProcessStartFailure(probeError) || probeCannotStartPrograms(probeError)
+            ? ("cannot" as const)
+            : ("unknown" as const),
       ),
       new Promise<"unknown">((resolve) => {
         timer = setTimeout(() => resolve("unknown"), START_PROBE_TIMEOUT_MS);
