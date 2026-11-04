@@ -415,7 +415,18 @@ can be built and tested.
   anywhere else the sandbox boots afresh and loses its programs. A
   host that refuses it (`host_full`, `unavailable`, `expired`) holds
   nothing of it, so the service gives it to the next candidate under a new
-  epoch. A wake or connect goes straight to the owner, found in the
+  epoch. A replica does not ask a host that refused a sandbox as full
+  about it again, or about anything of the same kind that needs at least
+  as much, until the host reports something different, or for ten
+  seconds at most. While no host is left to ask, a try places nothing,
+  reads no archive pointer and writes no row. A sandbox whose owner
+  refused to adopt it under its current epoch is placed again without
+  first being woken there, since that host holds nothing of it. A wake
+  waiting for room looks for it in the view every 250 ms and reads its
+  row once a second.
+  On each replica, one caller at a time places a sandbox nobody owns. The
+  others wait their turn and then find it placed. A wake or connect goes
+  straight to the owner, found in the
   replica's cache. If the owner answers, finally, that it does not have
   it, because a hand-off finished before the service heard, or its copy is
   behind the archive, the service gives it to the same host again under a

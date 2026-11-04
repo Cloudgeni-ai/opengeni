@@ -14,5 +14,6 @@ mod native;
 mod pointers;
 mod reach;
 mod resize;
+mod room;
 mod support;
 mod templates;

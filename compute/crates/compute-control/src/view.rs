@@ -28,6 +28,15 @@
 //! is not chosen for them, and logged, until a number is free when it is
 //! next read. A sandbox's reach is numbered as it is placed, under the
 //! same lock, so a number given back never stands for the name it had.
+//!
+//! A host that refuses a sandbox as full is not asked about it again
+//! until what it reports could have changed ([`View::refused`]): its
+//! next report that differs from the one it refused under, or
+//! [`FULL_FOR`] at most, whichever comes first. Placement passes it over
+//! for anything at least as large as what it refused, of the same kind,
+//! meanwhile. Without this, a fleet with no room asks the same full host
+//! the same thing four times a second per waiting caller, and each ask
+//! writes the sandbox's row first.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -38,6 +47,7 @@ use compute_fleet::{
     Rng, ShapeKey, ZoneId,
 };
 use compute_protocol::fleet::{Capacity as Reported, HostInfo as Described};
+use compute_protocol::host::Id;
 
 use crate::store::{HostRow, Store};
 
@@ -54,6 +64,14 @@ const FULL_EVERY: u32 = 40;
 /// How many offer names placement tells apart: one bit of
 /// [`compute_fleet::Offers`] each.
 const MAX_OFFERS: usize = 64;
+
+/// The longest a host's refusal as full is believed while its reports
+/// stay the same: a report need not show every reason its admission
+/// refused, so the host is asked again after this anyway.
+pub const FULL_FOR: Duration = Duration::from_secs(10);
+
+/// How many refusals a host's entry keeps; the oldest go first.
+const REFUSALS_KEPT: usize = 32;
 
 /// A kind of new sandbox, for ready clones: its image and shape.
 #[must_use]
@@ -100,6 +118,46 @@ pub struct Known {
     pub capacity: Reported,
 }
 
+/// What a host refused as full ([`View::refused`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refused {
+    /// A sandbox placed on it, created or adopted, needing this. It also
+    /// refuses anything of the same preference that needs at least as
+    /// much of everything.
+    Place(Demand),
+    /// A wake of this sandbox, which it owns.
+    Wake(Id),
+}
+
+impl Refused {
+    /// Whether a host that refused `self` would refuse `asked` too.
+    fn covers(&self, asked: &Self) -> bool {
+        match (self, asked) {
+            (Self::Place(refused), Self::Place(asked)) => {
+                refused.prefer == asked.prefer
+                    && asked.memory_mib >= refused.memory_mib
+                    && asked.memory_max_mib >= refused.memory_max_mib
+                    && asked.cpu_millis >= refused.cpu_millis
+                    && asked.disk_mib >= refused.disk_mib
+            }
+            (Self::Wake(refused), Self::Wake(asked)) => refused == asked,
+            _ => false,
+        }
+    }
+}
+
+/// What a host reported as it refused: a later report that differs could
+/// have room.
+type Report = (HostEpoch, HostState, Capacity);
+
+/// What a host refused as full under one report.
+#[derive(Debug)]
+struct Full {
+    report: Report,
+    /// Each refusal and when it came.
+    refused: Vec<(Refused, Instant)>,
+}
+
 #[derive(Debug)]
 struct Inner {
     fleet: Fleet,
@@ -118,6 +176,8 @@ struct Inner {
     rng: Rng,
     /// When this replica last read host rows from the store.
     read_at: Option<Instant>,
+    /// What each host refused as full since its last report that changed.
+    full: HashMap<HostId, Full>,
 }
 
 /// An offer name some host makes.
@@ -128,6 +188,16 @@ struct Offered {
 }
 
 impl Inner {
+    /// Whether host `host` refused `asked`, or something it covers, under
+    /// the report the view holds now, within [`FULL_FOR`].
+    fn refuses(&self, host: HostId, asked: &Refused) -> bool {
+        self.full.get(&host).is_some_and(|full| {
+            full.refused
+                .iter()
+                .any(|(refused, at)| at.elapsed() < FULL_FOR && refused.covers(asked))
+        })
+    }
+
     /// The offers named `names`, as numbered now.
     fn reach(&self, names: &[String]) -> Result<Offers, Unplaced> {
         names.iter().try_fold(Offers::NONE, |offers, name| {
@@ -256,6 +326,7 @@ impl View {
                 offered_by: HashMap::new(),
                 rng: Rng::new(seed),
                 read_at: None,
+                full: HashMap::new(),
             }),
             silent_after,
         }
@@ -298,9 +369,16 @@ impl View {
                 huge_pages: row.info.profile == "nested",
                 offers,
             };
-            inner
-                .fleet
-                .upsert(row.id, info, row.state, capacity(&row.info, &row.capacity));
+            let capacity = capacity(&row.info, &row.capacity);
+            // A report that changed could have room for what it refused.
+            if inner
+                .full
+                .get(&row.id)
+                .is_some_and(|full| full.report != (row.epoch, row.state, capacity.clone()))
+            {
+                inner.full.remove(&row.id);
+            }
+            inner.fleet.upsert(row.id, info, row.state, capacity);
             inner.hosts.insert(
                 row.id,
                 Known {
@@ -336,9 +414,51 @@ impl View {
         for host in gone {
             inner.hosts.remove(&host);
             inner.heard.remove(&host);
+            inner.full.remove(&host);
             inner.fleet.remove(host);
             inner.give_back(host);
         }
+    }
+
+    /// Notes that host `host` refused `refused` as full: placement passes
+    /// it over for that, and for anything it covers, and
+    /// [`Self::refuses`] says so, until the host reports anything other
+    /// than what the view holds of it now, or [`FULL_FOR`] at most.
+    pub fn refused(&self, host: HostId, refused: Refused) {
+        let mut inner = self.write();
+        let inner = &mut *inner;
+        let Some(known) = inner.hosts.get(&host) else {
+            return;
+        };
+        let report = (
+            known.target.epoch,
+            known.state,
+            capacity(&known.info, &known.capacity),
+        );
+        let full = inner.full.entry(host).or_insert_with(|| Full {
+            report: report.clone(),
+            refused: Vec::new(),
+        });
+        if full.report != report {
+            *full = Full {
+                report,
+                refused: Vec::new(),
+            };
+        }
+        full.refused
+            .retain(|(kept, at)| at.elapsed() < FULL_FOR && *kept != refused);
+        if full.refused.len() >= REFUSALS_KEPT {
+            full.refused.remove(0);
+        }
+        full.refused.push((refused, Instant::now()));
+    }
+
+    /// Whether host `host` refused `asked` as full, or something that
+    /// covers it, and has reported nothing new since, within
+    /// [`FULL_FOR`].
+    #[must_use]
+    pub fn refuses(&self, host: HostId, asked: &Refused) -> bool {
+        self.read().refuses(host, asked)
     }
 
     /// Where a request to `host` goes, while it is not given up on.
@@ -396,7 +516,8 @@ impl View {
 
     /// Places `demand`, reaching the offers named `reach` (its own
     /// `reach` is not read), on a live host not in `exclude`, and heard
-    /// renewing within the view's `silent_after`, and books it there until
+    /// renewing within the view's `silent_after`, that has not just
+    /// refused it as full ([`Self::refused`]), and books it there until
     /// the host next reports. Places nothing while this replica has read
     /// no host rows within `silent_after` ([`Unplaced::Blind`]). The names
     /// are numbered under the lock placement holds, as hosts' offers are.
@@ -412,31 +533,60 @@ impl View {
         exclude: &HashSet<HostId>,
     ) -> Result<Placement, Unplaced> {
         let mut inner = self.write();
-        let inner = &mut *inner;
+        let (placement, demand) =
+            Self::choose(&mut inner, self.silent_after, demand, reach, exclude)?;
+        inner.fleet.reserve(placement, &demand);
+        Ok(placement)
+    }
+
+    /// Whether [`Self::place`] would place `demand` now, booking nothing:
+    /// what a caller waiting for room checks.
+    #[must_use]
+    pub fn has_room(&self, demand: &Demand, reach: &[String], exclude: &HashSet<HostId>) -> bool {
+        let mut inner = self.write();
+        Self::choose(&mut inner, self.silent_after, demand, reach, exclude).is_ok()
+    }
+
+    /// Where [`Self::place`] would place `demand`, and the demand with its
+    /// reach numbered.
+    fn choose(
+        inner: &mut Inner,
+        silent_after: Duration,
+        demand: &Demand,
+        reach: &[String],
+        exclude: &HashSet<HostId>,
+    ) -> Result<(Placement, Demand), Unplaced> {
         match inner.read_at.map(|at| at.elapsed()) {
-            Some(since) if since <= self.silent_after => {}
+            Some(since) if since <= silent_after => {}
             since => return Err(Unplaced::Blind(since)),
         }
-        let demand = &Demand {
+        let demand = Demand {
             reach: inner.reach(reach)?,
             ..*demand
         };
-        let silent: Vec<HostId> = inner
+        let refused = Refused::Place(demand);
+        let passed: Vec<HostId> = inner
             .heard
             .iter()
-            .filter(|(_, (_, at))| at.elapsed() > self.silent_after)
+            .filter(|(_, (_, at))| at.elapsed() > silent_after)
             .map(|(host, _)| *host)
+            .chain(
+                inner
+                    .full
+                    .keys()
+                    .copied()
+                    .filter(|host| inner.refuses(*host, &refused)),
+            )
             .collect();
-        let placement = if silent.is_empty() {
-            inner.fleet.place(demand, exclude, &mut inner.rng)
+        let placement = if passed.is_empty() {
+            inner.fleet.place(&demand, exclude, &mut inner.rng)
         } else {
             let mut exclude = exclude.clone();
-            exclude.extend(silent);
-            inner.fleet.place(demand, &exclude, &mut inner.rng)
+            exclude.extend(passed);
+            inner.fleet.place(&demand, &exclude, &mut inner.rng)
         }
         .ok_or(Unplaced::NoRoom)?;
-        inner.fleet.reserve(placement, demand);
-        Ok(placement)
+        Ok((placement, demand))
     }
 
     /// Every host, by name.
@@ -744,5 +894,53 @@ mod tests {
             view.place(&demand(), &names(&["previews"]), &HashSet::new()),
             Err(Unplaced::Unoffered("previews".to_owned()))
         );
+    }
+
+    #[test]
+    fn a_host_that_refused_as_full_is_passed_over_until_its_report_changes() {
+        let view = View::new(1, Duration::from_secs(60));
+        view.apply_all(&[host(1)]);
+        let none = HashSet::new();
+        let placed = view.place(&demand(), &[], &none).unwrap();
+        view.refused(placed.host, Refused::Place(demand()));
+        // Passed over for as much or more, though by its report it fits.
+        assert_eq!(view.place(&demand(), &[], &none), Err(Unplaced::NoRoom));
+        let more = Demand {
+            memory_mib: 2048,
+            memory_max_mib: 2048,
+            ..demand()
+        };
+        assert!(!view.has_room(&more, &[], &none));
+        // Not for less, nor for another kind of request.
+        let less = Demand {
+            disk_mib: 512,
+            ..demand()
+        };
+        assert!(view.has_room(&less, &[], &none));
+        let create = Demand {
+            prefer: Prefer::ReadyClone(ShapeKey(1)),
+            ..demand()
+        };
+        assert!(view.has_room(&create, &[], &none));
+        // A renewal that reports the same leaves it refused.
+        view.apply(&[host(2)]);
+        assert!(!view.has_room(&demand(), &[], &none));
+        assert!(view.refuses(HostId(1), &Refused::Place(more)));
+        // One that reports otherwise could have room.
+        let mut changed = host(3);
+        changed.capacity.disk_free_mib -= 1;
+        view.apply(&[changed]);
+        assert!(view.has_room(&demand(), &[], &none));
+        assert!(!view.refuses(HostId(1), &Refused::Place(demand())));
+
+        // A wake refused is that sandbox's alone.
+        let refused = Id(compute_fleet::SandboxId(7));
+        view.refused(HostId(1), Refused::Wake(refused));
+        assert!(view.refuses(HostId(1), &Refused::Wake(refused)));
+        assert!(!view.refuses(HostId(1), &Refused::Wake(Id(compute_fleet::SandboxId(8)))));
+        assert!(view.has_room(&demand(), &[], &none));
+        // A host forgotten forgets what it refused.
+        view.apply_all(&[]);
+        assert!(!view.refuses(HostId(1), &Refused::Wake(refused)));
     }
 }
