@@ -244,7 +244,9 @@ export class CodemodeClient {
       method: "GET",
       ...(options.signal ? { signal: options.signal } : {}),
     });
-    const catalog = parseVerifiedAttemptToolCatalog(await responseJson(response, this.baseUrl));
+    const catalog = parseVerifiedAttemptToolCatalog(
+      await responseJson(response, this.baseUrl, options.signal),
+    );
     this.catalogSnapshot = catalog;
     return catalog;
   }
@@ -480,7 +482,8 @@ export class CodemodeClient {
           durableApproval: true,
         }),
       });
-      return CodemodeCallSubmission.parse(await responseJson(response, this.baseUrl)).operation;
+      return CodemodeCallSubmission.parse(await responseJson(response, this.baseUrl, signal))
+        .operation;
     });
   }
 
@@ -529,7 +532,7 @@ export class CodemodeClient {
         method: "GET",
         ...(signal ? { signal } : {}),
       });
-      return CodemodeOperation.parse(await responseJson(response, this.baseUrl));
+      return CodemodeOperation.parse(await responseJson(response, this.baseUrl, signal));
     });
   }
 
@@ -948,10 +951,16 @@ function submittedCallHint(operationId: string): string {
 }
 
 /** Read a JSON body; a connection lost mid-body names its cause like a failed request. */
-async function responseJson(response: Response, baseUrl: string): Promise<unknown> {
+async function responseJson(
+  response: Response,
+  baseUrl: string,
+  signal?: AbortSignal,
+): Promise<unknown> {
   try {
     return await response.json();
   } catch (error) {
+    // A caller's abort keeps its own reason, whatever code it carries.
+    if (signal?.aborted) throw error;
     const failure = describeCodemodeConnectionFailure(error, response.url || baseUrl);
     if (!failure) throw error;
     throw new CodemodeConnectionError(failure.message, failure.networkCode, { cause: error });

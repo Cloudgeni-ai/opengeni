@@ -43,12 +43,16 @@ describe("Codemode connection failures name their cause", () => {
     ["node", undiciFailure],
     ["bun", bunFailure],
   ] as const) {
-    test(`${runtime}: a failed DNS lookup names the host and resolv.conf`, async () => {
+    test(`${runtime}: a failed DNS lookup names the host and where to check DNS`, async () => {
       const original = failure("ENOTFOUND", "getaddrinfo ENOTFOUND api.opengeni.example");
       const error = await catalogError(original);
       expect(error).toBeInstanceOf(CodemodeConnectionError);
       expect((error as Error).message).toBe(
-        "Can't reach Opengeni: DNS lookup for api.opengeni.example failed (ENOTFOUND). Check /etc/resolv.conf.",
+        `Can't reach Opengeni: DNS lookup for api.opengeni.example failed (ENOTFOUND). ${
+          process.platform === "linux"
+            ? "Check /etc/resolv.conf."
+            : "Check this machine's DNS settings."
+        }`,
       );
       expect((error as CodemodeConnectionError).networkCode).toBe("ENOTFOUND");
       expect((error as Error).cause).toBe(original);
@@ -185,6 +189,30 @@ describe("Codemode connection failures name their cause", () => {
     expect((error as Error).message).toStartWith(
       "Can't reach Opengeni: the connection to api.opengeni.example closed unexpectedly (UND_ERR_SOCKET).",
     );
+  });
+
+  test("an abort while the answer is being read keeps the abort's own reason", async () => {
+    const controller = new AbortController();
+    const reason = Object.assign(new Error("caller gave up"), { code: "ETIMEDOUT" });
+    const client = new CodemodeClient({
+      baseUrl,
+      token: "bearer",
+      fetch: (async () =>
+        new Response(
+          new ReadableStream({
+            start(stream) {
+              stream.enqueue(new TextEncoder().encode('{"partial":'));
+              controller.abort(reason);
+              stream.error(reason);
+            },
+          }),
+          { headers: { "content-type": "application/json" } },
+        )) as unknown as typeof fetch,
+    });
+    const error = await client
+      .catalog({ signal: controller.signal })
+      .catch((caught: unknown) => caught);
+    expect(error).toBe(reason);
   });
 
   test("a failed recovery read after a lost submission carries the cause", async () => {
