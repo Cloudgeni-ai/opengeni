@@ -2463,12 +2463,15 @@ mod tests {
 
     #[tokio::test]
     async fn a_refused_connection_is_named_instead_of_a_bare_send_error() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listen");
-        let address = listener.local_addr().expect("address");
-        drop(listener);
+        // Bound but not listening: connections are refused, and no parallel
+        // test can take the port meanwhile.
+        let reserved = tokio::net::TcpSocket::new_v4().expect("socket");
+        reserved.bind("127.0.0.1:0".parse().unwrap()).expect("bind");
+        let address = reserved.local_addr().expect("address");
         let client =
             CodemodeClient::new(&format!("http://{address}/codemode"), "fixture".into()).unwrap();
         let message = client.catalog().await.unwrap_err().to_string();
+        drop(reserved);
         assert_eq!(
             message,
             format!(
@@ -2507,9 +2510,13 @@ mod tests {
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("catalog");
             read_request(&mut stream).await;
-            // Close the port before answering, so the submission and its
-            // read-back that follow the catalog are refused.
+            // Stop listening before answering, but keep the port bound, so
+            // the submission and its read-back that follow the catalog are
+            // refused and no parallel test can take the port meanwhile.
             drop(listener);
+            let reserved = tokio::net::TcpSocket::new_v4().expect("socket");
+            reserved.set_reuseaddr(true).expect("reuseaddr");
+            reserved.bind(address).expect("rebind");
             write_response(
                 &mut stream,
                 &json!({
@@ -2522,6 +2529,7 @@ mod tests {
                 }),
             )
             .await;
+            reserved
         });
         let client =
             CodemodeClient::new(&format!("http://{address}/codemode"), "fixture".into()).unwrap();
@@ -2537,7 +2545,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        server.await.unwrap();
+        drop(server.await.unwrap());
         assert_eq!(
             error.to_string(),
             format!(
