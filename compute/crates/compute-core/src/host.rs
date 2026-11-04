@@ -274,8 +274,8 @@ pub enum Input {
         millis: u64,
     },
     /// Bytes the sandbox's disk may still grow by, measured: what its
-    /// awake VM books for its disk from now on instead of its size's
-    /// `disk`. Send it before the [`Input::Disk`] reading taken after it,
+    /// awake VM or next local wake books for its disk instead of its
+    /// size's `disk`. Send it before the [`Input::Disk`] reading taken after it,
     /// in the same batch, since that reading shows what the disk grew by.
     DiskGrowth {
         /// The sandbox.
@@ -1186,7 +1186,9 @@ impl Host {
         let written = match (flight.step, outcome) {
             _ if !wrote => DiskSpace::default(),
             (Step::Checkpoint, _) | (Step::Save, Outcome::Failed(_)) => slot.save_space(),
-            (Step::Fetch, Outcome::Failed(_)) => DiskSpace::save(slot.size.fetch),
+            (Step::Fetch, Outcome::Failed(_)) => {
+                DiskSpace::save(slot.size.fetch.saturating_add(slot.size.disk))
+            }
             _ => DiskSpace::default(),
         };
         self.disk_spent = self.disk_spent.add(written);
@@ -1200,9 +1202,9 @@ impl Host {
                 .local_disk
                 .booked
                 .saturating_sub(slot.checkpoint_need());
-        } else if flight.step == Step::Pause {
-            // Its guest trimmed its disk: until a reading measures the disk
-            // again, it may grow by its whole bound, also once it wakes.
+        } else if matches!(flight.step, Step::Pause | Step::Fetch) {
+            // A pause trimmed the disk; a fetch replaced it. Until measured
+            // again, either may grow by its whole bound, also once it wakes.
             slot.local_disk.growth = slot.size.disk;
         }
         let before = slot.state;

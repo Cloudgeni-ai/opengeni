@@ -1352,14 +1352,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let mut actions = std::mem::take(&mut self.actions);
         // The inputs after which a sandbox may be at another level.
         let mut moved = Vec::new();
-        let inputs = inputs.into_iter().inspect(|input| match input {
-            Input::Add { sandbox, .. }
-            | Input::Finished { sandbox, .. }
-            | Input::Lost { sandbox } => {
-                moved.push(*sandbox);
-            }
-            _ => {}
-        });
+        let inputs = self
+            .disk_inputs(inputs)
+            .into_iter()
+            .inspect(|input| match input {
+                Input::Add { sandbox, .. }
+                | Input::Finished { sandbox, .. }
+                | Input::Lost { sandbox } => {
+                    moved.push(*sandbox);
+                }
+                _ => {}
+            });
         self.core.handle_all(now, inputs, &mut actions);
         for sandbox in moved {
             self.tell_link(Id(sandbox));

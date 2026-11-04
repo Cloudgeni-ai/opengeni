@@ -35,13 +35,15 @@ pub struct Size {
     /// while its VM holds state not saved yet and the host may save it
     /// unasked, or a save of it is asked for; see [`crate::DiskPolicy`].
     pub save: u64,
-    /// Bytes its disk may grow by at most while its VM runs, booked while
-    /// it is awake or waking, until [`crate::Input::DiskGrowth`] measures
+    /// Bytes its disk may grow by at most as it is fetched or its VM runs,
+    /// booked while awake or waking, until [`crate::Input::DiskGrowth`] measures
     /// it; see [`crate::DiskPolicy`].
     pub disk: u64,
-    /// Bytes a wake from object storage writes to local disk at most: its
-    /// disk, and the memory image its pager fills while the guest already
-    /// runs. Booked from the wake's admission until
+    /// Bytes a wake from object storage writes besides its disk: the
+    /// memory image its pager fills while the guest already runs, and
+    /// device state. The disk is counted only by `disk` and its measured
+    /// headroom, since fetching and guest writes fill the same file.
+    /// Booked from the wake's admission until
     /// [`crate::Input::Hydrating`] says the local copy is whole.
     pub fetch: u64,
 }

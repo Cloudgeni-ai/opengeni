@@ -197,8 +197,8 @@ impl Sandbox {
 
     /// What it books on local disk now: its next save while its VM holds
     /// state no copy has; what its disk may grow by while it is awake or
-    /// waking, since only a running VM writes to it; and what a wake from
-    /// object storage still writes locally, from its admission, across
+    /// waking or being fetched; and what a wake from object storage still
+    /// writes besides that disk, from its admission, across
     /// any retry, until its copy is whole.
     ///
     /// While a checkpoint runs, a clone of its disk shares every block the
@@ -229,12 +229,7 @@ impl Sandbox {
             booked = booked.add(self.save_space());
         }
         if self.reserves() {
-            let growth = if whole_disk {
-                self.local_disk.growth.max(self.size.disk)
-            } else {
-                self.local_disk.growth
-            };
-            booked = booked.add(DiskSpace::bytes(growth));
+            booked = booked.add(DiskSpace::bytes(self.disk_headroom(whole_disk)));
         }
         if self.local_disk.hydrating || (self.reserves() && self.state.level == Level::Remote) {
             booked = booked.add(DiskSpace::save(self.size.fetch));
@@ -242,11 +237,22 @@ impl Sandbox {
         booked
     }
 
+    /// A remote wake replaces the disk file, so an earlier local file's
+    /// measurement says nothing about its headroom. Fetching and guest
+    /// writes share this one bound, never two disk reservations.
+    fn disk_headroom(&self, whole_disk: bool) -> u64 {
+        if whole_disk || self.state.level == Level::Remote {
+            self.local_disk.growth.max(self.size.disk)
+        } else {
+            self.local_disk.growth
+        }
+    }
+
     /// What a wake of it books besides what it already does: its next
     /// save if the host may save it unasked, its disk's growth, and from
     /// object storage its local copy.
     pub(super) fn disk_need(&self) -> DiskSpace {
-        let mut awake = DiskSpace::bytes(self.local_disk.growth);
+        let mut awake = DiskSpace::bytes(self.disk_headroom(false));
         if self.policy().saves() {
             awake = awake.add(self.save_space());
         }

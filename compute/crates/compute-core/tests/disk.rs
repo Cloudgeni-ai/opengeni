@@ -674,8 +674,8 @@ fn a_growth_reading_and_a_disk_reading_in_one_batch_count_the_growth_once() {
 #[test]
 fn a_wake_from_object_storage_books_its_local_copy_until_it_is_whole() {
     let mut rig = Rig::new();
-    // Saves of 1 GiB; a fetch writes its 1 GiB disk and the 1 GiB memory
-    // image its pager fills, with room to spare.
+    // Saves of 1 GiB; fetching the memory image and device state may
+    // write 3 GiB besides the disk (sized separately).
     let size = Size {
         fetch: 3 * GIB,
         ..Size::whole(GIB)
@@ -709,6 +709,176 @@ fn a_wake_from_object_storage_books_its_local_copy_until_it_is_whole() {
     assert_eq!(rig.booked(), 4 * GIB, "until a reading shows it");
     rig.disk(2 * GIB, 10_000);
     assert_eq!(rig.booked(), GIB);
+}
+
+/// The disk is one file, whether the store or the guest writes it. The
+/// fetched base memory and the next save are different files: neither can
+/// borrow the other's reservation, even where their extents can be shared.
+#[test]
+fn a_remote_wake_books_one_disk_and_both_memory_images() {
+    for copies in [1, 2] {
+        let mut rig = Rig::new();
+        let size = wake_size(copies);
+        let need = size.disk + size.save + size.fetch;
+        rig.disk(need + GIB - 1, 10_000);
+        assert_eq!(
+            rig.host.create_room(
+                rig.now,
+                SandboxId(1),
+                size,
+                rules(),
+                true,
+                DiskSpace::default(),
+            ),
+            CreateRoom::Short(Resource::Disk, need, need - 1),
+            "adopt checks the same reservation as a wake"
+        );
+        rig.add_sized(1, State::new(Level::Remote, Durability::Remote, true), size);
+        assert_eq!(
+            host_full(&rig.hold(1), 1),
+            Some((Resource::Disk, need, need - 1))
+        );
+        let actions = rig.disk(need + GIB, 10_000);
+        assert!(matches!(started(&actions)[..], [(1, Step::Fetch, _)]));
+        assert_eq!(rig.booked(), need);
+        assert_eq!(rig.host.disk().unwrap().booked.inodes, 32);
+        if copies == 1 {
+            assert_eq!(need + size.disk, 103_481_868_288, "old double-disk booking");
+            assert_eq!(need, 68_987_912_192, "64.25 GiB, or 68.99 GB");
+        } else {
+            assert_eq!(need, 86_167_781_376, "80.25 GiB without shared extents");
+        }
+    }
+}
+
+fn wake_size(save_copies: u64) -> Size {
+    const EXTRA: u64 = 64 << 20;
+    Size {
+        disk: 32 * GIB + 32 * GIB / 256,
+        save: 16 * GIB * save_copies + EXTRA,
+        fetch: 16 * GIB + EXTRA,
+        ..Size::whole(16 * GIB)
+    }
+}
+
+#[test]
+fn a_hydrating_wake_books_only_the_disk_headroom_as_chunks_land() {
+    let mut rig = Rig::new();
+    let size = wake_size(1);
+    let remote = State::new(Level::Remote, Durability::Remote, true);
+    rig.add_sized(1, remote, size);
+    rig.disk(128 * GIB, 10_000);
+    let [(1, Step::Fetch, op)] = started(&rig.hold(1))[..] else {
+        panic!("no fetch")
+    };
+    let [(1, Step::Restore, op)] = started(&rig.finish(1, op))[..] else {
+        panic!("no restore")
+    };
+    rig.finish(1, op);
+    let mut previous = size.disk;
+    // The disk is fetched whole before Restore; the memory pager still
+    // fills its image as the guest writes more chunks of the same disk.
+    for held in [8 * GIB, 16 * GIB, 32 * GIB] {
+        let headroom = size.disk - held;
+        rig.send(Input::DiskGrowth {
+            sandbox: SandboxId(1),
+            bytes: headroom,
+        });
+        assert_eq!(
+            rig.booked(),
+            previous + size.save + size.fetch,
+            "unread writes remain booked"
+        );
+        rig.disk(128 * GIB - held, 10_000);
+        assert_eq!(rig.booked(), headroom + size.save + size.fetch);
+        assert!(rig.booked() >= size.disk - held + 2 * 16 * GIB);
+        previous = headroom;
+    }
+    rig.send(Input::Hydrating {
+        sandbox: SandboxId(1),
+        hydrating: false,
+    });
+    rig.disk(80 * GIB, 10_000);
+    assert_eq!(rig.booked(), previous + size.save);
+}
+
+#[test]
+fn a_local_wake_after_pause_uses_the_measured_disk_not_its_old_bound() {
+    let mut rig = Rig::new();
+    let size = wake_size(1);
+    rig.add_sized(1, saved(), size);
+    rig.disk(128 * GIB, 10_000);
+    wake(&mut rig, 1);
+    rig.release(1);
+    let [(1, Step::Pause, op)] = started(&rig.at(10))[..] else {
+        panic!("no pause")
+    };
+    rig.finish(1, op);
+    // After trimming, the stopped disk still holds 24 GiB. Admission
+    // needs only its remaining headroom and the next save (24.1875 GiB).
+    let headroom = size.disk - 24 * GIB;
+    rig.send(Input::DiskGrowth {
+        sandbox: SandboxId(1),
+        bytes: headroom,
+    });
+    rig.disk(headroom + size.save + GIB, 10_000);
+    let actions = rig.hold(1);
+    assert!(matches!(started(&actions)[..], [(1, Step::Resume, _)]));
+    assert_eq!(rig.booked(), headroom + size.save);
+    assert_eq!(rig.booked(), 25_971_130_368);
+}
+
+/// Remote files are replaced, not resumed in place. A measurement from
+/// an earlier local copy must not reduce either admission or the booking
+/// carried past Fetch into Restore, even after a retry.
+#[test]
+fn a_remote_wake_cannot_reuse_an_earlier_files_headroom() {
+    let mut rig = Rig::new();
+    let size = wake_size(1);
+    rig.add_sized(1, State::new(Level::Remote, Durability::Remote, true), size);
+    rig.send(Input::DiskGrowth {
+        sandbox: SandboxId(1),
+        bytes: GIB,
+    });
+    rig.disk(128 * GIB, 10_000);
+    let [(1, Step::Fetch, op)] = started(&rig.hold(1))[..] else {
+        panic!("no fetch")
+    };
+    assert_eq!(rig.booked(), size.disk + size.save + size.fetch);
+    rig.finish(1, op);
+    assert_eq!(rig.booked(), size.disk + size.save + size.fetch);
+}
+
+#[test]
+fn a_failed_fetch_keeps_unread_disk_writes_beside_the_next_attempt() {
+    let mut rig = Rig::new();
+    let size = wake_size(1);
+    let need = size.disk + size.save + size.fetch;
+    rig.add_sized(1, State::new(Level::Remote, Durability::Remote, true), size);
+    rig.disk(256 * GIB, 10_000);
+    let [(1, Step::Fetch, op)] = started(&rig.hold(1))[..] else {
+        panic!("no fetch")
+    };
+    rig.send(Input::Finished {
+        sandbox: SandboxId(1),
+        op,
+        outcome: Outcome::Failed(compute_core::Failure::Transient),
+        wrote: true,
+    });
+    assert_eq!(
+        rig.booked(),
+        need + size.disk + size.fetch,
+        "the failed attempt may have written both files since the reading"
+    );
+    let actions = rig.at(60);
+    assert!(matches!(started(&actions)[..], [(1, Step::Fetch, _)]));
+    assert_eq!(rig.booked(), need + size.disk + size.fetch);
+    rig.disk(256 * GIB - size.disk - size.fetch, 10_000);
+    assert_eq!(
+        rig.booked(),
+        need,
+        "only future writes remain after the reading"
+    );
 }
 
 /// The host agent sends the end of a hydration before the disk reading it
