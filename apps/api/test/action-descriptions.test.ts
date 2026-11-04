@@ -133,6 +133,7 @@ describe("action descriptions", () => {
       "allowedModels",
       "allowedPeople",
       "allowedWorkspaces",
+      "moveToOrganization",
       "sharePersonal",
       "version",
     ]);

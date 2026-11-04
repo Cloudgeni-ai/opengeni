@@ -1,4 +1,4 @@
-import { stringifyPayload } from "@opengeni/react/timeline-model";
+import { redactPayload, stringifyPayload } from "@opengeni/react/timeline-model";
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { Pressable, ScrollView, Text, View, type TextStyle } from "react-native";
 import Animated, {
@@ -457,14 +457,17 @@ export function TermBlock({
   return (
     <RuledBlock tone={failed ? "failed" : live ? "live" : "neutral"}>
       {showHeader ? (
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingBottom: 4 }}>
+        <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 8, paddingBottom: 4 }}>
           <Text style={[mono, { color: theme.colors["status-idle"] }]}>$</Text>
-          <Text
-            style={[mono, { fontSize: theme.size.sm, color: theme.colors["fg-muted"], flex: 1 }]}
-            numberOfLines={1}
-          >
-            {command ?? ""}
-          </Text>
+          {/* The whole command: a command row's title says what it did in plain words. */}
+          <ScrollView style={{ maxHeight: 256, flex: 1 }} nestedScrollEnabled>
+            <Text
+              selectable
+              style={[mono, { fontSize: theme.size.sm, color: theme.colors["fg-muted"] }]}
+            >
+              {command ?? ""}
+            </Text>
+          </ScrollView>
           {workdir ? (
             <Text
               style={[mono, { color: theme.colors["fg-subtle"], flexShrink: 1 }]}
@@ -514,7 +517,9 @@ export function PayloadBlock({
   failed?: boolean | undefined;
 }) {
   const theme = useNativeTimelineTheme();
-  const text = typeof value === "string" ? value : stringifyPayload(value);
+  // Signed links never show their signature.
+  const shown = redactPayload(value);
+  const text = typeof shown === "string" ? shown : stringifyPayload(shown);
   if (!text || text.trim() === "") return null;
   return (
     <RuledBlock tone={failed ? "failed" : "neutral"}>

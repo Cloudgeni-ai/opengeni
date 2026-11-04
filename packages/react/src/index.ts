@@ -440,7 +440,11 @@ export type {
 } from "./hooks/use-machine-chip";
 
 // Pending-approvals projection
-export { approvalsFromRequiresAction, projectPendingApprovals } from "./approvals";
+export {
+  approvalsDecidable,
+  approvalsFromRequiresAction,
+  projectPendingApprovals,
+} from "./approvals";
 export type { PendingApproval } from "./approvals";
 export { ApprovalSurface, defaultApprovalSurfaceMessages } from "./components/approval-surface";
 export { ToolActionReviewCard, ToolActionReviewDetails } from "./components/tool-action-review";
@@ -473,13 +477,19 @@ export { claimHumanInputDraftOwner, forgetAllHumanInputDrafts } from "./human-in
 export {
   buildTimeline,
   creditExhaustedFromEvents,
+  creditRefusalFromEvents,
   extractSessionRef,
   groupTimeline,
   sessionStatusFromEvents,
+  timelineLivePause,
+  timelinePauseSpans,
   toolDisplayName,
+  useTimelinePauses,
 } from "./timeline";
 export type {
   GroupTimelineOptions,
+  TimelineLivePause,
+  TimelinePauseSpan,
   ActivityItem,
   AgentMessageItem,
   AuthNeededItem,
@@ -773,7 +783,11 @@ export {
 export { CopyButton, CopyHoverFrame } from "./components/copy-button";
 export { copyTextToClipboard, tableElementToTsv } from "./lib/clipboard";
 export { SessionStatus, StatusDot, SESSION_STATUS_META } from "./components/session-status";
-export { sessionAdmissionBlocked, sessionDisplayStatus } from "./session-status-model";
+export {
+  promptSendDestination,
+  sessionAdmissionBlocked,
+  sessionDisplayStatus,
+} from "./session-status-model";
 export type { SessionDisplayStatus } from "./session-status-model";
 export type {
   SessionStatusProps,

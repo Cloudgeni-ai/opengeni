@@ -216,9 +216,12 @@ async function hydrateNewSessionDraft(
     if (!rig?.activeVersion) delete options.rigId;
   }
   if (options.targetSandboxId) {
-    const sandbox = await getSandbox(deps.db, workspaceId, options.targetSandboxId);
+    // The person's own view of the workspace, as creating the chat checks it:
+    // an organization machine, or their own one, can live in another workspace.
+    // Its enrollment lives there too.
+    const sandbox = await getSandbox(deps.db, { ...grant, workspaceId }, options.targetSandboxId);
     const enrollment = sandbox?.enrollmentId
-      ? await getEnrollment(deps.db, workspaceId, sandbox.enrollmentId)
+      ? await getEnrollment(deps.db, sandbox.workspaceId, sandbox.enrollmentId)
       : null;
     if (
       !sandbox ||

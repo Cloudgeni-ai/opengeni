@@ -137,6 +137,9 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
   });
   try {
     monitor.enter("tool_writers");
+    // Startup progress receipts still in flight finish before cleanup, so no
+    // append of this attempt outlives it. They never reject.
+    await deps.eventing.backgroundEventsSettled?.();
     await finalizeTurnAttemptSteps(deps, monitor);
   } finally {
     monitor.stop();
@@ -303,6 +306,10 @@ async function finalizeTurnAttemptSteps(
         },
       });
     }
+    // The drain above cancelled and quiesced this exact fence. Platform setup
+    // writes only through it, so a setup still waiting on something else (a
+    // read, an unanswered agent) cannot write any more either.
+    sandboxState.drainedCommandFence = toolCancellationFence ?? null;
     sandboxState.attemptWritersDrained = true;
     if (control.acknowledgeQuiescence) {
       // A cancellation before sandbox-backed capabilities exist still has

@@ -229,7 +229,7 @@ export function PersonalApiKeys(props: PersonalApiKeysProps) {
                 ),
               }}
               menu={
-                mine || canManageAll ? (
+                (key.canRevoke ?? (mine || canManageAll)) ? (
                   <DropdownMenuItem variant="destructive" onSelect={() => setRevoking(key)}>
                     <XIcon />
                     Revoke key…

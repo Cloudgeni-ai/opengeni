@@ -10,6 +10,8 @@ import {
   FileListResponse,
   FileDownloadUrlResponse,
   MAX_INLINE_MODEL_ATTACHMENT_BYTES,
+  UpdateFileReachRequest,
+  UpdateFileReachResponse,
   UpdateFileVisibilityRequest,
   UpdateFileVisibilityResponse,
   RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
@@ -51,6 +53,7 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import {
+  changeFileReach,
   changeFileVisibility,
   fileAccessFor,
   fileOwnerContextForAccess,
@@ -198,11 +201,10 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspace = await requireWorkspace(db, workspaceId);
     // A person's upload is shared unless they choose Only me. An agent's
     // follows its chat (Only me in an Only me chat) unless it chooses, on its
-    // owner's behalf; a personal workspace keeps an agent's uploads private.
-    const personal =
-      payload.scope && !(authority?.agent && workspace.kind === "personal")
-        ? payload.scope === "personal"
-        : Boolean(authority?.agent && privateOwner !== null);
+    // owner's behalf. A personal workspace follows the same rule.
+    const personal = payload.scope
+      ? payload.scope === "personal"
+      : Boolean(authority?.agent && privateOwner !== null);
     if (personal && !privateOwner)
       throw new HTTPException(403, {
         message: authority?.agent
@@ -556,6 +558,23 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(
       UpdateFileVisibilityResponse.parse({ file: await withFileAccess(workspaceId, file) }),
     );
+  });
+
+  // Where an Only me file works besides the workspace that stores it and its
+  // owner's Personal workspace. Only its owner changes it, from here.
+  app.put("/v1/workspaces/:workspaceId/files/:fileId/reach", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "files:upload");
+    const request = await parseRequestJson(c, UpdateFileReachRequest);
+    const { file } = await changeFileReach({
+      db,
+      grant,
+      workspace: await requireWorkspace(db, workspaceId),
+      person: fileRequestAuthority.get(c.req.raw)?.person ?? null,
+      fileId: retainedArtifactId(c.req.param("fileId")),
+      reachWorkspaceIds: request.reachWorkspaceIds,
+    });
+    return c.json(UpdateFileReachResponse.parse({ file: await withFileAccess(workspaceId, file) }));
   });
 
   app.get("/v1/workspaces/:workspaceId/artifacts/:artifactId", async (c) => {

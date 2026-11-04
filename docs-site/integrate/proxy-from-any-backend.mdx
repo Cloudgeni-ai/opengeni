@@ -49,6 +49,8 @@ x-opengeni-chunk-*                         (copied from the browser when present
 
 Return upstream status codes, error bodies, and the `Content-Type`, `Content-Length`, `Content-Disposition`, `Content-Range`, `Accept-Ranges`, `ETag`, `Last-Modified`, `Retry-After`, `Content-Security-Policy`, `Cross-Origin-Resource-Policy` and `x-opengeni-*` headers unchanged; the SDK reads them. Add `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, and `Content-Security-Policy: sandbox` when upstream sends none.
 
+To set the user's permissions from your own roles, add `"membership":{"permissions":["workspace:read","sessions:create","sessions:read"]}` to the actor JSON. Opengeni makes the user's workspace grant exactly that set before authorizing the request; see [External users](/reference/authentication#external-users).
+
 ## Security rules
 
 - Authenticate the user on every request and derive the workspace and user id on the server.

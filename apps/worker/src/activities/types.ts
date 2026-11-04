@@ -3,10 +3,10 @@ import type {
   ConnectionCredentialsPort,
   DocumentAuthorityKind,
   EntitlementsPort,
-  KnowledgeSourceSyncRunSummary,
   ScheduledTaskTriggerType,
   TurnInitiator,
 } from "@opengeni/contracts";
+import type { KnowledgeSourceSyncRetirementReason } from "@opengeni/contracts/knowledge-source-sync-retirement";
 import type {
   Database,
   SessionWorkflowWakeDeliveryResult,
@@ -75,6 +75,19 @@ export type StartRecordingWorkflow = (input: {
   ownerSubjectId: string;
 }) => Promise<"started" | "already_running">;
 
+/**
+ * Start the clean-replay verification that rebuilds a sandbox environment
+ * version's provider image for the deployment's current base image. The
+ * start is deduplicated per version, expected content and UTC day, so every
+ * turn that meets the stale image may ask without starting more than one
+ * rebuild a day.
+ */
+export type StartRigProviderImageRefresh = (input: {
+  workspaceId: string;
+  versionId: string;
+  contentHash: string;
+}) => Promise<"started" | "already_running">;
+
 /** Exact activity-owned proof that the hard sandbox/tool fence physically
  * drained. This is delivery evidence only: the workflow still validates the
  * persisted attempt dispatch and commits the authoritative Postgres receipt. */
@@ -124,6 +137,7 @@ export type SharedActivityServices = {
   startVideoGenerationWorkflow?: StartVideoGenerationWorkflow | null;
   startSessionTitleWorkflow?: StartSessionTitleWorkflow | null;
   startRecordingWorkflow?: StartRecordingWorkflow | null;
+  startRigProviderImageRefresh?: StartRigProviderImageRefresh | null;
   // §7.5 P3 — host-entitlements port, the WORKER half of the same seam the API
   // edge exposes on `AppDependencies`. When set, `ensureRunAllowed` (turn-entry
   // AND the mid-stream budget valve) delegates the funding decision to
@@ -546,10 +560,7 @@ export type DispatchScheduledTaskRunResult =
         | "machine_enrollment_inactive"
         | "rig_version_unavailable"
         | "scheduled_model_unavailable"
-        | "knowledge_source_paused"
-        | "legacy_source_schedule_requires_migration"
-        | "atlassian_native_retired"
-        | "google_drive_native_retired"
+        | KnowledgeSourceSyncRetirementReason
         | "incident_preflight_metadata_missing"
         | "incident_responder_under_capable"
         | "incident_data_source_unsuitable";
@@ -562,43 +573,7 @@ export type DispatchScheduledTaskRunResult =
       triggerEventId: string;
       workflowId: string;
       workflowWakeRevision: number | null;
-    }
-  | {
-      action: "knowledge_source_sync";
-      accountId: string;
-      workspaceId: string;
-      taskId: string;
-      scheduledTaskRunId: string;
-      sourceId: string;
-      overlapPolicy: "skip" | "buffer_one";
     };
-
-export type RunKnowledgeSourceSyncBatchInput = {
-  /** Host-bound attempt only. Legacy control workflow inputs have none and cannot fetch. */
-  agent?: Extract<import("@opengeni/db").KnowledgeActor, { kind: "agent" }>;
-
-  accountId: string;
-  workspaceId: string;
-  taskId: string;
-  scheduledTaskRunId: string;
-  sourceId: string;
-  overlapPolicy: "skip" | "buffer_one";
-};
-
-export type RunKnowledgeSourceSyncBatchResult = (
-  | { action: "continue" }
-  | {
-      action: "complete";
-      bufferedWake: boolean;
-      bufferedScheduledTaskRunId?: string | null;
-    }
-  | { action: "skipped" | "buffered" }
-  | {
-      action: "failed";
-      bufferedWake: boolean;
-      bufferedScheduledTaskRunId?: string | null;
-    }
-) & { summary?: KnowledgeSourceSyncRunSummary; errorCode?: string };
 
 type DocumentIndexIdentity = {
   accountId: string;

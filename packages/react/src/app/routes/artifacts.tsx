@@ -18,6 +18,7 @@ import { Link, useNavigate, useSearch } from "../lib/navigation";
 import {
   ArchiveIcon,
   ArchiveRestoreIcon,
+  LinkIcon,
   PanelsTopLeftIcon,
   PlusIcon,
   RotateCcwIcon,
@@ -27,6 +28,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "../lib/toast";
 
 import { ArtifactLibrary } from "../components/artifacts/artifact-library";
+import { useCopyArtifactLink } from "../components/artifacts/copy-artifact-link";
 import {
   ARTIFACT_DETAIL_FRAME,
   ArtifactKindTile,
@@ -64,7 +66,6 @@ import {
 } from "../lib/artifact-library-navigation";
 import type { ArtifactCatalogFilters } from "../lib/artifact-catalog";
 import type { ArtifactReturnSearch, SiteDetailTab } from "../lib/routes";
-import { errorMessage } from "@opengeni/contracts/values";
 
 // The Site view opens the same publish form through this route's code,
 // loaded when needed, so the form stays with the Site's Settings tab.
@@ -388,7 +389,7 @@ function EmbeddedSiteSettings({
           />
         )}
       </div>
-      {management.showAudience ? management.audience.dialog : null}
+      {management.audience.dialog}
     </div>
   );
 }
@@ -479,6 +480,7 @@ function ArtifactDetailPage({
   );
   const navigate = useNavigate();
   const back = useArtifactsBackLink(workspaceId, fromSession);
+  const copyLink = useCopyArtifactLink(workspaceId);
   const search = useSearch({ strict: false }) as ArtifactReturnSearch;
   // The tab is in the address, so Settings (from the workbench or the old
   // Publish link) and the other tabs can be linked to and survive a reload.
@@ -563,7 +565,7 @@ function ArtifactDetailPage({
       await load();
     } catch (nextError) {
       toast.error("Couldn't restore version", {
-        description: errorMessage(nextError),
+        description: userErrorText(nextError),
       });
     } finally {
       setBusyVersion(null);
@@ -578,7 +580,7 @@ function ArtifactDetailPage({
       setDetail((current) => (current ? { ...current, artifact } : current)),
     onStatusChanged: load,
   });
-  const { manageData, publication, audience, showAudience, statusBusy, setSiteStatus } = management;
+  const { manageData, publication, audience, statusBusy, setSiteStatus } = management;
   if (error) {
     return (
       <ContentPage width="standard" className={ARTIFACT_DETAIL_FRAME}>
@@ -634,17 +636,15 @@ function ArtifactDetailPage({
             leading={<ArtifactKindTile kind="site" />}
             title={artifact.title}
             chips={
-              showAudience || archived || publicationHeader.chip ? (
-                <>
-                  {showAudience ? audience.chip : null}
-                  {publicationHeader.chip}
-                  {archived ? (
-                    <StatusBadge tone="neutral" icon="auto">
-                      Archived
-                    </StatusBadge>
-                  ) : null}
-                </>
-              ) : null
+              <>
+                {audience.chip}
+                {publicationHeader.chip}
+                {archived ? (
+                  <StatusBadge tone="neutral" icon="auto">
+                    Archived
+                  </StatusBadge>
+                ) : null}
+              </>
             }
             meta={[
               artifact.currentVersion ? `Version ${artifact.currentVersion.revision}` : null,
@@ -653,37 +653,46 @@ function ArtifactDetailPage({
               <RelativeTime key="updated" date={artifact.updatedAt} prefix="Updated" inSentence />,
             ]}
             actions={
-              canPublish ? (
-                <>
-                  {showAudience ? audience.shareButton : null}
-                  {manageData && !archived ? (
-                    <SitePublishButton load={publication.load} onOpen={() => setTab("settings")} />
-                  ) : null}
-                  {archived ? (
-                    <Button
-                      type="button"
-                      size="sm"
-                      onClick={() => void setSiteStatus("active")}
-                      disabled={statusBusy}
-                      className="rounded-[10px] pointer-coarse:h-11"
-                    >
-                      <ArchiveRestoreIcon aria-hidden="true" />
-                      {statusBusy ? "Restoring…" : "Restore Site"}
-                    </Button>
-                  ) : (
-                    <Button
-                      type="button"
-                      size="sm"
-                      onClick={startEditSession}
-                      disabled={context.busy}
-                      className="rounded-[10px] pointer-coarse:h-11"
-                    >
-                      <SparklesIcon aria-hidden="true" />
-                      Edit with Opengeni
-                    </Button>
-                  )}
-                </>
-              ) : null
+              <>
+                {canPublish ? audience.shareButton : null}
+                <RowButton onClick={() => void copyLink({ kind: "site", id: artifactId })}>
+                  <LinkIcon aria-hidden="true" />
+                  Copy link
+                </RowButton>
+                {canPublish ? (
+                  <>
+                    {manageData && !archived ? (
+                      <SitePublishButton
+                        load={publication.load}
+                        onOpen={() => setTab("settings")}
+                      />
+                    ) : null}
+                    {archived ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        onClick={() => void setSiteStatus("active")}
+                        disabled={statusBusy}
+                        className="rounded-[10px] pointer-coarse:h-11"
+                      >
+                        <ArchiveRestoreIcon aria-hidden="true" />
+                        {statusBusy ? "Restoring…" : "Restore Site"}
+                      </Button>
+                    ) : (
+                      <Button
+                        type="button"
+                        size="sm"
+                        onClick={startEditSession}
+                        disabled={context.busy}
+                        className="rounded-[10px] pointer-coarse:h-11"
+                      >
+                        <SparklesIcon aria-hidden="true" />
+                        Edit with Opengeni
+                      </Button>
+                    )}
+                  </>
+                ) : null}
+              </>
             }
             tabs={
               <LineTabsList aria-label="Site">
@@ -789,7 +798,7 @@ function ArtifactDetailPage({
           ) : null}
         </LineTabs>
       </DetailPage>
-      {showAudience ? audience.dialog : null}
+      {audience.dialog}
     </ContentPage>
   );
 }

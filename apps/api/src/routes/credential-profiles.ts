@@ -5,8 +5,9 @@
  * that Opengeni adds to every command an agent runs (docs/secrets.md). The
  * routes read and store references only, never values. Reading needs
  * `secrets:list`; changing needs `secrets:write` plus the settings permission
- * of the level: `workspace:admin` for the workspace, `sessions:control` and
- * tool-policy access to the chat for a session.
+ * of the level: workspace settings for the workspace (an admin, or the owner
+ * of a Personal workspace), `sessions:control` and tool-policy access to the
+ * chat for a session.
  */
 import { CredentialProfileInput } from "@opengeni/contracts";
 import {
@@ -16,6 +17,7 @@ import {
   requireAccessGrantAuthorization,
   requirePermission,
   requireSessionAuthorization,
+  requireWorkspaceSettingsGrant,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
   setCredentialProfile,
@@ -81,19 +83,14 @@ export function registerCredentialProfileRoutes(app: Hono, deps: ApiRouteDeps): 
   app.put(`${PREFIX}/credential-profile`, (c) =>
     profileRoute(c, async () => {
       const workspaceId = c.req.param("workspaceId")!;
-      const authorization = await requireAccessGrantAuthorization(
-        c,
-        deps,
-        workspaceId,
-        "workspace:admin",
-      );
-      requirePermission(authorization.grant, "secrets:write");
+      const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
+      requirePermission(grant, "secrets:write");
       const payload = await parseRequestJson(c, CredentialProfileInput);
       const profile = await setCredentialProfile(deps.db, {
-        accountId: authorization.grant.accountId,
+        accountId: grant.accountId,
         workspaceId,
         sessionId: null,
-        subjectId: authorization.grant.subjectId,
+        subjectId: grant.subjectId,
         profile: payload,
       });
       return c.json({ profile });

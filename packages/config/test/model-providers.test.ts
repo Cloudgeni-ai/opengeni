@@ -1619,6 +1619,19 @@ describe("normalized model definitions", () => {
     }
   });
 
+  test("preserves optional hosted-search context and binds it to execution identity", () => {
+    const baseline = definitionFor();
+    expect(baseline).not.toHaveProperty("hostedWebSearchContextSize");
+    for (const size of ["low", "medium", "high"] as const) {
+      const model = definitionFor({ modelOverrides: { hostedWebSearchContextSize: size } });
+      expect(model.hostedWebSearchContextSize).toBe(size);
+      expect(model.definitionVersion).not.toBe(baseline.definitionVersion);
+    }
+    expect(() =>
+      definitionFor({ modelOverrides: { hostedWebSearchContextSize: "tiny" } }),
+    ).toThrow();
+  });
+
   const policyInput = {
     modelId: "acme/model",
     requestedModelId: null,
@@ -1626,6 +1639,19 @@ describe("normalized model definitions", () => {
     reasoningEffort: "medium",
     reasoningSource: "continuation",
   } as const;
+
+  test("a context-size change never silently rewrites an accepted turn's search tool", () => {
+    const accepted = resolveTurnExecutionPolicyV1(settingsFor(), policyInput);
+    const changed = settingsFor({ modelOverrides: { hostedWebSearchContextSize: "low" } });
+    expect(() => assertTurnExecutionPolicyMatchesConfigV1(changed, accepted, policyInput)).toThrow(
+      TurnExecutionPolicyDefinitionMismatchError,
+    );
+    const next = resolveTurnExecutionPolicyV1(changed, policyInput);
+    expect(next.definitionVersion).not.toBe(accepted.definitionVersion);
+    expect(() =>
+      assertTurnExecutionPolicyMatchesConfigV1(changed, next, policyInput),
+    ).not.toThrow();
+  });
 
   test("keeps the automatic-compaction default out of the executable identity", () => {
     // Workspace and organization compaction preferences already replace this

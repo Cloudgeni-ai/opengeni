@@ -436,7 +436,6 @@ export function ComposerTranscriptionControl({
                           type="button"
                           onClick={() => transcription.cancel()}
                           aria-label={messages.cancel}
-                          aria-keyshortcuts="Escape"
                           className={cn(
                             "inline-flex size-7 shrink-0 items-center justify-center rounded-og-sm",
                             "text-og-fg-muted transition-colors duration-150 motion-reduce:transition-none",

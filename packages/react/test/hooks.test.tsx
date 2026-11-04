@@ -24,7 +24,14 @@ import type {
   SteerMessageResult,
 } from "@opengeni/sdk";
 import { registerDom, renderHook, flush } from "./render-hook";
-import { fakeClient, fakeGoal, fakeTurn, SESSION_ID, WORKSPACE_ID } from "./fake-client";
+import {
+  fakeClient,
+  fakeGoal,
+  fakeTurn,
+  savedComposerPolicy,
+  SESSION_ID,
+  WORKSPACE_ID,
+} from "./fake-client";
 import type { EmbeddedSessionMcpApprovalPolicyClientLike } from "../src/client";
 import { OpenGeniApiError, OpenGeniClient } from "@opengeni/sdk";
 import { useAvailableModels, useWorkspaceModelCatalog } from "../src/hooks/use-available-models";
@@ -653,6 +660,64 @@ describe("useTurnQueue", () => {
     await flush(250);
     expect(listCalls).toBe(2);
     expect(hook.result.current.queue[0]?.id).toBe("turn-2");
+    await hook.unmount();
+  });
+
+  test("a refresh for an observed event does not adopt a queue read that started before it", async () => {
+    const paused = {
+      ...queueSnapshot([]).effectiveControl,
+      state: "paused" as const,
+      directState: "paused" as const,
+      controlVersion: 4,
+      controlEtag: "control-4",
+    };
+    let requests = 0;
+    let releaseStale!: () => void;
+    const staleGate = new Promise<void>((resolve) => {
+      releaseStale = resolve;
+    });
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async () => {
+        requests += 1;
+        const request = requests;
+        // The second read starts while the paused attempt is still stopping
+        // and answers only after the attempt has quiesced.
+        if (request === 2) await staleGate;
+        return new Response(
+          JSON.stringify(
+            queueSnapshot([], {
+              version: request,
+              effectiveControl: paused,
+              stoppingPreviousAttempt: request <= 2,
+            }),
+          ),
+          { headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      [] as SessionEvent[],
+    );
+    await flush();
+    expect(requests).toBe(1);
+    expect(hook.result.current.stoppingPreviousAttempt).toBe(true);
+
+    // Another reader of the same session queue starts before quiescence.
+    const staleRead = client.getQueue(WORKSPACE_ID, SESSION_ID);
+    await flush();
+    expect(requests).toBe(2);
+    await hook.rerender([makeEvent(1, "session.queue.changed", { operation: "attempt_quiesced" })]);
+    await flush(250);
+    releaseStale();
+    await staleRead;
+    await flush();
+
+    expect(requests).toBe(3);
+    expect(hook.result.current.snapshot?.version).toBe(3);
+    expect(hook.result.current.stoppingPreviousAttempt).toBe(false);
     await hook.unmount();
   });
 
@@ -2539,6 +2604,7 @@ describe("useComposer queue-vs-steer", () => {
         serverDraft = {
           ...serverDraft,
           ...request,
+          ...savedComposerPolicy(serverDraft, request),
           revision: request.expectedRevision + 1,
           updatedAt: new Date().toISOString(),
         };
@@ -3281,13 +3347,22 @@ describe("useComposer queue-vs-steer", () => {
     await flush();
 
     await flushing(async () => await hook.result.current.pause());
-    expect(hook.result.current.stoppingAttempt).toBeNull();
+    // The receipt still reports physical settlement, so the current attempt is
+    // shown stopping before any queue snapshot refresh arrives.
+    expect(hook.result.current.stoppingAttempt).toBe("current");
     expect(hook.result.current.effectiveControl).toMatchObject({
       state: "paused",
       controlVersion: 4,
     });
 
+    // A snapshot that is still behind the receipt does not end the projection.
+    await hook.rerender({ ...queueSnapshot([]).effectiveControl, controlVersion: 3 });
+    expect(hook.result.current.stoppingAttempt).toBe("current");
+
+    // Once the authoritative control catches up, the queue snapshot owns the
+    // stopping projection, in the same render.
     await hook.rerender({ ...pendingControl, settlement: null });
+    expect(hook.result.current.stoppingAttempt).toBeNull();
     expect(hook.result.current.effectiveControl?.state).toBe("paused");
     await hook.unmount();
   });
@@ -3341,10 +3416,13 @@ describe("useComposer queue-vs-steer", () => {
 
     await flushing(async () => await hook.result.current.pause());
     expect(hook.result.current.effectiveControl?.controlEtag).toBe("control-4");
+    // Nothing was interrupted, so nothing is shown stopping.
+    expect(hook.result.current.stoppingAttempt).toBeNull();
     await flushing(async () => await hook.result.current.resume());
 
     expect(resumeEtags).toEqual(["control-4"]);
     expect(hook.result.current.effectiveControl?.controlEtag).toBe("control-5");
+    expect(hook.result.current.stoppingAttempt).toBeNull();
     await hook.unmount();
   });
 
@@ -3850,9 +3928,10 @@ describe("useComposer durable draft and control binding", () => {
           text: request.text,
           resources: request.resources,
           annotations: request.annotations ?? [],
-          model: request.model,
-          reasoningEffort: request.reasoningEffort,
-          latencyMode: request.latencyMode,
+          ...savedComposerPolicy(
+            { model: "model-x", reasoningEffort: "medium", latencyMode: "standard" },
+            request,
+          ),
           sourceTurnId: null,
           sourceTurnVersion: null,
           updatedAt: new Date().toISOString(),
@@ -3890,7 +3969,7 @@ describe("useComposer durable draft and control binding", () => {
 
   test("typing before first hydrate still autosaves against the fetched OCC base", async () => {
     let resolveDraft!: (draft: ComposerDraft) => void;
-    const saved: Array<{ text: string; model: string; expectedRevision: number }> = [];
+    const saved: Array<{ text: string; model: string | undefined; expectedRevision: number }> = [];
     const client = fakeClient({
       getComposerDraft: async () =>
         await new Promise<ComposerDraft>((resolve) => {
@@ -3907,9 +3986,10 @@ describe("useComposer durable draft and control binding", () => {
           text: request.text,
           resources: request.resources,
           annotations: request.annotations ?? [],
-          model: request.model,
-          reasoningEffort: request.reasoningEffort,
-          latencyMode: request.latencyMode,
+          ...savedComposerPolicy(
+            { model: "model-x", reasoningEffort: "medium", latencyMode: "standard" },
+            request,
+          ),
           sourceTurnId: null,
           sourceTurnVersion: null,
           updatedAt: new Date().toISOString(),
@@ -4162,6 +4242,7 @@ describe("useComposer durable draft and control binding", () => {
         return {
           ...initial,
           ...request,
+          ...savedComposerPolicy(initial, request),
           revision: request.expectedRevision + 1,
         };
       },
@@ -4221,6 +4302,7 @@ describe("useComposer durable draft and control binding", () => {
         serverDraft = {
           ...serverDraft,
           ...request,
+          ...savedComposerPolicy(serverDraft, request),
           revision: serverDraft.revision + 1,
           updatedAt: new Date().toISOString(),
         };
@@ -4361,6 +4443,7 @@ describe("useComposer durable draft and control binding", () => {
         serverDraft = {
           ...serverDraft,
           ...request,
+          ...savedComposerPolicy(serverDraft, request),
           revision: serverDraft.revision + 1,
           resources: canonicalizeResources(request.resources),
           updatedAt: new Date().toISOString(),
@@ -4454,8 +4537,7 @@ describe("useComposer durable draft and control binding", () => {
           ...initial,
           text: request.text,
           resources: request.resources,
-          model: request.model,
-          reasoningEffort: request.reasoningEffort,
+          ...savedComposerPolicy(initial, request),
           revision: request.expectedRevision + 1,
         }),
         sendMessage: async (_ws, _session, input) => {
@@ -4580,6 +4662,7 @@ describe("useComposer durable draft and control binding", () => {
         serverDraft = {
           ...serverDraft,
           ...request,
+          ...savedComposerPolicy(serverDraft, request),
           revision: request.expectedRevision + 1,
           updatedAt: new Date().toISOString(),
         };
@@ -4670,8 +4753,7 @@ describe("useComposer durable draft and control binding", () => {
           ...initial,
           text: request.text,
           resources: request.resources,
-          model: request.model,
-          reasoningEffort: request.reasoningEffort,
+          ...savedComposerPolicy(initial, request),
           revision: request.expectedRevision + 1,
         };
       },
@@ -4841,6 +4923,7 @@ describe("useComposer durable draft and control binding", () => {
           serverDraft = {
             ...serverDraft,
             ...request,
+            ...savedComposerPolicy(serverDraft, request),
             revision: request.expectedRevision + 1,
             updatedAt: new Date().toISOString(),
           };
@@ -4927,6 +5010,54 @@ describe("useComposer durable draft and control binding", () => {
       await hook.unmount();
     });
   }
+
+  test("a member's own-key refused send says to ask an organization owner", async () => {
+    const client = fakeClient({
+      sendMessage: async () => {
+        throw new OpenGeniApiError(
+          402,
+          JSON.stringify({
+            error: {
+              status: 402,
+              code: "payment_required",
+              message: "Add credits to use your own key.",
+              retryable: false,
+              details: {
+                code: "byok_paid_credit_required",
+                action: { type: "add_credits", href: "/billing" },
+              },
+            },
+          }),
+          { mutation: true },
+        );
+      },
+    });
+    // Its own session, so the refused operation it keeps doesn't reach other tests.
+    const hook = await renderHook(
+      () =>
+        useComposer("66666666-6666-4666-8666-666666666666", {
+          client,
+          workspaceId: WORKSPACE_ID,
+          draftPersistence: "disabled",
+          initialPolicy: INITIAL_COMPOSER_POLICY,
+          canBuyCredits: false,
+        }),
+      undefined,
+    );
+    await flush();
+    expect(hook.result.current.canBuyCredits).toBe(false);
+    await flushing(async () => {
+      await hook.result.current.send("use my key");
+    });
+    await flush();
+    const failed = hook.result.current.optimisticMessages?.find(
+      (message) => message.state === "failed",
+    );
+    expect(failed?.error).toBe(
+      "Ask an organization owner to add credits to use your own key. Your message and attachments are saved.",
+    );
+    await hook.unmount();
+  });
 
   for (const delivery of ["send", "steer"] as const) {
     test(`${delivery} retries an outcome-unknown gateway failure with one idempotency key`, async () => {
@@ -5961,6 +6092,7 @@ describe("useComposer file-only send", () => {
         return {
           ...initial,
           ...request,
+          ...savedComposerPolicy(initial, request),
           revision: request.expectedRevision + 1,
         };
       },

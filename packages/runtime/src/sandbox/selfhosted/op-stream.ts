@@ -211,8 +211,17 @@ export type OpStreamExecResult =
  * The caller must persist this under its exact command before releasing output. */
 export type OpStreamOutputReceipt = { exitSeq: string; attachGeneration: string };
 
+/**
+ * The shortest foreground wait before an early yield (`yieldSignal`) returns a
+ * background handle, counted from when the op is running: about one model
+ * round trip of Steer latency, while a quick command still returns inline.
+ */
+export const OP_STREAM_EARLY_YIELD_GRACE_MS = 1_000;
+
 export type OpStreamYieldOptions = {
   yieldMs: number;
+  /** Ends the yield window early (a Steer is waiting); the op keeps running. */
+  yieldSignal?: AbortSignal;
   /** Durable ownership transfer. It runs while the exact consumer is still
    * attached; returning a running result is forbidden until this resolves. */
   onYield: () => void | Promise<void>;
@@ -915,6 +924,7 @@ class OpConsumer {
     }, this.ackIntervalMs);
     const liveness = this.watchLiveness(wallMs, runStartedAt);
     let yieldTimer: ReturnType<typeof setTimeout> | undefined;
+    let stopYieldSignal: (() => void) | undefined;
     let adopted = false;
     try {
       if (yieldOptions && yieldOptions.yieldMs > 0) {
@@ -923,6 +933,24 @@ class OpConsumer {
           liveness.wall,
           new Promise<"yield">((resolve) => {
             yieldTimer = setTimeout(() => resolve("yield"), yieldOptions.yieldMs);
+            // An early yield takes the same path as the window ending. It waits
+            // out a short grace first, so a quick command started while a
+            // Steer waits still returns its result instead of a handle.
+            const signal = yieldOptions.yieldSignal;
+            if (!signal) return;
+            const raceStartedAt = Date.now();
+            let graceTimer: ReturnType<typeof setTimeout> | undefined;
+            const onYield = () => {
+              const remainingMs = OP_STREAM_EARLY_YIELD_GRACE_MS - (Date.now() - raceStartedAt);
+              if (remainingMs <= 0) return resolve("yield");
+              graceTimer = setTimeout(() => resolve("yield"), remainingMs);
+            };
+            stopYieldSignal = () => {
+              signal.removeEventListener("abort", onYield);
+              if (graceTimer) clearTimeout(graceTimer);
+            };
+            if (signal.aborted) onYield();
+            else signal.addEventListener("abort", onYield, { once: true });
           }),
         ]);
         if (phase === "yield" && this.exitSeq === undefined) {
@@ -967,6 +995,7 @@ class OpConsumer {
       if (yieldTimer) {
         clearTimeout(yieldTimer);
       }
+      stopYieldSignal?.();
       liveness.stop();
     }
 

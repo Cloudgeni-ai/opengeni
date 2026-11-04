@@ -682,6 +682,8 @@ function assertCapabilitySurface(
     enabled("humanInput") && captured.buildOptions.humanInputEnabled !== false,
   );
   expect(captured.names.includes("list_models")).toBe(enabled("subagents"));
+  // Privacy answers come from server facts under every configuration.
+  expect(captured.names).toContain("privacy_facts");
   expect(captured.names.includes("image_generation")).toBe(enabled("media"));
   expect(captured.names.includes("skill_read")).toBe(enabled("skills"));
   for (const name of SKILL_MANAGEMENT_TOOLS) {
@@ -870,6 +872,7 @@ describe("agent configuration reaches the production model request", () => {
     assertCapabilitySurface(captured, config);
     expect(captured.names).toContain("request_human_input");
     expect(captured.names).toContain("skill_read");
+    expect(captured.names).toContain("privacy_facts");
     expect(captured.names).not.toContain("web_search");
     expect(captured.names).not.toContain("list_models");
     expect(captured.names).not.toContain("skill_search");
@@ -1206,6 +1209,40 @@ describe("Skill attachment is distinct from Skill catalog availability", () => {
       expect(captured.names).toContain("generate_video");
     },
   );
+  test("a short personal Skill is shown in full in the model-visible Skill index", async () => {
+    const captured = await captureWorkerRequest({
+      agent: agentConfig("all"),
+      loadSkillDescriptors: async () => [
+        {
+          id: "77777777-7777-4777-8777-777777777777",
+          title: "reply-in-norwegian",
+          description: "Applies in every conversation with this user.",
+          activationMode: "workspace_managed",
+          personalSkillMarkdown:
+            "---\nname: reply-in-norwegian\ndescription: Applies in every conversation with this user.\n---\n\nAlways reply in Norwegian.\n",
+        } as Awaited<ReturnType<typeof db.listSkillDescriptors>>[number],
+        {
+          id: "88888888-8888-4888-8888-888888888888",
+          title: SKILL_SENTINEL,
+          description: "Installed test Skill",
+          activationMode: "workspace_managed",
+          personalSkillMarkdown: null,
+        } as Awaited<ReturnType<typeof db.listSkillDescriptors>>[number],
+      ],
+    });
+    expect(captured.modelVisibleSkillCatalogText).toContain(
+      '- {"name":"reply-in-norwegian","description":"Applies in every conversation with this user.","instructions":"Always reply in Norwegian."}',
+    );
+    expect(captured.modelVisibleSkillCatalogText).toContain(
+      '- {"name":"' + SKILL_SENTINEL + '","description":"Installed test Skill"}',
+    );
+    expect(captured.modelVisibleSkillCatalogText).toContain(
+      "The following entries are descriptors, except that an instructions field holds that Skill's complete instructions",
+    );
+    expect(captured.modelVisibleSkillCatalogText).not.toContain(
+      "The following entries are descriptors, not the Skill instructions.",
+    );
+  });
   test("omitted video descriptor reads no video policy at turn start", async () => {
     const failure = new Error("live video policy unavailable");
     const phases: string[] = [];

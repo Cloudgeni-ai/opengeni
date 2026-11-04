@@ -674,7 +674,7 @@ describe("query-independent tool discovery", () => {
           type: "function_call",
           callId: "wrong-prefix",
           name: "tool_list",
-          arguments: '{"namePrefix":"weather."}',
+          arguments: '{"namePrefix":"forecast."}',
         },
       ],
       [{ type: "function_call", callId: "browse", name: "tool_list", arguments: "{}" }],
@@ -1577,6 +1577,7 @@ describe("generic lazy tool dispatch", () => {
       "Pause this turn and request structured human input",
     );
     const models = firstPartyTool("list_models", "List selectable workspace models");
+    const privacy = firstPartyTool("privacy_facts", "Facts about privacy and data handling");
     const codeSearch = firstPartyTool("code_search", "Find where code is implemented");
     const browser = firstPartyTool(
       "interaction__browser_act",
@@ -1596,6 +1597,7 @@ describe("generic lazy tool dispatch", () => {
         skillSave,
         human,
         models,
+        privacy,
         codeSearch,
         browser,
       ],
@@ -1616,6 +1618,7 @@ describe("generic lazy tool dispatch", () => {
       "repository_skill_read",
       "request_human_input",
       "list_models",
+      "privacy_facts",
       "code_search",
       "tool_search",
       "tool_invoke",
@@ -1630,6 +1633,7 @@ describe("generic lazy tool dispatch", () => {
       "repository_skill_read",
       "request_human_input",
       "list_models",
+      "privacy_facts",
       "code_search",
     ]) {
       expect(
@@ -1642,6 +1646,50 @@ describe("generic lazy tool dispatch", () => {
     expect(
       runtime.search({ query: "Save workspace Skill file changes" }).map((entry) => entry.name),
     ).toContain("skill_save");
+  });
+
+  test("a search for a tool every request carries says it is already in the tool list", async () => {
+    const human = firstPartyTool(
+      "request_human_input",
+      "Pause this turn and request structured human input from the person",
+    );
+    const exec = firstPartyTool("exec_command", "Run a shell command in the sandbox");
+    const skillSave = firstPartyTool("skill_save", "Save workspace Skill file changes");
+    const agent = new Agent({
+      name: "visible-search",
+      instructions: "Use tools.",
+      model: "scripted",
+      tools: [human, exec, skillSave],
+    });
+    const runtime = installLazyToolRuntime(agent, "generic_dispatch", new Set());
+    const visible = await agent.getAllTools(undefined as never);
+    const inner = new CapturingModel();
+    const wrapped = await new LazyToolModelProvider(providerFor(inner), runtime).getModel("test");
+    await wrapped.getResponse(baseRequest(visible.map(serializedFunction)));
+
+    const named = JSON.parse(
+      (await runtime.prepareSearch({ query: "", names: ["request_human_input"] })).output,
+    ) as { tools: unknown[]; unavailable: string[]; alreadyAvailable?: string };
+    expect(named.tools).toEqual([]);
+    expect(named.unavailable).toEqual([]);
+    expect(named.alreadyAvailable).toBe(
+      "request_human_input is already in your tool list; call it directly.",
+    );
+
+    const ranked = JSON.parse(
+      (await runtime.prepareSearch({ query: "request structured human input from the person" }))
+        .output,
+    ) as { alreadyAvailable?: string };
+    expect(ranked.alreadyAvailable).toBe(
+      "request_human_input is already in your tool list; call it directly.",
+    );
+
+    // A deferred tool still loads as before, with no notice.
+    const deferred = JSON.parse(
+      (await runtime.prepareSearch({ query: "", names: ["skill_save"] })).output,
+    ) as { tools: Array<{ name: string }>; alreadyAvailable?: string };
+    expect(deferred.tools.map((entry) => entry.name)).toEqual(["skill_save"]);
+    expect(deferred).not.toHaveProperty("alreadyAvailable");
   });
 
   test("searches, restores provider history, and executes the real tool pipeline", async () => {
@@ -2100,20 +2148,24 @@ describe("generic lazy tool dispatch", () => {
       JSON.stringify({ query: "weather capability", limit: 20 }),
       undefined as never,
     );
-    const parsed = JSON.parse(String(output)) as { tools: unknown[] };
-    expect(parsed.tools.length).toBeGreaterThan(0);
-    expect(parsed.tools.length).toBe(tools.length);
+    // A tie loads the top candidate and lists the others compactly.
+    const parsed = JSON.parse(String(output)) as { tools: unknown[]; suggestions: unknown[] };
+    expect(parsed.tools.length).toBe(1);
+    expect(parsed.tools.length + parsed.suggestions.length).toBe(tools.length);
     expect(Buffer.byteLength(String(output))).toBeLessThan(3_000);
     expect(Buffer.byteLength(String(output))).toBeLessThanOrEqual(
       MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES,
     );
 
-    const item = { type: "function_call_result", callId: "search-1", output };
+    // An unmarked historical search replays its compact ranked listing.
+    const args = JSON.stringify({ query: "weather capability", limit: 20 });
+    const historical = runtime.genericSearchOutput(args);
+    expect(Buffer.byteLength(historical)).toBeLessThan(3_000);
+    const item = { type: "function_call_result", callId: "search-1", output: historical };
     const truncated = boundModelToolOutputItem(item, 100) as typeof item;
-    expect(truncated.output).not.toBe(output);
+    expect(truncated.output).not.toBe(historical);
     expect(String(truncated.output)).toContain("tokens truncated");
 
-    const args = JSON.stringify({ query: "weather capability", limit: 20 });
     const marked = transformGenericDispatchResponse(
       {
         usage: new Usage(),
@@ -2142,7 +2194,7 @@ describe("generic lazy tool dispatch", () => {
       (candidate) => candidate.type === "function_call_result",
     );
     expect(providerCall?.providerData).toBeUndefined();
-    expect(providerResult?.output).toBe(output);
+    expect(providerResult?.output).toBe(historical);
     expect(() => JSON.parse(String(providerResult?.output))).not.toThrow();
   });
 
@@ -2325,7 +2377,9 @@ describe("OpenAI/Azure native client tool search", () => {
         await running;
         expect(outcome).toBe("completed");
         expect(reads).toBe(1);
-        expect(JSON.stringify(model.requests[0])).toContain("builtin:skill-management");
+        expect(JSON.stringify(model.requests[0])).toContain(
+          String.raw`{\"name\":\"skill-management\"`,
+        );
         expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toContain("skill_read");
         expect(model.requests[0]!.tools.map((candidate) => candidate.name)).not.toContain(
           "load_skill",
@@ -3729,5 +3783,144 @@ describe("opening tool load", () => {
       expect(JSON.stringify(requests[0]!.input)).not.toContain("call_opening_tools");
     }
     expect(JSON.stringify((await run(["unknown_tool"], false))[0])).toBe(JSON.stringify(plain[0]));
+  });
+});
+
+describe("tool names in replayed history", () => {
+  // The form stored before tool identities were exempt from secret masking:
+  // a known value inside the tool name replaced by its reference.
+  const maskedWeather = `${SERVER_ID}__\u007B\u007Bsecret:Vault/db/password}}`;
+
+  test.each(["openai_native", "codex_native"] as const)(
+    "%s: a stored tool_search_output and call with a masked or dotted name replay with the authorized name and the tool still runs",
+    async (transport) => {
+      let executed: unknown = null;
+      const weather = weatherTool({
+        execute: (input) => {
+          executed = input;
+          return "sunny";
+        },
+      });
+      const agent = agentWith(weather);
+      const runtime = installLazyToolRuntime(agent, transport, new Set([SERVER_ID]));
+      const model = new ScriptedStreamingModel([
+        [
+          {
+            type: "function_call",
+            callId: "call-now",
+            name: WEATHER_TOOL,
+            arguments: JSON.stringify({ city: "Oslo" }),
+          },
+        ],
+        [finalMessage("done")],
+      ]);
+      const definition = (name: string) => ({
+        type: "function",
+        name,
+        description: "Look up the current weather for a city",
+        // As stored when the search loaded it: the tool's own schema.
+        parameters: (weather as { parameters: unknown }).parameters,
+      });
+      const history = [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "Weather?" }] },
+        {
+          type: "tool_search_call",
+          call_id: "old-search",
+          execution: "client",
+          status: "completed",
+          arguments: { query: "weather" },
+        },
+        {
+          type: "tool_search_output",
+          call_id: "old-search",
+          execution: "client",
+          status: "completed",
+          tools: [definition(maskedWeather), definition(`${SERVER_ID}.weather_lookup`)],
+        },
+        {
+          type: "function_call",
+          callId: "old-call",
+          name: maskedWeather,
+          arguments: JSON.stringify({ city: "Bergen" }),
+          status: "completed",
+        },
+        { type: "function_call_result", callId: "old-call", name: maskedWeather, output: "rain" },
+        { type: "message", role: "user", content: [{ type: "input_text", text: "And now?" }] },
+      ];
+      const runner = new Runner({
+        modelProvider: new LazyToolModelProvider(providerFor(model), runtime),
+      });
+      const result = await runner.run(agent, history as never, {
+        stream: true,
+        historyOwnership: "external",
+        maxTurns: 4,
+        toolNotFoundBehavior: "return_error_to_model",
+        resolveMissingFunctionTool: createResolveMissingFunctionTool(runtime),
+      });
+      for await (const _event of result.toStream()) void _event;
+      await result.completed;
+
+      expect(result.finalOutput).toBe("done");
+      expect(executed).toEqual({ city: "Oslo" });
+      const first = model.requests[0]!.input as Array<Record<string, any>>;
+      const replayedSearch = first.find((item) => item.type === "tool_search_output")!;
+      // Both stored definitions denote the same tool, which is declared once.
+      expect(replayedSearch.tools.map((entry: { name: string }) => entry.name)).toEqual([
+        WEATHER_TOOL,
+      ]);
+      expect(
+        first.find((item) => item.callId === "old-call" && item.type === "function_call"),
+      ).toMatchObject({ name: WEATHER_TOOL });
+      expect(JSON.stringify(model.requests.map((request) => request.input))).not.toContain(
+        "\u007B\u007Bsecret:",
+      );
+    },
+  );
+
+  test("a name no authorized tool answers to stays raw for the route's projection", async () => {
+    const agent = agentWith(weatherTool());
+    const runtime = installLazyToolRuntime(agent, "openai_native", new Set([SERVER_ID]));
+    const model = new ScriptedStreamingModel([[finalMessage("done")]]);
+    const unknown = "other.unknown_tool";
+    const history = [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "Hi" }] },
+      {
+        type: "function_call",
+        callId: "old-call",
+        name: unknown,
+        arguments: "{}",
+        status: "completed",
+      },
+      { type: "function_call_result", callId: "old-call", name: unknown, output: "ok" },
+      {
+        type: "function_call",
+        callId: "masked-call",
+        name: maskedWeather,
+        arguments: JSON.stringify({ city: "Bergen" }),
+        status: "completed",
+      },
+      { type: "function_call_result", callId: "masked-call", name: maskedWeather, output: "rain" },
+      { type: "message", role: "user", content: [{ type: "input_text", text: "And now?" }] },
+    ];
+    const runner = new Runner({
+      modelProvider: new LazyToolModelProvider(providerFor(model), runtime),
+    });
+    const result = await runner.run(agent, history as never, {
+      stream: true,
+      historyOwnership: "external",
+      maxTurns: 2,
+    });
+    for await (const _event of result.toStream()) void _event;
+    await result.completed;
+
+    const first = model.requests[0]!.input as Array<Record<string, any>>;
+    // Chat replays it as a historical fact and Responses gives it an alias;
+    // the lazy layer does not decide that for every route.
+    expect(
+      first.find((item) => item.callId === "old-call" && item.type === "function_call"),
+    ).toMatchObject({ name: unknown });
+    expect(
+      first.find((item) => item.callId === "masked-call" && item.type === "function_call"),
+    ).toMatchObject({ name: WEATHER_TOOL });
   });
 });

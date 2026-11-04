@@ -3,6 +3,7 @@ import { parseRequestBody } from "../http/request-body";
 import { attachedBrowserViewer } from "../attached-browser-viewer";
 import { createHash, randomUUID } from "node:crypto";
 import sharp from "sharp";
+import { computerCursorIdentity } from "./computer-cursor-identity";
 import {
   resolveFirstPartyDelegationSecret,
   resolveStreamTokenSecret,
@@ -138,6 +139,8 @@ import { ApiHttpError } from "../http/api-error";
 import {
   interactionActionDeadlineApiError,
   interactionControlApiError,
+  interactionControlRequestFor,
+  type InteractionControlRequest,
   legacyInteractionCapacityError,
 } from "../http/interaction-control-error";
 import {
@@ -463,6 +466,7 @@ export function registerComputerSessionRoutes(
                   async (client) =>
                     await client.createComputerSession({
                       computerSessionId: preparedSession.id,
+                      cursorIdentity: await computerCursorIdentity(deps, grant, sourceSession),
                       controllerGeneration,
                       tokenGeneration: record.tokenGeneration,
                       ...tokens,
@@ -543,7 +547,7 @@ export function registerComputerSessionRoutes(
           error: interactionFailure(error),
         }).catch(() => undefined);
       }
-      throw computerRouteError(error);
+      throw computerRouteError(error, "open");
     }
   });
 
@@ -930,7 +934,7 @@ export function registerComputerSessionRoutes(
               ...(request.stream ? { stream: request.stream } : {}),
             });
           } catch (error) {
-            const publicFailure = interactionControlApiError(error, "computer");
+            const publicFailure = interactionControlApiError(error, "computer", "live_view");
             console.error("computer frame relay open failed", {
               computerSessionId,
               targetId: request.targetId,
@@ -1832,6 +1836,12 @@ export function registerComputerSessionRoutes(
           if (!recoverMissing || !isMissingComputerControllerSession(error)) throw error;
           await client.createComputerSession({
             computerSessionId,
+            cursorIdentity: await computerCursorIdentity(
+              deps,
+              grant,
+              sourceSession ??
+                (await requireSourceSession(deps, workspaceId, record.sourceSessionId)),
+            ),
             controllerGeneration: binding.controllerGeneration,
             tokenGeneration: record.tokenGeneration,
             ...tokens,
@@ -1882,7 +1892,7 @@ export function registerComputerSessionRoutes(
           ),
       );
     } catch (error) {
-      throw computerRouteError(error);
+      throw computerRouteError(error, interactionControlRequestFor(channelOperation));
     }
   }
 
@@ -2397,10 +2407,13 @@ function interactionFailure(error: unknown) {
   };
 }
 
-function computerRouteError(error: unknown): HTTPException {
+function computerRouteError(
+  error: unknown,
+  request: InteractionControlRequest = "request",
+): HTTPException {
   const actionDeadline = interactionActionDeadlineApiError(error);
   if (actionDeadline) return actionDeadline;
-  const connectedMachineError = interactionControlApiError(error, "computer");
+  const connectedMachineError = interactionControlApiError(error, "computer", request);
   if (connectedMachineError) return connectedMachineError;
   const routeUnavailable = activeRouteUnavailableError(error);
   if (routeUnavailable) return routeUnavailable;

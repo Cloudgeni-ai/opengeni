@@ -696,7 +696,7 @@ describe("company-profile agent administration", () => {
     ).toBeNull();
   }, 180_000);
 
-  test("fails closed for authority drift after resume, missing authority, and cross-organization ids", async () => {
+  test("admits organization admins and fails closed for members, authority drift after resume, missing authority, and cross-organization ids", async () => {
     if (!shared || !client) return;
     const unauthorized = await fixture({
       initiatingSubjectId: `user:outsider-${crypto.randomUUID()}`,
@@ -714,10 +714,10 @@ describe("company-profile agent administration", () => {
 
     const first = await fixture();
     const second = await fixture();
-    // An organization admin holds no `account:admin`; the agent path is exactly as narrow as
-    // the manual route and refuses the admin-initiated turn.
+    // The agent path admits exactly the people the manual route admits: an organization
+    // owner or admin of this organization. A member-initiated turn is refused.
     await shared.admin`
-      update organization_memberships set role = 'admin', authorization_revision = authorization_revision + 1
+      update organization_memberships set role = 'member', authorization_revision = authorization_revision + 1
       where account_id = ${first.grant.accountId} and subject_id = ${first.ownerSubjectId}`;
     try {
       await expect(
@@ -726,10 +726,29 @@ describe("company-profile agent administration", () => {
           request: {
             operationId: crypto.randomUUID(),
             profile: profile(),
-            reason: "An organization admin cannot administer the profile through an agent.",
+            reason: "An organization member cannot administer the profile through an agent.",
           },
         }),
       ).rejects.toMatchObject({ code: "authority_unavailable" });
+    } finally {
+      await shared.admin`
+        update organization_memberships set role = 'owner', authorization_revision = authorization_revision + 1
+        where account_id = ${first.grant.accountId} and subject_id = ${first.ownerSubjectId}`;
+    }
+    await shared.admin`
+      update organization_memberships set role = 'admin', authorization_revision = authorization_revision + 1
+      where account_id = ${first.grant.accountId} and subject_id = ${first.ownerSubjectId}`;
+    try {
+      reviewRequired(
+        await proposeCompanyProfileForAgent(client.db, {
+          attempt: first.attempt,
+          request: {
+            operationId: crypto.randomUUID(),
+            profile: profile(),
+            reason: "An organization admin administers the profile through an agent.",
+          },
+        }),
+      );
     } finally {
       await shared.admin`
         update organization_memberships set role = 'owner', authorization_revision = authorization_revision + 1

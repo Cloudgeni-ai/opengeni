@@ -80,8 +80,8 @@ test("subscription wire identity matches the pinned client while request identif
   expect(b.body.system[0].text).toContain("cc_prev_req=req_1;");
   expect(a.body.system[1].text).toBe("Opengeni instructions");
   expect(a.body.system[1].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
-  // Opus 5.5 writes progress updates: only display "updates" tells them apart.
-  expect(a.body.thinking).toEqual({ type: "adaptive", display: "updates" });
+  // Reasoning summaries stay readable, Opus 5.5 included.
+  expect(a.body.thinking).toEqual({ type: "adaptive", display: "summarized" });
   expect(a.body.output_config.effort).toBe("high");
   expect(a.body.max_tokens).toBe(32000);
   const betas = a.headers.get("anthropic-beta")!.split(",");

@@ -11,6 +11,16 @@ import type {
 /** Bumped only for incompatible changes; additions are new capabilities. */
 export const DESKTOP_BRIDGE_VERSION = 1;
 
+/** The macOS traffic lights: three 14px buttons. */
+export const DESKTOP_MAC_TRAFFIC_LIGHT_SIZE = 14;
+
+/**
+ * The window bar of macOS shells that don't report `windowBarHeight` (the
+ * desktop app 0.1.33 and older): they put the traffic lights 21px from the
+ * top, centred on a 56px row.
+ */
+export const DESKTOP_LEGACY_MAC_WINDOW_BAR_HEIGHT = 56;
+
 /** The global the preload script defines in the web app's main frame. */
 export const DESKTOP_BRIDGE_GLOBAL = "opengeniDesktop";
 
@@ -68,21 +78,59 @@ export interface DesktopSystemAudioError {
 export interface DesktopMeetingDetectionStatus {
   /** The person's switch: offer to record when a call starts. */
   enabled: boolean;
+  /**
+   * The person's second switch: when a call app's call starts, record it
+   * without asking, and stop when it ends. A meeting in a browser still asks.
+   * Absent from apps built before it existed.
+   */
+  autoRecord?: boolean;
   /** This computer, its OS version and this app build can tell when a call starts. */
   available: boolean;
+  /**
+   * The person's switch for reminders before calendar meetings: about a
+   * minute before a meeting with a join link starts, a card offers to join it
+   * and start its recording. Absent from apps built before it existed.
+   */
+  calendarReminders?: boolean;
+  /**
+   * Whether the signed-in person has a calendar Opengeni can read, as last
+   * checked; absent until then (and from older apps).
+   */
+  calendar?: "connected" | "none";
   /** Why detection isn't working right now, in a sentence for its row. */
   problem?: string;
 }
 
 /**
- * What the person chose on the app's meeting card: record the call an app
- * just started, or stop recording because the call ended. `app` is the call
- * app's name ("Zoom", "Google Chrome"); `title` suggests a name for the
- * meeting.
+ * What the person chose on the app's meeting card or menu: record the call an
+ * app just started, stop recording (the call ended, or Stop Recording in the
+ * menu), or open the meeting this page records (its live transcript). `app` is
+ * the call app's name ("Zoom", "Google Chrome"); `title` suggests a name for
+ * the meeting. From a reminder before a calendar meeting (Join and start
+ * recording), `calendarEvent` is that event, which names the meeting; with
+ * `replace`, a meeting being recorded stops and is kept, and the new one
+ * starts. `open` reaches only a page that described its recording with
+ * {@link DesktopMeetingDetection.setRecording}.
  */
 export type DesktopMeetingRequest =
-  | { kind: "record"; app: string; title: string }
-  | { kind: "stop"; app: string };
+  | {
+      kind: "record";
+      app: string;
+      title: string;
+      calendarEvent?: { provider: "google" | "microsoft"; id: string };
+      replace?: boolean;
+    }
+  | { kind: "stop"; app: string }
+  | { kind: "open" };
+
+/** The meeting a page records, for the app's menu bar or tray. */
+export interface DesktopRecordingMeeting {
+  /** Its name so far, or null when it has none yet. */
+  title: string | null;
+  /** Recorded time so far, excluding pauses. */
+  elapsedMilliseconds: number;
+  paused: boolean;
+}
 
 /**
  * Call detection. While on, the app shows a card in the top corner of the
@@ -93,12 +141,19 @@ export type DesktopMeetingRequest =
  */
 export interface DesktopMeetingDetection {
   status(): Promise<DesktopMeetingDetectionStatus>;
-  update(change: { enabled?: boolean }): Promise<DesktopMeetingDetectionStatus>;
+  update(change: {
+    enabled?: boolean;
+    autoRecord?: boolean;
+    calendarReminders?: boolean;
+  }): Promise<DesktopMeetingDetectionStatus>;
   /**
    * Tell the app whether this page is recording a meeting, so it doesn't
    * offer to record another and can offer to stop when the call ends.
+   * Describe the meeting with `meeting` (again whenever its title or pause
+   * changes) to show it in the app's menu, which can then ask this page to
+   * open it (an `open` request).
    */
-  setRecording(recording: boolean): void;
+  setRecording(recording: boolean, meeting?: DesktopRecordingMeeting): void;
   /**
    * The person chose Record or Stop on the card. The window comes to the
    * front first. Only the page's newest listener receives them; the app
@@ -274,7 +329,7 @@ export type DesktopDictationShortcut =
   | { kind: "modifierChord"; modifiers: DesktopDictationModifier[] }
   | { kind: "accelerator"; accelerator: string };
 
-/** One dictation shortcut and the language it listens for. */
+/** One dictation shortcut, the language it listens for and the model that hears it. */
 export interface DesktopDictationProfile {
   id: string;
   /** What the person calls it ("Norwegian"). */
@@ -282,6 +337,18 @@ export interface DesktopDictationProfile {
   shortcut: DesktopDictationShortcut;
   /** An ISO 639-1 or 639-3 code ("nb", "en"); null detects the language. */
   language: string | null;
+  /**
+   * The speech-to-text model this shortcut's dictations use, such as one for
+   * English and another for Norwegian. Absent or null: the workspace's voice
+   * input model.
+   */
+  model?: DesktopDictationModel | null;
+}
+
+/** A speech-to-text model by its provider, as the workspace's voice input lists it. */
+export interface DesktopDictationModel {
+  providerId: string;
+  model: string;
 }
 
 /**
@@ -313,7 +380,7 @@ export interface DesktopDictationSettings {
    * else the newest one kept on this computer. Null: none.
    */
   retryShortcut?: DesktopDictationKeys | null;
-  /** Throws away the dictation under way, as Escape does. Null: none. */
+  /** Throws away the dictation under way. Null: none. */
   cancelShortcut?: DesktopDictationKeys | null;
 }
 
@@ -384,6 +451,8 @@ export type DesktopDictationRequest =
       dictationId: string;
       profileId: string;
       language: string | null;
+      /** The model to transcribe with; absent or null: the workspace's voice input model. */
+      model?: DesktopDictationModel | null;
       /** Names and words to listen for; absent from apps that don't offer it. */
       vocabulary?: string[];
     }
@@ -393,6 +462,7 @@ export type DesktopDictationRequest =
       dictationId: string;
       profileId: string;
       language: string | null;
+      model?: DesktopDictationModel | null;
       vocabulary: string[];
       audio: DesktopDictationAudio;
     }
@@ -578,6 +648,18 @@ export interface DesktopBridge {
   readonly productName: string;
   /** The app's own version, e.g. "0.1.29". Absent from older apps. */
   readonly appVersion?: string;
+  /**
+   * macOS: the height of the window bar the shell centres the traffic lights
+   * on, in window points (CSS pixels at 100% zoom). The page centres its own
+   * bar controls on the same line. Absent from older apps; see
+   * `DESKTOP_LEGACY_MAC_WINDOW_BAR_HEIGHT`.
+   */
+  readonly windowBarHeight?: number;
+  /**
+   * The page's zoom factor (1 at 100%), so it can size what lines up with the
+   * window's own controls. Absent from older apps.
+   */
+  zoomFactor?(): number;
   /**
    * A PNG of the page in the window as it is now, at the screen's pixel
    * density, or null when nothing is shown. With the `captureWindow` capability.

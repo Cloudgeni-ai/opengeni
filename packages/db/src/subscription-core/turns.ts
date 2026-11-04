@@ -28,7 +28,7 @@ import {
   bindingStickiness,
   connectionIneligibility,
   connectionUsesExtraCredits,
-  personalFallbackActive,
+  automaticallyUsable,
   decidePlacement,
   quotaCapacity,
   storedQuotaDocument,
@@ -872,7 +872,7 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
         const { input } = await providerPlacementInput(tx, identity, world, request.productModelId);
         return input.connections.some(
           (connection) =>
-            (connection.ownership.kind === "shared" || personalFallbackActive(input)) &&
+            automaticallyUsable(input, connection) &&
             connectionIneligibility(input, connection, request.productModelId).every(
               (reason) => reason === "exhausted" || reason === "model_cooling_down",
             ),

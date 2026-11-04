@@ -204,7 +204,7 @@ describe("runSingleModelCall on Responses", () => {
     expect(result).toMatchObject({ text: '{"text":"Ver', finishReason: "length" });
   });
 
-  test("Azure deployments omit store", async () => {
+  test("Azure deployments are storeless too", async () => {
     const { client, bodies } = fakeClient({
       responses: () => ({ status: "completed", output: [] }),
     });
@@ -212,7 +212,7 @@ describe("runSingleModelCall on Responses", () => {
       { client, provider: provider("responses", "azure", "azure-openai"), modelId: "d" },
       { messages: [{ role: "user", content: "Hi" }] },
     );
-    expect(bodies[0]).not.toHaveProperty("store");
+    expect(bodies[0]).toHaveProperty("store", false);
   });
 
   test("subscription backends always stream and parse raw events", async () => {

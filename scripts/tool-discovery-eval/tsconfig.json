@@ -1,10 +1,5 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": { "noEmit": true },
-  "include": [
-    "decision-backend.ts",
-    "jev-decision.test.ts",
-    "../tool-discovery-decision-eval.ts",
-    "../tool-discovery-agent-eval.ts"
-  ]
+  "include": ["run.ts", "harness/*.ts"]
 }

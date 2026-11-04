@@ -30,11 +30,7 @@ import {
   type PlacementBrowserStateCaptureReceipt,
 } from "@opengeni/runtime";
 import type { ObjectStorage } from "@opengeni/storage";
-import {
-  acquireSharedTestDatabase,
-  grantDeferredRuntimeAccess,
-  type SharedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
 import { createBrowserDeadlineCheckpointActivities } from "../src/activities/browser-deadline-checkpoint";
 import { createSandboxLeaseActivities, type TerminateBoxFn } from "../src/activities/sandbox-lease";
@@ -662,12 +658,6 @@ describe("idle browser and desktop release", () => {
     const status = async (value: string) => {
       await admin`update sessions set status = ${value} where id = ${f.sessionId}`;
     };
-    // Until a later migration grants the inventory to the runtime, nothing is
-    // listed, even for a working session.
-    await status("running");
-    expect(await held()).toEqual([]);
-    await grantDeferredRuntimeAccess(admin);
-    await status("idle");
     // The session's turn ended and nothing is waiting: not held.
     expect(await held()).toEqual([]);
     // A turn runs without touching the browser: held, reached as the person

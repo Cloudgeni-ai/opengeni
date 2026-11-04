@@ -1,6 +1,15 @@
-import { createKnowledgeSourceAttemptTools } from "./knowledge-source-tools";
+import { publishStartupProgress } from "./model-usage";
 import { userSetupCardPoster } from "./user-setup-card";
 import { withAppActionConfirmation } from "./app-action-confirmation";
+import {
+  firstPartyToolsForAttendance,
+  sessionStartedUnattended,
+  sessionUnattendedNow,
+} from "./unattended";
+import {
+  resolveAppActionTargets,
+  savedAppActionApprovalCard,
+} from "@opengeni/db/app-action-targets";
 import {
   resolveInitiatingHuman,
   buildSlackApiRateLimiter,
@@ -20,6 +29,8 @@ import {
   updateSessionTitleWithEvent,
   subscriptionCoreCodexAppsRequestAuth,
   getSessionTitleOperation,
+  listSandboxGroupRepositoryResources,
+  settleSessionRepositoryCleanup,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -32,6 +43,7 @@ import {
   createFirstPartyInteractionRequestTargetReader,
   mcpToolDisplayMetadata,
   sideFeatureRouteRunnable,
+  skillInstructionsBody,
   toolFamilyForCatalogIdentity,
 } from "@opengeni/runtime";
 import { connectionTokenResolverForTurn } from "../mcp-credentials";
@@ -75,6 +87,8 @@ import {
   hasPermission,
   requireExplicitPermissionDelegation,
   createWebSearchBilling,
+  pendingSessionRepositoryCleanup,
+  withoutRemovedRepositories,
 } from "@opengeni/core";
 import { withFirstPartyTools } from "../goals";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
@@ -93,6 +107,7 @@ import {
   bundledSkillSelectionForAgentConfig,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   resolveAgentToolFamilies,
+  type AgentLearningDefaults,
   type ResourceRef,
   type Permission,
   type ToolAuthNeededPayload,
@@ -121,6 +136,11 @@ import {
 } from "./session-title";
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { createListModelsAttemptToolDefinition } from "./list-models";
+import {
+  createPrivacyFactsAttemptToolDefinition,
+  loadPrivacyFactsLive,
+  privacyFactsRouteForTurn,
+} from "./privacy-facts";
 import { createRefreshCredentialsAttemptToolDefinition } from "./refresh-credentials";
 import { codeSearchToolDefinitions, codeSearchWorkspaceFromChannel } from "./code-search";
 import { turnWebSearchPlan, webSearchToolDefinitions } from "./web-search";
@@ -134,7 +154,7 @@ import { guardSkillFilesystem } from "./skill-transfer";
 import { turnCredentialRestriction } from "./credential-restriction";
 import {
   attemptSecretResolver,
-  secretsCapabilityEnabled,
+  taskVaultSecretCaptureEnabled,
   type AttemptVaultAccess,
 } from "./secret-resolver";
 import {
@@ -142,6 +162,13 @@ import {
   attachTaskVaultSecretCapture,
   currentAttemptSecretValues,
 } from "./secret-values";
+
+/**
+ * The largest personal SKILL.md the Skill index reads for showing in full: a
+ * description of up to 1,024 characters plus a body within the index's own
+ * inline bound. Larger Skills are never transferred just to build the index.
+ */
+const PERSONAL_SKILL_MARKDOWN_MAX_BYTES = 8 * 1024;
 
 /** A linked turn's immutable policy must survive array and token boundaries. */
 export function linkedTurnFirstPartyPermissions(
@@ -172,11 +199,6 @@ export type PrepareTurnToolRuntimeDeps = {
   independentSessionTitles?: boolean;
   /** Connected-vault providers and the shared read budget for this attempt. */
   vaultAccess: AttemptVaultAccess;
-  fetchKnowledgeSource?:
-    | ((
-        input: import("../types").RunKnowledgeSourceSyncBatchInput,
-      ) => Promise<import("../types").RunKnowledgeSourceSyncBatchResult>)
-    | undefined;
   input: RunAgentTurnInput;
   catalogSourceSettings: Settings;
   db: ActivityServices["db"];
@@ -204,6 +226,8 @@ export type PrepareTurnToolRuntimeDeps = {
   lazyToolTransport: GovernanceModelOk["lazyToolTransport"];
   /** The workspace allows Opengeni credits; paid web tools are omitted when not. */
   workspaceCreditModelsAllowed: GovernanceModelOk["workspaceCreditModelsAllowed"];
+  /** Hosted paid tools would run on Opengeni's bill; provider web tools replace hosted search. */
+  hostedToolsBillCredits: GovernanceModelOk["hostedToolsBillCredits"];
   turnTools: ReturnType<typeof withFirstPartyTools>;
   connectionScope: { accountId: string; workspaceId: string };
   sandboxArtifactRuntime: ReturnType<typeof sandboxArtifactRuntimeAdmission>;
@@ -226,18 +250,54 @@ export type PrepareTurnToolRuntimeDeps = {
   /** Present when this turn resolves host-managed run credentials. */
   runCredentialRenewals?: RenewalState | undefined;
   runMcpCredentials?: RunMcpCredentials;
+  /** The accepted turn's frozen effective learning modes (instructions rendering only). */
+  learningModes?: AgentLearningDefaults | undefined;
 };
 
 export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
   const { input, db, turn, session, fileAuthoritySubjectId, capabilitySettings, runSettings } =
     deps;
 
-  const turnResources = mergeResourceRefs(session.resources, turn.resources);
+  // A repository a person removed from the chat stays out of every later
+  // turn: a turn queued before the removal never restores it from its own
+  // resource snapshot. The record lasts until a person attaches it again.
+  const turnResources = withoutRemovedRepositories(
+    mergeResourceRefs(session.resources, turn.resources),
+    session,
+  );
   // Repositories remain durable workspace inputs. File attachments do not:
   // only files attached to this exact turn enter the sandbox manifest and
   // eager materialization path. Historical file ids remain in canonical
   // history/session metadata and are recoverable through the Files MCP.
-  const runtimeResources = runtimeResourcesForTurn(session.resources, turn.resources);
+  const runtimeResources = withoutRemovedRepositories(
+    runtimeResourcesForTurn(session.resources, turn.resources),
+    session,
+  );
+  // The folders and credential bindings of newly removed repositories are
+  // removed from the sandbox before the agent runs. Child sessions share
+  // their parent's box by default: the cleanup keeps any folder or binding
+  // another session in the box still uses.
+  const pendingCleanup = pendingSessionRepositoryCleanup(session);
+  const repositoryRemoval =
+    pendingCleanup.length > 0
+      ? {
+          removed: pendingCleanup.map((entry) => entry.resource),
+          retained: await listSandboxGroupRepositoryResources(
+            db,
+            input.workspaceId,
+            session.sandboxGroupId,
+            input.sessionId,
+          ),
+          // Settles exactly these removals; a later removal stays pending.
+          onCleaned: async () =>
+            await settleSessionRepositoryCleanup(
+              db,
+              input.workspaceId,
+              input.sessionId,
+              pendingCleanup.map((entry) => entry.id),
+            ),
+        }
+      : null;
   // Attach the first-party MCP server to EVERY turn, regardless of how/when
   // the session was created (API, scheduled task, or a pre-existing session
   // whose stored tools predate this). The server registration is then
@@ -288,6 +348,7 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
   return {
     turnResources,
     runtimeResources,
+    repositoryRemoval,
     mcpAvailabilityNote,
     turnTools,
     connectionScope,
@@ -319,6 +380,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     resolvedModel,
     lazyToolTransport,
     workspaceCreditModelsAllowed,
+    hostedToolsBillCredits,
     turnTools: canonicalTurnTools,
     sandboxArtifactRuntime,
     activeSandboxBackend,
@@ -471,23 +533,64 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   const toolFamilies = resolveAgentToolFamilies(session.agent, {
     sandboxAttached: (activeSandboxBackend ?? groupBoxBackend) !== "none",
   });
-  const selectedFirstPartyMcpTools = toolFamilies.firstPartyTools(
-    scheduledTurnMcpServerIds(turn) !== null
-      ? allowedFirstPartyMcpToolsForSession(
-          runSettings,
-          scheduledTurnFirstPartyMcpTools(turn) ?? session.firstPartyMcpTools,
-        )
-      : resolveSessionFirstPartyMcpTools(
-          runSettings,
-          session,
-          (await requireWorkspace(db, input.workspaceId)).settings,
+  const bundledSkillIds = bundledSkillSelectionForAgentConfig(
+    session.bundledSkillIds,
+    session.agent,
+  );
+  const videoSkillSelected =
+    bundledSkillIds === undefined || bundledSkillIds.includes("builtin:video-generation");
+  // The tools follow how the chat started, so its tool list never changes
+  // under earlier requests; refusing what would wait follows the current setting.
+  const startedUnattended = sessionStartedUnattended(session);
+  const unattended = sessionUnattendedNow(session);
+  // These are independent metadata reads on separate pool scopes, after the
+  // linked-identity guard. No selection, credential or authority is cached.
+  // Join every scope before proceeding or failing; executable preparation and
+  // the ordered, fenced history writes still happen at their original boundary.
+  const [workspaceResult, skillConfigurationResult, sharedSkillsResult] = await Promise.allSettled([
+    scheduledTurnMcpServerIds(turn) === null
+      ? requireWorkspace(db, input.workspaceId)
+      : Promise.resolve(null),
+    toolFamilies.skills === false || !videoSkillSelected
+      ? Promise.resolve(null)
+      : getWorkspaceVideoGenerationPolicy(db, input.workspaceId),
+    toolFamilies.skills === false
+      ? Promise.resolve([])
+      : listSkillDescriptors(
+          db,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            ...(deps.fileAuthoritySubjectId ? { subjectId: deps.fileAuthoritySubjectId } : {}),
+          },
+          { personalSkillMarkdownMaxBytes: PERSONAL_SKILL_MARKDOWN_MAX_BYTES },
         ),
+  ]);
+  if (workspaceResult.status === "rejected") throw workspaceResult.reason;
+  if (skillConfigurationResult.status === "rejected") throw skillConfigurationResult.reason;
+  if (sharedSkillsResult.status === "rejected") throw sharedSkillsResult.reason;
+  const skillConfiguration = skillConfigurationResult.value;
+  const sharedSkillDescriptors = sharedSkillsResult.value;
+  // A session that started unattended has no tool that waits for a person to act.
+  const selectedFirstPartyMcpTools = firstPartyToolsForAttendance(
+    toolFamilies.firstPartyTools(
+      scheduledTurnMcpServerIds(turn) !== null
+        ? allowedFirstPartyMcpToolsForSession(
+            runSettings,
+            scheduledTurnFirstPartyMcpTools(turn) ?? session.firstPartyMcpTools,
+          )
+        : resolveSessionFirstPartyMcpTools(runSettings, session, workspaceResult.value!.settings),
+    ),
+    startedUnattended,
   );
   // Frozen with the selection and ceiling above; instructions only.
   const promptToolAvailability = promptToolAvailabilityForTurn({
     agentConfig: session.agent,
     selectedFirstPartyMcpTools,
     firstPartyPermissions: effectiveFirstPartyPermissions,
+    nestedAgentDepth: session.nestedAgentDepth,
+    effectiveMaxNestedAgentDepth: session.effectiveMaxNestedAgentDepth,
+    learning: deps.learningModes,
   });
   const needsTitle = shouldRequestMissingSessionTitle({
     agentConfig: session.agent,
@@ -517,8 +620,15 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     {
       preview: async (call) =>
         await previewConnectorActionApproval(db, connectorActionIdentity, call),
-      prepare: async (call) =>
-        await prepareConnectorActionApproval(db, connectorActionIdentity, call),
+      prepare: async (call) => {
+        // Nobody can answer an approval here, so an Ask opens no request for
+        // one: the call is refused (see the runtime) and nothing waits on it.
+        if (unattended) {
+          const preview = await previewConnectorActionApproval(db, connectorActionIdentity, call);
+          if (preview.managed && preview.decision === "ask" && !preview.requestId) return preview;
+        }
+        return await prepareConnectorActionApproval(db, connectorActionIdentity, call);
+      },
       begin: async (call) => await beginConnectorActionExecution(db, connectorActionIdentity, call),
       complete: async ({ requestId, outcome }) =>
         await completeConnectorActionExecution(db, {
@@ -532,41 +642,47 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     {
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
+      settings: runSettings,
       // Live per change, the same check the API makes before running it.
-      authority: async () =>
-        (
-          await resolveSessionAppActionAuthority(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: turn.id,
-          })
-        ).kind,
-    },
-  );
-  // These reads only feed the Skill index. Disabled Skills need neither the
-  // descriptors nor bundled files; agent build still rechecks live video policy.
-  // Enabled reads remain independent and finish before executable preparation.
-  const bundledSkillIds = bundledSkillSelectionForAgentConfig(
-    session.bundledSkillIds,
-    session.agent,
-  );
-  // A policy cannot affect the bundled index when this Skill was explicitly omitted.
-  // Agent build still performs its independent live policy read and validation.
-  const videoSkillSelected =
-    bundledSkillIds === undefined || bundledSkillIds.includes("builtin:video-generation");
-  const [skillConfiguration, sharedSkillDescriptors] = await Promise.all([
-    toolFamilies.skills === false || !videoSkillSelected
-      ? Promise.resolve(null)
-      : getWorkspaceVideoGenerationPolicy(db, input.workspaceId),
-    toolFamilies.skills === false
-      ? Promise.resolve([])
-      : listSkillDescriptors(db, {
+      authority: async () => {
+        const authority = await resolveSessionAppActionAuthority(db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
-          ...(deps.fileAuthoritySubjectId ? { subjectId: deps.fileAuthoritySubjectId } : {}),
+          sessionId: input.sessionId,
+          turnId: turn.id,
+        });
+        return {
+          kind: authority.kind,
+          ...("subjectId" in authority ? { subjectId: authority.subjectId } : {}),
+        };
+      },
+      // Names what a confirmed change touches, read as the person it asks.
+      targets: async (args, reader) =>
+        await resolveAppActionTargets(
+          db,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: reader.subjectId,
+            onLookupError: (error, parameter) =>
+              console.warn("app action target lookup failed", {
+                parameter,
+                error: error instanceof Error ? error.message : String(error),
+              }),
+          },
+          args,
+        ),
+      saved: async (approvalId) =>
+        await savedAppActionApprovalCard(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          approvalId,
         }),
-  ]);
+      cards: eventing.appActionApprovalCards,
+    },
+  );
   const bundledSkills =
     toolFamilies.skills === false
       ? []
@@ -598,11 +714,19 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           ...withoutSessionShadowedSkills(
             sharedSkillDescriptors.filter((entry) => entry.activationMode === "workspace_managed"),
             sessionShadowedSkillNames(selectedSkills),
-          ).map((entry) => ({
-            id: entry.id,
-            name: entry.title,
-            description: entry.description,
-          })),
+          ).map((entry) => {
+            // A short personal Skill (a standing preference) is shown in full,
+            // within the index's inline bounds, so it applies without a read.
+            const instructions = entry.personalSkillMarkdown
+              ? skillInstructionsBody(entry.personalSkillMarkdown)
+              : null;
+            return {
+              id: entry.id,
+              name: entry.title,
+              description: entry.description,
+              ...(instructions ? { instructions } : {}),
+            };
+          }),
           ...selectedSkills.map((entry) => ({
             id: entry.id,
             name: entry.artifact.name,
@@ -674,23 +798,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       });
     },
   });
-  const sourceTools = deps.fetchKnowledgeSource
-    ? await createKnowledgeSourceAttemptTools({
-        db,
-        context: {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          actor: {
-            kind: "agent",
-            sessionId: input.sessionId,
-            turnId: turn.id,
-            attemptId: input.attemptId,
-            executionGeneration: attempt.executionGeneration,
-          },
-        },
-        fetch: deps.fetchKnowledgeSource,
-      })
-    : [];
   const operationRecoveryEnabled = githubRestMcp.settings.mcpServers.some(
     (server) =>
       server.operationRecovery &&
@@ -802,18 +909,26 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     hasSkills: skillCatalog.length > 0,
   });
   // Provider web search: only where the turn has no hosted search (or the
-  // operator chose `replace`), only when a provider is configured, and only
-  // when the session's agent configuration allows web search (filtered below).
+  // operator chose `replace`, or hosted search would run on Opengeni's bill),
+  // only when a provider is configured, and only when the session's agent
+  // configuration allows web search (filtered below).
   const webSearchTools = webSearchToolDefinitions({
     settings: runSettings,
-    tools: turnWebSearchPlan(resolvedModel, runSettings, workspaceCreditModelsAllowed)
-      .providerTools,
+    tools: turnWebSearchPlan(
+      resolvedModel,
+      runSettings,
+      workspaceCreditModelsAllowed,
+      hostedToolsBillCredits,
+    ).providerTools,
     scope: {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
       turnId: turn.id,
       attemptId: input.attemptId,
+      // A turn whose paid hosted tools bill credits pays its web tools from
+      // the plan and grants covering its model first, like its Gateway images.
+      ...(hostedToolsBillCredits ? { creditUsageModelId: turnExecutionPolicy.productModelId } : {}),
     },
     billing: createWebSearchBilling({ db, settings: runSettings }),
     observability,
@@ -852,7 +967,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         ]
       : []),
     ...skillTools,
-    ...sourceTools,
     ...(deps.runCredentialRenewals
       ? [
           createRefreshCredentialsAttemptToolDefinition({
@@ -882,6 +996,37 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           modelNotes: currentCatalog.modelNotes,
         };
       },
+    }),
+    createPrivacyFactsAttemptToolDefinition({
+      route: privacyFactsRouteForTurn({
+        settings: runSettings,
+        policy: turnExecutionPolicy,
+        resolved: resolvedModel,
+      }),
+      deployment: {
+        privacyPolicyUrl: runSettings.legalPrivacyPolicyUrl ?? null,
+        termsOfServiceUrl: runSettings.legalTermsOfServiceUrl ?? null,
+        supportEmail: runSettings.supportEmail ?? null,
+        subprocessorsUrl: runSettings.legalSubprocessorsUrl ?? null,
+        dataHostingLocation: runSettings.dataHostingLocation ?? null,
+        sandboxes: {
+          backend: runSettings.sandboxBackend,
+          regions: runSettings.modalRegions ?? null,
+        },
+        // Archiving needs object storage; without it the worker never archives.
+        sessionArchiveIdleDays:
+          runSettings.sessionArchiveEnabled && deps.objectStorage
+            ? runSettings.sessionArchiveIdleDays
+            : null,
+        preservesProviderItemIds: runSettings.openaiProviderItemIds === "preserve",
+      },
+      loadLive: async () =>
+        await loadPrivacyFactsLive({
+          db,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          deploymentEuOnly: runSettings.requiredModelGeography === "eu",
+        }),
     }),
     ...(titleToolPlan.promoteTitleTool
       ? [
@@ -932,7 +1077,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     durationSeconds: (performance.now() - toolContextPreparationStartedAt) / 1_000,
     count: githubRestMcp.tools.length,
   });
-  await eventing.publish!([
+  await publishStartupProgress(eventing, [
     {
       type: "turn.startup.phase.started",
       payload: { phase: "tools" },
@@ -1036,7 +1181,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     db,
     encryptionKey: maskingKey,
     principal: maskingPrincipal,
-    enabled: secretsCapabilityEnabled(session.agent),
+    enabled: taskVaultSecretCaptureEnabled(session.agent, session.firstPartyMcpPermissions),
     observability,
   });
   try {
@@ -1201,7 +1346,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       durationSeconds: toolPreparationDurationMs / 1_000,
       count: githubRestMcp.tools.length,
     });
-    await eventing.publish!([
+    await publishStartupProgress(eventing, [
       {
         type:
           toolPreparationOutcome === "completed"
@@ -1244,6 +1389,8 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       (name) => mcpToolDisplayMetadata(tools.mcpServers, name),
       (entry) => toolFamilyForCatalogIdentity(entry, runSettings.mcpServers),
       tools.inputWaitYield,
+      // Nobody answers an approval here: a call that needs one is refused.
+      unattended,
     );
     eventing.codemodeDispatcher.start();
   };

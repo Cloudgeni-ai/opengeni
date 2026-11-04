@@ -9,7 +9,7 @@ import { PlusIcon, Trash2Icon, XIcon } from "lucide-react";
 
 import type { EventSource, EventTypeDescriptor } from "@opengeni/sdk";
 
-import { useOpenGeniText } from "../../messages/runtime";
+import { useOpenGeniText, type OpenGeniText } from "../../messages/runtime";
 import { Button } from "../../ui/button";
 import { CheckboxField, Field, TextInput } from "../../ui/field";
 import { ComboboxSelect, SelectMenu, type SelectOption } from "../../ui/select-menu";
@@ -418,6 +418,7 @@ export function EventTriggerEditor({
               state={eventTypes}
               sourceName={source?.name}
               single={source?.kind === "mcp"}
+              grouped={source?.kind === "workspace"}
               invalid={Boolean(issues?.eventTypes)}
               disabled={disabled}
             />
@@ -438,10 +439,14 @@ export function EventTriggerEditor({
             issues={issues?.conditions}
             disabled={disabled}
           />
-          {source?.kind === "github" || source?.kind === "slack" ? (
+          {source?.kind === "github" || source?.kind === "slack" || source?.kind === "workspace" ? (
             <CheckboxField
               label={t("automations.editor.includeOwn")}
-              description={t("automations.editor.includeOwnDescription")}
+              description={
+                source.kind === "workspace"
+                  ? t("automations.editor.includeOwnWorkspaceDescription")
+                  : t("automations.editor.includeOwnDescription")
+              }
               checked={value.includeOwnEvents}
               onCheckedChange={(includeOwnEvents) => onChange({ ...value, includeOwnEvents })}
               disabled={disabled}
@@ -461,12 +466,23 @@ const CUSTOM_PREFIX = "custom:";
 /** One empty list while types load, so the picker's options keep their identity. */
 const NO_EVENT_TYPES: EventTypeDescriptor[] = [];
 
+/** "This workspace" types under Chats, Usage and Meetings, in the catalog's order. */
+function workspaceEventGroup(t: OpenGeniText, type: string): string | undefined {
+  if (type.startsWith("recording.")) return t("automations.picker.groupMeetings");
+  if (type.startsWith("usage.")) return t("automations.picker.groupUsage");
+  if (type.startsWith("turn.") || type.startsWith("session.")) {
+    return t("automations.picker.groupChats");
+  }
+  return undefined;
+}
+
 export function EventTypePicker({
   value,
   onChange,
   state,
   sourceName,
   single = false,
+  grouped = false,
   invalid = false,
   disabled = false,
 }: {
@@ -477,6 +493,8 @@ export function EventTypePicker({
   sourceName?: string | undefined;
   /** Only one type (MCP triggers); picking replaces it. */
   single?: boolean | undefined;
+  /** Headings for "This workspace" types: Chats, Usage and Meetings. */
+  grouped?: boolean | undefined;
   invalid?: boolean | undefined;
   disabled?: boolean | undefined;
 }) {
@@ -504,6 +522,7 @@ export function EventTypePicker({
           label: descriptor.type,
           description: unavailable ?? descriptor.description,
           disabled: !descriptor.available,
+          ...(grouped ? { group: workspaceEventGroup(t, descriptor.type) } : {}),
           ...(descriptor.available
             ? {}
             : { disabledReason: unavailable ?? t("automations.picker.cantReceive") }),
@@ -547,7 +566,7 @@ export function EventTypePicker({
           ]
         : [];
     return [...matches, ...custom];
-  }, [descriptors, query, single, sourceName, t, value]);
+  }, [descriptors, grouped, query, single, sourceName, t, value]);
 
   const add = (picked: string) => {
     const type = picked.startsWith(CUSTOM_PREFIX) ? picked.slice(CUSTOM_PREFIX.length) : picked;

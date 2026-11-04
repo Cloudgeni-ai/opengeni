@@ -719,7 +719,7 @@ describe("SDK / contracts parity", () => {
     ).toBe(false);
   });
 
-  test("established-session submit requires one exact policy snapshot", () => {
+  test("established-session submit carries one whole policy snapshot or none", () => {
     const submit: SubmitComposerDraftRequest = {
       expectedDraftRevision: 4,
       clientEventId: "submit-draft-4",
@@ -735,6 +735,9 @@ describe("SDK / contracts parity", () => {
     expect(ContractSubmitComposerDraftRequest.safeParse(submit).success).toBe(true);
     const { latencyMode: _latencyMode, ...missingLatency } = submit;
     expect(ContractSubmitComposerDraftRequest.safeParse(missingLatency).success).toBe(false);
+    // A draft that follows the chat's settings is submitted without any.
+    const { model: _model, reasoningEffort: _effort, ...following } = missingLatency;
+    expect(ContractSubmitComposerDraftRequest.safeParse(following).success).toBe(true);
   });
 
   test("scheduled task literals and shapes match the contracts", () => {
@@ -764,6 +767,40 @@ describe("SDK / contracts parity", () => {
     expect(ContractScheduledTaskAgentConfigInput.parse(machineConfig).machineTarget).toEqual(
       machineConfig.machineTarget,
     );
+    // Every field the contract accepts or returns is typed in the SDK.
+    const inputFieldsCovered: Exclude<
+      keyof z.input<typeof ContractScheduledTaskAgentConfigInput>,
+      keyof ScheduledTaskAgentConfigInput
+    > extends never
+      ? true
+      : false = true;
+    const taskFieldsCovered: Exclude<
+      keyof z.infer<typeof ContractScheduledTask>,
+      keyof ScheduledTask
+    > extends never
+      ? true
+      : false = true;
+    const chatConfig: ScheduledTaskAgentConfigInput = {
+      prompt: "Review the open findings",
+      mcpServers: [{ id: "product", name: "Product", url: "https://mcp.example.com/mcp" }],
+      memoryScope: "off",
+      agentAccess: "session",
+      skills: [
+        {
+          activationMode: "session_selected",
+          files: [
+            {
+              path: "SKILL.md",
+              content: "---\nname: review\ndescription: Review findings.\n---\nReview them.",
+            },
+          ],
+        },
+      ],
+    };
+    const parsedChatConfig = ContractScheduledTaskAgentConfigInput.parse(chatConfig);
+    expect(parsedChatConfig.mcpServers).toEqual(chatConfig.mcpServers);
+    expect(parsedChatConfig.skills).toEqual(chatConfig.skills);
+    expect(inputFieldsCovered && taskFieldsCovered).toBe(true);
     expect(
       [acceptScheduledTask, acceptScheduledTaskMachineTarget].every(
         (fn) => typeof fn === "function",

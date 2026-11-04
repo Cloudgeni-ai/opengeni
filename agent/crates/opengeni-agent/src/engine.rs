@@ -121,6 +121,8 @@ impl EngineBudgets {
 pub struct OpHandles {
     /// Last assigned frame seq (the pump publishes it on every append).
     pub watermark: Arc<AtomicU64>,
+    /// When the op last started or wrote output (see [`crate::job::OpHeard`]).
+    pub heard: Arc<crate::job::OpHeard>,
     /// The terminal record, set exactly once at completion.
     pub exit: Arc<OnceLock<JobExit>>,
     /// Notification delivery only, independent of retained output custody.
@@ -397,6 +399,25 @@ impl Engine {
         self.admission.lock().expect("admission lock").snapshot()
     }
 
+    /// How many running ops have written no output for longer than `silence`
+    /// (nor started within it). A compute sandbox's activity count leaves
+    /// them out, so a quiet command left running cannot keep the sandbox
+    /// awake forever.
+    #[must_use]
+    pub fn quiet_running(&self, silence: std::time::Duration) -> usize {
+        use opengeni_agent_engine::registry::OpEntry;
+        let now = tokio::time::Instant::now();
+        self.registry
+            .lock()
+            .expect("registry lock")
+            .live()
+            .filter(|(_, entry)| match entry {
+                OpEntry::Running { state, .. } => state.heard.silent_for(now) > silence,
+                OpEntry::Complete { .. } => false,
+            })
+            .count()
+    }
+
     /// Derives the per-frame data size from the connection's negotiated
     /// `max_payload` (rule T: query the external constraint, derive from it).
     #[cfg(test)]
@@ -619,6 +640,7 @@ impl Engine {
                 ..JobConfig::default()
             },
             watermark: handles.watermark.clone(),
+            heard: handles.heard.clone(),
             collection_failure: handles.collection_failure.clone(),
         };
 
@@ -863,6 +885,7 @@ impl Engine {
                 ..JobConfig::default()
             },
             watermark: handles.watermark.clone(),
+            heard: handles.heard.clone(),
             collection_failure: handles.collection_failure.clone(),
         };
         let cleanup = JobCleanup {
@@ -1605,6 +1628,68 @@ mod tests {
         assert!(matches!(refused, Err(RefusalReason::QueueFull)));
         for task in parked {
             task.abort();
+        }
+    }
+
+    // Drives REAL /bin/sh children (unix-only by nature; the #349 CI lesson).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_running_op_is_quiet_once_it_writes_nothing_for_the_silence() {
+        use std::time::Duration;
+
+        let (engine, _dir) = test_engine(AdmissionConfig::default());
+        let silence = Duration::from_millis(300);
+        let mut jobs = Vec::new();
+        for (id, script) in [
+            ("quiet", "printf once; sleep 30"),
+            ("talking", "while :; do printf x; sleep 0.05; done"),
+            ("finished", "exit 0"),
+        ] {
+            let op = OpId::from(id);
+            let ticket = engine
+                .admit(&op, JobClass::Heavy, "o")
+                .await
+                .expect("admit");
+            let (exit_tx, exit_rx) = oneshot::channel();
+            let outcome = engine.start_job(
+                &op,
+                ticket,
+                Vec::new(),
+                None,
+                0,
+                || Ok::<_, std::io::Error>(sh(script)),
+                |_frame| {},
+                |exit| format!("{exit:?}").into_bytes(),
+                move |_, _: &JobExit| {
+                    let _ = exit_tx.send(());
+                },
+            );
+            let StartOutcome::Started(job) = outcome else {
+                panic!("fresh id must start");
+            };
+            jobs.push((job, exit_rx));
+        }
+        assert_eq!(engine.quiet_running(silence), 0, "every op was just heard");
+
+        let (_, finished) = jobs.pop().expect("the finished op");
+        tokio::time::timeout(Duration::from_secs(10), finished)
+            .await
+            .expect("exit in time")
+            .expect("exit delivered");
+        tokio::time::sleep(silence * 2).await;
+        assert_eq!(
+            engine.quiet_running(silence),
+            1,
+            "only the op that stopped writing is quiet; a finished op is not running"
+        );
+        assert_eq!(engine.admission_snapshot().heavy_running, 2);
+        assert_eq!(engine.quiet_running(Duration::from_secs(600)), 0);
+
+        for (job, _) in &jobs {
+            let _ = job.mailbox.send(JobCommand::Cancel).await;
+        }
+        for (_, exit) in jobs {
+            let _ = tokio::time::timeout(Duration::from_secs(10), exit).await;
         }
     }
 

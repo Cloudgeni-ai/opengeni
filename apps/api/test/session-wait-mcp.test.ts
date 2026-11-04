@@ -15,6 +15,7 @@ import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import {
   CommandReadResult,
+  CommandWaitManyResult,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   type AccessGrant,
 } from "@opengeni/contracts";
@@ -835,7 +836,12 @@ describe("session_wait and command_wait MCP tools (real PostgreSQL, in-memory ev
       opId,
       command: "printf done",
     });
-    const runningRead = await callCommandWait({ commandId }, {}, attemptServer, "command_read");
+    const runningRead = await callCommandWait(
+      { commandId, waitSeconds: 0 },
+      {},
+      attemptServer,
+      "command_read",
+    );
     expect(CommandReadResult.safeParse(runningRead).success).toBe(true);
     expect(runningRead).toMatchObject({
       commandId,
@@ -888,6 +894,120 @@ describe("session_wait and command_wait MCP tools (real PostgreSQL, in-memory ev
       completionObservedAt: commandResult.completionObservedAt,
     });
     expect(immediateCommandResult.waitedMs).toBeLessThan(1_000);
+
+    // command_wait over several commands: "any" returns on the first finish,
+    // "all" once every one has finished.
+    const multiIds = [crypto.randomUUID(), crypto.randomUUID()];
+    for (const [index, id] of multiIds.entries()) {
+      await adoptConnectedMachineSessionBackgroundCommand(client.db, {
+        accountId,
+        workspaceId,
+        sessionId: claimSessionId,
+        turnId: turnId,
+        executionGeneration,
+        attemptId,
+        commandId: id,
+        controlWorkspaceId: workspaceId,
+        enrollmentId,
+        connectionInstanceId,
+        opId: `session-wait-multi-op-${index}`,
+        command: `printf multi-${index}`,
+      });
+    }
+    const settleMulti = async (index: number) => {
+      const settlement = await settleConnectedMachineSessionBackgroundCommand(client.db, {
+        accountId,
+        workspaceId,
+        sessionId: claimSessionId,
+        commandId: multiIds[index]!,
+        controlWorkspaceId: workspaceId,
+        enrollmentId,
+        connectionInstanceId,
+        opId: `session-wait-multi-op-${index}`,
+        outcome: "exited",
+        exitCode: index,
+        reason: "op_completed",
+      });
+      await attemptBus.publish(workspaceId, claimSessionId, settlement!.events);
+    };
+    const anyPending = callCommandWait(
+      { commandIds: multiIds, waitFor: "any", waitSeconds: 20 },
+      {},
+      attemptServer,
+    );
+    await Bun.sleep(300);
+    await settleMulti(1);
+    const anyResult = (await anyPending) as unknown as CommandWaitManyResult;
+    expect(CommandWaitManyResult.safeParse(anyResult).success).toBe(true);
+    expect(anyResult.waitFor).toBe("any");
+    expect(anyResult.timedOut).toBe(false);
+    expect(anyResult.commands.map((command) => [command.commandId, command.terminal])).toEqual([
+      [multiIds[0], false],
+      [multiIds[1], true],
+    ]);
+    const allPending = callCommandWait(
+      { commandIds: multiIds, waitSeconds: 20 },
+      {},
+      attemptServer,
+    );
+    await Bun.sleep(300);
+    await settleMulti(0);
+    const allResult = (await allPending) as unknown as CommandWaitManyResult;
+    expect(allResult.waitFor).toBe("all");
+    expect(allResult.commands.map((command) => command.exitCode)).toEqual([0, 1]);
+    expect(allResult.commands.every((command) => command.completionObservedAt !== null)).toBe(true);
+    await expect(
+      callCommandWait(
+        { commandIds: multiIds, cursors: [`${crypto.randomUUID()}:0:0`], waitSeconds: 0 },
+        {},
+        attemptServer,
+      ),
+    ).rejects.toThrow("cursor");
+    // Each cursor reaches its own command, and cursors alone select the
+    // several-command path even with a single commandId.
+    const ownCursor = `${multiIds[1]}:999999:0`;
+    const withCursor = (await callCommandWait(
+      { commandIds: multiIds, cursors: [ownCursor], waitSeconds: 0 },
+      {},
+      attemptServer,
+    )) as unknown as CommandWaitManyResult;
+    expect(withCursor.commands[1]!.nextCursor).toBe(ownCursor);
+    expect(withCursor.commands[0]!.nextCursor).not.toBe(ownCursor);
+    const single = (await callCommandWait(
+      { commandId: multiIds[1], cursors: [ownCursor], waitSeconds: 0 },
+      {},
+      attemptServer,
+    )) as unknown as CommandWaitManyResult;
+    expect(single.commands.map((command) => command.nextCursor)).toEqual([ownCursor]);
+    // A malformed cursor fails before the default wait on a running command.
+    const runningId = crypto.randomUUID();
+    await adoptConnectedMachineSessionBackgroundCommand(client.db, {
+      accountId,
+      workspaceId,
+      sessionId: claimSessionId,
+      turnId: turnId,
+      executionGeneration,
+      attemptId,
+      commandId: runningId,
+      controlWorkspaceId: workspaceId,
+      enrollmentId,
+      connectionInstanceId,
+      opId: "session-wait-malformed-cursor-op",
+      command: "sleep 600",
+    });
+    const malformedStarted = Date.now();
+    await expect(
+      callCommandWait(
+        { commandId: runningId, cursor: `${runningId}:x` },
+        {},
+        attemptServer,
+        "command_read",
+      ),
+    ).rejects.toThrow();
+    await expect(
+      callCommandWait({ commandIds: [runningId], cursors: [`${runningId}:x`] }, {}, attemptServer),
+    ).rejects.toThrow();
+    expect(Date.now() - malformedStarted).toBeLessThan(2_000);
 
     let authorizationCalls = 0;
     const revokingDeps = fakeDeps(attemptBus);

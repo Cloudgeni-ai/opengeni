@@ -21,6 +21,7 @@ export async function loadRailFooterMenuHarness() {
 
   mock.module("@tanstack/react-router", () => ({
     Link: ({ children }: { children: ReactNode }) => <a href="#settings">{children}</a>,
+    useNavigate: () => () => undefined,
   }));
 
   mock.module("@opengeni/react/app/components/rail/rail-context", () => ({

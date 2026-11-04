@@ -17,10 +17,25 @@ import {
   type ResponseStreamEvent,
 } from "@openai/agents";
 import { claudeNativeModelProfile, type ResolvedModelProvider } from "@opengeni/config";
+import {
+  hasClaudeCiteTag,
+  rewriteClaudeCiteTags,
+  type ClaudeCiteSource,
+} from "@opengeni/contracts/claude-cite-tags";
 import { withClaudeModelRequest } from "./claude-subscription-usage";
 import { createModelImageSizer } from "./model-image-sizing";
 import { isModelPreempted, preemptedResponseDone } from "./model-preemption";
 import { projectHistoryForProvider } from "./provider-history-adapter";
+import {
+  guardRequestToolNames,
+  RejectedToolNames,
+  observeToolNames,
+  rejectsToolName,
+  restoreClaudeToolNames,
+  type ToolNameAliases,
+  type ToolNameObservers,
+} from "./provider-request-tool-names";
+import { parseInvalidRequestText } from "./provider-invalid-request";
 import { projectHostedSearchEvidence } from "./hosted-search-evidence";
 import { splitStableSystemPromptPrefix } from "./system-prompt-cache-prefix";
 import {
@@ -50,27 +65,41 @@ export class AnthropicProtocolError extends Error {
   readonly code = "anthropic_protocol_error";
 }
 
-/** Beta header that admits `thinking.display: "updates"`. */
-export const ANTHROPIC_THINKING_DISPLAY_UPDATES_BETA = "thinking-display-updates-2026-08-18";
-
 /**
- * Whether this model writes progress updates between tool calls as their own
- * `thinking` blocks (Claude Opus 5.5, Sonnet 5.5).
+ * Whether this model may write progress updates between tool calls as their
+ * own `thinking` blocks (Claude Opus 5.5, Sonnet 5.5).
  *
- * Such a model is asked for `display: "updates"`: reasoning blocks then come
- * back empty and only progress updates carry text. That text is Anthropic's
- * summary of the update, not the words the model wrote (those stay inside the
- * signed block), and it can claim things the model never said. It is therefore
- * reasoning: shown as a thought, never as the agent's message or reply, and it
- * never counts as a visible reply. Its signed block is replayed unchanged in
- * place like any other thinking block.
+ * Every Claude request asks for `display: "summarized"`, so each thinking
+ * block, reasoning or progress update alike, comes back as Anthropic's
+ * readable summary and is shown as a thought. That text is not the words the
+ * model wrote (those stay inside the signed block) and it can claim things the
+ * model never said. It is therefore reasoning: never the agent's message or
+ * reply, and it never counts as a visible reply. A progress update is told
+ * apart from reasoning by its signature (`anthropicThinkingIsProgressUpdate`)
+ * and marked, so the wait_for_input guard asks for the verbatim `reply`
+ * argument. Its signed block is replayed unchanged in place like any other
+ * thinking block.
  */
 export function anthropicWritesProgressUpdates(model: string): boolean {
   return claudeNativeModelProfile(model)?.progressUpdates === true;
 }
 
-function anthropicThinkingDisplay(model: string): "updates" | "summarized" {
-  return anthropicWritesProgressUpdates(model) ? "updates" : "summarized";
+const PROGRESS_UPDATE_SIGNATURE_MARKER = "narration";
+
+/**
+ * Whether a thinking block is a progress update (a note the model wrote for
+ * the person) rather than reasoning. Anthropic documents no field for this
+ * under `display: "summarized"`, but a progress update's signature carries
+ * the marker "narration" and a reasoning block's never does; Claude Code
+ * relies on the same marker. Checked against every thinking block of a
+ * long-running production chat: all 176 blocks that `display: "updates"`
+ * returned with text (the progress updates) carry it, and none of the 3,460
+ * empty (reasoning) blocks do. A signature that cannot be read counts as
+ * reasoning.
+ */
+export function anthropicThinkingIsProgressUpdate(signature: string): boolean {
+  if (!signature) return false;
+  return Buffer.from(signature, "base64").includes(PROGRESS_UPDATE_SIGNATURE_MARKER);
 }
 
 /**
@@ -302,30 +331,39 @@ function contentBlocks(
 ): Json[] {
   if (typeof value === "string") return value ? [{ type: "text", text: value }] : [];
   const blocks = Array.isArray(value) ? value : [value];
-  return blocks.map((entry) => {
+  return blocks.flatMap((entry): Json[] => {
     const block = object(entry);
     // History recorded while progress updates became assistant messages keeps
     // Claude's own signed thinking block on the message. It goes back exactly
     // as received, never as the summary text it was shown as.
     const signed = options.assistant ? block.providerData?.anthropic?.block : undefined;
-    if (signed?.type === "thinking") return structuredClone(object(signed));
+    if (signed?.type === "thinking") return [structuredClone(object(signed))];
     if (["text", "input_text", "output_text", "refusal"].includes(block.type)) {
+      const blockText = text(block.text ?? block.refusal, "text");
+      // Claude rejects an empty text block. Other providers can record one (a
+      // reply with no words), and it says nothing, so it is left out. A request
+      // that held one was always refused, so no cached prefix changes.
+      if (!blockText) return [];
       // Claude's own cited text is replayed with its citations exactly while
       // the cited searches are still native in this request.
       const citations = block.providerData?.anthropic?.citations;
-      return {
-        type: "text",
-        text: text(block.text ?? block.refusal, "text"),
-        ...(options.citations && Array.isArray(citations) && citations.length
-          ? { citations: structuredClone(citations) }
-          : {}),
-      };
+      return [
+        {
+          type: "text",
+          text: blockText,
+          ...(options.citations && Array.isArray(citations) && citations.length
+            ? { citations: structuredClone(citations) }
+            : {}),
+        },
+      ];
     }
     if (["image", "input_image"].includes(block.type)) {
-      return {
-        type: "image",
-        source: imageSource(block.image ?? block.imageUrl ?? block.image_url),
-      };
+      return [
+        {
+          type: "image",
+          source: imageSource(block.image ?? block.imageUrl ?? block.image_url),
+        },
+      ];
     }
     throw new AnthropicProtocolError(`Unsupported Claude content block: ${block.type}`);
   });
@@ -351,11 +389,45 @@ export function anthropicMessages(
 ): Message[] {
   const messages: Message[] = [];
   let foreignSearch = false;
-  const append = (role: Message["role"], content: Json[]) => {
-    if (!content.length) return;
+  // A runtime-form search record waits for the next user message: inside a
+  // reply it would split it (thinking from its tool call), and it is never
+  // Claude's speech. An assistant-form record keeps its original place.
+  let pendingRecords: Json[] = [];
+  // Tool calls of the history so far that have no result yet.
+  const openCalls = new Set<string>();
+  // A system message inside an unfinished tool step (another provider can put
+  // one there, for example a search notice after a search that ran in the
+  // middle of a step). Claude accepts it there only when the step's results
+  // come next, so it keeps its place then; when more of the reply follows, it
+  // moves to just after the step's results. Either way it depends only on the
+  // items themselves, so every later request reproduces the same prefix.
+  let heldSystem: Json[] = [];
+  let heldPastReply = false;
+  const emit = (role: Message["role"], content: Json[]) => {
     const previous = messages.at(-1);
     if (previous?.role === role) previous.content.push(...content);
     else messages.push({ role, content });
+  };
+  const releaseHeldSystem = () => {
+    if (heldSystem.length) emit("system", heldSystem);
+    heldSystem = [];
+    heldPastReply = false;
+  };
+  const append = (role: Message["role"], content: Json[]) => {
+    if (role === "user" && pendingRecords.length) {
+      content = [...pendingRecords, ...content];
+      pendingRecords = [];
+    }
+    if (!content.length) return;
+    if (role === "system" && openCalls.size) {
+      heldSystem.push(...content);
+      return;
+    }
+    if (heldSystem.length) {
+      if (role === "assistant") heldPastReply = true;
+      else if (!heldPastReply) releaseHeldSystem();
+    }
+    emit(role, content);
   };
   const items = typeof input === "string" ? [{ role: "user", content: input }] : input;
   for (const raw of items) {
@@ -377,25 +449,30 @@ export function anthropicMessages(
       case "function_call": {
         const args =
           typeof item.arguments === "string" ? JSON.parse(item.arguments) : item.arguments;
+        const id = anthropicToolUseId(text(item.callId ?? item.call_id, "tool ID"));
         append("assistant", [
           {
             type: "tool_use",
-            id: anthropicToolUseId(text(item.callId ?? item.call_id, "tool ID")),
+            id,
             name: anthropicToolName(text(item.name, "tool name"), item.namespace),
             input: object(args),
           },
         ]);
+        openCalls.add(id);
         break;
       }
       case "function_call_result": {
+        const id = anthropicToolUseId(text(item.callId ?? item.call_id, "tool result ID"));
         append("user", [
           {
             type: "tool_result",
-            tool_use_id: anthropicToolUseId(text(item.callId ?? item.call_id, "tool result ID")),
+            tool_use_id: id,
             content: contentBlocks(item.output),
             ...(item.providerData?.anthropic?.is_error ? { is_error: true } : {}),
           },
         ]);
+        openCalls.delete(id);
+        if (!openCalls.size && heldPastReply) releaseHeldSystem();
         break;
       }
       case "reasoning": {
@@ -415,7 +492,9 @@ export function anthropicMessages(
           if (options.webSearch && sameAccount) append("assistant", anthropicWebSearchBlocks(item));
           else {
             if (!sameAccount) foreignSearch = true;
-            append("assistant", contentBlocks(object(projectHostedSearchEvidence(item)).content));
+            const projected = object(projectHostedSearchEvidence(item));
+            if (projected.role === "user") pendingRecords.push(...contentBlocks(projected.content));
+            else append("assistant", contentBlocks(projected.content));
           }
           break;
         }
@@ -436,6 +515,12 @@ export function anthropicMessages(
         ]);
     }
   }
+  releaseHeldSystem();
+  // A request that ends in Claude's own reply continues it (a paused search).
+  // A record placed after that reply would end it, and would move once the
+  // reply grows, so records still waiting then reach Claude with the next
+  // user message, in a later request.
+  if (messages.at(-1)?.role !== "assistant") append("user", []);
   withoutUncontinuableSearches(messages);
   // Validate adjacency and pairing before network I/O. Reorder only results within their user message.
   let pending = new Set<string>();
@@ -616,7 +701,8 @@ export function buildAnthropicRequest(
     provider.kind === "anthropic-workspace" ||
     provider.kind === "anthropic-organization" ||
     provider.kind === "claude-subscription-workspace" ||
-    provider.kind === "claude-subscription-organization";
+    provider.kind === "claude-subscription-organization" ||
+    provider.kind === "claude-subscription";
   const outputLimit = profile?.maxOutputTokens ?? (managed ? 32_000 : undefined);
   const names = toolNames(request);
   const forcedName = (name: string): string => {
@@ -744,7 +830,7 @@ export function buildAnthropicRequest(
       throw new AnthropicProtocolError(
         "The selected Claude model does not support this reasoning effort",
       );
-    body.thinking = { type: "adaptive", display: anthropicThinkingDisplay(model) };
+    body.thinking = { type: "adaptive", display: "summarized" };
     body.output_config = {
       effort,
     };
@@ -839,6 +925,59 @@ function requestUsage(raw: Json): Usage {
   });
 }
 
+/**
+ * Claude's web-search results in the order it numbers them for citations:
+ * each `web_search_result` of each result block, counted from 1.
+ */
+export function anthropicSearchResultSources(blocks: Iterable<unknown>): ClaudeCiteSource[] {
+  const sources: ClaudeCiteSource[] = [];
+  for (const block of blocks) {
+    const result = block as Json | null;
+    if (result?.type !== "web_search_tool_result" || !Array.isArray(result.content)) continue;
+    for (const entry of result.content as Json[])
+      if (entry?.type === "web_search_result")
+        sources.push({
+          url: typeof entry.url === "string" ? entry.url : "",
+          title: typeof entry.title === "string" ? entry.title : null,
+        });
+  }
+  return sources;
+}
+
+/** The search results a built request sends, in order. */
+function requestSearchResultSources(body: Json): ClaudeCiteSource[] {
+  const messages = Array.isArray(body.messages) ? (body.messages as Json[]) : [];
+  return messages.flatMap((message) =>
+    Array.isArray(message.content) ? anthropicSearchResultSources(message.content) : [],
+  );
+}
+
+/**
+ * With native web search, Anthropic tells Claude to mark quotes with citation
+ * tags (a `cite` tag whose `index="N-M"` names search result N, sentence M),
+ * and turns them into structured citations only in ordinary answer text. A
+ * `wait_for_input` or `goal_complete` call's `reply` is shown verbatim as the
+ * turn's answer, so its tags would reach the person as raw markup. They become
+ * the quoted text, linked to the search result the index names among the
+ * results this request and response hold, or plain text when it names none.
+ * Only that reply is changed: other tool arguments, such as file edits, keep
+ * their exact text.
+ */
+function withLinkedReplyCitations(
+  toolName: string,
+  input: Json,
+  searchResults: () => readonly ClaudeCiteSource[],
+): Json {
+  if (!/(?:^|__)(?:wait_for_input|goal_complete)$/u.test(toolName)) return input;
+  const reply = input.reply;
+  if (typeof reply !== "string" || !hasClaudeCiteTag(reply)) return input;
+  const sources = searchResults();
+  return {
+    ...input,
+    reply: rewriteClaudeCiteTags(reply, (result) => sources[result - 1] ?? null),
+  };
+}
+
 export function anthropicResponse(
   message: Json,
   requestId?: string,
@@ -846,7 +985,11 @@ export function anthropicResponse(
   searchQueries: ReadonlyMap<string, string> = new Map(),
   requestUsages: Json[] = [],
   accountScope: string | null = null,
-  options: { progressUpdates?: boolean } = {},
+  options: {
+    progressUpdates?: boolean;
+    /** The search results the request sent, in order, read only when needed. */
+    requestSearchResults?: () => readonly ClaudeCiteSource[];
+  } = {},
 ): ModelResponse {
   // A refused response can be HTTP 200 with no content blocks. It must not
   // become an empty successful response or admit a tool call from partial output.
@@ -932,7 +1075,16 @@ export function anthropicResponse(
           ...(names.get(block.name)?.namespace
             ? { namespace: names.get(block.name)!.namespace }
             : {}),
-          arguments: JSON.stringify(object(block.input)),
+          arguments: JSON.stringify(
+            withLinkedReplyCitations(
+              names.get(block.name)?.name ?? block.name,
+              object(block.input),
+              () => [
+                ...(options.requestSearchResults?.() ?? []),
+                ...anthropicSearchResultSources(content.slice(0, index)),
+              ],
+            ),
+          ),
           status: "completed",
         });
         break;
@@ -942,13 +1094,13 @@ export function anthropicResponse(
           text(block.thinking, "thinking text");
           text(block.signature, "thinking signature");
         } else text(block.data, "redacted thinking data");
-        // Readable thinking text is always Anthropic's summary (of reasoning,
-        // or of a progress update under display "updates"), never words the
-        // model wrote for the person. It stays reasoning so it is never shown
-        // or recorded as the agent's message (anthropicWritesProgressUpdates).
-        // Under "updates" only a progress update carries text: it is marked so
-        // the wait_for_input guard knows a note for the person was not shown
-        // as written and asks for the verbatim `reply` argument instead.
+        // Readable thinking text is always Anthropic's summary (of reasoning
+        // or of a progress update), never words the model wrote for the
+        // person. It stays reasoning so it is never shown or recorded as the
+        // agent's message (anthropicWritesProgressUpdates). A progress update
+        // (anthropicThinkingIsProgressUpdate) is marked, because it holds a
+        // note for the person that was not shown as written: the
+        // wait_for_input guard then asks for the verbatim `reply` argument.
         output.push({
           type: "reasoning",
           id,
@@ -956,7 +1108,10 @@ export function anthropicResponse(
           providerData: {
             anthropic: {
               block: structuredClone(block),
-              ...(options.progressUpdates && block.type === "thinking" && block.thinking
+              ...(options.progressUpdates &&
+              block.type === "thinking" &&
+              block.thinking &&
+              anthropicThinkingIsProgressUpdate(String(block.signature ?? ""))
                 ? { progressUpdate: true }
                 : {}),
             },
@@ -1000,11 +1155,22 @@ export class AnthropicMessagesModel implements Model {
   // The same bound applies from the first image onward. A growing conversation
   // must not resize its old prefix when it crosses the many-image threshold.
   private readonly sizeImage = createModelImageSizer(2000, ANTHROPIC_IMAGE_MAX_ENCODED_BYTES);
+  /** The tool-name aliases each response answers (see provider-request-tool-names.ts). */
+  private readonly toolNameAliases = new WeakMap<Response, ToolNameAliases>();
+  /** Names this model's route rejected (see RejectedToolNames). */
+  private readonly rejectedToolNames = new RejectedToolNames();
   constructor(
     readonly provider: ResolvedModelProvider,
     readonly model: string,
     private readonly fetch: typeof globalThis.fetch = globalThis.fetch,
+    private readonly toolNameObservers: ToolNameObservers = {},
   ) {}
+
+  /** A Claude message or stream event with aliased tool names mapped back. */
+  private restoredToolNames<T>(response: Response, payload: T): T {
+    const aliases = this.toolNameAliases.get(response);
+    return aliases ? restoreClaudeToolNames(payload, aliases) : payload;
+  }
 
   /** Project inline images only; never fetch arbitrary URLs or edit stored history. */
   private async sizeImageBlocks(
@@ -1051,7 +1217,18 @@ export class AnthropicMessagesModel implements Model {
     return result;
   }
 
-  private async prepare(request: ModelRequest, stream: boolean) {
+  /**
+   * The search results a request sends, in order, as Claude numbers them for
+   * citations. A paused turn's continuation adds its earlier content after
+   * these, and the response numbers those blocks itself.
+   */
+  private requestSearchResults(request: ModelRequest): ClaudeCiteSource[] {
+    return requestSearchResultSources(
+      buildAnthropicRequest(request, this.model, this.provider, false),
+    );
+  }
+
+  private async prepare(request: ModelRequest, stream: boolean, strictToolNames = false) {
     request.signal?.throwIfAborted();
     const body = buildAnthropicRequest(request, this.model, this.provider, stream);
     const projection = { resized: false };
@@ -1085,7 +1262,7 @@ export class AnthropicMessagesModel implements Model {
     if (claudeNativeModelProfile(this.model)?.prefixBoundThinking && resetsPrefix) {
       body.thinking = {
         type: "adaptive",
-        display: anthropicThinkingDisplay(this.model),
+        display: "summarized",
         ...body.thinking,
         block_binding: { prefix_mismatch_behavior: "drop_block" },
       };
@@ -1093,11 +1270,6 @@ export class AnthropicMessagesModel implements Model {
       delete body.top_p;
       const betas = new Set((headers.get("anthropic-beta") ?? "").split(",").filter(Boolean));
       betas.add("thinking-binding-controls-2026-08-01");
-      headers.set("anthropic-beta", [...betas].join(","));
-    }
-    if (body.thinking?.display === "updates") {
-      const betas = new Set((headers.get("anthropic-beta") ?? "").split(",").filter(Boolean));
-      betas.add(ANTHROPIC_THINKING_DISPLAY_UPDATES_BETA);
       headers.set("anthropic-beta", [...betas].join(","));
     }
     if ((claudeNativeModelProfile(this.model)?.contextWindowTokens ?? 0) > 200_000) {
@@ -1141,8 +1313,20 @@ export class AnthropicMessagesModel implements Model {
         previousRequestId: this.previousRequestId,
       });
     }
-    const serialized = JSON.stringify(body);
-    return { url, headers, serialized, size: anthropicRequestSize(body, serialized) };
+    // The outbound tool-name guard runs last, on the body as it is sent.
+    const guarded = guardRequestToolNames("anthropic-messages", body, {
+      strict: strictToolNames,
+      rejected: this.rejectedToolNames.forModel(body.model),
+    });
+    const serialized = JSON.stringify(guarded.body);
+    return {
+      url,
+      headers,
+      serialized,
+      size: anthropicRequestSize(guarded.body, serialized),
+      toolNames: guarded,
+      unguardedBody: body,
+    };
   }
 
   /** Uses the same final serialization as dispatch, but performs no network I/O. */
@@ -1150,8 +1334,32 @@ export class AnthropicMessagesModel implements Model {
     return (await this.prepare(request, stream)).size;
   }
 
-  private async send(request: ModelRequest, stream: boolean): Promise<Response> {
-    const { url, headers, serialized, size } = await this.prepare(request, stream);
+  /**
+   * Send one request. A 400 that rejects a tool name is answered by sending
+   * the request once more with every tool name aliased (strict mode); that
+   * resend is never repeated, and its own answer is final.
+   */
+  private async send(
+    request: ModelRequest,
+    stream: boolean,
+    strictToolNames = false,
+  ): Promise<Response> {
+    const {
+      url,
+      headers,
+      serialized,
+      size,
+      toolNames: guardedToolNames,
+      unguardedBody,
+    } = await this.prepare(request, stream, strictToolNames);
+    if (!strictToolNames) {
+      for (const field of guardedToolNames.repaired) {
+        observeToolNames(this.toolNameObservers.onToolNameRepair, {
+          api: "anthropic-messages",
+          field,
+        });
+      }
+    }
     if (size.requestBytes > ANTHROPIC_REQUEST_MAX_BYTES)
       throw new AnthropicRequestSizeError(size, "preflight");
     request.signal?.throwIfAborted();
@@ -1177,6 +1385,36 @@ export class AnthropicMessagesModel implements Model {
         Math.min(this.provider.anthropic?.streamIdleTimeoutMs ?? 600000, 5000),
         request.signal,
       );
+      if (
+        !strictToolNames &&
+        response.status === 400 &&
+        rejectsToolName(parseInvalidRequestText(detail)) &&
+        // Without a tool name to alias, a resend would repeat the same request.
+        guardRequestToolNames("anthropic-messages", unguardedBody, { strict: true }).body !==
+          unguardedBody
+      ) {
+        let resent: Response;
+        try {
+          resent = await this.send(request, stream, true);
+        } catch (error) {
+          observeToolNames(this.toolNameObservers.onToolNameRetry, {
+            api: "anthropic-messages",
+            outcome: "failed",
+          });
+          throw error;
+        }
+        observeToolNames(this.toolNameObservers.onToolNameRetry, {
+          api: "anthropic-messages",
+          outcome: "completed",
+        });
+        this.rejectedToolNames.rememberRejection(
+          "anthropic-messages",
+          guardedToolNames.body,
+          guardedToolNames.aliases,
+          parseInvalidRequestText(detail),
+        );
+        return resent;
+      }
       const contextExceeded =
         response.status === 400 &&
         /prompt is too long|context_length_exceeded|exceeds.*context window/i.test(detail);
@@ -1224,6 +1462,8 @@ export class AnthropicMessagesModel implements Model {
       );
     }
     this.previousRequestId = response.headers.get("request-id") ?? undefined;
+    if (guardedToolNames.aliases.size > 0)
+      this.toolNameAliases.set(response, guardedToolNames.aliases);
     return response;
   }
 
@@ -1239,7 +1479,7 @@ export class AnthropicMessagesModel implements Model {
         : request;
       const response = await this.send(current, false);
       requestId = response.headers.get("request-id") ?? undefined;
-      const message = object(await response.json());
+      const message = object(this.restoredToolNames(response, await response.json()));
       if (message.stop_reason === "refusal")
         throw new AnthropicProviderRejection("content_policy_violation", 200, requestId);
       merged = mergePausedMessage(merged, message);
@@ -1253,7 +1493,10 @@ export class AnthropicMessagesModel implements Model {
       searchQueries,
       merged!.requestUsages,
       accountScope,
-      { progressUpdates: anthropicWritesProgressUpdates(this.model) },
+      {
+        progressUpdates: anthropicWritesProgressUpdates(this.model),
+        requestSearchResults: () => this.requestSearchResults(request),
+      },
     );
   }
 
@@ -1321,7 +1564,10 @@ export class AnthropicMessagesModel implements Model {
       searchQueries,
       merged!.requestUsages,
       accountScope,
-      { progressUpdates: anthropicWritesProgressUpdates(this.model) },
+      {
+        progressUpdates: anthropicWritesProgressUpdates(this.model),
+        requestSearchResults: () => this.requestSearchResults(request),
+      },
     );
     yield protocol.StreamEventResponseCompleted.parse({
       type: "response_done",
@@ -1350,11 +1596,12 @@ export class AnthropicMessagesModel implements Model {
     partial.blocks = blocks;
     let message: Json | undefined;
     let finalDelta = false;
-    for await (const event of anthropicSse(
+    for await (const streamed of anthropicSse(
       response.body,
       this.provider.anthropic?.streamIdleTimeoutMs ?? 600000,
       request.signal,
     )) {
+      const event = this.restoredToolNames(response, streamed);
       request.signal?.throwIfAborted();
       if (event.type === "error") {
         const kind = event.error?.type;

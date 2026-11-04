@@ -1,5 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import {
+  excelAddin,
   getNativeAppManagedSession,
   NATIVE_APP_CREDENTIAL_PREFIX,
   type ApiRouteDeps,
@@ -18,6 +19,7 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { runManagedAuthProvider } from "../auth/managed-auth-attempt-context";
 import { managedAuthSessionCookieHeaders } from "../auth/managed-auth-session-adapter";
+import { managedAuthRefusal } from "../auth/managed-passkeys";
 import { admitManagedSignInMutation } from "./managed-sign-in-methods";
 import { parseRequestBody } from "../http/request-body";
 
@@ -81,6 +83,8 @@ const PushDeviceBody = z.object({
   environment: z.enum(["development", "production"]),
   token: z.string().min(8).max(4096),
   rules: z.array(z.enum(NATIVE_PUSH_RULES)).max(NATIVE_PUSH_RULES.length),
+  /** iOS PushKit token; agent calls ring it. Without one, iOS keeps no call rules. */
+  voipToken: z.string().min(8).max(4096).nullish(),
 });
 
 const StoredGrant = z.object({
@@ -108,6 +112,30 @@ export function nativeAppRedirectAllowed(
     schemes.some((scheme) => redirectUri === `${scheme}://auth/callback`) ||
     webOrigins.some((origin) => redirectUri === `${origin}${OFFICE_ADDIN_CALLBACK_PATH}`)
   );
+}
+
+/**
+ * Why a native callback was refused, in words the person can act on. An Office
+ * add-in callback on another web address means the add-in was installed from an
+ * address this deployment doesn't sign in from (an older or internal one): the
+ * pane still loads there, so only reinstalling from the current page helps.
+ */
+export function unregisteredNativeRedirectMessage(
+  redirectUri: string,
+  addin: { name: string; installUrl: string | null },
+): string {
+  let officeCallback = false;
+  try {
+    const url = new URL(redirectUri);
+    officeCallback =
+      (url.protocol === "https:" || url.protocol === "http:") &&
+      url.pathname === OFFICE_ADDIN_CALLBACK_PATH;
+  } catch {
+    officeCallback = false;
+  }
+  if (!officeCallback) return "Unregistered native app redirect";
+  const from = addin.installUrl ? ` from ${addin.installUrl}` : "";
+  return `This copy of the ${addin.name} add-in is out of date: it was installed from an address that no longer signs in. Remove it from Excel, add the current one${from}, then sign in again.`;
 }
 
 function deploymentWebOrigins(settings: ApiRouteDeps["settings"]): string[] {
@@ -175,7 +203,9 @@ export function registerNativeAppAuthRoutes(app: Hono, deps: ApiRouteDeps): void
         deploymentWebOrigins(deps.settings),
       )
     ) {
-      throw new HTTPException(400, { message: "Unregistered native app redirect" });
+      throw new HTTPException(400, {
+        message: unregisteredNativeRedirectMessage(body.redirectUri, excelAddin(deps.settings)),
+      });
     }
     // The device session is bound to the same sign-in method as the approving
     // browser session, so the canonical identity checks treat them alike.
@@ -236,11 +266,16 @@ export function registerNativeAppAuthRoutes(app: Hono, deps: ApiRouteDeps): void
     ) {
       return context.json({ error: "invalid_grant" }, 400);
     }
+    // A refusal from the session hook (the address was taken off the allowed
+    // list after the web sign-in) is a denial, not a server failure.
     const session = await runManagedAuthProvider(grant.providerId, () =>
       authContext.internalAdapter.createSession(grant.userId, false, {
         userAgent: nativeAppSessionUserAgent(grant.platform, grant.deviceName),
       }),
-    );
+    ).catch((error: unknown) => {
+      if (managedAuthRefusal(error)) return null;
+      throw error;
+    });
     if (!session?.token || new Date(session.expiresAt).getTime() <= Date.now()) {
       return context.json({ error: "access_denied" }, 403);
     }

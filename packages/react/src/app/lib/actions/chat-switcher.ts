@@ -9,8 +9,13 @@
  * the app knows, most recently active first, so holding Tab keeps going back
  * in time. The list is read when the switcher opens and only ever grows at
  * the end (as more chats load), so it holds still while the person cycles.
+ *
+ * Every chat the person opened is there, sub-agent chats included: someone
+ * who works in a sub-agent's chat expects Control+Tab to take them back to
+ * it. The carry-on part lists only their own chats (and sub-agent chats they
+ * pinned), since a workspace can hold far more sub-agent chats than chats.
  */
-import type { ChatDirectorySnapshot, ChatRecord } from "./chat-directory";
+import { listsAsTopLevel, type ChatDirectorySnapshot, type ChatRecord } from "./chat-directory";
 
 /** At most this many chats; older ones are a search away in ⌘K. */
 export const SWITCHER_LIMIT = 100;
@@ -33,13 +38,11 @@ type SwitcherDirectory = Pick<ChatDirectorySnapshot, "recent" | "rows">;
 function switchable(
   record: ChatRecord | undefined,
   reachable: (workspaceId: string) => boolean,
-): boolean {
-  if (!record || record.archived || !reachable(record.workspaceId)) return false;
-  // Subagent chats live under their parent, as in the sidebar.
-  return !record.row || record.row.parentSessionId === null;
+): record is ChatRecord {
+  return Boolean(record && !record.archived && reachable(record.workspaceId));
 }
 
-/** Known chats not in `taken`, most recently active first. */
+/** Known chats not in `taken`, most recently active first; sub-agent chats only when pinned. */
 function moreChats(
   directory: SwitcherDirectory,
   taken: ReadonlySet<string>,
@@ -49,7 +52,9 @@ function moreChats(
   if (room <= 0) return [];
   const more: ChatRecord[] = [];
   for (const record of directory.rows.values()) {
-    if (!taken.has(record.id) && switchable(record, reachable)) more.push(record);
+    if (!taken.has(record.id) && switchable(record, reachable) && listsAsTopLevel(record)) {
+      more.push(record);
+    }
   }
   more.sort((a, b) => b.updatedAt - a.updatedAt || (a.id < b.id ? -1 : 1));
   return more.slice(0, room).map((record) => record.id);

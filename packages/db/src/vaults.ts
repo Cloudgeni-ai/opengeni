@@ -387,6 +387,35 @@ export async function listVaultsForSubject(
   );
 }
 
+/**
+ * Every organization vault, wherever it works (migration 1218), for the
+ * people who manage organization vaults; the caller checks organization
+ * administration (the owner or an admin).
+ * Summaries only: a vault's items still need it to reach the workspace.
+ * Null while the routine's runtime EXECUTE is withheld (runtime-posture
+ * DEFERRED_RUNTIME_PRIVATE_ROUTINES). The grant is checked in its own
+ * statement, because EXECUTE is checked when a statement starts.
+ */
+export async function listOrganizationVaults(
+  db: Database,
+  context: VaultDbContext,
+  input: { workspaceId: string },
+): Promise<VaultRow[] | null> {
+  return await inVaultContext(db, context, async (scoped, principal) => {
+    const [grant] = await rawRows<{ granted: boolean | null }>(
+      scoped,
+      sql`select coalesce(has_function_privilege(
+          to_regprocedure('opengeni_private.list_organization_vaults_v1(uuid, jsonb)')::oid,
+          'EXECUTE'), false) as granted`,
+    );
+    if (grant?.granted !== true) return null;
+    return await many<VaultRow>(
+      scoped,
+      sql`select value from opengeni_private.list_organization_vaults_v1(${input.workspaceId}::uuid, ${principal}::jsonb) value`,
+    );
+  });
+}
+
 export async function getVault(
   db: Database,
   context: VaultDbContext,
@@ -408,7 +437,7 @@ export async function createVault(
     description?: string | null;
     ownerKind: "user" | "workspace" | "organization";
     availability?: { allowedWorkspaceIds: string[] | null; allowPersonalWorkspaces: boolean };
-    /** The caller holds account:admin. */
+    /** The caller administers the organization (the owner or an admin). */
     allowOrganization?: boolean;
   },
 ): Promise<VaultRow> {
@@ -883,7 +912,7 @@ export async function linkProviderVault(
     providerVaultRef: string;
     mode: VaultMode;
     availability?: { allowedWorkspaceIds: string[] | null; allowPersonalWorkspaces: boolean };
-    /** The caller holds account:admin. */
+    /** The caller administers the organization (the owner or an admin). */
     allowOrganization?: boolean;
   },
 ): Promise<VaultRow> {

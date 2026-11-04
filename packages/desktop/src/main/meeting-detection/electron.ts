@@ -66,16 +66,25 @@ export interface CreateMeetingDetectionOptions {
    * waits for another page. The newest by default.
    */
   chooseTarget?: MeetingDetectionOptions["chooseTarget"];
+  /**
+   * Reminders before the active account's calendar meetings, with one click
+   * to join and start recording. None by default.
+   */
+  calendar?: MeetingDetectionOptions["calendar"];
   log?: (message: string, error?: unknown) => void;
 }
 
 /**
  * Meeting detection for an Electron app. Answer the page with
  * `handleMeetingDetectionIpc`, call `start()` once the app is ready and
- * `stop()` as it quits.
+ * `shutdown()` as it quits.
  */
 export function createMeetingDetection(options: CreateMeetingDetectionOptions): MeetingDetection {
   const file = options.logDir ? meetingDetectionFileLog(options.logDir) : null;
+  const log = (message: string, error?: unknown) => {
+    file?.(message, error);
+    options.log?.(message, error);
+  };
   let icon: string | null | undefined;
   const iconPath = options.iconPath;
   return new MeetingDetection({
@@ -90,6 +99,7 @@ export function createMeetingDetection(options: CreateMeetingDetectionOptions): 
     store: new MeetingDetectionStore(options.dataDir),
     view: new MeetingPromptCard({
       platform: process.platform,
+      log,
       ...(options.words ? { words: options.words } : {}),
       icon: () => {
         if (icon === undefined) {
@@ -101,9 +111,7 @@ export function createMeetingDetection(options: CreateMeetingDetectionOptions): 
     }),
     reveal: options.reveal,
     ...(options.chooseTarget ? { chooseTarget: options.chooseTarget } : {}),
-    log: (message, error) => {
-      file?.(message, error);
-      options.log?.(message, error);
-    },
+    ...(options.calendar ? { calendar: options.calendar } : {}),
+    log,
   });
 }

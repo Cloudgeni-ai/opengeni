@@ -780,6 +780,30 @@ describe("embedded worker lifecycle contract", () => {
             has_dependents: false,
             configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
           },
+          // Migration 1103: the subscription account-administrator grant,
+          // created without runtime EXECUTE; 1149 granted it.
+          {
+            name: "grant_subscription_account_administrator(jsonb)",
+            owner: "opengeni_migrator",
+            can_execute: true,
+            public_execute: false,
+            security_definer: true,
+            trigger_callable: false,
+            has_dependents: false,
+            configuration: ["search_path=pg_catalog, public, pg_temp"],
+          },
+          // Migration 1172: the lock-free external identity read. Its runtime
+          // grant stays deferred for previous-release compatibility.
+          {
+            name: "read_external_identity_v1(uuid, text, text)",
+            owner: "opengeni_migrator",
+            can_execute: false,
+            public_execute: false,
+            security_definer: true,
+            trigger_callable: false,
+            has_dependents: false,
+            configuration: ["search_path=public, pg_catalog, pg_temp"],
+          },
           ...[
             "authorize_subscription_ownerless_session_access(uuid, uuid, uuid, uuid)",
             "authorize_subscription_personal_placement_access(uuid, uuid, uuid, uuid, text, uuid, bigint, text, text)",
@@ -819,6 +843,7 @@ describe("embedded worker lifecycle contract", () => {
         ...opengeniDb.SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
         ...opengeniDb.SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES,
         ...opengeniDb.SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES,
+        ...opengeniDb.SUBSCRIPTION_ADMINISTRATION_OWNER_ROUTINES,
       ].map((name) => ({
         name,
         owner: "opengeni_migrator",

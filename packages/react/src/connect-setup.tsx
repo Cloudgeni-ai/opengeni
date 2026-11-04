@@ -295,17 +295,25 @@ function ScopedSetup({
             )}
             {action.type === "wait" && (
               <>
+                {/* In reading order: the code to enter, the page to enter it
+                    on, then what to do there. */}
                 {action.userCode && (
                   <p>
                     {t("connectSetup.verificationCode")} <code>{action.userCode}</code>
                   </p>
                 )}
-                <p>{t("connectSetup.completeProviderAuthorizationThenCheck")}</p>
                 {verificationUrl && (
-                  <a href={verificationUrl} target="_blank" rel="noopener noreferrer">
+                  <a
+                    href={verificationUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="og-connect-setup-primary"
+                  >
                     {t("connectSetup.openProviderVerificationPageNew")}
+                    <span className="sr-only"> {t("connectSetup.opensInNewTab")}</span>
                   </a>
                 )}
+                <p>{t("connectSetup.completeProviderAuthorizationThenCheck")}</p>
               </>
             )}
             <div className="og-connect-setup-secondary">

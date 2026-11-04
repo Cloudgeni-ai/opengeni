@@ -1,3 +1,4 @@
+import type { ComponentPropsWithoutRef, ReactNode } from "react";
 import { cn } from "../lib/cn";
 import { SESSION_STATUS_PRESENTATION, type SessionDisplayStatus } from "../session-status-model";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
@@ -86,17 +87,56 @@ export function SessionStatus({ status, label, size = "md", className }: Session
   const t = useOpenGeniText();
   const meta = SESSION_STATUS_META(t)[status];
   return (
-    <span
+    <StatusPill
       data-status={status}
+      size={size}
+      className={cn(meta.badgeClassName, className)}
+      dot={<StatusDot status={status} className={size === "sm" ? "size-1" : "size-1.5"} />}
+    >
+      {label ?? meta.label}
+    </StatusPill>
+  );
+}
+
+export type StatusPillProps = ComponentPropsWithoutRef<"span"> & {
+  size?: "sm" | "md" | undefined;
+  /**
+   * Leading dot. Omitted, it is a still dot in the text colour, sized for the
+   * pill; `null` or `false` hides it. A replacement should use the same size
+   * (`size-1` sm, `size-1.5` md).
+   */
+  dot?: ReactNode;
+  /** Colour classes (text, border, background). Geometry and type come from the pill. */
+  className?: string | undefined;
+};
+
+/**
+ * The pill shape every status badge shares: type, height, padding, border and
+ * dot spacing. Use it for a status that is not a `SessionDisplayStatus` (the
+ * header's Waiting pill) so it can never drift from the others.
+ */
+export function StatusPill({ size = "md", dot, className, children, ...rest }: StatusPillProps) {
+  return (
+    <span
+      {...rest}
       className={cn(
         "og-root inline-flex shrink-0 items-center rounded-full border font-medium",
         size === "sm" ? "gap-1 px-1.5 py-px text-og-xs" : "gap-1.5 px-2 py-0.5 text-og-control",
-        meta.badgeClassName,
         className,
       )}
     >
-      <StatusDot status={status} className={size === "sm" ? "size-1" : "size-1.5"} />
-      {label ?? meta.label}
+      {dot === undefined ? (
+        <span
+          aria-hidden
+          className={cn(
+            "relative inline-flex shrink-0 rounded-full bg-current",
+            size === "sm" ? "size-1" : "size-1.5",
+          )}
+        />
+      ) : (
+        dot
+      )}
+      {children}
     </span>
   );
 }

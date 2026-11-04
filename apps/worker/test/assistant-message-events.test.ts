@@ -182,16 +182,22 @@ function scriptedClaude(responses: ClaudeBlock[][], ids: string[] = []) {
   return { model, calls: () => calls };
 }
 
-// Under display "updates" reasoning comes back empty and a progress update
-// carries Anthropic's summary, not the model's words. These are the shapes of
-// the production responses whose summaries were shown as the agent's reply.
-const emptyReasoning: ClaudeBlock = { type: "thinking", thinking: "", signature: "sig_reasoning" };
+// A progress update carries Anthropic's summary, not the model's words, and
+// its signature carries the marker "narration" (anthropicThinkingIsProgressUpdate);
+// a reasoning block's never does. These are the shapes of the production
+// responses whose summaries were shown as the agent's reply.
+const signature = (marker: string) => Buffer.from(`sig\u0000${marker}\u0001`).toString("base64");
+const emptyReasoning: ClaudeBlock = {
+  type: "thinking",
+  thinking: "",
+  signature: signature("reasoning"),
+};
 const FABRICATED =
   "Both workers are running now. I've explained how subagents currently choose between asking you or the parent and proposed a rule.\n\n";
 const progressSummary: ClaudeBlock = {
   type: "thinking",
   thinking: FABRICATED,
-  signature: "sig_progress",
+  signature: signature("narration"),
 };
 const waitCall = (id: string, input: Record<string, unknown> = {}): ClaudeBlock => ({
   type: "tool_use",
@@ -672,7 +678,11 @@ describe("assistant message events from a real agent turn", () => {
         "Waiting for your pick of A or B, and for the Site sidebar and live Site editing workers.",
       timeoutSeconds: 6900,
     };
-    const update: ClaudeBlock = { type: "thinking", thinking: SUMMARY, signature: "sig_update" };
+    const update: ClaudeBlock = {
+      type: "thinking",
+      thinking: SUMMARY,
+      signature: signature("narration"),
+    };
     const completedMessages = (events: Awaited<ReturnType<typeof runTurn>>) =>
       events
         .filter((event) => event.type === "agent.message.completed")

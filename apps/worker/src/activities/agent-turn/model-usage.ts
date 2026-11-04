@@ -58,6 +58,7 @@ import {
   sanitizedModelUsageInput,
   sessionUsageMeterAmountMicros,
   settleModelUsage,
+  settleHostedWebSearchUsage,
   type ModelUsageBillingRecord,
 } from "@opengeni/core";
 
@@ -139,6 +140,29 @@ export type TurnEventPublisher = (
   accepted: boolean;
   canonicalStartupMilestones: CanonicalTurnStartupMilestoneReceipt[];
 }>;
+
+/** Issues progress receipts in order without waiting for them (turn-event-lane.ts). */
+export type TurnBackgroundEventPublisher = (
+  events: Parameters<TurnEventPublisher>[0],
+  options?: { measureDelivery?: <T>(work: () => Promise<T>) => Promise<T> },
+) => void;
+
+/** A startup progress receipt nothing reads back before the first model
+ * request. Uses the background lane when the attempt wired one; otherwise it
+ * is an ordinary awaited append. */
+export async function publishStartupProgress(
+  eventing: {
+    publish: TurnEventPublisher | null;
+    publishInBackground: TurnBackgroundEventPublisher | null;
+  },
+  events: Parameters<TurnEventPublisher>[0],
+): Promise<void> {
+  if (eventing.publishInBackground) {
+    eventing.publishInBackground(events);
+    return;
+  }
+  await eventing.publish!(events);
+}
 
 export type ModelResponseEventState = {
   responseCount: number;
@@ -284,6 +308,8 @@ export async function processModelResponseTerminalEvent(input: {
   externallyBilled: boolean;
   chargesOpenGeniCredits?: boolean;
   countsTowardTokenCap?: boolean;
+  /** Served by the person's own API key (the turn's funding): pays the platform fee. */
+  byok?: boolean;
   creditPolicyRevision?: number | undefined;
   servingCredentialId: string | null;
   priorSessionCredentialId: string | null;
@@ -355,7 +381,17 @@ export async function processModelResponseTerminalEvent(input: {
     leaseLost: input.leaseLost,
     leaseLostMessage: input.leaseLostMessage,
     recordUsage: async () => {
-      if (!responseUsage) return;
+      if (!responseUsage) {
+        // No usage means no token debit here, but the provider still ran
+        // these searches. Each response settles its own under its own source
+        // key, so a stream that mixes responses with and without usage
+        // charges every search once, whatever the aggregate fallback does.
+        await settleHostedWebSearchUsageWithoutTokens(input, {
+          sourceKey,
+          requests: terminal.webSearchRequests ?? 0,
+        });
+        return;
+      }
       const billing = await recordModelUsageAndDebitCredits(input.settings, input.db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -365,6 +401,7 @@ export async function processModelResponseTerminalEvent(input: {
         model: input.model,
         creditPolicyRevision: input.creditPolicyRevision,
         externallyBilled: input.externallyBilled,
+        ...(input.byok !== undefined ? { byok: input.byok } : {}),
         ...(input.chargesOpenGeniCredits !== undefined
           ? { chargesOpenGeniCredits: input.chargesOpenGeniCredits }
           : {}),
@@ -374,6 +411,7 @@ export async function processModelResponseTerminalEvent(input: {
         usage: responseUsage.usage,
         normalizedUsage,
         gatewayBilling: responseUsage.gatewayBilling,
+        webSearchRequests: responseUsage.webSearchRequests,
         sourceKey,
         ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
         observability: input.observability,
@@ -464,6 +502,42 @@ export async function processModelResponseTerminalEvent(input: {
 }
 
 /**
+ * Hosted searches of a model response that reported no usage. The same gates
+ * as the token path: only a credit-billed turn on a billed deployment pays
+ * (settleHostedWebSearchUsage checks billing, the operator switch and legacy
+ * accounts). There is no Gateway-reported cost without usage, so nothing
+ * already includes these searches.
+ */
+async function settleHostedWebSearchUsageWithoutTokens(
+  input: {
+    settings: Settings;
+    db: ActivityServices["db"];
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    turnAttemptId: string;
+    model: string;
+    externallyBilled: boolean;
+    chargesOpenGeniCredits?: boolean | undefined;
+  },
+  response: { sourceKey: string; requests: number },
+): Promise<void> {
+  const chargesOpenGeniCredits = input.chargesOpenGeniCredits ?? !input.externallyBilled;
+  if (response.requests <= 0 || !chargesOpenGeniCredits) return;
+  await settleHostedWebSearchUsage(input.db, input.settings, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: input.turnId,
+    turnAttemptId: input.turnAttemptId,
+    sourceId: `${input.turnId}:${response.sourceKey}`,
+    model: input.model,
+    requests: response.requests,
+  });
+}
+
+/**
  * Apply the same source-key authority ordering to the compaction summarizer's
  * usage callback. The summarizer can retry or mirror a terminal response just
  * like the main stream, so claim before lease renewal, billing, durable usage,
@@ -490,6 +564,8 @@ export async function processCompactionModelUsageEvent(input: {
   externallyBilled: boolean;
   chargesOpenGeniCredits?: boolean;
   countsTowardTokenCap?: boolean;
+  /** Served by the person's own API key (the turn's funding): pays the platform fee. */
+  byok?: boolean;
   creditPolicyRevision?: number | undefined;
   servingCredentialId: string | null;
   priorSessionCredentialId: string | null;
@@ -543,6 +619,7 @@ export async function processCompactionModelUsageEvent(input: {
         model: input.model,
         creditPolicyRevision: input.creditPolicyRevision,
         externallyBilled: input.externallyBilled,
+        ...(input.byok !== undefined ? { byok: input.byok } : {}),
         ...(input.chargesOpenGeniCredits !== undefined
           ? { chargesOpenGeniCredits: input.chargesOpenGeniCredits }
           : {}),
@@ -552,6 +629,7 @@ export async function processCompactionModelUsageEvent(input: {
         usage: input.usage.usage,
         normalizedUsage,
         gatewayBilling: input.usage.gatewayBilling,
+        webSearchRequests: input.usage.webSearchRequests,
         sourceKey,
         observability: input.observability,
         metricProvider: input.provider,
@@ -861,8 +939,12 @@ export async function recordModelUsageAndDebitCredits(
     externallyBilled: boolean;
     chargesOpenGeniCredits?: boolean;
     countsTowardTokenCap?: boolean;
+    /** Served by the person's own API key; omitted resolves from the model. */
+    byok?: boolean;
     creditPolicyRevision?: number | undefined;
     gatewayBilling?: ModelResponseUsage["gatewayBilling"];
+    /** Hosted provider searches the response reported; charged on credit-billed turns. */
+    webSearchRequests?: number | undefined;
     usage?: ModelUsageInput | ModelCallUsageInput | null;
     normalizedUsage?: ModelCallUsageNormalization;
     sourceKey: string;
@@ -883,8 +965,10 @@ export async function recordModelUsageAndDebitCredits(
     model: input.model,
     chargesOpenGeniCredits: input.chargesOpenGeniCredits ?? !input.externallyBilled,
     countsTowardTokenCap: input.countsTowardTokenCap ?? !input.externallyBilled,
+    ...(input.byok !== undefined ? { byok: input.byok } : {}),
     creditPolicyRevision: input.creditPolicyRevision,
     ...(input.gatewayBilling ? { gatewayBilling: input.gatewayBilling } : {}),
+    ...(input.webSearchRequests ? { hostedWebSearchRequests: input.webSearchRequests } : {}),
     normalizedUsage: input.normalizedUsage ?? normalizeModelCallUsage(input.usage),
     sourceId: `${input.turnId}:${input.sourceKey}`,
     sessionId: input.sessionId,

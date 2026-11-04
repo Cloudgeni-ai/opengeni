@@ -1,5 +1,6 @@
-//! Host memory running short: a running VM is never compressed by the
-//! kernel, and a guest that outgrows the huge-page pool.
+//! Host memory running short: a running VM guaranteed all of its memory is
+//! never compressed by the kernel, and a guest that outgrows the huge-page
+//! pool. What running VMs that borrow go through is the guest suite's.
 
 use super::*;
 
@@ -483,11 +484,12 @@ async fn watch_squeeze(
     (compressed, ended)
 }
 
-/// A running VM's memory never goes into zswap, not even when the kernel
-/// reclaims under real memory pressure, while idle sandboxes are
-/// compressed or ended by the host's own relief. The pressure is real but
-/// local: the agent's VMs and a memory hog share a memory limit, so the
-/// kernel reclaims from them as from a full host.
+/// A running VM guaranteed all of its memory never has it go into zswap,
+/// not even when the kernel reclaims under real memory pressure, while
+/// idle sandboxes are compressed or ended by the host's own relief: it
+/// never borrows, so nothing of it is the host's to take (ADR 24). The
+/// pressure is real but local: the agent's VMs and a memory hog share a
+/// memory limit, so the kernel reclaims from them as from a full host.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_running_vm_is_never_compressed_under_memory_pressure() {
     let Some(lab) = lab() else {
@@ -502,16 +504,18 @@ async fn a_running_vm_is_never_compressed_under_memory_pressure() {
     let hog = Group::create(Path::new(SQUEEZED).join("hog"), false);
     let vms = Path::new(SQUEEZED).join("vms");
     // The agent sees memory short all the time, so it pushes every idle
-    // sandbox as deep as it may go.
-    let beyond = (meminfo("MemTotal:") / 1024 * 2).to_string();
+    // sandbox as deep as it may go: both watermarks 4 GiB short of the
+    // host's memory, which is also where its VMs' limit and wall go, far
+    // above what these VMs hold.
+    let marks = (meminfo("MemTotal:") / 1024 - 4096).to_string();
     let host = Host::new(
         &lab,
         "squeezed",
         &[
             "--memory-low-mib",
-            &beyond,
+            &marks,
             "--memory-high-mib",
-            &beyond,
+            &marks,
             "--memory-buffer-mib",
             "0",
         ],

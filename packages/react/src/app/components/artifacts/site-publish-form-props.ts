@@ -6,10 +6,7 @@ import type { SiteManagement } from "./site-settings";
  * and the Site view's Publish both use it, so the two forms can't drift apart.
  */
 export function sitePublishFormProps(
-  management: Pick<
-    SiteManagement,
-    "workspaceName" | "isAdmin" | "showAudience" | "publication" | "audience"
-  >,
+  management: Pick<SiteManagement, "workspaceName" | "isAdmin" | "publication" | "audience">,
   {
     client,
     workspaceId,
@@ -26,8 +23,6 @@ export function sitePublishFormProps(
     load: management.publication.load,
     onReload: () => void management.publication.reload(),
     isAdmin: management.isAdmin,
-    onShareWithWorkspace: management.showAudience ? management.audience.share : undefined,
-    // A Personal workspace has no audience: Only me and the workspace are one person.
-    personalWorkspace: !management.showAudience,
+    onShareWithWorkspace: management.audience.share,
   } satisfies Partial<SitePublishPageProps>;
 }

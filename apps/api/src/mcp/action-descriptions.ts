@@ -62,6 +62,24 @@ const RULES: Rule[] = [
   },
   {
     method: "POST",
+    pattern: /\/workspaces\/:workspaceId\/members$/,
+    text: () =>
+      "Add someone who is already in the organization to a shared workspace, so they can see its shared chats and work there. A Personal workspace can't have other members. To let someone only read one chat, for example family or a friend, use createSessionShareLink instead.",
+  },
+  {
+    method: "POST",
+    pattern: /^\/v1\/organizations\/:organizationId\/invitations$/,
+    text: () =>
+      "Invite someone by email to join the organization, optionally into shared workspaces. They see only the workspaces they are added to, never anyone's Personal workspace. To let someone only read one chat, for example family or a friend, use createSessionShareLink instead; they need no account.",
+  },
+  {
+    method: "PUT",
+    pattern: /\/workspaces\/:workspaceId\/sessions\/:sessionId\/visibility$/,
+    text: () =>
+      "Choose who in this workspace can see a chat: private (only the person who started it) or workspace (every member of this workspace). It never shows the chat to anyone outside the workspace; to let someone else read it, use createSessionShareLink.",
+  },
+  {
+    method: "POST",
     pattern: /\/vault-providers\/connections$/,
     text: () =>
       "Connect Proton Pass, Keeper Secrets Manager, Bitwarden (including Vaultwarden) or an external vault. Set ownership and provider-specific credentials; Bitwarden takes the server address, the account's personal API key and its master password, which is used once and not stored. Saved-but-pending setup returns a connection ID; register it with a remote host if needed, then verify using the saved credentials.",
@@ -176,13 +194,25 @@ const RULES: Rule[] = [
     method: "PUT",
     pattern: /\/model-connections\/:kind\/:connectionId\/access$/,
     text: () =>
-      "Change which workspaces and which models a model connection can serve. Workspaces: all (optionally including Personal workspaces), selected ones, or none. Models: all including new ones, or only chosen ones. Applies to new chats and schedules; running work keeps going.",
+      "Change which workspaces and which models a model connection can serve. Workspaces: all (optionally including Personal workspaces), selected ones, or none. Models: all including new ones, or only chosen ones. A workspace's own subscription account stays its workspace's when shared with selected workspaces; serving all workspaces, Personal workspaces or people needs moveToOrganization: true on the organization route, after which only organization admins manage it. Applies to new chats and schedules; running work keeps going.",
+  },
+  {
+    method: "DELETE",
+    pattern: /\/model-connections\/:kind\/:connectionId\/access$/,
+    text: () =>
+      "Stop this workspace from using another workspace's own subscription account that was shared with it. Only that workspace's admins or the organization's can share it here again.",
   },
   {
     method: "GET",
     pattern: /\/organizations\/:organizationId\/model-account-settings$/,
     text: () =>
-      "Read the organization's subscription account settings for every workspace: rotation, cross-provider failover and its fallback order, whether personal accounts are allowed, and personal fallback, plus which ones are locked so workspaces cannot change them.",
+      "Read the organization's subscription account settings for every workspace: rotation, cross-provider failover and its fallback order, and whether personal accounts are allowed, plus which ones are locked so workspaces cannot change them. The returned personal-fallback value is retired and changes nothing.",
+  },
+  {
+    method: "PATCH",
+    pattern: /\/organizations\/:organizationId\/me\/model-account-preferences$/,
+    text: () =>
+      "Retired: the personal-fallback opt-in no longer changes which account pays. To use your own subscription for the messages you send in a workspace, issue an always, workspace_shared grant on its subscription_connection user-resource authority in that workspace.",
   },
   {
     method: "PATCH",

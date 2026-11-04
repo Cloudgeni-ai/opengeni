@@ -48,7 +48,7 @@ export function useHomeDraftSync(input: {
     modelProvided: input.modelProvided,
     selectedProjectChannelId: choices.channelId,
     options: {
-      ...(choices.visibility === "private" ? { visibility: "private" as const } : {}),
+      ...(options.ready && options.visibilityChosen ? { visibility: choices.visibility } : {}),
       ...(choices.targetSandboxId ? { targetSandboxId: choices.targetSandboxId } : {}),
       ...(choices.excludedConnectorIds.length > 0
         ? { excludedMcpServerIds: choices.excludedConnectorIds }
@@ -68,7 +68,7 @@ export function useHomeDraftSync(input: {
         input.applyModel(remote.model, remote.reasoningEffort, remote.latencyMode);
       }
       options.apply({
-        visibility: remote.options.visibility ?? "workspace",
+        ...(remote.options.visibility ? { visibility: remote.options.visibility } : {}),
         targetSandboxId: remote.options.targetSandboxId ?? null,
         channelId: remote.selectedProjectChannelId ?? null,
         excludedConnectorIds: remote.options.excludedMcpServerIds ?? [],

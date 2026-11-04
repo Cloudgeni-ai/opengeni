@@ -169,7 +169,6 @@ function randomWorld(seed: number): { world: World; sessionId: string } {
       people: PEOPLE.map((id) => ({
         id,
         active: rng.bool(0.9),
-        personalFallbackOptIn: rng.bool(),
       })),
       models: MODELS,
       connections,
@@ -338,7 +337,7 @@ describe("reference model scenarios", () => {
       workspaceOverrides: {},
     },
     workspaces: [{ id: "ws-team", kind: "shared", ownerId: null, allowedModels: null }],
-    people: [{ id: "person-a", active: true, personalFallbackOptIn: false }],
+    people: [{ id: "person-a", active: true }],
     models: MODELS,
     connections: [
       shared("claude-a", "claude"),
@@ -456,10 +455,10 @@ describe("reference model scenarios", () => {
     });
   });
 
-  test("model:SUB-SEL-01, model:SUB-SEL-02: an opted-in personal account is used only after the organization accounts for the same model", () => {
-    let world: World = {
+  test("model:SUB-SEL-01, model:SUB-SEL-02: the person's own account turned on here pays first; otherwise only an explicit choice uses it", () => {
+    const personal = (turnedOn: boolean, visibility: "private" | "shared"): World => ({
       ...base(),
-      people: [{ id: "person-a", active: true, personalFallbackOptIn: true }],
+      people: [{ id: "person-a", active: true }],
       connections: [
         ...base().connections,
         {
@@ -467,21 +466,29 @@ describe("reference model scenarios", () => {
           ownership: { kind: "personal", ownerId: "person-a" },
         },
       ],
-      sessions: base().sessions.map((session) => ({ ...session, visibility: "private" as const })),
-    };
-    expect(decide(world, "session-1", NOW)).toMatchObject({ connectionId: "claude-a" });
-    world = exhaust(exhaust(world, "claude-a", NOW + 60_000), "claude-b", NOW + 60_000);
-    // Same model on the personal account comes before cross-provider failover (D-12).
-    expect(decide(world, "session-1", NOW)).toMatchObject({
-      connectionId: "personal-claude",
-      modelId: "claude/model-a",
+      sessions: base().sessions.map((session) => ({
+        ...session,
+        visibility,
+        ...(turnedOn
+          ? { sharedPersonalChoices: [{ connectionId: "personal-claude", ownerId: "person-a" }] }
+          : {}),
+      })),
     });
-    // In a shared session the personal account is never used automatically.
-    const sharedSession = {
-      ...world,
-      sessions: world.sessions.map((session) => ({ ...session, visibility: "shared" as const })),
-    };
-    expect(decide(sharedSession, "session-1", NOW)).toMatchObject({ connectionId: "codex-a" });
+    // Turned on in this shared workspace: it pays first, in shared and Only me chats alike.
+    for (const visibility of ["shared", "private"] as const) {
+      expect(decide(personal(true, visibility), "session-1", NOW)).toMatchObject({
+        connectionId: "personal-claude",
+        modelId: "claude/model-a",
+      });
+    }
+    // Not turned on here: the organization's accounts serve, and once they run
+    // out the turn moves to another provider rather than to the personal account.
+    for (const visibility of ["shared", "private"] as const) {
+      let world = personal(false, visibility);
+      expect(decide(world, "session-1", NOW)).toMatchObject({ connectionId: "claude-a" });
+      world = exhaust(exhaust(world, "claude-a", NOW + 60_000), "claude-b", NOW + 60_000);
+      expect(decide(world, "session-1", NOW)).toMatchObject({ connectionId: "codex-a" });
+    }
   });
 
   test("model:SUB-SET-03: a locked organization setting ignores the workspace override", () => {
@@ -594,14 +601,14 @@ describe("reference model scenarios", () => {
     expect(stayed.length).toBeGreaterThan(0);
   });
 
-  test("model:SUB-WAIT-02, model:SUB-SEL-02: the expected reset ignores a personal account the person has not opted into", () => {
-    const withPersonal = (optIn: boolean): World =>
+  test("model:SUB-WAIT-02, model:SUB-SEL-02: the expected reset ignores a personal account not turned on here", () => {
+    const withPersonal = (turnedOn: boolean): World =>
       exhaust(
         exhaust(
           exhaust(
             {
               ...base(),
-              people: [{ id: "person-a", active: true, personalFallbackOptIn: optIn }],
+              people: [{ id: "person-a", active: true }],
               connections: [
                 ...base().connections,
                 {
@@ -613,6 +620,13 @@ describe("reference model scenarios", () => {
                 ...session,
                 visibility: "private" as const,
                 onlyThisModel: true,
+                ...(turnedOn
+                  ? {
+                      sharedPersonalChoices: [
+                        { connectionId: "personal-claude", ownerId: "person-a" },
+                      ],
+                    }
+                  : {}),
               })),
             },
             "claude-a",

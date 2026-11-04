@@ -34,3 +34,6 @@ Rules:
    or resource-limit failures must be reported rather than guessed around.
 6. Never install or download AnyDoc at runtime. If `anydoc` is unavailable,
    report that the selected compute image lacks the parsing runtime.
+7. AnyDoc's Markdown does not mark PDF pages. When page numbers matter, get
+   the count with `pdfinfo file.pdf` and one page's text with
+   `pdftotext -layout -f N -l N file.pdf -`.

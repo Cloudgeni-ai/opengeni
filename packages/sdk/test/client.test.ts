@@ -943,6 +943,33 @@ describe("OpenGeniClient", () => {
     expect(requests).toBe(4);
   });
 
+  test("a fresh queue read waits for its own request instead of joining an older one", async () => {
+    let requests = 0;
+    let releaseStale!: () => void;
+    const staleGate = new Promise<void>((resolve) => {
+      releaseStale = resolve;
+    });
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async () => {
+        requests += 1;
+        const request = requests;
+        if (request === 1) await staleGate;
+        return jsonResponse({ version: request, stoppingPreviousAttempt: request === 1 });
+      },
+    });
+    const stale = client.getQueue(WORKSPACE_ID, SESSION_ID);
+    const joined = client.getQueue(WORKSPACE_ID, SESSION_ID);
+    const fresh = client.getQueue(WORKSPACE_ID, SESSION_ID, { fresh: true });
+    await Bun.sleep(1);
+    expect(requests).toBe(1);
+    releaseStale();
+    expect(await stale).toMatchObject({ version: 1, stoppingPreviousAttempt: true });
+    expect(await joined).toMatchObject({ version: 1 });
+    expect(await fresh).toMatchObject({ version: 2, stoppingPreviousAttempt: false });
+    expect(requests).toBe(2);
+  });
+
   test("keeps a shared session read alive while another caller is still waiting", async () => {
     let requests = 0;
     let requestSignal: AbortSignal | undefined;
@@ -2368,6 +2395,47 @@ describe("OpenGeniClient", () => {
     ).toEqual(totals);
     expect(requests[0]!.url).toContain("includeTotals=true");
     expect(requests[0]!.url).toContain("needsYouOnly=true");
+  });
+
+  test("selects sessions by id only on servers that acknowledge the selection", async () => {
+    const ids = [crypto.randomUUID(), crypto.randomUUID()];
+    const old = makeClient(() =>
+      jsonResponse({ pinned: [], sessions: [], nextCursor: null, filtersApplied: true }),
+    );
+    await expect(
+      old.client.listSessionSummaryPage(WORKSPACE_ID, { sessionIds: ids }),
+    ).rejects.toThrow("session id filtering");
+    const latestTurn = {
+      id: ids[1]!,
+      status: "completed" as const,
+      startedAt: null,
+      finishedAt: null,
+    };
+    const { client, requests } = makeClient(() =>
+      jsonResponse({
+        projection: "summary",
+        pinned: [],
+        sessions: [{ id: ids[0], latestTurn }],
+        nextCursor: null,
+        filtersApplied: true,
+        sessionIdsApplied: true,
+      }),
+    );
+    const page = await client.listSessionSummaryPage(WORKSPACE_ID, {
+      sessionIds: ids,
+      includePinned: false,
+    });
+    expect(page.sessions[0]!.latestTurn).toEqual(latestTurn);
+    const url = new URL(requests[0]!.url);
+    expect(url.searchParams.get("sessionIds")).toBe(ids.join(","));
+    expect(url.searchParams.get("projection")).toBe("summary");
+    // An empty selection matches nothing without a request.
+    expect(await client.listSessionSummaryPage(WORKSPACE_ID, { sessionIds: [] })).toMatchObject({
+      projection: "summary",
+      sessions: [],
+      nextCursor: null,
+    });
+    expect(requests).toHaveLength(1);
   });
 
   test("compact session pages retain cursors and filters across a rolling API upgrade", async () => {

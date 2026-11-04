@@ -355,7 +355,7 @@ export default defineConfig({
               // Session creation resolves the agent's capabilities, so their
               // helpers are startup code too.
               name: "startup-context",
-              test: /(?:packages[\\/]react[\\/]src[\\/](?:ui[\\/]api-error\.tsx|hooks[\\/]shared-query\.ts)$|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/](?:app-context\.tsx|components[\\/](?:common|secure-context-warning|sign-in-callback-notice|ui[\\/]sonner)\.tsx|lib[\\/](?:agent-capabilities|app-host|app-surfaces|console-text|navigation|analytics-consent|analytics-login|api-error|appearance|bootstrap-error|bootstrap-read|github-installation-unlink|managed-auth-form|managed-auth-transition|managed-self-context|model-access|org|organization-invitation-continuation|permissions|personal-github-authority|personal-security-context|session-context|session-create|session-creation-handoff|session-pins|shared-query|single-flight|toast|ui-events|use-capability-tool-defaults|workspace-deletion|workspace-navigation-preference|workspace-scope-context|workspace-transition|workspaces)\.tsx?)|(?:node_modules|\.bun)[\\/]sonner(?:@|[\\/]).*|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:copy|lock|octagon-x|refresh-cw)\.mjs)$/,
+              test: /(?:packages[\\/]react[\\/]src[\\/](?:ui[\\/](?:api-error\.tsx|error-reference\.ts|error-text\.tsx)|hooks[\\/]shared-query\.ts)$|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/](?:app-context\.tsx|components[\\/](?:common|secure-context-warning|sign-in-callback-notice|ui[\\/]sonner)\.tsx|lib[\\/](?:agent-capabilities|app-host|app-surfaces|console-text|navigation|analytics-consent|analytics-login|api-error|appearance|bootstrap-error|bootstrap-read|github-installation-unlink|managed-auth-form|managed-auth-transition|managed-self-context|model-access|org|organization-invitation-continuation|permissions|personal-github-authority|personal-security-context|session-context|session-create|session-creation-handoff|session-pins|shared-query|single-flight|toast|ui-events|use-capability-tool-defaults|workspace-deletion|workspace-navigation-preference|workspace-scope-context|workspace-transition|workspaces)\.tsx?)|(?:node_modules|\.bun)[\\/]sonner(?:@|[\\/]).*|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:copy|info|lock|octagon-x|refresh-cw)\.mjs)$/,
               includeDependenciesRecursively: false,
               priority: 5,
             },
@@ -388,7 +388,7 @@ export default defineConfig({
               // The before-paint scrollbar entry is eager too; its shared probe
               // remains in the higher-priority ui-runtime group.
               name: "startup-sdk-runtime",
-              test: /(?:packages[\\/]sdk[\\/]src[\\/](?:errors|types|retained-artifacts|interaction)\.tsx?|packages[\\/]contracts[\\/]src[\\/]browser-storage\.tsx?|packages[\\/]react[\\/]src[\\/](?:scrollbars|lib[\\/]scrollbars)\.tsx?|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/]lib[\\/](?:signup-attribution|analytics-observer|integration-connect-return|secrets-route|composer-launch)\.tsx?|vite[\\/]preload-helper\.js)$/,
+              test: /(?:packages[\\/]sdk[\\/]src[\\/](?:errors|types|retained-artifacts|interaction|model-display)\.tsx?|packages[\\/]contracts[\\/]src[\\/](?:browser-storage|model-display)\.tsx?|packages[\\/]react[\\/]src[\\/](?:scrollbars|lib[\\/]scrollbars)\.tsx?|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/]lib[\\/](?:signup-attribution|analytics-observer|integration-connect-return|secrets-route|composer-launch)\.tsx?|vite[\\/]preload-helper\.js)$/,
               includeDependenciesRecursively: false,
               priority: 5,
             },
@@ -556,6 +556,39 @@ export default defineConfig({
               priority: 21,
             },
             {
+              // The dropdown menu is used by many lazy pages and the session
+              // header, but not by startup. Left to entry-aware merging it can
+              // share a chunk with a startup helper (model display), so every
+              // page would load it and, through it, the menu primitives.
+              name: "dropdown-menu",
+              test: /packages[\\/]react[\\/]src[\\/]ui[\\/]dropdown-menu\.tsx$/,
+              includeDependenciesRecursively: false,
+              priority: 21,
+            },
+            {
+              // Meeting defaults are a Workspace settings section. Their theme
+              // wrapper reaches the embedded chat chunk, so if entry-aware
+              // merging folds them into a chunk a direct session loads (the
+              // sidebar row cache), the session waits on the optional
+              // conversation panels.
+              name: "meeting-settings",
+              test: /(?:apps[\\/]web[\\/]src[\\/]components[\\/]meetings[\\/]meeting-defaults-section|packages[\\/]react[\\/]src[\\/]meetings[\\/]meeting-settings)\.tsx$/,
+              includeDependenciesRecursively: false,
+              priority: 21,
+            },
+            {
+              // The window bar (with the actions provider behind it) serves
+              // settings and full pages, not a direct session. Left to
+              // entry-aware merging it can join the small chunk a direct
+              // session loads for the rig hooks, together with the settings
+              // search, so the session would download the command actions
+              // graph unused.
+              name: "window-bar",
+              test: /packages[\\/]react[\\/]src[\\/]app[\\/](?:components[\\/]window-bar|lib[\\/]window-bar-row)\.tsx$/,
+              includeDependenciesRecursively: false,
+              priority: 21,
+            },
+            {
               // Budget pages, Workspace settings > Usage and the member slider
               // (with its Radix primitive, used nowhere else; it must not join
               // the shared UI runtime). Only reached from lazy settings routes.
@@ -575,8 +608,11 @@ export default defineConfig({
               // its RowSelect) into a direct workspace load. Connection access renders a Models
               // form page, so it lives here, not in model-connection-settings,
               // whose shared icons the eager workspace graph imports.
-              // Workspace meeting defaults render only on the settings page, but
-              // entry-aware merging can fold them into a chunk direct sessions load.
+              // Workspace meeting defaults (the settings section and the shared
+              // meeting settings view it renders) appear only on the settings
+              // page, but entry-aware merging can fold them into a chunk direct
+              // sessions load; the view then drags the management primitives and
+              // the Meetings hooks into every chat.
               // Organization provider connections and Codex subscriptions are imported by the Models
               // pages above and by the lazy organization Models section; outside
               // this group they land in the section's chunk and form a cycle
@@ -590,7 +626,7 @@ export default defineConfig({
               // so the lazy agent consent route cannot read uninitialized data
               // across a settings-pages/organization-access-fields chunk cycle.
               name: "settings-pages",
-              test: /(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/](?:components[\\/](?:connection-access-settings|meetings[\\/]meeting-settings|organization-api-keys-section|organization-codex-subscriptions|organization-model-provider-connection|organization-access[\\/]organization-access-fields|models[\\/][\w-]+|settings[\\/](?:agent-activity|default-sandbox-environment-row|row-select|settings-frame))\.tsx|routes[\\/](?:workspace-api-keys|workspace-managed-access)\.tsx|lib[\\/](?:api-key-(?:presets|status)|organization-access)\.tsx?)$/,
+              test: /(?:(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/](?:components[\\/](?:connection-access-settings|meetings[\\/]meeting-defaults-section|organization-api-keys-section|organization-codex-subscriptions|organization-model-provider-connection|organization-access[\\/]organization-access-fields|models[\\/][\w-]+|settings[\\/](?:agent-activity|default-sandbox-environment-row|row-select|settings-frame))\.tsx|routes[\\/](?:workspace-api-keys|workspace-managed-access)\.tsx|lib[\\/](?:api-key-(?:presets|status)|organization-access)\.tsx?)|packages[\\/]react[\\/]src[\\/]meetings[\\/]meeting-settings\.tsx)$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },

@@ -14,6 +14,7 @@ import { ConnectionServiceLogo } from "./connection-service-logo";
 import { McpConnectionCard } from "./components/session-mcp-capability-card";
 import { mcpConnectionDiscoveryState } from "./mcp-connection-status";
 import { useOpenGeniText } from "./messages/runtime";
+import { useNobodyToShareWith } from "./workspace-sharing";
 
 export type ConnectionDiscoveryProps = {
   client: OpenGeniClient;
@@ -55,6 +56,7 @@ function ScopedDiscovery({
   const [limit, setLimit] = useState(12);
   const [selected, setSelected] = useState<CapabilityCatalogItem | null>(null);
   const opener = useRef<HTMLElement | null>(null);
+  const alone = useNobodyToShareWith(client, workspaceId);
   useEffect(() => {
     const abort = new AbortController();
     // Capture each read independently: even a synchronously throwing transport
@@ -139,6 +141,7 @@ function ScopedDiscovery({
           presentation="catalog"
           providerOnly
           initialProviderId={selectedProvider.id}
+          personalOnly={alone}
         />
       </section>
     );

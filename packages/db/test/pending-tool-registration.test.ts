@@ -389,6 +389,69 @@ describe("atomic tool receipt and timeline checkpoints", () => {
     expect(histories[1]).toBe(histories[0]);
   });
 
+  test("oversized tool output is stored and replayed within the output event bound", async () => {
+    const { input, triggerEventId } = await fixture();
+    input.callId = "oversized-output-call";
+    input.callItem = { ...input.callItem, callId: input.callId };
+    const head = "first-line-of-output\n";
+    const tail = "\nlast-line-of-output";
+    const hugeText = `${head}${"x".repeat(4 * 1024 * 1024)}${tail}`;
+    await registerPendingSessionToolCall(client.db, input);
+    expect(
+      await recordPendingSessionToolCallResult(client.db, {
+        ...input,
+        resultItem: {
+          type: "function_call_result",
+          callId: input.callId,
+          output: { type: "text", text: "model-facing output, already truncated" },
+        },
+        eventOutput: { content: [{ type: "text", text: hugeText }], isError: false },
+      }),
+    ).toEqual({ accepted: true, recorded: true });
+
+    const [stored] = await shared.admin<
+      Array<{ bytes: number; eventOutput: unknown; codec: number | null }>
+    >`
+      select octet_length(event_output::text) as bytes, event_output as "eventOutput",
+        event_output_codec_version as "codec"
+      from session_pending_tool_calls
+      where session_id = ${input.sessionId} and call_id = ${input.callId}`;
+    expect(stored!.bytes).toBeLessThanOrEqual(256 * 1024);
+    const storedOutput = fromPostgresLosslessJson(stored!.eventOutput, stored!.codec) as {
+      value: { content: Array<{ text: string }>; isError: boolean };
+      truncation?: { truncated: boolean; originalBytes: number | null };
+    };
+    expect(storedOutput.value.isError).toBe(false);
+    const storedText = storedOutput.value.content[0]!.text;
+    expect(storedText.startsWith(head)).toBe(true);
+    expect(storedText.endsWith(tail)).toBe(true);
+    expect(storedOutput.truncation?.truncated).toBe(true);
+    expect(storedOutput.truncation?.originalBytes).toBeGreaterThan(hugeText.length);
+
+    // Crash after the durable result: recovery replays the bounded output event.
+    const recovery = await requestSessionTurnRecovery(client.db, input.workspaceId, {
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      triggerEventId,
+      attemptId: input.attemptId,
+      reason: "worker_shutdown",
+    });
+    expect(recovery.action).toBe("recovering");
+    const [event] = await shared.admin<
+      Array<{ payload: Record<string, unknown>; codec: number | null }>
+    >`
+      select payload, payload_codec_version as codec from session_events
+      where session_id = ${input.sessionId} and type = 'agent.toolCall.output'`;
+    const payload = fromPostgresLosslessJson(event!.payload, event!.codec) as {
+      id: string;
+      output: { content: Array<{ text: string }> };
+      truncation?: { truncated: boolean };
+    };
+    expect(payload.id).toBe(input.callId);
+    expect(payload.output.content[0]!.text.startsWith(head)).toBe(true);
+    expect(payload.truncation?.truncated).toBe(true);
+  });
+
   test("generation mismatch never mutates a receipt or projects an output", async () => {
     const { input } = await fixture();
     expect(

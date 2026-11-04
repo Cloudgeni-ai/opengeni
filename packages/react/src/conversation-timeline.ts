@@ -75,6 +75,8 @@ export function conversationTimeline(
           : {}),
       },
     }));
+  const failed = optimistic.filter((message) => message.delivery?.state === "failed");
+  const unsent = optimistic.filter((message) => message.delivery?.state !== "failed");
   const ids = new Set(visible.map((item) => item.id));
   const steers: UserMessageItem[] = (queue.acceptedSteers ?? [])
     .filter((steer) => !ids.has(steer.triggerEventId))
@@ -88,5 +90,29 @@ export function conversationTimeline(
       occurredAt: steer.occurredAt,
       delivery: { state: steer.state },
     }));
-  return [...visible, ...optimistic, ...steers];
+  return [...placeFailedSends(visible, failed), ...unsent, ...steers];
+}
+
+/**
+ * A failed send stays where it was written. A person who sent something newer
+ * has moved on, so an old failure must not sit under that message and its work,
+ * looking like the latest thing they said. With nothing newer it stays last,
+ * next to the composer, where its recovery actions are seen.
+ */
+function placeFailedSends(items: TimelineItem[], failed: UserMessageItem[]): TimelineItem[] {
+  if (failed.length === 0) return items;
+  const before = new Map<number, UserMessageItem[]>();
+  const last: UserMessageItem[] = [];
+  for (const message of failed) {
+    const sentAt = Date.parse(message.occurredAt);
+    const newer = items.findIndex(
+      (item) => item.kind === "user-message" && Date.parse(item.occurredAt) > sentAt,
+    );
+    if (newer === -1) {
+      last.push(message);
+    } else {
+      before.set(newer, [...(before.get(newer) ?? []), message]);
+    }
+  }
+  return [...items.flatMap((item, index) => [...(before.get(index) ?? []), item]), ...last];
 }

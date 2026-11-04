@@ -22,7 +22,7 @@
 //! host connects to the guest's notice port and sends one line:
 //!
 //! ```text
-//! restored <unix time in nanoseconds> sandbox=<sandbox id> seed=<hex> order=<generation>.<revision> owner=<owner epoch>
+//! restored <unix time in nanoseconds> sandbox=<sandbox id> seed=<hex> order=<generation>.<revision> owner=<owner epoch> disk=<bytes>
 //! ```
 //!
 //! The guest sets its clock, drops connections it opened before the
@@ -33,6 +33,16 @@
 //! sandbox is used only after `ok seeded`: until it reseeds, it draws the
 //! numbers every other clone of the same snapshot draws. Later
 //! `key=value` fields may follow; a guest ignores those it does not know.
+//!
+//! `disk` is how long the sandbox's disk is, as the host made it: a claim
+//! or a create from a template may have made it longer than the memory the
+//! guest wakes with knows, and the guest's kernel learns of that only once
+//! it handles its disk's change after the resume. Before it answers, the
+//! guest waits for its kernel to see the disk that long and grows its root
+//! file system to fill it, so a sandbox is never used with less room than
+//! it asked for. A guest of a release before this grows it a moment after
+//! it answers.
+//!
 //! The host retries until the guest answers or a deadline passes, so set a
 //! notice port only for guest images that listen on it; a guest that never
 //! answers costs every restore the whole deadline (and still runs).
@@ -81,6 +91,20 @@
 //! files freed, and the saved disk, its archive and its copies hold only
 //! what they use. A guest that does not trim keeps its disk's file as
 //! large as its guest ever filled it.
+//!
+//! When the host is short of memory and a sandbox holds more than it
+//! requested, the host may ask its guest to give memory back (ADR 24):
+//!
+//! ```text
+//! shrink free=<bytes> keep=<bytes>
+//! ```
+//!
+//! The guest drops its file cache, then ends the processes its kernel's
+//! out-of-memory killer would end first, never those its init supervises,
+//! until `free` more bytes are free or no more than `keep` are in use, and
+//! answers `shrunk freed=<bytes> spent=<0|1> ended=<count> names=<a,b>`:
+//! what it freed, whether nothing is left that it may end, and what it
+//! ended. A guest of a release before this does not answer.
 //!
 //! Last, while a sandbox runs the host connects to the port every so often
 //! without sending a line, and closes the connection again: a guest reads
@@ -134,17 +158,24 @@ fn unix_nanos(at: SystemTime) -> io::Result<u128> {
 }
 
 /// Formats the notice to sandbox `sandbox` with `seed` at `order` for the
-/// time `now`.
+/// time `now`, with its disk's length, if known.
 fn notice(
     now: SystemTime,
     sandbox: impl fmt::Display,
     seed: &str,
     (owner, generation, revision): Order,
+    disk: Option<u64>,
 ) -> io::Result<String> {
+    use std::fmt::Write as _;
     let nanos = unix_nanos(now)?;
-    Ok(format!(
-        "restored {nanos} sandbox={sandbox} seed={seed} order={generation}.{revision} owner={owner}\n"
-    ))
+    let mut line = format!(
+        "restored {nanos} sandbox={sandbox} seed={seed} order={generation}.{revision} owner={owner}"
+    );
+    if let Some(disk) = disk {
+        let _ = write!(line, " disk={disk}");
+    }
+    line.push('\n');
+    Ok(line)
 }
 
 /// 32 bytes from the host's random number generator, in hex.
@@ -169,9 +200,10 @@ const FIRST_ATTEMPT: Duration = Duration::from_secs(1);
 /// Pause before trying again after the guest dropped the connection.
 const RETRY_PAUSE: Duration = Duration::from_millis(5);
 
-/// Tells the guest of sandbox `sandbox`, whose record is at `order`, through
-/// the VM's vsock socket and waits for its answer, trying again until
-/// `deadline` has passed.
+/// Tells the guest of sandbox `sandbox`, whose record is at `order` and
+/// whose disk is `disk` bytes long (if known), through the VM's vsock
+/// socket and waits for its answer, trying again until `deadline` has
+/// passed.
 ///
 /// Retrying matters right after a restore: the guest kernel first handles
 /// the VMM's vsock transport reset, and a connection that arrives in that
@@ -189,6 +221,7 @@ pub async fn tell_restored(
     port: u32,
     sandbox: impl fmt::Display,
     order: Order,
+    disk: Option<u64>,
     deadline: Duration,
 ) -> io::Result<Told> {
     let sandbox = sandbox.to_string();
@@ -201,7 +234,7 @@ pub async fn tell_restored(
         let left = give_up.saturating_duration_since(Instant::now());
         let error = match tokio::time::timeout(
             wait.min(left),
-            exchange(vsock_socket, port, &sandbox, &seed, order),
+            exchange(vsock_socket, port, &sandbox, &seed, order, disk),
         )
         .await
         {
@@ -232,10 +265,11 @@ async fn exchange(
     sandbox: &str,
     seed: &str,
     order: Order,
+    disk: Option<u64>,
 ) -> io::Result<bool> {
     let mut stream = vsock::connect(vsock_socket, port).await?;
     stream
-        .write_all(notice(SystemTime::now(), sandbox, seed, order)?.as_bytes())
+        .write_all(notice(SystemTime::now(), sandbox, seed, order, disk)?.as_bytes())
         .await?;
     let mut answer = Vec::with_capacity(SEEDED.len() + 1);
     let mut byte = [0_u8; 1];
@@ -417,6 +451,97 @@ pub async fn ask_sync(vsock_socket: &Path, port: u32, limit: Duration) -> io::Re
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "the guest did not answer sync"))?
 }
 
+/// How a guest answered `shrink`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Shrunk {
+    /// Bytes more free in the guest than before.
+    pub freed: u64,
+    /// Whether nothing is left that it may end.
+    pub spent: bool,
+    /// How many processes it ended.
+    pub ended: u32,
+    /// The names of some of them.
+    pub names: Vec<String>,
+}
+
+/// The longest answer to `shrink` the host reads.
+const MAX_SHRUNK: usize = 512;
+
+/// Parses the guest's answer to `shrink`, without its newline.
+fn parse_shrunk(line: &str) -> Option<Shrunk> {
+    let mut words = line.split_whitespace();
+    if words.next()? != "shrunk" {
+        return None;
+    }
+    let (mut freed, mut spent, mut ended, mut names) = (None, None, 0, Vec::new());
+    for field in words {
+        let (key, value) = field.split_once('=').unwrap_or((field, ""));
+        match key {
+            "freed" => freed = value.parse().ok(),
+            "spent" => spent = Some(value == "1"),
+            "ended" => ended = value.parse().unwrap_or(0),
+            "names" => {
+                names = value
+                    .split(',')
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+            }
+            _ => {}
+        }
+    }
+    Some(Shrunk {
+        freed: freed?,
+        spent: spent?,
+        ended,
+        names,
+    })
+}
+
+/// Asks a running guest to free `free` bytes of memory for the host,
+/// keeping at least `keep` in use (see the module documentation), and
+/// waits at most `limit` for its answer.
+///
+/// # Errors
+///
+/// The guest could not be reached, did not answer in time (also a guest
+/// that does not know the request), or answered something else.
+pub async fn ask_shrink(
+    vsock_socket: &Path,
+    port: u32,
+    free: u64,
+    keep: u64,
+    limit: Duration,
+) -> io::Result<Shrunk> {
+    let asked = async {
+        let mut stream = vsock::connect(vsock_socket, port).await?;
+        stream
+            .write_all(format!("shrink free={free} keep={keep}\n").as_bytes())
+            .await?;
+        let mut answer = Vec::with_capacity(64);
+        let mut byte = [0_u8; 1];
+        while answer.len() <= MAX_SHRUNK {
+            stream.read_exact(&mut byte).await?;
+            if byte[0] == b'\n' {
+                return std::str::from_utf8(&answer)
+                    .ok()
+                    .and_then(parse_shrunk)
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "unexpected answer to shrink")
+                    });
+            }
+            answer.push(byte[0]);
+        }
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "answer to shrink too long",
+        ))
+    };
+    tokio::time::timeout(limit, asked)
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "the guest did not answer shrink"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -426,11 +551,46 @@ mod tests {
     const ORDER: Order = (2, 4, 9);
 
     #[test]
-    fn the_notice_carries_unix_nanoseconds_and_the_record_fence() {
+    fn reads_what_a_guest_freed_and_ended() {
+        assert_eq!(
+            parse_shrunk("shrunk freed=5242880 spent=0 ended=3 names=cc1plus,node later=x"),
+            Some(Shrunk {
+                freed: 5 << 20,
+                spent: false,
+                ended: 3,
+                names: vec!["cc1plus".into(), "node".into()],
+            })
+        );
+        assert_eq!(
+            parse_shrunk("shrunk freed=0 spent=1 ended=0 names="),
+            Some(Shrunk {
+                freed: 0,
+                spent: true,
+                ended: 0,
+                names: Vec::new(),
+            })
+        );
+        for line in [
+            "",
+            "ok",
+            "shrunk spent=1",
+            "shrunk freed=x spent=0",
+            "synced",
+        ] {
+            assert_eq!(parse_shrunk(line), None, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn the_notice_carries_unix_nanoseconds_the_record_fence_and_the_disk() {
         let at = UNIX_EPOCH + Duration::new(1_700_000_000, 5);
         assert_eq!(
-            notice(at, "00ab", "5eed", ORDER).unwrap(),
+            notice(at, "00ab", "5eed", ORDER, None).unwrap(),
             "restored 1700000000000000005 sandbox=00ab seed=5eed order=4.9 owner=2\n"
+        );
+        assert_eq!(
+            notice(at, "00ab", "5eed", ORDER, Some(21_474_836_480)).unwrap(),
+            "restored 1700000000000000005 sandbox=00ab seed=5eed order=4.9 owner=2 disk=21474836480\n"
         );
     }
 
@@ -487,7 +647,7 @@ mod tests {
             ("seeded", b"ok seeded\n", true),
         ] {
             let socket = guest(name, Box::leak(Box::new([Some(answer)])));
-            let told = tell_restored(&socket, 53, 7, ORDER, Duration::from_secs(5))
+            let told = tell_restored(&socket, 53, 7, ORDER, None, Duration::from_secs(5))
                 .await
                 .unwrap();
             assert_eq!(
@@ -503,7 +663,7 @@ mod tests {
     #[tokio::test]
     async fn a_guest_resetting_its_transport_is_told_on_a_later_attempt() {
         let socket = guest("reset", &[None, Some(b""), Some(b"ok seeded\n")]);
-        let told = tell_restored(&socket, 53, 7, ORDER, Duration::from_secs(5))
+        let told = tell_restored(&socket, 53, 7, ORDER, None, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(told.attempts, 3);
@@ -518,7 +678,7 @@ mod tests {
             ("stale", b"stale\n"),
         ] {
             let socket = guest(name, Box::leak(Box::new([Some(answer), Some(b"ok\n")])));
-            let error = tell_restored(&socket, 53, 7, ORDER, Duration::from_secs(5))
+            let error = tell_restored(&socket, 53, 7, ORDER, None, Duration::from_secs(5))
                 .await
                 .unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{name}");
@@ -699,7 +859,7 @@ mod tests {
     #[tokio::test]
     async fn a_silent_guest_times_out() {
         let socket = guest("silent", &[Some(b""), Some(b""), Some(b"")]);
-        let error = tell_restored(&socket, 53, 7, ORDER, Duration::from_millis(200))
+        let error = tell_restored(&socket, 53, 7, ORDER, None, Duration::from_millis(200))
             .await
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);

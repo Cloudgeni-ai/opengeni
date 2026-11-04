@@ -487,7 +487,7 @@ export function OrganizationOnboardingPanel({
               We couldn't update your invitations. {invitationError}
             </p>
           ) : wrongAccount ? (
-            <div className="mt-4 rounded-md border border-border bg-surface-subtle p-3">
+            <div className="mt-4 rounded-md border border-border bg-surface-2 p-3">
               <p className="text-sm text-fg-subtle">
                 Use the account for {invitation?.targetEmail}. The invitation remains available
                 while you switch.

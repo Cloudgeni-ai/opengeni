@@ -1,5 +1,6 @@
 import {
   DEFAULT_AGENT_INSTRUCTIONS,
+  DEFAULT_BILLING_LEGACY_ACCOUNT_IDS,
   DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS,
   DEFAULT_GOAL_IDLE_BACKOFF_MS,
   DEFAULT_MODEL_COST_POLICY_JSON,
@@ -11,6 +12,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     slackAccessMode: "limited",
     microsoftTeamsToolsEnabled: false,
     microsoftTeamsAllowedWorkspaceIds: [],
+    billingLegacyAccountIds: [...DEFAULT_BILLING_LEGACY_ACCOUNT_IDS],
+    paidHostedToolsCreditBilling: true,
     teamsBotEnabled: false,
     teamsBotAllowedTenantIds: [],
     teamsBotAllowedChannelIds: [],
@@ -18,6 +21,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     teamsBotSetupAdminIds: [],
     signupChallengeEnabled: false,
     signupChallengeHostnames: "",
+    decisionModelAuth: "api_key",
     serviceName: "opengeni",
     officeAddinName: "Opengeni",
     browserExtensionName: "Opengeni Browser",
@@ -89,6 +93,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     organizationUserSetupQueryEdgeSanitizationConfirmed: false,
     billingMode: "disabled",
     subscriptionPlansEnabled: false,
+    // Off in fixtures; bring-your-own-key fee tests opt in.
+    byokPlatformFeeBps: 0,
     verifiedSignupTrialCreditsEnabled: false,
     creditPromotionPolicy: { offers: {} },
     sandboxWarmBillingMode: "usage_only",
@@ -175,6 +181,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     // Tests model a complete deployment; the production defaults are false.
     artifactMaterializerDeployed: true,
     eventTriggersEnabled: true,
+    automationMaxChainDepth: 3,
     streamTokenSecret: undefined,
     streamControlEnabled: false,
     workDiscoveryEnabled: true,
@@ -215,6 +222,9 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     slackWorkspaceRoutingEnabled: false,
     agentMaxModelCallsPerTurn: 40,
     contextWindowTokens: 1_050_000,
+    // Existing turn fixtures assert exact post-turn state; tests that exercise
+    // the idle checkpoint request enable it explicitly.
+    idleContextCompactionEnabled: false,
     contextCompactionThresholdRatio: 0.9,
     contextReservedOutputTokens: 128_000,
     modelToolOutputTruncationTokens: 10_000,
@@ -507,6 +517,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     documentEmbeddingDimensions: 3072,
     documentEmbeddingApiKey: undefined,
     documentEmbeddingBaseUrl: undefined,
+    documentEmbeddingAuth: "api_key",
     documentCurationProvider: "heuristic",
     documentCurationModel: "gpt-4o-mini",
     documentCurationApiKey: undefined,

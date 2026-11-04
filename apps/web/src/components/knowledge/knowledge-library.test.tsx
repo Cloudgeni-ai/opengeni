@@ -116,7 +116,7 @@ function Harness({
   filters?: Record<string, string[]>;
 }) {
   const [view, setView] = useState({
-    ...initialLibraryView(false),
+    ...initialLibraryView(),
     ...(collections ? { layout: "collections" as const } : {}),
     ...(added ? { filters: { added: [added] } } : {}),
     ...(filters ? { filters } : {}),
@@ -302,7 +302,7 @@ test("an empty Library explains itself with the add actions instead of a toolbar
 });
 
 test("uploads and old Files links show files even from Collections", () => {
-  const fromCollections = { ...initialLibraryView(false), layout: "collections" as const };
+  const fromCollections = { ...initialLibraryView(), layout: "collections" as const };
   expect(libraryFilesView(fromCollections)).toEqual({
     ...fromCollections,
     layout: "list",

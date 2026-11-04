@@ -15,7 +15,15 @@ import OpenAI from "openai";
 import { testSettings } from "@opengeni/testing";
 import { createHttpDecisionModel } from "@opengeni/decisions";
 import { ToolSearchIndex } from "../src/tool-discovery-ranking";
+import { toolDescriptor } from "../src/tool-discovery-catalog";
 import { rankToolPool } from "../src/codex-tool-search";
+import {
+  CONNECTED_TOOL_CATALOG,
+  GMAIL_TOOLS,
+  OUTLOOK_MAIL_TOOLS,
+  withAccount,
+  type CatalogTool,
+} from "./fixtures/connected-tool-catalog";
 import {
   catalogConnectableIntegrationLookup,
   connectableIntegrationNotice,
@@ -32,10 +40,14 @@ import {
   type ConnectedToolAccount,
 } from "../src/lazy-tool-transport";
 import { baseModelInputFilterForSettings } from "../src/model-input";
+import { prefixedMcpToolName } from "../src/mcp-model-tool-name";
 import { projectHistoryForProvider, TOOL_DISCLOSURE_KEY } from "../src/provider-history-adapter";
 import {
   createToolSelector,
+  selectFromJudgments,
+  TOOL_SELECTION_POLICY,
   toolSelectionRequest,
+  type ToolDecisionInput,
   type ToolSelector,
 } from "../src/tool-discovery-decision";
 
@@ -57,6 +69,18 @@ function candidate(
   }) as Tool;
 }
 const names = (tools: Tool[]) => tools.map((t) => (t as Tool & { name: string }).name);
+/** A selector that judges every candidate from a fixed table (default 0). */
+const judge =
+  (table: Record<string, number>, seen?: ToolDecisionInput[]): ToolSelector =>
+  async (input) => {
+    seen?.push(input);
+    return input.candidates.map((c) => ({
+      name: c.name,
+      probability: table[c.name] ?? 0,
+    }));
+  };
+const catalogTool = (t: CatalogTool) =>
+  candidate(`${t.source}__${t.name}`, t.description, t.inputSchema);
 const call = (id: string, name: string, args: unknown) => ({
   type: "function_call" as const,
   callId: id,
@@ -136,6 +160,45 @@ describe("tool discovery ranking", () => {
     expect(index.rank("the and of", 8)).toEqual([]);
     expect(index.rank("unmatched qqq", 8)).toEqual([]);
     expect(index.rank("hent faktura", 1)).toEqual([entry]);
+  });
+  test("ranks a connected account's tools past their account line", () => {
+    // With several accounts of one connector every description starts with
+    // the same account line; it must not stand in for the capability sentence.
+    const plain = CONNECTED_TOOL_CATALOG.map(catalogTool);
+    const lined = CONNECTED_TOOL_CATALOG.map((t) =>
+      t.source === "mcp__gmail" ? withAccount([t], t.source, "Gmail (a@example.com)")[0]! : t,
+    ).map(catalogTool);
+    expect((lined[0] as { description: string }).description).toStartWith(
+      "Account: Gmail (a@example.com). Use only this account;",
+    );
+    for (const query of [
+      "Search and read user's email inbox recent unread emails",
+      "send an email",
+      "list my email labels",
+      "show the open issues",
+    ]) {
+      expect(names(new ToolSearchIndex(lined).rank(query, 8))).toEqual(
+        names(new ToolSearchIndex(plain).rank(query, 8)),
+      );
+      expect(names(new ToolSearchIndex(lined).bestMatches(query))).toEqual(
+        names(new ToolSearchIndex(plain).bestMatches(query)),
+      );
+    }
+  });
+  test("a compact preview names the account, then what the tool does", () => {
+    const [search] = withAccount(GMAIL_TOOLS, "mcp__gmail", "Gmail (a@example.com)").filter(
+      (t) => t.name === "search_messages",
+    );
+    const descriptor = toolDescriptor(catalogTool(search!) as Tool & { name: string });
+    expect(descriptor.description).toStartWith(
+      "Account: Gmail (a@example.com). Searches individual messages using Gmail query syntax",
+    );
+    expect(Array.from(descriptor.description)).toHaveLength(160);
+    // A description without the runtime's account line is previewed unchanged.
+    const plain = candidate("x__y", "Account: one line someone wrote.\nMore.");
+    expect(toolDescriptor(plain as Tool & { name: string }).description).toBe(
+      "Account: one line someone wrote.\nMore.",
+    );
   });
 });
 
@@ -235,10 +298,10 @@ describe("compact candidates and exact schema loading", () => {
   test("a mistyped exact name returns compact recovery suggestions, not schemas", async () => {
     const runtime = new LazyToolRuntime("generic_dispatch", new Set());
     runtime.refresh([candidate("tasks__search", "Search tasks")]);
-    const result = await runtime.prepareSearch({ query: "", names: ["tasks.search"] });
+    const result = await runtime.prepareSearch({ query: "", names: ["tasks.serch"] });
     expect(JSON.parse(result.output)).toMatchObject({
       schemasLoaded: false,
-      unavailable: ["tasks.search"],
+      unavailable: ["tasks.serch"],
       suggestions: [{ name: "tasks__search" }],
     });
     expect(result.tools).toEqual([]);
@@ -363,28 +426,37 @@ describe("decision selection", () => {
         .map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }));
     expect(controls(configured)).toEqual(controls(plain));
   });
-  test("strong matches load without inference and alternatives remain unloaded", async () => {
-    const runtime = decisionRuntime(async () => {
-      throw new Error("must bypass inference");
+  test("a strong keyword match still goes to the selector, which can overrule it", async () => {
+    let calls = 0;
+    const runtime = decisionRuntime(async (input) => {
+      calls++;
+      return judge({ tasks__history: 0.9 })(input);
     });
     runtime.refresh([
       candidate("tasks__get", "Get task details"),
-      candidate("tasks__delete", "Delete task"),
+      candidate("tasks__history", "What changed on a task, including who changed its details"),
     ]);
     const result = await runtime.prepareSearch({ query: "get task details" });
-    expect(result.tools?.map((t) => t.name)).toEqual(["tasks__get"]);
-    expect(JSON.parse(result.output)).toMatchObject({
-      schemasLoaded: true,
-      suggestions: [{ name: "tasks__delete" }],
-    });
+    expect(calls).toBe(1);
+    expect(result.tools?.map((t) => t.name)).toEqual(["tasks__history"]);
+    // A clear choice shows no alternatives.
+    expect(JSON.parse(result.output).suggestions).toBeUndefined();
   });
-  test("the no-model default loads the strongest match but leaves exact ties compact", async () => {
+  test("the no-model default loads the strongest match, or the top-ranked one on a tie", async () => {
     const runtime = new LazyToolRuntime("generic_dispatch", new Set());
     runtime.refresh([candidate("tasks__get", "Get task"), candidate("tasks__read", "Read task")]);
     expect((await runtime.prepareSearch({ query: "get task" })).tools?.map((t) => t.name)).toEqual([
       "tasks__get",
     ]);
-    expect((await runtime.prepareSearch({ query: "task" })).tools).toEqual([]);
+    // A tie or a clause without resource words never comes back empty: the
+    // top-ranked candidate loads and the others stay visible.
+    const tie = await runtime.prepareSearch({ query: "task" });
+    expect(tie.tools).toHaveLength(1);
+    expect(JSON.parse(tie.output)).toMatchObject({
+      schemasLoaded: true,
+      tools: [{ name: "tasks__get" }],
+      suggestions: [{ name: "tasks__read" }],
+    });
   });
   test("selects only authorized candidates, returns a compact receipt and freezes selected schemas", async () => {
     let calls = 0;
@@ -392,7 +464,7 @@ describe("decision selection", () => {
       calls++;
       expect(input.candidates).toHaveLength(2);
       expect(JSON.stringify(input.candidates)).not.toContain('"parameters"');
-      return ["tasks__get"];
+      return judge({ tasks__get: 0.9 })(input);
     });
     runtime.refresh([candidate("tasks__get", "Get task"), candidate("tasks__list", "List tasks")]);
     const selected = await runtime.prepareSearch({ query: "task" });
@@ -406,7 +478,7 @@ describe("decision selection", () => {
     runtime.refresh([]);
     expect(JSON.stringify(selected)).toBe(original);
   });
-  test("exact names bypass inference; unavailable or invalid decisions fall back without schemas", async () => {
+  test("exact names bypass inference; unavailable or invalid decisions fall back to keywords", async () => {
     let calls = 0;
     const runtime = decisionRuntime(async () => {
       calls++;
@@ -416,18 +488,39 @@ describe("decision selection", () => {
     expect((await runtime.prepareSearch({ query: "", names: ["tasks__get"] })).tools).toHaveLength(
       1,
     );
+    expect(
+      (await runtime.prepareSearch({ query: "tasks__read tasks.get" })).tools?.map((t) => t.name),
+    ).toEqual(["tasks__read", "tasks__get"]);
     expect(calls).toBe(0);
     const fallback = await runtime.prepareSearch({ query: "task" });
     expect(calls).toBe(1);
     expect(JSON.parse(fallback.output)).toMatchObject({
-      schemasLoaded: false,
+      schemasLoaded: true,
       fallback: "decision_model_unavailable",
     });
-    expect(fallback.tools).toEqual([]);
+    expect(fallback.tools).toHaveLength(1);
     expect(fallback.output).not.toContain("secret");
-    const invalid = decisionRuntime(async () => ["not_authorized"]);
-    invalid.refresh([candidate("tasks__get", "Get task"), candidate("tasks__read", "Read task")]);
-    expect((await invalid.prepareSearch({ query: "task" })).tools).toEqual([]);
+    // Unknown names, missing candidates, out-of-range or duplicate judgments
+    // are all invalid: nothing the selector named is trusted.
+    for (const answer of [
+      [{ name: "not_authorized", probability: 1 }],
+      [{ name: "tasks__get", probability: 0.9 }],
+      [
+        { name: "tasks__get", probability: 1.5 },
+        { name: "tasks__read", probability: 0 },
+      ],
+      [
+        { name: "tasks__get", probability: 0.9 },
+        { name: "tasks__get", probability: 0.9 },
+      ],
+      ["tasks__get", "tasks__read"],
+    ]) {
+      const invalid = decisionRuntime(async () => answer as never);
+      invalid.refresh([candidate("tasks__get", "Get task"), candidate("tasks__read", "Read task")]);
+      const result = await invalid.prepareSearch({ query: "task" });
+      expect(JSON.parse(result.output).fallback).toBe("decision_model_unavailable");
+      expect(result.output).not.toContain("not_authorized");
+    }
   });
   test("an unavailable selector retains the usable best-match-first fallback", async () => {
     let calls = 0;
@@ -448,10 +541,36 @@ describe("decision selection", () => {
     });
     expect(result.output).not.toContain("private");
   });
+  test("a selector that does not answer by the deadline falls back; the turn's cancellation still wins", async () => {
+    const policy = TOOL_SELECTION_POLICY as { deadlineMs: number };
+    const original = policy.deadlineMs;
+    policy.deadlineMs = 20;
+    try {
+      const hanging = decisionRuntime(
+        (input) =>
+          new Promise((_, reject) =>
+            input.signal?.addEventListener("abort", () => reject(input.signal!.reason)),
+          ),
+      );
+      hanging.refresh([
+        candidate("tasks__get", "Get task"),
+        candidate("tasks__get_details", "Get task"),
+      ]);
+      const result = await hanging.prepareSearch({ query: "get task" });
+      expect(result.tools?.map((t) => t.name)).toEqual(["tasks__get"]);
+      expect(JSON.parse(result.output).fallback).toBe("decision_model_unavailable");
+      const turn = new AbortController();
+      const cancelled = hanging.prepareSearch({ query: "get task" }, turn.signal);
+      turn.abort(new Error("turn cancelled"));
+      await expect(cancelled).rejects.toThrow("turn cancelled");
+    } finally {
+      policy.deadlineMs = original;
+    }
+  });
   test("revocation during inference cannot disclose the old tool; cancellation is not a fallback", async () => {
-    const runtime = decisionRuntime(async () => {
+    const runtime = decisionRuntime(async (input) => {
       runtime.refresh([]);
-      return ["tasks__get"];
+      return judge({ tasks__get: 0.9 })(input);
     });
     runtime.refresh([candidate("tasks__get", "Get task"), candidate("tasks__read", "Read task")]);
     const revoked = await runtime.prepareSearch({ query: "task" });
@@ -471,6 +590,254 @@ describe("decision selection", () => {
     const second = toolSelectionRequest({ query: "second", candidates });
     expect(first.input.candidates).toEqual(second.input.candidates);
     expect(first.questions).toEqual(second.questions);
+  });
+  test("judgments load what clears the threshold, else the most probable, and say when unsure", () => {
+    const j = (...ps: number[]) => ps.map((probability, i) => ({ name: `t${i}`, probability }));
+    // Clear: one above the threshold and nothing close behind.
+    expect(selectFromJudgments(j(0.1, 0.92, 0.05))).toEqual({
+      load: ["t1"],
+      rest: ["t0", "t2"],
+      clear: true,
+    });
+    // Nothing above the threshold: the most probable still loads, unsure.
+    expect(selectFromJudgments(j(0.2, 0.4, 0.3))).toMatchObject({
+      load: ["t1"],
+      clear: false,
+    });
+    // A close runner-up makes a confident pick unsure.
+    expect(selectFromJudgments(j(0.9, 0.3))).toMatchObject({
+      load: ["t0"],
+      clear: false,
+    });
+    // Several needs load every tool judged requested, bounded only by the page size.
+    expect(selectFromJudgments(j(0.9, 0.8, 0.7, 0.6, 0.55, 0.3)).load).toEqual([
+      "t0",
+      "t1",
+      "t2",
+      "t3",
+      "t4",
+    ]);
+    expect(selectFromJudgments(j(0.9, 0.8), 1).load).toEqual(["t0"]);
+    // Ties keep candidate (ranking) order.
+    expect(selectFromJudgments(j(0.1, 0.1)).load).toEqual(["t0"]);
+  });
+  test("a candidate the model declined to judge is shown first, never silently dropped", () => {
+    const judgments = [
+      { name: "a", probability: 0.92 },
+      { name: "b", probability: 0, answered: false as const },
+      { name: "c", probability: 0.05 },
+    ];
+    expect(selectFromJudgments(judgments)).toEqual({ load: ["a"], rest: ["b", "c"], clear: false });
+    // With nothing judged above the threshold, a judged candidate loads first.
+    expect(selectFromJudgments([judgments[1]!, judgments[2]!]).load).toEqual(["c"]);
+  });
+  test("one declined candidate keeps the other judgments; declining all fails", async () => {
+    const answering = (answers: Record<string, unknown>) =>
+      createToolSelector(
+        createHttpDecisionModel({
+          provider: "openrouter",
+          model: "test",
+          apiKey: "test-only",
+          fetch: (async () => Response.json({ answers, usage: {} })) as typeof fetch,
+        }),
+      );
+    const candidates = ["tasks__get", "tasks__list"].map((name) => ({
+      name,
+      description: name,
+      inputFields: [],
+    }));
+    expect(
+      await answering({ 0: { type: "noul", noul: 0.9 }, 1: { type: "refusal" } })({
+        query: "get task",
+        candidates,
+      }),
+    ).toEqual([
+      { name: "tasks__get", probability: 0.9 },
+      { name: "tasks__list", probability: 0, answered: false },
+    ]);
+    await expect(
+      answering({ 0: { type: "refusal" }, 1: { type: "refusal" } })({
+        query: "get task",
+        candidates,
+      }),
+    ).rejects.toThrow();
+    // An incomplete answer set is still invalid.
+    await expect(
+      answering({ 0: { type: "noul", noul: 0.9 } })({ query: "get task", candidates }),
+    ).rejects.toThrow();
+  });
+  test("a provider blip gets one quick retry; a refusal or a second failure does not", async () => {
+    const candidates = ["tasks__get", "tasks__list"].map((name) => ({
+      name,
+      description: name,
+      inputFields: [],
+    }));
+    const answers = { 0: { type: "noul", noul: 0.9 }, 1: { type: "noul", noul: 0.1 } };
+    const replying = (...statuses: number[]) => {
+      let calls = 0;
+      const select = createToolSelector(
+        createHttpDecisionModel({
+          provider: "openrouter",
+          model: "test",
+          apiKey: "test-only",
+          fetch: (async () => {
+            const status = statuses[calls++] ?? 200;
+            return status === 200
+              ? Response.json({ answers, usage: {} })
+              : new Response("busy", { status });
+          }) as typeof fetch,
+        }),
+      );
+      return { select, calls: () => calls };
+    };
+
+    for (const status of [429, 503]) {
+      const blip = replying(status);
+      expect(await blip.select({ query: "get task", candidates })).toEqual([
+        { name: "tasks__get", probability: 0.9 },
+        { name: "tasks__list", probability: 0.1 },
+      ]);
+      expect(blip.calls()).toBe(2);
+    }
+
+    const refused = replying(403);
+    await expect(refused.select({ query: "get task", candidates })).rejects.toThrow("HTTP 403");
+    expect(refused.calls()).toBe(1);
+
+    const down = replying(429, 429);
+    await expect(down.select({ query: "get task", candidates })).rejects.toThrow("HTTP 429");
+    expect(down.calls()).toBe(2);
+
+    // Cancellation during the pause ends the search instead of retrying.
+    const cancelled = replying(429);
+    const controller = new AbortController();
+    const search = cancelled.select({ query: "get task", candidates, signal: controller.signal });
+    controller.abort();
+    await expect(search).rejects.toThrow();
+    expect(cancelled.calls()).toBe(1);
+  });
+  test("an unsure selector loads its best guess and shows the next candidates", async () => {
+    const runtime = decisionRuntime(
+      judge({
+        reports__activity: 0.45,
+        events__list: 0.4,
+        projects__history: 0.3,
+      }),
+    );
+    runtime.refresh([
+      candidate("events__list", "List events on a project"),
+      candidate("reports__activity", "Activity feed across all projects"),
+      candidate("projects__history", "Change history of one project"),
+      candidate("users__get", "Get a user"),
+    ]);
+    const result = await runtime.prepareSearch({
+      query: "what happened across projects this week",
+    });
+    expect(result.tools?.map((t) => t.name)).toEqual(["reports__activity"]);
+    const output = JSON.parse(result.output);
+    expect(output.suggestions.map((s: { name: string }) => s.name)).toEqual([
+      "events__list",
+      "projects__history",
+    ]);
+  });
+  test("a repeated search tells the selector what loaded and shows only unseen alternatives", async () => {
+    const seen: ToolDecisionInput[] = [];
+    const runtime = decisionRuntime(
+      judge({ a__events: 0.4, b__events: 0.3, c__events: 0.2 }, seen),
+    );
+    runtime.refresh([
+      candidate("a__events", "List events"),
+      candidate("b__events", "List events"),
+      candidate("c__events", "List events"),
+    ]);
+    const first = await runtime.prepareSearch({ query: "events" });
+    expect(first.tools?.map((t) => t.name)).toEqual(["a__events"]);
+    expect(seen[0]!.loadedEarlier).toBeUndefined();
+    const second = await runtime.prepareSearch({ query: "list the events" });
+    expect(seen[1]!.loadedEarlier).toEqual(["a__events"]);
+    // b__events and c__events were already shown, so nothing new to suggest.
+    expect(JSON.parse(second.output).suggestions).toBeUndefined();
+    // The selector context for the first search carried no memory field at all.
+    expect(toolSelectionRequest(seen[0]!).input).not.toHaveProperty("loadedEarlier");
+    expect(toolSelectionRequest(seen[1]!).input).toHaveProperty("loadedEarlier", ["a__events"]);
+  });
+  test("a query naming a tool and asking for more loads the named tool plus the selector's pick", async () => {
+    const seen: ToolDecisionInput[] = [];
+    const runtime = decisionRuntime(judge({ mail__send: 0.9 }, seen));
+    runtime.refresh([
+      candidate("tasks__get", "Get task"),
+      candidate("mail__send", "Send an email"),
+      candidate("mail__draft", "Draft an email"),
+    ]);
+    const result = await runtime.prepareSearch({
+      query: "tasks__get and send an email about it",
+    });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.candidates.map((c) => c.name)).toContain("tasks__get");
+    expect(result.tools?.map((t) => t.name)).toEqual(["tasks__get", "mail__send"]);
+  });
+  test("a tool family followed by operations names one tool per operation", async () => {
+    const seen: ToolDecisionInput[] = [];
+    const runtime = decisionRuntime(judge({}, seen));
+    runtime.refresh([
+      candidate("tickets__support_tickets_create", "Create a support ticket"),
+      candidate("tickets__support_tickets_get", "Read a support ticket"),
+      candidate("tickets__support_tickets_duplicate", "Copy a support ticket"),
+      candidate("tickets__support_tickets_list", "List support tickets"),
+    ]);
+    const result = await runtime.prepareSearch({
+      query: "+support_tickets create get duplicate",
+    });
+    expect(seen).toHaveLength(0);
+    expect(result.tools?.map((t) => t.name)).toEqual([
+      "tickets__support_tickets_create",
+      "tickets__support_tickets_get",
+      "tickets__support_tickets_duplicate",
+    ]);
+  });
+  test("a family that only begins several tool names leaves the choice to the selector", async () => {
+    const seen: ToolDecisionInput[] = [];
+    const runtime = decisionRuntime(judge({ reports__report_templates_list_builtin: 0.8 }, seen));
+    runtime.refresh([
+      candidate("reports__report_templates_list_team", "List a team's report templates"),
+      candidate("reports__report_templates_list_builtin", "List built-in report templates"),
+      candidate("reports__report_runs_list", "List report runs"),
+      candidate("tasks__get", "Get task"),
+    ]);
+    const result = await runtime.prepareSearch({
+      query: "+report_templates list kind finance",
+    });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.candidates.slice(0, 2).map((c) => c.name)).toEqual([
+      "reports__report_templates_list_team",
+      "reports__report_templates_list_builtin",
+    ]);
+    expect(result.tools?.map((t) => t.name)).toEqual(["reports__report_templates_list_builtin"]);
+  });
+  test("tools a candidate's description points to become candidates", async () => {
+    const seen: ToolDecisionInput[] = [];
+    const runtime = decisionRuntime(judge({ dashboards__widgets: 0.9 }, seen));
+    runtime.refresh([
+      candidate(
+        "events__list",
+        "List events. For what happened this week across everything, use dashboards__widgets instead.",
+      ),
+      candidate("dashboards__widgets", "Read dashboard widgets"),
+      candidate("users__get", "Get a user"),
+    ]);
+    const result = await runtime.prepareSearch({
+      query: "events this week",
+      limit: 1,
+    });
+    expect(seen[0]!.candidates.map((c) => c.name)).toContain("dashboards__widgets");
+    expect(result.tools?.map((t) => t.name)).toEqual(["dashboards__widgets"]);
+  });
+  test("the selector reads long descriptions only up to the cap", async () => {
+    const seen: ToolDecisionInput[] = [];
+    const runtime = decisionRuntime(judge({}, seen));
+    runtime.refresh([candidate("tasks__get", `Get task. ${"x".repeat(2000)}`)]);
+    await runtime.prepareSearch({ query: "get a task please" });
+    expect(seen[0]!.candidates[0]!.description.length).toBe(TOOL_SELECTION_POLICY.descriptionChars);
   });
   test("the shared typed implementation records usage even for an invalid answer", async () => {
     let usageCalls = 0;
@@ -543,9 +910,9 @@ test.each(
       undefined,
       undefined,
       decision
-        ? async () => {
+        ? async (input) => {
             decisions++;
-            return ["tasks__read"];
+            return judge({ tasks__read: 0.9 })(input);
           }
         : undefined,
     );
@@ -621,10 +988,12 @@ test.each(["codex_native", "openai_native", "generic_dispatch"] as const)(
         return "read";
       },
     }) as Tool;
+    // The tie loads the top-ranked guess (tasks__get); the exact load then
+    // brings the tool the model actually wants.
     const agent = new Agent({
       name: "discovery",
       model: "scripted",
-      tools: [target, candidate("tasks__get", "Read a task")],
+      tools: [candidate("tasks__get", "Read a task"), target],
     });
     const runtime = installLazyToolRuntime(agent, transport, new Set());
     const model = new ScriptedModel([
@@ -650,6 +1019,15 @@ test.each(["codex_native", "openai_native", "generic_dispatch"] as const)(
     expect(approvals).toBe(1);
     expect(executions).toBe(1);
     expect(JSON.stringify(model.requests[1]!.input)).not.toContain('"required"');
+    // The tie loads one guess; on native routes the other tool follows the
+    // result as a candidate, so the exact load is one call away.
+    if (transport !== "generic_dispatch")
+      expect(model.requests[1]!.input).toContainEqual({
+        type: "message",
+        role: "developer",
+        content:
+          'Close candidates this search did not load:\n- tasks__read: Read a task\nLoad one that fits with tool_search names:["<exact name>"] and query:"".',
+      });
     expect(JSON.stringify(model.requests[2]!.input)).toContain('"required"');
     for (let i = 1; i < model.requests.length; i++) {
       expect(model.requests[i]!.tools).toEqual(model.requests[0]!.tools);
@@ -1414,22 +1792,38 @@ describe("searches that reach one of several connected accounts", () => {
       expect(second.notice).toBeUndefined();
     });
 
-    test(`${transport}: one connected account, first-party tools and names loads change nothing`, async () => {
+    test(`${transport}: one connected account and first-party tools change nothing`, async () => {
       for (const [accounts, args] of [
         [ONLY_GMAIL, { query: "search gmail for new email", limit: 2 }],
+        [ONLY_GMAIL, { query: "", names: [GMAIL_SEARCH] }],
         [BOTH, { query: "notify the person on their phone" }],
-        [BOTH, { query: "", names: [GMAIL_SEARCH] }],
+        [BOTH, { query: "", names: ["opengeni__notify_user"] }],
       ] as const) {
         const runtime = runtimeWith(transport, accounts);
         expect(await runtime.prepareSearch(args)).toEqual(
           await runtimeWith(transport).prepareSearch(args),
         );
-        // Neither kind of search spends the run's one notice.
+        // Neither search spends the turn's one notice.
         if (accounts === BOTH) {
           const later = await runtime.prepareSearch({ query: "search gmail for new email" });
           expect(JSON.parse(later.output).connectedAccounts).toBe(NOTICE);
         }
       }
+    });
+
+    test(`${transport}: loading one account's tools by exact name names the others`, async () => {
+      // Browsing a group and loading exact names reaches an account the same
+      // way a ranked search does.
+      const runtime = runtimeWith(transport, BOTH);
+      const load = await runtime.prepareSearch({ query: "", names: [GMAIL_SEARCH, GMAIL_SEND] });
+      expect(loaded(load)).toEqual([GMAIL_SEARCH, GMAIL_SEND]);
+      const output = JSON.parse(load.output);
+      expect(output.schemasLoaded).toBe(true);
+      expect(output.connectedAccounts).toBe(NOTICE);
+      expect(load.notice).toBe(transport === "generic_dispatch" ? undefined : NOTICE);
+      const again = await runtime.prepareSearch({ query: "", names: [GMAIL_SEARCH] });
+      expect(JSON.parse(again.output).connectedAccounts).toBeUndefined();
+      expect(again.notice).toBeUndefined();
     });
 
     test(`${transport}: a search reaching every connected account names none`, async () => {
@@ -1539,9 +1933,9 @@ describe("searches that reach one of several connected accounts", () => {
     );
   });
 
-  test("compact candidates count as reached only where the output shows them", async () => {
-    // Two accounts' identical tools tie, so the search loads nothing and
-    // lists compact candidates; native outputs cannot show those.
+  test("a tie between two accounts' identical tools loads one and names the others", async () => {
+    // The top-ranked account's tool loads; the other account's identical tool
+    // stays visible as a candidate, and the accounts notice names it.
     const SECOND = "mcp__gmail_work__search_messages";
     const accounts: ReadonlyMap<string, ConnectedToolAccount> = new Map([
       ...BOTH,
@@ -1555,21 +1949,28 @@ describe("searches that reach one of several connected accounts", () => {
       ]);
       return runtime;
     };
-    const args = { query: "search the gmail mailbox for matching email messages", limit: 1 };
+    const args = {
+      query: "search the gmail mailbox for matching email messages",
+    };
     const generic = await tied("generic_dispatch").prepareSearch(args);
-    expect(loaded(generic)).toEqual([]);
+    expect(loaded(generic)).toEqual([GMAIL_SEARCH]);
     const output = JSON.parse(generic.output);
-    expect(output.schemasLoaded).toBe(false);
-    expect(output.connectedAccounts).toStartWith("These tools reach Gmail");
+    expect(output.schemasLoaded).toBe(true);
+    expect(output.suggestions.map((s: { name: string }) => s.name)).toContain(SECOND);
+    expect(output.connectedAccounts).toStartWith("These tools reach Gmail.");
+    expect(output.connectedAccounts).toContain("Gmail (work@example.com)");
     expect(output.connectedAccounts).toContain("Outlook Mail");
     const native = tied("openai_native");
-    const compact = await native.prepareSearch(args);
-    expect(loaded(compact)).toEqual([]);
-    expect(compact.notice).toBeUndefined();
-    // The run's one notice waits for a search the model can see.
-    const later = await native.prepareSearch({ query: "get me messages in the mailbox" });
+    const first = await native.prepareSearch(args);
+    expect(loaded(first)).toEqual([GMAIL_SEARCH]);
+    expect(first.notice).toContain(SECOND);
+    expect(first.notice).toContain("These tools reach Gmail.");
+    // The run's one notice is not repeated.
+    const later = await native.prepareSearch({
+      query: "get me messages in the mailbox",
+    });
     expect(loaded(later)).toEqual([OUTLOOK]);
-    expect(later.notice).toStartWith("These tools reach Outlook Mail. Also connected: Gmail");
+    expect(later.notice ?? "").not.toContain("Also connected");
   });
 
   test("a native search with both notices carries them as one joined notice", async () => {
@@ -1594,6 +1995,388 @@ describe("searches that reach one of several connected accounts", () => {
     const output = JSON.parse(result.output);
     expect(output.notConnected).toStartWith("Not connected yet: Google Calendar");
     expect(output.connectedAccounts).toBe(NOTICE);
-    expect(result.notice).toBe(`${output.notConnected}\n${NOTICE}`);
+    // An uncertain match lists its unloaded candidates first.
+    expect(result.notice).toStartWith("Close candidates this search did not load:\n");
+    expect(result.notice).toEndWith(`\n${output.notConnected}\n${NOTICE}`);
   });
+
+  describe("a vague email search with Gmail and Outlook Mail connected", () => {
+    // The real Gmail tools, and Outlook Mail tools in the shape the OpenAPI
+    // compiler gives Microsoft Graph operations.
+    const gmailTools = GMAIL_TOOLS.map(catalogTool);
+    const outlookTools = OUTLOOK_MAIL_TOOLS.map(catalogTool);
+    const accounts: ReadonlyMap<string, ConnectedToolAccount> = new Map([
+      ...gmailTools.map((t) => [(t as { name: string }).name, gmail] as const),
+      ...outlookTools.map((t) => [(t as { name: string }).name, outlook] as const),
+    ]);
+    const mailRuntime = (transport: "generic_dispatch" | "openai_native" | "codex_native") => {
+      const runtime = runtimeWith(transport, accounts);
+      runtime.refresh([...pool().slice(3), ...gmailTools, ...outlookTools]);
+      return runtime;
+    };
+    // The exact first search of a turn that asked "Have I got any new emails?".
+    const STAGING = { query: "Search and read user's email inbox recent unread emails", limit: 2 };
+
+    for (const transport of ["openai_native", "codex_native"] as const) {
+      test(`${transport}: loads the best candidate, lists the next and names the other mailbox`, async () => {
+        // No tool's own words include "email" or "inbox", so nothing clearly
+        // matches. The search still loads its best candidate and lists the
+        // next one, instead of reading as "No matching tools found".
+        const runtime = mailRuntime(transport);
+        const result = await runtime.prepareSearch(STAGING);
+        expect(loaded(result)).toEqual(["mcp__gmail__search_messages"]);
+        expect(result.notice).toStartWith(
+          "Close candidates this search did not load:\n- mcp__gmail__search_threads: ",
+        );
+        expect(result.notice).toEndWith(`\n${NOTICE}`);
+        // Loading a candidate by exact name follows; the turn's notice is spent.
+        const load = await runtime.prepareSearch({
+          query: "",
+          names: ["mcp__gmail__search_threads"],
+        });
+        expect(loaded(load)).toEqual(["mcp__gmail__search_threads"]);
+        expect(load.notice).toBeUndefined();
+      });
+
+      test(`${transport}: a query nothing ranks for still shows nothing`, async () => {
+        const runtime = mailRuntime(transport);
+        const result = await runtime.prepareSearch({ query: "book a flight to Paris", limit: 2 });
+        expect(loaded(result)).toEqual([]);
+        expect(JSON.parse(result.output).tools).toEqual([]);
+        expect(result.notice).toBeUndefined();
+        // Nothing shown, so the turn's notice is still unspent.
+        expect((await runtime.prepareSearch(STAGING)).notice).toEndWith(NOTICE);
+      });
+    }
+
+    test("generic_dispatch: loads the best candidate and lists the next", async () => {
+      const result = await mailRuntime("generic_dispatch").prepareSearch(STAGING);
+      expect(loaded(result)).toEqual(["mcp__gmail__search_messages"]);
+      const output = JSON.parse(result.output);
+      expect(output.schemasLoaded).toBe(true);
+      expect(output.suggestions.map((t: { name: string }) => t.name)).toContain(
+        "mcp__gmail__search_threads",
+      );
+      expect(output.connectedAccounts).toBe(NOTICE);
+    });
+  });
+});
+
+describe("plain tool names and unloaded candidates on every route", () => {
+  // A hyphenated registry ID and dotted tool names make every model name a
+  // digest alias, as for a large API integration.
+  const REGISTRY = "records-api-0a1b2c";
+  const RECORDS: [string, string][] = [
+    ["projects.search", "Search projects by name or project number."],
+    ["projects.list", "List projects in the organization, one page at a time."],
+    ["projects.list_history", "List the change history of one project."],
+    ["organizations.get", "Get the current organization's profile."],
+    [
+      "organizations.list_activity",
+      "List recent activity events across the whole organization, newest first.",
+    ],
+    ["incidents.get_events", "Get the event history timeline for one incident."],
+    ["billing_plans.update_payment_schedule_series", "Rename a payment schedule series."],
+    ["billing_plans.update_payment_schedule_terms", "Change the terms of a payment schedule."],
+  ];
+  const model = (original: string) => prefixedMcpToolName(REGISTRY, original);
+  const runtimeWith = (transport: "generic_dispatch" | "openai_native" | "codex_native") => {
+    const tools = RECORDS.map(([original, description]) => candidate(model(original), description));
+    const mapping = new Map(tools.map((t) => [(t as Tool & { name: string }).name, REGISTRY]));
+    const runtime = new LazyToolRuntime(
+      transport,
+      new Set([REGISTRY]),
+      undefined,
+      new Set([REGISTRY]),
+      new Set(),
+      () => mapping,
+    );
+    runtime.refresh([
+      ...tools,
+      candidate("opengeni__goal_complete", "Mark the session goal as completed."),
+    ]);
+    return runtime;
+  };
+  const loaded = (result: { tools?: { name?: unknown }[] }) =>
+    result.tools?.map((t) => t.name) ?? [];
+
+  test("names are digest aliases whose part is sanitized and shortened", () => {
+    expect(model("projects.search")).toMatch(/^mcp_[0-9a-f]{24}__projects_search$/);
+    expect(model("billing_plans.update_payment_schedule_terms")).toEndWith(
+      "__billing_plans_update_payment_sched",
+    );
+    expect(model("billing_plans.update_payment_schedule_series")).toEndWith(
+      "__billing_plans_update_payment_sched",
+    );
+  });
+
+  for (const transport of ["generic_dispatch", "openai_native", "codex_native"] as const) {
+    test(`${transport}: exact-name loads accept the names servers, Skills and code use`, async () => {
+      const runtime = runtimeWith(transport);
+      for (const [name, expected] of [
+        ["projects.search", model("projects.search")],
+        ["projects_search", model("projects.search")],
+        ["projects-search", model("projects.search")],
+        ["opengeni.goal_complete", "opengeni__goal_complete"],
+        // The shortened parts are equal; the exact published name decides.
+        [
+          "billing_plans.update_payment_schedule_terms",
+          model("billing_plans.update_payment_schedule_terms"),
+        ],
+        [
+          "billing_plans.update_payment_schedule_series",
+          model("billing_plans.update_payment_schedule_series"),
+        ],
+      ] as const) {
+        const result = await runtime.prepareSearch({ query: "", names: [name] });
+        expect(loaded(result)).toEqual([expected]);
+        expect(JSON.parse(result.output).unavailable).toEqual([]);
+        expect(result.notice).toBeUndefined();
+      }
+    });
+
+    test(`${transport}: a query naming tools in dotted form loads them without candidates`, async () => {
+      const runtime = runtimeWith(transport);
+      const result = await runtime.prepareSearch({
+        query: "use projects.list and projects.list_history to read recently changed projects.",
+      });
+      expect(loaded(result)).toEqual([model("projects.list"), model("projects.list_history")]);
+      expect(result.notice).toBeUndefined();
+    });
+  }
+
+  test("a dotted token that names nothing as a whole still names its underscored part", async () => {
+    const runtime = runtimeWith("openai_native");
+    const result = await runtime.prepareSearch({ query: "call tools.opengeni.goal_complete now" });
+    expect(loaded(result)).toEqual(["opengeni__goal_complete"]);
+  });
+
+  test("a shortened name resolves by the spelling the agent used, never to its look-alikes", async () => {
+    const terms = model("billing_plans.update_payment_schedule_terms");
+    const series = model("billing_plans.update_payment_schedule_series");
+    for (const transport of ["generic_dispatch", "codex_native"] as const) {
+      // The server spells it with a dot; agents also write it with underscores.
+      for (const name of [
+        "billing_plans_update_payment_schedule_terms",
+        "billing_plans-update_payment_schedule_terms",
+      ]) {
+        expect(loaded(await runtimeWith(transport).prepareSearch({ query: name }))).toEqual([
+          terms,
+        ]);
+        expect(
+          loaded(await runtimeWith(transport).prepareSearch({ query: "", names: [name] })),
+        ).toEqual([terms]);
+      }
+      // A name both shortened tools begin, but neither is, picks neither by name.
+      const ambiguous = await runtimeWith(transport).prepareSearch({
+        query: "billing_plans_update_payment_schedule",
+      });
+      expect(loaded(ambiguous)).not.toEqual([series, terms]);
+      expect(loaded(ambiguous)).not.toEqual([terms, series]);
+    }
+
+    // The server spells it with underscores; agents also write a dot.
+    const REQUESTS = "requests-api-3c4d5e";
+    const forms = ["ticket", "order", "quote"].map((kind) =>
+      prefixedMcpToolName(REQUESTS, `customer_request_drafts_convert_to_${kind}`),
+    );
+    expect(new Set(forms.map((name) => name.split("__")[1])).size).toBe(1);
+    const runtime = new LazyToolRuntime(
+      "codex_native",
+      new Set([REQUESTS]),
+      undefined,
+      new Set([REQUESTS]),
+      new Set(),
+      () => new Map(forms.map((name) => [name, REQUESTS])),
+    );
+    runtime.refresh(forms.map((name) => candidate(name, "Convert a customer request draft.")));
+    for (const query of [
+      "customer_request_drafts.convert_to_ticket",
+      "customer_request_drafts_convert_to_ticket",
+    ])
+      expect(loaded(await runtime.prepareSearch({ query }))).toEqual([forms[0]!]);
+
+    // The decision model reads each shortened sibling's full published name.
+    const seen: ToolDecisionInput[] = [];
+    const published = new Map(
+      ["ticket", "order", "quote"].map(
+        (kind, i) => [forms[i]!, `customer_request_drafts_convert_to_${kind}`] as const,
+      ),
+    );
+    const deciding = new LazyToolRuntime(
+      "codex_native",
+      new Set([REQUESTS]),
+      undefined,
+      new Set([REQUESTS]),
+      new Set(),
+      () => new Map(forms.map((name) => [name, REQUESTS])),
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      judge({ [forms[1]!]: 0.9 }, seen),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => published,
+    );
+    deciding.refresh(forms.map((name) => candidate(name, "Convert a customer request draft.")));
+    expect(
+      loaded(
+        await deciding.prepareSearch({ query: "turn the customer request draft into an order" }),
+      ),
+    ).toEqual([forms[1]!]);
+    expect(Object.fromEntries(seen[0]!.candidates.map((c) => [c.name, c.fullName]))).toEqual(
+      Object.fromEntries(published),
+    );
+  });
+
+  test("native routes say which close candidates an uncertain search did not load", async () => {
+    const query =
+      "organization-wide event history timeline activity feed across all projects, read-only";
+    const generic = await runtimeWith("generic_dispatch").prepareSearch({ query });
+    const output = JSON.parse(generic.output);
+    const listed = [
+      ...output.tools.map((t: { name: string }) => t.name),
+      ...(output.suggestions ?? []).map((t: { name: string }) => t.name),
+    ];
+    expect(listed).toContain(model("organizations.list_activity"));
+    expect(generic.notice).toBeUndefined();
+    for (const transport of ["openai_native", "codex_native"] as const) {
+      const native = await runtimeWith(transport).prepareSearch({ query });
+      const shown = loaded(native);
+      expect(shown.length).toBeLessThanOrEqual(1);
+      expect(native.notice).toStartWith(
+        shown.length
+          ? "Close candidates this search did not load:\n- "
+          : "No tool loaded. Close candidates:\n- ",
+      );
+      if (!shown.includes(model("organizations.list_activity")))
+        expect(native.notice).toContain(
+          `- ${model("organizations.list_activity")}: List recent activity events across the whole organization`,
+        );
+      for (const name of shown) expect(native.notice).not.toContain(`- ${name}:`);
+      expect(native.notice).toEndWith(
+        'Load one that fits with tool_search names:["<exact name>"] and query:"".',
+      );
+    }
+  });
+
+  test("native routes name unresolved exact names and their closest candidates", async () => {
+    const runtime = runtimeWith("openai_native");
+    const result = await runtime.prepareSearch({
+      query: "",
+      names: ["projects.serch", "projects.list"],
+    });
+    expect(loaded(result)).toEqual([model("projects.list")]);
+    expect(result.notice).toStartWith(
+      'No authorized tool is named "projects.serch".\nClose candidates this search did not load:\n- ',
+    );
+    expect(result.notice).toContain(`- ${model("projects.search")}: Search projects`);
+    expect(result.notice).not.toContain(`- ${model("projects.list")}:`);
+  });
+
+  test("a clearly matched search adds no candidates notice", async () => {
+    const runtime = runtimeWith("openai_native");
+    const result = await runtime.prepareSearch({ query: "search projects by project number" });
+    expect(loaded(result)).toEqual([model("projects.search")]);
+    expect(result.notice).toBeUndefined();
+  });
+
+  test("tool_list prefixes match the published name part, listed alphabetically", async () => {
+    const runtime = runtimeWith("generic_dispatch");
+    const list = runtime.controlTools.find((t) => t.type === "function" && t.name === "tool_list");
+    if (!list || list.type !== "function") throw new Error("missing list");
+    const invoke = async (args: unknown) =>
+      JSON.parse(String(await list.invoke({} as never, JSON.stringify(args))));
+    const expected = [
+      model("projects.list"),
+      model("projects.list_history"),
+      model("projects.search"),
+    ];
+    for (const namePrefix of ["projects.", "projects_"])
+      expect((await invoke({ namePrefix })).tools.map((t: { name: string }) => t.name)).toEqual(
+        expected,
+      );
+    const all = (await invoke({ limit: 40 })).tools.map((t: { name: string }) => t.name);
+    // The two billing tools share one shortened name part, so their order is open.
+    expect(new Set(all.slice(0, 2))).toEqual(
+      new Set([
+        model("billing_plans.update_payment_schedule_series"),
+        model("billing_plans.update_payment_schedule_terms"),
+      ]),
+    );
+    expect(all.slice(2, 8)).toEqual([
+      model("incidents.get_events"),
+      model("organizations.get"),
+      model("organizations.list_activity"),
+      ...expected,
+    ]);
+    expect(all.at(-1)).toBe("opengeni__goal_complete");
+    expect((await invoke({ namePrefix: "mcp_" })).total).toBe(RECORDS.length);
+  });
+
+  test.each(["codex_native", "openai_native"] as const)(
+    "%s: the candidates notice follows the search result in the wire, with a stable prefix",
+    async (transport) => {
+      const tools = RECORDS.map(([original, description]) =>
+        candidate(model(original), description),
+      );
+      const mapping = new Map(tools.map((t) => [(t as Tool & { name: string }).name, REGISTRY]));
+      const agent = new Agent({ name: "records", model: "scripted", tools });
+      const runtime = installLazyToolRuntime(
+        agent,
+        transport,
+        new Set([REGISTRY]),
+        undefined,
+        new Set([REGISTRY]),
+        new Set(),
+        () => mapping,
+      );
+      const query =
+        "organization-wide event history timeline activity feed across all projects, read-only";
+      const scripted = new ScriptedModel([
+        [searchCall(transport, "find", { query })],
+        [searchCall(transport, "load", { query: "", names: ["organizations.list_activity"] })],
+        [done],
+      ]);
+      const result = await new Runner({
+        modelProvider: new LazyToolModelProvider({ getModel: () => scripted }, runtime),
+      }).run(agent, "what happened in the company this week?", {
+        stream: true,
+        historyOwnership: "external",
+        resolveMissingFunctionTool: createResolveMissingFunctionTool(runtime),
+        callModelInputFilter: baseModelInputFilterForSettings(
+          testSettings({ sandboxBackend: "none" }),
+        ),
+      });
+      for await (const event of result.toStream()) void event;
+      await result.completed;
+      const request = scripted.requests[1]!;
+      const wire = responsesWire().wire({
+        ...request,
+        input: projectHistoryForProvider(request.input as Record<string, unknown>[], "responses", {
+          declaresAdditionalTools: true,
+        }) as ModelRequest["input"],
+      });
+      const notices = (wire.input as Record<string, unknown>[]).filter(
+        (item) => item.type === "message" && item.role === "developer",
+      );
+      expect(notices).toHaveLength(1);
+      expect(String(notices[0]!.content)).toContain(model("organizations.list_activity"));
+      expect(JSON.stringify(wire)).not.toContain("opengeni.lazy_search.v1");
+      expect(JSON.stringify(scripted.requests[2]!.input)).toContain(
+        model("organizations.list_activity"),
+      );
+      for (let i = 1; i < scripted.requests.length; i++) {
+        expect(scripted.requests[i]!.tools).toEqual(scripted.requests[0]!.tools);
+        const previous = scripted.requests[i - 1]!.input as unknown[];
+        expect((scripted.requests[i]!.input as unknown[]).slice(0, previous.length)).toEqual(
+          previous,
+        );
+      }
+    },
+  );
 });

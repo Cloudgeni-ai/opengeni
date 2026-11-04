@@ -1095,6 +1095,7 @@ function MembersSectionContent({
         consequences={[
           `They lose access to ${workspaceName} right away.`,
           "Private sessions they started here are stopped.",
+          "Schedules they own here stop running. Each one says why on the Automations page.",
           `They stay in ${organizationName}. You can add them again later.`,
         ]}
         confirmLabel="Remove from workspace"

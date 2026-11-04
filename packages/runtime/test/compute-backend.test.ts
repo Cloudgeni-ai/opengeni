@@ -491,6 +491,7 @@ function setup(
     desktop?: boolean;
     controlTimeoutMs?: number;
     execTimeoutMs?: number;
+    diskMib?: number;
   } = {},
 ) {
   const control = new FakeControlService();
@@ -513,6 +514,7 @@ function setup(
     desktop: options.desktop ?? false,
     vcpus: 2,
     memoryMib: 4096,
+    ...(options.diskMib !== undefined ? { diskMib: options.diskMib } : {}),
     readyTimeoutMs: options.readyTimeoutMs ?? 2_000,
     ...(options.controlTimeoutMs !== undefined
       ? { controlTimeoutMs: options.controlTimeoutMs }
@@ -526,6 +528,22 @@ function setup(
 const identity = { accountId: ACCOUNT, workspaceId: WORKSPACE, sandboxGroupId: GROUP };
 
 describe("compute sandbox client", () => {
+  test("create asks for the configured disk length, and for none when unset", async () => {
+    const sized = setup({ diskMib: 32_768 });
+    await sized.client.create(undefined, { opengeniCreateIdentity: identity });
+    const sizedBody = sized.control.requests.find(
+      (r) => r.method === "POST" && r.path === "/v1/sandboxes",
+    )!.body as Record<string, unknown>;
+    expect(sizedBody.disk_mib).toBe(32_768);
+
+    const plain = setup();
+    await plain.client.create(undefined, { opengeniCreateIdentity: identity });
+    const plainBody = plain.control.requests.find(
+      (r) => r.method === "POST" && r.path === "/v1/sandboxes",
+    )!.body as Record<string, unknown>;
+    expect("disk_mib" in plainBody).toBe(false);
+  });
+
   test("create makes the enrollment, names the agent in the init and waits for it", async () => {
     const { control, plane, client } = setup({ desktop: true });
     const session = await client.create(undefined, { opengeniCreateIdentity: identity });

@@ -1,9 +1,6 @@
 // Developer > Credential provider: the settings card, the provider's page with
 // Test connection, and the Connect / Edit form page.
-import type {
-  IntegrationWorkspaceFilter,
-  WorkspaceInheritedIntegrationsResponse,
-} from "@opengeni/sdk";
+import type { WorkspaceInheritedIntegrationsResponse } from "@opengeni/sdk";
 import {
   CalendarIcon,
   ClockIcon,
@@ -67,7 +64,7 @@ import {
   type Load,
 } from "./shared";
 import { CodeSample, CREDENTIAL_PROVIDER_GUIDE_URL, EndpointTestResult } from "./test-result";
-import { WorkspaceFilterField } from "./workspace-filter-field";
+import { WorkspaceFilterField, type RegistrationReach } from "./workspace-filter-field";
 
 type InheritedProvider = WorkspaceInheritedIntegrationsResponse["credentialProvider"];
 
@@ -140,7 +137,7 @@ export function CredentialProviderSection({
           }
           description={
             organization
-              ? workspaceFilterLabel(provider.workspaceFilter)
+              ? workspaceFilterLabel(provider)
               : inherited
                 ? "Runs here use it instead of your organization's provider."
                 : "Runs in this workspace ask it for credentials."
@@ -405,7 +402,12 @@ export function CredentialProviderPage({
         url: own.url,
         enabled,
         timeoutMs: own.timeoutMs,
-        ...(organization ? { workspaceFilter: own.workspaceFilter ?? null } : {}),
+        ...(organization
+          ? {
+              workspaceFilter: own.workspaceFilter ?? null,
+              allowPersonalWorkspaces: own.allowPersonalWorkspaces ?? false,
+            }
+          : {}),
       });
       setState({ own: response.provider, inherited });
       toast(enabled ? "Credential provider resumed" : "Credential provider paused", {
@@ -508,9 +510,7 @@ export function CredentialProviderPage({
             {displayUrl(provider.url)}
           </span>,
           fromOrganization ? <span key="by">set by your organization</span> : null,
-          organization ? (
-            <span key="filter">{workspaceFilterLabel(provider.workspaceFilter)}</span>
-          ) : null,
+          organization ? <span key="filter">{workspaceFilterLabel(provider)}</span> : null,
         ]}
         actions={actions}
       />
@@ -524,9 +524,7 @@ export function CredentialProviderPage({
               {Math.round(provider.timeoutMs / 1000)} seconds
             </DetailAsideItem>
             {organization ? (
-              <DetailAsideItem label="Workspaces">
-                {workspaceFilterLabel(provider.workspaceFilter)}
-              </DetailAsideItem>
+              <DetailAsideItem label="Workspaces">{workspaceFilterLabel(provider)}</DetailAsideItem>
             ) : null}
             {!fromOrganization ? (
               <>
@@ -585,7 +583,7 @@ export function CredentialProviderPage({
           <DetailSection>
             <InlineHelp icon>
               {organization
-                ? "Paused. Shared workspaces without their own provider get no credentials from your product until you resume it."
+                ? "Paused. Workspaces without their own provider get no credentials from your product until you resume it."
                 : "Paused. Runs in this workspace get no credentials from any provider, including your organization's, until you resume it."}
             </InlineHelp>
           </DetailSection>
@@ -708,8 +706,13 @@ function ProviderForm({
   const inherited = state.kind === "ready" ? state.value.inherited : null;
   const organization = api.scope === "organization";
   const [url, setUrl] = useState(own?.url ?? "");
-  const [filter, setFilter] = useState<IntegrationWorkspaceFilter | null>(
-    own?.workspaceFilter ?? null,
+  const [reach, setReach] = useState<RegistrationReach>({
+    filter: own?.workspaceFilter ?? null,
+    workspaceIds: own?.allowedWorkspaceIds ?? null,
+  });
+  const filter = reach.filter;
+  const [personalWorkspaces, setPersonalWorkspaces] = useState(
+    own?.allowPersonalWorkspaces ?? false,
   );
   const [errors, setErrors] = useState<{ url?: string; filter?: string }>({});
   const [secret, setSecret] = useState<string | null>(null);
@@ -742,6 +745,9 @@ function ProviderForm({
     if (organization && filter && !filter.externalSource.trim()) {
       nextErrors.filter = "Enter the external source, or use it for every shared workspace.";
     }
+    if (organization && reach.workspaceIds?.length === 0 && !personalWorkspaces) {
+      nextErrors.filter = "Pick at least one workspace, or turn on Personal workspaces.";
+    }
     setErrors(nextErrors);
     if (nextErrors.url || nextErrors.filter) return false;
     try {
@@ -752,6 +758,8 @@ function ProviderForm({
         ...(organization
           ? {
               workspaceFilter: filter ? { externalSource: filter.externalSource.trim() } : null,
+              allowPersonalWorkspaces: personalWorkspaces,
+              allowedWorkspaceIds: reach.workspaceIds,
             }
           : {}),
       });
@@ -777,7 +785,7 @@ function ProviderForm({
       title={own ? "Edit credential provider" : "Connect a credential provider"}
       description={
         organization
-          ? "Opengeni calls your endpoint before each run in the shared workspaces you choose, and gives the agent what it returns."
+          ? "Opengeni calls your endpoint before each run in the workspaces you choose, and gives the agent what it returns."
           : "Opengeni calls your endpoint before each run in this workspace, and gives the agent what it returns."
       }
       submitLabel={own ? "Save" : "Connect"}
@@ -811,12 +819,14 @@ function ProviderForm({
         </Field>
         {organization ? (
           <WorkspaceFilterField
-            value={filter}
+            value={reach}
             error={errors.filter}
             onChange={(next) => {
-              setFilter(next);
+              setReach(next);
               setErrors((value) => ({ ...value, filter: undefined }));
             }}
+            listWorkspaces={api.listSharedWorkspaces}
+            personalWorkspaces={{ checked: personalWorkspaces, onChange: setPersonalWorkspaces }}
           />
         ) : null}
         {!own ? (

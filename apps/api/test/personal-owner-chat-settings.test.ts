@@ -326,9 +326,10 @@ describe("a Personal workspace owner's own chat", () => {
     const key = await call(apiKey);
     expect(key.isError).toBe(true);
     expect(textOf(key)).toStartWith("Nothing was run: this call creates, shows, copies");
-    expect(
-      await shared.admin`select id from workspace_memberships where workspace_id = ${personal}`,
-    ).toHaveLength(0);
+    // Only the owner's own row (migration 1231) sits in Personal.
+    expect([
+      ...(await shared.admin`select subject_id from workspace_memberships where workspace_id = ${personal}`),
+    ]).toEqual([{ subject_id: subjectId }]);
     expect(
       await shared.admin`select id from api_keys where workspace_id = ${personal}`,
     ).toHaveLength(0);

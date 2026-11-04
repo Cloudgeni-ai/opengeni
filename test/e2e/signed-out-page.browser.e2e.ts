@@ -194,17 +194,23 @@ describe("signed-out homepage on the real app route", () => {
       try {
         await installApi(context, "legacy");
         if (platform !== "browser") {
-          await context.addInitScript((desktopPlatform) => {
-            Object.assign(window, {
-              opengeniDesktop: {
-                version: 1,
-                platform: desktopPlatform,
-                capabilities: [],
-                setAppearance: () => {},
-                openExternal: () => {},
-              },
-            });
-          }, platform);
+          // A current shell reports its window bar; without it a macOS page
+          // keeps the taller bar of the 0.1.33 and older apps.
+          await context.addInitScript(
+            ({ desktopPlatform, windowBarHeight }) => {
+              Object.assign(window, {
+                opengeniDesktop: {
+                  version: 1,
+                  platform: desktopPlatform,
+                  windowBarHeight,
+                  capabilities: [],
+                  setAppearance: () => {},
+                  openExternal: () => {},
+                },
+              });
+            },
+            { desktopPlatform: platform, windowBarHeight: WINDOW_BAR_HEIGHT },
+          );
         }
         if (platform === "windows") await simulateWindowsTitleBar(context);
         const top = platform === "browser" ? 0 : WINDOW_BAR_HEIGHT;

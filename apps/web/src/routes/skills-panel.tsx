@@ -16,6 +16,11 @@ import {
 } from "@/components/capabilities/capability-page-slot";
 import { humanizeName } from "@/components/capabilities/skill-copy";
 import { SkillPage, skillStatus } from "@/components/capabilities/skill-page";
+import {
+  OrganizationReachDialog,
+  organizationReachSummary,
+} from "@/components/organization-reach-dialog";
+import { useOrganizationNameFrom } from "@/lib/use-organization-name";
 import { Button } from "@opengeni/react/ui/button";
 import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { DetailPage } from "@opengeni/react/ui/detail-page";
@@ -31,7 +36,8 @@ import {
   userErrorText,
   userErrorTextWithoutReference,
 } from "@opengeni/react/ui/api-error";
-import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import { canAdministerOrganization } from "@opengeni/react/app/lib/workspaces";
 
 /** What failed, and the error behind it: the UI shows advice, never the raw API string. */
 type SkillsFailure = { title: string; cause: unknown };
@@ -39,7 +45,6 @@ type SkillsFailure = { title: string; cause: unknown };
 /** Both product destinations use this catalog and the same folder write API. */
 export function SkillsPanel({
   workspaceId,
-  personalWorkspace = false,
   query = "",
   onFindSkill,
   onImportSkill,
@@ -49,7 +54,6 @@ export function SkillsPanel({
   openSkillRef,
 }: {
   workspaceId: string;
-  personalWorkspace?: boolean;
   query?: string;
   onFindSkill?: (() => void) | undefined;
   onImportSkill?: (() => void) | undefined;
@@ -62,7 +66,6 @@ export function SkillsPanel({
     <SkillsPanelContent
       context={useAppContext()}
       workspaceId={workspaceId}
-      personalWorkspace={personalWorkspace}
       query={query}
       onFindSkill={onFindSkill}
       onImportSkill={onImportSkill}
@@ -77,7 +80,6 @@ export function SkillsPanel({
 export function SkillsPanelContent({
   context,
   workspaceId,
-  personalWorkspace = false,
   query = "",
   onFindSkill,
   onImportSkill,
@@ -88,7 +90,6 @@ export function SkillsPanelContent({
 }: {
   context: AppContextValue;
   workspaceId: string;
-  personalWorkspace?: boolean;
   query?: string;
   onFindSkill?: (() => void) | undefined;
   onImportSkill?: (() => void) | undefined;
@@ -116,9 +117,21 @@ export function SkillsPanelContent({
         (scope === "workspace" &&
           hasWorkspacePermission(context.accessContext, workspaceId, "documents:manage")) ||
         (scope === "organization" &&
-          grant &&
-          hasAccountPermission(context.accessContext, grant.accountId, "account:admin"))),
+          canAdministerOrganization({
+            accessContext: context.accessContext,
+            clientConfig: context.clientConfig,
+            accountId: grant?.accountId,
+          }))),
     );
+  // An organization Skill works in the workspaces its organization picks.
+  // Whoever may change the organization's Skills also sees the ones that
+  // don't work here, so they can change that; everyone else sees what this
+  // workspace's agents use.
+  const canManageOrganization = canManage("organization");
+  const organizationId = grant?.accountId ?? "";
+  const organizationName =
+    useOrganizationNameFrom(context, organizationId, canManageOrganization) ?? "your organization";
+  const [reachOpen, setReachOpen] = useState(false);
   const [skills, setSkills] = useState<SkillSummary[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [record, setRecord] = useState<SkillRecord | null>(null);
@@ -193,8 +206,10 @@ export function SkillsPanelContent({
   }, [client, workspaceId, reload]);
 
   useEffect(() => {
-    onSkillsChange?.(skills);
-  }, [skills, onSkillsChange]);
+    onSkillsChange?.(
+      skills.filter((skill) => skill.availableHere !== false || canManageOrganization),
+    );
+  }, [skills, onSkillsChange, canManageOrganization]);
   useEffect(() => {
     if (!refreshRevision) return;
     let live = true;
@@ -235,9 +250,7 @@ export function SkillsPanelContent({
       const id = slotKey.slice("skill:".length);
       if (id === "new") {
         if (record && record.id === draftId) return;
-        const scope = ([personalWorkspace ? "user" : "workspace", "organization"] as const).find(
-          canManage,
-        );
+        const scope = (["workspace", "organization"] as const).find(canManage);
         if (scope) create(scope);
         else slot.close({ replace: true });
         return;
@@ -528,8 +541,10 @@ export function SkillsPanelContent({
     record &&
     canManage(record.scope) &&
     (record.revisionId === record.activeRevisionId || record.revisionId === null);
-  const matchingSkills = skills.filter((skill) =>
-    `${skill.title} ${skill.stableKey}`.toLowerCase().includes(query.trim().toLowerCase()),
+  const matchingSkills = skills.filter(
+    (skill) =>
+      (skill.availableHere !== false || canManageOrganization) &&
+      `${skill.title} ${skill.stableKey}`.toLowerCase().includes(query.trim().toLowerCase()),
   );
 
   const backLabel = slot ? "Capabilities" : "Skills";
@@ -588,6 +603,12 @@ export function SkillsPanelContent({
       onReviewRevision={(operation) => void mutate(operation)}
       onChangeScope={(scope) => void changeScope(scope)}
       onOpenRevision={(revisionId) => navigate(() => void open(record.id, revisionId))}
+      reachSummary={record.reach ? organizationReachSummary(record.reach) : undefined}
+      onChangeReach={
+        record.scope === "organization" && record.reach && canManageOrganization
+          ? () => setReachOpen(true)
+          : undefined
+      }
     />
   ) : slotSkillKey ? (
     <DetailPage back={{ label: backLabel, onClick: back }}>
@@ -618,7 +639,7 @@ export function SkillsPanelContent({
           hidden={Boolean(query.trim()) && !matchingSkills.length && !record}
           action={
             <div hidden={Boolean(query.trim())} className="flex flex-wrap gap-2">
-              {([personalWorkspace ? "user" : "workspace", "organization"] as const)
+              {(["workspace", "organization"] as const)
                 .filter(canManage)
                 .slice(0, 1)
                 .map((scope) => (
@@ -692,8 +713,8 @@ export function SkillsPanelContent({
             id: skill.id,
             name: humanizeName(skill.title || skill.stableKey),
             icon: <BookOpenIcon aria-hidden="true" className="size-10 p-2 text-fg-muted" />,
-            status: skillStatus(skill),
-            showStatus: skillStatus(skill) !== "Installed",
+            status: skill.availableHere === false ? "Not used here" : skillStatus(skill),
+            showStatus: skill.availableHere === false || skillStatus(skill) !== "Installed",
             needsAttention: Boolean(skill.pendingRevisionIds.length),
             disabled: busy,
             onOpen: () => {
@@ -713,6 +734,37 @@ export function SkillsPanelContent({
         ) : (
           pageContent
         )
+      ) : null}
+      {record?.scope === "organization" && record.reach && canManageOrganization ? (
+        <OrganizationReachDialog
+          open={reachOpen}
+          onOpenChange={setReachOpen}
+          client={client}
+          noun="Skill"
+          name={humanizeName(record.title || record.stableKey)}
+          reach={record.reach}
+          organizationId={organizationId}
+          organizationName={organizationName}
+          managedBy="Organization owners and admins manage it."
+          hereId={workspaceId}
+          save={async (next) => (await client.updateSkillReach(workspaceId, record.id, next)).reach}
+          onSaved={(reach) => {
+            setReachOpen(false);
+            const skillId = record.id;
+            setRecord((value) => (value?.id === skillId ? { ...value, reach } : value));
+            // Whether this workspace's agents still use it is the server's call.
+            void client
+              .readWorkspaceSkill(workspaceId, skillId)
+              .then((fresh) => {
+                const placed = { reach: fresh.reach ?? reach, availableHere: fresh.availableHere };
+                setRecord((value) => (value?.id === skillId ? { ...value, ...placed } : value));
+                setSkills((list) =>
+                  list.map((skill) => (skill.id === skillId ? { ...skill, ...placed } : skill)),
+                );
+              })
+              .catch(() => undefined);
+          }}
+        />
       ) : null}
       <ConfirmDialog
         open={removal !== null}

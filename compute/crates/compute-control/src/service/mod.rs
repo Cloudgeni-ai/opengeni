@@ -31,7 +31,7 @@ use crate::store::{SandboxRow, Spec, Store, StoreError, Write, replace};
 use crate::view::{Target, Unplaced, View, shape_key};
 
 pub use holds::Depth;
-pub use moves::Drained;
+pub use moves::{Drained, Resize};
 pub use reach::Reached;
 pub use requests::request_digest;
 pub use templates::{COLLECT_EVERY, TEMPLATE_PREFIX, UNUSED_FOR};
@@ -48,8 +48,14 @@ pub const DEFAULT_SLEEP: SleepConfig = SleepConfig {
     ..SleepConfig::RECOMMENDED
 };
 
-/// How long a host may take to answer a create.
-const CREATE_WAIT: Duration = Duration::from_secs(30);
+/// How long a host may take to answer a create. A host without the image
+/// a create names fetches it from the store first (ADR 19), however long
+/// that takes for a large image, and answers once the VM is up; booting
+/// itself takes seconds. A host that restarts or goes away meanwhile ends
+/// the call sooner. The E2B layer gives a create ten minutes in all
+/// ([`crate::e2b::lifecycle::CREATE_WITHIN_MS`]), so this leaves the
+/// guest's init a minute.
+pub(crate) const CREATE_WAIT: Duration = Duration::from_secs(9 * 60);
 /// How long a host may take to answer a remove.
 const REMOVE_WAIT: Duration = Duration::from_secs(60);
 

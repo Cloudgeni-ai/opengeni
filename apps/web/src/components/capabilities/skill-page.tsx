@@ -64,6 +64,8 @@ export function SkillPage({
   onReviewRevision,
   onChangeScope,
   onOpenRevision,
+  reachSummary,
+  onChangeReach,
 }: {
   record: SkillRecord;
   files: SkillRecord["files"];
@@ -90,6 +92,10 @@ export function SkillPage({
   onReviewRevision: (operation: "approve" | "restore") => void;
   onChangeScope: (scope: SkillScope) => void;
   onOpenRevision: (revisionId: string) => void;
+  /** Where an organization Skill works: "All workspaces + Personal". */
+  reachSummary?: string | undefined;
+  /** Open "Available in"; omit for people who can't change the organization's Skills. */
+  onChangeReach?: (() => void) | undefined;
 }) {
   const skillFile = files.find((file) => file.path === "SKILL.md");
   const selected = files.find((file) => file.path === path);
@@ -318,6 +324,34 @@ export function SkillPage({
               </div>
             }
           />
+          {record.scope === "organization" && reachSummary && !isNew ? (
+            <SettingRow
+              label="Available in"
+              description={
+                record.availableHere === false
+                  ? "Agents in this workspace don't use it."
+                  : "Agents use it in these workspaces."
+              }
+              controlWidth="auto"
+              control={
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="text-sm text-fg-muted">{reachSummary}</span>
+                  {onChangeReach ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className={buttonClass}
+                      disabled={busy}
+                      onClick={onChangeReach}
+                    >
+                      Change
+                    </Button>
+                  ) : null}
+                </div>
+              }
+            />
+          ) : null}
           {history.length ? (
             <SettingRow
               label="Version"

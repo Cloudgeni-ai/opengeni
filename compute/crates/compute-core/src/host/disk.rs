@@ -6,7 +6,7 @@
 
 use core::fmt;
 
-use super::Host;
+use super::{CreateRoom, Host};
 use crate::ids::SandboxId;
 use crate::level::{Durability, Level, Step};
 use crate::sandbox::Sandbox;
@@ -169,11 +169,25 @@ impl DiskRoom {
 }
 
 impl Sandbox {
-    /// Whether it books disk for its next save: its VM holds state no copy
-    /// has yet, or it is waking into one.
-    pub(super) fn books_save(&self) -> bool {
+    /// Whether its VM holds state no copy has yet, or it is waking into
+    /// one.
+    pub(super) fn unsaved(&self) -> bool {
         self.reserves()
             || (self.state.level.has_process() && self.state.durability == Durability::Volatile)
+    }
+
+    /// Whether it books disk for its next save: it is [`Self::unsaved`],
+    /// and the host may save it without being asked (see
+    /// [`crate::SleepPolicy::saves`]), a save of it is asked for or one
+    /// runs. One the host never saves so books its save from the request
+    /// on, which the host refuses unless it fits ([`Host::save_room`]), so
+    /// its VM is never paused for a save the disk cannot take.
+    pub(super) fn books_save(&self) -> bool {
+        let asked = self.requested.max(self.floor) >= Level::Saved;
+        let saving = self
+            .in_flight
+            .is_some_and(|flight| flight.step == Step::Save);
+        self.unsaved() && (self.policy().saves() || asked || saving)
     }
 
     /// What its next save may need at most.
@@ -229,11 +243,13 @@ impl Sandbox {
     }
 
     /// What a wake of it books besides what it already does: its next
-    /// save, its disk's growth, and from object storage its local copy.
+    /// save if the host may save it unasked, its disk's growth, and from
+    /// object storage its local copy.
     pub(super) fn disk_need(&self) -> DiskSpace {
-        let mut awake = self
-            .save_space()
-            .add(DiskSpace::bytes(self.local_disk.growth));
+        let mut awake = DiskSpace::bytes(self.local_disk.growth);
+        if self.policy().saves() {
+            awake = awake.add(self.save_space());
+        }
         if self.local_disk.hydrating || self.state.level == Level::Remote {
             awake = awake.add(DiskSpace::save(self.size.fetch));
         }
@@ -409,6 +425,41 @@ impl Host {
                 disk.reserve.inodes,
             ),
         })
+    }
+
+    /// Whether a save asked of `sandbox`, an [`crate::Input::Sleep`] to
+    /// [`Level::Saved`] or deeper, can be booked on local disk now. One the
+    /// host never saves unasked books its next save only from such a
+    /// request on ([`Sandbox::books_save`]), so the host agent refuses a
+    /// request this finds short at once rather than pause its VM for a
+    /// save that would wait for room, as a hand-off would. Fits for a
+    /// sandbox that books its save already or has nothing to save, and on
+    /// a host that books no disk. Short by no more than what bookings that
+    /// ended since the last reading stood for, it awaits the next reading
+    /// (see [`Self::disk_awaits_reading`]), which decides it, as a create
+    /// does; before the first reading, it awaits that one.
+    #[must_use]
+    pub fn save_room(&self, sandbox: SandboxId) -> CreateRoom {
+        let Some(slot) = self.sandboxes.get(&sandbox) else {
+            return CreateRoom::Fits;
+        };
+        if !slot.unsaved() || slot.books_save() || slot.cannot_save() {
+            return CreateRoom::Fits;
+        }
+        let Some(mut room) = self.disk_room() else {
+            return CreateRoom::Fits;
+        };
+        let save = slot.save_space();
+        if self.disk.is_none() {
+            return CreateRoom::AwaitsReading(Resource::Disk, save.bytes, 0);
+        }
+        match room.take(save) {
+            Ok(()) => CreateRoom::Fits,
+            Err(short) if room.may_take(save, self.disk_spent) => {
+                CreateRoom::AwaitsReading(short.resource, short.needed, short.free)
+            }
+            Err(short) => CreateRoom::Short(short.resource, short.needed, short.free),
+        }
     }
 
     /// While the disk cannot book what is booked already, what the wakes

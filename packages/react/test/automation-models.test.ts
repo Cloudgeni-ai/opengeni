@@ -329,12 +329,13 @@ describe("event sources", () => {
       format: { preset: "tailscale" },
     };
     expect(eventSourceChoiceOf({ kind: "webhook", adapter: "linear" })).toBe("linear");
-    // Tailscale is a custom webhook made with its preset; any other custom one is a webhook.
+    // An app is a custom webhook made with its preset (a server's older
+    // `linear` and `sentry` adapters read the same); any other is a webhook.
     expect(eventSourceChoiceOf(tailscale)).toBe("tailscale");
     expect(eventSourceChoiceOf({ kind: "webhook", adapter: "custom", format: {} })).toBe("webhook");
     expect(
       eventSourceChoiceOf({ kind: "webhook", adapter: "custom", format: { preset: "linear" } }),
-    ).toBe("webhook");
+    ).toBe("linear");
     expect(eventSourceChoiceOf({ kind: "webhook", adapter: "standard" })).toBe("webhook");
     expect(eventSourceChoiceOf({ kind: "gmail", adapter: null })).toBe("gmail");
     expect(eventSourceKindLabel(t, { kind: "webhook", adapter: "sentry" })).toBe("Sentry webhook");
@@ -346,8 +347,8 @@ describe("event sources", () => {
     expect(eventSourceProviderDomain({ kind: "webhook", adapter: "standard" })).toBeNull();
     expect(eventSourceSubjectOfChoice(t, "linear")).toEqual({
       kind: "webhook",
-      adapter: "linear",
-      format: null,
+      adapter: "custom",
+      format: { preset: "linear" },
       name: "Linear",
       mcp: null,
     });
@@ -496,14 +497,21 @@ describe("event sources", () => {
       }),
     ).toEqual({
       kind: "webhook",
-      adapter: "linear",
+      adapter: "custom",
       name: "Linear",
       visibility: "workspace",
+      format: WEBHOOK_FORMAT_PRESETS.linear,
       signingSecret: "lin_wh_secret",
     });
     expect(
       createEventSourceRequest(t, { choice: "sentry", name: "Errors", visibility: "private" }),
-    ).toEqual({ kind: "webhook", adapter: "sentry", name: "Errors", visibility: "private" });
+    ).toEqual({
+      kind: "webhook",
+      adapter: "custom",
+      name: "Errors",
+      visibility: "private",
+      format: WEBHOOK_FORMAT_PRESETS.sentry,
+    });
     expect(
       createEventSourceRequest(t, {
         choice: "tailscale",

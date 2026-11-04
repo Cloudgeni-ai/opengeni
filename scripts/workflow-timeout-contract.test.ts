@@ -46,6 +46,7 @@ const EXPECTED_CAPS = [
     5,
     "run",
   ],
+  ["backup-image.yml", "publish", "Install restic", 2, "run"],
   ["backup-image.yml", "publish", "Test operator runner", 5, "run"],
   ["backup-image.yml", "publish", "Retain digest receipt", 1, "run"],
   ["local-startup.yml", "docker", "Check startup ownership and prerequisite regressions", 2, "run"],
@@ -200,7 +201,7 @@ const EXPECTED_CAPS = [
     2,
     "run",
   ],
-  ["ci.yml", "browserd-real-e2e", "Run headless browserd end-to-end suite", 6, "run"],
+  ["ci.yml", "browserd-real-e2e", "Run headless browserd end-to-end suite", 9, "run"],
   ["ci.yml", "browserd-real-e2e", "Run headed browserd streaming and interaction suite", 5, "run"],
   ["desktop-e2e.yml", "desktop-image", "Desktop image e2e", 36, "run"],
   ["ci.yml", "e2e-shards", "Install pinned browser runtimes", 17, "action"],
@@ -211,7 +212,7 @@ const EXPECTED_CAPS = [
 
 const EXPECTED_JOB_BUDGETS = {
   "agent-ci.yml:native-command-supervisor": { stepCaps: 5, needed: 6, jobCap: 6 },
-  "backup-image.yml:publish": { stepCaps: 6, needed: 7, jobCap: 30 },
+  "backup-image.yml:publish": { stepCaps: 8, needed: 9, jobCap: 30 },
   "local-startup.yml:docker": { stepCaps: 88, needed: 89, jobCap: 90 },
   "local-startup.yml:platform-preflight": { stepCaps: 2, needed: 3, jobCap: 5 },
   "publish-artifact-runtime.yml:publish": { stepCaps: 12, needed: 13, jobCap: 15 },
@@ -223,7 +224,7 @@ const EXPECTED_JOB_BUDGETS = {
   "ci.yml:test-suite": { stepCaps: 23, needed: 24, jobCap: 30 },
   "ci.yml:browser-acceptance": { stepCaps: 70, needed: 71, jobCap: 71 },
   "ci.yml:package-contracts": { stepCaps: 43, needed: 44, jobCap: 55 },
-  "ci.yml:browserd-real-e2e": { stepCaps: 30, needed: 31, jobCap: 33 },
+  "ci.yml:browserd-real-e2e": { stepCaps: 33, needed: 34, jobCap: 36 },
   "desktop-e2e.yml:desktop-image": { stepCaps: 36, needed: 37, jobCap: 45 },
 } as const;
 
@@ -258,7 +259,7 @@ describe("workflow timeout contract", () => {
     expect(validJobCap("ci.yml", "automation-admission", { ...job, steps: [] })).toBe(false);
     expect(validJobCap("other.yml", "plan", job)).toBe(false);
   });
-  test("all jobs and the exact 49 run plus 5 action steps use static native caps", async () => {
+  test("all jobs and the exact 50 run plus 5 action steps use static native caps", async () => {
     const workflows = await loadWorkflows();
     const capped: Array<readonly [string, string, string, number, "run" | "action"]> = [];
     const budgets: Record<string, { stepCaps: number; needed: number; jobCap: number }> = {};
@@ -298,7 +299,7 @@ describe("workflow timeout contract", () => {
       right: readonly [string, string, string, number, "run" | "action"],
     ) => left.slice(0, 3).join("\0").localeCompare(right.slice(0, 3).join("\0"));
     expect(capped.toSorted(byIdentity)).toEqual(EXPECTED_CAPS.toSorted(byIdentity));
-    expect(capped.filter((row) => row[4] === "run")).toHaveLength(49);
+    expect(capped.filter((row) => row[4] === "run")).toHaveLength(50);
     expect(capped.filter((row) => row[4] === "action")).toHaveLength(5);
     for (const [job, expected] of Object.entries(EXPECTED_JOB_BUDGETS)) {
       expect(budgets[job], job).toEqual(expected);

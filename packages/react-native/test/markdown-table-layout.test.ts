@@ -29,13 +29,38 @@ function visibleColumns(widths: number[], viewport: number) {
   return count;
 }
 
-test("a wide table wraps its cells to their longest word before scrolling, as a browser does", () => {
+test("a wide table of short cells wraps them to their longest word before scrolling", () => {
   const columns = tableColumns(PLANS);
   const { widths, scrolls } = tableLayout(columns, 358);
   expect(scrolls).toBe(true);
   // Each column is as narrow as its longest word ("business", "Negotiated").
   expect(widths).toEqual(columns.map((column) => column.min));
   expect(visibleColumns(widths, 358)).toBeGreaterThanOrEqual(4);
+});
+
+test("a column of sentences keeps reading as lines on a phone", () => {
+  const rows = [
+    ["Option", "What it is", "Budget for two"],
+    [
+      "Coastal hotel weekend",
+      "One night at a seaside hotel with dinner, breakfast and a walk along the shore before heading home.",
+      "5,000–7,000 NOK",
+    ],
+    [
+      "City break",
+      "Friday to Sunday in a modest central hotel, exploring the old town and waterfront, with a set-menu dinner.",
+      "6,000–9,000 NOK, two nights",
+    ],
+  ];
+  const columns = tableColumns(rows);
+  const { widths, scrolls } = tableLayout(columns, 358);
+  // Squeezing all three into 358 pt would leave the description a few words a
+  // line; it keeps a readable measure and the table scrolls instead.
+  expect(scrolls).toBe(true);
+  expect(widths[1]).toBeGreaterThanOrEqual(220);
+  // The short columns still wrap to their longest word.
+  expect(widths[0]).toBe(columns[0]!.min);
+  expect(widths[2]).toBe(columns[2]!.min);
 });
 
 test("a table that fits when wrapped doesn't scroll and fills the width", () => {

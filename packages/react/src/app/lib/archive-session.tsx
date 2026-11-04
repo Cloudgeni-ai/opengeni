@@ -1,144 +1,12 @@
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
-import { OpenGeniApiError } from "@opengeni/sdk";
 import { toast } from "./toast";
-import { ConfirmDialog } from "../../ui/confirm-dialog";
+import { apiErrorFacts, userErrorText, userFacingError } from "../../ui/api-error";
 import type { AppContextValue } from "../app-context";
 // Type only. Callers pass the chat's sidebar title: importing title code here
 // changes the web build's chunk graph (eager-page and chunk-cycle checks).
 import type { SessionListRow } from "../../session-list-model";
-import { useAppHost } from "./app-host";
-import { useRouterState } from "./navigation";
 
-type Confirmation = {
-  title: string;
-  description: string;
-  confirmLabel: string;
-  /**
-   * The page the archive was asked on. An answer that arrives after the
-   * person has moved to another page asks with `late` instead of a dialog.
-   */
-  page?: number | undefined;
-  late?: { title: string; description: string } | undefined;
-};
-
-export type ArchiveConfirmation = {
-  /** The page shown now; it changes each time the person moves to another one. */
-  page(): number;
-  confirm(input: Confirmation): Promise<boolean>;
-};
-
-const ArchiveConfirmationContext = createContext<ArchiveConfirmation>({
-  page: () => 0,
-  confirm: async () => false,
-});
-
-/** Counts the pages the person visits, where the app has navigation. */
-function PageWatcher({ onPage }: { onPage: (pathname: string) => void }) {
-  const pathname = useRouterState({ select: (state) => state.location.pathname });
-  useEffect(() => onPage(pathname), [onPage, pathname]);
-  return null;
-}
-
-/** One dialog for mouse, keyboard, header and command-menu archive actions. */
-export function ArchiveConfirmationProvider({ children }: { children: ReactNode }) {
-  const [pending, setPending] = useState<Confirmation | null>(null);
-  const resolve = useRef<((confirmed: boolean) => void) | null>(null);
-  const navigable = Boolean(useAppHost().navigation);
-  const pathname = useRef<string | null>(null);
-  const page = useRef(0);
-  const finish = useCallback((confirmed: boolean) => {
-    resolve.current?.(confirmed);
-    resolve.current = null;
-    setPending(null);
-  }, []);
-  const onPage = useCallback(
-    (next: string) => {
-      if (pathname.current === next) return;
-      const moved = pathname.current !== null;
-      pathname.current = next;
-      if (!moved) return;
-      page.current += 1;
-      // A question about a chat belongs to the page it was asked on.
-      if (resolve.current) finish(false);
-    },
-    [finish],
-  );
-  useEffect(
-    () => () => {
-      resolve.current?.(false);
-    },
-    [],
-  );
-  const confirm = useCallback((input: Confirmation): Promise<boolean> => {
-    if (input.page !== undefined && input.page !== page.current) {
-      // The person has moved on: a dialog here would be about a chat they
-      // asked for on another page, so ask in a notice they can leave.
-      return new Promise((done) => {
-        let settled = false;
-        // Settles even if no toaster is mounted to show the notice, so a
-        // missing toaster can never leave archiving stuck.
-        const fallback = setTimeout(() => {
-          settle(false);
-          toast.dismiss(notice);
-        }, LATE_NOTICE_MS * 3);
-        const settle = (confirmed: boolean) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(fallback);
-          done(confirmed);
-        };
-        const late = input.late ?? input;
-        const notice = toast(late.title, {
-          description: late.description,
-          duration: LATE_NOTICE_MS,
-          action: { label: input.confirmLabel, onClick: () => settle(true) },
-          onDismiss: () => settle(false),
-          onAutoClose: () => settle(false),
-        });
-      });
-    }
-    resolve.current?.(false);
-    setPending(input);
-    return new Promise((done) => {
-      resolve.current = done;
-    });
-  }, []);
-  const value = useMemo<ArchiveConfirmation>(
-    () => ({ page: () => page.current, confirm }),
-    [confirm],
-  );
-  return (
-    <ArchiveConfirmationContext.Provider value={value}>
-      {navigable ? <PageWatcher onPage={onPage} /> : null}
-      {children}
-      <ConfirmDialog
-        open={pending !== null}
-        onOpenChange={(open) => {
-          if (!open) finish(false);
-        }}
-        title={pending?.title}
-        description={pending?.description}
-        confirmLabel={pending?.confirmLabel ?? "Pause and archive"}
-        destructive={false}
-        cancelAutoFocus
-        onConfirm={() => finish(true)}
-      />
-    </ArchiveConfirmationContext.Provider>
-  );
-}
-
-export const useArchiveConfirmation = () => useContext(ArchiveConfirmationContext);
-
-export function canPauseArchivedChat(
+/** Whether this person can archive chats in the workspace (session control). */
+export function canArchiveChat(
   context: Pick<AppContextValue, "accessContext">,
   workspaceId: string,
 ): boolean {
@@ -152,82 +20,221 @@ export function canPauseArchivedChat(
   );
 }
 
+/**
+ * "Archive" where this person can archive the chat, otherwise null: an
+ * archived chat cannot be restored, and people without session control
+ * cannot archive.
+ */
 export function archiveActionLabel(
   context: Pick<AppContextValue, "accessContext">,
   chat: Pick<SessionListRow, "archived" | "workspaceId">,
-): string {
-  return chat.archived
-    ? "Restore"
-    : canPauseArchivedChat(context, chat.workspaceId)
-      ? "Archive"
-      : "Hide for me";
+): "Archive" | null {
+  return !chat.archived && canArchiveChat(context, chat.workspaceId) ? "Archive" : null;
 }
 
-export async function requestSessionArchive(
-  context: AppContextValue,
-  chat: SessionListRow,
-  archived: boolean,
-  confirmation: ArchiveConfirmation,
-  /** The chat's sidebar title (sessionDisplayTitle), named in the dialog. */
-  chatTitle: string,
-) {
-  const accepted = context.captureWorkspaceInvocation(chat.workspaceId);
-  if (!accepted) return null;
-  // Where the archive was asked: a late answer must not open a dialog elsewhere.
-  const page = confirmation.page();
-  const pause = canPauseArchivedChat(context, chat.workspaceId);
-  if (
-    archived &&
-    !pause &&
-    !(await confirmation.confirm({
-      title: "Hide this chat for you?",
-      description:
-        "You cannot pause this chat. Hiding it only removes it from your sidebar; its work and automations can keep running.",
-      confirmLabel: "Hide for me",
-    }))
-  )
-    return null;
-  const clientEventId = crypto.randomUUID();
-  const request = (confirmPause = false) => {
-    if (!context.ownsWorkspaceInvocation(chat.workspaceId, accepted)) return Promise.resolve(null);
-    return context.client.updateSessionArchive(chat.workspaceId, chat.id, {
-      archived,
-      clientEventId,
-      expectedVersion: chat.archiveVersion ?? 0,
-      mode: pause ? "pause_and_archive" : "hide_for_me",
-      confirmPause,
-    });
-  };
+/** How long Undo is offered; the server accepts it for a little longer. */
+export const ARCHIVE_UNDO_MS = 10_000;
+
+/** What keeps a chat live on purpose (the server's `session_archive_blocked`). */
+type ArchiveBlocker = { kind: string; sessionId: string };
+
+function archiveBlockers(error: unknown): ArchiveBlocker[] | null {
+  if (apiErrorFacts(error).code !== "session_archive_blocked") return null;
+  const body = (error as { body?: unknown }).body;
   try {
-    return await request();
-  } catch (error) {
-    if (
-      !(error instanceof OpenGeniApiError) ||
-      (error.details?.code ?? error.code) !== "session_archive_confirmation_required"
-    )
-      throw error;
-    if (!context.ownsWorkspaceInvocation(chat.workspaceId, accepted)) return null;
-    const name = quotedChatName(chatTitle);
-    if (
-      !(await confirmation.confirm({
-        title: `Pause and archive ${name}?`,
-        description:
-          "This chat has active work. Pause stops it and its sub-chats for everyone with access, removes their one-time waits, and blocks automations from starting work in them. Only your sidebar hides the chat. Restoring it will not resume it.",
-        confirmLabel: "Pause and archive",
-        page,
-        late: {
-          title: `${name} wasn't archived`,
-          description: "It has active work.",
-        },
-      }))
-    )
-      return null;
-    return await request(true);
+    const blockers: unknown = typeof body === "string" ? JSON.parse(body)?.blockers : null;
+    if (!Array.isArray(blockers)) return [];
+    return blockers.filter(
+      (blocker): blocker is ArchiveBlocker =>
+        typeof blocker?.kind === "string" && typeof blocker?.sessionId === "string",
+    );
+  } catch {
+    return [];
   }
 }
 
+/**
+ * Chats whose "Keep this chat active" was turned off by "Turn off and
+ * archive", by workspace and chat, so a failed archive or Undo turns it back
+ * on. Entries outlive the Undo window only briefly.
+ */
+const keptActiveTurnedOff = new Map<string, { sessionIds: string[]; token: symbol }>();
+const KEPT_ACTIVE_MEMORY_MS = 60_000;
+
+function archiveKey(chat: Pick<SessionListRow, "id" | "workspaceId">) {
+  return `${chat.workspaceId}/${chat.id}`;
+}
+
+function takeKeptActive(chat: Pick<SessionListRow, "id" | "workspaceId">) {
+  const key = archiveKey(chat);
+  const entry = keptActiveTurnedOff.get(key);
+  keptActiveTurnedOff.delete(key);
+  return entry?.sessionIds;
+}
+
+function rememberKeptActive(
+  chat: Pick<SessionListRow, "id" | "workspaceId">,
+  sessionIds: string[],
+): symbol {
+  const key = archiveKey(chat);
+  const token = Symbol(key);
+  keptActiveTurnedOff.set(key, { sessionIds, token });
+  setTimeout(() => {
+    if (keptActiveTurnedOff.get(key)?.token === token) keptActiveTurnedOff.delete(key);
+  }, KEPT_ACTIVE_MEMORY_MS);
+  return token;
+}
+
+/**
+ * Turns "Keep this chat active" back on. Resolves false when that failed, so
+ * a caller that needs it to have worked can say so.
+ */
+async function restoreKeepLive(
+  context: AppContextValue,
+  workspaceId: string,
+  sessionIds: readonly string[] | undefined,
+): Promise<boolean> {
+  if (!sessionIds?.length) return true;
+  const results = await Promise.allSettled(
+    sessionIds.map((sessionId) =>
+      context.client.updateSessionRetention(workspaceId, sessionId, { keepLive: true }),
+    ),
+  );
+  return results.every((result) => result.status === "fulfilled");
+}
+
+async function turnOffKeepLiveAndArchive(
+  context: AppContextValue,
+  chat: Pick<SessionListRow, "id" | "workspaceId">,
+  sessionIds: string[],
+  rerun: (archived: boolean) => void,
+  accepted: NonNullable<ReturnType<AppContextValue["captureWorkspaceInvocation"]>>,
+) {
+  // The person may have moved to another workspace since the notice showed.
+  if (!context.ownsWorkspaceInvocation(chat.workspaceId, accepted)) return;
+  const changed: string[] = [];
+  try {
+    for (const sessionId of sessionIds) {
+      await context.client.updateSessionRetention(chat.workspaceId, sessionId, {
+        keepLive: false,
+      });
+      changed.push(sessionId);
+    }
+  } catch (error) {
+    void restoreKeepLive(context, chat.workspaceId, changed);
+    toast.error("Couldn't turn off “Keep this chat active”.", {
+      description: userErrorText(error),
+    });
+    return;
+  }
+  const key = archiveKey(chat);
+  const token = rememberKeptActive(chat, changed);
+  if (!context.ownsWorkspaceInvocation(chat.workspaceId, accepted)) {
+    keptActiveTurnedOff.delete(key);
+    void restoreKeepLive(context, chat.workspaceId, changed);
+    return;
+  }
+  // The caller's archive takes the entry synchronously (requestSessionArchive
+  // reads it before its first await). Still there: that archive didn't start
+  // (one already in flight, or the workspace changed), so nothing was
+  // archived and the setting goes back on.
+  rerun(true);
+  if (keptActiveTurnedOff.get(key)?.token === token) {
+    keptActiveTurnedOff.delete(key);
+    void restoreKeepLive(context, chat.workspaceId, changed);
+  }
+}
+
+/**
+ * Archive a chat for everyone, or undo that (`archived: false`) within the
+ * few seconds Undo is offered. Archiving shows a notice with Undo; once it
+ * closes, the chat moves to long-term storage for good. When only "Keep this
+ * chat active" keeps it live, the notice offers one action that turns that
+ * off and archives through `rerun`. Other errors are thrown for the caller;
+ * a refusal that says what keeps the chat live is thrown as that sentence.
+ */
+export async function requestSessionArchive(
+  context: AppContextValue,
+  chat: Pick<SessionListRow, "id" | "workspaceId">,
+  archived: boolean,
+  /** The chat's sidebar title (sessionDisplayTitle), named in the notice. */
+  chatTitle: string,
+  /**
+   * Runs the caller's own archive again: `false` for Undo, `true` once
+   * "Keep this chat active" is turned off.
+   */
+  rerun?: (archived: boolean) => void,
+) {
+  const accepted = context.captureWorkspaceInvocation(chat.workspaceId);
+  if (!accepted) return null;
+  const turnedOff = archived ? takeKeptActive(chat) : undefined;
+  let updated: Awaited<ReturnType<AppContextValue["client"]["updateSessionArchive"]>>;
+  try {
+    updated = await context.client.updateSessionArchive(chat.workspaceId, chat.id, {
+      archived,
+    });
+  } catch (error) {
+    // The setting was turned off only to archive; put it back.
+    void restoreKeepLive(context, chat.workspaceId, turnedOff);
+    const blockers = archiveBlockers(error);
+    const keptActive =
+      blockers?.length && blockers.every((blocker) => blocker.kind === "keep_live");
+    if (archived && rerun && !turnedOff && keptActive) {
+      if (!context.ownsWorkspaceInvocation(chat.workspaceId, accepted)) return null;
+      const sessionIds = [...new Set(blockers.map((blocker) => blocker.sessionId))];
+      let chosen = false;
+      toast("Couldn't archive the chat.", {
+        description: sessionIds.includes(chat.id)
+          ? "“Keep this chat active” is on."
+          : "A chat it started has “Keep this chat active” on.",
+        duration: ARCHIVE_UNDO_MS,
+        action: {
+          label: "Turn off and archive",
+          onClick: () => {
+            // Once: a quick second click must not turn it off twice.
+            if (chosen) return;
+            chosen = true;
+            void turnOffKeepLiveAndArchive(context, chat, sessionIds, rerun, accepted);
+          },
+        },
+      });
+      return null;
+    }
+    const { code, serverMessage } = apiErrorFacts(error);
+    if (serverMessage && (blockers || code === "session_archive_final")) {
+      throw userFacingError(error, serverMessage);
+    }
+    throw error;
+  }
+  if (!context.ownsWorkspaceInvocation(chat.workspaceId, accepted)) return null;
+  if (archived) {
+    if (turnedOff) rememberKeptActive(chat, turnedOff);
+    toast(`Archived ${quotedChatName(chatTitle)}`, {
+      description:
+        "In a few seconds it moves to long-term storage and can't be restored. You can still read and search it under Archived.",
+      duration: ARCHIVE_UNDO_MS,
+      ...(rerun ? { action: { label: "Undo", onClick: () => rerun(false) } } : {}),
+    });
+  } else {
+    // Undo returns the chat as it was, "Keep this chat active" included. The
+    // chat comes back at once; the setting follows, and only a failure says so.
+    const kept = takeKeptActive(chat);
+    if (!kept?.length) toast.success("Archive undone.");
+    else {
+      void restoreKeepLive(context, chat.workspaceId, kept).then((restored) => {
+        if (restored) toast.success("Archive undone.");
+        else {
+          toast.warning("Archive undone, but “Keep this chat active” is still off.", {
+            description: "Turn it on in the chat's Agent tab.",
+          });
+        }
+      });
+    }
+  }
+  return updated;
+}
+
 const CHAT_NAME_MAX = 60;
-const LATE_NOTICE_MS = 10_000;
 
 /** A chat's sidebar title in quotes, shortened to fit a dialog title. */
 export function quotedChatName(sidebarTitle: string): string {

@@ -184,6 +184,12 @@ mock.module("@opengeni/react/ui/dropdown-menu", () => ({
       {children}
     </button>
   ),
+  // The rest of the module, which the toolbar's search and filters import.
+  DropdownMenuCheckboxItem: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DropdownMenuGroup: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DropdownMenuLabel: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DropdownMenuMeta: ({ children }: { children: ReactNode }) => <span>{children}</span>,
+  DropdownMenuSeparator: () => null,
 }));
 mock.module("@opengeni/react/app/components/ui/destructive-confirm", () => ({
   DestructiveConfirm: ({
@@ -505,7 +511,7 @@ describe("organization Codex subscriptions", () => {
     };
     expect(reachesWorkspace(limited, shared)).toBe(false);
     expect(reachesWorkspace(limited, personal)).toBe(false);
-    // Organization API keys never serve Personal workspaces.
+    // An account that can't serve Personal workspaces (a workspace's own) never reaches one.
     expect(reachesWorkspace({ ...access, personalWorkspacesSupported: false }, personal)).toBe(
       false,
     );

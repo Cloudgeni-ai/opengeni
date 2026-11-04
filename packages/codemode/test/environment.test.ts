@@ -43,6 +43,17 @@ function definition(
 }
 
 describe("AttemptToolEnvironment", () => {
+  test("internal construction never re-signs a digest smuggled through scope", () => {
+    const suppliedScope = { ...scope, digest: "a".repeat(64) };
+    expect(() =>
+      createAttemptToolEnvironment({
+        scope: suppliedScope,
+        generation: 1,
+        definitions: [definition("docs", "search")],
+      }),
+    ).toThrow(AttemptToolCatalogIntegrityError);
+  });
+
   test("does not partially freeze or memoize a catalog with mutable non-JSON annotations", () => {
     const { catalog } = createAttemptToolEnvironment({
       scope,
@@ -82,6 +93,57 @@ describe("AttemptToolEnvironment", () => {
     });
     const current = createAttemptToolEnvironment({ scope, generation: 1, createdAt, definitions });
     expect(JSON.stringify(current.catalog)).toBe(JSON.stringify(previous));
+  });
+
+  test("single-hash construction preserves ordered catalog bytes for varied metadata", () => {
+    for (let i = 0; i < 20; i++) {
+      const definitions: AttemptToolDefinition[] = ["zeta", "alpha", "middle"].map((name) => ({
+        ...definition("docs", name),
+        title: `Title ${i} — ${name}`,
+        inputSchema: {
+          type: "object",
+          properties: {
+            "10": { const: i },
+            "2": { enum: [null, true, "text"] },
+            z: { type: "array", items: { type: "string" } },
+          },
+          required: ["z", "2"],
+          additionalProperties: false,
+        },
+        outputSchema: { type: "object", properties: { value: { const: -0 } } },
+        annotations: { readOnlyHint: true, custom: { b: [i, null], a: "value" } },
+        icons: [{ src: "https://example.test/icon.svg", sizes: ["16x16", "32x32"] }],
+      }));
+      const createdAt = new Date("2026-08-09T12:00:00.000Z");
+      const unsigned = {
+        version: ATTEMPT_TOOL_CATALOG_VERSION,
+        ...scope,
+        generation: i + 1,
+        createdAt: createdAt.toISOString(),
+        firstPartyMcpPermissions: [] as [],
+        entries: [
+          ...prepareToolGatewayDefinitions(
+            definitions.map((entry) => ({
+              ...entry,
+              execute: async () => ({ content: [] }),
+            })),
+          ).entries,
+        ],
+      };
+      const previous = parseVerifiedAttemptToolCatalog({
+        ...unsigned,
+        digest: digestAttemptToolCatalog(unsigned),
+      });
+      const current = createAttemptToolEnvironment({
+        scope,
+        generation: i + 1,
+        createdAt,
+        firstPartyMcpPermissions: [],
+        definitions,
+      }).catalog;
+      expect(JSON.stringify(current)).toBe(JSON.stringify(previous));
+      expect(parseVerifiedAttemptToolCatalog(structuredClone(current))).toEqual(previous);
+    }
   });
 
   test("reuses only the exact immutable catalog snapshot and detaches caller schemas", () => {

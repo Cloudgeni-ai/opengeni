@@ -10,6 +10,7 @@ import {
   ConnectOperationRequest,
   ConnectProvider,
   ConnectAccount,
+  connectProviderAcceptsRequestedScopes,
   preparedMcpHeaders,
 } from "@opengeni/contracts/connect";
 import {
@@ -31,9 +32,9 @@ import {
   listPendingConnectAttempts,
   withWorkspaceSubjectRls,
   installApiIntegration,
+  IntegrationChangeRequiresAdminError,
   listConnectionsMetadata,
   getConnectionMetadata,
-  listInstalledApiIntegrations,
   createConnection,
   updateConnection,
   encryptEnvironmentValue,
@@ -46,6 +47,8 @@ import {
   externalActorContinuationForAuthorization,
   requireAccessGrantAuthorization,
   hasPermission,
+  hasIntegrationAdminPermission,
+  requireMemberIntegrationSetupAllowed,
   requireEnvironmentEncryption,
   isFikenConnection,
   isOpenGeniSlackBotConnection,
@@ -83,6 +86,11 @@ import {
   startApiIntegrationProviderOAuth,
 } from "../integrations/provider-oauth";
 import { resolveForRoute, validatedIntegrationInstallInput } from "./api-integrations";
+import {
+  curatedConnectFinishPermissions,
+  finishUnfinishedCuratedSetups,
+  isOwnAccountInstall,
+} from "../integrations/curated-connect-finish";
 import { assertMcpCredentialContentFlowAllowed, executeConnectOperation } from "@opengeni/core";
 import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
 import {
@@ -153,54 +161,6 @@ async function requireConnectAuthorization(
   throw new MissingPermissionRefusal("workspace:admin", {
     message: WORKSPACE_SETTINGS_REFUSAL,
   });
-}
-
-/**
- * Installing a deployment-reviewed integration's tools for the caller's own
- * personal account is connecting that account, so it needs only the right to
- * connect your own accounts (connections:personal, included in
- * connections:write), like connecting Gmail. The instance resolves
- * credentials for that person alone. Anything else (a workspace account, a
- * custom source, or an instance not already bound to this same account)
- * stays integration management (capabilities:manage).
- */
-async function isOwnAccountInstall(
-  deps: ApiRouteDeps,
-  scope: { workspaceId: string; subjectId: string },
-  attempt: {
-    id: string;
-    providerId: string;
-    ownership: string;
-    source?: unknown;
-    account?: { id: string } | undefined;
-    installationTarget?: { instanceKey: string } | undefined;
-  },
-): Promise<boolean> {
-  if (attempt.ownership !== "personal" || attempt.source !== undefined || !attempt.account)
-    return false;
-  if (
-    !CORE_INTEGRATION_DEFINITIONS.some((definition) => definition.id === attempt.providerId) ||
-    !integrationAvailable(deps.settings, scope.workspaceId, attempt.providerId)
-  )
-    return false;
-  const connection = await getConnectionMetadata(
-    deps.db,
-    scope.workspaceId,
-    attempt.account.id,
-    scope.subjectId,
-  );
-  if (!connection || connection.subjectId !== scope.subjectId) return false;
-  const instanceKey = attempt.installationTarget?.instanceKey;
-  // A fresh instance named after this attempt cannot replace anyone's.
-  if (!instanceKey || instanceKey === `account-${attempt.id}`) return true;
-  // Reconnecting reuses only an instance already bound to this same account.
-  const installed = await listInstalledApiIntegrations(deps.db, scope.workspaceId, scope.subjectId);
-  return installed.some(
-    (instance) =>
-      instance.instanceKey === instanceKey &&
-      instance.definitionId === attempt.providerId &&
-      instance.connectionRef?.connectionId === attempt.account!.id,
-  );
 }
 
 /** Shared durable setup entry. Provider completion is distinct from
@@ -290,7 +250,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         label: "Install MCP capability",
         family: "mcp",
         readiness:
-          !external || !hasPermission(authorization.grant.permissions, "capabilities:manage")
+          !external || !hasPermission(authorization.grant.permissions, "connections:write")
             ? "unsupported"
             : deps.settings.integrationsEnabled
               ? "available"
@@ -755,9 +715,12 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
     const input = await parseRequestJson(c, AdvanceConnectRequest);
     const action = input.action;
     const workspaceId = c.req.param("workspaceId");
+    // Adding an MCP server or an API integration is member work
+    // (INTEGRATION_SETUP_PERMISSION); auto-approval and changing what is
+    // already on stay with integration admins.
     const permission =
       action.type === "install"
-        ? "capabilities:manage"
+        ? "connections:write"
         : action.type === "credentials"
           ? "connections:write"
           : "workspace:read";
@@ -777,16 +740,24 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
     assertAgentPreparedConnect(actor, before);
     const advancePermission =
       before.providerId === "mcp-install"
-        ? "capabilities:manage"
+        ? "connections:write"
         : action.type === "credentials"
           ? connectSetupPermission(before)
-          : action.type === "install" && (await isOwnAccountInstall(deps, scope, before))
+          : action.type === "install" &&
+              (await isOwnAccountInstall(deps.db, deps.settings, scope, before))
             ? "connections:personal"
             : permission;
     if (!hasPermission(authorization.grant.permissions, advancePermission))
       throw new MissingPermissionRefusal(advancePermission);
-    if (before.mcpSetup && !hasPermission(authorization.grant.permissions, "capabilities:manage"))
-      throw new MissingPermissionRefusal("capabilities:manage");
+    // A member adding an MCP server or a workspace integration needs their
+    // organization to let members turn on integrations.
+    const memberSetup = !hasIntegrationAdminPermission(authorization.grant);
+    if (
+      memberSetup &&
+      (before.providerId === "mcp-install" ||
+        (action.type === "install" && advancePermission !== "connections:personal"))
+    )
+      await requireMemberIntegrationSetupAllowed(deps.db, scope);
     if (before.providerId === "mcp-install") {
       if (action.type !== "credentials")
         throw new HTTPException(422, { message: "Choose an MCP capability" });
@@ -803,7 +774,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           operationId: input.idempotencyKey,
           inputDigest: createHash("sha256").update(stableJson(input)).digest("hex"),
           authorize: (tx, _attempt, origin) =>
-            requireConnectOwnerAuthority(tx, scope, "capabilities:manage", origin),
+            requireConnectOwnerAuthority(tx, scope, "connections:write", origin),
           execute: async (attempt) => {
             if (attempt.state !== "credential_input")
               throw new HTTPException(409, { message: "Reload MCP setup" });
@@ -814,6 +785,8 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               accountId: scope.accountId,
               workspaceId,
               capabilityId: values.capabilityId,
+              // Members turn a server on only if it is not on yet.
+              ...(memberSetup ? { memberSetup: true } : {}),
               payload: { config: {}, metadata: {}, headers: {} },
               mcpServerLogoStorage: deps.objectStorage,
             });
@@ -1094,9 +1067,9 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           inputDigest: createHmac("sha256", encryptionKey).update(stableJson(input)).digest("hex"),
           beforeOperation: actor.beforeOperation,
           authorize: async (tx, attempt, origin) => {
+            // Finishing an agent-prepared key setup is member work: it saves a
+            // credential and turns the server on only if it is not on yet.
             await requireConnectOwnerAuthority(tx, scope, "connections:write", origin);
-            if (attempt.mcpSetup)
-              await requireConnectOwnerAuthority(tx, scope, "capabilities:manage", origin);
           },
           execute: async (attempt) => {
             if (attempt.state !== "credential_input")
@@ -1264,7 +1237,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(authorization),
               requestUrl: c.req.url,
               payload: {
-                requestedScopes: [],
+                requestedScopes: attempt.requestedScopes ? [...attempt.requestedScopes] : [],
                 mcpUrl: values.mcpUrl,
                 ownership: attempt.ownership,
                 returnUrl: stored.returnUrl,
@@ -1393,12 +1366,19 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           });
           let installation: ReturnType<typeof validatedIntegrationInstallInput>;
           try {
-            installation = validatedIntegrationInstallInput(
-              authorization.grant,
-              workspaceId,
-              payload,
-              resolved,
-            );
+            installation = {
+              ...validatedIntegrationInstallInput(
+                authorization.grant,
+                workspaceId,
+                payload,
+                resolved,
+              ),
+              // A member's add is create only. Reconnecting one's own account
+              // (connections:personal) keeps its own rules.
+              ...(memberSetup && advancePermission !== "connections:personal"
+                ? { memberCreate: true }
+                : {}),
+            };
           } catch (error) {
             // The shared validator's 409 means the reviewed source changed.
             // No installation write has run; persist a fresh, unselected preview.
@@ -1408,7 +1388,13 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           }
           return {
             commit: async (tx) => {
-              await installApiIntegration(tx, installation);
+              await installApiIntegration(tx, installation).catch((error: unknown) => {
+                if (error instanceof IntegrationChangeRequiresAdminError)
+                  throw new MissingPermissionRefusal("capabilities:manage", {
+                    message: error.message,
+                  });
+                throw error;
+              });
               return {
                 ...attempt,
                 error: undefined,
@@ -1446,7 +1432,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           assertAgentPreparedConnect(actor, attempt);
           const permission =
             attempt.providerId === "mcp-install"
-              ? "capabilities:manage"
+              ? "connections:write"
               : ["x", "reddit"].includes(attempt.providerId)
                 ? attempt.ownership === "workspace"
                   ? "workspace:admin"
@@ -1505,7 +1491,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         : requested;
     const setupPermission =
       input.providerId === "mcp-install"
-        ? "capabilities:manage"
+        ? "connections:write"
         : ["x", "reddit"].includes(input.providerId)
           ? input.ownership === "workspace"
             ? "workspace:admin"
@@ -1525,8 +1511,6 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(403, {
         message: "Verified Connect authority required",
       });
-    if (input.mcpSetup && !hasPermission(authorization.grant.permissions, "capabilities:manage"))
-      throw new MissingPermissionRefusal("capabilities:manage");
     if (input.providerId === "atlassian")
       throw new HTTPException(410, { message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
     if (
@@ -1534,6 +1518,12 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       input.ownership !== "personal"
     )
       throw new HTTPException(422, { message: "Google connections must be personal-owned" });
+    // Additional access is asked for only by reconnecting an OAuth MCP account;
+    // the OAuth start bounds it by the reviewed connector's permission list.
+    if (input.requestedScopes && !connectProviderAcceptsRequestedScopes(input.providerId))
+      throw new HTTPException(422, {
+        message: "This connector cannot ask for additional access when reconnecting",
+      });
     let target: URL;
     try {
       target = new URL(input.returnUrl);
@@ -1570,8 +1560,6 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                   null,
                   setupOwnerOptions,
                 );
-                if (input.mcpSetup)
-                  await requireConnectOwnerAuthority(actorTx, scope, "capabilities:manage");
                 const replay = await getConnectBeginReplay(actorTx, scope, {
                   idempotencyKey: input.idempotencyKey,
                   requestDigest: createHash("sha256").update(stableJson(input)).digest("hex"),
@@ -1608,8 +1596,6 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                   null,
                   setupOwnerOptions,
                 );
-                if (input.mcpSetup)
-                  await requireConnectOwnerAuthority(actorTx, scope, "capabilities:manage");
                 return persistConnectAttempt(actorTx, scope, {
                   ...attemptInput,
                   authorizeAcquisition: async () => {
@@ -1947,6 +1933,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               integrationInstalled: false,
               completionRequirement: input.mcpSetup ? "integration" : "connection",
               ...(input.mcpSetup ? { mcpSetup: input.mcpSetup } : {}),
+              ...(input.requestedScopes ? { requestedScopes: [...input.requestedScopes] } : {}),
               ...(existing
                 ? {
                     account: {
@@ -2106,6 +2093,16 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                             isPersonalConnectionOwnerPrincipal(authorization),
                           ...(continuation ? { externalContinuation: continuation } : {}),
                           connectAttemptId: id,
+                          // Lets the callback finish setup with exactly this request's rights.
+                          finishPermissions: curatedConnectFinishPermissions((permission) =>
+                            permission === "capabilities:manage"
+                              ? hasIntegrationAdminPermission(authorization.grant)
+                              : hasPermission(
+                                  authorization.grant.permissions,
+                                  permission,
+                                  authorization.grant.permissionMode,
+                                ),
+                          ),
                           requestUrl: c.req.url,
                           payload: {
                             definitionId: input.providerId,
@@ -2194,6 +2191,26 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           (!actor.preparedOnly || (attempt.providerId === "mcp-headers" && attempt.mcpSetup)),
       ),
     );
+  });
+  // Finishes the caller's built-in integration setups that saved an account
+  // but never added its tools (the app was closed before the last step),
+  // with exactly the caller's own rights. The app calls it when Capabilities
+  // opens; it returns the setups it completed.
+  app.post("/v1/workspaces/:workspaceId/connect/attempts/finish", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+    const actor = await connectRequestActor(deps, authorization);
+    if (actor.preparedOnly) return c.json([]);
+    const finishPermissions = curatedConnectFinishPermissions((permission) =>
+      permission === "capabilities:manage"
+        ? hasIntegrationAdminPermission(authorization.grant)
+        : hasPermission(
+            authorization.grant.permissions,
+            permission,
+            authorization.grant.permissionMode,
+          ),
+    );
+    return c.json(await finishUnfinishedCuratedSetups(deps, actor.scope, finishPermissions));
   });
   app.get("/v1/workspaces/:workspaceId/connect/attempts/:attemptId", async (c) => {
     const workspaceId = c.req.param("workspaceId");

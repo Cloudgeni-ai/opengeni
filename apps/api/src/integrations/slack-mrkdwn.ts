@@ -20,6 +20,8 @@
  * every retry.
  */
 
+import { rewriteClaudeCiteTags } from "@opengeni/contracts/claude-cite-tags";
+
 /**
  * A private provider citation handle: U+E200 `cite`, one or more U+E202
  * separated references, then U+E201. Codex web search can emit these without
@@ -88,11 +90,25 @@ export function stripProviderCitationMarkers(text: string): string {
  *   The opening fence loses its language tag, which Slack would otherwise print
  *   as the first code line, and an unclosed block is closed so Slack still
  *   renders it as code.
- * - Provider citation handles are removed.
+ * - Provider citation handles are removed, and Claude citation tags outside code
+ *   become their quoted text (`rewriteClaudeCiteTags`).
  *
  * Text that uses none of this syntax comes back unchanged.
  */
 export function slackMrkdwnFromMarkdown(markdown: string): string {
+  return slackMrkdwn(rewriteClaudeCiteTags(markdown));
+}
+
+/**
+ * The rendering from before Claude citation tags were rewritten. An operation
+ * an earlier release bound to these bytes keeps them on retry
+ * (`deliverSlackModelText`); nothing else should use it.
+ */
+export function slackMrkdwnKeepingClaudeCiteTags(markdown: string): string {
+  return slackMrkdwn(markdown);
+}
+
+function slackMrkdwn(markdown: string): string {
   const lines = stripProviderCitationMarkers(markdown).split("\n");
   const output: string[] = [];
   let fence: { character: string; length: number } | null = null;

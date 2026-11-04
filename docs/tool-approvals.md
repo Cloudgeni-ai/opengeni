@@ -9,6 +9,7 @@ missing access. There is no additional host, embedder or organization policy flo
 
 | Surface | Owner and meaning |
 | --- | --- |
+| Whose choices | A workspace login's choices belong to that workspace and are set by its connector managers. A personal (Only me) login's choices belong to the login: only its owner sets them, they are kept once in the workspace the login was connected from, and they apply in every workspace where the owner's turn uses that login. A copy left elsewhere by an older release is ignored. A workspace limits a personal login through whether the connector is on and which tools are enabled, not through choices of its own. |
 | Canonical decision and settings | `packages/db/src/connector-action-policy.ts`; most specific exact selector, conflicting ties Block, then recommendation. Settings project the same snapshot and report conditional differences as Mixed. |
 | Registered action selector | `packages/contracts/src/tool-policy.ts`; executable schema determines recognized actions. Arbitrary argument text cannot select an easier policy. |
 | `requireApproval`, `approvalMode`, provider annotations | Compatibility inputs and recommended defaults, never an extra gate after an explicit choice. |
@@ -16,6 +17,7 @@ missing access. There is no additional host, embedder or organization policy flo
 | Model MCP and Codemode | The same attempt environment and connector preparation/begin/completion lifecycle. Standalone adapters without the lifecycle retain their safe approval-required failure. |
 | Workspace HTTP gateway | The same decision resolver; existing one-use approval capability stays bound to exact caller, payload and authority. |
 | External MCP | Tools that might ask remain unavailable without a verified human approval round trip. No blanket approval token is synthesized. |
+| MCP server questions | A third-party MCP server may ask the person mid-call (MCP form elicitation); the question becomes an approval of the same call. See [MCP elicitation](mcp-elicitation.md). |
 | Human-input and learning settings | Separate product behavior. Requesting a person's answer and publishing learned instructions are not connector permission defaults. |
 
 Saved preferences activate when work next starts or resumes. A prepared action

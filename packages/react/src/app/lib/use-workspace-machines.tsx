@@ -6,8 +6,10 @@ import {
   type UseMachinesOptions,
 } from "../../machines";
 import { useAppContext } from "../app-context";
-import type { AccessContext } from "../types";
-import { hasWorkspacePermission } from "./permissions";
+import { hasWorkspacePermission, isSignedInPerson } from "./permissions";
+import { canAdministerOrganization } from "./workspaces";
+
+export { isSignedInPerson };
 
 const EMPTY_MACHINES: MachineView[] = [];
 const ignoreRefresh = async () => {};
@@ -15,33 +17,14 @@ const denyMutation = async () => null;
 const denyAttach = async () => false;
 const emptySeries = async (): Promise<MetricSample[]> => [];
 
-/**
- * The signed-in person themself, not a key, a delegated credential or an
- * agent: an Opengeni account (`user:`) or the local install's person (`dev`).
- * Mirrors the API's rule for Only me machines; the API still decides.
- */
-export function isSignedInPerson(context: AccessContext | null, workspaceId: string): boolean {
-  if (!context || context.credential) return false;
-  const person =
-    context.mode === "local" ? context.subjectId === "dev" : context.subjectId.startsWith("user:");
-  const grant = context.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId);
-  return Boolean(
-    person &&
-    grant &&
-    grant.subjectId === context.subjectId &&
-    grant.principalKind === "human_session" &&
-    grant.metadata?.delegated !== true &&
-    !grant.serviceInitiator,
-  );
-}
-
 // Stock-console reads follow the current workspace grant. The public React
 // hook remains usable by embedding hosts with their own authorization model.
 // Anyone who can see machines connects and changes their own Only me
-// machines; workspace machines need enrollments:manage (`canManage`).
+// machines; workspace machines need enrollments:manage (`canManage`), and
+// organization machines also the organization's owner or an admin.
 export function useWorkspaceMachines(options: UseMachinesOptions = {}) {
   const { workspaceId } = useOpenGeni();
-  const { accessContext } = useAppContext();
+  const { accessContext, clientConfig } = useAppContext();
   const targetWorkspaceId = options.workspaceId ?? workspaceId;
   const canRead =
     (!options.sessionId ||
@@ -55,9 +38,23 @@ export function useWorkspaceMachines(options: UseMachinesOptions = {}) {
     canRead && hasWorkspacePermission(accessContext, targetWorkspaceId, "sessions:control");
   const fleet = useMachines({ ...options, enabled: canRead && options.enabled !== false });
   const machines = canRead ? fleet.machines : EMPTY_MACHINES;
-  /** Change this machine: your own Only me machine, or any with canManage. */
+  const administersOrganization = canAdministerOrganization({
+    accessContext,
+    clientConfig,
+    accountId: accessContext.workspaceGrants.find(
+      (grant) => grant.workspaceId === targetWorkspaceId,
+    )?.accountId,
+  });
+  /**
+   * Change this machine: your own Only me machine, a workspace machine with
+   * canManage, an organization machine with canManage as its owner or an admin.
+   */
   const canManageMachine = (machine: Pick<MachineView, "scope">) =>
-    machine.scope === "user" ? canConnect : canManage;
+    machine.scope === "user"
+      ? canConnect
+      : machine.scope === "organization"
+        ? canManage && administersOrganization
+        : canManage;
   const mayChange = (enrollmentId: string) => {
     const machine = machines.find((candidate) => candidate.enrollmentId === enrollmentId);
     return machine ? canManageMachine(machine) : canManage;
@@ -67,6 +64,12 @@ export function useWorkspaceMachines(options: UseMachinesOptions = {}) {
     canRead,
     canManage,
     canConnect,
+    /**
+     * Connect a new machine of one's own (Only me, or any machine in a
+     * Personal workspace). Off when the organization keeps that to its
+     * owners and admins; machines already connected stay changeable.
+     */
+    canConnectOwnMachine: canConnect && fleet.canConnectOwnMachine,
     canManageMachine,
     canControl,
     canRemove: canConnect && fleet.canRemove,

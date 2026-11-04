@@ -16,6 +16,7 @@ import {
   creditDebitAttributionMetadata,
   deferKnowledgeIndexJob,
   freezeKnowledgeIndexBillingMode,
+  billingOriginForAttribution,
   getSpendableCreditBalance,
   guardPaidKnowledgeIndexPublication,
   knowledgeIndexBillingActivationTime,
@@ -229,7 +230,19 @@ export function createKnowledgeIndexingActivities(
                 return;
               }
               if (paid && current.nextIndex === 0) {
-                const balance = await getSpendableCreditBalance(lockedDb, claim.accountId);
+                // Funded like the work that added the document (API keys: credits).
+                const balance = await getSpendableCreditBalance(
+                  lockedDb,
+                  claim.accountId,
+                  undefined,
+                  undefined,
+                  undefined,
+                  await billingOriginForAttribution(lockedDb, {
+                    accountId: claim.accountId,
+                    workspaceId: current.billingWorkspaceId,
+                    attribution: claim.billingAttribution,
+                  }),
+                );
                 if (balance.balanceMicros <= 0) {
                   await waitKnowledgeIndexForFunding(lockedDb, claim);
                   result.deferred++;

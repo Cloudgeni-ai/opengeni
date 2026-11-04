@@ -90,6 +90,8 @@ export function SessionMachinePickerAction(props: {
   rigId: string | null;
   move: (machine: MachineView) => Promise<string | null>;
   queuedWork?: boolean | undefined;
+  /** A small text action for a one-line heads-up, instead of a full button. */
+  compact?: boolean | undefined;
 }) {
   const [open, setOpen] = useState(false);
   if (!props.runsOn.fleet.canAttach) return null;
@@ -108,9 +110,15 @@ export function SessionMachinePickerAction(props: {
   return (
     <Popover.Root open={open} onOpenChange={setOpen}>
       <Popover.Trigger asChild>
-        <Button type="button" className="min-h-11">
-          Choose machine
-        </Button>
+        {props.compact ? (
+          <Button type="button" variant="link" size="xs" className="h-auto px-0 align-baseline">
+            Use another machine
+          </Button>
+        ) : (
+          <Button type="button" className="min-h-11">
+            Choose machine
+          </Button>
+        )}
       </Popover.Trigger>
       <PopoverContainedPortal>
         <Popover.Content

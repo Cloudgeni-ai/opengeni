@@ -11,6 +11,18 @@ export {
 } from "./recorder";
 export { MeetingsList, type MeetingsListProps } from "./meetings-list";
 export {
+  audioImportMimeType,
+  AudioImportError,
+  importAudioFile,
+  importedAudioTitle,
+  isSharedAudioUrl,
+  sharedAudioRedirect,
+  showAudioImportError,
+  useSharedAudioImport,
+  type ImportAudioFileInput,
+  type UseSharedAudioImportOptions,
+} from "./audio-import";
+export {
   useMeetingView,
   type MeetingAction,
   type MeetingActionId,

@@ -94,6 +94,7 @@ export async function admitIndependentSessionTitle(input: {
   externallyBilled: boolean;
   chargesOpenGeniCredits: boolean;
   countsTowardTokenCap: boolean;
+  byok?: boolean;
   serviceTier?: "fast" | "priority" | "ultrafast";
 }): Promise<void> {
   if (!input.prompt.trim()) return;
@@ -121,6 +122,7 @@ export async function admitIndependentSessionTitle(input: {
     externallyBilled: input.externallyBilled,
     chargesOpenGeniCredits: input.chargesOpenGeniCredits,
     countsTowardTokenCap: input.countsTowardTokenCap,
+    ...(input.byok !== undefined ? { byok: input.byok } : {}),
     pricingJson: titlePricingJson(input.settings, route.modelId),
     serviceTier: input.serviceTier,
     processingResidency: servedRouteProcessingResidency(
@@ -405,6 +407,7 @@ function recordTitleBilling(
     externallyBilled: request.externallyBilled,
     chargesOpenGeniCredits: request.chargesOpenGeniCredits,
     countsTowardTokenCap: request.countsTowardTokenCap,
+    ...(request.byok !== undefined ? { byok: request.byok } : {}),
     creditPolicyRevision: request.creditPolicyRevision,
     normalizedUsage: normalizeModelCallUsage(usage.usage),
     usage: usage.usage,

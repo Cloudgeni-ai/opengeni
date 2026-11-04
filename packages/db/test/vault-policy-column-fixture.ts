@@ -131,13 +131,13 @@ const laterCapabilities = new Set([
  * 0978, 0984, 0998 and 1091 has no exhausted-schedule outbox, predicate,
  * visibility preview, foreign authority inventory, audience change,
  * machine-owner lookup, connected-command re-arm, managed passkey mutation or
- * secret scrub routines, so current readiness
- * reports them missing.
- * Drop exactly those messages (and only that table from a combined
+ * passkey table, or secret scrub routines, so current readiness reports them
+ * missing.
+ * Drop exactly those messages (and only those tables from a combined
  * "... tables are missing" line).
  */
 export function withoutAbsentLaterPosture(violations: readonly string[]): string[] {
-  const table = "scheduled_task_schedule_outbox";
+  const tables = new Set(["scheduled_task_schedule_outbox", "auth_passkeys"]);
   const kept: string[] = [];
   for (const violation of violations) {
     if (laterCapabilities.has(violation)) continue;
@@ -149,7 +149,7 @@ export function withoutAbsentLaterPosture(violations: readonly string[]): string
       const others = violation
         .slice(prefix.length)
         .split(", ")
-        .filter((name) => name !== table);
+        .filter((name) => !tables.has(name));
       if (others.length > 0) kept.push(`${prefix}${others.join(", ")}`);
       continue;
     }

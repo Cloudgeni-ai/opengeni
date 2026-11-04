@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { electronStub } from "./electron-stub";
+import { electronStub, FakeBrowserWindow, FakeWebContents } from "./electron-stub";
 
 mock.module("electron", () => electronStub);
 
@@ -22,6 +22,8 @@ import {
   PROMPT_AFTER_MS,
   promptRequest,
   promptText,
+  recordedMilliseconds,
+  recordingMeeting,
   type MeetingPage,
   type MeetingPrompt,
   type MeetingPromptOutcome,
@@ -33,7 +35,8 @@ import { handleMeetingDetectionIpc } from "../src/main/meeting-detection/ipc";
 import { ENGLISH_MEETING_WORDS } from "../src/main/meeting-detection/words";
 
 // These import Electron, which the stub stands in for.
-const { cardAnswer, cardBounds } = await import("../src/main/meeting-detection/card");
+const { cardAnswer, cardBounds, MeetingPromptCard } =
+  await import("../src/main/meeting-detection/card");
 const { meetingDetectionFileLog } = await import("../src/main/meeting-detection/electron");
 const { meetingDetectionBridge } = await import("../src/preload/meeting-detection");
 
@@ -125,14 +128,74 @@ describe("parseWatchLine", () => {
 function prompter() {
   const shown: MeetingPrompt[] = [];
   const closed: MeetingPrompt[] = [];
-  const subject = new MeetingPrompter(own, (prompt) => {
-    shown.push(prompt);
-    return { close: () => closed.push(prompt) };
-  });
-  return { subject, shown, closed };
+  const auto = { on: false, started: [] as string[], stopped: [] as string[] };
+  const subject = new MeetingPrompter(
+    own,
+    (prompt) => {
+      shown.push(prompt);
+      return { close: () => closed.push(prompt) };
+    },
+    {
+      enabled: () => auto.on,
+      start: (app) => auto.started.push(app.id),
+      stop: (app) => auto.stopped.push(app.id),
+    },
+  );
+  return { subject, shown, closed, auto };
 }
 
 describe("MeetingPrompter", () => {
+  test("recording without asking records a call app's call and stops it when it ends", () => {
+    const { subject, shown, closed, auto } = prompter();
+    auto.on = true;
+    subject.observe([zoom], 0);
+    subject.evaluate(PROMPT_AFTER_MS);
+    expect(auto.started).toEqual(["zoom"]);
+    expect(shown).toEqual([]);
+    // A browser joining before the page records joins that recording, unasked.
+    subject.observe([zoom, chrome], PROMPT_AFTER_MS + 500);
+    subject.evaluate(PROMPT_AFTER_MS * 3);
+    expect(shown).toEqual([]);
+    // Once the page records, the card says so; until then it claims nothing.
+    subject.setRecording(true, PROMPT_AFTER_MS * 3 + 100);
+    expect(shown.map((prompt) => [prompt.kind, prompt.app.id])).toEqual([["recording", "zoom"]]);
+    subject.observe([], 20_000);
+    subject.evaluate(20_000 + ENDED_AFTER_MS);
+    expect(auto.stopped).toEqual(["chrome"]);
+    expect(shown.map((prompt) => prompt.kind)).toEqual(["recording"]);
+    expect(closed.map((prompt) => prompt.kind)).toEqual(["recording"]);
+    subject.setRecording(false, 30_000);
+    expect(auto.started).toEqual(["zoom"]);
+  });
+
+  test("a meeting in a browser still asks, and a recording started by hand asks to stop", () => {
+    const { subject, shown, auto } = prompter();
+    auto.on = true;
+    subject.observe([chrome], 0);
+    subject.evaluate(PROMPT_AFTER_MS);
+    expect(shown.map((prompt) => prompt.kind)).toEqual(["record"]);
+    subject.setRecording(true, PROMPT_AFTER_MS + 100);
+    subject.observe([], 10_000);
+    subject.evaluate(10_000 + ENDED_AFTER_MS);
+    expect(shown.map((prompt) => prompt.kind)).toEqual(["record", "stop"]);
+    expect(auto).toMatchObject({ started: [], stopped: [] });
+  });
+
+  test("a start without asking that never began recording doesn't make a later one automatic", () => {
+    const { subject, shown, auto } = prompter();
+    auto.on = true;
+    subject.observe([zoom], 0);
+    subject.evaluate(PROMPT_AFTER_MS);
+    expect(auto.started).toEqual(["zoom"]);
+    // Much later the person starts recording by hand during the same call.
+    subject.setRecording(true, PROMPT_AFTER_MS + 120_000);
+    expect(shown).toEqual([]);
+    subject.observe([], 200_000);
+    subject.evaluate(200_000 + ENDED_AFTER_MS);
+    expect(auto.stopped).toEqual([]);
+    expect(shown.at(-1)?.kind).toBe("stop");
+  });
+
   test("asks once a call has held the microphone a few seconds", () => {
     const { subject, shown } = prompter();
     subject.observe([zoom], 0);
@@ -204,6 +267,24 @@ describe("prompt words", () => {
   const browser: MeetingPrompt = { kind: "record", app: identifyCallApp(chrome)! };
   const stop: MeetingPrompt = { kind: "stop", app: identifyCallApp(chrome)! };
 
+  test("a call recorded without asking says so, and its button stops it", () => {
+    const recording: MeetingPrompt = { kind: "recording", app: identifyCallApp(zoom)! };
+    expect(promptText(recording)).toEqual({
+      question: "Recording this call",
+      reason: "A call in Zoom started, so it's being recorded.",
+      action: "Stop recording",
+      dismiss: "OK",
+    });
+    expect(promptRequest(recording)).toEqual({ kind: "stop", app: "Zoom" });
+    // An app's words from before this card fall back to English for it.
+    const { recordingStarted, callRecording, ok, ...older } = ENGLISH_MEETING_WORDS;
+    void [recordingStarted, callRecording, ok];
+    expect(promptText(recording, { ...older, stop: "Stopp opptak" })).toMatchObject({
+      question: "Recording this call",
+      action: "Stopp opptak",
+    });
+  });
+
   test("the card asks, says why, and names its two buttons", () => {
     expect(promptText(record)).toEqual({
       question: "Record this meeting?",
@@ -241,6 +322,19 @@ describe("prompt words", () => {
 });
 
 describe("MeetingDetectionStore", () => {
+  test("recording without asking is off unless turned on, beside the other switch", () => {
+    const dir = mkdtempSync(join(tmpdir(), "meetings-"));
+    try {
+      expect(new MeetingDetectionStore(dir).autoRecord()).toBe(false);
+      new MeetingDetectionStore(dir).setAutoRecord(true);
+      new MeetingDetectionStore(dir).setEnabled(false);
+      expect(new MeetingDetectionStore(dir).autoRecord()).toBe(true);
+      expect(new MeetingDetectionStore(dir).enabled()).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("on unless turned off, and remembered", () => {
     const dir = mkdtempSync(join(tmpdir(), "meetings-"));
     try {
@@ -285,10 +379,13 @@ function detection(
     chooseTarget?: (pages: readonly MeetingPage[]) => MeetingPage | undefined;
     /** Whether a page said it can record, before this run. Yes by default. */
     canRecord?: boolean;
+    /** Recording without asking. Off by default. */
+    autoRecord?: boolean;
   } = {},
 ) {
   let now = 0;
   let enabled = true;
+  let autoRecord = options.autoRecord ?? false;
   let canRecord = options.canRecord ?? true;
   let helpers = 0;
   const helper = Object.assign(new EventEmitter(), {
@@ -313,6 +410,10 @@ function detection(
       enabled: () => enabled,
       setEnabled: (value) => {
         enabled = value;
+      },
+      autoRecord: () => autoRecord,
+      setAutoRecord: (value) => {
+        autoRecord = value;
       },
       canRecord: () => canRecord,
       setCanRecord: (value) => {
@@ -500,6 +601,170 @@ describe("MeetingDetection", () => {
     expect(changes).toBe(1);
     subject.stop();
   });
+
+  test("recording without asking starts and stops in the background, and its card stops it", () => {
+    const { subject, cards, call, microphone, log, revealed } = detection({ autoRecord: true });
+    const page = new FakePage(1);
+    subject.listen(page, true);
+    call();
+    // No question: the page records and the window stays where it is.
+    expect(page.sent).toEqual([{ kind: "record", app: "Zoom", title: "Zoom meeting" }]);
+    expect(revealed()).toBe(0);
+    expect(cards).toEqual([]);
+    expect(log).toContain("Meeting detection: recording a call without asking (zoom).");
+    // Once it records, the card says so.
+    subject.setRecording(page, true);
+    expect(cards.map((card) => card.prompt.kind)).toEqual(["recording"]);
+    // The call ends: the recording stops without a question.
+    microphone([], 10_000);
+    microphone([], 10_000 + ENDED_AFTER_MS);
+    expect(page.sent.at(-1)).toEqual({ kind: "stop", app: "Zoom" });
+    expect(cards.map((card) => card.prompt.kind)).toEqual(["recording"]);
+    subject.setRecording(page, false);
+    // The card's Stop recording stops it too.
+    call(zoom, 30_000);
+    subject.setRecording(page, true);
+    cards.at(-1)!.done("chosen");
+    expect(page.sent.at(-1)).toEqual({ kind: "stop", app: "Zoom" });
+    expect(revealed()).toBe(0);
+    subject.stop();
+  });
+
+  test("with no page open, a start without asking opens the window to record", () => {
+    const { subject, call, revealed } = detection({ autoRecord: true });
+    call();
+    expect(revealed()).toBe(1);
+    const page = new FakePage(1);
+    subject.listen(page, true);
+    expect(page.sent.map((request) => request.kind)).toEqual(["record"]);
+    subject.stop();
+  });
+
+  test("recording without asking is a switch of its own, remembered and announced", () => {
+    const { subject, log } = detection();
+    let changes = 0;
+    subject.onChange(() => (changes += 1));
+    expect(subject.status()).toMatchObject({ enabled: true, autoRecord: false });
+    expect(subject.update({ autoRecord: true })).toMatchObject({ enabled: true, autoRecord: true });
+    expect(changes).toBe(1);
+    expect(log).toContain("Meeting detection: recording without asking turned on.");
+    subject.update({ autoRecord: true });
+    expect(changes).toBe(1);
+    subject.stop();
+  });
+});
+
+describe("the meeting being recorded, for the menu", () => {
+  test("a page that describes its recording shows in the menu, opens and stops it", () => {
+    const { subject, microphone } = detection();
+    const other = new FakePage(1);
+    const page = new FakePage(2);
+    subject.listen(other, true);
+    subject.listen(page, true);
+    let changes = 0;
+    subject.onRecording(() => {
+      changes += 1;
+    });
+    expect(subject.recording()).toBeNull();
+    microphone([], 10_000);
+    subject.setRecording(page, true, {
+      title: "Weekly sync",
+      elapsedMilliseconds: 4_000,
+      paused: false,
+    });
+    const recording = subject.recording()!;
+    expect(recording).toMatchObject({ page, title: "Weekly sync", paused: false, canOpen: true });
+    expect(recordedMilliseconds(recording, 70_000)).toBe(64_000);
+    expect(changes).toBe(1);
+    // A pause freezes the time.
+    microphone([], 20_000);
+    subject.setRecording(page, true, {
+      title: "Weekly sync",
+      elapsedMilliseconds: 14_000,
+      paused: true,
+    });
+    expect(recordedMilliseconds(subject.recording()!, 90_000)).toBe(14_000);
+    expect(changes).toBe(2);
+
+    expect(subject.openRecording(subject.recording()!)).toBe(true);
+    expect(page.sent).toEqual([{ kind: "open" }]);
+    expect(subject.stopRecording()).toBe(true);
+    // Stopping goes only to the page that records.
+    expect(page.sent.at(-1)).toEqual({ kind: "stop", app: "" });
+    expect(other.sent).toEqual([]);
+
+    subject.setRecording(page, false);
+    expect(subject.recording()).toBeNull();
+    expect(changes).toBe(3);
+    expect(subject.stopRecording()).toBe(false);
+    subject.stop();
+  });
+
+  test("a page built before it described its meetings counts from when the app heard, and isn't asked to open it", () => {
+    const { subject, microphone } = detection();
+    const page = new FakePage(1);
+    subject.listen(page, true);
+    microphone([], 5_000);
+    subject.setRecording(page, true);
+    const recording = subject.recording()!;
+    expect(recording).toMatchObject({ title: null, canOpen: false });
+    expect(recordedMilliseconds(recording, 65_000)).toBe(60_000);
+    // Saying it again doesn't restart the time.
+    microphone([], 30_000);
+    subject.setRecording(page, true);
+    expect(subject.recording()!.at).toBe(5_000);
+    // Its page would take an unknown request for Stop, so it gets none.
+    expect(subject.openRecording(subject.recording()!)).toBe(false);
+    expect(page.sent).toEqual([]);
+    subject.stop();
+  });
+
+  test("describing it again doesn't end the recording the card knows about", () => {
+    const { subject, cards, call, microphone } = detection();
+    const page = new FakePage(1);
+    subject.listen(page, true);
+    call();
+    cards[0]!.done("chosen");
+    subject.setRecording(page, true, { title: null, elapsedMilliseconds: 0, paused: false });
+    subject.setRecording(page, true, {
+      title: "Renamed",
+      elapsedMilliseconds: 9_000,
+      paused: false,
+    });
+    // The call ends: the card offers to stop the recording, as before.
+    microphone([], 20_000);
+    microphone([], 20_000 + ENDED_AFTER_MS + 1_000);
+    expect(cards.at(-1)!.prompt.kind).toBe("stop");
+    subject.stop();
+  });
+
+  test("the newest recording shows; a closed page's goes", () => {
+    const { subject } = detection();
+    const first = new FakePage(1);
+    const second = new FakePage(2);
+    subject.setRecording(first, true, { title: "A", elapsedMilliseconds: 0, paused: false });
+    subject.setRecording(second, true, { title: "B", elapsedMilliseconds: 0, paused: false });
+    expect(subject.recording()!.title).toBe("B");
+    second.destroyed = true;
+    expect(subject.recording()!.title).toBe("A");
+    subject.pageGone(first);
+    expect(subject.recording()).toBeNull();
+    subject.stop();
+  });
+
+  test("only a well-formed description is taken", () => {
+    expect(
+      recordingMeeting({ title: "  Standup ", elapsedMilliseconds: 1_000, paused: true }),
+    ).toEqual({ title: "Standup", elapsedMilliseconds: 1_000, paused: true });
+    expect(recordingMeeting({ title: "", elapsedMilliseconds: -5 })).toEqual({
+      title: null,
+      elapsedMilliseconds: 0,
+      paused: false,
+    });
+    expect(recordingMeeting(undefined)).toBeNull();
+    expect(recordingMeeting({ title: "x" })).toBeNull();
+    expect(recordingMeeting({ elapsedMilliseconds: Number.NaN })).toBeNull();
+  });
 });
 
 describe("the card", () => {
@@ -606,7 +871,15 @@ describe("handleMeetingDetectionIpc", () => {
     // A closed page records nothing.
     handlers.get(DESKTOP_IPC.meetingDetectionUpdate)!({ sender: page }, { enabled: true });
     handlers.get(DESKTOP_IPC.meetingDetectionRecording)!({ sender: page }, true);
+    expect(subject.recording()).toMatchObject({ title: null, canOpen: false });
+    (handlers.get(DESKTOP_IPC.meetingDetectionRecording) as (...args: unknown[]) => void)(
+      { sender: page },
+      true,
+      { title: "Planning", elapsedMilliseconds: 2_000, paused: false },
+    );
+    expect(subject.recording()).toMatchObject({ title: "Planning", canOpen: true });
     page.emit("destroyed");
+    expect(subject.recording()).toBeNull();
     call(chrome, 50_000);
     expect(cards.at(-1)!.prompt).toMatchObject({ kind: "record", app: { id: "chrome" } });
     subject.stop();
@@ -640,5 +913,86 @@ describe("meetingDetectionBridge", () => {
     ]);
     bridge.setRecording(true);
     expect(ipc.sent.at(-1)).toEqual([DESKTOP_IPC.meetingDetectionRecording, true]);
+    const meeting = { title: "Planning", elapsedMilliseconds: 1_000, paused: false };
+    const described: unknown[][] = [];
+    ipc.send = (...args: unknown[]) => void described.push(args);
+    bridge.setRecording(true, meeting);
+    expect(described).toEqual([[DESKTOP_IPC.meetingDetectionRecording, true, meeting]]);
+  });
+});
+
+describe("the card outlives its page", () => {
+  const call: MeetingPrompt = {
+    kind: "record",
+    app: { id: "zoom", name: "Zoom", browser: false, title: "Zoom meeting" },
+  };
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
+
+  function card(answer: (code: string) => Promise<unknown>) {
+    FakeBrowserWindow.made = [];
+    FakeWebContents.answer = answer;
+    const logged: string[] = [];
+    const view = new MeetingPromptCard({
+      platform: "darwin",
+      icon: () => null,
+      log: (message) => logged.push(message),
+      answerMs: 20,
+    });
+    const showing = () => FakeBrowserWindow.made.filter((window) => window.visible);
+    return { view, logged, showing };
+  }
+  const unanswered = (code: string) =>
+    code === "answer()" ? new Promise<unknown>(() => undefined) : Promise.resolve(120);
+
+  test("a page that died while hidden: the next question shows in a fresh window", async () => {
+    const c = card(unanswered);
+    c.view.show(call, () => undefined).close();
+    await settle();
+    const first = FakeBrowserWindow.made[0]!;
+    first.webContents.emit("render-process-gone", {}, { reason: "oom", exitCode: 0 });
+
+    c.view.show(call, () => undefined);
+    await settle();
+
+    expect(first.destroyed).toBe(true);
+    expect(FakeBrowserWindow.made).toHaveLength(2);
+    expect(c.showing()).toEqual([FakeBrowserWindow.made[1]!]);
+    expect(c.logged.join("\n")).toContain("oom");
+    c.view.destroy();
+  });
+
+  test("a page that dies while asking asks again in a fresh window, which answers", async () => {
+    const c = card(unanswered);
+    const outcomes: MeetingPromptOutcome[] = [];
+    c.view.show(call, (outcome) => outcomes.push(outcome));
+    await settle();
+    FakeWebContents.answer = (code) =>
+      code === "answer()" ? Promise.resolve("act/1") : unanswered(code);
+    FakeBrowserWindow.made[0]!.webContents.emit("unresponsive");
+    await settle();
+
+    expect(FakeBrowserWindow.made).toHaveLength(2);
+    expect(FakeBrowserWindow.made[0]!.destroyed).toBe(true);
+    expect(FakeBrowserWindow.made[1]!.shows).toBe(1);
+    // The fresh window's button answered the question, which hid the card.
+    expect(outcomes).toEqual(["chosen"]);
+    expect(c.showing()).toEqual([]);
+    c.view.destroy();
+  });
+
+  test("a render that never answers is shown once more in a fresh window", async () => {
+    const c = card(unanswered);
+    c.view.show(call, () => undefined).close();
+    await settle();
+    FakeBrowserWindow.made[0]!.webContents.answer = () => new Promise(() => undefined);
+
+    c.view.show(call, () => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    expect(FakeBrowserWindow.made[0]!.destroyed).toBe(true);
+    expect(c.showing()).toEqual([FakeBrowserWindow.made[1]!]);
+    expect(c.logged.some((message) => message.includes("failed"))).toBe(true);
+    c.view.destroy();
+    FakeWebContents.answer = async () => 200;
   });
 });

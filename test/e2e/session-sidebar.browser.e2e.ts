@@ -332,7 +332,7 @@ test("All isolates archives in the last collapsed folder and uses archive filing
   expect(archiveCall?.options.sortBy).toBeUndefined();
 }, 30_000);
 
-test("Archived filter opens only the archive folder; restore retains the original project", async () => {
+test("Archived filter opens only the archive folder; an archived chat can't be restored", async () => {
   await openActive();
   await selectView("Status", "Archived");
   await waitForRows("Archived", 4);
@@ -346,29 +346,17 @@ test("Archived filter opens only the archive folder; restore retains the origina
   expect(await group("Website redesign").count()).toBe(0);
   expect(await group("Bugfixes").count()).toBe(0);
   await rows(archived).first().click({ button: "right" });
-  await page.getByRole("menuitem", { name: "Restore", exact: true }).click();
-  await page.waitForFunction(() => window.sessionSidebarQa.archiveCalls.length === 1);
-  expect(await page.evaluate(() => window.sessionSidebarQa.archiveCalls)).toEqual([
-    {
-      workspaceId,
-      sessionId: "00000000-0000-4000-9000-000000000401",
-      archived: false,
-      expectedVersion: 1,
-      mode: "hide_for_me",
-      confirmPause: false,
-      clientEventId: expect.stringMatching(
-        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
-      ),
-      previousChannelId: redesignId,
-      returnedChannelId: redesignId,
-    },
-  ]);
+  await page.getByRole("menuitem", { name: "Delete chat", exact: true }).waitFor();
+  expect(await page.getByRole("menuitem", { name: "Restore", exact: true }).count()).toBe(0);
+  expect(await page.getByRole("menuitem", { name: /^Archive/ }).count()).toBe(0);
+  await page.keyboard.press("Escape");
+  expect(await page.evaluate(() => window.sessionSidebarQa.archiveCalls)).toEqual([]);
   await selectView("Status", "Active");
-  await group("Website redesign").getByText("Archived design kickoff", { exact: true }).waitFor();
+  await group("Website redesign").waitFor();
   expect(await group("Archived").count()).toBe(0);
-  expect(await group("Default").getByText("Archived design kickoff", { exact: true }).count()).toBe(
-    0,
-  );
+  expect(
+    await group("Website redesign").getByText("Archived design kickoff", { exact: true }).count(),
+  ).toBe(0);
 }, 30_000);
 
 test("a discovered creator auto-hydrates to four before disclosure and expands independently to eight", async () => {
@@ -833,6 +821,60 @@ test("stale pagination completion does not restore focus or grow a new browse ge
   expect(await rows(group("Today")).count()).toBe(4);
   expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true);
 }, 30_000);
+
+test("a chat's unread reply shows over its working sub-sessions, which still say so", async () => {
+  const row = (number: number) =>
+    page.locator(
+      `a[data-session-row="00000000-0000-4000-9000-${String(number).padStart(12, "0")}"]`,
+    );
+  const marker = (number: number) => row(number).locator("[data-session-row-metadata] [title]");
+  for (const desktop of ["browser", "macos"]) {
+    for (const theme of ["light", "dark"]) {
+      await page.goto(`${url}?scenario=unread-reply&theme=${theme}&desktop=${desktop}`);
+      await row(4001).waitFor();
+      // The disclosure is remembered across the reloads below.
+      const more = page.getByRole("button", { name: /^Show 3 more sessions/ });
+      if (await more.count()) await more.click();
+      await row(4009).waitFor();
+
+      // The manager answered while two workers run and it waits on them.
+      expect(await marker(4001).getAttribute("title")).toBe("1 unread · 2 working");
+      expect(await marker(4001).locator(".bg-session-update").count()).toBe(1);
+      expect(await marker(4001).locator(".animate-spin, .lucide-hourglass").count()).toBe(0);
+      expect(await row(4001).getAttribute("aria-label")).toContain("1 unread · 2 working");
+      // The same with a worker running.
+      expect(await marker(4004).getAttribute("title")).toBe("1 unread · 1 working");
+      // Its own turn keeps the spinner: progress posted mid-turn is not the answer.
+      expect(await marker(4005).getAttribute("title")).toBe("1 working");
+      expect(await marker(4005).locator(".animate-spin").count()).toBe(1);
+      // Without an unread reply the row still shows the work.
+      expect(await marker(4006).getAttribute("title")).toBe("1 working");
+      expect(await marker(4006).locator(".animate-spin").count()).toBe(1);
+      expect(await marker(4008).locator(".lucide-hourglass").count()).toBe(1);
+      // Something that needs you still comes first.
+      expect(await marker(4007).getAttribute("title")).toBe("1 needs you");
+      expect(await marker(4009).getAttribute("title")).toBe("1 unread");
+      await capture(`unread-reply-${desktop}-${theme}`);
+
+      // Expanded, each worker keeps its own spinner.
+      await row(4001)
+        .locator("xpath=..")
+        .getByRole("button", { name: "Expand spawned sessions" })
+        .click();
+      await row(4002).waitFor();
+      // Focus on the toggle swaps the row's metadata for its quick actions.
+      await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+      for (const worker of [4002, 4003])
+        expect(await marker(worker).locator(".animate-spin").count()).toBe(1);
+      await capture(`unread-reply-${desktop}-${theme}-expanded`);
+      await row(4001)
+        .locator("xpath=..")
+        .getByRole("button", { name: "Collapse spawned sessions" })
+        .click();
+      await row(4002).waitFor({ state: "detached" });
+    }
+  }
+}, 60_000);
 
 test("the row hover explains status, model and activity from the compact list row", async () => {
   await page.goto(`${url}?scenario=hover&theme=light`);
@@ -1341,7 +1383,7 @@ test("Archive hides a Site row for this person with Undo; a spawned row archives
   await sessionRowBox(childId)
     .getByRole("button", { name: "Archive workstream", exact: true })
     .click();
-  await page.getByText("Chat archived", { exact: true }).waitFor();
+  await page.getByText(/^Archived “/).waitFor();
   await page.waitForFunction(
     (id) => !document.querySelector(`a[data-session-row="${id}"]`),
     parentId,
@@ -1375,10 +1417,12 @@ async function dragRowToProject(row: Locator, project: string) {
 }
 
 test("a Site row moves to another project or Default like a chat row, by menu or by dragging", async () => {
-  await page.goto(`${url}?scenario=sites&theme=light`);
+  // `publish`: a member who may publish, so the row also offers Duplicate.
+  await page.goto(`${url}?scenario=sites&theme=light&publish`);
   await siteInProject("Website redesign", pricingSiteId).waitFor();
 
-  // Right-click offers the chat row's Move to project list, current project checked.
+  // Right-click offers the Site's actions and the chat row's Move to project
+  // list, current project checked.
   await siteInProject("Website redesign", pricingSiteId)
     .locator("a")
     .first()
@@ -1386,7 +1430,11 @@ test("a Site row moves to another project or Default like a chat row, by menu or
   const menu = page.getByRole("menu");
   await menu.getByText("Move to project", { exact: true }).waitFor();
   expect(await menu.getByRole("menuitem").allInnerTexts()).toEqual([
+    "Copy link",
+    "Copy title",
     "Pin",
+    "Duplicate",
+    "Site details",
     "Archive",
     "Default",
     "Website redesign",

@@ -1,6 +1,8 @@
 import { RunContext, type Agent } from "@openai/agents";
 import { INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME } from "@opengeni/contracts";
 import { HUMAN_INPUT_TOOL_NAME } from "./run-events";
+import { runWithMcpInputAnswer, type McpInputAnswer } from "./mcp-input-requests";
+import { normalizeProtocolJsonValue } from "./protocol-json";
 import {
   extractOpenSuffixMembers,
   type HistoryItem,
@@ -146,7 +148,7 @@ export function functionCallResultItem(input: {
   output: unknown;
 }): Record<string, unknown> {
   const text =
-    typeof input.output === "string" ? input.output : JSON.stringify(input.output ?? null);
+    typeof input.output === "string" ? input.output : functionCallOutputText(input.output);
   return {
     type: "function_call_result",
     name: input.name,
@@ -155,11 +157,27 @@ export function functionCallResultItem(input: {
   };
 }
 
+function functionCallOutputText(output: unknown): string {
+  try {
+    const serialized = JSON.stringify(output ?? null);
+    if (serialized !== undefined) return serialized;
+  } catch {
+    // Converted below: a tool result must never fail the resumed turn.
+  }
+  return JSON.stringify(normalizeProtocolJsonValue(output ?? null, '$["output"]')) ?? "null";
+}
+
 export async function invokePreparedAgentTool(input: {
   agent: Agent<any, any>;
   toolName: string;
   argumentsJson: string;
   callId: string;
+  /**
+   * The person's answer to, or decline of, the MCP server question that
+   * paused this call. The output carries a new question instead
+   * (`mcpInputRequestOf`) when the server asks again.
+   */
+  mcpInputAnswer?: McpInputAnswer;
 }): Promise<unknown> {
   const hosted = input.agent.tools.find(
     (tool) => tool.type === "function" && tool.name === input.toolName,
@@ -175,12 +193,16 @@ export async function invokePreparedAgentTool(input: {
       `Open suffix cannot invoke missing tool ${input.toolName}`,
     );
   }
-  return await tool.invoke(new RunContext(), input.argumentsJson, {
-    toolCall: {
-      type: "function_call",
-      callId: input.callId,
-      name: input.toolName,
-      arguments: input.argumentsJson,
-    },
-  });
+  const invoke = async () =>
+    await tool.invoke(new RunContext(), input.argumentsJson, {
+      toolCall: {
+        type: "function_call",
+        callId: input.callId,
+        name: input.toolName,
+        arguments: input.argumentsJson,
+      },
+    });
+  return input.mcpInputAnswer
+    ? await runWithMcpInputAnswer({ callId: input.callId, answer: input.mcpInputAnswer }, invoke)
+    : await invoke();
 }

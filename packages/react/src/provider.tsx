@@ -440,12 +440,12 @@ function ApiContractMismatchScreen({ mismatch }: { mismatch: OpenGeniApiContract
       aria-live="assertive"
       data-opengeni-api-contract-mismatch
     >
-      <div className="w-full max-w-md rounded-xl border border-og-border bg-og-surface p-6 shadow-2xl">
+      <div className="w-full max-w-md rounded-xl border border-og-border bg-og-surface-1 p-6 shadow-2xl">
         <p className="text-og-menu font-semibold text-og-fg">{t("provider.opengeniUpdated")}</p>
-        <p className="mt-2 text-og-menu leading-6 text-og-muted">
+        <p className="mt-2 text-og-menu leading-6 text-og-fg-muted">
           {t("provider.thisTabCannotSafelyContinue")}
         </p>
-        <p className="mt-3 font-mono text-og-control text-og-subtle">
+        <p className="mt-3 font-mono text-og-control text-og-fg-subtle">
           {t("provider.clientExpectedApiActual", {
             expected: mismatch.expected,
             actual: mismatch.actual,

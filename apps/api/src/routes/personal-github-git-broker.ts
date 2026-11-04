@@ -1,17 +1,23 @@
 import {
   PERSONAL_GITHUB_API_ORIGIN,
   PERSONAL_GITHUB_PROVIDER_DOMAIN,
+  PERSONAL_GITHUB_RECONNECT_MESSAGE,
   PersonalGitHubConnectionMetadata,
   isPersonalGitHubConnection,
+  personalGitHubConnectionNeedsReconnect,
   type PersonalGitHubRepositoryPermissions,
 } from "@opengeni/contracts/personal-github";
-import type { McpPersonalConnectionDelegation } from "@opengeni/contracts";
+import {
+  resourcesIncludeRepository,
+  type McpPersonalConnectionDelegation,
+} from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   buildConnectionTokenResolver,
   getConnectionMetadata,
   getPersonalGitHubRepositorySelectionState,
   getSessionAuthorityProjection,
+  getSessionResourcesForAuthority,
   getSessionTurnForAttempt,
   resolveAcceptedConnectionUse,
 } from "@opengeni/db";
@@ -127,8 +133,8 @@ export async function handlePersonalGitHubGitBrokerRequest(
   let authority: BrokerAuthority;
   try {
     authority = await services.resolveAuthority(claims, routeId);
-  } catch {
-    return brokerError(401, "Git broker authorization is no longer current.");
+  } catch (error) {
+    return brokerAuthorityError(error);
   }
   if (authority.repository.access !== "write" && requestsReceivePack(request, operation)) {
     return brokerError(403, "This repository is not authorized for Git pushes.");
@@ -142,8 +148,8 @@ export async function handlePersonalGitHubGitBrokerRequest(
       userApiUrl.toString(),
       "identity_verify",
     );
-  } catch {
-    return brokerError(401, "Git broker authorization is no longer current.");
+  } catch (error) {
+    return brokerAuthorityError(error);
   }
   if (
     !(await fetchLiveProviderUser(
@@ -167,8 +173,8 @@ export async function handlePersonalGitHubGitBrokerRequest(
       repositoryApiUrl.toString(),
       "repository_verify",
     );
-  } catch {
-    return brokerError(401, "Git broker authorization is no longer current.");
+  } catch (error) {
+    return brokerAuthorityError(error);
   }
   const repositoryLive = await fetchLiveRepository(
     services.fetch,
@@ -188,8 +194,8 @@ export async function handlePersonalGitHubGitBrokerRequest(
       upstreamUrl.toString(),
       operation,
     );
-  } catch {
-    return brokerError(401, "Git broker authorization is no longer current.");
+  } catch (error) {
+    return brokerAuthorityError(error);
   }
   const providerToken = bearerToken(gitAuthorization);
   if (!providerToken) {
@@ -265,6 +271,39 @@ function personalGitHubGitBrokerServices(deps: ApiRouteDeps): PersonalGitHubGitB
       await authorizeBrokerProviderRequest(deps, authority, destinationUrl, operation),
     fetch: deps.githubPersonalFetch ?? fetch,
   };
+}
+
+class BrokerRepositoryRemovedError extends Error {
+  constructor() {
+    super("personal GitHub repository was removed from the session");
+  }
+}
+
+/** GitHub refused the stored grant; only the person reconnecting fixes it. */
+class BrokerReconnectRequiredError extends Error {
+  constructor() {
+    super("personal GitHub connection must be reconnected");
+  }
+}
+
+/** The token refresh failed for a passing reason (GitHub 5xx, timeout). */
+class BrokerProviderUnavailableError extends Error {
+  constructor() {
+    super("personal GitHub token refresh is temporarily unavailable");
+  }
+}
+
+function brokerAuthorityError(error: unknown): Response {
+  if (error instanceof BrokerRepositoryRemovedError) {
+    return brokerError(403, "This repository was removed from this chat.");
+  }
+  if (error instanceof BrokerReconnectRequiredError) {
+    return brokerError(403, PERSONAL_GITHUB_RECONNECT_MESSAGE);
+  }
+  if (error instanceof BrokerProviderUnavailableError) {
+    return brokerError(502, "GitHub is temporarily unavailable. Try again.");
+  }
+  return brokerError(401, "Git broker authorization is no longer current.");
 }
 
 async function resolveBrokerAuthority(
@@ -353,6 +392,13 @@ async function authorizeBrokerProviderRequest(
     credential.connectionUseAttribution.ownerSubjectId !== claims.ownerSubjectId ||
     credential.connectionUseAttribution.workspaceId !== claims.workspaceId
   ) {
+    // A refused refresh has just moved the connection to needs_reauth; say so.
+    await assertCurrentConnectionAndSelection(deps, claims, repository);
+    // Still current and active: the refresh failed for a passing reason, so
+    // Git hears "try again", not that its authorization ended.
+    if (credential.status !== "ok" && credential.reason === "refresh_failed") {
+      throw new BrokerProviderUnavailableError();
+    }
     throw new Error("personal GitHub credential resolution was denied");
   }
   await assertCurrentConnectionAndSelection(deps, claims, repository);
@@ -438,12 +484,34 @@ async function assertCurrentConnectionAndSelection(
   claims: PersonalGitHubGitBrokerClaims,
   repository: BrokerRepository,
 ): Promise<{ providerPrincipalId: string }> {
+  // Session membership is live authority: a repository removed from the chat
+  // (or from the parent chat of this child) stops on its next Git request,
+  // even for a turn or goal continuation that captured an older snapshot.
+  const sessionResources = await getSessionResourcesForAuthority(
+    deps.db,
+    claims.workspaceId,
+    claims.sessionId,
+  );
+  if (!sessionResources || !resourcesIncludeRepository(sessionResources, repository.canonicalUrl)) {
+    throw new BrokerRepositoryRemovedError();
+  }
   const connection = await getConnectionMetadata(
     deps.db,
     claims.originWorkspaceId,
     claims.connectionId,
     claims.ownerSubjectId,
   );
+  if (
+    connection &&
+    connection.accountId === claims.accountId &&
+    connection.workspaceId === claims.originWorkspaceId &&
+    connection.subjectId === claims.ownerSubjectId &&
+    personalGitHubConnectionNeedsReconnect(connection) &&
+    PersonalGitHubConnectionMetadata.safeParse(connection.metadata).data?.credentialBindingId ===
+      claims.credentialBindingId
+  ) {
+    throw new BrokerReconnectRequiredError();
+  }
   if (
     !connection ||
     connection.accountId !== claims.accountId ||

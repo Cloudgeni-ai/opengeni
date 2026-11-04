@@ -5,9 +5,11 @@ import {
   type SubscriptionPoolCore,
 } from "./subscription-pool-core";
 import { managedCookieHuman, requireSubscriptionScopeMutation } from "./subscription-pool-access";
-import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 export { managedCookieHuman } from "./subscription-pool-access";
-import { requireOrganizationCodexHuman } from "./codex";
+import {
+  requireOrganizationSubscriptionAdministrator,
+  requireOrganizationSubscriptionMutationOrigin,
+} from "./codex";
 import {
   connectSubscriptionCoreXaiConnection,
   getSubscriptionCoreXaiOrganizationProjection,
@@ -47,6 +49,7 @@ import { requireConnectOwnerAuthority } from "@opengeni/core";
 import { databaseUnavailableHttpError } from "../http/api-error";
 import { requirePrivateSubscriptionHuman } from "./subscription-pool-access";
 import { parseRequestBody } from "../http/request-body";
+import { turnOnOwnSubscriptionWhereAdded } from "../own-subscription-turned-on";
 
 type SuperGrokConnectState = {
   externalContinuationEncrypted?: string;
@@ -116,6 +119,7 @@ function accountJson(row: XaiSubscriptionAccountMetadata, activeCredentialId: st
   return {
     id: row.id,
     scope: row.scope,
+    ownerWorkspaceId: row.ownerWorkspaceId ?? null,
     subject: row.providerAccountId ?? row.accountEmail ?? row.id,
     email: row.accountEmail,
     label: row.label,
@@ -155,6 +159,8 @@ async function coreSuperGrokConnected(
     workspaceId: string | null;
     subjectId: string;
     personal?: boolean;
+    /** The shared workspace the person added their own subscription from (D-53). */
+    addedFrom?: string | undefined;
     encryptionKey: Uint8Array;
     tokens: { accessToken: string; refreshToken?: string | null; expiresInSeconds: number };
     identity: ReturnType<typeof xaiIdentityFromDeviceTokens>;
@@ -181,6 +187,13 @@ async function coreSuperGrokConnected(
   if (result.kind === "refused")
     throw coreConnectRefused(result.reason, "SuperGrok", input.personal === true);
   await deliverPoolCoreWake(deps, SUPERGROK_CORE, result.wake);
+  if (input.personal && input.addedFrom && input.workspaceId)
+    await turnOnOwnSubscriptionWhereAdded(deps.db, {
+      accountId: input.accountId,
+      workspaceId: input.addedFrom,
+      subjectId: input.subjectId,
+      connectionId: result.id,
+    });
   return result.id;
 }
 
@@ -200,9 +213,9 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
   // relays the short code, and the person still approves at xAI themselves.
   const organizationActor = async (c: Context, mutation = false) => {
     requireEnabled(deps);
-    if (mutation) requireSameOriginBrowserMutation(c, deps);
+    if (mutation) requireOrganizationSubscriptionMutationOrigin(c, deps);
     const organizationId = c.req.param("organizationId")!;
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
     return { organizationId, actorSubjectId: human.subjectId };
   };
   app.post(`${organizationPath}/connect/start`, async (c) => {
@@ -443,6 +456,9 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
         workspaceId: authority.workspaceId,
         subjectId: authority.subjectId,
         personal: state.scope === "user",
+        ...(state.scope === "user" && authority.workspaceId !== workspaceId
+          ? { addedFrom: workspaceId }
+          : {}),
         encryptionKey,
         tokens: poll.tokens,
         identity,

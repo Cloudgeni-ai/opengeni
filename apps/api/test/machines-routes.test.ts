@@ -2,7 +2,11 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import postgres from "postgres";
 import { testSettings } from "@opengeni/testing/settings";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import {
+  acquireSharedTestDatabase,
+  grantDeferredRuntimeAccess,
+  type SharedTestDatabase,
+} from "@opengeni/testing/shared-pg";
 import {
   AgentEvent,
   AgentUpdateStage,
@@ -1304,6 +1308,161 @@ describe("Connected Machine command policy", () => {
       },
     );
     expect(invalidCpu.status).toBe(400);
+  }, 90_000);
+});
+
+describe("Where an organization machine works", () => {
+  test("organization owners and admins pick the workspaces; elsewhere it disappears", async () => {
+    if (!available) return;
+    const putReach = async (
+      machine: Awaited<ReturnType<typeof seedCrossWorkspaceScopedMachine>>,
+      permissions: Permission[],
+      body: unknown,
+    ) =>
+      await appFor(new MemoryEventBus()).request(
+        `/v1/workspaces/${machine.targetWorkspaceId}/machines/${machine.enrollmentId}/reach`,
+        {
+          method: "PUT",
+          headers: {
+            authorization: `Bearer ${await bearer(
+              machine.accountId,
+              machine.targetWorkspaceId,
+              permissions,
+            )}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify(body),
+        },
+      );
+    const reachAdmin = ["enrollments:read", "enrollments:manage", "account:admin"] as Permission[];
+    const machine = await seedCrossWorkspaceScopedMachine("organization");
+
+    const listed = await appFor(new MemoryEventBus()).request(
+      `/v1/workspaces/${machine.targetWorkspaceId}/machines`,
+      {
+        headers: {
+          authorization: `Bearer ${await bearer(machine.accountId, machine.targetWorkspaceId, [
+            "enrollments:read",
+          ])}`,
+        },
+      },
+    );
+    expect(listed.status).toBe(200);
+    const listedBody = (await listed.json()) as {
+      machines: Array<{ enrollmentId: string | null; reach: unknown }>;
+    };
+    expect(
+      listedBody.machines.find((candidate) => candidate.enrollmentId === machine.enrollmentId)
+        ?.reach,
+    ).toEqual({
+      homeWorkspaceId: machine.originWorkspaceId,
+      allowedWorkspaceIds: null,
+      allowPersonalWorkspaces: true,
+    });
+
+    const onlyHome = { allowedWorkspaceIds: [], allowPersonalWorkspaces: false };
+    expect(
+      (await putReach(machine, ["enrollments:read", "enrollments:manage"], onlyHome)).status,
+    ).toBe(403);
+    const unknown = await putReach(machine, reachAdmin, {
+      allowedWorkspaceIds: [crypto.randomUUID()],
+      allowPersonalWorkspaces: true,
+    });
+    expect(unknown.status).toBe(400);
+    expect(
+      (
+        await putReach(machine, reachAdmin, {
+          allowedWorkspaceIds: "all",
+          allowPersonalWorkspaces: true,
+        })
+      ).status,
+    ).toBe(400);
+
+    const kept = await putReach(machine, reachAdmin, {
+      allowedWorkspaceIds: [machine.targetWorkspaceId],
+      allowPersonalWorkspaces: false,
+    });
+    expect(kept.status).toBe(200);
+    expect(await kept.json()).toEqual({
+      reach: {
+        homeWorkspaceId: machine.originWorkspaceId,
+        allowedWorkspaceIds: [machine.targetWorkspaceId],
+        allowPersonalWorkspaces: false,
+      },
+    });
+
+    const narrowed = await putReach(machine, reachAdmin, onlyHome);
+    expect(narrowed.status).toBe(200);
+    // It no longer works in the target workspace, so it is not found there.
+    expect((await putReach(machine, reachAdmin, onlyHome)).status).toBe(404);
+
+    // Organization owners still find it in the list of every organization
+    // machine, from the target workspace, with where it works.
+    const listEverywhere = async (permissions: Permission[]) => {
+      const response = await appFor(new MemoryEventBus()).request(
+        `/v1/workspaces/${machine.targetWorkspaceId}/organization-machines`,
+        {
+          headers: {
+            authorization: `Bearer ${await bearer(
+              machine.accountId,
+              machine.targetWorkspaceId,
+              permissions,
+            )}`,
+          },
+        },
+      );
+      return {
+        status: response.status,
+        body: (await response.json()) as {
+          machines?: Array<{ id: string }>;
+          complete?: boolean;
+        },
+      };
+    };
+    expect((await listEverywhere(["enrollments:read", "enrollments:manage"])).status).toBe(403);
+    // Until the list is granted: only the ones that work here.
+    const before = await listEverywhere(["enrollments:read", "account:admin"]);
+    expect(before.status).toBe(200);
+    expect(before.body).toEqual({ machines: [], complete: false });
+    await grantDeferredRuntimeAccess(admin);
+    const after = await listEverywhere(["enrollments:read", "account:admin"]);
+    expect(after.status).toBe(200);
+    expect(after.body).toEqual({
+      machines: [
+        {
+          id: machine.enrollmentId,
+          name: "organization machine",
+          sandboxId: machine.sandboxId,
+          reach: {
+            homeWorkspaceId: machine.originWorkspaceId,
+            allowedWorkspaceIds: [],
+            allowPersonalWorkspaces: false,
+          },
+        },
+      ],
+      complete: true,
+    });
+  }, 90_000);
+
+  test("only an organization machine works in chosen workspaces", async () => {
+    if (!available) return;
+    const machine = await seedCrossWorkspaceScopedMachine("user");
+    const response = await appFor(new MemoryEventBus()).request(
+      `/v1/workspaces/${machine.targetWorkspaceId}/machines/${machine.enrollmentId}/reach`,
+      {
+        method: "PUT",
+        headers: {
+          authorization: `Bearer ${await bearer(machine.accountId, machine.targetWorkspaceId, [
+            "enrollments:read",
+            "enrollments:manage",
+            "account:admin",
+          ])}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ allowedWorkspaceIds: null, allowPersonalWorkspaces: true }),
+      },
+    );
+    expect(response.status).toBe(409);
   }, 90_000);
 });
 
@@ -2887,11 +3046,13 @@ describe("who can use a machine: Workspace or Only me, changed in place", () => 
       generation: before.generation,
       summary: {
         movedOffChats: 1,
-        schedulesMadeOnlyMe: 1,
+        schedulesMadeOnlyMe: 0,
         schedulesPaused: 0,
         notifiedPeople: 1,
       },
     });
+    // The owner's shared schedule runs as the owner, so it keeps running
+    // unchanged and is not listed.
     expect(listed.body.items).toEqual([
       expect.objectContaining({
         kind: "chat",
@@ -2901,12 +3062,6 @@ describe("who can use a machine: Workspace or Only me, changed in place", () => 
         title: "Member release",
         stopsTurn: false,
         stopsCommands: 0,
-      }),
-      expect.objectContaining({
-        kind: "schedule",
-        action: "make_only_me",
-        scheduledTaskId: schedule.id,
-        title: "Nightly build",
       }),
     ]);
 
@@ -2934,7 +3089,7 @@ describe("who can use a machine: Workspace or Only me, changed in place", () => 
     });
     const [scheduleRow] = await admin<Array<{ visibility: string; status: string }>>`
       select visibility, status from scheduled_tasks where id = ${schedule.id}`;
-    expect(scheduleRow).toEqual({ visibility: "user_private", status: "active" });
+    expect(scheduleRow).toEqual({ visibility: "workspace_shared", status: "active" });
 
     // The Machines list shows it as the owner's, and hides it from the member.
     const listFor = async (subjectId: string) => {

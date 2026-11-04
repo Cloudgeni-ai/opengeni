@@ -73,6 +73,7 @@ import {
   type EntryRowActions,
 } from "./knowledge-library";
 import { KnowledgeOriginalFile } from "./knowledge-original-file";
+import { KnowledgeReachItem } from "./knowledge-reach";
 import { MoreMenu } from "@opengeni/react/ui/page-actions";
 
 /* ----------------------------------------------------------------------------
@@ -498,6 +499,14 @@ function EntryPageContent({
             ? "Organization"
             : "This workspace"}
       </DetailAsideItem>
+      {record.scope !== "workspace" ? (
+        <KnowledgeReachItem
+          workspaceId={workspaceId}
+          entryId={record.id}
+          scope={record.scope}
+          title={entry.title}
+        />
+      ) : null}
       {/* One collection is already the header's path; several are listed here. */}
       {!collection && entry.groupIds.length !== 1 ? (
         <DetailAsideItem label="Collections" icon={<FolderIcon />}>
@@ -1327,7 +1336,6 @@ export type AddKind = "note" | "group";
 export function AddKnowledgePage({
   workspaceId,
   workspaceName,
-  personal,
   canWriteOrganization,
   defaultScope,
   collectionId,
@@ -1336,7 +1344,6 @@ export function AddKnowledgePage({
 }: {
   workspaceId: string;
   workspaceName: string;
-  personal: boolean;
   canWriteOrganization: boolean;
   defaultScope: KnowledgeEntryScope;
   collectionId?: string;
@@ -1352,9 +1359,11 @@ export function AddKnowledgePage({
   const [groupIds, setGroupIds] = useState<string[]>(collectionId ? [collectionId] : []);
   const [errors, setErrors] = useState<{ title?: string; content?: string }>({});
   const collectionTitle = useEntryTitleOptional(workspaceId, collectionId);
-  const scopes: KnowledgeEntryScope[] = personal
-    ? ["personal"]
-    : ["workspace", "personal", ...(canWriteOrganization ? (["organization"] as const) : [])];
+  const scopes: KnowledgeEntryScope[] = [
+    "workspace",
+    "personal",
+    ...(canWriteOrganization ? (["organization"] as const) : []),
+  ];
 
   return (
     <FormPage

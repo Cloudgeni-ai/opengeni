@@ -3,7 +3,6 @@ import { databaseBootConnectOptions } from "./boot-connect";
 import type { RlsStrategy } from "./database";
 import {
   DEFERRED_RUNTIME_PRIVATE_ROUTINES,
-  DEFERRED_RUNTIME_TARGET_ROUTINES,
   RUNTIME_FULL_DML_TABLES,
   RUNTIME_READ_INSERT_TABLES,
   RUNTIME_READ_INSERT_UPDATE_TABLES,
@@ -652,6 +651,7 @@ async function grantAppRoleIfSchemaExists(
   const managedAuthSessionSetRoutines = `ARRAY[${[
     "assert_managed_sign_in_recovery(text,text,uuid,jsonb)",
     "replay_managed_sign_in_method(text,text,jsonb)",
+    "mutate_managed_passkey(text,text,jsonb)",
     "claim_managed_sign_in_notification(uuid,text,text,integer)",
     "settle_managed_sign_in_notification(uuid,uuid,text)",
     "get_canonical_human_exact_login_binding(text,text)",
@@ -1487,16 +1487,6 @@ BEGIN
         );
       END IF;
     END LOOP;
-    -- Deferred target-schema capabilities stay withheld until the previous
-    -- release knows them (DEFERRED_RUNTIME_TARGET_ROUTINES).
-    FOREACH routine_signature IN ARRAY ARRAY[${DEFERRED_RUNTIME_TARGET_ROUTINES.map(literal).join(",")} ]::text[] LOOP
-      IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature)) IS NOT NULL THEN
-        EXECUTE format(
-          'REVOKE ALL ON FUNCTION %I.%s FROM PUBLIC, %I',
-          ${literal(schema)}, routine_signature, ${literal(role)}
-        );
-      END IF;
-    END LOOP;
     FOREACH routine_signature IN ARRAY ${organizationRecoveryRoutines} LOOP
       IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature)) IS NOT NULL THEN
         EXECUTE format(
@@ -2181,14 +2171,19 @@ BEGIN
           'GRANT EXECUTE ON FUNCTION %I.scheduled_scoped_rig_version_metadata(uuid, uuid, text, uuid, uuid) TO %I',
           ${literal(schema)}, ${literal(role)}
         );
-        EXECUTE format(
-          'REVOKE ALL ON FUNCTION %I.scheduled_variable_set_expected_generation_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid) FROM PUBLIC',
+        IF to_regprocedure(format(
+          '%I.scheduled_variable_set_expected_generation_for_attempt(uuid,uuid,uuid,uuid,uuid,integer,uuid)',
           ${literal(schema)}
-        );
-        EXECUTE format(
-          'GRANT EXECUTE ON FUNCTION %I.scheduled_variable_set_expected_generation_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid) TO %I',
-          ${literal(schema)}, ${literal(role)}
-        );
+        )) IS NOT NULL THEN
+          EXECUTE format(
+            'REVOKE ALL ON FUNCTION %I.scheduled_variable_set_expected_generation_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid) FROM PUBLIC',
+            ${literal(schema)}
+          );
+          EXECUTE format(
+            'GRANT EXECUTE ON FUNCTION %I.scheduled_variable_set_expected_generation_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid) TO %I',
+            ${literal(schema)}, ${literal(role)}
+          );
+        END IF;
         EXECUTE format(
           'REVOKE ALL ON FUNCTION %I.bind_scheduled_task_run_session(uuid, uuid, uuid, uuid) FROM PUBLIC',
           ${literal(schema)}
@@ -2751,6 +2746,7 @@ BEGIN
       'set_promotion_enforcement(boolean,text,text,boolean)',
       'evaluate_promotion_abuse(uuid)',
       'set_promotion_detector_mode(text,text)',
+      'set_free_credit_signup_cutoff(timestamptz,text,text,bigint)',
       'wake_teams_route_for_session_event()',
       'sync_usage_maintenance_due()',
       'arm_usage_allowances_for_membership()',

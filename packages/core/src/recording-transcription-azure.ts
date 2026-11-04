@@ -3,6 +3,7 @@ import type { RecordingTranscriptionCapabilities } from "@opengeni/contracts";
 import {
   canonicalLanguageTag,
   RecordingTranscriptionError,
+  transcriptionProviderOutOfCredit,
   type RecordingTranscribedWord,
   type RecordingTranscriptionCredentials,
   type RecordingTranscriptionProvider,
@@ -140,8 +141,14 @@ export function azureSpeechLocale(code: string): string {
   return tag.split("-")[0] ?? tag;
 }
 
-function azureSpeechError(status: number, code: string | null): RecordingTranscriptionError {
+function azureSpeechError(
+  status: number,
+  failure: { code: string | null; outOfCredit: boolean },
+): RecordingTranscriptionError {
+  const { code } = failure;
   const message = `Azure Speech could not transcribe this audio (HTTP ${status}${code ? `: ${code}` : ""})`;
+  // The free tier's spent quota comes back as 403, like a rejected key.
+  if (failure.outOfCredit) return new RecordingTranscriptionError(message, "quota_exceeded", false);
   if (status === 401 || status === 403) {
     return new RecordingTranscriptionError(message, "unauthorized", false);
   }
@@ -159,9 +166,20 @@ function azureSpeechError(status: number, code: string | null): RecordingTranscr
 }
 
 /** Speech errors are JSON with a code; MAI wraps its own. Only the code is kept. */
-async function azureSpeechErrorCode(response: Response): Promise<string | null> {
+async function azureSpeechFailure(
+  response: Response,
+): Promise<{ code: string | null; outOfCredit: boolean }> {
   const text = await response.text().catch(() => "");
-  return /"code"\s*:\s*"([A-Za-z_]{1,60})"/u.exec(text)?.[1] ?? null;
+  let body: unknown = text;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    // Not JSON: its text is read as it is.
+  }
+  return {
+    code: /"code"\s*:\s*"([A-Za-z_]{1,60})"/u.exec(text)?.[1] ?? null,
+    outOfCredit: transcriptionProviderOutOfCredit(body),
+  };
 }
 
 function azureSpeechAuthorization(
@@ -250,7 +268,7 @@ export function createAzureSpeechRecordingTranscriptionProvider(options: {
         throw new RecordingTranscriptionError("Could not reach Azure Speech", "network", true);
       }
       if (!response.ok) {
-        throw azureSpeechError(response.status, await azureSpeechErrorCode(response));
+        throw azureSpeechError(response.status, await azureSpeechFailure(response));
       }
       return parseAzureSpeechTranscript(await response.json().catch(() => null));
     },

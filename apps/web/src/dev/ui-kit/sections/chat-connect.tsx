@@ -124,6 +124,8 @@ const context = new Proxy(
     githubStatusFailed: false,
     repoBusy: false,
     personalGitHubBusy: false,
+    personalGitHubStatus: { enabled: true, connection: null, reviewUrl: null },
+    personalGitHubSelection: null,
     workspaces: [],
     accessContext: {
       subjectId: "kit-person",
@@ -247,6 +249,22 @@ const CARDS: Record<string, { label: string; item: AuthNeededItem; ask: [string,
     }),
     ask: ["Open a PR with the fix.", "I need GitHub access for this repository. Connect it below."],
   },
+  personalGitHub: {
+    label: "Your GitHub (not connected)",
+    item: notice("github-personal", {
+      providerDomain: "github.com",
+      capability: capability(
+        "api:github-personal",
+        "Your GitHub",
+        "api",
+        "Connect your GitHub so the pull request opens under your name.",
+      ),
+    }),
+    ask: [
+      "Open the PR as me.",
+      "Connect your GitHub below, then choose the repos I may use as you.",
+    ],
+  },
   plugin: {
     label: "Plugin (Skills and an MCP server)",
     item: notice("plugin", {
@@ -285,10 +303,11 @@ function Provider({ children }: { children: ReactNode }) {
 /* ----------------------------------------------------------------------------
    Live sign-in steps: a reviewed integration's card against a fake Connect
    backend. Press Connect to see the card wait for its sign-in window, then
-   Cancel or Reopen window. "fails" reports an error on its first poll.
+   Cancel or Reopen window. "fails" reports an error on its first poll;
+   "code" asks the person to enter a code on the provider's page.
    -------------------------------------------------------------------------- */
 
-function signInClient(definitionId: string, mode: "waits" | "fails") {
+function signInClient(definitionId: string, mode: "waits" | "fails" | "code") {
   let revision = 0;
   let current: Record<string, unknown> | null = null;
   const attempt = (overrides: Record<string, unknown>) => {
@@ -324,7 +343,15 @@ function signInClient(definitionId: string, mode: "waits" | "fails") {
     pending: async () => [],
     begin: async () =>
       attempt({
-        nextAction: { type: "authorize", url: "https://login.example.com/authorize?state=kit" },
+        nextAction:
+          mode === "code"
+            ? {
+                type: "wait",
+                userCode: "WDJB-MJHT",
+                verificationUrl: "https://login.example.com/device",
+                pollAfterMs: 5000,
+              }
+            : { type: "authorize", url: "https://login.example.com/authorize?state=kit" },
       }),
     recover: async () => structuredClone(current),
     get: async () => {
@@ -344,27 +371,40 @@ function signInClient(definitionId: string, mode: "waits" | "fails") {
   };
 }
 
-const SIGN_IN = [
+const SIGN_IN: {
+  label: string;
+  definitionId: string;
+  name: string;
+  mode: "waits" | "fails" | "code";
+  rationale: string;
+}[] = [
   {
     label: "Waiting for sign-in (press Connect)",
     definitionId: "microsoft-outlook-mail",
     name: "Outlook Mail",
-    mode: "waits" as const,
+    mode: "waits",
     rationale: "Saving the draft to your Outlook needs your mailbox.",
   },
   {
     label: "Cancelled (press Connect, then Cancel)",
     definitionId: "microsoft-outlook-calendar",
     name: "Outlook Calendar",
-    mode: "waits" as const,
+    mode: "waits",
     rationale: "Booking the review meeting needs your Outlook calendar.",
   },
   {
     label: "Sign-in could not continue (press Connect)",
     definitionId: "microsoft-onedrive",
     name: "OneDrive",
-    mode: "fails" as const,
+    mode: "fails",
     rationale: "Opening the quarterly report needs your OneDrive.",
+  },
+  {
+    label: "Enter a code on the provider's page (press Connect)",
+    definitionId: "microsoft-teams",
+    name: "Microsoft Teams",
+    mode: "code",
+    rationale: "Posting the summary needs your Teams account.",
   },
 ];
 

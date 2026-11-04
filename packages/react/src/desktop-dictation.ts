@@ -21,6 +21,7 @@ export {
 } from "./components/desktop-dictation/settings";
 export type {
   DesktopDictationSettingsProps,
+  DictationModelChoice,
   UseDesktopDictationResult,
 } from "./components/desktop-dictation/settings";
 export {

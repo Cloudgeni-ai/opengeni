@@ -388,44 +388,31 @@ describe("useVoiceInput: dictations as recordings", () => {
     await hook.unmount();
   });
 
-  test("Cancel and Escape delete the dictation, so nothing offers it again", async () => {
-    for (const via of ["cancel", "escape"] as const) {
-      const server = new FakeServer();
-      const { platform, recorders } = fakePlatform(server);
-      const { hook, draft, advance } = await renderDurable(server, platform);
-      await act(async () => {
-        await hook.result.current.start();
-      });
-      const id = hook.result.current.recordingId!;
-      advance(45_000);
-      await act(async () => {
-        if (via === "cancel") hook.result.current.cancel();
-        else document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
-        await settle();
-      });
-      expect(hook.result.current.status).toBe("idle");
-      expect(hook.result.current.hasRecoverableRecording).toBe(false);
-      expect(recorders[0]?.discarded).toBe(true);
-      expect(server.recordings.has(id)).toBe(false);
-      expect(draft.value).toBe("");
-      await hook.unmount();
-    }
-
+  test("Cancel deletes the dictation, so nothing offers it again; Escape never does", async () => {
     const server = new FakeServer();
     const { platform, recorders } = fakePlatform(server);
-    const { hook } = await renderDurable(server, platform);
+    const { hook, draft, advance } = await renderDurable(server, platform);
     await act(async () => {
       await hook.result.current.start();
     });
-    // An Escape a dialog already handled leaves dictation alone.
+    const id = hook.result.current.recordingId!;
+    advance(45_000);
+    // A stray Escape loses no speech.
     await act(async () => {
-      const event = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
-      event.preventDefault();
-      document.dispatchEvent(event);
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", cancelable: true }));
       await settle();
     });
     expect(hook.result.current.status).toBe("recording");
     expect(recorders[0]?.discarded).toBe(false);
+    await act(async () => {
+      hook.result.current.cancel();
+      await settle();
+    });
+    expect(hook.result.current.status).toBe("idle");
+    expect(hook.result.current.hasRecoverableRecording).toBe(false);
+    expect(recorders[0]?.discarded).toBe(true);
+    expect(server.recordings.has(id)).toBe(false);
+    expect(draft.value).toBe("");
     await hook.unmount();
   });
 

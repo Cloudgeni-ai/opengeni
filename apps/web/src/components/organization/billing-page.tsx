@@ -49,6 +49,11 @@ const WorkspaceBudgetsSection = lazy(() =>
     default: module.WorkspaceBudgetsSection,
   })),
 );
+const PersonalWorkspaceLimitSection = lazy(() =>
+  import("@/components/usage/personal-workspace-limit-section").then((module) => ({
+    default: module.PersonalWorkspaceLimitSection,
+  })),
+);
 const WorkspaceBudgetPage = lazy(() =>
   import("@/components/usage/workspace-budget-page").then((module) => ({
     default: module.WorkspaceBudgetPage,
@@ -408,6 +413,12 @@ function BillingOverview({
       <Suspense fallback={null}>
         <WorkspaceBudgetsSection onOpenWorkspace={onOpenBudget} />
       </Suspense>
+
+      {accountId ? (
+        <Suspense fallback={null}>
+          <PersonalWorkspaceLimitSection key={accountId} organizationId={accountId} />
+        </Suspense>
+      ) : null}
 
       {canReadBilling && accountId ? (
         <Section title="Usage">

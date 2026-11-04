@@ -62,6 +62,21 @@ impl Shape {
     pub fn cpu_millis(self) -> u64 {
         u64::from(self.cpu_weight()) * 10
     }
+
+    /// Millicores of processor time a create of this shape asking for the
+    /// default request books once it claims such a VM: far less than the
+    /// whole shape it books while it comes up.
+    #[must_use]
+    pub fn claim_cpu_millis(self) -> u64 {
+        u64::from(
+            SandboxConfig::new(
+                self.vcpus,
+                self.memory_mib,
+                crate::protocol::SleepConfig::default(),
+            )
+            .cpu_request(),
+        )
+    }
 }
 
 impl fmt::Display for Shape {

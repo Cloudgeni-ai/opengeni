@@ -2,6 +2,8 @@ import type { AttemptToolDefinition } from "@opengeni/codemode";
 import {
   compareModelPickerOrder,
   modelPickerBillingClassFor,
+  modelLabelDistinctions,
+  type ModelLabelGeography,
 } from "@opengeni/contracts/model-picker-order";
 import type { WorkspaceModelSelection } from "@opengeni/core";
 
@@ -16,6 +18,12 @@ function safeLineField(value: string): string {
     .replace(/\s+/gu, " ")
     .trim();
 }
+
+const GEOGRAPHY_NAMES: Record<ModelLabelGeography, string> = {
+  eu: "EU",
+  us: "US",
+  global: "Global",
+};
 
 export function renderListModels(input: {
   currentModelId: string | null;
@@ -41,9 +49,28 @@ export function renderListModels(input: {
     return lines.join("\n");
   }
 
+  // Models listed under the same name say what differs, as the picker does.
+  const distinctions = modelLabelDistinctions(
+    selectable.map(({ selection, billingClass }) => ({
+      id: selection.model.id,
+      label: selection.model.label,
+      group: billingClass,
+      providerLabel: selection.model.providerLabel,
+      residency: selection.model.residency,
+    })),
+  );
   for (const { selection } of selectable) {
     const { model } = selection;
-    const fields = [safeLineField(model.id), safeLineField(model.label), model.cost];
+    const distinction = distinctions.get(model.id);
+    const label = distinction
+      ? `${model.label} (${[
+          distinction.geography ? GEOGRAPHY_NAMES[distinction.geography] : undefined,
+          distinction.providerLabel,
+        ]
+          .filter(Boolean)
+          .join(", ")})`
+      : model.label;
+    const fields = [safeLineField(model.id), safeLineField(label), model.cost];
     const note = input.modelNotes[model.id];
     if (note) fields.push(safeLineField(note));
     lines.push(`- ${fields.join(" | ")}`);

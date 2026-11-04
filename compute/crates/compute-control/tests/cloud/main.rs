@@ -37,8 +37,8 @@ use support::{Beat, Fleet, address, token};
 
 /// Beats a second.
 const RATE: f64 = 20.0;
-/// The lease term the service grants (`LeaseTerms::RECOMMENDED`).
-const TERM: Duration = Duration::from_secs(10);
+/// The lease term the service grants.
+const TERM: Duration = compute_fleet::LeaseTerms::RECOMMENDED.term;
 /// What a host's VMs may run past its lease's end: the guard's freeze or
 /// kill, and the witness's view of it.
 const STOP: Duration = Duration::from_secs(1);

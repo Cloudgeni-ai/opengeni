@@ -201,7 +201,6 @@ export function generateReferenceWorld(seed: number): { world: World; sessionId:
       people: REFERENCE_PEOPLE.map((id) => ({
         id,
         active: rng.bool(0.9),
-        personalFallbackOptIn: rng.bool(),
       })),
       models: REFERENCE_MODELS,
       connections,
@@ -278,7 +277,7 @@ export function referenceScenarioWorld(): World {
       workspaceOverrides: {},
     },
     workspaces: [{ id: "ws-team", kind: "shared", ownerId: null, allowedModels: null }],
-    people: [{ id: "person-a", active: true, personalFallbackOptIn: false }],
+    people: [{ id: "person-a", active: true }],
     models: REFERENCE_MODELS,
     connections: [
       referenceSharedConnection("claude-a", "claude"),
@@ -352,7 +351,7 @@ export function referenceScenarioCheckpoints(): ReferenceScenarioCheckpoint[] {
     updateReferenceSession(world, { binding: { connectionId, modelId, lastUsedAt } });
   const withPersonal = (world: World): World => ({
     ...world,
-    people: [{ id: "person-a", active: true, personalFallbackOptIn: true }],
+    people: [{ id: "person-a", active: true }],
     connections: [
       ...world.connections,
       {
@@ -361,6 +360,10 @@ export function referenceScenarioCheckpoints(): ReferenceScenarioCheckpoint[] {
       },
     ],
   });
+  const turnedOn = (world: World): World =>
+    updateReferenceSession(withPersonal(world), {
+      sharedPersonalChoices: [{ connectionId: "personal-claude", ownerId: "person-a" }],
+    });
   const cooled = (world: World, until: Record<string, number>): World => ({
     ...world,
     connections: world.connections.map((connection) =>
@@ -394,7 +397,7 @@ export function referenceScenarioCheckpoints(): ReferenceScenarioCheckpoint[] {
   const pinTitle =
     "SUB-SEL-04, SUB-WAIT-02: a pinned session waits with the reset time and resumes on the same account after it";
   const personalTitle =
-    "SUB-SEL-01, SUB-SEL-02: an opted-in personal account is used only after the organization accounts for the same model";
+    "SUB-SEL-01, SUB-SEL-02: the turn person's own subscription turned on here comes first; any other personal account serves only an explicit choice (D-53)";
   const compactionTitle =
     "SUB-STICK-05: a completed compaction is a re-selection point even while warm";
   const failedOver = boundTo(bothClaudeExhausted(now + 60_000), "codex-a", "codex/model-a", now);
@@ -464,22 +467,24 @@ export function referenceScenarioCheckpoints(): ReferenceScenarioCheckpoint[] {
       { kind: "wait", reason: "no_eligible_capacity", earliestResetAt: now + 60_000 },
       true,
     ),
+    checkpoint(personalTitle + " (turned on: own first)", turnedOn(base()), now, {
+      kind: "run",
+      connectionId: "personal-claude",
+    }),
     checkpoint(
-      personalTitle + " (organization first)",
+      personalTitle + " (not turned on: not automatically, even in an Only me chat)",
       updateReferenceSession(withPersonal(base()), { visibility: "private" }),
       now,
       { kind: "run", connectionId: "claude-a" },
     ),
     checkpoint(
-      personalTitle + " (same model on the personal account before another provider, D-12)",
-      updateReferenceSession(withPersonal(bothClaudeExhausted(now + 60_000)), {
-        visibility: "private",
-      }),
+      personalTitle + " (turned on: same model on the own account before another provider, D-12)",
+      turnedOn(bothClaudeExhausted(now + 60_000)),
       now,
       { kind: "run", connectionId: "personal-claude", modelId: "claude/model-a" },
     ),
     checkpoint(
-      personalTitle + " (never automatically in a shared session)",
+      personalTitle + " (not turned on: another provider before the personal account)",
       withPersonal(bothClaudeExhausted(now + 60_000)),
       now,
       { kind: "run", connectionId: "codex-a" },

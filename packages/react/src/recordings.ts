@@ -18,6 +18,7 @@ export {
   useTranscript,
 } from "./hooks/use-recordings";
 export type {
+  ImportRecordingAudioInput,
   UseLiveTranscriptOptions,
   UseLiveTranscriptResult,
   UseRecorderOptions,

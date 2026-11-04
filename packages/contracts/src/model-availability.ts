@@ -20,3 +20,26 @@ export class ModelUnavailableError extends Error {
 export function isModelUnavailableError(error: unknown): error is ModelUnavailableError {
   return error instanceof ModelUnavailableError;
 }
+
+/**
+ * `details.code` on a session create refusal when the workspace's model policy
+ * does not allow the model. `reason` says which rule: the model uses credits
+ * and credits are off, its provider is not allowed, or the model itself is not.
+ */
+export const MODEL_POLICY_REFUSED_ERROR_CODE = "model_policy" as const;
+
+export type ModelPolicyRefusalReason = "credits" | "provider" | "model";
+
+/** Typed cause for a model the workspace's model policy does not allow. */
+export class ModelPolicyRefusedError extends Error {
+  readonly code = MODEL_POLICY_REFUSED_ERROR_CODE;
+
+  constructor(
+    readonly modelId: string,
+    readonly reason: ModelPolicyRefusalReason,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ModelPolicyRefusedError";
+  }
+}

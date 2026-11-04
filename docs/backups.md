@@ -1,28 +1,45 @@
 # Database backups
 
 Opengeni's optional backup runner is independent of the API, worker and Temporal.
-It uses PostgreSQL's tools, Age encryption and a named rclone remote. Scheduling
-belongs to the deployment: use the Helm CronJobs, systemd or cron. Managed
-PostgreSQL point-in-time recovery remains a good primary recovery mechanism;
-this is a portable logical-dump option, not a replacement for provider-native
-backups or a cluster replication controller.
+It streams PostgreSQL dumps into a [restic](https://restic.net) repository, which
+deduplicates, compresses and encrypts them. Scheduling belongs to the deployment:
+use the Helm CronJobs, systemd or cron. Managed PostgreSQL point-in-time recovery
+remains a good primary recovery mechanism; this is a portable logical-dump option,
+not a replacement for provider-native backups or a cluster replication controller.
+
+## How it works
+
+Each run dumps every configured database with `pg_dump --format=custom
+--compress=0` (plus the cluster roles when `rolesService` is set) and streams each
+dump straight into `restic backup --stdin`. Nothing is staged on local disk. While
+a dump streams, `pg_restore` parses the same bytes, so a run only counts when every
+archive is readable.
+
+The dumps are deliberately uncompressed. restic splits each stream into
+content-defined chunks and stores every chunk once, so the parts of a database that
+did not change since the last run are not stored or uploaded again. restic then
+compresses and encrypts what is new. How much a night adds depends on how much the
+database changed and how much its row order moved, not on its total size.
+
+Every file of a run is a restic snapshot tagged `opengeni-backup` and
+`run=<run id>`. Once all of a run's files are stored, they are tagged `complete`
+together. Only complete runs are recovery points; a failed run removes what it
+stored.
 
 ## Quick start
 
 Install Bun (the repository's `.bun-version`), PostgreSQL clients compatible with
-your server, `age`, `rclone` and `flock`. The independent container image includes
-them; build `docker/backup.Dockerfile` or pin a digest from the **Backup image**
-workflow's `backup-image-receipt`. Published images currently target Linux amd64
-and PostgreSQL 18 clients, which also dump and restore PostgreSQL 17 and older
-servers; a newer server major requires a compatible build using
+your server, restic 0.17 or newer, and `flock`. The independent container image
+includes them; build `docker/backup.Dockerfile` or pin a digest from the **Backup
+image** workflow's `backup-image-receipt`. Published images currently target Linux
+amd64 and PostgreSQL 18 clients, which also dump and restore PostgreSQL 17 and
+older servers; a newer server major requires a compatible build using
 `--build-arg POSTGRES_MAJOR=<major>`. Do not guess a tag from the application chart
 version: the operator image publishes independently.
 
-Use one private, persistent state directory and **one writer per destination**.
-Every invocation must share that directory/OS lock (the Helm jobs share one PVC).
-Do not run two installations against one bucket/prefix with separate state volumes.
-The runner fails closed on stale or ambiguous index publication; it does not
-pretend eventual-consistency storage provides a distributed lock.
+Use one private, persistent state directory per installation. Every invocation must
+share that directory, which holds the OS lock and restic's cache (the Helm jobs
+share one PVC). restic's own repository lock also guards against two writers.
 
 Create a private `pg_service.conf` using PostgreSQL's standard libpq service format:
 
@@ -56,28 +73,41 @@ PostgreSQL, optionally configure `rolesService` with privilege to dump cluster
 roles; it may not be permitted by managed providers. Preserve role/bootstrap
 configuration independently when omitting it.
 
-Configure a named `backup` remote using rclone's native S3-compatible, S3, Azure
-Blob, GCS or filesystem provider configuration. Use a dedicated bucket/prefix and
-credentials scoped to it. Keep credentials in the secret-managed rclone file or
-provider-native environment, never in the backup configuration or command line.
-Provider support is inherited from rclone; test your configured provider before
-relying on it. Provider multipart/readback retries remain provider configuration.
+Choose a repository on any restic backend: S3 or an S3-compatible store
+(`s3:https://host/bucket/prefix`), Azure Blob (`azure:container:/prefix`), Google
+Cloud Storage (`gs:bucket:/prefix`), a restic REST server, a local path, or any
+rclone remote (`rclone:remote:prefix`). Use a dedicated bucket or prefix and
+credentials scoped to it. Put the storage credentials in a private environment file
+of literal `KEY=VALUE` lines; the runner passes them only to restic:
 
-Generate an Age identity with `age-keygen`. Save an independent recovery copy in
-your secret manager, not only on the database host. Keep old identities available
-for retained backups after any rotation. The scheduled runner needs the identity
-to validate decryption; this is encryption at rest, not protection against a
-compromised runner holding that identity.
+```sh
+AWS_ACCESS_KEY_ID=<key id>
+AWS_SECRET_ACCESS_KEY=<secret>
+AWS_DEFAULT_REGION=<region>
+```
+
+Use the variables restic documents for your backend, for example
+`AZURE_ACCOUNT_NAME`/`AZURE_ACCOUNT_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`, or
+`RCLONE_CONFIG` pointing at a private rclone configuration file. `RESTIC_*`
+variables and `PATH` are rejected there: the repository belongs in the config and
+the password in its own file.
+
+Generate a long random repository password and store it in a private file. Save an
+independent recovery copy in your secret manager, not only next to the database:
+without it the repository cannot be read. The scheduled runner needs the password
+to deduplicate and verify; this is encryption at rest, not protection against a
+compromised runner.
 
 Example `config.json` (secret-free):
 
 ```json
 {
-  "remote": "backup:database-backups",
+  "repository": "s3:https://storage.example.internal/database-backups/opengeni",
+  "passwordFile": "/etc/opengeni-backup/restic-password",
+  "environmentFile": "/etc/opengeni-backup/restic.env",
   "stateDirectory": "/var/lib/opengeni-backup",
-  "ageRecipient": "<age public recipient>",
-  "ageIdentityFile": "/etc/opengeni-backup/age.key",
   "timeZone": "UTC",
+  "retention": { "daily": 7, "weekly": 4 },
   "databases": [
     { "name": "opengeni", "service": "application" },
     { "name": "temporal", "service": "workflow" },
@@ -87,55 +117,60 @@ Example `config.json` (secret-free):
 }
 ```
 
-Set `PGSERVICEFILE` and `RCLONE_CONFIG` to their private files, then:
+`environmentFile` is optional. `host` (default `opengeni`) names this installation's
+snapshots; give each installation its own value if several share one repository.
+
+Set `PGSERVICEFILE` to the private service file. Create the repository once, then
+schedule `run`:
 
 ```sh
+bun run deployment:backup init --config /etc/opengeni-backup/config.json
 bun run deployment:backup run --config /etc/opengeni-backup/config.json
 bun run deployment:backup list --config /etc/opengeni-backup/config.json
 bun run deployment:backup check --config /etc/opengeni-backup/config.json
 bun run deployment:backup verify --config /etc/opengeni-backup/config.json
 ```
 
-`check` returns failure when the nightly point is older than 36 hours, the weekly
-point is older than eight days, or an object is missing/truncated. `verify` also
-reads, hashes, decrypts and parses each full archive. Monitor command/Job failures;
-the runner does not silently add a notification receiver or public API endpoint.
-`list` works even when a backup is stale. None of these commands require the
-application to be up.
+`run` never creates a repository; a missing repository or a wrong password fails
+with a clear message. It prints one JSON line per run with each file's size and
+how many new bytes it added. `check` fails when the newest complete run is older
+than 36 hours, or when `restic check` finds the repository structure damaged.
+`verify` also reads every file of the newest run back in full and parses each
+archive with `pg_restore`; restic authenticates every chunk it reads. Monitor
+command/Job failures; the runner does not add a notification receiver or public API
+endpoint. `list` works even when a backup is stale. None of these commands require
+the application to be up.
+
+Tool error output can contain connection details, so the runner reports only the
+failing tool and its exit status. Set `OPENGENI_BACKUP_DIAGNOSTICS=1` to see the
+tools' own error output while investigating.
 
 ## Retention and safety
 
-Retention is deliberately small: **latest successful nightly + one Sunday weekly
-checkpoint** in the configured timezone. The first success seeds both references.
-The first success in a new week promotes the weekly point, including after a
-missed Sunday. That point is zero to seven days old, not an exactly-seven-day
-rolling history; the two slots sometimes share one snapshot.
+After each successful run, the runner keeps the newest complete run of each of the
+last `retention.daily` days (default 7) and of each of the last `retention.weekly`
+weeks (default 4, weeks starting Monday), in the configured time zone. It forgets
+every other run, including incomplete ones, and prunes data no kept run uses,
+tolerating up to 20% unused space to avoid rewriting live data on every run.
+Retention is decided per run, so a kept recovery point always has every file.
 
-Each database is dumped in compressed custom format and streamed through Age
-before anything touches disk. Only one ciphertext at a time is staged locally.
-Allow disk space for the largest compressed database (and ordinary operating
-headroom), and remote space for both retained points plus their replacement.
-The upload is read back once: SHA-256/size over ciphertext, full Age decryption,
-then full `pg_restore` SQL rendering to `/dev/null`. This is archive validation,
-not a successful database/application recovery drill.
+Because unchanged chunks are shared, keeping more points costs only the data that
+differs between them. Remote space is the first full run plus what each later run
+added while it is still retained. The local state directory holds restic's cache
+(repository metadata), not dumps.
 
-Each run has a unique immutable prefix. `CURRENT.json` references complete
-manifests for both retained points. Only verified replacements are published;
-only specifically displaced files are removed. Local `pending.json`,
-`checkpoint.json` and `cleanup.json` preserve publication/GC intent across
-interruption. An ambiguous index write keeps both old/new objects and fails
-closed until readback identifies the published index. Do not delete these
-journals to silence a conflict. An ungraceful kill before publication can leave
-unreferenced ciphertext; inspect it against both complete references before
-manual removal. The runner never purges a bucket or guesses at unknown objects.
+`verify` proves the stored archives are complete and readable. It is not a
+database/application recovery drill; rehearse restores separately.
 
 ## Helm
 
-Provision a private PVC large enough for encrypted scratch and a Secret with four
-keys: `config.json`, `pg_service.conf`, `rclone.conf`, `age.key`. Use the paths from
-the example above and keep the config timezone equal to the chart timezone.
-The Secret mounts under `/etc/opengeni-backup`; state mounts under
-`/var/lib/opengeni-backup`. The PVC needs working local POSIX file locks.
+Provision a private PVC for the lock and restic cache, and a Secret with the keys
+`config.json`, `pg_service.conf`, `restic-password` and, when used, `restic.env`.
+Use the paths from the example above and keep the config timezone equal to the
+chart timezone. The Secret mounts under `/etc/opengeni-backup`; state mounts under
+`/var/lib/opengeni-backup`. The PVC needs working local POSIX file locks. Run
+`init` once before the first scheduled run, for example in a one-off pod using the
+same image, Secret and PVC, or from a workstation with the same configuration.
 
 ```yaml
 backup:
@@ -158,29 +193,31 @@ the `<release>-backup-run` CronJob.
 ## Restore into isolation
 
 Restore never requires the source database to be alive. Provision roles and
-install extension binaries required by the source schema on an isolated recovery PostgreSQL
-cluster, using the encrypted `roles.sql.age` or your provider's normal bootstrap
-procedure. Review role SQL before applying it; it can contain privileged roles.
-Create an empty target database and add a distinct service, e.g. `recovery`, to
-the private libpq service file. Never point it at a running application database.
+install extension binaries required by the source schema on an isolated recovery
+PostgreSQL cluster, using the stored `roles.sql` (`restic dump <snapshot>
+/roles.sql`) or your provider's normal bootstrap procedure. Review role SQL before
+applying it; it can contain privileged roles. Create an empty target database and
+add a distinct service, e.g. `recovery`, to the private libpq service file. Never
+point it at a running application database.
 
 ```sh
 bun run deployment:backup restore --config /etc/opengeni-backup/config.json \
-  --slot weekly --database opengeni --target-service recovery --confirm-restore
+  --run latest --database opengeni --target-service recovery --confirm-restore
 ```
 
-Restore downloads ciphertext, verifies size/hash/decryption/full archive parsing,
-rejects configured source-service names and nonempty targets, then restores in a
-single transaction with `--exit-on-error`. Object ownership, grants, RLS policies
-and security-definer function owners are preserved; the recovery login needs
-permission to restore objects to the original roles. Missing roles fail the
-transaction rather than silently transferring ownership to that login. Let the
-archive create extensions in the empty target database. Service aliases are
-configuration, not proof of isolation: ensure
-the target host/database really is separate and has no writers. Repeat for the
-other databases into their isolated targets, validate rows/grants/application
-behavior, then perform an explicit operational cutover. A failed restore rolls
-back its transaction; it does not automatically switch traffic or start workers.
+`--run` takes `latest` (the default) or a run id from `list`. Restore rejects
+configured source-service names and nonempty targets, streams the archive out of
+restic (which authenticates every chunk) and restores it in a single transaction
+with `--exit-on-error`. Object ownership, grants, RLS policies and security-definer
+function owners are preserved; the recovery login needs permission to restore
+objects to the original roles. Missing roles fail the transaction rather than
+silently transferring ownership to that login. Let the archive create extensions in
+the empty target database. Service aliases are configuration, not proof of
+isolation: ensure the target host/database really is separate and has no writers.
+Repeat for the other databases into their isolated targets, validate
+rows/grants/application behavior, then perform an explicit operational cutover. A
+failed restore rolls back its transaction; it does not automatically switch traffic
+or start workers.
 
 Extension ownership needs separate attention: PostgreSQL creates extensions and
 their member objects under the restore login, rather than restoring their
@@ -190,6 +227,23 @@ security-definer functions after recovery. Do not assume that reassigning a
 bootstrap superuser's objects will work: that role also owns required system
 objects. An isolated successful restore proves archive recoverability, not exact
 application/security parity without these operator checks.
+
+## Upgrading from the Age format
+
+Earlier versions wrote Age-encrypted dumps through an rclone remote, indexed by
+`CURRENT.json`. This version does not read that format. To switch:
+
+1. Keep the Age identity and the old objects for as long as you need their
+   recovery points.
+2. Create the restic repository under a new prefix, not inside the old one, and
+   update the config and secret keys as described above.
+3. Run `init`, then `run` and `verify`, before relying on the new points.
+
+An old point can still be restored by hand: stream
+`runs/<run id>/<database>.dump.age` from the old prefix (for example with
+`rclone cat`), decrypt it with `age --decrypt --identity <identity file>`, and
+restore the result with `pg_restore` into an isolated empty database as above.
+Delete the old objects once you no longer need them.
 
 ## Coverage limits
 

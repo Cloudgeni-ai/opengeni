@@ -16,6 +16,100 @@ re-created after a workspace removal; never for SDK per-user workspaces; see
 [product integration](product-integration.md)). Use explicit onboarding to choose
 permissions before that first request. Retain its subject before starting onboarding.
 
+## State membership on each request
+
+An app built on Opengeni that already owns its users' roles does not have to
+mirror every member and permission change into Opengeni. It can state the
+user's membership on each request instead:
+
+```ts
+service.asUser(externalId, {
+  source,
+  membership: { permissions: ["workspace:read", "sessions:create", "sessions:read"] },
+});
+```
+
+The SDK adds `membership` to the `x-opengeni-external-actor` value, a
+percent-encoded JSON object:
+
+```json
+{
+  "mode": "external",
+  "identity": { "source": "my-app", "externalId": "user-123" },
+  "membership": { "permissions": ["workspace:read", "sessions:create", "sessions:read"] }
+}
+```
+
+`membership.permissions` is the same complete permission set as the
+external-members request body (1 or more permission names). It is accepted only
+in plain `external` mode; `linked_native` with a `membership` is a `400`.
+
+The browser session proxy (`createSessionProxyHandler`) states it the same way:
+when `resolve` returns `membership`, every forwarded request runs as
+`asUser(user, { source, membership })`.
+
+At request entry, for each shared workspace of the key's organization that the
+request authorizes, the user's grant there becomes exactly the stated set before
+the request is authorized:
+
+- A missing member is created, and the identity is admitted. A suspended or
+  offboarded identity stays refused.
+- An equal grant writes nothing. The comparison uses the grant the request reads
+  anyway, so the hot path costs no write.
+- A different grant is replaced. A narrowing advances the member's organization
+  authorization revision, as `updateExternalWorkspaceMember` does.
+- Each change runs under the organization membership fence with the member rows
+  locked `FOR UPDATE`. Concurrent requests serialize and the last one to commit
+  wins; no update is lost.
+- Each change writes the same operation receipt and
+  `organization_workspace_lifecycle_events` row as a keyed grant or update. It is
+  attributed to the key, and its receipt records the reason
+  `membership stated by request`.
+
+The key delegates no more than the external-members endpoints allow, with the
+same errors. Every request that states a membership is checked, even when the
+stored grant already matches:
+
+- The key needs `members:manage` (or a legacy `workspace:admin`); otherwise `403`.
+- An explicit access policy and setup keys keep their delegation refusals.
+- `secrets:read` needs literal `secrets:read` on the key. A key without
+  `workspace:admin` may state only permissions it holds literally. Both refusals
+  are the same `403` a PATCH returns.
+
+A change that would leave the workspace without an administrator is a `409`
+("the workspace must keep at least one administrator"). The administrator rows
+are locked together with the member under the fence, so two concurrent
+withdrawals cannot both pass.
+
+Without `membership`, nothing changes: the stored grant applies, and a missing
+member gets the first-use defaults described above. Schedules, automations and
+other work that runs later without a request use the last stated grant. A fresh
+re-check of an open stream never applies a statement. Personal workspaces, SDK
+per-user workspaces and other organizations' workspaces ignore the statement.
+
+Removing a user stays an explicit revoke (below). A revoke must win over a
+request that was already in flight when it happened. Every removal of an
+external member from a workspace (the keyed revoke below, the key's
+`removeWorkspaceMember`, or a workspace administrator removing them in the
+product) stamps a per-member marker in `external_workspace_member_revocations`
+with the next value of a global sequence, even when no membership was left to
+remove. Every plain external request, with or without a statement, reads the
+sequence's current value when it authenticates. The revoke and
+the read both run under the organization membership fence, so the read strictly
+orders the request against every revoke. When the request later applies its
+statement, or admits a missing member on first use, under the same fence, a
+marker above its watermark means the revoke happened after the request
+authenticated: nothing is created or changed, and the request runs on whatever
+grant remains (none after a revoke). A
+request that authenticates after the revoke is a new statement and admits the
+user again, so the app must stop stating a removed user. We chose a monotonic
+marker over a re-check after the lock because absence alone cannot tell "never a
+member" from "revoked a moment ago". A tombstone flag would also block a
+legitimate later re-admission, which a sequence does not.
+
+Limit: during a rolling deploy, removals served by older API instances do not
+stamp a marker, so they do not yet win over an in-flight statement.
+
 `service.lookupExternalIdentity(organizationId, { source, externalId })` requires
 the organization's service key with `members:manage` (or `workspace:admin`). It is
 a non-provisioning POST lookup, returning `{ found: false }` or content-free

@@ -62,15 +62,25 @@ export type TeamsMessage = {
   routeIdentity: string;
 };
 
-/** DM ownership changes get a fresh session without moving the former human's history. */
+/** DM ownership changes get a fresh session without moving the former human's history.
+ * So does a DM that starts landing in the sender's Personal workspace: its
+ * earlier chat stays where it was, and turning Personal workspaces off again
+ * returns to it. */
 export function teamsRouteId(
   message: Pick<TeamsMessage, "personal" | "routeIdentity">,
   generation: string,
   subjectId: string,
+  sessionWorkspaceId: string | null = null,
 ): string {
   return message.personal
     ? createHash("sha256")
-        .update(JSON.stringify([message.routeIdentity, generation, subjectId]))
+        .update(
+          JSON.stringify(
+            sessionWorkspaceId
+              ? [message.routeIdentity, generation, subjectId, sessionWorkspaceId]
+              : [message.routeIdentity, generation, subjectId],
+          ),
+        )
         .digest("hex")
     : `${message.routeIdentity}:${generation}`;
 }

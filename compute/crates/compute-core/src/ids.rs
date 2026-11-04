@@ -26,3 +26,9 @@ pub struct OpId(pub u64);
 /// as one made of an earlier VM of the same sandbox, changes nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BalloonRequest(pub u64);
+
+/// One shrink asked of a guest. The core assigns these, unique across the
+/// host, and expects them back in [`crate::Input::Shrunk`] or
+/// [`crate::Input::ShrinkFailed`]: a reply to any other changes nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ShrinkRequest(pub u64);

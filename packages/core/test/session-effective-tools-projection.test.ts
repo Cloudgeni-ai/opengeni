@@ -1037,4 +1037,36 @@ describe("provider web search projection", () => {
     });
     expect(names(disabled, context({ settings: providerSettings() }))).toEqual([]);
   });
+
+  test("a credit-billed model on a billed deployment is shown the billed tools, not hosted search", () => {
+    // The default model is credit-billed and has hosted search.
+    const billed = providerSettings({ billingMode: "stripe" });
+    expect(names(session(), context({ settings: billed }))).toEqual([
+      ["web_search", "runtime", "upfront"],
+      ["web_fetch", "runtime", "upfront"],
+    ]);
+    expect(
+      projected(session(), context({ settings: billed })).effectiveTools!.capabilities,
+    ).toMatchObject({ webSearch: true });
+    const hosted = [["web_search", "hosted", "upfront"]];
+    // CloudGeni's host account (a legacy billing account) keeps hosted search.
+    expect(
+      names(
+        session("all", { accountId: "25eacc5d-f383-4f79-910a-b3d11dbf1310" }),
+        context({ settings: billed }),
+      ),
+    ).toEqual(hosted);
+    // So does every account when the operator turned the charges off.
+    expect(
+      names(
+        session(),
+        context({
+          settings: providerSettings({
+            billingMode: "stripe",
+            paidHostedToolsCreditBilling: false,
+          }),
+        }),
+      ),
+    ).toEqual(hosted);
+  });
 });

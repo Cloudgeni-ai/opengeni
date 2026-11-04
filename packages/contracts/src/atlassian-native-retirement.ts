@@ -21,7 +21,7 @@ export function isRetiredNativeAtlassianSource(source: unknown): boolean {
   return typeof provider === "string" && provider.toLowerCase() === "api.atlassian.com";
 }
 
-/** Includes frozen historical source actions without changing their stored bytes. */
+/** @deprecated Use `retiredKnowledgeSourceSyncTask` from `./knowledge-source-sync-retirement`; every source task is retired. */
 export function isRetiredNativeAtlassianTask(task: {
   agentConfig?: { knowledgeSource?: unknown } | null;
   action?: { kind?: unknown } | null;

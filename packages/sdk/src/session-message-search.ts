@@ -4,6 +4,9 @@ export type SessionMessageSearchRequest = {
   sessionId?: string | undefined;
   /** Workspace-only first hit per session; cannot combine with sessionId. */
   groupBy?: "session" | undefined;
+  /** `newest` visits messages newest first (occurrences inside one message
+   * stay in text order). Default `oldest`. Cannot combine with groupBy. */
+  order?: "oldest" | "newest" | undefined;
   archiveStatus?: "active" | "archived" | "all" | undefined;
   limit?: number | undefined;
   cursor?: string | undefined;

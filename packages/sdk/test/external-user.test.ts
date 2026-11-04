@@ -339,3 +339,49 @@ test("asUser assertion cannot be replaced by case-variant custom headers", async
   expect(() => client.asUser("nul\0id")).toThrow("Invalid");
   expect(() => client.asUser("\uD800")).toThrow("Invalid");
 });
+
+test("asUser states the user's membership on every request when given one", async () => {
+  const requests: Headers[] = [];
+  const client = new OpenGeniClient({
+    baseUrl: "https://test.invalid",
+    apiKey: "synthetic-key",
+    fetch: async (_url, init) => {
+      requests.push(new Headers(init?.headers));
+      return Response.json({ id: "workspace" });
+    },
+  });
+  const member = client.asUser("alice", {
+    source: "product",
+    membership: { permissions: ["workspace:read", "sessions:create", "workspace:read"] },
+  });
+  await member.getWorkspace("workspace");
+  await member.listWorkspaces().catch(() => undefined);
+  await client.asUser("bob").getWorkspace("workspace");
+  const actors = requests.map((headers) =>
+    JSON.parse(decodeURIComponent(headers.get("x-opengeni-external-actor")!)),
+  );
+  const stated = {
+    mode: "external",
+    identity: { externalId: "alice", source: "product" },
+    membership: { permissions: ["workspace:read", "sessions:create"] },
+  };
+  expect(actors).toEqual([
+    stated,
+    stated,
+    { mode: "external", identity: { externalId: "bob", source: "default" } },
+  ]);
+  // A linked native client never carries a statement.
+  const linked = member.asLinkedUser("alice", {
+    source: "product",
+    linkId: crypto.randomUUID(),
+    expectedLinkRevision: 1,
+  });
+  await linked.getWorkspace("workspace");
+  expect(
+    JSON.parse(decodeURIComponent(requests.at(-1)!.get("x-opengeni-external-actor")!)),
+  ).not.toHaveProperty("membership");
+  for (const permissions of [[], "workspace:read", [""], [1]])
+    expect(() => client.asUser("alice", { membership: { permissions } as never })).toThrow(
+      "Invalid membership",
+    );
+});

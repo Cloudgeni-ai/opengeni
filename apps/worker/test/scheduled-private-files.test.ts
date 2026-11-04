@@ -149,3 +149,111 @@ test("a private scheduled target can retain its owner's attachment; shared targe
     `unknown file resource: ${fileId}`,
   );
 });
+
+test("in a Personal workspace, as in a shared one, a workspace-audience schedule can't take an Only me file; its owner's Only me chat can", async () => {
+  const access = await bootstrapWorkspace(client.db, {
+    accountExternalSource: "test",
+    accountExternalId: crypto.randomUUID(),
+    accountName: "Personal scheduled files",
+    workspaceExternalSource: "test",
+    workspaceExternalId: crypto.randomUUID(),
+    workspaceName: "Shared workspace",
+    subjectId: `user:${crypto.randomUUID()}`,
+  });
+  const shared0: AccessGrant = { ...access.workspaceGrants[0]!, principalKind: "human_session" };
+  const [personal] = await shared.admin`insert into workspaces (account_id, name)
+    values (${shared0.accountId}, 'Personal') returning id`;
+  await shared.admin`insert into workspace_inference_controls(workspace_id,account_id)
+    values(${personal!.id},${shared0.accountId})`;
+  await shared.admin`insert into organization_memberships
+    (account_id, subject_id, status, personal_workspace_id)
+    values (${shared0.accountId}, ${shared0.subjectId}, 'active', ${personal!.id})`;
+  const grant: AccessGrant = { ...shared0, workspaceId: personal!.id };
+  const authorization: AccessGrantAuthorization = {
+    grant,
+    accountGrant: null,
+    authenticatedSubjectId: grant.subjectId,
+    contextIntegrity: true,
+    canonicalManagedHumanSession: false,
+    canonicalLocalHumanSession: false,
+  };
+  const fileActor = { subjectId: grant.subjectId, privateFileOwnerSubjectId: grant.subjectId };
+  const fileId = crypto.randomUUID();
+  await withSessionRlsActorContext(fileActor, async () => {
+    const upload = await createFileUpload(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      fileId,
+      filename: "Plan.txt",
+      safeFilename: "plan.txt",
+      contentType: "text/plain",
+      sizeBytes: 1,
+      sha256: "a".repeat(64),
+      bucket: "test",
+      objectKey: `private/${fileId}`,
+      expiresAt: new Date(Date.now() + 60_000),
+      privateOwnerSubjectId: grant.subjectId,
+    });
+    await completeFileUpload(client.db, grant.workspaceId, upload.uploadId);
+  });
+  const input = {
+    settings: testSettings({ databaseUrl: shared.appUrl, sandboxBackend: "none" }),
+    db: client.db,
+    grant,
+    authorization,
+    toolsProvided: true,
+    objectStorage: {} as NonNullable<
+      Parameters<typeof createValidatedScheduledTask>[0]["objectStorage"]
+    >,
+  };
+  const agentConfig = {
+    prompt: "Read the attached plan",
+    resources: [{ kind: "file", fileId }],
+    tools: [],
+  };
+  // Its runs are workspace chats, which can't open the Only me file.
+  await expect(
+    withSessionRlsActorContext(fileActor, () =>
+      createValidatedScheduledTask({
+        ...input,
+        payload: CreateScheduledTaskRequest.parse({
+          name: "Workspace schedule",
+          schedule: { type: "manual" },
+          runMode: "new_session_per_run",
+          agentConfig,
+        }),
+      }),
+    ),
+  ).rejects.toThrow(`unknown file resource: ${fileId}`);
+  const session = await withSessionRlsActorContext(fileActor, () =>
+    createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "Review the plan",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      memoryScope: "user",
+      scopeSubjectId: grant.subjectId,
+      createdBy: { kind: "subject", subjectId: grant.subjectId },
+      createdByContext: {},
+    }),
+  );
+  const task = await withSessionRlsActorContext(fileActor, () =>
+    createValidatedScheduledTask({
+      ...input,
+      payload: CreateScheduledTaskRequest.parse({
+        name: "Only me schedule",
+        schedule: { type: "manual" },
+        runMode: "existing_session",
+        targetSessionId: session.id,
+        agentConfig,
+        agentLearning: { scope: "personal", settings: { knowledge: "review_first" } },
+      }),
+    }),
+  );
+  expect(task.agentConfig.resources).toMatchObject([{ kind: "file", fileId }]);
+});

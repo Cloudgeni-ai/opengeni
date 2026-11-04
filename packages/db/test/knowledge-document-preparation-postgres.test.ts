@@ -7,21 +7,13 @@ import { testSettings } from "@opengeni/testing/settings";
 import {
   createScheduledTask,
   createConnection,
-  ensureKnowledgeSourceSyncState,
   listScheduledTaskRuns,
-  claimSessionWorkForAttempt,
-  freezeAgentLearningPolicy,
-  readScheduledKnowledgeSource,
   saveAgentLearningSettings,
-  claimKnowledgeIndexJobs,
-  readKnowledgeIndexSource,
-  deferKnowledgeIndexJob,
   upsertKnowledgeProvider,
   upsertKnowledgeSource,
   appendKnowledgeSourceAclVersion,
   upsertKnowledgeSourceObject,
   appendKnowledgeDocumentVersion,
-  reviewKnowledgeEntry,
   createDb,
   claimKnowledgeDocumentPreparation,
   completeKnowledgeDocumentPreparation,
@@ -162,7 +154,7 @@ test("document preparation rejects stale leases and never overwrites a concurren
 });
 
 test.each(["contract-system", "google-drive"])(
-  "scheduled %s preparation freezes task review and keeps source access independent",
+  "a saved scheduled %s source sync is retired and keeps its imported document",
   async (providerKey) => {
     const f = await fixture();
     const { accountId, workspaceId, documentId } = f.identity;
@@ -313,110 +305,23 @@ test.each(["contract-system", "google-drive"])(
       triggerType: "scheduled",
       producerKey: `import:${documentId}`,
     });
-    if (providerKey === "google-drive") {
-      // Native Drive sync retired: its scheduled source runs never start.
-      expect(dispatched).toEqual({ action: "blocked", reason: "google_drive_native_retired" });
-      return;
-    }
-    if (dispatched.action !== "start") throw new Error(JSON.stringify(dispatched));
-    const [run] = await listScheduledTaskRuns(client.db, workspaceId, task.id);
-    if (!run) throw new Error("Expected ordinary source run");
-    const attemptId = crypto.randomUUID();
-    const turn = await claimSessionWorkForAttempt(client.db, workspaceId, {
-      sessionId: dispatched.sessionId,
-      workflowId: dispatched.workflowId,
-      workflowRunId: crypto.randomUUID(),
-      attemptId,
-      dispatchId: crypto.randomUUID(),
-      trigger: { kind: "next" },
+    // Integration Knowledge sync is retired: saved source tasks never start a
+    // run or fetch provider content, and the imported document stays intact.
+    expect(dispatched).toEqual({
+      action: "blocked",
+      reason:
+        providerKey === "google-drive"
+          ? "google_drive_native_retired"
+          : "knowledge_source_sync_retired",
     });
-    if (turn.action !== "claimed") throw new Error("Expected source agent turn");
-    const agent: KnowledgeContext = {
-      accountId,
-      workspaceId,
-      actor: {
-        kind: "agent",
-        sessionId: dispatched.sessionId,
-        turnId: turn.turn.id,
-        attemptId,
-        executionGeneration: turn.turn.executionGeneration,
-      },
-    };
-    await freezeAgentLearningPolicy(client.db, agent);
-    await ensureKnowledgeSourceSyncState(client.db, task);
-    await shared.admin`INSERT INTO knowledge_source_sync_index_obligations(account_id,workspace_id,scheduled_task_run_id,
-    source_id,source_sync_generation,initiating_subject_id,external_object_id,knowledge_source_object_id,
-    knowledge_document_version_id,document_id,source_config_generation,source_lifecycle_generation,object_lifecycle_generation,
-    object_version_generation,citation_locator,acl_eligibility)
-    VALUES(${accountId},${workspaceId},${run.id},${source.id},${source.syncGeneration},'user:reader','acme-contract',${object.id},${version.id},
-    ${documentId},1,1,1,1,'{}','eligible')`;
-    await saveAgentLearningSettings(client.db, f.context, {
-      scope: "workspace",
-      source: { kind: "scheduled_task", id: task.id },
-      operationId: crypto.randomUUID(),
-      expectedVersion: 1,
-      settings: { knowledge: "automatic" },
+    expect(await listScheduledTaskRuns(client.db, workspaceId, task.id)).toEqual([]);
+    const [imported] = await shared.admin`SELECT source_external_id,source_version,
+      knowledge_source_identity FROM documents WHERE id=${documentId}`;
+    expect(imported).toMatchObject({
+      source_external_id: "acme-contract",
+      source_version: "v1",
+      knowledge_source_identity: object.id,
     });
-    const claim = await claimKnowledgeDocumentPreparation(client.db, f.identity);
-    if (claim.status !== "prepare") throw new Error("Expected preparation");
-    const result = await completeKnowledgeDocumentPreparation(client.db, {
-      ...f.input,
-      leaseId: claim.leaseId,
-    });
-    if (result.status !== "retained") throw new Error("Expected retained source");
-    expect(result.receipt.outcome).toBe("pending");
-    expect(await getKnowledgeEntry(client.db, f.context, claim.entryId)).toBeNull();
-    const [batch] =
-      await shared.admin`SELECT scheduled_task_run_id FROM knowledge_review_batches WHERE id=${result.receipt.reviewBatchId}`;
-    expect(batch?.scheduled_task_run_id).toBe(run.id);
-    const approval = () =>
-      reviewKnowledgeEntry(client.db, f.context, {
-        operationId: crypto.randomUUID(),
-        entryId: claim.entryId,
-        expectedVersion: result.receipt.version,
-        revisionId: result.receipt.revisionId,
-        decision: "approve",
-      });
-    const sourcePage = await readScheduledKnowledgeSource(client.db, agent, {});
-    expect(sourcePage.items).toHaveLength(1);
-    expect(sourcePage.items[0]).toMatchObject({
-      entryId: claim.entryId,
-      revisionId: result.receipt.revisionId,
-      pending: true,
-    });
-    const sourceText = await readScheduledKnowledgeSource(client.db, agent, {
-      entryId: claim.entryId,
-    });
-    expect(sourceText.items[0]).toMatchObject({ content: f.input.content });
-    expect(await getKnowledgeEntry(client.db, agent, claim.entryId)).toBeNull();
-    await approval();
-    expect(
-      (await getKnowledgeEntry(client.db, f.context, claim.entryId))?.revision.entry.content,
-    ).toBe(f.input.content);
-    const jobs = await claimKnowledgeIndexJobs(client.db, {
-      model: "test",
-      dimensions: 3,
-      limit: 20,
-    });
-    const job = jobs.find((item) => item.revisionId === result.receipt.revisionId);
-    if (!job) throw new Error("Expected approved source projection");
-    expect((await readKnowledgeIndexSource(client.db, job))?.entry.content).toBe(f.input.content);
-    await deferKnowledgeIndexJob(client.db, job);
-    expect(
-      (await claimKnowledgeIndexJobs(client.db, { model: "test", dimensions: 3, limit: 20 })).some(
-        (item) => item.revisionId === result.receipt.revisionId,
-      ),
-    ).toBe(false);
-    // Completing the source adapter's external access observation wakes the
-    // existing deferred projection; it must not wait for its retry deadline.
-    await shared.admin`UPDATE knowledge_source_sync_index_obligations SET status='indexed',acl_eligibility='eligible'
-      WHERE account_id=${accountId} AND document_id=${documentId} AND scheduled_task_run_id=${run.id}`;
-    const awakened = (
-      await claimKnowledgeIndexJobs(client.db, { model: "test", dimensions: 3, limit: 20 })
-    ).find((item) => item.revisionId === result.receipt.revisionId);
-    if (!awakened) throw new Error("Expected source completion to wake projection");
-    expect((await readKnowledgeIndexSource(client.db, awakened))?.entry.content).toBe(
-      f.input.content,
-    );
+    expect(version.documentId).toBe(documentId);
   },
 );

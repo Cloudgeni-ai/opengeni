@@ -152,16 +152,12 @@ test.skipIf(process.platform !== "win32" || process.env.OPENGENI_CUA_E2E !== "1"
         }),
       );
       launchedPid = launched.observation?.target.processId ?? undefined;
-      // An elevated CUA driver starts apps only with a standard-user token,
-      // which it cannot do for a restored background launch (hosted CI
-      // runners are elevated). That launch must fail with CUA's own reason,
-      // never silently or as a bare protocol error.
-      if (elevated()) {
-        expect(launched.state).not.toBe("completed");
-        expect(JSON.stringify(launched.error)).toContain("Driver is elevated");
-      } else {
-        expect(launched).toMatchObject({ state: "completed" });
-      }
+      // Unlike an embedded SDK host, the source-pinned standalone worker can
+      // run its standard-user shell-launch helper even when the driver is
+      // elevated. The native token checks remain owned by the CUA harness.
+      expect(launched).toMatchObject({ state: "completed" });
+      expect(launchedPid).toBeGreaterThan(0);
+      expect(launchedPid).not.toBe(ready.pid);
     } finally {
       await supervisor?.close();
       // Only the process this test launched.
@@ -173,26 +169,3 @@ test.skipIf(process.platform !== "win32" || process.env.OPENGENI_CUA_E2E !== "1"
   },
   120_000,
 );
-
-/** Whether this process runs elevated, which the CUA driver it starts
- * inherits and checks for itself. An administrator's token is a member of the
- * Administrators role only when elevated (UAC filters it otherwise). */
-function elevated(): boolean {
-  const probe = Bun.spawnSync([
-    join(
-      process.env.SystemRoot ?? "C:\\Windows",
-      "System32",
-      "WindowsPowerShell",
-      "v1.0",
-      "powershell.exe",
-    ),
-    "-NoProfile",
-    "-NonInteractive",
-    "-Command",
-    "([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)",
-  ]);
-  const answer = probe.stdout.toString().trim();
-  if (probe.exitCode !== 0 || (answer !== "True" && answer !== "False"))
-    throw new Error(`elevation probe failed: ${answer} ${probe.stderr.toString().trim()}`);
-  return answer === "True";
-}

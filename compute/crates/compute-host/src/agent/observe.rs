@@ -8,7 +8,7 @@ use tokio::time::Instant;
 
 use crate::observe::{
     Cause, Event, Gauges, Severity, TraceContext, alarm_event, level_index, level_name,
-    outcome_name,
+    outcome_name, stall_index,
 };
 use crate::protocol::{Id, step_name};
 use crate::state::unix_ms_now;
@@ -256,11 +256,19 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
             let period = now.duration_since(slot.summarized);
             slot.summarized = now;
+            // What it used at most and what it requested, so requests can
+            // be set from what sandboxes of a kind use (ADR 24).
+            let peak = std::mem::take(&mut slot.peak);
+            let request = self.core.sandbox(*id).map(|view| view.request);
             let event = Event::new("compute.sandbox.summary", Severity::Info)
                 .with("compute.sandbox.id", Id(*id).to_string())
                 .with("compute.level", level_name(Level::Running))
                 .with("compute.duration_us", period)
-                .with("compute.zswap.in", reading.1.zswpin);
+                .with("compute.zswap.in", reading.1.zswpin)
+                .with("compute.memory.peak", peak)
+                .with_some("compute.memory.request", request)
+                .with_some("compute.memory.compressed", reading.1.compressed)
+                .with_some("compute.memory.swapped", reading.1.swapped);
             let event = with_pressure(event, pressure_since(slot.reported, reading));
             slot.reported = Some(reading);
             self.observer.emit(event);
@@ -286,6 +294,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             gauges.sandboxes[level_index(view.state.level)] += 1;
             gauges.broken += u64::from(view.broken);
             gauges.unsavable += u64::from(view.unsavable);
+            if view.state.level == Level::Running {
+                gauges.memory_requested += view.request;
+                gauges.memory_borrowed += view.borrowed;
+                gauges.memory_compressed += view.compressed;
+                gauges.memory_swapped += view.swapped;
+                gauges.memory_stalled[stall_index(view.stall)] += 1;
+            }
             if let Some(running) = &slot.op {
                 let index = running.step.index();
                 gauges.in_flight[index] += 1;
@@ -295,6 +310,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
         }
         gauges.blocked = self.blocked.len() as u64;
+        gauges.memory_levels = self.core.memory_levels();
         let host = crate::host_memory::host_gauges();
         gauges.zswap_stored = host.zswap_stored;
         gauges.zswap_original = host.zswap_original;

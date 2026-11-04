@@ -16,6 +16,13 @@
  * A recording belongs to the workspace it started in: switching workspace
  * while one is being captured leaves it recording there, and the recorder
  * moves to the new workspace once it stops. A new account still ends it.
+ *
+ * While the app is in the background (the phone locked, another app in
+ * front) the screens are told nothing: the clock, the level and the live
+ * transcript change several times a second, and redrawing screens nobody
+ * sees costs enough CPU that iOS ends the app, and the recording with it.
+ * Capture and upload go on; the screens get the latest state when the app
+ * is back.
  */
 import { useRecorder, type UseRecorderResult } from "@opengeni/react/recordings";
 import {
@@ -29,6 +36,7 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from "react";
+import { AppState } from "react-native";
 import { useNativeRecorderPlatform, type NativeRecorderPlatformOptions } from "../recordings";
 
 export type MeetingRecorder = UseRecorderResult & {
@@ -43,14 +51,23 @@ type RecorderStore = {
   /** Stop showing this recorder, unless another has replaced it already. */
   release: (recorder: UseRecorderResult) => void;
   markFinished: (recordingId: string) => void;
+  /** In the background the screens hear nothing; back in front they get the latest. */
+  setForeground: (foreground: boolean) => void;
 };
 
 function createRecorderStore(): RecorderStore {
   let recorder: UseRecorderResult | null = null;
   let finished: readonly string[] = [];
   let snapshot: MeetingRecorder | null = null;
+  let foreground = true;
+  let stale = false;
   const listeners = new Set<() => void>();
   const publish = () => {
+    if (!foreground) {
+      stale = true;
+      return;
+    }
+    stale = false;
     snapshot = recorder ? { ...recorder, finished } : null;
     for (const listener of listeners) listener();
   };
@@ -74,7 +91,24 @@ function createRecorderStore(): RecorderStore {
       finished = [...finished.filter((id) => id !== recordingId), recordingId];
       publish();
     },
+    setForeground: (next) => {
+      foreground = next;
+      if (foreground && stale) publish();
+    },
   };
+}
+
+/** Whether the app is in front (not in the background), following it as it changes. */
+export function useAppInForeground(): boolean {
+  const [foreground, setForeground] = useState(() => AppState.currentState !== "background");
+  useEffect(() => {
+    setForeground(AppState.currentState !== "background");
+    const subscription = AppState.addEventListener("change", (state) =>
+      setForeground(state !== "background"),
+    );
+    return () => subscription.remove();
+  }, []);
+  return foreground;
 }
 
 const MeetingRecorderContext = createContext<RecorderStore | null>(null);
@@ -102,6 +136,13 @@ export function MeetingRecorderProvider({
   ...platformOptions
 }: MeetingRecorderProviderProps) {
   const store = useMemo(createRecorderStore, []);
+  useEffect(() => {
+    store.setForeground(AppState.currentState !== "background");
+    const subscription = AppState.addEventListener("change", (state) =>
+      store.setForeground(state !== "background"),
+    );
+    return () => subscription.remove();
+  }, [store]);
   const scope = platformOptions.storeScope ?? "";
   const busy = useSyncExternalStore(
     store.subscribe,

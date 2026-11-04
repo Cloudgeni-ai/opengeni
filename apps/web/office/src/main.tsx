@@ -39,6 +39,8 @@ import {
   type WorkbookLinkState,
 } from "@opengeni/sdk/office";
 import { forgetToken, prepareSignIn, signIn, storedToken, type SignInRequest } from "./office-auth";
+import { landingWorkspaceId } from "./landing-workspace";
+import { SPREADSHEET_STARTERS } from "./starters";
 import {
   availableSessionStorage,
   currentViteBuildId,
@@ -317,15 +319,22 @@ function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }
       attempt > 0
         ? new Promise<void>((resolve) => setTimeout(resolve, RETRY_MIN_MS))
         : Promise.resolve();
-    client
-      .listWorkspaces()
-      .then(async (list) => {
+    Promise.all([
+      client.listWorkspaces(),
+      // The person's own default workspace; without it the pane still opens one.
+      client.getAccessContext().catch(() => null),
+    ])
+      .then(async ([list, access]) => {
         await shown;
         if (!live) return;
         setWorkspaces(list);
         setLoadError(null);
         setWorkspaceId((current) =>
-          current && list.some((each) => each.id === current) ? current : (list[0]?.id ?? null),
+          landingWorkspaceId({
+            workspaceIds: list.map((each) => each.id),
+            remembered: current,
+            defaultWorkspaceId: access?.defaultWorkspaceId,
+          }),
         );
         setRetrying(false);
       })
@@ -424,6 +433,7 @@ function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }
       theme={theme}
       surfaces={surfaces}
       messageContext={messageContext}
+      starters={SPREADSHEET_STARTERS}
       onUnauthorized={onSignedOut}
       openUrl={openInBrowser}
       slots={{

@@ -23,7 +23,8 @@ function accountLabel(connection: ConnectionMetadata): string {
     connection.metadata,
     `${connection.providerDomain} account`,
   );
-  const scope = connection.subjectId === null ? "This workspace" : "Only me";
+  // "Yours" is the person the agent acts for; "Shared" is everyone in the workspace.
+  const scope = connection.subjectId === null ? "Shared" : "Yours";
   return `${identity} · ${scope}`;
 }
 

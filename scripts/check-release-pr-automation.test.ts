@@ -5178,7 +5178,7 @@ describe("workflow contracts", () => {
       "images",
     ]) {
       const checkout = ci.jobs[jobName].steps.find(
-        (step: any) => step.uses === "actions/checkout@v6",
+        (step: any) => step.uses === "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
       );
       expect(checkout.with.ref).toBe(
         exactSelectorJobs.has(jobName)
@@ -5666,7 +5666,7 @@ describe("workflow contracts", () => {
     } as const;
     for (const [stepName, expected] of Object.entries(expectedEvidence)) {
       const upload = browser.steps.find((step: any) => step.name === stepName);
-      expect(upload.uses).toBe("actions/upload-artifact@v7.0.1");
+      expect(upload.uses).toBe("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a");
       expect(upload.if).toBe(expected.if);
       expect(upload.with.name).toBe(expected.name);
       expect(upload.with["if-no-files-found"]).toBe("error");

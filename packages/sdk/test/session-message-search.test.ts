@@ -113,8 +113,36 @@ test("workspace grouping is explicitly serialized without changing default Find"
   });
   await client.searchSessionMessages("workspace", { query: "x", groupBy: "session" });
   await client.searchSessionMessages("workspace", { query: "x", sessionId: "session" });
+  await client.searchSessionMessages("workspace", {
+    query: "x",
+    sessionId: "session",
+    order: "newest",
+  });
   expect(requests[0]!.searchParams.get("groupBy")).toBe("session");
   expect(requests[1]!.searchParams.has("groupBy")).toBe(false);
+  expect(requests[1]!.searchParams.has("order")).toBe(false);
+  expect(requests[2]!.searchParams.get("order")).toBe("newest");
+});
+
+test("newest-first order cannot combine with workspace grouping", () => {
+  expect(
+    SessionMessageSearchRequest.safeParse({
+      query: "x",
+      sessionId: crypto.randomUUID(),
+      order: "newest",
+    }).success,
+  ).toBe(true);
+  expect(
+    SessionMessageSearchRequest.safeParse({ query: "x", groupBy: "session", order: "newest" })
+      .success,
+  ).toBe(false);
+  expect(
+    SessionMessageSearchRequest.safeParse({ query: "x", groupBy: "session", order: "oldest" })
+      .success,
+  ).toBe(true);
+  expect(SessionMessageSearchRequest.safeParse({ query: "x", order: "latest" }).success).toBe(
+    false,
+  );
 });
 
 test("selected preview is browser-compatible and sends only the exact identity and cancellation", async () => {

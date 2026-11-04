@@ -2,7 +2,7 @@
 // renderer modules are available. The bridge exists only when the page is the
 // account's own server; the main process checks the sender again on every call.
 
-import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
+import { contextBridge, ipcRenderer, webFrame, type IpcRendererEvent } from "electron";
 
 import {
   DESKTOP_BRIDGE_GLOBAL,
@@ -81,6 +81,7 @@ if (origin && window.location.origin === origin) {
     else waitingAppShot = { result, at: Date.now() };
   });
   const appVersion = argument("opengeni-app-version");
+  const windowBarHeight = Number(argument("opengeni-window-bar-height"));
   const bridge: DesktopBridge = {
     version: DESKTOP_BRIDGE_VERSION,
     platform: platform(),
@@ -102,6 +103,8 @@ if (origin && window.location.origin === origin) {
     ],
     productName: argument("opengeni-product") ?? "Opengeni",
     ...(appVersion ? { appVersion } : {}),
+    ...(windowBarHeight > 0 ? { windowBarHeight } : {}),
+    zoomFactor: () => webFrame.getZoomFactor(),
     captureWindow: () => ipcRenderer.invoke(DESKTOP_IPC.captureWindow),
     accounts: {
       list: () => ipcRenderer.invoke(DESKTOP_IPC.accountsList) as Promise<DesktopAccountsSnapshot>,

@@ -2,9 +2,10 @@
 //! each request does in each of them
 //! ([ADR 19](../../../../docs/adr/0019-e2b-compatible-front-door-and-guest-init.md)).
 //!
-//! E2B's running sandbox sleeps whenever idle, like any other, and wakes on
-//! any request or traffic: that is the host's business and is not a state
-//! here. E2B's pause and its timeout are different. They are recorded
+//! E2B's running sandbox that pauses at its timeout sleeps whenever idle,
+//! like any other, and wakes on any request or traffic: that is the host's
+//! business and is not a state here. One killed at its timeout never sleeps
+//! (see [`super::ops::create`]). E2B's pause and its timeout are different. They are recorded
 //! states (`Pausing`, `Paused`, `Killing`) that traffic does not cancel: a
 //! pause ends every stream through the front door, has the owner host save
 //! the sandbox to at least Saved, and is complete only once the host
@@ -28,8 +29,12 @@
 use serde::{Deserialize, Serialize};
 
 /// How long a create may take, from recording the sandbox to envd taking
-/// its `/init`, before the sweeper gives it up and kills it.
+/// its `/init`, before the sweeper gives it up and kills it: the host's
+/// answer ([`crate::service::CREATE_WAIT`]), then the init.
 pub const CREATE_WITHIN_MS: u64 = 10 * 60 * 1000;
+
+// A create the host answers in time is never swept while its init runs.
+const _: () = assert!(crate::service::CREATE_WAIT.as_millis() < CREATE_WITHIN_MS as u128);
 
 /// The longest timeout a sandbox may have: a day, as on E2B.
 pub const MAX_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;

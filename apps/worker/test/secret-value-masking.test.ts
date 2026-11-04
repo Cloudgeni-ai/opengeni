@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { RunContext, tool } from "@openai/agents";
-import { parseSecretReference } from "@opengeni/contracts";
+import { parseSecretReference, type ResolvedAgentConfig } from "@opengeni/contracts";
 import { maskSecretValuesForStorage } from "@opengeni/db";
 import {
   installToolResultSecretMasking,
@@ -9,6 +9,7 @@ import {
 } from "@opengeni/runtime";
 import { createStaticSecretResolver } from "@opengeni/vaults/testing";
 import { z } from "zod";
+import { taskVaultSecretCaptureEnabled } from "../src/activities/agent-turn/secret-resolver";
 import {
   createAttemptSecretValueMemory,
   currentAttemptSecretValues,
@@ -217,5 +218,83 @@ describe("secret-shaped values in tool output", () => {
       const shown = String(await invokeFirst(agent));
       expect(shown).toContain("postgres://user:[masked url password]@host:5432/db");
     });
+  });
+});
+
+describe("task vault capture eligibility", () => {
+  const secretsOff = { capabilities: { secrets: false } } as unknown as ResolvedAgentConfig;
+  const secretsOn = { capabilities: { secrets: true } } as unknown as ResolvedAgentConfig;
+
+  test("a session narrowed to permissions without secrets has no task vault to save into", () => {
+    expect(taskVaultSecretCaptureEnabled(secretsOn, ["sessions:read", "files:write"])).toBe(false);
+    expect(taskVaultSecretCaptureEnabled(null, [])).toBe(false);
+  });
+
+  test("any secret-using permission, or no narrowing, keeps saving", () => {
+    for (const permission of [
+      "secrets:use",
+      "variable-sets:use",
+      "variable-sets:attach",
+      "environments:use",
+    ]) {
+      expect(taskVaultSecretCaptureEnabled(secretsOn, ["sessions:read", permission])).toBe(true);
+    }
+    expect(taskVaultSecretCaptureEnabled(secretsOn, null)).toBe(true);
+    expect(taskVaultSecretCaptureEnabled(undefined, undefined)).toBe(true);
+  });
+
+  test("the secrets capability off never saves", () => {
+    expect(taskVaultSecretCaptureEnabled(secretsOff, null)).toBe(false);
+    expect(taskVaultSecretCaptureEnabled(secretsOff, ["secrets:use"])).toBe(false);
+  });
+});
+
+describe("run credential names and match metrics", () => {
+  test("names are read word by word: author and session names are not credentials", () => {
+    const memory = createAttemptSecretValueMemory();
+    rememberRunCredentialMaterial(memory, {
+      environment: {
+        GIT_AUTHOR_NAME: "Release Automation Bot",
+        SESSION_NAME: "nightly-release-session",
+        TOKEN_ENDPOINT: "https://auth.example.test/oauth/token",
+        PGPASSWORD: "fake-pg-Pa55word-not-real-9",
+        GH_AUTH_TOKEN: "fake-gh-auth-token-value-0001",
+      },
+      mcp: [{ headers: { "X-Api-Key": "fake-mcp-api-key-value-0002" } }],
+    });
+    const text = [
+      "author Release Automation Bot",
+      "session nightly-release-session",
+      "endpoint https://auth.example.test/oauth/token",
+      "pg fake-pg-Pa55word-not-real-9",
+      "gh fake-gh-auth-token-value-0001",
+      "mcp fake-mcp-api-key-value-0002",
+    ].join("\n");
+    expect(memory.maskText(text)).toBe(
+      [
+        "author Release Automation Bot",
+        "session nightly-release-session",
+        "endpoint https://auth.example.test/oauth/token",
+        "pg [opengeni credential: run credential PGPASSWORD]",
+        "gh [opengeni credential: run credential GH_AUTH_TOKEN]",
+        "mcp [opengeni credential: mcp header]",
+      ].join("\n"),
+    );
+  });
+
+  test("each occurrence is counted by outcome, strength, entropy and position only", () => {
+    const counted: Array<{ name: string; labels?: Record<string, string> }> = [];
+    const memory = createAttemptSecretValueMemory({
+      warn() {},
+      incrementCounter: (input) => counted.push(input),
+    });
+    memory.remember("harbormaster", DB_REF);
+    memory.maskText("cd src/harbormaster && echo password=harbormaster");
+    expect(counted.map((entry) => entry.name)).toEqual([
+      "opengeni_secret_mask_matches_total",
+      "opengeni_secret_mask_matches_total",
+    ]);
+    expect(counted.map((entry) => entry.labels?.outcome)).toEqual(["kept", "masked"]);
+    expect(JSON.stringify(counted)).not.toContain("harbormaster");
   });
 });

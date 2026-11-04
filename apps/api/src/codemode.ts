@@ -259,6 +259,18 @@ export function isCodemodeGrant(grant: AccessGrant): boolean {
   );
 }
 
+const EXECUTION_SANDBOX_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * The machine whose process holds this Codemode token, when it is not the
+ * session's active sandbox: the signed claim the API mints into a `run_on`
+ * exec's token. Absent for the session's own sandbox and every other caller.
+ */
+export function codemodeExecutionSandboxId(grant: AccessGrant): string | null {
+  const value = grant.metadata?.executionSandboxId;
+  return typeof value === "string" && EXECUTION_SANDBOX_ID.test(value) ? value : null;
+}
+
 export function requireMatchingCodemodeCatalog(
   authority: CodemodeGrantAuthority,
   catalog: AttemptToolCatalog | null,
@@ -329,6 +341,7 @@ export async function submitAndDispatchCodemodeCall(
   const submitted = await submitCodemodeOperation(deps.db, {
     ...authority,
     ...(durableApproval ? { durableApproval: true } : {}),
+    executionSandboxId: codemodeExecutionSandboxId(grant),
     call: {
       ...request,
       caller: { kind: "codemode", subjectId: authority.subjectId },

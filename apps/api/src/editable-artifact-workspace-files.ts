@@ -4,7 +4,14 @@ import {
   type EditableArtifactAgentWorkspaceFilePort,
   type EditableArtifactDurableExportService,
 } from "@opengeni/core/editable-artifacts";
-import { completeFileUpload, prepareGeneratedWorkspaceFile, type Database } from "@opengeni/db";
+import {
+  completeFileUpload,
+  currentSessionRlsActorContext,
+  prepareGeneratedWorkspaceFile,
+  readEditableArtifactAudiences,
+  withSessionRlsActorContext,
+  type Database,
+} from "@opengeni/db";
 import { retryWhileMissing, type ObjectHead, type ObjectStorage } from "@opengeni/storage";
 
 const UPLOAD_INTENT_TTL_MS = 60 * 60_000;
@@ -17,6 +24,7 @@ export type EditableArtifactWorkspaceFileAdapterDependencies = Readonly<{
   now?: () => Date;
   prepareFile?: typeof prepareGeneratedWorkspaceFile;
   completeFile?: typeof completeFileUpload;
+  readAudiences?: typeof readEditableArtifactAudiences;
 }>;
 
 /**
@@ -27,11 +35,13 @@ export class EditableArtifactWorkspaceFileAdapter implements EditableArtifactAge
   private readonly now: () => Date;
   private readonly prepareFile: typeof prepareGeneratedWorkspaceFile;
   private readonly completeFile: typeof completeFileUpload;
+  private readonly readAudiences: typeof readEditableArtifactAudiences;
 
   constructor(private readonly dependencies: EditableArtifactWorkspaceFileAdapterDependencies) {
     this.now = dependencies.now ?? (() => new Date());
     this.prepareFile = dependencies.prepareFile ?? prepareGeneratedWorkspaceFile;
     this.completeFile = dependencies.completeFile ?? completeFileUpload;
+    this.readAudiences = dependencies.readAudiences ?? readEditableArtifactAudiences;
   }
 
   async ensureMaterializationFile(
@@ -60,20 +70,43 @@ export class EditableArtifactWorkspaceFileAdapter implements EditableArtifactAge
       );
       const safeFilename = `artifact-${input.artifact.id}-${input.jobId}.${download.format}`;
       const objectKey = `workspaces/${input.scope.workspaceId}/files/${fileId}/artifact-exports/${safeFilename}`;
-      const prepared = await this.prepareFile(this.dependencies.db, {
-        accountId: input.scope.accountId,
-        workspaceId: input.scope.workspaceId,
-        fileId,
-        uploadId,
-        filename,
-        safeFilename,
-        contentType: download.mimeType,
-        sizeBytes: download.byteSize,
-        sha256,
-        bucket: storage.bucket,
-        objectKey,
-        expiresAt: new Date(this.now().getTime() + UPLOAD_INTENT_TTL_MS),
-      });
+      // An Only me document's export is Only me for the document's owner, even
+      // when it is exported from a chat shared with the workspace. Otherwise
+      // it follows its chat, like every file an agent makes.
+      const audience = (
+        await this.readAudiences(this.dependencies.db, input.scope, [input.artifact.id])
+      ).get(input.artifact.id);
+      const onlyMeOwner = audience?.visibility === "user_private" ? audience.ownerSubjectId : null;
+      // Only the owner's own turns could open that download, so the file is
+      // written and completed scoped as the owner, whose Only me files only
+      // their own scope may create or see.
+      const asFileOwner = async <T>(fn: () => Promise<T>): Promise<T> =>
+        onlyMeOwner
+          ? await withSessionRlsActorContext(
+              {
+                ...(currentSessionRlsActorContext() ?? { subjectId: input.actor.subjectId }),
+                privateFileOwnerSubjectId: onlyMeOwner,
+              },
+              fn,
+            )
+          : await fn();
+      const prepared = await asFileOwner(() =>
+        this.prepareFile(this.dependencies.db, {
+          accountId: input.scope.accountId,
+          workspaceId: input.scope.workspaceId,
+          fileId,
+          uploadId,
+          filename,
+          safeFilename,
+          contentType: download.mimeType,
+          sizeBytes: download.byteSize,
+          sha256,
+          bucket: storage.bucket,
+          objectKey,
+          expiresAt: new Date(this.now().getTime() + UPLOAD_INTENT_TTL_MS),
+          ...(onlyMeOwner ? { privateOwnerSubjectId: onlyMeOwner } : {}),
+        }),
+      );
 
       let file = prepared.file;
       if (file.status !== "ready") {
@@ -102,7 +135,9 @@ export class EditableArtifactWorkspaceFileAdapter implements EditableArtifactAge
         }
         await download.assertUnchanged(input.signal);
         throwIfAborted(input.signal);
-        file = await this.completeFile(this.dependencies.db, input.scope.workspaceId, uploadId);
+        file = await asFileOwner(() =>
+          this.completeFile(this.dependencies.db, input.scope.workspaceId, uploadId),
+        );
       } else {
         await assertVisibleExport(
           storage,

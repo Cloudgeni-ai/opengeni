@@ -1,4 +1,4 @@
-import type { SlackChannelRoute, SlackReactionChannel } from "@opengeni/sdk";
+import type { SlackAgent, SlackChannelRoute, SlackReactionChannel } from "@opengeni/sdk";
 import { Loader2Icon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
@@ -21,6 +21,13 @@ import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 
 /** The null option: the channel asks the person once and remembers the answer. */
 const ASK_ONCE = "";
+/** Option values for a Slack agent; plain values are workspace ids. */
+const AGENT_PREFIX = "agent:";
+
+/** The stored answer for a channel as a select value. */
+function routeValue(route: SlackChannelRoute): string {
+  return route.slackAgentId ? `${AGENT_PREFIX}${route.slackAgentId}` : route.targetWorkspaceId;
+}
 
 /**
  * Which Opengeni workspace each Slack channel starts work in.
@@ -80,6 +87,8 @@ export function SlackChannelRoutingDialogBody({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  // Slack agents of this installation. Without any, the choice is only where work starts.
+  const [agents, setAgents] = useState<SlackAgent[]>([]);
   // Save must never run on a draft built from a failed load, and it sends only
   // what changed, so it needs the loaded set to compare against.
   const [loadedRoutes, setLoadedRoutes] = useState<Record<string, SlackChannelRoute> | null>(null);
@@ -100,6 +109,26 @@ export function SlackChannelRoutingDialogBody({
       hasWorkspacePermission(context.accessContext, candidate.id, "sessions:create") &&
       !isPersonalWorkspace(candidate, context.managedSelfContext),
   );
+  // An agent answers in its own workspace, so it is offered only where that
+  // workspace is one this admin could choose.
+  const agentChoices = agents.filter((agent) =>
+    choices.some((candidate) => candidate.id === agent.targetWorkspaceId),
+  );
+  const hasAgents = agentChoices.length > 0;
+
+  /** The workspace and agent a select value stands for. */
+  function parseValue(value: string): {
+    targetWorkspaceId: string | null;
+    slackAgentId: string | null;
+  } {
+    if (value.startsWith(AGENT_PREFIX)) {
+      const agent = agentChoices.find((entry) => entry.id === value.slice(AGENT_PREFIX.length));
+      return agent
+        ? { targetWorkspaceId: agent.targetWorkspaceId, slackAgentId: agent.id }
+        : { targetWorkspaceId: null, slackAgentId: null };
+    }
+    return { targetWorkspaceId: value || null, slackAgentId: null };
+  }
 
   /**
    * A stored route already pointing at this admin's own personal workspace.
@@ -143,18 +172,21 @@ export function SlackChannelRoutingDialogBody({
           workspaceId,
           connectionId,
         );
+        // Agents only add choices; routing still works when they can't be read.
+        const listed = await Promise.resolve()
+          .then(() => context.client.listOpenGeniSlackAgents(workspaceId))
+          .then((result) => result.agents.filter((agent) => agent.connectionId === connectionId))
+          .catch(() => [] as SlackAgent[]);
         if (cancelled) return;
         setChannels([...new Map(collected.map((channel) => [channel.id, channel])).values()]);
+        setAgents(listed);
         const byChannel = Object.fromEntries(
           routes.routes.map((route: SlackChannelRoute) => [route.slackChannelId, route]),
         );
         setLoadedRoutes(byChannel);
         setDraft(
           Object.fromEntries(
-            Object.entries(byChannel).map(([channelId, route]) => [
-              channelId,
-              route.targetWorkspaceId,
-            ]),
+            Object.entries(byChannel).map(([channelId, route]) => [channelId, routeValue(route)]),
           ),
         );
       } catch (caught) {
@@ -183,21 +215,32 @@ export function SlackChannelRoutingDialogBody({
   function changedRoutes() {
     return channels
       .filter((channel) => reachable(channel.id))
-      .map((channel) => ({
-        slackChannelId: channel.id,
-        targetWorkspaceId: draft[channel.id] ? draft[channel.id]! : null,
-      }))
+      .map((channel) => {
+        const choice = parseValue(draft[channel.id] ?? ASK_ONCE);
+        // An agent goes with its own workspace; omitted means plain Opengeni.
+        return {
+          slackChannelId: channel.id,
+          targetWorkspaceId: choice.targetWorkspaceId,
+          ...(choice.slackAgentId ? { slackAgentId: choice.slackAgentId } : {}),
+        };
+      })
       .filter((entry) => {
-        const stored = loadedRoutes?.[entry.slackChannelId]?.targetWorkspaceId ?? null;
-        return stored !== entry.targetWorkspaceId;
+        const stored = loadedRoutes?.[entry.slackChannelId];
+        return (
+          (stored?.targetWorkspaceId ?? null) !== entry.targetWorkspaceId ||
+          (stored?.slackAgentId ?? null) !== (entry.slackAgentId ?? null)
+        );
       });
   }
 
-  /** False when a route points at a workspace this admin cannot choose. */
+  /** False when a route points at a workspace or agent this admin cannot choose. */
   function reachable(channelId: string) {
     const stored = loadedRoutes?.[channelId];
     if (!stored) return true;
     if (personalRouteTarget(channelId)) return true;
+    if (stored.slackAgentId) {
+      return agentChoices.some((agent) => agent.id === stored.slackAgentId);
+    }
     return choices.some((candidate) => candidate.id === stored.targetWorkspaceId);
   }
 
@@ -239,49 +282,56 @@ export function SlackChannelRoutingDialogBody({
         </p>
       ) : (
         <div className={pageMode ? "grid gap-4" : "grid max-h-72 gap-2 overflow-y-auto"}>
-          {channels.map((channel) => (
-            <label
-              key={channel.id}
-              className="grid grid-cols-[1fr_auto] items-center gap-2 text-xs text-fg-muted"
-            >
-              <span className="truncate">
-                {channel.isPrivate ? "Private · " : "#"}
-                {channel.name ?? channel.id}
-              </span>
-              {reachable(channel.id) ? (
-                <Select
-                  value={draft[channel.id] ?? ASK_ONCE}
-                  disabled={!canManage || saving}
-                  onChange={(event) => setDraft({ ...draft, [channel.id]: event.target.value })}
-                >
-                  <option value={ASK_ONCE}>Ask me</option>
-                  {choices.map((candidate) => (
-                    <option key={candidate.id} value={candidate.id}>
-                      {candidate.name}
-                    </option>
-                  ))}
-                  {(() => {
-                    // Only ever the current value of a route set before a
-                    // channel could no longer point at a personal workspace.
-                    // Listed so the control shows what it is set to, and
-                    // named so it is obvious why it should change.
-                    const personal = personalRouteTarget(channel.id);
-                    return personal ? (
-                      <option value={personal.id}>{personal.name} · only you can see this</option>
-                    ) : null;
-                  })()}
-                </Select>
-              ) : (
-                // Somebody with access this admin does not have pointed this
-                // channel somewhere. Say so rather than rendering a blank
-                // control that cannot be saved.
-                <span className="text-2xs text-fg-subtle">
-                  {loadedRoutes?.[channel.id]?.targetWorkspaceName ?? "another workspace"} · set by
-                  someone else
-                </span>
-              )}
-            </label>
-          ))}
+          {channels.map((channel) => {
+            const channelName = `${channel.isPrivate ? "Private · " : "#"}${channel.name ?? channel.id}`;
+            const stored = loadedRoutes?.[channel.id];
+            return (
+              <label
+                key={channel.id}
+                className="grid grid-cols-[1fr_auto] items-center gap-2 text-xs text-fg-muted"
+              >
+                <span className="truncate">{channelName}</span>
+                {reachable(channel.id) ? (
+                  <Select
+                    aria-label={hasAgents ? `Who answers in ${channelName}` : undefined}
+                    value={draft[channel.id] ?? ASK_ONCE}
+                    disabled={!canManage || saving}
+                    onChange={(event) => setDraft({ ...draft, [channel.id]: event.target.value })}
+                  >
+                    <option value={ASK_ONCE}>Ask me</option>
+                    {agentChoices.map((agent) => (
+                      <option key={agent.id} value={`${AGENT_PREFIX}${agent.id}`}>
+                        {agent.name}
+                      </option>
+                    ))}
+                    {choices.map((candidate) => (
+                      <option key={candidate.id} value={candidate.id}>
+                        {hasAgents ? `Opengeni in ${candidate.name}` : candidate.name}
+                      </option>
+                    ))}
+                    {(() => {
+                      // Only ever the current value of a route set before a
+                      // channel could no longer point at a personal workspace.
+                      // Listed so the control shows what it is set to, and
+                      // named so it is obvious why it should change.
+                      const personal = personalRouteTarget(channel.id);
+                      return personal ? (
+                        <option value={personal.id}>{personal.name} · only you can see this</option>
+                      ) : null;
+                    })()}
+                  </Select>
+                ) : (
+                  // Somebody with access this admin does not have pointed this
+                  // channel somewhere. Say so rather than rendering a blank
+                  // control that cannot be saved.
+                  <span className="text-2xs text-fg-subtle">
+                    {stored?.slackAgentName ?? stored?.targetWorkspaceName ?? "another workspace"} ·
+                    set by someone else
+                  </span>
+                )}
+              </label>
+            );
+          })}
         </div>
       )}
     </div>
@@ -290,7 +340,11 @@ export function SlackChannelRoutingDialogBody({
     return (
       <FormPage
         title="Slack channels"
-        description="Choose the Opengeni workspace where each channel starts work."
+        description={
+          hasAgents
+            ? "Choose who answers in each channel: a Slack agent, or Opengeni in a workspace."
+            : "Choose the Opengeni workspace where each channel starts work."
+        }
         back={{ label: "Slack", onClick: onClose }}
         onCancel={onClose}
         submitLabel="Save"
@@ -309,8 +363,11 @@ export function SlackChannelRoutingDialogBody({
       <DialogHeader>
         <DialogTitle>Where Slack channels start work</DialogTitle>
         <DialogDescription>
-          Pick the Opengeni workspace each channel uses. A channel with no choice asks the person
-          once and remembers the answer. Direct messages always use each person's own workspace.
+          {hasAgents
+            ? "Pick who answers in each channel: a Slack agent, or Opengeni in a workspace."
+            : "Pick the Opengeni workspace each channel uses."}{" "}
+          A channel with no choice asks the person once and remembers the answer. Direct messages
+          always use each person's own workspace.
         </DialogDescription>
       </DialogHeader>
 

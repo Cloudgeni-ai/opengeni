@@ -91,8 +91,17 @@ export {
   type NativeCallEvent,
   type NativeCallPhase,
   type NativeCallRealtime,
+  type NativeIncomingCall,
+  type NativeIncomingCallAdapter,
+  type NativeIncomingCallEndReason,
   type NativeRealtimeCall,
 } from "./realtime/native-call";
+export {
+  incomingEndReason,
+  useIncomingAgentCalls,
+  useNativeVoipToken,
+  type IncomingAgentCallsOptions,
+} from "./realtime/incoming-agent-calls";
 export {
   DEFAULT_OPENGENI_NATIVE_CALL_LABELS,
   OpenGeniNativeCallView,
