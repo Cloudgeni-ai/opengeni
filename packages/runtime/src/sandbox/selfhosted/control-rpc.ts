@@ -32,6 +32,10 @@ import {
   responderWaitExhausted,
 } from "./control-replay";
 import { errorMessage } from "@opengeni/contracts/values";
+import {
+  isProcessStartFailureMessage,
+  sanitizeProcessStartFailureMessage,
+} from "./process-start-failure";
 
 // Re-export the contracts reason union locally so callers of the mapping below
 // don't have to import from two places. CapabilityUnavailableReason here is the
@@ -132,6 +136,10 @@ export class SelfhostedControlError extends Error {
   readonly draining: boolean;
   readonly agentOffline: boolean;
   readonly osNotFound: boolean;
+  /** The machine could not start the program (the agent's spawn failed).
+   *  Its message names only the started program, never the command text, and
+   *  it is never a missing-path answer, so `osNotFound` stays false. */
+  readonly processStartFailed: boolean;
   /** The reply exceeded the transport's max payload (a distinguishing flag so the
    *  fault renderer can name the size wall + recovery instead of a generic OS error). */
   readonly payloadTooLarge: boolean;
@@ -166,14 +174,20 @@ export class SelfhostedControlError extends Error {
     controlRequestId?: string | null;
     detail?: Record<string, string>;
   }) {
-    super(input.message);
+    const processStartFailed = isProcessStartFailureMessage(input.message);
+    super(
+      processStartFailed ? sanitizeProcessStartFailureMessage(input.message) : input.message,
+    );
     this.code = input.code;
     this.reason = input.reason;
     this.retryable = input.retryable;
     this.fenced = input.fenced ?? false;
     this.draining = input.draining ?? false;
     this.agentOffline = input.agentOffline ?? false;
-    this.osNotFound = input.osNotFound ?? false;
+    this.processStartFailed = processStartFailed;
+    // A failed process start is reported as ENOENT for whatever the spawn
+    // could not open; it says nothing about a path the caller asked about.
+    this.osNotFound = (input.osNotFound ?? false) && !processStartFailed;
     this.payloadTooLarge = input.payloadTooLarge ?? false;
     this.neverSent = input.neverSent ?? false;
     this.connectionReplaced = input.connectionReplaced ?? false;
