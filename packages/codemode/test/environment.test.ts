@@ -1,14 +1,14 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { ATTEMPT_TOOL_CATALOG_VERSION, AttemptToolCatalog } from "@opengeni/contracts";
 import { prepareToolGatewayDefinitions } from "@opengeni/tool-gateway";
-import type { AttemptToolDefinition } from "../src";
+import type { AttemptToolDefinition, CodemodeClient, CodemodeToolFunction } from "../src";
 import {
   AttemptToolApprovalRequiredError,
   AttemptToolCatalogIntegrityError,
   AttemptToolCatalogStaleError,
   AttemptToolInputValidationError,
   AttemptToolOutputValidationError,
-  AttemptToolPathCollisionError,
+  compileCodemodeTools,
   createAttemptToolEnvironment,
   digestAttemptToolCatalog,
   parseVerifiedAttemptToolCatalog,
@@ -248,9 +248,10 @@ describe("AttemptToolEnvironment", () => {
     expect(isolated.catalog.entries[0]?.codemodePath).toEqual(paths[0]);
   });
 
-  test("rejects path-prefix collisions while allocating the canonical catalog", () => {
-    expect(() =>
-      createAttemptToolEnvironment({
+  test("re-paths a path-prefix collision instead of failing the canonical catalog", () => {
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const environment = createAttemptToolEnvironment({
         scope,
         generation: 1,
         definitions: [
@@ -260,8 +261,93 @@ describe("AttemptToolEnvironment", () => {
             codemodePath: ["docs", "search", "advanced"],
           },
         ],
-      }),
-    ).toThrow(AttemptToolPathCollisionError);
+      });
+      expect(environment.catalog.entries.map((entry) => entry.codemodePath)).toEqual([
+        ["docs", "search"],
+        ["docs", expect.stringMatching(/^search_advanced_[0-9a-f]{16}$/u)],
+      ]);
+      expect(warn.mock.calls[0]![1]).toMatchObject({
+        event: "tool_catalog_degraded",
+        sessionId: scope.sessionId,
+        attemptId: scope.attemptId,
+        warnings: [{ code: "path_disambiguated", toolName: "search_advanced" }],
+      });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test("an MCP server listing one tool twice still yields a usable attempt catalog", async () => {
+    // Staging, November 4, 2026: the ElevenLabs hosted MCP repeated a tool in
+    // tools/list and every turn with that account failed with
+    // `Tool path account_0939….agents_bulk_delete_knowledge_base_e8b6a12b01 collides`.
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const serverId = "account-0939a3b0e4a4afa388063b840830e169707a22f94853349c53a4e972948b5c52";
+      const listed = {
+        ...definition(serverId, "agents_bulk_delete_knowledge_base"),
+        modelName: "mcp_4736c7ab5c4aacc3203e2998__agents_bulk_delete_knowledge_base",
+        codemodePath: [serverId, "agents_bulk_delete_knowledge_base"],
+      };
+      const environment = createAttemptToolEnvironment({
+        scope,
+        generation: 1,
+        definitions: [listed, { ...listed }, definition("docs", "search")],
+      });
+      expect(environment.catalog.entries.map((entry) => entry.codemodePath.join("."))).toEqual([
+        "account_0939a3b0e4a4afa388063b840830e169707a22f94853349c53a4e972948b5c52.agents_bulk_delete_knowledge_base_e8b6a12b01",
+        "docs.search",
+      ]);
+      const result = await environment.callModel({
+        modelName: listed.modelName,
+        arguments: { document_ids: ["a"] },
+        subjectId: "agent:test",
+      });
+      expect(result.content).toEqual([{ type: "text", text: '{"document_ids":["a"]}' }]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test("the Codemode namespace keeps the first tool when a signed catalog overlaps", () => {
+    const entry = (toolName: string, codemodePath: string[]) => ({
+      identity: { serverId: "docs", toolName },
+      modelName: `docs__${toolName}`,
+      codemodePath,
+      inputSchema: { type: "object" },
+      source: "mcp" as const,
+      approval: "none" as const,
+    });
+    const signed = (entries: ReturnType<typeof entry>[]) => {
+      const unsigned = {
+        version: ATTEMPT_TOOL_CATALOG_VERSION,
+        ...scope,
+        generation: 1,
+        createdAt: "2026-11-04T00:00:00.000Z",
+        entries,
+      };
+      return { ...unsigned, digest: digestAttemptToolCatalog(unsigned) };
+    };
+    const client = {} as CodemodeClient;
+    const leafFirst = compileCodemodeTools(
+      signed([entry("search", ["docs", "search"]), entry("deep", ["docs", "search", "deep"])]),
+      client,
+    );
+    expect(typeof leafFirst.docs!).toBe("object");
+    const leaf = (leafFirst.docs as Record<string, CodemodeToolFunction>).search!;
+    expect(typeof leaf).toBe("function");
+    expect((leaf as unknown as { entry: { identity: unknown } }).entry.identity).toEqual({
+      serverId: "docs",
+      toolName: "search",
+    });
+    // A later leaf never replaces an existing namespace (or the tools inside it).
+    const namespaceFirst = compileCodemodeTools(
+      signed([entry("deep", ["docs", "search", "deep"]), entry("search", ["docs", "search"])]),
+      client,
+    );
+    const namespace = (namespaceFirst.docs as Record<string, Record<string, unknown>>).search!;
+    expect(typeof namespace).toBe("object");
+    expect(typeof namespace.deep).toBe("function");
   });
 
   test("routes model and Codemode calls through one opaque executor", async () => {

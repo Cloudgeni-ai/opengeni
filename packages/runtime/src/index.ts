@@ -254,6 +254,7 @@ import {
   type LazyToolTransport,
 } from "./lazy-tool-transport";
 import { legacyMcpToolDigest, prefixedMcpToolName } from "./mcp-model-tool-name";
+import { uniqueListedMcpTools } from "./mcp-listed-tools";
 export { prefixedMcpToolName } from "./mcp-model-tool-name";
 import { createToolSelector } from "./tool-discovery-decision";
 import { withAccountLine } from "./tool-discovery-ranking";
@@ -9534,10 +9535,14 @@ class AttemptDefinitionMcpServer implements MCPServer {
     if (this.closed) throw new Error("local model tool server is closed");
     const environment = await this.requiredAttemptToolEnvironment();
     const sourceCallId = modelMcpSourceCallId(toolName);
+    // Bind the call to the tool this server advertised: if another server's
+    // tool won this model name in the catalog, the call is not found.
+    const expectedIdentity = this.catalogIdentities.get(toolName)?.identity;
     return await this.resultCustomDataBridge.captureResult(args, async (cleanArgs) =>
       environment.callModel({
         modelName: toolName,
         ...(sourceCallId === undefined ? {} : { sourceCallId }),
+        ...(expectedIdentity === undefined ? {} : { expectedIdentity }),
         arguments: cleanArgs ?? {},
         subjectId: this.subjectId,
         ...(meta === undefined ? {} : { transportMeta: meta }),
@@ -9872,13 +9877,21 @@ export class PrefixedMcpServer implements MCPServer {
   private async loadAndFreezeTools(): Promise<RuntimeMcpTool[]> {
     try {
       const tools = assertMcpToolListWithinBounds(await this.inner.listTools()) as RuntimeMcpTool[];
-      const exposed = tools
+      const exposed = uniqueListedMcpTools(this.registryId, tools)
         .filter((tool) => this.isAllowed(tool.name))
         .map((tool) => {
           const name = prefixedMcpToolName(this.registryId, tool.name);
           const prior = this.originalToolNames.get(name);
-          if (prior !== undefined && prior !== tool.name)
-            throw new Error("MCP model tool identity collision");
+          if (prior !== undefined && prior !== tool.name) {
+            // Two different names would share one model name and so one
+            // executor. Keep the first; the other is unavailable this turn.
+            console.warn("[mcp] server listed two tools with one model name; skipping the later", {
+              event: "mcp_tool_model_name_collision",
+              serverId: this.registryId,
+              toolName: tool.name.slice(0, 256),
+            });
+            return null;
+          }
           this.originalToolNames.set(name, tool.name);
           const metaTitle = tool.title ? undefined : displayTitleFromMeta(tool);
           if (metaTitle) this.displayTitles.set(tool.name, metaTitle);
@@ -9906,7 +9919,8 @@ export class PrefixedMcpServer implements MCPServer {
               ? { description: withAccountLine(this.accountLabel.model, tool.description) }
               : {}),
           };
-        });
+        })
+        .filter((tool): tool is NonNullable<typeof tool> => tool !== null);
       const bounded = (this.aggregateToolBudget?.replace(this.aggregateSourceId, exposed) ??
         assertMcpToolListWithinBounds(exposed)) as RuntimeMcpTool[];
       this.listedToolSchemaTokens = estimateSerializedValueTokens(bounded);
@@ -10000,6 +10014,9 @@ export class PrefixedMcpServer implements MCPServer {
         return await this.attemptToolEnvironment.callModel({
           modelName: toolName,
           ...(sourceCallId === undefined ? {} : { sourceCallId }),
+          // Bind the call to this server's own tool: a model name the catalog
+          // gave to another server's tool is not found, never rerouted.
+          expectedIdentity: { serverId: this.registryId, toolName: unprefixed },
           arguments: cleanArgs ?? {},
           subjectId: this.attemptToolSubjectId,
           ...(meta === undefined ? {} : { transportMeta: meta }),

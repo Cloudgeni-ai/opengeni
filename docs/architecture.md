@@ -2197,7 +2197,11 @@ See [`session-mcp-servers.md`](session-mcp-servers.md).
 `@opengeni/tool-gateway` owns catalogs, validation, authorization, approvals, and
 execution. Identity-derived paths/aliases represent
 `{serverId, toolName}`, never authority. Historical hashes require current
-authorization; namespace/tool-prefix and exact collisions block publication.
+authorization. Catalog building never fails a turn over one tool: repeated
+identities keep the first, a taken model name leaves the later tool out,
+colliding paths get identity-suffixed paths, and invalid definitions are
+skipped, each with a structured `tool_catalog_degraded` warning. Runtime MCP
+listing also collapses repeated tool names per server.
 Event metadata preserves identity and approvals. Local tools use the
 final combined attempt environment.
 
