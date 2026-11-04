@@ -2645,7 +2645,7 @@ describe("MessageTimeline — settled turn folding", () => {
       afterExpand[1]?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     await flush();
-    expect(r.container.textContent).toContain("bun test");
+    expect(r.container.textContent).toContain("Ran tests");
 
     await r.unmount();
   });
@@ -3011,7 +3011,7 @@ describe("MessageTimeline — settled turn folding", () => {
       timelineEvent("agent.toolCall.created", {
         id: "call-1",
         name: "exec_command",
-        arguments: { cmd: "step one" },
+        arguments: { cmd: "cat step-one.md" },
       }),
       timelineEvent("agent.toolCall.output", { id: "call-1", output: "ok" }),
       timelineEvent("agent.message.delta", { text: "Step one done, moving on." }),
@@ -3019,7 +3019,7 @@ describe("MessageTimeline — settled turn folding", () => {
       timelineEvent("agent.toolCall.created", {
         id: "call-2",
         name: "exec_command",
-        arguments: { cmd: "step two" },
+        arguments: { cmd: "cat step-two.md" },
       }),
     ];
     const r = await renderComponent(<MessageTimeline events={events} status="running" />);
@@ -3037,9 +3037,9 @@ describe("MessageTimeline — settled turn folding", () => {
     // Settled activity stays neutral even while a later cluster is running.
     expect(settled?.querySelector(".animate-og-pulse")).toBeNull();
     // The live tail stays expanded: its command is visible without expanding.
-    expect(r.container.textContent).toContain("step two");
+    expect(r.container.textContent).toContain("step-two.md");
     // The folded cluster's contents are NOT in the DOM until expanded.
-    expect(r.container.textContent).not.toContain("step one");
+    expect(r.container.textContent).not.toContain("step-one.md");
 
     await r.unmount();
   });
@@ -3051,7 +3051,7 @@ describe("MessageTimeline — settled turn folding", () => {
       timelineEvent("agent.toolCall.created", {
         id: "call-1",
         name: "exec_command",
-        arguments: { cmd: "terraform apply" },
+        arguments: { cmd: "cat deploy-plan.txt" },
       }),
       timelineEvent("session.requiresAction", {}),
     ];
@@ -3064,7 +3064,7 @@ describe("MessageTimeline — settled turn folding", () => {
     const triggers = turnSummaryTriggers(r.container);
     expect(triggers).toHaveLength(1);
     expect(triggers[0]?.getAttribute("data-state")).toBe("open");
-    expect(r.container.textContent).toContain("terraform apply");
+    expect(r.container.textContent).toContain("deploy-plan.txt");
     expect(r.container.textContent).toContain("Approval needed");
 
     await r.unmount();
@@ -3078,7 +3078,7 @@ describe("MessageTimeline — settled turn folding", () => {
       timelineEvent("agent.toolCall.created", {
         id: "call-1",
         name: "exec_command",
-        arguments: { cmd: "terraform apply" },
+        arguments: { cmd: "cat deploy-plan.txt" },
       }),
       timelineEvent("session.requiresAction", {}),
     ];
@@ -3101,7 +3101,7 @@ describe("MessageTimeline — settled turn folding", () => {
       timelineEvent("agent.toolCall.created", {
         id: "call-1",
         name: "exec_command",
-        arguments: { cmd: "step one" },
+        arguments: { cmd: "cat step-one.md" },
       }),
       timelineEvent("agent.toolCall.output", { id: "call-1", output: "ok" }),
       timelineEvent("agent.message.delta", { text: "Step one done, moving on." }),
@@ -3110,7 +3110,7 @@ describe("MessageTimeline — settled turn folding", () => {
       timelineEvent("agent.toolCall.created", {
         id: "call-2",
         name: "exec_command",
-        arguments: { cmd: "step two running" },
+        arguments: { cmd: "cat step-two-running.md" },
       }),
       // The queued follow-up remains exclusively in the prompt queue. Its
       // absence from the timeline must not make the live cluster fold.
@@ -3128,7 +3128,7 @@ describe("MessageTimeline — settled turn folding", () => {
     const triggers = turnSummaryTriggers(r.container);
     expect(triggers).toHaveLength(2);
     expect(triggers.some((node) => node.getAttribute("data-state") === "open")).toBe(true);
-    expect(r.container.textContent).toContain("step two running");
+    expect(r.container.textContent).toContain("step-two-running.md");
     expect(r.container.textContent).not.toContain("queued follow-up");
 
     await r.unmount();
@@ -3141,7 +3141,7 @@ describe("MessageTimeline — settled turn folding", () => {
       timelineEvent("agent.toolCall.created", {
         id: "call-1",
         name: "exec_command",
-        arguments: { cmd: "step one" },
+        arguments: { cmd: "cat step-one.md" },
       }),
       timelineEvent("agent.toolCall.output", { id: "call-1", output: "ok" }),
       timelineEvent("agent.message.delta", { text: "Step one done, moving on." }),
@@ -3149,7 +3149,7 @@ describe("MessageTimeline — settled turn folding", () => {
       timelineEvent("agent.toolCall.created", {
         id: "call-2",
         name: "exec_command",
-        arguments: { cmd: "step two" },
+        arguments: { cmd: "cat step-two.md" },
       }),
       timelineEvent("agent.toolCall.output", { id: "call-2", output: "ok" }),
       timelineEvent("agent.message.completed", { text: "All finished." }),
@@ -3176,14 +3176,14 @@ describe("MessageTimeline — settled turn folding", () => {
       timelineEvent("agent.toolCall.created", {
         id: "call-1",
         name: "exec_command",
-        arguments: { cmd: "step one" },
+        arguments: { cmd: "cat step-one.md" },
       }),
       timelineEvent("agent.toolCall.output", { id: "call-1", output: "ok" }),
       timelineEvent("agent.message.completed", { text: "Mid-turn checkpoint" }),
       timelineEvent("agent.toolCall.created", {
         id: "call-2",
         name: "exec_command",
-        arguments: { cmd: "step two" },
+        arguments: { cmd: "cat step-two.md" },
       }),
       timelineEvent("agent.toolCall.output", { id: "call-2", output: "ok" }),
       timelineEvent("agent.message.completed", { text: "All finished." }),
@@ -3209,7 +3209,7 @@ describe("MessageTimeline — settled turn folding", () => {
     expect(triggers).toHaveLength(3);
     expect(triggers.slice(1).every((t) => t.getAttribute("data-state") === "open")).toBe(true);
     expect(r.container.textContent).toContain("Mid-turn checkpoint");
-    expect(r.container.textContent).toContain("step one");
+    expect(r.container.textContent).toContain("step-one.md");
 
     // The outer fold closes after its beat but remains in settle choreography
     // through the slow collapse. Assert that durable state on the trigger, not
@@ -3236,7 +3236,7 @@ describe("MessageTimeline — settled turn folding", () => {
     expect(expanded).toHaveLength(3);
     expect(expanded.slice(1).every((t) => t.getAttribute("data-state") === "closed")).toBe(true);
     expect(r.container.textContent).toContain("Mid-turn checkpoint");
-    expect(r.container.textContent).not.toContain("step one");
+    expect(r.container.textContent).not.toContain("step-one.md");
 
     await r.unmount();
   });
@@ -3252,7 +3252,7 @@ describe("MessageTimeline — settled turn folding", () => {
       timelineEvent("agent.toolCall.created", {
         id: "call-1",
         name: "exec_command",
-        arguments: { cmd: "step one" },
+        arguments: { cmd: "cat step-one.md" },
       }),
       timelineEvent("agent.toolCall.output", { id: "call-1", output: "ok" }),
     ];
@@ -3278,7 +3278,7 @@ describe("MessageTimeline — settled turn folding", () => {
       timelineEvent("agent.toolCall.created", {
         id: "call-2",
         name: "exec_command",
-        arguments: { cmd: "step two" },
+        arguments: { cmd: "cat step-two.md" },
       }),
       timelineEvent("agent.toolCall.output", { id: "call-2", output: "ok" }),
     ];
@@ -3312,7 +3312,7 @@ describe("MessageTimeline — settled turn folding", () => {
     expect(triggers.slice(1).every((t) => t.getAttribute("data-state") === "closed")).toBe(true);
     // Narration (visible pre-wrap) rides the beat; folded step rows do not.
     expect(r.container.textContent).toContain("Mid-turn checkpoint");
-    expect(r.container.textContent).not.toContain("step one");
+    expect(r.container.textContent).not.toContain("step-one.md");
 
     // Through the collapse and after chrome clears: everything stays closed.
     await flush(2200);
@@ -4690,7 +4690,7 @@ describe("ask / run_on / exec collapsed previews", () => {
     );
     await flush();
     const text = r.container.textContent ?? "";
-    expect(text).toContain("$ pwd");
+    expect(text).toContain("Ran a command");
     expect(text).toContain("on studio-mac");
     expect(text).toContain("/workspace");
     await r.unmount();

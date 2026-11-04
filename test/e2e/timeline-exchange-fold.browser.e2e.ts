@@ -739,7 +739,10 @@ describe("readable timeline browser regression", () => {
             return paragraph.textContent;
           }, intent);
           await nextPaint(page);
-          expect((await sample(page)).following).toBe(false);
+          // A selection is reading and unpins. Focus is not reading position:
+          // the view keeps following, but the settle ease still yields to it.
+          const following = intent === "focus";
+          expect((await sample(page)).following).toBe(following);
           await page.evaluate(() =>
             window.exchangeFoldHarness!.show(window.exchangeFoldHarness!.total),
           );
@@ -758,7 +761,7 @@ describe("readable timeline browser regression", () => {
             expect(
               await page.evaluate(() => document.activeElement?.hasAttribute("data-pinned-focus")),
             ).toBe(true);
-          expect((await sample(page)).following).toBe(false);
+          expect((await sample(page)).following).toBe(following);
         } finally {
           await page.context().close();
         }

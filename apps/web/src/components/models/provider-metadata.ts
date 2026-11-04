@@ -104,7 +104,7 @@ export const ORGANIZATION_PROVIDER_META: Record<
     keyAriaLabel: "Organization Opper API key",
     customModelsHeading: "Custom models",
     customModelsDescription:
-      "Exact Opper model ids shared workspaces can pick: a pool such as gemini-3.8-flash or a pinned EU route such as aws/claude-opus-5-5. Separate from deployment-provided Opper models.",
+      "Exact Opper model ids shared workspaces can pick: a pool such as gemini-3.8-flash or a pinned route such as aws/claude-opus-5-5. Separate from deployment-provided Opper models.",
     customModelInputAriaLabel: "Opper organization model id",
     customModelPlaceholder: "aws/claude-opus-5-5",
     emptyCustomModelsDescription: "No custom models yet. Add one to offer it in shared workspaces.",

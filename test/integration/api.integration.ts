@@ -152,29 +152,37 @@ describe("API component integration", () => {
     );
   });
 
-  test("customer OpenAI and Azure keys are encrypted, externally billed, isolated, and revoked without fallback", async () => {
+  test("customer OpenAI, Azure and OpenAI-compatible keys are encrypted, externally billed, isolated, and revoked without fallback", async () => {
     const settings = testSettings({
       databaseUrl: services.databaseUrl,
       environmentsEncryptionKey: environmentsTestKey,
     });
     let probeStatus = 200;
+    const probeUrls: string[] = [];
     const app = createApp({
       settings,
       db: dbClient.db,
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
-      directModelFetch: (async () =>
-        Response.json(
+      directModelFetch: (async (url: string) => {
+        probeUrls.push(url);
+        return Response.json(
           probeStatus === 200
-            ? { status: "completed" }
+            ? { status: "completed", choices: [{ message: { role: "assistant", content: "OK" } }] }
             : { error: { message: "customer-test-secret" } },
           { status: probeStatus },
-        )) as typeof fetch,
+        );
+      }) as typeof fetch,
     });
     const workspaceId = await defaultWorkspaceId(app);
-    for (const provider of ["openai", "azure_openai"] as const) {
+    for (const provider of ["openai", "azure_openai", "openai_compatible"] as const) {
       const payload = {
-        providerDomain: provider === "openai" ? "api.openai.com" : "customer.openai.azure.com",
+        providerDomain:
+          provider === "openai"
+            ? "api.openai.com"
+            : provider === "azure_openai"
+              ? "customer.openai.azure.com"
+              : "models.customer.test",
         kind: "api_key",
         subjectId: null,
         credential: { apiKey: "customer-test-secret" },
@@ -188,6 +196,9 @@ describe("API component integration", () => {
             model: "customer-model",
             ...(provider === "azure_openai"
               ? { endpoint: "https://customer.openai.azure.com" }
+              : {}),
+            ...(provider === "openai_compatible"
+              ? { baseUrl: "https://models.customer.test/v1/chat/completions" }
               : {}),
           },
         },
@@ -213,7 +224,24 @@ describe("API component integration", () => {
       if (create.status !== 201)
         throw new Error(`Customer connection failed: ${create.status} ${await create.text()}`);
       expect(create.status).toBe(201);
-      const connection = ((await create.json()) as { connection: { id: string } }).connection;
+      expect(probeUrls.at(-1)).toBe(
+        provider === "openai"
+          ? "https://api.openai.com/v1/responses"
+          : provider === "azure_openai"
+            ? "https://customer.openai.azure.com/openai/v1/responses"
+            : "https://models.customer.test/v1/chat/completions",
+      );
+      const created = (
+        (await create.json()) as {
+          connection: { id: string; metadata: { directModelProvider: Record<string, unknown> } };
+        }
+      ).connection;
+      const connection = created;
+      if (provider === "openai_compatible")
+        // The pasted operation path is trimmed before the base URL is stored.
+        expect(created.metadata.directModelProvider.baseUrl).toBe(
+          "https://models.customer.test/v1",
+        );
       const replay = await app.request(workspacePath(workspaceId, "/connections"), {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -234,6 +262,11 @@ describe("API component integration", () => {
       };
       const model = catalogBody.models.find((row) => row.id.includes(connection.id))!;
       expect(model).toBeDefined();
+      expect(
+        model.id.startsWith(
+          provider === "openai_compatible" ? "workspace-compatible-" : "workspace-",
+        ),
+      ).toBe(true);
       expect(model.cost).toBe("workspace");
       expect(model.billing).toEqual({ upstreamPayer: "workspace", metering: "external" });
       expect(model.availability.selectable).toBe(true);
@@ -286,6 +319,32 @@ describe("API component integration", () => {
       await expect(
         loadDirectModelProviderConnection(dbClient.db, settings, workspaceId, model.id),
       ).rejects.toThrow("no longer available");
+    }
+    for (const directModelProvider of [
+      // A private or loopback address is refused before any request.
+      { provider: "openai_compatible", model: "model", baseUrl: "https://10.0.0.8/v1" },
+      { provider: "openai_compatible", model: "model", baseUrl: "https://localhost/v1" },
+      { provider: "openai_compatible", model: "model", baseUrl: "http://models.customer.test/v1" },
+      // The key is bound to the base URL's own host.
+      { provider: "openai_compatible", model: "model", baseUrl: "https://elsewhere.test/v1" },
+    ]) {
+      const before = probeUrls.length;
+      const refused = await app.request(workspacePath(workspaceId, "/connections"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          providerDomain: "models.customer.test",
+          kind: "api_key",
+          subjectId: null,
+          credential: { apiKey: "private-key" },
+          grantedScopes: [],
+          operationId: crypto.randomUUID(),
+          verifyModelAccess: true,
+          metadata: { credentialRole: "direct_openai_compatible", directModelProvider },
+        }),
+      });
+      expect(refused.status).toBe(422);
+      expect(probeUrls.length).toBe(before);
     }
     const invalid = await app.request(workspacePath(workspaceId, "/connections"), {
       method: "POST",
@@ -8142,6 +8201,78 @@ describe("API component integration", () => {
     });
     expect(link.installUrl).toContain(`/v1/workspaces/${grant.workspaceId}/github/connect?state=`);
     expect(link.linkUrl).toBe(link.installUrl);
+    // Both identities in one answer: personal sign-in is off on this deployment.
+    expect((link as unknown as { personal: Record<string, unknown> }).personal).toMatchObject({
+      enabled: false,
+      connected: false,
+      status: "disabled",
+      connectUrl: null,
+    });
+
+    const personalDeps = {
+      ...mcpDeps,
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        publicBaseUrl: "https://api.opengeni.test",
+        // The person's links open the web console, not the API origin.
+        webBaseUrl: "https://app.opengeni.test/",
+        integrationsEnabled: true,
+        githubPersonalOauthEnabled: true,
+        githubPersonalOauthClientId: "personal-client-id",
+        githubPersonalOauthClientSecret: "personal-client-secret",
+        ...configuredGitHub,
+      }),
+    };
+    const withPersonal = await callMcpTool<{
+      status: string;
+      personal: {
+        enabled: boolean;
+        connected: boolean | null;
+        status: string;
+        login: string | null;
+        repositoryCount: number | null;
+        connectUrl: string | null;
+        manageUrl: string | null;
+      };
+    }>(buildOpenGeniMcpServer(personalDeps, grant), "github_connect_link", {});
+    expect(withPersonal.status).toBe("unbound");
+    expect(withPersonal.personal).toMatchObject({
+      enabled: true,
+      connected: false,
+      status: "not_connected",
+      login: null,
+      repositoryCount: null,
+      manageUrl: null,
+      connectUrl: `https://app.opengeni.test/workspaces/${grant.workspaceId}/plugins?open=integration%3Agithub&github=personal`,
+    });
+    const memberPersonal = await callMcpTool<{
+      installUrl: string | null;
+      personal: { status: string; connectUrl: string | null };
+    }>(
+      buildOpenGeniMcpServer(personalDeps, {
+        ...grant,
+        permissions: ["github:use", "connections:read"],
+      }),
+      "github_connect_link",
+      {},
+    );
+    expect(memberPersonal.installUrl).toBeNull();
+    // Without github:manage the agent still has a link to the GitHub settings,
+    // where an admin installs the app on another account.
+    expect((memberPersonal as unknown as { settingsUrl: string | null }).settingsUrl).toBe(
+      `https://app.opengeni.test/workspaces/${grant.workspaceId}/plugins?open=integration%3Agithub`,
+    );
+    expect(memberPersonal.personal).toMatchObject({ status: "not_connected", connectUrl: null });
+    // Personal guidance reaches the agent only where personal sign-in exists.
+    const describedTool = (server: unknown, name: string) =>
+      (server as { _registeredTools?: Record<string, { description?: string }> })
+        ._registeredTools?.[name]?.description ?? "";
+    expect(
+      describedTool(buildOpenGeniMcpServer(mcpDeps, grant), "github_connect_link"),
+    ).not.toContain("github_personal__");
+    expect(
+      describedTool(buildOpenGeniMcpServer(personalDeps, grant), "github_connect_link"),
+    ).toContain("github_personal__*");
 
     const useOnlyLink = await callMcpTool<{
       status: string;

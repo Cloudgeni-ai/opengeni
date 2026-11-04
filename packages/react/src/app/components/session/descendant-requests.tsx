@@ -6,6 +6,7 @@
 // "Let the agent decide" instead hands a question to this chat's own agent,
 // which answers it for the sub-session.
 import type {
+  McpElicitationAnswer,
   OpenGeniClient,
   SessionEvent,
   SessionHumanInputRequest,
@@ -70,6 +71,12 @@ export type DescendantRequestsProps = {
   waiting: readonly SessionSummary[];
   /** Something was answered or decided here: re-read the tree. */
   onResolved?: (() => void) | undefined;
+  /**
+   * A sub-session started resuming from an approval decided here (`true`), or
+   * has no approval left to decide while it runs (`false`). While it resumes,
+   * the host keeps it in `waiting` so its other approvals stay decidable.
+   */
+  onResumingChange?: ((sessionId: string, resuming: boolean) => void) | undefined;
   /** Bumped when this session's agent answered or steered a sub-session; every item re-reads. */
   refreshSignal?: number | undefined;
   loadSkillReview?: HumanInputFormProps["loadSkillReview"];
@@ -178,6 +185,7 @@ function DescendantRequestItem({
   compact,
   delegatedInEvents,
   onResolved,
+  onResumingChange,
   refreshSignal = 0,
   loadSkillReview,
   allowedSaveTo,
@@ -260,19 +268,34 @@ function DescendantRequestItem({
     [client, sessionId, workspaceId],
   );
 
-  const decide = async (approval: PendingApproval, decision: "approve" | "reject") => {
+  const decide = async (
+    approval: PendingApproval,
+    decision: "approve" | "reject",
+    answer?: McpElicitationAnswer,
+  ) => {
     try {
       await client.sendApprovalDecision(workspaceId, sessionId, {
         approvalId: approval.id,
         decision,
+        ...answer,
       });
     } catch (error) {
       toast.error("Couldn't submit the decision", { description: userErrorText(error) });
       throw error instanceof Error ? error : new Error(String(error));
     }
+    // The sub-session resumes now; its other approvals stay decidable here.
+    onResumingChange?.(sessionId, true);
     settled();
     await refreshActivity();
   };
+  // Resuming with nothing left to decide: the card has done its part.
+  const resumingWithoutApprovals =
+    session.status !== "requires_action" &&
+    activity.data !== null &&
+    activity.data.approvals.length === 0;
+  useEffect(() => {
+    if (resumingWithoutApprovals) onResumingChange?.(sessionId, false);
+  }, [onResumingChange, resumingWithoutApprovals, sessionId]);
 
   const [delegations, markDelegated] = useState(0);
   const agentDeciding = useMemo(() => {
@@ -360,7 +383,7 @@ function DescendantRequestItem({
               approvals={approvals}
               loadReview={loadReview}
               loadDetails={loadDetails}
-              onApprove={(approval) => decide(approval, "approve")}
+              onApprove={(approval, answer) => decide(approval, "approve", answer)}
               onReject={(approval) => decide(approval, "reject")}
             />
           </div>
@@ -371,7 +394,8 @@ function DescendantRequestItem({
   // Waiting on something only its own page can take (a reconnect, a sign-in):
   // say so once both reads are in, and point there.
   const loaded = !humanInput.loading && (activity.data !== null || activity.error !== null);
-  if (!loaded || handledWait === waitKey) return null;
+  // A sub-session kept up while it resumes waits on nobody once it has no request.
+  if (!loaded || handledWait === waitKey || session.status !== "requires_action") return null;
   return (
     <div
       data-descendant-request={sessionId}

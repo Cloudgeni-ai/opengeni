@@ -1,3 +1,4 @@
+import { API_CREDITS_REQUIRED_MESSAGE } from "@opengeni/contracts";
 import {
   calculateVoiceInputCost,
   configuredStaticUsageLimits,
@@ -8,6 +9,7 @@ import {
   type VoiceInputUsage,
 } from "@opengeni/config";
 import {
+  chargeBillingOrigin,
   applyCreditDebitAfterUse,
   checkWorkspaceAllowance,
   creditDebitAttributionMetadata,
@@ -28,6 +30,7 @@ import {
   TranscriptionServiceError,
   type TranscriptionBilling,
   type TranscriptionBillingContext,
+  type TranscriptionSettlement,
 } from "../transcription";
 import {
   voiceCreditStanding,
@@ -44,6 +47,7 @@ export type VoiceInputBillingBasis =
   | "provider_tokens"
   | "provider_duration"
   | "server_duration"
+  | "client_reported_duration"
   | "reconciled_receipt";
 
 /**
@@ -51,13 +55,14 @@ export type VoiceInputBillingBasis =
  * price it (token usage with token rates, or a reported duration). Otherwise
  * the duration the server measured from WAV bytes it produced bills. Every
  * deployment-funded call carries that server duration, so an unpriced usage
- * shape never leaves a call unbillable. A client-reported duration is never a
- * billing input.
+ * shape never leaves a call unbillable. A client-reported duration bills only
+ * audio the server never sees (the live transcript), and is labelled as such.
  */
 export function voiceInputBillableUsage(input: {
   pricing: VoiceInputPricing;
   usage: VoiceInputUsage | null;
   trustedDurationSeconds?: number | undefined;
+  clientReportedDurationSeconds?: number | undefined;
 }): { usage: VoiceInputUsage; basis: VoiceInputBillingBasis } {
   if (input.usage?.kind === "tokens" && voiceInputPricingHasTokenRates(input.pricing)) {
     return { usage: input.usage, basis: "provider_tokens" };
@@ -73,6 +78,16 @@ export function voiceInputBillableUsage(input: {
     return {
       usage: { kind: "duration", seconds: input.trustedDurationSeconds },
       basis: "server_duration",
+    };
+  }
+  if (
+    input.clientReportedDurationSeconds !== undefined &&
+    Number.isFinite(input.clientReportedDurationSeconds) &&
+    input.clientReportedDurationSeconds >= 0
+  ) {
+    return {
+      usage: { kind: "duration", seconds: input.clientReportedDurationSeconds },
+      basis: "client_reported_duration",
     };
   }
   throw new TranscriptionServiceError({
@@ -119,15 +134,18 @@ export function createVoiceInputBilling(deps: {
     return true;
   };
   return {
-    async admit({ accountId, workspaceId, attribution }) {
+    async admit({ accountId, workspaceId, attribution, feature = "voice_input" }) {
       if (!voiceInputCreditBillingActive(deps.settings)) return;
+      const live = feature === "live_transcript";
       if (attribution.kind === "unknown") {
         // Not a microphone problem: the caller's credential has no payer the
         // ledger can attribute, so the deployment refuses by policy.
         throw new TranscriptionServiceError({
           code: "policy_blocked",
           status: 403,
-          message: "Voice input payer could not be verified.",
+          message: live
+            ? "This sign-in can't be charged for a live transcript."
+            : "Voice input payer could not be verified.",
         });
       }
       // Deployment-paid voice input spends Opengeni credits, so it honors the
@@ -138,7 +156,9 @@ export function createVoiceInputBilling(deps: {
           code: "policy_blocked",
           status: 403,
           fallbackSafe: true,
-          message: "Credits are turned off in this workspace.",
+          message: live
+            ? "Live transcripts use credits, which are turned off in this workspace. A workspace admin can turn them on."
+            : "Credits are turned off in this workspace.",
         });
       }
       // Debits whose receipt committed but whose ledger write failed are
@@ -151,11 +171,26 @@ export function createVoiceInputBilling(deps: {
           },
         );
       }
-      const balance = await getSpendableCreditBalance(deps.db, accountId, VOICE_CREDIT_USAGE);
+      // API callers spend credits only, as their debit will.
+      const origin = chargeBillingOrigin(attribution.billingOrigin);
+      const balance = await getSpendableCreditBalance(
+        deps.db,
+        accountId,
+        VOICE_CREDIT_USAGE,
+        undefined,
+        undefined,
+        origin,
+      );
       if (balance.balanceMicros <= 0) {
         throw new TranscriptionBillingRefusedError({
           code: "insufficient_credits",
-          message: voiceInsufficientCreditsMessage("Voice input", voiceCreditStanding(balance)),
+          message:
+            origin === "api"
+              ? API_CREDITS_REQUIRED_MESSAGE
+              : voiceInsufficientCreditsMessage(
+                  live ? "Live transcript" : "Voice input",
+                  voiceCreditStanding(balance),
+                ),
         });
       }
       const refusal = await checkWorkspaceAllowance(deps.db, {
@@ -197,30 +232,81 @@ export function createVoiceInputBilling(deps: {
 
     async settle(input) {
       if (!voiceInputCreditBillingActive(deps.settings)) return { creditCostMicros: 0 };
-      const { usage, basis } = voiceInputBillableUsage({
-        pricing: input.pricing,
-        usage: input.usage,
-        trustedDurationSeconds: input.billing.trustedDurationSeconds,
-      });
-      const cost = calculateVoiceInputCost(
-        input.pricing,
-        usage,
-        deps.settings.creditMarginBpsOverride,
-      );
-      return await settleVoiceInputUsage(deps.db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        providerId: input.providerId,
-        model: input.model,
-        billing: input.billing,
-        usage,
-        basis,
-        providerCostMicros: cost.providerCostMicros,
-        creditCostMicros: cost.creditCostMicros,
-        ...(input.processingResidency ? { processingResidency: input.processingResidency } : {}),
+      return await settleVoiceInputUsage(deps.db, pricedSettlement(deps.settings, input));
+    },
+
+    async recordReceipt(tx, input) {
+      if (!voiceInputCreditBillingActive(deps.settings)) return { creditCostMicros: 0 };
+      const receipt = await recordVoiceInputReceipt(tx, pricedSettlement(deps.settings, input));
+      return { creditCostMicros: Number(receipt.quantity) };
+    },
+
+    async reconcile({ accountId, workspaceId }) {
+      if (!voiceInputCreditBillingActive(deps.settings)) return;
+      // No in-flight settlement is waited for: a debit applied here and by
+      // its own settlement shares one idempotency key, so it applies once.
+      await reconcileUnsettledVoiceInputCharges(deps.db, {
+        accountId,
+        workspaceId,
+        minAgeMilliseconds: 0,
       });
     },
   };
+}
+
+type PricedVoiceInputSettlement = Parameters<typeof settleVoiceInputUsage>[1];
+
+/** One unit's billed measurement and its cost at this deployment's margin. */
+function pricedSettlement(
+  settings: Settings,
+  input: TranscriptionSettlement,
+): PricedVoiceInputSettlement {
+  const { usage, basis } = voiceInputBillableUsage({
+    pricing: input.pricing,
+    usage: input.usage,
+    trustedDurationSeconds: input.billing.trustedDurationSeconds,
+    clientReportedDurationSeconds: input.billing.clientReportedDurationSeconds,
+  });
+  const cost = calculateVoiceInputCost(input.pricing, usage, settings.creditMarginBpsOverride);
+  return {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    providerId: input.providerId,
+    model: input.model,
+    billing: input.billing,
+    usage,
+    basis,
+    providerCostMicros: cost.providerCostMicros,
+    creditCostMicros: cost.creditCostMicros,
+    ...(input.processingResidency ? { processingResidency: input.processingResidency } : {}),
+  };
+}
+
+/**
+ * The `model.cost` usage receipt for one unit (Insights spend, monthly cost
+ * cap, member-allowance attribution): the first writer's amount stands, so a
+ * repeat returns the recorded receipt. Inside a caller's transaction it
+ * commits with the caller's write.
+ */
+async function recordVoiceInputReceipt(db: Database, input: PricedVoiceInputSettlement) {
+  const keys = voiceTranscriptionSettlementKeys({
+    workspaceId: input.workspaceId,
+    sourceId: input.billing.sourceId,
+  });
+  return await recordUsageEvent(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    eventType: "model.cost",
+    quantity: input.creditCostMicros,
+    unit: "usd_micros",
+    sourceResourceType: VOICE_TRANSCRIPTION_SOURCE_TYPE,
+    sourceResourceId: input.billing.sourceId,
+    idempotencyKey: keys.usageIdempotencyKey,
+    // The API is the writer; the payer is the trusted attribution snapshot.
+    initiator: { kind: "service", subjectId: "api:voice-input" },
+    initiatorContext: { creditDebitAttribution: input.billing.attribution },
+    ...(input.processingResidency ? { processingResidency: input.processingResidency } : {}),
+  });
 }
 
 /**
@@ -252,20 +338,7 @@ export async function settleVoiceInputUsage(
     workspaceId: input.workspaceId,
     sourceId: input.billing.sourceId,
   });
-  const receipt = await recordUsageEvent(db, {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    eventType: "model.cost",
-    quantity: input.creditCostMicros,
-    unit: "usd_micros",
-    sourceResourceType: VOICE_TRANSCRIPTION_SOURCE_TYPE,
-    sourceResourceId: input.billing.sourceId,
-    idempotencyKey: keys.usageIdempotencyKey,
-    // The API is the writer; the payer is the trusted attribution snapshot.
-    initiator: { kind: "service", subjectId: "api:voice-input" },
-    initiatorContext: { creditDebitAttribution: attribution },
-    ...(input.processingResidency ? { processingResidency: input.processingResidency } : {}),
-  });
+  const receipt = await recordVoiceInputReceipt(db, input);
   const amount = Number(receipt.quantity);
   if (amount > 0) {
     await applyCreditDebitAfterUse(db, {

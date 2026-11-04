@@ -1,0 +1,645 @@
+import { describe, expect, test } from "bun:test";
+import type { ConnectionMetadataWithVerification } from "@opengeni/db";
+import {
+  googleCalendarEvents,
+  graphCalendarEvents,
+  meetingCalendarConnections,
+  meetingCalendarTitle,
+  meetingEventAt,
+  upcomingMeetings,
+  upcomingMeetingsAt,
+  type MeetingCalendarEvent,
+  type MeetingCalendarLookup,
+} from "../src/meeting-calendar-title";
+
+const at = new Date("2026-10-30T13:02:00Z");
+const owner = "user:owner";
+
+function event(overrides: Partial<MeetingCalendarEvent> = {}): MeetingCalendarEvent {
+  return {
+    title: "Acme renewal",
+    start: new Date("2026-10-30T13:00:00Z"),
+    end: new Date("2026-10-30T13:30:00Z"),
+    meeting: true,
+    private: false,
+    declined: false,
+    ...overrides,
+  };
+}
+
+function connection(
+  overrides: Partial<ConnectionMetadataWithVerification> = {},
+): ConnectionMetadataWithVerification {
+  return {
+    id: crypto.randomUUID(),
+    subjectId: owner,
+    providerDomain: "calendarmcp.googleapis.com",
+    kind: "oauth2",
+    status: "active",
+    grantedScopes: [],
+    ...overrides,
+  } as ConnectionMetadataWithVerification;
+}
+
+describe("the calendar event a meeting is of", () => {
+  test("the event under way when recording started", () => {
+    expect(meetingEventAt([event()], at)?.title).toBe("Acme renewal");
+  });
+
+  test("an event about to start, when recording began early", () => {
+    const soon = event({
+      title: "Board prep",
+      start: new Date("2026-10-30T13:10:00Z"),
+      end: new Date("2026-10-30T14:00:00Z"),
+    });
+    expect(meetingEventAt([soon], at)?.title).toBe("Board prep");
+  });
+
+  test("the nearest start wins over a long block and over the previous one running over", () => {
+    const block = event({
+      title: "Offsite",
+      start: new Date("2026-10-30T09:00:00Z"),
+      end: new Date("2026-10-30T17:00:00Z"),
+    });
+    const previous = event({
+      title: "Standup",
+      start: new Date("2026-10-30T12:45:00Z"),
+      end: new Date("2026-10-30T13:02:30Z"),
+    });
+    expect(meetingEventAt([block, previous, event()], at)?.title).toBe("Acme renewal");
+    // The standup ends within a minute of the start: it is the one running over.
+    expect(meetingEventAt([previous], at)).toBeNull();
+  });
+
+  test("never a private, declined, all-day or later event, or a blank one", () => {
+    expect(meetingEventAt([event({ private: true })], at)).toBeNull();
+    expect(meetingEventAt([event({ declined: true })], at)).toBeNull();
+    expect(meetingEventAt([event({ meeting: false })], at)).toBeNull();
+    expect(meetingEventAt([event({ title: "  \n " })], at)).toBeNull();
+    expect(
+      meetingEventAt(
+        [
+          event({
+            start: new Date("2026-10-30T13:20:00Z"),
+            end: new Date("2026-10-30T14:00:00Z"),
+          }),
+        ],
+        at,
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("reading providers' events", () => {
+  test("Google Calendar items", () => {
+    const events = googleCalendarEvents({
+      items: [
+        {
+          summary: "Acme renewal",
+          start: { dateTime: "2026-10-30T14:00:00+01:00" },
+          end: { dateTime: "2026-10-30T14:30:00+01:00" },
+          attendees: [{ self: true, responseStatus: "accepted" }],
+        },
+        { summary: "Holiday", start: { date: "2026-10-30" }, end: { date: "2026-10-31" } },
+        {
+          summary: "Focus",
+          eventType: "focusTime",
+          start: { dateTime: "2026-10-30T13:00:00Z" },
+          end: { dateTime: "2026-10-30T14:00:00Z" },
+        },
+        {
+          summary: "Therapist",
+          visibility: "private",
+          start: { dateTime: "2026-10-30T13:00:00Z" },
+          end: { dateTime: "2026-10-30T14:00:00Z" },
+        },
+        {
+          summary: "Skipped",
+          start: { dateTime: "2026-10-30T13:00:00Z" },
+          end: { dateTime: "2026-10-30T14:00:00Z" },
+          attendees: [{ self: true, responseStatus: "declined" }],
+        },
+        { start: { dateTime: "2026-10-30T13:00:00Z" } },
+      ],
+    });
+    expect(events.map((item) => [item.title, item.meeting, item.private, item.declined])).toEqual([
+      ["Acme renewal", true, false, false],
+      ["Holiday", false, false, false],
+      ["Focus", false, false, false],
+      ["Therapist", true, true, false],
+      ["Skipped", true, false, true],
+    ]);
+    expect(events[0]!.start.toISOString()).toBe("2026-10-30T13:00:00.000Z");
+    expect(googleCalendarEvents({ error: "nope" })).toEqual([]);
+  });
+
+  test("Microsoft Graph calendarView values, in UTC", () => {
+    const events = graphCalendarEvents({
+      value: [
+        {
+          subject: "Quarterly review",
+          start: { dateTime: "2026-10-30T13:00:00.0000000", timeZone: "UTC" },
+          end: { dateTime: "2026-10-30T14:00:00.0000000", timeZone: "UTC" },
+          responseStatus: { response: "accepted" },
+        },
+        {
+          subject: "Out",
+          showAs: "oof",
+          start: { dateTime: "2026-10-30T13:00:00" },
+          end: { dateTime: "2026-10-30T14:00:00" },
+        },
+        {
+          subject: "HR",
+          sensitivity: "confidential",
+          start: { dateTime: "2026-10-30T13:00:00" },
+          end: { dateTime: "2026-10-30T14:00:00" },
+        },
+      ],
+    });
+    expect(events[0]!.start.toISOString()).toBe("2026-10-30T13:00:00.000Z");
+    expect(events.map((item) => [item.title, item.meeting, item.private])).toEqual([
+      ["Quarterly review", true, false],
+      ["Out", false, false],
+      ["HR", true, true],
+    ]);
+  });
+});
+
+describe("which connections are asked", () => {
+  test("only the owner's own active calendar grants", () => {
+    const google = connection();
+    const graph = connection({
+      providerDomain: "graph.microsoft.com",
+      grantedScopes: ["Calendars.ReadWrite", "offline_access"],
+    });
+    const mailOnly = connection({
+      providerDomain: "graph.microsoft.com",
+      grantedScopes: ["Mail.Read"],
+    });
+    const shared = connection({ subjectId: null });
+    const someoneElses = connection({ subjectId: "user:other" });
+    const broken = connection({ status: "needs_reauth" } as never);
+    const all = [google, graph, mailOnly, shared, someoneElses, broken];
+    expect(
+      meetingCalendarConnections(all, { subjectId: owner, googleCalendarEnabled: true }).map(
+        (item) => item.id,
+      ),
+    ).toEqual([google.id, graph.id]);
+    expect(
+      meetingCalendarConnections(all, { subjectId: owner, googleCalendarEnabled: false }).map(
+        (item) => item.id,
+      ),
+    ).toEqual([graph.id]);
+  });
+});
+
+describe("the lookup", () => {
+  const googleBody = {
+    items: [
+      {
+        summary: "Acme renewal",
+        start: { dateTime: "2026-10-30T13:00:00Z" },
+        end: { dateTime: "2026-10-30T13:30:00Z" },
+      },
+    ],
+  };
+
+  function lookup(overrides: Partial<MeetingCalendarLookup> = {}) {
+    const requests: Array<{ url: string; headers: Record<string, string> }> = [];
+    const value: MeetingCalendarLookup = {
+      listConnections: async () => [connection()],
+      credentialHeaders: async () => ({ Authorization: "Bearer calendar-token" }),
+      fetch: (async (url: string, init: RequestInit) => {
+        requests.push({ url, headers: init.headers as Record<string, string> });
+        return Response.json(googleBody);
+      }) as unknown as typeof fetch,
+      googleCalendarEnabled: true,
+      ...overrides,
+    };
+    return { value, requests };
+  }
+
+  test("names the meeting after the event, asking only for the minutes around its start", async () => {
+    const { value, requests } = lookup();
+    expect(await meetingCalendarTitle(value, { subjectId: owner, at })).toBe("Acme renewal");
+    expect(requests).toHaveLength(1);
+    const url = new URL(requests[0]!.url);
+    expect(url.origin + url.pathname).toBe(
+      "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+    );
+    expect(url.searchParams.get("timeMin")).toBe("2026-10-30T13:03:00.000Z");
+    expect(url.searchParams.get("timeMax")).toBe("2026-10-30T13:12:00.000Z");
+    expect(url.searchParams.get("singleEvents")).toBe("true");
+    expect(requests[0]!.headers.Authorization).toBe("Bearer calendar-token");
+  });
+
+  test("no calendar, an unusable credential or a provider error leaves no name", async () => {
+    expect(
+      await meetingCalendarTitle(lookup({ listConnections: async () => [] }).value, {
+        subjectId: owner,
+        at,
+      }),
+    ).toBeNull();
+    expect(
+      await meetingCalendarTitle(lookup({ credentialHeaders: async () => null }).value, {
+        subjectId: owner,
+        at,
+      }),
+    ).toBeNull();
+    expect(
+      await meetingCalendarTitle(
+        lookup({
+          fetch: (async () => new Response("no", { status: 403 })) as unknown as typeof fetch,
+        }).value,
+        { subjectId: owner, at },
+      ),
+    ).toBeNull();
+    expect(
+      await meetingCalendarTitle(
+        lookup({
+          listConnections: async () => {
+            throw new Error("database down");
+          },
+        }).value,
+        { subjectId: owner, at },
+      ),
+    ).toBeNull();
+  });
+
+  test("a slow calendar never holds the recording up", async () => {
+    const started = Date.now();
+    const title = await meetingCalendarTitle(
+      lookup({
+        timeoutMs: 50,
+        fetch: ((_url: string, init: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            init.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+          })) as unknown as typeof fetch,
+      }).value,
+      { subjectId: owner, at },
+    );
+    expect(title).toBeNull();
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  test("both calendars are asked, and the nearest event wins", async () => {
+    const graph = connection({
+      providerDomain: "graph.microsoft.com",
+      grantedScopes: ["Calendars.Read"],
+    });
+    const { value, requests } = lookup({
+      listConnections: async () => [connection(), graph],
+      fetch: (async (url: string, init: RequestInit) => {
+        requests.push({ url, headers: init.headers as Record<string, string> });
+        return url.startsWith("https://graph.microsoft.com/")
+          ? Response.json({
+              value: [
+                {
+                  subject: "Pricing sync",
+                  start: { dateTime: "2026-10-30T13:01:00.0000000" },
+                  end: { dateTime: "2026-10-30T13:30:00.0000000" },
+                },
+              ],
+            })
+          : Response.json(googleBody);
+      }) as unknown as typeof fetch,
+    });
+    expect(await meetingCalendarTitle(value, { subjectId: owner, at })).toBe("Pricing sync");
+    const graphRequest = requests.find((request) => request.url.includes("graph.microsoft.com"))!;
+    expect(new URL(graphRequest.url).pathname).toBe("/v1.0/me/calendarView");
+    expect(graphRequest.headers.Prefer).toBe('outlook.timezone="UTC"');
+  });
+
+  test("says why a calendar couldn't be read, without the credential", async () => {
+    const problems: Array<{ providerDomain: string; reason: string }> = [];
+    const onProblem = (problem: { providerDomain: string; reason: string }) =>
+      void problems.push(problem);
+    await meetingCalendarTitle(
+      lookup({
+        onProblem,
+        fetch: (async () => new Response("no", { status: 401 })) as unknown as typeof fetch,
+      }).value,
+      { subjectId: owner, at },
+    );
+    await meetingCalendarTitle(lookup({ onProblem, credentialHeaders: async () => null }).value, {
+      subjectId: owner,
+      at,
+    });
+    expect(problems).toEqual([
+      { providerDomain: "calendarmcp.googleapis.com", reason: "HTTP 401" },
+      { providerDomain: "calendarmcp.googleapis.com", reason: "credential unavailable" },
+    ]);
+    // A lookup that worked reports nothing, even after its time is up.
+    problems.length = 0;
+    expect(
+      await meetingCalendarTitle(lookup({ onProblem, timeoutMs: 30 }).value, {
+        subjectId: owner,
+        at,
+      }),
+    ).toBe("Acme renewal");
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(problems).toEqual([]);
+  });
+});
+
+describe("which invitations name a meeting", () => {
+  test("an event the owner answered comes before an invitation they haven't", () => {
+    const invitation = event({
+      title: "Unexpected invite",
+      start: new Date("2026-10-30T13:02:00Z"),
+      unanswered: true,
+    });
+    expect(meetingEventAt([invitation, event()], at)?.title).toBe("Acme renewal");
+    // Alone, an unanswered invitation still names the meeting.
+    expect(meetingEventAt([invitation], at)?.title).toBe("Unexpected invite");
+  });
+
+  test("Google's needsAction and Graph's notResponded are unanswered; Graph's personal events are private", () => {
+    const [google] = googleCalendarEvents({
+      items: [
+        {
+          summary: "Invite",
+          start: { dateTime: "2026-10-30T13:00:00Z" },
+          end: { dateTime: "2026-10-30T13:30:00Z" },
+          attendees: [{ self: true, responseStatus: "needsAction" }],
+        },
+      ],
+    });
+    expect(google?.unanswered).toBe(true);
+    const [notResponded, personal] = graphCalendarEvents({
+      value: [
+        {
+          subject: "Invite",
+          start: { dateTime: "2026-10-30T13:00:00" },
+          end: { dateTime: "2026-10-30T13:30:00" },
+          responseStatus: { response: "notResponded" },
+        },
+        {
+          subject: "Doctor",
+          sensitivity: "personal",
+          start: { dateTime: "2026-10-30T13:00:00" },
+          end: { dateTime: "2026-10-30T13:30:00" },
+          responseStatus: { response: "organizer" },
+        },
+      ],
+    });
+    expect(notResponded?.unanswered).toBe(true);
+    expect(personal).toMatchObject({ private: true, unanswered: false });
+  });
+
+  test("a Microsoft calendar scope stored as a URL counts", () => {
+    const graph = connection({
+      providerDomain: "graph.microsoft.com",
+      grantedScopes: ["https://graph.microsoft.com/Calendars.Read"],
+    });
+    expect(
+      meetingCalendarConnections([graph], { subjectId: owner, googleCalendarEnabled: false }),
+    ).toHaveLength(1);
+  });
+});
+
+describe("meetings about to start", () => {
+  const now = new Date("2026-10-30T12:59:00Z");
+
+  test("events carry their id and the link that joins their call", () => {
+    const [meet, zoom, none] = googleCalendarEvents({
+      items: [
+        {
+          id: "evt-meet",
+          summary: "Standup",
+          hangoutLink: "https://meet.google.com/abc-defg-hij",
+          start: { dateTime: "2026-10-30T13:00:00Z" },
+          end: { dateTime: "2026-10-30T13:15:00Z" },
+        },
+        {
+          id: "evt-zoom",
+          summary: "Acme call",
+          conferenceData: {
+            entryPoints: [
+              { entryPointType: "phone", uri: "tel:+1-555-0100" },
+              { entryPointType: "video", uri: "https://acme.zoom.us/j/123456789?pwd=x" },
+            ],
+          },
+          start: { dateTime: "2026-10-30T13:00:00Z" },
+          end: { dateTime: "2026-10-30T13:30:00Z" },
+        },
+        {
+          id: "evt-room",
+          summary: "Lunch",
+          location: "Canteen, https://maps.example.com/canteen",
+          start: { dateTime: "2026-10-30T13:00:00Z" },
+          end: { dateTime: "2026-10-30T14:00:00Z" },
+        },
+      ],
+    });
+    expect(meet).toMatchObject({
+      id: "evt-meet",
+      provider: "google",
+      joinUrl: "https://meet.google.com/abc-defg-hij",
+      service: "Google Meet",
+    });
+    expect(zoom).toMatchObject({
+      joinUrl: "https://acme.zoom.us/j/123456789?pwd=x",
+      service: "Zoom",
+    });
+    expect(none!.joinUrl).toBeUndefined();
+    const [teams] = graphCalendarEvents({
+      value: [
+        {
+          id: "AAMk-1",
+          subject: "Design review",
+          start: { dateTime: "2026-10-30T13:00:00" },
+          end: { dateTime: "2026-10-30T13:45:00" },
+          body: {
+            content:
+              "Join: https://teams.microsoft.com/l/meetup-join/19%3ameeting_x%40thread.v2/0 .",
+          },
+        },
+      ],
+    });
+    expect(teams).toMatchObject({
+      id: "AAMk-1",
+      provider: "microsoft",
+      joinUrl: "https://teams.microsoft.com/l/meetup-join/19%3ameeting_x%40thread.v2/0",
+      service: "Microsoft Teams",
+    });
+  });
+
+  test("soonest first; only meetings with a link, not declined, all-day or long started", () => {
+    const base = { meeting: true, private: false, declined: false, provider: "google" as const };
+    const link = { joinUrl: "https://meet.google.com/abc-defg-hij", service: "Google Meet" };
+    const inMinutes = (minutes: number) => new Date(now.getTime() + minutes * 60_000);
+    const listed = upcomingMeetingsAt(
+      [
+        { ...base, ...link, id: "later", title: "Later", start: inMinutes(10), end: inMinutes(40) },
+        {
+          ...base,
+          ...link,
+          id: "invite",
+          title: "Invite",
+          start: inMinutes(1),
+          end: inMinutes(31),
+          unanswered: true,
+        },
+        {
+          ...base,
+          ...link,
+          id: "accepted",
+          title: "Accepted",
+          start: inMinutes(1),
+          end: inMinutes(61),
+        },
+        { ...base, ...link, id: "short", title: "Short", start: inMinutes(1), end: inMinutes(16) },
+        {
+          ...base,
+          ...link,
+          id: "running",
+          title: "Running",
+          start: inMinutes(-3),
+          end: inMinutes(27),
+        },
+        { ...base, ...link, id: "old", title: "Old", start: inMinutes(-20), end: inMinutes(10) },
+        { ...base, ...link, id: "far", title: "Far", start: inMinutes(30), end: inMinutes(60) },
+        {
+          ...base,
+          ...link,
+          id: "no",
+          title: "Declined",
+          start: inMinutes(1),
+          end: inMinutes(30),
+          declined: true,
+        },
+        {
+          ...base,
+          ...link,
+          id: "allday",
+          title: "Day",
+          start: inMinutes(1),
+          end: inMinutes(30),
+          meeting: false,
+        },
+        { ...base, id: "nolink", title: "No link", start: inMinutes(1), end: inMinutes(30) },
+        {
+          ...base,
+          ...link,
+          id: "secret",
+          title: "Doctor",
+          start: inMinutes(5),
+          end: inMinutes(30),
+          private: true,
+        },
+        { ...base, ...link, id: "later", title: "Later", start: inMinutes(10), end: inMinutes(40) },
+      ],
+      now,
+    );
+    expect(listed.map((meeting) => meeting.id)).toEqual([
+      "running",
+      "short",
+      "accepted",
+      "invite",
+      "secret",
+      "later",
+    ]);
+    expect(listed[1]).toEqual({
+      id: "short",
+      provider: "google",
+      title: "Short",
+      private: false,
+      startsAt: "2026-10-30T13:00:00.000Z",
+      endsAt: "2026-10-30T13:15:00.000Z",
+      joinUrl: "https://meet.google.com/abc-defg-hij",
+      service: "Google Meet",
+      unanswered: false,
+    });
+    expect(listed.find((meeting) => meeting.id === "secret")!.private).toBe(true);
+  });
+
+  test("asks each calendar for the next minutes with join details, and says when there is none", async () => {
+    const requests: Array<{ url: string; headers: Record<string, string> }> = [];
+    const graph = connection({
+      providerDomain: "graph.microsoft.com",
+      grantedScopes: ["Calendars.Read"],
+    });
+    const value: MeetingCalendarLookup = {
+      listConnections: async () => [connection(), graph],
+      credentialHeaders: async () => ({ Authorization: "Bearer calendar-token" }),
+      fetch: (async (url: string, init: RequestInit) => {
+        requests.push({ url, headers: init.headers as Record<string, string> });
+        return url.startsWith("https://graph.microsoft.com/")
+          ? Response.json({ value: [] })
+          : Response.json({
+              items: [
+                {
+                  id: "evt-1",
+                  summary: "Weekly sync",
+                  hangoutLink: "https://meet.google.com/abc-defg-hij",
+                  start: { dateTime: "2026-10-30T13:00:00Z" },
+                  end: { dateTime: "2026-10-30T13:30:00Z" },
+                },
+              ],
+            });
+      }) as unknown as typeof fetch,
+      googleCalendarEnabled: true,
+    };
+    const result = await upcomingMeetings(value, { subjectId: owner, now });
+    expect(result.calendar).toBe("connected");
+    expect(result.complete).toBe(true);
+    expect(result.meetings.map((meeting) => [meeting.title, meeting.service])).toEqual([
+      ["Weekly sync", "Google Meet"],
+    ]);
+    const google = new URL(requests.find((request) => request.url.includes("googleapis"))!.url);
+    expect(google.searchParams.get("timeMin")).toBe("2026-10-30T12:59:00.000Z");
+    expect(google.searchParams.get("timeMax")).toBe("2026-10-30T13:19:00.000Z");
+    expect(google.searchParams.get("fields")).toContain("hangoutLink");
+    expect(google.searchParams.get("fields")).toContain("conferenceData");
+    const outlook = requests.find((request) => request.url.includes("graph.microsoft.com"))!;
+    expect(new URL(outlook.url).searchParams.get("$select")).toContain("onlineMeeting");
+    expect(outlook.headers.Prefer).toContain('outlook.body-content-type="text"');
+
+    const none = await upcomingMeetings(
+      { ...value, listConnections: async () => [] },
+      { subjectId: owner, now },
+    );
+    expect(none).toEqual({ calendar: "none", complete: true, meetings: [] });
+
+    // One calendar failing leaves the others' meetings, and says the list may miss some.
+    const failing = await upcomingMeetings(
+      {
+        ...value,
+        fetch: (async (url: string, init: RequestInit) =>
+          url.startsWith("https://graph.microsoft.com/")
+            ? new Response("busy", { status: 503 })
+            : value.fetch(url, init)) as unknown as typeof fetch,
+      },
+      { subjectId: owner, now },
+    );
+    expect(failing.complete).toBe(false);
+    expect(failing.meetings.map((meeting) => meeting.title)).toEqual(["Weekly sync"]);
+  });
+});
+
+describe("a meeting started for a calendar event", () => {
+  test("is named after that event, even when another starts nearer", () => {
+    const nearer = event({ id: "a", provider: "google", title: "Previous one running over" });
+    const chosen = event({
+      id: "b",
+      provider: "google",
+      title: "Board prep",
+      start: new Date("2026-10-30T13:05:00Z"),
+      end: new Date("2026-10-30T14:00:00Z"),
+    });
+    expect(meetingEventAt([nearer, chosen], at)?.title).toBe("Previous one running over");
+    expect(meetingEventAt([nearer, chosen], at, { provider: "google", id: "b" })?.title).toBe(
+      "Board prep",
+    );
+    // Not one on another calendar with the same id.
+    expect(meetingEventAt([nearer, chosen], at, { provider: "microsoft", id: "b" })?.title).toBe(
+      "Previous one running over",
+    );
+    // A private or declined one the person chose names nothing, never another meeting.
+    const secret = { ...chosen, private: true };
+    expect(meetingEventAt([nearer, secret], at, { provider: "google", id: "b" })).toBeNull();
+    const declined = { ...chosen, declined: true };
+    expect(meetingEventAt([nearer, declined], at, { provider: "google", id: "b" })).toBeNull();
+  });
+});

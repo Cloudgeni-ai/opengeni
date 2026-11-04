@@ -108,6 +108,49 @@ describe("list_models", () => {
     ).toBe("Current: gpt-5.6-sol\nNo models are available in this workspace.");
   });
 
+  test("names what differs when two routes of a model share a name", () => {
+    const euDataZone = {
+      geography: "eu",
+      deploymentType: "azure_data_zone",
+      regions: ["swedencentral"],
+      evidence: {
+        source: "operator_declaration",
+        reference: "Data zone deployment",
+        verifiedAt: "2026-10-26",
+      },
+    };
+    const route = (id: string, residency?: unknown) => ({
+      id,
+      api: "responses",
+      wireProfile: "azure-openai",
+      baseUrl: `https://${id}.openai.azure.com/openai/v1`,
+      apiKey: "key",
+      ...(residency === undefined ? {} : { residency }),
+      models: [{ id: `${id}/gpt-6.1-sol`, upstreamModelId: "gpt-6.1-sol", label: "GPT-6.1 Sol" }],
+    });
+    const settings = testSettings({
+      modelProvidersJson: JSON.stringify([route("azure-sol"), route("azure-eu", euDataZone)]),
+      modelCostPolicyJson: JSON.stringify({
+        "azure-sol/gpt-6.1-sol": "credits",
+        "azure-eu/gpt-6.1-sol": "credits",
+      }),
+    });
+    const selections = resolveWorkspaceModelSelection({
+      settings,
+      policy: {
+        allowedProviders: null,
+        allowedModels: ["azure-sol/gpt-6.1-sol", "azure-eu/gpt-6.1-sol"],
+      },
+      codexSubscriptionActive: false,
+    });
+    expect(renderListModels({ currentModelId: null, selections, modelNotes: {} })).toBe(
+      [
+        "- azure-sol/gpt-6.1-sol | GPT-6.1 Sol | credits",
+        "- azure-eu/gpt-6.1-sol | GPT-6.1 Sol (EU) | credits",
+      ].join("\n"),
+    );
+  });
+
   test("lists workspace OpenRouter custom models only when that workspace connection is ready", () => {
     const customModels = [
       { upstreamModelId: "anthropic/claude-sonnet-4.6", label: "Workspace Claude" },

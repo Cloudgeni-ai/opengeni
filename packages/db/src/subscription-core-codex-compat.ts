@@ -120,6 +120,7 @@ function projectAccount(
   return {
     id: row.id,
     source: input.source,
+    ownerWorkspaceId: row.managed_by_workspace_id ?? null,
     chatgptAccountId: row.provider_account_id,
     label: row.label,
     accountEmail: row.account_email,
@@ -427,6 +428,8 @@ export async function setSubscriptionCoreWorkspaceCodexSource(
     workspaceId: string;
     subjectId: string;
     mode: WorkspaceCodexSubscriptionMode;
+    /** The request verified the Personal workspace's owner acting as themselves (1233). */
+    personalWorkspaceOwnerVerified?: boolean | undefined;
   },
 ): Promise<{ source: WorkspaceCodexSubscriptionSource; wake: SubscriptionCoreCodexWake }> {
   const changed = await setSubscriptionCoreWorkspaceSource(db, SUBSCRIPTION_CORE_CODEX, {

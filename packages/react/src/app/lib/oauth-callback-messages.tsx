@@ -27,6 +27,10 @@ export function oauthCallbackReasonMessage(reason: string | null): string | null
       return "This account is already connected. Reconnect the existing account in connection settings.";
     case "account_identity_unavailable":
       return "We couldn't confirm which account this is, so another connection can't be added safely. Reconnect the existing connection in settings, then try again.";
+    case "account_limit_one":
+      return "This service doesn't tell us which account you signed in with, so you can connect one account. Disconnect it to use a different one.";
+    case "account_reconnect_required":
+      return "Reconnect your existing account once, then add another.";
     case "access_denied":
     case "provider_denied":
       return `You cancelled at the provider, so nothing was connected.${RETRY}`;

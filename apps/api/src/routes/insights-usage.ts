@@ -55,6 +55,8 @@ export function insightsRawQuerySupported(
 ): boolean {
   const keys = new Set([
     "range",
+    "from",
+    "to",
     "provider",
     "model",
     "payer",
@@ -69,7 +71,9 @@ export function insightsRawQuerySupported(
   if (Object.keys(query).some((key) => !keys.has(key))) return false;
   if (
     query.range !== undefined &&
-    !new Set(["today", "week", "month", "30d", "90d", "ytd"]).has(String(query.range))
+    !new Set(["today", "week", "month", "30d", "90d", "ytd", "custom", "1h", "3h", "24h"]).has(
+      String(query.range),
+    )
   )
     return false;
   return (

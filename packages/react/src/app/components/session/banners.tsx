@@ -11,6 +11,7 @@ import { Button } from "../../../ui/button";
 import { formatTimestamp } from "../../lib/format";
 import type { Session } from "../../types";
 import { MessageFileSkeletons, MessageRepositoryChips } from "./message-resource-placeholders";
+import { useOpenGeniText } from "../../../messages/runtime";
 
 const MessageResourceAttachments = lazy(() => import("./message-resource-attachments"));
 
@@ -74,6 +75,7 @@ export function UserMessageBody({
   item: UserMessageItem;
   searchTarget?: TimelineSearchTarget | null | undefined;
 }) {
+  const t = useOpenGeniText();
   const hasFiles = item.resources.some((resource) => resource.kind === "file");
   const repositoryChips = item.resources.some((resource) => resource.kind === "repository") ? (
     <div className="mb-2 flex flex-wrap gap-1.5">
@@ -86,7 +88,9 @@ export function UserMessageBody({
       {item.presentation ? (
         <div className="mb-1.5 inline-flex items-center gap-1 text-xs font-medium text-fg-muted">
           <AudioLinesIcon className="size-3.5" />
-          {item.presentation.kind === "realtime_voice_handoff" ? "Voice handoff" : "Voice request"}
+          {item.presentation.kind === "realtime_voice_handoff"
+            ? t("messageTimeline.voiceHandoff")
+            : t("messageTimeline.voiceRequest")}
         </div>
       ) : null}
       {hasFiles ? (

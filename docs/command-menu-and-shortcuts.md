@@ -152,6 +152,12 @@ Opening it is instant: no request is made before it appears.
   "Recent Sites" lists at most three of this workspace's Sites, most recent
   activity first (conversations, a new version, or the person opening it),
   from the Site rows the sidebar has loaded; the Site on screen is left out.
+  Where the app has Meetings, "Recent meetings" follows with this workspace's
+  three newest meetings (the one on screen left out). The menu asks for them
+  each time it opens and shows the last answer at once, so it still opens
+  without waiting. On a meeting's page, "This meeting" offers "Ask about this
+  meeting" (the cursor goes to the meeting's Ask field) and "Copy meeting
+  link", and "Meetings" itself is among the general actions.
 - **Typing:** results update on every keystroke from chats already loaded in
   the sidebar and recent list, ranked by how well the title matches. The server
   title search runs alongside and merges in chats the sidebar has not loaded,
@@ -175,6 +181,29 @@ Opening it is instant: no request is made before it appears.
   refuses access is not asked again until the menu opens next. Enter opens the
   Site in the app's Site view, as its sidebar row does (the desktop app too);
   ⌘/Ctrl+Enter on the web opens it in a new tab.
+- **Meetings:** where the app has Meetings (the console and the desktop app,
+  also in a browser that can't record), a "Meetings" group (at most five)
+  follows the chats and Sites, or takes their place by match when there are
+  none. A meeting is found by its title (the newest meetings answer
+  instantly), and from two characters the meetings list
+  (`GET /v1/workspaces/:workspaceId/recordings`) is asked three ways at once:
+  `query` (every word in its title or current transcript), `person` (someone
+  who spoke, by part of their name) and, when the whole query is a date,
+  `startedFrom`/`startedTo`. Dates read English and Norwegian words: "today",
+  "yesterday", "i går", a weekday ("friday" is the latest Friday, today
+  included; "last friday" and "forrige fredag" the one before today), "this
+  week", "last week" (weeks start on Monday), a month written out ("october",
+  the latest one), and a day of a month ("30 oct", "oct 30", "30. oktober",
+  "30.10", "30.10.2026", "2026-10-30"; without a year, the latest one). Bare
+  abbreviations ("man", "jan") are not dates on their own, since they are
+  often words or names. A speaker match ranks above a date match ("August"
+  is a name and a month), a date above title words, and words found only in
+  the transcript last. The list's own access rules apply, so the menu shows
+  only meetings the person can already open. Enter opens the meeting's page;
+  ⌘/Ctrl+Enter on the web opens it in a new tab. On a meeting that takes
+  questions, the row above "Search messages for …" is "Ask about this
+  meeting: “…”", which asks the typed question as the meeting's Ask field
+  does (a new chat with the meeting attached).
 - **Fork chat:** forks the chat on screen from its latest message, the same as
   the fork button under a message, and opens the same confirmation.
 - **Ranking:** whole-title prefix, then a word in the title starting with the

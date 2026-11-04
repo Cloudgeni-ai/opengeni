@@ -229,12 +229,13 @@ e2e(
       expect(back.state).toBe("completed");
       expect(await evaluate("clicks")).toBe(2);
 
-      // In view but not taking the pointer at all.
+      // In view but not taking the pointer at all: refused before any input,
+      // so the refusal is definite.
       const ghost = await click({
         type: "click",
         locator: { kind: "role", role: "button", name: "Ghost", exact: true },
       });
-      expect(ghost.state).toBe("outcome_unknown");
+      expect(ghost.state).toBe("failed");
       expect(ghost.error?.message).toContain(
         "browser element does not take pointer input (pointer-events: none), which often means it is disabled; use another control",
       );

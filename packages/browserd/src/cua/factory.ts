@@ -189,14 +189,19 @@ export async function createCuaComputerDriver(
   const backend = await CuaComputerBackend.open(
     runtime,
     process.platform === "win32" ? "windows" : process.platform === "linux" ? "linux" : "macos",
-    process.platform === "darwin"
-      ? {
-          ...(nativeBinary ? { macWindows: computerNativeMacWindows(resolve(nativeBinary)) } : {}),
-          personInput: await macPersonInput(),
-        }
-      : process.platform === "win32"
-        ? { frontWindow: windowsFronting() }
-        : {},
+    {
+      ...(context.cursorIdentity ? { cursorIdentity: context.cursorIdentity } : {}),
+      ...(process.platform === "darwin"
+        ? {
+            ...(nativeBinary
+              ? { macWindows: computerNativeMacWindows(resolve(nativeBinary)) }
+              : {}),
+            personInput: await macPersonInput(),
+          }
+        : process.platform === "win32"
+          ? { frontWindow: windowsFronting() }
+          : {}),
+    },
   );
   return new ComputerDriver({
     computerSessionId: context.computerSessionId,

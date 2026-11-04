@@ -103,6 +103,45 @@ describe("Jev and code_search settings", () => {
     expect(decisionModelConfiguration(settings, true)?.provider).toBe("jev");
     expect(codeSearchDeploymentPolicy(settings).available).toBe(false);
   });
+
+  const azureIdentity = {
+    OPENGENI_DECISION_MODEL_AUTH: "deployment_identity",
+    OPENGENI_DECISION_MODEL_PROVIDER: "openai",
+    OPENGENI_DECISION_MODEL_ID: "configured-deployment",
+    OPENGENI_DECISION_MODEL_BASE_URL: "https://resource.openai.azure.test/openai/v1",
+    AZURE_TENANT_ID: "tenant-test",
+    AZURE_CLIENT_ID: "client-test",
+    AZURE_FEDERATED_TOKEN_FILE: "/var/run/secrets/azure/tokens/token-test",
+  };
+
+  test("an Azure OpenAI decision model signs in as the deployment identity, without a key", () => {
+    const settings = withEnv(azureIdentity, getSettings);
+    expect(decisionModelConfiguration(settings)).toEqual({
+      provider: "openai",
+      model: "configured-deployment",
+      baseUrl: "https://resource.openai.azure.test/openai/v1",
+      azureEntra: {
+        tenantId: "tenant-test",
+        clientId: "client-test",
+        federatedTokenFile: "/var/run/secrets/azure/tokens/token-test",
+      },
+    });
+  });
+
+  test.each([
+    ["no deployment identity", { AZURE_FEDERATED_TOKEN_FILE: undefined }],
+    ["a provider other than openai", { OPENGENI_DECISION_MODEL_PROVIDER: "openrouter" }],
+    ["no resource base URL", { OPENGENI_DECISION_MODEL_BASE_URL: undefined }],
+  ])("deployment identity with %s configures nothing", (_, override) => {
+    const settings = withEnv(
+      Object.fromEntries(
+        Object.entries({ ...azureIdentity, ...override }).filter(([, value]) => value),
+      ) as NodeJS.ProcessEnv,
+      getSettings,
+    );
+    expect(decisionModelConfiguration(settings)).toBeUndefined();
+    expect(decisionModelConfiguration(settings, true)).toBeUndefined();
+  });
 });
 
 function withEnv<T>(env: NodeJS.ProcessEnv, run: () => T): T {

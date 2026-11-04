@@ -8,14 +8,38 @@
  * Mentions are a contract with the meeting page, which renders them:
  * `[Name](speaker:<speakerLabel>)` and `[Name](person:<personId>)`, with the
  * labels and ids `meeting_read` gives.
+ *
+ * After a re-run, `replacesRevision` names the revision of notes an earlier
+ * summary wrote that nobody has touched since: the summary writes them again
+ * from the new transcript, saving over exactly that revision.
+ *
+ * The notes also name the meeting: `meeting_notes_save` keeps the name only
+ * while the meeting has none from a person or a calendar event.
  */
-export function meetingSummaryPrompt(input: { recordingId: string; title: string | null }): string {
-  const title = input.title?.replace(/\s+/gu, " ").trim().slice(0, 300) || null;
+export function meetingSummaryPrompt(input: {
+  recordingId: string;
+  title: string | null;
+  replacesRevision?: number | null | undefined;
+  /** A title that is only a date or an app's guess says nothing about the meeting. */
+  titleSource?: "person" | "calendar" | "conversation" | "app" | "default" | undefined;
+}): string {
+  const named = input.titleSource !== "default" && input.titleSource !== "app";
+  // A calendar title may come from whoever sent the invitation: it stays one
+  // quoted line of text, never a way out of its quotes.
+  const title =
+    (named && input.title?.replace(/\s+/gu, " ").replaceAll('"', "'").trim().slice(0, 300)) || null;
   const meeting = title ? `the meeting "${title}"` : "this meeting";
+  const replaces = input.replacesRevision ?? null;
   return [
-    `Write the notes for ${meeting} (meeting id ${input.recordingId}). Its transcript is ready.`,
+    replaces === null
+      ? `Write the notes for ${meeting} (meeting id ${input.recordingId}). Its transcript is ready.`
+      : `Write the notes for ${meeting} (meeting id ${input.recordingId}) again. Its transcript was made again, and its notes were written from the earlier transcript.`,
     "",
-    `Read the whole meeting with meeting_read and meetingId ${input.recordingId}, following nextCursor until it is null. Its details list each speaker's label, and personId for a person from the workspace, the notes people took during it (notepad) and the written-up notes with their revision. If that revision is above 0, someone already wrote notes: stop without changing anything.`,
+    `Read the whole meeting with meeting_read and meetingId ${input.recordingId}, following nextCursor until it is null. Its details list each speaker's label, and personId for a person from the workspace, the notes people took during it (notepad) and the written-up notes with their revision. ${
+      replaces === null
+        ? "If that revision is above 0, someone already wrote notes: stop without changing anything."
+        : `If that revision is not ${replaces}, someone changed the notes since: stop without changing anything. Otherwise write them from this transcript alone; the earlier notes may be wrong about what was said and by whom.`
+    }`,
     "",
     "Write the notes in Markdown, in this order:",
     "1. A one-paragraph overview: what the meeting was about and where it ended up.",
@@ -27,6 +51,8 @@ export function meetingSummaryPrompt(input: { recordingId: string; title: string
     "",
     "Link people when you name them: a person from the workspace (a speaker with a personId) as [Display name](person:<personId>), and any other speaker as [Display name](speaker:<label>), using exactly the labels and ids meeting_read gave. Name anyone else in plain text.",
     "",
-    `Save them with meeting_notes_save: meetingId ${input.recordingId}, the Markdown as notes, and expectedRevision 0. If it answers notes_changed, someone saved notes first: keep theirs. Then reply in one short sentence.`,
+    "Name the meeting too: a title of at most eight words saying what it was about, in the meeting's language, such as the main topic and who it was with. No date, no quotes, and not a generic word like Meeting or Call.",
+    "",
+    `Save them with meeting_notes_save: meetingId ${input.recordingId}, the Markdown as notes, the name as title, and expectedRevision ${replaces ?? 0}. The name is kept only if nobody named the meeting yet. If it answers notes_changed, someone saved notes first: keep theirs. Then reply in one short sentence.`,
   ].join("\n");
 }

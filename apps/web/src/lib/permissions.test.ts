@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  canContributeWorkspaceContent,
   canManageWorkspaceMembers,
   canManageWorkspaceSettings,
   hasWorkspacePermission,
@@ -207,6 +208,112 @@ describe("Personal workspace settings", () => {
         memberships: [{ ...self.memberships[0]!, personalWorkspaceId: "different-workspace" }],
       }),
     ).toBe(false);
+  });
+});
+
+describe("shared workspace content (instructions, name, custom models)", () => {
+  const workspace = {
+    id: "44444444-4444-4444-8444-444444444444",
+    accountId: "11111111-1111-4111-8111-111111111111",
+    kind: "shared" as const,
+  };
+  const context = (permissions: string[], extra: Record<string, unknown> = {}) =>
+    ({
+      mode: "managed",
+      subjectId: "user:kari",
+      accountGrants: [],
+      workspaceGrants: [
+        {
+          workspaceId: workspace.id,
+          accountId: workspace.accountId,
+          subjectId: "user:kari",
+          permissions,
+          principalKind: "human_session",
+        },
+      ],
+      defaultAccountId: workspace.accountId,
+      defaultWorkspaceId: workspace.id,
+      ...extra,
+    }) as Parameters<typeof canContributeWorkspaceContent>[0];
+  const member = ["workspace:read", "sessions:create", "documents:manage"];
+
+  test("a member who can start chats may change it; a viewer may not", () => {
+    expect(canContributeWorkspaceContent(context(member), workspace, null)).toBe(true);
+    expect(canManageWorkspaceSettings(context(member), workspace, null)).toBe(false);
+    expect(
+      canContributeWorkspaceContent(context(["workspace:read", "sessions:read"]), workspace, null),
+    ).toBe(false);
+    expect(canContributeWorkspaceContent(context(["workspace:admin"]), workspace, null)).toBe(true);
+  });
+
+  test("only a person signed in as themselves, in the workspace's own organization", () => {
+    expect(
+      canContributeWorkspaceContent(
+        context(member, { credential: { kind: "api_key" } }),
+        workspace,
+        null,
+      ),
+    ).toBe(false);
+    expect(
+      canContributeWorkspaceContent(
+        context(member, { subjectId: "external_user:abc" }),
+        workspace,
+        null,
+      ),
+    ).toBe(false);
+    expect(
+      canContributeWorkspaceContent(
+        context(member),
+        { ...workspace, accountId: "other-org" },
+        null,
+      ),
+    ).toBe(false);
+    expect(canContributeWorkspaceContent(context(member), null, null)).toBe(false);
+  });
+
+  test("a delegated credential or a service acting for the member does not show the controls", () => {
+    const withGrant = (grant: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
+      context(member, {
+        workspaceGrants: [
+          {
+            workspaceId: workspace.id,
+            accountId: workspace.accountId,
+            subjectId: "user:kari",
+            permissions: member,
+            principalKind: "human_session",
+            ...grant,
+          },
+        ],
+        ...extra,
+      });
+    expect(canContributeWorkspaceContent(withGrant({}), workspace, null)).toBe(true);
+    expect(
+      canContributeWorkspaceContent(withGrant({ metadata: { delegated: true } }), workspace, null),
+    ).toBe(false);
+    expect(
+      canContributeWorkspaceContent(
+        withGrant({ serviceInitiator: { kind: "service" } }),
+        workspace,
+        null,
+      ),
+    ).toBe(false);
+    expect(
+      canContributeWorkspaceContent(
+        withGrant(
+          { subjectId: "dev", metadata: { delegated: true } },
+          { mode: "local", subjectId: "dev" },
+        ),
+        workspace,
+        null,
+      ),
+    ).toBe(false);
+    expect(
+      canContributeWorkspaceContent(
+        withGrant({ subjectId: "dev" }, { mode: "local", subjectId: "dev" }),
+        workspace,
+        null,
+      ),
+    ).toBe(true);
   });
 });
 

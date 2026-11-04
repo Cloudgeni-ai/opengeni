@@ -70,3 +70,37 @@ test("a template saved from an Only me chat starts Only me, and the person can s
     visibility: "workspace",
   });
 });
+
+test("a colleague editing a shared template isn't offered Only me", async () => {
+  const onSubmit = mock(async () => {});
+  await act(async () =>
+    root.render(
+      <BotTemplateDialog
+        open
+        onOpenChange={() => {}}
+        workspaceId="00000000-0000-4000-8000-000000000001"
+        seed="shared"
+        mode="edit"
+        canMakePrivate={false}
+        initial={{
+          name: "Release notes writer",
+          description: "",
+          avatar: null,
+          setupInstructions: "Draft release notes from merged pull requests.",
+          visibility: "workspace",
+        }}
+        onSubmit={onSubmit}
+      />,
+    ),
+  );
+  expect(button("Only me")).toBeUndefined();
+  expect(document.body.textContent).toContain("Everyone in the workspace");
+  expect(document.body.textContent).toContain(
+    "Only whoever saved it, or an admin, can make it Only me.",
+  );
+  await act(async () => {
+    button("Save").click();
+    await flush();
+  });
+  expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ visibility: "workspace" }));
+});

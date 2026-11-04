@@ -42,8 +42,8 @@ type AtlassianUiState = {
 };
 
 type DriveUiState = {
+  /** Requests to the retired facet browse and source routes; must stay 0. */
   driveSaves: number;
-  sourceRequest: Record<string, unknown> | null;
   binding: Record<string, unknown> | null;
 };
 
@@ -672,11 +672,10 @@ describe("capabilities browser e2e", () => {
     }
   }, 60_000);
 
-  test("Google Drive folders configure only the exact named Integration instance", async () => {
+  test("a saved Google Drive Knowledge source shows only as retired and removable", async () => {
     const state: DriveUiState = {
       driveSaves: 0,
-      sourceRequest: null,
-      binding: null,
+      binding: driveBinding(),
     };
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
     const page = await context.newPage();
@@ -686,9 +685,7 @@ describe("capabilities browser e2e", () => {
         waitUntil: "networkidle",
       });
 
-      // One Google Drive row folds every account in: the primary knowledge
-      // connection plus each named Drive account (its own tool namespace).
-      // The row's accessible name carries the state, and the accounts - with
+      // One Google Drive row folds every account in. The accounts - with
       // their per-instance facets - live in the row's detail sheet.
       const driveRow = page.getByRole("button", {
         name: "Google Drive. Not connected",
@@ -704,35 +701,17 @@ describe("capabilities browser e2e", () => {
       await instance
         .getByRole("button", { name: "Manage facets for Google Drive — Finance" })
         .click();
+      // Integration Knowledge sync is retired: the saved source stays visible
+      // so it can be removed, but it cannot be configured or resumed.
       const facet = instance.locator('[data-integration-facet="drive-content"]');
       await expectVisible(facet);
-      await facet.getByRole("button", { name: "Configure" }).click();
-
-      const dialog = page.locator('[data-slot="dialog-content"]').filter({
-        hasText: "Google Drive locations · Google Drive — Finance",
-      });
-      await expectVisible(dialog);
-      await expectText(dialog, "Google Drive locations · Google Drive — Finance");
-      await dialog.getByRole("checkbox", { name: "Connect My Drive" }).check();
-      await assertAccessibleAndBounded(page, '[data-slot="dialog-content"]');
-      await dialog.getByRole("button", { name: "Save 1 location" }).click();
-      await expectHidden(dialog);
-
-      expect(state.driveSaves).toBe(1);
-      expect(state.sourceRequest).toMatchObject({
-        sources: [
-          {
-            id: "root",
-            name: "My Drive",
-            mimeType: "application/vnd.google-apps.folder",
-            driveId: null,
-          },
-        ],
-        destination: { authorityKind: "workspace", collectionId: null },
-        syncCadence: "hourly",
-        readPolicy: "allow",
-      });
-      await expectText(facet, "Active");
+      await expectText(facet, "Retired");
+      await expectText(facet, "Knowledge sync is retired");
+      expect(await facet.getByRole("button", { name: "Configure" }).count()).toBe(0);
+      expect(await facet.getByRole("button", { name: "Edit" }).count()).toBe(0);
+      await expectVisible(facet.getByRole("button", { name: "Remove" }));
+      await assertAccessibleAndBounded(page, '[data-integration-sheet="google-drive"]');
+      expect(state.driveSaves).toBe(0);
     } finally {
       await context.close();
     }
@@ -1163,28 +1142,12 @@ async function installCapabilityApi(
     }
     if (
       "driveSaves" in state &&
-      request.method() === "GET" &&
-      url.pathname ===
-        `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(driveCapabilityId)}/instances/finance/facets/drive-content/browse`
-    ) {
-      return json(driveBrowse());
-    }
-    if (
-      "driveSaves" in state &&
-      request.method() === "PUT" &&
-      url.pathname ===
-        `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(driveCapabilityId)}/instances/finance/facets/drive-content/source`
+      url.pathname.startsWith(
+        `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(driveCapabilityId)}/instances/finance/facets/drive-content/`,
+      )
     ) {
       state.driveSaves += 1;
-      state.sourceRequest = request.postDataJSON() as Record<string, unknown>;
-      state.binding = driveBinding(state.sourceRequest);
-      return json({
-        capabilityId: driveCapabilityId,
-        instanceKey: "finance",
-        facetKey: "drive-content",
-        status: "configured",
-        binding: state.binding,
-      });
+      return json({ message: "retired" }, 410);
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/variable-sets`) {
       return json([]);
@@ -1860,39 +1823,7 @@ function driveIdentityDefinition() {
   };
 }
 
-function driveBrowse() {
-  return {
-    connection: driveConnection(),
-    parentId: "root",
-    current: {
-      id: "root",
-      name: "My Drive",
-      mimeType: "application/vnd.google-apps.folder",
-      kind: "folder",
-      driveId: null,
-      modifiedTime: null,
-      size: null,
-      webViewLink: "https://drive.google.com/drive/my-drive",
-    },
-    items: [
-      {
-        id: "folder-1",
-        name: "Product",
-        mimeType: "application/vnd.google-apps.folder",
-        kind: "folder",
-        driveId: null,
-        modifiedTime: "2026-08-11T00:00:00.000Z",
-        size: null,
-        webViewLink: "https://drive.google.com/drive/folders/folder-1",
-      },
-    ],
-    nextPageToken: null,
-    incompleteSearch: false,
-  };
-}
-
-function driveBinding(request: Record<string, unknown>) {
-  const sources = Array.isArray(request.sources) ? request.sources : [];
+function driveBinding() {
   return {
     id: "00000000-0000-4000-8000-000000000132",
     facetKey: "drive-content",
@@ -1902,18 +1833,14 @@ function driveBinding(request: Record<string, unknown>) {
     connectionId: driveConnectionId,
     status: "active",
     config: {
-      sources: sources.map((source) => ({
-        ...(source as Record<string, unknown>),
-        sourceKind: (source as Record<string, unknown>).id === "root" ? "my_drive" : "folder",
-        includeDescendants: true,
-      })),
+      sources: [{ id: "root", name: "My Drive", sourceKind: "my_drive", includeDescendants: true }],
       destination: {
         authorityKind: "workspace",
         authorityAccountId: accountId,
         authorityWorkspaceId: workspaceId,
       },
-      syncCadence: request.syncCadence,
-      readPolicy: request.readPolicy,
+      syncCadence: "hourly",
+      readPolicy: "allow",
     },
     version: 1,
     hasCursor: false,

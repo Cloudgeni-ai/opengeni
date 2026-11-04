@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "5.5.1",
+  "version": "6.8.0",
   "description": "Shared zod schemas and wire-contract types for the Opengeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -26,6 +26,14 @@
       "types": "./src/automation-templates.ts",
       "default": "./src/automation-templates.ts"
     },
+    "./mcp-elicitation": {
+      "types": "./src/mcp-elicitation.ts",
+      "default": "./src/mcp-elicitation.ts"
+    },
+    "./mcp-elicitation-model": {
+      "types": "./src/mcp-elicitation-model.ts",
+      "default": "./src/mcp-elicitation-model.ts"
+    },
     "./prepared-mcp-setup": {
       "types": "./src/prepared-mcp-setup.ts",
       "default": "./src/prepared-mcp-setup.ts"
@@ -42,9 +50,21 @@
       "types": "./src/modal-native-proof-v2.ts",
       "default": "./src/modal-native-proof-v2.ts"
     },
+    "./billing-origin": {
+      "types": "./src/billing-origin.ts",
+      "default": "./src/billing-origin.ts"
+    },
     "./allowance-refusal": {
       "types": "./src/allowance-refusal.ts",
       "default": "./src/allowance-refusal.ts"
+    },
+    "./timeline-order": {
+      "types": "./src/timeline-order.ts",
+      "default": "./src/timeline-order.ts"
+    },
+    "./knowledge-source-sync-retirement": {
+      "types": "./src/knowledge-source-sync-retirement.ts",
+      "default": "./src/knowledge-source-sync-retirement.ts"
     },
     "./learning-refusal": {
       "types": "./src/learning-refusal.ts",
@@ -53,6 +73,14 @@
     "./values": {
       "types": "./src/values.ts",
       "default": "./src/values.ts"
+    },
+    "./json-safe": {
+      "types": "./src/json-safe.ts",
+      "default": "./src/json-safe.ts"
+    },
+    "./claude-cite-tags": {
+      "types": "./src/claude-cite-tags.ts",
+      "default": "./src/claude-cite-tags.ts"
     },
     "./usage-allowances": {
       "types": "./src/usage-allowances.ts",
@@ -65,6 +93,10 @@
     "./session-usage-limit-refusal": {
       "types": "./src/session-usage-limit-refusal.ts",
       "default": "./src/session-usage-limit-refusal.ts"
+    },
+    "./seat-upgrade": {
+      "types": "./src/seat-upgrade.ts",
+      "default": "./src/seat-upgrade.ts"
     },
     "./browser-storage": {
       "types": "./src/browser-storage.ts",
@@ -230,6 +262,10 @@
       "types": "./src/model-display.ts",
       "default": "./src/model-display.ts"
     },
+    "./claude-subscription-model-ids": {
+      "types": "./src/claude-subscription-model-ids.ts",
+      "default": "./src/claude-subscription-model-ids.ts"
+    },
     "./secret-use-approval-question": {
       "types": "./src/secret-use-approval-question.ts",
       "default": "./src/secret-use-approval-question.ts"
@@ -330,6 +366,7 @@
   },
   "dependencies": {
     "@noble/hashes": "^1.8.0",
+    "entities": "^7.0.1",
     "yaml": "2.9.0",
     "zod": "^4.2.1"
   },

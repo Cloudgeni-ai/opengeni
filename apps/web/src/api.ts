@@ -6,6 +6,7 @@ import {
   OpenGeniBrowserClient,
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
+  OPENGENI_CORRELATION_HEADER,
 } from "@opengeni/sdk/browser";
 import type { OrganizationUserSetupPreview } from "@opengeni/contracts";
 import { desktopAppHeaders } from "@opengeni/react/app/lib/desktop";
@@ -13,12 +14,16 @@ import { userActivityHeaders } from "./lib/user-activity";
 
 import type { AuthSession, ClientConfig } from "@opengeni/react/app/types";
 import { beginAnalyticsRequest } from "@opengeni/react/app/lib/analytics-observer";
+import { beginFeedbackRequest } from "@opengeni/react/app/lib/feedback-trail";
 import {
   ApiError,
   apiErrorFromResponseBody,
   isApiErrorStatus,
 } from "@opengeni/react/app/lib/app-api";
-import { securityReauthenticationPath } from "./lib/sign-in-feedback";
+import {
+  organizationSecurityReturnPath,
+  securityReauthenticationPath,
+} from "./lib/sign-in-feedback";
 import { noteClientRequestFailure } from "@opengeni/react/app/lib/client-signals";
 import { signupAttribution, signupReturnPath } from "./lib/signup-attribution";
 import { askForPasskey, createPasskey, type PasskeyCeremony } from "./lib/passkeys";
@@ -229,9 +234,17 @@ export async function managedActorFetch(
   init: RequestInit = {},
 ): Promise<Response> {
   let finishAnalytics: (status: number | null) => void = () => {};
+  // The latest requests go with a feedback report, each with its server reference.
+  let finishFeedback: ReturnType<typeof beginFeedbackRequest> = () => {};
   // Same-origin API path, for the content-free failed-request signal.
   let apiPathname: string | null = null;
   let responseReceived = false;
+  let receivedStatus: number | null = null;
+  let correlationId: string | null = null;
+  const finishRequest = (status: number) => {
+    finishAnalytics(status);
+    finishFeedback(status, { correlationId });
+  };
   try {
     const requestUrl = new URL(
       typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
@@ -243,6 +256,7 @@ export async function managedActorFetch(
     ) {
       apiPathname = requestUrl.pathname;
       finishAnalytics = beginAnalyticsRequest(requestUrl.pathname, requestMethod(input, init));
+      finishFeedback = beginFeedbackRequest(requestMethod(input, init), requestUrl.pathname);
     }
   } catch {
     /* Telemetry must never affect transport. */
@@ -310,6 +324,8 @@ export async function managedActorFetch(
       signal: controller.signal,
     });
     responseReceived = true;
+    receivedStatus = response.status;
+    correlationId = response.headers.get(OPENGENI_CORRELATION_HEADER);
     if (
       acceptedEpoch !== null &&
       response.headers.get(MANAGED_ACTOR_STATE_HEADER)?.toLowerCase() === "changed"
@@ -336,7 +352,7 @@ export async function managedActorFetch(
       response.status === 304
     ) {
       void response.body?.cancel().catch(() => undefined);
-      finishAnalytics(response.status);
+      finishRequest(response.status);
       return new Response(null, {
         status: response.status,
         statusText: response.statusText,
@@ -344,7 +360,7 @@ export async function managedActorFetch(
       });
     }
     if (!response.body) {
-      finishAnalytics(response.status);
+      finishRequest(response.status);
       return response;
     }
     // Finite JSON is consumed before it crosses the actor boundary. Returning
@@ -410,7 +426,7 @@ export async function managedActorFetch(
           actorBodyController.abort(reason);
         };
     responseOwnsCleanup = true;
-    finishAnalytics(response.status);
+    finishRequest(response.status);
     return managedActorTrackedResponse(
       actorResponse,
       actorBodyController.signal,
@@ -421,6 +437,10 @@ export async function managedActorFetch(
     );
   } catch (error) {
     finishAnalytics(null);
+    finishFeedback(receivedStatus, {
+      correlationId,
+      aborted: error instanceof Error && error.name === "AbortError",
+    });
     if (!responseReceived) noteClientRequestFailure(apiPathname, requestMethod(input, init), error);
     throw error;
   } finally {
@@ -1044,6 +1064,11 @@ function authReturnBase(): string {
   if (typeof window === "undefined") return "/";
   const teamsReturn = teamsAuthReturnPath(window.location);
   if (teamsReturn) return teamsReturn;
+  const organizationSecurity = organizationSecurityReturnPath(
+    window.location.pathname,
+    window.location.search,
+  );
+  if (organizationSecurity) return organizationSecurity;
   return window.location.pathname === "/connect-agent" ||
     window.location.pathname === "/native-sign-in" ||
     window.location.pathname === "/site-auth/authorize"

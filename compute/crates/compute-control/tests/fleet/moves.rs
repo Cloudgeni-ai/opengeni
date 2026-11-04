@@ -98,6 +98,59 @@ async fn a_move_without_a_target_leaves_it_for_its_next_wake_to_place() {
     assert!(epoch > 1, "adopted under a raised epoch: {row}");
 }
 
+/// A wake that finds no host to place a sandbox nobody owns on (its only
+/// host is draining, say, or restarting) waits for one, as it does for a
+/// full or unreachable owner, instead of failing at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_wake_with_no_host_to_place_on_waits_for_one() {
+    let fleet = Fleet::start().await;
+    let a = fleet.host("host-a.example").await;
+    let sandbox = fleet.create(json!({})).await;
+    let (status, drained) = operator(
+        &fleet,
+        reqwest::Method::POST,
+        "/v1/hosts/host-a.example/drain",
+    )
+    .await;
+    assert_eq!(status, 200, "{drained}");
+    assert_eq!(a.holds(id(&sandbox)), None);
+    let live = async |want: &str| {
+        let (_, hosts) = operator(&fleet, reqwest::Method::GET, "/v1/hosts").await;
+        hosts
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|host| host["name"] == "host-a.example" && host["state"] == json!(want))
+    };
+    until(
+        Duration::from_secs(5),
+        "the view sees it draining",
+        async || live("draining").await,
+    )
+    .await;
+
+    let woken = {
+        let fleet = &fleet;
+        let path = format!("/v1/sandboxes/{sandbox}/wake");
+        async move { fleet.post(&path, json!({})).await }
+    };
+    let back = async {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let (status, _) = operator(
+            &fleet,
+            reqwest::Method::POST,
+            "/v1/hosts/host-a.example/undrain",
+        )
+        .await;
+        assert_eq!(status, 204);
+    };
+    let ((status, woken), ()) = tokio::join!(woken, back);
+    assert_eq!(status, 200, "{woken}");
+    assert_eq!(woken["host"], "host-a.example", "{woken}");
+    let (_, row) = fleet.get(&format!("/v1/sandboxes/{sandbox}")).await;
+    assert_eq!(a.holds(id(&sandbox)), row["owner_epoch"].as_u64());
+}
+
 /// A sandbox's state is what its owner says of it now, and with no owner
 /// it is in the store alone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

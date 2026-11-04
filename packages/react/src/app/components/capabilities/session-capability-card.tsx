@@ -38,6 +38,9 @@ import type { ChatSendContext } from "./session-github-repositories";
 import { SessionGitHubCapabilityCard } from "./session-github-card";
 import { RepeatedMachineRequestNote, SessionMachineCapabilityCard } from "./session-machine-card";
 import { SessionChromeCapabilityCard } from "./session-chrome-card";
+import { SessionPersonalGitHubCapabilityCard } from "./session-personal-github-card";
+import { PERSONAL_GITHUB_CAPABILITY_ID } from "@opengeni/contracts/personal-github";
+import { useNobodyToShareWith } from "../../lib/workspace-sharing";
 import { SessionPluginCapabilityCard } from "./session-plugin-card";
 import { usePage } from "../../lib/navigation";
 import {
@@ -141,6 +144,15 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
       />
     );
   }
+  if (capability?.id === PERSONAL_GITHUB_CAPABILITY_ID) {
+    return (
+      <SessionPersonalGitHubCapabilityCard
+        key={`${props.workspaceId}:${props.sessionId}`}
+        item={item}
+        workspaceId={props.workspaceId}
+      />
+    );
+  }
   const resolved = context.workspaceCapabilityCatalog.find((entry) => entry.id === capability?.id);
   const grant = context.accessContext?.workspaceGrants.find(
     (entry) => entry.workspaceId === props.workspaceId,
@@ -149,7 +161,14 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
   // this card never offers a connection the agent was told isn't possible.
   // Until the grant has loaded, offer the card; the API still enforces access.
   const setup =
-    capability && grant ? inChatCapabilitySetup(grant, capability.id, resolved) : undefined;
+    capability && grant
+      ? inChatCapabilitySetup(
+          grant,
+          capability.id,
+          resolved,
+          context.workspaceMemberIntegrationSetup,
+        )
+      : undefined;
   if (setup?.kind === "unavailable") return <AuthNeededRow item={item} setupUnavailable />;
   if (capability?.kind === "plugin") {
     return (
@@ -222,6 +241,9 @@ function ScopedSessionCapabilityCard({
   const [resolvedItem, setResolvedItem] = useState<CapabilityCatalogItem | null>(null);
   const opener = useRef<HTMLButtonElement>(null);
   const cardRef = useRef<HTMLElement>(null);
+  // Read with the card rather than the dialog, so the answer is known before
+  // the person opens setup and the sharing question never flashes.
+  const nobodyToShareWith = useNobodyToShareWith(context.client, workspaceId);
   useEffect(() => {
     if (!restoreFocus) return;
     // The review dialog's opener is removed when the new connection card
@@ -322,6 +344,7 @@ function ScopedSessionCapabilityCard({
           sessionId={sessionId}
           onClose={close}
           onComplete={finish}
+          nobodyToShareWith={nobodyToShareWith}
         />
       )}
     </SessionCapabilityFrame>
@@ -338,6 +361,7 @@ function SessionCapabilitySetup({
   sessionId,
   onClose,
   onComplete,
+  nobodyToShareWith,
 }: {
   busy: boolean;
   setBusy: (busy: boolean) => void;
@@ -348,6 +372,7 @@ function SessionCapabilitySetup({
   sessionId: string;
   onClose: () => void;
   onComplete: () => void;
+  nobodyToShareWith: boolean;
 }) {
   const page = usePage();
   const context = useAppContext();
@@ -511,7 +536,7 @@ function SessionCapabilitySetup({
           canManageSkills: hasWorkspacePermission(
             context.accessContext,
             workspaceId,
-            "capabilities:manage",
+            "documents:manage",
           ),
           refresh: catalog.refresh,
           onRuntimeChanged: () => {
@@ -656,9 +681,10 @@ function SessionCapabilitySetup({
           canManageSkills={hasWorkspacePermission(
             context.accessContext,
             workspaceId,
-            "capabilities:manage",
+            "documents:manage",
           )}
           onAction={(action) => void act(action)}
+          nobodyToShareWith={nobodyToShareWith}
           onRetryAuthInspection={
             needsAuthInspection
               ? () => {

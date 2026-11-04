@@ -462,3 +462,42 @@ export const KnowledgeOriginalFileDownload = /* @__PURE__ */ defineSchema(() =>
     .strict(),
 );
 export type KnowledgeOriginalFileDownload = z.infer<typeof KnowledgeOriginalFileDownload>;
+
+/**
+ * Where an organization or personal Knowledge entry works besides the
+ * workspace it was added in, which always has it. Organization: every shared
+ * workspace (`allowedWorkspaceIds: null`, new ones too) or the listed ones,
+ * and members' Personal workspaces when `allowPersonalWorkspaces` is on.
+ * Personal: the owner's listed workspaces, or every one of theirs (null);
+ * their Personal workspace always has it, so `allowPersonalWorkspaces` is
+ * always true.
+ */
+export const KnowledgeEntryReach = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      allowedWorkspaceIds: z.array(primitives.uuid).max(500).nullable(),
+      allowPersonalWorkspaces: primitives.boolean,
+    })
+    .strict(),
+);
+export type KnowledgeEntryReach = z.infer<typeof KnowledgeEntryReach>;
+
+/** `PUT .../knowledge/entries/:entryId/reach`: organization and personal entries. */
+export const UpdateKnowledgeEntryReachRequest = KnowledgeEntryReach;
+export type UpdateKnowledgeEntryReachRequest = KnowledgeEntryReach;
+
+/** Where an entry works, and whether the person asking may change it. */
+export const KnowledgeEntryReachRecord = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      entryId: z.uuid(),
+      scope: KnowledgeEntryScope,
+      /** The workspace it was added in, which always has it. */
+      originWorkspaceId: z.uuid(),
+      /** Null for workspace entries, which work only in their workspace. */
+      reach: KnowledgeEntryReach.nullable(),
+      canChange: primitives.boolean,
+    })
+    .strict(),
+);
+export type KnowledgeEntryReachRecord = z.infer<typeof KnowledgeEntryReachRecord>;

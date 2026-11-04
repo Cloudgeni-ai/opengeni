@@ -67,7 +67,12 @@ runs from before the last edit or resume do not count):
   refused the run because the organization membership revision the task
   revision was saved under changed (`scheduled_run_authority_proof_rejected`,
   `scheduled_causal_membership_changed`). Saving the schedule again approves it
-  with the owner's current access.
+  with the owner's current access. An owner who left the workspace or the
+  organization can never save it again, so the notice and the schedule's
+  Automations page also say that someone else can set it up as theirs or
+  delete it. The confirmations for suspending a member, removing them from the
+  organization and removing them from a workspace say that schedules they own
+  stop running.
 - When runs fail or are skipped for a reason that may clear by itself (a busy
   chat, a paused workspace, a retryable refusal, a failed turn), the owner is
   told once and the schedule keeps running. Only a schedule that runs at least

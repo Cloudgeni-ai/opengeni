@@ -85,6 +85,9 @@ export type SubmitCodemodeOperationInput = {
   executionGeneration: number;
   call: AttemptToolCallValue;
   durableApproval?: boolean;
+  /** The machine the calling code runs on, when it is not the session's active
+   *  sandbox: the signed `executionSandboxId` of a `run_on` exec's token. */
+  executionSandboxId?: string | null | undefined;
 };
 
 /**
@@ -196,6 +199,9 @@ export async function submitCodemodeOperation(
                 toolName: call.identity.toolName,
                 arguments: call.arguments,
                 callerSubjectId: call.caller.subjectId,
+                ...(input.executionSandboxId
+                  ? { callerExecutionSandboxId: input.executionSandboxId }
+                  : {}),
               })
               .returning();
             if (!created) throw new Error("Failed to create Codemode operation");
@@ -224,6 +230,37 @@ export async function getCodemodeOperation(
         )
         .limit(1);
       return row ? mapCodemodeOperation(row) : null;
+    },
+  );
+}
+
+/**
+ * The machine a session's Codemode call came from, when its code ran on an
+ * enrolled machine other than the session's active sandbox (a `run_on` exec).
+ * Null for every other call, including model calls whose ids name no row.
+ */
+export async function getCodemodeCallExecutionSandboxId(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string; operationId: string },
+): Promise<string | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [row] = await scopedDb
+        .select({
+          executionSandboxId: schema.sessionAttemptCodemodeCalls.callerExecutionSandboxId,
+        })
+        .from(schema.sessionAttemptCodemodeCalls)
+        .where(
+          and(
+            eq(schema.sessionAttemptCodemodeCalls.operationId, input.operationId),
+            eq(schema.sessionAttemptCodemodeCalls.workspaceId, input.workspaceId),
+            eq(schema.sessionAttemptCodemodeCalls.sessionId, input.sessionId),
+          ),
+        )
+        .limit(1);
+      return row?.executionSandboxId ?? null;
     },
   );
 }

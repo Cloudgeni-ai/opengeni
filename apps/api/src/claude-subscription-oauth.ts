@@ -36,6 +36,7 @@ import {
   connectClaudeCore,
   deliverClaudeCoreWake,
 } from "./claude-subscription-core";
+import { turnOnOwnSubscriptionWhereAdded } from "./own-subscription-turned-on";
 
 export type ClaudeOAuthScope = {
   accountId: string;
@@ -351,6 +352,15 @@ export async function completeClaudeSubscriptionOAuth(
     return connected;
   });
   await deliverClaudeCoreWake(deps, saved.wake);
+  // Their own account added from a shared workspace starts turned on there
+  // for the messages they send (D-53).
+  if (personal && scope.workspaceId && where.workspaceId && scope.workspaceId !== where.workspaceId)
+    await turnOnOwnSubscriptionWhereAdded(deps.db, {
+      accountId: where.accountId,
+      workspaceId: scope.workspaceId,
+      subjectId: where.actorSubjectId,
+      connectionId: saved.id,
+    });
   await offerClaudeDefaultModels(deps, {
     ...(where.workspaceId
       ? { accountId: where.accountId, workspaceId: where.workspaceId }

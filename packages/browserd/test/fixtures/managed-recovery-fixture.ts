@@ -90,7 +90,7 @@ if (import.meta.main) {
     input.rootDirectory,
   );
   const created = await supervisor.createSession(input.options);
-  const clicked = await supervisor.action(clickFirstButton(created.observation));
+  const clicked = await supervisor.action(clickFirstButton(created.observation!));
   console.log(JSON.stringify({ state: clicked.state, names: semanticNames(clicked.observation!) }));
   // Hold the controller until the test kills this process.
   setInterval(() => {}, 60_000);

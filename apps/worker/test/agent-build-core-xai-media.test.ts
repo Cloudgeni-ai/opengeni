@@ -66,9 +66,9 @@ async function buildSuperGrokTurn(
       },
     } as unknown as ReturnType<typeof db.subscriptionCoreOperationConnections>),
     spyOn(db, "getSandboxRecoveryDiscontinuity").mockResolvedValue(null),
-    spyOn(db, "turnCanChangeWorkspaceSettings").mockImplementation(async (_db, input) => {
+    spyOn(db, "turnWorkspaceSettingsAccess").mockImplementation(async (_db, input) => {
       settingsChecks.push(input);
-      return false;
+      return null;
     }),
     spyOn(db, "getWorkspaceVideoGenerationPolicy").mockResolvedValue(
       policyEnabled

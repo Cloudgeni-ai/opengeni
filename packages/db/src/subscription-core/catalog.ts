@@ -15,8 +15,13 @@
  *
  * A connection's model policy is what placement intersects: the connection
  * allowlist and exclusions. Nothing here returns credential material.
+ *
+ * Every reader that decides whether a model is available here (catalog
+ * readiness, admission, placement funding) counts exactly these
+ * connections. Who manages a connection never decides which models exist
+ * (docs/design/subscription-model-ids-without-pools.md).
  */
-import { providerSwitchesFor } from "@opengeni/subscriptions";
+import { providerSwitchesFor, withSubscriptionCoreModelIdForms } from "@opengeni/subscriptions";
 import { sql } from "drizzle-orm";
 import { rawRows, withRlsContext, type Database } from "../database";
 import { namedSubjectPersonalWorkspaceId } from "../slack-routing-personal-workspace";
@@ -41,24 +46,26 @@ export type SubscriptionCoreServingConnection = {
   /** Models the connection excludes. */
   excludedModelIds: string[];
   /**
-   * The legacy model-prefix pool the connection serves in this workspace:
-   * `workspace` for the workspace's own connection, else `organization`.
-   * Empty for a personal connection, which belongs to no shared pool.
-   */
-  pools: Array<"workspace" | "organization">;
-  /**
    * Product models with a live per-model cooldown on this connection (a
    * proven plan refusal). Read for personal connections, whose live model
    * list cannot be read outside an exact accepted turn.
    */
   cooledDownModelIds: string[];
-  /** Shared catalog proven fresh for the connection's current credential generation. */
+  /**
+   * The latest shared catalog observed under the connection's current
+   * credential generation. It may have expired: only `expiresAt > now`
+   * proves it fresh.
+   */
   modelCatalog?: { slugs: string[]; observedAt: number; expiresAt: number } | null;
 };
 
 type ModelPolicy = Pick<SubscriptionCoreServingConnection, "allowedModelIds" | "excludedModelIds">;
 
-/** Placement's static model admission for one connection (allowlists and exclusions). */
+/**
+ * Placement's static model admission for one connection (allowlists and
+ * exclusions). Lists are read in every id form of their models
+ * (`withSubscriptionCoreModelIdForms`), so any form of a listed model matches.
+ */
 export function subscriptionCoreConnectionAllowsModel(
   connection: ModelPolicy,
   modelId: string,
@@ -163,26 +170,27 @@ export async function listSubscriptionCoreServingConnections(
                     sql`, `,
                   )})`,
             );
-      const excludedById = new Map(exclusions.map((row) => [row.id, row.excluded_models ?? []]));
+      const excludedById = new Map(
+        exclusions.map((row) => [
+          row.id,
+          withSubscriptionCoreModelIdForms(provider.adapter, row.excluded_models ?? []),
+        ]),
+      );
       const servingShared = shared.map((candidate) => ({
         connectionId: candidate.id,
         ownership: "shared" as const,
         planType: exclusions.find((row) => row.id === candidate.id)?.plan_type ?? null,
         allowedModelIds: candidate.allowedModelIds === null ? null : [...candidate.allowedModelIds],
         excludedModelIds: excludedById.get(candidate.id) ?? [],
-        pools: [
-          candidate.ownership.kind === "shared" &&
-          candidate.ownership.managedByWorkspaceId === input.workspaceId
-            ? ("workspace" as const)
-            : ("organization" as const),
-        ],
         cooledDownModelIds: [],
+        // The latest list under the current credential generation, fresh or
+        // expired; readers compare expiresAt themselves.
         modelCatalog:
-          candidate.observedModelSlugs != null &&
+          (candidate.lastObservedModelSlugs ?? candidate.observedModelSlugs) != null &&
           candidate.modelCatalogObservedAt != null &&
           candidate.modelCatalogExpiresAt != null
             ? {
-                slugs: [...candidate.observedModelSlugs],
+                slugs: [...(candidate.lastObservedModelSlugs ?? candidate.observedModelSlugs)!],
                 observedAt: candidate.modelCatalogObservedAt,
                 expiresAt: candidate.modelCatalogExpiresAt,
               }
@@ -209,9 +217,11 @@ export async function listSubscriptionCoreServingConnections(
             connectionId: row.id,
             ownership: "personal" as const,
             planType: row.plan_type,
-            allowedModelIds: row.allowed_model_ids ?? null,
+            allowedModelIds:
+              row.allowed_model_ids == null
+                ? null
+                : withSubscriptionCoreModelIdForms(provider.adapter, row.allowed_model_ids),
             excludedModelIds: [],
-            pools: [],
             cooledDownModelIds: liveModelCooldowns(decodeSubscriptionQuota(row), now),
           })),
       ];

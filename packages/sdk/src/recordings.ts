@@ -22,6 +22,8 @@ import type {
   CreateRecordingLiveSessionRequest,
   CreateRecordingPersonRequest,
   CreateRecordingRequest,
+  UpcomingMeetingsResponse,
+  RecordingCreateTitleSource,
   CreateRecordingTranscriptRequest,
   CreateRecordingUploadsRequest,
   CreateRecordingUploadsResponse,
@@ -69,8 +71,10 @@ import {
 } from "./recording-live";
 import { errorMessage } from "@opengeni/contracts/values";
 import { ownerNameField } from "./recording-owner";
+import { audioFileCreatedAt, audioFileDurationMilliseconds } from "./recording-audio-duration";
 
 export * from "./recording-live";
+export { audioFileCreatedAt, audioFileDurationMilliseconds } from "./recording-audio-duration";
 
 /** What {@link OpenGeniRecordingsClient} needs from the core client. */
 export type OpenGeniRecordingsTransport = Pick<OpenGeniClient, "requestJson">;
@@ -127,6 +131,26 @@ export class OpenGeniRecordingsClient {
           : {}),
         ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
       },
+      options.signal ? { signal: options.signal } : {},
+    );
+  }
+
+  /**
+   * The caller's own meetings with a join link that start in the next 20
+   * minutes (or started in the last 5), from their connected Google Calendar
+   * or Outlook, soonest first. `calendar` is `none` when they have none
+   * connected. Pass a meeting's `{ provider, id }` as `calendarEvent` when
+   * recording it.
+   */
+  async listUpcomingMeetings(
+    workspaceId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<UpcomingMeetingsResponse> {
+    return await this.client.requestJson<UpcomingMeetingsResponse>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/upcoming-meetings`,
+      undefined,
+      undefined,
       options.signal ? { signal: options.signal } : {},
     );
   }
@@ -532,6 +556,12 @@ export type RecordingUploadStatus = {
   recordingId: string;
   /** The server has the recording, so it shows in recording lists. */
   created: boolean;
+  /**
+   * The title the server named the recording with itself when it created
+   * it, such as its owner's calendar event at the time; absent when it kept
+   * the one it was given or has none yet.
+   */
+  serverTitle?: string;
   /** Chunks stored locally and not confirmed by the server yet. */
   pendingChunks: number;
   pendingBytes: number;
@@ -683,12 +713,16 @@ export class RecordingUploader {
    * local copy is gone, the server is updated directly.
    */
   async rename(workspaceId: string, recordingId: string, title: string): Promise<void> {
-    const stored = await this.mutate(recordingId, (recording) => ({
-      ...recording,
-      create: { ...recording.create, title },
-      ...(recording.created ? { pendingTitle: title } : {}),
-      updatedAt: Date.now(),
-    }));
+    const stored = await this.mutate(recordingId, (recording) => {
+      // A name someone gives is theirs, not a guess for the server to replace.
+      const { titleSource: _guess, ...create } = recording.create;
+      return {
+        ...recording,
+        create: { ...create, title },
+        ...(recording.created ? { pendingTitle: title } : {}),
+        updatedAt: Date.now(),
+      };
+    });
     if (stored) {
       this.kick(recordingId);
       return;
@@ -934,7 +968,21 @@ export class RecordingUploader {
     if (!recording.created) {
       const workspaceId = recording.workspaceId;
       const sent = recording.create;
-      await guarded(() => client.createRecording(workspaceId, sent));
+      const made = await guarded(() => client.createRecording(workspaceId, sent)).catch(
+        async (error: unknown) => {
+          // A server from before titleSource (or calendarEvent) refuses the
+          // field: the recording is sent without them, as every one was then.
+          if (
+            !(error instanceof PermanentRecordingError) ||
+            error.status !== 400 ||
+            (sent.titleSource === undefined && sent.calendarEvent === undefined)
+          ) {
+            throw error;
+          }
+          const { titleSource: _unknownThere, calendarEvent: _unknownToo, ...older } = sent;
+          return await guarded(() => client.createRecording(workspaceId, older));
+        },
+      );
       recording = await this.mutate(recordingId, (current) => ({
         ...current,
         created: true,
@@ -960,6 +1008,14 @@ export class RecordingUploader {
           discarded: true,
         });
         return true;
+      }
+      // Named by the server, such as after a calendar event: the recorder shows it.
+      if (
+        made?.titleSource === "calendar" &&
+        made.title !== sent.title &&
+        recording.create.title === sent.title
+      ) {
+        this.update(pump, { serverTitle: made.title });
       }
     }
     if (!pump.status.created) this.update(pump, { created: true });
@@ -1171,7 +1227,7 @@ export type UploadRecordingAudioOptions = {
   audio: Blob;
   /** Its type; the blob's own type by default. */
   mimeType?: string;
-  /** How long it plays, when known; 0 otherwise. */
+  /** How long it plays. Read from an MP4 (M4A) file when omitted; 0 otherwise. */
   durationMilliseconds?: number;
   /** A new id by default. */
   recordingId?: string;
@@ -1181,6 +1237,12 @@ export type UploadRecordingAudioOptions = {
   };
   /** What the audio was recorded from. Default: the microphone. */
   source?: RecordingCaptureSource;
+  /**
+   * Called once every piece is saved on the device, before the upload is
+   * waited for. From then on the recording survives the app closing: the
+   * uploader's resume finishes it on the next start.
+   */
+  onStored?: (recordingId: string) => void;
   /** Stop waiting for the upload (it continues in the background). */
   signal?: AbortSignal;
 };
@@ -1200,15 +1262,31 @@ export async function uploadRecordingAudio(
   const bytes = new Uint8Array(await options.audio.arrayBuffer());
   if (bytes.byteLength === 0) throw new TypeError("uploadRecordingAudio needs audio.");
   const recordingId = options.recordingId ?? crypto.randomUUID();
-  const duration = Math.max(0, Math.round(options.durationMilliseconds ?? 0));
+  const duration = Math.max(
+    0,
+    Math.round(options.durationMilliseconds ?? audioFileDurationMilliseconds(bytes) ?? 0),
+  );
   const { startedAt, ...create } = options.create ?? {};
+  // A given start, else the date the file says it was recorded, else it ended
+  // just now. Either way it lasts as long as the audio plays, not as long as
+  // it took to bring in.
+  const now = Date.now();
+  const recorded = audioFileCreatedAt(bytes)?.getTime();
+  const startedAtMilliseconds = startedAt
+    ? Date.parse(startedAt)
+    : recorded !== undefined && recorded + duration <= now + 60_000
+      ? recorded
+      : now - duration;
+  if (!Number.isFinite(startedAtMilliseconds)) {
+    throw new TypeError("uploadRecordingAudio needs a valid startedAt.");
+  }
   await options.uploader.begin({
     workspaceId: options.workspaceId,
     recordingId,
     create: {
       ...create,
       recordingId,
-      startedAt: startedAt ?? new Date(Date.now() - duration).toISOString(),
+      startedAt: new Date(startedAtMilliseconds).toISOString(),
       tracks: [{ trackNumber: 0, source: options.source ?? "microphone", mimeType }],
     },
   });
@@ -1232,8 +1310,9 @@ export async function uploadRecordingAudio(
       durationMilliseconds: end - start,
     });
   }
+  options.onStored?.(recordingId);
   return await options.uploader.finish(recordingId, {
-    endedAt: new Date(),
+    endedAt: new Date(startedAtMilliseconds + duration),
     ...(options.signal ? { signal: options.signal } : {}),
   });
 }
@@ -1523,10 +1602,18 @@ export type RecorderOptions = {
   store?: RecordingChunkStore;
   /** Share one uploader between recorders; one is created otherwise. */
   uploader?: RecordingUploader;
+  /** Leave it out unless the person gave one; Opengeni then names the meeting. */
   title?: string;
+  /** `app` when `title` is your app's guess, such as the call app's name; see CreateRecordingRequest. */
+  titleSource?: RecordingCreateTitleSource;
   visibility?: RecordingVisibility;
   externalRef?: string;
   metadata?: CreateRecordingRequest["metadata"];
+  /**
+   * The owner's calendar event the meeting is of, such as one from
+   * `listUpcomingMeetings` that the person joined; it names the meeting.
+   */
+  calendarEvent?: CreateRecordingRequest["calendarEvent"];
   transcription?: RecordingTranscriptionRequest;
   /**
    * The person recording's name, as your app knows it: their microphone's
@@ -1907,11 +1994,14 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
       store: options.store ?? createIndexedDbRecordingChunkStore(),
     });
   let unsubscribe: (() => void) | null = null;
+  // Until someone names it, a name the server found replaces the guess shown.
+  let titleIsGuess = !options.title || options.titleSource === "app";
   const watchUploads = () => {
     unsubscribe ??= uploader.subscribe((status) => {
       if (status.recordingId !== snapshot.recordingId) return;
       emit({
         upload: status,
+        ...(status.serverTitle && titleIsGuess ? { title: status.serverTitle } : {}),
         ...(status.failed
           ? {
               error: {
@@ -1941,7 +2031,10 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
   };
 
   const fail = (code: RecorderErrorCode, message: string, reason?: DesktopSystemAudioErrorCode) => {
-    emit({ state: "failed", error: { code, message, ...(reason ? { reason } : {}) } });
+    emit({
+      state: "failed",
+      error: { code, message, ...(reason ? { reason } : {}) },
+    });
   };
 
   const liveSnapshot = () =>
@@ -2182,10 +2275,12 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
           recordingId,
           ...(options.purpose ? { purpose: options.purpose } : {}),
           ...(options.title ? { title: options.title } : {}),
+          ...(options.title && options.titleSource ? { titleSource: options.titleSource } : {}),
           ...(options.visibility ? { visibility: options.visibility } : {}),
           startedAt: new Date().toISOString(),
           ...(options.externalRef ? { externalRef: options.externalRef } : {}),
           ...(options.metadata ? { metadata: options.metadata } : {}),
+          ...(options.calendarEvent ? { calendarEvent: options.calendarEvent } : {}),
           ...(options.transcription ? { transcription: options.transcription } : {}),
           ...ownerNameField(options.ownerName, captures),
           tracks: captures.map((capture) => ({
@@ -2336,6 +2431,7 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
       const recordingId = snapshot.recordingId;
       if (!recordingId) throw new Error("Nothing is being recorded to rename.");
       await uploader.rename(options.workspaceId, recordingId, title);
+      titleIsGuess = false;
       if (snapshot.recordingId === recordingId) emit({ title });
     },
 

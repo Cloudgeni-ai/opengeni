@@ -40,7 +40,12 @@ import {
 } from "@opengeni/contracts";
 import { createHash } from "node:crypto";
 import { isProxy } from "node:util/types";
-import { projectHostedSearchEvidence } from "./hosted-search-evidence";
+import { toJsonSafeValue } from "@opengeni/contracts/json-safe";
+import {
+  isHostedSearchEvidenceRecord,
+  projectHostedSearchEvidence,
+  withSearchRecordsAfterOpenCalls,
+} from "./hosted-search-evidence";
 
 import {
   latestReasoningConfiguration,
@@ -1029,11 +1034,16 @@ export function estimateSerializedValueTokens(value: unknown): number {
 }
 
 function materializedJson(value: unknown): string {
-  const serialized = JSON.stringify(value);
-  if (serialized === undefined) {
-    throw new TypeError("value has no JSON representation");
+  // A token estimate must never fail a turn: a value the native serializer
+  // refuses (bigint, cycle, throwing toJSON) is estimated from its converted
+  // JSON-safe form instead.
+  let serialized: string | undefined;
+  try {
+    serialized = JSON.stringify(value);
+  } catch {
+    serialized = JSON.stringify(toJsonSafeValue(value, { copy: true }));
   }
-  return serialized;
+  return serialized ?? "null";
 }
 
 export type CompleteModelInputFootprint = {
@@ -1608,8 +1618,10 @@ export function prepareCompactionPromptInput(
   maxInputTokens: number,
 ): PreparedCompactionPromptInput {
   const budget = Math.max(0, Math.floor(maxInputTokens));
-  let history = omitOpaqueArtifactsFromPortableCompactionHistory(items).map((item) =>
-    projectHostedSearchEvidence(item),
+  let history = withSearchRecordsAfterOpenCalls(
+    omitOpaqueArtifactsFromPortableCompactionHistory(items).map((item) =>
+      projectHostedSearchEvidence(item),
+    ),
   );
   let estimatedInputTokens = estimateTokens(buildCompactionPromptInput(history));
   let rewrittenToolOutputs = 0;
@@ -1667,7 +1679,9 @@ function minimalToolResultForCompaction(item: CompactionItem): CompactionItem {
 function oldestLogicalUnitCuts(items: readonly CompactionItem[]): number[] {
   const userMessageIndexes: number[] = [];
   for (let index = 0; index < items.length; index += 1) {
-    if (isUserMessage(items[index])) userMessageIndexes.push(index);
+    // A search record is runtime input inside a unit, not a person's message.
+    if (isUserMessage(items[index]) && !isHostedSearchEvidenceRecord(items[index]))
+      userMessageIndexes.push(index);
   }
   const cuts: number[] = [];
   if (userMessageIndexes.length === 0) {

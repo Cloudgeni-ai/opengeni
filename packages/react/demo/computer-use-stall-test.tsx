@@ -90,7 +90,7 @@ function App() {
   };
   const now = Date.parse("2026-10-28T07:40:00.000Z");
   return (
-    <div className="flex min-h-screen items-center justify-center bg-bg-subtle p-8">
+    <div className="flex min-h-screen items-center justify-center bg-surface-2 p-8">
       <div className="flex h-[640px] w-[1080px] overflow-hidden rounded-xl border border-border bg-bg shadow-2xl">
         <aside className="flex w-[248px] shrink-0 flex-col border-r border-border bg-surface">
           <div className="flex h-11 items-center gap-2 px-4">

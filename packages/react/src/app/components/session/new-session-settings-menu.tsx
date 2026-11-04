@@ -42,15 +42,15 @@ import {
 import { cn } from "../../lib/utils";
 
 /*
- * Per-session settings of a new chat, as drill-ins of the composer's "+" menu:
- * where it runs (managed sandbox and its environment, or a connected machine
- * and its folder) and who can see it. The composer bar keeps only +, voice,
- * the model and Send.
+ * Per-session settings of a new chat: where it runs (managed sandbox and its
+ * environment, or a connected machine and its folder) and who can see it. The
+ * new-chat page shows them as chips beside the project chip above the message;
+ * the composer bar keeps only +, voice, the model and Send.
  *
- * Inside the "+" dropdown the rows are Radix radio items, so arrow keys reach
- * them (a Radix menu traps Tab and roves only over its own items). When the
- * "+" menu presents a drill-in as a dialog, there is no menu to rove in, so
- * the rows are plain radio buttons that Tab reaches.
+ * Inside a dropdown the rows are Radix radio items, so arrow keys reach them
+ * (a Radix menu traps Tab and roves only over its own items). When a host
+ * presents a body as a dialog, there is no menu to rove in, so the rows are
+ * plain radio buttons that Tab reaches.
  */
 
 function machineStateMeta(machine: MachineView): string {
@@ -78,7 +78,7 @@ export type RunsOnChoices = {
   selectionHistory: NewSessionSelectionHistory;
 };
 
-/** Whether "Runs on" has anything to choose; otherwise the + menu omits it. */
+/** Whether "Runs on" has anything to choose; otherwise the page omits it. */
 export function hasRunsOnChoices(
   choices: Pick<
     RunsOnChoices,
@@ -113,8 +113,8 @@ export function runsOnSummary(choices: RunsOnChoices): string {
 }
 
 /**
- * Why "Runs on" keeps Send disabled, if it does. The choice lives behind "+",
- * so the page says what is missing and where to fix it.
+ * Why "Runs on" keeps Send disabled, if it does. The page says what is missing
+ * and where to fix it.
  */
 export type RunsOnAttention =
   | "fleet-load-failed"
@@ -176,7 +176,7 @@ export function RunsOnNotice(props: {
   if (props.attention === "machine-unavailable")
     return (
       <Notice tone="waiting" live="polite">
-        Machine unavailable. Reconnect it or choose another under + &gt; Runs on.
+        Machine unavailable. Reconnect it or choose another in Runs on, above the message.
       </Notice>
     );
   if (props.attention === "connect-machine") {
@@ -190,8 +190,8 @@ export function RunsOnNotice(props: {
   return (
     <Notice tone="waiting" live="polite">
       {anyAvailable
-        ? "Pick a machine under + > Runs on to send."
-        : "Your connected machines are offline. Pick one under + > Runs on once it's back."}
+        ? "Pick a machine in Runs on, above the message, to send."
+        : "Your connected machines are offline. Pick one in Runs on, above the message, once it's back."}
     </Notice>
   );
 }

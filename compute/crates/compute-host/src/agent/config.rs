@@ -31,6 +31,11 @@ pub struct HostConfig {
     pub policy: HostPolicy,
     /// How often to sample host and VM memory.
     pub sample_every: Duration,
+    /// How long a new sandbox's first wake stays booked if it is not woken:
+    /// long enough for its creator to make it and ask for it, short enough
+    /// that room a create never used comes back soon. A create still
+    /// waiting for its image or a disk reading renews it.
+    pub first_wake_within: Duration,
     /// Readings of the local disk given to the agent instead of its own of
     /// the state root's filesystem, as tests give (see [`DiskGauge`]).
     /// `None` reads the filesystem every sample.
@@ -99,6 +104,11 @@ pub struct HostConfig {
     /// How long a sandbox stays awake before it reports what it went
     /// through since its last step or summary.
     pub summary_every: Duration,
+    /// How soon a sandbox an agent restart could not take back is tried
+    /// again, such as one whose VMM did not answer in time while the guard
+    /// held it frozen: first after this long, then twice as long after
+    /// each failure, up to [`HostConfig::RECOVERY_RETRY_SPAN`] times this.
+    pub recovery_retry: Duration,
     /// The host's agent links, for sandboxes that run Opengeni's agent
     /// (see [`link`](super::link)). `None` refuses their guests' connections.
     pub agent_link: Option<compute_link::Hub>,
@@ -114,10 +124,17 @@ pub struct HostConfig {
 }
 
 impl HostConfig {
+    /// The default for [`HostConfig::first_wake_within`].
+    pub const FIRST_WAKE_WITHIN: Duration = Duration::from_secs(120);
     /// The default for [`HostConfig::stream_idle`].
     pub const STREAM_IDLE: Duration = Duration::from_secs(10 * 60);
     /// The default for [`HostConfig::summary_every`].
     pub const SUMMARY_EVERY: Duration = Duration::from_secs(3600);
+    /// The default for [`HostConfig::recovery_retry`].
+    pub const RECOVERY_RETRY: Duration = Duration::from_secs(10);
+    /// The longest wait between tries of a recovery, as a multiple of
+    /// [`HostConfig::recovery_retry`].
+    pub const RECOVERY_RETRY_SPAN: u32 = 30;
 }
 
 /// How VMs whose memory needs a fault handler get one: a pager process of

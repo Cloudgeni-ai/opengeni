@@ -181,4 +181,52 @@ describe.skipIf(!hasFfmpeg)("transcribeTrack", () => {
     });
     expect(identities.at(-1)).toBe("version:a2:0");
   });
+
+  test("sends only the stretches with sound, and nothing for a silent track", async () => {
+    const sent: Array<{ mimeType: string; fileName: string; head: string }> = [];
+    const heard: number[] = [];
+    const result = await transcribeTrack({
+      provider: countingProvider(sent),
+      spec: { model: "m", name: "M", capabilities, usdPerHour: null },
+      audio,
+      durationMilliseconds: 25_000,
+      ffmpegPath,
+      credentials: { apiKey: "k" },
+      request,
+      sound: [
+        { startMilliseconds: 2_000, endMilliseconds: 6_000 },
+        { startMilliseconds: 15_000, endMilliseconds: 20_000 },
+      ],
+      onSent: (milliseconds) => heard.push(milliseconds),
+    });
+    expect(sent.map((item) => item.fileName)).toEqual(["track-1-0.webm", "track-1-1.webm"]);
+    expect(heard).toEqual([4_000, 5_000]);
+    // Words land on the track's timeline, and the track keeps its length.
+    const seconds = result.words.map((word) => Math.floor(word.startMilliseconds / 1_000));
+    expect(
+      seconds.every((second) => (second >= 2 && second < 6) || (second >= 15 && second < 20)),
+    ).toBe(true);
+    expect(seconds).toContain(2);
+    expect(seconds).toContain(15);
+    expect(result.audioMilliseconds).toBe(25_000);
+
+    const silent: typeof sent = [];
+    const nothing = await transcribeTrack({
+      provider: countingProvider(silent),
+      spec: { model: "m", name: "M", capabilities, usdPerHour: null },
+      audio,
+      durationMilliseconds: 25_000,
+      ffmpegPath,
+      credentials: { apiKey: "k" },
+      request,
+      sound: [],
+    });
+    expect(silent).toEqual([]);
+    expect(nothing).toEqual({
+      languages: [],
+      audioMilliseconds: 25_000,
+      diarized: false,
+      words: [],
+    });
+  });
 });

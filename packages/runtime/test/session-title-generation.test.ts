@@ -6,6 +6,7 @@ import {
   generateSessionTitle,
   SESSION_TITLE_GENERATION_INSTRUCTIONS,
   SESSION_TITLE_GENERATION_MAX_OUTPUT_TOKENS,
+  SESSION_TITLE_NOT_YET,
 } from "../src/index";
 import { buildProviderClient } from "../src/model-provider-client";
 import { buildModelInstance } from "../src/model-provider-routing";
@@ -134,6 +135,40 @@ describe("session title generation", () => {
     );
 
     expect(result.title).toBe("Kubernetes Pod Crash");
+  });
+
+  test("the instructions ask for the person's language and for no title while there is nothing to name", () => {
+    expect(SESSION_TITLE_GENERATION_INSTRUCTIONS).toContain(
+      "Write the title in the language the person writes in.",
+    );
+    expect(SESSION_TITLE_GENERATION_INSTRUCTIONS).toContain(
+      `(only a greeting, thanks or small talk), return exactly ${SESSION_TITLE_NOT_YET}.`,
+    );
+  });
+
+  for (const answer of [
+    SESSION_TITLE_NOT_YET,
+    `"${SESSION_TITLE_NOT_YET}"`,
+    `${SESSION_TITLE_NOT_YET}.`,
+    "no_title",
+    `<think>Only a greeting.</think>\n${SESSION_TITLE_NOT_YET}`,
+  ]) {
+    test(`an opener with nothing to name yet gets no title (${JSON.stringify(answer)})`, async () => {
+      const { result } = await generateThroughResolvedChatModel(() =>
+        chatCompletion(answer, "stop"),
+      );
+
+      expect(result.title).toBeNull();
+      expect(result.usage?.usage.outputTokens).toBe(12);
+    });
+  }
+
+  test("a title that only mentions the no-title answer is still a title", async () => {
+    const { result } = await generateThroughResolvedChatModel(() =>
+      chatCompletion("NO_TITLE Sentinel Handling", "stop"),
+    );
+
+    expect(result.title).toBe("NO_TITLE Sentinel Handling");
   });
 
   test("a capped response with only reasoning yields no title", async () => {

@@ -134,3 +134,39 @@ test("an unavailable saved preference never locks an admin out of choosing anoth
     container.remove();
   }
 });
+
+test("an EU-only workspace without an EU route shows voice input switched off", async () => {
+  const writes: unknown[] = [];
+  const context = {
+    workspaces: [{ id: "workspace", settings: { voiceInput: { enabled: true } } }],
+    clientConfig: {
+      voiceInput: { available: false, providers: [] },
+      inferenceFeatures: [
+        { id: "voice_input", available: false, unavailableReason: "region_restricted" },
+      ],
+    },
+    captureWorkspaceInvocation: () => ({}),
+    ownsWorkspaceInvocation: () => true,
+    updateWorkspaceSettings: async (_id: string, patch: unknown) => {
+      writes.push(patch);
+      return {};
+    },
+  } as unknown as ComponentProps<typeof VoiceInputPreferences>["context"];
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(<VoiceInputPreferences workspaceId="workspace" canManage context={context} />),
+    );
+    expect(container.textContent).toContain("Not supported in EU");
+    expect(container.textContent).not.toContain("Connect a supported subscription");
+    const voiceSwitch = container.querySelector<HTMLButtonElement>('[role="switch"]')!;
+    expect(voiceSwitch.getAttribute("aria-checked")).toBe("false");
+    await act(async () => voiceSwitch.click());
+    expect(writes).toEqual([]);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});

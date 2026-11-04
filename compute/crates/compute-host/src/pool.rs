@@ -77,7 +77,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use tokio::time::{Instant, sleep, timeout};
 
-use crate::image::{CHUNK_BYTES, Depth, Images, Parts, Suspect, Verified, ZERO};
+use crate::image::{CHUNK_BYTES, Depth, Images, Made, Parts, Suspect, Verified, ZERO};
 use crate::layout::{
     Machine, Paths, copy_size, copy_sparse, link_kernel, remove_if_present, sync_parent,
     templates_dir, write_atomic,
@@ -158,6 +158,11 @@ pub(crate) struct Sources {
     pub networked: bool,
     /// How guest memory is backed, as the engine describes it.
     pub memory: String,
+    /// The runtime new VMs run under (see [`compute_engine::Engine::runtime`]):
+    /// a template's clones wake under the runtime that saved it, so one
+    /// saved under another, before the host's kernel changed say, would
+    /// give every new sandbox an image this host may refuse.
+    pub runtime: String,
     /// The guest port that says a booted guest is ready for work: a guest
     /// image that answers elsewhere is another guest.
     pub ready_port: u32,
@@ -193,6 +198,7 @@ impl Sources {
             boot_args: self.boot_args.clone(),
             networked: self.networked,
             memory: self.memory.clone(),
+            runtime: self.runtime.clone(),
             ready_port: self.ready_port,
         })
     }
@@ -233,6 +239,7 @@ pub(crate) struct Inputs {
     boot_args: String,
     networked: bool,
     memory: String,
+    runtime: String,
     ready_port: u32,
 }
 
@@ -333,14 +340,19 @@ impl Template {
             .map_err(CopyFailure::from)?
             .ok_or_else(|| CopyFailure::Unusable("the template has no image".into()))?;
         copy_sparse(&self.dir.join(DISK), &paths.disk).map_err(CopyFailure::from)?;
-        // A clone is made by whatever made its template.
+        // A clone is made by whatever made its template, and from the
+        // same machine and disk.
         images
             .publish_made_by(
                 Parts::Shared {
                     from: &source,
                     image: &image,
                 },
-                image.meta().runtime.as_deref(),
+                Made {
+                    runtime: image.meta().runtime.as_deref(),
+                    vcpus: image.meta().vcpus,
+                    disk_len: image.meta().disk_len,
+                },
             )
             .map_err(CopyFailure::from)?;
         Ok(())
@@ -551,6 +563,20 @@ impl Pool {
             }
         };
         self.entries.insert(shape, entry);
+    }
+
+    /// Puts off `shape`'s build, which found no memory, disk or processor
+    /// time to spare: as after a failed build, new sandboxes boot cold and
+    /// a later one tries again, but nothing failed, so it is not warned
+    /// about each time.
+    pub fn put_off(&mut self, shape: Shape, now: Instant) {
+        tracing::debug!(%shape, "template build put off: no room to spare for it");
+        self.entries.insert(
+            shape,
+            Entry::Failed {
+                retry: now + RETRY_AFTER,
+            },
+        );
     }
 
     /// Forgets `template`, which no longer fits today's inputs, and asks for
@@ -959,6 +985,7 @@ fn publish(
     fs::rename(&paths.disk, &disk)?;
     compute_engine::confined::check_written(&disk)?;
     seal(&disk)?;
+    let disk_len = fs::metadata(&disk)?.len();
     let images = Images::new(staging.join("images"));
     images
         .publish_made_by(
@@ -967,7 +994,11 @@ fn publish(
                 memory: &written.memory,
                 len: inputs.shape.bytes(),
             },
-            Some(runtime),
+            Made {
+                runtime: Some(runtime),
+                vcpus: Some(inputs.shape.vcpus),
+                disk_len: Some(disk_len),
+            },
         )
         .map_err(io::Error::other)?;
     let footprint = match images.current_verified() {

@@ -225,9 +225,14 @@ jobs:
   # re-run a main SHA to get its images now. Version merges always run.
   main-ci-cadence:
     name: Main CI cadence
+    # A batcher landing is never deferred: an attested push records its batch's
+    # exact-tree result and an intermediate one runs nothing (batch-receipt
+    # below). Every other push keeps the cadence.
+    needs: [batch-receipt]
     if: >-
-      ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_attempt == 1 &&
+      ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_attempt == 1 &&
       vars.MAIN_CI_DEFERRED == 'true' &&
+      !(needs.batch-receipt.result == 'success' && (needs.batch-receipt.outputs.kind == 'attested' || needs.batch-receipt.outputs.kind == 'intermediate')) &&
       !startsWith(github.event.head_commit.message, 'chore: version packages') &&
       !contains(github.event.head_commit.message, 'changeset-release/main') }}
     runs-on: ubuntu-latest
@@ -275,12 +280,12 @@ jobs:
       tree: ${{ steps.receipt.outputs.tree }}
       final_sha: ${{ steps.receipt.outputs.final_sha }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           # A batch lands at most maxBatch members on its base.
           fetch-depth: 32
           persist-credentials: false
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
       - name: Classify this main push
@@ -288,7 +293,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: bun scripts/ci/batch-receipt.ts
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: batch-receipt-${{ github.sha }}
           path: batch-receipt.json
@@ -323,7 +328,7 @@ jobs:
       browser_lane_matrix: ${{ steps.plan.outputs.browser_lane_matrix }}
     steps:
       - name: Check out exact candidate
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 1
@@ -414,7 +419,7 @@ jobs:
           echo "attested=$attested" >> "$GITHUB_OUTPUT"
 
       - name: Set up pinned Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
 
@@ -517,7 +522,7 @@ jobs:
           mv ci-profile/dependencies.json.tmp ci-profile/dependencies.json
 
       - name: Upload exact impact plan
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ci-impact-plan
           path: impact-plan.json
@@ -526,7 +531,7 @@ jobs:
 
       - name: Upload dependency resource profile
         if: ${{ failure() }}
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ci-profile-dependencies
           path: ci-profile/dependencies.json
@@ -541,7 +546,7 @@ jobs:
     timeout-minutes: 35
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 1
@@ -597,12 +602,12 @@ jobs:
             exit 1
           fi
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
 
       - name: Cache Bun dependencies
-        uses: actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.bun/install/cache
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
@@ -620,7 +625,7 @@ jobs:
         run: bun scripts/generate-site-browser-runtime.ts --check
 
       - name: Download exact impact plan
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ci-impact-plan
           path: ${{ runner.temp }}/ci-impact-plan
@@ -635,6 +640,7 @@ jobs:
           plan="$RUNNER_TEMP/changeset-status.json"
           git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
           version_base_ref=refs/remotes/origin/main
+          version_head_ref=HEAD
 
           # `changeset status` deliberately exits non-zero on the generated
           # Version PR: its package files changed and the consumed changeset is
@@ -649,6 +655,16 @@ jobs:
             git cat-file -e "$AUTOMATION_BASE_SHA^{commit}"
             version_base_ref="$AUTOMATION_BASE_SHA"
             is_version_pr=true
+          elif [ "$GITHUB_EVENT_NAME" = "push" ] && [[ "$GITHUB_REF" == refs/heads/batch/* ]]; then
+            # A singleton Version batch has consumed its changesets too. Prove
+            # its complete merge tree, then reproduce the original Version head
+            # from its own base, retaining any disjoint main movement.
+            version_batch="$(bun scripts/release/version-batch.ts)"
+            if [ "$version_batch" != null ]; then
+              version_base_ref="$(jq -er '.base' <<< "$version_batch")"
+              version_head_ref="$(jq -er '.head' <<< "$version_batch")"
+              is_version_pr=true
+            fi
           fi
           git update-ref refs/heads/main "$version_base_ref"
           if [ "$is_version_pr" = "true" ]; then
@@ -669,7 +685,7 @@ jobs:
             )
 
             expected_tree="$(git -C "$expected" write-tree)"
-            actual_tree="$(git rev-parse 'HEAD^{tree}')"
+            actual_tree="$(git rev-parse "$version_head_ref^{tree}")"
             if [ "$actual_tree" != "$expected_tree" ]; then
               echo "::error::Version PR tree does not exactly reproduce 'changeset version' from its admitted base"
               git -C "$expected" diff --cached --stat
@@ -720,7 +736,7 @@ jobs:
 
       - name: Upload source-contract resource profiles
         if: ${{ failure() }}
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ci-profile-source-contracts
           path: |
@@ -742,7 +758,7 @@ jobs:
         include: ${{ fromJSON(needs.plan.outputs.unit_matrix) }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 1
@@ -798,12 +814,12 @@ jobs:
             exit 1
           fi
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
 
       - name: Cache Bun dependencies
-        uses: actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.bun/install/cache
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
@@ -814,7 +830,7 @@ jobs:
         run: bun packages/testing/src/acquisition-diagnostics.ts -- bun install --frozen-lockfile
 
       - name: Download exact impact plan
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ci-impact-plan
 
@@ -833,7 +849,7 @@ jobs:
 
       - name: Upload unit resource profile
         if: ${{ failure() }}
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ci-profile-unit-${{ matrix.number }}
           path: ci-profile/unit-${{ matrix.number }}.json
@@ -852,13 +868,13 @@ jobs:
         include: ${{ fromJSON(needs.plan.outputs.integration_matrix) }}
     steps:
       - name: Check out exact candidate
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
 
@@ -866,7 +882,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Download exact impact plan
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ci-impact-plan
 
@@ -883,7 +899,7 @@ jobs:
 
       - name: Upload integration resource profile
         if: ${{ failure() }}
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ci-profile-integration-${{ matrix.number }}
           path: |
@@ -904,18 +920,18 @@ jobs:
         include: ${{ fromJSON(needs.plan.outputs.e2e_matrix) }}
     steps:
       - name: Check out exact candidate
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
 
       - name: Cache Bun dependencies
-        uses: actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.bun/install/cache
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
@@ -926,7 +942,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Download exact impact plan
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ci-impact-plan
 
@@ -973,7 +989,7 @@ jobs:
 
       - name: Upload E2E resource profile on failure
         if: ${{ failure() }}
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ci-profile-e2e-${{ matrix.number }}
           path: |
@@ -990,7 +1006,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 1
@@ -1046,12 +1062,12 @@ jobs:
             exit 1
           fi
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
 
       - name: Cache Bun dependencies
-        uses: actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.bun/install/cache
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
@@ -1101,7 +1117,7 @@ jobs:
         include: ${{ fromJSON(needs.plan.outputs.browser_lane_matrix) }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 1
@@ -1157,12 +1173,12 @@ jobs:
             exit 1
           fi
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
 
       - name: Cache Bun dependencies
-        uses: actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.bun/install/cache
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
@@ -1337,7 +1353,7 @@ jobs:
           ${{ always() && matrix.lane == 'accounts' &&
           (steps.browser_accounts.outcome == 'success' ||
           steps.browser_accounts.outcome == 'failure') }}
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: browser-account-acceptance-${{ matrix.engine }}
           if-no-files-found: error
@@ -1357,7 +1373,7 @@ jobs:
           matrix.lane == 'knowledge' &&
           (steps.session_pin_browser.outcome == 'success' ||
           steps.session_pin_browser.outcome == 'failure') }}
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sessionpin-session-pin-visual-evidence
           if-no-files-found: error
@@ -1375,7 +1391,7 @@ jobs:
           ${{ always() && matrix.lane == 'interaction' &&
           (steps.session_search_header_browser.outcome == 'success' ||
           steps.session_search_header_browser.outcome == 'failure') }}
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: session-search-header-evidence
           if-no-files-found: error
@@ -1384,7 +1400,7 @@ jobs:
 
       - name: Upload Codex quota visual evidence
         if: ${{ always() && matrix.lane == 'interaction' }}
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: codex-quota-codex-quota-entitlement-visual-evidence
           if-no-files-found: error
@@ -1397,7 +1413,7 @@ jobs:
 
       - name: Upload responsive knowledge-surface evidence
         if: ${{ always() && matrix.lane == 'knowledge' && (steps.knowledge_surfaces_browser.outcome == 'success' || steps.knowledge_surfaces_browser.outcome == 'failure') }}
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: responsive-knowledge-surface-evidence
           if-no-files-found: error
@@ -1422,7 +1438,7 @@ jobs:
           matrix.lane == 'onboarding' &&
           (steps.organization_onboarding.outcome == 'success' ||
           steps.organization_onboarding.outcome == 'failure') }}
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: organization-onboarding-acceptance-evidence
           if-no-files-found: error
@@ -1441,7 +1457,7 @@ jobs:
           matrix.lane == 'workbench' &&
           (steps.workbench_browser.outcome == 'success' ||
           steps.workbench_browser.outcome == 'failure') }}
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: workbench-visual-evidence
           if-no-files-found: error
@@ -1458,7 +1474,7 @@ jobs:
           matrix.lane == 'workbench' &&
           (steps.editable_artifact_browser.outcome == 'success' ||
           steps.editable_artifact_browser.outcome == 'failure') }}
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: editable-artifact-visual-evidence
           if-no-files-found: error
@@ -1476,7 +1492,7 @@ jobs:
     timeout-minutes: 55
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 1
@@ -1532,12 +1548,12 @@ jobs:
             exit 1
           fi
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
 
       - name: Cache Bun dependencies
-        uses: actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.bun/install/cache
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
@@ -1548,7 +1564,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Download exact impact plan
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ci-impact-plan
 
@@ -1611,7 +1627,7 @@ jobs:
 
       - name: Retain failed canonical modality WASM rebuild
         if: ${{ failure() && steps.modality-wasm-rebuild.outcome == 'failure' }}
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ci-canonical-modality-wasm-${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
           path: .opengeni/ci-canonical-modality-wasm
@@ -1658,14 +1674,14 @@ jobs:
       # Keep workflow-owned regressions with their own immutable tooling tree;
       # never skip them or replace the candidate when it predates these files.
       - name: Check out registry export guard tooling
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.workflow_sha }}
           path: .ci/registry-export-guard
           persist-credentials: false
 
       - name: Set up registry export guard Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .ci/registry-export-guard/.bun-version
 
@@ -1709,7 +1725,7 @@ jobs:
           bun --no-env-file test ./scripts/test-registry-dependency-exports.test.ts ./scripts/test-effective-dependency-exports.test.ts ./scripts/dependency-export-workflow-contract.test.ts
 
       - name: Restore candidate Bun after registry export regression
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
 
@@ -1731,7 +1747,7 @@ jobs:
 
       - name: Upload package-build resource profile
         if: ${{ failure() }}
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ci-profile-packages
           path: |
@@ -1745,18 +1761,18 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.browserd_real_e2e == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') && needs.plan.outputs.attested != 'true' }}
     runs-on: ubuntu-latest
-    # 17m browser installation + 2m recovery + 6m headless + 5m headed,
+    # 17m browser installation + 2m recovery + 9m headless + 5m headed,
     # with 3m for checkout, dependencies and cleanup.
-    timeout-minutes: 33
+    timeout-minutes: 36
     steps:
       - name: Check out exact candidate
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
 
@@ -1787,7 +1803,9 @@ jobs:
             --test-name-pattern '^a (graceful|killed) controller leaves the same live browser'
 
       - name: Run headless browserd end-to-end suite
-        timeout-minutes: 6
+        # The suite runs about 5.5 minutes on main; 9 keeps a stalled run
+        # bounded without failing batches that add a few e2e files.
+        timeout-minutes: 9
         run: |
           set -euo pipefail
           # Use the shipped desktop software compositor on this GPU-less CI host.
@@ -1823,7 +1841,7 @@ jobs:
         run: test "$PLAN_RESULT" = "success"
 
       - name: Check out exact aggregate source
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
@@ -1875,18 +1893,18 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
 
       - name: Cache Bun dependencies
-        uses: actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.bun/install/cache
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
@@ -1897,10 +1915,10 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Set up Helm
-        uses: azure/setup-helm@v5
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
 
       - name: Set up Terraform
-        uses: hashicorp/setup-terraform@v4
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
 
       - name: Validate deployment profiles
         run: |
@@ -2135,7 +2153,7 @@ jobs:
       contents: read
     steps:
       - name: Check out exact aggregate source
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
@@ -2195,7 +2213,7 @@ jobs:
       api_digest: ${{ steps.api_image.outputs.digest }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
@@ -2218,7 +2236,7 @@ jobs:
 
       - name: Install Bun for canary interaction bundle
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
 
@@ -2247,13 +2265,13 @@ jobs:
           done
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4.4.0
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -2261,7 +2279,7 @@ jobs:
 
       - name: Build API image
         id: api_image
-        uses: docker/build-push-action@v7.3.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: docker/opengeni.Dockerfile
@@ -2290,19 +2308,19 @@ jobs:
       worker_digest: ${{ steps.worker_image.outputs.digest }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4.4.0
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -2310,7 +2328,7 @@ jobs:
 
       - name: Build worker image
         id: worker_image
-        uses: docker/build-push-action@v7.3.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: docker/opengeni.Dockerfile
@@ -2339,16 +2357,16 @@ jobs:
       web_digest: ${{ steps.web_image.outputs.digest }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4.4.0
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -2356,7 +2374,7 @@ jobs:
 
       - name: Build web image
         id: web_image
-        uses: docker/build-push-action@v7.3.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: docker/opengeni.Dockerfile
@@ -2386,7 +2404,7 @@ jobs:
       artifact_materializer_digest: ${{ steps.artifact_materializer_image.outputs.digest }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
@@ -2398,13 +2416,13 @@ jobs:
           path: .release/artifact-runtime
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4.4.0
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -2412,7 +2430,7 @@ jobs:
 
       - name: Build artifact materializer image
         id: artifact_materializer_image
-        uses: docker/build-push-action@v7.3.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: docker/opengeni.Dockerfile
@@ -2441,19 +2459,19 @@ jobs:
       artifact_outbox_dispatcher_digest: ${{ steps.artifact_outbox_dispatcher_image.outputs.digest }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4.4.0
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -2461,7 +2479,7 @@ jobs:
 
       - name: Build artifact outbox dispatcher image
         id: artifact_outbox_dispatcher_image
-        uses: docker/build-push-action@v7.3.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: docker/opengeni.Dockerfile
@@ -2490,19 +2508,19 @@ jobs:
       relay_digest: ${{ steps.relay_image.outputs.digest }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4.4.0
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -2510,7 +2528,7 @@ jobs:
 
       - name: Build relay image
         id: relay_image
-        uses: docker/build-push-action@v7.3.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: agent
           file: agent/crates/opengeni-relay/Dockerfile
@@ -2535,7 +2553,7 @@ jobs:
       sandbox_digest: ${{ steps.sandbox_image.outputs.digest }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
@@ -2545,13 +2563,13 @@ jobs:
           name: ${{ needs.artifact-runtime.outputs.artifact_name }}
           path: .release/artifact-runtime
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4.4.0
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -2559,7 +2577,7 @@ jobs:
 
       - name: Build headless sandbox image
         id: sandbox_image
-        uses: docker/build-push-action@v7.3.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: docker/sandbox.Dockerfile
@@ -2589,7 +2607,7 @@ jobs:
       desktop_digest: ${{ steps.desktop_image.outputs.digest }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
@@ -2599,10 +2617,10 @@ jobs:
           name: ${{ needs.artifact-runtime.outputs.artifact_name }}
           path: .release/artifact-runtime
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4.4.0
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -2610,7 +2628,7 @@ jobs:
 
       - name: Build desktop sandbox image
         id: desktop_image
-        uses: docker/build-push-action@v7.3.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: docker/desktop.Dockerfile
@@ -2677,7 +2695,7 @@ jobs:
           test "$DESKTOP_IMAGE_RESULT" = "success"
 
       - name: Check out exact aggregate source
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
@@ -2806,11 +2824,11 @@ jobs:
       actions: read
       statuses: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
       - name: Recompute landed merge trees from their parents
@@ -2862,7 +2880,7 @@ jobs:
           gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
             -f state=success -f context='Full CI' -f target_url="$url" \
             -f description="$description"
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: full-green-main-${{ github.sha }}
           path: full-green-main.json

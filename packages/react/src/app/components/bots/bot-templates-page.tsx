@@ -5,7 +5,7 @@
  * read and change before sending; the agent then sets itself up with its
  * ordinary tools. Templates can be exported as a file and imported into
  * another workspace. A template is Only me or shared with the workspace, like
- * a chat; whoever saved one, or an admin, can change or delete it.
+ * a chat; anyone who starts chats here can change or delete a shared one.
  */
 import { useRef, useState } from "react";
 import { BotIcon, DownloadIcon, PlusIcon, UploadIcon } from "lucide-react";
@@ -46,7 +46,18 @@ const EMPTY_TEMPLATE: BotTemplateValues = {
   visibility: "workspace",
 };
 
-export function BotTemplatesPage({ workspaceId }: { workspaceId: string }) {
+export function BotTemplatesPage({
+  workspaceId,
+  onUseInSlack,
+}: {
+  workspaceId: string;
+  /**
+   * Start a Slack agent from a template: a one-time copy of its name,
+   * description, avatar and setup instructions. Hosts pass it only to people
+   * who can create Slack agents.
+   */
+  onUseInSlack?: ((template: WorkspaceBotTemplate) => void) | undefined;
+}) {
   const { client } = useAppContext();
   const navigate = useNavigate();
   const saved = useBotTemplates(workspaceId);
@@ -220,6 +231,11 @@ export function BotTemplatesPage({ workspaceId }: { workspaceId: string }) {
                       <DownloadIcon />
                       Export
                     </DropdownMenuItem>
+                    {onUseInSlack ? (
+                      <DropdownMenuItem onSelect={() => onUseInSlack(template)}>
+                        Use in Slack
+                      </DropdownMenuItem>
+                    ) : null}
                     {template.viewerAccess === "manage" ? (
                       <>
                         <DropdownMenuItem onSelect={() => setEditing(template)}>
@@ -262,6 +278,7 @@ export function BotTemplatesPage({ workspaceId }: { workspaceId: string }) {
         workspaceId={workspaceId}
         seed={editing?.id ?? "bot-template"}
         mode="edit"
+        canMakePrivate={editing?.viewerCanMakePrivate ?? true}
         initial={
           editing
             ? {

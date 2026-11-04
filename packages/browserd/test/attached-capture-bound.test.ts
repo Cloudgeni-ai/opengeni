@@ -144,6 +144,8 @@ class SlowCaptureBridge implements AttachedBrowserBridgeTransport {
         };
       case "Accessibility.getFullAXTree":
         return { nodes: [] };
+      case "DOMSnapshot.captureSnapshot":
+        return { strings: [], documents: [] };
       case "Runtime.evaluate":
         return {
           result: {
@@ -351,10 +353,10 @@ test("a capture Chrome keeps refusing fails with a plain reason at the deadline"
     refuses: () => true,
   });
   expect(outcome).toMatchObject({
-    code: "resource_unavailable",
+    code: "timeout",
     retryable: true,
     message:
-      "browser screenshot unavailable: Chrome has not drawn this tab, which happens while it is hidden or still loading; try again in a moment, or read it with browser_observe.",
+      "browser screenshot timed out: Chrome had not drawn this tab yet; retry shortly, or read it with browser_observe.",
   });
   expect(elapsed).toBeGreaterThan(9_500);
   expect(elapsed).toBeLessThan(10_500);

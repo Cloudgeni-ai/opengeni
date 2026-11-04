@@ -43,13 +43,15 @@ const setCollapsed = (value: boolean) => {
   collapsed = value;
   listeners.forEach((listener) => listener());
 };
+// `?railwidth=<px>`: the width the person dragged the main rail to.
+const railWidth = Number(new URLSearchParams(location.search).get("railwidth")) || 288;
 export function useRail() {
   return {
     workspaceId,
     collapsed: useSyncExternalStore(subscribe, () => collapsed),
     isMobile: false,
     drawerOpen: false,
-    width: 288,
+    width: railWidth,
     setCollapsed,
     toggleCollapsed: () => setCollapsed(!collapsed),
     setDrawerOpen: () => {},
@@ -57,4 +59,10 @@ export function useRail() {
     openOrg: () => {},
     startNewSession: () => {},
   };
+}
+// The settings shell reads the rail where it may be absent; here it is present.
+// `?apprail=none`: a page with no app rail around it, as personal settings.
+export function useOptionalRail() {
+  const rail = useRail();
+  return new URLSearchParams(location.search).get("apprail") === "none" ? null : rail;
 }

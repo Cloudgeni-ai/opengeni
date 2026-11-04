@@ -184,7 +184,7 @@ const FORK_POINT_COPY: Record<string, string> = {
   fork_point_message_unavailable:
     "Only your messages and the agent's replies can be fork points. Choose one of those, or fork the whole session.",
   fork_point_boundary_not_retained:
-    "This message is from before the conversation was compacted, so it can't be a fork point. Choose a more recent message, or fork the whole session.",
+    "This message can't be matched to a point in the conversation the agent saw, so it can't be a fork point. Choose a nearby message, or fork the whole session.",
   fork_point_history_compacted:
     "The conversation up to this message was compacted, so it can't be copied as it was then. Choose a more recent message, or fork the whole session.",
   fork_point_unfinished_tool_exchange:

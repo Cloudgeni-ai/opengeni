@@ -580,6 +580,8 @@ export function createMeetingsFixture(
       recording(ELSEWHERE_RECORDING_ID, "Pipeline review", minutes(60 * 3), 1_864_000, {
         workspaceId: SALES_WORKSPACE,
         sourceWorkspace: sales,
+        // Turned on in this workspace, so it shows here.
+        reachWorkspaceIds: [WORKSPACE],
       }),
       recording(
         "4f3e2d1c-0b9a-4f8e-9d7c-6b5a4f3e2d1c",
@@ -589,6 +591,7 @@ export function createMeetingsFixture(
         {
           workspaceId: SALES_WORKSPACE,
           sourceWorkspace: sales,
+          reachWorkspaceIds: null,
         },
       ),
     ].sort((a, b) => b.startedAt.localeCompare(a.startedAt));

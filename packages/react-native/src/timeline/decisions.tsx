@@ -6,6 +6,10 @@ import type {
 } from "@opengeni/sdk";
 import type { PendingApproval } from "@opengeni/react/session";
 import {
+  mcpElicitationKind,
+  type McpElicitationAnswer,
+} from "@opengeni/contracts/mcp-elicitation-model";
+import {
   approvalAnswerLabels,
   approvalArgumentsText,
   approvalToolName,
@@ -71,6 +75,12 @@ import { Selector } from "./selector";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
 import { errorMessage } from "@opengeni/contracts/values";
+import {
+  initialMcpQuestionDraft,
+  mcpQuestionAnswer,
+  McpQuestionFields,
+  type McpQuestionDraft,
+} from "./mcp-question";
 
 /* ----------------------------------------------------------------------------
    Decision surfaces: the web HumanInputForm (one question at a time, choice
@@ -845,7 +855,16 @@ export const defaultApprovalStripMessages = (t: OpenGeniText): ApprovalStripMess
 
 export interface ApprovalStripProps {
   approvals: PendingApproval[];
-  onDecide: (approvalId: string, decision: "approve" | "reject") => void | Promise<void>;
+  /**
+   * `answer` is present when approving answers its MCP server's question
+   * (`approval.elicitation`): the answers and the round they answer. Send
+   * both with the decision.
+   */
+  onDecide: (
+    approvalId: string,
+    decision: "approve" | "reject",
+    answer?: McpElicitationAnswer,
+  ) => void | Promise<void>;
   messages?: Partial<ApprovalStripMessages> | undefined;
 }
 
@@ -853,7 +872,8 @@ export interface ApprovalStripProps {
  * The live decision strip: one readable review card per pending tool approval,
  * as the web approval surface shows it. An app action (a setting changed
  * through chat) reads as a plain question answered with Allow or Cancel; the
- * raw arguments stay behind Details.
+ * raw arguments stay behind Details. A call its MCP server paused to ask
+ * something shows that question and its form instead.
  */
 /**
  * The scrolling part of an approval card. When the review is taller than its
@@ -890,16 +910,42 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
   const [pending, setPending] = useState<Record<string, "approve" | "reject">>({});
   const [settled, setSettled] = useState<Record<string, "approve" | "reject">>({});
   const [details, setDetails] = useState<Record<string, boolean>>({});
+  // Why a decision was refused, such as an action only its account's owner
+  // can approve: shown on the card, which stays open to decide again.
+  const [failures, setFailures] = useState<Record<string, string>>({});
+  // Answers in progress, each tied to the question it answers: a server that
+  // asks again on the same call starts a fresh answer and a live card.
+  const [answers, setAnswers] = useState<
+    Record<string, { question: string; draft: McpQuestionDraft; problem: string | null }>
+  >({});
+  // Taps land before the busy state re-renders: one request per card, however fast.
+  const inFlight = useRef(new Set<string>());
   if (approvals.length === 0) return null;
-  const decide = async (id: string, decision: "approve" | "reject") => {
-    setPending((current) => ({ ...current, [id]: decision }));
+  const decide = async (
+    id: string,
+    decision: "approve" | "reject",
+    answer?: McpElicitationAnswer,
+    key = id,
+  ) => {
+    if (inFlight.current.has(key)) return;
+    inFlight.current.add(key);
+    setPending((current) => ({ ...current, [key]: decision }));
+    setFailures((current) => {
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
     try {
-      await onDecide(id, decision);
-      setSettled((current) => ({ ...current, [id]: decision }));
+      await (answer ? onDecide(id, decision, answer) : onDecide(id, decision));
+      setSettled((current) => ({ ...current, [key]: decision }));
+    } catch (error) {
+      const message = error instanceof Error && error.message ? error.message : String(error);
+      setFailures((current) => ({ ...current, [key]: message }));
     } finally {
+      inFlight.current.delete(key);
       setPending((current) => {
         const next = { ...current };
-        delete next[id];
+        delete next[key];
         return next;
       });
     }
@@ -924,7 +970,9 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
       nestedScrollEnabled
     >
       {approvals.map((approval) => {
-        const busy = Boolean(pending[approval.id]) || Boolean(settled[approval.id]);
+        const question = approval.elicitation ? JSON.stringify(approval.elicitation) : null;
+        const key = question ? `${approval.id}:${question}` : approval.id;
+        const busy = Boolean(pending[key]) || Boolean(settled[key]);
         const toolName = approvalToolName(approval);
         const answer = approvalAnswerLabels(t, toolName);
         const review = pendingApprovalReview(approval, {
@@ -941,6 +989,36 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
         const payload = showDetails ? approvalArgumentsText(approval) : "";
         const approveLabel = answer?.approve ?? messages.approve;
         const rejectLabel = answer?.reject ?? messages.reject;
+        const answering =
+          approval.elicitation && question
+            ? (() => {
+                const elicitation = approval.elicitation;
+                const entry = answers[approval.id];
+                const current =
+                  entry?.question === question
+                    ? entry
+                    : { question, draft: initialMcpQuestionDraft(elicitation), problem: null };
+                return {
+                  elicitation,
+                  ...current,
+                  kind: mcpElicitationKind(elicitation),
+                  update: (draft: McpQuestionDraft, problem: string | null = null) =>
+                    setAnswers((all) => ({ ...all, [approval.id]: { question, draft, problem } })),
+                };
+              })()
+            : null;
+        const send = () => {
+          if (!answering) return void decide(approval.id, "approve");
+          const resolved = mcpQuestionAnswer(answering.elicitation, answering.draft);
+          if (!resolved.ok) return answering.update(answering.draft, resolved.problem);
+          answering.update(answering.draft);
+          void decide(
+            approval.id,
+            "approve",
+            { content: resolved.content, elicitationRound: answering.elicitation.round },
+            key,
+          );
+        };
         return (
           <DecisionCard key={approval.id} accessibilityLabel={review.title}>
             <View style={{ padding: 16, gap: 12 }}>
@@ -951,7 +1029,7 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
                   gap: 12,
                 }}
               >
-                <DecisionMark icon="shield-check" />
+                <DecisionMark icon={answering ? "message-circle-question" : "shield-check"} />
                 <View style={{ flex: 1, minWidth: 0, paddingTop: 1 }}>
                   <Text
                     accessibilityRole="header"
@@ -966,15 +1044,50 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
                   </Text>
                   <DecisionMeta
                     waiting
-                    parts={[t("toolActionReview.approvalNeeded"), review.accountLabel]}
+                    parts={[
+                      answering
+                        ? t("approvalSurface.serverAsks", { server: answering.elicitation.server })
+                        : t("toolActionReview.approvalNeeded"),
+                      review.accountLabel,
+                    ]}
                   />
                 </View>
               </View>
               {/* The title and the buttons stay pinned; a long review scrolls
                   between them so the buttons are never pushed off screen. */}
               <ReviewBody maxHeight={bodyMaxHeight}>
-                {note ? <Text style={{ ...body, color: c["fg-muted"] }}>{note}</Text> : null}
-                {facts.effects.length > 0 ? (
+                {answering ? (
+                  <>
+                    <McpQuestionFields
+                      elicitation={answering.elicitation}
+                      draft={answering.draft}
+                      disabled={busy}
+                      onChange={(requestId, name, value) =>
+                        answering.update({
+                          ...answering.draft,
+                          [requestId]: { ...answering.draft[requestId], [name]: value },
+                        })
+                      }
+                    />
+                    {answering.problem ? (
+                      <Text
+                        accessibilityRole="alert"
+                        style={{ ...small, color: c["status-failed"] }}
+                      >
+                        {answering.problem}
+                      </Text>
+                    ) : null}
+                  </>
+                ) : null}
+                {failures[key] ? (
+                  <Text accessibilityRole="alert" style={{ ...small, color: c["status-failed"] }}>
+                    {failures[key]}
+                  </Text>
+                ) : null}
+                {note && !answering ? (
+                  <Text style={{ ...body, color: c["fg-muted"] }}>{note}</Text>
+                ) : null}
+                {facts.effects.length > 0 && !answering ? (
                   <View accessibilityLabel={t("toolActionReview.alsoChanges")} style={{ gap: 2 }}>
                     {facts.effects.map((effect) => (
                       <Text key={effect} style={{ ...body, color: c.fg }}>
@@ -984,7 +1097,7 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
                     ))}
                   </View>
                 ) : null}
-                {facts.shown.length > 0 ? (
+                {facts.shown.length > 0 && !answering ? (
                   <View
                     style={{
                       gap: 10,
@@ -1018,7 +1131,7 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
                     ) : null}
                   </View>
                 ) : null}
-                {!canApprove ? (
+                {!canApprove && !answering ? (
                   <Text style={{ ...body, color: c.fg }}>
                     {t("toolActionReview.theDetailsOfThisOlder")}
                   </Text>
@@ -1050,22 +1163,36 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
               <DecisionActions
                 style={{ marginTop: 4 }}
                 primary={
-                  canApprove ? (
+                  canApprove || answering ? (
                     <DecisionButton
                       kind="primary"
-                      label={settled[approval.id] === "approve" ? messages.approved : approveLabel}
-                      busy={pending[approval.id] === "approve"}
+                      label={
+                        settled[key] === "approve"
+                          ? messages.approved
+                          : answering
+                            ? answering.kind === "form"
+                              ? t("approvalSurface.sendAnswer")
+                              : t("approvalSurface.allow")
+                            : approveLabel
+                      }
+                      busy={pending[key] === "approve"}
                       disabled={busy}
-                      onPress={() => void decide(approval.id, "approve")}
+                      onPress={send}
                     />
                   ) : undefined
                 }
                 secondary={
                   <DecisionButton
-                    label={settled[approval.id] === "reject" ? messages.rejected : rejectLabel}
-                    busy={pending[approval.id] === "reject"}
+                    label={
+                      settled[key] === "reject"
+                        ? messages.rejected
+                        : answering
+                          ? t("approvalSurface.decline")
+                          : rejectLabel
+                    }
+                    busy={pending[key] === "reject"}
                     disabled={busy}
-                    onPress={() => void decide(approval.id, "reject")}
+                    onPress={() => void decide(approval.id, "reject", undefined, key)}
                   />
                 }
                 lead={

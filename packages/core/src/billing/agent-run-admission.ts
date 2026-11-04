@@ -3,10 +3,21 @@ import {
   configuredStaticUsageLimits,
   type Settings,
 } from "@opengeni/config";
-import type { EntitlementsPort } from "@opengeni/contracts";
+import {
+  BYOK_UPGRADE_REQUIRED_MESSAGE,
+  type BillingOrigin,
+  type EntitlementsPort,
+} from "@opengeni/contracts";
+import {
+  byokPaidCreditRefusalMessage,
+  byokPlatformFeeActive,
+  ownSubscriptionPlanAllows,
+} from "./byok-platform-fee";
 import { coreRoutedSubscriptionFunding, modelFundingForAdmission } from "./limits";
 import {
+  chargeBillingOrigin,
   checkWorkspaceAllowance,
+  getByokFeeSpendableBalance,
   getSpendableCreditBalance,
   isCodexBilledTurn,
   sumUsageQuantity,
@@ -15,6 +26,14 @@ import {
 
 export type AgentRunAdmissionDenial =
   | "insufficient_credits"
+  /** API work found no credits: plan credit never pays for it. */
+  | "api_credits_required"
+  /** The person's own key found no paid credit for its platform fee. */
+  | "byok_paid_credit_required"
+  /** The same on the Free plan, where upgrading is the fix. */
+  | "byok_upgrade_required"
+  /** The person's own subscription needs a paid plan (Pro or higher). */
+  | "subscription_plan_required"
   | "allowance_exhausted"
   | "monthly_model_cost_limit"
   | "monthly_agent_run_limit";
@@ -30,6 +49,11 @@ export async function agentRunAdmissionDenial(
     /** The accepted work's causal human, not the scheduler/service caller. */
     initiatingHumanSubjectId?: string | null;
     acceptedTurn?: { sessionId: string; turnId: string };
+    /**
+     * Who pays: API work needs credits; plan credit never pays for it. A
+     * resolver is read only when credits decide admission.
+     */
+    billingOrigin?: BillingOrigin | null | (() => Promise<BillingOrigin | null>);
   },
 ): Promise<AgentRunAdmissionDenial | null> {
   const codexBilled = await isCodexBilledTurn({
@@ -41,7 +65,7 @@ export async function agentRunAdmissionDenial(
     subjectId: input.initiatingHumanSubjectId ?? null,
     ...(input.acceptedTurn ? { acceptedTurn: input.acceptedTurn } : {}),
   });
-  const externallyBilled = modelFundingForAdmission(
+  const funding = modelFundingForAdmission(
     services.settings,
     input.model,
     codexBilled,
@@ -52,7 +76,27 @@ export async function agentRunAdmissionDenial(
       subjectId: input.initiatingHumanSubjectId ?? null,
       ...(input.acceptedTurn ? { acceptedTurn: input.acceptedTurn } : {}),
     }),
-  ).fundedWithoutCredits;
+  );
+  const externallyBilled = funding.fundedWithoutCredits;
+  // The person's own subscription pays no fee; it needs a paid plan.
+  if (
+    funding.ownSubscription &&
+    !(await ownSubscriptionPlanAllows(services.db, services.settings, input.accountId))
+  ) {
+    return "subscription_plan_required";
+  }
+  // The person's own key pays the platform fee, payable only from paid credit.
+  if (funding.byok && byokPlatformFeeActive(services.settings, input.accountId)) {
+    const billingOrigin = chargeBillingOrigin(
+      typeof input.billingOrigin === "function" ? await input.billingOrigin() : input.billingOrigin,
+    );
+    const balance = await getByokFeeSpendableBalance(services.db, input.accountId, billingOrigin);
+    if (balance.balanceMicros <= 0) {
+      return byokPaidCreditRefusalMessage(balance, billingOrigin) === BYOK_UPGRADE_REQUIRED_MESSAGE
+        ? "byok_upgrade_required"
+        : "byok_paid_credit_required";
+    }
+  }
   if (
     !externallyBilled &&
     (services.settings.billingMode === "stripe" || services.settings.usageLimitsMode === "managed")
@@ -66,12 +110,23 @@ export async function agentRunAdmissionDenial(
       });
       if (!decision.allowed) return "insufficient_credits";
     } else {
+      const billingOrigin =
+        typeof input.billingOrigin === "function"
+          ? await input.billingOrigin()
+          : input.billingOrigin;
       const balance = await getSpendableCreditBalance(
         services.db,
         input.accountId,
         canonicalizeConfiguredModelId(services.settings, input.model),
+        undefined,
+        undefined,
+        billingOrigin,
       );
-      if (balance.balanceMicros <= 0) return "insufficient_credits";
+      if (balance.balanceMicros <= 0) {
+        return chargeBillingOrigin(billingOrigin) === "api"
+          ? "api_credits_required"
+          : "insufficient_credits";
+      }
     }
   }
   const refusal = await checkWorkspaceAllowance(services.db, {

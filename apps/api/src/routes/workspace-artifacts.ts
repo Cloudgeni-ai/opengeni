@@ -43,6 +43,7 @@ import {
   getWorkspaceArtifactCurrent,
   listWorkspaceArtifacts,
   ChannelNotFoundError,
+  ChannelAudienceMismatchError,
   listSiteProjectConversationIds,
   moveSiteToProject,
   recordSiteOpened,
@@ -359,7 +360,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
         SiteProjectResponse.parse({ siteId, channelId: change.channelId, ...moved }),
       );
     } catch (error) {
-      if (error instanceof ChannelNotFoundError)
+      if (error instanceof ChannelNotFoundError || error instanceof ChannelAudienceMismatchError)
         throw new HTTPException(422, { message: error.message });
       return workspaceArtifactErrorResponse(context, error);
     }

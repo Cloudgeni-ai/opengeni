@@ -235,6 +235,7 @@ async function acceptanceFixture(
     } as Awaited<ReturnType<typeof db.getScheduledTaskClaudeProviderAccountAuthoritySnapshot>>),
     // Codex v2 (M3 PR 3b): before the cutover a task carries none.
     spyOn(db, "getScheduledTaskSubscriptionAuthority").mockResolvedValue(null),
+    spyOn(db, "readScheduledTaskBillingOrigin").mockResolvedValue("app"),
     spyOn(db, "getScheduledTaskRunPersonalResourceAuthority").mockResolvedValue(null),
     spyOn(db, "recordUsageEvent").mockResolvedValue(undefined),
     spyOn(core, "resolveWorkspaceCatalogSettings").mockResolvedValue({ settings } as Awaited<

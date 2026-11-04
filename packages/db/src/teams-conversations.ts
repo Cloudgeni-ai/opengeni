@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { rawRows, withRlsContext, type Database } from "./database";
+import { namedSubjectPersonalWorkspaceId } from "./slack-routing-personal-workspace";
 import {
   CONNECTION_DISCONNECTED_AUDIT_ACTION,
   insertDisconnectAuditEventInScope,
@@ -29,6 +30,9 @@ export type TeamsRoute = TeamsInstallation & {
   service_url: string;
   bot_id: string;
   session_id: string;
+  /** Where a 1:1 route's session lives when not in the installation's workspace:
+   * the linked person's own Personal workspace. Null keeps the installation's. */
+  session_workspace_id: string | null;
   session_bound: boolean;
   delivered_sequence: number;
   lease_token: string | null;
@@ -277,11 +281,32 @@ export async function enqueueTeamsMessage(
     botId: string;
     eventId: string;
     payload: unknown;
+    /** A 1:1 route's session in the sender's own Personal workspace. */
+    sessionWorkspaceId?: string | null;
   },
 ) {
   if (input.groupAudience && input.groupRevision === undefined)
     throw new Error("teams_group_revision_missing");
+  const sessionWorkspaceId = input.sessionWorkspaceId ?? null;
+  if (
+    sessionWorkspaceId &&
+    (!input.personal ||
+      input.groupAudience ||
+      input.channelId ||
+      sessionWorkspaceId === i.workspace_id)
+  )
+    throw new Error("teams_route_unavailable");
   return teamsScoped(db, i, async (tx) => {
+    // Only the linked person's own Personal workspace, named by their active
+    // organization membership, can hold their 1:1 chat.
+    if (
+      sessionWorkspaceId &&
+      (await namedSubjectPersonalWorkspaceId(tx, {
+        accountId: i.account_id,
+        subjectId: input.subjectId,
+      })) !== sessionWorkspaceId
+    )
+      throw new Error("teams_route_unavailable");
     const active = await rawRows(
       tx,
       sql`select 1 from teams_bot_installations where tenant_id=${i.tenant_id}::uuid and active and generation=${i.generation}::uuid and (${input.groupRevision ?? null}::bigint is null or group_revision=${input.groupRevision ?? null}::bigint) for update`,
@@ -309,8 +334,8 @@ export async function enqueueTeamsMessage(
         input = { ...input, routeId: `teams-group:${randomUUID()}` };
       }
     }
-    await tx.execute(sql`insert into teams_bot_routes(account_id,workspace_id,tenant_id,route_id,generation,actor_id,subject_id,personal,channel_id,conversation_id,thread_id,service_url,bot_id,group_audience,group_active)
-   values(${i.account_id}::uuid,${i.workspace_id}::uuid,${i.tenant_id}::uuid,${input.routeId},${i.generation}::uuid,${input.actorId}::uuid,${input.subjectId},${input.personal},${input.channelId ?? null},${input.conversationId},${input.threadId},${input.serviceUrl},${input.botId},${input.groupAudience ? JSON.stringify(input.groupAudience) : null}::jsonb,${Boolean(input.groupAudience)}) on conflict(route_id) do nothing`);
+    await tx.execute(sql`insert into teams_bot_routes(account_id,workspace_id,tenant_id,route_id,generation,actor_id,subject_id,personal,channel_id,conversation_id,thread_id,service_url,bot_id,group_audience,group_active,session_workspace_id)
+   values(${i.account_id}::uuid,${i.workspace_id}::uuid,${i.tenant_id}::uuid,${input.routeId},${i.generation}::uuid,${input.actorId}::uuid,${input.subjectId},${input.personal},${input.channelId ?? null},${input.conversationId},${input.threadId},${input.serviceUrl},${input.botId},${input.groupAudience ? JSON.stringify(input.groupAudience) : null}::jsonb,${Boolean(input.groupAudience)},${sessionWorkspaceId}::uuid) on conflict(route_id) do nothing`);
     const [route] = await rawRows<TeamsRoute>(
       tx,
       sql`select * from teams_bot_routes where route_id=${input.routeId}`,
@@ -318,7 +343,8 @@ export async function enqueueTeamsMessage(
     if (
       !route ||
       route.generation !== i.generation ||
-      (route.personal && route.actor_id !== input.actorId)
+      (route.personal && route.actor_id !== input.actorId) ||
+      (route.session_workspace_id ?? null) !== sessionWorkspaceId
     )
       throw new Error("teams_route_unavailable");
     await tx.execute(

@@ -69,6 +69,7 @@ import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-in
 import { createAutomaticAgentUpdater } from "./sandbox/agent-update";
 import { startTeamsBotPump } from "./integrations/teams-bot";
 import { startSlackInteractionPump } from "./integrations/slack-interactions";
+import { startSlackAgentUpdatePump } from "./integrations/slack-agent-updates";
 import { startMemorySlackPublicationPump } from "./memory-slack-delivery";
 import { startTemporalScheduleCleanupPump } from "./temporal-schedule-cleanup";
 import { closeNativeExternalVaultProviders } from "./integrations/external-vault-providers";
@@ -360,6 +361,28 @@ export async function createTemporalWorkflowClient(
           // and one after its deletion makes it again from the bundle.
           workflowIdReusePolicy: "ALLOW_DUPLICATE",
           args: [input],
+        });
+      } catch (error) {
+        if (isWorkflowAlreadyStarted(error)) return;
+        throw error;
+      }
+    },
+    scheduleSessionArchive: async (input) => {
+      try {
+        await temporal.workflow.start("sessionArchiveRequestWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          // One Archive, one run: an undone and repeated Archive has a new time.
+          workflowId: `session-archive-request-${input.workspaceId}-${input.sessionId}-${Date.parse(input.archivedAt)}`,
+          startDelay: Math.max(0, input.runAt.getTime() - Date.now()),
+          args: [
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              subjectId: input.subjectId,
+              archivedAt: input.archivedAt,
+            },
+          ],
         });
       } catch (error) {
         if (isWorkflowAlreadyStarted(error)) return;
@@ -669,6 +692,9 @@ export async function startApi(options: StartApiOptions = {}) {
   const stopSlackInteractionPump = settings.slackSigningSecret
     ? startSlackInteractionPump(routeDeps)
     : undefined;
+  const stopSlackAgentUpdatePump = settings.slackSigningSecret
+    ? startSlackAgentUpdatePump(routeDeps)
+    : undefined;
   const stopTeamsBotPump = startTeamsBotPump(routeDeps);
   const stopMemorySlackPublicationPump = startMemorySlackPublicationPump(routeDeps);
   const stopWorkspaceWebhookDispatchPump = startWorkspaceWebhookDispatchPump({
@@ -785,6 +811,7 @@ export async function startApi(options: StartApiOptions = {}) {
       const vaultProvidersClosed = closeNativeExternalVaultProviders().catch(() => undefined);
       metricsServer?.stop(true);
       stopSlackInteractionPump?.();
+      await stopSlackAgentUpdatePump?.();
       stopTeamsBotPump();
       await stopMemorySlackPublicationPump();
       stopMetricsIngestion?.();

@@ -390,6 +390,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
   "test/e2e/timeline-exchange-fold.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/timeline-tip-follow.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/lossless-message.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
+  "test/e2e/machine-card.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/knowledge-surfaces.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/api-router",
@@ -442,6 +443,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
   "test/e2e/capability-details.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/workspace-switcher-trigger.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/session-rail-row-metadata.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/project-profile.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/project-rename.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/session-sidebar.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/desktop-rail.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
@@ -544,6 +546,7 @@ const BROWSER_ACCEPTANCE_TESTS: Readonly<Record<BrowserAcceptanceLane, readonly 
     "test/e2e/timeline-exchange-fold.browser.e2e.ts",
     "test/e2e/timeline-tip-follow.browser.e2e.ts",
     "test/e2e/lossless-message.browser.e2e.ts",
+    "test/e2e/machine-card.browser.e2e.ts",
     "test/e2e/user-message-disclosure.browser.e2e.ts",
     "test/e2e/session-search.browser.e2e.ts",
     "test/e2e/realtime-demo.browser.e2e.ts",

@@ -119,8 +119,10 @@ export function providerEnabled(input: PlacementInput, provider: string): boolea
 /**
  * Authorization of one connection for the session's work, independent of
  * model and capacity. Personal connections serve only their owner's own work,
- * in the owner's private sessions or Personal workspace, with frozen personal
- * authority for that provider (SUB-ELIG-05, design 3.7, 3.8). Shared
+ * in the owner's private sessions or Personal workspace, or the exact
+ * connection a turn of theirs accepted for this session (an explicit choice,
+ * or their own subscription turned on in this workspace, D-53), with frozen
+ * personal authority for that provider (SUB-ELIG-05, design 3.7, 3.8). Shared
  * connections serve the workspaces and people in their scope, where people are
  * evaluated against the session owner.
  */
@@ -247,14 +249,44 @@ export function servableAgainAt(
   return transitions.find((now) => canServe({ ...input, now }, connection, modelId)) ?? null;
 }
 
-/** Own Personal workspaces use connected accounts directly; elsewhere fallback requires consent. */
-export function personalFallbackActive(input: PlacementInput): boolean {
-  if (input.session.ownerMembershipId === null) return false;
-  if (input.workspace.kind === "shared" && input.session.visibility === "shared") return false;
-  return (
-    (input.workspace.kind === "personal" &&
-      input.workspace.ownerMembershipId === input.session.ownerMembershipId) ||
-    (input.settings.personalFallbackAllowed &&
-      !!findPerson(input, input.session.ownerMembershipId)?.personalFallbackOptIn)
+/**
+ * Is this connection the turn person's own subscription, turned on where the
+ * turn runs (D-53)? That is their own Personal workspace, or the exact
+ * connection the turn's accepted personal authority names for this session.
+ * Acceptance writes that entry from the person's explicit choice or from
+ * their "use it for my turns here" switch. Authorization is separate
+ * (`authorizationIneligibility`): this only says the account takes part in
+ * automatic selection, and ranks first there (SUB-SEL-01).
+ */
+export function ownSubscriptionTurnedOn(
+  input: PlacementInput,
+  connection: SubscriptionConnection,
+): boolean {
+  const ownership = connection.ownership;
+  if (ownership.kind !== "personal") return false;
+  const owner = ownership.ownerMembershipId;
+  if (input.workspace.kind === "personal" && input.workspace.ownerMembershipId === owner) {
+    return true;
+  }
+  return input.session.personalAuthority.some(
+    (entry) =>
+      entry.provider === connection.provider &&
+      entry.ownerMembershipId === owner &&
+      entry.sharedSessionChoice?.sessionId === input.session.id &&
+      entry.sharedSessionChoice.connectionId === connection.id,
   );
+}
+
+/**
+ * May automatic selection consider this connection at all (SUB-SEL-01,
+ * SUB-SEL-02)? Shared connections may; a personal one only when it is the
+ * turn person's own subscription turned on here. Any other personal
+ * authority, such as an Only me chat in a shared workspace, serves only an
+ * explicit choice.
+ */
+export function automaticallyUsable(
+  input: PlacementInput,
+  connection: SubscriptionConnection,
+): boolean {
+  return connection.ownership.kind === "shared" || ownSubscriptionTurnedOn(input, connection);
 }

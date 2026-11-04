@@ -127,18 +127,22 @@ describe("Claude adapter", () => {
       expect(error.message).toContain("Claude");
   });
 
-  test("workspace model policy judges a Claude model under its own scope's id and the organization id", () => {
+  test("workspace model policy judges every Claude model id form under the same provider ids", () => {
     const { adapter } = SUBSCRIPTION_CORE_CLAUDE;
     const organization = "organization-claude-subscription";
     const workspace = "workspace-claude-subscription";
-    expect(subscriptionCoreClaudeModelPolicyProviderIds(`${organization}/claude-sonnet-5`)).toEqual(
-      [organization],
-    );
-    // On the core a workspace-scoped model runs on organization connections:
-    // both identities must be allowed, so this can only narrow access.
-    expect(subscriptionCoreModelPolicyProviderIds(adapter, `${workspace}/claude-sonnet-5`)).toEqual(
-      [workspace, organization],
-    );
+    // Every form names one model served by the same accounts, so each form
+    // carries every Claude subscription provider id; workspace model policy
+    // evaluates those as one provider (`evaluateWorkspaceModelPolicy`).
+    const every = ["claude-subscription", workspace, organization];
+    for (const modelId of [
+      `${organization}/claude-sonnet-5`,
+      `${workspace}/claude-sonnet-5`,
+      "claude/claude-sonnet-5",
+    ]) {
+      expect(subscriptionCoreClaudeModelPolicyProviderIds(modelId)).toEqual(every);
+      expect(subscriptionCoreModelPolicyProviderIds(adapter, modelId)).toEqual(every);
+    }
     // Any other id keeps the provider's declared identity.
     for (const modelId of ["claude-sonnet-5", "anthropic/claude-sonnet-5", "/claude-sonnet-5"])
       expect(subscriptionCoreModelPolicyProviderIds(adapter, modelId)).toEqual([
@@ -384,6 +388,7 @@ describe("Claude usage in the shared quota model", () => {
     expect(decoded.source).toBe("usage_endpoint");
     expect(quotaCapacity(quota(decoded), now.getTime())).toEqual({ kind: "available" });
     expect(decoded.modelCooldowns).toEqual({
+      "claude/claude-opus-5-5": at(7200) * 1000,
       "organization-claude-subscription/claude-opus-5-5": at(7200) * 1000,
       "workspace-claude-subscription/claude-opus-5-5": at(7200) * 1000,
     });
@@ -819,6 +824,7 @@ describe("Claude usage in the shared quota model", () => {
     };
     const decoded = decode(observation);
     expect(Object.keys(decoded.modelCooldowns).sort()).toEqual([
+      "claude/claude-opus-5-5",
       "organization-claude-subscription/claude-opus-5-5",
       "workspace-claude-subscription/claude-opus-5-5",
     ]);
@@ -874,6 +880,7 @@ describe("Claude usage in the shared quota model", () => {
       ],
     });
     expect(Object.keys(covered.modelCooldowns).sort()).toEqual([
+      "claude/claude-haiku-5-5",
       "organization-claude-subscription/claude-haiku-5-5",
       "workspace-claude-subscription/claude-haiku-5-5",
     ]);

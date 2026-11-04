@@ -18,6 +18,7 @@ import {
 } from "@opengeni/db";
 import {
   GitHubAppApiError,
+  GitHubAppConfigurationError,
   getGitHubAppWebhookSetup,
   listGitHubAppInstallationSummaries,
   listGitHubAppRepositories,
@@ -25,6 +26,10 @@ import {
   setGitHubAppWebhookUrl,
 } from "@opengeni/github";
 import type { ApiRouteDeps, GitHubAppWebhookPort } from "@opengeni/core";
+import {
+  createGitHubRepositoryCatalog,
+  type GitHubRepositoryCatalog,
+} from "./github-repository-catalog";
 
 /**
  * The GitHub App's webhook settings for GitHub event sources: the host's App
@@ -190,9 +195,45 @@ export function githubInstallationBindingLifecycle(
   return "active";
 }
 
+/** One repository catalog per GitHub App source (host App or this deployment's). */
+const repositoryCatalogs = new WeakMap<object, GitHubRepositoryCatalog>();
+
+/**
+ * Only an outage-like failure (GitHub 5xx, rate limit, timeout, network) is
+ * answered with the last good list. Missing configuration or an installation
+ * GitHub no longer grants (401, 403, 404) is reported as it happens.
+ */
+export function isTransientGitHubRepositoryListFailure(error: unknown): boolean {
+  if (error instanceof GitHubAppConfigurationError) return false;
+  if (error instanceof GitHubAppApiError && error.status !== null) {
+    if (error.status === 403) return /rate limit/i.test(error.message);
+    return error.status === 408 || error.status === 429 || error.status >= 500;
+  }
+  return true;
+}
+
+function repositoryCatalogFor(deps: ApiRouteDeps): GitHubRepositoryCatalog {
+  const source: object = deps.githubAppApi ?? deps.settings;
+  let catalog = repositoryCatalogs.get(source);
+  if (!catalog) {
+    catalog = createGitHubRepositoryCatalog({
+      serveStaleOn: isTransientGitHubRepositoryListFailure,
+    });
+    repositoryCatalogs.set(source, catalog);
+  }
+  return catalog;
+}
+
+/**
+ * The GitHub repositories this workspace may use. Bindings and the workspace's
+ * repository allowlist are read live every time; GitHub's own repository list
+ * comes from a short-lived per-process catalog unless `fresh` is set (an
+ * explicit sync), so passive reads survive a brief GitHub failure.
+ */
 export async function listWorkspaceGitHubRepositories(
   deps: ApiRouteDeps,
   workspaceId: string,
+  options: { fresh?: boolean } = {},
 ): Promise<GitHubRepository[]> {
   const bindings = await listWorkspaceGitHubInstallationBindings(deps, workspaceId);
   const activeInstallationIds = new Set(
@@ -213,9 +254,20 @@ export async function listWorkspaceGitHubRepositories(
     return [];
   }
   const installationIds = authorizedAccess.map((installation) => installation.installationId);
-  const repositories = deps.githubAppApi?.listRepositories
-    ? await deps.githubAppApi.listRepositories({ installationIds })
-    : await listGitHubAppRepositories(deps.settings, { installationIds });
+  // A (re)connect on any API replica rewrites the binding: a list fetched
+  // before that may miss repositories the person just shared.
+  const boundAt = Math.max(
+    ...authorizedAccess.map((installation) => Date.parse(installation.updatedAt) || 0),
+  );
+  const host = deps.githubAppApi;
+  const repositories = await repositoryCatalogFor(deps).read(
+    installationIds,
+    () =>
+      host?.listRepositories
+        ? host.listRepositories({ installationIds })
+        : listGitHubAppRepositories(deps.settings, { installationIds }),
+    { ...options, notBefore: boundAt },
+  );
   const accessByInstallation = new Map(
     authorizedAccess.map((installation) => [installation.installationId, installation]),
   );

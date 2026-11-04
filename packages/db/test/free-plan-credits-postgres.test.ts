@@ -122,7 +122,9 @@ test("Free is allocated first only for covered models; concurrency and replay ca
   expect(balance.generalBalanceMicros).toBe(0);
   expect(balance.plan).toMatchObject({ creditScoped: true, creditRemainingMicros: 10 * M });
   expect(spendableCreditMicros(balance, "claude-opus")).toBe(0);
-  expect(spendableCreditMicros(balance)).toBe(0);
+  // Free plan credit pays for app tools (no model), never for uncovered models.
+  expect(spendableCreditMicros(balance)).toBe(10 * M);
+  expect(spendableCreditMicros(balance, undefined, "api")).toBe(0);
   expect((await charge(id, M, "claude-opus")).debitedMicros).toBe(0);
   const first = await charge(id, 6 * M, "model-a");
   expect(first.balance.plan?.creditRemainingMicros).toBe(4 * M);

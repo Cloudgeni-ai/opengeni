@@ -2043,6 +2043,103 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
     expect((await forkSessionContent(client.db, input)).sessionId).toBe(fork.sessionId);
   }, 180_000);
 
+  test("a reply sent through wait_for_input is a fork point at its wait call", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    const workspaceId = human.personalWorkspaceId;
+    const sourceSessionId = await ownedSession(human, workspaceId);
+    const turnId = crypto.randomUUID();
+    const userEventId = crypto.randomUUID();
+    const replyEventId = crypto.randomUUID();
+    const otherReplyEventId = crypto.randomUUID();
+    const reply = "Queued. The batch lands at 20:00.";
+    await shared.admin`insert into session_turns (
+      id, account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+      status, position, prompt, model, reasoning_effort, sandbox_backend
+    ) values (${turnId}, ${human.accountId}, ${workspaceId}, ${sourceSessionId},
+      ${userEventId}, 'wait-reply-fork-test', 'completed', 1, 'Ship it', 'test-model', 'medium', 'none')`;
+    for (const [index, event] of [
+      { id: userEventId, type: "user.message", payload: { text: "Ship it" } },
+      {
+        id: replyEventId,
+        type: "agent.message.completed",
+        payload: {
+          text: reply,
+          phase: "final_answer",
+          messageId: `wait_for_input:reply:${crypto.randomUUID()}`,
+        },
+      },
+      {
+        id: otherReplyEventId,
+        type: "agent.message.completed",
+        payload: {
+          text: "A reply no wait call carries",
+          phase: "final_answer",
+          messageId: `wait_for_input:reply:${crypto.randomUUID()}`,
+        },
+      },
+    ].entries()) {
+      await shared.admin`insert into session_events (id, account_id, workspace_id, session_id, turn_id, sequence, type, payload)
+        values (${event.id}, ${human.accountId}, ${workspaceId}, ${sourceSessionId}, ${turnId}, ${index + 1}, ${event.type}, ${shared.admin.json(event.payload)})`;
+    }
+    const waitCall = (callId: string, waitReply: string): postgres.JSONValue => ({
+      type: "function_call",
+      callId,
+      name: "opengeni__wait_for_input",
+      arguments: JSON.stringify({ reason: "Waiting", timeoutSeconds: 1800, reply: waitReply }),
+    });
+    for (const [index, item] of [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "Ship it" }] },
+      { type: "function_call", callId: "work", name: "exec_command", arguments: "{}" },
+      { type: "function_call_result", callId: "work", name: "exec_command", output: "ok" },
+      waitCall("wait", reply),
+      {
+        type: "function_call_result",
+        callId: "wait",
+        name: "opengeni__wait_for_input",
+        output: "{}",
+      },
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Later work must not be copied" }],
+      },
+    ].entries()) {
+      await shared.admin`insert into session_history_items (account_id, workspace_id, session_id, turn_id, position, item)
+        values (${human.accountId}, ${workspaceId}, ${sourceSessionId}, ${turnId}, ${index + 1}, ${shared.admin.json(item)})`;
+    }
+    const input = {
+      sourceWorkspaceId: workspaceId,
+      sourceSessionId,
+      actorSubjectId: human.subjectId,
+      destinationWorkspaceId: workspaceId,
+      destinationVisibility: "user_private" as const,
+      workspaceSharedAcknowledged: false,
+      operationKey: crypto.randomUUID(),
+      sourceEventId: replyEventId,
+    };
+    const fork = await forkSessionContent(client.db, input);
+    // The user message, the earlier tool exchange, and the wait call with its result.
+    expect(fork.copiedHistoryItemCount).toBe(5);
+    const rows =
+      await shared.admin`select item from session_history_items where session_id = ${fork.sessionId} order by position`;
+    expect(JSON.stringify(rows)).toContain("Queued. The batch lands");
+    expect(JSON.stringify(rows)).not.toContain("Later work");
+    // A reply that no wait call in its turn carries still has no boundary.
+    await expect(
+      forkSessionContent(client.db, {
+        ...input,
+        sourceEventId: otherReplyEventId,
+        operationKey: crypto.randomUUID(),
+      }),
+    ).rejects.toMatchObject({ forkPointRefusal: "boundary_not_retained" });
+    // A wait call whose result is missing cannot be a boundary either.
+    await shared.admin`delete from session_history_items where session_id = ${sourceSessionId} and position = 5`;
+    await expect(
+      forkSessionContent(client.db, { ...input, operationKey: crypto.randomUUID() }),
+    ).rejects.toMatchObject({ forkPointRefusal: "boundary_not_retained" });
+  }, 180_000);
+
   test("fork_session_content accepts the owner's own personal workspace as source", async () => {
     if (!shared || !client) return;
     const human = await provisionManagedHuman();

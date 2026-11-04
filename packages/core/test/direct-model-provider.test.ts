@@ -86,3 +86,83 @@ test("invalid routes never dispatch and network errors are safe to display", asy
   ).rejects.toThrow("couldn’t reach");
   expect(calls).toBe(1);
 });
+
+test("an OpenAI-compatible endpoint is checked with one short Chat Completions or Responses call", async () => {
+  for (const api of [undefined, "chat", "responses"] as const) {
+    let requestedUrl = "";
+    let request: RequestInit = {};
+    const transport = (async (url: string, init: RequestInit) => {
+      requestedUrl = url;
+      request = init;
+      return Response.json(
+        api === "responses"
+          ? { output: [{ type: "message", content: [] }] }
+          : { choices: [{ message: { role: "assistant", content: "OK" } }] },
+      );
+    }) as typeof fetch;
+    await verifyDirectModelAccess(
+      {
+        provider: "openai_compatible",
+        baseUrl: "https://api.example.com/v1",
+        model: "org/model:tag",
+        ...(api ? { api } : {}),
+      },
+      "private-test-key",
+      transport,
+    );
+    expect(requestedUrl).toBe(
+      api === "responses"
+        ? "https://api.example.com/v1/responses"
+        : "https://api.example.com/v1/chat/completions",
+    );
+    expect(request.redirect).toBe("error");
+    expect(new Headers(request.headers).get("authorization")).toBe("Bearer private-test-key");
+    expect(JSON.parse(request.body as string)).toEqual(
+      api === "responses"
+        ? { model: "org/model:tag", input: "Reply OK.", max_output_tokens: 32 }
+        : {
+            model: "org/model:tag",
+            messages: [{ role: "user", content: "Reply OK." }],
+            max_tokens: 32,
+            stream: false,
+          },
+    );
+  }
+});
+
+test("OpenAI-compatible check failures are actionable and never reflect the endpoint's reply", async () => {
+  const config = {
+    provider: "openai_compatible" as const,
+    baseUrl: "https://api.example.com/v1",
+    model: "model",
+  };
+  for (const [status, message] of [
+    [401, "API key"],
+    [404, "base URL"],
+    [400, "model ID exactly"],
+    [429, "quota"],
+    [500, "Try again"],
+  ] as const) {
+    const transport = (async () =>
+      Response.json({ error: { message: "private-test-key" } }, { status })) as typeof fetch;
+    const error = await verifyDirectModelAccess(config, "private-test-key", transport).catch(
+      (caught: unknown) => caught as Error,
+    );
+    expect(error?.message).toContain(message);
+    expect(error?.message).not.toContain("private-test-key");
+  }
+  // A success status without a chat reply is not a working endpoint.
+  const html = (async () => new Response("<html>private-test-key</html>")) as typeof fetch;
+  await expect(verifyDirectModelAccess(config, "private-test-key", html)).rejects.toThrow(
+    "couldn’t complete",
+  );
+  const refused = (async () => {
+    throw new Error("Model endpoint may not target a private or special-use network address");
+  }) as typeof fetch;
+  const unreachable = await verifyDirectModelAccess(config, "private-test-key", refused).catch(
+    (caught: unknown) => caught as Error & { status?: number },
+  );
+  expect(unreachable?.message).toContain("public HTTPS address");
+  // Shown to the person as is: the API replaces every 502 with a generic outage message.
+  expect(unreachable?.status).toBe(422);
+});

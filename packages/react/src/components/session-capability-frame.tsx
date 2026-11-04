@@ -100,12 +100,14 @@ export function SessionCapabilityFrame({
   const buttonRef = opener ?? localOpener;
   const sectionRef = cardRef ?? localCard;
   const portalStyle = usePortalTokenStyle(sectionRef.current);
+  // A row without a better name is titled by its domain; never say it twice.
+  const shownSubtitle = subtitle.trim().toLowerCase() === name.trim().toLowerCase() ? "" : subtitle;
   const identity = (
     <>
       <Mark src={logo} name={name} />
       <div className="og-session-capability-identity">
         <h3>{name}</h3>
-        {subtitle ? <span>{subtitle}</span> : null}
+        {shownSubtitle ? <span>{shownSubtitle}</span> : null}
       </div>
       {badge ? <span className="og-session-capability-type">{badge}</span> : null}
     </>
@@ -126,7 +128,8 @@ export function SessionCapabilityFrame({
           {complete ? <CheckIcon size={16} aria-hidden /> : null}
         </div>
         {complete ? (
-          <p role="status" className="og-session-capability-copy">
+          // Focusable so a card that just finished can keep keyboard focus.
+          <p role="status" tabIndex={-1} className="og-session-capability-copy">
             {completeLabel ??
               (skill
                 ? t("sessionCapabilityFrame.installedWorkspace")
@@ -199,7 +202,8 @@ export function SessionCapabilityFrame({
               const target = buttonRef.current?.isConnected
                 ? buttonRef.current
                 : sectionRef.current;
-              if (target?.isConnected) target.focus();
+              // Keep the view where the conversation is; focus alone must not scroll.
+              if (target?.isConnected) target.focus({ preventScroll: true });
             }}
           >
             <div className="og-session-capability-dialog-header">
@@ -207,7 +211,7 @@ export function SessionCapabilityFrame({
               <div>
                 <Dialog.Title>{name}</Dialog.Title>
                 <Dialog.Description>
-                  {[typeLabel, subtitle].filter(Boolean).join(" · ")}
+                  {[typeLabel, shownSubtitle].filter(Boolean).join(" · ")}
                 </Dialog.Description>
               </div>
               {!busy ? (

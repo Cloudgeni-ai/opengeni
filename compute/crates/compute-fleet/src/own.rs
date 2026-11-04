@@ -186,6 +186,28 @@ impl Ownership {
             },
         }
     }
+
+    /// Takes a sandbox nobody owns anew, leaving it without an owner under
+    /// a new epoch, as a give would: no host that still holds a copy of an
+    /// earlier epoch, such as one given up on, gets it back
+    /// ([`reconcile`]), and its next owner starts from the store's copy.
+    /// For a change of what the sandbox is, such as its shape, which no
+    /// host may then hold as it was. Without `whole`, the copy is taken up
+    /// from its files alone, as after a lost owner: for a change its memory
+    /// image cannot follow, such as other processors or memory.
+    #[must_use]
+    pub const fn retake(self, whole: bool) -> Change {
+        let epoch = self.epoch.next();
+        Change {
+            expect: self,
+            set: Self {
+                owner: None,
+                epoch,
+                taken: epoch,
+                whole: if whole { self.carried(epoch) } else { None },
+            },
+        }
+    }
 }
 
 /// A sandbox a registering host still has, under the epoch it last ran it.
@@ -318,6 +340,11 @@ mod tests {
         assert!(!given.lose().set.whole_copy());
         assert!(!given.lose().set.give(B).set.whole_copy());
         assert!(!given.release().set.reclaim(A).set.whole_copy());
+        // Taken anew for a change its memory cannot follow: not whole,
+        // through later gives too; for one it can, as whole as it was.
+        assert!(!handed_off.retake(false).set.whole_copy());
+        assert!(!handed_off.retake(false).set.give(B).set.whole_copy());
+        assert!(handed_off.retake(true).set.give(B).set.whole_copy());
         assert!(
             !Ownership {
                 whole: None,
@@ -367,6 +394,11 @@ mod tests {
         assert_eq!(reconcile(A, e, Some(row(None, 8, 7))), Verdict::Drop);
         assert_eq!(reconcile(A, e, Some(row(None, 4, 1))), Verdict::Drop);
         assert_eq!(reconcile(A, e, None), Verdict::Drop);
+        // Lost, then taken anew while nobody owned it: its copy stays as
+        // whole as it was.
+        let retaken = row(None, 6, 5).retake(true).set;
+        assert_eq!(retaken, row(None, 7, 7));
+        assert_eq!(reconcile(A, e, Some(retaken)), Verdict::Drop);
         // A owns it again, but took it from the archive after its copy.
         assert_eq!(
             reconcile(A, e, Some(row(Some(A), 9, 9))),

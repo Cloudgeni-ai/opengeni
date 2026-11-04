@@ -31,6 +31,7 @@ import {
   withWorkspaceOpperCredential,
   withXaiSubscriptionCatalogProvider,
 } from "@opengeni/config";
+import { retainedClaudeUpstreamModelId } from "./model-catalog";
 import {
   getWorkspaceGatewayCustomModelForExecution,
   getWorkspaceOpenRouterCustomModelForExecution,
@@ -274,9 +275,12 @@ export async function settingsWithOrganizationProviderCredentials(
         workspaceId,
         providerKind,
       }));
-    const upstreamModelId = retainedProductModelId?.startsWith(prefix)
-      ? retainedProductModelId.slice(prefix.length)
-      : null;
+    const upstreamModelId =
+      providerKind === "claude_subscription"
+        ? retainedClaudeUpstreamModelId(retainedProductModelId, providerKind, "organization")
+        : retainedProductModelId?.startsWith(prefix)
+          ? retainedProductModelId.slice(prefix.length)
+          : null;
     const retained = upstreamModelId
       ? await getOrganizationModelProviderCustomModelForExecution(db, {
           accountId,
@@ -401,16 +405,18 @@ export async function settingsWithOrganizationProviderCredentials(
           workspaceId,
           providerKind: kind,
         });
-    const workspacePrefix = claudeProviderId(kind, "workspace") + "/";
-    const workspaceModelId = retainedProductModelId?.startsWith(workspacePrefix)
-      ? retainedProductModelId
-      : null;
-    if (workspaceModelId) {
+    const workspaceUpstreamModelId = retainedClaudeUpstreamModelId(
+      retainedProductModelId,
+      kind,
+      "workspace",
+    );
+    const workspaceModelId = workspaceUpstreamModelId === null ? null : retainedProductModelId!;
+    if (workspaceUpstreamModelId !== null) {
       const retained = await getWorkspaceProviderCustomModelForExecution(db, {
         accountId,
         workspaceId,
         providerKind: kind,
-        upstreamModelId: workspaceModelId.slice(workspacePrefix.length),
+        upstreamModelId: workspaceUpstreamModelId,
       });
       if (retained && !workspaceModels.some((model) => model.id === retained.id))
         workspaceModels.push(retained);

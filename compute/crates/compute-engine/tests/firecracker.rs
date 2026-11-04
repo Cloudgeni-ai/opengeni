@@ -9,10 +9,11 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use compute_engine::cgroup::{Cgroup, OnlyCopy};
 use compute_engine::firecracker::{Firecracker, FirecrackerConfig, FirecrackerVm};
 use compute_engine::{
-    CancellationToken, Completion, Drive, Engine, Found, MemorySource, RestoreFiles, SnapshotFiles,
-    SnapshotKind, VmSpec, vsock,
+    CancellationToken, Completion, Drive, Engine, Found, MemorySource, RestoreFiles, RoomKept,
+    SnapshotFiles, SnapshotKind, VmSpec, vsock,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -476,8 +477,11 @@ async fn boot_pause_compress_snapshot_restore() {
         (-0.2..1.0).contains(&after_restore),
         "a timer due while saved fired {after_restore} s after restore"
     );
+    // /proc/uptime counts hundredths: its two readings can understate the
+    // time the timer slept by one, and the subtraction then lands a hair
+    // below it (-1.8e-15 for a timer that fired on time).
     assert!(
-        (0.0..0.5).contains(&late_by),
+        (-0.0101..0.5).contains(&late_by),
         "a timer due after the restore fired {late_by} s late"
     );
     assert_trimmed_space_returns(&uds, &spec.drives[0].path).await;
@@ -616,4 +620,132 @@ async fn only_a_vmm_seen_running_counts_as_a_launch() {
         "a VMM that refused its snapshot did not count: {error}"
     );
     std::fs::remove_dir_all(&spec.logs).unwrap();
+}
+
+/// A VM started into the group an earlier VM of its name left behind (a
+/// group's removal gives up while the kernel still holds it) starts
+/// unmarked, whatever mark as its sandbox's only copy that VM had: the
+/// guard would otherwise leave running a VM whose sandbox has a copy.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_vm_started_into_a_group_left_behind_starts_unmarked() {
+    let Some(lab) = lab() else { return };
+    let name = format!("mark-test-{}", std::process::id());
+    let spec = jailed_spec(&lab, &name, 3_900_004);
+    let engine = engine(&lab);
+    let left = Cgroup::at(Path::new("/sys/fs/cgroup/compute-test").join(&name));
+    let _ = std::fs::remove_dir(left.path());
+    std::fs::create_dir(left.path()).unwrap();
+    left.set_only_copy(true).unwrap();
+    assert_eq!(left.only_copy().unwrap(), OnlyCopy::Yes);
+
+    let vm = engine.boot(&spec).await.unwrap();
+    assert_eq!(
+        vm.cgroup().path(),
+        left.path(),
+        "started into the group left"
+    );
+    assert_eq!(vm.cgroup().only_copy().unwrap(), OnlyCopy::No);
+    engine.set_only_copy(&vm, true).unwrap();
+    assert_eq!(vm.cgroup().only_copy().unwrap(), OnlyCopy::Yes);
+
+    let cgroup = vm.cgroup().path().to_owned();
+    engine.stop(vm).await.unwrap();
+    assert!(!cgroup.exists(), "cgroup left behind");
+    std::fs::remove_dir_all(&spec.logs).unwrap();
+}
+
+/// Page cache charged to the VMs' group, as their disks and VMs that ended
+/// leave it, is dropped once it fills the reserve under their limit, and
+/// only by what the reserve lacks (ADR 24).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_vms_reserve_is_kept_free_of_page_cache() {
+    const MIB: u64 = 1 << 20;
+    const RESERVE: u64 = 512 * MIB;
+    let Some(lab) = lab() else { return };
+    let parent = PathBuf::from(format!(
+        "/sys/fs/cgroup/compute-test-room-{}",
+        std::process::id()
+    ));
+    let engine = Firecracker::new(FirecrackerConfig {
+        firecracker: lab.join("bin/firecracker"),
+        retained: Vec::new(),
+        jailer: lab.join("bin/jailer"),
+        cgroup_parent: parent.clone(),
+    })
+    .unwrap();
+    // 1 GiB of clean cache, written and read by a group under the VMs'
+    // that then ends, leaving its cache to them: twice the reserve, so
+    // that dropping all of it shows.
+    let ended = parent.join("ended");
+    std::fs::create_dir(&ended).unwrap();
+    let file = lab.join(format!("room-cache-{}", std::process::id()));
+    let script = format!(
+        "echo $$ > {group}/cgroup.procs && dd if=/dev/zero of={file} bs=1M count=1024 \
+         conv=fsync status=none && cat {file} > /dev/null",
+        group = ended.display(),
+        file = file.display(),
+    );
+    let status = std::process::Command::new("sh")
+        .args(["-c", &script])
+        .status()
+        .unwrap();
+    assert!(status.success(), "{script}: {status}");
+    std::fs::remove_dir(&ended).unwrap();
+    let current = || -> u64 {
+        std::fs::read_to_string(parent.join("memory.current"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    };
+    let before = current();
+    assert!(
+        before >= 800 * MIB,
+        "the cache was not left to the VMs' group: {before} bytes"
+    );
+    // A limit that leaves 128 MiB of the reserve free.
+    let high = before + 128 * MIB;
+    let engine = engine.with_memory_high(Some(high)).unwrap();
+    let RoomKept::Dropping(asked) = engine.keep_memory_room(RESERVE) else {
+        panic!("nothing was dropped with 128 MiB of a 512 MiB reserve free");
+    };
+    assert!(
+        asked.abs_diff(RESERVE - 128 * MIB) <= 16 * MIB,
+        "asked {asked} bytes"
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while high.saturating_sub(current()) + 16 * MIB < RESERVE {
+        if engine.keep_memory_room(RESERVE) == RoomKept::Unsupported {
+            eprintln!("skipped: this kernel cannot drop page cache alone (Linux 6.9)");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the reserve was never freed: {} bytes free of {RESERVE}",
+            high.saturating_sub(current())
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let after = current();
+    eprintln!(
+        "room: asked {} MiB, dropped {} MiB of {} MiB, {} MiB of the reserve free",
+        asked / MIB,
+        before.saturating_sub(after) / MIB,
+        before / MIB,
+        high.saturating_sub(after) / MIB
+    );
+    if high.saturating_sub(after) + 16 * MIB >= RESERVE {
+        // Some kernels take more than a write asks (Linux 7.0 with the
+        // multi-generation LRU takes about half the cache per write), so
+        // the drop is held only to leaving a good share of the cache.
+        assert!(
+            after >= before / 4,
+            "dropped {} bytes of {before} for {asked} asked",
+            before.saturating_sub(after)
+        );
+        assert_eq!(engine.keep_memory_room(RESERVE), RoomKept::Free);
+    }
+    let _ = engine.with_memory_high(None);
+    let _ = std::fs::remove_file(&file);
+    let _ = std::fs::remove_dir(&parent);
 }

@@ -25,6 +25,7 @@ import {
   listWorkspaceMembers,
 } from "./workspace-membership-access";
 import { removeWorkspaceMember } from "./organization-membership-lifecycle";
+import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
 import {
   lockActiveExternalOrganizationKeyAuthority,
   lockExternalWorkspaceMembershipLifecycle,
@@ -175,10 +176,13 @@ export const USER_ISOLATION_WORKSPACE_SOURCE_PREFIX = "opengeni-sdk:user-isolati
  * organization membership and requires both active), and the same receipt and
  * lifecycle event attributed to the key. It only inserts a missing row (insert
  * ... on conflict do nothing): an existing membership is returned unchanged.
- * There is no tombstone: a member removed from a shared workspace is created
- * again on their next request, because the host owns its users. Personal and
- * SDK per-user (`opengeni-sdk:user-isolation:*`) workspaces are refused.
- * Concurrent first requests serialize on the organization fence.
+ * A removal stamped after `revocationWatermark` (read under the same fence
+ * when the request authenticated) wins exactly as for a stated membership:
+ * the request is `superseded` and creates nothing. A request that
+ * authenticates after the removal creates the member again, because the host
+ * owns its users. Personal and SDK per-user (`opengeni-sdk:user-isolation:*`)
+ * workspaces are refused. Concurrent first requests serialize on the
+ * organization fence.
  */
 export async function ensureExternalWorkspaceMemberOnFirstUse(
   db: Database,
@@ -187,8 +191,9 @@ export async function ensureExternalWorkspaceMemberOnFirstUse(
     subjectId: string;
     identity: { source: string; externalId: string };
     permissions: readonly Permission[];
+    revocationWatermark: string;
   },
-): Promise<"created" | "existing"> {
+): Promise<"created" | "existing" | "superseded"> {
   const permissions = [...new Set(input.permissions)].sort();
   const refuse = (message: string): never => {
     throw Object.assign(new Error(message), { code: "42501" });
@@ -215,6 +220,15 @@ export async function ensureExternalWorkspaceMemberOnFirstUse(
       (member) => member.subjectId === input.subjectId,
     );
     if (existing) return "existing";
+    if (
+      await revokedAfter(tx, {
+        organizationId: scope.organizationId,
+        workspaceId: scope.workspaceId,
+        subjectId: input.subjectId,
+        revocationWatermark: input.revocationWatermark,
+      })
+    )
+      return "superseded";
     const command = {
       ...scope,
       action: "grant",
@@ -259,6 +273,9 @@ export async function cancelExternalWorkspaceMemberGrant(
       return CancelExternalWorkspaceMemberGrantResponse.parse({ ...stored, replay: true });
     }
     const identity = z.object({ subjectId: z.string() }).parse(prepared.identity);
+    // The removal also stamps the revocation marker under the fence, even
+    // when no row was removed: a request that authenticated before this
+    // revoke must not create the member afterwards.
     const removed = await removeWorkspaceMember(tx, {
       accountId: scope.organizationId,
       workspaceId: scope.workspaceId,
@@ -339,5 +356,199 @@ export async function updateExternalWorkspaceMemberOperation(
       narrowed,
       replay: false,
     });
+  });
+}
+
+/** Revocation markers order an app's revoke against requests that state a
+ * membership. Both run under the organization membership fence, so the last
+ * value read there when a request authenticates is a strict watermark: every
+ * revoke committed before it is at or below it, every later revoke above. */
+export async function readExternalWorkspaceRevocationWatermark(tx: Database): Promise<string> {
+  const [row] = await rawRows<{ watermark: string }>(
+    tx,
+    sql`select coalesce(pg_sequence_last_value('external_workspace_member_revocation_seq'::regclass), 0)::text as watermark`,
+  );
+  if (!row) throw new Error("External workspace revocation watermark was not read");
+  return row.watermark;
+}
+
+/** Whether a removal of this member was stamped after the watermark a request
+ * read when it authenticated. Call under the organization membership fence. */
+async function revokedAfter(
+  tx: Database,
+  input: {
+    organizationId: string;
+    workspaceId: string;
+    subjectId: string;
+    revocationWatermark: string;
+  },
+): Promise<boolean> {
+  const [revocation] = await rawRows<{ newer: boolean }>(
+    tx,
+    sql`select revocation_sequence > ${input.revocationWatermark}::bigint as newer
+      from external_workspace_member_revocations
+      where account_id = ${input.organizationId}::uuid
+        and workspace_id = ${input.workspaceId}::uuid and subject_id = ${input.subjectId}`,
+  );
+  return revocation?.newer === true;
+}
+
+/** The audit reason recorded on receipts written for a stated membership. */
+export const STATED_EXTERNAL_MEMBERSHIP_REASON = "membership stated by request";
+
+/** A stated narrowing would leave the workspace without an administering member. */
+export class StatedExternalMembershipLastAdminError extends Error {
+  constructor() {
+    super("the workspace must keep at least one administrator");
+    this.name = "StatedExternalMembershipLastAdminError";
+  }
+}
+
+export type StatedExternalWorkspaceMembershipOutcome =
+  /** The stored grant already equals the stated one; nothing was written. */
+  | "unchanged"
+  | "created"
+  | "updated"
+  /** The app revoked this member after the request authenticated, so the
+   * request's older statement writes nothing and the stored state stands. */
+  | "superseded";
+
+const administers = (permissions: readonly string[]): boolean =>
+  permissions.includes("workspace:admin") || permissions.includes("members:manage");
+
+/**
+ * Make an external member's grant in one shared workspace exactly the
+ * permissions its app stated on this request. The same authority as the
+ * keyed external-members grant and update: the organization lifecycle fence,
+ * the live key check (`members:manage`, or a legacy `workspace:admin` key,
+ * covering every stated permission under its policy, with the workspace in
+ * scope), the database's own grant ceiling (literal `secrets:read`, no
+ * permission outside a non-admin key), the identity's active status, and the
+ * same receipts and lifecycle events attributed to the key, with
+ * {@link STATED_EXTERNAL_MEMBERSHIP_REASON} as the reason. Narrowing advances
+ * the member's authorization revision exactly like the keyed update.
+ *
+ * Writes only when the stored grant differs, after re-reading it under the
+ * fence, so concurrent equal statements write once. A revoke stamped after
+ * `revocationWatermark` (read when the request authenticated) wins: the
+ * statement is `superseded` and nothing is created or changed. Never narrows
+ * the workspace's last administering member. Personal and SDK per-user
+ * workspaces are refused (42501).
+ */
+export async function applyStatedExternalWorkspaceMembership(
+  db: Database,
+  scope: ServiceScope & { workspaceId: string },
+  input: {
+    identity: ExternalIdentity;
+    permissions: readonly Permission[];
+    revocationWatermark: string;
+  },
+): Promise<StatedExternalWorkspaceMembershipOutcome> {
+  const permissions = [...new Set(input.permissions)].sort();
+  const refuse = (message: string): never => {
+    throw Object.assign(new Error(message), { code: "42501" });
+  };
+  return withWorkspaceSubjectRls(db, scope.workspaceId, scope.actorSubjectId, async (tx) => {
+    await requireLiveServiceKey(tx, scope, permissions);
+    // Personal workspaces are refused by the operation's own preparation.
+    const [workspace] = await rawRows<{ account_id: string; external_source: string | null }>(
+      tx,
+      sql`select account_id, external_source from workspaces where id = ${scope.workspaceId}::uuid`,
+    );
+    if (
+      !workspace ||
+      workspace.account_id !== scope.organizationId ||
+      workspace.external_source?.startsWith(USER_ISOLATION_WORKSPACE_SOURCE_PREFIX)
+    )
+      refuse("Workspace does not admit stated membership");
+    const subjectId = input.identity.subjectId;
+    // The administering roster and the target, locked in id order like the
+    // native member update, so the last-admin check holds until commit.
+    const roster = await rawRows<{ subject_id: string; permissions: unknown }>(
+      tx,
+      sql`select subject_id, permissions from workspace_memberships
+        where workspace_id = ${scope.workspaceId}::uuid
+          and (subject_id = ${subjectId}
+            or permissions ?| array['workspace:admin', 'members:manage'])
+        order by id for update`,
+    );
+    const existingRow = roster.find((member) => member.subject_id === subjectId);
+    const existing = existingRow
+      ? normalizeWorkspaceMembershipPermissions(existingRow.permissions)
+      : null;
+    if (
+      existing &&
+      existing.length === permissions.length &&
+      existing.every((permission) => permissions.includes(permission))
+    )
+      return "unchanged";
+    if (
+      await revokedAfter(tx, {
+        organizationId: scope.organizationId,
+        workspaceId: scope.workspaceId,
+        subjectId,
+        revocationWatermark: input.revocationWatermark,
+      })
+    )
+      return "superseded";
+    if (!existing) {
+      const command = {
+        ...scope,
+        action: "grant",
+        identity: { source: input.identity.source, externalId: input.identity.externalId },
+        permissions,
+        operationId: crypto.randomUUID(),
+      };
+      // Re-validates the identity and its organization membership under the
+      // fence (suspended/offboarded -> 42501) and the grant ceiling.
+      const prepared = await prepare(tx, command);
+      const identity = ExternalIdentity.parse(prepared.identity);
+      if (identity.subjectId !== subjectId || identity.status !== "active")
+        refuse("External identity changed");
+      const inserted = await insertWorkspaceMembershipIfAbsent(tx, {
+        accountId: scope.organizationId,
+        workspaceId: scope.workspaceId,
+        subjectId,
+        role: "member",
+        permissions,
+      });
+      if (!inserted) throw new Error("Stated membership row appeared under the fence");
+      await record(tx, command, {
+        workspaceId: scope.workspaceId,
+        identity,
+        reason: STATED_EXTERNAL_MEMBERSHIP_REASON,
+      });
+      return "created";
+    }
+    if (
+      administers(existing) &&
+      !administers(permissions) &&
+      !roster.some(
+        (member) =>
+          member.subject_id !== subjectId &&
+          administers(normalizeWorkspaceMembershipPermissions(member.permissions)),
+      )
+    )
+      throw new StatedExternalMembershipLastAdminError();
+    const command = {
+      ...scope,
+      membershipId: input.identity.organizationMembershipId,
+      action: "update",
+      operationId: crypto.randomUUID(),
+      permissions,
+    };
+    const prepared = await prepare(tx, command);
+    const identity = z
+      .object({ subjectId: z.string(), organizationMembershipId: z.string() })
+      .parse(prepared.identity);
+    if (identity.subjectId !== subjectId) refuse("External identity changed");
+    await record(tx, command, {
+      workspaceId: scope.workspaceId,
+      identity,
+      permissions,
+      narrowed: existing.some((permission) => !permissions.includes(permission)),
+      reason: STATED_EXTERNAL_MEMBERSHIP_REASON,
+    });
+    return "updated";
   });
 }

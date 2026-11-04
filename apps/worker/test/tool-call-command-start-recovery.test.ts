@@ -3,9 +3,14 @@ import { ToolCallError } from "@openai/agents";
 import * as db from "@opengeni/db";
 import * as events from "@opengeni/events";
 import { ToolCallCommandNotStartedError } from "@opengeni/runtime";
+import { ComputeControlError, SelfhostedControlError } from "@opengeni/runtime/sandbox";
 import { ModalCommandStartPreDispatchUnavailableError } from "../../../packages/runtime/src/sandbox/providers/modal-command-router-wire";
 import * as parentWake from "../src/activities/parent-wake";
 import { settleTurnFailure } from "../src/activities/agent-turn/failure-settlement";
+import {
+  createSandboxSetupReplayGuard,
+  sandboxSetupFailure,
+} from "../src/activities/agent-turn/sandbox-setup-agent-failure";
 import { createCoreSubscriptionRequests } from "../src/activities/agent-turn/subscription-core-requests";
 import type { SubscriptionCoreTurn } from "../src/activities/agent-turn/turn-context";
 
@@ -329,5 +334,176 @@ describe("a command waiting for its sandbox when the turn fails", () => {
     };
     expect(settled.events[0]!.type).toBe("turn.failed");
     expect(settled.notStartedToolCallIds).toEqual(["call-waiting"]);
+  });
+});
+
+describe("no sandbox capacity while a tool call waits for its sandbox", () => {
+  // Staging: a Claude subscription turn's exec_command lazily created its
+  // compute sandbox, and compute-control answered 503 no_capacity. The SDK
+  // wraps the tool's failure on `.error`.
+  function noCapacity(): Error {
+    return new ToolCallError(
+      "Failed to run function tools: ComputeControlError: compute control service POST /v1/sandboxes: no host can take it now",
+      new ComputeControlError({
+        kind: "no_capacity",
+        status: 503,
+        message: "compute control service POST /v1/sandboxes: no host can take it now",
+      }),
+    );
+  }
+  const route = {
+    model: "claude-opus-5-5",
+    modelLabel: "Claude Opus 5.5",
+    providerLabel: "Claude subscription",
+  };
+  function withWaitingCall(input: Record<string, unknown>) {
+    (input.attempt as Record<string, unknown>).modelRoutePresentation = route;
+    (input.eventing as Record<string, unknown>).toolCancellationFenceRef = {
+      current: { settleCommandCallsNotStarted: () => ["call-waiting"] },
+    };
+    return input;
+  }
+
+  test("recovers the same turn as a sandbox capacity wait, not a model outage", async () => {
+    coreRuntime();
+    toolProgress(0);
+    const recovery = spy(db, "requestSessionTurnRecovery").mockResolvedValue({
+      action: "recovering",
+      events: [],
+    } as never);
+    const { deps: input, settle } = deps(noCapacity(), "Claude", await answeredLane([]));
+    const result = (await settleTurnFailure(withWaitingCall(input) as never)) as {
+      status: string;
+      continueDelayMs: number;
+    };
+    expect(result.status).toBe("recovering");
+    expect(result.continueDelayMs).toBeGreaterThanOrEqual(60_000);
+    expect(settle).not.toHaveBeenCalled();
+    const request = recovery.mock.calls[0]![2] as Record<string, unknown> & {
+      detail: Record<string, unknown>;
+    };
+    expect(request).toMatchObject({
+      reason: "sandbox_capacity_unavailable",
+      providerRecoveryCount: 1,
+      notStartedToolCallIds: ["call-waiting"],
+      detail: {
+        code: "sandbox_capacity_unavailable",
+        retryable: true,
+        error:
+          "No sandbox capacity is available right now. The same turn will retry after a short delay.",
+        maxProviderRecoveryCount: 5,
+      },
+    });
+    expect(request.detail).not.toHaveProperty("modelLabel");
+    expect(request.detail).not.toHaveProperty("providerCondition");
+  });
+
+  test("an exhausted budget fails the turn naming the sandbox, never the model", async () => {
+    coreRuntime();
+    toolProgress(5);
+    const recovery = spy(db, "requestSessionTurnRecovery");
+    const { deps: input, settle } = deps(noCapacity(), "Claude", await answeredLane([]));
+    expect(await settleTurnFailure(withWaitingCall(input) as never)).toMatchObject({
+      status: "failed",
+    });
+    expect(recovery).not.toHaveBeenCalled();
+    const settled = settle.mock.calls[0]![0] as {
+      events: Array<{ type: string; payload: Record<string, unknown> }>;
+      notStartedToolCallIds?: string[];
+    };
+    expect(settled.notStartedToolCallIds).toEqual(["call-waiting"]);
+    expect(settled.events[0]).toMatchObject({
+      type: "turn.failed",
+      payload: {
+        code: "sandbox_capacity_unavailable",
+        retryable: false,
+        recoveryExhausted: true,
+        providerRecoveryCount: 5,
+        error:
+          "No sandbox capacity is available right now. Retried 5 times without success. Try again in a few minutes.",
+      },
+    });
+    const payload = settled.events[0]!.payload;
+    expect(payload).not.toHaveProperty("modelLabel");
+    expect(payload).not.toHaveProperty("providerCondition");
+    expect(String(payload.error)).not.toMatch(/claude|model|provider/i);
+  });
+});
+
+describe("the sandbox's agent does not answer during setup", () => {
+  // Production: the first sandbox tool call of a compute turn lazily set up its
+  // sandbox, and the machine agent was replaced while the credential seed ran.
+  // Nothing the model asked for reached the box.
+  function agentReplaced() {
+    return new SelfhostedControlError({
+      message:
+        "The machine's agent was replaced before this command's outcome was known: it may not have started, may still be running, or may have finished. A stop has been requested for it.",
+      code: 0 as never,
+      reason: "agent_offline",
+      retryable: false,
+      agentOffline: true,
+      connectionReplaced: true,
+    });
+  }
+  function waitingCall(input: Record<string, unknown>) {
+    (input.eventing as Record<string, unknown>).toolCancellationFenceRef = {
+      current: { settleCommandCallsNotStarted: () => ["call-waiting"] },
+    };
+    return input;
+  }
+
+  test("recovers the same turn after a short delay and settles the call as not started", async () => {
+    coreRuntime();
+    toolProgress(0);
+    const recovery = spy(db, "requestSessionTurnRecovery").mockResolvedValue({
+      action: "recovering",
+      events: [],
+    } as never);
+    const setupFailure = sandboxSetupFailure(createSandboxSetupReplayGuard(), agentReplaced());
+    const { deps: input, settle } = deps(
+      new ToolCallError(
+        `Failed to run function tools: ${String(agentReplaced())}`,
+        setupFailure as Error,
+      ),
+      "Codex",
+      await answeredLane([]),
+    );
+    expect(await settleTurnFailure(waitingCall(input) as never)).toMatchObject({
+      status: "recovering",
+      continueDelayMs: 2_000,
+    });
+    expect(settle).not.toHaveBeenCalled();
+    expect(recovery.mock.calls[0]![2]).toMatchObject({
+      reason: "sandbox_command_start_unavailable",
+      providerRecoveryCount: 1,
+      notStartedToolCallIds: ["call-waiting"],
+      detail: {
+        code: "sandbox_command_start_unavailable",
+        retryable: true,
+        continueDelayMs: 2_000,
+        maxProviderRecoveryCount: 5,
+      },
+    });
+  });
+
+  test("the same failure from a model command that may have run still fails the turn", async () => {
+    coreRuntime();
+    toolProgress(0);
+    const recovery = spy(db, "requestSessionTurnRecovery");
+    const { deps: input, settle } = deps(
+      new ToolCallError(
+        `Failed to run function tools: ${String(agentReplaced())}`,
+        agentReplaced(),
+      ),
+      "Codex",
+      await answeredLane([]),
+    );
+    expect(await settleTurnFailure(input as never)).toMatchObject({ status: "failed" });
+    expect(recovery).not.toHaveBeenCalled();
+    const settled = settle.mock.calls[0]![0] as {
+      events: Array<{ type: string; payload: Record<string, unknown> }>;
+    };
+    expect(settled.events[0]!.type).toBe("turn.failed");
+    expect(settled.events[0]!.payload.code).not.toBe("sandbox_command_start_unavailable");
   });
 });

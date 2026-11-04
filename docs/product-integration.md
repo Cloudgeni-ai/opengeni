@@ -213,6 +213,9 @@ never changes an existing membership. It also never runs for SDK per-user
 workspaces (external source `opengeni-sdk:user-isolation:*`): those stay
 single-user, and the SDK adds their owner explicitly with a stable onboarding
 key. It never runs when the request needs a permission outside the defaults.
+That includes renaming a workspace, its instructions and its custom model
+entries: those take people who can start chats there acting as themselves,
+which a product's user never is, so a refused request creates nothing.
 The identity is re-checked as active under the same lock, and the grant
 writes the same receipt and `organization_workspace_lifecycle_events` row as
 explicit onboarding, attributed to the key. A user removed from a shared
@@ -228,6 +231,16 @@ permissions up front, and `updateExternalWorkspaceMember` with a new
 `operationId` changes an existing member's permissions, including one created
 automatically. Explicit onboarding after a user's first request returns a `409`
 when its permissions differ from the automatic defaults; update instead.
+
+Products that already own their users' roles can skip that mirroring:
+`asUser(user, { source, membership: { permissions } })` states the user's
+permissions on every request, and the API makes the stored grant equal to them
+before it authorizes the request. It creates a missing member, writes only when
+the grant differs, applies the same ceiling and last-administrator rules as the
+explicit endpoints, and loses to a revoke that happened while the request was in
+flight. Work that runs later without a request uses the last stated grant.
+Removing a user is still an explicit revoke. See
+[state membership on each request](external-membership-operations.md#state-membership-on-each-request).
 
 ### Configure the agent
 
@@ -1077,10 +1090,12 @@ Integration lifecycle:
    stable instance key, Connection, and selected operations. Operations the
    preview marks `approvalMode: "ask"` pause for human approval on every call;
    for unattended or scheduled work, list the ones policy permits in
-   `autoApprovedTools` (`capabilities:manage`; curated definitions may keep specific operations human-approved;
-   re-checked against organization integration policy; declarative, so an
-   update that omits it restores approval). Connector Block, session approval
-   policy, and action policies still apply.
+   `autoApprovedTools` (`capabilities:manage`; members, who hold
+   `connections:write`, install without it; curated definitions may keep
+   specific operations human-approved; re-checked against organization
+   integration policy; an update that omits it keeps an earlier choice only for
+   the same account and unchanged operations, otherwise approval is restored).
+   Connector Block, session approval policy, and action policies still apply.
 6. Persist the returned non-secret instance/server identifiers and select that
    server in sessions.
 

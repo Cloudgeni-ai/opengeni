@@ -24,6 +24,19 @@ export type RigInstructionsContext = {
 };
 
 /**
+ * Which GitHub identity one mounted repository acts as. `personal` is the
+ * person's own account (Git through the personal broker, github_personal__*
+ * tools); `app` is the workspace Opengeni GitHub App bot.
+ */
+export type AgentPromptRepositoryIdentity = {
+  /** Mount path relative to the workspace, e.g. repos/github.com/acme/web. */
+  path: string;
+  identity: "personal" | "app";
+  /** The person's GitHub login, when known (personal only). */
+  login?: string | undefined;
+};
+
+/**
  * What the session is attached to, as far as its instructions care. Every flag
  * must be derived from session-level facts so the composed prefix only changes
  * when they change. Per-turn resources (file attachments) must never appear
@@ -43,8 +56,29 @@ export type AgentPromptResources = {
    * the secrets prompt module; omitted keeps prompts unchanged.
    */
   secretReferences?: boolean | undefined;
+  /**
+   * No person will see or answer a question until the task ends (frozen at
+   * session create). Gates the unattended module; omitted keeps prompts unchanged.
+   */
+  unattended?: boolean | undefined;
+  /**
+   * Personal GitHub sign-in ("Your GitHub") is enabled on this deployment.
+   * Gates personal-identity guidance; omitted keeps prompts unchanged.
+   */
+  personalGitHub?: boolean | undefined;
+  /**
+   * Finished background commands report themselves with their output (with a
+   * later tool result, or as input). Gates the "do not poll" sentence; omitted
+   * keeps prompts unchanged.
+   */
+  commandCompletionDelivery?: boolean | undefined;
   workspaceEnvironment?: WorkspaceEnvironmentContext | undefined;
   rig?: RigInstructionsContext | undefined;
+  /**
+   * GitHub identity per mounted GitHub repository (session-level). Omitted
+   * keeps the repositories module unchanged.
+   */
+  repositoryIdentities?: readonly AgentPromptRepositoryIdentity[] | undefined;
 };
 
 /** Everything a prompt module may read. Pure data; no settings, no clock. */
@@ -71,13 +105,21 @@ export type AgentPromptExperiments = {
  * Which tool-specific instruction clauses may render for one attempt. A
  * rendering input only: it never grants, withholds, defers or reorders a tool.
  *
- * `unavailable` lists only tool names proven absent for the attempt (see
- * `deriveAgentPromptToolAvailability`). Every other name — deferred or lazily
+ * `unavailable` lists tool names proven absent for the attempt (see
+ * `deriveAgentPromptToolAvailability`), plus save-only tools whose writes the
+ * turn's frozen learning policy refuses. Every other name — deferred or lazily
  * disclosed, external MCP, provider-hosted, local adapter, or unknown — counts
  * as available, so its guidance stays.
  */
 export type AgentPromptToolAvailability = {
   readonly unavailable: readonly FirstPartyMcpToolName[];
+  /**
+   * The session can never have child sessions: its nesting depth, frozen at
+   * create, has reached its frozen maximum, so no child was or will be
+   * admitted. Omitted when that is not proven (for example `session_create`
+   * merely unselected on a turn of a session that may already have children).
+   */
+  readonly childSessionsImpossible?: true;
 };
 
 /** False only when the attempt proved the named tool absent. */

@@ -165,7 +165,7 @@ function renderCompanyProfile(snapshot: ResolvedCompanyProfileSnapshot | null): 
   const rendered = [
     `Organization identity [revisionId=${active.id}; revision=${active.revision}; sha256=${active.contentHash}; activationVersion=${active.activationVersion}; activatedAt=${active.activatedAt}; provenance=${active.provenance.source}; provenanceSourceIdHash=${active.provenance.sourceIdHash ?? "none"}]`,
     ...sections,
-    "Identity and mission are mandatory organization context, not a document corpus, Memory record, Skill, workspace instruction, or policy. Any legacy structured details above are retained only for compatibility until an organization owner explicitly replaces this profile. New products, customers, goals, constraints, strategy, and other changing facts must be retrieved from authorized organization knowledge when relevant.",
+    "Identity and mission are mandatory organization context, not a document corpus, Memory record, Skill, workspace instruction, or policy. Any legacy structured details above are retained only for compatibility until an organization owner or admin explicitly replaces this profile. New products, customers, goals, constraints, strategy, and other changing facts must be retrieved from authorized organization knowledge when relevant.",
   ].join("\n\n");
   const actualUtf8Bytes = Buffer.byteLength(rendered, "utf8");
   if (actualUtf8Bytes > COMPANY_PROFILE_PROMPT_MAX_UTF8_BYTES) {

@@ -248,7 +248,7 @@ const OPPER_CONFIG: ProviderConnectionConfig = {
   keyPlaceholder: (connected) => (connected ? "Replace Opper API key" : "Opper API key"),
   customModelsHeading: "Custom models",
   customModelsDescription:
-    "Add an exact Opper model id for this workspace account: a pool such as gemini-3.8-flash or a pinned EU route such as aws/claude-opus-5-5. Deployment-provided Opper models remain separate.",
+    "Add an exact Opper model id for this workspace account: a pool such as gemini-3.8-flash or a pinned route such as aws/claude-opus-5-5. Deployment-provided Opper models remain separate.",
   customModelInputAriaLabel: "Opper model id",
   customModelPlaceholder: "aws/claude-opus-5-5",
   customModelConnectedHelp: "The model becomes selectable when workspace policy allows it.",
@@ -323,6 +323,12 @@ export type ProviderConnectionProps = {
   workspaceId: string;
   canManageConnection: boolean;
   canManageCustomModels: boolean;
+  /**
+   * Change which models the key may serve ("Models it can serve"), a workspace
+   * setting. Defaults to `canManageCustomModels`; a member who adds custom
+   * models but doesn't manage settings passes false.
+   */
+  canManageAccess?: boolean | undefined;
   onConnectionChange?: (() => void) | undefined;
   enabled?: boolean;
   /** Reuse model management with an independently managed subscription pool. */
@@ -401,6 +407,8 @@ export interface ProviderConnectionView {
   accessTarget: ConnectionAccessTarget;
   canManageConnection: boolean;
   canManageCustomModels: boolean;
+  /** Change "Models it can serve". */
+  canManageAccess: boolean;
   connected: boolean;
   settled: boolean;
   hidden: boolean;
@@ -984,6 +992,7 @@ export function useProviderConnection(
     },
     canManageConnection: enabled && !props.catalogConnection && props.canManageConnection,
     canManageCustomModels: enabled && props.canManageCustomModels,
+    canManageAccess: enabled && (props.canManageAccess ?? props.canManageCustomModels),
     connection,
     connected,
     loaded: connectionLoaded,
@@ -1932,7 +1941,7 @@ export function ProviderConnectionPage({
               <ConnectionAccessRows
                 access={access}
                 organization={state.organization}
-                canManage={state.canManageCustomModels}
+                canManage={state.canManageAccess}
                 onEdit={onEditAccess}
               />
             </SettingRowGroup>
@@ -2058,9 +2067,11 @@ export function ProviderConnectPage({
 /** What "Models it can serve" edits for this provider. */
 export function ProviderAccessPage({
   state,
+  organizationName,
   onClose,
 }: {
   state: ProviderConnection;
+  organizationName?: string | undefined;
   onClose: () => void;
 }) {
   const access = useConnectionAccess(state.accessTarget);
@@ -2068,7 +2079,8 @@ export function ProviderAccessPage({
     <ConnectionAccessFormPage
       access={access}
       organization={state.organization}
-      canManage={state.canManageCustomModels}
+      organizationName={organizationName}
+      canManage={state.canManageAccess}
       name={state.config.title}
       onClose={onClose}
     />

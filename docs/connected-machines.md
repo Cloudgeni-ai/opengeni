@@ -14,7 +14,7 @@ agent" in the context of a session means the AI agent driving it.
 Human device-flow approval defaults to user ownership. A user-owned machine follows
 its owner across same-organization workspaces they can currently access; workspace
 ownership limits it to the approving workspace, and organization ownership requires
-account-admin approval. Only the owner may attach a user machine. Moving a running
+approval by the organization's owner or an admin. Only the owner may attach a user machine. Moving a running
 chat is explicit owner consent for that logical turn, even when another person,
 a schedule, or an agent started it. The route changes immediately; the next tool
 operation uses the new machine. Already dispatched work is not moved or replayed.
@@ -749,23 +749,25 @@ as the new session row. If the target is invalid, removed, revoked, or otherwise
 no longer attachable, the create fails without leaving a queued session shell.
 
 Workspace- and organization-scoped machines run any schedule. A user-scoped
-(personal) machine runs only an **Only me** schedule owned by the machine's
-owner:
+(personal) machine runs only schedules owned by the machine's owner, **Only
+me** or **Workspace** alike, because a schedule runs as its owner:
 
-- Saving is the consent. Create and update accept a personal machine only when
-  the final audience is Only me; widening such a schedule to Workspace, or
-  saving it for Workspace, returns 422. The scoped sandbox lookup returns a
-  personal machine to its owner alone, so nobody else can select it.
+- Picking the machine on the schedule is the consent. The scoped sandbox
+  lookup returns a personal machine to its owner alone, so nobody else can
+  select it, and only a schedule's owner changes or runs it. A schedule never
+  uses a personal machine by following the workspace default (422).
 - Each run attaches the machine through the owner's scoped authorization and
   then issues a `session`-mode `connected_machine.use` grant (context
-  `user_private`) for exactly that run's chat. No standing `always` grant is
-  created, so the owner's other chats keep asking.
+  `user_private` or `workspace_shared`, like the run's chat) for exactly that
+  run's chat. No standing `always` grant is created.
 - Every attempt goes through the same database admission as an interactive
   turn (`admit_session_attempt_personal_machine`): the run's causal human must
   be the machine's owner and still an active member with access to the
   workspace, the machine's authority must be current, and the run's grant must
   be active. Removing the person, revoking the machine or revoking the grant
   stops the next attempt.
+- Other people can see a Workspace schedule's runs and write in its chats.
+  Their messages wait for the owner, as in any chat on a personal machine.
 
 In a chat on a personal machine, only the owner's own messages start work. A
 message somebody else sends there (through the API, an agent acting for them,
@@ -977,10 +979,36 @@ the monitored ancestor and candidate cgroup have the same owner, so host policy
 must preserve that ownership relationship. Cgroup placement alone does not change
 host-wide kernel OOM victim selection: the generated service requests a negative
 supervisor `OOMScoreAdjust`, startup reports the effective `/proc` value because an
-unprivileged user manager may clamp it. A pre-exec hook gives commands the smallest
-valid higher OOM-score bias over the live supervisor: neutral `0` when the
-supervisor is negative, otherwise supervisor + 1. If the supervisor is already at
+unprivileged user manager may clamp it. A pre-exec hook gives commands a higher
+OOM-score bias than the live supervisor: neutral `0` when the supervisor is
+negative, otherwise the kernel maximum `1000`. Raising a score needs no
+privilege, while lowering one needs `CAP_SYS_RESOURCE`, which containers lack by
+default; the supervisor then stays at `0`, and only the maximum bias (the whole
+memory limit added to every command process's score) keeps a small command
+process ahead of the supervisor's mostly file-backed resident memory. A bias of
+`+1` was worth about a thousandth of the limit, less than the supervisor itself.
+A human terminal's shell gets the same bias. If the supervisor is already at
 the kernel maximum, no relative preference is representable and both remain 1000.
+On a machine where a user service manager clamps the supervisor to `0`, this
+also makes the agent's commands the first victims of a machine-wide OOM, ahead
+of the person's other processes; that is deliberate, since a killed command
+fails visibly while a killed supervisor takes the machine offline.
+
+A foreground `opengeni-agent run` on Linux (a container, a CI job, a terminal)
+has no service manager to start it again, so it runs as a small keeper process
+whose child is the real agent. When the agent is killed (`SIGKILL`, as from the
+out-of-memory killer) or crashes, the keeper starts it again after a back-off of
+1 s doubling to 30 s, reset after a minute of healthy running; the new agent
+reconnects with a new connection instance, and the commands of the agent that
+died ended with it. Stop signals (`SIGTERM`, `SIGINT`, `SIGHUP`, `SIGQUIT`) are
+passed on and stop it for good, `SIGUSR1` and `SIGUSR2` are passed on, an agent
+that exits by itself is not started again and the keeper exits with its status,
+and a killed keeper takes the agent with it. A signal ignored at start (`nohup`)
+stays ignored. The agent that starts again logs why in `agent.log`. The generated
+services, the desktop app and compute sandboxes already start the agent again and
+run it without a keeper; an in-place update keeps the agent's process, and so its
+keeper. A process started with `SIGCHLD` ignored, or without a readable `/proc`,
+runs the agent itself without a keeper, as before.
 Work delegated over a socket to an
 external privileged daemon (for example, a container build) is not a descendant
 of the command: the daemon chooses that workload's cgroup and OOM score. Operators
@@ -1301,6 +1329,47 @@ and re-attaches to the runner's authoritative retention log; it never limits or
 truncates command output. Completed stdout/stderr are assembled once for the
 tool result, and source frame references are then released.
 
+### Git review fanout and command-backlog recovery
+
+A large Git review can exceed the combined capture size or require per-file
+fallback when patch sections and metadata do not match. The fallback must read
+all selected files under the existing per-file content contract, with bounded
+physical concurrency. `SandboxChannelAService` admits four file reads per
+fallback, preserves result order, and stops admitting queued reads on failure
+or cancellation while joining those already dispatched. Turn-end capture passes
+its owner/deadline AbortSignal into Git read admission: superseding the capture
+stops queued files even when the provider itself keeps answering successfully.
+Already-started file reads retain their chunk collection and exact spool cleanup. This is scheduling,
+not a limit on the agent's work or the number of files reviewed. Eagerly
+constructing one command promise per changed file can flood the runner and
+command ledger before cancellation takes effect. This inherited bug can be
+activated by a large diff; a shared command preview is not evidence of a retry
+loop. Inspect full command contents and exact operation identities.
+
+Terminal command settlement uses the lightweight write-admission control
+projection under the canonical workspace/session locks. It must not compute
+UI settlement summaries or recount the stopping backlog there: doing that once
+per command makes recovery quadratic and extends the locks that other requests
+need. Pause, ancestor pause and workspace pause still govern completion wakes.
+
+When investigating congestion, correlate stopping-command count and oldest age,
+settlement throughput, PostgreSQL lock waits and API readiness. Group commands
+by their exact session, launch attempt and provider connection; distinguish a
+large set of distinct Git reads from replay of one operation. A growing backlog
+with falling settlement throughput needs investigation even when node CPU and
+memory have spare capacity.
+
+Contain the source with the normal session Pause action before draining its
+backlog. Reconcile against the recorded provider/enrollment, connection and op
+identity through the normal command lifecycle. Settle only with exact terminal
+exit or typed loss proof; preserve output-custody requirements and audit events.
+A temporary disconnect, timeout or expired claim is not process-death proof.
+Do not bulk-edit commands to `exited`/`lost`, fabricate exit codes, query a
+replacement connection as proof for its predecessor, or delete the ledger.
+Confirm that the backlog and lock waits fall and normal API reads recover before
+resuming the workload. Restarting API replicas alone does not remove either the
+queued commands or their settlement cost.
+
 ## Swap the active sandbox
 
 A session points at one active sandbox at a time. `swapActiveSandbox` re-points
@@ -1357,12 +1426,34 @@ every enrollment and per-machine write):
   keeps needing `enrollments:manage`, so a read-only delegation never connects
   a machine; keys, services and agents acting as themselves are refused.
 - **This workspace**: `enrollments:manage`.
-- **Organization**: `enrollments:manage` and `account:admin`.
+- **Organization**: `enrollments:manage`, and the caller is the organization's
+  owner or an admin signed in as themselves (or a credential holding
+  `account:admin`). Being an admin of one organization grants nothing in another.
 
 The same rule covers declining a pairing code and, for an existing machine,
 removal, command policy, screen control, macOS privacy panes and agent updates.
 `list_scoped_enrollments` returns an Only me machine only to its owner, so a
 teammate reaches only their own. Refusals are plain sentences.
+
+An organization's owners and admins can also turn off **Members connect their
+own machines** (Organization settings > Security & data > Machines;
+`membersConnectOwnMachines` on `/v1/organizations/:organizationId/privacy-settings`,
+column `organization_privacy_preferences.members_connect_own_machines`,
+migration 1148; on by default). Off, only the organization's owners and admins
+connect a new machine of their own: an Only me machine anywhere, or any machine
+in a Personal workspace, whose This workspace is still only its owner.
+Workspace permissions don't lift it, since a Personal workspace's owner manages
+machines there and an Only me machine follows its owner into every workspace.
+Approving a pairing code and minting a connect command check it before anything
+is created (`requireOwnMachineConnectAllowed`); declining a code never does.
+Shared-workspace and organization machines keep the rule above. It is
+acquisition policy only: machines already connected keep working and stay
+their owners' to change or remove, and a command minted before the change
+works until it expires (an hour). Connecting such a machine again is a new
+connection. `GET /v1/workspaces/:workspaceId/machines` reports
+`canConnectOwnMachine` for a person, so the connect dialog disables Only me
+(and This workspace in a Personal workspace), skips the desktop app's
+this-computer path, and mints nothing when nothing is left.
 
 The universal Machines-page one-liner securely installs or updates the runner
 installation, including a generated background-service definition when the
@@ -1731,7 +1822,7 @@ machine holds (its own dispatch gate checks them). Turning it on never needs a
 reconnect, a token or a human click:
 `POST /v1/workspaces/:ws/machines/:enrollmentId/screen-control`
 (the scope rule above: the owner for an Only me machine, `enrollments:manage`
-for a workspace machine, also `account:admin` for organization machines; no body)
+for a workspace machine, also the organization's owner or an admin for organization machines; no body)
 sets `allow_screen_control` on the enrollment in place, with the same id,
 scope, owner and credential generation, so the machine's current credentials
 stay valid. The API then sends the live agent a `credential_renew` control
@@ -1790,14 +1881,20 @@ place. The machine keeps its enrollment id, sandbox id, credentials and live
 connection, so its chats, schedules and the installed agent are not registered
 again, and the agent keeps running (with its running commands) without a
 restart or an upgrade. On the Machines page, open the machine and choose
-**Who can use it?**. Organization machines are shared with the whole
-organization and cannot be changed here.
+**Who can use it?**. Organization machines belong to the organization and
+cannot be changed here. The organization's owner or an admin chooses which
+workspaces they work in instead (see
+[Choose where an organization machine works](#choose-where-an-organization-machine-works)).
 
 - Narrowing to **Only me** is done by the person who will own the machine, or by
   a workspace admin who picks that owner. The owner must be an active member who
   can use the workspace.
 - Widening to **This workspace** needs `workspace:admin`, and is done by the
-  machine's owner, so nobody exposes another person's Only me machine.
+  machine's owner, so nobody exposes another person's Only me machine. In a
+  Personal workspace, where This workspace is still only its owner, the verified
+  owner acting as themselves may widen it without `workspace:admin` (the same
+  check as the workspace's other settings). Making a machine Only me for
+  someone else still needs `workspace:admin`.
 - Both need `enrollments:manage`. An agent cannot change it.
 
 The dialog shows what one confirmation will do, as counts in plain sentences
@@ -1818,9 +1915,9 @@ Nothing has to be resolved by hand first. Narrowing to **Only me** does this:
   cancelled (`authority_changed`): turns in chats that move off, and turns
   someone other than the owner started in the owner's shared chats. The agent's
   commands still running in chats that move off are stopped too.
-- **Schedules** that target the machine: the owner's Workspace schedules become
-  Only me schedules when the owner may have Only me schedules, and pause
-  otherwise. Everyone else's pause. The owner's Only me schedules keep running.
+- **Schedules** that target the machine: the new owner's schedules keep running
+  with no change, Only me or Workspace, because a schedule runs as its owner.
+  Everyone else's pause.
 - **Notices**: each affected person other than the one switching gets one
   inbox notification saying what moved, paused or stopped, and that they can
   choose another machine to continue.
@@ -1849,8 +1946,9 @@ The API is the same flow:
 - `POST /v1/workspaces/:ws/machines/:enrollmentId/audience/preview` with
   `{ audience: "only_me" | "workspace", ownerSubjectId? }` returns the plan:
   `summary` counts, `items` (each with its `action`: `move_off`, `keep`,
-  `make_only_me`, `pause` or `remove_first`), whether it is `ready`, and the
-  machine's `generation`.
+  `pause` or `remove_first`; `make_only_me` and `summary.schedulesMadeOnlyMe`
+  are no longer produced), whether it is `ready`, and the machine's
+  `generation`.
 - `PUT /v1/workspaces/:ws/machines/:enrollmentId/audience` with the same body
   plus `expectedGeneration` applies it and returns the counts and the chats it
   moved off. It answers `409` with `details.reason: "stale"` when the machine
@@ -1863,6 +1961,61 @@ they gave their full access: a session with admin access or a connected agent
 with full access calls the same two routes as them (the `previewMachineAudience`
 and `changeMachineAudience` admin actions). An agent acting as itself, or one
 with less than the person's full access, is refused.
+
+### Choose where an organization machine works
+
+An organization machine works in the organization's workspaces that an
+organization owner or admin picks, like the organization's model keys and connectors:
+every shared workspace, or chosen ones, plus a separate switch for members'
+Personal workspaces. The workspace it was connected from always has it,
+because its rows live there. A machine connected before this keeps working
+everywhere it did: every shared workspace and every Personal workspace.
+
+On the Machines page, an organization machine shows **Available in** with a
+short summary. Organization owners and admins see **Change** next to it, which
+opens the shared **Available in** picker. Taking workspaces away warns that chats and
+schedules there stop using the machine from their next turn. Nothing is moved
+or rebuilt: the machine list, the fleet
+tools, attempt resolution and direct attaches all check where the machine works
+on every call, so a workspace it no longer works in simply stops seeing it.
+
+`PUT /v1/workspaces/:ws/machines/:enrollmentId/reach` with
+`{ allowedWorkspaceIds: string[] | null, allowPersonalWorkspaces: boolean }`
+sets it (`null` means every shared workspace) and answers `{ reach }`, the same
+shape the machine list reports as `reach` for organization machines
+(`homeWorkspaceId`, `allowedWorkspaceIds`, `allowPersonalWorkspaces`). It needs
+`enrollments:manage`, and the caller is the organization's owner or an admin
+signed in as themselves (or a credential holding `account:admin`), the same
+rule as changing the machine. The connecting workspace is dropped
+from the list, since it always has the machine, and any id that is not a shared
+workspace of the organization answers `400` with `details.workspaceIds`. A
+workspace machine or an Only me machine answers `409`: those already work only
+in their workspace, or wherever their owner uses them. As with who can use a
+machine, a person makes this change, directly or through an agent they gave
+their full access. Each change records a `connected_machine.reach.changed`
+audit event with the previous and new reach.
+
+`GET /v1/workspaces/:ws/organization-machines` lists every organization
+machine wherever it works, as `{ machines: [{ id, name, sandboxId, reach }],
+complete }` (`id` is the enrollment), for Organization settings › Shared. It
+needs `enrollments:read` and an organization owner or admin, from a person or
+an agent acting as them; an agent acting as itself gets `403` and sees only
+what works in its workspace. Until a later release grants the
+organization-wide read (migration 1224 adds it), it answers the organization
+machines that work in this workspace with `complete: false`.
+
+### Where your own machine works
+
+An **Only me** machine runs its owner's own messages, and only in the
+workspaces where it is on. It starts on in the owner's Personal workspace and
+in the workspace it was connected from. Opening the machine on the Machines
+page shows **Where it works** under **Who can use it?**: every workspace the
+owner belongs to in the organization, with a switch for each. Turning it on
+in a workspace is the owner's standing `always` `connected_machine.use` grant
+there, for private and shared chats; turning it off revokes it, including in
+the Personal workspace. Other people's messages never run on it. The list and
+switches use the same own-resources reach routes as personal logins (see
+`docs/remote-mcp-credentials.md`).
 
 ### Zero-click token (fleet / headless)
 
@@ -1892,8 +2045,12 @@ fleet. Tokens minted before 0696 carry no `jti` and stay multi-use until they
 expire an hour later. Expired redemptions are pruned per workspace during later
 exchanges.
 
-`scope` chooses who can use the machine: `"workspace"` (the default, shared with
-the workspace) or `"user"` (only the person who minted the token). A personal
+`scope` chooses who can use the machine: `"workspace"` (shared with the
+workspace) or `"user"` (only the person who minted the token). Omitted, it is
+`"workspace"` for callers that may connect workspace machines
+(`enrollments:manage`), keys and services, and `"user"` for a signed-in
+teammate without `enrollments:manage`, who can only connect their own machine.
+A personal
 token can be minted only for a verified person: a signed-in human session, or a
 credential acting as that person (a personal API key, or an organization key or
 organization MCP client acting as them), the same canonical-actor rule as
@@ -1922,7 +2079,7 @@ is **secret**: anyone holding it can connect one machine until it expires.
 const { token, expiresAt, expiresInSeconds } = await client.mintEnrollToken(
   workspaceId,
   {
-    scope: "user", // only me; "workspace" (the default) shares it
+    scope: "user", // only me; "workspace" shares it with the workspace
     allowScreenControl: false, // bake screen-control consent into the token
   },
 );
@@ -2238,9 +2395,29 @@ a few seconds for it. A tab blocked by a dialog its page opened while no agent
 held the browser is left as it is for the person, and the session continues in
 a new tab.
 
-An attached tab's debugger disconnect invalidates its cached target, document,
-frame and element authority without restarting Chrome or changing other tabs.
-A later read can reattach the same surviving tab with fresh fences. Chrome's
+An attached tab's debugger disconnect ends that attachment's commands and
+controls without restarting Chrome or changing other tabs. A later call can
+reattach the same surviving tab: if it still shows the same document (same
+main-frame frame and loader ids), its target, document, frame and element
+authority carry over, so an observation made just before still holds; a new
+document gets fresh fences. Chrome ends debugging of a tab whenever another
+extension adds a frame of its own page (a password manager's inline menu); the
+extension removes such frames. A frame created blank and then loaded with the
+other extension's page, which its address does not show, is removed only when
+it is the one place the tab can hold that page. Chrome's debugging targets
+show other extensions' pages only for the whole browser, not per tab, and
+Chrome does not list every frame of a page to the extension (`webNavigation`
+omits other extensions' pages and some of the page's own, such as a data: page
+a blank frame was pointed at by script). So the frame must be the tab's only
+frame the extension cannot see into, hold no frames of its own, and every
+frame Chrome does list must have run the extension's script; the page must
+add no frame while the extension searches, hold no other extension's page
+found by its address, and Chrome's targets must hold another extension's page.
+Otherwise (the page also holds an error page, say, a data: frame of its own, a
+site the person took the extension's access from, or keeps adding frames) no
+frame is removed, the call fails saying the frame could not be
+removed, and the tab can be debugged again once the menu closes, still holding
+earlier observations of the same document. Chrome's
 `canceled_by_user` disconnect requires reconnecting the profile; it is never
 silently overridden. Detachment during pending input or other possible effects preserves an unknown
 outcome and blocks automatic reattachment until the profile reconnects. A late

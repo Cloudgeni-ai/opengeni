@@ -22,6 +22,31 @@ export const DEFAULT_TURN_WORKER_SHUTDOWN_GRACE_MS = 90_000;
 export const DEFAULT_TURN_WORKER_SHUTDOWN_FORCE_MS = 105_000;
 
 /**
+ * Internal accounts kept on the billing terms from before the app/API split:
+ * CloudGeni's host account and our own team's organizations, whose work
+ * (heavy use of the team's own Claude and Codex subscriptions included) pays
+ * no own-key platform fee and meets no new billing block. Lower-case ids.
+ */
+export const DEFAULT_BILLING_LEGACY_ACCOUNT_IDS: readonly string[] = [
+  // CloudGeni's production host account (Cloudgeni-Embedded).
+  "25eacc5d-f383-4f79-910a-b3d11dbf1310",
+  // Production: the team's main organization, "Cloudgeni Internal".
+  "67435f59-7f73-4996-8845-cd7baa2b7268",
+  // Production: "OpenGeni Internal".
+  "9d533546-b4a8-48e1-b9de-1b56c7ce0e50",
+  // Production: Bendik's own internal organization.
+  "7ee4f92f-dd65-4ac1-888e-e53d9b5f5b3b",
+  // Production: Himanshu's internal organization.
+  "d8afe24f-b593-463f-8f70-249e067a73ba",
+  // Production: Iuliia's internal organization.
+  "d955c979-cf01-4ee7-b130-8306cf099642",
+  // Production: Davlet's internal organization.
+  "2c9e60c8-d1d3-4d3d-849c-59a876488cf1",
+  // Staging: the team's "Cloudgeni Internal" organization.
+  "049d0b24-7665-4dbe-a7d8-4c2dc8e5674c",
+];
+
+/**
  * Placeholder token inside an agent-instructions persona template. The runtime
  * substitutes the non-bypassable CORE (goal-loop ownership + the dynamic
  * workspace-environment block) at this marker. A template that omits the

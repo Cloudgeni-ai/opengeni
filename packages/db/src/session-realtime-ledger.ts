@@ -30,6 +30,7 @@ import {
   lockWorkspaceInferenceControlForAdmission,
 } from "./session-control";
 import { submitHumanPromptInTransaction } from "./session-queue-commands";
+import { endSessionUnattendedDefaultInTransaction } from "./session-unattended";
 import { mirrorSessionRealtimeContextInTransaction } from "./session-realtime-mirror";
 
 export const SESSION_REALTIME_LEDGER_MAX_BATCH = 64;
@@ -1230,6 +1231,13 @@ async function admitRealtimeDelegationInTransaction(
     ),
     mcpAccountBindings: parseAcceptedMcpAccountBindings(mode.mcpAccountBindings),
     connectionAccountIntent: parseConnectionAccountIntent(mode.connectionAccountIntent),
+  });
+  // The call's owner is talking: an automation's unattended default ends, as
+  // when a person writes in the chat; an explicit choice stays. After the
+  // admission, which already holds the session row in the canonical lock order.
+  await endSessionUnattendedDefaultInTransaction(db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
   });
   return {
     turnId: admitted.turnId,

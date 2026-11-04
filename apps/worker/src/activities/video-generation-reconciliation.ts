@@ -282,8 +282,10 @@ async function reconcileWithProviderCredential(
           operationId: operation.id,
           requestDigest: operation.requestDigest,
           status: "outcome_unknown",
-          publicReason:
+          publicReason: withCreditsNote(
+            operation,
             "The video provider did not confirm whether generation started. It was not retried with a new request.",
+          ),
         }),
       );
       await deliverTerminalResult(service, operation);
@@ -346,7 +348,7 @@ async function reconcileWithProviderCredential(
             operationId: operation.id,
             requestDigest: operation.requestDigest,
             status: "provider_failed",
-            publicReason: "The video provider rejected the generation request.",
+            publicReason: refusedVideoStartReason(error, operation.fundingSource),
             privateError: privateError(error),
           }),
         );
@@ -403,10 +405,12 @@ async function reconcileWithProviderCredential(
         operationId: operation.id,
         requestDigest: operation.requestDigest,
         status: failureStatus,
-        publicReason:
+        publicReason: withCreditsNote(
+          operation,
           failureStatus === "retention_failed"
             ? "The generated video could not be retained."
             : "The video provider stopped reporting the accepted generation.",
+        ),
         privateError: privateError(error),
       }),
     );
@@ -433,7 +437,7 @@ async function reconcileWithProviderCredential(
         operationId: operation.id,
         requestDigest: operation.requestDigest,
         status: failureStatus,
-        publicReason: status.publicReason,
+        publicReason: withCreditsNote(operation, status.publicReason),
       }),
     );
     await deliverTerminalResult(service, operation);
@@ -501,7 +505,7 @@ async function reconcileWithProviderCredential(
         operationId: operation.id,
         requestDigest: operation.requestDigest,
         status: "retention_failed",
-        publicReason: "The generated video could not be retained.",
+        publicReason: withCreditsNote(operation, "The generated video could not be retained."),
         privateError: privateError(error),
       }),
     );
@@ -760,6 +764,49 @@ function isPermanentProviderFailure(error: unknown): boolean {
     error.status !== 408 &&
     error.status !== 429
   );
+}
+
+const NOTHING_CHARGED = "Nothing was charged.";
+
+/**
+ * Every failure settled here refunds an Opengeni credit debit, so a
+ * credit-funded video says so; other funding sources bill outside Opengeni.
+ */
+function withCreditsNote(
+  operation: Pick<VideoGenerationOperationWithReferences, "fundingSource">,
+  reason: string,
+): string {
+  return operation.fundingSource === "opengeni_credits" ? `${reason} ${NOTHING_CHARGED}` : reason;
+}
+
+/**
+ * What the person and the agent read when the provider refused to start a
+ * video. A refused start is never billed and its credits are refunded. It
+ * says whose side refused: the account paying for the video (key refused,
+ * out of funds, model not available to it), where trying again can't help
+ * until someone fixes it, or this request, where rewording may help.
+ */
+export function refusedVideoStartReason(error: unknown, fundingSource: string): string {
+  const status =
+    error instanceof GatewayVideoApiError || error instanceof XaiSubscriptionError
+      ? (error.status ?? null)
+      : null;
+  const accountRefused =
+    (error instanceof XaiSubscriptionError && error.kind === "relogin_required") ||
+    status === 401 ||
+    status === 402 ||
+    status === 403 ||
+    status === 404;
+  if (!accountRefused) {
+    return `The video service refused this description, so no video was made. ${NOTHING_CHARGED} Rewording it may help.`;
+  }
+  if (fundingSource === "workspace_gateway") {
+    return `The workspace's own Vercel AI Gateway refused this video, so none was made. ${NOTHING_CHARGED} A workspace admin can check its key and credit in Settings; trying again won't help until then.`;
+  }
+  if (fundingSource === "supergrok_subscription") {
+    return `The connected SuperGrok account refused this video, so none was made. ${NOTHING_CHARGED} It may need to be connected again in Settings; trying again won't help until then.`;
+  }
+  return `Video isn't working on this service right now, so no video was made. ${NOTHING_CHARGED} Trying again won't help until the service is fixed.`;
 }
 
 function privateError(error: unknown): string {

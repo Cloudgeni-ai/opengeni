@@ -2,10 +2,20 @@ import {
   recoverProviderClockAfterDependencyWait,
   PROVIDER_RECOVERY_SUSPENDED_AT,
 } from "./provider-recovery-clock";
+import {
+  pendingApprovalAccountOwner,
+  SessionApprovalForbiddenError,
+} from "./personal-connection-approval";
 export { continueSessionWaitingWork, getSessionMachineAccess } from "./session-machine-access";
+export { canonicalSecretPermissions } from "./canonical-secret-permissions";
 import { listWorkspaceBackgroundCommandsInScope } from "./session-background-commands";
 import { resolveSessionAppActionAuthority } from "./session-admin-access";
 export * from "./site-session-access";
+export * from "./organization-connectors";
+import {
+  organizationConnectorLogin,
+  type OrganizationConnectorRow,
+} from "./organization-connectors";
 import { siteSessionAccessFilter } from "./site-session-access";
 import {
   decodeActivityXid,
@@ -23,8 +33,11 @@ export {
 } from "./scheduled-task-lifecycle";
 export * from "./scheduled-task-blockers";
 export * from "./session-target";
+export * from "./session-resource-removal";
+import { admitRequestedRepositories } from "./session-resource-removal";
 export * from "./active-session-history";
 import type { ActiveSessionHistoryFootprint } from "./active-session-history";
+export * from "./session-search-records";
 export * from "./model-call-timing";
 export * from "./model-provider-execution-inputs";
 export * from "./workspace-model-catalog-inputs";
@@ -35,6 +48,7 @@ import {
 } from "./model-call-timing";
 export * from "./human-input-secret-answers";
 export * from "./secret-use-approvals";
+export * from "./personal-connection-approval";
 export * from "./credential-profiles";
 export * from "./secret-value-masking";
 export * from "./secret-use-history";
@@ -71,6 +85,9 @@ import {
   readOrganizationCodexUsage,
 } from "./organization-codex-usage";
 export * from "./organization-slack-bots";
+export * from "./slack-agents";
+export * from "./slack-agent-proposals";
+export * from "./slack-agent-updates";
 export * from "./voice-transcription-settlement";
 import {
   connectionMetadataColumns,
@@ -97,16 +114,27 @@ export * from "./subscription-plans";
 import { beginPlanCreditSettlement } from "./subscription-plans";
 export * from "./subscription-plan-maintenance";
 import {
+  byokFeeFunding,
+  chargeBillingOrigin,
   getBillingBalance,
   getSpendableCreditBalance,
+  paidCreditReceipt,
+  receiptCreatedAt,
   planCreditDebit,
   planPostUseCreditAllocations,
+  readBillingBalance,
   type CreditUsage,
 } from "./credit-balances";
+import { chainedReceipt, feeDebtRepaid, paidCreditMark } from "./paid-credit";
 export {
+  apiSpendableCreditMicros,
+  byokFeeSpendableMicros,
+  chargeBillingOrigin,
   getBillingBalance,
+  getByokFeeSpendableBalance,
   getSpendableCreditBalance,
   spendableCreditMicros,
+  toolCreditUsage,
   VOICE_CREDIT_USAGE,
   type CreditUsage,
 } from "./credit-balances";
@@ -133,6 +161,7 @@ export { effectiveSessionPolicyQuery } from "./session-execution-policy";
 
 import {
   BROWSER_WAIT_HOLD_MAX_MS,
+  boundSessionEventPayloadForWrite,
   CAPABILITY_SETUP_COMPLETED_NAME_MAX_CHARS,
   capabilitySetupCompletedSummary,
   type CapabilitySetupContinuationSkipReason,
@@ -155,7 +184,14 @@ import {
   type PromptCacheCallSample,
   type PromptCacheDiagnostics,
   type PromptCacheObservation,
+  resolveSessionUnattended,
+  sessionMetadataUnattended,
+  withSessionUnattendedMetadata,
+  type SessionUnattendedSetting,
+  parseSessionRemovedRepositories,
+  type SessionRemovedRepository,
 } from "@opengeni/contracts";
+import { API_CREDITS_REQUIRED_MESSAGE } from "@opengeni/contracts";
 import { recordToolApproval } from "@opengeni/observability";
 import { connectorActionFingerprint } from "./connector-action-fingerprint";
 import {
@@ -297,6 +333,11 @@ export {
 
 import { directModelConnectionSpec, isDirectModelId } from "@opengeni/contracts";
 import {
+  BYOK_PLATFORM_FEE_TYPE,
+  storedBillingOrigin,
+  type BillingOrigin,
+} from "@opengeni/contracts";
+import {
   normalizeOrganizationAccessPolicy,
   type OrganizationAccessPolicy,
   type UpdateOrganizationApiKeyRequest,
@@ -325,6 +366,7 @@ import {
 export {
   createOrganizationServiceAccount,
   deleteOrganizationServiceAccount,
+  effectiveKeyPermissions,
   getOrganizationServiceAccount,
   listOrganizationServiceAccounts,
   OrganizationServiceAccountNotFoundError,
@@ -338,6 +380,7 @@ import {
   currentSessionRlsActorInitiatingHumanSubjectId,
 } from "./database";
 import {
+  ambientBillingOrigin,
   CreditDebitAttribution,
   creditDebitAttributionMetadata,
   currentCreditDebitAttribution,
@@ -509,6 +552,14 @@ export {
   type SubscriptionCoreDisconnectAudit,
   type SubscriptionCoreDisconnectOutcome,
 } from "./subscription-core/connections";
+// Account administration a request proved without an organization membership
+// (configured access key, account-scoped key, signed delegation).
+export {
+  withSubscriptionAccountAdministrators,
+  type SubscriptionAccountAdministratorResolver,
+  type SubscriptionAccountAdministratorStamp,
+} from "./subscription-core/account-administrator";
+import { setSubscriptionAdministrationSubject } from "./subscription-core/account-administrator";
 export * from "./subscription-core-xai-compat";
 export * from "./subscription-core-claude-adapter";
 export * from "./subscription-core-claude";
@@ -525,7 +576,9 @@ export {
 // A person's own personal connections outside placement: stored status for
 // status reads and the live re-read of a stored exhaustion (design 5.3).
 export {
+  listOwnSubscriptionCoreConnections,
   subscriptionCorePersonalConnections,
+  type OwnSubscriptionCoreConnection,
   type SubscriptionCorePersonalConnection,
 } from "./subscription-core/personal-connections";
 import {
@@ -651,8 +704,10 @@ import {
 export * from "./model-connection-access";
 export {
   SubscriptionCoreAccessInvalidError,
+  SubscriptionCoreAccessMoveRequiredError,
   SubscriptionCoreAccessPeopleUnlistableError,
   SubscriptionCoreAccessPersonNotInOrganizationError,
+  SubscriptionCoreAccessWorkspaceNotAdministeredError,
   type SubscriptionCoreAccess,
 } from "./subscription-core/access";
 import { createHash, randomUUID } from "node:crypto";
@@ -826,6 +881,7 @@ import type {
   SessionListTotals,
   SiteConversationGroup,
   SessionListEntryResponse,
+  SessionListLatestTurn,
   SessionTenancyPublicProjection,
   SessionEvent,
   SessionEventPayloadMode,
@@ -870,6 +926,7 @@ import type {
   WorkspaceControlEvent,
   WorkspaceMemoryPromptMode,
   Channel,
+  OrganizationComputeReach,
   Rig,
   RigProviderImage,
   RigProviderImages,
@@ -945,6 +1002,9 @@ import {
 
 import {
   approvalIdentifier,
+  McpElicitationApprovalRequest,
+  McpElicitationContent,
+  resolveMcpElicitationContent,
   boundWorkspaceControlEvent,
   workspaceControlUtf8Bytes,
   SESSION_EVENT_RAW_DELTA_TYPES,
@@ -1017,6 +1077,11 @@ import {
 } from "@opengeni/config";
 import { SandboxTransitionWaitBudget } from "./sandbox-transition-wait";
 import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
+import { canonicalSecretPermissions } from "./canonical-secret-permissions";
+import {
+  accountPermissionsForOrganizationRole,
+  allAccountPermissions,
+} from "./organization-role-permissions";
 import {
   canonicalizePersistedHistoryItem,
   CodexAppsCredentialUnavailable,
@@ -1064,7 +1129,11 @@ import {
   UNATTRIBUTED_LEGACY_INITIATOR,
   type FrozenTurnInitiator,
 } from "./turn-initiator";
-export { frozenInitiatorForCommandActor, type FrozenTurnInitiator } from "./turn-initiator";
+export {
+  frozenInitiatorForCommandActor,
+  sameTurnSender,
+  type FrozenTurnInitiator,
+} from "./turn-initiator";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 import {
   fromPostgresLosslessJson,
@@ -1136,7 +1205,6 @@ import {
   registerSessionTurnAttemptClaim,
   reserveSessionCommandReceipt,
   serializeEffectiveSessionControl,
-  sessionWorkstreamHasActiveWork,
   type SessionDiscoveryControl,
   type SessionCommandActor,
   SessionControlConflictError,
@@ -1152,6 +1220,7 @@ import {
 } from "./session-realtime";
 import {
   insertConnectedMachineSessionBackgroundCommandInTransaction,
+  backgroundCommandResultOutputInTransaction,
   boundedSessionBackgroundCommandReason,
   insertManagedSessionBackgroundCommandInTransaction,
   settleClaimedConnectedMachineBackgroundCommandWithMutation,
@@ -1281,6 +1350,7 @@ export * from "./governed-learning-evaluator";
 export * from "./slack-task-policy";
 export * from "./preference-registry";
 export * from "./skills";
+export * from "./organization-shared-workspaces";
 export * from "./learning-refusals";
 export * from "./session-tool-results";
 export type { SkillSourceReleaseReceipt } from "./skill-source-release";
@@ -1293,6 +1363,7 @@ export * from "./company-brain-governed-writes";
 export * from "./company-brain-context-selection";
 export * from "./knowledge-source-sync";
 export * from "./task-notes";
+export * from "./session-share-links";
 export * from "./work-claims";
 export * from "./managed-human-provisioning";
 export * from "./managed-user-setup";
@@ -1321,12 +1392,14 @@ export {
 } from "./integration-oauth-pending-states";
 export * from "./workspace-integrations";
 export * from "./native-push";
+export * from "./agent-calls";
 export * from "./inbox";
 export * from "./vaults";
 export * from "./persistence-errors";
 export * from "./runtime-posture";
 export * from "./capability-integrations";
 export * from "./integration-bindings";
+import { IntegrationChangeRequiresAdminError } from "./integration-bindings";
 export * from "./integration-facets";
 export * from "./insights";
 export * from "./insights-model-bundle";
@@ -1351,6 +1424,11 @@ import {
   subjectHasLiveWorkspaceAuthorityInScope,
 } from "./workspace-authority";
 import { managedPersonalWorkspacePermissions } from "./personal-workspace-permissions";
+import {
+  joinedWorkspaceIsNotPersonal,
+  membershipOutsidePersonalWorkspace,
+} from "./personal-workspace-membership";
+export { PERSONAL_WORKSPACE_EXTERNAL_SOURCE } from "./personal-workspace-membership";
 export { memoryTextForStorage } from "./memory-domain";
 // Re-exported so external consumers can `import { migrate } from "@opengeni/db"`.
 // The `@opengeni/db/migrate` subpath stays available too (internal callers + the
@@ -2245,15 +2323,10 @@ export const allWorkspacePermissions: Permission[] = [
   "connections:write",
   "connections:personal",
   "capabilities:manage",
-  "variable-sets:list",
-  "variable-sets:read",
-  "variable-sets:write",
-  "variable-sets:manage",
-  "variable-sets:attach",
-  "variable-sets:use",
   "secrets:list",
   "secrets:read",
   "secrets:write",
+  "secrets:use",
   "mcp_servers:attach",
   "goals:manage",
   "enrollments:read",
@@ -2304,13 +2377,25 @@ export async function turnCanChangeWorkspaceSettings(
   db: Database,
   input: { accountId: string; workspaceId: string; sessionId: string; turnId: string },
 ): Promise<boolean> {
+  return (await turnWorkspaceSettingsAccess(db, input)) !== null;
+}
+
+/**
+ * How this turn's app actions can change the workspace's settings: "confirm"
+ * when each change waits for the person's yes in the chat, "full_access" when
+ * changes run straight away, or null when they can't change them.
+ */
+export async function turnWorkspaceSettingsAccess(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string; turnId: string },
+): Promise<"confirm" | "full_access" | null> {
   const authority = await resolveSessionAppActionAuthority(db, input);
-  if (authority.kind === "unavailable" || authority.kind === "read_only") return false;
+  if (authority.kind === "unavailable" || authority.kind === "read_only") return null;
   if (authority.kind === "confirm" && !authority.permissions.includes("workspace:admin")) {
-    return false;
+    return null;
   }
   const { subjectId } = authority;
-  return await withWorkspaceSubjectRls(db, input.workspaceId, subjectId, async (tx) => {
+  const allowed = await withWorkspaceSubjectRls(db, input.workspaceId, subjectId, async (tx) => {
     const membership = await getWorkspaceGrant(tx, subjectId, input.workspaceId);
     if (membership?.accountId === input.accountId) {
       return membership.permissions.includes("workspace:admin");
@@ -2320,25 +2405,10 @@ export async function turnCanChangeWorkspaceSettings(
       (await resolveNamedManagedPersonalWorkspaceGrant(tx, { ...input, subjectId })) !== null
     );
   });
+  return allowed ? authority.kind : null;
 }
 
-export const allAccountPermissions: Permission[] = [
-  "account:read",
-  "account:admin",
-  "members:manage",
-  "workspace:create",
-  "billing:read",
-  "billing:manage",
-  "api_keys:manage",
-];
-
-function accountPermissionsForOrganizationRole(role: "owner" | "admin" | "member"): Permission[] {
-  if (role === "owner") return allAccountPermissions;
-  if (role === "admin") {
-    return ["account:read", "members:manage", "workspace:create", "billing:read"];
-  }
-  return ["account:read"];
-}
+export { allAccountPermissions } from "./organization-role-permissions";
 
 export type BootstrapWorkspaceInput = {
   accountExternalSource: string;
@@ -2540,7 +2610,12 @@ export async function bootstrapWorkspace(
         schema.workspaces,
         eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id),
       )
-      .where(eq(schema.workspaceMemberships.subjectId, input.subjectId))
+      .where(
+        and(
+          eq(schema.workspaceMemberships.subjectId, input.subjectId),
+          joinedWorkspaceIsNotPersonal(),
+        ),
+      )
       .orderBy(desc(schema.workspaces.createdAt));
     return {
       mode: input.accountExternalSource === "opengeni:local" ? "local" : "configured",
@@ -2665,6 +2740,8 @@ async function projectManagedOrganizationAccess(
       and(
         eq(schema.workspaceMemberships.accountId, schema.managedAccounts.id),
         eq(schema.workspaceMemberships.subjectId, input.subjectId),
+        // The Personal grant below comes from the pointer, never a row there.
+        membershipOutsidePersonalWorkspace(),
       ),
     )
     .leftJoin(
@@ -3030,6 +3107,7 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
           eq(schema.workspaceMemberships.subjectId, subjectId),
           eq(schema.workspaceMemberships.accountId, account.id),
           eq(schema.workspaces.accountId, account.id),
+          joinedWorkspaceIsNotPersonal(),
         ),
       )
       .orderBy(desc(schema.workspaces.createdAt));
@@ -3092,6 +3170,7 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
             eq(schema.workspaceMemberships.subjectId, subjectId),
             eq(schema.workspaceMemberships.accountId, organizationMembership.organizationId),
             eq(schema.workspaces.accountId, organizationMembership.organizationId),
+            joinedWorkspaceIsNotPersonal(),
           ),
         )
         .orderBy(desc(schema.workspaces.createdAt));
@@ -3229,7 +3308,9 @@ export async function listWorkspacesForSubject(
     .select({ workspace: schema.workspaces })
     .from(schema.workspaceMemberships)
     .innerJoin(schema.workspaces, eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id))
-    .where(eq(schema.workspaceMemberships.subjectId, subjectId))
+    .where(
+      and(eq(schema.workspaceMemberships.subjectId, subjectId), joinedWorkspaceIsNotPersonal()),
+    )
     .orderBy(desc(schema.workspaces.createdAt))
     .limit(limit);
   return await mapWorkspaceProjections(db, rows, async (row) =>
@@ -4010,6 +4091,9 @@ export async function getWorkspaceGrant(
   workspaceId: string,
   provenance?: { principalKind?: AccessPrincipalKind },
 ): Promise<AccessGrant | null> {
+  // A bare membership grant, never a Personal workspace's own row: whoever
+  // names the owner's subject would otherwise reach it. See
+  // membershipOutsidePersonalWorkspace.
   const [row] = await db
     .select({
       membership: schema.workspaceMemberships,
@@ -4021,6 +4105,7 @@ export async function getWorkspaceGrant(
       and(
         eq(schema.workspaceMemberships.subjectId, subjectId),
         eq(schema.workspaceMemberships.workspaceId, workspaceId),
+        joinedWorkspaceIsNotPersonal(),
       ),
     )
     .limit(1);
@@ -4741,25 +4826,29 @@ export async function deleteWorkspaceIfQuiescent(
           // deleting the parent. Finalize the gate inside this transaction: the
           // workspace activity counter disappears with the parent cascade.
           const variableSetDetachStartedAt = performance.now();
-          await withRestoredSessionActivityRlsContext(
+          // Release-N compatibility only: ordinary ORM reads no longer name
+          // retired columns. The contract release removes this table and its
+          // attachment guards atomically, after which detachment is unnecessary.
+          const [retiredVariableSetSchema] = await rawRows<{ present: boolean }>(
             tx,
-            { accountId: input.accountId, workspaceId: input.workspaceId },
-            async (activityDb) => {
-              await activityDb
-                .update(schema.sessions)
-                .set({
-                  variableSetIds: [],
-                  variableSetId: null,
-                  updatedAt: new Date(),
-                })
-                .where(
-                  and(
-                    eq(schema.sessions.workspaceId, input.workspaceId),
-                    isNotNull(schema.sessions.variableSetId),
-                  ),
-                );
-            },
+            sql`select pg_catalog.to_regclass('workspace_variable_sets') is not null as present`,
           );
+          if (retiredVariableSetSchema?.present) {
+            await withRestoredSessionActivityRlsContext(
+              tx,
+              { accountId: input.accountId, workspaceId: input.workspaceId },
+              async (activityDb) => {
+                await activityDb.execute(sql`
+                  update sessions
+                  set variable_set_ids = '[]'::jsonb, variable_set_id = null,
+                    updated_at = ${new Date().toISOString()}::timestamptz
+                  where workspace_id = ${input.workspaceId}::uuid
+                    and account_id = ${input.accountId}::uuid
+                    and variable_set_id is not null
+                `);
+              },
+            );
+          }
           observeWorkspaceDeletePhase(input.observer, {
             phase: "variable_set_detach",
             outcome: "ok",
@@ -6634,6 +6723,18 @@ export async function applyCreditLedgerEntryOnce(
       // Funding and usage adjustments share the expiry boundary too.
       await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
       const settledAt = await beginPlanCreditSettlement(scopedDb, input.accountId);
+      // Paid-for credit, refunds of it and unpaid credit record what they
+      // change in paid credit (paid-credit.ts).
+      const receipt = await paidCreditReceipt(scopedDb, {
+        accountId: input.accountId,
+        settledAt,
+        type: input.type,
+        amountMicros: input.amountMicros,
+        eligibleModelIds: input.eligibleModelIds ?? null,
+        metadata: input.metadata,
+        sourceType: input.sourceType ?? null,
+        sourceId: input.sourceId ?? null,
+      });
       const inserted = await scopedDb
         .insert(schema.creditLedgerEntries)
         .values({
@@ -6645,9 +6746,9 @@ export async function applyCreditLedgerEntryOnce(
           sourceType: input.sourceType ?? null,
           sourceId: input.sourceId ?? null,
           idempotencyKey: input.idempotencyKey,
-          metadata: input.metadata ?? {},
+          metadata: { ...input.metadata, ...receipt.metadata },
           occurredAt: input.occurredAt ?? new Date(),
-          createdAt: sql`${settledAt}::timestamptz`,
+          createdAt: receipt.createdAt,
         })
         .onConflictDoNothing({
           target: schema.creditLedgerEntries.idempotencyKey,
@@ -6659,6 +6760,83 @@ export async function applyCreditLedgerEntryOnce(
       };
     },
   );
+}
+
+const USAGE_ORIGIN_TURN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The funding origin a usage debit is charged under, frozen on its ledger row
+ * (`usage_origin`): the caller's explicit origin; else the origin carried in
+ * its attribution metadata; else the turn it names; else the origin a
+ * trusted outer scope fixed; else app (today's behaviour, and legacy null).
+ * API debits never count against the monthly plan allowance.
+ */
+/**
+ * The origin a frozen billing record is charged under, resolved like the
+ * debit itself (see resolveUsageOrigin), so admission and charge agree.
+ */
+async function attributionBillingOrigin(
+  scopedDb: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    attribution?: CreditDebitAttribution | null | undefined;
+  },
+): Promise<BillingOrigin> {
+  const attribution = input.attribution;
+  if (!attribution || attribution.kind === "unknown") return ambientBillingOrigin() ?? "app";
+  return await resolveUsageOrigin(scopedDb, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    metadata: creditDebitAttributionMetadata(attribution),
+  });
+}
+
+/** {@link attributionBillingOrigin} for a caller outside an account scope. */
+export async function billingOriginForAttribution(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    attribution?: CreditDebitAttribution | null | undefined;
+  },
+): Promise<BillingOrigin> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => await attributionBillingOrigin(scopedDb, input),
+  );
+}
+
+async function resolveUsageOrigin(
+  scopedDb: Database,
+  input: {
+    accountId: string;
+    workspaceId?: string | null;
+    usageOrigin?: BillingOrigin | undefined;
+    metadata?: Record<string, unknown> | undefined;
+  },
+): Promise<BillingOrigin> {
+  if (input.usageOrigin) return input.usageOrigin;
+  const metadataOrigin = input.metadata?.billingOrigin;
+  if (metadataOrigin === "app" || metadataOrigin === "api") return metadataOrigin;
+  const attribution = currentCreditDebitAttribution();
+  const turnId =
+    typeof input.metadata?.turnId === "string"
+      ? input.metadata.turnId
+      : attribution.kind === "turn" && !attribution.billingOrigin
+        ? attribution.turnId
+        : null;
+  if (turnId && input.workspaceId && USAGE_ORIGIN_TURN_ID.test(turnId)) {
+    const [turn] = await rawRows<{ billingOrigin: string | null }>(
+      scopedDb,
+      sql`SELECT billing_origin AS "billingOrigin" FROM session_turns
+        WHERE account_id=${input.accountId}::uuid AND workspace_id=${input.workspaceId}::uuid
+          AND id=${turnId}::uuid`,
+    );
+    if (turn) return storedBillingOrigin(turn.billingOrigin);
+  }
+  return ambientBillingOrigin() ?? "app";
 }
 
 export async function applyCreditDebitUpToBalance(
@@ -6676,6 +6854,8 @@ export async function applyCreditDebitUpToBalance(
     idempotencyKey: string;
     metadata?: Record<string, unknown>;
     occurredAt?: Date;
+    /** Funding origin; omitted resolves from the attribution (see resolveUsageOrigin). */
+    usageOrigin?: BillingOrigin;
   },
 ): Promise<{
   balance: BillingBalance;
@@ -6707,7 +6887,8 @@ export async function applyCreditDebitUpToBalance(
         settledAt,
         true,
       );
-      const plan = planCreditDebit(before, input.requestedAmountMicros, input.modelId);
+      const usageOrigin = await resolveUsageOrigin(scopedDb, input);
+      const plan = planCreditDebit(before, input.requestedAmountMicros, input.modelId, usageOrigin);
       const candidateDebitMicros = plan.debitedMicros;
       // Keep a zero-cost receipt too: retrying after a top-up must not charge
       // a response that was already settled while the eligible balance was empty.
@@ -6720,6 +6901,7 @@ export async function applyCreditDebitUpToBalance(
           amountMicros: -candidateDebitMicros,
           sourceType: input.sourceType ?? null,
           sourceId: input.sourceId ?? null,
+          usageOrigin,
           idempotencyKey: input.idempotencyKey,
           metadata: {
             ...input.metadata,
@@ -6779,10 +6961,15 @@ export async function applyCreditDebitAfterUse(
      * Omitted: general credit only.
      */
     usage?: CreditUsage;
+    /** Funding origin; omitted resolves from the attribution (see resolveUsageOrigin). */
+    usageOrigin?: BillingOrigin;
   },
 ): Promise<{ balance: BillingBalance; debitedMicros: number }> {
   if (!Number.isSafeInteger(input.amountMicros) || input.amountMicros <= 0) {
     throw new Error("post-use credit debit requires a positive, safe integer micro amount");
+  }
+  if (input.type === BYOK_PLATFORM_FEE_TYPE) {
+    throw new Error("a bring-your-own-key fee settles with applyByokPlatformFeeDebit");
   }
   return await withRlsContext(
     db,
@@ -6792,68 +6979,165 @@ export async function applyCreditDebitAfterUse(
       // that cannot allocate promotional grants.
       await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
       const settledAt = await beginPlanCreditSettlement(scopedDb, input.accountId);
+      const usageOrigin = await resolveUsageOrigin(scopedDb, input);
       let allocations: { grantEntryId: string; amountMicros: number }[] = [];
-      if (input.usage) {
+      // App use: plan credit (the Free plan's scoped credit too) pays for
+      // tools as well as models.
+      if (usageOrigin === "app") {
         allocations = planPostUseCreditAllocations(
           await getBillingBalance(scopedDb, input.accountId, undefined, settledAt, true),
           input.amountMicros,
           input.usage,
         );
       }
-      const inserted = await scopedDb
-        .insert(schema.creditLedgerEntries)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId ?? null,
-          type: input.type,
-          amountMicros: -input.amountMicros,
-          sourceType: input.sourceType,
-          sourceId: input.sourceId,
-          idempotencyKey: input.idempotencyKey,
-          metadata: input.metadata ?? {},
-          occurredAt: input.occurredAt ?? new Date(),
-          createdAt: sql`${settledAt}::timestamptz`,
-        })
-        .onConflictDoNothing({ target: schema.creditLedgerEntries.idempotencyKey })
-        .returning({ id: schema.creditLedgerEntries.id });
-      if (inserted.length === 0) {
-        const [prior] = await scopedDb
-          .select({
-            accountId: schema.creditLedgerEntries.accountId,
-            workspaceId: schema.creditLedgerEntries.workspaceId,
-            type: schema.creditLedgerEntries.type,
-            amountMicros: schema.creditLedgerEntries.amountMicros,
-            sourceType: schema.creditLedgerEntries.sourceType,
-            sourceId: schema.creditLedgerEntries.sourceId,
-          })
-          .from(schema.creditLedgerEntries)
-          .where(eq(schema.creditLedgerEntries.idempotencyKey, input.idempotencyKey));
-        if (
-          !prior ||
-          prior.accountId !== input.accountId ||
-          prior.workspaceId !== (input.workspaceId ?? null) ||
-          prior.type !== input.type ||
-          prior.amountMicros !== -input.amountMicros ||
-          prior.sourceType !== input.sourceType ||
-          prior.sourceId !== input.sourceId
-        ) {
-          throw new Error(
-            "post-use credit debit idempotency key conflicts with a different charge",
-          );
-        }
-      } else if (allocations.length) {
+      const insertedId = await insertPostUseDebit(scopedDb, input, usageOrigin, settledAt);
+      if (insertedId && allocations.length) {
         await scopedDb.insert(schema.creditDebitAllocations).values(
           allocations.map((allocation) => ({
             ...allocation,
             accountId: input.accountId,
-            debitEntryId: inserted[0]!.id,
+            debitEntryId: insertedId,
           })),
         );
       }
       return {
         balance: await getBillingBalance(scopedDb, input.accountId),
-        debitedMicros: inserted.length ? input.amountMicros : 0,
+        debitedMicros: insertedId ? input.amountMicros : 0,
       };
+    },
+  );
+}
+
+/**
+ * Insert an already-consumed charge once. A replay of the same idempotency
+ * key must be the same charge. Returns the new row's id, or null on replay.
+ */
+async function insertPostUseDebit(
+  scopedDb: Database,
+  input: {
+    accountId: string;
+    workspaceId?: string | null;
+    type: string;
+    amountMicros: number;
+    sourceType: string;
+    sourceId: string;
+    idempotencyKey: string;
+    metadata?: Record<string, unknown>;
+    occurredAt?: Date;
+  },
+  usageOrigin: BillingOrigin,
+  settledAt: string,
+  createdAt: SQL = sql`${settledAt}::timestamptz`,
+): Promise<string | null> {
+  const inserted = await scopedDb
+    .insert(schema.creditLedgerEntries)
+    .values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId ?? null,
+      type: input.type,
+      amountMicros: -input.amountMicros,
+      sourceType: input.sourceType,
+      sourceId: input.sourceId,
+      usageOrigin,
+      idempotencyKey: input.idempotencyKey,
+      metadata: input.metadata ?? {},
+      occurredAt: input.occurredAt ?? new Date(),
+      createdAt,
+    })
+    .onConflictDoNothing({ target: schema.creditLedgerEntries.idempotencyKey })
+    .returning({ id: schema.creditLedgerEntries.id });
+  if (inserted.length) return inserted[0]!.id;
+  const [prior] = await scopedDb
+    .select({
+      accountId: schema.creditLedgerEntries.accountId,
+      workspaceId: schema.creditLedgerEntries.workspaceId,
+      type: schema.creditLedgerEntries.type,
+      amountMicros: schema.creditLedgerEntries.amountMicros,
+      sourceType: schema.creditLedgerEntries.sourceType,
+      sourceId: schema.creditLedgerEntries.sourceId,
+    })
+    .from(schema.creditLedgerEntries)
+    .where(eq(schema.creditLedgerEntries.idempotencyKey, input.idempotencyKey));
+  if (
+    !prior ||
+    prior.accountId !== input.accountId ||
+    prior.workspaceId !== (input.workspaceId ?? null) ||
+    prior.type !== input.type ||
+    prior.amountMicros !== -input.amountMicros ||
+    prior.sourceType !== input.sourceType ||
+    prior.sourceId !== input.sourceId
+  ) {
+    throw new Error("post-use credit debit idempotency key conflicts with a different charge");
+  }
+  return null;
+}
+
+/**
+ * Settle one bring-your-own-key platform fee (`byok_platform_fee`), payable
+ * only from paid credit: an active paid plan's credit first (app use), then
+ * paid credits; the rest is fee debt the next top-up repays. Its row records
+ * the split (`planPaidMicros`, `creditPaidMicros`, `unfundedMicros`) and a
+ * paid-credit mark (paid-credit.ts). One balance read under the account lock.
+ */
+export async function applyByokPlatformFeeDebit(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId?: string | null;
+    amountMicros: number;
+    sourceType: string;
+    sourceId: string;
+    idempotencyKey: string;
+    metadata?: Record<string, unknown>;
+    occurredAt?: Date;
+    /** Funding origin; omitted resolves from the attribution (see resolveUsageOrigin). */
+    usageOrigin?: BillingOrigin;
+  },
+): Promise<{
+  debitedMicros: number;
+  planPaidMicros: number;
+  creditPaidMicros: number;
+  unfundedMicros: number;
+}> {
+  if (!Number.isSafeInteger(input.amountMicros) || input.amountMicros <= 0) {
+    throw new Error("post-use credit debit requires a positive, safe integer micro amount");
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
+    async (scopedDb) => {
+      await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
+      const settledAt = await beginPlanCreditSettlement(scopedDb, input.accountId);
+      const usageOrigin = await resolveUsageOrigin(scopedDb, input);
+      const { balance, paid } = await readBillingBalance(
+        scopedDb,
+        input.accountId,
+        undefined,
+        settledAt,
+        true,
+      );
+      const funding = byokFeeFunding(balance, paid, input.amountMicros, usageOrigin);
+      const insertedId = await insertPostUseDebit(
+        scopedDb,
+        {
+          ...input,
+          type: BYOK_PLATFORM_FEE_TYPE,
+          metadata: {
+            ...input.metadata,
+            ...chainedReceipt(
+              paid,
+              { type: BYOK_PLATFORM_FEE_TYPE, amountMicros: input.amountMicros },
+              { ...funding, ...paidCreditMark(paid), ...feeDebtRepaid(paid) },
+            ),
+          },
+        },
+        usageOrigin,
+        settledAt,
+        receiptCreatedAt(settledAt, paid),
+      );
+      return insertedId
+        ? { debitedMicros: input.amountMicros, ...funding }
+        : { debitedMicros: 0, planPaidMicros: 0, creditPaidMicros: 0, unfundedMicros: 0 };
     },
   );
 }
@@ -7086,6 +7370,8 @@ export type ScheduledTaskCreatorPolicy = {
 export type CreateScheduledTaskInput = {
   id?: string;
   accountId: string;
+  /** Funding origin of whoever set the task up, inherited by every run. */
+  billingOrigin?: BillingOrigin | null;
   /** Vault narrowing for every run (0739); omission is `{ mode: "all" }`. */
   vaultPolicy?: import("@opengeni/contracts").VaultPolicy | undefined;
   workspaceId: string;
@@ -7110,6 +7396,8 @@ export type CreateScheduledTaskInput = {
   metadata: Record<string, unknown>;
   /** Who can see it; `user_private` requires a human owner. Default shared. */
   visibility?: "user_private" | "workspace_shared";
+  /** Only the frozen creator principal may change, run or delete it; never an agent attempt. */
+  creatorLocked?: boolean;
   /** Trusted database-only admission seam. Throwing rolls the task creation back. */
   beforeCreateCommit?: (tx: Database) => Promise<void>;
 
@@ -7625,6 +7913,11 @@ export type CreateCapabilityCatalogItemInput = {
   installUrl?: string | null;
   authModel?: string | null;
   metadata?: Record<string, unknown>;
+  /**
+   * Insert only: an existing workspace row with this id is returned unchanged
+   * instead of being rewritten (a member adding a server never edits one).
+   */
+  createOnly?: boolean;
 };
 
 export type ImportBatch = {
@@ -7677,6 +7970,13 @@ export type RegistryCapabilityCatalogItemInput = {
   tier: "verified" | "community";
   provenance: string;
   logoAssetPath?: string | null;
+  /**
+   * The row has no logo by policy (an overlay `logoSourceUrl: null`, or a
+   * screened letter placeholder): clear any asset an earlier import stored.
+   * Without it a null `logoAssetPath` keeps the existing asset, because a
+   * skipped or failed fetch must not erase a good logo.
+   */
+  clearLogoAsset?: boolean;
   importBatchId: string;
   scopesHint?: string[];
   homepageUrl?: string | null;
@@ -7702,6 +8002,8 @@ export type EnableCapabilityInstallationInput = {
   onlyIfUninstalled?: boolean;
   config?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
+  /** The person turning it on or changing it; recorded as its installer. */
+  installedBySubjectId?: string | null;
 };
 
 export type InstallPortableSkillInput = {
@@ -7907,6 +8209,8 @@ export type EnqueueSessionTurnInput = {
   source: SessionTurnSource;
   /** Content-free product surface the request entered through. */
   surface?: SessionTurnSurface | null;
+  /** Funding origin frozen on the turn; null inherits the session's latest. */
+  billingOrigin?: BillingOrigin | null;
   prompt: string;
   modelContext?: string | null;
   resources: ResourceRef[];
@@ -7936,6 +8240,8 @@ export type SessionTurnForExecution = SessionTurn & {
   /** Worker-only causal authority; never inferred from the current worker. */
   initiatingHumanSubjectId: string | null;
   scheduledTaskRunId: string | null;
+  /** Funding origin frozen at acceptance; legacy null is app. */
+  billingOrigin: BillingOrigin;
   xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
   claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1;
   goalSnapshot: SessionGoalSnapshot;
@@ -8281,6 +8587,102 @@ export async function updateFileVisibility(
   );
 }
 
+export type FileReachChangeResult =
+  | { kind: "changed" | "unchanged"; file: FileAsset }
+  | { kind: "not_found" }
+  | { kind: "not_owner" }
+  | { kind: "not_private" };
+
+/**
+ * Where the owner's Only me file works besides the workspace that stores it
+ * and their Personal workspace: the other workspaces of the organization in
+ * `reachWorkspaceIds`, or all of them (null). The caller resolves the list to
+ * the owner's own workspaces of this organization first. Only the owner
+ * changes it, from the workspace that stores the file, and the change and its
+ * audit fact commit together.
+ */
+export async function updateFileReach(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    fileId: string;
+    reachWorkspaceIds: readonly string[] | null;
+    /** The owner: the human caller, or the human an agent acts for. */
+    actorSubjectId: string;
+    /** Audit subject: the caller's own subject. */
+    auditSubjectId: string;
+  },
+): Promise<FileReachChangeResult> {
+  const reach =
+    input.reachWorkspaceIds === null
+      ? null
+      : [...new Set(input.reachWorkspaceIds)].filter((id) => id !== input.workspaceId).sort();
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (tx) => {
+      // Read and change it as its owner's private-file identity, the one the
+      // row-level policies check, then restore the caller's own identity.
+      const [previous] = await rawRows<{ owner: string | null }>(
+        tx,
+        sql`select current_setting('opengeni.private_file_owner', true) as owner`,
+      );
+      await rawRows(
+        tx,
+        sql`select set_config('opengeni.private_file_owner', ${input.actorSubjectId}::text, true)`,
+      );
+      const restore = async () =>
+        await rawRows(
+          tx,
+          sql`select set_config('opengeni.private_file_owner', ${previous?.owner ?? ""}::text, true)`,
+        );
+      const [row] = await tx
+        .select()
+        .from(schema.files)
+        .where(
+          and(eq(schema.files.workspaceId, input.workspaceId), eq(schema.files.id, input.fileId)),
+        )
+        .for("update")
+        .limit(1);
+      if (!row) {
+        await restore();
+        return { kind: "not_found" };
+      }
+      if (!row.privateOwnerSubjectIds) {
+        await restore();
+        return { kind: "not_private" };
+      }
+      if (mapFile(row).ownerSubjectId !== input.actorSubjectId) {
+        await restore();
+        return { kind: "not_owner" };
+      }
+      const current = row.reachWorkspaceIds === null ? null : [...row.reachWorkspaceIds].sort();
+      if (JSON.stringify(current) === JSON.stringify(reach)) {
+        await restore();
+        return { kind: "unchanged", file: mapFile(row) };
+      }
+      const [updated] = await tx
+        .update(schema.files)
+        .set({ reachWorkspaceIds: reach, updatedAt: new Date() })
+        .where(and(eq(schema.files.workspaceId, input.workspaceId), eq(schema.files.id, row.id)))
+        .returning();
+      await restore();
+      if (!updated) return { kind: "not_found" };
+      await recordAuditEvent(tx, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.auditSubjectId,
+        action: "file.reach.changed",
+        targetType: "workspace_file",
+        targetId: row.id,
+        metadata: { fileId: row.id, from: current, to: reach },
+      });
+      return { kind: "changed", file: mapFile(updated) };
+    },
+  );
+}
+
 /**
  * Whether a finished file exists in this workspace but is Only me for someone
  * other than the caller. It reveals nothing else: no name, owner or content.
@@ -8323,6 +8725,7 @@ export async function requireFileForSubject(
     return file;
   }
 
+  const reaching = filesReachingWorkspace(input);
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -8335,10 +8738,7 @@ export async function requireFileForSubject(
         .where(
           and(
             eq(schema.files.accountId, input.accountId),
-            or(
-              eq(schema.files.workspaceId, input.workspaceId),
-              isNotNull(schema.files.privateOwnerSubjectIds),
-            ),
+            reaching,
             eq(schema.files.id, input.fileId),
             sql`google_drive_file_authorized(
               ${input.accountId}::uuid,
@@ -8353,6 +8753,41 @@ export async function requireFileForSubject(
       return mapFile(row);
     },
   );
+}
+
+/**
+ * The files a workspace may read for a person: its own, plus their Only me
+ * files from the organization's other workspaces that work here, because the
+ * file's reach list names this workspace or is null (every workspace, as all
+ * files made before the list existed). In the person's own Personal
+ * workspace all their Only me files work (docs/design/ownership-and-reach.md:
+ * an Only me thing works where its owner turned it on, always in their
+ * Personal workspace). Row-level security still decides whose Only me files
+ * these are, and a Personal workspace has exactly one member, so a person
+ * reading in one is its owner. The workspace kind is read once per statement
+ * inside the caller's workspace context, never in a separate round trip.
+ */
+function filesReachingWorkspace(input: {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string | null;
+}): SQL {
+  const reachesHere = or(
+    isNull(schema.files.reachWorkspaceIds),
+    sql`${input.workspaceId}::uuid = ANY(${schema.files.reachWorkspaceIds})`,
+  );
+  return or(
+    eq(schema.files.workspaceId, input.workspaceId),
+    and(
+      isNotNull(schema.files.privateOwnerSubjectIds),
+      input.subjectId === null
+        ? reachesHere
+        : or(
+            sql`(select get_workspace_kind(${input.accountId}::uuid, ${input.workspaceId}::uuid)) = 'personal'`,
+            reachesHere,
+          ),
+    ),
+  )!;
 }
 
 /**
@@ -8430,6 +8865,7 @@ export async function listFilesForSubject(
       throw new z.ZodError([{ code: "custom", path: ["cursor"], message: "Invalid file cursor" }]);
     }
   }
+  const reaching = filesReachingWorkspace(input);
   return withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -8445,10 +8881,7 @@ export async function listFilesForSubject(
           and(
             eq(schema.files.accountId, input.accountId),
             eq(schema.files.status, "ready"),
-            or(
-              eq(schema.files.workspaceId, input.workspaceId),
-              isNotNull(schema.files.privateOwnerSubjectIds),
-            ),
+            reaching,
             input.scope === "workspace"
               ? isNull(schema.files.privateOwnerSubjectIds)
               : input.scope === "personal"
@@ -8488,6 +8921,7 @@ export async function getFilesForSubject(
 ): Promise<FileAsset[]> {
   const ids = [...new Set(input.fileIds)];
   if (ids.length === 0) return [];
+  const reaching = filesReachingWorkspace(input);
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -8515,10 +8949,7 @@ export async function getFilesForSubject(
         .where(
           and(
             eq(schema.files.accountId, input.accountId),
-            or(
-              eq(schema.files.workspaceId, input.workspaceId),
-              isNotNull(schema.files.privateOwnerSubjectIds),
-            ),
+            reaching,
             inArray(schema.files.id, ids),
             sql`google_drive_file_authorized(
               ${input.accountId}::uuid,
@@ -10155,7 +10586,9 @@ export async function upsertRegistryCapabilityCatalogItem(
     credentialFacts: values.credentialFacts,
     tier: values.tier,
     provenance: values.provenance,
-    logoAssetPath: sql`coalesce(excluded.logo_asset_path, ${schema.capabilityCatalogItems.logoAssetPath})`,
+    logoAssetPath: input.clearLogoAsset
+      ? null
+      : sql`coalesce(excluded.logo_asset_path, ${schema.capabilityCatalogItems.logoAssetPath})`,
     importBatchId: values.importBatchId,
     stale: false,
     staleAt: null,
@@ -10296,14 +10729,24 @@ export async function upsertCapabilityCatalogItem(
         metadata: values.metadata,
         updatedAt: values.updatedAt,
       };
-      const [row] = await scopedDb
-        .insert(schema.capabilityCatalogItems)
-        .values(values)
-        .onConflictDoUpdate({
-          target: [schema.capabilityCatalogItems.workspaceId, schema.capabilityCatalogItems.id],
-          set: updateValues,
-        })
-        .returning();
+      const insert = scopedDb.insert(schema.capabilityCatalogItems).values(values);
+      const target = [schema.capabilityCatalogItems.workspaceId, schema.capabilityCatalogItems.id];
+      const [row] = input.createOnly
+        ? await insert.onConflictDoNothing({ target }).returning()
+        : await insert.onConflictDoUpdate({ target, set: updateValues }).returning();
+      if (!row && input.createOnly) {
+        const [existing] = await scopedDb
+          .select()
+          .from(schema.capabilityCatalogItems)
+          .where(
+            and(
+              eq(schema.capabilityCatalogItems.workspaceId, input.workspaceId),
+              eq(schema.capabilityCatalogItems.id, input.id),
+            ),
+          )
+          .limit(1);
+        if (existing) return mapCapabilityCatalogItem(existing);
+      }
       if (!row) {
         throw new Error("Failed to upsert capability catalog item");
       }
@@ -11474,6 +11917,8 @@ export async function enableCapabilityInstallation(
             metadata: input.metadata ?? existing.metadata,
             enabledAt: now,
             updatedAt: now,
+            // Changing an installation hands it to whoever changed it.
+            installedBySubjectId: input.installedBySubjectId ?? null,
           })
           .where(
             and(
@@ -11495,6 +11940,7 @@ export async function enableCapabilityInstallation(
         status: "active",
         config: input.config ?? {},
         metadata: input.metadata ?? {},
+        installedBySubjectId: input.installedBySubjectId ?? null,
       });
       const [row] = await (
         input.onlyIfUninstalled ? insert.onConflictDoNothing() : insert
@@ -11513,6 +11959,79 @@ export async function enableCapabilityInstallation(
         throw new Error("Failed to enable capability installation");
       }
       return mapCapabilityInstallation(row);
+    },
+  );
+}
+
+/** Who turned each MCP server on in a workspace, and whether it is on now. */
+export async function listCapabilityInstallationInstallers(
+  db: Database,
+  workspaceId: string,
+): Promise<Map<string, { status: string; installedBySubjectId: string | null }>> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        capabilityId: schema.capabilityInstallations.capabilityId,
+        status: schema.capabilityInstallations.status,
+        installedBySubjectId: schema.capabilityInstallations.installedBySubjectId,
+      })
+      .from(schema.capabilityInstallations)
+      .where(eq(schema.capabilityInstallations.workspaceId, workspaceId));
+    return new Map(
+      rows.map((row) => [
+        row.capabilityId,
+        { status: row.status, installedBySubjectId: row.installedBySubjectId },
+      ]),
+    );
+  });
+}
+
+/**
+ * Removes an MCP server's installation from a workspace, so it is no longer
+ * on and can be turned on again from scratch (whoever does so becomes its
+ * installer). With `memberRemoval` the caller must be the recorded installer
+ * of an installation that is on: one an admin or another person turned on,
+ * one with no recorded installer, or one an admin turned off stays with
+ * admins ({@link IntegrationChangeRequiresAdminError}). Decided on the locked
+ * row, in the removal transaction. Null when nothing is installed.
+ */
+export async function removeCapabilityInstallation(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    capabilityId: string;
+    subjectId: string;
+    memberRemoval?: boolean;
+  },
+): Promise<CapabilityInstallation | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const where = and(
+        eq(schema.capabilityInstallations.workspaceId, input.workspaceId),
+        eq(schema.capabilityInstallations.capabilityId, input.capabilityId),
+      );
+      const [existing] = await scopedDb
+        .select()
+        .from(schema.capabilityInstallations)
+        .where(where)
+        .limit(1)
+        .for("update");
+      if (!existing) return null;
+      if (input.memberRemoval) {
+        if (existing.installedBySubjectId !== input.subjectId)
+          throw new IntegrationChangeRequiresAdminError(
+            "Only an admin can remove a server someone else added",
+          );
+        if (existing.status !== "active")
+          throw new IntegrationChangeRequiresAdminError(
+            "An admin turned this server off. Only an admin can remove it.",
+          );
+      }
+      await scopedDb.delete(schema.capabilityInstallations).where(where);
+      return mapCapabilityInstallation(existing);
     },
   );
 }
@@ -11541,6 +12060,101 @@ export async function disableCapabilityInstallation(
     }
     return mapCapabilityInstallation(row);
   });
+}
+
+/** Marks the turned-off installation that switches an organization connector off in one workspace. */
+export const ORGANIZATION_CONNECTOR_OVERRIDE_METADATA_KEY = "organizationOverride";
+
+export function isOrganizationConnectorOverride(
+  installation: Pick<CapabilityInstallation, "status" | "metadata">,
+): boolean {
+  return (
+    installation.status === "disabled" &&
+    installation.metadata[ORGANIZATION_CONNECTOR_OVERRIDE_METADATA_KEY] === true
+  );
+}
+
+/**
+ * Turns the organization's connector off in this workspace: a turned-off
+ * installation of the same capability, which wins over the organization's
+ * setup. An existing installation is returned unchanged.
+ */
+export async function turnOffOrganizationConnectorInWorkspace(
+  db: Database,
+  input: { accountId: string; workspaceId: string; capabilityId: string },
+): Promise<CapabilityInstallation> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await scopedDb
+        .insert(schema.capabilityInstallations)
+        .values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          capabilityId: input.capabilityId,
+          kind: "mcp",
+          status: "disabled",
+          config: {},
+          metadata: { [ORGANIZATION_CONNECTOR_OVERRIDE_METADATA_KEY]: true },
+        })
+        .onConflictDoNothing();
+      const current = await getCapabilityInstallation(
+        scopedDb,
+        input.workspaceId,
+        input.capabilityId,
+      );
+      if (!current) throw new Error("Failed to turn the organization connector off");
+      return current;
+    },
+  );
+}
+
+/**
+ * Removes this workspace's turned-off override, so the organization's
+ * connector applies again. Any other installation is left alone (false).
+ */
+export async function restoreOrganizationConnectorInWorkspace(
+  db: Database,
+  workspaceId: string,
+  capabilityId: string,
+): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const deleted = await scopedDb
+      .delete(schema.capabilityInstallations)
+      .where(
+        and(
+          eq(schema.capabilityInstallations.workspaceId, workspaceId),
+          eq(schema.capabilityInstallations.capabilityId, capabilityId),
+          eq(schema.capabilityInstallations.status, "disabled"),
+          sql`${schema.capabilityInstallations.metadata} -> ${ORGANIZATION_CONNECTOR_OVERRIDE_METADATA_KEY} = 'true'::jsonb`,
+        ),
+      )
+      .returning({ id: schema.capabilityInstallations.id });
+    return deleted.length > 0;
+  });
+}
+
+/**
+ * An organization connector reaching this workspace, shaped as the
+ * installation a workspace setup of it would be (header names only).
+ */
+export function organizationConnectorAsInstallation(
+  connector: OrganizationConnectorRow,
+  workspaceId: string,
+): CapabilityInstallation {
+  return {
+    id: connector.id,
+    accountId: connector.accountId,
+    workspaceId,
+    capabilityId: connector.capabilityId,
+    kind: "mcp",
+    status: "active",
+    config: projectInstallationConfig(connector.config),
+    metadata: { ...connector.metadata, organizationConnectorId: connector.id },
+    enabledAt: connector.updatedAt.toISOString(),
+    updatedAt: connector.updatedAt.toISOString(),
+  };
 }
 
 export async function listCapabilityInstallations(
@@ -11655,43 +12269,40 @@ async function listEnabledMcpCapabilityRows(
   only?: { capabilityIds: readonly string[]; serverIds: readonly string[] },
 ): Promise<EnabledMcpCapabilityRow[]> {
   if (only && only.capabilityIds.length === 0 && only.serverIds.length === 0) return [];
-  const rows = await withWorkspaceRls(
-    db,
-    workspaceId,
-    async (scopedDb) =>
-      await scopedDb
-        .select({
-          item: schema.capabilityCatalogItems,
-          installation: schema.capabilityInstallations,
-        })
-        .from(schema.capabilityInstallations)
-        .innerJoin(
-          schema.capabilityCatalogItems,
-          and(
-            or(
-              eq(
-                schema.capabilityInstallations.workspaceId,
-                schema.capabilityCatalogItems.workspaceId,
-              ),
-              isNull(schema.capabilityCatalogItems.workspaceId),
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        item: schema.capabilityCatalogItems,
+        installation: schema.capabilityInstallations,
+      })
+      .from(schema.capabilityInstallations)
+      .innerJoin(
+        schema.capabilityCatalogItems,
+        and(
+          or(
+            eq(
+              schema.capabilityInstallations.workspaceId,
+              schema.capabilityCatalogItems.workspaceId,
             ),
-            eq(schema.capabilityInstallations.capabilityId, schema.capabilityCatalogItems.id),
+            isNull(schema.capabilityCatalogItems.workspaceId),
           ),
-        )
-        .where(
-          and(
-            eq(schema.capabilityInstallations.workspaceId, workspaceId),
-            eq(schema.capabilityInstallations.kind, "mcp"),
-            eq(schema.capabilityInstallations.status, "active"),
-            eq(schema.capabilityCatalogItems.stale, false),
-            only
-              ? sql`(${schema.capabilityInstallations.capabilityId} = any(${capabilityTextArray(only.capabilityIds)})
+          eq(schema.capabilityInstallations.capabilityId, schema.capabilityCatalogItems.id),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.capabilityInstallations.workspaceId, workspaceId),
+          eq(schema.capabilityInstallations.kind, "mcp"),
+          eq(schema.capabilityInstallations.status, "active"),
+          eq(schema.capabilityCatalogItems.stale, false),
+          only
+            ? sql`(${schema.capabilityInstallations.capabilityId} = any(${capabilityTextArray(only.capabilityIds)})
                   or exists (
                     select 1 from unnest(${capabilityTextArray(only.serverIds)}) as target(id)
                     where strpos(coalesce(${schema.capabilityCatalogItems.metadata} ->> 'mcpServerId', ''), target.id) > 0
                   ))`
-              : undefined,
-            sql`(
+            : undefined,
+          sql`(
               ${schema.capabilityInstallations.metadata} ->> 'facetInstallationId' is null
               or exists (
                 select 1
@@ -11700,23 +12311,222 @@ async function listEnabledMcpCapabilityRows(
                   and ${effectiveCapabilityOwnerSql(sql`owner.owner_kind`, sql`owner.owner_id`)}
               )
             )`,
-          ),
-        )
-        .orderBy(asc(schema.capabilityCatalogItems.name)),
-  );
+        ),
+      )
+      .orderBy(asc(schema.capabilityCatalogItems.name));
 
-  // A workspace-scoped catalog row and a global registry row can share the
-  // same capability id; the join then matches one installation twice. Keep
-  // one row per installation, preferring the workspace-scoped catalog row
-  // (same precedence as getCapabilityCatalogItem).
-  const preferredByInstallation = new Map<string, (typeof rows)[number]>();
-  for (const row of rows) {
-    const existing = preferredByInstallation.get(row.installation.id);
-    if (!existing || (existing.item.workspaceId === null && row.item.workspaceId !== null)) {
-      preferredByInstallation.set(row.installation.id, row);
+    // A workspace-scoped catalog row and a global registry row can share the
+    // same capability id; the join then matches one installation twice. Keep
+    // one row per installation, preferring the workspace-scoped catalog row
+    // (same precedence as getCapabilityCatalogItem).
+    const preferredByInstallation = new Map<string, (typeof rows)[number]>();
+    for (const row of rows) {
+      const existing = preferredByInstallation.get(row.installation.id);
+      if (!existing || (existing.item.workspaceId === null && row.item.workspaceId !== null)) {
+        preferredByInstallation.set(row.installation.id, row);
+      }
     }
-  }
-  return [...preferredByInstallation.values()];
+    const own = [...preferredByInstallation.values()];
+    const organization = (await organizationConnectorCapabilityRows(scopedDb, workspaceId)).filter(
+      ({ item }) => !only || capabilityRowMatchesOnly(item, only),
+    );
+    if (organization.length === 0) return own;
+    return await inCatalogNameOrder(scopedDb, [...own, ...organization]);
+  });
+}
+
+/** The same narrowing as the installation query's `only` filter, for an organization row. */
+function capabilityRowMatchesOnly(
+  item: EnabledMcpCapabilityRow["item"],
+  only: { capabilityIds: readonly string[]; serverIds: readonly string[] },
+): boolean {
+  if (only.capabilityIds.includes(item.id)) return true;
+  const explicit = typeof item.metadata.mcpServerId === "string" ? item.metadata.mcpServerId : "";
+  return only.serverIds.some((id) => explicit.includes(id));
+}
+
+/**
+ * Rows in the order the installation query gives (`order by name`, ties kept
+ * as listed), so a connector the organization serves sits where the
+ * workspace's own setup of it would. The database sorts, with its collation.
+ */
+async function inCatalogNameOrder(
+  scopedDb: Database,
+  rows: readonly EnabledMcpCapabilityRow[],
+): Promise<EnabledMcpCapabilityRow[]> {
+  const order = await rawRows<{ position: number }>(
+    scopedDb,
+    sql`select (entry.position - 1)::int as position
+      from unnest(${capabilityTextArray(rows.map(({ item }) => item.name))}) with ordinality as entry(name, position)
+      order by entry.name, entry.position`,
+  );
+  return order.map(({ position }) => rows[position]!);
+}
+
+/**
+ * The organization's connectors that reach this workspace (row security
+ * decides reach), as the rows a workspace installation of each would give:
+ * the global catalog item for a catalog connector, or a definition of this
+ * workspace's own for a custom server, so a custom server gets no catalog
+ * approval floor, exactly like a workspace's custom server. Any installation
+ * of the same capability in this workspace, on or off, wins: a turned-off
+ * row is how a workspace turns the organization's connector off.
+ */
+async function organizationConnectorCapabilityRows(
+  scopedDb: Database,
+  workspaceId: string,
+): Promise<EnabledMcpCapabilityRow[]> {
+  const connectors = await scopedDb
+    .select()
+    .from(schema.organizationConnectors)
+    .where(
+      and(
+        eq(schema.organizationConnectors.status, "active"),
+        eq(schema.organizationConnectors.kind, "mcp"),
+        sql`not exists (
+          select 1 from ${schema.capabilityInstallations} installation
+          where installation.workspace_id = ${workspaceId}::uuid
+            and installation.capability_id = ${schema.organizationConnectors.capabilityId}
+        )`,
+      ),
+    )
+    .orderBy(asc(schema.organizationConnectors.capabilityId));
+  if (connectors.length === 0) return [];
+  const catalogIds = connectors
+    .filter((connector) => connector.customDefinition === null)
+    .map((connector) => connector.capabilityId);
+  const catalogItems =
+    catalogIds.length === 0
+      ? []
+      : await scopedDb
+          .select()
+          .from(schema.capabilityCatalogItems)
+          .where(
+            and(
+              isNull(schema.capabilityCatalogItems.workspaceId),
+              eq(schema.capabilityCatalogItems.kind, "mcp"),
+              eq(schema.capabilityCatalogItems.stale, false),
+              inArray(schema.capabilityCatalogItems.id, catalogIds),
+            ),
+          );
+  const catalogItemById = new Map(catalogItems.map((item) => [item.id, item]));
+  return connectors.flatMap((connector) => {
+    const item = connector.customDefinition
+      ? organizationCustomCatalogItem(connector, workspaceId)
+      : catalogItemById.get(connector.capabilityId);
+    if (!item) return [];
+    return [
+      {
+        item,
+        installation: {
+          id: connector.id,
+          accountId: connector.accountId,
+          workspaceId,
+          capabilityId: connector.capabilityId,
+          kind: "mcp",
+          status: "active",
+          config: connector.config,
+          metadata: connector.metadata,
+          installedBySubjectId: null,
+          enabledAt: connector.updatedAt,
+          updatedAt: connector.updatedAt,
+        },
+      },
+    ];
+  });
+}
+
+/** A custom organization MCP server's definition; an API integration's has no MCP endpoint. */
+function organizationMcpServerDefinition(
+  definition: OrganizationConnectorRow["customDefinition"],
+): { name: string; description?: string | null; endpointUrl: string } {
+  if (!definition || "kind" in definition)
+    return { name: definition?.name ?? "", description: null, endpointUrl: "" };
+  return definition;
+}
+
+/** A custom organization server, defined for the reading workspace. */
+function organizationCustomCatalogItem(
+  connector: Pick<
+    OrganizationConnectorRow,
+    "capabilityId" | "accountId" | "customDefinition" | "config" | "createdAt" | "updatedAt"
+  >,
+  workspaceId: string | null,
+): EnabledMcpCapabilityRow["item"] {
+  const definition = organizationMcpServerDefinition(connector.customDefinition);
+  return {
+    id: connector.capabilityId,
+    accountId: connector.accountId,
+    workspaceId,
+    kind: "mcp",
+    source: "manual",
+    name: definition.name,
+    description: definition.description ?? null,
+    category: "custom",
+    tags: [],
+    homepageUrl: null,
+    endpointUrl: definition.endpointUrl,
+    installUrl: null,
+    authModel: null,
+    providerDomain: null,
+    surfaceType: null,
+    transport: null,
+    mcpUrl: null,
+    authKind: organizationConnectorLogin(connector.config) === "each_person" ? "oauth2" : null,
+    credentialFacts: [],
+    tier: null,
+    provenance: null,
+    logoAssetPath: null,
+    importBatchId: null,
+    stale: false,
+    staleAt: null,
+    metadata: {},
+    createdAt: connector.createdAt,
+    updatedAt: connector.updatedAt,
+  };
+}
+
+/**
+ * The catalog item a custom organization server is listed as in
+ * `workspaceId`, or as the organization defines it (`null`, for
+ * administration and checks before it is saved).
+ */
+export function organizationConnectorCatalogItem(
+  connector: Pick<
+    OrganizationConnectorRow,
+    "capabilityId" | "accountId" | "customDefinition" | "config" | "createdAt" | "updatedAt"
+  >,
+  workspaceId: string | null,
+): CapabilityCatalogItem {
+  return mapCapabilityCatalogItem(organizationCustomCatalogItem(connector, workspaceId), "trusted");
+}
+
+/**
+ * Curated and registry catalog connectors (no workspace) trusted for
+ * exposure, by id: the catalog an organization can add connectors from.
+ */
+export async function listTrustedGlobalMcpCatalogItems(
+  db: Database,
+  accountId: string,
+  ids: readonly string[],
+): Promise<CapabilityCatalogItem[]> {
+  if (ids.length === 0) return [];
+  const rows = await withRlsContext(db, { accountId, workspaceId: null }, async (scopedDb) =>
+    scopedDb
+      .select()
+      .from(schema.capabilityCatalogItems)
+      .where(
+        and(
+          isNull(schema.capabilityCatalogItems.workspaceId),
+          eq(schema.capabilityCatalogItems.kind, "mcp"),
+          eq(schema.capabilityCatalogItems.stale, false),
+          inArray(schema.capabilityCatalogItems.id, [...ids]),
+        ),
+      ),
+  );
+  return rows.flatMap((row) =>
+    catalogExposureState(row, null) === "trusted" ? [mapCapabilityCatalogItem(row, "trusted")] : [],
+  );
 }
 
 /**
@@ -11883,34 +12693,172 @@ export async function listEnabledMcpCapabilityServerIds(
     }
   }
 
-  return [...preferredByInstallation.values()].flatMap((row) => {
-    const metadata = row.itemMcpServerId !== null ? { mcpServerId: row.itemMcpServerId } : {};
-    const trusted =
-      row.itemSource !== registryCapabilitySource ||
-      (row.itemMcpProbePresent &&
-        row.itemMcpProbeStatus === "real" &&
-        row.itemAuthKind !== null &&
-        row.itemAuthKind !== "unknown" &&
-        (row.itemAuthKind !== "api_key" || row.itemRegistryApiKeyContractValid));
-    const connectivityOk =
-      row.mcpConnectivityStatus === "ok" || row.mcpConnectivityStatus === "auth_deferred";
-    const legacyActive =
-      !trusted &&
-      row.itemSource === registryCapabilitySource &&
-      !row.itemMcpProbePresent &&
+  const own = [...preferredByInstallation.values()].flatMap(runnableMcpServerIdFromMetadata);
+  const organization = (await organizationConnectorServerIdRows(db, workspaceId)).flatMap(
+    runnableMcpServerIdFromMetadata,
+  );
+  return organization.length === 0 ? own : [...own, ...organization];
+}
+
+type McpServerIdMetadataRow = {
+  itemId: string;
+  itemSource: string;
+  itemAuthKind: string | null;
+  itemAuthModel: string | null;
+  itemMcpProbePresent: boolean;
+  itemMcpProbeStatus: string | null;
+  itemRegistryApiKeyContractValid: boolean;
+  itemMcpServerId: string | null;
+  endpointPresent: boolean;
+  mcpConnectivityStatus: string | null;
+  hasEncryptedHeaders: boolean;
+  hasConnectionRef: boolean;
+};
+
+function runnableMcpServerIdFromMetadata(row: McpServerIdMetadataRow): string[] {
+  const metadata = row.itemMcpServerId !== null ? { mcpServerId: row.itemMcpServerId } : {};
+  const trusted =
+    row.itemSource !== registryCapabilitySource ||
+    (row.itemMcpProbePresent &&
+      row.itemMcpProbeStatus === "real" &&
       row.itemAuthKind !== null &&
       row.itemAuthKind !== "unknown" &&
-      connectivityOk &&
-      (!row.itemAuthModel || row.hasEncryptedHeaders || row.hasConnectionRef);
-    if (
-      (!trusted && !legacyActive) ||
-      !row.endpointPresent ||
-      !connectivityOk ||
-      (row.itemAuthModel && !row.hasEncryptedHeaders && !row.hasConnectionRef)
-    ) {
-      return [];
-    }
-    return [mcpServerIdForCapability(row.itemId, metadata)];
+      (row.itemAuthKind !== "api_key" || row.itemRegistryApiKeyContractValid));
+  const connectivityOk =
+    row.mcpConnectivityStatus === "ok" || row.mcpConnectivityStatus === "auth_deferred";
+  const legacyActive =
+    !trusted &&
+    row.itemSource === registryCapabilitySource &&
+    !row.itemMcpProbePresent &&
+    row.itemAuthKind !== null &&
+    row.itemAuthKind !== "unknown" &&
+    connectivityOk &&
+    (!row.itemAuthModel || row.hasEncryptedHeaders || row.hasConnectionRef);
+  if (
+    (!trusted && !legacyActive) ||
+    !row.endpointPresent ||
+    !connectivityOk ||
+    (row.itemAuthModel && !row.hasEncryptedHeaders && !row.hasConnectionRef)
+  ) {
+    return [];
+  }
+  return [mcpServerIdForCapability(row.itemId, metadata)];
+}
+
+/**
+ * `listEnabledMcpCapabilityServerIds` for the organization's connectors that
+ * reach the workspace and that no installation here overrides: the same
+ * credential-presence booleans, computed in PostgreSQL, never the stored
+ * header ciphertext or connection reference.
+ */
+async function organizationConnectorServerIdRows(
+  db: Database,
+  workspaceId: string,
+): Promise<McpServerIdMetadataRow[]> {
+  const connector = schema.organizationConnectors;
+  const rows = await withWorkspaceRls(
+    db,
+    workspaceId,
+    async (scopedDb) =>
+      await scopedDb
+        .select({
+          itemId: connector.capabilityId,
+          custom: sql<boolean>`${connector.customDefinition} is not null`,
+          customEndpointPresent: sql<boolean>`coalesce(length(${connector.customDefinition} ->> 'endpointUrl'), 0) > 0`,
+          catalogItemPresent: sql<boolean>`${schema.capabilityCatalogItems.id} is not null`,
+          itemSource: schema.capabilityCatalogItems.source,
+          itemAuthKind: schema.capabilityCatalogItems.authKind,
+          itemAuthModel: schema.capabilityCatalogItems.authModel,
+          itemMcpProbePresent: sql<boolean>`coalesce(${schema.capabilityCatalogItems.metadata} ? 'mcpProbe', false)`,
+          itemMcpProbeStatus: sql<
+            string | null
+          >`${schema.capabilityCatalogItems.metadata} -> 'mcpProbe' ->> 'status'`,
+          itemRegistryApiKeyContractValid: registryApiKeyContractValidSql,
+          itemMcpServerId: sql<
+            string | null
+          >`${schema.capabilityCatalogItems.metadata} ->> 'mcpServerId'`,
+          catalogEndpointPresent: sql<boolean>`coalesce(length(${schema.capabilityCatalogItems.endpointUrl}), 0) > 0`,
+          mcpConnectivityStatus: sql<
+            string | null
+          >`${connector.metadata} -> 'mcpConnectivity' ->> 'status'`,
+          hasEncryptedHeaders: sql<boolean>`exists (
+            select 1
+            from jsonb_each_text(
+              case
+                when jsonb_typeof(${connector.config} -> 'headersEncrypted') = 'object'
+                  then ${connector.config} -> 'headersEncrypted'
+                else '{}'::jsonb
+              end
+            ) header
+            where length(header.value) > 0
+          )`,
+          hasConnectionRef: sql<boolean>`(
+            jsonb_typeof(${connector.config} -> 'connectionRef') = 'object'
+            and jsonb_typeof(${connector.config} -> 'connectionRef' -> 'providerDomain') = 'string'
+            and length(${connector.config} -> 'connectionRef' ->> 'providerDomain') > 0
+          )`,
+        })
+        .from(connector)
+        .leftJoin(
+          schema.capabilityCatalogItems,
+          and(
+            isNull(connector.customDefinition),
+            isNull(schema.capabilityCatalogItems.workspaceId),
+            eq(schema.capabilityCatalogItems.kind, "mcp"),
+            eq(schema.capabilityCatalogItems.stale, false),
+            eq(schema.capabilityCatalogItems.id, connector.capabilityId),
+          ),
+        )
+        .where(
+          and(
+            eq(connector.status, "active"),
+            eq(connector.kind, "mcp"),
+            sql`not exists (
+              select 1 from ${schema.capabilityInstallations} installation
+              where installation.workspace_id = ${workspaceId}::uuid
+                and installation.capability_id = ${connector.capabilityId}
+            )`,
+          ),
+        )
+        .orderBy(asc(connector.capabilityId)),
+  );
+  return rows.flatMap((row) => {
+    if (row.custom)
+      // A custom organization server is defined like a workspace's own custom
+      // server: a manual source with no catalog credential contract.
+      return [
+        {
+          itemId: row.itemId,
+          itemSource: "manual",
+          itemAuthKind: null,
+          itemAuthModel: null,
+          itemMcpProbePresent: false,
+          itemMcpProbeStatus: null,
+          itemRegistryApiKeyContractValid: false,
+          itemMcpServerId: null,
+          endpointPresent: row.customEndpointPresent,
+          mcpConnectivityStatus: row.mcpConnectivityStatus,
+          hasEncryptedHeaders: row.hasEncryptedHeaders,
+          hasConnectionRef: row.hasConnectionRef,
+        },
+      ];
+    if (!row.catalogItemPresent || row.itemSource === null) return [];
+    return [
+      {
+        itemId: row.itemId,
+        itemSource: row.itemSource,
+        itemAuthKind: row.itemAuthKind,
+        itemAuthModel: row.itemAuthModel,
+        itemMcpProbePresent: row.itemMcpProbePresent,
+        itemMcpProbeStatus: row.itemMcpProbeStatus,
+        itemRegistryApiKeyContractValid: row.itemRegistryApiKeyContractValid,
+        itemMcpServerId: row.itemMcpServerId,
+        endpointPresent: row.catalogEndpointPresent,
+        mcpConnectivityStatus: row.mcpConnectivityStatus,
+        hasEncryptedHeaders: row.hasEncryptedHeaders,
+        hasConnectionRef: row.hasConnectionRef,
+      },
+    ];
   });
 }
 
@@ -12592,6 +13540,7 @@ export async function persistProviderOAuthConnection(
               and(
                 eq(schema.workspaceMemberships.workspaceId, input.workspaceId),
                 eq(schema.workspaceMemberships.subjectId, input.subjectId),
+                membershipOutsidePersonalWorkspace(),
               ),
             )
             .for("update")
@@ -13451,6 +14400,8 @@ export type SlackBotUserLink = {
    * one-time onboarding hint, or `null` when the hint has not been shown.
    */
   firstTaskHintInteractionId: string | null;
+  /** When this person muted occasional update messages about new agents. */
+  updatesMutedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -13486,6 +14437,10 @@ export type SlackInteractionInboxEntry = {
   retryAt: Date | null;
   lastErrorCode: string | null;
   reactionContextCheckpoint: unknown | null;
+  /** A request passed on to one exact Slack agent by another chat. */
+  targetSlackAgentId?: string | null;
+  handoffFromInteractionId?: string | null;
+  handoffFromSlackAgentId?: string | null;
   processedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
@@ -13565,6 +14520,13 @@ export type SlackInteraction = {
    * and a workspace line on every message).
    */
   startMessageLine: string | null;
+  /** The Slack agent this chat was started for. Null for plain Opengeni. */
+  slackAgentId: string | null;
+  /** The agent whose chat passed this thread on, which it never hands back to. */
+  handoffFromSlackAgentId: string | null;
+  /** The latest Slack message this chat was given, and who sent it. */
+  lastInboundProviderEventId: string | null;
+  lastInboundSlackUserId: string | null;
   progressCount: number;
   terminalDeliveryState: "open" | "completed" | "failed" | "cancelled" | "blocked";
   createdAt: Date;
@@ -13642,7 +14604,10 @@ export async function saveSlackBotUserLink(
   db: Database,
   // The one-time onboarding hint claim is deliberately not writable here: a
   // re-link of the same Slack identity keeps whatever was already shown.
-  input: Omit<SlackBotUserLink, "id" | "createdAt" | "updatedAt" | "firstTaskHintInteractionId">,
+  input: Omit<
+    SlackBotUserLink,
+    "id" | "createdAt" | "updatedAt" | "firstTaskHintInteractionId" | "updatesMutedAt"
+  >,
 ): Promise<SlackBotUserLink> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
@@ -14187,6 +15152,10 @@ export async function getOrCreateSlackInteraction(
     // Owned by `bindSlackInteractionSession`, frozen with the bound session.
     | "sessionDefaultsLine"
     | "startMessageLine"
+    | "slackAgentId"
+    | "handoffFromSlackAgentId"
+    | "lastInboundProviderEventId"
+    | "lastInboundSlackUserId"
     | "progressCount"
     | "terminalDeliveryState"
     | "createdAt"
@@ -14194,6 +15163,8 @@ export async function getOrCreateSlackInteraction(
   > & {
     initiatingSlackUserId?: string | null;
     routedWorkspaceLabel?: string | null;
+    slackAgentId?: string | null;
+    handoffFromSlackAgentId?: string | null;
   },
 ): Promise<{ created: boolean; interaction: SlackInteraction }> {
   const outcome = await withRlsContext(db, input, async (scopedDb) => {
@@ -14203,6 +15174,8 @@ export async function getOrCreateSlackInteraction(
         ...input,
         initiatingSlackUserId: input.initiatingSlackUserId ?? null,
         routedWorkspaceLabel: input.routedWorkspaceLabel ?? null,
+        slackAgentId: input.slackAgentId ?? null,
+        handoffFromSlackAgentId: input.handoffFromSlackAgentId ?? null,
       })
       .onConflictDoNothing()
       .returning();
@@ -14977,6 +15950,145 @@ export async function rekeySlackInteractionRoute(
   });
 }
 
+/**
+ * Free a thread's route key so another chat can take the thread over: a
+ * handoff to another Slack agent, or a person naming a different agent in the
+ * thread. The old chat keeps its channel and thread, so anything it still
+ * delivers lands in the same thread; it just no longer receives new messages.
+ *
+ * Idempotent for one interaction: the retired key is derived from its id.
+ */
+export async function retireSlackInteractionRoute(
+  db: Database,
+  input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId" | "routeKey">,
+  /**
+   * Why the chat lost its thread. A hand-off retires to `:moved:<id>`, which
+   * lets the same chat finish an interrupted hand-off; a person moving the
+   * thread to another agent retires to `:switched:<id>`, which does not.
+   */
+  reason: "handoff" | "switch" = "handoff",
+): Promise<SlackInteraction | null> {
+  // Idempotent: a key that is already retired stays as it is.
+  const alreadyRetired =
+    input.routeKey.endsWith(`:moved:${input.id}`) ||
+    input.routeKey.endsWith(`:switched:${input.id}`);
+  const suffix = reason === "switch" ? `:switched:${input.id}` : `:moved:${input.id}`;
+  const retiredKey = alreadyRetired ? input.routeKey : `${input.routeKey.slice(0, 200)}${suffix}`;
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const [row] = await scopedDb
+      .update(schema.slackInteractions)
+      .set({ routeKey: retiredKey, updatedAt: sql`now()` })
+      .where(
+        and(
+          eq(schema.slackInteractions.id, input.id),
+          eq(schema.slackInteractions.accountId, input.accountId),
+          eq(schema.slackInteractions.workspaceId, input.workspaceId),
+        ),
+      )
+      .returning();
+    return row ? mapSlackInteraction(row) : null;
+  });
+}
+
+/** Remember the latest Slack message a chat was given and who sent it. */
+export async function recordSlackInteractionInbound(
+  db: Database,
+  input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId"> & {
+    providerEventId: string;
+    slackUserId: string;
+  },
+): Promise<void> {
+  await withRlsContext(db, input, async (scopedDb) => {
+    await scopedDb
+      .update(schema.slackInteractions)
+      .set({
+        lastInboundProviderEventId: input.providerEventId,
+        lastInboundSlackUserId: input.slackUserId,
+      })
+      .where(
+        and(
+          eq(schema.slackInteractions.id, input.id),
+          eq(schema.slackInteractions.accountId, input.accountId),
+          eq(schema.slackInteractions.workspaceId, input.workspaceId),
+        ),
+      );
+  });
+}
+
+/**
+ * The Slack event a turn is answering, by its `slack:<provider event id>`
+ * client event id. A delivered user message has no `turn_id`; the turn points
+ * back at it through `trigger_event_id`, so that is read first.
+ *
+ * `turnFound` is false only when the turn is unknown. A known turn started by
+ * something other than a Slack message has a null `providerEventId`.
+ */
+export async function getSlackProviderEventIdForTurn(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; turnId: string },
+): Promise<{ turnFound: boolean; providerEventId: string | null }> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [trigger] = await scopedDb
+      .select({ clientEventId: schema.sessionEvents.clientEventId })
+      .from(schema.sessionTurns)
+      .leftJoin(
+        schema.sessionEvents,
+        and(
+          eq(schema.sessionEvents.id, schema.sessionTurns.triggerEventId),
+          eq(schema.sessionEvents.workspaceId, schema.sessionTurns.workspaceId),
+          eq(schema.sessionEvents.sessionId, schema.sessionTurns.sessionId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, input.workspaceId),
+          eq(schema.sessionTurns.sessionId, input.sessionId),
+          eq(schema.sessionTurns.id, input.turnId),
+        ),
+      )
+      .limit(1);
+    if (trigger?.clientEventId?.startsWith("slack:")) {
+      return { turnFound: true, providerEventId: trigger.clientEventId.slice("slack:".length) };
+    }
+    const [row] = await scopedDb
+      .select({ clientEventId: schema.sessionEvents.clientEventId })
+      .from(schema.sessionEvents)
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, input.workspaceId),
+          eq(schema.sessionEvents.sessionId, input.sessionId),
+          eq(schema.sessionEvents.turnId, input.turnId),
+          sql`${schema.sessionEvents.clientEventId} like 'slack:%'`,
+        ),
+      )
+      .orderBy(desc(schema.sessionEvents.sequence))
+      .limit(1);
+    const fromTurnId = row?.clientEventId ? row.clientEventId.slice("slack:".length) : null;
+    return { turnFound: trigger !== undefined || fromTurnId !== null, providerEventId: fromTurnId };
+  });
+}
+
+/** The inbox row of one Slack event, read under the installation's HOME tenancy. */
+export async function getSlackInteractionInboxByProviderEvent(
+  db: Database,
+  home: { accountId: string; workspaceId: string },
+  input: { connectionId: string; providerEventId: string },
+): Promise<SlackInteractionInboxEntry | null> {
+  return await withRlsContext(db, home, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.slackInteractionInbox)
+      .where(
+        and(
+          eq(schema.slackInteractionInbox.connectionId, input.connectionId),
+          eq(schema.slackInteractionInbox.providerEventId, input.providerEventId),
+        ),
+      )
+      .limit(1);
+    return row ? mapSlackInteractionInbox(row) : null;
+  });
+}
+
 export async function claimSlackInteractionDelivery(
   db: Database,
   claimHolderId: string,
@@ -15265,6 +16377,17 @@ function mapSlackInteractionInbox(
     lastErrorCode: slackRowNullableString(row, "lastErrorCode", "last_error_code"),
     reactionContextCheckpoint:
       slackRowValue(row, "reactionContextCheckpoint", "reaction_context_checkpoint") ?? null,
+    targetSlackAgentId: slackRowNullableString(row, "targetSlackAgentId", "target_slack_agent_id"),
+    handoffFromInteractionId: slackRowNullableString(
+      row,
+      "handoffFromInteractionId",
+      "handoff_from_interaction_id",
+    ),
+    handoffFromSlackAgentId: slackRowNullableString(
+      row,
+      "handoffFromSlackAgentId",
+      "handoff_from_slack_agent_id",
+    ),
     processedAt: slackRowNullableDate(row, "processedAt", "processed_at"),
     createdAt: slackRowDate(row, "createdAt", "created_at"),
     updatedAt: slackRowDate(row, "updatedAt", "updated_at"),
@@ -15356,6 +16479,22 @@ function mapSlackInteraction(
       "session_defaults_line",
     ),
     startMessageLine: slackRowNullableString(row, "startMessageLine", "start_message_line"),
+    slackAgentId: slackRowNullableString(row, "slackAgentId", "slack_agent_id"),
+    handoffFromSlackAgentId: slackRowNullableString(
+      row,
+      "handoffFromSlackAgentId",
+      "handoff_from_slack_agent_id",
+    ),
+    lastInboundProviderEventId: slackRowNullableString(
+      row,
+      "lastInboundProviderEventId",
+      "last_inbound_provider_event_id",
+    ),
+    lastInboundSlackUserId: slackRowNullableString(
+      row,
+      "lastInboundSlackUserId",
+      "last_inbound_slack_user_id",
+    ),
     progressCount: slackRowNumber(row, "progressCount", "progress_count"),
     terminalDeliveryState: slackRowString(
       row,
@@ -19261,6 +20400,7 @@ export async function createScheduledTask(
           id: input.id,
           accountId: input.accountId,
           workspaceId: input.workspaceId,
+          billingOrigin: input.billingOrigin ?? null,
           name: input.name,
           ownerSubjectId:
             (input.action?.kind ?? "agent_turn") === "agent_turn"
@@ -19284,7 +20424,9 @@ export async function createScheduledTask(
             input.claudeProviderAccountAuthoritySnapshot ?? sharedTaskPool!.claude,
           subscriptionAuthority: taskSubscriptionAuthority,
           creatorFirstPartyMcpTools: input.creatorPolicy?.firstPartyMcpTools ?? null,
-          creatorFirstPartyMcpPermissions: input.creatorPolicy?.firstPartyMcpPermissions ?? null,
+          creatorFirstPartyMcpPermissions: input.creatorPolicy?.firstPartyMcpPermissions
+            ? canonicalSecretPermissions(input.creatorPolicy.firstPartyMcpPermissions)
+            : null,
           creatorSessionPolicy: scheduledTaskCreatorSessionPolicyForInsert(input.creatorPolicy),
           reusableSessionId: input.targetSessionId ?? null,
           // The column default is { mode: "all" }; omit it so rows written
@@ -19292,6 +20434,7 @@ export async function createScheduledTask(
           ...(input.vaultPolicy !== undefined ? { vaultPolicy: input.vaultPolicy } : {}),
           rigId: input.rigId ?? null,
           metadata: input.metadata,
+          ...(input.creatorLocked ? { creatorLocked: true } : {}),
         })
         .returning();
       if (!row) {
@@ -19325,7 +20468,11 @@ export async function createScheduledTask(
   );
 }
 
-/** Trusted mutation seam: verify an exact agent attempt before deriving its human. */
+/**
+ * Trusted mutation seam: verify an exact agent attempt before deriving its
+ * human. A creator-locked task matches only its own creator principal, and
+ * never an agent attempt.
+ */
 export async function scheduledTaskMutationOwnerMatches(
   db: Database,
   input: {
@@ -19339,7 +20486,11 @@ export async function scheduledTaskMutationOwnerMatches(
   return withWorkspaceRls(db, input.workspaceId, async (tx) => {
     const actor = await frozenSessionCreatorForInsert(tx, input);
     const [task] = await tx
-      .select({ owner: schema.scheduledTasks.ownerSubjectId })
+      .select({
+        owner: schema.scheduledTasks.ownerSubjectId,
+        creatorLocked: schema.scheduledTasks.creatorLocked,
+        creatorSubjectId: schema.scheduledTasks.createdBySubjectId,
+      })
       .from(schema.scheduledTasks)
       .where(
         and(
@@ -19350,6 +20501,9 @@ export async function scheduledTaskMutationOwnerMatches(
       .for("update")
       .limit(1);
     if (!task) return false;
+    if (task.creatorLocked) {
+      return !input.createdByActor && actor.initiator.subjectId === task.creatorSubjectId;
+    }
     const subject =
       actor.initiatingHumanSubjectId ??
       (actor.initiator.kind === "subject" ? actor.initiator.subjectId : null);
@@ -19535,6 +20689,34 @@ export async function getVisibleSessionTenancyVisibility(
   });
 }
 
+/**
+ * A chat's audience and, for an Only me chat, its owner; null when the
+ * caller cannot see the chat.
+ */
+export async function getVisibleSessionAudience(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<{
+  visibility: "user_private" | "workspace_shared";
+  ownerSubjectId: string | null;
+} | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        visibility: schema.sessions.visibility,
+        ownerSubjectId: schema.sessions.ownerSubjectId,
+      })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    if (!row) return null;
+    return row.visibility === "user_private"
+      ? { visibility: "user_private", ownerSubjectId: row.ownerSubjectId ?? null }
+      : { visibility: "workspace_shared", ownerSubjectId: null };
+  });
+}
+
 export async function updateScheduledTask(
   db: Database,
   workspaceId: string,
@@ -19608,9 +20790,9 @@ export async function updateScheduledTask(
         ...(input.creatorFirstPartyPolicy
           ? {
               creatorFirstPartyMcpTools: [...input.creatorFirstPartyPolicy.firstPartyMcpTools],
-              creatorFirstPartyMcpPermissions: [
-                ...input.creatorFirstPartyPolicy.firstPartyMcpPermissions,
-              ],
+              creatorFirstPartyMcpPermissions: canonicalSecretPermissions(
+                input.creatorFirstPartyPolicy.firstPartyMcpPermissions,
+              ),
             }
           : {}),
         ...(input.refreshPersonalResourceAuthority ||
@@ -20649,21 +21831,18 @@ export async function deleteScheduledTask(
 }
 
 /**
- * Archiving a chat pauses it, so the one-time waits that would continue it
- * are retired with it: a run-once event automation that has not run yet, and
- * a one-time scheduled run still ahead. Both belong to the chat (a "wake me
- * when" from that chat or one of its sub-chats); repeating automations stay,
- * and a run of theirs that meets the paused chat is blocked with a notice to
- * the owner. Pass the archive transaction so the chat never ends up archived
- * with a pending wait; any Temporal schedule is removed by the cleanup pump
- * from the durable outbox row each deletion writes. Restore does not bring
- * a retired wait back. Returns the retired automation ids.
+ * An archived chat can never continue, so its one-time automations are
+ * retired when its undo window ends: run-once event automations and one-time
+ * scheduled runs, whether still ahead or already run. They belong to the chat
+ * (a "wake me when" from that chat or one of its sub-chats). Repeating
+ * automations are not retired; they keep Archive from starting at all. Any
+ * Temporal schedule is removed by the cleanup pump from the durable outbox
+ * row each deletion writes. Returns the retired automation ids.
  */
 export async function retireArchivedChatWaits(
   db: Database,
-  input: { workspaceId: string; rootSessionId: string; now?: Date },
+  input: { workspaceId: string; rootSessionId: string },
 ): Promise<string[]> {
-  const now = input.now ?? new Date();
   const task = schema.scheduledTasks;
   const settings = schema.scheduledTaskEventSettings;
   const rows = await withWorkspaceRls(db, input.workspaceId, async (scoped) =>
@@ -20685,12 +21864,8 @@ export async function retireArchivedChatWaits(
           eq(task.runMode, "existing_session"),
           eq(schema.sessions.rootSessionId, input.rootSessionId),
           or(
-            and(eq(settings.once, true), isNull(settings.completedAt)),
-            and(
-              isNull(settings.taskId),
-              sql`${task.schedule} ->> 'type' = 'once'`,
-              sql`(${task.schedule} ->> 'runAt')::timestamptz > ${now.toISOString()}::timestamptz`,
-            ),
+            eq(settings.once, true),
+            and(isNull(settings.taskId), sql`${task.schedule} ->> 'type' = 'once'`),
           ),
         ),
       )
@@ -21637,6 +22812,7 @@ export async function failScheduledGeneratedSessionRoute(
             status: "failed",
             activeTurnId: null,
             compactRequested: false,
+            compactRequestTrigger: null,
             lastSequence: inserted.sequence,
             queueVersion: session.queueVersion + 1,
             updatedAt: now,
@@ -21707,6 +22883,60 @@ export async function isWorkspaceAgentActivityPaused(
       .from(schema.workspaceInferenceControls)
       .where(eq(schema.workspaceInferenceControls.workspaceId, workspaceId));
     return row?.state === "paused";
+  });
+}
+
+/**
+ * Whether the chat of a task's latest earlier run is still working: it has an
+ * active turn, or work queued or waiting in it. A `skip` task that starts a
+ * new chat per run skips an occurrence while this holds. A chat that is idle,
+ * failed, cancelled, gone or only shows an empty queued projection does not
+ * hold it.
+ */
+export async function scheduledTaskPreviousRunSessionBusy(
+  db: Database,
+  input: { workspaceId: string; taskId: string; runId: string },
+): Promise<boolean> {
+  return withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [previous] = await scopedDb
+      .select({
+        sessionId: schema.sessions.id,
+        status: schema.sessions.status,
+        activeTurnId: schema.sessions.activeTurnId,
+      })
+      .from(schema.scheduledTaskRuns)
+      .innerJoin(
+        schema.sessions,
+        and(
+          eq(schema.sessions.workspaceId, schema.scheduledTaskRuns.workspaceId),
+          eq(schema.sessions.id, schema.scheduledTaskRuns.sessionId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
+          eq(schema.scheduledTaskRuns.taskId, input.taskId),
+          ne(schema.scheduledTaskRuns.id, input.runId),
+          isNotNull(schema.scheduledTaskRuns.sessionId),
+        ),
+      )
+      .orderBy(desc(schema.scheduledTaskRuns.createdAt))
+      .limit(1);
+    if (!previous) return false;
+    if (previous.activeTurnId !== null) return true;
+    if (
+      previous.status === "idle" ||
+      previous.status === "failed" ||
+      previous.status === "cancelled"
+    ) {
+      return false;
+    }
+    if (previous.status !== "queued") return true;
+    return !(await sessionQueueIsEmptyInTransaction(
+      scopedDb,
+      input.workspaceId,
+      previous.sessionId,
+    ));
   });
 }
 
@@ -22009,6 +23239,22 @@ function unknownRigHealth(activeVersion: RigVersion | null): RigVerificationHeal
   return activeVersion ? { checkHealth: "unknown", lastVerifiedAt: null } : null;
 }
 
+/** Where an organization machine or rig works (migration 1190); null for
+ * workspace and personal ones, whose reach is their owner's. */
+function organizationComputeReach(row: {
+  authorityScope: string;
+  workspaceId: string;
+  allowedWorkspaceIds: string[] | null;
+  allowPersonalWorkspaces: boolean;
+}): OrganizationComputeReach | null {
+  if (row.authorityScope !== "organization") return null;
+  return {
+    homeWorkspaceId: row.workspaceId,
+    allowedWorkspaceIds: row.allowedWorkspaceIds ?? null,
+    allowPersonalWorkspaces: row.allowPersonalWorkspaces,
+  };
+}
+
 function mapRig(
   row: typeof schema.rigs.$inferSelect,
   activeVersion: RigVersion | null,
@@ -22030,6 +23276,7 @@ function mapRig(
     versionCount,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
+    reach: organizationComputeReach(row),
   };
 }
 
@@ -22587,6 +23834,180 @@ export async function revokeScopedRig(
   });
 }
 
+/** Input for changing where an organization machine or rig works. The caller
+ * has checked that the subject is an organization owner or admin. */
+export type OrganizationComputeReachInput = {
+  accountId: string;
+  /** The workspace the machine was connected from or the rig was made in. */
+  homeWorkspaceId: string;
+  allowedWorkspaceIds: string[] | null;
+  allowPersonalWorkspaces: boolean;
+  subjectId: string;
+};
+
+export type OrganizationComputeReachUpdate =
+  | { status: "updated"; reach: OrganizationComputeReach }
+  | { status: "not_found" }
+  | { status: "unknown_workspaces"; workspaceIds: string[] };
+
+/** The listed ids, without duplicates or the home workspace (which always has
+ * it), checked against the organization's shared workspaces. */
+async function normalizeOrganizationComputeReach(
+  db: Database,
+  input: OrganizationComputeReachInput,
+): Promise<
+  { ok: true; allowedWorkspaceIds: string[] | null } | { ok: false; workspaceIds: string[] }
+> {
+  if (input.allowedWorkspaceIds === null) return { ok: true, allowedWorkspaceIds: null };
+  const listed = [...new Set(input.allowedWorkspaceIds)].filter(
+    (workspaceId) => workspaceId !== input.homeWorkspaceId,
+  );
+  if (listed.length === 0) return { ok: true, allowedWorkspaceIds: [] };
+  const shared = await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: null },
+    async (scopedDb) =>
+      await rawRows<{ workspace_id: string }>(
+        scopedDb,
+        sql`select workspace_id from list_organization_workspace_ids(${input.accountId}::uuid)`,
+      ),
+  );
+  const sharedIds = new Set(shared.map((row) => row.workspace_id));
+  const unknown = listed.filter((workspaceId) => !sharedIds.has(workspaceId));
+  if (unknown.length > 0) return { ok: false, workspaceIds: unknown };
+  return { ok: true, allowedWorkspaceIds: listed.sort() };
+}
+
+/** Change where an organization rig works. Its home workspace always has it;
+ * chats and schedules in a workspace it no longer works in fail at their next
+ * attempt instead of using it. */
+export async function updateOrganizationRigReach(
+  db: Database,
+  rigId: string,
+  input: OrganizationComputeReachInput,
+): Promise<OrganizationComputeReachUpdate> {
+  const normalized = await normalizeOrganizationComputeReach(db, input);
+  if (!normalized.ok)
+    return { status: "unknown_workspaces", workspaceIds: normalized.workspaceIds };
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.homeWorkspaceId },
+    async (scopedDb) => {
+      const where = and(
+        eq(schema.rigs.accountId, input.accountId),
+        eq(schema.rigs.workspaceId, input.homeWorkspaceId),
+        eq(schema.rigs.id, rigId),
+        eq(schema.rigs.authorityScope, "organization"),
+        eq(schema.rigs.status, "active"),
+      );
+      const [before] = await scopedDb
+        .select({
+          allowedWorkspaceIds: schema.rigs.allowedWorkspaceIds,
+          allowPersonalWorkspaces: schema.rigs.allowPersonalWorkspaces,
+        })
+        .from(schema.rigs)
+        .where(where)
+        .for("update")
+        .limit(1);
+      if (!before) return { status: "not_found" };
+      const [row] = await scopedDb
+        .update(schema.rigs)
+        .set({
+          allowedWorkspaceIds: normalized.allowedWorkspaceIds,
+          allowPersonalWorkspaces: input.allowPersonalWorkspaces,
+          updatedAt: new Date(),
+        })
+        .where(where)
+        .returning();
+      if (!row) return { status: "not_found" };
+      await scopedDb.insert(schema.auditEvents).values({
+        accountId: input.accountId,
+        workspaceId: input.homeWorkspaceId,
+        subjectId: input.subjectId,
+        action: "rig.reach.changed",
+        targetType: "rig",
+        targetId: rigId,
+        metadata: {
+          from: before,
+          to: {
+            allowedWorkspaceIds: row.allowedWorkspaceIds,
+            allowPersonalWorkspaces: row.allowPersonalWorkspaces,
+          },
+        },
+      });
+      return {
+        status: "updated",
+        reach: {
+          homeWorkspaceId: row.workspaceId,
+          allowedWorkspaceIds: row.allowedWorkspaceIds ?? null,
+          allowPersonalWorkspaces: row.allowPersonalWorkspaces,
+        },
+      };
+    },
+  );
+}
+
+/** An organization machine or rig, wherever it works: its name and reach only. */
+export type OrganizationComputeSummaryRow = {
+  id: string;
+  name: string;
+  /** Machines: the machine's sandbox, which their pages open by. */
+  sandboxId?: string | null;
+  reach: OrganizationComputeReach;
+};
+
+const LIST_ORGANIZATION_COMPUTE = "opengeni_private.list_organization_compute_v1(uuid, uuid, text)";
+
+/**
+ * Every active organization machine or rig in the account, wherever it works
+ * (migration 1224), for the people who decide where they work; the caller
+ * checks account:admin and refuses agent runs. Null while the routine's
+ * runtime EXECUTE is withheld (runtime-posture
+ * DEFERRED_RUNTIME_PRIVATE_ROUTINES). The grant is checked in its own
+ * statement, because EXECUTE is checked when a statement starts.
+ */
+export async function listOrganizationCompute(
+  db: Database,
+  access: RigAccessContext,
+  kind: "machine" | "rig",
+): Promise<OrganizationComputeSummaryRow[] | null> {
+  return await withRlsContext(db, access, async (scopedDb) => {
+    await setSubjectRlsContext(scopedDb, access.subjectId);
+    const [grant] = await rawRows<{ granted: boolean | null }>(
+      scopedDb,
+      sql`select coalesce(has_function_privilege(
+          to_regprocedure(${LIST_ORGANIZATION_COMPUTE})::oid, 'EXECUTE'), false) as granted`,
+    );
+    if (grant?.granted !== true) return null;
+    const rows = await rawRows<{
+      value: {
+        id: string;
+        name?: string;
+        sandboxId?: string | null;
+        sandboxName?: string | null;
+        os?: string | null;
+        reach: OrganizationComputeReach;
+      };
+    }>(
+      scopedDb,
+      sql`select value from opengeni_private.list_organization_compute_v1(
+        ${access.accountId}::uuid, ${access.workspaceId}::uuid, ${kind}
+      ) value`,
+    );
+    return rows.map(({ value }) =>
+      kind === "machine"
+        ? {
+            id: value.id,
+            // As the machine list names it.
+            name: value.sandboxName ?? `${value.os} machine`,
+            sandboxId: value.sandboxId ?? null,
+            reach: value.reach,
+          }
+        : { id: value.id, name: value.name ?? "", reach: value.reach },
+    );
+  });
+}
+
 // --- Channels ---------------------------------------------------------------
 // Workspace-shared rail organization for root sessions. Pure metadata: filing
 // a session into a channel never affects execution, authority, or history.
@@ -22605,10 +24026,35 @@ export class ChannelNotFoundError extends Error {
   }
 }
 
+/**
+ * An Only me project holds only its owner's own Only me chats and Sites
+ * (1161), so nothing in it is ever visible to anyone else.
+ */
+export class ChannelAudienceMismatchError extends Error {
+  constructor(kind: "chat" | "Site") {
+    super(`An Only me project holds only your own Only me ${kind}s.`);
+    this.name = "ChannelAudienceMismatchError";
+  }
+}
+
 function isChannelNameUniqueViolation(error: unknown): boolean {
+  const constraint = safeDatabaseErrorFacts(error).constraint;
   return (
     nestedPostgresSqlState(error) === "23505" &&
-    safeDatabaseErrorFacts(error).constraint === "channels_workspace_name_idx"
+    (constraint === "channels_workspace_name_idx" || constraint === "channels_owner_name_idx")
+  );
+}
+
+/** Whether an item fits a project: anything fits a shared one. */
+function fitsProject(
+  project: { visibility: string; ownerSubjectId: string | null },
+  item: { visibility: string; ownerSubjectId: string | null },
+): boolean {
+  return (
+    project.visibility !== "user_private" ||
+    (item.visibility === "user_private" &&
+      item.ownerSubjectId !== null &&
+      item.ownerSubjectId === project.ownerSubjectId)
   );
 }
 
@@ -22638,8 +24084,10 @@ function mapChannel(row: typeof schema.channels.$inferSelect): Channel {
     workspaceId: row.workspaceId,
     name: row.name,
     description: row.description ?? null,
+    avatar: storedSessionAvatar(row.avatar),
     pinned: row.pinned,
     sortOrder: row.sortOrder,
+    visibility: row.visibility === "user_private" ? "private" : "workspace",
     createdBy: row.createdBy ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -22653,9 +24101,19 @@ export async function createChannel(
     workspaceId: string;
     name: string;
     description?: string | null;
+    avatar?: SessionAvatar | null;
     createdBy?: string | null;
+    /**
+     * Who sees it; Only me needs its owner. Omitted, shared with the
+     * workspace, as every project was before audiences.
+     */
+    audience?: { visibility: "user_private" | "workspace_shared"; ownerSubjectId: string | null };
   },
 ): Promise<Channel> {
+  const visibility = input.audience?.visibility ?? "workspace_shared";
+  const ownerSubjectId = input.audience?.ownerSubjectId ?? null;
+  if (visibility === "user_private" && !ownerSubjectId)
+    throw new TypeError("An Only me project needs an owner");
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -22677,7 +24135,10 @@ export async function createChannel(
             workspaceId: input.workspaceId,
             name: input.name,
             description: input.description ?? null,
+            avatar: input.avatar ?? null,
             sortOrder: nextSortOrder,
+            visibility,
+            ownerSubjectId,
             createdBy: input.createdBy ?? null,
           })
           .returning();
@@ -22732,17 +24193,39 @@ export async function updateChannel(
   input: {
     name?: string | undefined;
     description?: string | null | undefined;
+    avatar?: SessionAvatar | null | undefined;
     pinned?: boolean | undefined;
+    /** Shares an Only me project with the workspace; never narrows. */
+    visibility?: "workspace_shared" | undefined;
   },
 ): Promise<Channel | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    // Sharing keeps the name, which then has to be free among shared projects.
+    const conflictName =
+      input.name ??
+      (input.visibility === undefined
+        ? ""
+        : ((
+            await scopedDb
+              .select({ name: schema.channels.name })
+              .from(schema.channels)
+              .where(
+                and(
+                  eq(schema.channels.workspaceId, workspaceId),
+                  eq(schema.channels.id, channelId),
+                ),
+              )
+              .limit(1)
+          )[0]?.name ?? ""));
     try {
       const [row] = await scopedDb
         .update(schema.channels)
         .set({
           ...(input.name !== undefined ? { name: input.name } : {}),
           ...(input.description !== undefined ? { description: input.description } : {}),
+          ...(input.avatar !== undefined ? { avatar: input.avatar } : {}),
           ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
+          ...(input.visibility !== undefined ? { visibility: input.visibility } : {}),
           updatedAt: new Date(),
         })
         .where(and(eq(schema.channels.workspaceId, workspaceId), eq(schema.channels.id, channelId)))
@@ -22750,7 +24233,7 @@ export async function updateChannel(
       return row ? mapChannel(row) : null;
     } catch (error) {
       if (isChannelNameUniqueViolation(error)) {
-        throw new ChannelNameConflictError(input.name ?? "");
+        throw new ChannelNameConflictError(conflictName);
       }
       throw error;
     }
@@ -22846,7 +24329,11 @@ export async function setSessionChannel(
   return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) => {
     if (input.channelId !== null) {
       const [channel] = await scopedDb
-        .select({ id: schema.channels.id })
+        .select({
+          id: schema.channels.id,
+          visibility: schema.channels.visibility,
+          ownerSubjectId: schema.channels.ownerSubjectId,
+        })
         .from(schema.channels)
         .where(
           and(
@@ -22857,6 +24344,29 @@ export async function setSessionChannel(
         .limit(1);
       if (!channel) {
         throw new ChannelNotFoundError(input.channelId);
+      }
+      if (channel.visibility === "user_private") {
+        const [session] = await scopedDb
+          .select({
+            visibility: schema.sessions.visibility,
+            ownerSubjectId: schema.sessions.ownerSubjectId,
+          })
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          )
+          .limit(1);
+        if (!session) return false;
+        if (
+          !fitsProject(channel, {
+            visibility: session.visibility,
+            ownerSubjectId: session.ownerSubjectId ?? null,
+          })
+        )
+          throw new ChannelAudienceMismatchError("chat");
       }
     }
     try {
@@ -22955,6 +24465,8 @@ export async function moveSiteToProject(
         accountId: string;
         homeChannelId: string | null;
         inAudience: boolean;
+        visibility: string;
+        ownerSubjectId: string | null;
       }>(
         scoped,
         sql`
@@ -22962,7 +24474,9 @@ export async function moveSiteToProject(
             (case when placement.site_id is not null then placement.channel_id
               else creator.channel_id end)::text as "homeChannelId",
             (artifact.visibility = 'workspace_shared'
-              or artifact.owner_subject_id = ${input.subjectId}) as "inAudience"
+              or artifact.owner_subject_id = ${input.subjectId}) as "inAudience",
+            artifact.visibility as "visibility",
+            artifact.owner_subject_id as "ownerSubjectId"
           from ${schema.workspaceArtifacts} artifact
           left join ${schema.siteProjectPlacements} placement
             on placement.workspace_id = artifact.workspace_id and placement.site_id = artifact.id
@@ -22983,7 +24497,11 @@ export async function moveSiteToProject(
       if (input.fromChannelId === input.channelId) return { siteMoved: false, movedSessionIds: [] };
       if (input.channelId !== null) {
         const [channel] = await scoped
-          .select({ id: schema.channels.id })
+          .select({
+            id: schema.channels.id,
+            visibility: schema.channels.visibility,
+            ownerSubjectId: schema.channels.ownerSubjectId,
+          })
           .from(schema.channels)
           .where(
             and(
@@ -22993,6 +24511,30 @@ export async function moveSiteToProject(
           )
           .limit(1);
         if (!channel) throw new ChannelNotFoundError(input.channelId);
+        // An Only me project takes only its owner's Only me Site, and the
+        // conversations that move with a row must fit it too.
+        if (channel.visibility === "user_private") {
+          if (!fitsProject(channel, site)) throw new ChannelAudienceMismatchError("Site");
+          const misfits =
+            input.sessionIds.length === 0
+              ? []
+              : await scoped
+                  .select({ id: schema.sessions.id })
+                  .from(schema.sessions)
+                  .where(
+                    and(
+                      eq(schema.sessions.workspaceId, input.workspaceId),
+                      inArray(schema.sessions.id, [...input.sessionIds]),
+                      or(
+                        ne(schema.sessions.visibility, "user_private"),
+                        isNull(schema.sessions.ownerSubjectId),
+                        ne(schema.sessions.ownerSubjectId, channel.ownerSubjectId ?? ""),
+                      ),
+                    ),
+                  )
+                  .limit(1);
+          if (misfits.length > 0) throw new ChannelAudienceMismatchError("chat");
+        }
       }
       const siteMoved = site.inAudience && site.homeChannelId === input.fromChannelId;
       try {
@@ -24407,12 +25949,13 @@ export const TENANCY_PARITY_GATES: readonly TenancyParityGateDefinition[] = [
   },
   {
     id: "personal_workspace_has_no_membership_row",
-    title: "A managed personal workspace carries no workspace_memberships row",
+    title: "A managed personal workspace's only workspace_memberships row is its active owner's",
     basis: "runtime",
     rule:
-      "The owner-only personal-workspace grant is a derived access projection, not a " +
-      "delegable membership. A persisted row there is exactly how membership CRUD and " +
-      "the subject-membership fallback would widen it into shared access.",
+      "Migration 1231 keeps exactly one row there: the active owner's, role member with " +
+      "personal_workspace_owner_permissions(). Any other row (another subject's, an " +
+      "administering one, or one whose owner is no longer active) is exactly how " +
+      "membership CRUD and the subject-membership fallback would widen it into shared access.",
   },
   {
     id: "authority_resource_single_owner",
@@ -24849,13 +26392,21 @@ async function withOrganizationCodexAdministrator<T>(
       // overview and before any Codex workspace inventory so a new workspace
       // cannot commit after the source snapshot was captured.
       await lockOrganizationMembershipLifecycle(scopedDb, input.organizationId);
-      await setSubjectRlsContext(scopedDb, input.actorSubjectId);
-      await scopedDb.execute(sql`
-        select get_organization_administration_overview(
-          ${input.organizationId}::uuid,
-          ${input.actorSubjectId}
-        )
-      `);
+      // An account administrator the request proved (for example the
+      // deployment's configured key) has no organization membership for the
+      // overview to find; its recorded authority is the check instead.
+      const accountAdministrator = await setSubscriptionAdministrationSubject(scopedDb, {
+        accountId: input.organizationId,
+        subjectId: input.actorSubjectId,
+      });
+      if (!accountAdministrator) {
+        await scopedDb.execute(sql`
+          select get_organization_administration_overview(
+            ${input.organizationId}::uuid,
+            ${input.actorSubjectId}
+          )
+        `);
+      }
       return await use(scopedDb);
     },
   );
@@ -27633,9 +29184,10 @@ export async function readSubscriptionCoreCodexResetAuthority(
  * post-resolution gate (a blocked provider never reaches a model call and
  * never silently remaps).
  *
- * A workspace row is the workspace's own choice. Without one, the workspace
- * follows its organization's default allowlist (organization_model_defaults);
- * with neither, every model is allowed.
+ * The organization's allowlist (organization_model_defaults) is a ceiling for
+ * every workspace in it. A workspace row only narrows it: a model must pass
+ * both. Without a row the workspace uses the organization's list as is; with
+ * neither, every model is allowed.
  */
 export type WorkspaceModelPolicy = {
   allowedProviders: string[] | null;
@@ -27657,10 +29209,33 @@ function restrictsAnything(policy: WorkspaceModelPolicy | null | undefined): boo
   return Boolean(policy && (policy.allowedProviders !== null || policy.allowedModels !== null));
 }
 
+/** One allowlist narrowed by another; null allows everything. */
+function narrowAllowlist(ceiling: string[] | null, own: string[] | null): string[] | null {
+  if (ceiling === null) return own;
+  if (own === null) return ceiling;
+  const allowed = new Set(ceiling);
+  return own.filter((id) => allowed.has(id));
+}
+
 /**
- * The workspace's own policy row and the organization default it would
- * follow without one. `organization` is null when the organization allows
- * every model.
+ * What a workspace may use: its own allowlists within the organization's. A
+ * model passes only when both allow its provider and both allow the model.
+ */
+function narrowWorkspaceModelPolicy(
+  organization: WorkspaceModelPolicy | null,
+  workspace: WorkspaceModelPolicy | null,
+): WorkspaceModelPolicy | null {
+  if (!organization) return workspace;
+  if (!workspace) return organization;
+  return {
+    allowedProviders: narrowAllowlist(organization.allowedProviders, workspace.allowedProviders),
+    allowedModels: narrowAllowlist(organization.allowedModels, workspace.allowedModels),
+  };
+}
+
+/**
+ * The workspace's own policy row and the organization's ceiling above it.
+ * `organization` is null when the organization allows every model.
  */
 export async function getWorkspaceModelPolicyLayers(
   db: Database,
@@ -27711,17 +29286,23 @@ export async function getWorkspaceModelPolicyLayers(
 }
 
 /**
- * The policy this workspace runs with: the allowlists of its own row, else of
- * its organization's default, plus its credit switch. Null only when nothing
- * is restricted (every model allowed and credits on).
+ * The policy this workspace runs with: its own allowlists narrowed within its
+ * organization's, plus its credit switch. Null only when nothing is
+ * restricted (every model allowed and credits on).
  */
 export async function getWorkspaceModelPolicy(
   db: Database,
   workspaceId: string,
 ): Promise<EffectiveWorkspaceModelPolicy | null> {
-  const layers = await getWorkspaceModelPolicyLayers(db, workspaceId);
-  const allowlists = layers.workspace ?? layers.organization;
-  if (!allowlists && layers.allowCreditModels) return null;
+  return effectiveWorkspaceModelPolicy(await getWorkspaceModelPolicyLayers(db, workspaceId));
+}
+
+/** The policy a workspace runs with, from its already-read layers. */
+function effectiveWorkspaceModelPolicy(
+  layers: Awaited<ReturnType<typeof getWorkspaceModelPolicyLayers>>,
+): EffectiveWorkspaceModelPolicy | null {
+  const allowlists = narrowWorkspaceModelPolicy(layers.organization, layers.workspace);
+  if (!restrictsAnything(allowlists) && layers.allowCreditModels) return null;
   return {
     allowedProviders: allowlists?.allowedProviders ?? null,
     allowedModels: allowlists?.allowedModels ?? null,
@@ -27729,7 +29310,7 @@ export async function getWorkspaceModelPolicy(
   };
 }
 
-/** Remove the workspace's own policy so it follows its organization's default. */
+/** Remove the workspace's own policy so it uses its organization's list as is. */
 export async function deleteWorkspaceModelPolicy(
   db: Database,
   input: { accountId: string; workspaceId: string },
@@ -27747,8 +29328,8 @@ export async function deleteWorkspaceModelPolicy(
 
 /**
  * Create or replace the workspace's own model policy. Passing null for a field
- * clears that restriction; a policy of {null, null} is kept as the workspace's
- * explicit choice to allow every model even when its organization restricts.
+ * clears that restriction. It only ever narrows the organization's list, so
+ * {null, null} allows exactly what the organization allows.
  */
 export async function upsertWorkspaceModelPolicy(
   db: Database,
@@ -28768,6 +30349,12 @@ export type ConnectorActionInvocation = {
   actionName?: string;
   /** Legacy recommendation or capability-authorized mutation ledger mode. */
   approvalMode?: "session_mcp" | "connector_write";
+  /**
+   * This execution only tells the provider that the person declined the
+   * question it asked mid-call (MCP elicitation). It is admitted once, from
+   * the rejected round of a request that asked.
+   */
+  deliversDecline?: true;
 };
 
 export type PrepareConnectorActionApprovalResult =
@@ -29430,6 +31017,105 @@ export async function listConnectorActionPolicies(
   );
 }
 
+const connectorActionPolicySnapshotColumns = {
+  id: schema.connectorActionPolicies.id,
+  connectionId: schema.connectorActionPolicies.connectionId,
+  serverId: schema.connectorActionPolicies.serverId,
+  toolName: schema.connectorActionPolicies.toolName,
+  actionName: schema.connectorActionPolicies.actionName,
+  policy: schema.connectorActionPolicies.policy,
+  version: schema.connectorActionPolicies.version,
+};
+
+/**
+ * The tool choices a turn starts with. A workspace login's choices are that
+ * workspace's. A personal login's choices belong to the login: they are stored
+ * once, in the workspace it was connected from, and follow it to every
+ * workspace where its owner's turn uses it. A copy left in this workspace is
+ * ignored. A login whose choices don't fit the snapshot bound is left out
+ * whole, so its recommendations apply; never part of its rules. The
+ * workspace's own rows keep database order and followed logins come after
+ * them, so exact-attempt re-entry compares equal snapshots.
+ */
+export async function connectorActionPolicySnapshotForTurn(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    bindings: readonly McpConnectionAccountBinding[] | null;
+  },
+): Promise<ConnectorActionPolicySnapshotEntry[]> {
+  const followed = new Map<string, Set<string>>();
+  for (const binding of input.bindings ?? []) {
+    if (binding.subjectScope !== "subject" || binding.originWorkspaceId === input.workspaceId)
+      continue;
+    const ids = followed.get(binding.originWorkspaceId) ?? new Set<string>();
+    ids.add(binding.connectionId);
+    followed.set(binding.originWorkspaceId, ids);
+  }
+  const followedIds = new Set([...followed.values()].flatMap((ids) => [...ids]));
+  const stored = await db
+    .select(connectorActionPolicySnapshotColumns)
+    .from(schema.connectorActionPolicies)
+    .where(
+      and(
+        eq(schema.connectorActionPolicies.accountId, input.accountId),
+        eq(schema.connectorActionPolicies.workspaceId, input.workspaceId),
+      ),
+    )
+    .orderBy(
+      asc(schema.connectorActionPolicies.connectionId),
+      asc(schema.connectorActionPolicies.serverId),
+      asc(schema.connectorActionPolicies.toolName),
+      asc(schema.connectorActionPolicies.actionName),
+      asc(schema.connectorActionPolicies.id),
+    )
+    .limit(CONNECTOR_ACTION_POLICY_SNAPSHOT_MAX + 1);
+  if (stored.length > CONNECTOR_ACTION_POLICY_SNAPSHOT_MAX) {
+    throw new Error("Connector action policy snapshot exceeds the 2048-row bound");
+  }
+  const snapshot: ConnectorActionPolicySnapshotEntry[] = stored.filter(
+    (row) => !followedIds.has(row.connectionId),
+  );
+  for (const [originWorkspaceId, ids] of [...followed].sort(([left], [right]) =>
+    left < right ? -1 : left > right ? 1 : 0,
+  )) {
+    // Read the login's home under that workspace's tenant scope, without the
+    // session-tenancy fence: this is a read inside the claim transaction.
+    const rows = await withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: originWorkspaceId },
+      async (scoped) =>
+        await scoped
+          .select(connectorActionPolicySnapshotColumns)
+          .from(schema.connectorActionPolicies)
+          .where(
+            and(
+              eq(schema.connectorActionPolicies.accountId, input.accountId),
+              eq(schema.connectorActionPolicies.workspaceId, originWorkspaceId),
+              inArray(schema.connectorActionPolicies.connectionId, [...ids].sort()),
+            ),
+          )
+          .orderBy(
+            asc(schema.connectorActionPolicies.connectionId),
+            asc(schema.connectorActionPolicies.serverId),
+            asc(schema.connectorActionPolicies.toolName),
+            asc(schema.connectorActionPolicies.actionName),
+            asc(schema.connectorActionPolicies.id),
+          )
+          .limit(CONNECTOR_ACTION_POLICY_SNAPSHOT_MAX + 1),
+      undefined,
+      "none",
+    );
+    for (const connectionId of [...ids].sort()) {
+      const group = rows.filter((row) => row.connectionId === connectionId);
+      if (snapshot.length + group.length <= CONNECTOR_ACTION_POLICY_SNAPSHOT_MAX)
+        snapshot.push(...group);
+    }
+  }
+  return snapshot;
+}
+
 /**
  * Install a risk-appropriate connector default without overwriting an explicit
  * user choice that already exists for the same immutable connector action.
@@ -29858,6 +31544,35 @@ export async function beginConnectorActionExecution(
           actionFingerprint: row.actionFingerprint,
         } as const;
       }
+      if (row.status === "rejected" && row.inputRound > 0 && invocation.deliversDecline) {
+        // The person declined the provider's question: the call runs once
+        // more under that rejection, only to tell the provider so.
+        const [executing] = await tx
+          .update(schema.connectorActionRequests)
+          .set({
+            status: "executing",
+            executionAttemptId: identity.attemptId,
+            executionAttemptGeneration: identity.executionGeneration,
+            executionStartedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(eq(schema.connectorActionRequests.id, row.id))
+          .returning();
+        if (!executing) throw new Error("Declined connector action request disappeared");
+        row = executing;
+        await insertConnectorActionAudit(tx, {
+          row,
+          action: "connector.action.execution_started",
+          subjectId: identity.initiator.subjectId,
+          extra: { outcome: "decline_delivery", inputRound: row.inputRound },
+        });
+        return {
+          allowed: true,
+          managed: true,
+          requestId: row.id,
+          actionFingerprint: row.actionFingerprint,
+        } as const;
+      }
       if (row.status === "executing") {
         if (inserted) {
           return {
@@ -29920,7 +31635,13 @@ export async function completeConnectorActionExecution(
     workspaceId: string;
     requestId: string;
     attemptId: string;
-    outcome: "completed" | "uncertain" | "not_executed";
+    /**
+     * `input_required`: the provider stopped before finishing to ask the
+     * person a question (MCP elicitation). The request opens its next input
+     * round as an undecided `pending` request, so the answer is that round's
+     * approval decision and the retry executes once under it.
+     */
+    outcome: "completed" | "uncertain" | "not_executed" | "input_required";
   },
 ): Promise<void> {
   await runConnectorActionLedgerTransaction(
@@ -29940,11 +31661,22 @@ export async function completeConnectorActionExecution(
             and(
               eq(schema.connectorActionRequests.workspaceId, input.workspaceId),
               eq(schema.connectorActionRequests.id, input.requestId),
-              eq(schema.connectorActionRequests.executionAttemptId, input.attemptId),
             ),
           );
       const [located] = await request().limit(1);
-      if (!located) throw new Error("Connector action request not found for completion");
+      // Asking the person releases the executing attempt, so a repeated
+      // settlement of the same question finds an undecided round instead.
+      const settledQuestion = (row: typeof located) =>
+        input.outcome === "input_required" &&
+        row?.status === "pending" &&
+        row.inputRound > 0 &&
+        row.executionAttemptId === null;
+      if (
+        !located ||
+        (located.executionAttemptId !== input.attemptId && !settledQuestion(located))
+      ) {
+        throw new Error("Connector action request not found for completion");
+      }
       // Settlement is not admission: it takes the canonical prefix but never the
       // Pause/Steer write fence, so an interrupted attempt still settles.
       await lockPrefix({
@@ -29954,6 +31686,43 @@ export async function completeConnectorActionExecution(
       });
       const [existing] = await request().for("update").limit(1);
       if (!existing) throw new Error("Connector action request not found for completion");
+      if (settledQuestion(existing)) return;
+      if (existing.executionAttemptId !== input.attemptId) {
+        throw new Error("Connector action request not found for completion");
+      }
+      if (input.outcome === "input_required") {
+        if (existing.status !== "executing") {
+          throw new Error(`Connector action request cannot ask from ${existing.status}`);
+        }
+        const [row] = await tx
+          .update(schema.connectorActionRequests)
+          .set({
+            status: "pending",
+            inputRound: existing.inputRound + 1,
+            // The new question is decided and executed afresh; earlier
+            // rounds' decisions stay in the audit log.
+            decision: null,
+            decisionBySubjectId: null,
+            decisionByKind: null,
+            decisionBySignedInPerson: false,
+            decisionEventId: null,
+            decidedAt: null,
+            executionAttemptId: null,
+            executionAttemptGeneration: null,
+            executionStartedAt: null,
+            updatedAt: new Date(),
+          })
+          .where(eq(schema.connectorActionRequests.id, existing.id))
+          .returning();
+        if (!row) throw new Error("Connector action request disappeared while asking");
+        await insertConnectorActionAudit(tx, {
+          row,
+          action: "connector.action.approval_requested",
+          subjectId: row.initiatorSubjectId,
+          extra: { outcome: "input_required", inputRound: row.inputRound },
+        });
+        return;
+      }
       // A not-executed completion is a terminal failure whose provider
       // request never happened; it keeps the existing status vocabulary.
       // Reaching the terminal status is idempotent even when a concurrent
@@ -30219,6 +31988,16 @@ export type SessionCreateInput = {
   firstPartyMcpPermissions?: Permission[] | null;
   firstPartyMcpTools?: FirstPartyMcpToolName[];
   instructions?: string | null;
+  /**
+   * No person will see or answer a question until the task ends. Recorded only
+   * under the reserved metadata key, which a caller-supplied value never sets.
+   */
+  unattended?: boolean;
+  /**
+   * Changeable unattended setting (migration 1111), set only by first-party
+   * creators such as the scheduler; omitted leaves it to the create option.
+   */
+  unattendedSetting?: SessionUnattendedSetting;
   /** Vault narrowing for this session (0739); omission is `{ mode: "all" }`. */
   vaultPolicy?: import("@opengeni/contracts").VaultPolicy | undefined;
   policyRole?: string | null;
@@ -30390,6 +32169,36 @@ function mapSessionSpawnDenial(
     idempotencyKey: row.idempotencyKey ?? null,
     createdAt: row.createdAt.toISOString(),
   };
+}
+
+/**
+ * A child inherits its parent's repository removal records, read from the
+ * parent row the depth decision already holds FOR SHARE: a removal either
+ * commits first and is seen here, or waits for this create and then narrows
+ * the new child too. An agent cannot give a child a removed repository; a
+ * person (or API caller) creating the child with one attaches it again there.
+ */
+async function childSessionRemovedRepositories(
+  tx: Database,
+  input: SessionCreateInput,
+  parentSessionId: string,
+): Promise<SessionRemovedRepository[]> {
+  const [parent] = await tx
+    .select({ removedRepositories: schema.sessions.removedRepositories })
+    .from(schema.sessions)
+    .where(
+      and(
+        eq(schema.sessions.workspaceId, input.workspaceId),
+        eq(schema.sessions.id, parentSessionId),
+      ),
+    )
+    .for("share")
+    .limit(1);
+  return admitRequestedRepositories({
+    removedRepositories: parseSessionRemovedRepositories(parent?.removedRepositories),
+    requested: input.resources,
+    requester: input.createdByActor ? "agent" : "person",
+  }).removedRepositories;
 }
 
 async function parentSessionCodeSearchEnabled(
@@ -30566,6 +32375,8 @@ type SessionCreateReplayIdentity = {
   memoryScope?: SessionMemoryScope;
   /** Resolved creation-time configuration; omitted and null are equivalent. */
   agentConfig?: ResolvedAgentConfig | null;
+  /** Unattended create; omitted means interactive. */
+  unattended?: boolean;
 };
 
 // Session metadata is immutable after creation and already participates in
@@ -30653,6 +32464,10 @@ function assertSessionCreateReplayIdentity(
     throw new SessionCreateIdempotencyConflictError();
   }
   if (existing.createRequestedVisibility !== (input.visibility ?? "workspace_shared")) {
+    throw new SessionCreateIdempotencyConflictError();
+  }
+  // A keyed retry must not silently flip whether anyone answers the agent.
+  if (sessionMetadataUnattended(existing.metadata) !== (input.unattended === true)) {
     throw new SessionCreateIdempotencyConflictError();
   }
   // A keyed retry that asks for a different agent-access, end-user, or memory
@@ -30877,15 +32692,18 @@ async function createSessionInTransaction(
   // A session an agent starts never stores a secret value its attempt knows.
   input = { ...input, initialMessage: maskSecretValuesForStorage(input.initialMessage, "message") };
   const selectedInstalledSkillIds = input.selectedInstalledSkillIds ?? [];
-  const sessionMetadata = metadataWithSelectedInstalledSkillCreateIdentity(
-    withBundledSkillSelectionMetadata(
-      metadataWithAgentConfigCreateIdentity(
-        metadataWithAgentLearningCreateIdentity(input.metadata, input.initialAgentLearning),
-        input.agentConfig,
+  const sessionMetadata = withSessionUnattendedMetadata(
+    metadataWithSelectedInstalledSkillCreateIdentity(
+      withBundledSkillSelectionMetadata(
+        metadataWithAgentConfigCreateIdentity(
+          metadataWithAgentLearningCreateIdentity(input.metadata, input.initialAgentLearning),
+          input.agentConfig,
+        ),
+        input.bundledSkillIds,
       ),
-      input.bundledSkillIds,
+      selectedInstalledSkillIds,
     ),
-    selectedInstalledSkillIds,
+    input.unattended === true,
   );
   const createIdempotencyKey = input.createIdempotencyKey ?? null;
   const createRequestedVisibility = input.visibility ?? "workspace_shared";
@@ -30946,6 +32764,7 @@ async function createSessionInTransaction(
         ...(input.scopeSubjectId !== undefined ? { scopeSubjectId: input.scopeSubjectId } : {}),
         ...(input.memoryScope ? { memoryScope: input.memoryScope } : {}),
         ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
+        ...(input.unattended ? { unattended: true } : {}),
       });
       const grouped = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
         existing.id,
@@ -31165,6 +32984,9 @@ async function createSessionInTransaction(
     input.channelId == null && !input.parentSessionId
       ? await siteHomeChannelId(tx as unknown as Database, input.workspaceId, sessionMetadata)
       : (input.channelId ?? null);
+  const removedRepositories = input.parentSessionId
+    ? await childSessionRemovedRepositories(tx as unknown as Database, input, input.parentSessionId)
+    : [];
   try {
     const insertValues: typeof schema.sessions.$inferInsert = withLosslessContentWriteVersion(
       {
@@ -31176,6 +32998,7 @@ async function createSessionInTransaction(
         title: AUTOMATIC_SESSION_TITLE_FALLBACK,
         titleSource: "agent",
         resources: input.resources,
+        removedRepositories,
         skills: input.skills ?? [],
         tools: input.tools ?? [],
         toolPolicy: input.toolPolicy ?? {
@@ -31200,7 +33023,9 @@ async function createSessionInTransaction(
         rigId: input.rigId ?? null,
         rigVersionId: input.rigVersionId ?? null,
         channelId,
-        firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
+        firstPartyMcpPermissions: input.firstPartyMcpPermissions
+          ? canonicalSecretPermissions(input.firstPartyMcpPermissions)
+          : null,
         firstPartyMcpTools: input.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
         initialPersonalConnectionDelegations: input.personalConnectionDelegations ?? [],
         initialMcpAccountBindings: acceptedMcpAccountBindings,
@@ -31245,6 +33070,13 @@ async function createSessionInTransaction(
             : "portable"),
         codeSearchEnabled,
         agentConfig: input.agentConfig ?? null,
+        ...(input.unattendedSetting ? { unattendedSetting: input.unattendedSetting } : {}),
+        // Frozen: the chat starts unattended through its setting. The
+        // instructions and tools follow this, never the setting's later value.
+        ...(input.unattendedSetting === "unattended" ||
+        input.unattendedSetting === "unattended_by_default"
+          ? { startedUnattended: true }
+          : {}),
         // Creation reserves identity, not runnable work. The atomic start
         // transaction installs queued status together with its turn/wake.
         status: "idle",
@@ -31265,9 +33097,11 @@ async function createSessionInTransaction(
       // continuations) are included. SQL rechecks it against the locked turn
       // and the request's verified claims; another person never matches.
       const columns = getTableColumns(schema.sessions);
+      // The creation seam's column allow-list predates removal records; the
+      // inherited records are written right after, in this transaction.
       const valuesByColumn = Object.fromEntries(
         Object.entries(insertValues)
-          .filter(([, value]) => value !== undefined)
+          .filter(([key, value]) => value !== undefined && key !== "removedRepositories")
           .map(([key, value]) => {
             const column = columns[key as keyof typeof columns];
             return [column.name, agentChildCreationColumnValue(column, value)];
@@ -31281,9 +33115,15 @@ async function createSessionInTransaction(
         ${actor.turnId}::uuid, ${actor.attemptId}::uuid, ${actor.executionGeneration}::integer,
         ${JSON.stringify(valuesByColumn)}::jsonb
       )`);
-      insertedRows = created.length
-        ? await tx.select().from(schema.sessions).where(eq(schema.sessions.id, created[0]!.id))
-        : [];
+      insertedRows = !created.length
+        ? []
+        : removedRepositories.length > 0
+          ? await tx
+              .update(schema.sessions)
+              .set({ removedRepositories })
+              .where(eq(schema.sessions.id, created[0]!.id))
+              .returning()
+          : await tx.select().from(schema.sessions).where(eq(schema.sessions.id, created[0]!.id));
     } else {
       // Non-agent creates, unscoped legacy creates and turns with no initiating
       // human retain their original path. Never infer the request subject from
@@ -31333,6 +33173,7 @@ async function createSessionInTransaction(
           ...(input.scopeSubjectId !== undefined ? { scopeSubjectId: input.scopeSubjectId } : {}),
           ...(input.memoryScope ? { memoryScope: input.memoryScope } : {}),
           ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
+          ...(input.unattended ? { unattended: true } : {}),
         });
         const grouped = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
           existing.id,
@@ -31547,6 +33388,8 @@ export async function getInitializedSessionCreateReplay(
     deferInitialTurn?: boolean;
     /** Resolved agent configuration of the retry; omitted skips the comparison. */
     agentConfig?: ResolvedAgentConfig | null;
+    /** The retry's `unattended: true`; a keyed replay must agree with the winner. */
+    unattended?: boolean;
   },
 ): Promise<InitializedSessionCreateReplay | null> {
   return await withWorkspaceSubjectSessionActivityRls(
@@ -33056,7 +34899,15 @@ export type SessionListFilterOptions = {
   mineOnly?: boolean;
   /** Exact opaque end-user label pair (both parts). */
   scopeSubjectId?: SessionScopeSubjectId;
+  /**
+   * Only these sessions (at most {@link SESSION_LIST_MAX_SESSION_IDS}). It
+   * narrows the caller's ordinary authorized list and never widens it.
+   */
+  sessionIds?: readonly string[];
 };
+
+/** Upper bound for the session-list `sessionIds` filter. */
+export const SESSION_LIST_MAX_SESSION_IDS = 200;
 
 export type ListSessionsForSubjectOptions = ListSessionsOptions &
   SessionListFilterOptions & {
@@ -33069,9 +34920,9 @@ export type ListSessionsForSubjectOptions = ListSessionsOptions &
     pinsOnly?: boolean | undefined;
     /** Skip pin hydration when the caller reads the pinned section separately. */
     includePinned?: boolean | undefined;
-    /** List personally archived chats instead of active chats. */
+    /** List archived chats instead of active chats. */
     archivedOnly?: boolean | undefined;
-    sortBy?: "updatedAt" | "createdAt" | "name" | undefined;
+    sortBy?: "updatedAt" | "createdAt" | "name" | "archivedAt" | undefined;
     archiveStatus?: "active" | "archived" | "all" | undefined;
     /** Return a continuation cursor. Disable for legacy one-page array reads. */
     materializeSnapshot?: boolean | undefined;
@@ -33111,17 +34962,19 @@ export class SessionPinVersionConflictError extends Error {
   }
 }
 
+/** Archived chats leave the Pinned list with every other list, so they cannot be pinned. */
+export class SessionArchivedPinError extends Error {
+  readonly code = "session_archived_pin";
+  constructor() {
+    super("Archived chats can't be pinned.");
+    this.name = "SessionArchivedPinError";
+  }
+}
+
 export class SessionAttentionVersionConflictError extends Error {
   constructor(readonly current: Pick<Session, "unread" | "activelyWorking" | "attentionVersion">) {
     super("session attention version conflict");
     this.name = "SessionAttentionVersionConflictError";
-  }
-}
-
-export class SessionArchiveVersionConflictError extends Error {
-  constructor(readonly current: Pick<Session, "archived" | "archivedAt" | "archiveVersion">) {
-    super("session archive version conflict");
-    this.name = "SessionArchiveVersionConflictError";
   }
 }
 
@@ -33205,6 +35058,7 @@ async function requireSessionPersonalStateWriteAuthority(
       and(
         eq(schema.workspaceMemberships.workspaceId, input.workspaceId),
         eq(schema.workspaceMemberships.subjectId, input.subjectId),
+        membershipOutsidePersonalWorkspace(),
       ),
     )
     .limit(1);
@@ -33225,6 +35079,25 @@ async function requireSessionPersonalStateWriteAuthority(
   ) {
     throw new SessionPinAccessError();
   }
+}
+
+/**
+ * Archive is for everyone, but like the personal state it replaced only a
+ * workspace member, or a Personal workspace's verified owner, may start or
+ * undo one: a token that merely names someone gets no further. Throws
+ * {@link SessionPinAccessError}.
+ */
+export async function requireSessionArchiveMemberAuthority(
+  db: Database,
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    personalWorkspaceOwnerException?: PersonalWorkspaceOwnerException | undefined;
+  },
+): Promise<void> {
+  await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) =>
+    requireSessionPersonalStateWriteAuthority(scopedDb as unknown as Database, input),
+  );
 }
 
 type SessionPinRow = Pick<
@@ -33520,16 +35393,44 @@ function mapSessionAttention(
       };
 }
 
+/**
+ * Whether a session row is archived for everyone: archived through the chat's
+ * Archive action (or since migration 1213 by the idle archiver), or stored by
+ * the idle archiver before archived_at existed.
+ */
+function sessionArchivedSql(alias: SQL): SQL {
+  return sql`(${alias}.archived_at is not null or ${alias}.content_archive_state is not null)`;
+}
+
+/** When a session row was archived, by {@link sessionArchivedSql}'s rule. */
+function sessionArchivedAtSql(alias: SQL): SQL {
+  return sql`coalesce(${alias}.archived_at, ${alias}.content_archived_at, ${alias}.content_archive_started_at)`;
+}
+
+/**
+ * The archive fields a session row does not carry itself: the version of the
+ * retired personal archive (kept for clients that still send it) and, from a
+ * list page, the exact archive time of its keyset. `archived` and `archivedAt`
+ * come from the session row (see mapSession).
+ */
 function mapSessionArchive(
   row: SessionPinRow | null | undefined,
-): Pick<Session, "archived" | "archivedAt" | "archiveVersion"> {
-  return row
-    ? {
-        archived: row.archived,
-        archivedAt: row.archivedAt?.toISOString() ?? null,
-        archiveVersion: Number(row.archiveVersion),
-      }
-    : { archived: false, archivedAt: null, archiveVersion: 0 };
+): Pick<Session, "archiveVersion"> & Partial<Pick<Session, "archivedAt">> {
+  return { archiveVersion: row ? Number(row.archiveVersion) : 0 };
+}
+
+/** A session row's archive fields, for everyone (migration 1213). */
+function sessionRowArchive(
+  row: Pick<
+    typeof schema.sessions.$inferSelect,
+    "archivedAt" | "contentArchiveState" | "contentArchivedAt" | "contentArchiveStartedAt"
+  >,
+): Pick<Session, "archived" | "archivedAt"> {
+  const archivedAt = row.archivedAt ?? row.contentArchivedAt ?? row.contentArchiveStartedAt;
+  return {
+    archived: row.archivedAt !== null || row.contentArchiveState !== null,
+    archivedAt: archivedAt?.toISOString() ?? null,
+  };
 }
 
 type SessionTreeStats = NonNullable<Session["treeStats"]>;
@@ -33543,6 +35444,7 @@ type SessionTreeStatsRow = {
   waitingDescendants: number | string;
   attentionDescendants: number | string;
   pausedDescendants: number | string;
+  pausedWorkDescendants: number | string;
   failedDescendants: number | string;
   unreadFailedDescendants: number | string;
   unreadDescendants: number | string;
@@ -33564,6 +35466,7 @@ const EMPTY_SESSION_TREE_STATS: SessionTreeStats = {
   waitingDescendants: 0,
   attentionDescendants: 0,
   pausedDescendants: 0,
+  pausedWorkDescendants: 0,
   failedDescendants: 0,
   unreadFailedDescendants: 0,
   unreadDescendants: 0,
@@ -33695,6 +35598,7 @@ export async function sessionTreeStatsForSessions(
         stats."waitingDescendants",
         stats."attentionDescendants",
         stats."pausedDescendants",
+        stats."pausedWorkDescendants",
         stats."failedDescendants",
         stats."unreadFailedDescendants",
         stats."unreadDescendants",
@@ -33708,6 +35612,44 @@ export async function sessionTreeStatsForSessions(
        and root_cursor.session_id = root.id
       join ${schema.workspaceInferenceControls} workspace_control
         on workspace_control.workspace_id = root.workspace_id
+      cross join lateral (
+        -- A sub-chat root inherits its ancestors' pauses. An ancestor's pause
+        -- reaches it unless a subtree resume newer than that pause sits below
+        -- the ancestor; the workspace pause unless one sits anywhere above.
+        with recursive ancestors(id, parent_session_id, override_revision, pause_revision, below, depth) as (
+          select
+            parent.id,
+            parent.parent_session_id,
+            parent.subtree_run_override_revision,
+            case when parent.direct_control_state = 'paused' then parent.direct_pause_revision end,
+            coalesce(root.subtree_run_override_revision, 0),
+            1
+          from ${schema.sessions} parent
+          where parent.workspace_id = ${workspaceId}
+            and parent.id = root.parent_session_id
+            and parent.id <> root.id
+
+          union all
+
+          select
+            parent.id,
+            parent.parent_session_id,
+            parent.subtree_run_override_revision,
+            case when parent.direct_control_state = 'paused' then parent.direct_pause_revision end,
+            greatest(ancestors.below, coalesce(ancestors.override_revision, 0)),
+            ancestors.depth + 1
+          from ancestors
+          join ${schema.sessions} parent
+            on parent.workspace_id = ${workspaceId}
+           and parent.id = ancestors.parent_session_id
+          where ancestors.depth < ${SESSION_TREE_STATS_MAX_DEPTH}
+            and parent.id <> root.id
+        )
+        select
+          max(pause_revision) filter (where pause_revision >= below) as pause_revision,
+          coalesce(max(coalesce(override_revision, 0)), 0) as override_revision
+        from ancestors
+      ) root_lineage
       cross join lateral (
         -- Every node has exactly one parent, so a walk down child links can
         -- only revisit its own start node (when that start sits on a legacy
@@ -33734,13 +35676,14 @@ export async function sessionTreeStatsForSessions(
               case
                 when workspace_control.workspace_state = 'paused'
                   and workspace_control.workspace_pause_revision is not null
-                  and (
-                    root.subtree_run_override_revision is null
-                    or root.subtree_run_override_revision <= workspace_control.workspace_pause_revision
-                  )
+                  and greatest(
+                    coalesce(root.subtree_run_override_revision, 0),
+                    root_lineage.override_revision
+                  ) <= workspace_control.workspace_pause_revision
                   then workspace_control.workspace_pause_revision
                 else null
               end,
+              root_lineage.pause_revision,
               case
                 when root.direct_control_state = 'paused' then root.direct_pause_revision
                 else null
@@ -33854,6 +35797,14 @@ export async function sessionTreeStatsForSessions(
           )::int as "waitingDescendants",
           count(*) filter (where status = 'requires_action')::int as "attentionDescendants",
           count(*) filter (where effective_pause_revision is not null)::int as "pausedDescendants",
+          count(*) filter (
+            where effective_pause_revision is not null
+              and status not in ('requires_action', 'cancelled', 'failed')
+              and (
+                active_turn_id is not null
+                or status in ('running', 'recovering', 'queued', 'waiting_capacity')
+              )
+          )::int as "pausedWorkDescendants",
           count(*) filter (where status = 'failed')::int as "failedDescendants",
           count(*) filter (where status = 'failed' and unread)::int as "unreadFailedDescendants",
           count(*) filter (where unread)::int as "unreadDescendants",
@@ -33912,6 +35863,7 @@ export async function sessionTreeStatsForSessions(
         waitingDescendants: Number(row.waitingDescendants),
         attentionDescendants: Number(row.attentionDescendants),
         pausedDescendants: Number(row.pausedDescendants),
+        pausedWorkDescendants: Number(row.pausedWorkDescendants),
         failedDescendants: Number(row.failedDescendants),
         unreadFailedDescendants: Number(row.unreadFailedDescendants),
         unreadDescendants: Number(row.unreadDescendants),
@@ -33951,6 +35903,79 @@ export async function sessionRequiresActionSinceForSessions(
     `,
   );
   return new Map(rows.map((row) => [row.sessionId, new Date(row.since).toISOString()]));
+}
+
+/**
+ * Each listed session's newest turn in execution order: the last queued turn,
+ * else the turn currently executing, else the most recently finished turn.
+ * Three bounded backward probes of existing partial indexes per session
+ * (prompt queue, one current inference, finished order), so a long session
+ * costs the same as a new one. Sessions without turns are absent.
+ */
+export async function sessionLatestTurnsForSessions(
+  db: Database,
+  workspaceId: string,
+  sessionIds: readonly string[],
+): Promise<Map<string, SessionListLatestTurn>> {
+  const uniqueIds = [...new Set(sessionIds)];
+  if (uniqueIds.length === 0) return new Map();
+  const rows = await rawRows<{
+    sessionId: string;
+    id: string;
+    status: SessionListLatestTurn["status"];
+    startedAt: Date | string | null;
+    finishedAt: Date | string | null;
+  }>(
+    db,
+    sql`
+      select listed.session_id as "sessionId", latest.id, latest.status,
+        latest.started_at as "startedAt", latest.finished_at as "finishedAt"
+      from unnest(${`{${uniqueIds.join(",")}}`}::uuid[]) as listed(session_id)
+      cross join lateral (
+        select candidate.id, candidate.status, candidate.started_at, candidate.finished_at
+        from (
+          (select queued.id, queued.status, queued.started_at, queued.finished_at, 0 as rank
+            from ${schema.sessionTurns} queued
+            where queued.workspace_id = ${workspaceId}::uuid
+              and queued.session_id = listed.session_id
+              and queued.status = 'queued'
+            order by queued.position desc
+            limit 1)
+          union all
+          (select current_turn.id, current_turn.status, current_turn.started_at,
+              current_turn.finished_at, 1 as rank
+            from ${schema.sessionTurns} current_turn
+            where current_turn.workspace_id = ${workspaceId}::uuid
+              and current_turn.session_id = listed.session_id
+              and current_turn.status in ('running', 'requires_action', 'recovering', 'waiting_capacity')
+            limit 1)
+          union all
+          (select finished.id, finished.status, finished.started_at, finished.finished_at, 2 as rank
+            from ${schema.sessionTurns} finished
+            where finished.workspace_id = ${workspaceId}::uuid
+              and finished.session_id = listed.session_id
+              and finished.finished_at is not null
+            order by finished.finished_at desc, finished.position desc, finished.created_at desc
+            limit 1)
+        ) candidate
+        order by candidate.rank
+        limit 1
+      ) latest
+    `,
+  );
+  const iso = (value: Date | string | null) =>
+    value === null ? null : new Date(value).toISOString();
+  return new Map(
+    rows.map((row) => [
+      row.sessionId,
+      {
+        id: row.id,
+        status: row.status,
+        startedAt: iso(row.startedAt),
+        finishedAt: iso(row.finishedAt),
+      },
+    ]),
+  );
 }
 
 function withRequiresActionSince<T extends Pick<Session, "id" | "status" | "requiresActionSince">>(
@@ -34070,6 +36095,7 @@ async function sessionListTotalsInScope(
     !options.updatedBefore &&
     !options.createdFrom &&
     !options.createdBefore &&
+    !options.sessionIds &&
     !options.authorizationScope?.agentAccessViewer;
   const rootFilters = and(
     eq(schema.sessions.workspaceId, workspaceId),
@@ -34082,7 +36108,11 @@ async function sessionListTotalsInScope(
     }),
     ...(archiveStatus === "all"
       ? []
-      : [sql`coalesce(root_archive.archived, false) = ${archiveStatus === "archived"}`]),
+      : [
+          archiveStatus === "archived"
+            ? sessionArchivedSql(sql`${schema.sessions}`)
+            : sql`not (${sessionArchivedSql(sql`${schema.sessions}`)})`,
+        ]),
     // A Site this person archived from their sidebar hides its conversations
     // with its row, as an archived chat hides its tree.
     ...(archiveStatus === "active" && siteConversations
@@ -34120,7 +36150,7 @@ async function sessionListTotalsInScope(
         ${schema.sessions.createdAt} as created_at,
         ${schema.sessions.metadata}->'_opengeniSiteOrigin'->>'title' as origin_title,
         ${sessionRelatedListScope(options.authorizationScope)} as related,
-        coalesce(root_personal.archived, false) as archived,
+        ${sessionArchivedSql(sql`${schema.sessions}`)} as archived,
         coalesce(root_personal.pinned, false) as pinned,
         coalesce(case when root_personal.manually_unread_through is not null then -1
           else root_personal.acknowledged_sequence end, 0) as acknowledged_sequence,
@@ -34129,9 +36159,6 @@ async function sessionListTotalsInScope(
       left join lateral (
         select * from personal_state where session_id = ${schema.sessions.id} offset 0
       ) root_personal on true
-      left join lateral (
-        select * from personal_state where session_id = ${schema.sessions.rootSessionId} offset 0
-      ) root_archive on true
       where ${rootFilters}
     ), visible_children as materialized (
       -- Immutable root lineage excludes trees that cannot enter this recursion.
@@ -34494,6 +36521,7 @@ function sessionFilters(
     | "needsYouOnly"
     | "contentArchivedOnly"
     | "mineOnly"
+    | "sessionIds"
   >,
 ): SQL[] {
   const filters: SQL[] = [
@@ -34533,13 +36561,13 @@ function sessionFilters(
         : sql`${schema.sessions.siteAccessRootId} is null`,
     );
   }
+  // A chat is archived for everyone, and its sub-chats with it.
   const archivedRoot = sql`exists (
     select 1
-    from ${schema.sessionPins} archive_state
-    where archive_state.workspace_id = ${schema.sessions.workspaceId}
-      and archive_state.subject_id = ${options.subjectId}
-      and archive_state.session_id = ${schema.sessions.rootSessionId}
-      and archive_state.archived = true
+    from ${schema.sessions} archive_root
+    where archive_root.workspace_id = ${schema.sessions.workspaceId}
+      and archive_root.id = ${schema.sessions.rootSessionId}
+      and ${sessionArchivedSql(sql`archive_root`)}
   )`;
   const archiveStatus = options.archiveStatus ?? (options.archivedOnly ? "archived" : "active");
   if (archiveStatus !== "all") {
@@ -34595,6 +36623,14 @@ function sessionFilters(
   if (options.createdBefore) filters.push(lt(schema.sessions.createdAt, options.createdBefore));
   if (options.scopeSubjectId) {
     filters.push(eq(schema.sessions.scopeSubjectId, options.scopeSubjectId));
+  }
+  if (options.sessionIds) {
+    if (options.sessionIds.length > SESSION_LIST_MAX_SESSION_IDS)
+      throw new SessionListCursorError(
+        `sessionIds accepts at most ${SESSION_LIST_MAX_SESSION_IDS} ids`,
+      );
+    // An empty selection matches nothing, never everything.
+    filters.push(anyOf(schema.sessions.id, [...new Set(options.sessionIds)]));
   }
   return filters;
 }
@@ -34786,7 +36822,8 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     !options.scopeSubjectId &&
     !options.needsYouOnly &&
     !options.contentArchivedOnly &&
-    !options.mineOnly
+    !options.mineOnly &&
+    !options.sessionIds
   ) {
     return "all";
   }
@@ -34805,6 +36842,17 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     ...(options.needsYouOnly ? [["needsYouOnly", true]] : []),
     ...(options.contentArchivedOnly ? [["contentArchivedOnly", true]] : []),
     ...(options.mineOnly ? [["mineOnly", true]] : []),
+    // A digest keeps continuation cursors short for a 200-id selection.
+    ...(options.sessionIds
+      ? [
+          [
+            "sessionIds",
+            createHash("sha256")
+              .update([...new Set(options.sessionIds)].sort().join(","))
+              .digest("hex"),
+          ],
+        ]
+      : []),
   ]);
 }
 
@@ -35002,6 +37050,7 @@ export async function searchSessionMessagesForSubject(
           and(
             eq(schema.workspaceMemberships.workspaceId, workspaceId),
             eq(schema.workspaceMemberships.subjectId, authority.subjectId),
+            membershipOutsidePersonalWorkspace(),
           ),
         )
         .limit(1);
@@ -35050,6 +37099,7 @@ export async function listWorkspaceBackgroundCommandsForSubject(
         and(
           eq(schema.workspaceMemberships.workspaceId, workspaceId),
           eq(schema.workspaceMemberships.subjectId, authority.subjectId),
+          membershipOutsidePersonalWorkspace(),
         ),
       )
       .limit(1);
@@ -35125,6 +37175,7 @@ async function requireSessionListReadAuthorityInScope(
       and(
         eq(schema.workspaceMemberships.workspaceId, workspaceId),
         eq(schema.workspaceMemberships.subjectId, options.subjectId),
+        membershipOutsidePersonalWorkspace(),
       ),
     )
     .limit(1);
@@ -35271,14 +37322,12 @@ async function readSessionListForSubject(
             : or(isNull(schema.sessionPins.id), eq(schema.sessionPins.pinned, false))!;
         const parentFilter = sessionParentFilter(options.parentSessionId);
         const searchFilter = sessionSearchFilter(options.search);
-        // Descendants inherit their root's subject-specific archive ordering,
-        // just as they inherit its archive visibility in sessionFilters.
-        const archiveSortAt = sql`(select archive_order.archived_at
-              from ${schema.sessionPins} archive_order
+        // Descendants inherit their root's archive ordering, just as they
+        // inherit its archive visibility in sessionFilters.
+        const archiveSortAt = sql`(select ${sessionArchivedAtSql(sql`archive_order`)}
+              from ${schema.sessions} archive_order
               where archive_order.workspace_id = ${schema.sessions.workspaceId}
-                and archive_order.subject_id = ${options.subjectId}
-                and archive_order.session_id = ${schema.sessions.rootSessionId}
-                and archive_order.archived = true)`;
+                and archive_order.id = ${schema.sessions.rootSessionId})`;
         // Locale-independent normalization shared with the UI contract. Do not
         // use localeCompare/lower(): those depend on deployment/client locale.
         const ordinarySortAt =
@@ -35343,6 +37392,8 @@ async function readSessionListForSubject(
               initialModelContext: sql<SessionRow["initialModelContext"]>`null::text`,
               agentConfig: sql<SessionRow["agentConfig"]>`null::jsonb`,
               mcpApprovalPolicies: sql<SessionRow["mcpApprovalPolicies"]>`null::jsonb`,
+              // Only list-entry fields are reliable here: `unattended` is not
+              // (the create option's key is left out) and SessionListEntry omits it.
               metadata: sql<SessionRow["metadata"]>`jsonb_build_object(
             'scheduledTaskId', ${schema.sessions.metadata}->'scheduledTaskId',
             '_opengeniSiteOrigin', ${schema.sessions.metadata}->'_opengeniSiteOrigin')`,
@@ -35639,13 +37690,13 @@ async function readSessionListForSubject(
           tx,
           workspaceId,
           [...pinnedRows, ...pageRows].map((row) => row.session),
-          !summary,
+          false,
         );
-        // Compact rows skip the unbounded effective-policy walk but still name
-        // the model with two fixed index probes per row.
-        const canonicalSessions = summary
-          ? await withSessionListModelPolicy(tx, workspaceId, canonicalRows)
-          : canonicalRows;
+        // Every list page names each row's model with two fixed index probes
+        // per row. The effective-policy walk can scan back over every turn
+        // started since the last settings write, which took seconds on long
+        // sessions; a single-session read still uses it.
+        const canonicalSessions = await withSessionListModelPolicy(tx, workspaceId, canonicalRows);
         const canonicalSessionById = new Map(
           canonicalSessions.map((session) => [session.id, session]),
         );
@@ -35672,6 +37723,9 @@ async function readSessionListForSubject(
             .map((row) => row.session.id),
         );
         const controls = await sessionControlProjections(tx, workspaceId, ids);
+        const latestTurns = summary
+          ? await sessionLatestTurnsForSessions(tx, workspaceId, ids)
+          : new Map<string, SessionListLatestTurn>();
         const mapListSession = (
           row: (typeof pinnedRows)[number] | (typeof pageRows)[number],
         ): Session => {
@@ -35701,7 +37755,7 @@ async function readSessionListForSubject(
                   mapSessionAttention(session, row.pin),
                   {
                     ...mapSessionArchive(row.pin),
-                    ...(row.pin?.archived && exactArchiveTimestamps.has(session.id)
+                    ...(exactArchiveTimestamps.get(session.id)
                       ? { archivedAt: exactArchiveTimestamps.get(session.id)! }
                       : {}),
                   },
@@ -35720,6 +37774,10 @@ async function readSessionListForSubject(
             rootRelatedIds.has(session.id) ? "root" : "target",
           );
         };
+        const listEntry = (row: (typeof pinnedRows)[number] | (typeof pageRows)[number]) => ({
+          ...sessionListEntry(mapListSession(row)),
+          latestTurn: latestTurns.get(row.session.id) ?? null,
+        });
         if (summary)
           return {
             projection: "summary",
@@ -35727,12 +37785,13 @@ async function readSessionListForSubject(
             ...(options.needsYouOnly ? { needsYouOnly: true as const } : {}),
             ...(options.contentArchivedOnly ? { contentArchivedOnly: true as const } : {}),
             ...(options.mineOnly ? { mineOnly: true as const } : {}),
+            ...(options.sessionIds ? { sessionIdsApplied: true as const } : {}),
             ...(options.siteConversations ? { siteConversations: options.siteConversations } : {}),
             ...(siteGroups ? { siteGroups } : {}),
             ...(siteGroupsTruncated ? { siteGroupsTruncated: true } : {}),
-            pinned: pinnedRows.map((row) => sessionListEntry(mapListSession(row))),
+            pinned: pinnedRows.map(listEntry),
             pinnedTruncated,
-            sessions: pageRows.map((row) => sessionListEntry(mapListSession(row))),
+            sessions: pageRows.map(listEntry),
             nextCursor,
             sortBy,
             archiveStatus: archiveMode,
@@ -35742,6 +37801,7 @@ async function readSessionListForSubject(
           ...(options.needsYouOnly ? { needsYouOnly: true as const } : {}),
           ...(options.contentArchivedOnly ? { contentArchivedOnly: true as const } : {}),
           ...(options.mineOnly ? { mineOnly: true as const } : {}),
+          ...(options.sessionIds ? { sessionIdsApplied: true as const } : {}),
           ...(options.siteConversations ? { siteConversations: options.siteConversations } : {}),
           ...(siteGroups ? { siteGroups } : {}),
           ...(siteGroupsTruncated ? { siteGroupsTruncated: true } : {}),
@@ -36068,6 +38128,11 @@ export async function setSessionPin(
         if (input.expectedVersion !== undefined && input.expectedVersion !== current.pinVersion) {
           throw new SessionPinVersionConflictError(current);
         }
+        // The Pinned list shows chats that are not archived, so an archived
+        // chat cannot be pinned; unpinning one is always allowed.
+        if (input.pinned && sessionRowArchive(session).archived) {
+          throw new SessionArchivedPinError();
+        }
         let pin = existing ?? null;
         if (!existing) {
           const [inserted] = await tx
@@ -36316,243 +38381,6 @@ export async function setSessionAttention(
   );
 }
 
-/**
- * Whether archiving this chat must first ask to pause its work, answered from
- * a plain read before any lock. Archive takes the person's archive lock and the
- * workspace's control lock before it pauses; on a busy workspace those waits
- * last many seconds, and the question must not wait behind them. The locked
- * check in the pause stays the authority for work that starts in between.
- * False when the chat is not one this person can archive here, is already
- * archived for them, or changed since the version they saw, so those requests
- * take the ordinary path and get its answer.
- */
-export async function sessionArchiveNeedsPauseConfirmation(
-  db: Database,
-  input: {
-    workspaceId: string;
-    subjectId: string;
-    sessionId: string;
-    expectedVersion?: number | undefined;
-    personalWorkspaceOwnerException?: PersonalWorkspaceOwnerException | undefined;
-  },
-): Promise<boolean> {
-  return await withWorkspaceSubjectSessionActivityRls(
-    db,
-    input.workspaceId,
-    input.subjectId,
-    async (tx) => {
-      await requireSessionPersonalStateWriteAuthority(tx, input);
-      const [chat] = await tx
-        .select({
-          id: schema.sessions.id,
-          archived: schema.sessionPins.archived,
-          archiveVersion: schema.sessionPins.archiveVersion,
-        })
-        .from(schema.sessions)
-        .leftJoin(
-          schema.sessionPins,
-          and(
-            eq(schema.sessionPins.workspaceId, schema.sessions.workspaceId),
-            eq(schema.sessionPins.sessionId, schema.sessions.id),
-            eq(schema.sessionPins.subjectId, input.subjectId),
-          ),
-        )
-        .where(
-          and(
-            eq(schema.sessions.workspaceId, input.workspaceId),
-            eq(schema.sessions.id, input.sessionId),
-            isNull(schema.sessions.parentSessionId),
-          ),
-        )
-        .limit(1);
-      if (!chat || chat.archived === true) return false;
-      if (
-        input.expectedVersion !== undefined &&
-        input.expectedVersion !== (chat.archiveVersion ?? 0)
-      ) {
-        return false;
-      }
-      return await sessionWorkstreamHasActiveWork(tx, input.workspaceId, input.sessionId);
-    },
-    undefined,
-    "none",
-  );
-}
-
-/**
- * Archive or restore one root chat for a single member. Archiving also removes
- * personal pin/follow-up labels so hidden work cannot remain in active rail
- * sections. Descendants inherit visibility from the archived root at list time.
- */
-export async function setSessionArchive(
-  db: Database,
-  input: {
-    workspaceId: string;
-    subjectId: string;
-    sessionId: string;
-    archived: boolean;
-    expectedVersion?: number | undefined;
-    /** Trusted composition hook, inside the personal-state fence and before hiding. */
-    beforeArchive?:
-      | ((tx: SessionActivityDatabase, archiveVersion: number) => Promise<boolean | void>)
-      | undefined;
-    /** See {@link PersonalWorkspaceOwnerException}. Absent means "no exception". */
-    personalWorkspaceOwnerException?: PersonalWorkspaceOwnerException | undefined;
-  },
-): Promise<Session | null> {
-  return await withWorkspaceSubjectSessionActivityRls(
-    db,
-    input.workspaceId,
-    input.subjectId,
-    async (tx) => {
-      await lockSessionPersonalStateExclusive(tx, input.workspaceId, input.subjectId);
-      await requireSessionPersonalStateWriteAuthority(tx, input);
-
-      const [storedSession] = await tx
-        .select()
-        .from(schema.sessions)
-        .where(
-          and(
-            eq(schema.sessions.workspaceId, input.workspaceId),
-            eq(schema.sessions.id, input.sessionId),
-            isNull(schema.sessions.parentSessionId),
-          ),
-        )
-        .limit(1);
-      if (!storedSession) return null;
-      const [session] = await canonicalSessionRowsFromEventCursors(tx, input.workspaceId, [
-        storedSession,
-      ]);
-      if (!session) throw new Error(`Session event cursor missing for session ${input.sessionId}`);
-
-      const [existing] = await tx
-        .select()
-        .from(schema.sessionPins)
-        .where(
-          and(
-            eq(schema.sessionPins.workspaceId, input.workspaceId),
-            eq(schema.sessionPins.subjectId, input.subjectId),
-            eq(schema.sessionPins.sessionId, input.sessionId),
-          ),
-        )
-        .limit(1);
-      const current = mapSessionArchive(existing);
-      if (current.archived === input.archived) {
-        if (input.archived && input.beforeArchive) {
-          const replay = await input.beforeArchive(tx, current.archiveVersion);
-          // An identical receipt may replay the original pre-transition CAS.
-          // A fresh pause intent must not bypass a stale archive precondition.
-          if (
-            input.expectedVersion !== undefined &&
-            input.expectedVersion !== current.archiveVersion &&
-            !replay
-          ) {
-            throw new SessionArchiveVersionConflictError(current);
-          }
-        }
-        return await mapSessionWithControl(
-          tx as unknown as Database,
-          session,
-          [],
-          mapSessionPin(existing),
-          mapSessionAttention(session, existing),
-          current,
-        );
-      }
-      if (input.expectedVersion !== undefined && input.expectedVersion !== current.archiveVersion) {
-        throw new SessionArchiveVersionConflictError(current);
-      }
-
-      if (input.archived && input.beforeArchive) {
-        await input.beforeArchive(tx, current.archiveVersion + 1);
-      }
-
-      let state = existing ?? null;
-      if (!existing) {
-        const [inserted] = await tx
-          .insert(schema.sessionPins)
-          .values({
-            accountId: session.accountId,
-            workspaceId: input.workspaceId,
-            subjectId: input.subjectId,
-            sessionId: input.sessionId,
-            pinned: false,
-            pinnedAt: null,
-            version: 0,
-            activelyWorking: false,
-            archived: true,
-            archivedAt: new Date(),
-            attentionVersion: 0,
-            archiveVersion: 1,
-          })
-          // A turn claim may have created this subject's row for the same
-          // session between the read above and here, to acknowledge a consumed
-          // child lifecycle notice. That row is archive-neutral and pin-neutral
-          // (the absent-row projection), so this is the same false -> true
-          // archive transition; its attention fence and version stay untouched.
-          .onConflictDoUpdate({
-            target: [
-              schema.sessionPins.subjectId,
-              schema.sessionPins.workspaceId,
-              schema.sessionPins.sessionId,
-            ],
-            set: {
-              archived: true,
-              archivedAt: new Date(),
-              archiveVersion: sql`${schema.sessionPins.archiveVersion} + 1`,
-              pinned: false,
-              pinnedAt: null,
-              activelyWorking: false,
-            },
-          })
-          .returning();
-        state = inserted ?? null;
-      } else {
-        const [updated] = await tx
-          .update(schema.sessionPins)
-          .set({
-            archived: input.archived,
-            archivedAt: input.archived ? new Date() : null,
-            archiveVersion: sql`${schema.sessionPins.archiveVersion} + 1`,
-            ...(input.archived
-              ? {
-                  pinned: false,
-                  pinnedAt: null,
-                  activelyWorking: false,
-                  version: existing.pinned
-                    ? sql`${schema.sessionPins.version} + 1`
-                    : sql`${schema.sessionPins.version}`,
-                  attentionVersion: existing.activelyWorking
-                    ? sql`${schema.sessionPins.attentionVersion} + 1`
-                    : sql`${schema.sessionPins.attentionVersion}`,
-                }
-              : {}),
-          })
-          .where(
-            and(
-              eq(schema.sessionPins.workspaceId, input.workspaceId),
-              eq(schema.sessionPins.subjectId, input.subjectId),
-              eq(schema.sessionPins.sessionId, input.sessionId),
-            ),
-          )
-          .returning();
-        state = updated ?? null;
-      }
-      const mcpServers = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
-        session.id,
-      ]);
-      return await mapSessionWithControl(
-        tx as unknown as Database,
-        session,
-        mcpServers.get(session.id) ?? [],
-        mapSessionPin(state),
-        mapSessionAttention(session, state),
-        mapSessionArchive(state),
-      );
-    },
-  );
-}
-
 export async function listSessions(
   db: Database,
   workspaceId: string,
@@ -36678,10 +38506,16 @@ export type SessionDiscoveryCursor = {
 };
 export const SESSION_DISCOVERY_GOAL_MAX_CHARS = 600;
 export const SESSION_DISCOVERY_MESSAGE_MAX_CHARS = 600;
+/** Who can see a session: only its owner, or everyone in the workspace. */
+export type SessionDiscoveryVisibility = "private" | "workspace";
+
 export type SessionDiscoverySummary = {
   id: string;
   title: string | null;
   titleOriginalChars: number | null;
+  visibility: SessionDiscoveryVisibility;
+  /** Archived to long-term storage: read-only, still readable. */
+  archived: boolean;
   channelId?: string | null;
   parentSessionId: string | null;
   rootSessionId: string;
@@ -36750,12 +38584,17 @@ type NormalizedSessionDiscoveryFilters = {
   channelId: string | null | undefined;
   parentSessionId: string | null | undefined;
   subject: WorkClaimSubjectFilter | null;
+  /** The app's Mine filter: chats the caller started or prompted. */
+  mineOnly: boolean;
+  visibility: SessionDiscoveryVisibility | null;
 };
 
 type SessionDiscoveryPageRow = {
   id: string | null;
   title: string | null;
   titleOriginalChars: number | string | null;
+  visibility: string | null;
+  archived: boolean | null;
   channelId?: string | null;
   parentSessionId: string | null;
   rootSessionId: string | null;
@@ -36830,6 +38669,8 @@ function normalizeSessionDiscoveryFilters(options: {
   channelId?: string | null;
   parentSessionId?: string | null;
   subject?: WorkClaimSubjectFilter;
+  mineOnly?: boolean;
+  visibility?: SessionDiscoveryVisibility;
 }): NormalizedSessionDiscoveryFilters {
   const query = normalizeSessionDiscoveryQuery(options.query ?? options.search);
   if (
@@ -36869,6 +38710,11 @@ function normalizeSessionDiscoveryFilters(options: {
       ? (options.parentSessionId ?? null)
       : undefined,
     subject,
+    mineOnly: options.mineOnly === true,
+    visibility:
+      options.visibility === undefined
+        ? null
+        : z.enum(["private", "workspace"]).parse(options.visibility),
   };
 }
 
@@ -36886,6 +38732,9 @@ function sessionDiscoveryFilterHash(filters: NormalizedSessionDiscoveryFilters):
           filters.parentSessionId === undefined ? { any: true } : filters.parentSessionId,
         ...(filters.channelId !== undefined ? { channelId: filters.channelId } : {}),
         subject: filters.subject,
+        // Added later: present only when set, so earlier relevance cursors keep their hash.
+        ...(filters.mineOnly ? { mineOnly: true } : {}),
+        ...(filters.visibility ? { visibility: filters.visibility } : {}),
       }),
     )
     .digest("hex");
@@ -36959,6 +38808,18 @@ async function selectSessionDiscoveryPageRows(
   }
   if (options.filters.activeOnly) {
     authorizationFilters.push(notInArray(schema.sessions.status, ["failed", "cancelled"]));
+  }
+  if (options.filters.mineOnly) {
+    if (!options.subjectId) throw new Error("sessions_list mineOnly requires a caller identity");
+    authorizationFilters.push(sessionMineSql(options.subjectId));
+  }
+  if (options.filters.visibility) {
+    authorizationFilters.push(
+      eq(
+        schema.sessions.visibility,
+        options.filters.visibility === "private" ? "user_private" : "workspace_shared",
+      ),
+    );
   }
   if (options.filters.recentHours !== null) {
     authorizationFilters.push(
@@ -37285,6 +39146,8 @@ async function selectSessionDiscoveryPageRows(
         select
           ${schema.sessions.id} as id,
           ${schema.sessions.title} as title,
+          ${schema.sessions.visibility} as visibility,
+          ${schema.sessions.archivedAt} is not null as archived,
           ${schema.sessions.channelId} as channel_id,
           ${schema.sessions.parentSessionId} as parent_session_id,
           ${schema.sessions.rootSessionId} as root_session_id,
@@ -37305,6 +39168,8 @@ async function selectSessionDiscoveryPageRows(
         page.id,
         page.title,
         page."titleOriginalChars",
+        page.visibility,
+        page.archived,
         page."channelId",
         page."parentSessionId",
         page."rootSessionId",
@@ -37327,6 +39192,8 @@ async function selectSessionDiscoveryPageRows(
           ranked_sessions.id,
           left(ranked_sessions.title, ${SESSION_DISCOVERY_CONTROL_TITLE_MAX_CHARS}) as title,
           char_length(ranked_sessions.title)::integer as "titleOriginalChars",
+          ranked_sessions.visibility,
+          ranked_sessions.archived,
           ranked_sessions.channel_id as "channelId",
           ranked_sessions.parent_session_id as "parentSessionId",
           ranked_sessions.root_session_id as "rootSessionId",
@@ -37521,6 +39388,9 @@ export async function listSessionDiscoverySummaries(
     activeOnly?: boolean;
     recentHours?: number;
     subject?: WorkClaimSubjectFilter;
+    /** The app's Mine filter (chats the caller started or prompted); needs subjectId. */
+    mineOnly?: boolean;
+    visibility?: SessionDiscoveryVisibility;
     claimLimit?: number;
     /** Skip advisory claim reads on plain MCP browse or an operator-disabled rollout.
      * Omitted retains the REST/UI legacy evidence default. */
@@ -37766,6 +39636,8 @@ export async function listSessionDiscoverySummaries(
         id: sessionId,
         title: row.title,
         titleOriginalChars: row.titleOriginalChars === null ? null : Number(row.titleOriginalChars),
+        visibility: row.visibility === "user_private" ? "private" : "workspace",
+        archived: row.archived === true,
         channelId: row.channelId ?? null,
         parentSessionId: relatedAccess === "root" ? row.parentSessionId : null,
         rootSessionId: relatedAccess === "root" ? row.rootSessionId! : sessionId,
@@ -40462,10 +42334,10 @@ export type AcceptSessionHumanInputResponseResult =
   | { action: "not_found" };
 
 /**
- * One requires-action boundary may admit exactly one durable resume event.
- * Human-input responses and ordinary approval decisions share this gate: a
- * mixed parallel interruption batch must not accept one of each before the
- * workflow claims the first and advances the turn's trigger/generation.
+ * One requires-action boundary admits one question answer: only the trigger
+ * carries an answer into the resume. Approval decisions never block it; the
+ * peek resumes from the answer first, and that resume applies every approval
+ * decision of the pause recorded before it.
  */
 async function hasAcceptedRequiresActionAdvance(
   tx: Database,
@@ -40498,12 +42370,122 @@ async function hasAcceptedRequiresActionAdvance(
         eq(schema.sessionEvents.sessionId, input.sessionId),
         eq(schema.sessionEvents.turnId, input.turnId),
         eq(schema.sessionEvents.turnGeneration, input.turnGeneration),
-        inArray(schema.sessionEvents.type, ["user.approvalDecision", "user.humanInputResponse"]),
+        eq(schema.sessionEvents.type, "user.humanInputResponse"),
         gt(schema.sessionEvents.sequence, trigger.sequence),
       ),
     )
     .limit(1);
   return accepted !== undefined;
+}
+
+/** One approval's identity for one question round; rounds only for MCP questions. */
+function approvalDecisionKey(approvalId: string | null, round: number | undefined): string {
+  return `${approvalId ?? ""}\u0000${round ?? ""}`;
+}
+
+/** A recorded approval decision: the call it decides and the decision payload. */
+export type TurnApprovalDecision = {
+  eventId: string;
+  sequence: number;
+  approvalId: string;
+  /** The question round it answers or declined; none for an approval without one. */
+  elicitationRound?: number;
+  payload: Record<string, unknown>;
+};
+
+async function turnApprovalDecisionsTx(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    afterSequence?: number;
+    throughSequence?: number;
+  },
+): Promise<TurnApprovalDecision[]> {
+  const rows = await tx
+    .select({
+      id: schema.sessionEvents.id,
+      sequence: schema.sessionEvents.sequence,
+      payload: schema.sessionEvents.payload,
+      payloadCodecVersion: schema.sessionEvents.payloadCodecVersion,
+    })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, input.sessionId),
+        eq(schema.sessionEvents.type, "user.approvalDecision"),
+        eq(schema.sessionEvents.turnId, input.turnId),
+        ...(input.afterSequence !== undefined
+          ? [gt(schema.sessionEvents.sequence, input.afterSequence)]
+          : []),
+        ...(input.throughSequence !== undefined
+          ? [lte(schema.sessionEvents.sequence, input.throughSequence)]
+          : []),
+      ),
+    )
+    .orderBy(asc(schema.sessionEvents.sequence));
+  return rows.flatMap((row) => {
+    const payload = sessionEventPayloadRecord(row.payload, row.payloadCodecVersion);
+    if (typeof payload.approvalId !== "string") return [];
+    const round = approvalDecisionRound(payload);
+    return [
+      {
+        eventId: row.id,
+        sequence: row.sequence,
+        approvalId: payload.approvalId,
+        ...(round !== undefined ? { elicitationRound: round } : {}),
+        payload,
+      },
+    ];
+  });
+}
+
+/** Keys of the approvals decided after the attempt's trigger: the next resume applies them. */
+async function approvalDecisionsAfterTriggerTx(
+  tx: Database,
+  input: { workspaceId: string; sessionId: string; turnId: string; triggerEventId: string },
+): Promise<Set<string>> {
+  const [trigger] = await tx
+    .select({ sequence: schema.sessionEvents.sequence })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, input.sessionId),
+        eq(schema.sessionEvents.id, input.triggerEventId),
+      ),
+    )
+    .limit(1);
+  if (!trigger) return new Set();
+  const decisions = await turnApprovalDecisionsTx(tx, {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: input.turnId,
+    afterSequence: trigger.sequence,
+  });
+  return new Set(
+    decisions.map((decision) =>
+      approvalDecisionKey(decision.approvalId, decision.elicitationRound),
+    ),
+  );
+}
+
+/**
+ * The approval decisions a resume applies besides its own trigger: every
+ * decision of the turn recorded up to the trigger, oldest first. A pause's
+ * decisions are applied together; one recorded later resumes the turn again.
+ */
+export async function listTurnApprovalDecisions(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; turnId: string; throughSequence: number },
+): Promise<TurnApprovalDecision[]> {
+  return await withWorkspaceRls(
+    db,
+    input.workspaceId,
+    async (scopedDb) => await turnApprovalDecisionsTx(scopedDb, input),
+  );
 }
 
 async function humanInputResponseEventForRequest(
@@ -42743,7 +44725,16 @@ export async function recordPendingSessionToolCallResultInTransaction(
     ? withLosslessContentWriteVersion(
         {
           ...resultUpdate,
-          eventOutput: { value: input.eventOutput },
+          // Kept only to replay the result's agent.toolCall.output event, which
+          // is bounded on write anyway; store it within the same bound. A tool
+          // can return far more than an event (or a single jsonb string, at
+          // most 256 MiB) can hold, and that must not fail the turn. Bounding
+          // the `{ value }` envelope keeps the value's own shape and records
+          // any omission in a sibling `truncation` that replay carries over.
+          eventOutput: boundSessionEventPayloadForWrite<schema.PendingToolCallEventOutput>(
+            "agent.toolCall.output",
+            { value: input.eventOutput },
+          ),
         },
         "eventOutput",
         "eventOutputCodecVersion",
@@ -42828,6 +44819,8 @@ export type OpenSuffixPendingToolCall = {
   tiedReasoningItems: Array<Record<string, unknown>>;
   resultItem: Record<string, unknown> | null;
   modelToolOutputTruncationTokens: number | null;
+  /** Private state of the MCP server question that paused this call, if any. */
+  mcpInputRequest?: Record<string, unknown> | null;
 };
 
 function asOpenSuffixInterruptionKind(value: string | null): OpenSuffixInterruptionKind | null {
@@ -42851,6 +44844,8 @@ export async function attachOpenSuffixToPendingToolCalls(
       callId: string;
       interruptionKind: OpenSuffixInterruptionKind;
       reasoningItems: Array<Record<string, unknown>>;
+      /** The MCP server question that paused this call, kept outside events. */
+      mcpInputRequest?: Record<string, unknown>;
     }>;
   },
 ): Promise<{ accepted: boolean; attached: number }> {
@@ -42912,6 +44907,7 @@ export async function attachOpenSuffixToPendingToolCalls(
                 {
                   interruptionKind: member.interruptionKind,
                   tiedReasoningItems: member.reasoningItems,
+                  ...(member.mcpInputRequest ? { mcpInputRequest: member.mcpInputRequest } : {}),
                 },
                 "tiedReasoningItems",
                 "tiedReasoningItemsCodecVersion",
@@ -42961,6 +44957,7 @@ export async function listTurnOpenSuffixToolCalls(
         tiedReasoningItems: Array.isArray(row.tiedReasoningItems) ? row.tiedReasoningItems : [],
         resultItem: row.resultItem ?? null,
         modelToolOutputTruncationTokens: row.modelToolOutputTruncationTokens,
+        mcpInputRequest: row.mcpInputRequest ?? null,
       };
     });
   });
@@ -42990,6 +44987,53 @@ export async function listRecordedInteractionToolCallIds(
       );
     return new Set(rows.flatMap((row) => (row.toolCallId ? [row.toolCallId] : [])));
   });
+}
+
+/**
+ * The MCP server answered a resumed call with another question: replace the
+ * paused call's stored question so the next approval answers the new one. The
+ * call stays open; only the attempt that resumed it may write.
+ */
+export async function replacePendingToolCallMcpInputRequest(
+  db: Database,
+  input: Omit<PendingSessionToolCallInput, "callId" | "callType" | "callItem"> & {
+    callId: string;
+    mcpInputRequest: Record<string, unknown>;
+  },
+): Promise<{ accepted: boolean }> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const fence = await lockTurnAttemptWriteFenceTx(tx, {
+          rowProjection: "event",
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          executionGeneration: input.executionGeneration,
+          attemptId: input.attemptId,
+        });
+        if (!fence.allowed) return { accepted: false };
+        const updated = await tx
+          .update(schema.sessionPendingToolCalls)
+          .set({ mcpInputRequest: input.mcpInputRequest })
+          .where(
+            and(
+              eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
+              eq(schema.sessionPendingToolCalls.sessionId, input.sessionId),
+              eq(schema.sessionPendingToolCalls.turnId, input.turnId),
+              eq(schema.sessionPendingToolCalls.callId, input.callId),
+              isNull(schema.sessionPendingToolCalls.resultItem),
+            ),
+          )
+          .returning({ id: schema.sessionPendingToolCalls.id });
+        if (updated.length !== 1) {
+          throw new Error(`Paused call ${input.callId} is no longer open`);
+        }
+        return { accepted: true };
+      }),
+  );
 }
 
 /**
@@ -43545,7 +45589,9 @@ export async function applyContextCompaction(
             // Keep this field provider-only and let the first successful
             // post-compaction response install the next authoritative count.
             lastInputTokens: null,
-            ...(input.clearRequestedCompaction ? { compactRequested: false } : {}),
+            ...(input.clearRequestedCompaction
+              ? { compactRequested: false, compactRequestTrigger: null }
+              : {}),
             ...(input.switchToPortableCompaction ? { codexCompactionMode: "portable" } : {}),
             ...(insertedEvents.length > 0
               ? {
@@ -43772,7 +45818,9 @@ export async function recordSkippedContextCompaction(
         await tx
           .update(schema.sessions)
           .set({
-            ...(clearRequestedCompaction ? { compactRequested: false } : {}),
+            ...(clearRequestedCompaction
+              ? { compactRequested: false, compactRequestTrigger: null }
+              : {}),
             lastSequence: fence.session.lastSequence + 1,
             updatedAt: new Date(),
           })
@@ -44312,7 +46360,8 @@ export async function countSessionHistoryItems(
 /**
  * Set the operator /compact request flag. The worker honors it before the next
  * turn (forced portable compaction) and clears it. Idempotent: repeated
- * requests collapse to one pending compaction.
+ * requests collapse to one pending compaction. An operator request always
+ * relabels a pending request as `operator`; the label never changes what runs.
  */
 export async function requestSessionCompaction(
   db: Database,
@@ -44330,19 +46379,190 @@ export async function requestSessionCompaction(
       .for("no key update")
       .limit(1);
     if (!session) throw new Error(`Session not found: ${sessionId}`);
-    await scopedDb
-      .update(schema.sessions)
-      .set({ compactRequested: true, updatedAt: new Date() })
-      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
-    const temporalWorkflowId = session.temporalWorkflowId ?? `session-${sessionId}`;
-    const wakeRevision = await enqueueSessionWorkflowWakeInTransaction(scopedDb, {
+    return await setSessionCompactionRequestInTransaction(scopedDb, {
       accountId: session.accountId,
       workspaceId,
       sessionId,
-      temporalWorkflowId,
-      reason: "compaction_requested",
+      temporalWorkflowId: session.temporalWorkflowId,
+      trigger: "operator",
     });
-    return { wakeRevision, temporalWorkflowId };
+  });
+}
+
+async function setSessionCompactionRequestInTransaction(
+  scopedDb: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    temporalWorkflowId: string | null;
+    trigger: schema.CompactRequestTrigger;
+  },
+): Promise<{ wakeRevision: number; temporalWorkflowId: string }> {
+  await scopedDb
+    .update(schema.sessions)
+    .set({
+      compactRequested: true,
+      compactRequestTrigger: input.trigger,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(schema.sessions.workspaceId, input.workspaceId),
+        eq(schema.sessions.id, input.sessionId),
+      ),
+    );
+  const temporalWorkflowId = input.temporalWorkflowId ?? `session-${input.sessionId}`;
+  const wakeRevision = await enqueueSessionWorkflowWakeInTransaction(scopedDb, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    temporalWorkflowId,
+    reason: "compaction_requested",
+  });
+  return { wakeRevision, temporalWorkflowId };
+}
+
+export type IdleSessionCompactionRequestResult =
+  | { requested: true; wakeRevision: number; temporalWorkflowId: string }
+  | {
+      requested: false;
+      reason:
+        | "not_found"
+        | "not_idle"
+        | "child_session"
+        | "already_requested"
+        | "below_threshold"
+        | "active_goal"
+        | "input_wait"
+        | "pending_delayed_wake";
+    };
+
+/**
+ * Request a `proactive` checkpoint for a session that just went idle at its
+ * automatic compaction threshold, so the compaction runs now instead of in
+ * front of the next message. It reuses the operator request exactly: the same
+ * durable flag, workflow wake, and born-running `source="compaction"`
+ * maintenance execution, never prompt-queue work.
+ *
+ * Everything is rechecked under the session row lock: the session must still
+ * be idle with no active turn, be a root session, have no pending request, and
+ * hold a provider-reported `last_input_tokens` at or above the threshold. A
+ * session that already moved on (a queued or running turn) keeps its ordinary
+ * pre-inference threshold check instead. A pending operator request is never
+ * relabeled.
+ *
+ * A session with an active goal or a held `wait_for_input` is also left alone:
+ * its next continuation or awaited input compacts at the ordinary threshold
+ * check, and this request's wake must not pull that obligation's future-dated
+ * wake (`goal_idle_backoff`, `session_input_wait_deadline`) forward or let
+ * maintenance claim ahead of it.
+ */
+export async function requestIdleSessionCompactionIfDue(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; thresholdTokens: number },
+): Promise<IdleSessionCompactionRequestResult> {
+  return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) => {
+    const [session] = await scopedDb
+      .select({
+        accountId: schema.sessions.accountId,
+        temporalWorkflowId: schema.sessions.temporalWorkflowId,
+        status: schema.sessions.status,
+        activeTurnId: schema.sessions.activeTurnId,
+        parentSessionId: schema.sessions.parentSessionId,
+        compactRequested: schema.sessions.compactRequested,
+        lastInputTokens: schema.sessions.lastInputTokens,
+        inputWaitTurnId: schema.sessions.inputWaitTurnId,
+        inputWaitUntil: schema.sessions.inputWaitUntil,
+      })
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.id, input.sessionId),
+        ),
+      )
+      .for("no key update")
+      .limit(1);
+    if (!session) return { requested: false, reason: "not_found" };
+    if (session.status !== "idle" || session.activeTurnId !== null) {
+      return { requested: false, reason: "not_idle" };
+    }
+    if (session.parentSessionId !== null) return { requested: false, reason: "child_session" };
+    if (session.compactRequested) return { requested: false, reason: "already_requested" };
+    const [activeGoal] = await scopedDb
+      .select({ id: schema.sessionGoals.id })
+      .from(schema.sessionGoals)
+      .where(
+        and(
+          eq(schema.sessionGoals.workspaceId, input.workspaceId),
+          eq(schema.sessionGoals.sessionId, input.sessionId),
+          eq(schema.sessionGoals.status, "active"),
+        ),
+      )
+      .limit(1);
+    if (activeGoal) return { requested: false, reason: "active_goal" };
+    const wait = await sessionInputWaitStateTx(scopedDb, input.workspaceId, input.sessionId, {
+      inputWaitTurnId: session.inputWaitTurnId,
+      inputWaitUntil: session.inputWaitUntil,
+    });
+    if (wait.disposition === "held" || wait.disposition === "timeout") {
+      return { requested: false, reason: "input_wait" };
+    }
+    // The wake outbox holds one row per session and coalescing pulls an
+    // undelivered wake's deadline to now. A future-dated undelivered wake
+    // belongs to another producer's pacing (a retry or backoff); never move it.
+    // The margin absorbs clock skew between the host that stamped an
+    // immediate wake and the database.
+    const [delayedWake] = await scopedDb
+      .select({ sessionId: schema.sessionWorkflowWakeOutbox.sessionId })
+      .from(schema.sessionWorkflowWakeOutbox)
+      .where(
+        and(
+          eq(schema.sessionWorkflowWakeOutbox.workspaceId, input.workspaceId),
+          eq(schema.sessionWorkflowWakeOutbox.sessionId, input.sessionId),
+          sql`${schema.sessionWorkflowWakeOutbox.wakeRevision} > ${schema.sessionWorkflowWakeOutbox.deliveredRevision}`,
+          sql`${schema.sessionWorkflowWakeOutbox.nextAttemptAt} > now() + interval '5 seconds'`,
+        ),
+      )
+      .limit(1);
+    if (delayedWake) return { requested: false, reason: "pending_delayed_wake" };
+    if (
+      !(input.thresholdTokens > 0) ||
+      session.lastInputTokens === null ||
+      session.lastInputTokens < input.thresholdTokens
+    ) {
+      return { requested: false, reason: "below_threshold" };
+    }
+    const requested = await setSessionCompactionRequestInTransaction(scopedDb, {
+      accountId: session.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      temporalWorkflowId: session.temporalWorkflowId,
+      trigger: "proactive",
+    });
+    return { requested: true, ...requested };
+  });
+}
+
+/** Who asked for the pending compaction, or null when none is pending. A
+ * request written by an older binary carries no label and reads as operator. */
+export async function sessionCompactionRequestTrigger(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<schema.CompactRequestTrigger | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [session] = await scopedDb
+      .select({
+        compactRequested: schema.sessions.compactRequested,
+        compactRequestTrigger: schema.sessions.compactRequestTrigger,
+      })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    if (session?.compactRequested !== true) return null;
+    return session.compactRequestTrigger ?? "operator";
   });
 }
 
@@ -44389,6 +46609,11 @@ export async function convertSessionToPortableCompactionForModelSwitch(
       .set({
         codexCompactionMode: sql`case when ${checkpoint} then 'remote_v2' else 'portable' end`,
         compactRequested: sql`${schema.sessions.compactRequested} or ${checkpoint}`,
+        // A request this conversion creates is operator-labeled (NULL); only a
+        // request already pending keeps its own label, so a stale label copied
+        // by a fork can never relabel it.
+        compactRequestTrigger: sql`case when ${schema.sessions.compactRequested}
+          then ${schema.sessions.compactRequestTrigger} else null end`,
         updatedAt: new Date(),
       })
       .where(
@@ -45817,8 +48042,9 @@ export class SandboxPaidComputeAdmissionError extends Error {
   constructor(
     public readonly workspaceId: string,
     public readonly sandboxGroupId: string,
+    message = "Insufficient workspace credits to admit paid sandbox compute",
   ) {
-    super("Insufficient workspace credits to admit paid sandbox compute");
+    super(message);
   }
 }
 
@@ -47141,9 +49367,28 @@ async function acquireLeaseOnce(
                 refusal,
               );
             }
-            const balance = await getSpendableCreditBalance(tx, accountId);
+            // The box is funded like the work it runs: an API chat's box spends credits.
+            const leaseOrigin = await attributionBillingOrigin(tx, {
+              accountId,
+              workspaceId,
+              attribution,
+            });
+            const balance = await getSpendableCreditBalance(
+              tx,
+              accountId,
+              undefined,
+              undefined,
+              undefined,
+              leaseOrigin,
+            );
             if (balance.balanceMicros <= 0) {
-              throw new SandboxPaidComputeAdmissionError(workspaceId, sandboxGroupId);
+              throw new SandboxPaidComputeAdmissionError(
+                workspaceId,
+                sandboxGroupId,
+                chargeBillingOrigin(leaseOrigin) === "api"
+                  ? `${API_CREDITS_REQUIRED_MESSAGE} Add credits to start this computer.`
+                  : undefined,
+              );
             }
           }
         }
@@ -54280,7 +56525,20 @@ export async function heartbeatLeaseHolderStatus(
           (input.billingMode ?? snapshot?.mode) === "credits" &&
           snapshot?.mode === "credits" &&
           snapshot.rateMicrosPerSecond > 0 &&
-          (await getSpendableCreditBalance(tx, input.accountId)).balanceMicros <= 0
+          (
+            await getSpendableCreditBalance(
+              tx,
+              input.accountId,
+              undefined,
+              undefined,
+              undefined,
+              await attributionBillingOrigin(tx, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                attribution: snapshot.attribution,
+              }),
+            )
+          ).balanceMicros <= 0
         ) {
           // Touching the holder above is essential: the running writer remains
           // protected while it winds down. The provider/lease TTL is not renewed.
@@ -55529,35 +57787,19 @@ export type AgentHeldBrowserSession = {
   routeSubjectId: string | null;
 };
 
-const LIST_AGENT_HELD_BROWSER_SESSIONS =
-  "opengeni_private.list_agent_held_browser_sessions(integer, bigint)";
-
 /**
  * The browsers that agent sessions hold right now, across workspaces: active,
  * used within `BROWSER_WAIT_HOLD_MAX_MS`, and created or used by a session
  * that is still working (a turn queued, running, recovering, waiting for
  * capacity or waiting on a person) or has an armed input wait. The same rule
  * as the box release below; the API renews each one's hold on its controller.
- * Most recently used first, at most `limit`.
- *
- * 1002 creates the routine with its runtime EXECUTE withheld for one release
- * (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES). Until a later migration
- * grants it, this lists nothing. The grant is checked in a separate statement:
- * EXECUTE is checked when a statement starts.
+ * Most recently used first, at most `limit`. Migration 1002 creates the
+ * routine and 1093 grants it to the runtime.
  */
 export async function listAgentHeldBrowserSessions(
   db: Database,
   input: { limit: number },
 ): Promise<AgentHeldBrowserSession[]> {
-  const [grant] = await rawRows<{ granted: boolean | null }>(
-    db,
-    sql`
-      select has_function_privilege(
-        to_regprocedure(${LIST_AGENT_HELD_BROWSER_SESSIONS})::oid, 'EXECUTE'
-      ) as granted
-    `,
-  );
-  if (grant?.granted !== true) return [];
   const rows = await rawRows<{
     account_id: string;
     workspace_id: string;
@@ -56507,7 +58749,20 @@ export async function reArmDrainingLease(
             ? snapshot.mode === "credits" && snapshot.rateMicrosPerSecond > 0
             : input.warmBilling?.rateMicrosPerSecond !== undefined &&
               input.warmBilling.rateMicrosPerSecond > 0) &&
-          (await getSpendableCreditBalance(tx, input.accountId)).balanceMicros <= 0
+          (
+            await getSpendableCreditBalance(
+              tx,
+              input.accountId,
+              undefined,
+              undefined,
+              undefined,
+              await attributionBillingOrigin(tx, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                attribution: snapshot?.attribution ?? null,
+              }),
+            )
+          ).balanceMicros <= 0
         ) {
           throw new SandboxPaidComputeAdmissionError(input.workspaceId, input.sandboxGroupId);
         }
@@ -58904,6 +61159,13 @@ export async function verifyWorkspaceMutationSettlement(
   },
 ): Promise<void> {
   const routeKind = input.routeKind ?? "home";
+  // Settle the exact admission: without an explicit route epoch, the route
+  // epoch is the one recorded when it was admitted, never the session's
+  // current epoch. A swap during a home-sandbox command moves the session's
+  // active route but changes nothing about where that command ran, so it must
+  // not reject the command's output (an active-route move is still fenced as
+  // route_fenced against the admission's recorded route).
+  const routeEpoch = input.routeEpoch ?? input.admission.routeEpoch;
   await verifyWorkspaceMutationSettlementForAuthority(
     db,
     {
@@ -58920,7 +61182,7 @@ export async function verifyWorkspaceMutationSettlement(
       expectedInstanceId: input.expectedInstanceId,
       routeKind,
       routeTargetId: routeKind === "home" ? null : (input.routeTargetId ?? null),
-      ...(input.routeEpoch === undefined ? {} : { routeEpoch: input.routeEpoch }),
+      routeEpoch,
     },
     input,
   );
@@ -64263,6 +66525,9 @@ export type EnrollmentRecord = {
   createdAt: string;
   revokedAt: string | null;
   updatedAt: string;
+  /** Where an organization machine works (migration 1190); null for workspace
+   * and personal machines. */
+  reach?: OrganizationComputeReach | null;
 };
 
 function mapEnrollment(row: typeof schema.enrollments.$inferSelect): EnrollmentRecord {
@@ -64336,6 +66601,7 @@ function mapEnrollment(row: typeof schema.enrollments.$inferSelect): EnrollmentR
     createdAt: row.createdAt.toISOString(),
     revokedAt: row.revokedAt ? row.revokedAt.toISOString() : null,
     updatedAt: row.updatedAt.toISOString(),
+    reach: organizationComputeReach(row),
   };
 }
 
@@ -64686,6 +66952,76 @@ export async function updateEnrollmentOperationPolicy(
         },
       });
       return mapEnrollment(row);
+    },
+  );
+}
+
+/** Change where an organization machine works. The workspace it was connected
+ * from always has it; chats and schedules in a workspace it no longer works
+ * in fail at their next attach or attempt instead of using it. */
+export async function updateOrganizationMachineReach(
+  db: Database,
+  enrollmentId: string,
+  input: OrganizationComputeReachInput,
+): Promise<OrganizationComputeReachUpdate> {
+  const normalized = await normalizeOrganizationComputeReach(db, input);
+  if (!normalized.ok)
+    return { status: "unknown_workspaces", workspaceIds: normalized.workspaceIds };
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.homeWorkspaceId },
+    async (scopedDb) => {
+      const where = and(
+        eq(schema.enrollments.accountId, input.accountId),
+        eq(schema.enrollments.workspaceId, input.homeWorkspaceId),
+        eq(schema.enrollments.id, enrollmentId),
+        eq(schema.enrollments.kind, "machine"),
+        eq(schema.enrollments.authorityScope, "organization"),
+        eq(schema.enrollments.status, "active"),
+      );
+      const [before] = await scopedDb
+        .select({
+          allowedWorkspaceIds: schema.enrollments.allowedWorkspaceIds,
+          allowPersonalWorkspaces: schema.enrollments.allowPersonalWorkspaces,
+        })
+        .from(schema.enrollments)
+        .where(where)
+        .for("update")
+        .limit(1);
+      if (!before) return { status: "not_found" };
+      const [row] = await scopedDb
+        .update(schema.enrollments)
+        .set({
+          allowedWorkspaceIds: normalized.allowedWorkspaceIds,
+          allowPersonalWorkspaces: input.allowPersonalWorkspaces,
+          updatedAt: new Date(),
+        })
+        .where(where)
+        .returning();
+      if (!row) return { status: "not_found" };
+      await scopedDb.insert(schema.auditEvents).values({
+        accountId: input.accountId,
+        workspaceId: input.homeWorkspaceId,
+        subjectId: input.subjectId,
+        action: "connected_machine.reach.changed",
+        targetType: "enrollment",
+        targetId: enrollmentId,
+        metadata: {
+          from: before,
+          to: {
+            allowedWorkspaceIds: row.allowedWorkspaceIds,
+            allowPersonalWorkspaces: row.allowPersonalWorkspaces,
+          },
+        },
+      });
+      return {
+        status: "updated",
+        reach: {
+          homeWorkspaceId: row.workspaceId,
+          allowedWorkspaceIds: row.allowedWorkspaceIds ?? null,
+          allowPersonalWorkspaces: row.allowPersonalWorkspaces,
+        },
+      };
     },
   );
 }
@@ -72790,6 +75126,8 @@ export type InitializeSessionStartInput = {
   turnExecutionPolicy?: TurnExecutionPolicyV1;
   /** Content-free product surface the create request entered through. */
   surface?: SessionTurnSurface | null;
+  /** Funding origin frozen on the initial turn; null inherits the parent's. */
+  billingOrigin?: BillingOrigin | null;
   /**
    * Normalized IANA zone of the person sending the initial message, frozen in
    * the initial turn's metadata.
@@ -73415,6 +75753,7 @@ export async function initializeSessionStartAtomically(
                   status: "queued",
                   source: "user",
                   surface: input.surface ?? null,
+                  billingOrigin: input.billingOrigin ?? null,
                   promptRouting: runnable ? "accepted_for_execution" : "queued_for_execution",
                   position: queueTailPosition,
                   prompt: canonicalInitialMessage,
@@ -73761,6 +76100,7 @@ export async function enqueueSessionTurn(
                 status: "queued",
                 source: input.source,
                 surface: input.surface ?? null,
+                billingOrigin: input.billingOrigin ?? null,
                 promptRouting: "queued_for_execution",
                 position,
                 prompt: input.prompt,
@@ -76462,29 +78802,14 @@ export async function claimSessionWorkForAttempt(
               }
             }
           }
-          const connectorPolicyRows = await tx
-            .select({
-              id: schema.connectorActionPolicies.id,
-              connectionId: schema.connectorActionPolicies.connectionId,
-              serverId: schema.connectorActionPolicies.serverId,
-              toolName: schema.connectorActionPolicies.toolName,
-              actionName: schema.connectorActionPolicies.actionName,
-              policy: schema.connectorActionPolicies.policy,
-              version: schema.connectorActionPolicies.version,
-            })
-            .from(schema.connectorActionPolicies)
-            .where(eq(schema.connectorActionPolicies.workspaceId, workspaceId))
-            .orderBy(
-              asc(schema.connectorActionPolicies.connectionId),
-              asc(schema.connectorActionPolicies.serverId),
-              asc(schema.connectorActionPolicies.toolName),
-              asc(schema.connectorActionPolicies.actionName),
-              asc(schema.connectorActionPolicies.id),
-            )
-            .limit(2049);
-          if (connectorPolicyRows.length > 2048) {
-            throw new Error("Connector action policy snapshot exceeds the 2048-row bound");
-          }
+          const connectorPolicyRows = await connectorActionPolicySnapshotForTurn(
+            tx as unknown as Database,
+            {
+              accountId: session.accountId,
+              workspaceId,
+              bindings: turn.mcpAccountBindings,
+            },
+          );
           // New queued, compaction, and internal-update executions are born
           // while the locked session still has no active-turn pointer. Publish
           // that ownership edge before freezing governance so the database
@@ -77183,7 +79508,10 @@ export async function claimSessionWorkForAttempt(
                     sequence: session.lastSequence + 1,
                     type: "session.context.compaction.requested",
                     payload: {
-                      trigger: "operator",
+                      // A worker-requested idle checkpoint is labeled
+                      // proactive; /compact and older unlabeled requests
+                      // remain operator.
+                      trigger: session.compactRequestTrigger ?? "operator",
                       initiator: compactionInitiator.initiator,
                     },
                     occurredAt: now,
@@ -78797,6 +81125,11 @@ export async function getSessionAttemptActivityRef(
  * and every writer it did admit (including retained-process child writes) must
  * carry a physical settlement before the ordinary receipt transaction is
  * allowed to run.
+ *
+ * With that proof, owned-box setup that the attempt's provably exited worker
+ * left unsettled is settled first (`settleCrashedWorkerSetupAdmissions`).
+ * `workerProcessExitDeadlineMs` is the turn worker's process-exit deadline
+ * after a shutdown signal; without it a worker-shutdown closure keeps its gate.
  */
 export async function reconcileSessionAttemptQuiescence(
   db: Database,
@@ -78809,8 +81142,10 @@ export async function reconcileSessionAttemptQuiescence(
     temporalWorkflowRunId: string;
     temporalActivityId: string;
     activitySettled: boolean;
+    workerProcessExitDeadlineMs?: number;
   },
 ): Promise<ReconcileSessionAttemptQuiescenceResult> {
+  if (input.activitySettled) await settleCrashedWorkerSetupAdmissions(db, input);
   const eligibility = await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -78947,6 +81282,113 @@ export async function reconcileSessionAttemptQuiescence(
     temporalActivityId: input.temporalActivityId,
   });
   return { action: "quiesced", events };
+}
+
+/**
+ * Reject the owned-box setup requests that a worker-shutdown closure left
+ * behind once the closing worker's process provably no longer exists. Nothing
+ * else settles them: the worker closed the attempt `interrupted_recoverable`
+ * and exited before its writer drain released them, and a box that stays warm
+ * (compute is never drained for being idle) never reaches the cold commit that
+ * rejects crashed-worker requests. The closed attempt then never quiesced and
+ * its session never claimed another turn, Steer or message.
+ *
+ * A settled activity and a missing holder do not prove the worker exited (a
+ * closed attempt's holder is removed at once, and Temporal reports a cancelled
+ * activity settled while its code still runs). Time does: the closure came
+ * from the attempt's own `worker_shutdown` recovery request, which follows the
+ * worker's shutdown signal, and a standalone worker process exits within its
+ * process-exit deadline of that signal whatever its drain does. So the attempt
+ * must have closed at least that deadline ago, with no Pause/Steer interruption
+ * row.
+ *
+ * The request must be the attempt's own owned-box setup, unsettled, without a
+ * holder or retained process, on a turn whose setup Start outcome is not
+ * recorded unknown (that turn waits for the box to be gone). Setup writes only
+ * through its attempt's command fence, and the replacement attempt runs the same
+ * setup again before any model work. Pause, Steer, cancellation, other recovery
+ * reasons, other closures and every other request keep today's gate.
+ */
+async function settleCrashedWorkerSetupAdmissions(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    attemptId: string;
+    temporalWorkflowId: string;
+    temporalWorkflowRunId: string;
+    temporalActivityId: string;
+    workerProcessExitDeadlineMs?: number;
+  },
+): Promise<void> {
+  const exitDeadlineMs = input.workerProcessExitDeadlineMs;
+  if (exitDeadlineMs === undefined || !Number.isSafeInteger(exitDeadlineMs) || exitDeadlineMs < 0)
+    return;
+  await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await scopedDb.execute(sql`
+        update sandbox_workspace_mutation_admissions admission
+        set provider_outcome = 'rejected', settled_at = now()
+        from session_turn_attempts attempt
+        join session_turns turn
+          on turn.workspace_id = attempt.workspace_id
+         and turn.session_id = attempt.session_id
+         and turn.id = attempt.turn_id
+        where attempt.account_id = ${input.accountId}
+          and attempt.workspace_id = ${input.workspaceId}
+          and attempt.session_id = ${input.sessionId}
+          and attempt.id = ${input.attemptId}
+          and attempt.temporal_workflow_id = ${input.temporalWorkflowId}
+          and attempt.temporal_workflow_run_id = ${input.temporalWorkflowRunId}
+          and attempt.temporal_activity_id = ${input.temporalActivityId}
+          and attempt.state = 'closed'
+          and attempt.quiesced_at is null
+          and attempt.outcome = 'interrupted_recoverable'
+          and attempt.closed_at <= now() - (${exitDeadlineMs}::integer * interval '1 millisecond')
+          and not exists (
+            select 1 from session_attempt_interruptions interruption
+            where interruption.workspace_id = attempt.workspace_id
+              and interruption.session_id = attempt.session_id
+              and interruption.attempt_id = attempt.id
+          )
+          and exists (
+            select 1 from session_events recovery
+            where recovery.account_id = attempt.account_id
+              and recovery.workspace_id = attempt.workspace_id
+              and recovery.session_id = attempt.session_id
+              and recovery.turn_id = attempt.turn_id
+              and recovery.turn_attempt_id = attempt.id
+              and recovery.type = 'turn.recovery.requested'
+              and recovery.payload ->> 'reason' = 'worker_shutdown'
+          )
+          and (turn.metadata -> 'sandboxSetupOutcomeUnknown') is null
+          and admission.account_id = attempt.account_id
+          and admission.workspace_id = attempt.workspace_id
+          and admission.session_id = attempt.session_id
+          and admission.turn_id = attempt.turn_id
+          and admission.attempt_id = attempt.id
+          and admission.actor_kind = 'turn'
+          and admission.actor_id = attempt.id
+          and admission.holder_kind = 'turn'
+          and admission.execution_generation = attempt.execution_generation
+          and admission.operation in ('lazyOwnedSandboxSetup', 'eagerOwnedSandboxSetup')
+          and admission.settled_at is null
+          and admission.provider_outcome is null
+          and not exists (
+            select 1 from sandbox_retained_processes retained
+            where retained.parent_admission_id = admission.id
+          )
+          and not exists (
+            select 1 from sandbox_lease_holders holder
+            where holder.lease_id = admission.lease_id
+              and holder.holder_id = admission.holder_id
+          )
+      `);
+    },
+  );
 }
 
 /**
@@ -80096,7 +82538,15 @@ export async function peekSessionWork(
               gt(schema.sessionEvents.sequence, currentTrigger.sequence),
             ),
           )
-          .orderBy(desc(schema.sessionEvents.sequence), desc(schema.sessionEvents.id))
+          // One question answer is accepted per pause and only the trigger
+          // carries it, so it resumes first. Approval decisions are applied
+          // together by any resume (those up to its trigger), and one recorded
+          // after the trigger resumes the turn again.
+          .orderBy(
+            sql`(${schema.sessionEvents.type} = 'user.humanInputResponse') desc`,
+            desc(schema.sessionEvents.sequence),
+            desc(schema.sessionEvents.id),
+          )
           .limit(1);
         if (actionResponse) {
           return {
@@ -81497,6 +83947,7 @@ async function settleSessionWorkBeforeAttemptClaim(
             status: "failed",
             activeTurnId: null,
             compactRequested: false,
+            compactRequestTrigger: null,
             ...(retirement
               ? {
                   inputWaitTurnId: null,
@@ -83201,6 +85652,21 @@ export type ApplySessionTurnSettlementInput = {
     producerSeq?: number | null;
     occurredAt?: Date;
   };
+  /**
+   * A standalone maintenance compaction deferred for subscription capacity.
+   * An automatic `proactive` request is dropped here, in the same
+   * attempt-fenced transaction, and settled with a `capacity_unavailable`
+   * skipped landmark: kept, it would win every later claim ahead of pending
+   * machine input and goal continuations without any capacity waiter to wake
+   * it. The person's next turn compacts at its ordinary threshold check
+   * instead. An operator request is kept, as before. Decided from the label
+   * read under the session lock; a `turn.cancelled` event's
+   * `requestPreserved` flag is rewritten to match.
+   */
+  dropProactiveCompactionRequest?: {
+    producerId?: string | null;
+    producerSeq?: number | null;
+  };
   /** In-flight calls with call-scoped proof that their command never started. */
   notStartedToolCallIds?: readonly string[];
 };
@@ -83552,7 +86018,9 @@ export async function applySessionTurnSettlement(
       : input.recording?.action === "failed"
         ? ["recording.failed"]
         : []),
-    ...(input.compactionRequestFailure ? ["session.context.compaction.skipped"] : []),
+    ...(input.compactionRequestFailure || input.dropProactiveCompactionRequest
+      ? ["session.context.compaction.skipped"]
+      : []),
     ...(input.turnStatus === "failed" ? ["child_terminal_result"] : []),
     ...(input.turnStatus === "requires_action" ? ["child_requires_action"] : []),
   ];
@@ -83690,6 +86158,25 @@ export async function applySessionTurnSettlement(
       }));
       const interactionInterventionRequests = input.runState?.interactionInterventionRequests ?? [];
       let interactionRefusalEvent: AppendEventInput | null = null;
+      // Decisions recorded while this attempt resumed (after its trigger) are
+      // applied by the next resume. Their approvals stay in the frozen run
+      // state for it, but are never shown or announced as waiting again.
+      // When every approval was decided that way, the pause is still written
+      // as requires_action with nothing shown; the workflow's immediate
+      // re-peek resumes it from those decisions.
+      const decidedSinceTrigger =
+        input.runState && input.turnStatus === "requires_action"
+          ? await approvalDecisionsAfterTriggerTx(tx as unknown as Database, {
+              workspaceId,
+              sessionId: input.sessionId,
+              turnId: input.turnId,
+              triggerEventId: input.triggerEventId,
+            })
+          : null;
+      const undecided = (approval: unknown) =>
+        !decidedSinceTrigger?.has(
+          approvalDecisionKey(approvalIdentifier(approval), pendingApprovalRound(approval)),
+        );
       if (input.runState) {
         if (input.turnStatus !== "requires_action" || input.sessionStatus !== "requires_action") {
           throw new Error("A frozen run state requires a requires_action settlement");
@@ -83851,9 +86338,9 @@ export async function applySessionTurnSettlement(
             if (!(error instanceof InteractionRequestRefusedError)) throw error;
             // The agent learns why as this call's result: the pause records
             // a system rejection, so the turn resumes at once instead of
-            // failing. One decision resumes a pause, so a second refused call
-            // stays pending; the worker's re-freeze after the first is
-            // answered passes it here again and it is refused the same way.
+            // failing. Only one refusal is recorded per pause, so a second
+            // refused call stays pending; a later resume's re-freeze passes
+            // it here again and it is refused the same way.
             interactionRefusalEvent ??= {
               type: "user.approvalDecision",
               payload: {
@@ -83879,7 +86366,7 @@ export async function applySessionTurnSettlement(
               turnId: input.turnId,
               turnGeneration: turn.executionGeneration,
               humanInputRequests,
-              pendingApprovals: input.runState.pendingApprovals,
+              pendingApprovals: input.runState.pendingApprovals.filter(undecided),
             },
           );
         }
@@ -84057,6 +86544,53 @@ export async function applySessionTurnSettlement(
               : {}),
           }
         : null;
+      const dropProactiveCompaction =
+        input.dropProactiveCompactionRequest !== undefined &&
+        input.compactionRequestFailure === undefined &&
+        session.compactRequested &&
+        session.compactRequestTrigger === "proactive";
+      const proactiveCompactionDropEvent: AppendEventInput | null = dropProactiveCompaction
+        ? {
+            type: "session.context.compaction.skipped",
+            payload: { reason: "capacity_unavailable", trigger: "proactive" },
+            ...(input.dropProactiveCompactionRequest?.producerId != null
+              ? { producerId: input.dropProactiveCompactionRequest.producerId }
+              : {}),
+            ...(input.dropProactiveCompactionRequest?.producerSeq != null
+              ? { producerSeq: input.dropProactiveCompactionRequest.producerSeq }
+              : {}),
+          }
+        : null;
+      const projectedInputEvents =
+        input.dropProactiveCompactionRequest === undefined
+          ? input.events
+          : input.events.map((event) =>
+              event.type === "turn.cancelled" &&
+              event.payload &&
+              typeof event.payload === "object" &&
+              "requestPreserved" in event.payload
+                ? {
+                    ...event,
+                    payload: { ...event.payload, requestPreserved: !dropProactiveCompaction },
+                  }
+                : event,
+            );
+      const inputEvents =
+        decidedSinceTrigger && decidedSinceTrigger.size > 0
+          ? projectedInputEvents.flatMap((event) => {
+              if (event.type !== "session.requiresAction") return [event];
+              const payload =
+                event.payload && typeof event.payload === "object"
+                  ? (event.payload as Record<string, unknown>)
+                  : {};
+              const approvals = Array.isArray(payload.approvals) ? payload.approvals : [];
+              const waiting = approvals.filter(undecided);
+              if (waiting.length === approvals.length) return [event];
+              return waiting.length > 0
+                ? [{ ...event, payload: { ...payload, approvals: waiting } }]
+                : [];
+            })
+          : projectedInputEvents;
       if (input.turnStatus === "completed") {
         await settleInterruptedCodemodeCallsInTransaction(tx as unknown as Database, {
           workspaceId,
@@ -84227,10 +86761,11 @@ export async function applySessionTurnSettlement(
       const settlementEvents = [
         ...(recordingEvent ? [recordingEvent] : []),
         ...(compactionRequestEvent ? [compactionRequestEvent] : []),
+        ...(proactiveCompactionDropEvent ? [proactiveCompactionDropEvent] : []),
         ...terminalHumanInputEvents,
         ...(machineInputSettlementEvent ? [machineInputSettlementEvent] : []),
         ...(consumedChildResultEvent ? [consumedChildResultEvent] : []),
-        ...input.events,
+        ...inputEvents,
         ...(interactionRefusalEvent ? [interactionRefusalEvent] : []),
         ...(allowanceGoalEvent ? [allowanceGoalEvent] : []),
       ];
@@ -84442,7 +86977,9 @@ export async function applySessionTurnSettlement(
         .set({
           status: effectiveSessionStatus,
           activeTurnId: input.activeTurnId,
-          ...(input.compactionRequestFailure ? { compactRequested: false } : {}),
+          ...(input.compactionRequestFailure || dropProactiveCompaction
+            ? { compactRequested: false, compactRequestTrigger: null }
+            : {}),
           lastSequence: sequence,
           queueVersion: session.queueVersion + 1,
           updatedAt: now,
@@ -87835,6 +90372,11 @@ export type EnqueueCapabilitySetupContinuationInput = {
   workspaceId: string;
   sessionId: string;
   capabilityId: string;
+  /**
+   * The card is a connected account's own notice (expired access, more access
+   * a tool needs) rather than a capability card: find it by this connection.
+   */
+  connectionId?: string;
   /** The live catalog's name for the capability, shown to the agent. */
   capabilityName: string;
   /**
@@ -87888,19 +90430,7 @@ export async function enqueueCapabilitySetupContinuation(
 ): Promise<EnqueueCapabilitySetupContinuationResult> {
   const read = await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scoped) => {
     const tx = scoped as unknown as Database;
-    const [card] = await tx
-      .select({ id: schema.sessionEvents.id, sequence: schema.sessionEvents.sequence })
-      .from(schema.sessionEvents)
-      .where(
-        and(
-          eq(schema.sessionEvents.workspaceId, input.workspaceId),
-          eq(schema.sessionEvents.sessionId, input.sessionId),
-          eq(schema.sessionEvents.type, "tool.auth_needed"),
-          sql`${schema.sessionEvents.payload} -> 'capability' ->> 'id' = ${input.capabilityId}`,
-        ),
-      )
-      .orderBy(desc(schema.sessionEvents.sequence))
-      .limit(1);
+    const [card] = await latestAuthCardTx(tx, input);
     if (!card) return { kind: "skip", reason: "no_card" } as const;
     const [existing] = await tx
       .select()
@@ -88063,6 +90593,58 @@ export async function enqueueCapabilitySetupContinuation(
   }
 }
 
+/** The latest card the continuation answers: a capability card, or an account's own. */
+async function latestAuthCardTx(
+  tx: Database,
+  input: Pick<
+    EnqueueCapabilitySetupContinuationInput,
+    "workspaceId" | "sessionId" | "capabilityId" | "connectionId"
+  >,
+): Promise<Array<{ id: string; sequence: number; payload: unknown }>> {
+  return await tx
+    .select({
+      id: schema.sessionEvents.id,
+      sequence: schema.sessionEvents.sequence,
+      payload: schema.sessionEvents.payload,
+    })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, input.sessionId),
+        eq(schema.sessionEvents.type, "tool.auth_needed"),
+        input.connectionId
+          ? sql`${schema.sessionEvents.payload} ->> 'connectionId' = ${input.connectionId}`
+          : sql`${schema.sessionEvents.payload} -> 'capability' ->> 'id' = ${input.capabilityId}`,
+      ),
+    )
+    .orderBy(desc(schema.sessionEvents.sequence))
+    .limit(1);
+}
+
+/**
+ * The latest auth notice this chat showed for one connected account, so the
+ * caller can check the account now has what the notice asked for before it
+ * continues the request. Null when the chat showed none.
+ */
+export async function latestConnectionAuthNotice(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; connectionId: string },
+): Promise<{ id: string; payload: Record<string, unknown> } | null> {
+  return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scoped) => {
+    const [card] = await latestAuthCardTx(scoped as unknown as Database, {
+      ...input,
+      capabilityId: "",
+    });
+    if (!card) return null;
+    const payload =
+      card.payload && typeof card.payload === "object" && !Array.isArray(card.payload)
+        ? (card.payload as Record<string, unknown>)
+        : {};
+    return { id: card.id, payload };
+  });
+}
+
 async function userMessageAfterSequenceTx(
   tx: Database,
   input: Pick<EnqueueCapabilitySetupContinuationInput, "workspaceId" | "sessionId">,
@@ -88152,7 +90734,13 @@ export async function addSessionSystemUpdateWithSourceMutation<
         // An archived session is read-only: machine input addressed to it (a
         // late child result, schedule or media completion) is settled exactly
         // like input to a cancelled session instead of being retried forever.
-        if (session.status === "cancelled" || session.contentArchiveState !== null) {
+        // That includes a chat archived and waiting to be stored, so nothing
+        // starts work in it again.
+        if (
+          session.status === "cancelled" ||
+          session.contentArchiveState !== null ||
+          session.archivedAt !== null
+        ) {
           await mutateSource(tx as unknown as Database, null, null, "session_cancelled");
           return { added: false, reason: "session_cancelled" } as const;
         }
@@ -88760,10 +91348,14 @@ function backgroundCommandTerminalMutation(input: {
           `Session ${input.sessionId} does not belong to account ${input.accountId}`,
         );
       }
+      // Terminal settlement only needs pause/admission state. Recounting all
+      // stopping commands here makes draining a backlog quadratic, while each
+      // count holds the session write lock and blocks unrelated lifecycle work.
       controlActive =
         (
-          await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
+          await evaluateSessionWriteAdmissionControl(tx, input.workspaceId, input.sessionId, {
             workspaceControl: locks.control,
+            lockedSession: session,
           })
         ).state === "active";
     },
@@ -88889,6 +91481,19 @@ function backgroundCommandTerminalMutation(input: {
                   : command.exitCode === 0
                     ? `${commandLabel}: completed successfully.`
                     : `${commandLabel}: exited with code ${command.exitCode ?? "unknown"}.`;
+      // The result carries the start and end of the output, so the turn it
+      // wakes or reaches needs no extra read to learn what the command did.
+      // A lost command (its sandbox gone, or contained) carries none: those
+      // settle in bulk under lease locks, and its output stays readable.
+      const output =
+        command.state === "lost"
+          ? null
+          : await backgroundCommandResultOutputInTransaction(tx, {
+              accountId: session.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              commandId: command.id,
+            });
       const payload = {
         type: "background_command_result" as const,
         commandId: command.id,
@@ -88897,6 +91502,7 @@ function backgroundCommandTerminalMutation(input: {
         reason,
         ...(command.failure ? { failure: command.failure } : {}),
         outputLocator,
+        ...(output !== null ? { output } : {}),
         ...(command.backgroundChildrenStopped
           ? { notice: CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE }
           : {}),
@@ -89519,6 +92125,7 @@ function sessionEventTypesAdvanceActivity(inputs: ReadonlyArray<{ type: string }
 
 function sessionMutationAdvancesActivity(update: {
   resources?: ResourceRef[];
+  removedRepositories?: SessionRemovedRepository[];
   tools?: ToolRef[];
   firstPartyMcpTools?: FirstPartyMcpToolName[];
   agentConfig?: ResolvedAgentConfig | null;
@@ -89660,12 +92267,160 @@ export type AcceptSessionApprovalDecisionResult =
       events: SessionEvent[];
       workflowWakeRevision: number;
     }
-  | { action: "conflict"; sessionStatus: SessionStatus };
+  | {
+      action: "conflict";
+      sessionStatus: SessionStatus;
+      reason: SessionApprovalConflictReason;
+      /** What the person reads: why this decision cannot be taken. */
+      message: string;
+    };
 
 /**
- * Accept exactly one decision for the currently waiting approval boundary.
- * The session and active turn are locked with the append so concurrent Pause,
- * Steer, and duplicate decisions cannot manufacture a second resume trigger.
+ * Why a decision was refused. A decision for an approval that is still
+ * undecided is never refused merely because the session is resuming from a
+ * sibling decision of the same pause.
+ */
+export type SessionApprovalConflictReason =
+  | "already_decided"
+  | "already_finished"
+  | "turn_ended"
+  | "not_pending";
+
+function approvalConflict(
+  sessionStatus: SessionStatus,
+  reason: SessionApprovalConflictReason,
+  decided?: unknown,
+): Extract<AcceptSessionApprovalDecisionResult, { action: "conflict" }> {
+  const message =
+    reason === "already_decided"
+      ? decided === "reject"
+        ? "This action was already declined."
+        : "This action was already approved."
+      : reason === "already_finished"
+        ? "This action already finished."
+        : reason === "turn_ended"
+          ? "This approval closed: the agent's turn ended before it was decided."
+          : "This approval is no longer waiting for a decision.";
+  return { action: "conflict", sessionStatus, reason, message };
+}
+
+/** The question round a decision answers; none for an approval without questions. */
+function approvalDecisionRound(payload: Record<string, unknown>): number | undefined {
+  return typeof payload.elicitationRound === "number" ? payload.elicitationRound : undefined;
+}
+
+/** The question round an approval currently asks; none when it asks no question. */
+function pendingApprovalRound(pending: unknown): number | undefined {
+  const elicitation =
+    pending && typeof pending === "object"
+      ? (pending as { elicitation?: unknown }).elicitation
+      : undefined;
+  if (elicitation === undefined) return undefined;
+  const parsed = McpElicitationApprovalRequest.safeParse(elicitation);
+  return parsed.success ? parsed.data.round : undefined;
+}
+
+/**
+ * The newest recorded decision for one approval and question round, within
+ * the live turn when there is one. Call ids are unique within a turn, and an
+ * MCP server asking again under the same id asks a new round, so this is the
+ * decision the person already made for exactly what they see.
+ */
+async function latestApprovalDecisionForRound(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    approvalId: string;
+    round: number | undefined;
+    /** The live turn: call ids are only unique within one turn. */
+    turnId?: string;
+  },
+): Promise<{
+  event: typeof schema.sessionEvents.$inferSelect;
+  payload: Record<string, unknown>;
+} | null> {
+  const rows = await tx
+    .select()
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, input.sessionId),
+        eq(schema.sessionEvents.type, "user.approvalDecision"),
+        input.turnId === undefined ? undefined : eq(schema.sessionEvents.turnId, input.turnId),
+        sql`${schema.sessionEvents.payload} ->> 'approvalId' = ${input.approvalId}`,
+      ),
+    )
+    .orderBy(desc(schema.sessionEvents.sequence))
+    .limit(16);
+  for (const row of rows) {
+    const payload = sessionEventPayloadRecord(row.payload, row.payloadCodecVersion);
+    if (payload.approvalId !== input.approvalId) continue;
+    if (approvalDecisionRound(payload) !== input.round) continue;
+    return { event: row, payload };
+  }
+  return null;
+}
+
+/** The answer to an approval's MCP server questions does not fit their forms. */
+export class SessionApprovalAnswerError extends Error {
+  override readonly name = "SessionApprovalAnswerError";
+}
+
+/**
+ * The decision payload to record for one pending approval. An approval with
+ * MCP server questions records the complete answer (the forms' defaults plus
+ * what the person entered), checked against each form; a rejection carries no
+ * answer. Approving must name the question's round: the server can ask again
+ * under the same approval id, so an approval sent for an earlier question, or
+ * from a surface that never showed this one, must not answer it. A rejection
+ * needs no round; declining is always safe to deliver. `content` or a round
+ * for an approval without questions is refused.
+ */
+function approvalDecisionPayloadWithAnswer(
+  pending: unknown,
+  payload: Record<string, unknown>,
+): Record<string, unknown> {
+  const elicitation =
+    pending && typeof pending === "object"
+      ? (pending as { elicitation?: unknown }).elicitation
+      : undefined;
+  const { content, elicitationRound, ...withoutAnswer } = payload;
+  if (elicitation === undefined) {
+    if (content !== undefined || elicitationRound !== undefined) {
+      throw new SessionApprovalAnswerError("This approval has no questions to answer");
+    }
+    return payload;
+  }
+  const request = McpElicitationApprovalRequest.parse(elicitation);
+  // A rejection needs no round from the client, but records the round it
+  // declined so a later question under the same call id is never taken as
+  // already declined.
+  if (payload.decision !== "approve") return { ...withoutAnswer, elicitationRound: request.round };
+  if (elicitationRound !== request.round) {
+    throw new SessionApprovalAnswerError(
+      elicitationRound === undefined
+        ? `${request.server} asked a question about this call; answer it with elicitationRound ${request.round}`
+        : `${request.server} has asked a newer question about this call; answer that one`,
+    );
+  }
+  const given = content === undefined ? undefined : McpElicitationContent.safeParse(content);
+  if (given && !given.success) {
+    throw new SessionApprovalAnswerError("The answer is not a set of form values");
+  }
+  const resolution = resolveMcpElicitationContent(request, given?.data);
+  if (!resolution.ok) throw new SessionApprovalAnswerError(resolution.problem);
+  return { ...withoutAnswer, elicitationRound: request.round, content: resolution.content };
+}
+
+/**
+ * Accept one decision for an approval still open in the live turn's latest
+ * pause, whether the session waits or is resuming from a sibling decision.
+ * The same decision again is idempotent; a different one is refused as
+ * already decided. The session and active turn are locked with the append so
+ * concurrent Pause, Steer, and duplicate decisions stay serialized with the
+ * worker's settlement.
  */
 export async function acceptSessionApprovalDecision(
   db: Database,
@@ -89697,7 +92452,8 @@ export async function acceptSessionApprovalDecision(
 ): Promise<AcceptSessionApprovalDecisionResult> {
   // Defense in depth for internal callers: this field is ingress-only even
   // when a caller accidentally passes the complete public request payload.
-  const { mcpCredentialUpdates: _writeOnlyCredentials, ...payload } = input.payload;
+  const { mcpCredentialUpdates: _writeOnlyCredentials, ...requestedPayload } = input.payload;
+  let payload = requestedPayload;
   return await withSessionActivityRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -89783,56 +92539,169 @@ export async function acceptSessionApprovalDecision(
         if (turnPreview && !turn) {
           throw new Error(`Active turn disappeared: ${turnPreview.id}`);
         }
-        if (session.status !== "requires_action" || turn?.status !== "requires_action") {
-          return {
-            action: "conflict",
-            sessionStatus: session.status as SessionStatus,
-          } as const;
+        const sessionStatus = session.status as SessionStatus;
+        const approvalId = payload.approvalId;
+        if (typeof approvalId !== "string") {
+          return approvalConflict(sessionStatus, "not_pending");
         }
-        if (
-          await hasAcceptedRequiresActionAdvance(tx as unknown as Database, {
+        // Every approval of the turn's latest pause stays decidable until its
+        // call settles, also while the turn resumes from a sibling decision:
+        // a pause's decisions are applied together, and one recorded while
+        // the turn resumes is applied by the next resume.
+        const liveTurn =
+          turn &&
+          session.activeTurnId === turn.id &&
+          !isTerminalSessionTurnStatus(turn.status as SessionTurnStatus)
+            ? turn
+            : undefined;
+        const [runState] = liveTurn
+          ? await tx
+              .select({
+                turnId: schema.agentRunStates.turnId,
+                pendingApprovals: schema.agentRunStates.pendingApprovals,
+                pendingApprovalsCodecVersion: schema.agentRunStates.pendingApprovalsCodecVersion,
+              })
+              .from(schema.agentRunStates)
+              .where(
+                and(
+                  eq(schema.agentRunStates.workspaceId, input.workspaceId),
+                  eq(schema.agentRunStates.sessionId, input.sessionId),
+                  eq(schema.agentRunStates.turnId, liveTurn.id),
+                ),
+              )
+              .orderBy(desc(schema.agentRunStates.stateVersion))
+              .limit(1)
+          : [];
+        const pendingApproval = runState
+          ? fromPostgresLosslessJson(
+              runState.pendingApprovals,
+              runState.pendingApprovalsCodecVersion,
+            ).find((pending) => approvalIdentifier(pending) === approvalId)
+          : undefined;
+        const [pendingCall] =
+          liveTurn && pendingApproval !== undefined
+            ? await tx
+                .select({
+                  interruptionKind: schema.sessionPendingToolCalls.interruptionKind,
+                  hasResult: sql<boolean>`${schema.sessionPendingToolCalls.resultItem} is not null`,
+                })
+                .from(schema.sessionPendingToolCalls)
+                .where(
+                  and(
+                    eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
+                    eq(schema.sessionPendingToolCalls.turnId, liveTurn.id),
+                    eq(schema.sessionPendingToolCalls.callId, approvalId),
+                  ),
+                )
+                .limit(1)
+            : [];
+        const callSettled = pendingCall?.hasResult === true;
+        const waiting =
+          sessionStatus === "requires_action" && liveTurn?.status === "requires_action";
+        // The same decision again (a double click, a retry after a lost
+        // response) is the decision already recorded: accepted, nothing new.
+        const round =
+          pendingApproval !== undefined
+            ? pendingApprovalRound(pendingApproval)
+            : approvalDecisionRound(payload);
+        const prior = await latestApprovalDecisionForRound(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          approvalId,
+          round,
+          ...(liveTurn ? { turnId: liveTurn.id } : {}),
+        });
+        if (prior) {
+          // A decision the waiting pause should already have applied, for a
+          // call that is still open, was lost (a worker from before this
+          // change resumed only its own trigger): take the new one instead.
+          const [trigger] =
+            waiting && liveTurn && pendingCall && !callSettled
+              ? await tx
+                  .select({ sequence: schema.sessionEvents.sequence })
+                  .from(schema.sessionEvents)
+                  .where(
+                    and(
+                      eq(schema.sessionEvents.workspaceId, input.workspaceId),
+                      eq(schema.sessionEvents.sessionId, input.sessionId),
+                      eq(schema.sessionEvents.id, liveTurn.triggerEventId),
+                    ),
+                  )
+                  .limit(1)
+              : [];
+          const lost = trigger !== undefined && prior.event.sequence <= trigger.sequence;
+          if (!lost) {
+            // A repeat that carries credentials to store is a different
+            // response: the recorded one already decided, so refuse it
+            // rather than report its credentials as stored.
+            if (
+              prior.payload.decision !== payload.decision ||
+              (input.mcpCredentialUpdates?.length ?? 0) > 0
+            ) {
+              return approvalConflict(sessionStatus, "already_decided", prior.payload.decision);
+            }
+            const workflowWakeRevision = await enqueueSessionWorkflowWakeInTransaction(
+              tx as unknown as Database,
+              {
+                accountId: session.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: session.id,
+                temporalWorkflowId: session.temporalWorkflowId ?? `session-${session.id}`,
+                reason: "approval_decision",
+              },
+            );
+            return {
+              action: "accepted",
+              event: mapEvent(prior.event),
+              events: [],
+              workflowWakeRevision,
+            } as const;
+          }
+        }
+        if (!liveTurn) return approvalConflict(sessionStatus, "turn_ended");
+        if (pendingApproval === undefined) return approvalConflict(sessionStatus, "not_pending");
+        if (callSettled) return approvalConflict(sessionStatus, "already_finished");
+        if (!waiting) {
+          // Resuming: only a call the next resume can still apply. A model
+          // tool's open call, or a programmatic call still waiting on review.
+          const resumable =
+            pendingCall !== undefined
+              ? pendingCall.interruptionKind === "approval" ||
+                pendingCall.interruptionKind === "interaction_intervention"
+              : // Programmatic approval ids are operation UUIDs.
+                UUID_PATTERN.test(approvalId) &&
+                (
+                  await tx
+                    .select({ operationId: schema.sessionAttemptCodemodeCalls.operationId })
+                    .from(schema.sessionAttemptCodemodeCalls)
+                    .where(
+                      and(
+                        eq(schema.sessionAttemptCodemodeCalls.workspaceId, input.workspaceId),
+                        eq(schema.sessionAttemptCodemodeCalls.sessionId, input.sessionId),
+                        eq(schema.sessionAttemptCodemodeCalls.turnId, liveTurn.id),
+                        eq(schema.sessionAttemptCodemodeCalls.operationId, approvalId),
+                        eq(schema.sessionAttemptCodemodeCalls.state, "waiting_for_approval"),
+                      ),
+                    )
+                    .limit(1)
+                ).length > 0;
+          if (!resumable) return approvalConflict(sessionStatus, "not_pending");
+        }
+        // The call runs on the turn's frozen accounts, never the approver's:
+        // approving one that runs on someone's own account is theirs alone.
+        // Checked before the answer, so a non-owner always learns who decides.
+        if (payload.decision === "approve") {
+          const owner = await pendingApprovalAccountOwner(tx as unknown as Database, {
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,
-            turnId: turn.id,
-            turnGeneration: turn.executionGeneration,
-            triggerEventId: turn.triggerEventId,
-          })
-        ) {
-          return {
-            action: "conflict",
-            sessionStatus: "requires_action",
-          } as const;
+            turnId: liveTurn.id,
+            approvalId,
+          });
+          if (owner !== null && owner.subjectId !== input.subjectId) {
+            throw new SessionApprovalForbiddenError(owner);
+          }
         }
-        const approvalId = payload.approvalId;
-        const [runState] = await tx
-          .select({
-            turnId: schema.agentRunStates.turnId,
-            pendingApprovals: schema.agentRunStates.pendingApprovals,
-            pendingApprovalsCodecVersion: schema.agentRunStates.pendingApprovalsCodecVersion,
-          })
-          .from(schema.agentRunStates)
-          .where(
-            and(
-              eq(schema.agentRunStates.workspaceId, input.workspaceId),
-              eq(schema.agentRunStates.sessionId, input.sessionId),
-              eq(schema.agentRunStates.turnId, turn.id),
-            ),
-          )
-          .orderBy(desc(schema.agentRunStates.stateVersion))
-          .limit(1);
-        if (
-          typeof approvalId !== "string" ||
-          !runState ||
-          !fromPostgresLosslessJson(
-            runState.pendingApprovals,
-            runState.pendingApprovalsCodecVersion,
-          ).some((pending) => approvalIdentifier(pending) === approvalId)
-        ) {
-          return {
-            action: "conflict",
-            sessionStatus: "requires_action",
-          } as const;
-        }
+        payload = approvalDecisionPayloadWithAnswer(pendingApproval, payload);
         if (input.interactionIntervention) {
           const expectedInteractionDecision =
             input.interactionIntervention.outcome === "completed" ? "approve" : "reject";
@@ -89898,8 +92767,8 @@ export async function acceptSessionApprovalDecision(
                 accountId: session.accountId,
                 workspaceId: input.workspaceId,
                 sessionId: input.sessionId,
-                turnId: turn.id,
-                turnGeneration: turn.executionGeneration,
+                turnId: liveTurn.id,
+                turnGeneration: liveTurn.executionGeneration,
                 turnAssociation: "current",
                 sequence: session.lastSequence + 1,
                 type: "user.approvalDecision",
@@ -89919,8 +92788,8 @@ export async function acceptSessionApprovalDecision(
             input.workspaceId,
             session,
             {
-              turnId: turn.id,
-              turnGeneration: turn.executionGeneration,
+              turnId: liveTurn.id,
+              turnGeneration: liveTurn.executionGeneration,
               requestId: null,
               approvalId,
               outcome: approvalDecision === "approve" ? "approved" : "rejected",
@@ -89949,7 +92818,7 @@ export async function acceptSessionApprovalDecision(
               and(
                 eq(schema.connectorActionRequests.workspaceId, input.workspaceId),
                 eq(schema.connectorActionRequests.sessionId, input.sessionId),
-                eq(schema.connectorActionRequests.turnId, turn.id),
+                eq(schema.connectorActionRequests.turnId, liveTurn.id),
                 eq(schema.connectorActionRequests.approvalId, approvalId),
                 eq(schema.connectorActionRequests.status, "pending"),
               ),
@@ -89960,7 +92829,12 @@ export async function acceptSessionApprovalDecision(
               row: connectorRequest,
               action: "connector.action.approval_decided",
               subjectId: input.subjectId,
-              extra: { decision: approvalDecision },
+              extra: {
+                decision: approvalDecision,
+                ...(connectorRequest.inputRound > 0
+                  ? { inputRound: connectorRequest.inputRound }
+                  : {}),
+              },
             });
           }
         }
@@ -90011,7 +92885,7 @@ async function scheduledHumanWaitTargetInRlsContext(
   workspaceId: string,
   turn: { id: string; sessionId: string; executionGeneration: number },
 ): Promise<
-  | { kind: "approval"; approvalId: string }
+  | { kind: "approval"; approvalId: string; elicitationRound?: number }
   | { kind: "input"; requestId: string; denyQuestionIds: string[] | null }
   | null
 > {
@@ -90033,10 +92907,25 @@ async function scheduledHumanWaitTargetInRlsContext(
   const pendingApprovals = runState
     ? fromPostgresLosslessJson(runState.pendingApprovals, runState.pendingApprovalsCodecVersion)
     : [];
-  const approvalId = (Array.isArray(pendingApprovals) ? pendingApprovals : [])
-    .map((pending) => approvalIdentifier(pending))
-    .find((id): id is string => typeof id === "string" && id.length > 0);
-  if (approvalId) return { kind: "approval", approvalId };
+  const pendingApproval = (Array.isArray(pendingApprovals) ? pendingApprovals : []).find(
+    (pending) => {
+      const id = approvalIdentifier(pending);
+      return typeof id === "string" && id.length > 0;
+    },
+  );
+  const approvalId = pendingApproval ? approvalIdentifier(pendingApproval) : undefined;
+  if (typeof approvalId === "string") {
+    // An MCP server can ask again under the same approval id after a
+    // timeout's decline; each of its questions times out on its own.
+    const question = McpElicitationApprovalRequest.safeParse(
+      (pendingApproval as { elicitation?: unknown }).elicitation,
+    );
+    return {
+      kind: "approval",
+      approvalId,
+      ...(question.success ? { elicitationRound: question.data.round } : {}),
+    };
+  }
   const requests = await scopedDb
     .select({
       id: schema.sessionHumanInputRequests.id,
@@ -90160,6 +93049,10 @@ export async function expireScheduledRunHumanWait(
     .update(
       `${turn.id}\0${turn.executionGeneration}\0${target.kind}\0${
         target.kind === "approval" ? target.approvalId : target.requestId
+      }${
+        target.kind === "approval" && target.elicitationRound !== undefined
+          ? `\0${target.elicitationRound}`
+          : ""
       }`,
       "utf8",
     )
@@ -91307,6 +94200,8 @@ type LockedSessionUpdateResult = {
   events: AppendEventInput[];
   update?: {
     resources?: ResourceRef[];
+    /** Repository removal records (migration 1140), written with `resources`. */
+    removedRepositories?: SessionRemovedRepository[];
     tools?: ToolRef[];
     firstPartyMcpTools?: FirstPartyMcpToolName[];
     /** Trusted host normalization; never accepted directly from a public update body. */
@@ -91487,12 +94382,19 @@ export async function appendSessionEventsWithLockedSessionUpdate(
           .set({
             lastSequence: sequence,
             ...(update.resources !== undefined ? { resources: update.resources } : {}),
+            ...(update.removedRepositories !== undefined
+              ? { removedRepositories: update.removedRepositories }
+              : {}),
             ...(update.tools !== undefined ? { tools: update.tools } : {}),
             ...(update.firstPartyMcpTools !== undefined
               ? { firstPartyMcpTools: update.firstPartyMcpTools }
               : {}),
             ...(update.firstPartyMcpPermissions !== undefined
-              ? { firstPartyMcpPermissions: update.firstPartyMcpPermissions }
+              ? {
+                  firstPartyMcpPermissions: canonicalSecretPermissions(
+                    update.firstPartyMcpPermissions,
+                  ),
+                }
               : {}),
             ...(update.sandboxBackend !== undefined
               ? { sandboxBackend: update.sandboxBackend }
@@ -91574,7 +94476,7 @@ async function mapSessionWithControl(
     activelyWorking: false,
     attentionVersion: 0,
   },
-  archive: Pick<Session, "archived" | "archivedAt" | "archiveVersion"> = mapSessionArchive(null),
+  archive: ReturnType<typeof mapSessionArchive> = mapSessionArchive(null),
   workspaceControl?: WorkspaceControlRow,
   tenancyViewer?: { subjectId: string },
   presentation: "full" | "model_gate" = "full",
@@ -91677,7 +94579,7 @@ function mapSession(
     activelyWorking: false,
     attentionVersion: 0,
   },
-  archive: Pick<Session, "archived" | "archivedAt" | "archiveVersion"> = mapSessionArchive(null),
+  archive: ReturnType<typeof mapSessionArchive> = mapSessionArchive(null),
   tenancyViewer?: { subjectId: string },
 ): Session {
   const bundledSkillIds = bundledSkillSelectionFromMetadata(row.metadata);
@@ -91696,6 +94598,11 @@ function mapSession(
         }
       : {}),
     retention: sessionRetentionFromRow(row),
+    unattended: resolveSessionUnattended({
+      setting: row.unattendedSetting ?? null,
+      createdUnattended: sessionMetadataUnattended(row.metadata),
+      forked: row.forkedFromSessionId !== null,
+    }),
     admissionBlock: projectSessionAdmissionBlock(row.admissionBlock),
     initialMessage: fromPostgresLosslessText(row.initialMessage, row.initialMessageCodecVersion),
     title: cleanStoredSessionTitle(row.title, row.titleSource),
@@ -91708,13 +94615,23 @@ function mapSession(
     scopeSubjectId: sessionEndUserFromRow(row),
     memoryScope: sessionMemoryScopeFromRow(row),
     resources: row.resources as ResourceRef[],
+    ...sessionRemovedRepositoriesProjection(row.removedRepositories),
     skills: StoredSessionSkills.parse(row.skills ?? []),
     ...(bundledSkillIds !== undefined ? { bundledSkillIds } : {}),
     tools: row.tools as ToolRef[],
     toolPolicy: row.toolPolicy as SessionToolPolicy,
     toolPolicyVersion: Number(row.toolPolicyVersion),
     mcpApprovalPolicies: row.mcpApprovalPolicies,
-    metadata: row.metadata,
+    // A person makes a fork to continue the work, so a fork reads as attended
+    // even though the fork routine copies the source row's metadata.
+    // Otherwise a chat that started unattended through its setting carries the
+    // same frozen marker as the create option, so everything that follows how
+    // the chat started reads one place.
+    metadata: row.forkedFromSessionId
+      ? withSessionUnattendedMetadata(row.metadata, false)
+      : row.startedUnattended === true
+        ? withSessionUnattendedMetadata(row.metadata, true)
+        : row.metadata,
     ...(tenancyViewer ? { tenancy: mapSessionTenancy(row, tenancyViewer.subjectId) } : {}),
     createdBy: initiatorFromStorage(
       row.createdByKind,
@@ -91759,8 +94676,10 @@ function mapSession(
     effectiveControl,
     inputWait: effectiveControl.state === "active" ? (row.currentInputWait ?? null) : null,
     lastSequence: row.lastSequence,
-    codexPinnedCredentialId: row.codexPinnedCredentialId ?? null,
-    codexLastCredentialId: row.codexLastCredentialId ?? null,
+    // Public adapters project these from subscription-core bindings and leases,
+    // never the frozen columns of the retired allocator.
+    codexPinnedCredentialId: null,
+    codexLastCredentialId: null,
     codexCompactionMode:
       row.codexCompactionMode === "remote_v2" || row.codexCompactionMode === "portable"
         ? row.codexCompactionMode
@@ -91769,6 +94688,7 @@ function mapSession(
     agent: parseStoredSessionAgentConfig(row.agentConfig),
     ...pin,
     ...attention,
+    ...sessionRowArchive(row),
     ...archive,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -91818,6 +94738,14 @@ function mapProjectedEvent(row: SessionEventProjectionRow): SessionEvent {
 
 function utf8JsonBytes(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value), "utf8");
+}
+
+/** Present only when the session has removal records, so other sessions read unchanged. */
+function sessionRemovedRepositoriesProjection(
+  value: unknown,
+): Pick<Session, "removedRepositories"> {
+  const removedRepositories = parseSessionRemovedRepositories(value);
+  return removedRepositories.length > 0 ? { removedRepositories } : {};
 }
 
 function mapSessionTurn(row: typeof schema.sessionTurns.$inferSelect): SessionTurn {
@@ -91875,6 +94803,7 @@ function mapSessionTurnForExecution(
     mcpAccountBindings: parseAcceptedMcpAccountBindings(row.mcpAccountBindings),
     initiatingHumanSubjectId: row.initiatingHumanSubjectId ?? null,
     scheduledTaskRunId: row.scheduledTaskRunId ?? null,
+    billingOrigin: storedBillingOrigin(row.billingOrigin),
     personalConnectionDelegations: parsedPersonalConnectionDelegations(
       row.personalConnectionDelegations,
       `session_turns:${row.workspaceId}:${row.sessionId}:${row.id}`,
@@ -91916,6 +94845,8 @@ function mapFile(row: typeof schema.files.$inferSelect): FileAsset {
     ownerSubjectId:
       row.ownerSubjectId ??
       (row.privateOwnerSubjectIds?.length === 1 ? row.privateOwnerSubjectIds[0]! : null),
+    // Only an Only me file works in other workspaces.
+    ...(row.privateOwnerSubjectIds ? { reachWorkspaceIds: row.reachWorkspaceIds ?? null } : {}),
     id: row.id,
     workspaceId: row.workspaceId,
     status: row.status as FileStatus,
@@ -92001,6 +94932,8 @@ function mapScheduledTask(row: typeof schema.scheduledTasks.$inferSelect): Sched
     rigId: row.rigId ?? null,
     vaultPolicy: row.vaultPolicy ?? { mode: "all" },
     metadata: row.metadata,
+    // Projected only when set, so unlocked tasks keep their exact shape.
+    ...(row.creatorLocked ? { creatorLocked: true as const } : {}),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -92855,9 +95788,12 @@ export * from "./recordings";
 export * from "./recording-live";
 export {
   cosineSimilarity,
+  memberVoiceprints,
   recordingVoiceChannel,
   suggestSpeakersByVoice,
+  voiceMatchingVoiceprints,
   VOICE_SUGGESTION_THRESHOLD,
+  type KnownVoice,
   type RecordingSpeakerVoice,
   type RecordingVoiceChannel,
 } from "./recording-voices";
@@ -92869,6 +95805,7 @@ export * from "./session-content-blobs";
 export * from "./session-content-compaction";
 export * from "./session-secret-redaction";
 export * from "./session-archive";
+export * from "./session-unattended";
 export * from "./codemode-operations";
 export * from "./codemode-approvals";
 export * from "./tool-action-reviews";
@@ -93080,7 +96017,7 @@ export async function loadDirectModelProviderConnection(
   const metadata = (
     connectionMetadata ?? (await listConnectionsMetadata(db, workspaceId, null))
   ).find((candidate) => directModelConnectionSpec(candidate)?.modelId === modelId);
-  if (!metadata) throw new Error("OpenAI or Azure OpenAI connection is no longer available");
+  if (!metadata) throw new Error("This model connection is no longer available");
   const connection = await loadConnectionCredentialForBroker(db, settings, {
     workspaceId,
     connectionId: metadata.id,
@@ -93094,7 +96031,7 @@ export async function loadDirectModelProviderConnection(
     typeof connection.credential.apiKey !== "string" ||
     !connection.credential.apiKey.trim()
   ) {
-    throw new Error("OpenAI or Azure OpenAI connection changed; reconnect and select its model");
+    throw new Error("This model connection changed; reconnect and select its model");
   }
   await assertModelConnectionAllowsTurn(db, {
     workspaceId,

@@ -90,15 +90,16 @@ impl Process {
         *self.exit.borrow() == Exit::Running
     }
 
-    /// Makes this process one of the out-of-memory killer's last choices;
-    /// see [`OOM_SCORE_ADJ`]. The file is opened by number, then written
+    /// Lowers what the out-of-memory killer counts against this process by
+    /// `adj` thousandths of what it counts against (`oom_score_adj`), such
+    /// as [`OOM_SCORE_ADJ`]. The file is opened by number, then written
     /// only if the pinned process has not exited since: a procfs file
     /// names the process that had the number when it was opened, and the
     /// number cannot pass to another before the pinned process exits.
-    pub fn protect_from_oom(&self) -> io::Result<()> {
+    pub fn protect_from_oom(&self, adj: i32) -> io::Result<()> {
         let mut file = open_oom_score_adj(self.pid)?;
         self.still_running()?;
-        file.write_all(OOM_SCORE_ADJ.to_string().as_bytes())
+        file.write_all(adj.clamp(-999, 1000).to_string().as_bytes())
     }
 
     /// Names this process apart from every other the host has run or will
@@ -196,9 +197,21 @@ pub(crate) fn parse_pid(text: &str) -> Option<Pid> {
 /// `/proc/<pid>/stat`, `text`. The command name (field 2) is in
 /// parentheses and may hold spaces and parentheses itself, so fields are
 /// counted from the last closing one, after which field 3 comes.
-fn start_time(text: &str) -> Option<u64> {
+pub(crate) fn start_time(text: &str) -> Option<u64> {
     let (_, after_name) = text.rsplit_once(')')?;
     after_name.split_whitespace().nth(22 - 3)?.parse().ok()
+}
+
+/// When a process that has not ended started (see [`start_time`]), or
+/// `None` for one that has ended and is not yet reaped: its state (field
+/// 3) is zombie (`Z`) or dead (`X`).
+pub(crate) fn running_since(text: &str) -> Option<u64> {
+    let (_, after_name) = text.rsplit_once(')')?;
+    let state = after_name.split_whitespace().next()?;
+    if matches!(state, "Z" | "X" | "x") {
+        return None;
+    }
+    start_time(text)
 }
 
 #[cfg(test)]
@@ -255,6 +268,20 @@ mod tests {
         assert_eq!(start_time(&format!("42 (a) b (c)) {tail}")), Some(987_654));
         assert_eq!(start_time("42 (firecracker) S 1 2"), None);
         assert_eq!(start_time("garbage"), None);
+    }
+
+    #[test]
+    fn a_process_that_ended_has_no_start_time_while_it_runs() {
+        let tail = "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 987654 19 20";
+        assert_eq!(
+            running_since(&format!("42 (a) Z) S {tail}")),
+            Some(987_654),
+            "the state follows the last parenthesis"
+        );
+        assert_eq!(running_since(&format!("42 (a) D {tail}")), Some(987_654));
+        assert_eq!(running_since(&format!("42 (a) Z {tail}")), None);
+        assert_eq!(running_since(&format!("42 (a) X {tail}")), None);
+        assert_eq!(running_since("garbage"), None);
     }
 
     #[tokio::test]

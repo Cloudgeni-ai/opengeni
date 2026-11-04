@@ -129,6 +129,7 @@ const client = {
   getModelConnectionAccess: mock(async (): Promise<unknown> => {
     throw new Error("must not read access for this account");
   }),
+  removeModelConnectionFromWorkspace: mock(async (_target: unknown): Promise<void> => undefined),
   listSuperGrokAccounts: mock(
     async (): Promise<unknown> => ({
       accounts: [],
@@ -243,6 +244,42 @@ const client = {
     ],
   })),
   updateModelConnectionAccess: mock(async (_target: unknown, policy: unknown) => policy),
+  getOwnResourceReach: mock(
+    async (_workspaceId: string, resource: { resourceKind: string; resourceId: string }) => ({
+      ...resource,
+      workspaces: [
+        {
+          workspaceId: "workspace-personal",
+          name: "Personal",
+          personal: true,
+          current: false,
+          on: true,
+          alwaysOn: true,
+          canChange: false,
+        },
+        {
+          workspaceId: "workspace-a",
+          name: "Design preview",
+          personal: false,
+          current: true,
+          on: true,
+          alwaysOn: false,
+          canChange: true,
+        },
+      ],
+    }),
+  ),
+  setOwnResourceReach: mock(async (workspaceId: string, request: { on: boolean }) => ({
+    workspace: {
+      workspaceId,
+      name: "Design preview",
+      personal: false,
+      current: true,
+      on: request.on,
+      alwaysOn: false,
+      canChange: true,
+    },
+  })),
   listOrganizationProviderCustomModels: mock(async (): Promise<unknown> => ({ models: [] })),
   createOrganizationProviderCustomModel: mock(
     async (...args: unknown[]): Promise<unknown> => ({
@@ -343,6 +380,12 @@ mock.module("@opengeni/react/ui/dropdown-menu", () => ({
       {children}
     </button>
   ),
+  // The rest of the module, which the toolbar's search and filters import.
+  DropdownMenuCheckboxItem: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DropdownMenuGroup: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DropdownMenuLabel: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DropdownMenuMeta: ({ children }: { children: ReactNode }) => <span>{children}</span>,
+  DropdownMenuSeparator: () => null,
 }));
 mock.module("@opengeni/react/app/components/ui/destructive-confirm", () => ({
   DestructiveConfirm: ({
@@ -438,7 +481,7 @@ test.each([false, true])(
       if (selectedBefore) {
         const selected = [
           ...view.container.querySelectorAll<HTMLElement>('[data-slot="choice-card"]'),
-        ].find((card) => card.textContent?.includes("Only selected workspaces"))!;
+        ].find((card) => card.textContent?.includes("Selected workspaces"))!;
         await act(async () => selected.click());
         await flush();
       }
@@ -449,7 +492,7 @@ test.each([false, true])(
       expect(save).toHaveBeenCalledTimes(1);
       const selected = [
         ...view.container.querySelectorAll<HTMLElement>('[data-slot="choice-card"]'),
-      ].find((card) => card.textContent?.includes("Only selected workspaces"))!;
+      ].find((card) => card.textContent?.includes("Selected workspaces"))!;
       expect(selected).not.toBeNull();
       await act(async () => selected.click());
       await flush();
@@ -1326,6 +1369,80 @@ describe("Codex account page", () => {
       await cleanup(view);
     }
   });
+
+  test("D-52: another workspace's own account says who shared it, and this workspace's admins can stop using it", async () => {
+    accounts = {
+      ...accounts,
+      source: { ...source, effectiveSource: "organization", workspaceAvailable: false },
+      accounts: [codexAccount({ source: "organization", ownerWorkspaceId: "workspace-b" })],
+    };
+    organizationWorkspaces = [
+      {
+        id: "workspace-a",
+        name: "Design preview",
+        personal: false,
+        canManage: true,
+        savedDefaultModel: null,
+      },
+      {
+        id: "workspace-b",
+        name: "Research",
+        personal: false,
+        canManage: false,
+        savedDefaultModel: null,
+      },
+    ];
+    const view = await render();
+    try {
+      expect(rowsNamed(view.container, "Team plan")[0]!.textContent).toContain(
+        "Shared by Research",
+      );
+      expect(view.container.textContent).not.toContain("Shared by Acme");
+      await act(async () =>
+        view.container.querySelector<HTMLElement>("[data-row-action]")!.click(),
+      );
+      await flush();
+      const text = view.container.textContent ?? "";
+      expect(text).toContain(
+        "Shared with Design preview by Research. That workspace's admins manage it.",
+      );
+      expect(text).not.toContain("Managed by the owners and admins of Acme.");
+      expect(button(view.container, /Disconnect/)).toBeUndefined();
+      expect(button(view.container, /Rename/)).toBeUndefined();
+      // Its access belongs to Research: never read from here.
+      expect(client.getModelConnectionAccess).not.toHaveBeenCalled();
+      await act(async () => button(view.container, /Remove from this workspace/)!.click());
+      expect(client.removeModelConnectionFromWorkspace).not.toHaveBeenCalled();
+      expect(view.container.textContent).toContain("Stop using Team plan in Design preview?");
+      expect(view.container.textContent).toContain(
+        "Only the admins of Research or the organization can share it here again.",
+      );
+      await act(async () =>
+        view.container.querySelector<HTMLButtonElement>("[data-confirm]")!.click(),
+      );
+      await flush();
+      expect(client.removeModelConnectionFromWorkspace).toHaveBeenCalledWith({
+        workspaceId: "workspace-a",
+        kind: "codex",
+        connectionId: "acct-1",
+      });
+      expect(view.container.textContent).toContain(ACCOUNTS_SECTION);
+    } finally {
+      await cleanup(view);
+    }
+    // Someone who can't change this workspace's settings can't remove it.
+    const readOnly = await render(false);
+    try {
+      await act(async () =>
+        readOnly.container.querySelector<HTMLElement>("[data-row-action]")!.click(),
+      );
+      await flush();
+      expect(readOnly.container.textContent).toContain("Shared by Research");
+      expect(button(readOnly.container, /Remove from this workspace/)).toBeUndefined();
+    } finally {
+      await cleanup(readOnly);
+    }
+  });
 });
 
 describe("Connect Codex", () => {
@@ -1738,15 +1855,15 @@ describe("One Models page for the organization and the workspace", () => {
       expect(text).toContain(
         "Sign in with the ChatGPT account whose plan pays for work across Acme.",
       );
-      expect(text).toContain("Which workspaces can use it");
+      expect(text).toContain("Available in");
       expect(text).toContain("All workspaces in Acme");
-      expect(text).toContain("including new ones and everyone's Personal workspace");
+      expect(text).toContain("Members can use it in their own Personal workspace");
       expect(
         view.container.querySelector<HTMLElement>('[data-slot=choice-card][data-state="checked"]')
           ?.textContent,
       ).toContain("All workspaces in Acme");
       // Owning it by this workspace is not a choice here: it would read the
-      // same as "Only selected workspaces" with this one ticked.
+      // same as "Selected workspaces" with this one ticked.
       expect(text).not.toContain("Advanced");
       expect(text).not.toContain("Connect for Design preview only");
     } finally {
@@ -1754,7 +1871,7 @@ describe("One Models page for the organization and the workspace", () => {
     }
   });
 
-  test("Only selected workspaces lists the organization's workspaces and Personal workspaces as one choice", async () => {
+  test("Selected workspaces lists the organization's workspaces and Personal workspaces as one choice", async () => {
     organizationAdmin = true;
     routeOrganizationReads();
     const view = await render();
@@ -1763,7 +1880,7 @@ describe("One Models page for the organization and the workspace", () => {
       await flush();
       const selected = [
         ...view.container.querySelectorAll<HTMLElement>("[data-slot=choice-card]"),
-      ].find((card) => card.textContent?.includes("Only selected workspaces"))!;
+      ].find((card) => card.textContent?.includes("Selected workspaces"))!;
       await act(async () => selected.click());
       await flush();
       const text = view.container.textContent ?? "";
@@ -1788,11 +1905,11 @@ describe("One Models page for the organization and the workspace", () => {
       await act(async () => navigateTo({ view: "connect-org:claude_subscription" }));
       await flush();
       const everyWorkspaceText = view.container.textContent ?? "";
-      expect(everyWorkspaceText).toContain("including new ones and everyone's Personal workspace");
+      expect(everyWorkspaceText).toContain("Members can use it in their own Personal workspace");
       expect(everyWorkspaceText).not.toContain("can't be used in Personal workspaces");
       const selected = [
         ...view.container.querySelectorAll<HTMLElement>("[data-slot=choice-card]"),
-      ].find((card) => card.textContent?.includes("Only selected workspaces"))!;
+      ].find((card) => card.textContent?.includes("Selected workspaces"))!;
       await act(async () => selected.click());
       await flush();
       const personal = [
@@ -1808,33 +1925,36 @@ describe("One Models page for the organization and the workspace", () => {
     }
   });
 
-  test("an organization key can't be offered to Personal workspaces, and its choice is saved after connecting", async () => {
+  test("an organization key is offered to Personal workspaces like a subscription, and its choice is saved after connecting", async () => {
     organizationAdmin = true;
     routeOrganizationReads();
     client.getModelConnectionAccess.mockImplementation(async () => ({
       policy: openPolicy,
       workspaces: [],
       models: [],
-      personalWorkspacesSupported: false,
+      personalWorkspacesSupported: true,
     }));
     const view = await render();
     try {
       await act(async () => navigateTo({ view: "connect-org:openrouter" }));
       await flush();
-      expect(view.container.textContent).toContain(
-        "Organization API keys can't be used in Personal workspaces.",
-      );
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Members can use it in their own Personal workspace");
+      expect(text).not.toContain("can't be used in Personal workspaces");
+      expect(text).not.toContain("can't be used there");
       const selected = [
         ...view.container.querySelectorAll<HTMLElement>("[data-slot=choice-card]"),
-      ].find((card) => card.textContent?.includes("Only selected workspaces"))!;
+      ].find((card) => card.textContent?.includes("Selected workspaces"))!;
       await act(async () => selected.click());
       await flush();
       const personal = [
         ...view.container.querySelectorAll<HTMLElement>("[role=checkbox], input[type=checkbox]"),
-      ].find((box) => box.closest("div")?.textContent?.includes("Personal workspaces"));
+      ].find((box) => box.closest("div")?.textContent?.includes("Personal workspaces"))!;
       expect(
-        personal?.hasAttribute("disabled") || personal?.getAttribute("aria-disabled") === "true",
-      ).toBe(true);
+        personal.hasAttribute("disabled") || personal.getAttribute("aria-disabled") === "true",
+      ).toBe(false);
+      await act(async () => personal.click());
+      await flush();
       const input = view.container.querySelector<HTMLInputElement>(
         'input[aria-label="OpenRouter API key"], input[aria-label*="OpenRouter"]',
       )!;
@@ -1863,14 +1983,14 @@ describe("One Models page for the organization and the workspace", () => {
           kind: "openrouter",
           connectionId: "current",
         },
-        { ...openPolicy, allowedWorkspaces: ["workspace-a"], allowPersonalWorkspaces: false },
+        { ...openPolicy, allowedWorkspaces: ["workspace-a"], allowPersonalWorkspaces: true },
       );
     } finally {
       await cleanup(view);
     }
   });
 
-  test("an organization key whose workspaces leave this one out is not available here, and a Personal workspace says shared workspaces only", async () => {
+  test("an organization key whose workspaces leave this one out is not available here, a Personal workspace included", async () => {
     organizationAdmin = true;
     routeOrganizationReads();
     client.getOrganizationModelProviderConnection.mockImplementation(async (...args: unknown[]) =>
@@ -1880,7 +2000,7 @@ describe("One Models page for the organization and the workspace", () => {
       policy: { ...openPolicy, allowedWorkspaces: ["workspace-b"], allowPersonalWorkspaces: false },
       workspaces: [],
       models: [],
-      personalWorkspacesSupported: false,
+      personalWorkspacesSupported: true,
     }));
     const view = await render();
     try {
@@ -1893,7 +2013,8 @@ describe("One Models page for the organization and the workspace", () => {
     } finally {
       await cleanup(view);
     }
-    // Organization keys serve shared workspaces only.
+    // A Personal workspace is left out the same way, by the key's own
+    // Personal workspaces switch.
     personalWorkspace = true;
     const personal = await render();
     try {
@@ -1901,9 +2022,27 @@ describe("One Models page for the organization and the workspace", () => {
       const row = [
         ...personal.container.querySelectorAll<HTMLElement>("[data-slot=list-row]"),
       ].find((candidate) => candidate.textContent?.includes("OpenRouter"))!;
-      expect(row.textContent).toContain("Shared workspaces only");
+      expect(row.textContent).toContain("Not available here");
+      expect(row.textContent).not.toContain("Shared workspaces only");
     } finally {
       await cleanup(personal);
+    }
+    // With the switch on, the key serves the Personal workspace.
+    client.getModelConnectionAccess.mockImplementation(async () => ({
+      policy: { ...openPolicy, allowedWorkspaces: ["workspace-b"], allowPersonalWorkspaces: true },
+      workspaces: [],
+      models: [],
+      personalWorkspacesSupported: true,
+    }));
+    const reached = await render();
+    try {
+      await flush();
+      const row = [...reached.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].find(
+        (candidate) => candidate.textContent?.includes("OpenRouter"),
+      )!;
+      expect(row.textContent).not.toContain("Not available here");
+    } finally {
+      await cleanup(reached);
       client.getOrganizationModelProviderConnection.mockImplementation(async () => null);
     }
   });
@@ -1921,20 +2060,12 @@ describe("One Models page for the organization and the workspace", () => {
     try {
       await act(async () => navigateTo({ view: "connect-org:opper" }));
       await flush();
-      expect(view.container.textContent).toContain(
-        "Organization API keys can't be used in Personal workspaces.",
-      );
+      expect(view.container.textContent).not.toContain("can't be used in Personal workspaces");
       const selected = [
         ...view.container.querySelectorAll<HTMLElement>("[data-slot=choice-card]"),
-      ].find((card) => card.textContent?.includes("Only selected workspaces"))!;
+      ].find((card) => card.textContent?.includes("Selected workspaces"))!;
       await act(async () => selected.click());
       await flush();
-      const personal = [
-        ...view.container.querySelectorAll<HTMLElement>("[role=checkbox], input[type=checkbox]"),
-      ].find((box) => box.closest("div")?.textContent?.includes("Personal workspaces"));
-      expect(
-        personal?.hasAttribute("disabled") || personal?.getAttribute("aria-disabled") === "true",
-      ).toBe(true);
       const input = view.container.querySelector<HTMLInputElement>(
         'input[aria-label="Organization Opper API key"]',
       )!;
@@ -2225,6 +2356,37 @@ describe("One Models page for the organization and the workspace", () => {
     }
   });
 
+  test("a Personal workspace shows its rules and Codex's switch exactly when its owner can change them", async () => {
+    personalWorkspace = true;
+    // The server says its owner, acting as themselves, can change them.
+    const owner = await render();
+    try {
+      const text = owner.container.textContent ?? "";
+      expect(text).toContain("Using subscriptions");
+      expect(text).toContain("Your Personal workspace uses the defaults for every rule.");
+      expect(text).toContain("Turn off Codex");
+    } finally {
+      await cleanup(owner);
+    }
+    // Otherwise (for example a local Personal workspace) it follows the organization.
+    const settings = client.getWorkspaceModelAccountSettings.getMockImplementation()!;
+    client.getWorkspaceModelAccountSettings.mockImplementation(async () => ({
+      ...(await settings()),
+      canEdit: false,
+    }));
+    const { clearSharedQueries } = await import("@opengeni/react/app/lib/shared-query");
+    clearSharedQueries(client);
+    const follower = await render();
+    try {
+      const text = follower.container.textContent ?? "";
+      expect(text).not.toContain("Using subscriptions");
+      expect(text).not.toContain("Turn off Codex");
+    } finally {
+      await cleanup(follower);
+      client.getWorkspaceModelAccountSettings.mockImplementation(settings);
+    }
+  });
+
   // A regular organization member owns their Personal workspace without
   // `workspace:admin` there; the API refuses the workspace's scope (403), so
   // their Claude subscription is connected as their own.
@@ -2342,7 +2504,7 @@ describe("One Models page for the organization and the workspace", () => {
       expect(view.container.textContent).toContain(
         "It will belong to Design preview: everyone here can use it. Design preview's admins and Acme's owners and admins can change or remove it.",
       );
-      expect(view.container.textContent).not.toContain("Which workspaces can use it");
+      expect(view.container.textContent).not.toContain("Available in");
     } finally {
       await cleanup(view);
     }
@@ -2365,7 +2527,7 @@ describe("One Models page for the organization and the workspace", () => {
     },
   ];
   const OWN_NOTE =
-    "It will be yours: it pays for your work in your Personal workspace and in chats you keep to yourself. Nobody else can use it.";
+    "It will be yours. It pays for your Personal workspace and for the messages you send in Design preview, where it starts turned on. Nobody else can use it.";
 
   test("a shared workspace's member connects their own subscriptions right here", async () => {
     workspaceSettingsAdmin = false;
@@ -2538,6 +2700,17 @@ describe("One Models page for the organization and the workspace", () => {
         account: `claude:${ownClaudeId}`,
       });
       expect(view.container.querySelector("h1")?.textContent).toBe("My Claude");
+      // Its page lists where it works for their own messages, asked from this workspace.
+      expect(client.getOwnResourceReach).toHaveBeenCalledWith("workspace-a", {
+        resourceKind: "subscription_connection",
+        resourceId: ownClaudeId,
+      });
+      expect(view.container.textContent).toContain("Where it works");
+      expect(
+        view.container
+          .querySelector('[aria-label="Use My Claude in Design preview"]')
+          ?.getAttribute("aria-checked"),
+      ).toBe("true");
       await act(async () => navigateTo({ account: "codex:own-codex" }));
       await flush();
       expect(view.container.querySelector("h1")?.textContent).toBe("My ChatGPT");
@@ -2556,6 +2729,7 @@ describe("One Models page for the organization and the workspace", () => {
       accountId: "organization-a",
       workspaceId,
       subjectId: "user:member",
+      principalKind: "human_session",
       permissions,
     });
     const previous = { workspaces: context.workspaces, accessContext: context.accessContext };
@@ -2571,6 +2745,7 @@ describe("One Models page for the organization and the workspace", () => {
         },
       ];
       context.accessContext = {
+        subjectId: "user:member",
         accountGrants: [{ accountId: "organization-a", permissions: [] }],
         workspaceGrants: [
           memberGrant("workspace-a", sharedPermissions),
@@ -2659,6 +2834,22 @@ describe("One Models page for the organization and the workspace", () => {
       try {
         expect(view.container.textContent).toContain("Only its workspace admins");
         expect(button(view.container, /Connect provider/)).toBeUndefined();
+      } finally {
+        await cleanup(view);
+      }
+
+      // A member who can start chats there opens it for its custom models,
+      // even without connections:write, as the server allows.
+      setAccess(["workspace:read", "sessions:create"]);
+      view = await mount();
+      try {
+        expect(view.container.textContent).not.toContain("Only its workspace admins");
+        expect(button(view.container, /Connect provider/)).toBeUndefined();
+        await act(async () => navigateTo({}));
+        await flush();
+        const row = rowsNamed(view.container, "Design preview")[0];
+        expect(row?.textContent).toContain("Custom models");
+        expect(row?.textContent).not.toContain("your own subscriptions");
       } finally {
         await cleanup(view);
       }
@@ -2762,9 +2953,11 @@ describe("One Models page for the organization and the workspace", () => {
       await act(async () => navigateTo({ view: "connect:codex" }));
       await flush();
       const text = view.container.textContent ?? "";
-      expect(text).toContain("This account will belong to Design preview only.");
+      expect(text).toContain(
+        "This account will belong to Design preview. Use it for Codex Apps or to redeem usage limit resets. Design preview's admins can also share it with other workspaces they manage.",
+      );
       expect(text).toContain("Codex Apps");
-      expect(text).not.toContain("Which workspaces can use it");
+      expect(text).not.toContain("Available in");
     } finally {
       await cleanup(view);
     }
@@ -2799,7 +2992,7 @@ describe("One Models page for the organization and the workspace", () => {
     }
   });
 
-  test("in a Personal workspace an organization key step points to a key for that workspace", async () => {
+  test("in a Personal workspace an organization key step offers Personal workspaces, like any workspace", async () => {
     organizationAdmin = true;
     personalWorkspace = true;
     routeOrganizationReads();
@@ -2807,21 +3000,30 @@ describe("One Models page for the organization and the workspace", () => {
     try {
       await act(async () => navigateTo({ view: "connect-org:openrouter" }));
       await flush();
-      expect(view.container.textContent).toContain("To use a key in your Personal workspace,");
-      await act(async () =>
-        button(view.container, "connect it for your Personal workspace")!.click(),
-      );
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Available in");
+      expect(text).toContain("Members can use it in their own Personal workspace");
+      expect(text).not.toContain("To use a key in your Personal workspace,");
+      const selected = [
+        ...view.container.querySelectorAll<HTMLElement>("[data-slot=choice-card]"),
+      ].find((card) => card.textContent?.includes("Selected workspaces"))!;
+      await act(async () => selected.click());
       await flush();
-      expect(lastNavigation?.search).toMatchObject({ view: "connect:openrouter" });
-      expect(view.container.textContent).toContain(
-        "This key will belong to your Personal workspace, so only you use it.",
-      );
+      // Opened from a Personal workspace, the Personal workspaces choice starts on.
+      const personal = [
+        ...view.container.querySelectorAll<HTMLElement>("[role=checkbox], input[type=checkbox]"),
+      ].find((box) => box.closest("div")?.textContent?.includes("Personal workspaces"))!;
+      expect(
+        personal.getAttribute("aria-checked") === "true" ||
+          (personal as HTMLInputElement).checked === true ||
+          personal.getAttribute("data-state") === "checked",
+      ).toBe(true);
     } finally {
       await cleanup(view);
     }
   });
 
-  test("in a Personal workspace Connect provider opens the key form for that workspace", async () => {
+  test("in a Personal workspace Connect provider connects keys for the organization, like any workspace", async () => {
     organizationAdmin = true;
     personalWorkspace = true;
     routeOrganizationReads();
@@ -2830,65 +3032,52 @@ describe("One Models page for the organization and the workspace", () => {
       await act(async () => button(view.container, /Connect provider/)!.click());
       await flush();
       expect(view.container.querySelector("h1")?.textContent).toBe("Connect provider");
-      for (const name of ["OpenRouter", "Vercel AI Gateway", "Opper"]) {
+      for (const name of ["OpenRouter", "Vercel AI Gateway", "Opper", "Azure OpenAI"]) {
         const row = rowsNamed(view.container, name)[0]!;
-        expect(row.textContent).toContain("For your Personal workspace");
+        expect(row.textContent).not.toContain("For your Personal workspace");
         expect(row.textContent).not.toContain("Not used in Personal workspaces");
       }
-      // An organization OpenAI key still serves shared workspaces only.
-      expect(rowsNamed(view.container, "Azure OpenAI")[0]?.textContent).toContain(
-        "Not used in Personal workspaces",
-      );
       const openRouter = rowsNamed(view.container, "OpenRouter")[0]!;
       await act(async () => openRouter.querySelector<HTMLElement>("[data-row-action]")!.click());
       await flush();
-      expect(lastNavigation?.search).toMatchObject({ view: "connect:openrouter" });
-      const text = view.container.textContent ?? "";
-      expect(text).toContain(
-        "This key will belong to your Personal workspace, so only you use it.",
-      );
-      expect(text).not.toContain("Which workspaces can use it");
+      expect(lastNavigation?.search).toMatchObject({ view: "connect-org:openrouter" });
+      expect(view.container.textContent).toContain("Available in");
     } finally {
       await cleanup(view);
     }
   });
 
-  test("in a Personal workspace a connected key opens that workspace's key, not the organization's", async () => {
+  test("in a Personal workspace an organization key's page still offers a key of its own", async () => {
     organizationAdmin = true;
     personalWorkspace = true;
     routeOrganizationReads();
-    client.listConnections.mockImplementation(async () => [
-      {
-        id: "66666666-6666-4666-8666-666666666666",
-        accountId: "organization-a",
-        workspaceId: "workspace-a",
-        subjectId: null,
-        providerDomain: "openrouter.ai",
-        kind: "api_key",
-        status: "active",
-        grantedScopes: [],
-        expiresAt: null,
-        lastRefreshAt: null,
-        lastUsedAt: null,
-        lastError: null,
-        version: 1,
-        metadata: { credentialRole: "openrouter", credentialLabel: "OpenRouter" },
-        createdBySubjectId: "user:fixture-admin",
-        updatedBySubjectId: "user:fixture-admin",
-        createdAt: "2026-08-27T12:00:00.000Z",
-        updatedAt: "2026-08-27T12:00:00.000Z",
-      } as ConnectionMetadata,
-    ]);
+    client.getModelConnectionAccess.mockImplementation(async () => ({
+      policy: openPolicy,
+      workspaces: [],
+      models: [],
+      personalWorkspacesSupported: true,
+    }));
+    client.getOrganizationModelProviderConnection.mockImplementation(async (...args: unknown[]) =>
+      args[1] === "openrouter" ? { status: "active", version: 1 } : null,
+    );
     const view = await render();
     try {
-      await act(async () => navigateTo({ view: "connect" }));
+      await act(async () => navigateTo({ account: "org:gateway:openrouter" }));
       await flush();
-      const openRouter = rowsNamed(view.container, "OpenRouter")[0]!;
-      await act(async () => openRouter.querySelector<HTMLElement>("[data-row-action]")!.click());
+      const text = view.container.textContent ?? "";
+      expect(text).toContain(
+        "To pay with your own OpenRouter key, connect one just for your Personal workspace.",
+      );
+      expect(text).not.toContain("can't be used in Personal workspaces");
+      await act(async () => button(view.container, "Connect for your Personal workspace")!.click());
       await flush();
-      expect(lastNavigation?.search).toMatchObject({ account: "gateway:openrouter" });
+      expect(lastNavigation?.search).toMatchObject({ view: "connect:openrouter" });
+      expect(view.container.textContent).toContain(
+        "This key will belong to your Personal workspace, so only you use it.",
+      );
     } finally {
       await cleanup(view);
+      client.getOrganizationModelProviderConnection.mockImplementation(async () => null);
     }
   });
 

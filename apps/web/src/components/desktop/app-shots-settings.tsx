@@ -209,7 +209,7 @@ export function AppShotsSettings({ className }: { className?: string }) {
                   control={
                     permission.granted ? (
                       <span className="inline-flex items-center gap-1.5 text-sm text-fg-muted">
-                        <CheckIcon className="size-4 text-success" aria-hidden />
+                        <CheckIcon className="size-4 text-status-success" aria-hidden />
                         Allowed
                       </span>
                     ) : (

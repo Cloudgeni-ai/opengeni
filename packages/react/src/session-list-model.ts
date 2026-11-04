@@ -474,21 +474,62 @@ export function recentSessionsForHome<T extends SessionListRow>(
 ): T[] {
   // Sub-agent sessions are reached from their parent. In a workspace that runs
   // many sub-agents they would otherwise take every slot (they run often) and
-  // push the person's own conversations out of the list.
+  // push the person's own conversations out of the list. A pinned one stays:
+  // pinning says the person works with it as an agent of its own.
   const ordinary = sessions.filter((session) => !session.pinned && !session.parentSessionId);
   const { running, grouped } = groupSessionsForRail(t, ordinary, now);
-  const topLevelPinned = pinned.filter((session) => !session.parentSessionId);
-  return [...topLevelPinned, ...running, ...grouped.flatMap((bucket) => bucket.sessions)].slice(
-    0,
-    limit,
-  );
+  return [...pinned, ...running, ...grouped.flatMap((bucket) => bucket.sessions)].slice(0, limit);
+}
+
+/** A chat the person opened in this app, as the app remembers it across reloads. */
+export type OpenedChat = Readonly<{ id: string; title: string; openedAt: number }>;
+
+/** One row of the home screen's recent sessions: a listed session, or a chat known only as opened. */
+export type RecentHomeEntry<T> =
+  | Readonly<{ kind: "session"; session: T }>
+  | Readonly<{ kind: "opened"; chat: OpenedChat }>;
+
+/**
+ * The home screen's recent sessions, led by the chats the person opened here
+ * most recently (newest first), then `recentSessionsForHome`'s pins, running
+ * and recency rows. In a busy workspace, other running sessions would
+ * otherwise fill every slot and hide the chat they just left. An opened chat
+ * the list also holds shows as that row, with its live status.
+ */
+export function recentSessionsWithOpened<T extends SessionListRow>(
+  t: OpenGeniText,
+  sessions: T[],
+  pinned: T[],
+  opened: readonly OpenedChat[],
+  limit = 6,
+  now: Date = new Date(),
+): RecentHomeEntry<T>[] {
+  const listed = new Map<string, T>();
+  for (const session of [...sessions, ...pinned]) listed.set(session.id, session);
+  const entries: RecentHomeEntry<T>[] = [];
+  const seen = new Set<string>();
+  for (const chat of opened) {
+    if (entries.length >= limit) break;
+    if (seen.has(chat.id)) continue;
+    seen.add(chat.id);
+    const session = listed.get(chat.id);
+    entries.push(session ? { kind: "session", session } : { kind: "opened", chat });
+  }
+  for (const session of recentSessionsForHome(t, sessions, pinned, limit, now)) {
+    if (entries.length >= limit) break;
+    if (seen.has(session.id)) continue;
+    seen.add(session.id);
+    entries.push({ kind: "session", session });
+  }
+  return entries;
 }
 
 /**
  * The phone home screen's chats in two sections: every pinned conversation,
  * then the most recently used others (running first, then by recency), so
  * pins never push recent work off the screen. Sub-agent sessions are reached
- * from their parent and are left out of both.
+ * from their parent and are left out of the recent ones; a pinned sub-agent
+ * session is pinned like any other.
  */
 export function homeSessionSections<T extends SessionListRow>(
   t: OpenGeniText,
@@ -500,7 +541,7 @@ export function homeSessionSections<T extends SessionListRow>(
   const ordinary = sessions.filter((session) => !session.pinned && !session.parentSessionId);
   const { running, grouped } = groupSessionsForRail(t, ordinary, now);
   return {
-    pinned: pinned.filter((session) => !session.parentSessionId),
+    pinned,
     recent: [...running, ...grouped.flatMap((bucket) => bucket.sessions)].slice(0, recentLimit),
   };
 }

@@ -96,6 +96,32 @@ export function approvalAnswerLabels(
 }
 
 /**
+ * The facts the server read about what an app action changes, carried beside
+ * the approval's display (`targetFacts`), bounded as the review saves them.
+ */
+function approvalTargetFacts(approval: PendingApproval): {
+  targetFacts?: Array<{ label: string; value: string }>;
+} {
+  const raw = approval.raw;
+  const list =
+    raw && typeof raw === "object" && Array.isArray((raw as { targetFacts?: unknown }).targetFacts)
+      ? ((raw as { targetFacts: unknown[] }).targetFacts as unknown[])
+      : [];
+  const targetFacts = list.slice(0, 12).flatMap((fact) => {
+    const { label, value } = (fact ?? {}) as { label?: unknown; value?: unknown };
+    return typeof label === "string" &&
+      typeof value === "string" &&
+      label.trim() &&
+      value.trim() &&
+      label.length <= 64 &&
+      value.length <= 256
+      ? [{ label: label.trim(), value: value.trim() }]
+      : [];
+  });
+  return targetFacts.length > 0 ? { targetFacts } : {};
+}
+
+/**
  * The review a pending approval shows from its own arguments, before (or
  * without) the server's versioned review. It never changes what is approved.
  */
@@ -104,10 +130,12 @@ export function pendingApprovalReview(
   options: { formatToolName: (name: string) => string; approveLabel: string },
 ): ToolActionReview {
   const toolName = approvalToolName(approval);
-  const action = toolReviewAction(toolName, approval.arguments, {
-    kind: "generic",
+  const context = {
+    kind: "generic" as const,
     title: approval.display?.title ?? options.formatToolName(toolName),
-  });
+    ...approvalTargetFacts(approval),
+  };
+  const action = toolReviewAction(toolName, approval.arguments, context);
   return {
     version: 1,
     id: approval.id,
@@ -116,7 +144,7 @@ export function pendingApprovalReview(
     status: "pending",
     ...action,
     ...(approval.display?.accountLabel ? { accountLabel: approval.display.accountLabel } : {}),
-    ...toolReviewFields(approval.arguments, undefined, toolName),
+    ...toolReviewFields(approval.arguments, context, toolName),
     reason: "",
     createdAt: "",
     updatedAt: "",

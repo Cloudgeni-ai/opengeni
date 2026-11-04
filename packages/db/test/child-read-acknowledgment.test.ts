@@ -656,6 +656,10 @@ describe("child read acknowledgment on parent consumption", () => {
       account_id, activation_version, inventory_digest, parity_digest, activated_by
     ) values (${grant.accountId}, 1, ${"a".repeat(64)}, ${"b".repeat(64)}, 'historical-read-test')
       on conflict (account_id) do nothing`;
+    // An owner whose Personal workspace predates its row (the 1232 backfill has
+    // not reached it yet) is still accepted through the pointer.
+    await shared.admin`delete from workspace_memberships
+      where workspace_id=${grant.workspaceId} and subject_id=${grant.subjectId}`;
     const [row] = await shared.admin`select count(*)::int as count from workspace_memberships
       where workspace_id=${grant.workspaceId} and subject_id=${grant.subjectId}`;
     expect(row!.count).toBe(0);

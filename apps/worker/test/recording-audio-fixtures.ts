@@ -55,7 +55,24 @@ export function adtsFrames(bytes: Uint8Array): Uint8Array[] {
   return frames;
 }
 
+/**
+ * A WebM/Opus recording `seconds` long that is a tone during each
+ * `[from, to)` second range and digital silence the rest of the time.
+ */
+export function gatedOpusWebm(seconds: number, loud: Array<[number, number]>): Uint8Array {
+  const gate = loud.map(([from, to]) => `between(t,${from},${to})`).join("+") || "0";
+  return lavfi(
+    `aevalsrc=exprs='0.5*sin(2*PI*440*t)*(${gate})':s=48000:d=${seconds}`,
+    ["-c:a", "libopus", "-b:a", "32k", "-ac", "1", "-f", "webm"],
+    "webm",
+  );
+}
+
 function tone(seconds: number, frequency: number, codec: string[], extension: string): Uint8Array {
+  return lavfi(`sine=frequency=${frequency}:duration=${seconds}`, codec, extension);
+}
+
+function lavfi(source: string, codec: string[], extension: string): Uint8Array {
   const directory = mkdtempSync(join(tmpdir(), "recording-audio-test-"));
   try {
     const output = join(directory, `tone.${extension}`);
@@ -66,7 +83,7 @@ function tone(seconds: number, frequency: number, codec: string[], extension: st
       "-f",
       "lavfi",
       "-i",
-      `sine=frequency=${frequency}:duration=${seconds}`,
+      source,
       ...codec,
       output,
     ]);

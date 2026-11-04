@@ -324,12 +324,11 @@ describe("managed sign-up funnel metrics", () => {
       const accountId = crypto.randomUUID();
       google.getUserInfo = async () => ({
         user: {
-          id: accountId,
           name: "Provider Human",
           email: `social-${accountId}@example.test`,
           emailVerified: true,
         },
-        data: {},
+        data: { sub: accountId },
       });
       const start = await app.request("/v1/auth/sign-in/social", {
         method: "POST",

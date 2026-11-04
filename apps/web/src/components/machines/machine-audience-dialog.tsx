@@ -47,6 +47,12 @@ export interface MachineAudienceDialogProps {
   subjectId: string;
   /** Workspace admins can share a machine and pick another owner. */
   workspaceAdmin: boolean;
+  /**
+   * Whether the person may share the machine with the whole workspace: a
+   * workspace admin, or the owner of a Personal workspace (still only them).
+   * Defaults to `workspaceAdmin`. Mirrors the API's audience check.
+   */
+  canShareWithWorkspace?: boolean;
   /** A personal workspace has nobody else to share with. */
   personalWorkspace?: boolean;
   open: boolean;
@@ -117,13 +123,6 @@ export function machineAudienceSummaryLines(
       `${count(summary.stoppedCommands, "agent command", "agent commands")} running in those chats ${summary.stoppedCommands === 1 ? "stops" : "stop"}.`,
     );
   }
-  if (summary.schedulesMadeOnlyMe > 0) {
-    lines.push(
-      summary.schedulesMadeOnlyMe === 1
-        ? `${owner} Workspace automation on it becomes Only me.`
-        : `${owner} ${summary.schedulesMadeOnlyMe} Workspace automations on it become Only me.`,
-    );
-  }
   if (summary.schedulesPaused > 0) {
     lines.push(
       `${count(summary.schedulesPaused, "automation pauses", "automations pause")}. Resume ${summary.schedulesPaused === 1 ? "it" : "them"} after choosing another machine.`,
@@ -147,9 +146,6 @@ function itemOutcome(item: MachineAudienceItem): string {
       parts.push(
         item.visibility === "workspace_shared" ? "Stays here, still shared" : "Stays here",
       );
-      break;
-    case "make_only_me":
-      parts.push("Becomes Only me");
       break;
     case "pause":
       parts.push("Pauses");
@@ -217,6 +213,7 @@ export function MachineAudienceDialog({
   machine,
   subjectId,
   workspaceAdmin,
+  canShareWithWorkspace = workspaceAdmin,
   personalWorkspace = false,
   open,
   onOpenChange,
@@ -235,7 +232,7 @@ export function MachineAudienceDialog({
   const [members, setMembers] = useState<WorkspaceMember[] | null>(null);
 
   const changing = target !== current;
-  const sharingNeedsAdmin = changing && target === "workspace" && !workspaceAdmin;
+  const sharingNeedsAdmin = changing && target === "workspace" && !canShareWithWorkspace;
   const pickOwner = changing && target === "only_me" && workspaceAdmin && !personalWorkspace;
 
   // Admins can make the machine someone else's: list the workspace's people.

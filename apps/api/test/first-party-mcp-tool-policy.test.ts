@@ -533,7 +533,7 @@ describe("first-party MCP tool visibility policy", () => {
       expect(description(name)).toContain("payload.finalAnswer");
     }
     expect(description("wait_for_input")).toContain(
-      "No preliminary short wait or status recheck is required",
+      "no preliminary short wait or status recheck is required",
     );
     expect(description("wait_for_input")).toContain(
       "potentially hours or days within the schema limits",
@@ -574,6 +574,9 @@ describe("first-party MCP tool visibility policy", () => {
       "Work already in flight or a meaningful timed recheck",
     );
     expect(registered.goal_pause!.description).toContain("Tool approvals remain human-only");
+    expect(registered.goal_pause!.description).toContain(
+      "is not by itself a reason to pause: if you still pause after trying those alternatives, name the ones you tried",
+    );
     expect(registered.goal_resume!.description).toContain(
       "A user's question alone is not a reason to resume",
     );

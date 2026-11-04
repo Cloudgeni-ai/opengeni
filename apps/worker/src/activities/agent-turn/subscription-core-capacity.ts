@@ -245,9 +245,11 @@ export async function selectCoreSubscriptionTurnCapacity(
           provider.displayName,
         );
       case "wait":
-        // Maintenance never parks: as on the legacy path, compaction is
-        // cancelled with its request preserved and runs again with the
-        // session's next work, instead of holding a capacity waiter.
+        // Maintenance never parks: compaction is cancelled instead of holding
+        // a capacity waiter. An operator request is preserved and runs again
+        // with the session's next work; an automatic `proactive` request is
+        // dropped, so it cannot keep winning claims ahead of pending input
+        // with nothing to wake it when capacity returns.
         if (turn.source === "compaction") return await deferCoreCompaction(deps, placement);
         // Park the same turn on the durable core waiter (EP-T09); it resumes
         // when placement can serve it again (a reset, a wake or a timer).
@@ -298,7 +300,12 @@ export async function selectCoreSubscriptionTurnCapacity(
   }
 }
 
-/** The legacy compaction capacity outcome (`requestPreserved`), on a core wait. */
+/**
+ * The compaction capacity outcome on a core wait. The settlement decides from
+ * the request label under the session lock: an operator request is preserved
+ * (`requestPreserved: true`), a `proactive` one is dropped with a
+ * `capacity_unavailable` skipped landmark (`requestPreserved: false`).
+ */
 async function deferCoreCompaction(
   deps: CapacityPhaseDeps,
   wait: WaitPlacement,
@@ -320,6 +327,7 @@ async function deferCoreCompaction(
     turnStatus: "cancelled",
     sessionStatus: "idle",
     activeTurnId: null,
+    dropProactiveCompactionRequest: true,
   });
   if (!settled) return { exit: claimedResult({ status: "cancelled" }) };
   control.turnMetricOutcome = "cancelled";

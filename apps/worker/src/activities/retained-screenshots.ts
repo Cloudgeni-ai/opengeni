@@ -979,6 +979,129 @@ export function collectRetainedScreenshotRunStateReceipts(
   return target;
 }
 
+/** Tool-result images a model history always keeps inline: the newest few. */
+export const HISTORY_IMAGES_KEPT = 3;
+/**
+ * Older images are replaced in batches of this many, so the history prefix the
+ * provider has cached changes once per batch rather than at every new image.
+ * Each batch change makes the provider re-read everything after the first newly
+ * omitted image once, so a larger batch spreads that cost over more images.
+ */
+export const HISTORY_IMAGE_OMISSION_BATCH = 5;
+
+/** How many of `total` tool-result images, oldest first, a history omits. */
+export function historyImagesToOmit(
+  total: number,
+  kept: number = HISTORY_IMAGES_KEPT,
+  batch: number = HISTORY_IMAGE_OMISSION_BATCH,
+): number {
+  const keep = Math.max(0, Math.floor(kept));
+  const step = Math.max(1, Math.floor(batch));
+  if (total <= keep) return 0;
+  return Math.floor((total - keep) / step) * step;
+}
+
+/**
+ * The model's copy of a history with older tool-result images replaced by a
+ * short note saying how to see them again. When it omits any, it keeps the
+ * newest images (between HISTORY_IMAGES_KEPT and HISTORY_IMAGES_KEPT +
+ * HISTORY_IMAGE_OMISSION_BATCH - 1 of them) and omits the rest in whole batches. Prepared once at the start of
+ * each turn attempt from the stored history, so every model call of a turn sees
+ * the same prefix, and the omitted set only grows, which keeps the provider's
+ * prompt cache valid between omission batches. Retained markers and inline
+ * images are both counted; user attachments and native `computer_call_result`
+ * screenshots are not touched (Opengeni's own browser and computer tool
+ * screenshots are function results and are omitted like any other). Stored history is never rewritten; omitted images are not read
+ * from storage.
+ */
+export function omitOlderHistoryImages(
+  history: Array<Record<string, unknown>>,
+  kept: number = HISTORY_IMAGES_KEPT,
+  batch: number = HISTORY_IMAGE_OMISSION_BATCH,
+): Array<Record<string, unknown>> {
+  const isOmittable = (item: Record<string, unknown>) =>
+    item.type !== "computer_call_result" && item.type !== "computer_call_output";
+  const directImage = (output: unknown) =>
+    isRetainedImageMarker(output) ||
+    (typeof output === "string" && output.startsWith("data:image/"));
+  const entryImage = (entry: unknown) =>
+    isRetainedImageMarker(historyEntryImage(entry)) || isInlineImageContent(entry);
+  let total = 0;
+  for (const item of history) {
+    if (!isOmittable(item)) continue;
+    if (directImage(item.output)) total += 1;
+    else for (const entry of historyOutputEntries(item) ?? []) if (entryImage(entry)) total += 1;
+  }
+  let remaining = historyImagesToOmit(total, kept, batch);
+  if (remaining === 0) return history;
+  const calls = new Map<string, { name: string; args: unknown }>();
+  const parseArgs = (args: unknown) => {
+    if (typeof args !== "string") return args;
+    try {
+      return JSON.parse(args) as unknown;
+    } catch {
+      return null;
+    }
+  };
+  for (const item of history) {
+    const callId = historyCallId(item);
+    if (callId && item.type === "function_call" && typeof item.name === "string") {
+      calls.set(callId, { name: item.name, args: parseArgs(item.arguments) });
+    }
+  }
+  const note = (callId: string | null) =>
+    omittedHistoryImageNote(callId ? calls.get(callId) : undefined);
+  return history.map((item) => {
+    if (remaining === 0 || !isOmittable(item)) return item;
+    const callId = historyCallId(item);
+    if (directImage(item.output)) {
+      remaining -= 1;
+      return { ...item, output: note(callId) };
+    }
+    const entries = historyOutputEntries(item);
+    if (!entries) return item;
+    let changed = false;
+    // One note per result: the first omitted image becomes the note and any
+    // further omitted image of the same result is dropped.
+    const output = entries.flatMap((entry) => {
+      if (remaining === 0 || !entryImage(entry)) return [entry];
+      remaining -= 1;
+      if (changed) return [];
+      changed = true;
+      return [{ type: "input_text", text: note(callId) }];
+    });
+    if (!changed) return item;
+    return {
+      ...item,
+      output: Array.isArray(item.output)
+        ? output
+        : { ...(item.output as Record<string, unknown>), content: output },
+    };
+  });
+}
+
+const OMITTED_IMAGE_PREFIX = "[An earlier image was omitted from the conversation to save context.";
+// Other tools may act (click, type, open) as well as capture, so the note
+// never suggests repeating the call.
+const OMITTED_IMAGE_NOTE = `${OMITTED_IMAGE_PREFIX} If you need the current state, take a fresh screenshot or observation instead of repeating an action.]`;
+
+function omittedHistoryImageNote(call: { name: string; args: unknown } | undefined): string {
+  if (!call) return OMITTED_IMAGE_NOTE;
+  const path =
+    call.args && typeof call.args === "object" && !Array.isArray(call.args)
+      ? (call.args as Record<string, unknown>).path
+      : undefined;
+  if (
+    call.name === "view_image" &&
+    typeof path === "string" &&
+    path.length > 0 &&
+    path.length <= 1024
+  ) {
+    return `${OMITTED_IMAGE_PREFIX} To see it again, call view_image with path ${JSON.stringify(path)}; it shows the file as it is now.]`;
+  }
+  return OMITTED_IMAGE_NOTE;
+}
+
 /**
  * Materialize canonical receipts to the exact SDK input_image data URL shape.
  * Missing/deleted/expired/corrupt bytes fail closed; no item is omitted,

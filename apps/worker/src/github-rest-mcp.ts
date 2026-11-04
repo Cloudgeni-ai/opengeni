@@ -1,18 +1,22 @@
 import type { Settings } from "@opengeni/config";
 import {
   mergeToolRefs,
+  resourcesIncludeRepository,
   type McpPersonalConnectionDelegation,
   type ResourceRef,
   type ToolRef,
 } from "@opengeni/contracts";
 import {
   isPersonalGitHubConnection,
+  PERSONAL_GITHUB_RECONNECT_MESSAGE,
   PersonalGitHubConnectionMetadata,
+  personalGitHubConnectionNeedsReconnect,
 } from "@opengeni/contracts/personal-github";
 import { personalGitHubRepositoryResources } from "@opengeni/core";
 import {
   getConnectionMetadata,
   getPersonalGitHubRepositorySelectionState,
+  getSessionResourcesForAuthority,
   hasAuditableGitHubInstallationAuthority,
   listGitHubInstallationAccessForWorkspace,
   resolveAcceptedConnectionUse,
@@ -35,6 +39,7 @@ import {
   GITHUB_REST_READ_TOOL_NAMES,
   GITHUB_REST_TOOL_NAMES,
   GitHubRestAuthorityError,
+  GitHubRestRepositoryDetachedError,
   githubRestConnectorActionOutcome,
   GitHubRestMcpServer,
   type GitHubRestRepository,
@@ -236,12 +241,34 @@ function personalRepositoryAuthority(
   });
 }
 
+/**
+ * Session membership is live authority: a repository removed from the chat
+ * stops working on the next call, even for a turn, child or goal
+ * continuation that captured an older resource snapshot.
+ */
+async function assertRepositoryStillAttached(
+  input: { db: Database; workspaceId: string; sessionId: string },
+  repository: GitHubRestRepository,
+): Promise<void> {
+  const resources = await getSessionResourcesForAuthority(
+    input.db,
+    input.workspaceId,
+    input.sessionId,
+  );
+  if (!resources || !resourcesIncludeRepository(resources, repository.canonicalUrl)) {
+    throw new GitHubRestRepositoryDetachedError(
+      `${repository.fullName} was removed from this chat`,
+    );
+  }
+}
+
 function workspaceAppAuthorityResolver(
   input: {
     db: Database;
     settings: Settings;
     accountId: string;
     workspaceId: string;
+    sessionId: string;
   },
   repositories: GitHubRestRepository[],
 ): ConstructorParameters<typeof GitHubRestMcpServer>[0]["resolveAuthority"] {
@@ -258,6 +285,7 @@ function workspaceAppAuthorityResolver(
     if (!installationId || !Number.isSafeInteger(repositoryId)) {
       throw new GitHubRestAuthorityError("GitHub App repository binding changed");
     }
+    await assertRepositoryStillAttached(input, repository);
     const installations = await listGitHubInstallationAccessForWorkspace(
       input.db,
       input.workspaceId,
@@ -342,11 +370,20 @@ function personalAuthorityResolver(input: {
     repository,
     forceRefresh,
   }): Promise<GitHubRestResolvedAuthority> => {
-    const current = await validatePersonalRepository(
-      input,
-      repository,
-      toolName === "repositories_list",
-    );
+    // A grant GitHub refused bumps the connection out of `active`; tell the
+    // agent the person must reconnect instead of a generic authority error.
+    const reconnectOr = (error: GitHubRestAuthorityError) =>
+      personalReconnectOr(error, () => personalConnectionNeedsReconnect(input));
+    let current: Awaited<ReturnType<typeof validatePersonalRepository>>;
+    try {
+      current = await validatePersonalRepository(
+        input,
+        repository,
+        toolName === "repositories_list",
+      );
+    } catch (error) {
+      throw error instanceof GitHubRestAuthorityError ? await reconnectOr(error) : error;
+    }
     if (toolName === "repositories_list") {
       return {
         headers: {},
@@ -380,7 +417,9 @@ function personalAuthorityResolver(input: {
       forceRefresh,
     });
     if (resolution.status !== "ok" || resolution.connectionId !== repository.connectionId) {
-      throw new GitHubRestAuthorityError("Personal GitHub credential is unavailable");
+      throw await reconnectOr(
+        new GitHubRestAuthorityError("Personal GitHub credential is unavailable"),
+      );
     }
     return {
       headers: githubAuthorizationHeaders(resolution.headers),
@@ -401,6 +440,48 @@ function personalAuthorityResolver(input: {
   };
 }
 
+/**
+ * A generic personal authority failure becomes "reconnect" when GitHub refused
+ * the person's stored grant; any other failure keeps its own message.
+ */
+export async function personalReconnectOr(
+  error: GitHubRestAuthorityError,
+  needsReconnect: () => Promise<boolean>,
+): Promise<GitHubRestAuthorityError> {
+  return (await needsReconnect().catch(() => false))
+    ? new GitHubRestAuthorityError(PERSONAL_GITHUB_RECONNECT_MESSAGE)
+    : error;
+}
+
+/** Whether the turn's frozen personal GitHub connection now needs reconnecting. */
+export async function personalConnectionNeedsReconnect(
+  input: {
+    db: Database;
+    accountId: string;
+    turn: Pick<SessionTurnForExecution, "personalConnectionDelegations">;
+  },
+  readConnection: typeof getConnectionMetadata = getConnectionMetadata,
+): Promise<boolean> {
+  try {
+    const delegation = exactPersonalDelegation(input.turn.personalConnectionDelegations);
+    if (!delegation.originWorkspaceId) return false;
+    const connection = await readConnection(
+      input.db,
+      delegation.originWorkspaceId,
+      delegation.connectionId,
+      delegation.ownerSubjectId,
+    );
+    return (
+      connection !== null &&
+      connection.accountId === input.accountId &&
+      connection.subjectId === delegation.ownerSubjectId &&
+      personalGitHubConnectionNeedsReconnect(connection)
+    );
+  } catch {
+    return false;
+  }
+}
+
 async function validatePersonalRepository(
   input: {
     db: Database;
@@ -413,6 +494,7 @@ async function validatePersonalRepository(
   repository: GitHubRestRepository,
   validateAcceptedUse: boolean,
 ) {
+  await assertRepositoryStillAttached(input, repository);
   const delegation = exactPersonalDelegation(input.turn.personalConnectionDelegations);
   if (delegation.connectionId !== repository.connectionId || !delegation.originWorkspaceId) {
     throw new GitHubRestAuthorityError("Personal GitHub delegation changed");

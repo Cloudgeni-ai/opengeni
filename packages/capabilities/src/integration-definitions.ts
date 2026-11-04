@@ -78,6 +78,11 @@ export interface IntegrationDefinition {
 
 export interface IntegrationFacetDefinition {
   readonly facetKey: string;
+  /**
+   * `knowledge_source` is retired: integrations give agents tools and no core
+   * definition publishes it. It stays in the type only so stored facets and
+   * existing published-type consumers keep compiling; configuring one returns 410.
+   */
   readonly kind: "knowledge_source" | "inbound_trigger" | "delivery_destination" | "identity_link";
   readonly configSchema: Readonly<Record<string, unknown>>;
   readonly capabilities: Readonly<Record<string, unknown>>;
@@ -91,67 +96,6 @@ const accountIdentityFacet = (provider: "google" | "microsoft"): IntegrationFace
     provider,
     connectionRequired: true,
     identity: "connected_account",
-  },
-});
-
-const driveKnowledgeFacet = (
-  provider: "google-drive" | "microsoft-onedrive",
-): IntegrationFacetDefinition => ({
-  facetKey: "drive-content",
-  kind: "knowledge_source",
-  configSchema: {
-    type: "object",
-    required: ["sources", "destination", "syncCadence", "readPolicy"],
-    properties: {
-      sources: {
-        type: "array",
-        minItems: 1,
-        maxItems: 100,
-        items: {
-          type: "object",
-          required: ["id", "name", "mimeType", "sourceKind", "includeDescendants"],
-          properties: {
-            id: { type: "string", minLength: 1, maxLength: 512 },
-            name: { type: "string", minLength: 1, maxLength: 1024 },
-            mimeType: { type: "string", minLength: 1, maxLength: 256 },
-            driveId: { type: "string", minLength: 1, maxLength: 512 },
-            sourceKind: {
-              type: "string",
-              enum:
-                provider === "google-drive"
-                  ? ["my_drive", "shared_drive", "folder"]
-                  : ["my_drive", "shared_library", "folder"],
-            },
-            includeDescendants: { type: "boolean" },
-          },
-          additionalProperties: false,
-        },
-      },
-      destination: {
-        type: "object",
-        required: ["authorityKind", "authorityAccountId"],
-        properties: {
-          authorityKind: {
-            type: "string",
-            enum: ["organization", "workspace", "personal"],
-          },
-          authorityAccountId: { type: "string", minLength: 1, maxLength: 128 },
-          authorityWorkspaceId: { type: "string", minLength: 1, maxLength: 128 },
-          authoritySubjectId: { type: "string", minLength: 1, maxLength: 512 },
-          collectionId: { type: "string", minLength: 1, maxLength: 512 },
-        },
-        additionalProperties: false,
-      },
-      syncCadence: { type: "string", enum: ["manual", "hourly", "daily"] },
-      readPolicy: { type: "string", enum: ["allow", "ask", "block"] },
-    },
-    additionalProperties: false,
-  },
-  capabilities: {
-    provider,
-    connectionRequired: true,
-    sync: "incremental",
-    cursor: provider === "google-drive" ? "page_token" : "delta_link",
   },
 });
 
@@ -221,7 +165,7 @@ export const GOOGLE_DRIVE_INTEGRATION_DEFINITION: IntegrationDefinition = {
     operationKey: "drive.about.get",
     arguments: { query: { fields: "user" } },
   },
-  facets: [driveKnowledgeFacet("google-drive"), accountIdentityFacet("google")],
+  facets: [accountIdentityFacet("google")],
 };
 
 export const MICROSOFT_GRAPH_OPENAPI_URL =
@@ -425,7 +369,7 @@ export const MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION: IntegrationDefinition = 
   },
   baseUrl: MICROSOFT_GRAPH_BASE_URL,
   authentication: microsoftOAuth(["Files.ReadWrite.All"]),
-  facets: [driveKnowledgeFacet("microsoft-onedrive"), accountIdentityFacet("microsoft")],
+  facets: [accountIdentityFacet("microsoft")],
 };
 
 const SHAREPOINT_SCOPE = ["Sites.ReadWrite.All"] as const;

@@ -3,12 +3,17 @@
 import { useNavigate } from "@tanstack/react-router";
 
 import { resolveWorkspaceRecordingSettings } from "@opengeni/contracts";
+import { inferenceFeatureRestriction } from "@opengeni/react";
 import { MeetingDetailPage, MeetingsListPage } from "@opengeni/react/meetings";
 import { useRecordingsClient } from "@opengeni/react/recordings";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import { t } from "@opengeni/react/app/lib/console-text";
+import { orgLabel } from "@opengeni/react/app/lib/org";
 import { ContentPage } from "@opengeni/react/ui/content-layout";
 import { meetingViewerName } from "../components/meetings/viewer-name";
+import { CalendarRemindersOffer } from "../components/meetings/calendar-reminders-offer";
+import { connectCalendarPath } from "../components/desktop/use-meeting-detection";
 
 import { meetingQuestionMessage, meetingQuestionVisibility } from "@/lib/meeting-ask";
 
@@ -22,15 +27,22 @@ function meetingPath(workspaceId: string, recordingId: string): string {
 export function MeetingsRoute({ workspaceId }: { workspaceId: string }) {
   const navigate = useNavigate();
   const context = useAppContext();
-  const { workspaces } = context;
+  const { workspaces, clientConfig } = context;
   const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
   const settings = resolveWorkspaceRecordingSettings(workspace?.settings);
+  // EU-only workspace without an EU transcription route: no new recordings.
+  const recordingRestricted = inferenceFeatureRestriction(t, clientConfig, "meeting_transcription");
   return (
     <ContentPage width="standard" className="pt-6">
+      <CalendarRemindersOffer
+        className="mb-4"
+        onConnect={() => void navigate({ href: connectCalendarPath(workspaceId) })}
+      />
       <MeetingsListPage
         workspaceId={workspaceId}
         defaultLanguage={settings.language ?? null}
         viewerName={meetingViewerName(context)}
+        recordingOff={recordingRestricted}
         meetingHref={(recordingId) => meetingPath(workspaceId, recordingId)}
         onOpen={(recordingId) =>
           void navigate({
@@ -66,6 +78,16 @@ export function MeetingDetailRoute({
     context.clientConfig.billingMode === "stripe" &&
     hasAccountPermission(accessContext, workspace?.accountId ?? "", "billing:manage");
   const canConnectModels = hasWorkspacePermission(accessContext, workspaceId, "connections:write");
+  // Where the person's own Only me meetings can work: their workspaces in
+  // this organization, their Personal workspace marked.
+  const reachWorkspaces = workspace
+    ? workspaces
+        .filter((candidate) => candidate.accountId === workspace.accountId)
+        .map(({ id, name, kind }) => ({ id, name, personal: kind === "personal" }))
+    : undefined;
+  const organizationName = workspace
+    ? orgLabel(t, workspace.accountId, accessContext.accountGrants)
+    : undefined;
   const ask = async (meetingId: string, question: string): Promise<boolean> => {
     const meeting = await recordings.getRecording(workspaceId, meetingId).catch(() => null);
     const created = await startSession(
@@ -90,6 +112,8 @@ export function MeetingDetailRoute({
         viewerSubjectId={accessContext.subjectId}
         viewerName={meetingViewerName(context) ?? "Me"}
         voiceRecognition={voiceRecognition}
+        reachWorkspaces={reachWorkspaces}
+        organizationName={organizationName}
         onBack={() =>
           void navigate({ to: "/workspaces/$workspaceId/meetings", params: { workspaceId } })
         }

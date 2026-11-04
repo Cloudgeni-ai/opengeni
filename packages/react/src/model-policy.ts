@@ -1,11 +1,18 @@
 import {
   compareModelPickerOrder,
+  modelLabelDistinctions,
   modelPickerBillingClassFor,
   type ModelPickerBillingClass,
+  type ModelLabelGeography,
 } from "@opengeni/sdk/model-picker-order";
 import { modelDisplayName } from "@opengeni/sdk/model-display";
+import {
+  isClaudeSubscriptionModelId,
+  isClaudeSubscriptionProviderId,
+} from "@opengeni/contracts/claude-subscription-model-ids";
 import type { ClientModel, ReasoningEffort, WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { type OpenGeniText } from "./messages/runtime";
+import { regionRestrictedText } from "./inference-region";
 
 export type PickerBillingClass = ModelPickerBillingClass;
 
@@ -66,9 +73,12 @@ export function billingClassForModel(model: ClientModel): PickerBillingClass {
   ) {
     return "organization_byok";
   }
+  // Keep in step with DIRECT_MODEL_PROVIDER_ID_PREFIXES in @opengeni/contracts;
+  // the session entry must not import the zod-backed contracts barrel.
   if (
     model.provider?.startsWith("workspace-openai-") ||
-    model.provider?.startsWith("workspace-azure-openai-")
+    model.provider?.startsWith("workspace-azure-openai-") ||
+    model.provider?.startsWith("workspace-compatible-")
   )
     return "byok";
   if (
@@ -97,7 +107,11 @@ export function availabilityReasonLabel(
   if (!reason) {
     return null;
   }
-  return AVAILABILITY_REASON_LABELS(t)[reason] ?? t("modelPolicy.unavailable");
+  return (
+    regionRestrictedText(t, reason) ??
+    AVAILABILITY_REASON_LABELS(t)[reason] ??
+    t("modelPolicy.unavailable")
+  );
 }
 
 export function effortOptionsForModel(model: ClientModel): ReasoningEffort[] {
@@ -187,6 +201,24 @@ export function modelUsesCredits(model: ClientModel | undefined): boolean {
   return model?.billing?.metering === "opengeni_credits";
 }
 
+/**
+ * Which connected subscription serves a model (`codex`, `claude`, `xai`), or
+ * null. The workspace catalog leaves `credentialSource` out of its models, so
+ * the public provider id and rail decide when it is absent.
+ */
+export function connectedSubscriptionProvider(
+  model: Pick<ClientModel, "id" | "provider" | "source" | "credentialSource">,
+): "codex" | "claude" | "xai" | null {
+  const source = model.credentialSource;
+  if (source) return source.kind === "connected_subscription" ? source.provider : null;
+  if (isClaudeSubscriptionProviderId(model.provider) || isClaudeSubscriptionModelId(model.id)) {
+    return "claude";
+  }
+  if (model.source === "supergrok") return "xai";
+  if (model.source === "codex") return "codex";
+  return null;
+}
+
 export function payerSummaryForModel(t: OpenGeniText, model: ClientModel): string {
   if (model.cost === "free") {
     return t("modelPolicy.freeInThisDeployment");
@@ -195,8 +227,7 @@ export function payerSummaryForModel(t: OpenGeniText, model: ClientModel): strin
     return t("modelPolicy.opengeniCredits");
   }
   if (model.cost === "subscription") {
-    return model.credentialSource?.kind === "connected_subscription" &&
-      model.credentialSource.provider === "claude"
+    return connectedSubscriptionProvider(model) === "claude"
       ? t("modelPolicy.claudeSubscriptionExternalBilling")
       : model.source === "supergrok"
         ? t("modelPolicy.supergrokSubscriptionExternalBilling")
@@ -219,8 +250,7 @@ export function payerSummaryForModel(t: OpenGeniText, model: ClientModel): strin
     return t("modelPolicy.opengeniCreditsAutomaticManagedRoute");
   }
   if (billing.upstreamPayer === "connected_subscription") {
-    return model.credentialSource?.kind === "connected_subscription" &&
-      model.credentialSource.provider === "claude"
+    return connectedSubscriptionProvider(model) === "claude"
       ? t("modelPolicy.claudeSubscriptionExternalBilling")
       : model.source === "supergrok"
         ? t("modelPolicy.supergrokSubscriptionExternalBilling")
@@ -240,6 +270,10 @@ export function payerSummaryForModel(t: OpenGeniText, model: ClientModel): strin
 export function advancedSourceSummary(t: OpenGeniText, model: ClientModel): string | null {
   const source = model.credentialSource;
   if (!source) {
+    const subscription = connectedSubscriptionProvider(model);
+    if (subscription === "claude") return t("modelPolicy.connectedClaudeSubscription");
+    if (subscription === "xai") return t("modelPolicy.connectedSupergrokSubscription");
+    if (subscription === "codex") return t("modelPolicy.connectedCodexSubscription");
     return model.billing?.metering === "external" && model.billing.upstreamPayer === "deployment"
       ? t("modelPolicy.deploymentProvidedConnection")
       : null;
@@ -276,6 +310,8 @@ function workspaceProviderPayerSummary(t: OpenGeniText, model: ClientModel): str
     return t("modelPolicy.billedToTheWorkspaceAnthropic");
   if (model.provider === "workspace-claude-subscription")
     return t("modelPolicy.usesTheWorkspaceClaudeSubscription");
+  if (model.provider === "claude-subscription")
+    return t("modelPolicy.usesTheConnectedClaudeSubscription");
   if (model.provider === "workspace-openrouter") {
     return t("modelPolicy.billedToTheWorkspaceOpenrouter");
   }
@@ -291,7 +327,10 @@ function workspaceProviderPayerSummary(t: OpenGeniText, model: ClientModel): str
 function organizationProviderPayerSummary(t: OpenGeniText, model: ClientModel): string {
   if (model.provider === "organization-anthropic")
     return t("modelPolicy.billedToTheOrganizationAnthropic");
-  if (model.provider === "organization-claude-subscription")
+  if (
+    model.provider === "organization-claude-subscription" ||
+    model.provider === "claude-subscription"
+  )
     return t("modelPolicy.usesTheConnectedClaudeSubscription");
   if (model.provider === "organization-openrouter") {
     return t("modelPolicy.billedToTheOrganizationOpenrouter");
@@ -357,7 +396,7 @@ export function projectPickerRows(
   t: OpenGeniText,
   models: WorkspaceModelCatalogModel[],
 ): PickerModelRow[] {
-  return models
+  const rows = models
     .filter((catalog) => (catalog.credentialReadiness?.status ?? "ready") === "ready")
     .map((catalog) => {
       const billingClass = billingClassForModel(catalog);
@@ -385,26 +424,85 @@ export function projectPickerRows(
         catalog,
       };
     });
+  return withDistinctLabels(t, rows);
 }
 
-/** Project the lightweight client-config model list into the same picker contract. */
+/**
+ * Project the lightweight client-config model list into the same picker
+ * contract. Only a region restriction makes a row unselectable here: the
+ * other availability reasons are hints this list never enforced.
+ */
 export function projectClientModelRows(
   t: OpenGeniText,
   models: ClientModel[],
 ): PickerModelRow<ClientModel>[] {
-  return models.map((catalog) => {
+  const rows = models.map((catalog) => {
     const billingClass = billingClassForModel(catalog);
+    const regionRestricted = regionRestrictedText(t, catalog.availability?.reason);
     return {
       id: catalog.id,
       label: modelDisplayName(catalog),
       ...compactLabel(catalog),
       billingClass,
       billingClassLabel: billingClassLabel(t, billingClass),
-      selectable: true,
-      unavailableReason: null,
+      selectable: regionRestricted === null,
+      unavailableReason: regionRestricted,
       provider: catalog.provider,
       providerLabel: catalog.providerLabel,
       catalog,
+    };
+  });
+  return withDistinctLabels(t, rows);
+}
+
+const GEOGRAPHY_LABELS = (t: OpenGeniText): Record<ModelLabelGeography, string> => ({
+  eu: t("modelPolicy.geographyEu"),
+  us: t("modelPolicy.geographyUs"),
+  global: t("modelPolicy.geographyGlobal"),
+});
+
+/**
+ * Rows shown under the same name in the same group say what differs, from the
+ * route's residency record or provider: "GPT-6.1 Sol" and "GPT-6.1 Sol (EU)".
+ * Rows with a unique name keep it unchanged, and organization and workspace
+ * copies of one model, which the picker shows as one choice, count once.
+ */
+export function withDistinctLabels<TCatalog extends ClientModel>(
+  t: OpenGeniText,
+  rows: PickerModelRow<TCatalog>[],
+): PickerModelRow<TCatalog>[] {
+  const choiceId = (row: PickerModelRow<TCatalog>) => {
+    // Older Site hosts list bare `{ id }` rows without a provider.
+    const identity = row.provider ? scopeFreeIdentity(row) : null;
+    return identity === null ? `model\u0000${row.id}` : `scope\u0000${identity}`;
+  };
+  const choices = new Map<string, PickerModelRow<TCatalog>>();
+  for (const row of rows) if (!choices.has(choiceId(row))) choices.set(choiceId(row), row);
+  const distinctions = modelLabelDistinctions(
+    [...choices].map(([id, row]) => ({
+      id,
+      label: row.label,
+      group: row.billingClassLabel,
+      providerLabel: row.providerLabel,
+      residency: row.catalog.residency,
+    })),
+  );
+  if (distinctions.size === 0) return rows;
+  const geographies = GEOGRAPHY_LABELS(t);
+  return rows.map((row) => {
+    const distinction = distinctions.get(choiceId(row));
+    if (!distinction) return row;
+    const suffix = ` (${[
+      distinction.geography ? geographies[distinction.geography] : undefined,
+      // A scope copy names its own connection.
+      distinction.providerLabel ? row.providerLabel : undefined,
+    ]
+      .filter(Boolean)
+      .join(", ")})`;
+    return {
+      ...row,
+      label: `${row.label}${suffix}`,
+      ...(row.shortLabel ? { shortLabel: `${row.shortLabel}${suffix}` } : {}),
     };
   });
 }

@@ -48,6 +48,7 @@ const AGENT_PERMISSIONS: Permission[] = [
 ];
 // What "none" keeps: runtime mechanics plus reaching the person (humanInput).
 const RUNTIME_TOOLS = [
+  "call_user",
   "command_read",
   "command_wait",
   "inbox_tidy",

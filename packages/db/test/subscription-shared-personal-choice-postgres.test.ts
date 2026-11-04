@@ -15,7 +15,9 @@ import {
   createSession,
   enqueueSessionTurn,
   ensureManagedAccessForUser,
+  issueSelfUserResourceGrant,
   readSubscriptionCoreTurnIdentity,
+  revokeSelfUserResourceGrant,
   settleConnectedMachineSessionBackgroundCommand,
   submitHumanPromptInTransaction,
   withSessionRlsActorContext,
@@ -634,4 +636,99 @@ describe.skipIf(!realDb)("shared personal choice with a FORCE-RLS-bound schema o
       select subscription_authority as authority from session_turns where id = ${frozen.turnId}::uuid`;
     expect(stored!.authority).toEqual(frozen.authority);
   });
+
+  test("SUB-ELIG-05 D-53: your own subscription turned on in a workspace serves only your own turns there", async () => {
+    const f = await fixture();
+    const own = await connect(f, f.participant);
+    const creatorOwn = await connect(f, f.creator);
+    expect((await send(f, f.participant)).authority).toEqual(EMPTY);
+    // Nobody can turn on someone else's account.
+    await expect(turnOn(f, f.creator, own)).rejects.toThrow();
+    const grant = await turnOn(f, f.participant, own);
+    expect(grant).toMatchObject({
+      action: "subscription_connection.use",
+      mode: "always",
+      context: "workspace_shared",
+      targetWorkspaceId: f.workspaceId,
+      targetSessionId: null,
+    });
+    // Shared chat: your own turns use it without choosing it per chat.
+    expect((await send(f, f.participant)).authority).toEqual(exact(f, f.participant, own));
+    // Another member's turn in the same chat never does.
+    expect((await send(f, f.creator)).authority).toEqual(EMPTY);
+    // An explicit choice of your own account still wins over the switch.
+    await turnOn(f, f.creator, creatorOwn);
+    expect((await choose(f, f.creator, creatorOwn)).outcome).toBe("changed");
+    expect((await send(f, f.creator)).authority).toEqual(exact(f, f.creator, creatorOwn));
+
+    // Only me chat in the same shared workspace: the switch freezes the same
+    // restricted entry; without it the owner entry serves explicit pins only.
+    const privateSession = await withSessionRlsActorContext(
+      { subjectId: f.participant.subjectId },
+      () =>
+        createSession(client!.db, {
+          accountId: f.accountId,
+          workspaceId: f.workspaceId,
+          subjectId: f.participant.subjectId,
+          initialMessage: "only me",
+          resources: [],
+          metadata: {},
+          model: "codex/gpt-5.5",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          visibility: "user_private",
+          createdBy: { kind: "subject", subjectId: f.participant.subjectId },
+          createdByContext: {},
+        }),
+    );
+    const onlyMe = { ...f, sessionId: privateSession.id };
+    expect((await send(onlyMe, f.participant)).authority).toEqual(
+      exact(onlyMe, f.participant, own),
+    );
+
+    // Turning it off applies from the next turn.
+    await withSessionRlsActorContext({ subjectId: f.participant.subjectId }, () =>
+      revokeSelfUserResourceGrant(client!.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        subjectId: f.participant.subjectId,
+        grantId: grant.grantId,
+      }),
+    );
+    expect((await send(f, f.participant)).authority).toEqual(EMPTY);
+    expect((await send(onlyMe, f.participant)).authority).toEqual({
+      version: 2,
+      personal: [
+        {
+          provider: "codex",
+          ownerMembershipId: f.participant.membershipId,
+          authorityGeneration: 1,
+        },
+      ],
+    });
+
+    // The organization can still refuse personal accounts in shared work.
+    await turnOn(f, f.participant, own);
+    await database!.admin`update subscription_settings set personal_connections_allowed = false
+      where account_id = ${f.accountId}::uuid and workspace_id is null`;
+    expect((await send(f, f.participant)).authority).toEqual(EMPTY);
+  });
 });
+
+async function turnOn(f: Fixture, person: Person, connectionId: string) {
+  const [connection] = await database!.admin<{ authority_id: string }[]>`
+    select authority_id::text from subscription_connections where id = ${connectionId}::uuid`;
+  return await withSessionRlsActorContext({ subjectId: person.subjectId }, () =>
+    issueSelfUserResourceGrant(client!.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      subjectId: person.subjectId,
+      authorityId: connection!.authority_id,
+      resourceKind: "subscription_connection",
+      mode: "always",
+      context: "workspace_shared",
+      workspaceSharedAcknowledged: true,
+    }),
+  );
+}

@@ -225,10 +225,22 @@ async fn a_fill_is_limited_to_its_booking_until_it_is_claimed() {
         "the limit is the booking, not the shape"
     );
     assert!(lab.world.limits_set.lock().unwrap().is_empty());
+    assert!(
+        filled
+            .iter()
+            .all(|name| lab.world.only_copies.lock().unwrap().get(name) != Some(&true)),
+        "a ready sandbox is no one's only copy"
+    );
     assert_eq!(create(&lab, id(1)).await, Reply::Done);
-    let (dir, _) = record_of(&lab, id(1));
+    let (dir, record) = record_of(&lab, id(1));
     assert!(filled.contains(&dir), "it took the ready sandbox");
-    assert_eq!(*lab.world.limits_set.lock().unwrap(), [(dir, None)]);
+    assert_eq!(*lab.world.limits_set.lock().unwrap(), [(dir.clone(), None)]);
+    // Claimed, it is its sandbox's only copy, and its VM marked so.
+    assert_eq!(record["only_copy"].as_bool(), Some(true));
+    assert_eq!(
+        lab.world.only_copies.lock().unwrap().get(&dir).copied(),
+        Some(true)
+    );
 }
 
 /// A ready sandbox is filled guaranteed its whole shape, but a create of
@@ -457,6 +469,90 @@ async fn overlapping_claims_book_each_claimed_vm_once() {
     let capacity = lab.status().await.capacity.unwrap();
     assert_eq!((capacity.reserved, capacity.awake), (512 << 20, 2));
     assert!(capacity.occupied <= capacity.total, "{capacity:?}");
+    lab.assert_clean();
+}
+
+/// A fill leaves room in the budget to claim every ready sandbox kept: once
+/// one of two is claimed on a host with room for two, no fill takes the
+/// room the other's claim needs, so the next create claims it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fill_never_takes_the_room_a_claim_of_a_kept_ready_sandbox_needs() {
+    let policy = HostPolicy {
+        admission: Some(Admission {
+            budget: 512 << 20,
+            buffer: 0,
+            busy_grace: Duration::from_millis(100),
+        }),
+        ..HostPolicy::default()
+    };
+    let lab = Lab::start_configured(
+        Lab::root(),
+        Arc::default(),
+        Delays::default(),
+        policy,
+        keeping(2),
+    )
+    .await;
+    wait_filled(&lab, 2).await;
+    let boots = lab.world.boots.load(Ordering::Relaxed);
+    assert_eq!(create(&lab, id(1)).await, Reply::Done);
+    // The claim's refill, and those after samples, find no room.
+    sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        pool(&lab.status().await),
+        (1, 0, 2),
+        "no fill into the room the next claim needs"
+    );
+    assert_eq!(create(&lab, id(2)).await, Reply::Done);
+    assert_eq!(
+        lab.world.boots.load(Ordering::Relaxed),
+        boots,
+        "both claimed a ready sandbox"
+    );
+    for n in 1..=2 {
+        assert!(matches!(lab.wake(id(n)).await, Reply::Woken { .. }));
+    }
+    let capacity = lab.status().await.capacity.unwrap();
+    assert_eq!((capacity.reserved, capacity.awake), (512 << 20, 2));
+    lab.assert_clean();
+}
+
+/// The processor room a fill keeps for claims is what creates asking for
+/// the default request book, not the whole shape a fill books while it
+/// comes up: on a host that guarantees one and a half processors, a pool of
+/// three one-processor sandboxes fills, and three creates claim all three.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn claims_keep_the_default_processor_request_free_not_the_whole_shape() {
+    let policy = HostPolicy {
+        cpu_budget: Some(1500),
+        ..HostPolicy::default()
+    };
+    let lab = Lab::start_configured(
+        Lab::root(),
+        Arc::default(),
+        Delays::default(),
+        policy,
+        keeping(3),
+    )
+    .await;
+    wait_filled(&lab, 3).await;
+    let boots = lab.world.boots.load(Ordering::Relaxed);
+    for n in 1..=3 {
+        assert_eq!(create(&lab, id(n)).await, Reply::Done);
+    }
+    assert_eq!(
+        lab.world.boots.load(Ordering::Relaxed),
+        boots,
+        "every create claimed a ready sandbox"
+    );
+    for n in 1..=3 {
+        assert!(matches!(lab.wake(id(n)).await, Reply::Woken { .. }));
+    }
+    let reserved = lab.status().await.cpu.unwrap().reserved;
+    assert!(
+        (300..=1300).contains(&reserved),
+        "three claims at the default request, and at most one refill: {reserved}"
+    );
     lab.assert_clean();
 }
 

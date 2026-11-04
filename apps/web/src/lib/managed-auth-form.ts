@@ -1,5 +1,12 @@
 import { AuthApiError } from "@/api";
-import { MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE, SIGNUPS_PAUSED_MESSAGE } from "@/lib/signups-paused";
+import {
+  MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE,
+  MANAGED_AUTH_SIGN_IN_EMAIL_NOT_ALLOWED_CODE,
+  MANAGED_AUTH_SIGNUP_EMAIL_NOT_ALLOWED_CODE,
+  SIGN_IN_EMAIL_NOT_ALLOWED_MESSAGE,
+  SIGNUP_EMAIL_NOT_ALLOWED_MESSAGE,
+  SIGNUPS_PAUSED_MESSAGE,
+} from "@/lib/signups-paused";
 
 import {
   ManagedAuthSessionUnavailableError,
@@ -65,6 +72,22 @@ export function managedAuthFailure(mode: ManagedAuthMode, error: unknown): Manag
         fields: {},
         message: `${SIGNUPS_PAUSED_MESSAGE} If you already have an account, sign in instead.`,
         switchTo: "signin",
+        canResendVerification: false,
+      };
+    }
+    if (error.code === MANAGED_AUTH_SIGNUP_EMAIL_NOT_ALLOWED_CODE) {
+      return {
+        fields: {},
+        message: `${SIGNUP_EMAIL_NOT_ALLOWED_MESSAGE} If you already have an account, sign in instead.`,
+        switchTo: "signin",
+        canResendVerification: false,
+      };
+    }
+    if (error.code === MANAGED_AUTH_SIGN_IN_EMAIL_NOT_ALLOWED_CODE) {
+      return {
+        fields: {},
+        message: SIGN_IN_EMAIL_NOT_ALLOWED_MESSAGE,
+        switchTo: null,
         canResendVerification: false,
       };
     }

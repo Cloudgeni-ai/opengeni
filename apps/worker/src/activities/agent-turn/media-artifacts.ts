@@ -27,6 +27,7 @@ import {
   collectRetainedScreenshotReceipts,
   compactRetainedScreenshotRunState,
   materializeRetainedScreenshotHistory,
+  omitOlderHistoryImages,
   retainComputerScreenshot,
   toolOutputContainsInlineImage,
   typedScreenshotFromToolOutput,
@@ -353,7 +354,9 @@ export class TurnMediaArtifacts {
       objectStorage: this.deps.objectStorage,
       workspaceId: this.deps.workspaceId,
       sessionId: this.deps.sessionId,
-      history,
+      // Older images become a note on how to see them again; receipts above
+      // still come from the complete history.
+      history: omitOlderHistoryImages(history),
     });
   };
 }

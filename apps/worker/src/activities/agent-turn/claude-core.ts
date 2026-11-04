@@ -8,7 +8,6 @@ import {
   decodeSubscriptionCoreClaudeQuota,
   SUBSCRIPTION_CORE_CLAUDE,
   SUBSCRIPTION_CORE_CLAUDE_LEASE_TTL_MS,
-  SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES,
   SubscriptionCoreError,
   subscriptionCoreRequests,
   subscriptionCoreTurns,
@@ -16,7 +15,12 @@ import {
   type SubscriptionCoreClaudeTokenSnapshot,
   type SubscriptionCoreProvider,
 } from "@opengeni/db";
-import { parseClaudeUsageHeaders, parseModelProvidersJson, type Settings } from "@opengeni/config";
+import {
+  parseClaudeUsageHeaders,
+  parseModelProvidersJson,
+  withClaudeConnectionCredential,
+  type Settings,
+} from "@opengeni/config";
 import type { PreparedUsageRequest } from "@opengeni/runtime";
 import type { CapacityPhaseDeps, CapacityPhaseOutcome } from "./codex-capacity";
 import type { ClaudeTurnLease } from "./credential-leases";
@@ -290,11 +294,28 @@ export function claudeCoreSettingsCredential(
   });
 }
 
-/** The scope a Claude product model id names (its prefix). */
-export function claudeCoreModelScope(productModelId: string): "organization" | "workspace" {
-  return productModelId.startsWith(`${SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES[1]}/`)
-    ? "workspace"
-    : "organization";
+/**
+ * Settings whose Claude subscription providers carry a core-placed turn's
+ * credential. Every Claude subscription list (workspace and organization)
+ * gets it: whichever one defines the accepted model, in whichever id form,
+ * the turn runs on the connection the core placed it on.
+ */
+export function withClaudeCoreConnectionCredential(
+  settings: Settings,
+  credential: string,
+  credentialBinding: { connectionId: string; credentialVersion: number },
+): Settings {
+  return (["workspace", "organization"] as const).reduce(
+    (current, scope) =>
+      withClaudeConnectionCredential(
+        current,
+        "claude_subscription",
+        credential,
+        scope,
+        credentialBinding,
+      ),
+    settings,
+  );
 }
 
 /** The upstream model ids of the deployment's Claude subscription catalog. */
@@ -307,7 +328,8 @@ export function claudeSubscriptionUpstreamModelIds(
         .filter(
           (provider) =>
             provider.kind === "claude-subscription-workspace" ||
-            provider.kind === "claude-subscription-organization",
+            provider.kind === "claude-subscription-organization" ||
+            provider.kind === "claude-subscription",
         )
         .flatMap((provider) => provider.models.map((model) => model.upstreamModelId ?? model.id)),
     ),
@@ -323,7 +345,8 @@ export function claudeSubscriptionProviderIds(
       .filter(
         (provider) =>
           provider.kind === "claude-subscription-workspace" ||
-          provider.kind === "claude-subscription-organization",
+          provider.kind === "claude-subscription-organization" ||
+          provider.kind === "claude-subscription",
       )
       .map((provider) => provider.id),
   );

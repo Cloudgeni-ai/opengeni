@@ -9,6 +9,7 @@ import {
   accountScopedApiKeyWorkspaceAuthority,
   organizationWorkspaceInScope,
   hasPermission,
+  holdsOrganizationAdministration,
   requireAccessContext,
   requireAccessGrantAuthorization,
   requireSessionAuthorizationListScope,
@@ -92,11 +93,11 @@ type OrganizationSessionReadAuthority = "organization_api_key" | "account_admin"
  *
  * An organization API key qualifies through its exact stamped workspace
  * authority when that authority carries `sessions:read` (a `full` key holds the
- * `workspace:admin` wildcard, a `read` key holds the literal). A human
- * organization owner qualifies through an `account:admin` account grant, but
- * that grant alone opens no workspace: every workspace is still authorized
- * through the ordinary per-workspace grant resolution below, so an owner sees
- * exactly the shared workspaces they are a member of.
+ * `workspace:admin` wildcard, a `read` key holds the literal). The
+ * organization's owner or an admin qualifies through organization
+ * administration, but that alone opens no workspace: every workspace is still
+ * authorized through the ordinary per-workspace grant resolution below, so an
+ * owner or admin sees exactly the shared workspaces they are a member of.
  */
 function requireOrganizationSessionReadAuthority(
   context: AccessContext,
@@ -112,10 +113,7 @@ function requireOrganizationSessionReadAuthority(
     }
     throw new HTTPException(403, { message: "organization session read authority required" });
   }
-  const accountGrant = context.accountGrants.find(
-    (candidate) => candidate.accountId === organizationId,
-  );
-  if (accountGrant?.permissions.includes("account:admin")) {
+  if (holdsOrganizationAdministration(context, organizationId)) {
     return "account_admin";
   }
   throw new HTTPException(403, { message: "organization session read authority required" });

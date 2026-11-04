@@ -22,7 +22,8 @@ export type MirrorSessionRealtimeContextInput = {
     | "human_input_request"
     | "human_input_response"
     | "assistant_progress"
-    | "assistant_terminal";
+    | "assistant_terminal"
+    | "agent_call";
   sourceId: string;
   text: string;
   channel: SessionRealtimeMirrorChannel;
@@ -160,6 +161,20 @@ export function renderRealtimeHumanInputContext(input: {
     `  <text>${escapeXmlText(input.text)}</text>`,
     "  <instruction>Already routed by Opengeni; do not delegate this message again.</instruction>",
     "</session_user_message>",
+  ].join("\n");
+}
+
+/**
+ * The opening of a call the agent placed (call_user) and the person answered:
+ * the voice side speaks first and says why it called.
+ */
+export function renderRealtimeAgentCallContext(input: { reason: string }): string {
+  return [
+    "<agent_call>",
+    "  <status>answered</status>",
+    `  <reason>${escapeXmlText(input.reason)}</reason>`,
+    "  <instruction>You phoned the person about this and they just picked up. Speak first: greet them briefly, say in one sentence why you called, then talk it through. What they ask for goes to the agent in this chat as usual.</instruction>",
+    "</agent_call>",
   ].join("\n");
 }
 

@@ -39,6 +39,8 @@ before owned setup; see [run lifecycle](run-lifecycle.md#agent-loop-request-life
 
 Worker pre-dispatch timing, nested phase boundaries and the real-PostgreSQL
 comparison harness: [startup round trips](design/turn-predispatch-round-trips.md).
+HTTP/Temporal first-request measurements, independent metadata overlap and
+unchanged-request proof: [turn startup latency](design/turn-startup-latency.md).
 Continuation account resolution reuses the claim's locked session connector
 configuration, but reads live account authority in the same claim transaction.
 
@@ -374,6 +376,9 @@ Replay: [notices/catalogs](run-lifecycle.md),
 shares prepared prefixes with both Responses compaction modes; Chat retains
 its transcript adapter. Both modes retain recent system-role input batches
 within existing budgets, preserving chronological accepted goal snapshots.
+At a worker compaction boundary, the SDK finishes through model-step handover
+so queued tool events drain before the original compaction signal is raised.
+Tool outputs and receipts are published before compaction can retire their history.
 
 Failed-session retry (`packages/db/src/session-retry.ts`) fences failure identity,
 reserves actor-scoped receipts, rejects unresolved execution/safety refusals,
@@ -446,6 +451,10 @@ into bounded snippets/cursors, not histories. See
 Docker/local SDK processes expose bounded-wait, turn-scoped handles, stay
 cancellation-fenced and stop before finalization; agents can test preview
 servers without awaiting exit.
+The Unix-local/Docker durable supervisor retains terminal run directories for
+one day. Cleanup runs independently of command launch with a PID/start-identity
+lock, so a slow disk or large history cannot consume the command response deadline;
+a later launcher recovers a dead cleanup owner without treating commands as lost.
 
 Interactive ttyd input readiness is separate from command execution proof.
 `agent/native/terminal-ready` owns the stock image's Bash 5.2 Readline producer;
@@ -901,6 +910,26 @@ and [`../AGENTS.md`](../AGENTS.md) Sandbox Notes.
 
 ### 3.9 Compute routing and sandbox ownership stay explicit
 
+A new session may name only a sandbox backend the deployment serves
+(`sandboxBackendServed` in `packages/config`): its default, `none`,
+`selfhosted` with Connected Machines on, and providers whose credentials are
+configured; `local` and `docker` run on the host and are served only as the
+default. Every create path applies it (REST/SDK, `session_create`, forks,
+schedule save and run admission) because the worker builds whatever provider
+a session row names. Shared children and existing rows keep their backend,
+except that a host backend the deployment does not serve is refused again
+before any box, hook or credential. Session code rebinds settings to the
+session's backend (`{...settings, sandboxBackend}`), so the rule reads
+`Settings.deploymentSandboxBackend`, which `getSettings` fixes once and every
+spread keeps (`hostSandboxBackendRefused`). The worker fails such a turn at
+start with the terminal `sandbox_backend_not_served`; `resolveSessionSandboxRuntime`
+answers every API-direct surface (Channel A terminal, files, browser and
+computer, and viewers) with 409; and `createSandboxClientForBackend` refuses
+the `local` or `docker` client for any other caller, whatever the host image
+contains. A stored host-backend lease that is still draining on such a
+deployment stays draining (fail closed) rather than being stopped through a
+refused client.
+
 A human owner's personal-machine move during a turn is explicit consent for
 that logical turn, independent of the initiating person. The separate turn
 receipt and attempt bindings survive recovery without rewriting accepted
@@ -1049,6 +1078,9 @@ Archive capture/restore: [storage](workspace-archive-storage.md).
 
 Lease liveness, provider existence, route attachment, archives, workspace readiness,
 and operation availability are independent; a warm row does not prove executability.
+An attached sibling whose bounded warming wait expires yields to same-turn
+lifecycle recovery rather than failing the turn or replacing the elected creator.
+Only that creator renews the warming lease; the reaper still fences abandoned owners.
 
 Resolve synthetic groups' effective backend once from session policy and deployment
 configuration. Fleet, swaps, viewers, API operations and worker turns share that answer.
@@ -1356,9 +1388,11 @@ flowchart LR
 ```
 
 Send and Steer create durable turn intent. A normal human Send is promoted to
-Steer-equivalent replacement only when the active, unpaused branch is waiting in
-`requires_action`; checked-out queue edits, paused sessions, and other active
-lifecycle states keep ordinary Send ordering. Human prompts are the reorderable
+Steer-equivalent replacement only when the active, unpaused, admissible branch
+is waiting with no live attempt: in `requires_action`, or in
+`waiting_capacity` on a parked subscription turn (`sendTakesOverActiveWait`);
+checked-out queue edits, paused sessions, and other active lifecycle states
+keep ordinary Send ordering. Human prompts are the reorderable
 queue surface; machine-origin inputs remain typed records and join a turn only
 through the claim transaction. A `requires_action` resume preserves that rule
 without violating provider protocol: it first writes the interrupted
@@ -1625,8 +1659,8 @@ immutable receipts, distinct causal claims and live personal-grant admission:
 [lifecycle](run-lifecycle.md).
 
 `session_turns.initiating_human_subject_id` alone never authorizes:
-`artifacts:publish`/archive/restore require exact mutation fences; pure service
-work fails closed. [Lifecycle](run-lifecycle.md).
+`artifacts:publish`/archive/restore require exact mutation fences, which pure
+service work passes like any run. [Lifecycle](run-lifecycle.md).
 
 All model/Codemode calls share current authorized catalogs, execution fences and
 approvals across backends/loading paths.
@@ -1651,7 +1685,8 @@ errors or a failure of every catalog entry. See [startup decisions and measureme
 
 Always-visible first-request local tools (closed set): `exec_command`,
 `write_stdin`, `apply_patch`, `view_image`, `skill_read`, `repository_skill_read`,
-`request_human_input`, `list_models` (lists, never switches models), optional
+`request_human_input`, `list_models` (lists, never switches models),
+[`privacy_facts`](privacy-facts.md) (privacy and data-handling facts), optional
 [`code_search`](code-search.md), and optional provider
 [`web_search`/`web_fetch`](web-search.md). Authorized first-party harness control
 tools (`opengeni__goal_*` lifecycle, `opengeni__command_read`/`command_wait`,
@@ -2332,6 +2367,39 @@ requires consent. Computer frames bind screenshot digest to controller/session/t
 runtime, API and SDK independently verify. The browser extension only attaches;
 Lightpanda is semantic-only.
 
+`packages/browserd/src/page-protection.ts` owns the shared protected-field
+policy for DOM reads, editable-value confirmation and accessibility reads.
+Chromium DOM snapshots find protected nodes in child documents and flattened
+shadow roots; out-of-process frames are read through their own sessions.
+Snapshots stay inside the controller. Known values are masked before semantic
+normalization and on result delivery, including digit-grouped numeric secrets
+and three-digit CVCs. Protection discovery or masking failure withholds output.
+Only primary password/card-field values are remembered; hidden metadata and
+expiry options are protected in place. Card values do not age out of memory.
+After a browser tab encounters payment fields or known card data, its screenshots,
+live frames and recordings are refused (semantic controls and unrelated tabs
+remain usable). This state is shared across controllers for that tab in the
+browserd process; it is not
+a claim of pixel-level redaction or arbitrary canvas/OCR protection.
+Transient pixels between DOM checks and desktop captures of the browser are
+outside that per-tab guarantee. Attached Chrome admits the read-only snapshot
+through the matching extension method allowlist.
+The extension advertises that read-only capability in its existing handshake;
+an agent needing it refuses an older extension as `extension_outdated`, which
+starts Chrome's existing update check. Older agents ignore the additive field,
+so extension-first rollout remains compatible.
+
+Computer cursor badges carry the source chat's display title and a bounded PNG
+of its existing sidebar avatar. The API resolves image access as the caller and
+sends pixels, never a signed storage URL, through the internal controller-create
+request (including recovery). Missing avatars fall back to initials or the name.
+Display metadata never replaces the private CUA session key. All desktop
+platforms use the same source-pinned supervised CUA worker; the published SDK
+provides only its local transport.
+Identity is captured when a controller opens or recovers. Avatar work has a
+750 ms cosmetic deadline and falls back to the name. GNOME keeps its existing
+single-cursor/no-hover behavior; avatars require helper v11 there.
+
 Connected-machine tool failures preserve the API's closed failure details and
 opaque request references at the model boundary. The MCP error renderer retains
 `outcomeUnknown` and discourages automatic action retries; uncertain execution
@@ -2344,9 +2412,19 @@ diagnosis with open-a-new-tab guidance, not as a retryable outage.
 Pre-input failures are definite; already-sent input retains uncertain effects and
 must not replay. Other tabs keep their independent authority and queues.
 
-An attached tab's debugger disconnect invalidates only its cached target,
-document, frame and element authority. Read-only recovery can attach the same
-surviving tab with fresh fences; explicit cancellation and uncertain effects
+Live browser frame sampling treats page-command timeouts as temporary: a busy
+renderer resumes the same subscription when it answers again. Sampling remains
+outside the action queue and preserves capture serialization. Lost targets,
+connections and repeated non-timeout capture failures still fail the subscription
+and reach the viewer through the stream's existing terminal error path.
+
+An attached tab's debugger disconnect ends only that attachment's commands and
+controls. Recovery can attach the same surviving tab again; when it still shows
+the same document (same main-frame frame and loader ids), it keeps its target,
+document, frame and element authority, so an observation made before the
+disconnect still holds, and otherwise it gets fresh fences. Another extension
+adding a frame (a password manager's inline menu) ends Chrome's debugging of a
+tab without changing its page. Explicit cancellation and uncertain effects
 require profile reconnection. Chrome and unrelated tabs remain intact, and
 mutations are never replayed. Partially dispatched input remains outcome unknown;
 queued input, DOM changes, navigation and emulation cannot cross into a replacement
@@ -2500,6 +2578,29 @@ and active/input focus; no action implicitly activates or substitutes Screen.
 All text/chord components in a physical batch are resolved before its first
 input request, so known unsupported mappings remain definite zero-input failures.
 Once any request may have escaped, failures retain an unknown outcome.
+
+X11 text the layout cannot type is bound to spare keycodes (keycodes with no
+keysym) for the rest of the session, never only for one batch. The server
+cannot confirm that a receiving client has refreshed its keymap, so a binding
+restored after the action returns could reach a busy application late and lose
+or repeat characters. Each binding is recorded in a root-window property with an
+owner window that lives exactly as long as the session's own X connection. A
+claimed spare is never rebound to another glyph; sessions that bind the same
+glyph share it. When the last session using a spare closes, its keycode is
+restored after a short grace period, and a session start restores the bindings
+of owners that have gone away (a crashed process). Named function keys the layout
+lacks (F13 to F24) use the same bindings.
+
+When a batch needs more distinct glyphs than spare keycodes remain, it is refused
+before its first key. The computer driver then pastes ordinary single-line text
+through a CLIPBOARD owner of the helper's own: once a client of the focused
+window has read the text (clipboard-manager reads do not count), the previous
+clipboard text is put back, or the clipboard is emptied again if it was empty.
+It cannot be put back when it held something other than text, was too large to
+read whole, or the target did not read the paste within three seconds; the pasted
+text then stays. A copy the person makes meanwhile is kept. Text with secret
+references is never pasted: it is refused with a message that names neither the
+character nor the clipboard.
 
 Window pointer preflight follows the mapped point through the X11 tree and
 requires the original client window and the same XRes resource owner, including
@@ -2834,7 +2935,7 @@ Canonical: `packages/runtime/src/sandbox/`,
 
 ---
 
-Turn-end review capture yields to queued turns and fences late commits. Single-read files and unique storage keys isolate cleanup. Recovery snapshots retain their separate fifteen-minute cadence.
+Turn-end review capture yields to queued turns and fences late commits. Its cancellation signal also fences admission of queued per-file Git reads; already-started reads retain output collection and exact spool cleanup. Single-read files and unique storage keys isolate cleanup. Recovery snapshots retain their separate fifteen-minute cadence.
 
 ## 9. Data and storage
 
@@ -2852,6 +2953,10 @@ runtime-role/RLS posture.
 Readiness is forward-compatible only for entirely unknown, securely shaped
 objects; named-object ACL, RLS and capability contracts remain exact. Unknown
 callable SECURITY DEFINER routines require a prior explicit binary contract.
+The explicit removed-feature retirement inventory additionally permits absent
+legacy tables while preserving their exact contracts when present; it does not
+authorize dropping live SQL dependencies. See
+[retirement sequencing](migrations-expand-contract.md#retiring-removed-feature-schema).
 The pinned previous-binary inspector/evaluator CI and its release bootstrap are
 documented in [expand/contract migrations](migrations-expand-contract.md#pinned-previous-binary-readiness).
 The migration runner partitions the live pending ledger into a posture-inert rolling prefix,
@@ -3278,21 +3383,25 @@ do not remove it. See `docs/local-development.md`.
 
 Teams admission uses an internal durable inbox proof at native session/message commit
 (`packages/core/src/application/teams-private-session.ts` and `packages/db/src/teams-private-session.ts`). It binds the exact installation generation, actor, linked human, route, message,
-and current lease. Personal Teams conversations may create private sessions in an authorized
-shared workspace under the existing organization privacy policy; this does not mint managed-browser authority or permit Personal workspace binding, visibility changes, forks, or
-approvals.
+and current lease. Personal Teams conversations create private sessions in the sender's own
+Personal workspace when they have one and Personal workspaces are on (the route's
+`session_workspace_id`, migration 1097), otherwise in the authorized shared workspace under the
+existing organization privacy policy. The route, inbox, outbox and link stay in the installation's
+workspace; the proof verifies them there. This does not mint managed-browser authority or permit
+installation in a Personal workspace, visibility changes, forks, or approvals.
 
 Teams reply discovery uses a content-free sequence wake on relevant durable session events.
 An invoker-rights trigger updates the reserved route in the event transaction; delivery still
 checks the exact linked human and current session audience before reading reply content.
 Idle routes are excluded from pump claims, and pending output keeps its durable delivery state.
-Personal sidebar Archive is an atomic composition of native Pause and personal
-visibility in `archiveHumanSessionWorkstream` (`packages/core/src/application/session-commands.ts`).
-Its personal-state fence precedes the normal control/workspace/session locks;
-post-commit fanout uses the existing durable control outboxes. Shared-chat control
-authority is independent of creator identity. Restore never resumes, and explicit
-Hide for me does not pause. See [run lifecycle](run-lifecycle.md) for schedule and
-background-command semantics.
+The chat Archive action (`archiveHumanSessionWorkstream` in
+`packages/core/src/application/session-commands.ts`) is the one archive, for
+everyone, and needs session control regardless of who started the chat. It marks
+the chat tree archived (`sessions.archived_at`) and schedules a delayed workflow
+for the end of a ten-second Undo window; that workflow retires the chat's
+one-time automations, pauses its goals, cancels its running work and stores it
+through the idle-session archive. See [session storage
+lifecycle](session-storage-lifecycle.md#archiving-a-chat).
 
 Teams group chats use a separate native workspace-visible session namespace.
 The Connector roster freezes exact Teams actor-to-Opengeni human mappings in

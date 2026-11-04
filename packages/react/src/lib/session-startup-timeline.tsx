@@ -174,6 +174,8 @@ export type PendingPrompt = {
   text: string;
   /** When the person sent it (ISO 8601). Anchors the startup row's clock. */
   sentAt: string;
+  /** Already uploaded attachments, displayed while durable history loads. */
+  resources?: Extract<TimelineItem, { kind: "user-message" }>["resources"] | undefined;
 };
 
 const PENDING_SCOPE = "pending-prompt";
@@ -186,7 +188,7 @@ function pendingPromptItems(prompt: PendingPrompt): TimelineItem[] {
       kind: "user-message",
       id: "pending-prompt-message",
       text: prompt.text,
-      resources: [],
+      resources: prompt.resources ?? [],
       tools: [],
       occurredAt: prompt.sentAt,
     },

@@ -992,3 +992,48 @@ describe("durable advisory work claims", () => {
     }
   });
 });
+
+describe("session discovery creator and visibility filters", () => {
+  test("mineOnly and visibility narrow discovery; rows say visibility and archive state", async () => {
+    if (!shared || !client) return;
+    const f = await fixture({ privateSession: true });
+    const otherSubjectId = `user:discovery-other-${crypto.randomUUID()}`;
+    await grantWorkspaceAccess(client.db, {
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      subjectId: otherSubjectId,
+      permissions: ["sessions:read", "sessions:create", "sessions:control"],
+    });
+    const mineShared = await createOwnedSession(f, "Shared chat I started");
+    const othersShared = await createOwnedSession(
+      { grant: f.grant, ownerSubjectId: otherSubjectId },
+      "Shared chat someone else started",
+    );
+    const list = async (options: { mineOnly?: boolean; visibility?: "private" | "workspace" }) =>
+      await listSessionDiscoverySummaries(client!.db, f.grant.workspaceId, {
+        limit: 20,
+        subjectId: f.ownerSubjectId,
+        ...options,
+      });
+    const ids = (page: Awaited<ReturnType<typeof list>>) =>
+      new Set(page.sessions.map((session) => session.id));
+
+    expect(ids(await list({}))).toEqual(new Set([f.session.id, mineShared.id, othersShared.id]));
+    expect(ids(await list({ mineOnly: true }))).toEqual(new Set([f.session.id, mineShared.id]));
+    expect(ids(await list({ visibility: "private" }))).toEqual(new Set([f.session.id]));
+    const mineAndShared = await list({ mineOnly: true, visibility: "workspace" });
+    expect(ids(mineAndShared)).toEqual(new Set([mineShared.id]));
+    expect(mineAndShared.total).toBe(1);
+
+    const all = await list({});
+    const byId = new Map(all.sessions.map((session) => [session.id, session]));
+    expect(byId.get(f.session.id)).toMatchObject({ visibility: "private", archived: false });
+    expect(byId.get(othersShared.id)).toMatchObject({ visibility: "workspace", archived: false });
+
+    await shared.admin`
+      update sessions set archived_at = now()
+      where workspace_id = ${f.grant.workspaceId} and id = ${mineShared.id}`;
+    const archived = (await list({ mineOnly: true, visibility: "workspace" })).sessions[0]!;
+    expect(archived).toMatchObject({ id: mineShared.id, archived: true });
+  });
+});

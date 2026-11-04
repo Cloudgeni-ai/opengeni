@@ -31,6 +31,29 @@ test("every platform catalog comes from the CUA release browserd pins", async ()
   });
 });
 
+test("all platform catalogs admit the pinned worker's shared batching contract", async () => {
+  const sharedBatch = CUA_DESKTOP_TOOLS.find((tool) => tool.name === "run_steps")!;
+  for (const [platform, tools] of [
+    ["linux", CUA_LINUX_DESKTOP_TOOLS],
+    ["windows", CUA_WINDOWS_DESKTOP_TOOLS],
+  ] as const) {
+    const batch = tools.find((tool) => tool.name === "run_steps");
+    expect(batch).toEqual(sharedBatch);
+    const runtime: CuaDesktopRuntime = {
+      listToolsJson: async () => JSON.stringify({ tools: [sharedBatch] }),
+      callTool: async () => {
+        throw new Error("Validation must not dispatch");
+      },
+      shutdown: async () => {},
+    };
+    await new CuaNativeTools(runtime, "owned", platform).validate({
+      operationId: randomUUID(),
+      tool: "run_steps",
+      arguments: { steps: [{ tool: "press_key", args: { key: "return" } }] },
+    });
+  }
+});
+
 test("Linux native admission uses the Linux release schema without accepting a Mac worker", async () => {
   const runtime: CuaDesktopRuntime = {
     listToolsJson: async () => JSON.stringify({ tools: CUA_LINUX_DESKTOP_TOOLS }),

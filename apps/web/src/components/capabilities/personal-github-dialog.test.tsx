@@ -92,4 +92,33 @@ describe("PersonalGitHubDialog", () => {
       container.remove();
     }
   });
+  test("names the identity and says when repositories are still loading", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const dialog = (loading: boolean) => (
+      <PersonalGitHubDialog
+        open
+        onOpenChange={() => undefined}
+        login="octocat"
+        repositories={[]}
+        loading={loading}
+        busy={false}
+        onSave={async () => true}
+        onReconnect={() => undefined}
+        onDisconnect={() => undefined}
+      />
+    );
+    try {
+      await act(async () => root.render(dialog(true)));
+      expect(container.querySelector("h2")?.textContent).toBe("Your GitHub");
+      expect(container.textContent).toContain("Choose the repos Opengeni may use as you.");
+      expect(container.textContent).toContain("Loading repositories…");
+      await act(async () => root.render(dialog(false)));
+      expect(container.textContent).toContain("No repositories found.");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
 });

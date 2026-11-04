@@ -597,8 +597,9 @@ export function TurnSummary({
 }
 
 /**
- * "Working · 2m 14s", "Waiting for 2 agents · 3m 5s", or "Worked for 4m 10s";
- * null when a settled span is too short to state.
+ * "Working · 2m 14s", "Waiting for 2 agents · 3m 5s", "Paused · 2m 14s" (its
+ * clock stopped), or "Worked for 4m 10s"; null when a settled span is too
+ * short to state.
  */
 function turnSummaryStatusLine(t: OpenGeniText, status: TurnSummaryStatus): ReactNode {
   if (status.kind === "worked") {
@@ -609,6 +610,18 @@ function turnSummaryStatusLine(t: OpenGeniText, status: TurnSummaryStatus): Reac
         {status.label ?? t("timeline.turnSummary.workedFor")} {formatElapsed(t, status.durationMs)}
       </span>
     ) : null;
+  }
+  if (status.kind === "paused") {
+    return (
+      <span data-og-exchange-status="paused">
+        {status.label ?? t("timeline.turnSummary.paused")}
+        {status.durationMs !== undefined &&
+        Number.isFinite(status.durationMs) &&
+        status.durationMs >= 1000 ? (
+          <span className="tabular-nums">{` · ${formatElapsed(t, status.durationMs)}`}</span>
+        ) : null}
+      </span>
+    );
   }
   const label =
     status.label ??

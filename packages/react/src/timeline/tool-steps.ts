@@ -17,6 +17,7 @@ export const TOOL_STEP_IDS = [
   "archiveNote",
   "askForHelp",
   "askYou",
+  "changeEventSource",
   "changeModel",
   "checkAccounts",
   "checkChats",
@@ -62,6 +63,7 @@ export const TOOL_STEP_IDS = [
   "nameChat",
   "noteProgress",
   "notify",
+  "callYou",
   "openBrowser",
   "openFile",
   "openScreen",
@@ -130,6 +132,7 @@ const BUILT_IN_TOOL_STEPS: Readonly<Record<string, ToolStepId>> = {
   set_other_session_title: "nameChat",
   bot_template_save: "saveBotTemplate",
   notify_user: "notify",
+  call_user: "callYou",
   notification_withdraw: "withdrawNotification",
   inbox_tidy: "tidyInbox",
   goal_set: "setGoal",
@@ -275,6 +278,7 @@ const BUILT_IN_TOOL_STEPS: Readonly<Record<string, ToolStepId>> = {
   rig_verify: "manageSetup",
   rig_promote: "manageSetup",
   list_models: "checkModels",
+  privacy_facts: "checkSettings",
   get_video_generation_capabilities: "checkModels",
 
   // Passwords and settings
@@ -335,6 +339,9 @@ const BUILT_IN_TOOL_STEPS: Readonly<Record<string, ToolStepId>> = {
   scheduled_task_runs_list: "checkSchedules",
   event_sources_list: "checkEvents",
   events_get: "checkEvents",
+  event_sources_create_webhook: "changeEventSource",
+  event_sources_update: "changeEventSource",
+  event_sources_delete: "changeEventSource",
   scheduled_tasks_create: "createSchedule",
   scheduled_tasks_update: "updateSchedule",
   scheduled_tasks_pause: "updateSchedule",
@@ -356,6 +363,10 @@ const BUILT_IN_TOOL_STEPS: Readonly<Record<string, ToolStepId>> = {
   slack_bot_prepare_message: "postSlack",
   slack_bot_send_prepared_message: "postSlack",
   slack_bot_delete_message: "deleteMessage",
+  slack_agent_handoff: "postSlack",
+  slack_agent_suggest: "postSlack",
+  slack_agent_chats: "readSlack",
+  slack_agent_propose: "postSlack",
 
   // Accounting
   fiken_companies_list: "readAccounting",

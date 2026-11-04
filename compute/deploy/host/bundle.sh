@@ -60,9 +60,9 @@ chmod 755 "$dir/guest/compute-guest" "$dir/guest/envd" "$dir/guest/bash"
 chmod 644 "$dir/guest/VERSIONS"
 
 install -m 755 "$here/install.sh" "$here/check-host" "$here/host-setup" \
-  "$here/compute-host-certificate" "$dir/"
+  "$here/compute-host-certificate" "$here/agent-inputs" "$dir/"
 install -m 644 "$here/pins.env" "$here/host.env.example" "$here/compute-host.service" \
-  "$here/compute-guard.service" "$here/compute-host-setup.service" \
+  "$here/compute-guard.service" "$here/compute-guard-shared.conf" "$here/compute-host-setup.service" \
   "$here/compute-host-certificate.service" "$here/compute-host-certificate.timer" "$dir/"
 echo "$VERSION" >"$dir/VERSION"
 (cd "$dir" && find . -type f ! -name SHA256SUMS -printf '%P\n' | LC_ALL=C sort | xargs sha256sum >SHA256SUMS)

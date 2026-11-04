@@ -57,6 +57,7 @@ import {
   syncUpdatedScheduledTask,
   updateScheduledTaskForApi,
   triggerScheduledTaskForGrant,
+  manualScheduledTaskTriggerBillingOrigin,
   validateScheduledTaskMachineTarget,
   validateScheduledTaskTarget,
   validatedScheduledTaskUpdate,
@@ -536,7 +537,6 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
         runMode: task.runMode,
         reusableSessionId: task.reusableSessionId,
         agentConfig: task.agentConfig,
-        audience: task.visibility === "private" ? "user_private" : "workspace_shared",
         requireOnline: true,
       });
       const taskAuthoritySubjectId = await getScheduledTaskRevisionAuthoritySubject(db, {
@@ -557,6 +557,8 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
             taskAuthoritySubjectId === task.ownerSubjectId ? taskAuthoritySubjectId : null,
           action: "agent_run:create",
           quantity: 1,
+          // The run is API use when the caller or the task is.
+          billingOrigin: await manualScheduledTaskTriggerBillingOrigin(db, grant, task.id),
           // A model-less task is checked against the model its occurrence
           // will run (a connected subscription, the credits default, or the
           // deployment default), not always the deployment default.

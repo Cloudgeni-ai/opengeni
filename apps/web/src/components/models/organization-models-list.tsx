@@ -161,11 +161,16 @@ export interface ModelsWorkspace {
   /** The viewer can change its default model and Allowed models. */
   canManage: boolean;
   /**
-   * The viewer can't change its models but connects and manages their own
-   * subscriptions ("Only me") on its page: a member who can manage
-   * connections there.
+   * The viewer can't change its models but opens its page to connect and
+   * manage their own subscriptions ("Only me"), a member who can manage
+   * connections there, or to add and remove its custom models
+   * (`customModels`).
    */
   connectOwn?: boolean | undefined;
+  /** The viewer adds and removes its custom models without managing it. */
+  customModels?: boolean | undefined;
+  /** False when the viewer can't connect their own subscriptions there. */
+  ownSubscriptions?: boolean | undefined;
   /** Its saved default model, if any (from the workspace's settings). */
   savedDefaultModel: string | null;
 }
@@ -1235,7 +1240,13 @@ function WorkspaceRow({
       <ListRow
         leading={leading}
         title={title}
-        meta={["Your own subscriptions"]}
+        meta={[
+          workspace.customModels
+            ? workspace.ownSubscriptions === false
+              ? "Custom models"
+              : "Custom models and your own subscriptions"
+            : "Your own subscriptions",
+        ]}
         indicator="open"
         onOpen={onOpen}
       />

@@ -31,6 +31,7 @@ import {
   textVerbosityForTurn,
 } from "../src/activities/agent-turn/tool-policy";
 import { createTurnContext } from "../src/activities/agent-turn/turn-context";
+import { createTurnEventLane } from "../src/activities/agent-turn/turn-event-lane";
 import { createRuntimeBatcher } from "../src/activities/streaming";
 import { TurnAttemptFencedError } from "../src/activities/turn-attempt-fenced";
 import { streamSessionEvents, type SessionEvent } from "@opengeni/sdk";
@@ -193,6 +194,8 @@ function fencedPublisher(accept: boolean, stored: SessionEvent[]) {
   );
   const parsed = parseSync("claim.ts", source);
   expect(parsed.errors).toEqual([]);
+  // The publisher appends through `append`, ordered by the turn's event lane.
+  const declared = new Map<string, Node>();
   let expression: Node | undefined;
   const visit = (value: unknown) => {
     if (!value || typeof value !== "object") return;
@@ -201,6 +204,13 @@ function fencedPublisher(accept: boolean, stored: SessionEvent[]) {
       return;
     }
     const node = value as Node;
+    if (
+      node.type === "VariableDeclarator" &&
+      node.id.type === "Identifier" &&
+      (node.id.name === "append" || node.id.name === "eventLane") &&
+      node.init
+    )
+      declared.set(node.id.name, node.init);
     if (
       node.type === "AssignmentExpression" &&
       node.left.type === "MemberExpression" &&
@@ -214,8 +224,15 @@ function fencedPublisher(accept: boolean, stored: SessionEvent[]) {
   };
   visit(parsed.program);
   if (!expression) throw new Error("Missing production fenced event publisher");
+  const append = declared.get("append");
+  const eventLane = declared.get("eventLane");
+  if (!append || !eventLane) throw new Error("Missing production event append or event lane");
   const compiled = new Bun.Transpiler({ loader: "ts" }).transformSync(
-    `const publish = ${source.slice(expression.start, expression.end)};`,
+    [
+      `const append = ${source.slice(append.start, append.end)};`,
+      `const eventLane = ${source.slice(eventLane.start, eventLane.end)};`,
+      `const publish = ${source.slice(expression.start, expression.end)};`,
+    ].join("\n"),
   );
   const noop = () => undefined;
   const ports = {
@@ -228,6 +245,7 @@ function fencedPublisher(accept: boolean, stored: SessionEvent[]) {
     activityContext: null,
     heartbeatDetails: {},
     TurnAttemptFencedError,
+    createTurnEventLane,
     recordSessionEventAppendLatency: noop,
     recordSessionEventAppendPhase: noop,
     recordSessionEventPublishLatency: noop,

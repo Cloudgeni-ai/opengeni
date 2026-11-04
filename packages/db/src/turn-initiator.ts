@@ -120,6 +120,30 @@ export function humanTurnSenderLabel(row: {
   return typeof label === "string" && label.trim() ? label : null;
 }
 
+/**
+ * Whether two messages come from the same sender: the same person, or for a
+ * message without a person behind it (a workspace key, a service), the same
+ * exact sender. A queue edit keeps its message's authority, including the
+ * sender's own (Only me) accounts, only when its own sender resubmits it;
+ * anyone else's edit is their own new message.
+ */
+export function sameTurnSender(
+  left: Pick<FrozenTurnInitiator, "initiator" | "initiatingHumanSubjectId">,
+  right: Pick<FrozenTurnInitiator, "initiator" | "initiatingHumanSubjectId">,
+): boolean {
+  const person = (value: typeof left) =>
+    value.initiatingHumanSubjectId?.trim() ||
+    (value.initiator.kind === "subject" ? value.initiator.subjectId.trim() : "") ||
+    null;
+  const leftPerson = person(left);
+  const rightPerson = person(right);
+  if (leftPerson !== null || rightPerson !== null) return leftPerson === rightPerson;
+  return (
+    left.initiator.kind === right.initiator.kind &&
+    left.initiator.subjectId === right.initiator.subjectId
+  );
+}
+
 export function initiatorColumns(value: FrozenTurnInitiator): {
   initiatorKind: TurnInitiator["kind"];
   initiatorSubjectId: string;

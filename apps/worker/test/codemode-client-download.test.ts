@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { gunzipSync } from "node:zlib";
 import {
   loadManagedCodemodeClient,
   managedCodemodeClientBytes,
@@ -60,7 +61,13 @@ describe("managed Codemode client download", () => {
     expect(second?.url).toContain(key);
     expect(store.heads).toEqual([key]);
     expect(store.puts).toHaveLength(1);
-    expect(new TextDecoder().decode(store.puts[0]!.body)).toBe(managedCodemodeClientBytes(client));
+    expect(key).toEndWith(".json.gz");
+    expect(gunzipSync(store.puts[0]!.body).toString("utf8")).toBe(
+      managedCodemodeClientBytes(client),
+    );
+    expect(store.puts[0]!.body.byteLength).toBeLessThan(
+      Buffer.byteLength(managedCodemodeClientBytes(client)),
+    );
     expect(store.signed).toHaveLength(2);
     expect(store.signed[0]!.expiresInSeconds).toBeGreaterThan(0);
   });

@@ -1,5 +1,4 @@
 import type { OpenGeniText } from "@opengeni/react/messages";
-import { GENIE_PREPARING_PHRASES, GENIE_WAITING_PHRASES } from "@opengeni/react/timeline-model";
 
 /** What the composer's single trailing control does right now. */
 export type ComposerTrailingMode = "send" | "pause" | "resume" | "call" | "idle";
@@ -41,15 +40,13 @@ export function composerAlternateSend(input: {
 }
 
 /**
- * The loading copy beside the orb: a host's own phrases replace both phases',
- * as the web timeline's loading `phrases` option does; otherwise the built-in
- * preparing or waiting copy.
+ * One calm status across startup phases; hosts may supply their own wording.
  */
 export function nativeLoadingPhrases(
   t: OpenGeniText,
   hostPhrases: readonly string[],
-  phase: "preparing" | "waiting",
+  _phase: "preparing" | "waiting",
 ): readonly string[] {
   if (hostPhrases.length > 0) return hostPhrases;
-  return phase === "waiting" ? GENIE_WAITING_PHRASES(t) : GENIE_PREPARING_PHRASES(t);
+  return [t("native.timeline.messages.working")];
 }

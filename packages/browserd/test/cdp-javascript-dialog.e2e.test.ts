@@ -16,6 +16,7 @@ import {
   type AttachedBrowserBridgeTransport,
 } from "../src/attached-cdp";
 import { CdpConnection } from "../src/cdp";
+import { PAGE_NOT_ANSWERING_MESSAGE, PAGE_STILL_BUSY_MESSAGE } from "../src/cdp-driver";
 
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 
@@ -233,6 +234,143 @@ e2e(
   60_000,
 );
 
+// A dialog the page opens on its own, before anything debugs its tab.
+const EARLY_DIALOG_PAGE = `data:text/html,${encodeURIComponent(`<!doctype html><title>waiting</title>
+<script>setTimeout(() => { document.title = confirm("Leave this page?") ? "accepted" : "dismissed" }, 500)</script>
+<button onclick="document.title = confirm('Delete it?') ? 'deleted' : 'kept'">Delete</button>`)}`;
+
+// A page that keeps its main thread busy for 40 seconds, with no dialog.
+const BUSY_PAGE = `data:text/html,${encodeURIComponent(`<!doctype html><title>busy</title>
+<script>setTimeout(() => { const end = Date.now() + 40000; while (Date.now() < end) {} document.title = "done" }, 500)</script>`)}`;
+
+/** The person's own tab in front, opened while nothing debugs it, with a
+ * driver of a session that has another tab. */
+async function withPersonTab(
+  url: string,
+  run: (fixture: {
+    driver: AgentBrowserDriver;
+    bridge: ChromeDebuggerBridge;
+    tabId: string;
+  }) => Promise<void>,
+): Promise<void> {
+  const directory = await mkdtemp("/tmp/ogb-dialog-early-");
+  const chrome = Bun.spawn(
+    [
+      process.env.OPENGENI_BROWSER_EXECUTABLE ?? "chromium",
+      "--headless=new",
+      "--remote-debugging-port=0",
+      `--user-data-dir=${join(directory, "profile")}`,
+      "--no-first-run",
+      "--no-default-browser-check",
+      "about:blank",
+    ],
+    { stdout: "ignore", stderr: "pipe" },
+  );
+  const browser = await CdpConnection.connect(await devtoolsEndpoint(chrome.stderr));
+  const bridge = new ChromeDebuggerBridge(browser);
+  const connection = new AttachedChromeCdpConnection(bridge, {
+    browserName: "Chrome",
+    browserVersion: "151.0.0.0",
+  });
+  const driver = createAttachedChromeDriver(
+    { browserSessionId: randomUUID(), controllerGeneration: `fixture-${randomUUID()}` },
+    { connection, runner: new AttachedChromeRunner(bridge, connection) },
+  );
+  try {
+    await driver.start("data:text/html,<title>other</title>");
+    const { tab } = await bridge.request<{ tab: { id: string } }>({ type: "tabs.create", url });
+    await bridge.request({ type: "tabs.activate", tabId: tab.id });
+    await Bun.sleep(1_500);
+    bridge.activations.length = 0;
+    await run({ driver, bridge, tabId: tab.id });
+  } finally {
+    await driver.close().catch(() => undefined);
+    browser.close();
+    chrome.kill();
+    await chrome.exited;
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+e2e(
+  "a dialog a tab in front opened before attaching is reported at once, and handle_dialog dismiss cancels it",
+  async () => {
+    await withPersonTab(EARLY_DIALOG_PAGE, async ({ driver, bridge, tabId }) => {
+      const pages = await bridge.pageCount();
+      const started = Date.now();
+      await expect(driver.observe(tabId)).rejects.toThrow(PAGE_NOT_ANSWERING_MESSAGE);
+      expect(Date.now() - started).toBeLessThan(12_000);
+      // Nothing was switched or answered: the person can still answer it.
+      expect(bridge.activations).toEqual([]);
+      expect(await bridge.title(tabId)).toBe("waiting");
+
+      // The agent cancels it explicitly, naming the tab from its state.
+      const state = await driver.targetState(tabId);
+      expect(state).toMatchObject({ documentGeneration: null, frameId: null });
+      const cancelled = await driver.dispatch({
+        protocolVersion: 1,
+        operationId: randomUUID(),
+        browserSessionId: state.browserSessionId,
+        controllerGeneration: state.controllerGeneration,
+        targetId: state.targetId,
+        expectedTargetGeneration: state.targetGeneration,
+        expectedDocumentGeneration: state.documentGeneration,
+        expectedFrameId: state.frameId,
+        actor: { kind: "agent", subjectId: "browserd-dialog-e2e" },
+        action: { type: "handle_dialog", response: "dismiss" },
+      });
+      expect(cancelled?.dialog).toBeNull();
+      expect(await bridge.evaluate(tabId, "document.title")).toBe("dismissed");
+      // Shown again, and the blank tab shown meanwhile is gone.
+      expect(bridge.activeTabId).toBe(tabId);
+      expect(await bridge.pageCount()).toBe(pages);
+
+      // A dialog it opens now shows, and handle_dialog answers it.
+      const asked = await driver.dispatch({
+        ...command(cancelled!, {
+          type: "click",
+          locator: { kind: "role", role: "button", name: "Delete" },
+        }),
+        observationMode: "full",
+      } as BrowserActionCommand);
+      expect(asked?.dialog).toMatchObject({ type: "confirm", message: "Delete it?" });
+      await driver.dispatch(command(asked!, { type: "handle_dialog", response: "accept" }));
+      expect(await bridge.evaluate(tabId, "document.title")).toBe("deleted");
+    });
+  },
+  90_000,
+);
+
+e2e(
+  "a busy page in front is reported the same way, and dismissing it claims no dialog",
+  async () => {
+    await withPersonTab(BUSY_PAGE, async ({ driver, bridge, tabId }) => {
+      const pages = await bridge.pageCount();
+      await expect(driver.observe(tabId)).rejects.toThrow(PAGE_NOT_ANSWERING_MESSAGE);
+      expect(bridge.activations).toEqual([]);
+      const state = await driver.targetState(tabId);
+      await expect(
+        driver.dispatch({
+          protocolVersion: 1,
+          operationId: randomUUID(),
+          browserSessionId: state.browserSessionId,
+          controllerGeneration: state.controllerGeneration,
+          targetId: state.targetId,
+          expectedTargetGeneration: state.targetGeneration,
+          expectedDocumentGeneration: state.documentGeneration,
+          expectedFrameId: state.frameId,
+          actor: { kind: "agent", subjectId: "browserd-dialog-e2e" },
+          action: { type: "handle_dialog", response: "dismiss" },
+        }),
+      ).rejects.toThrow(PAGE_STILL_BUSY_MESSAGE);
+      expect(bridge.activeTabId).toBe(tabId);
+      expect(await bridge.pageCount()).toBe(pages);
+      expect(await bridge.title(tabId)).toBe("busy");
+    });
+  },
+  90_000,
+);
+
 /** The Opengeni Chrome extension's bridge, over a real Chromium: tabs are page
  * targets, chrome.debugger is a flattened CDP session per tab, and debugger
  * events reach browserd only by polling, as they do from the extension. */
@@ -263,13 +401,17 @@ class ChromeDebuggerBridge implements AttachedBrowserBridgeTransport {
       case "tabs.list":
         return { tabs: await this.tabs() } as T;
       case "tabs.create": {
+        // The extension opens a tab without showing it.
         const { targetId } = await this.browser.send<{ targetId: string }>("Target.createTarget", {
           url: String(payload.url),
+          background: true,
         });
         return { tab: (await this.tabs()).find((tab) => this.target(tab.id) === targetId) } as T;
       }
       case "tabs.activate":
         await this.browser.send("Target.activateTarget", { targetId: this.target(payload.tabId) });
+        this.activeTabId = String(payload.tabId);
+        this.activations.push(this.activeTabId);
         return {} as T;
       case "tabs.close":
         await this.browser.send("Target.closeTarget", { targetId: this.target(payload.tabId) });
@@ -320,6 +462,20 @@ class ChromeDebuggerBridge implements AttachedBrowserBridgeTransport {
   close(): void {}
 
   private held: Promise<void> | null = null;
+  /** The tab last brought to the front; every tab is in one window. */
+  activeTabId: string | null = null;
+  /** Every tab brought to the front, in order. */
+  readonly activations: string[] = [];
+
+  /** A tab's title as the browser lists it, which a page held by a dialog
+   * can still give. */
+  async title(tabId: string): Promise<string | undefined> {
+    return (await this.tabs()).find((tab) => tab.id === tabId)?.title;
+  }
+
+  async pageCount(): Promise<number> {
+    return (await this.tabs()).length;
+  }
 
   /** Holds page reads until released, as a busy page would. */
   holdPageReads(): () => void {
@@ -372,7 +528,8 @@ class ChromeDebuggerBridge implements AttachedBrowserBridgeTransport {
         id: this.tabId(target.targetId),
         title: target.title || "Untitled",
         url: target.url,
-        active: false,
+        active: this.tabId(target.targetId) === this.activeTabId,
+        windowId: 1,
         controllable: true,
       }));
   }

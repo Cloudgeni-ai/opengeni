@@ -51,7 +51,7 @@ function event(type: string, payload: unknown, turnId: string | null = "turn-1")
 
 function tool(id: string, name: string, turnId = "turn-1", output: unknown = "ok") {
   return [
-    event("agent.toolCall.created", { id, name, arguments: { cmd: id } }, turnId),
+    event("agent.toolCall.created", { id, name, arguments: { cmd: `cat ${id}.md` } }, turnId),
     event("agent.toolCall.output", { id, output }, turnId),
   ];
 }
@@ -658,7 +658,9 @@ describe("capacity limit rows", () => {
       await act(async () => trigger.click());
       await flush();
       expect(trigger.getAttribute("aria-expanded")).toBe("true");
-      expect(r.container.querySelector("[data-og-fold-content]")?.textContent).toContain("ls");
+      expect(r.container.querySelector("[data-og-fold-content]")?.textContent).toContain(
+        "Looked through files",
+      );
       expect(guidance()).toBe(GUIDANCE);
       expect(trigger.textContent).not.toMatch(/\d+[smh]\b/);
     } finally {

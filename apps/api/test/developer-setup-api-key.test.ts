@@ -166,6 +166,8 @@ describe("Developer setup organization API keys", () => {
           ),
         );
         track(spyOn(db, "lockExternalWorkspaceMembershipLifecycle").mockResolvedValue(undefined));
+        track(spyOn(db, "externalIdentityReadGranted").mockResolvedValue(false));
+        track(spyOn(db, "readExternalWorkspaceRevocationWatermark").mockResolvedValue("0"));
         track(
           spyOn(db, "ensureExternalIdentity").mockResolvedValue({
             id: "55555555-5555-4555-8555-555555555555",

@@ -5,11 +5,13 @@ import {
   type SandboxRecord,
 } from "@opengeni/db";
 import {
+  assertHostSandboxBackendServed,
   ensureModalRegistryImage,
   swapTargetEstablishability,
   type BackendUnresolvableCode,
 } from "@opengeni/runtime";
-import { type Settings } from "@opengeni/config";
+import { deploymentSandboxBackend, type Settings } from "@opengeni/config";
+import { managedSessionGroupBackend } from "@opengeni/core";
 import type { TurnActivityServices as ActivityServices } from "../types";
 import {
   sandboxLeaseHolderIdForAttempt,
@@ -18,6 +20,31 @@ import {
 import { type TurnSandboxEstablishReason } from "../../observability-metrics";
 import { type SessionEventType } from "@opengeni/contracts";
 import { safeErrorDiagnostic } from "./errors";
+
+/**
+ * Refuse a turn whose session would build its box on a host backend (`local`,
+ * `docker`) this deployment does not serve, before anything else touches a
+ * sandbox: no box, repository clone, setup, Rig or hydration hook, credential
+ * or Codemode materialization. Session creation already rejects such backends
+ * (`sandboxBackendServed`), but rows stored before that gate, and shared-box
+ * children that inherit a parent's backend, still name one. `deploymentSettings`
+ * should be the worker's own settings; the deployment default is read from
+ * `deploymentSandboxBackend`, so a session-rebound copy cannot serve itself.
+ *
+ * The backend checked is the one the turn would build (`selfhosted` falls back
+ * to the deployment default; `none` builds nothing). Throws
+ * SandboxBackendNotServedError, a non-retryable configuration failure.
+ */
+export function assertTurnSandboxBackendServed(
+  deploymentSettings: Settings,
+  sessionBackend: Settings["sandboxBackend"],
+): void {
+  const built = managedSessionGroupBackend(
+    deploymentSandboxBackend(deploymentSettings),
+    sessionBackend,
+  );
+  if (built) assertHostSandboxBackendServed(deploymentSettings, built);
+}
 
 export async function resolveActiveSandboxBackend(
   routingOn: boolean,

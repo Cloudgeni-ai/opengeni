@@ -1269,24 +1269,29 @@ describe("BrowserSession route discipline", () => {
       managedAuth: null,
     });
     const undrawn =
-      "browser screenshot unavailable: Chrome has not drawn this tab, which happens while it is hidden or still loading; try again in a moment, or read it with browser_observe.";
+      "browser screenshot timed out: Chrome had not drawn this tab yet; retry shortly, or read it with browser_observe.";
     const stalled =
       "browser screenshot stalled: Chrome did not draw this tab, which can happen while another tab is in front of it in its window; try again, or read it with browser_observe.";
     const cases = [
-      [503, "resource_unavailable", undrawn],
-      [504, "timeout", stalled],
+      ["undrawn", undrawn],
+      ["stalled", stalled],
     ] as const;
-    for (const [status, code, message] of cases) {
-      const internal = new BrowserControlRequestError(status, { code, message, retryable: true });
+    const status = 504;
+    for (const [name, message] of cases) {
+      const internal = new BrowserControlRequestError(status, {
+        code: "timeout",
+        message,
+        retryable: true,
+      });
       const projected = browserScreenshotError(internal);
       expect(projected).toBeInstanceOf(HTTPException);
       expect((projected as Error).cause).toBe(internal);
-      app.get(`/v1/test/browser-capture-${code}`, () => {
+      app.get(`/v1/test/browser-capture-${name}`, () => {
         throw projected;
       });
     }
-    for (const [status, code, message] of cases) {
-      const path = `/v1/test/browser-capture-${code}`;
+    for (const [name, message] of cases) {
+      const path = `/v1/test/browser-capture-${name}`;
       const response = await app.request(`http://localhost${path}`, {
         headers: { "x-opengeni-correlation-id": "capture-request-43" },
       });

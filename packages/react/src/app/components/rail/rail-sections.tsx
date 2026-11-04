@@ -1,16 +1,19 @@
 // The rail's sections that surfaces fill in: the brand row with the workspace
 // switcher slot, and the primary navigation with "New session" plus the
 // surface's own entries. `SessionShell` composes them.
-import { ChevronsLeftIcon, ChevronsRightIcon, SquarePenIcon, XIcon } from "lucide-react";
+import { SquarePenIcon, XIcon } from "lucide-react";
 import { createContext, useContext, type ReactNode } from "react";
 
-import { BrandMark, Wordmark } from "../brand-mark";
 import { useRail } from "./rail-context";
+import { RAIL_BRAND_LINK_CLASS, RailBrandMark, RailBrandRow } from "./rail-surface";
 import { NewSessionLink } from "./session-list";
 import { Button } from "../../../ui/button";
-import { Tooltip, TooltipContent, TooltipTrigger } from "../../../ui/tooltip";
 import { useActionShortcut } from "../../lib/actions/actions-provider";
-import { TooltipWithKeys } from "../command-menu/keycaps";
+import {
+  SIDEBAR_TOGGLE_IN_WINDOW_BAR,
+  SidebarToggleButton,
+  WindowBarControls,
+} from "../window-bar";
 import { Link, useRouterState } from "../../lib/navigation";
 import { cn } from "../../lib/utils";
 import { useSessionUiFeature } from "../../lib/session-ui-features";
@@ -57,65 +60,45 @@ export function SessionShellSlotsProvider({
  * the settings rail's top (12px, 32px brand row, 12px gap) so switching
  * between the two rails doesn't jump. The collapse toggle sits at the right end
  * of the brand row; collapsed, only the mark stays, with the expand toggle
- * under it.
+ * under it. In the macOS app the toggle is in the window bar instead.
  */
 export function RailHeader({ showSwitcher = true }: { showSwitcher?: boolean }) {
   const rail = useRail();
   const { switcher } = useContext(SessionShellSlotsContext);
-  const sidebarKeys = useActionShortcut("view.sidebar");
   // Without the brand (an embed), the row holds just the collapse toggle, at
   // its end.
   const brand = useSessionUiFeature("brand");
   const brandless = !brand;
+  const toggleInWindowBar = SIDEBAR_TOGGLE_IN_WINDOW_BAR && !rail.isMobile;
   const collapseToggle = !rail.isMobile ? (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          aria-label={rail.collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          aria-keyshortcuts={sidebarKeys?.ariaKeys}
-          onClick={rail.toggleCollapsed}
-          className="shrink-0 text-fg-label hover:text-fg pointer-coarse:size-10"
-        >
-          {rail.collapsed ? (
-            <ChevronsRightIcon className="size-4" />
-          ) : (
-            <ChevronsLeftIcon className="size-4" />
-          )}
-        </Button>
-      </TooltipTrigger>
-      <TooltipContent side="right">
-        <TooltipWithKeys
-          label={rail.collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          shortcut={sidebarKeys}
-        />
-      </TooltipContent>
-    </Tooltip>
+    <SidebarToggleButton
+      collapsed={rail.collapsed}
+      onToggle={rail.toggleCollapsed}
+      inWindowBar={toggleInWindowBar}
+    />
   ) : null;
+  const rowToggle = toggleInWindowBar ? null : collapseToggle;
   return (
     <div data-rail-header className="flex shrink-0 flex-col gap-3 pt-3">
-      <div
-        data-rail-brand
-        data-window-drag
-        className={cn(
-          "flex h-8 min-w-0 items-center gap-2 px-2",
-          rail.collapsed ? "justify-center" : brandless ? "justify-end" : "justify-between",
-        )}
+      {toggleInWindowBar && collapseToggle ? (
+        <WindowBarControls>{collapseToggle}</WindowBarControls>
+      ) : null}
+      <RailBrandRow
+        className={
+          rail.collapsed ? "justify-center" : brandless ? "justify-end" : "justify-between"
+        }
       >
         {brandless ? null : (
           <Link
             to="/workspaces/$workspaceId/sessions"
             params={{ workspaceId: rail.workspaceId }}
-            className="flex h-8 shrink-0 items-center gap-2 rounded-md px-1.5 text-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+            className={RAIL_BRAND_LINK_CLASS}
             aria-label="Opengeni home"
           >
-            <BrandMark className="w-5" />
-            {!rail.collapsed ? <Wordmark className="text-[18px]" /> : null}
+            <RailBrandMark collapsed={rail.collapsed} />
           </Link>
         )}
-        {!rail.collapsed || brandless ? collapseToggle : null}
+        {!rail.collapsed || brandless ? rowToggle : null}
         {rail.isMobile ? (
           <Button
             type="button"
@@ -128,9 +111,9 @@ export function RailHeader({ showSwitcher = true }: { showSwitcher?: boolean }) 
             <XIcon className="size-4" />
           </Button>
         ) : null}
-      </div>
-      {rail.collapsed && collapseToggle && !brandless ? (
-        <div className="-mt-1 grid justify-items-center">{collapseToggle}</div>
+      </RailBrandRow>
+      {rail.collapsed && rowToggle && !brandless ? (
+        <div className="-mt-1 grid justify-items-center">{rowToggle}</div>
       ) : null}
       {showSwitcher && !rail.collapsed ? switcher : null}
     </div>

@@ -14,6 +14,7 @@ import {
   linkTeamsActor,
   disconnectTeamsBot,
 } from "../src";
+import { rawRows } from "../src/database";
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -208,4 +209,109 @@ test("identity relinking respects the native workspace-before-provider lock orde
     expect(await requireTeamsPrivateSessionProof(tx, input)).toBe(i.tenant_id);
   });
   await linked;
+});
+
+test("a 1:1 route holds its session only in the sender's own Personal workspace, and its proof follows it there", async () => {
+  const accountId = crypto.randomUUID(),
+    workspaceId = crypto.randomUUID(),
+    personalId = crypto.randomUUID(),
+    otherId = crypto.randomUUID(),
+    tenantId = crypto.randomUUID(),
+    actorId = crypto.randomUUID(),
+    subjectId = `user:${crypto.randomUUID()}`;
+  await shared!.admin`insert into managed_accounts(id,name) values(${accountId},'Teams Personal')`;
+  await shared!.admin`insert into workspaces(id,account_id,name) values
+    (${workspaceId},${accountId},'Shared'),(${personalId},${accountId},'Personal'),(${otherId},${accountId},'Other')`;
+  await shared!
+    .admin`insert into organization_memberships(account_id,subject_id,role,status,personal_workspace_id)
+    values(${accountId},${subjectId},'member','active',${personalId})`;
+  const i = await installTeamsBot(client!.db, {
+    accountId,
+    workspaceId,
+    tenantId,
+    actorId,
+    subjectId,
+    nonce: crypto.randomUUID(),
+  });
+  const message = (routeId: string, eventId: string) => ({
+    routeId,
+    actorId,
+    subjectId,
+    personal: true,
+    conversationId: "19:dm",
+    threadId: null,
+    serviceUrl: "https://smba.trafficmanager.net/emea/",
+    botId: "28:test",
+    eventId,
+    payload: { text: "in my own workspace" },
+  });
+  // Not somebody else's workspace, and never a channel.
+  await expect(
+    enqueueTeamsMessage(client!.db, i, {
+      ...message(`route:${crypto.randomUUID()}`, `event:${crypto.randomUUID()}`),
+      sessionWorkspaceId: otherId,
+    }),
+  ).rejects.toThrow("teams_route_unavailable");
+  await expect(
+    enqueueTeamsMessage(client!.db, i, {
+      ...message(`route:${crypto.randomUUID()}`, `event:${crypto.randomUUID()}`),
+      personal: false,
+      channelId: "19:channel",
+      sessionWorkspaceId: personalId,
+    }),
+  ).rejects.toThrow("teams_route_unavailable");
+  const routeId = `route:${crypto.randomUUID()}`,
+    eventId = `event:${crypto.randomUUID()}`;
+  await enqueueTeamsMessage(client!.db, i, {
+    ...message(routeId, eventId),
+    sessionWorkspaceId: personalId,
+  });
+  // The same route can't later be read as the installation's.
+  await expect(
+    enqueueTeamsMessage(client!.db, i, message(routeId, `event:${crypto.randomUUID()}`)),
+  ).rejects.toThrow("teams_route_unavailable");
+  const route = (await claimTeamsRoute(client!.db, i))!;
+  expect(route.route_id).toBe(routeId);
+  expect(route.session_workspace_id).toBe(personalId);
+  const input = {
+    accountId,
+    workspaceId: personalId,
+    subjectId,
+    sessionId: route.session_id,
+    initialMessage: "in my own workspace",
+    proof: {
+      routeId,
+      eventId,
+      leaseToken: route.lease_token!,
+      installationGeneration: i.generation,
+    },
+  };
+  const proof = await requireTeamsConversationProof(client!.db, { ...input, personal: true });
+  expect(proof.tenantId).toBe(tenantId);
+  expect(proof.installationWorkspaceId).toBe(workspaceId);
+  // Its session belongs to the Personal workspace, not the installation's or another.
+  await expect(
+    requireTeamsPrivateSessionProof(client!.db, { ...input, workspaceId }),
+  ).rejects.toThrow();
+  await expect(
+    requireTeamsPrivateSessionProof(client!.db, { ...input, workspaceId: otherId }),
+  ).rejects.toThrow();
+  await expect(
+    requireTeamsPrivateSessionProof(client!.db, { ...input, subjectId: "user:other" }),
+  ).rejects.toThrow();
+  // The route is visible in its session's scope, and nowhere else but the installation's.
+  const visible = async (scope: string) =>
+    withRlsContext(
+      client!.db,
+      { accountId, workspaceId: scope },
+      async (tx) =>
+        (await rawRows(tx, sql`select route_id from teams_bot_routes where route_id=${routeId}`))
+          .length,
+    );
+  expect(await visible(personalId)).toBe(1);
+  expect(await visible(workspaceId)).toBe(1);
+  expect(await visible(otherId)).toBe(0);
+  // Unlinking in the installation's workspace still revokes it.
+  await removeTeamsLink(client!.db, i, subjectId);
+  await expect(requireTeamsPrivateSessionProof(client!.db, input)).rejects.toThrow();
 });

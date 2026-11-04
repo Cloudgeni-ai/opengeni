@@ -238,6 +238,7 @@ export function SessionChromeCapabilityCard({
             "personal"
           }
           canShareWithWorkspace={fleet.canManage}
+          canConnectOwnMachine={fleet.canConnectOwnMachine}
           defaultScope="user"
         />
       ) : null}

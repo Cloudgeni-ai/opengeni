@@ -2,6 +2,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import type { AccessGrant } from "@opengeni/contracts";
 import {
+  resolveNewArtifactAudience,
   resolveNewSiteAudience,
   resolveSiteAudienceChange,
   siteViewerForGrant,
@@ -400,6 +401,56 @@ test("a Site made in an Only me chat starts Only me without exposing the chat", 
   expect(await audienceFor(f.other, chat.id)).toEqual({
     visibility: "workspace_shared",
     ownerSubjectId: f.other.subjectId,
+  });
+  // A run there without a person (such as a meeting summary) still makes the
+  // chat owner's Only me things; where the chat is not visible, it learns nothing.
+  const withoutPerson = (subjectId: string, sourcePrivate = false) =>
+    withSessionRlsActorContext({ subjectId }, async () =>
+      resolveNewArtifactAudience({
+        db: db.db,
+        settings: f.settings,
+        grant: f.owner.grant,
+        viewer: { subjectId: null },
+        requested: undefined,
+        sourceSessionId: chat.id,
+        sourcePrivate,
+        noun: "document",
+      }),
+    );
+  expect(await withoutPerson(f.owner.subjectId)).toEqual({
+    visibility: "user_private",
+    ownerSubjectId: f.owner.subjectId,
+  });
+  expect(await withoutPerson(f.other.subjectId)).toEqual({
+    visibility: "workspace_shared",
+    ownerSubjectId: null,
+  });
+  // Made from an Only me file, a document starts Only me for its person, even
+  // from a shared chat; without a person it cannot be Only me.
+  const fromOwnFile = (who: { subjectId: string | null }, requested?: "private" | "workspace") =>
+    withSessionRlsActorContext({ subjectId: f.owner.subjectId }, async () =>
+      resolveNewArtifactAudience({
+        db: db.db,
+        settings: f.settings,
+        grant: f.owner.grant,
+        viewer: who,
+        requested,
+        sourceSessionId: workspaceChat.id,
+        sourcePrivate: true,
+        noun: "document",
+      }),
+    );
+  expect(await fromOwnFile({ subjectId: f.owner.subjectId })).toEqual({
+    visibility: "user_private",
+    ownerSubjectId: f.owner.subjectId,
+  });
+  expect(await fromOwnFile({ subjectId: f.owner.subjectId }, "workspace")).toEqual({
+    visibility: "workspace_shared",
+    ownerSubjectId: f.owner.subjectId,
+  });
+  expect(await fromOwnFile({ subjectId: null })).toEqual({
+    visibility: "workspace_shared",
+    ownerSubjectId: null,
   });
 
   // Its versions name the chat; nobody else sees the Site, and once shared

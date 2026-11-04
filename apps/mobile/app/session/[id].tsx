@@ -46,18 +46,22 @@ import { copyText } from "@/clipboard";
 import { markSessionInboxRead, useSessionRepliesMute } from "@/notifications";
 import { useSessionComputeLabel } from "@/compute-label";
 import { useWorkspaceModelCatalog } from "@/model-catalog";
+import { readPendingPrompt, forgetPendingPrompt } from "@/pending-prompt";
 import { ComposerPlusMenu } from "@/new-session-options";
 import { useSessionFullAccess, type SessionFullAccess } from "@/session-full-access";
 import { AppThemeProvider } from "@/theme";
+import { rememberSessionRow } from "@/session-list-cache";
 import { useComposerVoice } from "@/voice";
 import { openLinkFromApp } from "@/app-link-registry";
 import { appSessionPath } from "@/app-links";
-import { openOnWeb, webPaths } from "@/web-links";
+import { openOnWeb, webPaths, webUrl } from "@/web-links";
 
 /** The session menu item that sends outside calls (Siri, Phone, Shortcuts) to this session. */
 const CALL_PIN_ACTION = "opengeni.take-calls-here";
 /** The session menu item that opens this conversation in the web app. */
 const OPEN_ON_WEB_ACTION = "opengeni.open-on-web";
+/** The session menu item that copies this conversation's web link. */
+const COPY_LINK_ACTION = "opengeni.copy-link";
 /** The session menu item that mutes or unmutes this session's replies for the person. */
 const MUTE_REPLIES_ACTION = "opengeni.mute-replies";
 /** Session menu items for full access: a time limit to give it for, or turning it off. */
@@ -140,6 +144,7 @@ export default function SessionScreen() {
   return (
     <AppThemeProvider>
       <LiveSession
+        key={`${account?.id ?? "signed-out"}:${workspaceId}:${id}`}
         client={client}
         models={models}
         baseUrl={account?.baseUrl ?? null}
@@ -246,6 +251,11 @@ function LiveSession(props: {
     workspaceId: props.workspaceId,
   });
   const session = controller.session.session;
+  // The lists underneath follow this chat's row while it is open, so going back
+  // shows them already in order rather than reordering under the next tap.
+  useEffect(() => {
+    if (session && session.workspaceId === props.workspaceId) rememberSessionRow(session);
+  }, [session, props.workspaceId]);
   const feedback = useMemo(
     () => ({ client: props.client, workspaceId: props.workspaceId, sessionId: props.sessionId }),
     [props.client, props.workspaceId, props.sessionId],
@@ -311,6 +321,13 @@ function LiveSession(props: {
   const effort = policy?.reasoningEffort ?? session?.reasoningEffort ?? null;
   // The web composer's phone-width pill: compact model name, effort when it is a choice.
   const pill = model ? compactModelPill(t, props.models, model, effort ?? undefined) : null;
+  const [pendingPrompt] = useState(() =>
+    readPendingPrompt(props.client, props.workspaceId, props.sessionId),
+  );
+  useEffect(() => {
+    if (controller.initialHistoryReady)
+      forgetPendingPrompt(props.client, props.workspaceId, props.sessionId);
+  }, [controller.initialHistoryReady, props.client, props.workspaceId, props.sessionId]);
   // A session the runtime could not start reads as stuck, never "Waiting on you".
   const status = controller.displayStatus;
   const paused = controller.queue.effectiveControl?.state === "paused";
@@ -432,6 +449,11 @@ function LiveSession(props: {
                             title: "Open in web",
                             image: "safari" as MenuAction["image"],
                           },
+                          {
+                            id: COPY_LINK_ACTION,
+                            title: "Copy link",
+                            image: "link" as MenuAction["image"],
+                          },
                         ]
                       : []),
                     {
@@ -466,6 +488,15 @@ function LiveSession(props: {
                     if (nativeEvent.event === OPEN_ON_WEB_ACTION) {
                       if (webBaseUrl)
                         openOnWeb(webBaseUrl, webPaths.session(workspaceId, props.sessionId));
+                      return;
+                    }
+                    if (nativeEvent.event === COPY_LINK_ACTION) {
+                      if (!webBaseUrl) return;
+                      void copyText(
+                        webUrl(webBaseUrl, webPaths.session(workspaceId, props.sessionId)),
+                      ).then(() =>
+                        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success),
+                      );
                       return;
                     }
                     if (nativeEvent.event === CALL_PIN_ACTION) {
@@ -542,6 +573,7 @@ function LiveSession(props: {
       />
       <NativeSessionScreen
         controller={controller}
+        pendingPrompt={pendingPrompt}
         focusSequence={props.focusSequence}
         client={props.client}
         models={props.models}

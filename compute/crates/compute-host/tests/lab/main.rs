@@ -1000,6 +1000,21 @@ impl LocalService {
             all.extend(args);
             run(&all);
         };
+        // A run that died before its guard existed left its namespace and
+        // link, whose route to the same address would take this run's
+        // connections: remove what belongs to runs no longer alive.
+        let listed = Command::new("ip").args(["netns", "list"]).output().unwrap();
+        for line in String::from_utf8_lossy(&listed.stdout).lines() {
+            let Some(name) = line.split_whitespace().next() else {
+                continue;
+            };
+            let Some(owner) = name.strip_prefix("lab-lan-") else {
+                continue;
+            };
+            if !std::path::Path::new("/proc").join(owner).exists() {
+                run(&["ip", "netns", "del", name]);
+            }
+        }
         run(&["ip", "netns", "add", &namespace]);
         run(&[
             "ip", "link", "add", &host_end, "type", "veth", "peer", "name", "lan0", "netns",
@@ -1029,20 +1044,27 @@ impl LocalService {
             format!("lan-{pid}.compute-test.invalid"),
             format!("hidden-{pid}.compute-test.invalid"),
         ];
-        let mut hosts = std::fs::read_to_string("/etc/hosts").unwrap();
-        if !hosts.ends_with('\n') {
-            hosts.push('\n');
-        }
-        for name in &names {
-            hosts.extend([SERVICE, " ", name.as_str(), "\n"]);
-        }
-        std::fs::write("/etc/hosts", hosts).unwrap();
         let service = Self {
             namespace,
             host_end,
             listener,
             names,
         };
+        // Made first, so a failure from here on still ends the listener
+        // and removes the namespace.
+        let mut hosts = std::fs::read_to_string("/etc/hosts").unwrap();
+        if !hosts.ends_with('\n') {
+            hosts.push('\n');
+        }
+        for name in &service.names {
+            hosts.extend([SERVICE, " ", name.as_str(), "\n"]);
+        }
+        std::fs::write("/etc/hosts", hosts).unwrap_or_else(|error| {
+            panic!(
+                "the test names the local service in /etc/hosts, which cannot be written \
+                 here (on NixOS it is a link into the store): {error}"
+            )
+        });
         // The positive control: both ports answer from the host.
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         for port in [LISTED, UNLISTED] {

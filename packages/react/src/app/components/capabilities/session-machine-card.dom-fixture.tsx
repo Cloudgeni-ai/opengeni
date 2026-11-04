@@ -892,6 +892,23 @@ describe("Connected Machine conversation card", () => {
       expect(input.text).toBe("Use the machine “Studio Mac” for this chat.");
       expect(input.model).toBe("model-a");
       expect(input.personalResourceAttachment).toEqual(consent);
+      // Once the machine read catches up, Allow becomes a quiet confirmation.
+      fleet.machines = fleet.machines.map((candidate) => ({
+        ...candidate,
+        active: candidate.sandboxId === "mac",
+      }));
+      await h.rerender();
+      expect(h.container.querySelector<HTMLElement>("[data-machine-setup]")?.hidden).toBe(true);
+      expect(h.button("Machine settings")?.getAttribute("aria-expanded")).toBe("false");
+      expect(h.container.querySelector("[data-machine-confirmation]")?.textContent).toContain(
+        "Using Studio Mac",
+      );
+      await click(h.button("Machine settings"));
+      expect(h.container.querySelector<HTMLElement>("[data-machine-setup]")?.hidden).toBe(false);
+      expect(h.button("Machine settings")?.getAttribute("aria-expanded")).toBe("true");
+      expect(h.button("Connect another computer")).not.toBeNull();
+      await click(h.button("Machine settings"));
+      expect(h.container.querySelector<HTMLElement>("[data-machine-setup]")?.hidden).toBe(true);
     } finally {
       await h.close();
     }
@@ -977,6 +994,8 @@ describe("Connected Machine conversation card", () => {
     try {
       expect(h.text()).toContain("This chat runs on Studio Mac");
       expect(h.button("Allow")).toBeNull();
+      expect(h.container.querySelector<HTMLElement>("[data-machine-setup]")?.hidden).toBe(true);
+      expect(h.button("Machine settings")?.getAttribute("aria-expanded")).toBe("false");
     } finally {
       await h.close();
     }

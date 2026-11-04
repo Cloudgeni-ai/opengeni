@@ -1,5 +1,6 @@
 import type { FeedbackContext, FeedbackScreenshotUpload } from "@opengeni/sdk";
 import { desktopBridge, desktopCapability } from "./desktop";
+import { feedbackTrail, sessionIdInPath } from "./feedback-trail";
 import { recentErrors } from "./recent-errors";
 
 /* ----------------------------------------------------------------------------
@@ -228,7 +229,8 @@ function clip(text: string | undefined, max: number): string | undefined {
 
 /**
  * Facts about where a report was sent from: web or the desktop app, versions,
- * the page in view, browser, language, time zone, connection and recent errors.
+ * the page and chat in view, browser, language, time zone, connection, recent
+ * errors, the latest API requests, uncaught errors and the steps before it.
  */
 export function webFeedbackContext(server: {
   serverVersion?: string | undefined;
@@ -243,6 +245,8 @@ export function webFeedbackContext(server: {
     timeZone = undefined;
   }
   const errors = recentErrors();
+  const trail = feedbackTrail();
+  const pathname = typeof window === "undefined" ? undefined : window.location.pathname;
   const context: FeedbackContext = {
     source: desktop ? "desktop" : "web",
     trigger: "menu",
@@ -257,11 +261,15 @@ export function webFeedbackContext(server: {
     appVersion: clip(appVersion, 64),
     buildNumber: clip(buildNumber, 64),
     deviceModel: clip(browserName(agent), 120),
-    screen: typeof window === "undefined" ? undefined : clip(window.location.pathname, 500),
+    screen: clip(pathname, 500),
+    sessionId: pathname ? sessionIdInPath(pathname) : undefined,
     locale: typeof navigator === "undefined" ? undefined : clip(navigator.language, 35),
     timeZone: clip(timeZone, 64),
     online: typeof navigator === "undefined" ? undefined : navigator.onLine,
     recentErrors: errors.length > 0 ? errors : undefined,
+    recentRequests: trail.recentRequests.length > 0 ? trail.recentRequests : undefined,
+    recentExceptions: trail.recentExceptions.length > 0 ? trail.recentExceptions : undefined,
+    breadcrumbs: trail.breadcrumbs.length > 0 ? trail.breadcrumbs : undefined,
   };
   for (const [key, value] of Object.entries(fields))
     if (value !== undefined) (context as Record<string, unknown>)[key] = value;

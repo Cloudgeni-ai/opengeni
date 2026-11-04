@@ -77,6 +77,36 @@ export type SessionUsageLimitStatus = z.infer<typeof SessionUsageLimitStatus>;
 export const SessionUsageLimitHistory = z.enum(["complete", "legacy_partial", "preparing"]);
 export type SessionUsageLimitHistory = z.infer<typeof SessionUsageLimitHistory>;
 
+function isTimeZone(value: string): boolean {
+  try {
+    return new Intl.DateTimeFormat("en-US", { timeZone: value }).resolvedOptions().timeZone !== "";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A recurring window: the limit applies to the usage recorded since the
+ * current day started in `timeZone`, and each new day reopens admission.
+ */
+export const SessionUsageLimitWindowInput = z
+  .object({
+    period: z.literal("day"),
+    /** IANA time zone the day starts in, for example `UTC` or `Europe/Oslo`. */
+    timeZone: z.string().min(1).max(64).refine(isTimeZone, "unknown time zone"),
+  })
+  .strict();
+export type SessionUsageLimitWindowInput = z.infer<typeof SessionUsageLimitWindowInput>;
+
+export const SessionUsageLimitWindow = SessionUsageLimitWindowInput.extend({
+  timeZone: z.string().min(1).max(64),
+  /** When the current window started. */
+  startedAt: primitives.string.datetime({ offset: true }),
+  /** When the next window starts and admission reopens. */
+  resetsAt: primitives.string.datetime({ offset: true }),
+}).strict();
+export type SessionUsageLimitWindow = z.infer<typeof SessionUsageLimitWindow>;
+
 export const SessionUsageLimit = z
   .object({
     basis: SessionUsageLimitBasis,
@@ -90,9 +120,12 @@ export const SessionUsageLimit = z
     /**
      * Recorded known (priced or known-free) usage of the whole task tree, in USD
      * micros. Null while `preparing` or `unavailable`: never render it as $0.
-     * May exceed `limitMicros`.
+     * May exceed `limitMicros`. With a `window`, only the usage recorded in
+     * the current window.
      */
     usedMicros: UsageMicros.nullable(),
+    /** Present when the limit recurs; absent for a lifetime limit. */
+    window: SessionUsageLimitWindow.optional(),
     /** Configuration version for compare-and-set writes. Survives clearing. */
     version: Version,
     /** Monotonic usage revision; increases whenever a usage receipt changes the total or coverage. */
@@ -120,6 +153,12 @@ export const SetSessionUsageLimitRequest = z
     limitMicros: SessionUsageLimitMicros.nullable(),
     expectedVersion: Version,
     operationId: OperationId,
+    /**
+     * Make the limit recur daily, or `null` for a lifetime limit. Omitted
+     * keeps the current choice; clearing the limit also clears it. A new
+     * window counts the usage already recorded in it.
+     */
+    window: SessionUsageLimitWindowInput.nullable().optional(),
   })
   .strict();
 export type SetSessionUsageLimitRequest = z.infer<typeof SetSessionUsageLimitRequest>;

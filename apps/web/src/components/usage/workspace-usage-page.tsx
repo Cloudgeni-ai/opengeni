@@ -30,7 +30,10 @@ export function WorkspaceUsagePage({
   workspaceId: string;
   workspaceName: string;
   organizationId: string;
-  /** Set for a Personal workspace: budgets don't apply, only the owner's own use. */
+  /**
+   * Set for a Personal workspace: no workspace budget or roster, only the
+   * owner's own use and the organization's per-person monthly limit, if any.
+   */
   personalOrganizationLabel?: string | undefined;
 }) {
   const context = useAppContext();
@@ -39,7 +42,8 @@ export function WorkspaceUsagePage({
   const isOwner =
     Boolean(organizationId) &&
     hasAccountPermission(context.accessContext, organizationId, "account:admin");
-  // A Personal workspace has no budget or roster to read, only the owner's own use.
+  // A Personal workspace has no budget or roster to read, only the owner's own
+  // use, which the organization's per-person limit may cap.
   const shared = personalOrganizationLabel === undefined;
   const budget = useWorkspaceBudget(context.client, workspaceId, {
     roster: shared && isAdmin,
@@ -96,7 +100,7 @@ export function WorkspaceUsagePage({
           title="Your usage"
           description={
             !shared
-              ? `Your Personal workspace uses ${personalOrganizationLabel}'s credits without a monthly budget. Budgets apply to shared workspaces.`
+              ? `Your Personal workspace uses ${personalOrganizationLabel}'s credits with no monthly limit.`
               : `No usage limits here: work in ${workspaceName} uses the organization's credits with no monthly budget. ${
                   isOwner
                     ? "Set a budget to cap what this workspace spends each month."
@@ -106,6 +110,31 @@ export function WorkspaceUsagePage({
           action={manageBudget}
         >
           <OwnUsedThisMonth usage={usage} viewer={viewer} selfOnly={selfOnly} />
+        </Section>
+      </SectionStack>
+    );
+  }
+  if (!shared) {
+    // The organization's per-person limit: everything spent here is the owner's.
+    return (
+      <SectionStack>
+        <Section
+          title="Your usage"
+          description={`What your Personal workspace can spend from ${personalOrganizationLabel}'s credits each month. Your own model plans and keys don't count.`}
+        >
+          <div className="py-1">
+            <UsageMeterView
+              summary={summarizeUsage({ ...usage, members: [] })}
+              density="hero"
+              formatAmount={formatCredits}
+              labels={{ workspaceTitle: "", amountLeft: (amount) => `${amount} left this month` }}
+            />
+            {usage.workspace.status === "exhausted" ? (
+              <p className="mt-3 text-xs leading-[18px] text-fg-muted">
+                An organization owner or admin can raise this limit.
+              </p>
+            ) : null}
+          </div>
         </Section>
       </SectionStack>
     );

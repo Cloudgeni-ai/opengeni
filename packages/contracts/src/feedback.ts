@@ -11,6 +11,9 @@ export type FeedbackSentiment = z.infer<typeof FeedbackSentiment>;
 export const FEEDBACK_SCREENSHOT_MAX_COUNT = 3;
 export const FEEDBACK_SCREENSHOT_MAX_BYTES = 3 * 1024 * 1024;
 export const FEEDBACK_RECENT_ERRORS_MAX = 10;
+export const FEEDBACK_RECENT_REQUESTS_MAX = 20;
+export const FEEDBACK_RECENT_EXCEPTIONS_MAX = 10;
+export const FEEDBACK_BREADCRUMBS_MAX = 30;
 
 export const FeedbackScreenshotContentType = /* @__PURE__ */ defineSchema(() =>
   z.enum(["image/jpeg", "image/png"]),
@@ -59,6 +62,55 @@ export const FeedbackRecentError = /* @__PURE__ */ defineSchema(() =>
 export type FeedbackRecentError = z.infer<typeof FeedbackRecentError>;
 
 /**
+ * One of the app's latest API requests. The path never carries a query string;
+ * correlationId is the server's request reference, which finds its logs.
+ */
+export const FeedbackRecentRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      at: z.string().datetime(),
+      method: z.string().regex(/^[A-Z]{1,10}$/),
+      path: z.string().min(1).max(300),
+      /** 0 when no response arrived (offline, aborted, timed out). */
+      status: z.number().int().min(0).max(999),
+      durationMs: z.number().int().min(0).max(86_400_000),
+      correlationId: z.string().max(128).optional(),
+    })
+    .strict(),
+);
+export type FeedbackRecentRequest = z.infer<typeof FeedbackRecentRequest>;
+
+/**
+ * Something that broke in the app without the person necessarily seeing it:
+ * an uncaught error, an unhandled promise rejection, or an image or file that
+ * failed to load (source is then its address, without a query string).
+ */
+export const FeedbackRecentException = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      at: z.string().datetime(),
+      kind: z.enum(["error", "unhandled_rejection", "resource"]),
+      message: z.string().min(1).max(1000),
+      stack: z.string().max(4000).optional(),
+      source: z.string().max(500).optional(),
+    })
+    .strict(),
+);
+export type FeedbackRecentException = z.infer<typeof FeedbackRecentException>;
+
+/** A step the person took before reporting: a screen they opened, the app going to the background, the network dropping. */
+export const FeedbackBreadcrumb = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      at: z.string().datetime(),
+      kind: z.enum(["navigation", "lifecycle", "network"]),
+      label: z.string().min(1).max(200),
+    })
+    .strict(),
+);
+export type FeedbackBreadcrumb = z.infer<typeof FeedbackBreadcrumb>;
+
+/**
  * Facts about the app and device a report came from, so it can be reproduced
  * without asking. Every field but source is optional; clients send what they know.
  */
@@ -75,10 +127,22 @@ export const FeedbackContext = /* @__PURE__ */ defineSchema(() =>
       deviceModel: z.string().max(120).optional(),
       /** The screen in view, as an app path such as /session/<id>. */
       screen: z.string().max(500).optional(),
+      /**
+       * The chat in view when the report was sent. Unlike the request's
+       * sessionId it does not make the report about that chat; the server
+       * records the chat's state with the report when the author can read it.
+       */
+      sessionId: primitives.uuid.optional(),
       locale: z.string().max(35).optional(),
       timeZone: z.string().max(64).optional(),
       online: z.boolean().optional(),
       recentErrors: z.array(FeedbackRecentError).max(FEEDBACK_RECENT_ERRORS_MAX).optional(),
+      recentRequests: z.array(FeedbackRecentRequest).max(FEEDBACK_RECENT_REQUESTS_MAX).optional(),
+      recentExceptions: z
+        .array(FeedbackRecentException)
+        .max(FEEDBACK_RECENT_EXCEPTIONS_MAX)
+        .optional(),
+      breadcrumbs: z.array(FeedbackBreadcrumb).max(FEEDBACK_BREADCRUMBS_MAX).optional(),
     })
     .strict(),
 );

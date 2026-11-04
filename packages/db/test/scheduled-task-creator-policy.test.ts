@@ -140,6 +140,45 @@ function fixture() {
 }
 
 describe("scheduled task protected creator policy persistence", () => {
+  test("new policies canonicalize aliases without mutating the source snapshot", async () => {
+    const state = fixture();
+    const policy: ScheduledTaskCreatorPolicy = {
+      ...agentPolicy,
+      firstPartyMcpPermissions: [
+        "variable-sets:read",
+        "secrets:list",
+        "environments:use",
+        "variable-sets:use",
+      ],
+    };
+    const original = structuredClone(policy);
+    await createScheduledTask(state.db, taskInput(policy));
+    expect(state.row().creatorFirstPartyMcpPermissions).toEqual(["secrets:list", "secrets:use"]);
+    expect(policy).toEqual(original);
+    await updateScheduledTask(state.db, workspaceId, taskId, {
+      creatorFirstPartyPolicy: {
+        firstPartyMcpTools: ["set_session_title"],
+        firstPartyMcpPermissions: ["variable-sets:manage", "secrets:write"],
+      },
+    });
+    expect(state.row().creatorFirstPartyMcpPermissions).toEqual(["secrets:write"]);
+    expect(state.writes.at(-1)).not.toHaveProperty("creatorSessionPolicy");
+    expect(policy).toEqual(original);
+  });
+
+  test("explicit empty policies remain zero authority on create and edit", async () => {
+    const state = fixture();
+    await createScheduledTask(
+      state.db,
+      taskInput({ ...agentPolicy, firstPartyMcpPermissions: [] }),
+    );
+    expect(state.row().creatorFirstPartyMcpPermissions).toEqual([]);
+    await updateScheduledTask(state.db, workspaceId, taskId, {
+      creatorFirstPartyPolicy: { firstPartyMcpTools: [], firstPartyMcpPermissions: [] },
+    });
+    expect(state.row().creatorFirstPartyMcpPermissions).toEqual([]);
+  });
+
   test("a restriction-only snapshot uses existing JSON without selecting defaults", async () => {
     const state = fixture();
     await createScheduledTask(state.db, taskInput(restrictionOnly));

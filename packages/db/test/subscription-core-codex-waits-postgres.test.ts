@@ -1013,6 +1013,108 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
     ).not.toBe("capacity-wait");
   });
 
+  test("a person's Send takes over a turn parked on a usage limit and starts at once; a paused chat keeps it queued", async () => {
+    const org = await organization();
+    const connectionId = await sharedConnection(org, "send-after-limit");
+    const resetAt = new Date(Date.now() + 5 * 3_600_000);
+    await exhaust(org, connectionId, resetAt.getTime());
+    const asOwner = <T>(fn: Parameters<typeof withWorkspaceSubjectSessionActivityRls<T>>[3]) =>
+      withWorkspaceSubjectSessionActivityRls(
+        client!.db,
+        org.sharedWorkspaceId,
+        org.ownerSubjectId,
+        fn,
+      );
+    const send = (sessionId: string, text: string) =>
+      asOwner((tx) =>
+        submitHumanPromptInTransaction(tx, {
+          accountId: org.accountId,
+          workspaceId: org.sharedWorkspaceId,
+          sessionId,
+          subjectId: org.ownerSubjectId,
+          actor: { type: "human", subjectId: org.ownerSubjectId },
+          operationKey: crypto.randomUUID(),
+          // An ordinary Send, the composer's Enter, not an explicit Steer.
+          delivery: "send",
+          text,
+          resources: [],
+          reasoningEffortFallback: "medium",
+          source: "user",
+        }),
+      );
+    const wake = async (sessionId: string) => {
+      const [row] = await shared!.admin<{ wake: string; control: string }[]>`
+        select wake_revision::text as wake, control_revision::text as control
+        from session_workflow_wake_outbox where session_id = ${sessionId}::uuid`;
+      return { wake: Number(row?.wake ?? 0), control: Number(row?.control ?? 0) };
+    };
+
+    const parked = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    if ((await arm(parked, resetAt)).action !== "waiting") throw new Error("arm failed");
+    expect(await rowState(parked)).toMatchObject({
+      session_status: "waiting_capacity",
+      turn_status: "waiting_capacity",
+    });
+    const before = await wake(parked.identity.sessionId);
+    const sent = await send(parked.identity.sessionId, "try again");
+    // The Send replaced the parked turn: its waiter went with it, so nothing
+    // holds the new message until the quota resets.
+    expect(sent.turn.metadata).toMatchObject({
+      delivery: "steer",
+      replacedTurnId: parked.identity.turnId,
+    });
+    expect(await waiterRows(parked)).toEqual([]);
+    expect(await rowState(parked)).toMatchObject({
+      session_status: "queued",
+      active_turn_id: null,
+      turn_status: "superseded",
+    });
+    // A control wake, which ends the workflow's capacity wait at once instead
+    // of after its wake spread.
+    const after = await wake(parked.identity.sessionId);
+    expect(after.wake).toBeGreaterThan(before.wake);
+    expect(after.control).toBe(after.wake);
+    const peek = await peekSessionWork(
+      client!.db,
+      org.sharedWorkspaceId,
+      parked.identity.sessionId,
+    );
+    expect(peek.kind).not.toBe("capacity-wait");
+    const claimed = await claimSessionWorkForAttempt(client!.db, org.sharedWorkspaceId, {
+      sessionId: parked.identity.sessionId,
+      workflowId: `session-${parked.identity.sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error(`claim failed: ${claimed.reason}`);
+    expect(claimed.turn.id).toBe(sent.turnId);
+
+    // A paused chat keeps an ordinary Send inert, as for any other wait: the
+    // parked turn and its waiter stay, and the message waits in the queue.
+    const paused = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    if ((await arm(paused, resetAt)).action !== "waiting") throw new Error("arm failed");
+    await asOwner((tx) =>
+      mutateSessionControlInTransaction(tx, {
+        accountId: org.accountId,
+        workspaceId: org.sharedWorkspaceId,
+        sessionId: paused.identity.sessionId,
+        actor: { type: "human", subjectId: org.ownerSubjectId },
+        operationKey: crypto.randomUUID(),
+        action: "pause",
+      }),
+    );
+    const queued = await send(paused.identity.sessionId, "later");
+    expect(queued.turn.metadata).not.toMatchObject({ delivery: "steer" });
+    expect(queued.turn.status).toBe("queued");
+    expect(await waiterRows(paused)).toHaveLength(1);
+    expect(await rowState(paused)).toMatchObject({
+      active_turn_id: paused.identity.turnId,
+      turn_status: "waiting_capacity",
+    });
+  });
+
   test("a 403 quarantines the leased connection until its retry time; a revoked sign-in stays down", async () => {
     const org = await organization();
     const first = await sharedConnection(org, "health-a");

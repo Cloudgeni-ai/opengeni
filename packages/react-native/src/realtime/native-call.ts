@@ -20,7 +20,44 @@ export type NativeCallEvent =
    * app's recents, an App Intent or a shortcut). `target` is the host's own
    * call target, for example a session id, or absent for the default.
    */
-  | { type: "startRequested"; target: string | null };
+  | { type: "startRequested"; target: string | null }
+  /** The PushKit token agent calls ring changed (iOS). */
+  | { type: "voipToken"; token: string | null }
+  /** An agent's call is ringing this phone. */
+  | { type: "incoming"; call: NativeIncomingCall }
+  /** The person answered it on the ring screen. */
+  | { type: "incomingAnswered"; call: NativeIncomingCall }
+  /** The person declined it on the ring screen. */
+  | { type: "incomingDeclined"; call: NativeIncomingCall }
+  /** It stopped ringing on its own (its ring time ran out). */
+  | { type: "incomingEnded"; callId: string; reason: "unanswered" };
+
+/**
+ * An agent's call ringing this phone (a VoIP push). `callId` is the call's id
+ * on the server and the system call's id.
+ */
+export type NativeIncomingCall = {
+  callId: string;
+  sessionId: string;
+  workspaceId: string;
+  /** The person called, to pick the right account. */
+  subjectId: string | null;
+  /** Who calls: the chat, or the member the agent works for. */
+  title: string | null;
+  /** Why the agent calls. */
+  reason: string | null;
+  ringUntil: string | null;
+  /** What the person did on this phone so far. */
+  state: "ringing" | "answered" | "declined";
+};
+
+/** Why a ringing call ends without being answered here. */
+export type NativeIncomingCallEndReason =
+  | "answeredElsewhere"
+  | "declinedElsewhere"
+  | "unanswered"
+  | "remoteEnded"
+  | "failed";
 
 export type NativeCallAudioRoute = "receiver" | "speaker" | "bluetooth" | "headphones" | "other";
 
@@ -42,6 +79,20 @@ export interface NativeCallAdapter {
   subscribe(listener: (event: NativeCallEvent) => void): () => void;
   /** A start request that launched the app before JavaScript subscribed. */
   takePendingStartRequest(): Promise<{ target: string | null } | null>;
+  /**
+   * Agent calls (PushKit and CallKit on iOS). Absent where the platform cannot
+   * ring the app: agents can then not call this phone.
+   */
+  incoming?: NativeIncomingCallAdapter | undefined;
+}
+
+export interface NativeIncomingCallAdapter {
+  /** The token the server rings this phone with, or null until iOS issues one. */
+  getVoipToken(): Promise<string | null>;
+  /** Calls that rang, or were answered or declined, before JavaScript listened. */
+  takeIncomingCalls(): Promise<NativeIncomingCall[]>;
+  /** Stop a ring that was settled elsewhere or rang out. */
+  endIncomingCall(callId: string, reason: NativeIncomingCallEndReason): void;
 }
 
 /** Native hosts can stream voice over WebRTC; WebSocket audio transports need a browser. */
@@ -103,6 +154,11 @@ export function useNativeRealtimeCall(options: {
   call?: NativeCallAdapter | null | undefined;
   title: string;
   target?: string | null | undefined;
+  /**
+   * The system call the person already answered (an agent's incoming call):
+   * voice runs on it instead of reporting a new outgoing call.
+   */
+  answeredCallId?: string | null | undefined;
 }): NativeRealtimeCall {
   const t = useOpenGeniText();
   const { realtime, call } = options;
@@ -146,12 +202,7 @@ export function useNativeRealtimeCall(options: {
         setSpeakerState(event.route === "speaker");
         return;
       }
-      if (
-        event.type === "startRequested" ||
-        event.type === "audioSessionActivated" ||
-        event.type === "audioSessionDeactivated"
-      )
-        return;
+      if (event.type !== "ended" && event.type !== "muteChanged") return;
       if (event.callId !== callIdRef.current) return;
       if (event.type === "ended") {
         callIdRef.current = null;
@@ -195,11 +246,16 @@ export function useNativeRealtimeCall(options: {
         current.admissionBlocker ?? t("native.realtime.nativeCall.voiceIsNotReadyYet"),
       );
     }
-    const id = randomCallId();
+    const answered = options.answeredCallId?.toLowerCase() ?? null;
+    const id = answered ?? randomCallId();
     callIdRef.current = id;
     setCallId(id);
     setError(null);
-    if (call) {
+    if (answered) {
+      // The system already shows this call: it was answered on the ring screen.
+      systemCallRef.current = id;
+      setSystemCall(Boolean(call));
+    } else if (call) {
       try {
         await call.startCall({ callId: id, title: options.title, target: options.target ?? null });
         if (callIdRef.current === id) {
@@ -224,7 +280,7 @@ export function useNativeRealtimeCall(options: {
       await finish("failed");
       throw cause;
     }
-  }, [call, finish, options.target, options.title, t]);
+  }, [call, finish, options.answeredCallId, options.target, options.title, t]);
 
   const end = useCallback(async () => {
     if (!callIdRef.current) return;

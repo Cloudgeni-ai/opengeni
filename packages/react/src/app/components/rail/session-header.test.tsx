@@ -511,3 +511,39 @@ test("other payment rails keep the maker's logo and never show an account contro
     container.remove();
   }
 });
+
+test("a chat started for a Slack agent names the agent beside its title", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const render = (metadata: Record<string, unknown>) => (
+    <SessionHeader
+      session={{ ...session, metadata } as Session}
+      ancestors={[]}
+      connectionState="live"
+      status="idle"
+      keyAuthRequired={false}
+      onForgetAccessKey={() => undefined}
+      inspectorOpen={false}
+      onRename={async () => null}
+      onPin={async () => null}
+    />
+  );
+  try {
+    await act(async () =>
+      root.render(
+        render({
+          slackAgent: { id: "11111111-1111-4111-8111-111111111111", name: "Data team" },
+        }),
+      ),
+    );
+    const chip = container.querySelector("[data-session-slack-agent]");
+    expect(chip?.textContent).toBe("Slack agent: Data team");
+    expect(chip?.closest("[data-session-title-row]")).not.toBeNull();
+    await act(async () => root.render(render({})));
+    expect(container.querySelector("[data-session-slack-agent]")).toBeNull();
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});

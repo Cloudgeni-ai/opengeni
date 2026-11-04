@@ -556,6 +556,7 @@ const CAPABILITY_LABELS: Record<string, string> = {
   clipboard: "clipboard",
   backgroundActions: "background actions",
   parallelApps: "parallel apps",
+  targetFocus: "window focus",
 };
 
 export function computerSessionLine(session: {
@@ -673,6 +674,7 @@ export function computerActionText(
         observation: (ComputerTextObservation & { capturedFrame?: undefined }) | null;
         observationPrecedesStop?: boolean | undefined;
         roleStandIns?: readonly ComputerTextRoleStandIn[] | undefined;
+        unconfirmedInput?: true | undefined;
       },
 ): string {
   if (receipt.type === "batch") return computerBatchText(receipt);
@@ -681,24 +683,35 @@ export function computerActionText(
   ];
   if (receipt.error) lines.push(computerErrorLine(receipt.error));
   for (const standIn of receipt.roleStandIns ?? []) lines.push(roleStandInLine(standIn, false));
-  const semantic = receipt.observation?.semantic;
-  if (
-    receipt.unconfirmedInput &&
-    receipt.state === "completed" &&
-    receipt.observation?.target.id === receipt.targetId &&
-    semantic?.kind === "diff" &&
-    semantic.changed.length === 0 &&
-    semantic.removedRefs.length === 0
-  )
-    lines.push(
-      "The app did not confirm this input and no element changed, so it may not have taken effect: check the window before sending it again.",
-    );
+  if (receipt.state === "completed" && unconfirmedWithoutChange(receipt))
+    lines.push(UNCONFIRMED_INPUT_LINE);
   if (receipt.observation && receipt.observation.target.id !== receipt.targetId)
     lines.push(
       `This action opened ${receipt.observation.target.id}; act on that target with the observation below.`,
     );
   if (receipt.observation) lines.push(computerObservationText(receipt.observation));
   return lines.join("\n");
+}
+
+const UNCONFIRMED_INPUT_LINE =
+  "The app did not confirm this input and no element changed, so it may not have taken effect: check the window before sending it again.";
+
+/** The receipt's raw input (a click, a key press) went with nothing
+ * confirming that the app acted on it, and the target's observation after
+ * it shows no element changed or removed. */
+function unconfirmedWithoutChange(receipt: {
+  targetId: string;
+  observation: ComputerTextObservation | null;
+  unconfirmedInput?: true | undefined;
+}): boolean {
+  const semantic = receipt.observation?.semantic;
+  return (
+    receipt.unconfirmedInput === true &&
+    receipt.observation?.target.id === receipt.targetId &&
+    semantic?.kind === "diff" &&
+    semantic.changed.length === 0 &&
+    semantic.removedRefs.length === 0
+  );
 }
 
 function actionRange(first: number, last: number): string {
@@ -712,6 +725,9 @@ function computerBatchText(receipt: {
   observation: (ComputerTextObservation & { capturedFrame?: undefined }) | null;
   observationPrecedesStop?: boolean | undefined;
   roleStandIns?: readonly ComputerTextRoleStandIn[] | undefined;
+  /** An action of the batch delivered raw input with nothing confirming
+   * that the app acted on it. */
+  unconfirmedInput?: true | undefined;
 }): string {
   const last = receipt.steps.at(-1);
   const lines: string[] = [];
@@ -723,6 +739,7 @@ function computerBatchText(receipt: {
       : null;
   if (last && last.state === "completed" && receipt.steps.length === receipt.actionCount) {
     lines.push(`Batch completed on ${receipt.targetId}: ${plural(receipt.actionCount, "action")}.`);
+    if (unconfirmedWithoutChange(receipt)) lines.push(UNCONFIRMED_INPUT_LINE);
   } else if (opened) {
     const at = receipt.steps.length;
     lines.push(

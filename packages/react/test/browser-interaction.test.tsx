@@ -2981,6 +2981,12 @@ describe("BrowserSession frame stream", () => {
     await flush(5);
     expect(hook.result.current.state).toBe("live");
     expect(hook.result.current.frame?.sequence).toBe(2);
+    // A producer that cannot continue must not leave the last picture marked live.
+    await dispatch(socket!, "message", { data: relayMessage(4, new Uint8Array()) });
+    await flush(5);
+    expect(hook.result.current.state).toBe("error");
+    expect(hook.result.current.error?.message).toBe("Browser frame source ended.");
+    expect(socket!.closed).toBe(true);
     await hook.unmount();
   });
 

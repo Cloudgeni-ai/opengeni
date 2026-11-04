@@ -103,10 +103,10 @@ export function CustomApiSetupDialog({
         {state.error ? (
           <div
             role="alert"
-            className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs leading-5 text-fg-muted"
+            className="rounded-lg border border-status-waiting/40 bg-status-waiting/10 p-3 text-xs leading-5 text-fg-muted"
           >
             <div className="flex items-start gap-2">
-              <AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-warning" />
+              <AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-status-waiting" />
               <span>{state.error}</span>
             </div>
           </div>
@@ -492,9 +492,9 @@ function ReviewStep({
   const preview = state.preview!;
   return (
     <div className="grid gap-5">
-      <div className="rounded-xl border border-success/30 bg-success/5 p-4">
+      <div className="rounded-xl border border-status-success/30 bg-status-success/5 p-4">
         <div className="flex items-start gap-3">
-          <CheckCircle2Icon className="mt-0.5 size-5 shrink-0 text-success" />
+          <CheckCircle2Icon className="mt-0.5 size-5 shrink-0 text-status-success" />
           <div>
             <h3 className="text-sm font-semibold text-fg">Immutable preview ready</h3>
             <p className="mt-1 text-xs leading-5 text-fg-muted">
@@ -555,7 +555,7 @@ function ReviewStep({
           className={cn(
             "rounded-xl border p-4 text-xs",
             diff.digestChanged || diff.addedTools.length || diff.removedTools.length
-              ? "border-warning/40 bg-warning/10"
+              ? "border-status-waiting/40 bg-status-waiting/10"
               : "border-border bg-bg/50",
           )}
         >
@@ -568,16 +568,20 @@ function ReviewStep({
             {diff.unchangedTools} unchanged tools.
           </p>
           {diff.addedTools.length > 0 ? (
-            <p className="mt-2 break-words text-success">Added: {diff.addedTools.join(", ")}</p>
+            <p className="mt-2 break-words text-status-success">
+              Added: {diff.addedTools.join(", ")}
+            </p>
           ) : null}
           {diff.removedTools.length > 0 ? (
-            <p className="mt-1 break-words text-warning">Removed: {diff.removedTools.join(", ")}</p>
+            <p className="mt-1 break-words text-status-waiting">
+              Removed: {diff.removedTools.join(", ")}
+            </p>
           ) : null}
         </div>
       ) : null}
 
       {preview.warnings.length > 0 ? (
-        <div className="rounded-xl border border-warning/40 bg-warning/10 p-4">
+        <div className="rounded-xl border border-status-waiting/40 bg-status-waiting/10 p-4">
           <h3 className="text-xs font-semibold text-fg">Warnings</h3>
           <ul className="mt-2 list-disc space-y-1 pl-4 text-xs leading-5 text-fg-muted">
             {preview.warnings.map((warning) => (
@@ -631,7 +635,7 @@ function ReviewStep({
           })}
         </div>
         {state.selectedTools.length === 0 ? (
-          <p className="text-xs leading-5 text-warning">
+          <p className="text-xs leading-5 text-status-waiting">
             Select at least one tool before installing. An empty selection is never treated as “all
             tools.”
           </p>

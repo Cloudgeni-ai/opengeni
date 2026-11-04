@@ -29,7 +29,10 @@
 //! Memory is one book, kept by the core: every ready sandbox, filling or
 //! filled, is a spare VM there (see [`compute_core::Input::Spare`]). A
 //! fill starts only within [`compute_core::Host::spare_fits`], room no wake
-//! wants, and is booked before it starts; the core counts ready sandboxes
+//! wants that also leaves room in the budget to claim every ready sandbox
+//! kept, itself included, so a fill never takes the room a create needs
+//! to claim one kept already. It is booked before it starts; the core
+//! counts ready sandboxes
 //! against the admission budget and ends them first, with
 //! [`compute_core::Action::Discard`], when it needs memory for a wake, its
 //! buffer or pressure. A claim takes its ready sandbox off the spares and
@@ -46,7 +49,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use compute_core::{DiskSpace, Durability, Input, Level, Outcome, SandboxId, State, Step};
+use compute_core::{Claims, DiskSpace, Durability, Input, Level, Outcome, SandboxId, State, Step};
 use compute_engine::{CancellationToken, Engine};
 use tokio::time::Instant;
 
@@ -58,8 +61,8 @@ use crate::state::{Claim, Identity, Record, Records};
 use crate::step::{After, Job, Live, LiveMemory};
 use crate::store::{OwnerEpoch, Store};
 
-use super::requests::{first_wake_by_ms, new_files};
-use super::{Event, HostAgent, HostError, Reply};
+use super::requests::new_files;
+use super::{End, Event, HostAgent, HostError, Reply};
 
 /// Most ready sandboxes filled at once on a host.
 const FILL_AT_ONCE: usize = 4;
@@ -107,9 +110,9 @@ pub(super) struct Ready<V> {
     /// Build VMs that may still run, by VM name, with the name their
     /// memory is counted under as unmanaged.
     pub(super) left_builds: HashMap<String, Id>,
-    /// Ready sandboxes a create is claiming, by host name, with whether
-    /// their VM ended meanwhile.
-    claiming: HashMap<SandboxId, bool>,
+    /// Ready sandboxes a create is claiming, by host name, with how their
+    /// VM ended if it did meanwhile.
+    claiming: HashMap<SandboxId, Option<End>>,
 }
 
 impl<V> Ready<V> {
@@ -376,14 +379,61 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     /// Whether the core leaves room for one more ready sandbox filled from
     /// `template`: room no wake wants, above the admission buffer and the
-    /// high watermark, counting every spare booked already, and disk for
-    /// its fill (see [`HostAgent::fill_disk`]).
+    /// high watermark, counting every spare booked already, room in the
+    /// budget for creates to claim every ready sandbox kept and this one
+    /// (see [`HostAgent::unclaimed`]), and disk for its fill (see
+    /// [`HostAgent::fill_disk`]).
     pub(super) fn memory_allows(&self, template: &Template) -> bool {
+        let (shape, fill) = (template.shape(), self.fill_memory(template));
+        let kept = self.unclaimed();
+        // Its own claim books the rest of its shape's memory, and the
+        // processor time it books while it fills.
+        let claims = Claims {
+            memory: kept
+                .memory
+                .saturating_add(shape.bytes().saturating_sub(fill)),
+            cpu: kept.cpu,
+        };
         self.core.spare_fits(
-            self.fill_memory(template),
-            self.fill_disk(template.shape().image),
-            template.shape().cpu_millis(),
+            fill,
+            self.fill_disk(shape.image),
+            shape.cpu_millis(),
+            claims,
         )
+    }
+
+    /// What creates claiming every ready sandbox kept, filled or filling,
+    /// would book beyond what each books now, each claimed by a create of
+    /// its shape asking for the default guarantees (see
+    /// [`HostAgent::claim`]): all its memory, less what it holds, and the
+    /// default processor request. One filling books more processor time
+    /// than that already, its whole shape, and one filled none. A create
+    /// asking for more processor time than the default can find a fill's
+    /// in its way until that fill is ready, as any create the processor
+    /// budget cannot take is refused.
+    fn unclaimed(&self) -> Claims {
+        let idle = self
+            .ready
+            .idle
+            .iter()
+            .map(|idle| (idle.record.id.0, Shape::of(&idle.record.config), false));
+        let filling = self
+            .ready
+            .filling
+            .iter()
+            .map(|(host, shape)| (*host, *shape, true));
+        idle.chain(filling)
+            .fold(Claims::default(), |sum, (host, shape, filling)| {
+                let held = self.ready.spares.get(&host).copied().unwrap_or(0);
+                Claims {
+                    memory: sum
+                        .memory
+                        .saturating_add(shape.bytes().saturating_sub(held)),
+                    cpu: sum
+                        .cpu
+                        .saturating_add(if filling { 0 } else { shape.claim_cpu_millis() }),
+                }
+            })
     }
 
     /// What a ready sandbox filled from `template` books of host memory
@@ -673,10 +723,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     /// Handles the end of a ready sandbox's VM; false if `host` names
     /// none.
-    pub(super) fn ready_exited(&mut self, host: Id, incarnation: u64) -> bool {
+    pub(super) fn ready_exited(&mut self, host: Id, incarnation: u64, end: End) -> bool {
         if let Some(died) = self.ready.claiming.get_mut(&host.0) {
             // Its claim hands the news on with the VM.
-            *died = true;
+            *died = Some(end);
             return true;
         }
         let Some(at) = self
@@ -744,6 +794,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         else {
             return Some((config, reply));
         };
+        // Checked before the claim; a create the host would refuse goes on
+        // without a ready sandbox, which refuses it.
+        let Ok(policy) = self.sleep_policy(&config) else {
+            return Some((config, reply));
+        };
         let idle = self.ready.idle.remove(at)?;
         let Some(sources) = self.warm.as_ref().map(|warm| Arc::clone(&warm.sources)) else {
             self.ready.idle.insert(at, idle);
@@ -754,15 +809,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let events = self.events_tx.clone();
         let engine = Arc::clone(&self.engine);
         let (host, fence) = (idle.record.id, idle.record.fence());
-        self.ready.claiming.insert(host.0, false);
+        self.ready.claiming.insert(host.0, None);
         // No longer spare: the claimed sandbox's first wake, checked before
         // the claim, books the memory its VM holds, up to the request; the
         // VM's memory beyond that stays counted under the name it was
         // filled under until the sandbox joins the core.
         let bytes = self.ready.spares.remove(&host.0).unwrap_or(shape.bytes());
         let size = self.size(&config, None);
-        let by_ms = first_wake_by_ms();
-        let first_wake = self.first_wake(id, size, false, by_ms);
+        let by_ms = self.first_wake_by_ms();
+        let first_wake = self.first_wake(id, size, policy, false, by_ms);
         self.inputs([
             Input::Spare {
                 sandbox: host.0,
@@ -806,6 +861,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                         disk_bytes,
                     };
                     let claimed = records.claim(host, fence, claim).await;
+                    // Claimed, it is its sandbox's only copy (see
+                    // `Record::only_copy`); a mark that cannot be set
+                    // leaves it fenced like any other, which is safe.
+                    if let Ok(record) = &claimed
+                        && let Err(error) = engine.set_only_copy(&idle.live.vm, record.only_copy)
+                    {
+                        tracing::warn!(%id, %error, "the claimed VM's mark as its sandbox's only copy is not set");
+                    }
                     ClaimResult::Claimed(claimed.map(Box::new).map_err(HostError::from))
                 }
                 Ok(Fit::Stale) => ClaimResult::Stale,
@@ -844,7 +907,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             result,
         } = claimed;
         let host = idle.record.id;
-        let died = self.ready.claiming.remove(&host.0).unwrap_or(false);
+        let died = self.ready.claiming.remove(&host.0).flatten();
         if !matches!(result, ClaimResult::Claimed(Ok(_))) {
             // Its VM holds all it did again until it goes, and a create
             // that starts over books its first wake again.
@@ -936,8 +999,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 cpu: 0,
             },
         ]);
-        if died {
-            self.exited(id, incarnation);
+        if let Some(end) = died {
+            self.exited(id, incarnation, end);
         }
         tracing::debug!(%id, %host, "ready sandbox claimed");
         let _ = reply.send(Ok(()));

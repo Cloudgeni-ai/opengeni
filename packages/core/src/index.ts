@@ -122,6 +122,7 @@ export * from "./billing/limits";
 export * from "./domain/browser-retained-downloads";
 export * from "./billing/agent-run-admission";
 export * from "./billing/model-usage-settlement";
+export * from "./billing/byok-platform-fee";
 export * from "./billing/model-call-admission";
 export * from "./model-call";
 
@@ -130,6 +131,7 @@ export * from "./model-call";
 // scheduled-task/workspace-member logic, …).
 export * from "./domain/capabilities";
 export * from "./domain/mcp-credential-content-flow";
+export * from "./domain/organization-connectors";
 export * from "./domain/native-mcp-connection-admission";
 export * from "./domain/skill-imports";
 export * from "./domain/skill-search";
@@ -157,8 +159,11 @@ export * from "./domain/scheduled-task-audience";
 export * from "./domain/automation-templates";
 export * from "./domain/bot-templates";
 export * from "./domain/site-audience";
+export * from "./domain/project-audience";
 export * from "./domain/file-audience";
 export * from "./domain/sessions";
+export { UNATTENDED_REQUEST_GOAL } from "./domain/unattended-request-goal";
+export * from "./domain/session-resource-removal";
 export * from "./domain/insights";
 export * from "./domain/insights-usage";
 export * from "./domain/memory-slack-publication";
@@ -182,6 +187,7 @@ export * from "./application/site-session-cancellation";
 export * from "./application/archived-session-imports";
 export * from "./application/session-tenancy";
 export * from "./application/organization-privacy";
+export * from "./application/session-share-links";
 export * from "./application/sandbox-recovery";
 export * from "./application/user-resource-grants";
 export * from "./application/api-integration-servers";
@@ -206,6 +212,14 @@ export {
   type HostSessionUsageLimit,
 } from "./host-session-usage-limit";
 export { resolveTurnSurface } from "./turn-surface";
+export {
+  billingOriginForGrant,
+  configureBillingLegacyAccounts,
+  fundedBillingOrigin,
+  requestBillingOrigin,
+  resolveTurnBillingOrigin,
+  stampRequestBillingOrigin,
+} from "./billing-origin";
 export { turnAppActionGrant } from "./app-action-turn-grant";
 
 export { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./domain/file-owner";

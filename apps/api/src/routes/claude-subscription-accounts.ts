@@ -8,7 +8,7 @@ import { prepareClaudeSubscriptionCredential } from "../claude-workspace-connect
 import { requireAccessGrant } from "@opengeni/core";
 import { ClaudeSubscriptionUsage, ClaudeSubscriptionSetupTokenRequest } from "@opengeni/contracts";
 
-import { requireOrganizationCodexHuman } from "./codex";
+import { requireOrganizationSubscriptionAdministrator } from "./codex";
 import { requireSubscriptionScopeMutation } from "./subscription-pool-access";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 
@@ -28,11 +28,13 @@ import {
 } from "../claude-subscription-core";
 import { deliverPoolCoreWake } from "./subscription-pool-core";
 import { managedCookieHuman } from "./subscription-pool-access";
+import { turnOnOwnSubscriptionWhereAdded } from "../own-subscription-turned-on";
 
 function accountJson(account: ClaudeSubscriptionAccountMetadata, activeId: string | null) {
   return {
     id: account.id,
     scope: account.scope,
+    ownerWorkspaceId: account.ownerWorkspaceId ?? null,
     subject: account.providerAccountId ?? account.id,
     email: account.accountEmail,
     label: account.label,
@@ -75,7 +77,7 @@ export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRout
     if (mutation && !c.req.header("authorization")) requireSameOriginBrowserMutation(c, deps);
     if (organization) {
       const accountId = c.req.param("organizationId")!;
-      const human = await requireOrganizationCodexHuman(c, deps, accountId);
+      const human = await requireOrganizationSubscriptionAdministrator(c, deps, accountId);
       return {
         core: true,
         accountId,
@@ -126,7 +128,11 @@ export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRout
       const actor = organization
         ? {
             organizationId: c.req.param("organizationId")!,
-            ...(await requireOrganizationCodexHuman(c, deps, c.req.param("organizationId")!)),
+            ...(await requireOrganizationSubscriptionAdministrator(
+              c,
+              deps,
+              c.req.param("organizationId")!,
+            )),
           }
         : null;
       const requestWorkspaceId = organization ? null : c.req.param("workspaceId")!;
@@ -208,6 +214,15 @@ export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRout
         SETUP_TOKEN_CHANGED,
       );
       await deliverPoolCoreWake(deps, CLAUDE_CORE, connected.wake);
+      // Their own account added from a shared workspace starts turned on
+      // there for the messages they send (D-53).
+      if (personal && workspaceId && requestWorkspaceId && requestWorkspaceId !== workspaceId)
+        await turnOnOwnSubscriptionWhereAdded(deps.db, {
+          accountId,
+          workspaceId: requestWorkspaceId,
+          subjectId,
+          connectionId: connected.id,
+        });
       await offerClaudeDefaultModels(deps, {
         ...(workspaceId ? { accountId, workspaceId } : { organizationId: accountId }),
         actorSubjectId: subjectId,

@@ -187,6 +187,17 @@ describe("browser model text", () => {
     ]);
   });
 
+  test("a notice about the tab follows its tab line", () => {
+    const notice =
+      "This browser was stopped after going unused for 10 minutes and relaunched on its next call, so this tab's page reloaded: anything typed, selected or opened on it before then that the page did not save is gone.";
+    expect(
+      browserObservationText({ ...formObservation(), notice })
+        .split("\n")
+        .slice(0, 3),
+    ).toEqual(['Tab T1: "Checkout" https://shop.example/checkout', notice, "Viewport 1280x720"]);
+    expect(browserObservationText(formObservation())).not.toContain("reloaded");
+  });
+
   test("says when no accessibility view is available", () => {
     expect(
       browserObservationText({ target, agentView: { sourceKind: "none", nodes: [] } }),
