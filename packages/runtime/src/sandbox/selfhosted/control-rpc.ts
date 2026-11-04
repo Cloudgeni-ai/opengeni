@@ -175,9 +175,7 @@ export class SelfhostedControlError extends Error {
     detail?: Record<string, string>;
   }) {
     const processStartFailed = isProcessStartFailureMessage(input.message);
-    super(
-      processStartFailed ? sanitizeProcessStartFailureMessage(input.message) : input.message,
-    );
+    super(processStartFailed ? sanitizeProcessStartFailureMessage(input.message) : input.message);
     this.code = input.code;
     this.reason = input.reason;
     this.retryable = input.retryable;

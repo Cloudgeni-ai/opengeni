@@ -238,7 +238,10 @@ export type SandboxProcessStartRecovery = {
   /** Publish the restart's `sandbox.operation.*` events (durable). */
   publish: (
     events: Array<{
-      type: "sandbox.operation.started" | "sandbox.operation.completed" | "sandbox.operation.failed";
+      type:
+        | "sandbox.operation.started"
+        | "sandbox.operation.completed"
+        | "sandbox.operation.failed";
       payload: Record<string, unknown>;
     }>,
   ) => Promise<void>;

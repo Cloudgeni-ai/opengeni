@@ -1908,6 +1908,8 @@ mod tests {
     /// the tests already run as root. `None` where neither is permitted.
     #[cfg(target_os = "linux")]
     fn private_mount_namespace_args() -> Option<&'static [&'static str]> {
+        const ROOTLESS: &[&str] = &["--user", "--map-root-user", "--mount"];
+        const ROOT: &[&str] = &["--mount", "--propagation", "private"];
         let works = |args: &[&str]| {
             std::process::Command::new("unshare")
                 .args(args)
@@ -1918,8 +1920,6 @@ mod tests {
                 .status()
                 .is_ok_and(|status| status.success())
         };
-        const ROOTLESS: &[&str] = &["--user", "--map-root-user", "--mount"];
-        const ROOT: &[&str] = &["--mount", "--propagation", "private"];
         if works(ROOTLESS) {
             Some(ROOTLESS)
         } else if nix::unistd::geteuid().is_root() && works(ROOT) {
@@ -2017,7 +2017,10 @@ mod tests {
         let script = format!("node -e '\nconst raw = 1;\n{}'", "x".repeat(500));
         let described = describe_program(std::ffi::OsStr::new(&script));
         assert!(!described.contains('\n'), "{described}");
-        assert!(described.chars().count() <= PROGRAM_NAME_LIMIT + 1, "{described}");
+        assert!(
+            described.chars().count() <= PROGRAM_NAME_LIMIT + 1,
+            "{described}"
+        );
         assert_eq!(describe_program(std::ffi::OsStr::new("/bin/sh")), "/bin/sh");
     }
 

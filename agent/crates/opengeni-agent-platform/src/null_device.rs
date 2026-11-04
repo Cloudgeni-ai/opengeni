@@ -72,7 +72,9 @@ static WARNED: AtomicBool = AtomicBool::new(false);
 /// the path.
 pub(crate) fn prime() {
     ensure_null_device();
-    let mut retained = RETAINED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut retained = RETAINED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if retained.is_none() {
         *retained = open_null_device(Path::new(NULL_DEVICE_PATH));
     }
@@ -84,10 +86,7 @@ fn open_null_device(path: &Path) -> Option<File> {
         .write(true)
         .open(path)
         .ok()?;
-    file.metadata()
-        .ok()
-        .filter(is_null_device)
-        .map(|_| file)
+    file.metadata().ok().filter(is_null_device).map(|_| file)
 }
 
 /// A stdio stream connected to the null device for a process about to start.
@@ -96,7 +95,9 @@ fn open_null_device(path: &Path) -> Option<File> {
 /// [`Stdio::null`] only when no handle could ever be opened.
 pub(crate) fn null_stdio() -> Stdio {
     prime();
-    let retained = RETAINED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let retained = RETAINED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     retained
         .as_ref()
         .and_then(|file| file.try_clone().ok())
@@ -114,7 +115,11 @@ pub(crate) fn ensure_null_device() {
     }
     let outcome = repair(path, state);
     if WARNED.swap(true, Ordering::Relaxed) {
-        tracing::debug!(?state, ?outcome, "the null device {NULL_DEVICE_PATH} was unhealthy again");
+        tracing::debug!(
+            ?state,
+            ?outcome,
+            "the null device {NULL_DEVICE_PATH} was unhealthy again"
+        );
     } else {
         tracing::warn!(
             ?state,
@@ -144,7 +149,9 @@ fn repair(path: &Path, observed: NullDeviceState) -> RepairOutcome {
     if !nix::unistd::geteuid().is_root() {
         return RepairOutcome::NotRepaired("the agent is not running as root".to_string());
     }
-    let _guard = REPAIR.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = REPAIR
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // Another start may have repaired it while this one waited.
     let state = inspect(path);
     if state == NullDeviceState::Healthy {
@@ -223,8 +230,12 @@ mod tests {
     #[test]
     fn the_retained_handle_is_the_null_device() {
         prime();
-        let retained = RETAINED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let file = retained.as_ref().expect("a healthy machine retains the device");
+        let retained = RETAINED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let file = retained
+            .as_ref()
+            .expect("a healthy machine retains the device");
         assert!(is_null_device(&file.metadata().expect("metadata")));
     }
 
@@ -234,6 +245,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let outcome = repair(dir.path(), NullDeviceState::Replaced);
         assert!(dir.path().is_dir());
-        assert!(matches!(outcome, RepairOutcome::NotRepaired(_)), "{outcome:?}");
+        assert!(
+            matches!(outcome, RepairOutcome::NotRepaired(_)),
+            "{outcome:?}"
+        );
     }
 }

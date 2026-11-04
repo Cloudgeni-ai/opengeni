@@ -53,5 +53,4 @@ describe("a turn whose sandbox cannot start programs", () => {
     }
     expect(failure.error.length).toBeLessThan(200);
   });
-
 });

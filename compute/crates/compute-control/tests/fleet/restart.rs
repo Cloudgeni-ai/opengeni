@@ -28,10 +28,9 @@ async fn a_restart_hands_an_awake_sandbox_off_and_its_next_wake_boots_it_from_it
     assert!(restarted["owner_epoch"].as_u64() > before["owner_epoch"].as_u64());
     // Handed off even though it was awake: a restart is for a running box.
     assert!(
-        a.seen().into_iter().any(|seen| matches!(
-            seen.envelope.request,
-            Request::HandOff { awake: true, .. }
-        )),
+        a.seen()
+            .into_iter()
+            .any(|seen| matches!(seen.envelope.request, Request::HandOff { awake: true, .. })),
         "{:?}",
         a.ops()
     );
@@ -77,5 +76,9 @@ async fn restarting_an_unknown_sandbox_is_not_found() {
     let (status, deleted) = fleet.delete(&format!("/v1/sandboxes/{sandbox}")).await;
     assert!(status == 204 || status == 200, "{deleted}");
     let (status, missing) = restart(&fleet, &sandbox).await;
-    assert_eq!((status, &missing["code"]), (404, &json!("not_found")), "{missing}");
+    assert_eq!(
+        (status, &missing["code"]),
+        (404, &json!("not_found")),
+        "{missing}"
+    );
 }
