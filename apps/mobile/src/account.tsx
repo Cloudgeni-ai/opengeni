@@ -195,6 +195,10 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   );
   // Reads of one account can overlap; only the newest one may mark it.
   const readGenerations = useRef(new Map<string, number>());
+  /** Reads of an account still in flight no longer count (it signed in or out). */
+  const supersedeReads = useCallback((id: string) => {
+    readGenerations.current.set(id, (readGenerations.current.get(id) ?? 0) + 1);
+  }, []);
   /**
    * Read accounts' saved sign-ins. A missing one marks the account signed
    * out, so every menu and list shows it as it is; one that couldn't be read
@@ -377,6 +381,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       const existing = current.accounts.find((each) => sameIdentity(each, identity));
       const id = existing?.id ?? `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
       await writeAccountToken(id, result.accessToken);
+      supersedeReads(id);
       noteRead(id, false);
       const stored: StoredAccount = {
         id,
@@ -395,7 +400,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       });
       return result;
     },
-    [noteRead, persist, rememberWayBack],
+    [noteRead, persist, rememberWayBack, supersedeReads],
   );
 
   const switchAccount = useCallback(
@@ -411,6 +416,8 @@ export function AccountProvider({ children }: { children: ReactNode }) {
 
   const chooseAccount = useCallback(
     async (id: string): Promise<"stay" | "switched" | "signIn"> => {
+      // The account in use stays as it is: its state comes from its own loading.
+      if (snapshotRef.current?.activeId === id) return "stay";
       // An unreadable credential opens the sign-in too (with a retry), but
       // only a missing one marks the account signed out.
       const read = await checkCredential(id);
@@ -461,13 +468,15 @@ export function AccountProvider({ children }: { children: ReactNode }) {
         console.warn("Native sign-out: no stored credential for the account");
       }
       await forgetAccountToken(id);
+      supersedeReads(id);
+      noteRead(id, false);
       const accounts = current.accounts.filter((each) => each.id !== id);
       await persist({
         accounts,
         activeId: current.activeId === id ? (accounts[0]?.id ?? null) : current.activeId,
       });
     },
-    [persist],
+    [noteRead, persist, supersedeReads],
   );
 
   const organizations = useMemo(

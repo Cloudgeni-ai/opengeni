@@ -35,6 +35,8 @@ const pushed: unknown[] = [];
 let pathname = "/";
 let unreadable = false;
 let pushFails = false;
+// When set, credential reads wait here until the test settles them.
+let heldReads: Array<{ id: string; settle(value: string | null): void }> | null = null;
 
 mock.module("@/account-store", () => ({
   loadAccounts: async () => structuredClone(stored),
@@ -43,6 +45,10 @@ mock.module("@/account-store", () => ({
   },
   readAccountToken: async (id: string) => {
     if (unreadable) throw new Error("keychain locked");
+    if (heldReads) {
+      const held = heldReads;
+      return new Promise<string | null>((settle) => held.push({ id, settle }));
+    }
     return tokens.get(id) ?? null;
   },
   writeAccountToken: async (id: string) => tokenWrites.push(`write:${id}`),
@@ -104,6 +110,7 @@ async function mount(
   pathname = "/";
   unreadable = options.unreadable ?? false;
   pushFails = false;
+  heldReads = null;
   const probe = {} as Probe;
   function Read() {
     probe.state = useAccount();
@@ -241,6 +248,60 @@ test("a sheet that failed to open does not block the next pick", async () => {
     await pick(probe, "staging");
     expect(pushed).toEqual([{ pathname: "/add-account", params: { account: "staging" } }]);
   } finally {
+    await view.unmount();
+  }
+});
+
+test("picking the account in use leaves it as it is, whatever its credential read says", async () => {
+  const { probe, view } = await mount(
+    { accounts: [work, personal], activeId: "work" },
+    { work: "ogapp_work", personal: "ogapp_personal" },
+  );
+  try {
+    let inUse = 0;
+    tokens.delete("work");
+    await pick(probe, "work", () => inUse++);
+    unreadable = true;
+    await pick(probe, "work", () => inUse++);
+    expect(inUse).toBe(2);
+    expect(pushed).toEqual([]);
+    expect(probe.state.status).toBe("ready");
+    expect(probe.state.account?.signedOut).toBeUndefined();
+    expect(probe.state.unreadable.size).toBe(0);
+    expect(saved).toEqual([]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("only the newest read of an account may mark it", async () => {
+  const { probe, view } = await mount(
+    { accounts: [work, personal], activeId: "work" },
+    { work: "ogapp_work", personal: "ogapp_personal" },
+  );
+  try {
+    const held: NonNullable<typeof heldReads> = [];
+    heldReads = held;
+    let older: Promise<unknown> = Promise.resolve();
+    let newer: Promise<unknown> = Promise.resolve();
+    await act(async () => {
+      older = probe.state.chooseAccount("personal");
+      newer = probe.state.chooseAccount("personal");
+      await flush();
+    });
+    expect(held.map((each) => each.id)).toEqual(["personal", "personal"]);
+    // The newer read finds the credential; the older one, settling last, finds none.
+    await act(async () => {
+      held[1]?.settle("ogapp_personal");
+      await newer;
+      held[0]?.settle(null);
+      await older;
+      await flush();
+    });
+    expect(probe.state.account?.id).toBe("personal");
+    expect(probe.state.accounts.find((each) => each.id === "personal")?.signedOut).toBeUndefined();
+  } finally {
+    heldReads = null;
     await view.unmount();
   }
 });

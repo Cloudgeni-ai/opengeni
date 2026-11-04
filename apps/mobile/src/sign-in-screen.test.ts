@@ -290,4 +290,14 @@ test("the sheet for an account that is no longer on the device adds an account i
   } finally {
     await known.unmount();
   }
+  // Adding an account never turns into the account in use's own screen.
+  params = {};
+  state = { ...state, account: work, unreadable: new Set(["work"]) };
+  const adding = await renderComponent(createElement(AddAccountScreen));
+  try {
+    expect(adding.container.textContent).toContain("Add an account");
+    expect(adding.container.textContent).not.toContain("Couldn't read");
+  } finally {
+    await adding.unmount();
+  }
 });

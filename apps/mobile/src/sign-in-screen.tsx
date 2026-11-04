@@ -51,8 +51,14 @@ export function SignInScreen({
     switchAccount,
     retrySignIn,
   } = useAccount();
+  // A sheet passes its target (null to add an account); only the full
+  // screen without one falls back to the account in use.
   const expired =
-    target ?? (account && (account.signedOut || unreadable.has(account.id)) ? account : null);
+    target !== undefined
+      ? target
+      : account && (account.signedOut || unreadable.has(account.id))
+        ? account
+        : null;
   const cantRead = Boolean(expired && !expired.signedOut && unreadable.has(expired.id));
   const choices = onCancel
     ? []
