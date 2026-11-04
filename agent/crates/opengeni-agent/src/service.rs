@@ -202,8 +202,7 @@ fn inspect_managed_systemd_definition() -> Result<(), String> {
         .map_err(|error| format!("read {}: {error}", unit_path.display()))?;
     let definition = managed_systemd_definition(&existing, &spec);
     if let Some(replacement) = refreshed_systemd_definition(definition, &spec) {
-        if let Err(error) = refresh_previous_systemd_unit(install_scope, &unit_path, &replacement)
-        {
+        if let Err(error) = refresh_previous_systemd_unit(install_scope, &unit_path, &replacement) {
             tracing::warn!(
                 %error,
                 path = %unit_path.display(),
@@ -243,7 +242,8 @@ fn refresh_previous_systemd_unit(
     unit_path: &Path,
     replacement: &str,
 ) -> Result<(), String> {
-    let staged = unit_path.with_file_name(format!(".{}.opengeni-update", service::ids::SYSTEMD_UNIT));
+    let staged =
+        unit_path.with_file_name(format!(".{}.opengeni-update", service::ids::SYSTEMD_UNIT));
     std::fs::write(&staged, replacement)
         .map_err(|error| format!("write {}: {error}", staged.display()))?;
     if let Err(error) = std::fs::rename(&staged, unit_path) {
@@ -278,9 +278,9 @@ fn refreshed_systemd_definition(
 ) -> Option<String> {
     match definition {
         ManagedSystemdDefinition::PreviousCurrentOwned => Some(service::render_systemd_unit(spec)),
-        ManagedSystemdDefinition::PreviousCompatibleOwned => {
-            Some(service::render_systemd_unit_without_supervisor_subgroup(spec))
-        }
+        ManagedSystemdDefinition::PreviousCompatibleOwned => Some(
+            service::render_systemd_unit_without_supervisor_subgroup(spec),
+        ),
         ManagedSystemdDefinition::CurrentOwned
         | ManagedSystemdDefinition::CompatibleOwned
         | ManagedSystemdDefinition::Unowned => None,

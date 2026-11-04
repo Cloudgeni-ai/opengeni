@@ -180,7 +180,12 @@ pub fn render_previous_systemd_unit_without_supervisor_subgroup(spec: &ServiceSp
     )
 }
 
-fn previous_generation(current: &str, marker: &str, previous_marker: &str, restart: &str) -> String {
+fn previous_generation(
+    current: &str,
+    marker: &str,
+    previous_marker: &str,
+    restart: &str,
+) -> String {
     current
         .replacen(marker, previous_marker, 1)
         .replacen(START_RATE_POLICY, PREVIOUS_START_RATE_POLICY, 1)
