@@ -200,6 +200,15 @@ describe("a sandbox that cannot start programs", () => {
     expect(failure.error).toBe(
       "Your connected machine can't start programs because the null device /dev/null is missing. Restart the machine to restore it, then retry.",
     );
+    // /dev/null is named only when the agent detected it as the cause.
+    const unnamed = await recoverSandboxSetupFailure(
+      createSandboxSetupReplayGuard(),
+      processStartError(INSTALL_SCRIPT),
+      recovery,
+    );
+    expect(agentRunFailurePayload(inToolCall(unnamed)).error).toBe(
+      "Your connected machine can't start programs. Restart the machine, then retry.",
+    );
   });
 
   test("an unanswered agent keeps its own recovery", async () => {

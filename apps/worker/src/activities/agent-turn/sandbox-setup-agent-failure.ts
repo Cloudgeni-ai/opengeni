@@ -217,7 +217,7 @@ function processStartFailedCopy(
     const nullDevice = processStartFailureNullDeviceNote(agentMessage);
     return nullDevice
       ? `Your connected machine can't start programs because ${nullDevice}. Restart the machine to restore it, then retry.`
-      : "Your connected machine can't start programs. Restart the machine or its Opengeni agent, then retry.";
+      : "Your connected machine can't start programs. Restart the machine, then retry.";
   }
   if (restartedThisTurn) {
     return "The workspace machine still can't start programs after it was restarted, so this turn stopped. Retry once more, or start a new chat if it keeps failing.";

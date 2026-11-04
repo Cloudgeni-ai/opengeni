@@ -4000,6 +4000,8 @@ export const englishMessages = {
     "This tab cannot safely continue with the new server version. Reload it before sending or controlling work.",
   "providerRecoveryNotice.theTurnContinuesAutomaticallyAs":
     "The turn continues automatically as soon as the sandbox is ready.",
+  "providerRecoveryNotice.theTurnContinuesAutomaticallyOnceItsBack":
+    "The turn continues automatically as soon as it's back.",
   "providerRecoveryNotice.yourMessageIsSavedOpengeni":
     "Your message is saved. {product} keeps retrying automatically for a few minutes.",
   "queueItemContent.contentUnavailable": "Content unavailable",

@@ -405,7 +405,8 @@ test("a workspace machine that can't start programs reads as plain words while r
   const view = await renderComponent(<ProviderRecoveryNotice recovery={restarting} />);
   try {
     const text = view.container.textContent ?? "";
-    expect(text).toContain("continues automatically as soon as the sandbox is ready");
+    expect(text).toContain("The turn continues automatically as soon as it's back.");
+    expect(text).not.toContain("sandbox");
     // Restarted once per turn: no attempt budget to count.
     expect(text).not.toContain("attempt");
   } finally {
