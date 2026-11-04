@@ -235,35 +235,71 @@ fn inspect_managed_systemd_definition() -> Result<(), String> {
 /// Replaces an unchanged earlier generated unit with the current one of the
 /// same shape and reloads the manager. Only the restart policy differs, which
 /// systemd applies on reload, so the running agent is not restarted. A failed
-/// reload leaves the new, valid unit on disk for the next reload to apply.
+/// reload leaves the new, valid unit on disk for the next reload to apply. The
+/// reload runs on its own thread so a stuck manager never holds up startup.
 #[cfg(target_os = "linux")]
 fn refresh_previous_systemd_unit(
     install_scope: ServiceScope,
     unit_path: &Path,
     replacement: &str,
 ) -> Result<(), String> {
-    let staged =
-        unit_path.with_file_name(format!(".{}.opengeni-update", service::ids::SYSTEMD_UNIT));
-    std::fs::write(&staged, replacement)
-        .map_err(|error| format!("write {}: {error}", staged.display()))?;
-    if let Err(error) = std::fs::rename(&staged, unit_path) {
-        let _ = std::fs::remove_file(&staged);
-        return Err(format!("replace {}: {error}", unit_path.display()));
-    }
+    replace_unit_file(unit_path, replacement)?;
     let reload: &[&str] = match install_scope {
         ServiceScope::User => &["--user", "daemon-reload"],
         ServiceScope::System => &["daemon-reload"],
     };
-    match systemctl(reload) {
-        Ok(()) => info!(
-            path = %unit_path.display(),
-            "updated the generated systemd unit so the agent keeps restarting however often it is stopped"
-        ),
-        Err(error) => tracing::warn!(
+    let path = unit_path.display().to_string();
+    let spawned = std::thread::Builder::new()
+        .name("systemd-unit-reload".into())
+        .spawn(move || match systemctl(reload) {
+            Ok(()) => info!(
+                path = %path,
+                "updated the generated systemd unit so the agent keeps restarting however often it is stopped"
+            ),
+            Err(error) => tracing::warn!(
+                %error,
+                path = %path,
+                "updated the generated systemd unit, but systemd could not reload it yet; it applies on the next reload"
+            ),
+        });
+    if let Err(error) = spawned {
+        tracing::warn!(
             %error,
             path = %unit_path.display(),
-            "updated the generated systemd unit, but systemd could not reload it yet; it applies on the next reload"
-        ),
+            "updated the generated systemd unit, but could not start its reload; it applies on the next reload"
+        );
+    }
+    Ok(())
+}
+
+/// Atomically replaces `unit_path` with `contents`: written and flushed to a
+/// hidden file in the same directory, renamed over the unit, then the
+/// directory is flushed, so a crash leaves either the old or the new unit,
+/// never an empty one. A failure removes the staged file and leaves the unit
+/// as it was.
+#[cfg(any(target_os = "linux", test))]
+fn replace_unit_file(unit_path: &Path, contents: &str) -> Result<(), String> {
+    use std::io::Write;
+    let file_name = unit_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| service::ids::SYSTEMD_UNIT.to_owned());
+    let staged = unit_path.with_file_name(format!(".{file_name}.opengeni-update"));
+    let written = std::fs::File::create(&staged).and_then(|mut file| {
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()
+    });
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&staged);
+        return Err(format!("write {}: {error}", staged.display()));
+    }
+    if let Err(error) = std::fs::rename(&staged, unit_path) {
+        let _ = std::fs::remove_file(&staged);
+        return Err(format!("replace {}: {error}", unit_path.display()));
+    }
+    if let Some(dir) = unit_path.parent() {
+        // Best effort: the rename itself already succeeded.
+        let _ = std::fs::File::open(dir).and_then(|dir| dir.sync_all());
     }
     Ok(())
 }
@@ -1635,6 +1671,31 @@ mod tests {
         ] {
             assert_eq!(refreshed_systemd_definition(current, &spec), None);
         }
+    }
+
+    #[test]
+    fn a_refreshed_unit_replaces_the_file_whole_and_leaves_nothing_staged() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let unit = dir.path().join(service::ids::SYSTEMD_UNIT);
+        std::fs::write(&unit, "[Unit]\nStartLimitBurst=5\n").expect("seed unit");
+        replace_unit_file(&unit, "[Unit]\nStartLimitIntervalSec=0\n").expect("replace");
+        assert_eq!(
+            std::fs::read_to_string(&unit).expect("read unit"),
+            "[Unit]\nStartLimitIntervalSec=0\n"
+        );
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("list")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from(service::ids::SYSTEMD_UNIT)]);
+
+        // A unit that cannot be replaced is reported and leaves no staged file.
+        let blocked = dir.path().join("blocked");
+        std::fs::create_dir(&blocked).expect("dir in the unit's place");
+        std::fs::write(blocked.join("keep"), "").expect("non-empty dir");
+        assert!(replace_unit_file(&blocked, "[Unit]\n").is_err());
+        assert!(!dir.path().join(".blocked.opengeni-update").exists());
+        assert!(blocked.join("keep").exists());
     }
 
     #[test]

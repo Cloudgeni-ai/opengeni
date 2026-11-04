@@ -1016,11 +1016,15 @@ example when a command kills it. The systemd unit has no start limit
 starts a minute and then left the agent stopped until someone started it by hand.
 On systemd 254 and newer it restarts after 2 s, backing off to 30 s over five
 restarts (`RestartSteps=`, `RestartMaxDelaySec=`); systemd resets that count only
-when the service is started by hand or the machine boots, so after several stops
-the agent comes back within 30 s. Older systemd restarts after a fixed 5 s. The
-macOS LaunchAgent (`KeepAlive`) has no start limit either; launchd waits its
-`ThrottleInterval` of 5 s between starts. The Windows task's one-minute repetition
-starts an exited agent within a minute, with no limit.
+when the service is started by hand, `systemctl reset-failed` runs or the machine
+boots, so after several stops the agent comes back within 30 s. Older systemd
+restarts after a fixed 5 s. The macOS LaunchAgent (`KeepAlive`) has no start limit
+either; launchd waits its `ThrottleInterval` of 5 s between starts. The Windows
+task's one-minute repetition starts an exited agent within a minute, with no limit;
+a process that keeps the agent's hidden console host open after the agent exits
+delays that start until it ends, because the task skips a tick while its previous
+run is still going.
+
 Work delegated over a socket to an
 external privileged daemon (for example, a container build) is not a descendant
 of the command: the daemon chooses that workload's cgroup and OOM score. Operators
