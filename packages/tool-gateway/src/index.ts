@@ -145,6 +145,12 @@ export type ModelToolGatewayCall = {
   subjectId: string;
   transportMeta?: Record<string, unknown> | null;
   signal?: AbortSignal;
+  /**
+   * The identity the caller advertised under `modelName`. When set, the call
+   * runs only if the catalog binds that model name to this exact identity; a
+   * name the catalog gave to a different tool is not found, never rerouted.
+   */
+  expectedIdentity?: ToolGatewayIdentity;
 };
 
 type CompiledDefinition = {
@@ -443,6 +449,13 @@ export class ToolGateway {
     if (!definition) {
       throw new ToolGatewayToolNotFoundError();
     }
+    if (
+      input.expectedIdentity !== undefined &&
+      identityKey(input.expectedIdentity) !== identityKey(definition.entry.identity)
+    ) {
+      // Two tools claimed this model name and the catalog kept the other one.
+      throw new ToolGatewayToolNotFoundError();
+    }
     const call = {
       operationId: input.operationId ?? randomUUID(),
       catalogDigest: this.catalogDigest,
@@ -524,9 +537,8 @@ function admitToolGatewayDefinitions(
   definitions: readonly ToolGatewayDefinition[],
   warnings: ToolGatewayCatalogWarning[],
 ): AdmittedDefinition[] {
-  const admitted: AdmittedDefinition[] = [];
-  const byIdentity = new Map<string, string>();
-  const modelNames = new Set<string>();
+  const parsed: (AdmittedDefinition & { key: string; content: string })[] = [];
+  const contentsByIdentity = new Map<string, Set<string>>();
   for (const definition of definitions) {
     const about = warningSubject(definition);
     let entry: ToolGatewayCatalogEntryValue;
@@ -573,19 +585,33 @@ function admitToolGatewayDefinitions(
       continue;
     }
     const key = identityKey(entry.identity);
-    const existing = byIdentity.get(key);
-    if (existing !== undefined) {
-      warnings.push({
-        ...about,
-        code: existing === content ? "duplicate_identity" : "conflicting_identity",
-      });
+    parsed.push({ definition, entry, key, content });
+    const contents = contentsByIdentity.get(key) ?? new Set<string>();
+    contents.add(content);
+    contentsByIdentity.set(key, contents);
+  }
+  const admitted: AdmittedDefinition[] = [];
+  const admittedIdentities = new Set<string>();
+  const modelNames = new Set<string>();
+  for (const { definition, entry, key } of parsed) {
+    const about = warningSubject(definition);
+    if (contentsByIdentity.get(key)!.size > 1) {
+      // Different definitions claim one identity. Identity is the routing key
+      // for every caller, so no choice between them is safe: leave all out.
+      warnings.push({ ...about, code: "conflicting_identity" });
+      continue;
+    }
+    if (admittedIdentities.has(key)) {
+      warnings.push({ ...about, code: "duplicate_identity" });
       continue;
     }
     if (modelNames.has(entry.modelName)) {
+      // Callers that advertise this name pass the identity they advertised
+      // (`expectedIdentity`), so the later tool's calls are refused, not rerouted.
       warnings.push({ ...about, code: "duplicate_model_name" });
       continue;
     }
-    byIdentity.set(key, content);
+    admittedIdentities.add(key);
     modelNames.add(entry.modelName);
     admitted.push({ definition, entry });
   }
@@ -978,14 +1004,18 @@ function allocateToolPaths(
       serverId: entry.identity.serverId,
       toolName: entry.identity.toolName,
       modelName: entry.modelName,
-      path: base.join("."),
+      path: boundedWarningText(base.join(".")),
     };
     if (!path) {
       warnings.push({ ...subject, code: "path_unavailable" });
       continue;
     }
     if (path !== candidates[0]) {
-      warnings.push({ ...subject, code: "path_disambiguated", resolvedPath: path.join(".") });
+      warnings.push({
+        ...subject,
+        code: "path_disambiguated",
+        resolvedPath: boundedWarningText(path.join(".")),
+      });
     }
     allocated[index] = path;
   }

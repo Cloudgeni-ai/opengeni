@@ -9441,10 +9441,14 @@ class AttemptDefinitionMcpServer implements MCPServer {
     if (this.closed) throw new Error("local model tool server is closed");
     const environment = await this.requiredAttemptToolEnvironment();
     const sourceCallId = modelMcpSourceCallId(toolName);
+    // Bind the call to the tool this server advertised: if another server's
+    // tool won this model name in the catalog, the call is not found.
+    const expectedIdentity = this.catalogIdentities.get(toolName)?.identity;
     return await this.resultCustomDataBridge.captureResult(args, async (cleanArgs) =>
       environment.callModel({
         modelName: toolName,
         ...(sourceCallId === undefined ? {} : { sourceCallId }),
+        ...(expectedIdentity === undefined ? {} : { expectedIdentity }),
         arguments: cleanArgs ?? {},
         subjectId: this.subjectId,
         ...(meta === undefined ? {} : { transportMeta: meta }),
@@ -9916,6 +9920,9 @@ export class PrefixedMcpServer implements MCPServer {
         return await this.attemptToolEnvironment.callModel({
           modelName: toolName,
           ...(sourceCallId === undefined ? {} : { sourceCallId }),
+          // Bind the call to this server's own tool: a model name the catalog
+          // gave to another server's tool is not found, never rerouted.
+          expectedIdentity: { serverId: this.registryId, toolName: unprefixed },
           arguments: cleanArgs ?? {},
           subjectId: this.attemptToolSubjectId,
           ...(meta === undefined ? {} : { transportMeta: meta }),

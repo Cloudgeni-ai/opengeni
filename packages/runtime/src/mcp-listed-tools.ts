@@ -19,7 +19,7 @@ export function uniqueListedMcpTools<T extends ListedMcpTool>(
   const unique: T[] = [];
   let repeated = 0;
   const repeatedNames = new Set<string>();
-  const conflicting: string[] = [];
+  const conflicting = new Set<string>();
   for (const tool of tools) {
     const seen = first.get(tool.name);
     if (!seen) {
@@ -30,8 +30,8 @@ export function uniqueListedMcpTools<T extends ListedMcpTool>(
     repeated += 1;
     repeatedNames.add(tool.name);
     seen.digest ??= listedToolDigest(seen.tool);
-    if (listedToolDigest(tool) !== seen.digest && conflicting.length < 16) {
-      conflicting.push(tool.name.slice(0, 256));
+    if (listedToolDigest(tool) !== seen.digest && conflicting.size < 16) {
+      conflicting.add(tool.name.slice(0, 256));
     }
   }
   if (repeated > 0) {
@@ -40,7 +40,7 @@ export function uniqueListedMcpTools<T extends ListedMcpTool>(
       serverId,
       repeated,
       names: [...repeatedNames].slice(0, 16).map((name) => name.slice(0, 256)),
-      ...(conflicting.length > 0 ? { conflicting } : {}),
+      ...(conflicting.size > 0 ? { conflicting: [...conflicting] } : {}),
     });
   }
   return unique;

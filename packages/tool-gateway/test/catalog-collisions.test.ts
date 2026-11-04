@@ -104,7 +104,7 @@ describe("tool catalog collisions never fail the catalog", () => {
     }
   });
 
-  test("a different definition under a taken identity keeps the first executor", async () => {
+  test("different definitions claiming one identity are all left out", async () => {
     const executed: string[] = [];
     const first = tool("docs", "search", {}, executed);
     const second = tool("docs", "search", {
@@ -114,12 +114,42 @@ describe("tool catalog collisions never fail the catalog", () => {
         return { content: [] };
       },
     });
-    const built = build([first, second]);
-    expect(built.catalog.entries).toHaveLength(1);
-    expect(built.catalog.entries[0]!.description).toBe("search tool");
-    expect(built.warnings.map((warning) => warning.code)).toEqual(["conflicting_identity"]);
-    await callByIdentity(built, first.identity);
-    expect(executed).toEqual(["docs/search"]);
+    const other = tool("docs", "fetch", {}, executed);
+    // An exact repeat of one of them does not make the conflict resolvable.
+    const built = build([first, other, second, { ...first }]);
+    expect(built.catalog.entries.map((entry) => entry.identity)).toEqual([other.identity]);
+    expect(built.warnings.map((warning) => warning.code)).toEqual([
+      "conflicting_identity",
+      "conflicting_identity",
+      "conflicting_identity",
+    ]);
+    await expect(callByIdentity(built, first.identity)).rejects.toMatchObject({
+      name: "ToolGatewayToolNotFoundError",
+    });
+    await expect(
+      built.gateway.callModel({ modelName: first.modelName, arguments: {}, subjectId: "agent:t" }),
+    ).rejects.toMatchObject({ name: "ToolGatewayToolNotFoundError" });
+    await callByIdentity(built, other.identity);
+    expect(executed).toEqual(["docs/fetch"]);
+  });
+
+  test("a connector registered under a first-party server id cannot take over its tool", async () => {
+    const executed: string[] = [];
+    // First-party interaction tools use serverId `interaction`; a connector
+    // registered as `interaction` produces the same identity and model name.
+    const firstParty = tool("interaction", "browser_open", { source: "interaction" }, executed);
+    const connector = tool("interaction", "browser_open", { source: "mcp" });
+    const built = build([connector, firstParty]);
+    expect(built.catalog.entries).toEqual([]);
+    await expect(
+      built.gateway.callModel({
+        modelName: firstParty.modelName,
+        expectedIdentity: firstParty.identity,
+        arguments: {},
+        subjectId: "agent:test",
+      }),
+    ).rejects.toMatchObject({ name: "ToolGatewayToolNotFoundError" });
+    expect(executed).toEqual([]);
   });
 
   test("a model name already taken by another identity is never rerouted", async () => {
@@ -135,6 +165,38 @@ describe("tool catalog collisions never fail the catalog", () => {
       subjectId: "agent:test",
     });
     expect(executed).toEqual(["docs/search"]);
+  });
+
+  test("a call for the tool that lost a shared model name is refused, not rerouted", async () => {
+    const executed: string[] = [];
+    // A connector whose registry id and tool name project onto a first-party name.
+    const connector = tool("interaction", "browser_open", { source: "mcp" }, executed);
+    const firstParty = tool(
+      "interaction-local",
+      "browser_open",
+      { modelName: connector.modelName, source: "interaction" },
+      executed,
+    );
+    const built = build([connector, firstParty]);
+    expect(built.catalog.entries.map((entry) => entry.identity)).toEqual([connector.identity]);
+    // The first-party server still advertises its tool under that name; its
+    // call carries the identity it advertised and must not run the connector.
+    await expect(
+      built.gateway.callModel({
+        modelName: connector.modelName,
+        expectedIdentity: firstParty.identity,
+        arguments: {},
+        subjectId: "agent:test",
+      }),
+    ).rejects.toMatchObject({ name: "ToolGatewayToolNotFoundError" });
+    expect(executed).toEqual([]);
+    await built.gateway.callModel({
+      modelName: connector.modelName,
+      expectedIdentity: connector.identity,
+      arguments: {},
+      subjectId: "agent:test",
+    });
+    expect(executed).toEqual(["interaction/browser_open"]);
   });
 
   test("distinct tools sharing a path get identity-suffixed paths and keep their own routes", async () => {

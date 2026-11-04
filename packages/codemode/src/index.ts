@@ -98,6 +98,8 @@ export type ModelAttemptToolCall = {
   subjectId: string;
   transportMeta?: Record<string, unknown> | null;
   signal?: AbortSignal;
+  /** The identity advertised under `modelName`; a call bound to another tool is not found. */
+  expectedIdentity?: AttemptToolIdentity;
 };
 
 export {
