@@ -41,6 +41,7 @@ import {
 } from "./opensandbox-kubernetes-inventory";
 import {
   MCP_TOOL_METRIC_EXTERNAL_LABEL,
+  type ModelPreparationMeasurement,
   REPOSITORY_SKILL_DISCOVERY_ERROR_CLASSES,
   SANDBOX_OPERATION_PURPOSES,
   SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES,
@@ -2505,6 +2506,33 @@ export function recordRepositorySkillDiscoveryFailure(
       handling: REPOSITORY_SKILL_DISCOVERY_HANDLING.has(input.handling) ? input.handling : "other",
     },
   });
+}
+
+/** One model-preparation phase measurement from the runtime: its startup
+ * phase timing, plus the bounded discovery-failure counter when it failed. */
+export function recordModelPreparationPhase(
+  observability: Observability,
+  input: {
+    provider: string;
+    backend: string;
+    measurement: ModelPreparationMeasurement;
+  },
+): void {
+  const { measurement } = input;
+  recordTurnStartupPhase(observability, {
+    phase: `model_prepare_${measurement.phase}`,
+    provider: input.provider,
+    backend: input.backend,
+    outcome: measurement.outcome,
+    durationSeconds: measurement.durationSeconds,
+    ...(measurement.count === undefined ? {} : { count: measurement.count }),
+  });
+  if (measurement.failure)
+    recordRepositorySkillDiscoveryFailure(observability, {
+      backend: input.backend,
+      errorClass: measurement.failure.errorClass,
+      handling: measurement.failure.handling,
+    });
 }
 
 /** Observe an existing dependency only. Child intervals can overlap and are

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing/settings";
 import {
+  recordModelPreparationPhase,
   recordRepositorySkillDiscoveryFailure,
   runtimeMetricsHooksForObservability,
 } from "../src/observability-metrics";
@@ -52,6 +53,36 @@ describe("repository skill discovery metrics", () => {
     );
     expect(metrics).not.toContain("secret");
     expect(metrics).not.toContain("private-provider");
+    await observability.flush();
+  });
+
+  test("a failed discovery measurement from the runtime reaches the failure counter", async () => {
+    const observability = workerObservability();
+    recordModelPreparationPhase(observability, {
+      provider: "openai",
+      backend: "modal",
+      measurement: {
+        phase: "repository_skill_discovery",
+        outcome: "failed",
+        durationSeconds: 0.2,
+        count: 2,
+        failure: { errorClass: "workspace_unavailable", handling: "propagated" },
+      },
+    });
+    recordModelPreparationPhase(observability, {
+      provider: "openai",
+      backend: "modal",
+      measurement: {
+        phase: "repository_skill_discovery",
+        outcome: "completed",
+        durationSeconds: 0.1,
+      },
+    });
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_repository_skill_discovery_failures_total\{[^}]*error_class="workspace_unavailable"[^}]*handling="propagated"[^}]*\} 1/,
+    );
+    expect(metrics).toContain("model_prepare_repository_skill_discovery");
     await observability.flush();
   });
 });

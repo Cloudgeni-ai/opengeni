@@ -101,8 +101,8 @@ import {
   recordBatchFlush,
   recordContextCompaction,
   recordModelInputTokens,
+  recordModelPreparationPhase,
   recordModelStepPhase,
-  recordRepositorySkillDiscoveryFailure,
   recordTurnStartupPhase,
   recordTurnWorkerPreparationTotal,
   StreamTimingMetrics,
@@ -1244,23 +1244,12 @@ export async function runTurnStreamAttempt(
               eventing.modelRunSettings,
             ),
           },
-          onModelPreparationPhase: (measurement) => {
-            recordTurnStartupPhase(observability, {
-              phase: `model_prepare_${measurement.phase}`,
+          onModelPreparationPhase: (measurement) =>
+            recordModelPreparationPhase(observability, {
               provider: turnExecutionPolicy.providerId,
               backend: activeSandboxBackend ?? groupBoxBackend,
-              outcome: measurement.outcome,
-              durationSeconds: measurement.durationSeconds,
-              ...(measurement.count === undefined ? {} : { count: measurement.count }),
-            });
-            if (measurement.failure) {
-              recordRepositorySkillDiscoveryFailure(observability, {
-                backend: activeSandboxBackend ?? groupBoxBackend,
-                errorClass: measurement.failure.errorClass,
-                handling: measurement.failure.handling,
-              });
-            }
-          },
+              measurement,
+            }),
           ...(!providerPublishesNativeRequestEvents
             ? {
                 onModelTransportStarted: recordFallbackProviderDispatchAtWire,

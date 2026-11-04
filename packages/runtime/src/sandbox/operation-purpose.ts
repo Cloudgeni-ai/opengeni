@@ -78,12 +78,17 @@ const INSTRUMENTED_OPERATIONS = [
   "materializeEntry",
 ] as const;
 
-const READ_ONLY_PATH_PROBES = new Set<string>(["readFile", "listDir", "pathExists"]);
+const READ_ONLY_PATH_PROBES = new Set<string>(["readFile", "listDir", "pathExists", "viewImage"]);
 
-/** A read-only probe whose provider proved the path absent. Only typed or
- * errno-coded not-found evidence counts; "not found" prose (for example a
- * vanished sandbox) remains a failure. */
-function isReadOnlyPathMiss(op: string, error: unknown): boolean {
+/** A definite path miss is the provider's authoritative answer to a read-only
+ * probe (repository skill discovery lists absent `.agents/skills` on almost
+ * every turn), not a failed provider operation. Writes never qualify. Only
+ * typed or errno-coded misses count, the same set skill discovery treats as
+ * absent: generic 404 statuses or "not found" prose (for example a vanished
+ * sandbox) never do. Shared by this setup metric and the routed per-operation
+ * metric. The setup metric's `purpose` label tells callers apart: a miss is
+ * expected for skill discovery, but may matter for another purpose. */
+export function isReadOnlyPathProbeMiss(op: string, error: unknown): boolean {
   return (
     READ_ONLY_PATH_PROBES.has(op) &&
     (isDefinitePathNotFoundError(error) ||
@@ -125,7 +130,7 @@ export function instrumentSandboxSessionOperations<T>(
           return result;
         } catch (error) {
           try {
-            if (isReadOnlyPathMiss(op, error)) outcome = "not_found";
+            if (isReadOnlyPathProbeMiss(op, error)) outcome = "not_found";
           } catch {
             // Classification is telemetry only.
           }
