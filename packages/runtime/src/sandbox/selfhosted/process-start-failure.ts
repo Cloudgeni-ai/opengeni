@@ -22,8 +22,9 @@ const NULL_DEVICE_NOTE =
   /\((the null device \/dev\/null is missing|\/dev\/null has been replaced by something other than the null device)\)/;
 
 /** A newer agent's quoted program: `program "<name>"`, then the end, a note
- * or `: <OS error>`. The agent never puts `"` or a line break in the name. */
-const QUOTED_PROGRAM = new RegExp(`^program "([^"\\n]{0,${PROGRAM_LIMIT + 1}})"(?=$| \\(|: )`);
+ * or `: <OS error>`. The agent never puts `"` or a line break in the name and
+ * bounds it; any length is still read as a name and cut when kept. */
+const QUOTED_PROGRAM = /^program "([^"\n]*)"(?=$| \(|: )/;
 
 /** An older agent's unquoted program name: path characters only, then the
  * end or `: <OS error>`. Anything else (spaces, quotes, `=`, `;`, `(`) is
@@ -48,7 +49,12 @@ type ParsedStart =
 function parse(rest: string): ParsedStart {
   const quoted = QUOTED_PROGRAM.exec(rest);
   if (quoted) {
-    return { kind: "quoted", program: quoted[1] ?? "", tail: rest.slice(quoted[0].length) };
+    const program = quoted[1] ?? "";
+    return {
+      kind: "quoted",
+      program: program.length > PROGRAM_LIMIT ? `${program.slice(0, PROGRAM_LIMIT)}…` : program,
+      tail: rest.slice(quoted[0].length),
+    };
   }
   const legacy = LEGACY_PROGRAM.exec(rest)?.[1];
   if (legacy) {

@@ -151,6 +151,7 @@ describe("process-start failures from the machine agent", () => {
       const error = spawnError(program);
       expect(error.processStartFailed).toBe(false);
       expect(error.osNotFound).toBe(true);
+      expect(error.message.length).toBeLessThan(260);
     }
     for (const program of [
       "C:\\Windows\\System32\\cmd.exe",
