@@ -74,7 +74,8 @@ export function signInSwitchChoices(
   previousId: string | null,
 ): SignInSwitchChoice[] {
   const others = accounts.filter((each) => each.id !== activeId);
-  const previous = others.find((each) => each.id === previousId);
+  // The way back leads only while it is still signed in.
+  const previous = others.find((each) => each.id === previousId && !each.signedOut);
   const ordered = previous ? [previous, ...others.filter((each) => each !== previous)] : others;
   return ordered.map((account) => ({ account, signedIn: !account.signedOut }));
 }

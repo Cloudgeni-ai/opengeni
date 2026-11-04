@@ -29,6 +29,8 @@ let tokens = new Map<string, string>();
 const saved: AccountsSnapshot[] = [];
 const tokenWrites: string[] = [];
 const pushed: unknown[] = [];
+// The screen on top: a push opens the sign-in sheet, as the router would.
+let pathname = "/";
 let unreadable = false;
 
 mock.module("@/account-store", () => ({
@@ -44,7 +46,15 @@ mock.module("@/account-store", () => ({
   forgetAccountToken: async (id: string) => tokenWrites.push(`forget:${id}`),
   sameIdentity: () => false,
 }));
-mock.module("expo-router", () => ({ router: { push: (target: unknown) => pushed.push(target) } }));
+mock.module("expo-router", () => ({
+  router: {
+    push: (target: unknown) => {
+      pushed.push(target);
+      pathname = "/add-account";
+    },
+  },
+  usePathname: () => pathname,
+}));
 mock.module("@react-native-async-storage/async-storage", () => ({
   default: { getItem: async () => null, setItem: async () => undefined },
 }));
@@ -83,6 +93,7 @@ async function mount(snapshot: AccountsSnapshot, credentials: Record<string, str
   saved.length = 0;
   tokenWrites.length = 0;
   pushed.length = 0;
+  pathname = "/";
   unreadable = false;
   const probe = {} as Probe;
   function Read() {
@@ -92,7 +103,13 @@ async function mount(snapshot: AccountsSnapshot, credentials: Record<string, str
   }
   const view = await renderComponent(createElement(AccountProvider, null, createElement(Read)));
   await act(async () => flush());
-  return { probe, view };
+  /** Cancel on the sheet: back to the screen underneath. */
+  const closeSheet = async () => {
+    pathname = "/";
+    pushed.length = 0;
+    await view.rerender(createElement(AccountProvider, null, createElement(Read)));
+  };
+  return { probe, view, closeSheet };
 }
 const pick = async (probe: Probe, id: string, onInUse?: () => void) => {
   await act(async () => {
@@ -117,7 +134,9 @@ test("a signed-out pick opens its sign-in over the account in use and changes no
     expect(pushed).toEqual([{ pathname: "/add-account", params: { account: "staging" } }]);
     expect(probe.state.account?.id).toBe("work");
     expect(probe.state.status).toBe("ready");
-    expect(saved.every((each) => each.activeId === "work")).toBe(true);
+    // Nothing saved: the list, its order and the pick's own state are unchanged.
+    expect(saved).toEqual([]);
+    expect(probe.state.accounts).toEqual([work, staging, personal]);
     expect(tokenWrites).toEqual([]);
     expect(inUse).toBe(0);
   } finally {
@@ -125,20 +144,24 @@ test("a signed-out pick opens its sign-in over the account in use and changes no
   }
 });
 
-test("an account with no readable credential is marked signed out and not switched to", async () => {
-  const { probe, view } = await mount(
+test("a missing credential opens the sign-in and marks the account; an unreadable one only opens it", async () => {
+  const { probe, view, closeSheet } = await mount(
     { accounts: [work, personal], activeId: "work" },
     { work: "ogapp_work" },
   );
+  const personalFlag = () => probe.state.accounts.find((each) => each.id === "personal")?.signedOut;
   try {
+    unreadable = true;
     await pick(probe, "personal");
     expect(pushed).toEqual([{ pathname: "/add-account", params: { account: "personal" } }]);
     expect(probe.state.account?.id).toBe("work");
-    expect(probe.state.accounts.find((each) => each.id === "personal")?.signedOut).toBe(true);
-    unreadable = true;
-    pushed.length = 0;
+    expect(personalFlag()).toBeUndefined();
+    await closeSheet();
+    unreadable = false;
     await pick(probe, "personal");
     expect(pushed).toEqual([{ pathname: "/add-account", params: { account: "personal" } }]);
+    expect(probe.state.account?.id).toBe("work");
+    expect(personalFlag()).toBe(true);
     expect(tokenWrites).toEqual([]);
   } finally {
     await view.unmount();
@@ -164,8 +187,8 @@ test("a signed-in pick switches at once and remembers the way back", async () =>
   }
 });
 
-test("a quick second tap does not open a second sign-in sheet", async () => {
-  const { probe, view } = await mount(
+test("a second tap does not open a second sign-in sheet; after Cancel a pick works again", async () => {
+  const { probe, view, closeSheet } = await mount(
     { accounts: [work, staging], activeId: "work" },
     { work: "ogapp_work" },
   );
@@ -175,6 +198,12 @@ test("a quick second tap does not open a second sign-in sheet", async () => {
       probe.pick("staging");
       await flush();
     });
+    expect(pushed).toHaveLength(1);
+    // Later, while the sheet is still on its way up or open.
+    await pick(probe, "staging");
+    expect(pushed).toHaveLength(1);
+    await closeSheet();
+    await pick(probe, "staging");
     expect(pushed).toHaveLength(1);
   } finally {
     await view.unmount();

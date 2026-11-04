@@ -29,7 +29,7 @@ import {
   useState,
 } from "react";
 import { AppState } from "react-native";
-import { router } from "expo-router";
+import { router, usePathname } from "expo-router";
 import {
   forgetAccountToken,
   loadAccounts,
@@ -316,14 +316,18 @@ export function AccountProvider({ children }: { children: ReactNode }) {
 
   const chooseAccount = useCallback(
     async (id: string): Promise<"stay" | "switched" | "signIn"> => {
-      // An unreadable credential is a missing one: the account signs in again.
-      const hasCredential = Boolean(await readAccountToken(id).catch(() => null));
+      // An unreadable credential opens the sign-in too, but only a missing
+      // one marks the account signed out: the read may work next time.
+      const read = await readAccountToken(id).then(
+        (token) => ({ token, failed: false }),
+        () => ({ token: null, failed: true }),
+      );
       const current = snapshotRef.current;
       if (!current) return "stay";
-      const pick = planAccountPick(current, id, hasCredential);
+      const pick = planAccountPick(current, id, Boolean(read.token));
       if (pick.kind === "signIn") {
         // Mark it, so the menus and lists show it as signed out from now on.
-        if (!pick.account.signedOut) updateAccount(id, { signedOut: true });
+        if (!pick.account.signedOut && !read.failed) updateAccount(id, { signedOut: true });
         return "signIn";
       }
       if (pick.kind === "stay") return "stay";
@@ -440,17 +444,24 @@ export function useAccount(): AccountState {
  */
 export function usePickAccount(): (id: string, onInUse?: () => void) => void {
   const { chooseAccount } = useAccount();
-  // A second tap while the first pick settles would open a second sheet.
+  // A second tap while the first pick settles, or before its sheet covers
+  // the screen, would open a second sheet.
   const picking = useRef(false);
+  const sheetOpen = useRef(false);
+  sheetOpen.current = usePathname() === "/add-account";
   return useCallback(
     (id: string, onInUse?: () => void) => {
-      if (picking.current) return;
+      if (picking.current || sheetOpen.current) return;
       picking.current = true;
       void chooseAccount(id)
         .then((outcome) => {
           if (outcome === "signIn") {
+            sheetOpen.current = true;
             router.push({ pathname: "/add-account", params: { account: id } });
           } else onInUse?.();
+        })
+        .catch((caught: unknown) => {
+          if (__DEV__) console.warn("Couldn't switch accounts", caught);
         })
         .finally(() => {
           picking.current = false;

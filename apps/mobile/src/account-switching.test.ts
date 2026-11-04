@@ -45,6 +45,11 @@ test("the full-screen sign-in offers the other accounts, the one you came from f
     { account: old, signedIn: false },
   ]);
   expect(signInSwitchChoices([old], "old", null)).toEqual([]);
+  // A way back that has since been signed out no longer leads the list.
+  expect(signInSwitchChoices(stuck, "home", "old")).toEqual([
+    { account: work, signedIn: true },
+    { account: old, signedIn: false },
+  ]);
 });
 
 test("account menus say which accounts must sign in again", () => {
