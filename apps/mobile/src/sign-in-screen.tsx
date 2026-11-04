@@ -1,22 +1,48 @@
 import { Button, fontStyle, useNativeTimelineTheme } from "@opengeni/react-native/timeline";
 import { useEffect, useRef, useState } from "react";
-import { KeyboardAvoidingView, Platform, ScrollView, Text, TextInput, View } from "react-native";
+import {
+  KeyboardAvoidingView,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { DEFAULT_SERVER_URL, useAccount } from "@/account";
-import { normalizeServerUrl, serverLabel } from "@/account-store";
+import { normalizeServerUrl, serverLabel, type StoredAccount } from "@/account-store";
+import { signInSwitchChoices, type SignInSwitchChoice } from "@/account-switching";
 import { BrandMark } from "@/brand-mark";
+import { InitialTile } from "@/ui";
 
 /**
  * Sign in, or add another account: the deployment's own web sign-in opens in
  * the system auth browser, so every web method (password, Google, GitHub,
  * passkeys, SSO) works and the password never touches the app.
+ *
+ * `target` is an account to sign in to again. Shown full screen (no Cancel),
+ * the screen also lists the device's other accounts, so the person can always
+ * go back to one they are signed in to.
  */
-export function SignInScreen({ onDone, onCancel }: { onDone?: () => void; onCancel?: () => void }) {
+export function SignInScreen({
+  target,
+  onDone,
+  onCancel,
+}: {
+  target?: StoredAccount | null;
+  onDone?: () => void;
+  onCancel?: () => void;
+}) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const insets = useSafeAreaInsets();
-  const { account, addAccount } = useAccount();
-  const expired = account?.signedOut ? account : null;
+  const { account, accounts, previousAccountId, addAccount, switchAccount } = useAccount();
+  const expired = target ?? (account?.signedOut ? account : null);
+  const choices = onCancel
+    ? []
+    : signInSwitchChoices(accounts, account?.id ?? null, previousAccountId);
   const [server, setServer] = useState(expired?.baseUrl ?? DEFAULT_SERVER_URL);
   const [editingServer, setEditingServer] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -165,7 +191,109 @@ export function SignInScreen({ onDone, onCancel }: { onDone?: () => void; onCanc
             {serverLabel(normalizeServerUrl(server) ?? server)} · Change server
           </Text>
         )}
+
+        {choices.length > 0 ? (
+          <SwitchAccountList choices={choices} onPick={switchAccount} disabled={busy} />
+        ) : null}
       </ScrollView>
     </KeyboardAvoidingView>
+  );
+}
+
+/** The other accounts on this device, one tap each: signed in goes straight in. */
+function SwitchAccountList({
+  choices,
+  onPick,
+  disabled,
+}: {
+  choices: SignInSwitchChoice[];
+  onPick(id: string): void;
+  disabled: boolean;
+}) {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  return (
+    <View style={{ marginTop: 40 }}>
+      <Text
+        accessibilityRole="header"
+        style={{
+          ...fontStyle(theme, 500),
+          fontSize: 13,
+          lineHeight: 18,
+          color: c["fg-subtle"],
+          marginBottom: 8,
+          paddingHorizontal: 4,
+        }}
+      >
+        Switch account
+      </Text>
+      <View
+        style={{
+          borderRadius: theme.radius.lg,
+          borderWidth: StyleSheet.hairlineWidth,
+          borderColor: c.border,
+          backgroundColor: c["surface-1"],
+          overflow: "hidden",
+        }}
+      >
+        {choices.map(({ account, signedIn }, index) => {
+          const status = signedIn ? "Signed in" : "Signed out";
+          return (
+            <Pressable
+              key={account.id}
+              accessibilityRole="button"
+              accessibilityLabel={`Switch to ${account.email} on ${serverLabel(account.baseUrl)}, ${status.toLowerCase()}`}
+              accessibilityState={{ disabled }}
+              disabled={disabled}
+              onPress={() => onPick(account.id)}
+              style={({ pressed }) => ({
+                flexDirection: "row",
+                alignItems: "center",
+                gap: 12,
+                minHeight: 56,
+                paddingHorizontal: 12,
+                paddingVertical: 8,
+                borderTopWidth: index === 0 ? 0 : StyleSheet.hairlineWidth,
+                borderTopColor: c.border,
+                backgroundColor: pressed ? c.hover : "transparent",
+                opacity: disabled ? 0.5 : 1,
+              })}
+            >
+              <InitialTile label={account.email} size={32} />
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text
+                  numberOfLines={1}
+                  style={{ ...fontStyle(theme, 500), fontSize: 15, lineHeight: 20, color: c.fg }}
+                >
+                  {account.email}
+                </Text>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                  <View
+                    style={{
+                      width: 6,
+                      height: 6,
+                      borderRadius: 3,
+                      backgroundColor: signedIn ? c["status-idle"] : c["fg-subtle"],
+                    }}
+                  />
+                  <Text
+                    numberOfLines={1}
+                    style={{
+                      ...fontStyle(theme),
+                      fontSize: 13,
+                      lineHeight: 18,
+                      color: signedIn ? c["fg-muted"] : c["fg-subtle"],
+                      flexShrink: 1,
+                    }}
+                  >
+                    {status} · {serverLabel(account.baseUrl)}
+                  </Text>
+                </View>
+              </View>
+            </Pressable>
+          );
+        })}
+      </View>
+    </View>
   );
 }
