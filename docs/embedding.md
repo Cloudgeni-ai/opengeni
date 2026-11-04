@@ -1025,6 +1025,20 @@ named `optional-repository-access`. This only removes repositories from the
 turn. A repository without the flag keeps the strict checks and still fails
 the turn when its access is gone.
 
+The clone hook runs again on every turn and never deletes a repository folder
+that may hold work. A folder that another user owns (Git reports "dubious
+ownership", for example after `chown -R` inside the box) is added to the box's
+global `safe.directory` and kept as it is. A folder that is not a readable work
+tree (a corrupt `.git`, or an interrupted clone), or whose `HEAD` is not the
+repository's `expectedCommitSha` or a commit built on it, is renamed to the
+sibling `<mount path>.opengeni-recovered-<UTC yyyymmddThhmmssZ>` (with a
+numeric suffix if that name exists) and a fresh clone takes its place. Local
+commits on top of the pinned commit stay in place. The model is told where the
+moved copy is, and the `repository-clone` `sandbox.operation.completed` event
+lists each move in `recoveredRepositories` as `{ path, movedTo }`
+(workspace-relative). Only an empty folder, Opengeni's own temporary clone, or an
+untouched empty-remote stub is removed.
+
 When upgrading existing sessions that omitted `mountPath`, the new default
 materializes the repository at the host-aware location. A host that must retain
 an existing warm workspace path should persist the session's former effective

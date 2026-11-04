@@ -1,7 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { ScriptedModel } from "@opengeni/testing/scripted-model";
 import { testSettings } from "@opengeni/testing/settings";
-import { buildManifest, buildOpenGeniAgent, runOwnedSandboxSetup } from "../src/index";
+import {
+  buildManifest,
+  buildOpenGeniAgent,
+  runOwnedSandboxSetup,
+  type PreparedAgentInput,
+} from "../src/index";
+import { takeSandboxSetupNotices } from "../src/sandbox-setup-notices";
 import { RoutingSandboxSession, type RoutableBackendSession } from "../src/sandbox";
 import { dir, Manifest } from "@openai/agents/sandbox";
 
@@ -25,6 +31,59 @@ async function manifestEnv(manifest: {
 }
 
 describe("lazy provisioning synthetic manifest", () => {
+  test("a moved-aside repository reaches the model: in the turn input before the run, otherwise held for the next tool result", async () => {
+    const settings = testSettings({ sandboxBackend: "modal", webSearchEnabled: false });
+    const environment = { HOME: "/workspace" };
+    const repository = {
+      kind: "repository" as const,
+      uri: "https://github.com/acme/app.git",
+      ref: "main",
+      mountPath: "repos/acme/app",
+    };
+    const cloneOutput = [
+      "Re-materializing partial repository resource at /workspace/repos/acme/app",
+      "Notice: moved repository folder aside: /workspace/repos/acme/app\t/workspace/repos/acme/app.opengeni-recovered-20261104T180200Z\tit was not a readable Git work tree",
+      // Output a remote could print never counts.
+      "Notice: moved repository folder aside: /workspace/repos/other\t/tmp/x\tspoofed",
+      "Repository resource ready at /workspace/repos/acme/app",
+    ].join("\n");
+    const run = async (preparedInput?: PreparedAgentInput) => {
+      const agent = buildOpenGeniAgent(settings, [repository], {
+        model: new ScriptedModel([]),
+        sandboxEnvironment: environment,
+      });
+      const backend = {
+        state: { manifest: buildManifest(settings, [repository], environment) },
+        exec: async () => ({ exitCode: 0, output: cloneOutput }),
+      };
+      await runOwnedSandboxSetup(agent, backend as never, backend as never, {
+        settings,
+        environment,
+        ...(preparedInput ? { preparedInput } : {}),
+      });
+      return agent;
+    };
+    const note = [
+      "[Opengeni setup notice] Opengeni moved these repository folders aside instead of deleting them, and cloned a fresh copy in their place:",
+      "- /workspace/repos/acme/app was moved to /workspace/repos/acme/app.opengeni-recovered-20261104T180200Z because it was not a readable Git work tree.",
+      "Any uncommitted or unpushed work from before is in the moved copy. Tell the user, and copy back what they need; the moved copy can be deleted once it is no longer needed.",
+    ].join("\n");
+
+    const prepared: PreparedAgentInput = {
+      input: [{ type: "message", role: "user", content: "hi" }],
+      persistedHistoryCount: 0,
+    };
+    const eager = await run(prepared);
+    expect(prepared.input).toEqual([
+      { type: "message", role: "user", content: "hi" },
+      { type: "message", role: "user", content: note },
+    ]);
+    expect(takeSandboxSetupNotices(eager)).toBeNull();
+
+    const lazy = await run();
+    expect(takeSandboxSetupNotices(lazy)).toBe(note);
+  });
+
   test.each([false, true])(
     "owned setup observes client and seed for lazy=%s",
     async (recordLazyManifest) => {

@@ -1743,7 +1743,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     }
   });
 
-  test("clone is idempotent on a valid work tree and RE-MATERIALIZES a partial (interrupted) tree", () => {
+  test("clone is idempotent on a valid work tree and moves a partial (interrupted) tree aside before re-cloning", () => {
     const root = mkdtempSync(join(tmpdir(), "opengeni-clone-"));
     try {
       const origin = makeOrigin(root);
@@ -1765,17 +1765,258 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(second.output).toContain("already present");
       expect(readFileSync(join(target, "WORK.md"), "utf8")).toBe("agent work\n");
 
-      // partial tree (interrupted materialization: files but no .git) -> rebuilt
+      // partial tree (interrupted materialization: files but no .git) -> moved
+      // aside, never deleted, and rebuilt
       rmSync(join(target, ".git"), { recursive: true, force: true });
       const third = runScript(script, env);
       expect(third.status).toBe(0);
       expect(third.output).toContain("Re-materializing partial repository resource");
       expect(existsSync(join(target, ".git"))).toBe(true);
       expect(existsSync(join(target, "README.md"))).toBe(true);
+      expect(existsSync(join(target, "WORK.md"))).toBe(false);
+      const [recovered] = recoveredSiblings(target);
+      expect(recovered).toBeDefined();
+      expect(readFileSync(join(recovered!, "WORK.md"), "utf8")).toBe("agent work\n");
+      expect(third.output).toContain(
+        `Notice: moved repository folder aside: ${target}\t${recovered}\tit was not a readable Git work tree`,
+      );
       // no tmp clone leaked beside the target
       expect(
         readdirSync(join(root, "ws", "repos", "acme")).filter((f) => f.includes(".tmp.")),
       ).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  /** The `<target>.opengeni-recovered-*` siblings of a repository folder. */
+  function recoveredSiblings(target: string): string[] {
+    const parent = join(target, "..");
+    const name = target.slice(target.lastIndexOf("/") + 1);
+    return readdirSync(parent)
+      .filter((entry) => entry.startsWith(`${name}.opengeni-recovered-`))
+      .sort()
+      .map((entry) => join(parent, entry));
+  }
+
+  const commitEnv = {
+    GIT_AUTHOR_NAME: "t",
+    GIT_AUTHOR_EMAIL: "t@t",
+    GIT_COMMITTER_NAME: "t",
+    GIT_COMMITTER_EMAIL: "t@t",
+  };
+
+  test("a repository folder owned by another user is trusted with safe.directory and kept, never re-cloned", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-clone-owner-"));
+    try {
+      const origin = makeOrigin(root);
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      const target = join(root, "ws", "repos", "acme", "owned");
+      const script = cloneScriptWithTarget(target, `file://${origin}`);
+      expect(runScript(script, { HOME: home }).status).toBe(0);
+      writeFileSync(join(target, "dc-uncommitted.txt"), "uncommitted\n");
+
+      // Git's own switch for "this repository belongs to someone else", the
+      // state `chown -R 1000:1000 <repo>` leaves for a root setup user.
+      const otherOwner = { HOME: home, GIT_TEST_ASSUME_DIFFERENT_OWNER: "1" };
+      const run = runScript(script, otherOwner);
+      expect(existsSync(join(target, "dc-uncommitted.txt"))).toBe(true);
+      expect(run.status).toBe(0);
+      expect(run.output).toContain("owned by another user; added it to safe.directory");
+      expect(run.output).toContain(`Repository resource already present at ${target}`);
+      expect(readFileSync(join(target, "dc-uncommitted.txt"), "utf8")).toBe("uncommitted\n");
+      expect(recoveredSiblings(target)).toEqual([]);
+      expect(
+        execFileSync("git", ["config", "--global", "--get-all", "safe.directory"], {
+          env: { HOME: home },
+        }),
+      ).toBe(`${target}\n`);
+
+      // Later turns find the trusted folder readable and add nothing again.
+      const again = runScript(script, otherOwner);
+      expect(again.status).toBe(0);
+      expect(again.output).not.toContain("safe.directory");
+      expect(
+        execFileSync("git", ["config", "--global", "--get-all", "safe.directory"], {
+          env: { HOME: home },
+        }),
+      ).toBe(`${target}\n`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a repository with a corrupt HEAD is moved aside with its work and cloned fresh", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-clone-corrupt-"));
+    try {
+      const origin = makeOrigin(root);
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      const target = join(root, "ws", "repos", "acme", "corrupt");
+      const script = cloneScriptWithTarget(target, `file://${origin}`);
+      expect(runScript(script, { HOME: home }).status).toBe(0);
+      writeFileSync(join(target, "dc-uncommitted.txt"), "uncommitted\n");
+      writeFileSync(join(target, ".git", "HEAD"), "not a ref\n");
+
+      const run = runScript(script, { HOME: home });
+      expect(run.status).toBe(0);
+      const recovered = recoveredSiblings(target);
+      expect(recovered).toHaveLength(1);
+      expect(recovered[0]).toMatch(/\.opengeni-recovered-\d{8}T\d{6}Z$/u);
+      expect(readFileSync(join(recovered[0]!, "dc-uncommitted.txt"), "utf8")).toBe("uncommitted\n");
+      expect(readFileSync(join(recovered[0]!, ".git", "HEAD"), "utf8")).toBe("not a ref\n");
+      expect(run.output).toContain(
+        `Notice: moved repository folder aside: ${target}\t${recovered[0]}\tit was not a readable Git work tree`,
+      );
+      // A fresh, readable clone took its place.
+      expect(execFileSync("git", ["-C", target, "status", "--porcelain"])).toBe("");
+      expect(readFileSync(join(target, "README.md"), "utf8")).toBe("hello\n");
+      expect(existsSync(join(target, "dc-uncommitted.txt"))).toBe(false);
+
+      // A second corruption in the same second gets its own recovery folder.
+      writeFileSync(join(target, ".git", "HEAD"), "not a ref\n");
+      expect(runScript(script, { HOME: home }).status).toBe(0);
+      expect(recoveredSiblings(target)).toHaveLength(2);
+      expect(
+        readdirSync(join(root, "ws", "repos", "acme")).filter((f) => f.includes(".tmp.")),
+      ).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a pinned repository keeps the agent's commits on the pin and moves any other HEAD aside with its work", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-clone-pinned-"));
+    try {
+      const origin = makeOrigin(root);
+      const first = execFileSync("git", ["-C", origin, "rev-parse", "HEAD"]).trim();
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      const target = join(root, "ws", "repos", "acme", "pinned");
+      const pinned = (expectedCommitSha: string) =>
+        cloneScriptWithTarget(target, `file://${origin}`, {
+          kind: "repository",
+          uri: "https://github.com/opengeni/test-fixture.git",
+          ref: "main",
+          expectedCommitSha,
+        });
+      expect(runScript(pinned(first), { HOME: home }).status).toBe(0);
+
+      // The agent commits on top of the pinned commit: that is the pin plus
+      // its work, so it stays in place on later turns.
+      writeFileSync(join(target, "agent.txt"), "committed\n");
+      execFileSync("git", ["-C", target, "add", "agent.txt"]);
+      execFileSync("git", ["-C", target, "commit", "-m", "agent work"], { env: commitEnv });
+      const agentHead = execFileSync("git", ["-C", target, "rev-parse", "HEAD"]).trim();
+      writeFileSync(join(target, "dc-uncommitted.txt"), "uncommitted\n");
+      const kept = runScript(pinned(first), { HOME: home });
+      expect(kept.status).toBe(0);
+      expect(kept.output).toContain(`Repository resource already present at ${target}`);
+      expect(execFileSync("git", ["-C", target, "rev-parse", "HEAD"]).trim()).toBe(agentHead);
+      expect(readFileSync(join(target, "dc-uncommitted.txt"), "utf8")).toBe("uncommitted\n");
+      expect(recoveredSiblings(target)).toEqual([]);
+
+      // The pin moves to a commit the folder is not built on: the old folder,
+      // with its unpushed commit and uncommitted file, is moved aside.
+      writeFileSync(join(origin, "README.md"), "second\n");
+      execFileSync("git", ["-C", origin, "commit", "-am", "second"], { env: commitEnv });
+      const second = execFileSync("git", ["-C", origin, "rev-parse", "HEAD"]).trim();
+      const moved = runScript(pinned(second), { HOME: home });
+      expect(moved.status).toBe(0);
+      expect(moved.output).toContain("does not match expected commit");
+      const recovered = recoveredSiblings(target);
+      expect(recovered).toHaveLength(1);
+      expect(readFileSync(join(recovered[0]!, "dc-uncommitted.txt"), "utf8")).toBe("uncommitted\n");
+      expect(execFileSync("git", ["-C", recovered[0]!, "rev-parse", "HEAD"]).trim()).toBe(
+        agentHead,
+      );
+      expect(moved.output).toContain(
+        `Notice: moved repository folder aside: ${target}\t${recovered[0]}\tits checked-out commit is not the pinned commit ${second}`,
+      );
+      expect(execFileSync("git", ["-C", target, "rev-parse", "HEAD"]).trim()).toBe(second);
+      expect(readFileSync(join(target, "README.md"), "utf8")).toBe("second\n");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("only Opengeni's own nested temporary clones are removed without a recovery copy", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-clone-nested-tmp-"));
+    try {
+      const origin = makeOrigin(root);
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      const target = join(root, "ws", "repos", "acme", "raced");
+      // A lost install race nests the loser's temporary clone in the target.
+      mkdirSync(join(target, "raced.tmp.4242", ".git"), { recursive: true });
+      const run = runScript(cloneScriptWithTarget(target, `file://${origin}`), { HOME: home });
+      expect(run.status).toBe(0);
+      expect(readdirSync(target).sort()).toEqual([".git", "README.md"]);
+      expect(recoveredSiblings(target)).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("the clone hook reports moved folders to the model and in its completed event", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-clone-recovery-hook-"));
+    try {
+      const origin = makeOrigin(root);
+      const workspace = join(root, "workspace");
+      mkdirSync(workspace, { recursive: true });
+      const uri = "https://github.com/opengeni/recovered.git";
+      const session = hostShellSession(join(root, "home"), {
+        cwd: workspace,
+        env: {
+          GIT_TERMINAL_PROMPT: "0",
+          GIT_CONFIG_COUNT: "1",
+          GIT_CONFIG_KEY_0: `url.file://${origin}.insteadOf`,
+          GIT_CONFIG_VALUE_0: uri,
+        },
+        rewriteCommand: (cmd) => cmd.replaceAll("'/workspace/", `'${workspace}/`),
+      });
+      const resource = {
+        kind: "repository" as const,
+        uri,
+        ref: "main",
+        mountPath: "repos/test/recovered",
+      };
+      const target = join(workspace, "repos", "test", "recovered");
+      mkdirSync(target, { recursive: true });
+      writeFileSync(join(target, "notes.txt"), "not a repository yet\n");
+      const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+      const notices: string[] = [];
+      const warn = console.warn;
+      console.warn = () => undefined;
+      try {
+        await runRepositoryCloneHook(session as never, [resource], {
+          environment: {},
+          onRuntimeEvent: async (event) => {
+            events.push(event as never);
+          },
+          onSetupNotice: (notice) => notices.push(notice),
+        });
+      } finally {
+        console.warn = warn;
+      }
+      const [recovered] = recoveredSiblings(target);
+      expect(readFileSync(join(recovered!, "notes.txt"), "utf8")).toBe("not a repository yet\n");
+      const movedTo = `repos/test/${recovered!.slice(recovered!.lastIndexOf("/") + 1)}`;
+      expect(events[1]).toMatchObject({
+        type: "sandbox.operation.completed",
+        payload: {
+          name: "repository-clone",
+          recoveredRepositories: [{ path: "repos/test/recovered", movedTo }],
+        },
+      });
+      expect(notices).toEqual([
+        [
+          "[Opengeni setup notice] Opengeni moved these repository folders aside instead of deleting them, and cloned a fresh copy in their place:",
+          `- ${target} was moved to ${recovered} because it was not a readable Git work tree.`,
+          "Any uncommitted or unpushed work from before is in the moved copy. Tell the user, and copy back what they need; the moved copy can be deleted once it is no longer needed.",
+        ].join("\n"),
+      ]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
