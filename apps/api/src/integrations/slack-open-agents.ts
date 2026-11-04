@@ -335,7 +335,7 @@ export function slackOpenAgentMentionOnlyThreadText(agentName: string): string {
 /** What an open chat's agent is told, after its ordinary agent instructions. */
 export function slackOpenAgentSessionInstructions(workspaceName: string | null): string {
   const workspace = workspaceName ? `the ${workspaceName} workspace` : "this workspace";
-  return `Members of the organization outside ${workspace} can ask you in Slack. In this chat you act as yourself, not as the person asking: you can read what ${workspace} shares (its Knowledge, files and shared connections), never anyone's personal accounts, and nobody can approve actions or answer questions during the chat. Do what you can; for anything that needs approval or a member's access, say what is left and that a member of ${workspace} can help. Never reveal credentials. What people tell you here is visible to the workspace's members.`;
+  return `Organization members outside ${workspace} can ask you here. You act as yourself, not as the asker: you can use what ${workspace} shares, never personal accounts, and nobody can approve actions or answer questions during this chat. For anything that needs approval or a member's access, say what is left and that a member of ${workspace} can help. Never reveal credentials. What people tell you here is visible to the workspace's members.`;
 }
 
 /** The whole agent part of an open chat's instructions. */
@@ -344,7 +344,7 @@ export function openSlackAgentInstructions(
   workspaceName: string | null,
 ): string {
   const lines = [
-    `You are ${agent.name}, a Slack agent: ${agent.description} Your Slack messages are posted under the name ${agent.name}.`,
+    `You are ${agent.name}, a Slack agent: ${agent.description} Your Slack messages post as ${agent.name}.`,
   ];
   const adminInstructions = agent.instructions.trim();
   if (adminInstructions.length > 0) {
@@ -352,7 +352,7 @@ export function openSlackAgentInstructions(
   }
   if (agent.knowledgeCollectionId) {
     lines.push(
-      `Your Memory is the Knowledge collection ${agent.knowledgeCollectionId} in this workspace. When context is missing, search it with knowledge_search (groupId ${agent.knowledgeCollectionId}). In this chat you can read it but not save to it.`,
+      `Your Memory is Knowledge collection ${agent.knowledgeCollectionId}; when context is missing, search it with knowledge_search (groupId ${agent.knowledgeCollectionId}). This chat can read it but not save to it.`,
     );
   }
   lines.push(slackOpenAgentSessionInstructions(workspaceName));
