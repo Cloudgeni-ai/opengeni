@@ -43,6 +43,8 @@ export {
   OpenGeniStreamError,
   formatErrorMessage,
   isMaintenanceError,
+  isApprovalRequiresAccountOwnerError,
+  APPROVAL_REQUIRES_ACCOUNT_OWNER_CODE,
   isRetryableStreamError,
   OPENGENI_MAINTENANCE_ERROR_CODE,
 } from "./errors";

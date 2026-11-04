@@ -1,6 +1,7 @@
 import { ClaudeSubscriptionReconnectRequired } from "@opengeni/db";
 import { DrizzleQueryError } from "drizzle-orm";
 import { SandboxCapabilitiesChangedError } from "./provider-dispatch-barrier";
+import { SandboxSetupAgentUnavailableError } from "./sandbox-setup-agent-failure";
 import { heldSessionUsageReceiptsForTurn } from "./session-usage-custody";
 import {
   ActiveSessionHistoryLimitExceededError,
@@ -1731,6 +1732,31 @@ function uncertainMutationOutcome(
   return { uncertain: node instanceof Error ? node.message : String(node) };
 }
 
+/**
+ * Platform sandbox setup failed only because the machine agent did not answer
+ * (see SandboxSetupAgentUnavailableError). No model-requested command reached
+ * the box, so the same turn retries with the bounded sandbox-setup recovery
+ * budget. An uncertain mutation outcome in the same failure, or an unreadable
+ * graph, still forbids the replay.
+ */
+function sandboxSetupAgentUnavailableFailure(
+  error: unknown,
+): ReturnType<typeof baseAgentRunFailurePayload> | null {
+  const graph = structuredRecoveryCauseGraph(error);
+  const nodes = graph ? [...graph.keys()] : [error];
+  const setup = nodes.find((node) => node instanceof SandboxSetupAgentUnavailableError);
+  if (!setup) return null;
+  const { uncertain } = uncertainMutationOutcome(graph, nodes);
+  if (uncertain !== undefined) return null;
+  return {
+    error:
+      "The sandbox's agent did not answer while the sandbox was being set up, and nothing the model asked for ran. The same turn will retry after a short delay.",
+    code: "sandbox_command_start_unavailable",
+    retryable: true,
+    detail: setup.message,
+  };
+}
+
 const SANDBOX_FAILURE_SUBJECT = {
   [SANDBOX_CAPACITY_UNAVAILABLE_CODE]: "No sandbox capacity is available right now",
   [SANDBOX_SERVICE_UNAVAILABLE_CODE]: "The sandbox service is temporarily unavailable",
@@ -2240,6 +2266,8 @@ function baseAgentRunFailurePayload(
   // provider 5xx below. Retry authority follows the error's own kind.
   const sandboxService = findSandboxServiceFailure(error);
   if (sandboxService) return sandboxServiceFailurePayload(sandboxService);
+  const setupAgentUnavailable = sandboxSetupAgentUnavailableFailure(error);
+  if (setupAgentUnavailable) return setupAgentUnavailable;
   if (error instanceof AnthropicSizeRecoveryExhaustedError) {
     return { error: error.message, code: error.code, retryable: false };
   }

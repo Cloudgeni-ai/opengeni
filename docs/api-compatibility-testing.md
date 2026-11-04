@@ -93,5 +93,7 @@ bridge deliberately omits this npm-client diagnostic, so its bytes do not
 depend on package version bumps or require a new Version PR regeneration step.
 
 Update pins deliberately using npm registry metadata and known integrator
-lockfiles. Never use floating tags in CI or drop a red version. The canonical
-policy specifies the support window and the retirement-notice gate.
+lockfiles. Never use floating tags in CI or drop a red version. The guard rejects
+removing an existing test pin; a major release or elapsed deprecation period
+does not retire compatibility. This bounded matrix records tested versions,
+not a limit on the canonical policy's compatibility promise.

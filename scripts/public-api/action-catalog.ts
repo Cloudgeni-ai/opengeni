@@ -65,7 +65,7 @@ export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason:
   },
   {
     pattern:
-      /^\/v1\/workspaces\/:workspaceId\/(recordings|recording-people|recording-models)(\/|$)/,
+      /^\/v1\/workspaces\/:workspaceId\/(recordings|recording-people|recording-models|upcoming-meetings)(\/|$)/,
     reason:
       "meeting recordings reach agents through the meetings_search, meeting_read and meeting_notes_save tools",
   },

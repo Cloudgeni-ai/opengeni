@@ -15,48 +15,24 @@ const matrixSchema = z
     reviewedOn: date,
     registry: z.literal("https://registry.npmjs.org"),
     versions: z.array(z.object({ version, reason: z.string().min(1) }).strict()).min(1),
-    retirementNotices: z
-      .array(
-        z
-          .object({ version, announcedOn: date, sunset: date, migration: z.string().min(1) })
-          .strict(),
-      )
-      .default([]),
   })
   .strict();
 export type SdkCompatibilityMatrix = z.infer<typeof matrixSchema>;
 
-export function sdkCompatibilityFailures(
-  candidate: unknown,
-  previous?: unknown,
-  now = new Date(),
-): string[] {
+export function sdkCompatibilityFailures(candidate: unknown, previous?: unknown): string[] {
   const parsed = matrixSchema.safeParse(candidate);
   if (!parsed.success) return [`SDK compatibility matrix is invalid: ${parsed.error.message}`];
   const current = parsed.data;
   const failures: string[] = [];
   if (new Set(current.versions.map((entry) => entry.version)).size !== current.versions.length)
     failures.push("SDK compatibility matrix contains duplicate versions");
-  for (const notice of current.retirementNotices) {
-    if (Date.parse(notice.sunset) - Date.parse(notice.announcedOn) < 90 * 86_400_000)
-      failures.push(`SDK ${notice.version}: retirement requires at least 90 days' notice`);
-  }
   if (previous === undefined) return failures;
   const base = matrixSchema.parse(previous);
   for (const entry of base.versions) {
     if (current.versions.some((item) => item.version === entry.version)) continue;
-    // The notice must already be on main: a PR cannot backdate its own notice
-    // and simultaneously stop exercising a customer's installed SDK.
-    const notice = base.retirementNotices.find((item) => item.version === entry.version);
-    if (
-      !notice ||
-      Date.parse(notice.sunset) > now.getTime() ||
-      Date.parse(notice.sunset) - Date.parse(notice.announcedOn) < 90 * 86_400_000
-    ) {
-      failures.push(
-        `SDK ${entry.version}: cannot remove compatibility coverage without a previously committed 90-day retirement notice whose sunset has passed`,
-      );
-    }
+    failures.push(
+      `SDK ${entry.version}: cannot remove compatibility coverage; a major release or deprecation period does not retire existing integrations`,
+    );
   }
   return failures;
 }

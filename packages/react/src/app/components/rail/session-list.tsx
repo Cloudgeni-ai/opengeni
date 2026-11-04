@@ -7,6 +7,7 @@ import { archiveActionLabel, requestSessionArchive } from "../../lib/archive-ses
 import { t } from "../../lib/console-text";
 import { useSessionListHintRefresh } from "../../lib/use-session-list-hint-refresh";
 import { useSiteOpenedListener } from "../../lib/site-opened";
+import { publishSiteSidebarBridge } from "../../lib/site-sidebar-bridge";
 import { useOpenGeni } from "../../../session-context";
 import { useChannels } from "../../../hooks/use-channels";
 import { useSessionLineage } from "../../../hooks/use-session-lineage";
@@ -287,7 +288,6 @@ import {
 import { rememberSidebarSites } from "../../lib/actions/site-directory";
 import { useChatOperations } from "../../lib/actions/chat-operations";
 import { TooltipWithKeys } from "../command-menu/keycaps";
-import { errorMessage } from "@opengeni/contracts/values";
 import { userErrorText } from "../../../ui/api-error";
 
 /** True when the browser should own navigation (new tab / window / modified click). */
@@ -2013,7 +2013,7 @@ export function SessionList() {
         await refreshSessionPages();
       } catch (attentionError) {
         toast.error("Couldn't update the session status.", {
-          description: errorMessage(attentionError),
+          description: userErrorText(attentionError),
         });
         await refreshSessionPages();
       }
@@ -2062,9 +2062,9 @@ export function SessionList() {
           session,
           archived,
           sessionDisplayTitle(session),
-          () => {
+          (next) => {
             if (!context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)) return;
-            void archiveSession({ ...session, archived: true }, false);
+            void archiveSession({ ...session, archived: !next }, next);
           },
         );
         if (!updated) return;
@@ -2093,7 +2093,7 @@ export function SessionList() {
       } catch (archiveError) {
         if (!context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)) return;
         toast.error(archived ? "Couldn't archive the chat." : "Couldn't undo the archive.", {
-          description: errorMessage(archiveError),
+          description: userErrorText(archiveError),
         });
         await refreshSessionPages();
       } finally {
@@ -2149,7 +2149,7 @@ export function SessionList() {
       } catch (pinError) {
         if (!context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition)) return;
         toast.error(nextPinned ? "Couldn't pin the Site." : "Couldn't unpin the Site.", {
-          description: errorMessage(pinError),
+          description: userErrorText(pinError),
         });
       } finally {
         setSitePinOverrides((current) => {
@@ -2234,7 +2234,7 @@ export function SessionList() {
         if (!context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition)) return;
         setArchived(!archived);
         toast.error(archived ? "Couldn't archive the Site." : "Couldn't restore the Site.", {
-          description: errorMessage(archiveError),
+          description: userErrorText(archiveError),
         });
       } finally {
         const remaining = (inFlight.get(origin.siteId) ?? 1) - 1;
@@ -2307,6 +2307,25 @@ export function SessionList() {
         : null,
     [context.client, onArchiveSite, onMoveSite, onPinSite],
   );
+  // The open Site's page offers the same Pin and Archive as its row.
+  const pinnedSiteIds = useMemo(
+    () =>
+      new Set(
+        (siteGroups ?? [])
+          .filter((group) => "pinned" in group && group.pinned === true)
+          .map((group) => group.siteId),
+      ),
+    [siteGroups],
+  );
+  useEffect(() => {
+    if (!siteRowActions) return;
+    return publishSiteSidebarBridge({
+      workspaceId: rail.workspaceId,
+      pinnedSiteIds,
+      pin: siteRowActions.pin,
+      archive: siteRowActions.archive,
+    });
+  }, [pinnedSiteIds, rail.workspaceId, siteRowActions]);
   const onDeleteSession = useCallback(async (): Promise<boolean> => {
     if (!sessionPendingDelete) return false;
     try {
@@ -2368,7 +2387,7 @@ export function SessionList() {
       return true;
     } catch (deleteError) {
       toast.error("Couldn't delete the chat.", {
-        description: errorMessage(deleteError),
+        description: userErrorText(deleteError),
       });
       return false;
     }

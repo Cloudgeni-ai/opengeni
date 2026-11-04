@@ -4,7 +4,10 @@ import {
   resolveTurnExecutionPolicyV1,
   UnsupportedLatencyModeError,
 } from "../../../packages/config/src/index";
-import { OPENGENI_CORRELATION_HEADER } from "../../../packages/contracts/src/index";
+import {
+  ModelPolicyRefusedError,
+  OPENGENI_CORRELATION_HEADER,
+} from "../../../packages/contracts/src/index";
 import { HTTPException } from "hono/http-exception";
 import {
   canonicalConfiguredModel,
@@ -144,6 +147,30 @@ describe("session admission error envelope", () => {
     const other = await server.request("/v1/test/other-validation", { method: "POST" });
     expect(other.status).toBe(422);
     expect((await other.json()).error.details).toBeUndefined();
+  });
+
+  test("a model policy refusal on Send is a typed, nonretryable model_policy 422", async () => {
+    // Follow-ups and model changes in an open chat reach the global handler;
+    // the same model is refused again until the model or the policy changes.
+    const server = app();
+    const message = `model "codex/gpt-6-sol" is not allowed by this workspace's model policy`;
+    server.post("/v1/test/policy-refused", () => {
+      throw new HTTPException(422, {
+        message,
+        cause: new ModelPolicyRefusedError("codex/gpt-6-sol", "model", message),
+      });
+    });
+    const refused = await server.request("/v1/test/policy-refused", { method: "POST" });
+    expect(refused.status).toBe(422);
+    expect(await refused.json()).toMatchObject({
+      error: {
+        status: 422,
+        code: "validation_failed",
+        message,
+        retryable: false,
+        details: { code: "model_policy", modelId: "codex/gpt-6-sol", reason: "model" },
+      },
+    });
   });
 
   test("retains allowance scope, subject and reset in a nonretryable HTTP 402", async () => {

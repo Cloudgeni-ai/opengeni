@@ -166,6 +166,7 @@ import {
   DATABASE_UNAVAILABLE_ERROR_DETAIL_CODE,
   databaseContentionHttpError,
   databaseUnavailableHttpError,
+  modelPolicyRefusedHttpError,
   modelUnavailableHttpError,
   connectionAccountSelectionHttpError,
   regionRestrictedHttpError,
@@ -2652,6 +2653,7 @@ export function createAppComposition(deps: AppDependencies): {
             scheduledTaskTargetAccessHttpError(rawError) ??
             agentConfigHttpError(rawError) ??
             modelUnavailableHttpError(rawError) ??
+            modelPolicyRefusedHttpError(rawError) ??
             connectionAccountSelectionHttpError(rawError) ??
             (rawError instanceof UnsupportedLatencyModeError
               ? new ApiHttpError(422, {

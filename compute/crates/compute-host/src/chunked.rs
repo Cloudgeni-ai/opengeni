@@ -332,7 +332,7 @@ impl Chunked {
     pub async fn sweep(&self, delete: bool) -> Result<Report, StorageError> {
         compute_storage::sweep::sweep(
             &self.chunks,
-            |pointer| async move { self.names(&pointer).await },
+            &copy::Copies(&self.chunks),
             delete,
             std::time::SystemTime::UNIX_EPOCH,
         )
@@ -343,6 +343,7 @@ impl Chunked {
     /// `pointer` keeps. Anything unreadable fails, so a sweep stops before
     /// deleting what it could not account for; only a damaged or missing
     /// working-set pack does not, since a wake without it is just slower.
+    #[cfg(test)]
     async fn names(&self, pointer: &[u8]) -> Result<Vec<String>, StorageError> {
         copy::names(&self.chunks, pointer).await
     }

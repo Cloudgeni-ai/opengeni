@@ -246,6 +246,15 @@ export const ToolActionReview = /* @__PURE__ */ defineSchema(() =>
       updatedAt: primitives.string,
       approveLabel: primitives.string,
       availableActions: z.array(z.enum(["approve", "reject"])),
+      /**
+       * Who alone can approve this waiting action, when not everyone who can
+       * control the chat may: it runs on someone's own (Only me) account.
+       * `account_owner` means another person, so this viewer can only decline;
+       * `you` means the viewer, shown in chats shared with the workspace.
+       */
+      approvedBy: z.enum(["you", "account_owner"]).optional(),
+      /** The account owner's name, with `approvedBy: "account_owner"`, when known. */
+      accountOwnerLabel: z.string().optional(),
       detailsAvailable: primitives.boolean,
     })
     .strict(),

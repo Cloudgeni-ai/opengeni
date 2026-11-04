@@ -7,12 +7,14 @@ import type {
 import {
   buildTimeline,
   groupTimeline,
+  useTimelinePauses,
   type AgentMessageItem,
   type AuthNeededItem,
   type HumanInputItem,
   type TimelineGroup,
   type TimelineAnnotationSourceDescriptor,
   type TimelineItem,
+  type TimelineLivePause,
   type UserMessageItem,
 } from "@opengeni/react/session";
 import {
@@ -133,6 +135,11 @@ export interface NativeMessageTimelineProps extends NativeActivityOptions {
   items?: TimelineItem[] | undefined;
   events?: SessionEvent[] | undefined;
   status?: SessionStatus | null | undefined;
+  /**
+   * The session's live Pause (`timelineLivePause(session.effectiveControl)`).
+   * A turn still open under a pause reads "Paused" with its clock stopped.
+   */
+  pause?: TimelineLivePause | null | undefined;
   facets?: TurnSummaryFacetConfiguration | undefined;
   renderMarkdown?: NativeMarkdownRenderer | undefined;
   /** Replace the preparing visual (the web orb) — e.g. a product character. */
@@ -211,7 +218,11 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
     () => props.items ?? buildTimeline(t, props.events ?? []),
     [t, props.items, props.events],
   );
-  const groups = useMemo(() => groupTimeline(t, items, { readableTurns: true }), [t, items]);
+  const pauses = useTimelinePauses(props.events, props.pause);
+  const groups = useMemo(
+    () => groupTimeline(t, items, { readableTurns: true, pauses }),
+    [t, items, pauses],
+  );
   const turnsWithOutput = useMemo(() => timelineTurnsWithOutput(items), [items]);
   const sources = useMemo(() => annotationSources(items), [items]);
   useNativeTextAnnotation(sources, props.onAnnotate);
@@ -921,7 +932,9 @@ function TimelineGroupView({
                   label: base.label,
                   preview: base.detail ? <WaitDetail text={base.detail} /> : undefined,
                 }
-              : { kind: "worked", durationMs: base.durationMs, label: base.label };
+              : base.kind === "paused"
+                ? { kind: "paused", durationMs: base.durationMs, label: base.label }
+                : { kind: "worked", durationMs: base.durationMs, label: base.label };
         return (
           <TurnSummary
             items={group.items}

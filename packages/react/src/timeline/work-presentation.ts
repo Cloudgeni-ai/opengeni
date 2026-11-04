@@ -92,6 +92,7 @@ export function isPreparingWork(group: ActivityGroup, options: ReadableWorkOptio
     !options.startupDismissed &&
     !group.work.endedAt &&
     !group.work.waiting &&
+    !group.work.pausedAt &&
     phases.length > 0 &&
     group.items.every(
       (item) => item.kind === "startup-phase" || (item.kind === "reasoning" && !item.text.trim()),
@@ -132,9 +133,10 @@ export function readableWorkHasDetails(
 /**
  * Status of a readable turn's work row, minus the host-rendered live preview.
  * Time spent waiting for model capacity, or between a failed attempt and its
- * Retry, is not work: the worked duration and the live working clock exclude
- * it, and a capacity wait itself shows no clock. A
- * wait's `detail` is its one quiet secondary line.
+ * Retry, or paused, is not work: the worked duration and the live working
+ * clock exclude it, and a capacity wait itself shows no clock. A turn parked
+ * by a pause still in force reads as paused, its clock stopped where the
+ * pause began. A wait's `detail` is its one quiet secondary line.
  */
 export function readableWorkStatus(
   t: OpenGeniText,
@@ -157,8 +159,15 @@ export function readableWorkStatus(
       durationMs: durationMs === undefined ? undefined : Math.max(0, durationMs - pausedMs),
     };
   }
+  if (group.work.pausedAt) {
+    const durationMs = durationBetween(group.work.startedAt, group.work.pausedAt);
+    return {
+      kind: "paused",
+      durationMs: durationMs === undefined ? undefined : Math.max(0, durationMs - pausedMs),
+    };
+  }
   if (group.work.waiting) {
-    const { untimed, since, ...waiting } = group.work.waiting;
+    const { untimed, since, waitingOn: _waitingOn, ...waiting } = group.work.waiting;
     return { kind: "waiting", ...waiting, ...(untimed ? {} : { since }) };
   }
   const started = Date.parse(group.work.startedAt);

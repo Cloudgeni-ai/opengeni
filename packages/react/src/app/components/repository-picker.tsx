@@ -33,6 +33,7 @@ import { Label } from "../../ui/label";
 import { MetaChip } from "../../ui/meta-chip";
 import { SegmentedControl } from "../../ui/segmented-control";
 import { userErrorText } from "../../ui/api-error";
+import { ErrorText } from "../../ui/error-text";
 import { repoCountLabel } from "../lib/format";
 import { attachedManualRepositoryCount } from "../lib/manual-repositories";
 import {
@@ -624,7 +625,13 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
           {/* The list refreshes itself on open and after GitHub flows; only a failure offers a retry. */}
           {(refreshError || updateFailed) && !loadFailed ? (
             <p className="px-2.5 text-xs text-status-failed" role="alert">
-              Couldn't update the list.{refreshError ? ` ${refreshError}` : ""}
+              Couldn't update the list.
+              {refreshError ? (
+                <>
+                  {" "}
+                  <ErrorText>{refreshError}</ErrorText>
+                </>
+              ) : null}
               {canRefresh ? (
                 <>
                   {" "}

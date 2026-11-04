@@ -1798,17 +1798,21 @@ reconsider — they can change with their counterpart, not with the SDK.
 
 ## Compatibility
 
-Evolution is additive within a **major** and both sides are tolerant readers.
-The hosted API also retains the contracts of supported older SDKs: shipping a
-new SDK major does not force an installed client to upgrade. The committed
-`test/integration/sdk-compatibility/versions.json` matrix tests recent stable
-minor releases and known customer pins against the current API.
-Official server builds expose `serverVersion` on `/healthz` and
-`/v1/config/client`. A breaking change ships only in a new major, announced in
-the changelog, with migration guidance and at least 90 days' notice before old
-behavior stops working. Full policy: `docs/design/api-compatibility-policy.md`.
-Requests include `x-opengeni-sdk-version` for server diagnostics; missing or
-unknown versions never change authorization or compatibility admission.
+Server updates do not break existing integrations. The API only grows: routes,
+fields, event types and documented behaviour that a published SDK uses keep
+working, so a pinned SDK version keeps working against the managed service.
+Upgrade when you want new features. Replacements for older designs ship beside
+them, and `@deprecated` members keep working. Clients should ignore unknown
+response fields, enum values and event types. Official server builds expose
+`serverVersion` on `/healthz` and `/v1/config/client`. Full policy:
+`docs/design/api-compatibility-policy.md`.
+Rare exceptions (an emergency security fix or an explicit product-owner decision) are announced with migration notes.
+
+The committed `test/integration/sdk-compatibility/versions.json` matrix tests
+pinned stable releases and known customer pins against the current API; it is
+not a limit on the compatibility promise. Requests include
+`x-opengeni-sdk-version` for server diagnostics; missing or unknown versions
+never change authorization or compatibility admission.
 
 ## Proxy through your own API
 

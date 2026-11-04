@@ -51,7 +51,11 @@ export type SubscriptionCoreServingConnection = {
    * list cannot be read outside an exact accepted turn.
    */
   cooledDownModelIds: string[];
-  /** Shared catalog proven fresh for the connection's current credential generation. */
+  /**
+   * The latest shared catalog observed under the connection's current
+   * credential generation. It may have expired: only `expiresAt > now`
+   * proves it fresh.
+   */
   modelCatalog?: { slugs: string[]; observedAt: number; expiresAt: number } | null;
 };
 
@@ -179,12 +183,14 @@ export async function listSubscriptionCoreServingConnections(
         allowedModelIds: candidate.allowedModelIds === null ? null : [...candidate.allowedModelIds],
         excludedModelIds: excludedById.get(candidate.id) ?? [],
         cooledDownModelIds: [],
+        // The latest list under the current credential generation, fresh or
+        // expired; readers compare expiresAt themselves.
         modelCatalog:
-          candidate.observedModelSlugs != null &&
+          (candidate.lastObservedModelSlugs ?? candidate.observedModelSlugs) != null &&
           candidate.modelCatalogObservedAt != null &&
           candidate.modelCatalogExpiresAt != null
             ? {
-                slugs: [...candidate.observedModelSlugs],
+                slugs: [...(candidate.lastObservedModelSlugs ?? candidate.observedModelSlugs)!],
                 observedAt: candidate.modelCatalogObservedAt,
                 expiresAt: candidate.modelCatalogExpiresAt,
               }
