@@ -59143,11 +59143,12 @@ export async function confirmDrainCold(
             : [];
         let lockedCommandSessions: ReadonlySet<string> = new Set();
         if (blockerScope) {
-          lockedCommandSessions = await lockLostProviderCommandSessionsTx(
-            tx,
-            blockerScope,
-            abandonedNoticeSessionIds,
-          );
+          lockedCommandSessions =
+            abandonedNoticeSessionIds.length > 0
+              ? await withCompleteSandboxGroupScope(tx, () =>
+                  lockLostProviderCommandSessionsTx(tx, blockerScope, abandonedNoticeSessionIds),
+                )
+              : await lockLostProviderCommandSessionsTx(tx, blockerScope);
           await lockExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
         } else if (abandonedNoticeSessionIds.length > 0) {
           await withCompleteSandboxGroupScope(tx, () =>
