@@ -125,7 +125,9 @@ export function parseLenientSkillFrontmatter(markdown: string): LenientSkillFron
   const descriptionText = description
     ? unquoteFallbackValue(
         foldFallbackValue(
-          description.inline ? [description.inline, ...description.lines] : description.lines,
+          description.inline
+            ? [quotedFallbackValue(description.inline), ...description.lines]
+            : description.lines,
           description.mode,
         ),
       )
@@ -192,6 +194,12 @@ function closingQuoteIndex(text: string): number {
     }
   }
   return -1;
+}
+
+/** A value that opens with a quote keeps everything up to a trailing
+ * comment; unquoted text is left as written (its `#` may be prose). */
+function quotedFallbackValue(value: string): string {
+  return value.startsWith('"') || value.startsWith("'") ? stripFallbackComment(value) : value;
 }
 
 function stripFallbackComment(value: string): string {

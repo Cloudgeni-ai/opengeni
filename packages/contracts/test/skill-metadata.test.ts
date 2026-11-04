@@ -202,6 +202,12 @@ test.each([
     "Line\nnext: x",
     "yaml_bad_indent",
   ],
+  [
+    '---\nname: deploy\ndescription: "Use when: x" # note\nbad: [\n---\n',
+    "deploy",
+    "Use when: x",
+    "yaml_bad_indent",
+  ],
   // A quoted "null" is a string; an indented continuation is the name.
   [
     '---\nname: "null"\ndescription: Use when: x\n---\n',

@@ -2365,8 +2365,9 @@ description, tab indentation, unindented continuation lines, values starting
 with a YAML indicator) and logs the bounded parser code plus key names, never
 values. It never invents a name: a header without exactly one usable `name:`
 line (an unquoted `null`, boolean or number is not a name, and stray
-unindented text is never borrowed) is still skipped, and the "Skipped repository skills" notice carries a
-`reason` for every omitted entry. Managed and inline Skill admission stay strict.
+unindented text is never borrowed) is still skipped, and the "Skipped
+repository skills" notice carries a `reason` for every omitted entry. Managed
+and inline Skill admission stay strict.
 Discovery, inventories, and reading accept ordinary files and directories;
 symlink Skill entrypoints are excluded because portable filesystem APIs cannot
 prove target containment. The repository index remains a separate sandbox-SDK instruction source, outside
