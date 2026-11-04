@@ -661,6 +661,8 @@ describe("intent-preserving failed-session retry", () => {
 
   test("a turn's process-start restarts are counted from its own events until a human retry", async () => {
     const f = await fixture(true);
+    // A never-claimed preclaim failure has no started turn; retry it first.
+    expect((await f.retry()).outcome).toBe("accepted");
     const claimed = await f.claim();
     if (claimed.action !== "claimed") throw new Error("not claimed");
     const turn = claimed.turn;
@@ -701,17 +703,38 @@ describe("intent-preserving failed-session retry", () => {
       },
     ]);
     expect(await count()).toBe(1);
-    // Another turn of the same session has its own budget.
+    // Another turn has its own budget.
     expect(
       await countSessionTurnSandboxProcessStartRestarts(client.db, f.workspaceId, {
         sessionId: f.session.id,
         turnId: crypto.randomUUID(),
       }),
     ).toBe(0);
-    // A person's Retry is a new request: the turn may restart again.
-    await append([
-      { type: "turn.recovery.requested", payload: { reason: "human_retry" } } as never,
-    ]);
+
+    // The turn fails; the person's Retry is a new request and may restart again.
+    await applySessionTurnSettlement(client.db, f.workspaceId, {
+      sessionId: f.session.id,
+      turnId: turn.id,
+      triggerEventId: turn.triggerEventId,
+      attemptId: turn.activeAttemptId!,
+      turnStatus: "failed",
+      sessionStatus: "failed",
+      activeTurnId: null,
+      events: [
+        {
+          type: "turn.failed",
+          payload: { error: "still cannot start programs", code: "sandbox_process_start_failed" },
+        },
+        { type: "session.status.changed", payload: { status: "failed" } },
+      ],
+    });
+    expect(await count()).toBe(1);
+    const failed = (await listSessionEvents(client.db, f.workspaceId, f.session.id))
+      .filter((event) => event.type === "turn.failed")
+      .at(-1)!;
+    expect(
+      (await f.retry({ failureEventId: failed.id, clientEventId: crypto.randomUUID() })).outcome,
+    ).toBe("accepted");
     expect(await count()).toBe(0);
   });
 
