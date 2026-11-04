@@ -17,6 +17,13 @@ export function sandboxRowTitle(
       item.origin ?? null,
     );
   }
+  if (item.name === "sandbox.process_start_restart") {
+    return item.status === "failed"
+      ? t("timeline.platformActivityPresentation.workspaceMachineRestartFailed")
+      : item.status === "running"
+        ? t("timeline.platformActivityPresentation.restartingTheWorkspaceMachine")
+        : t("timeline.platformActivityPresentation.workspaceMachineRestarted");
+  }
   return displayName(item.name);
 }
 

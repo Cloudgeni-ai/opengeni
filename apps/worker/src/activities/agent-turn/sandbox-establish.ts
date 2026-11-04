@@ -4,6 +4,8 @@ import {
   getSandboxForAttempt,
   readActiveSandbox,
   getLiveEnrollmentConnection,
+  countSessionTurnSandboxProcessStartRestarts,
+  SANDBOX_PROCESS_START_RESTART_OPERATION,
   resolvePersonalMachineRouteForAttempt,
   type SandboxRecord,
 } from "@opengeni/db";
@@ -90,7 +92,10 @@ import type { GovernanceModelOk } from "./governance-model";
 import type { SandboxTurnRuntime } from "./sandbox-runtime";
 import type { AttemptIdentityState, EventingState, SandboxRuntimeState } from "./turn-context";
 import { createSharedRigSetupCoordinator } from "./sandbox-shared-preparation";
-import { createSandboxSetupReplayGuard, sandboxSetupFailure } from "./sandbox-setup-agent-failure";
+import {
+  createSandboxSetupReplayGuard,
+  recoverSandboxSetupFailure,
+} from "./sandbox-setup-agent-failure";
 import { sandboxStartupPhaseObserver } from "./sandbox-startup-phase";
 import { errorMessage } from "@opengeni/contracts/values";
 
@@ -1286,8 +1291,21 @@ export async function bindLazySandboxProvisioner(
           } catch (error) {
             // Nothing the model asked for has reached the box yet, and every
             // setup step above is idempotent, so an unanswered agent lets the
-            // same turn retry instead of failing it.
-            throw sandboxSetupFailure(setupReplayGuard, error);
+            // same turn retry instead of failing it, and a box that cannot
+            // start programs is restarted once per turn.
+            throw await recoverSandboxSetupFailure(setupReplayGuard, error, {
+              session: provisioned.established.session,
+              backend: activeSandboxBackend ?? groupBoxBackend,
+              restartsThisTurn: async () =>
+                await countSessionTurnSandboxProcessStartRestarts(db, input.workspaceId, {
+                  sessionId: input.sessionId,
+                  turnId: turn.id,
+                }),
+              publish: async (events) => {
+                await eventing.publish?.(events, true);
+              },
+              operationName: SANDBOX_PROCESS_START_RESTART_OPERATION,
+            });
           } finally {
             await measure.flush();
           }

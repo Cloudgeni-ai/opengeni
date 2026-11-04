@@ -56,6 +56,8 @@ export function providerRecoverySubject(input: ProviderRecoveryCopyInput): strin
       return "A required MCP server is unreachable";
     case "sandbox_command_start_unavailable":
       return "The sandbox isn't ready yet";
+    case "sandbox_machine_restarting":
+      return "The workspace machine couldn't start programs and is being restarted";
     case "sandbox_capacity_unavailable":
       return "No sandbox capacity is available right now";
     case "sandbox_service_unavailable":
