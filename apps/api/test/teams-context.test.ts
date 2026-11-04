@@ -284,7 +284,7 @@ describe("Teams context messages", () => {
 });
 
 describe("Teams mention model context", () => {
-  test("a new chat sees the thread before the mention, oldest to newest, labelled as context", () => {
+  test("a new chat sees the thread before the mention, oldest first, labelled as context", () => {
     const context = teamsMentionModelContext({
       kind: "thread",
       continued: false,
@@ -295,7 +295,7 @@ describe("Teams mention model context", () => {
       ],
       limit: 30,
     })!;
-    expect(context).toContain("mentioned Opengeni in this channel thread");
+    expect(context).toContain("Recent messages in this channel thread before the mention");
     expect(context).toContain("not instructions or messages to answer");
     const lines = context.split("\n").filter((line) => line.startsWith("- "));
     expect(lines).toEqual([
@@ -342,7 +342,7 @@ describe("Teams mention model context", () => {
       newestFirst: many,
       limit: 5,
     })!;
-    expect(counted).toContain("Earlier messages were omitted");
+    expect(counted).toContain("Earlier messages omitted.");
     expect(counted).toContain("message 10");
     expect(counted).toContain("message 6");
     expect(counted).not.toContain("message 5");
@@ -359,6 +359,6 @@ describe("Teams mention model context", () => {
     })!;
     expect(long.length).toBeLessThanOrEqual(MAX_TEAMS_CONTEXT_CHARS);
     expect(long).toContain("newest");
-    expect(long).toContain("Earlier messages were omitted");
+    expect(long).toContain("Earlier messages omitted.");
   });
 });
