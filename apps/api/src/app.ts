@@ -144,7 +144,7 @@ import {
   withMcpTelemetry,
 } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
-import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { createApiMcpTransport } from "./mcp/transport";
 import { SUPPORTED_PROTOCOL_VERSIONS } from "@modelcontextprotocol/sdk/types.js";
 import { handleMcpRequestWithClientAbort } from "./mcp/request-abort";
 import {
@@ -1899,7 +1899,7 @@ export function createAppComposition(deps: AppDependencies): {
         { allow: "POST" },
       );
     }
-    const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
+    const transport = createApiMcpTransport({ enableJsonResponse: true });
     const mcp = buildOrganizationMcpServer({
       caller,
       ...(auditProvenance ? { auditProvenance } : {}),
@@ -2009,7 +2009,7 @@ export function createAppComposition(deps: AppDependencies): {
           oauthAccess.grant,
           oauthAccess.allowedToolIdentities,
         );
-        const transport = new WebStandardStreamableHTTPServerTransport({
+        const transport = createApiMcpTransport({
           enableJsonResponse: true,
         });
         const mcp = buildWorkspaceToolGatewayMcpServer(
@@ -2054,7 +2054,7 @@ export function createAppComposition(deps: AppDependencies): {
       (await isProtocolOnlyMcpRequest(boundedRequest))
     ) {
       await requireLiveAgentAttemptGrant(routeDeps, grant);
-      const transport = new WebStandardStreamableHTTPServerTransport({
+      const transport = createApiMcpTransport({
         enableJsonResponse: true,
       });
       const mcp = buildOpenGeniMcpProtocolServer(grant);
@@ -2094,7 +2094,7 @@ export function createAppComposition(deps: AppDependencies): {
             throw error;
           }
         };
-        const transport = new WebStandardStreamableHTTPServerTransport({
+        const transport = createApiMcpTransport({
           enableJsonResponse: true,
         });
         if (c.req.method === "GET" || !grantUsesAttemptScopedMcp(grant)) {
