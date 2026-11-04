@@ -38,6 +38,8 @@ mod error;
 mod exec_handover;
 mod native;
 #[cfg(unix)]
+mod null_device;
+#[cfg(unix)]
 mod process_cleanup;
 mod pty;
 pub mod run_as;
