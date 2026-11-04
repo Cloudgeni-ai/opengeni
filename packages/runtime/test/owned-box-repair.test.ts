@@ -23,7 +23,8 @@ const HOST = "staging.app.opengeni.ai";
 /**
  * A fake box: the script's own files live in a temp directory and `date`,
  * `getent`, `id` and `sudo` are stubs first on PATH. `getent` resolves only
- * while resolv.conf names the platform server, like the real box did.
+ * while resolv.conf names the platform server first, like the real box did
+ * (glibc tries the first server and times out on a dead one).
  */
 let box: string;
 beforeEach(() => {
@@ -49,7 +50,7 @@ exit 2`,
     `[ "$1" = hosts ] || exit 1
 [ -f "${box}/getent-exit" ] && exit "$(cat "${box}/getent-exit")"
 [ -f "${box}/dns-down" ] && exit 2
-grep -qx 'nameserver 169.254.0.22' "${box}/resolv.conf" 2>/dev/null || exit 2`,
+[ "$(grep -m 1 '^nameserver' "${box}/resolv.conf" 2>/dev/null)" = 'nameserver 169.254.0.22' ] || exit 2`,
   );
   // No usable node lookup unless a test provides one: it cannot tell.
   stub("node", "exit 3");
@@ -183,7 +184,7 @@ describe("a cloud computer's clock and resolver are repaired at turn setup", () 
       [
         "[Opengeni checked the cloud computer this chat runs on before this turn]",
         "- Its clock says 2001-01-01 00:00 UTC, but the time is 2026-11-04 13:46 UTC, and Opengeni could not set it; TLS and git may fail until it is fixed.",
-        "- It cannot look up staging.app.opengeni.ai, and Opengeni left /etc/resolv.conf unchanged because it already lists the platform name server, so the network itself is failing.",
+        "- It cannot look up staging.app.opengeni.ai, and Opengeni left /etc/resolv.conf unchanged because it already lists only the platform name server, so the network itself is failing.",
       ].join("\n"),
     );
   });
@@ -195,15 +196,38 @@ describe("a cloud computer's clock and resolver are repaired at turn setup", () 
     expect(result.report).toEqual({});
   });
 
-  test("a failing lookup with the platform server already listed leaves the file alone", () => {
+  test("a failing lookup with only the platform server listed leaves the file alone", () => {
     writeFileSync(join(box, "dns-down"), "");
-    const custom = "nameserver 169.254.0.22\noptions ndots:2\n";
+    const custom = "# platform\nnameserver 169.254.0.22\n";
     const result = runOnBox({ clock: WORKER_EPOCH, resolv: custom });
     expect(result.resolv).toBe(custom);
     expect(result.replaced).toBeNull();
     expect(result.report.dns).toEqual({
       outcome: "unrepaired",
       reason: "platform-server-fails",
+      host: HOST,
+    });
+  });
+
+  test("a dead name server listed ahead of the platform's is repaired", () => {
+    const broken = "nameserver 1.1.1.1\nnameserver 169.254.0.22\n";
+    const result = runOnBox({ clock: WORKER_EPOCH, resolv: broken });
+    expect(result.resolv).toBe("nameserver 169.254.0.22\n");
+    expect(result.replaced).toBe(broken);
+    expect(result.report).toEqual({
+      dns: { outcome: "restored", servers: ["169.254.0.22"], host: HOST },
+    });
+  });
+
+  test("a failing platform server with options of its own is restored and reported honestly", () => {
+    writeFileSync(join(box, "dns-down"), "");
+    const custom = "nameserver 169.254.0.22\noptions timeout:30\n";
+    const result = runOnBox({ clock: WORKER_EPOCH, resolv: custom });
+    expect(result.resolv).toBe("nameserver 169.254.0.22\n");
+    expect(result.replaced).toBe(custom);
+    expect(result.report.dns).toEqual({
+      outcome: "restored-still-failing",
+      servers: ["169.254.0.22"],
       host: HOST,
     });
   });

@@ -138,19 +138,30 @@ if [ -n "$host" ]; then
       | awk -F: '{ print $8; print $9 }' \\
       | grep -E '^[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}$')
     wanted=$(for server in $servers; do printf 'nameserver %s\\n' "$server"; done)
-    listed_platform_server() {
-      for server in $servers; do
-        grep -Eq "^[[:space:]]*nameserver[[:space:]]+$server([[:space:]]|\\$)" "$resolv" 2>/dev/null && return 0
+    # True when the file is already just the platform's: every name server is
+    # a platform server and no options line can change how they are used. A
+    # dead server listed ahead of the platform's, or an option such as a long
+    # timeout, is still repaired.
+    only_platform_servers() {
+      listed=$(sed -n 's/^[[:space:]]*nameserver[[:space:]][[:space:]]*\\([^[:space:]#]*\\).*/\\1/p' "$resolv" 2>/dev/null)
+      [ -n "$listed" ] || return 1
+      grep -q '^[[:space:]]*options' "$resolv" 2>/dev/null && return 1
+      for entry in $listed; do
+        known=
+        for server in $servers; do
+          if [ "$entry" = "$server" ]; then known=1; fi
+        done
+        [ -n "$known" ] || return 1
       done
-      return 1
+      return 0
     }
     if [ -z "$wanted" ]; then
       report "dns=unrepaired reason=no-platform-servers host=$host"
     elif [ "$(readlink "$resolv" 2>/dev/null)" = /proc/net/pnp ]; then
       report "dns=unrepaired reason=kernel-list host=$host"
-    elif listed_platform_server; then
+    elif only_platform_servers; then
       # Rewriting cannot help: the platform's own server already fails (an
-      # upstream outage or blocked egress), so the person's file stays.
+      # upstream outage or blocked egress), so the file stays as it is.
       report "dns=unrepaired reason=platform-server-fails host=$host"
     else
       if as_root sh -c '
@@ -234,7 +245,7 @@ const UNREPAIRED_DNS_REASONS: Record<string, string> = {
   "no-platform-servers": "no platform name servers are known",
   "kernel-list": "it is the kernel's own list",
   "platform-server-fails":
-    "it already lists the platform name server, so the network itself is failing",
+    "it already lists only the platform name server, so the network itself is failing",
   "write-failed": "it could not be written",
 };
 
