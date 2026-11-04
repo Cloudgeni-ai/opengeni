@@ -141,7 +141,7 @@ ALTER TABLE mcp_oauth_refresh_tokens
     (trusted_issuer_id IS NULL) = (assertion_subject IS NULL)
     AND (assertion_subject IS NULL OR char_length(assertion_subject) BETWEEN 1 AND 1024)
   ) NOT VALID;
--- 1240 validates the check and 1241 builds its index concurrently.
+-- 1247 validates the check and 1248 builds its index concurrently.
 
 -- Row security ---------------------------------------------------------------
 

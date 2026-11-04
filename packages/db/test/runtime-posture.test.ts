@@ -2110,7 +2110,7 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 2
             : 0) +
-          // 1239 MCP auto-connect: five full-DML FORCE-RLS tables.
+          // 1246 MCP auto-connect: five full-DML FORCE-RLS tables.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
           tables === RUNTIME_DML_TABLES
@@ -2191,7 +2191,7 @@ describe("runtime database posture evaluator", () => {
         2 + // 1152 Slack agent proposals and Ask forms: full-DML, FORCE-RLS.
         3 + // 1153 Slack agent update settings, recipients and deliveries: full-DML, FORCE-RLS.
         2 + // 1235 Slack agent intro posts and suggestions: full-DML, FORCE-RLS.
-        5; // 1239 MCP auto-connect trusted issuers, their people, events, replays and signing keys.
+        5; // 1246 MCP auto-connect trusted issuers, their people, events, replays and signing keys.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");
