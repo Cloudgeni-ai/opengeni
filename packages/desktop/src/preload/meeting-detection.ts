@@ -32,7 +32,8 @@ export function meetingDetectionBridge(ipc: IpcRenderer = ipcRenderer): DesktopM
         DESKTOP_IPC.meetingDetectionUpdate,
         change,
       ) as Promise<DesktopMeetingDetectionStatus>,
-    setRecording: (recording) => ipc.send(DESKTOP_IPC.meetingDetectionRecording, recording),
+    setRecording: (recording, meeting) =>
+      ipc.send(DESKTOP_IPC.meetingDetectionRecording, recording, meeting),
     onRequest: (listener) => {
       requestListener = listener;
       ipc.send(DESKTOP_IPC.meetingDetectionListen, true);

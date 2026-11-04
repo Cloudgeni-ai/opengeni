@@ -28,6 +28,7 @@ import {
   XIcon,
 } from "lucide-react";
 import { toast } from "sonner";
+import { userErrorText } from "../ui/api-error";
 import type {
   RecordingPerson,
   RecordingSpeaker,
@@ -178,7 +179,9 @@ async function withToast(failure: string, work: () => Promise<void>): Promise<bo
     await work();
     return true;
   } catch (error) {
-    toast.error(failure, { description: error instanceof Error ? error.message : undefined });
+    toast.error(failure, {
+      description: error instanceof Error ? userErrorText(error) : undefined,
+    });
     return false;
   }
 }

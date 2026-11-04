@@ -407,7 +407,7 @@ pub struct HostView {
     pub cpu_free_millis: u64,
     pub disk_free_mib: u64,
     /// Disk in MiB it frees for a sandbox without losing anything, by
-    /// disk relief (ADR 29); placement counts it as free.
+    /// disk relief (ADR 30); placement counts it as free.
     pub disk_reclaimable_mib: u64,
     pub sandboxes: u32,
     pub awake: u32,

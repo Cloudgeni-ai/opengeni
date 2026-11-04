@@ -2,6 +2,7 @@ import { CheckIcon, ChevronRightIcon, CircleAlertIcon, CopyIcon } from "lucide-r
 import { useContext, useEffect, useId, useRef, useState, type ReactNode } from "react";
 
 import { SectionCardContext } from "./section-variant";
+import { splitErrorText } from "./error-reference";
 import { cn } from "../lib/cn";
 
 /* ----------------------------------------------------------------------------
@@ -58,6 +59,13 @@ export function ErrorMessage({
   announce = false,
   className,
 }: ErrorMessageProps) {
+  // Text from `userErrorText` may end with an unexpected failure's
+  // "Reference: <id>.": it belongs in Technical details, not the sentence.
+  if (typeof children === "string") {
+    const parts = splitErrorText(children);
+    children = parts.text;
+    reference ??= parts.reference;
+  }
   const facts: ErrorDetail[] = [
     ...(details ?? []),
     ...(reference ? [{ label: "Reference", value: reference, copyable: true }] : []),

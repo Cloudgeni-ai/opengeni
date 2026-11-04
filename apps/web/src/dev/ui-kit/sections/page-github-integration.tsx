@@ -1,7 +1,10 @@
 import { useMemo, type ReactNode } from "react";
+import { toast } from "sonner";
 import { AppContext } from "@opengeni/react/app/app-context";
+import { showPersonalGitHubReconnectToast } from "@opengeni/react/app/app-state";
 import { nativeIntegrationModel } from "@opengeni/react/app/components/capabilities/native-connect-readiness";
 import { SessionPersonalGitHubCapabilityCard } from "@opengeni/react/app/components/capabilities/session-personal-github-card";
+import { Button } from "@opengeni/react/ui/button";
 import type { AuthNeededItem } from "@opengeni/react";
 
 import { IntegrationPage } from "@/components/capabilities/integration-page";
@@ -63,6 +66,10 @@ type State = {
   bound: boolean;
   connected: boolean;
   repositories: number;
+  /** The stored grant's status; GitHub refusing a refresh makes it needs_reauth. */
+  connectionStatus?: "active" | "needs_reauth";
+  /** False when the repository selection could not be read. */
+  selectionLoaded?: boolean;
 };
 
 const MANAGER = ["github:use", "github:manage", "connections:read", "connections:write"];
@@ -90,6 +97,25 @@ const STATES: State[] = [
     bound: true,
     connected: true,
     repositories: 3,
+  },
+  {
+    key: "needs-reconnect",
+    label: "GitHub refused the stored grant: Reconnect is the one action",
+    permissions: MANAGER,
+    bound: true,
+    connected: true,
+    repositories: 0,
+    connectionStatus: "needs_reauth",
+    selectionLoaded: false,
+  },
+  {
+    key: "selection-unread",
+    label: "Connected, but the repository list could not be read yet",
+    permissions: MANAGER,
+    bound: true,
+    connected: true,
+    repositories: 0,
+    selectionLoaded: false,
   },
   {
     key: "member",
@@ -131,15 +157,24 @@ function fakeContext(state: State) {
       githubAppBusy: false,
       personalGitHubStatus: {
         enabled: true,
-        connection: state.connected ? personalConnection : null,
+        connection: state.connected
+          ? { ...personalConnection, status: state.connectionStatus ?? "active" }
+          : null,
         reviewUrl: null,
       },
-      personalGitHubSelection: state.connected
-        ? { repositories: Array.from({ length: state.repositories }, () => ({})) }
-        : null,
+      personalGitHubSelection:
+        state.connected && state.selectionLoaded !== false
+          ? { repositories: Array.from({ length: state.repositories }, () => ({})) }
+          : null,
       personalGitHubRepositories: [],
       personalGitHubCatalogReady: true,
       personalGitHubBusy: false,
+      // Preview wiring: the production disconnect retries a connection that
+      // changed while the page held it, then shows this toast.
+      disconnectPersonalGitHub: async () => {
+        toast.success("Your GitHub account was disconnected");
+        return true;
+      },
     } as Record<string, unknown>,
     {
       get(target, key) {
@@ -225,6 +260,25 @@ export default function GitHubIntegrationPageSection() {
           </StateCell>
         ))}
       </StatesGrid>
+      {showPart("reconnect-toast") ? (
+        <StatesGrid title="Toast" columns={1}>
+          <StateCell label="Shown once per stale grant; it stays until Reconnect or close">
+            <div data-preview="github-reconnect-toast">
+              <Button
+                variant="outline"
+                onClick={() =>
+                  showPersonalGitHubReconnectToast(
+                    personalConnection.metadata.githubLogin,
+                    () => {},
+                  )
+                }
+              >
+                Show the reconnect toast
+              </Button>
+            </div>
+          </StateCell>
+        </StatesGrid>
+      ) : null}
       <StatesGrid title="In a chat" columns={1}>
         {CARD_STATES.filter((state) => showPart(state.key)).map((state) => (
           <StateCell key={state.key} label={state.label} align="stretch" span="full">

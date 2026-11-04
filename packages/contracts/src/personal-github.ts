@@ -323,6 +323,28 @@ export function isPersonalGitHubConnection(
   );
 }
 
+/** What agents and Git see when GitHub stopped accepting the person's stored grant. */
+export const PERSONAL_GITHUB_RECONNECT_MESSAGE =
+  "GitHub no longer accepts this person's connection. They need to reconnect it in Opengeni (GitHub settings, Your GitHub, Reconnect).";
+
+/**
+ * A personal GitHub connection whose grant GitHub refused (a failed token
+ * refresh): it stays the person's, but only reconnecting makes it work again.
+ * Nothing sets `error` on personal GitHub today; it is included so a future
+ * failure state also asks for a reconnect instead of failing silently.
+ */
+export function personalGitHubConnectionNeedsReconnect(
+  connection: Pick<
+    z.infer<typeof ConnectionMetadata>,
+    "providerDomain" | "kind" | "metadata" | "status"
+  >,
+): boolean {
+  return (
+    (connection.status === "needs_reauth" || connection.status === "error") &&
+    isPersonalGitHubConnection(connection)
+  );
+}
+
 export function hasReservedPersonalGitHubMetadata(
   metadata: Record<string, unknown> | undefined,
 ): boolean {

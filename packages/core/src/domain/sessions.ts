@@ -6,6 +6,7 @@ import {
   isDirectModelId,
   MESSAGE_TIME_ZONE_METADATA_KEY,
   messageSentByPerson,
+  ModelPolicyRefusedError,
   ModelUnavailableError,
   normalizeMessageTimeZone,
 } from "@opengeni/contracts";
@@ -197,6 +198,7 @@ import {
   getSessionLineage,
   getSessionTurn,
   getSessionTurnInitiatingHumanSubjectId,
+  sameTurnSender,
   readTurnBillingOrigin,
   getSessionTurnForAttempt,
   getSessionTurnPersonalConnectionDelegations,
@@ -1929,13 +1931,16 @@ export async function assertWorkspaceModelPolicyAllows(
     chargesCredits: policyChargesCreditsForModel(settings, canonicalModel),
   });
   if (!verdict.allowed) {
+    const message =
+      verdict.reason === "credits"
+        ? `model "${canonicalModel}" uses credits, which are turned off in this workspace. Choose a model paid by a subscription or API key, or ask a workspace admin to turn credits back on`
+        : verdict.reason === "provider"
+          ? `model "${canonicalModel}" is not allowed by this workspace's model policy: provider "${providerId}" is not in the allowed providers`
+          : `model "${canonicalModel}" is not allowed by this workspace's model policy`;
+    // Typed, so a refused new chat can say which rule in words a person reads.
     throw new HTTPException(422, {
-      message:
-        verdict.reason === "credits"
-          ? `model "${canonicalModel}" uses credits, which are turned off in this workspace. Choose a model paid by a subscription or API key, or ask a workspace admin to turn credits back on`
-          : verdict.reason === "provider"
-            ? `model "${canonicalModel}" is not allowed by this workspace's model policy: provider "${providerId}" is not in the allowed providers`
-            : `model "${canonicalModel}" is not allowed by this workspace's model policy`,
+      message,
+      cause: new ModelPolicyRefusedError(canonicalModel, verdict.reason, message),
     });
   }
 }
@@ -3606,7 +3611,12 @@ async function createSessionForRequestInFileScope(
           : {}),
       });
       if (!admissibleWorkspaceModel(selections, model)) {
-        throw new HTTPException(422, { message: `model is not selectable: ${model}` });
+        // Typed as unavailable (it is not selectable for this caller), so the
+        // composer names it instead of showing this developer text.
+        throw new HTTPException(422, {
+          message: `model is not selectable: ${model}`,
+          cause: new ModelUnavailableError(model),
+        });
       }
     }
   });
@@ -4738,7 +4748,8 @@ async function acceptSessionUserMessageInFileScope(
         frozenInitiatorForCommandActor(scopedDb, workspaceId, admissionActor, grant.subjectLabel),
     );
     // Re-submitting a checked-out queue edit retains the original turn's
-    // causal human, just as the locked prompt transaction does.
+    // causal human when its own sender resubmits it, just as the locked
+    // prompt transaction does. Anyone else's edit is their own message.
     if (delivery === "send" && input.expectedDraftRevision != null) {
       const draft = await withWorkspaceSubjectSessionActivityRls(
         db,
@@ -4754,7 +4765,7 @@ async function acceptSessionUserMessageInFileScope(
       if (draft?.revision === input.expectedDraftRevision && draft.sourceTurnId) {
         const sourceTurn = await getSessionTurn(db, workspaceId, draft.sourceTurnId);
         if (sourceTurn?.sessionId === sessionId) {
-          frozenAdmissionInitiator = {
+          const sourceInitiator = {
             initiator: sourceTurn.initiator,
             context: sourceTurn.initiatorContext,
             initiatingHumanSubjectId: await getSessionTurnInitiatingHumanSubjectId(
@@ -4763,6 +4774,9 @@ async function acceptSessionUserMessageInFileScope(
               sourceTurn.id,
             ),
           };
+          if (sameTurnSender(sourceInitiator, frozenAdmissionInitiator)) {
+            frozenAdmissionInitiator = sourceInitiator;
+          }
         }
       }
     }

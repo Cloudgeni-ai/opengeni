@@ -250,10 +250,14 @@ computeControl:
       iam.gke.io/gcp-service-account: opengeni-compute-control@example.iam.gserviceaccount.com
 ```
 
-The hourly sweep of the store (ADR 17, 25, 28) runs as a CronJob from the same
-image, identity and database (`computeControl.sweep`), as `compute-control
-sweep`: it reads the pointers the service keeps. It deletes on any archive,
-`gs://`, `az://` or `s3://`.
+The hourly sweep of the store (ADR 17, 25, 28, 29) runs as a CronJob from the
+same image, identity and database (`computeControl.sweep`), as
+`compute-control sweep`: it reads the pointers the service keeps. It deletes on
+any archive, `gs://`, `az://` or `s3://`. Each run lists only the hours that
+became old enough since the last run, and deletes what replaced copies alone
+named; once a day it lists everything. It keeps its progress under `sweep/` in
+the store, gives up starting new listings after 40 minutes, leaves what failed
+to the next run, and logs each step, so a run that is slow shows where it is.
 
 ### Hosts
 
@@ -1088,7 +1092,7 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   request, or stalling, wants a larger request. A sandbox that only stalls
   itself is never shrunk for it: the severe-stall alert names the host,
   and the sandbox summaries there show which one.
-- **Disk relief** ([ADR 29](adr/0029-disk-relief-for-admission.md)): what
+- **Disk relief** ([ADR 30](adr/0030-disk-relief-for-admission.md)): what
   a host frees for a create, adopt or wake without losing anything, idle
   sandboxes' local copies that object storage holds and templates and
   cached images nothing uses, is in its status (`disk.reclaimable`, bytes)
@@ -1453,7 +1457,7 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   sandbox's disk each, more with ready sandboxes), cached images and the
   local copies of idle archived sandboxes stay on a host's state volume
   until a create, adopt or wake needs the room, when the least recently
-  used go first ([ADR 29](adr/0029-disk-relief-for-admission.md)), or until
+  used go first ([ADR 30](adr/0030-disk-relief-for-admission.md)), or until
   a week unused. Size the volume for what runs and wakes at once, with
   room for the templates of the shapes in use; a volume that only fits
   with relief keeps rebuilding templates and fetching images and copies

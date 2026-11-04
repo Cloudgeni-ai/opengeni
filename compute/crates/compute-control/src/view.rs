@@ -228,7 +228,7 @@ fn capacity(info: &Described, reported: &Reported) -> Capacity {
         cpu_millis: reported.cpu_millis,
         free_cpu_millis: reported.cpu_free_millis,
         // What the host frees by disk relief is room as much as what is
-        // free (ADR 29).
+        // free (ADR 30).
         free_disk_mib: reported
             .disk_free_mib
             .saturating_add(reported.disk_reclaimable_mib),

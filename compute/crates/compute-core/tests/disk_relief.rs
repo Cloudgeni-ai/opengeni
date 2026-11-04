@@ -3,7 +3,7 @@
 //! room for a create or a wake. One that fits only with it waits, booking
 //! what it needs, while relief frees it least recently used first across
 //! every kind; one short even with it is refused at once; and what cannot
-//! be freed is never counted (ADR 29).
+//! be freed is never counted (ADR 30).
 
 use std::time::Duration;
 

@@ -9,7 +9,7 @@
 //! what the host keeps only to go faster, such as templates and cached
 //! images ([`crate::Input::Cache`]). What it frees, as the host agent
 //! measures it, counts as room for a create, an adopt or a wake, as instant
-//! memory relief does (ADR 29): one that fits only with it books its room,
+//! memory relief does (ADR 30): one that fits only with it books its room,
 //! relief frees what it needs, least recently used first across every
 //! kind, and the readings after decide it.
 

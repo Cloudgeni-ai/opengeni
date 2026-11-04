@@ -1077,7 +1077,8 @@ class PolicyMcpServer extends McpServer {
       if (!memory) return dispatch();
       return withSecretValueMasking(memory, async () => {
         try {
-          return memory.mask(await dispatch(), "first_party_result");
+          // A tool result is data: a tool-shaped record in it is masked in full.
+          return memory.maskData(await dispatch(), "first_party_result");
         } catch (error) {
           throw maskSecretValuesInError(error, memory);
         }
@@ -6488,7 +6489,7 @@ function registerWorkspaceOrchestrationTools(
 
     if (callerSessionId !== null) {
       const commandReadNotes =
-        "Output larger than maxOutputBytes (default 16384) returns its start and its end, with the size of the omitted middle and a cursor to read it; a read with a cursor pages on from there (pass waitSeconds 0 to page without waiting), and the end cursor continues after the newest output. Output remains readable after the process exits. A terminal read observes completion and suppresses only its still-pending inbox notification; running reads and already claimed history are unchanged. These execution-wait limits do not cap wait_for_input: use it for long out-of-turn waits, except pending Codemode calls require observation in the same live attempt. Neither tool sends stdin or cancels the command.";
+        "Output larger than maxOutputBytes (default 16384) returns its start and its end, with the size of the omitted middle and a cursor to read it; a read with a cursor pages on from there (pass waitSeconds 0 to page without waiting), and the end cursor continues after the newest output. Output remains readable after the process exits. A terminal read observes completion and suppresses only its still-pending inbox notification; running reads and already claimed history are unchanged. A finished command's result, with its exit status and output, also reaches the session on its own, so there is no need to read only to learn that it finished. These execution-wait limits do not cap wait_for_input: use it for long out-of-turn waits, except pending Codemode calls require observation in the same live attempt. Neither tool sends stdin or cancels the command.";
       for (const toolName of ["command_read", "command_wait"] as const) {
         const multi = toolName === "command_wait";
         server.registerTool(

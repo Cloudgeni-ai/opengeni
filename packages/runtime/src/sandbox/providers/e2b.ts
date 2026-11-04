@@ -1,6 +1,7 @@
 import { E2BSandboxClient } from "@openai/agents-extensions/sandbox/e2b";
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
 import { SandboxConfigError } from "../errors";
+import { loadE2BServiceBusyError } from "../provider-capacity";
 import {
   REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE,
   REPEATABLE_PORTABLE_TAR_WORKSPACE_CAPTURE,
@@ -27,6 +28,8 @@ export const e2bProvider: ProviderRegistration = {
     }
   },
   build({ settings, environment, exposedPorts }) {
+    // Classify E2B's typed capacity refusal as sandbox capacity, never a model outage.
+    void loadE2BServiceBusyError();
     const options: NonNullable<ConstructorParameters<typeof E2BSandboxClient>[0]> = {
       env: environment,
       exposedPorts,

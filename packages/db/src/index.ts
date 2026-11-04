@@ -2,6 +2,10 @@ import {
   recoverProviderClockAfterDependencyWait,
   PROVIDER_RECOVERY_SUSPENDED_AT,
 } from "./provider-recovery-clock";
+import {
+  pendingApprovalAccountOwner,
+  SessionApprovalForbiddenError,
+} from "./personal-connection-approval";
 export { continueSessionWaitingWork, getSessionMachineAccess } from "./session-machine-access";
 export { canonicalSecretPermissions } from "./canonical-secret-permissions";
 import { listWorkspaceBackgroundCommandsInScope } from "./session-background-commands";
@@ -44,6 +48,7 @@ import {
 } from "./model-call-timing";
 export * from "./human-input-secret-answers";
 export * from "./secret-use-approvals";
+export * from "./personal-connection-approval";
 export * from "./credential-profiles";
 export * from "./secret-value-masking";
 export * from "./secret-use-history";
@@ -1124,7 +1129,11 @@ import {
   UNATTRIBUTED_LEGACY_INITIATOR,
   type FrozenTurnInitiator,
 } from "./turn-initiator";
-export { frozenInitiatorForCommandActor, type FrozenTurnInitiator } from "./turn-initiator";
+export {
+  frozenInitiatorForCommandActor,
+  sameTurnSender,
+  type FrozenTurnInitiator,
+} from "./turn-initiator";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 import {
   fromPostgresLosslessJson,
@@ -1211,6 +1220,7 @@ import {
 } from "./session-realtime";
 import {
   insertConnectedMachineSessionBackgroundCommandInTransaction,
+  backgroundCommandResultOutputInTransaction,
   boundedSessionBackgroundCommandReason,
   insertManagedSessionBackgroundCommandInTransaction,
   settleClaimedConnectedMachineBackgroundCommandWithMutation,
@@ -61098,6 +61108,13 @@ export async function verifyWorkspaceMutationSettlement(
   },
 ): Promise<void> {
   const routeKind = input.routeKind ?? "home";
+  // Settle the exact admission: without an explicit route epoch, the route
+  // epoch is the one recorded when it was admitted, never the session's
+  // current epoch. A swap during a home-sandbox command moves the session's
+  // active route but changes nothing about where that command ran, so it must
+  // not reject the command's output (an active-route move is still fenced as
+  // route_fenced against the admission's recorded route).
+  const routeEpoch = input.routeEpoch ?? input.admission.routeEpoch;
   await verifyWorkspaceMutationSettlementForAuthority(
     db,
     {
@@ -61114,7 +61131,7 @@ export async function verifyWorkspaceMutationSettlement(
       expectedInstanceId: input.expectedInstanceId,
       routeKind,
       routeTargetId: routeKind === "home" ? null : (input.routeTargetId ?? null),
-      ...(input.routeEpoch === undefined ? {} : { routeEpoch: input.routeEpoch }),
+      routeEpoch,
     },
     input,
   );
@@ -81057,6 +81074,11 @@ export async function getSessionAttemptActivityRef(
  * and every writer it did admit (including retained-process child writes) must
  * carry a physical settlement before the ordinary receipt transaction is
  * allowed to run.
+ *
+ * With that proof, owned-box setup that the attempt's provably exited worker
+ * left unsettled is settled first (`settleCrashedWorkerSetupAdmissions`).
+ * `workerProcessExitDeadlineMs` is the turn worker's process-exit deadline
+ * after a shutdown signal; without it a worker-shutdown closure keeps its gate.
  */
 export async function reconcileSessionAttemptQuiescence(
   db: Database,
@@ -81069,8 +81091,10 @@ export async function reconcileSessionAttemptQuiescence(
     temporalWorkflowRunId: string;
     temporalActivityId: string;
     activitySettled: boolean;
+    workerProcessExitDeadlineMs?: number;
   },
 ): Promise<ReconcileSessionAttemptQuiescenceResult> {
+  if (input.activitySettled) await settleCrashedWorkerSetupAdmissions(db, input);
   const eligibility = await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -81207,6 +81231,113 @@ export async function reconcileSessionAttemptQuiescence(
     temporalActivityId: input.temporalActivityId,
   });
   return { action: "quiesced", events };
+}
+
+/**
+ * Reject the owned-box setup requests that a worker-shutdown closure left
+ * behind once the closing worker's process provably no longer exists. Nothing
+ * else settles them: the worker closed the attempt `interrupted_recoverable`
+ * and exited before its writer drain released them, and a box that stays warm
+ * (compute is never drained for being idle) never reaches the cold commit that
+ * rejects crashed-worker requests. The closed attempt then never quiesced and
+ * its session never claimed another turn, Steer or message.
+ *
+ * A settled activity and a missing holder do not prove the worker exited (a
+ * closed attempt's holder is removed at once, and Temporal reports a cancelled
+ * activity settled while its code still runs). Time does: the closure came
+ * from the attempt's own `worker_shutdown` recovery request, which follows the
+ * worker's shutdown signal, and a standalone worker process exits within its
+ * process-exit deadline of that signal whatever its drain does. So the attempt
+ * must have closed at least that deadline ago, with no Pause/Steer interruption
+ * row.
+ *
+ * The request must be the attempt's own owned-box setup, unsettled, without a
+ * holder or retained process, on a turn whose setup Start outcome is not
+ * recorded unknown (that turn waits for the box to be gone). Setup writes only
+ * through its attempt's command fence, and the replacement attempt runs the same
+ * setup again before any model work. Pause, Steer, cancellation, other recovery
+ * reasons, other closures and every other request keep today's gate.
+ */
+async function settleCrashedWorkerSetupAdmissions(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    attemptId: string;
+    temporalWorkflowId: string;
+    temporalWorkflowRunId: string;
+    temporalActivityId: string;
+    workerProcessExitDeadlineMs?: number;
+  },
+): Promise<void> {
+  const exitDeadlineMs = input.workerProcessExitDeadlineMs;
+  if (exitDeadlineMs === undefined || !Number.isSafeInteger(exitDeadlineMs) || exitDeadlineMs < 0)
+    return;
+  await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await scopedDb.execute(sql`
+        update sandbox_workspace_mutation_admissions admission
+        set provider_outcome = 'rejected', settled_at = now()
+        from session_turn_attempts attempt
+        join session_turns turn
+          on turn.workspace_id = attempt.workspace_id
+         and turn.session_id = attempt.session_id
+         and turn.id = attempt.turn_id
+        where attempt.account_id = ${input.accountId}
+          and attempt.workspace_id = ${input.workspaceId}
+          and attempt.session_id = ${input.sessionId}
+          and attempt.id = ${input.attemptId}
+          and attempt.temporal_workflow_id = ${input.temporalWorkflowId}
+          and attempt.temporal_workflow_run_id = ${input.temporalWorkflowRunId}
+          and attempt.temporal_activity_id = ${input.temporalActivityId}
+          and attempt.state = 'closed'
+          and attempt.quiesced_at is null
+          and attempt.outcome = 'interrupted_recoverable'
+          and attempt.closed_at <= now() - (${exitDeadlineMs}::integer * interval '1 millisecond')
+          and not exists (
+            select 1 from session_attempt_interruptions interruption
+            where interruption.workspace_id = attempt.workspace_id
+              and interruption.session_id = attempt.session_id
+              and interruption.attempt_id = attempt.id
+          )
+          and exists (
+            select 1 from session_events recovery
+            where recovery.account_id = attempt.account_id
+              and recovery.workspace_id = attempt.workspace_id
+              and recovery.session_id = attempt.session_id
+              and recovery.turn_id = attempt.turn_id
+              and recovery.turn_attempt_id = attempt.id
+              and recovery.type = 'turn.recovery.requested'
+              and recovery.payload ->> 'reason' = 'worker_shutdown'
+          )
+          and (turn.metadata -> 'sandboxSetupOutcomeUnknown') is null
+          and admission.account_id = attempt.account_id
+          and admission.workspace_id = attempt.workspace_id
+          and admission.session_id = attempt.session_id
+          and admission.turn_id = attempt.turn_id
+          and admission.attempt_id = attempt.id
+          and admission.actor_kind = 'turn'
+          and admission.actor_id = attempt.id
+          and admission.holder_kind = 'turn'
+          and admission.execution_generation = attempt.execution_generation
+          and admission.operation in ('lazyOwnedSandboxSetup', 'eagerOwnedSandboxSetup')
+          and admission.settled_at is null
+          and admission.provider_outcome is null
+          and not exists (
+            select 1 from sandbox_retained_processes retained
+            where retained.parent_admission_id = admission.id
+          )
+          and not exists (
+            select 1 from sandbox_lease_holders holder
+            where holder.lease_id = admission.lease_id
+              and holder.holder_id = admission.holder_id
+          )
+      `);
+    },
+  );
 }
 
 /**
@@ -91299,6 +91430,19 @@ function backgroundCommandTerminalMutation(input: {
                   : command.exitCode === 0
                     ? `${commandLabel}: completed successfully.`
                     : `${commandLabel}: exited with code ${command.exitCode ?? "unknown"}.`;
+      // The result carries the start and end of the output, so the turn it
+      // wakes or reaches needs no extra read to learn what the command did.
+      // A lost command (its sandbox gone, or contained) carries none: those
+      // settle in bulk under lease locks, and its output stays readable.
+      const output =
+        command.state === "lost"
+          ? null
+          : await backgroundCommandResultOutputInTransaction(tx, {
+              accountId: session.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              commandId: command.id,
+            });
       const payload = {
         type: "background_command_result" as const,
         commandId: command.id,
@@ -91307,6 +91451,7 @@ function backgroundCommandTerminalMutation(input: {
         reason,
         ...(command.failure ? { failure: command.failure } : {}),
         outputLocator,
+        ...(output !== null ? { output } : {}),
         ...(command.backgroundChildrenStopped
           ? { notice: CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE }
           : {}),
@@ -92490,6 +92635,20 @@ export async function acceptSessionApprovalDecision(
                     .limit(1)
                 ).length > 0;
           if (!resumable) return approvalConflict(sessionStatus, "not_pending");
+        }
+        // The call runs on the turn's frozen accounts, never the approver's:
+        // approving one that runs on someone's own account is theirs alone.
+        // Checked before the answer, so a non-owner always learns who decides.
+        if (payload.decision === "approve") {
+          const owner = await pendingApprovalAccountOwner(tx as unknown as Database, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: liveTurn.id,
+            approvalId,
+          });
+          if (owner !== null && owner.subjectId !== input.subjectId) {
+            throw new SessionApprovalForbiddenError(owner);
+          }
         }
         payload = approvalDecisionPayloadWithAnswer(pendingApproval, payload);
         if (input.interactionIntervention) {

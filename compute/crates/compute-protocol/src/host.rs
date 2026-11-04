@@ -1068,7 +1068,7 @@ pub struct DiskStatus {
     /// Bytes more wakes may book.
     pub free: u64,
     /// Bytes beyond [`DiskStatus::free`] that a new sandbox could book now
-    /// by disk relief (ADR 29): what the host frees without losing
+    /// by disk relief (ADR 30): what the host frees without losing
     /// anything, idle sandboxes' local copies that object storage holds
     /// and templates and cached images nothing uses, as its admission
     /// counts it. Missing from what a host of an earlier release wrote,

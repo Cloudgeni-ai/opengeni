@@ -197,7 +197,7 @@ pub struct Capacity {
     pub disk_free_mib: u64,
     /// Disk in MiB beyond [`Capacity::disk_free_mib`] that a new sandbox
     /// could take now by the host freeing what it keeps without losing
-    /// anything, as its admission counts it (ADR 29). Placement counts it
+    /// anything, as its admission counts it (ADR 30). Placement counts it
     /// as free. Missing from what a host or the service of an earlier
     /// release wrote, which then counts none.
     #[serde(default)]

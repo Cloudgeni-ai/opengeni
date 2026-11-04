@@ -88,6 +88,7 @@ import { createTurnMediaArtifacts } from "./media-artifacts";
 import { createTurnHistorySink } from "./history-sink";
 import {
   ActiveRouteDispatchBoundary,
+  activeRouteSessionForBoundary,
   checkpointHistoryBeforeProviderDispatch,
 } from "./provider-dispatch-barrier";
 import {
@@ -495,10 +496,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         recoveryStartedAt: attempt.providerRecoveryStartedAt,
       });
     const activeRoute = new ActiveRouteDispatchBoundary({
-      session: () =>
-        sandboxState.resolvedSandbox?.established.session as
-          | { assertActiveRouteContinuable?: () => Promise<void> }
-          | undefined,
+      session: () => activeRouteSessionForBoundary(sandboxState),
       isRouteTransition: (error) => sandboxRouteTransitionCode(error) !== null,
     });
     const checkpointBeforeProviderDispatch = async () => {
@@ -1747,6 +1745,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           });
           const toolRuntime = await prepareTurnToolRuntime({
             independentSessionTitles: !!startSessionTitleWorkflow,
+            learningModes: learning.effective,
             vaultAccess,
             runCredentialRenewals: runCredentialResolver ? renewals : undefined,
             runMcpCredentials,

@@ -1,4 +1,4 @@
-//! Disk relief (ADR 29): a create short of disk by no more than what the
+//! Disk relief (ADR 30): a create short of disk by no more than what the
 //! host keeps only to go faster, a template or a cached image nothing
 //! uses, has that removed and goes on once a reading shows the room; one
 //! that would need what it uses itself is refused, and that stays. The

@@ -6,6 +6,7 @@ import { useOpenGeniText, createOpenGeniText, type OpenGeniText } from "../messa
 import { regionRestrictedText } from "../inference-region";
 import { useState, type ComponentProps } from "react";
 import { toast } from "sonner";
+import { userErrorText } from "../ui/api-error";
 
 import {
   type RecordingPerson,
@@ -652,7 +653,9 @@ function VoiceRows({
       await work();
       toast.success(success);
     } catch (error) {
-      toast.error(failure, { description: error instanceof Error ? error.message : undefined });
+      toast.error(failure, {
+        description: error instanceof Error ? userErrorText(error) : undefined,
+      });
     } finally {
       setBusy(false);
     }

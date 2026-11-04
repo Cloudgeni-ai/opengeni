@@ -34,6 +34,8 @@ export const englishMessages = {
   "approvalSurface.sendingAnswer": "Sending answer…",
   /** Above an MCP server's question in the middle of a tool call, e.g. "Linear asks". */
   "approvalSurface.serverAsks": "{server} asks",
+  /** A waiting action whose review offers no decision yet; a Try again button follows. */
+  "approvalSurface.thisActionCanTBeDecided": "This action can't be decided yet.",
   "approvalSurface.tryAgain": "Try again",
   "approvalSurface.viewFullDetails": "View full details",
   "approvalSurface.youDonTHaveAccess":
@@ -2104,7 +2106,15 @@ export const englishMessages = {
     "A selected connector account is unavailable. Review accounts in + → Connectors, then edit and send your saved message.",
   "lib.format.modelUnavailable":
     "This chat's model is no longer available. Choose another model to continue. Your message is saved.",
+  "lib.format.newChatModelUnavailable":
+    "This model isn't available to you. Choose another model. Your message is saved.",
+  "lib.format.modelPolicyCredits":
+    "This model uses credits, which are off in this workspace. Choose a model paid by a subscription or API key. Your message is saved.",
+  "lib.format.modelPolicyRefused":
+    "This workspace's model policy doesn't allow this model. Choose another model. Your message is saved.",
   "lib.format.now": "now",
+  "lib.format.speedUnavailable":
+    "This model can't run at the selected speed. Choose another speed. Your message is saved.",
   "lib.format.outOfCreditsThisWorkspace":
     "There aren't enough credits for this model. Add credits, or choose another model. The conversation is preserved.",
   "lib.format.providerBlockedRequest": "The model provider blocked this request.",
@@ -2158,6 +2168,7 @@ export const englishMessages = {
   "lib.providerRecovery.modelStoppedRespondingAt": "{model} stopped responding{at}",
   "lib.providerRecovery.modelStoppedRightAfterCompacting":
     "{model} stopped right after compacting the conversation",
+  "lib.providerRecovery.noSandboxCapacityIsAvailable": "No sandbox capacity is available right now",
   "lib.providerRecovery.opengeniCanTReachAn": "{product} can't reach an upstream service",
   "lib.providerRecovery.opengeniIsApplyingAConfiguration":
     "{product} is applying a configuration update",
@@ -2177,6 +2188,8 @@ export const englishMessages = {
   "lib.providerRecovery.theSandboxIsnTReady": "The sandbox isn't ready yet",
   "lib.providerRecovery.theSandboxReachedItsMaximum":
     "The sandbox reached its maximum lifetime, so {product} is moving the workspace to a fresh sandbox",
+  "lib.providerRecovery.theSandboxServiceIsTemporarily":
+    "The sandbox service is temporarily unavailable",
   "lib.providerRecovery.tryAgainInAFew": "Try again in a few minutes, or switch to another model.",
   "lib.providerRecovery.tryAgainInAFew2": "Try again in a few minutes.",
   "lib.transientRetry.actionMayNotHaveGoneThrough":
@@ -5559,6 +5572,7 @@ export const englishMessages = {
   "timeline.screenshotLightbox.zoomOut": "Zoom out",
   "timeline.shared.bytesOmitted_one": "{bytes} byte omitted",
   "timeline.shared.bytesOmitted_other": "{bytes} bytes omitted",
+  "timeline.shared.copyStep": "Copy step",
   "timeline.shared.expandScreenshot": "Expand screenshot",
   "timeline.shared.fullEvidence": "full evidence",
   "timeline.shared.imageUnavailable": "image unavailable",
@@ -6152,6 +6166,12 @@ export const englishMessages = {
   "toolActionReview.reasonItDidNotRun": "{reason} It did not run.",
   "toolActionReview.someOfItRanCheck": "Some of it ran. Check the result before continuing.",
   "toolActionReview.theActionRanButReturned": "The action ran but returned an error.",
+  "toolActionReview.onlyTheAccountOwnerCanApprove":
+    "Only the person whose own account this runs on can approve it. You can decline it.",
+  "toolActionReview.onlyNameCanApprove":
+    "Only {name} can approve this, because it runs on their own account. You can decline it.",
+  "toolActionReview.onlyYouCanApprove":
+    "This runs on your own account, so only you can approve it.",
   "toolActionReview.theDetailsOfThisOlder":
     "The details of this older request couldn't be recovered, so it can't be approved. Decline it to let the agent continue.",
   "toolActionReview.theExactValuesSavedFor":

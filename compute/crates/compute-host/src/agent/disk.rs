@@ -15,7 +15,7 @@
 //! reading, about a second away, which decides it.
 //!
 //! So does work that fits only once disk relief frees what the host keeps
-//! without needing it (ADR 29; see [`super::relief`]): it books what it
+//! without needing it (ADR 30; see [`super::relief`]): it books what it
 //! waits for ([`compute_core::Input::Wants`]), which has the core free
 //! that, and the readings after decide it.
 //!

@@ -1,4 +1,4 @@
-//! What disk relief may free besides sandboxes' local copies (ADR 29):
+//! What disk relief may free besides sandboxes' local copies (ADR 30):
 //! what the host keeps on local disk only to go faster, templates with
 //! their ready sandboxes and cached images, while nothing uses them.
 //!
