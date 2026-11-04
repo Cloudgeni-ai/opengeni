@@ -404,7 +404,15 @@ export function nextBatch(
     pending.length && !halvesFirst
       ? ready.find((p) => alone(p) && !bisecting.has(p.number))
       : undefined;
-  if (starved) return { kind: "build", members: [starved], pending, aheadOfBisection: true };
+  // It carries what the bisection blamed, so the half after it keeps it.
+  if (starved)
+    return {
+      kind: "build",
+      members: [starved],
+      pending,
+      aheadOfBisection: true,
+      ...(blame.length ? { blame } : {}),
+    };
 
   // A half holding a priority PR runs before the other halves; the halves are
   // independent, so their order only decides which PRs land sooner.
@@ -584,7 +592,9 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
             ? "its CI failed only in jobs the batch it was split from failed also after a retry, so it is split without another retry"
             : "its CI failed",
         });
-        blame = blamed(blame, result.runs);
+        // What a batch built ahead of a bisection failed in says nothing about
+        // the bisection's halves.
+        if (manifest.aheadOfBisection !== true) blame = blamed(blame, result.runs);
         halvesFirst = manifest.aheadOfBisection === true;
         if (numbers.length === 1) {
           const run = result.runs.find((r) => r.workflow === CI_WORKFLOW) ?? result.runs[0]!;
