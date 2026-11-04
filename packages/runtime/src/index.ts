@@ -6072,16 +6072,24 @@ class DeferredPreparedMcpServer implements MCPServer {
 }
 
 /**
- * More servers than one turn can connect must not fail the turn. Required
- * servers are kept before optional ones, each group in selection order; the
+ * More servers than one turn can connect must not fail the turn. Opengeni's
+ * own server is kept first, then required servers, then best-effort ones
+ * (optional or connection-backed), each group in selection order; the
  * servers left out are logged and named to the model.
  */
-function fitMcpServerSelection(tools: ToolRef[], unavailableSink: Map<string, string>): ToolRef[] {
+function fitMcpServerSelection(
+  settings: Settings,
+  tools: ToolRef[],
+  unavailableSink: Map<string, string>,
+): ToolRef[] {
   if (tools.length <= MCP_MAX_SELECTED_SERVERS) return tools;
-  const ordered = [
-    ...tools.filter((tool) => tool.optional !== true),
-    ...tools.filter((tool) => tool.optional === true),
-  ];
+  const configs = new Map(settings.mcpServers.map((server) => [server.id, server]));
+  const rank = (tool: ToolRef): number => {
+    const config = configs.get(tool.id);
+    if (config && !config.connectionRef && isFirstPartyMcpServer(settings, config)) return 0;
+    return tool.optional === true || config?.connectionRef ? 2 : 1;
+  };
+  const ordered = [0, 1, 2].flatMap((group) => tools.filter((tool) => rank(tool) === group));
   const kept = new Set(ordered.slice(0, MCP_MAX_SELECTED_SERVERS));
   const left = tools.filter((tool) => !kept.has(tool));
   console.warn("[mcp] more servers selected than one turn can connect; skipping the rest", {
@@ -6112,7 +6120,7 @@ export async function prepareAgentTools(
   const unavailableMcpServers = new Map<string, string>();
   const resolvedMcpConnectionIds = options.deferredResolvedMcpConnectionIds ?? new Map();
   const resolvedMcpToolConnectionIds = new Map<string, string>();
-  tools = fitMcpServerSelection(tools, unavailableMcpServers);
+  tools = fitMcpServerSelection(settings, tools, unavailableMcpServers);
   if (options.attemptToolDefinitions?.length && !attemptToolScope(options)) {
     throw new Error("in-process attempt tools require exact attempt scope");
   }
@@ -6284,10 +6292,18 @@ export async function prepareAgentTools(
               codexConnectorNamespaces,
             )
           : mcpFetchImpl;
+        // The SDK can replace a size refusal's error (a later page, an SSE
+        // disconnect); this record lets the server still recognise it.
+        const listSizeRefusal = { refused: false };
         const guardedTransport = guardedMcpFetch(
           firstParty ? { ...settings, integrationsAllowPrivateNetworkTargets: true } : settings,
           baseFetch,
           {
+            onSizeRefusal: (rpcMethod) => {
+              if (rpcMethod === undefined || rpcMethod === "tools/list") {
+                listSizeRefusal.refused = true;
+              }
+            },
             ...(firstParty ? { requireHttpsOutsideLocalTest: false } : {}),
             ...(useBunNativeFetch && !isCodexAppsMcpServer(config)
               ? { usePinnedRequestTransport: true }
@@ -6482,6 +6498,7 @@ export async function prepareAgentTools(
           url,
           Boolean(config.connectionRef) && !bridge && !isCodexAppsMcpServer(config),
         );
+        if (!bridge) server.listSizeRefusal = listSizeRefusal;
         return {
           server,
           bestEffort,
@@ -6619,7 +6636,11 @@ export async function prepareAgentTools(
     eagerRequiredEntries,
     eagerBestEffortEntries,
     "blocking",
-  );
+  ).catch(async (error: unknown) => {
+    // The built-in tool server is created first; free its budget share too.
+    await localToolServer?.close().catch(() => undefined);
+    throw error;
+  });
   const connectedEagerRequired = connectedEager.required;
   const connectedEagerBestEffort = connectedEager.bestEffort;
   warnBestEffortFailures(connectedEagerBestEffort);
@@ -6876,7 +6897,8 @@ function localMcpServerRegistry(
   registrations: readonly LocalMcpServerRegistration[],
   settingsRegistry: ReadonlyMap<string, Settings["mcpServers"][number]>,
 ): ReadonlyMap<string, LocalMcpServerRegistration> {
-  assertMcpServerSelectionWithinBounds(registrations);
+  // No count limit here: a host registers a server for every tool it offers,
+  // and only the selection that fits the turn (fitMcpServerSelection) is built.
   const registry = new Map<string, LocalMcpServerRegistration>();
   for (const registration of registrations) {
     if (!settingsRegistry.has(registration.id)) {
@@ -9704,6 +9726,8 @@ export class PrefixedMcpServer implements MCPServer {
   private loggedListToolsFailure = false;
   /** Where this server records that some or all of its tools are unavailable this attempt. */
   unavailableSink: Map<string, string> | undefined;
+  /** Set by this server's transport when a tools/list response is refused for size. */
+  listSizeRefusal: { refused: boolean } | undefined;
   private listedToolSchemaTokens = 0;
   private alwaysVisibleToolSchemaTokens = 0;
   private readonly eagerToolNames: ReadonlySet<string>;
@@ -9894,14 +9918,19 @@ export class PrefixedMcpServer implements MCPServer {
     budget: McpAggregateToolListBudget,
     servers: readonly MCPServer[],
   ) {
+    const prefixed = servers
+      .filter((server): server is PrefixedMcpServer => server instanceof PrefixedMcpServer)
+      .filter((server) => server.aggregateToolBudget === budget);
+    // Opengeni's own server (harness control, goals) is admitted before any
+    // connector, so a full budget never cuts its tools.
     budget.sequence(
-      servers
-        .filter((server): server is PrefixedMcpServer => server instanceof PrefixedMcpServer)
-        .filter((server) => server.aggregateToolBudget === budget)
-        .map((server) => ({
-          sourceId: server.aggregateSourceId,
-          start: () => server.freezeTools(),
-        })),
+      [
+        ...prefixed.filter((server) => server.firstPartyCatalog),
+        ...prefixed.filter((server) => !server.firstPartyCatalog),
+      ].map((server) => ({
+        sourceId: server.aggregateSourceId,
+        start: () => server.freezeTools(),
+      })),
     );
   }
 
@@ -10010,6 +10039,7 @@ export class PrefixedMcpServer implements MCPServer {
     try {
       // De-duplicate before any size check: a paginated listing that repeats
       // pages must not count its repeats against the limits.
+      if (this.listSizeRefusal) this.listSizeRefusal.refused = false;
       const tools = (await this.inner.listTools()) as RuntimeMcpTool[];
       const exposed = uniqueListedMcpTools(this.registryId, tools)
         .filter((tool) => this.isAllowed(tool.name))
@@ -10095,7 +10125,7 @@ export class PrefixedMcpServer implements MCPServer {
       // every later turn the same way. Even a required server degrades to no
       // tools here; it was reached, and the model is told why its tools are
       // missing. Any other required-server failure still fails loudly.
-      const tooLarge = isMcpPayloadTooLargeError(error);
+      const tooLarge = isMcpPayloadTooLargeError(error) || this.listSizeRefusal?.refused === true;
       // A REQUIRED server's tools/list failure is fatal (fail-loud default): the
       // caller explicitly requested it, so its absence must fail the turn.
       if (!this.bestEffort && !tooLarge) {

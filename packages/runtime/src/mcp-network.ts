@@ -501,6 +501,8 @@ export type McpToolListDrop = {
 export type McpToolListFit<T> = {
   tools: T[];
   dropped: McpToolListDrop[];
+  /** Exact serialized size of `tools` as one JSON array. */
+  bytes: number;
 };
 
 export type McpToolListFitOptions<T> = {
@@ -510,6 +512,8 @@ export type McpToolListFitOptions<T> = {
   maxBytes?: number;
   /** Reasons recorded for tools that do not fit; list limits by default. */
   limitReasons?: { entries: McpToolListDropReason; bytes: McpToolListDropReason };
+  /** Serialized size of one tool; lets a caller measure each tool only once. */
+  sizeOf?: (tool: T) => number;
 };
 
 function listedToolName(tool: unknown): string {
@@ -540,7 +544,7 @@ export function fitMcpToolListWithinBounds<T>(
   tools.forEach((tool, index) => {
     let size: number;
     try {
-      size = mcpSerializedSizeBytes(tool);
+      size = options.sizeOf ? options.sizeOf(tool) : mcpSerializedSizeBytes(tool);
     } catch {
       dropped.push({ name: listedToolName(tool), reason: "definition_unreadable" });
       return;
@@ -556,12 +560,13 @@ export function fitMcpToolListWithinBounds<T>(
   // list the same tools in a different order (or page) on another turn, and
   // the kept set must stay the same for the same tools.
   const keepFirst = options.keepFirst;
-  const pinned = (index: number) => (keepFirst?.(tools[index]!) ? 0 : 1);
+  const pins = new Map(candidates.map((index) => [index, keepFirst?.(tools[index]!) ? 0 : 1]));
+  const names = new Map(candidates.map((index) => [index, listedToolName(tools[index])]));
   const order = [...candidates].sort((left, right) => {
-    const byPin = pinned(left) - pinned(right);
+    const byPin = pins.get(left)! - pins.get(right)!;
     if (byPin !== 0) return byPin;
-    const leftName = listedToolName(tools[left]);
-    const rightName = listedToolName(tools[right]);
+    const leftName = names.get(left)!;
+    const rightName = names.get(right)!;
     return leftName < rightName ? -1 : leftName > rightName ? 1 : left - right;
   });
   const accepted = new Set<number>();
@@ -582,6 +587,7 @@ export function fitMcpToolListWithinBounds<T>(
   return {
     tools: tools.filter((_, index) => accepted.has(index)),
     dropped,
+    bytes,
   };
 }
 
@@ -696,10 +702,22 @@ export class McpAggregateToolListBudget {
       dropped.push({ name: name.slice(0, 256), reason: "model_name_taken" });
       return false;
     });
-    const listed = fitMcpToolListWithinBounds(unclaimed, options);
+    // Measure each tool once for both fits; a thrown measurement is reported
+    // by the fit as an unreadable definition.
+    const sizes = new Map<unknown, number>();
+    const sizeOf = (tool: T) => {
+      let size = sizes.get(tool);
+      if (size === undefined) {
+        size = mcpSerializedSizeBytes(tool);
+        sizes.set(tool, size);
+      }
+      return size;
+    };
+    const listed = fitMcpToolListWithinBounds(unclaimed, { ...options, sizeOf });
     const previous = this.contributions.get(sourceId) ?? { entries: 0, bytes: 0 };
     const fitted = fitMcpToolListWithinBounds(listed.tools, {
       ...options,
+      sizeOf,
       maxEntries: this.maxEntries - (this.totalEntries - previous.entries),
       maxBytes: this.maxBytes - (this.totalBytes - previous.bytes),
       limitReasons: { entries: "aggregate_entry_limit", bytes: "aggregate_byte_limit" },
@@ -707,7 +725,7 @@ export class McpAggregateToolListBudget {
     this.remove(sourceId);
     const contribution = {
       entries: fitted.tools.length,
-      bytes: fitted.tools.length > 0 ? mcpSerializedSizeBytes(fitted.tools) : 0,
+      bytes: fitted.tools.length > 0 ? fitted.bytes : 0,
     };
     this.contributions.set(sourceId, contribution);
     this.totalEntries += contribution.entries;
@@ -717,7 +735,11 @@ export class McpAggregateToolListBudget {
       if (typeof name === "string") this.modelNameClaims.set(name, sourceId);
     }
     this.settlement(sourceId).resolve();
-    return { tools: fitted.tools, dropped: [...dropped, ...listed.dropped, ...fitted.dropped] };
+    return {
+      tools: fitted.tools,
+      dropped: [...dropped, ...listed.dropped, ...fitted.dropped],
+      bytes: fitted.bytes,
+    };
   }
 
   /**
@@ -877,6 +899,12 @@ export function guardedMcpFetch<TInput extends string | URL | Request>(
     pinResolvedDestination?: boolean;
     requireHttpsOutsideLocalTest?: boolean;
     usePinnedRequestTransport?: boolean;
+    /**
+     * Told when a response is refused for size, with its JSON-RPC method. SDK
+     * layers can replace the refusal error (a continuation page, an SSE
+     * disconnect), so the caller keeps its own record.
+     */
+    onSizeRefusal?: (rpcMethod: string | undefined) => void;
   } = {},
 ): (input: TInput, init?: RequestInit) => Promise<Response> {
   return async (input: TInput, init?: RequestInit) => {
@@ -925,18 +953,32 @@ export function guardedMcpFetch<TInput extends string | URL | Request>(
       });
       throw error;
     }
+    const onRefusal = options.onSizeRefusal
+      ? () => {
+          try {
+            options.onSizeRefusal!(rpcMethod);
+          } catch {
+            // Reporting never changes the transport outcome.
+          }
+        }
+      : undefined;
     return observation.run(() =>
-      boundMcpResponseBody(response, options.maxResponseBytes ?? MCP_MAX_RESPONSE_BYTES),
+      boundMcpResponseBody(response, options.maxResponseBytes ?? MCP_MAX_RESPONSE_BYTES, onRefusal),
     );
   };
 }
 
-export function boundMcpResponseBody(response: Response, maxBytes: number): Response {
+export function boundMcpResponseBody(
+  response: Response,
+  maxBytes: number,
+  onRefusal?: () => void,
+): Response {
   const observation = beginMcpPhase("network_body");
   const declaredLength = Number(response.headers.get("content-length"));
   if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
     observation.end("rejected");
     void response.body?.cancel().catch(() => undefined);
+    onRefusal?.();
     throw new McpPayloadTooLargeError("MCP response", declaredLength, maxBytes);
   }
   if (!response.body) {
@@ -965,6 +1007,7 @@ export function boundMcpResponseBody(response: Response, maxBytes: number): Resp
         if (receivedBytes > maxBytes) {
           observation.end("rejected");
           await reader.cancel().catch(() => undefined);
+          onRefusal?.();
           controller.error(new McpPayloadTooLargeError("MCP response", receivedBytes, maxBytes));
           return;
         }

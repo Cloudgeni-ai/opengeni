@@ -1,8 +1,15 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { RunContext, type MCPServer } from "@openai/agents";
 import { testSettings } from "@opengeni/testing/settings";
 import { buildOpenGeniAgent, prepareAgentTools } from "../src/index";
-import { MCP_MAX_TOOL_DEFINITION_BYTES, McpPayloadTooLargeError } from "../src/mcp-network";
+import {
+  MCP_MAX_RESPONSE_BYTES,
+  MCP_MAX_TOOL_DEFINITION_BYTES,
+  McpPayloadTooLargeError,
+} from "../src/mcp-network";
 
 // Bendik's rule: one connector's oversized or clashing tool list must never end
 // a turn with no way to recover. Each case below used to throw while the turn's
@@ -236,7 +243,8 @@ test("more servers than one turn connects: required ones are kept first, the res
     ],
     {
       ...scope(),
-      localMcpServers: kept.map((id) => ({
+      // The host registers a server for every selected id, more than 64.
+      localMcpServers: [...kept, "skipped_required", "skipped_optional"].map((id) => ({
         id,
         server: localServer(id, () => [listed("ping")]),
       })),
@@ -261,5 +269,54 @@ test("more servers than one turn connects: required ones are kept first, the res
     ]);
   } finally {
     await prepared.close();
+  }
+});
+
+test("a remote required server whose later tools/list page is over the response limit degrades", async () => {
+  // The SDK replaces a continuation page's error with one that has no cause, so
+  // the size refusal is recognised from the transport's own record. Before: the
+  // required server failed every turn.
+  const bulky = Array.from({ length: 20 }, (_, index) =>
+    listed(`bulky_${index}`, "x".repeat(Math.ceil(MCP_MAX_RESPONSE_BYTES / 16))),
+  );
+  const provider = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const server = new Server(
+        { name: "paged", version: "1.0.0" },
+        { capabilities: { tools: {} } },
+      );
+      server.setRequestHandler(ListToolsRequestSchema, (list) =>
+        list.params?.cursor ? { tools: bulky } : { tools: [listed("small")], nextCursor: "page-2" },
+      );
+      server.setRequestHandler(CallToolRequestSchema, () => ({ content: [] }));
+      const transport = new WebStandardStreamableHTTPServerTransport({
+        sessionIdGenerator: undefined,
+        enableJsonResponse: true,
+      });
+      await server.connect(transport);
+      return transport.handleRequest(request);
+    },
+  });
+  const settings = testSettings({
+    sandboxBackend: "none",
+    mcpServers: [{ id: "paged", url: `http://127.0.0.1:${provider.port}/mcp` }],
+  });
+  try {
+    const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "paged" }], scope());
+    try {
+      expect(prepared.attemptToolCatalog!.entries).toEqual([]);
+      expect(prepared.unavailableMcpServers.get("paged")).toBe(
+        "connected, but its tool list is larger than one turn can hold, so its tools are unavailable this turn.",
+      );
+      expect(degradedWarnings()).toEqual([
+        expect.objectContaining({ serverId: "paged", required: true }),
+      ]);
+    } finally {
+      await prepared.close();
+    }
+  } finally {
+    provider.stop(true);
   }
 });
