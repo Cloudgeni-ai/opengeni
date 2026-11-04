@@ -631,7 +631,7 @@ describe("missing quiescence-receipt wake repair", () => {
       "utf8",
     );
     const quietWindowMigration = await readFile(
-      new URL("../drizzle/1239_quiescence_repair_wake_quiet_window.sql", import.meta.url),
+      new URL("../drizzle/1260_quiescence_repair_wake_quiet_window.sql", import.meta.url),
       "utf8",
     );
     await shared.admin.begin(async (tx) => {
@@ -685,7 +685,7 @@ describe("missing quiescence-receipt wake repair", () => {
         expect(constraint.definition).toContain("REFERENCES workspaces(id, account_id)");
       }
 
-      // 1239 then changes only the quiet window, idempotently, keeping the
+      // 1260 then changes only the quiet window, idempotently, keeping the
       // routine's owner, grants and signature.
       const [ownerKey] = await tx<{ body: string }[]>`
         select prosrc as body from pg_proc

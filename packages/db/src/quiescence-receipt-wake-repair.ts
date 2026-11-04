@@ -15,7 +15,7 @@ type Candidate = QuiescenceReceiptWakeRepairCursor & { accountId: string };
  * Temporal's server-owned `runAgentTurn` heartbeat lease (two minutes after
  * the last heartbeat, which precedes the close) has expired, so an earlier
  * wake would only be paced away. Must be at least that heartbeat timeout.
- * Migration 1239's inventory uses the same interval.
+ * Migration 1260's inventory uses the same interval.
  */
 export const QUIESCENCE_REPAIR_CLOSE_GRACE_SECONDS = 120;
 
@@ -28,7 +28,7 @@ export const QUIESCENCE_REPAIR_CLOSE_GRACE_SECONDS = 120;
  * period). `OpenGeniSessionRecoveryBacklogStale` must clearly outlast that, so
  * a self-repair within the designed time never pages; apps/worker's
  * recovery-repair alert test holds the two together.
- * Migration 1239's inventory uses the same interval.
+ * Migration 1260's inventory uses the same interval.
  */
 export const QUIESCENCE_REPAIR_WAKE_QUIET_SECONDS = 120;
 

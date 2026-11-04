@@ -1485,7 +1485,7 @@ activity and closed), nothing else revisits the session. A bounded,
 identity-only inventory (`list_quiescence_receipt_wake_repairs_v1`, migration
 0701) finds attempts closed more than two minutes ago (the `runAgentTurn`
 heartbeat lease, after which the workflow can prove the activity gone) with no
-undelivered wake and no wake in the last two minutes (migration 1239; it was
+undelivered wake and no wake in the last two minutes (migration 1260; it was
 ten, which coincided with the alert below so a normal self-repair paged).
 Both windows are `QUIESCENCE_REPAIR_CLOSE_GRACE_SECONDS` and
 `QUIESCENCE_REPAIR_WAKE_QUIET_SECONDS`, so a stranded recovery is re-woken
