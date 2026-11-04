@@ -586,10 +586,11 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
           // Bisect: test the first half now and keep the second half next in
           // line. Priority PRs among others are tested on their own first, so
           // a broken fill delays them one round and a broken one is found in one.
-          // The fill is halved too once it has at least as many PRs as the
-          // priority group: it then most likely holds what broke the batch, and
-          // testing it whole again would only fail once more (and retry) before
-          // the same split.
+          // The fill is halved too once it has at least two PRs and at least as
+          // many as the priority group: it is then at least as likely to hold
+          // what broke the batch, and testing it whole again would usually only
+          // fail once more (with a retry when no blame is carried) before the
+          // same split.
           const urgent = numbers.filter((n) => byNumber.get(n)?.priority);
           const fill = numbers.filter((n) => !urgent.includes(n));
           const halves =
