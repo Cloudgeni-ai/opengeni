@@ -96,5 +96,8 @@ restore depend on every earlier link.
   read that way books its whole length for that reading. A pause has the
   guest trim first and holds the VM, so no reading of its disk comes while
   it runs: from a pause's start until a reading measures the disk again,
-  the sandbox books its disk's whole length, also for a wake that comes
-  before that reading.
+  the sandbox books its disk's whole length. Once the pause succeeds, the
+  agent can measure the quiescent file immediately, and again at local
+  wake admission, without a concurrent-write allowance. Missing readings
+  keep the whole bound. ADR 14's disk-book amendment counts fetching and
+  guest writes against this one disk file, not two copies.

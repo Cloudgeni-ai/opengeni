@@ -36,7 +36,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use compute_core::{DiskSpace, Input, Level, SandboxId};
+use compute_core::{DiskSpace, Input, Level, Outcome, SandboxId, Step};
 use compute_engine::{Engine, VmSpec, Writes};
 use tokio::task::JoinSet;
 
@@ -155,13 +155,13 @@ pub(super) enum AfterReading {
     HandOff(Id, OwnerEpoch, bool, Reply<()>),
 }
 
-/// What each sandbox with a VM had written, read just before the disk
-/// reading of a sample, with whether its memory image was still being
-/// filled; see [`HostAgent::disk_readings`].
+/// What each VM had written, read just before the disk reading of a
+/// sample, with whether its memory image was still being filled and the
+/// headroom of disks at rest; see [`HostAgent::disk_readings`].
 #[derive(Debug, Default)]
 pub(super) struct BeforeReading {
     writes: Vec<(SandboxId, Option<Writes>)>,
-    hydrating: Vec<Input>,
+    inputs: Vec<Input>,
 }
 
 /// When a new sandbox fits; see [`HostAgent::room_for`].
@@ -174,6 +174,66 @@ pub(super) enum Room {
 }
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
+    /// Measures a disk only while no step or guest can change it. Callers
+    /// establish that it is local and not running (including a pause that
+    /// just finished). A missing or unreadable file keeps the whole bound.
+    fn resting_disk(&self, id: SandboxId) -> Option<Input> {
+        let slot = self.slots.get(&id)?;
+        if slot.op.is_some() || slot.destroy || self.tearing_down.contains_key(&id) {
+            return None;
+        }
+        let record = self.records.get(Id(id))?;
+        let bytes = self
+            .headroom(id, &slot.paths.disk)
+            .map_or_else(|| self.record_size(&record).disk, |headroom| headroom.left);
+        Some(Input::DiskGrowth { sandbox: id, bytes })
+    }
+
+    /// At rest, a disk needs no running-VMM race allowance. Measure before
+    /// admission, and after Add/Pause in the same core batch, so a wake
+    /// arriving before the next sample uses the file, not its whole bound.
+    pub(super) fn disk_inputs(&self, inputs: impl IntoIterator<Item = Input>) -> Vec<Input> {
+        let mut batch = Vec::new();
+        for input in inputs {
+            let id = match &input {
+                Input::Touch { sandbox, .. } | Input::Hold { sandbox, .. }
+                    if self.core.sandbox(*sandbox).is_some_and(|view| {
+                        view.step.is_none()
+                            && !matches!(view.state.level, Level::Running | Level::Remote)
+                    }) =>
+                {
+                    Some(*sandbox)
+                }
+                Input::Add { sandbox, state, .. }
+                    if !matches!(state.level, Level::Running | Level::Remote) =>
+                {
+                    Some(*sandbox)
+                }
+                Input::Finished {
+                    sandbox,
+                    outcome: Outcome::Done,
+                    ..
+                } if self
+                    .core
+                    .sandbox(*sandbox)
+                    .is_some_and(|view| view.step == Some(Step::Pause)) =>
+                {
+                    Some(*sandbox)
+                }
+                _ => None,
+            };
+            let reading = id.and_then(|id| self.resting_disk(id));
+            if matches!(input, Input::Add { .. } | Input::Finished { .. }) {
+                batch.push(input);
+                batch.extend(reading);
+            } else {
+                batch.extend(reading);
+                batch.push(input);
+            }
+        }
+        batch
+    }
+
     /// The disk of ready sandbox `record`, for a claim of it.
     pub(super) fn claimed_disk(&self, record: &Record) -> ClaimedDisk {
         let paths = Paths::of(&self.root, record);
@@ -215,10 +275,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let mut before = BeforeReading::default();
         for (id, slot) in &self.slots {
             let Some(live) = slot.vm.as_ref() else {
+                if self.core.sandbox(*id).is_some_and(|view| {
+                    view.step.is_none()
+                        && matches!(view.state.level, Level::Saved | Level::Archived)
+                }) {
+                    before.inputs.extend(self.resting_disk(*id));
+                }
                 continue;
             };
             before.writes.push((*id, self.vm_writes(*id, &live.vm)));
-            before.hydrating.push(Input::Hydrating {
+            before.inputs.push(Input::Hydrating {
                 sandbox: *id,
                 hydrating: live.memory.hydrating(),
             });
@@ -248,7 +314,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// or do not return within [`SETTLE_WITHIN`], books all it may take,
     /// its whole bound, for this reading.
     pub(super) async fn disk_growth_readings(&self, before: BeforeReading) -> Vec<Input> {
-        let mut readings = before.hydrating;
+        let mut readings = before.inputs;
         let mut read = Vec::new();
         let mut settling = JoinSet::new();
         for (id, first) in before.writes {
