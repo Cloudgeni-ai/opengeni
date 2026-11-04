@@ -4,6 +4,7 @@ import {
   createSessionRetainedScreenshotLoader,
   createWorkspaceRetainedArtifactLoader,
   createWorkspaceRetainedVideoLoader,
+  timelineLivePause,
 } from "../../timeline";
 import { isModelUnavailableSubmissionError, type CreditRefusalKind } from "../../lib/format";
 import { inertProps } from "../../lib/inert";
@@ -4253,6 +4254,7 @@ function SessionChatPane(props: {
                           focusSequence={momentSequence}
                           events={props.events}
                           status={props.session.status}
+                          pause={timelineLivePause(admissionControl)}
                           computeLabel={computeLabel}
                           renderMessageText={renderMessageText}
                           renderMessageActions={renderMessageActions}

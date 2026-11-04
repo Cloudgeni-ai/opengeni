@@ -25,6 +25,7 @@ import {
   type TimelineSearchTarget,
 } from "./timeline-search";
 import { GenieLoadingOptionsContext, type GenieLoadingOptions } from "../timeline/genie-loading";
+import { useTimelinePauses } from "../timeline/use-timeline-pauses";
 import { ChildSessionLink } from "./child-session-link";
 import { useStartupDetails } from "../timeline/startup-preference";
 import {
@@ -133,6 +134,7 @@ import {
   defaultToolRegistry,
   groupTimeline,
   LightboxProvider,
+  type TimelineLivePause,
   type ActivityItem,
   type AgentMessageItem,
   type AuthNeededItem,
@@ -235,6 +237,14 @@ export type MessageTimelineProps = {
   items?: TimelineItem[] | undefined;
   /** Current session status (reserved; tip "Working…" chrome removed for now). */
   status?: SessionStatus | null | undefined;
+  /**
+   * The session's live Pause, from its effective control
+   * (`timelineLivePause(session.effectiveControl)`). A turn still open under a
+   * pause reads "Paused" with its clock stopped, and paused time is not
+   * counted as work. Omit to rely on the session's events alone, which do not
+   * show a pause of an ancestor or the workspace that interrupted nothing.
+   */
+  pause?: TimelineLivePause | null | undefined;
   /** Host-owned controls beside Copy and the timestamp on settled message rows. */
   renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
   /**
@@ -651,6 +661,7 @@ export function MessageTimeline({
   events,
   items,
   status: _status,
+  pause,
   renderMessageActions,
   renderMessageSender,
   renderMessageText,
@@ -820,9 +831,10 @@ export function MessageTimeline({
   const olderPageBudgetRef = useRef(0);
   const [olderDemand, setOlderDemand] = useState(0);
   const readableTurns = turnSummary?.rolling === true;
+  const pauses = useTimelinePauses(events, pause, readableTurns);
   const projectedGroups = useMemo(
-    () => groupTimeline(t, resolvedItems, { readableTurns }),
-    [resolvedItems, readableTurns, t],
+    () => groupTimeline(t, resolvedItems, { readableTurns, pauses }),
+    [resolvedItems, readableTurns, pauses, t],
   );
   // A new timeline revision (including session/turn replacement) owns layout.
   // Never leave an old decorative transform running on its retained rows.
