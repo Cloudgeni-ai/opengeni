@@ -32,6 +32,7 @@ mod capture;
 mod checkpoint;
 mod disk_lengths;
 mod disk_reading;
+mod disk_relief;
 mod fleet;
 mod images;
 mod link;

@@ -1092,6 +1092,20 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   request, or stalling, wants a larger request. A sandbox that only stalls
   itself is never shrunk for it: the severe-stall alert names the host,
   and the sandbox summaries there show which one.
+- **Disk relief** ([ADR 30](adr/0030-disk-relief-for-admission.md)): what
+  a host frees for a create, adopt or wake without losing anything, idle
+  sandboxes' local copies that object storage holds and templates and
+  cached images nothing uses, is in its status (`disk.reclaimable`, bytes)
+  and its lease report (`disk_reclaimable_mib`), which the leader reports
+  as `compute_fleet_host_disk_reclaimable_bytes` and placement counts as
+  free disk. Each thing that goes is a `compute.disk.freed` event with its
+  kind (`copy`, `template` or `image`), the bytes it was measured to free
+  (`compute.disk.bytes`, a lower bound, 0 if never measured) and why
+  (`compute.disk.reason`): `relief` for room something booked, `unused`
+  for the week rule, `sleep` for a sandbox's own sleep policy. Many
+  `relief` events say the host's disk is too small for what it runs, and
+  templates removed that way are built again by the next create of their
+  shape.
 - **Find a slow sandbox** by querying `compute.step` and `compute.request`
   events for its `compute.sandbox.id`. Steps carry time per phase, bytes,
   cause and the host-side pressure the sandbox saw since its previous
@@ -1439,6 +1453,15 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
 - **Busy is busy.** A sandbox that keeps computing stays awake, whether it
   builds code or mines coins. Sleep policy does not decide who pays: usage
   for billing and account budgets belongs to the layer above.
+- **Local disk holds caches, which give way.** Templates (about a
+  sandbox's disk each, more with ready sandboxes), cached images and the
+  local copies of idle archived sandboxes stay on a host's state volume
+  until a create, adopt or wake needs the room, when the least recently
+  used go first ([ADR 30](adr/0030-disk-relief-for-admission.md)), or until
+  a week unused. Size the volume for what runs and wakes at once, with
+  room for the templates of the shapes in use; a volume that only fits
+  with relief keeps rebuilding templates and fetching images and copies
+  back.
 - **Certificates cost nothing.** The hosts' authority is a key the service
   holds; no managed certificate authority is billed.
 - **Sharing between customers.** Identical chunks are shared within a store
