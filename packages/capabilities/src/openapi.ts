@@ -43,6 +43,8 @@ export interface OpenApiParameterBinding {
   readonly description?: string;
   readonly style?: string;
   readonly explode?: boolean;
+  /** A path parameter expanded as a path: `/` is kept and each segment encoded. */
+  readonly allowReserved?: true;
 }
 
 export interface OpenApiOperationBinding {
@@ -264,6 +266,13 @@ export function compileOpenApiRevision(
       // must not collide with their immutable stored bindings for the same spec.
       ...(Object.values(bindings).some((binding) => binding.parameters.some(isNonExplodedFormQuery))
         ? { queryArraySerializationVersion: 1 }
+        : {}),
+      // Older compilers ignored allowReserved, so the same document compiled
+      // to different bindings.
+      ...(Object.values(bindings).some((binding) =>
+        binding.parameters.some((parameter) => parameter.allowReserved),
+      )
+        ? { reservedPathExpansionVersion: 1 }
         : {}),
       ...(options.schemaMode ? { schemaMode: options.schemaMode } : {}),
       // Reviewed read-only overrides change tool safety, so they are part of the
@@ -793,6 +802,12 @@ function readParameters(
         parameter.explode === false
           ? { style: "form", explode: false }
           : {}),
+        // Reserved expansion (OpenAPI allowReserved, RFC 6570 `{+name}`), as
+        // reviewed definitions mark it. Other bindings keep their old shape
+        // and immutable revision ID.
+        ...(location === "path" && parameter.allowReserved === true
+          ? { allowReserved: true as const }
+          : {}),
         schema: dereferenceSchema(document, parameter.schema),
         ...(stringValue(parameter.description)
           ? { description: stringValue(parameter.description)! }
@@ -945,6 +960,48 @@ function isReplaySafeMethod(method: OpenApiHttpMethod): boolean {
   return method === "get" || method === "head" || method === "options";
 }
 
+/**
+ * A path parameter's value as a path: each segment is encoded and `/` kept.
+ * Leading, trailing and repeated slashes are dropped, so `/sites/hr` and
+ * `sites/hr` mean the same. A segment that is already percent-encoded (a
+ * path copied from a browser) is decoded once first, so `R%26D%20Team` and
+ * `R&D Team` send the same bytes. A `.` or `..` segment, in either form,
+ * would be resolved away by URL parsing, so it is refused instead of
+ * silently reaching another path.
+ */
+function reservedPathValue(name: string, value: string): string {
+  return value
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => pathSegment(name, decodedOnce(segment)))
+    .join("/");
+}
+
+function decodedOnce(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
+}
+
+/** One encoded path segment; `.` and `..` would move the request elsewhere. */
+function pathSegment(name: string, segment: string): string {
+  const invalid = (reason: string) =>
+    new IntegrationInvocationError(
+      "parameter_invalid",
+      `The path parameter ${JSON.stringify(name)} ${reason}`,
+      "not_started",
+      false,
+    );
+  if (segment === "." || segment === "..") throw invalid("cannot be or contain . or ..");
+  try {
+    return encodeURIComponent(segment);
+  } catch {
+    throw invalid("is not valid Unicode text");
+  }
+}
+
 function buildOperationUrl(binding: OpenApiOperationBinding, args: Record<string, unknown>): URL {
   const pathArgs = objectValue(args.path);
   const path = binding.pathTemplate.replace(/\{([^}]+)\}/g, (_match, name: string) => {
@@ -957,11 +1014,17 @@ function buildOperationUrl(binding: OpenApiOperationBinding, args: Record<string
         false,
       );
     }
-    return encodeURIComponent(scalarString(value));
+    const parameter = binding.parameters.find(
+      (entry) => entry.location === "path" && entry.name === name,
+    );
+    return parameter?.allowReserved
+      ? reservedPathValue(name, scalarString(value))
+      : pathSegment(name, scalarString(value));
   });
   const base = new URL(binding.serverUrl);
+  // `./` keeps a first segment with a colon (`{drive-id}:/…`) from reading as a scheme.
   const url = new URL(
-    path.replace(/^\//, ""),
+    `./${path.replace(/^\//, "")}`,
     base.toString().endsWith("/") ? base : new URL(`${base}/`),
   );
   const query = objectValue(args.query);
