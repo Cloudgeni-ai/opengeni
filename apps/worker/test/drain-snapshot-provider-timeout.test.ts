@@ -13,6 +13,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { Context } from "@temporalio/activity";
 import { createDb, readLease, type Database, type DbClient } from "@opengeni/db";
+import { sandboxDeadlineMandatoryCaptureLeadMs } from "@opengeni/config";
 import { createObservability } from "@opengeni/observability";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
@@ -274,6 +275,69 @@ describe("drain snapshot provider timeout", () => {
     currentAttempt += 1;
     await expect(drainSandboxLease(input)).rejects.toThrow("provider capture failed");
     expect(provider.calls).toHaveLength(8);
+  }, 60_000);
+
+  test("a backoff never runs past the start of the pre-deadline save window", async () => {
+    if (!available) return;
+    const epoch = 6;
+    const instanceId = "sb-backoff-window";
+    const ids = await drainingModalLease(epoch, instanceId);
+    const provider = modalLikeClient(async () => {
+      throw new Error("provider capture failed");
+    });
+    const { drainSandboxLease } = createSandboxLeaseActivities(services(), {
+      createClientForBackend: (() => provider.client) as never,
+      probeDrainableProvider: async () => "ready",
+    });
+    // Five failures earn a 480 s backoff, but the save window opens in 60 s.
+    const leadMs = sandboxDeadlineMandatoryCaptureLeadMs(SETTINGS);
+    await shared!.admin`
+      update sandbox_leases
+      set drain_capture_failures = 5,
+          drain_capture_failure_epoch = ${epoch},
+          drain_capture_first_failed_at = now() - interval '1 hour',
+          drain_capture_last_failed_at = now(),
+          provider_created_at = now() - interval '23 hours',
+          provider_deadline_at = now() + ${`${leadMs + 60_000} milliseconds`}::interval
+      where sandbox_group_id = ${ids.groupId}`;
+    currentAttempt += 1;
+    const deferred = await drainSandboxLease(drainInput(ids, epoch, instanceId)).then(
+      () => null,
+      (caught: unknown) => caught as { type?: string; nextRetryDelay?: unknown },
+    );
+    expect(deferred?.type).toBe("SandboxDrainCaptureBackoffError");
+    const delayMs = Number(deferred?.nextRetryDelay);
+    expect(delayMs).toBeGreaterThan(50_000);
+    expect(delayMs).toBeLessThanOrEqual(60_000);
+    expect(provider.calls).toHaveLength(0);
+  }, 60_000);
+
+  test("a successful save ends the run of failures", async () => {
+    if (!available) return;
+    const epoch = 7;
+    const instanceId = "sb-failures-then-save";
+    const ids = await drainingModalLease(epoch, instanceId);
+    await shared!.admin`
+      update sandbox_leases
+      set drain_capture_failures = 3,
+          drain_capture_failure_epoch = ${epoch},
+          drain_capture_first_failed_at = now() - interval '2 hours',
+          drain_capture_last_failed_at = now() - interval '1 hour'
+      where sandbox_group_id = ${ids.groupId}`;
+    const provider = modalLikeClient(async () => new TextEncoder().encode("workspace tar bytes"));
+    const { drainSandboxLease } = createSandboxLeaseActivities(services(), {
+      createClientForBackend: (() => provider.client) as never,
+      probeDrainableProvider: async () => "ready",
+    });
+    currentAttempt += 1;
+    expect(await drainSandboxLease(drainInput(ids, epoch, instanceId))).toEqual({
+      status: "terminated",
+    });
+    const [row] = await shared!.admin<
+      { drain_capture_failures: number; drain_capture_last_failed_at: Date | null }[]
+    >`select drain_capture_failures, drain_capture_last_failed_at
+      from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
+    expect(row).toEqual({ drain_capture_failures: 0, drain_capture_last_failed_at: null });
   }, 60_000);
 
   test("a new lease epoch starts counting from zero", async () => {

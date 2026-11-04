@@ -628,8 +628,9 @@ class SandboxDrainCaptureBackoffError extends SandboxDrainRecoveryDeferredError 
 }
 
 /** Time left in this lease's drain snapshot backoff, or zero. No backoff once
- * the provider deadline is inside the mandatory pre-deadline save window:
- * there, waiting would only let the provider end the box uncaptured. */
+ * the provider deadline is inside the mandatory pre-deadline save window, and
+ * none that would run past that window's start: there, waiting would only let
+ * the provider end the box uncaptured. */
 function sandboxDrainCaptureBackoffRemainingMs(
   lease: Pick<LeaseSnapshot, "drainCaptureFailures" | "providerDeadlineAt">,
   settings: Parameters<typeof sandboxDeadlineMandatoryCaptureLeadMs>[0],
@@ -637,16 +638,14 @@ function sandboxDrainCaptureBackoffRemainingMs(
 ): number {
   const failures = lease.drainCaptureFailures;
   if (!failures || failures.count <= 0 || !failures.lastFailedAt) return 0;
-  if (
-    lease.providerDeadlineAt &&
-    lease.providerDeadlineAt.getTime() - nowMs <= sandboxDeadlineMandatoryCaptureLeadMs(settings)
-  ) {
-    return 0;
-  }
-  return Math.max(
+  const backoffMs = Math.max(
     0,
     failures.lastFailedAt.getTime() + sandboxDrainCaptureRetryDelayMs(failures.count) - nowMs,
   );
+  if (!lease.providerDeadlineAt) return backoffMs;
+  const windowStartsInMs =
+    lease.providerDeadlineAt.getTime() - sandboxDeadlineMandatoryCaptureLeadMs(settings) - nowMs;
+  return Math.min(backoffMs, Math.max(0, windowStartsInMs));
 }
 
 /**
@@ -1080,6 +1079,18 @@ export function createSandboxLeaseActivities(
         };
         if (error instanceof SandboxDrainRecoveryDeferredError) {
           observability.info("sandbox reaper: per-sandbox recovery deferred safely", details);
+        } else if (
+          error instanceof Error &&
+          error.name === "SandboxCheckpointArtifactRegistrationConflictError"
+        ) {
+          // A takeover's earlier attempt registered the same provider snapshot
+          // first and publishes it; this retry then finds the box drained. A
+          // conflict that persists still leaves the lease expired-draining,
+          // which alerts on its own.
+          observability.info(
+            "sandbox reaper: drain snapshot already registered by an earlier attempt",
+            details,
+          );
         } else {
           observability.warn("sandbox reaper: per-sandbox drain failed", details);
         }
@@ -5401,6 +5412,10 @@ export async function terminateProviderBox(
       // The provider's own hard timeout is the separate, longer drain budget:
       // when it equalled the wait, a snapshot slower than the wait was killed
       // by the provider every time and the box could never drain.
+      // The capture claim's deadline (wait + settlement grace) therefore no
+      // longer bounds the provider operation. That is safe: a retry by another
+      // worker takes the claim over with the same provider request id, which
+      // Modal treats as the same snapshot, so a late result publishes once.
       const capture = captureWorkspaceArchiveForStorage(
         session,
         Date.now(),

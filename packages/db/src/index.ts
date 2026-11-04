@@ -47543,8 +47543,9 @@ export interface LeaseSnapshot {
    * generation admissions) that no capture taken with none attached has
    * covered yet. Null when every such write is in the archive. */
   untrackedWriterSince: Date | null;
-  /** Consecutive settled drain snapshot failures of THIS lease epoch (zero
-   * after a new box). Drives the drain retry backoff and its alerts. */
+  /** Consecutive settled drain snapshot failures of THIS lease epoch since
+   * its last published save (zero after a new box or a save). Drives the
+   * drain retry backoff and its alerts. */
   drainCaptureFailures?: SandboxDrainCaptureFailures;
   /** Exact provider capture currently holding the lease-local admission gate. */
   archiveCapture: {
@@ -65234,6 +65235,12 @@ async function foldWorkspaceArchiveOntoLease(
       archive_generation = ${input.expectedWorkspaceGeneration},
       current_checkpoint_artifact_id = ${input.checkpointArtifactId}::uuid,
       previous_checkpoint_artifact_id = ${input.previousCheckpointArtifactId}::uuid,
+      -- A published save ends any run of drain snapshot failures: the count
+      -- means failures since this box's last successful save.
+      drain_capture_failures = 0,
+      drain_capture_failure_epoch = null,
+      drain_capture_first_failed_at = null,
+      drain_capture_last_failed_at = null,
       ${
         input.livenessGuard === "warm"
           ? sql`

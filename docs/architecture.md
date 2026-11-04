@@ -1054,12 +1054,14 @@ That budget bounds a drain attempt's wait, not its capture: a slower capture sti
 publishes late, and a worker never runs two drain captures of one lease epoch at
 once (see `docs/run-lifecycle.md`).
 The provider's own hard snapshot timeout for a drain is the separate
-`OPENGENI_SANDBOX_DRAIN_PROVIDER_SNAPSHOT_TIMEOUT_MS` (default 10 minutes, never
-below the drain wait), so a snapshot slower than the wait can finish instead of
-being cut off by Modal at the wait. After a settled failure, the next full drain
-snapshot of the same lease epoch waits 30 s, doubling up to 10 minutes; there is
-no backoff inside the mandatory pre-deadline save window. The count lives on the
-lease (`drain_capture_failures`, migration 1253) and resets with a new epoch.
+`OPENGENI_SANDBOX_DRAIN_PROVIDER_SNAPSHOT_TIMEOUT_MS` (default 10 minutes, and at
+least twice the drain wait), so a snapshot slower than the wait can finish instead
+of being cut off by Modal at the wait. After a settled failure, the next full drain
+snapshot of the same lease epoch waits 30 s, doubling up to 10 minutes; a backoff
+never runs past the start of the mandatory pre-deadline save window, and there is
+none inside it. The count lives on the lease (`drain_capture_failures`, migration
+1253): failures since the box's last successful save, reset by a published save
+or a new epoch.
 Warm-capture reclamation/heartbeat cleanup retain holders through the original
 deadline after turn closure: no takeover or authority extension.
 

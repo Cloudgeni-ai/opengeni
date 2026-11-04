@@ -6897,17 +6897,19 @@ export function effectiveSandboxDrainSnapshotTimeoutMs(
   return settings.sandboxDrainSnapshotTimeoutMs ?? settings.sandboxSnapshotTimeoutMs;
 }
 
-/** Hard provider-side timeout for one zero-holder drain snapshot. Never below
- * the drain wait, so the wait (not the provider) is what ends an attempt, and
- * a slow but finite snapshot keeps running and publishes late under its
- * claim. `drainWaitMs` is the wait the durable drain child froze. */
+/** Hard provider-side timeout for one zero-holder drain snapshot: the
+ * configured budget, and at least twice the drain wait, so the wait (not the
+ * provider) is what ends an attempt and a slow but finite snapshot keeps
+ * running and publishes late under its claim. Only a wait at the maximum
+ * snapshot timeout leaves the two equal. `drainWaitMs` is the wait the durable
+ * drain child froze. */
 export function effectiveSandboxDrainProviderSnapshotTimeoutMs(
   settings: Pick<Settings, "sandboxDrainProviderSnapshotTimeoutMs">,
   drainWaitMs: number,
 ): number {
   return Math.min(
     SANDBOX_SNAPSHOT_MAX_TIMEOUT_MS,
-    Math.max(settings.sandboxDrainProviderSnapshotTimeoutMs, drainWaitMs),
+    Math.max(settings.sandboxDrainProviderSnapshotTimeoutMs, 2 * drainWaitMs),
   );
 }
 

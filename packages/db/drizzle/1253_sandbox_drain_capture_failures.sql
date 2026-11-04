@@ -5,7 +5,8 @@
 -- reaper had no durable record of how often one lease had already failed, so
 -- every retry started a new full snapshot about every 1.5 minutes with no
 -- backoff, and nothing could alert on a lease that kept failing. These
--- columns count settled failures of one lease epoch: a count is valid only
+-- columns count settled failures of one lease epoch since its last published
+-- save (a publish resets them): a count is valid only
 -- while drain_capture_failure_epoch equals lease_epoch, so a new box starts
 -- from zero without any existing epoch writer having to reset it.
 --
