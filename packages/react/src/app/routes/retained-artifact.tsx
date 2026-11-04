@@ -2,7 +2,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { FileAsset, RetainedArtifactReference } from "@opengeni/sdk";
 import { LightboxProvider, createWorkspaceRetainedArtifactLoader } from "../../timeline";
 import { PatchApplyCommand, isPatchFilename } from "../../artifacts";
-import { DownloadIcon, LockKeyholeIcon, Maximize2Icon, RefreshCwIcon } from "lucide-react";
+import {
+  DownloadIcon,
+  LinkIcon,
+  LockKeyholeIcon,
+  Maximize2Icon,
+  RefreshCwIcon,
+} from "lucide-react";
 import { useAppContext } from "../app-context";
 import { ArtifactSessionPage } from "../components/session/artifact-session-page";
 import { ArtifactFullView } from "../components/artifacts/artifact-full-view";
@@ -30,9 +36,12 @@ import {
   retainedArtifactLoadErrorPresentation,
 } from "../lib/retained-artifact-load-error";
 import { FILE_AUDIENCE_COPY, useArtifactAudience } from "../components/artifacts/site-audience";
-import { isPersonalWorkspace } from "../lib/managed-self-context";
+import { FileReachDialog } from "../components/artifacts/file-reach-dialog";
+import { useCopyArtifactLink } from "../components/artifacts/copy-artifact-link";
 import { hasWorkspacePermission } from "../lib/permissions";
 import { invalidateArtifactCatalog } from "../lib/use-artifact-catalog";
+import { t } from "../lib/console-text";
+import { orgLabel } from "../lib/org";
 
 export function RetainedArtifactRoute({
   workspaceId,
@@ -84,6 +93,7 @@ function RetainedArtifactDetail({
   const { client, accessKeyVersion } = context;
   const back = useArtifactsBackLink(workspaceId, fromSession);
   const [fullView, setFullView] = useArtifactFullView();
+  const copyLink = useCopyArtifactLink(workspaceId);
   const key = `${workspaceId}:${artifactId}:${accessKeyVersion}`;
   const [state, setState] = useState<{
     key: string;
@@ -97,6 +107,7 @@ function RetainedArtifactDetail({
   const [retry, setRetry] = useState(0);
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [choosingWhere, setChoosingWhere] = useState(false);
   const downloads = useRef({ generation: 0 }).current;
   useEffect(() => {
     let current = true;
@@ -144,7 +155,6 @@ function RetainedArtifactDetail({
     artifact !== undefined &&
     retainedPreviewKind(artifact.contentType, loaded?.filename) !== null;
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
-  // A Personal workspace has nobody to share with, so there is no audience.
   // Session screenshots and saved tool output stay with their chat.
   const file = loaded?.file;
   const showAudience =
@@ -152,26 +162,31 @@ function RetainedArtifactDetail({
     file.scope !== undefined &&
     artifact?.kind !== "computer_screenshot" &&
     artifact?.kind !== "browser_screenshot" &&
-    artifact?.kind !== "tool_result" &&
-    !isPersonalWorkspace(workspace, context.managedSelfContext);
+    artifact?.kind !== "tool_result";
+  const ownFile = Boolean(
+    showAudience &&
+    file?.ownerSubjectId &&
+    file.ownerSubjectId === context.accessContext.subjectId &&
+    hasWorkspacePermission(context.accessContext, workspaceId, "files:upload"),
+  );
+  // The owner's Only me file can work in their other workspaces of the
+  // organization too, on a server that keeps where it works.
+  const reachable =
+    ownFile && file?.scope === "personal" && file.reachWorkspaceIds !== undefined && !!workspace;
   const audience = useArtifactAudience({
     client,
     workspaceId,
     workspaceName: workspace?.name ?? "this workspace",
     title: filename,
     visibility: file?.scope === "personal" ? "private" : "workspace",
-    ownedByCurrentUser: Boolean(
-      showAudience &&
-      file?.ownerSubjectId &&
-      file.ownerSubjectId === context.accessContext.subjectId &&
-      hasWorkspacePermission(context.accessContext, workspaceId, "files:upload"),
-    ),
+    ownedByCurrentUser: ownFile,
     copy: FILE_AUDIENCE_COPY,
     update: async (visibility) => {
       const response = await client.updateFileVisibility(workspaceId, artifactId, { visibility });
       setState((current) => (current?.key === key ? { ...current, file: response.file } : current));
       invalidateArtifactCatalog(client, workspaceId);
     },
+    onChooseWhere: reachable ? () => setChoosingWhere(true) : undefined,
   });
   const patchLoader = useMemo(
     () => createWorkspaceRetainedArtifactLoader(client, workspaceId),
@@ -248,6 +263,13 @@ function RetainedArtifactDetail({
       actions={
         <>
           {showAudience ? audience.shareButton : null}
+          {/* In a chat's panel the panel's header has it. */}
+          {embedded ? null : (
+            <RowButton onClick={() => void copyLink({ kind: "file", id: artifactId })}>
+              <LinkIcon aria-hidden="true" />
+              Copy link
+            </RowButton>
+          )}
           {expandable ? (
             <RowButton onClick={() => setFullView(true)}>
               <Maximize2Icon aria-hidden="true" />
@@ -308,6 +330,27 @@ function RetainedArtifactDetail({
           </>
         ) : null}
         {showAudience ? audience.dialog : null}
+        {reachable && file && workspace ? (
+          <FileReachDialog
+            open={choosingWhere}
+            onOpenChange={setChoosingWhere}
+            title={filename}
+            homeWorkspaceId={workspaceId}
+            reachWorkspaceIds={file.reachWorkspaceIds ?? null}
+            workspaces={context.workspaces
+              .filter((candidate) => candidate.accountId === workspace.accountId)
+              .map(({ id, name, kind }) => ({ id, name, personal: kind === "personal" }))}
+            organizationName={orgLabel(t, workspace.accountId, context.accessContext.accountGrants)}
+            onSave={async (reachWorkspaceIds) => {
+              const response = await client.updateFileReach(workspaceId, artifactId, {
+                reachWorkspaceIds,
+              });
+              setState((current) =>
+                current?.key === key ? { ...current, file: response.file } : current,
+              );
+            }}
+          />
+        ) : null}
       </DetailPage>
     </ContentPage>
   );

@@ -34,11 +34,10 @@ use crate::layout::{Images, Paths, sync_parent};
 use crate::observe::{Alarm, Observer, alarm_event};
 use crate::protocol::{Id, SandboxConfig};
 use crate::state::{Change, Disk, Record};
-use crate::store::{Claimed, Owned, OwnerEpoch, Stamp, Store};
+use crate::store::{Claimed, MadeAt, Owned, OwnerEpoch, Stamp, Store};
 
 use super::disk::{AfterReading, Room};
 use super::remove::unmake;
-use super::requests::first_wake_by_ms;
 use super::{Command, Event, HostAgent, HostError, Reply};
 use crate::fleet::Admission;
 
@@ -370,9 +369,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // claimed the wake is checked and booked without it; its disk is
         // judged by the copy's own then (see `Self::adopted_room`).
         let unclaimed = self.size(&config, Some(0));
-        match self.can_create(id, &config, unclaimed, true) {
-            Ok(Room::Now) => {}
-            Ok(Room::AfterReading) => {
+        let policy = match self.can_create(id, &config, unclaimed, true) {
+            Ok((Room::Now, policy)) => policy,
+            Ok((Room::AfterReading, _)) => {
                 let waiting = AfterReading::Adopt(id, Box::new(config), owner, from_files, reply);
                 self.after_reading(waiting);
                 return;
@@ -381,7 +380,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 let _ = reply.send(Err(error));
                 return;
             }
-        }
+        };
         let ordinal = match self.take_ordinal() {
             Ok(ordinal) => ordinal,
             Err(problem) => {
@@ -398,8 +397,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
         };
         self.preparing.insert(id.0);
-        let by_ms = first_wake_by_ms();
-        self.input(self.first_wake(id, unclaimed, true, by_ms));
+        let by_ms = self.first_wake_by_ms();
+        self.input(self.first_wake(id, unclaimed, policy, true, by_ms));
         let mut record = Record::new(id, ordinal, allocation, config);
         record.first_wake_by_ms = Some(by_ms);
         self.claim_copy(id, record, owner, from_files, reply);
@@ -431,7 +430,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }),
                 Ok(Owned::Done(None)) => Err(HostError::NoCopy(id)),
                 Ok(Owned::Done(Some(claimed))) => {
-                    files_only(&*store, &observer, id, owner, claimed, from_files).await
+                    let why = FilesOnly::of(&claimed, &record.config, from_files);
+                    files_only(&*store, &observer, id, owner, claimed, why).await
                 }
             };
             let event = match claimed {
@@ -599,9 +599,19 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let _ = reply.send(Err(HostError::Awake(id)));
             return;
         }
-        if let Err(error) = self.request_sleep(id, Level::Archived) {
-            let _ = reply.send(Err(error));
-            return;
+        match self.request_sleep(id, Level::Archived) {
+            Ok(Room::Now) => {}
+            Ok(Room::AfterReading) => {
+                // Only the next disk reading can tell whether its save
+                // fits: nothing of it has changed, and the hand-off is
+                // asked again then.
+                self.after_reading(AfterReading::HandOff(id, owner, awake, reply));
+                return;
+            }
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return;
+            }
         }
         if wanted {
             // Whoever waits for it to wake here asks again and finds it on
@@ -848,22 +858,53 @@ async fn adopted_files(
     .map_err(io::Error::other)?
 }
 
-/// The copy `claimed` names, taken up from its files alone with
-/// `from_files`: its memory image is deleted from the store first, as the
-/// claim's next save, so a later adopt or wake never restores it. A try
-/// whose answer was lost finds the change done; an adopt tried again
-/// claims the copy without the image and leaves it be. Deleting the image
-/// raises [`Alarm::ProgramsLost`], as a VM that died does: the sandbox
-/// boots fresh from its disk, and whatever ran in it is gone.
+/// Why an adopted copy is taken up from its files alone, if it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FilesOnly {
+    /// Its memory image is restored.
+    No,
+    /// The service does not vouch for the copy as the sandbox's latest
+    /// state: its last owner was lost, so its memory image may be stale.
+    Stale,
+    /// Its memory image was saved from a machine of another shape than
+    /// the sandbox is given now (it was resized), which a restore would
+    /// bring back instead.
+    Reshaped,
+}
+
+impl FilesOnly {
+    /// Why `claimed`, adopted for a sandbox of `config`, is taken up from
+    /// its files alone, with `from_files` as the adopt asked.
+    fn of(claimed: &Claimed, config: &SandboxConfig, from_files: bool) -> Self {
+        if !claimed.memory {
+            Self::No
+        } else if claimed.made_at.differs(config) {
+            Self::Reshaped
+        } else if from_files {
+            Self::Stale
+        } else {
+            Self::No
+        }
+    }
+}
+
+/// The copy `claimed` names, taken up from its files alone when `why`
+/// says: its memory image is deleted from the store first, as the claim's
+/// next save, so a later adopt or wake never restores it. A try whose
+/// answer was lost finds the change done; an adopt tried again claims the
+/// copy without the image and leaves it be. The sandbox boots fresh from
+/// its disk, and whatever ran in it is gone: for a stale image that raises
+/// [`Alarm::ProgramsLost`], as a VM that died does, while a resize, which
+/// asked for it, is only logged.
 async fn files_only<S: Store>(
     store: &S,
     observer: &Observer,
     id: Id,
     owner: OwnerEpoch,
     claimed: Claimed,
-    from_files: bool,
+    why: FilesOnly,
 ) -> Result<Claimed, HostError> {
-    if !from_files || !claimed.memory {
+    if why == FilesOnly::No {
         return Ok(claimed);
     }
     let change = Stamp {
@@ -879,30 +920,37 @@ async fn files_only<S: Store>(
         }),
         Ok(Owned::Done(None)) => Err(HostError::NoCopy(id)),
         Ok(Owned::Done(Some(receipt))) => {
-            tracing::info!(%id, "adopted from its files: its last owner was lost, so its memory image may be stale");
-            let what =
-                "running programs lost: adopted from its files, its memory image may be stale";
-            observer.alarm(
-                Alarm::ProgramsLost,
-                alarm_event(what).with("compute.sandbox.id", id.to_string()),
-            );
+            if why == FilesOnly::Reshaped {
+                tracing::info!(%id, made_at = ?claimed.made_at, "adopted from its files: it was resized, and its memory image restores the machine it was saved from");
+            } else {
+                tracing::info!(%id, "adopted from its files: its last owner was lost, so its memory image may be stale");
+                let what =
+                    "running programs lost: adopted from its files, its memory image may be stale";
+                observer.alarm(
+                    Alarm::ProgramsLost,
+                    alarm_event(what).with("compute.sandbox.id", id.to_string()),
+                );
+            }
             Ok(Claimed {
                 save: change.save,
                 receipt,
                 memory: false,
                 disk_bytes: claimed.disk_bytes,
+                made_at: MadeAt::default(),
             })
         }
     }
 }
 
 /// Makes `record` that of a sandbox kept only in the store, as `claimed`
-/// left it, owned under `owner`.
+/// left it, owned under `owner`. Its disk is booked at the length its
+/// config asks for, if longer than the copy's: its first fetch makes it
+/// that long.
 fn remote_record(record: &mut Record, owner: OwnerEpoch, claimed: &Claimed) {
     record.disk = Disk::Remote;
     record.image = claimed.memory;
     record.archived = true;
     record.owner_epoch = owner.0;
     record.saves = claimed.save;
-    record.allocation.disk_bytes = Some(claimed.disk_bytes);
+    record.allocation.disk_bytes = Some(record.config.disk_bytes(claimed.disk_bytes));
 }

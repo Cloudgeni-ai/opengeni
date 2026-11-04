@@ -52,6 +52,12 @@ impl Children {
             Ok(())
         }
     }
+
+    /// The children it started that have not been reaped.
+    pub fn pids(&self) -> Vec<i32> {
+        let waiting = self.waiting.lock().unwrap_or_else(PoisonError::into_inner);
+        waiting.keys().copied().collect()
+    }
 }
 
 /// The new command, for the program at `path`, starting with no signal

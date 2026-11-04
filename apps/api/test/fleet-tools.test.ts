@@ -573,7 +573,7 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
       activeEpoch: before?.activeEpoch ?? 0,
       code: "personal_machine_permission_required",
     });
-    expect(refused.reason).toContain("its owner has not allowed this chat");
+    expect(refused.reason).toContain("its owner has not turned it on for agents in this workspace");
     expect(refused.reason).toContain("capability_authorization_request");
     expect(refused.reason).not.toContain("Failed query");
     const refusedRun = await runOnSandbox(services, ctx, machine.sandboxId, {
@@ -581,7 +581,9 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
       cmd: "hostname",
     });
     expect(refusedRun.ok).toBe(false);
-    expect(refusedRun.reason).toContain("its owner has not allowed this chat");
+    expect(refusedRun.reason).toContain(
+      "its owner has not turned it on for agents in this workspace",
+    );
     expect(refusedRun.code).toBe("personal_machine_permission_required");
     await allowThisChat();
     const withoutAttempt: FleetContext = {

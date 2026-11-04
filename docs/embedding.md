@@ -164,7 +164,7 @@ A preset decides which features show and single keys switch them:
 | `adminAccess`: workspace-admin access indicator and grant | on | off | off |
 | `keyboardShortcuts`: ⌘K menu, shortcut keys and the ⌘/ sheet (`newChatShortcut` is a deprecated alias) | on | off | off |
 | `brand`: the Opengeni row at the top of the chat list and the mobile header | on | on | off |
-| `starters`: suggested first tasks under the new-chat composer (the host's own `starters`, or Opengeni's) | on | on | off |
+| `starters`: Opengeni's suggested first tasks under the new-chat composer | on | on | off |
 | `shareLinks`: Share in the chat header, a read-only link anyone holding it can open | on | on | off |
 | `addCredits`: the new-chat page's "Add credits" button for people who manage billing (card billing only); the credits notice still shows when a model's credits run out | on | off | on |
 
@@ -182,8 +182,9 @@ the composer (its `detail` in the tooltip), and the person can leave it out of
 their messages; a new label brings it back. Pass a new value whenever the
 context changes (the Excel add-in passes the current selection). A function is
 also accepted; it is read when each message is sent and shows no pill.
-An item may also name the first-party `tools` it is for, such as the tool that
-reaches the open document it describes. A new chat that starts with that item
+An item may also name the `tools` it is for, such as the tool that reaches the
+open document it describes, or the tools your own MCP server publishes for the
+record the page shows (by the names it publishes). A new chat that starts with that item
 loads those tools before its first model request, as a tool search by name
 would, so the agent can call them in its first step without searching. The
 chat's instructions and tool list stay the same as any other chat's, and its
@@ -196,13 +197,13 @@ the HTTP API, send the same names as `modelContextTools` next to
 with the browser's own context.
 With the dock off, entries that only open a dock panel hide with it.
 
-`starters` replaces Opengeni's new-chat suggestions with the host's own, such
-as tasks for the document the person has open (the Excel add-in suggests
-summarizing the sheet, making a chart or explaining a formula). Each has an
-`id`, a `title`, an optional `description` and the `prompt` that choosing it
-puts in the composer; nothing is sent until the person sends it. Passing them
-turns the `starters` feature on unless `features.starters` says otherwise, and
-an empty list shows no suggestions.
+`starters` replaces Opengeni's suggestions under the new-chat composer with
+the host's own, such as tasks that fit the app the chat sits in (the Excel
+add-in suggests explaining a sheet or writing a formula). Each one has an
+`id`, a `title`, an optional `description` and `icon`, and the `prompt` it puts
+in the composer for the person to edit and send. An empty list shows none, and
+the `starters` feature still turns them off. The new-chat page's recent chats
+lead with the ones the person opened there most recently.
 
 Links in agent messages to Opengeni objects (files, Sites, editable
 artifacts) open in the dock when it is on, and otherwise open the object's
@@ -315,8 +316,8 @@ control (`sessions:control`) plus one of these:
   custom MCP servers, shared or workspace connections, other people's
   connections, or removing or reconfiguring an integration, and an
   organization can reserve turning integrations on for admins.
-- `connections:write` with `connections:read` and `capabilities:manage` (or an
-  integration that is already on): any account, shared or personal.
+- `connections:write` with `connections:read`: any account, shared or
+  personal, turning the integration on if it is not on yet.
 - `connections:read` alone, when the integration is already on and bound to a
   shared workspace account.
 
@@ -572,6 +573,35 @@ with `PUT /v1/workspaces/:workspaceId/sessions/:sessionId/skills` (SDK
 and is recorded as a `session.skills.updated` event with the Skill names. An
 agent can only remove Skills this way. A session Skill shadows a workspace
 Skill with the same name.
+
+Repositories attached to a session can be removed with
+`POST /v1/workspaces/:workspaceId/sessions/:sessionId/resources/remove` (SDK
+`removeSessionResources`) and a body of `{ resources: [{ kind: "repository", uri }] }`.
+The repositories are removed from the session and its child sessions, each
+recording a `session.resources.removed` event. Matching ignores letter case
+and a trailing `.git`. Removing a repository that is not attached is a no-op,
+so a retry completes a partial removal.
+
+Access through Opengeni ends on the next call: the personal Git broker, the
+GitHub tools and every new Git credential mint check the session's current
+repositories each time, including for a running turn, a child or a goal
+continuation. A token already written into a sandbox is not recalled: a
+shared GitHub App token stays valid until it expires (at most an hour). When
+Opengeni's own GitHub App minted a token for that repository alone, the next
+managed-sandbox turn best-effort revokes it; a token supplied by a host
+credential callback is never revoked. A sandbox shared with another session
+that still attaches the repository keeps its folder and credentials.
+
+Each session keeps a record of the removal (`session.removedRepositories`)
+until a person attaches the repository again with a message. Until then an
+agent cannot attach it again (to the chat or to a child it creates), turns
+queued earlier leave it out, and child sessions created later inherit the
+record. An agent acting through `admin_action_call` acts with the person's
+own authority and counts as that person. The next turn in a managed sandbox
+removes the repository folder and credential binding before the agent starts
+and then sets the record's `sandboxCleanupPending` to false; files on a
+Connected Machine are left alone. Check `session.git.read` status first if
+the folder may hold uncommitted or unpushed work.
 
 ### Agent instructions and per-message application context
 

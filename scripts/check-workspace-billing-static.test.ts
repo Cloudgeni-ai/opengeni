@@ -170,6 +170,38 @@ describe("workspace and organization MCP route guard", () => {
     return findings;
   }
 
+  test.each([
+    "CHANGELOG.md",
+    "apps/api/CHANGELOG.md",
+    "packages/contracts/CHANGELOG.md",
+    "packages/core/CHANGELOG.md",
+    "packages/db/CHANGELOG.md",
+    "packages/runtime/CHANGELOG.md",
+    "packages\\sdk\\CHANGELOG.md",
+  ])("permits historical route descriptions in %s", (file) => {
+    expect(routeFindings(file, `Removed the old \`${organizationMcpPath}\` default.`)).toEqual([]);
+    const findings: Finding[] = [];
+    checkBillingPortalSurface(
+      file,
+      `Removed \`${["/v1/billing", "portal"].join("/")}\`.`,
+      findings,
+    );
+    expect(findings).toEqual([]);
+  });
+
+  test.each([
+    "README.md",
+    "packages/sdk/README.md",
+    "docs/current-usage.md",
+    "apps/api/src/routes/example.ts",
+    "deploy/helm/opengeni/values.yaml",
+  ])("still checks live routes and current guidance in %s", (file) => {
+    expect(routeFindings(file, `Use \`${organizationMcpPath}\` as the default.`)).toHaveLength(2);
+    const findings: Finding[] = [];
+    checkBillingPortalSurface(file, `Use \`${["/v1/billing", "portal"].join("/")}\`.`, findings);
+    expect(findings).toHaveLength(1);
+  });
+
   test.each(organizationSurfaces)(
     "admits only the canonical organization MCP leaf in %s",
     (file) => {

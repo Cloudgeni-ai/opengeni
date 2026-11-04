@@ -352,7 +352,7 @@ export function useMeetingView({
     if (id === "rerun") {
       Alert.alert(
         msg("native.meetings.meetingView.transcribeAgainQuestion"),
-        msg("native.meetings.meetingView.aNewTranscriptIsMadeFromTheFullAudio"),
+        msg("native.meetings.meetingView.aNewTranscriptAndNotesToo"),
         [
           { text: msg("meetings.recorderPanel.cancel"), style: "cancel" },
           {

@@ -14,6 +14,7 @@ import {
   BROWSER_ACTION_RECEIPT_NOTES_VERSION,
   BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER,
   BROWSER_OBSERVATION_NOTICES_PARAMETER,
+  BROWSER_SESSION_NO_OBSERVATION_PARAMETER,
   BROWSER_CONTROL_MAX_JSON_BYTES,
   BROWSER_CONTROL_PORT,
   COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER,
@@ -298,7 +299,9 @@ export type PlacementBrowserSessionReference = {
 };
 
 export type PlacementBrowserSession = PlacementBrowserSessionReference & {
-  observation: BrowserObservationValue;
+  /** Null when a session continued in the person's own browser with none of
+   * its tabs left: it has no tab until one is opened. */
+  observation: BrowserObservationValue | null;
   /** The tab inventory at creation, when the controller reports it. */
   targets?: BrowserTargetValue[];
   /** A plain line about how the controller launched this browser. */
@@ -323,6 +326,7 @@ export type PlacementComputerSession = PlacementComputerSessionReference & {
 };
 
 export type CreatePlacementComputerSessionInput = PlacementComputerSessionReference & {
+  cursorIdentity?: import("@opengeni/contracts").ComputerCursorIdentity;
   tokenGeneration: number;
   controlToken: string;
   viewToken: string;
@@ -802,7 +806,7 @@ export class BrowserControlClient {
     try {
       data = await this.requestJson({
         method: "POST",
-        path: "/v1/browser-sessions",
+        path: `/v1/browser-sessions?${BROWSER_SESSION_NO_OBSERVATION_PARAMETER}=1`,
         token: this.adminToken,
         body: {
           ...reference,
@@ -841,7 +845,7 @@ export class BrowserControlClient {
     }
     return {
       ...returnedReference,
-      observation: BrowserObservation.parse(data.observation),
+      observation: data.observation === null ? null : BrowserObservation.parse(data.observation),
       ...creationTargets(data.targets, returnedReference),
       ...creationNotice(data.notice),
       ...creationDisplay(data.display),
@@ -852,7 +856,7 @@ export class BrowserControlClient {
     input: CreatePlacementComputerSessionInput,
   ): Promise<PlacementComputerSession> {
     const reference = parseComputerReference(input);
-    const data = await this.requestJson({
+    const request = {
       method: "POST",
       path: "/v1/computer-sessions",
       token: this.adminToken,
@@ -861,8 +865,27 @@ export class BrowserControlClient {
         tokenGeneration: positiveSafeInteger(input.tokenGeneration, "token generation"),
         controlToken: requireToken(input.controlToken, "computer control token"),
         viewToken: requireToken(input.viewToken, "computer view token"),
+        ...(input.cursorIdentity ? { cursorIdentity: input.cursorIdentity } : {}),
       },
-    });
+    } as const;
+    let data: unknown;
+    try {
+      data = await this.requestJson(request);
+    } catch (error) {
+      // Older agents reject the new field in their request parser, before
+      // creating a session. Only this exact, definite pre-dispatch rejection
+      // permits a metadata-free retry; never replay an uncertain create.
+      if (
+        !input.cursorIdentity ||
+        !(error instanceof BrowserControlRequestError) ||
+        error.status !== 400 ||
+        error.error.code !== "invalid_action" ||
+        error.error.message !== "request contains unknown fields"
+      )
+        throw error;
+      const { cursorIdentity: _identity, ...body } = request.body;
+      data = await this.requestJson({ ...request, body });
+    }
     if (!isRecord(data) || !Array.isArray(data.targets)) {
       throw new BrowserControlProtocolError(
         "interaction controller returned malformed computer session data",
@@ -2462,7 +2485,7 @@ export class BrowserControlSessionClient {
     return BrowserPasskeySyncResponse.parse(
       await this.parent.requestForSession({
         method: "POST",
-        path: this.path("passkeys/sync"),
+        path: this.path("passkeys/sync?backupFlags=1"),
         token: this.controlToken,
         body: parsed,
       }),
@@ -3175,7 +3198,9 @@ function parseEnvelope(body: string, status: number): unknown {
       throw new BrowserControlRequestError(
         status,
         parsed.data,
-        parsed.data.code === "driver_failed"
+        // A driver failure, or a read that kept failing for an unclassified
+        // reason, carries the driver's error class and frame for logs.
+        parsed.data.code === "driver_failed" || parsed.data.code === "resource_unavailable"
           ? parseInteractionDriverDiagnostic(value.diagnostic)
           : null,
       );

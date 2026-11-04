@@ -113,6 +113,91 @@ is disabled.
 The chat account list only controls attachments. Adding or connecting accounts
 uses the connector's Capabilities page or a prepared inline Connect card.
 
+### Where your own logins work
+
+A personal (Only me) login belongs to its owner across the organization, but it
+works for their messages only where they turned it on:
+
+- Always in their Personal workspace.
+- In a shared workspace when they turned it on there. A login starts on in the
+  workspace it was added from. Connecting the same account again, or
+  reconnecting it, from another shared workspace turns it on there too.
+- Under each of the viewer's own logins, a connector's Capabilities page lists
+  **Where it works**: every workspace they belong to in the organization, with
+  a switch for each. The Personal workspace is always on. A workspace where
+  they may not add their own things shows the switch off with the reason; a
+  login that is on can always be turned off.
+- When a chat asks for a connector whose login the person added elsewhere, the
+  Connect card offers it with one click ("Use it here") instead of a new sign-in.
+- In a chat shared with the workspace, the owner sees one quiet line above the
+  composer, "N personal connections in this chat", counting the accounts that
+  are on. It opens a menu that says people in the workspace see what the agent
+  does with them, with one switch per account. Off turns every connection of
+  that account off in this workspace; on turns it back on with the same grant
+  as **Where it works**. An account connected more than once is listed once.
+  A row turned off stays in the menu until the chat is left. It never blocks a
+  turn.
+
+Turning a login on is the owner's standing `connection.use` grant for that
+workspace (`always`, `workspace_shared`); it is not a per-chat approval. Other
+people's messages never use someone's own login. Logins that are off in a
+workspace are not attached to turns there, so the agent sees the connector as
+not connected and offers the Connect card. Accepted turns keep the accounts
+frozen at acceptance. Personal GitHub keeps its own per-chat repository choice.
+
+Editing a queued message keeps its accepted accounts only when its own sender
+resubmits it. When anyone else (another member, a workspace API key) edits and
+sends it, it becomes the editor's own message: it runs as the editor, with the
+editor's own logins and allowance, never the original sender's.
+
+A waiting action runs on the accounts its message froze, whoever decides it,
+so approving an action that runs on someone's own login is that person's
+decision alone. Anyone who can control the chat may decline it, and actions on
+workspace logins keep their ordinary rules. The owner's own requests count as
+the owner: their signed-in session, their personal API key and a token issued
+on their behalf (`asUser`). Another member, a workspace API key with no person
+behind it, or someone else's Slack click gets `403` with
+`details.code: "APPROVAL_REQUIRES_ACCOUNT_OWNER"` (and `details.accountOwnerLabel`
+when known; the SDK's `isApprovalRequiresAccountOwnerError` checks it), whose message names the owner when known
+("Only Alice can approve this action, because it runs on their own account.").
+A tool review tells each viewer the same: `approvedBy: "account_owner"` with
+`accountOwnerLabel` and only `reject` for everyone else, and
+`approvedBy: "you"` for the owner in a chat shared with the workspace.
+
+The same list serves a person's own logins, model subscriptions and machines:
+`GET /v1/workspaces/:workspaceId/own-resources/reach?resourceKind=&resourceId=`
+returns each workspace with `on`, `alwaysOn` and `canChange`, Personal first,
+and `PUT` on the same path with `{ resourceKind, resourceId, on }` turns it on
+or off in the path's workspace. `resourceKind` is `connection`,
+`subscription_connection` or `connected_machine` (the machine's enrollment id).
+Anything that isn't the caller's own answers `404`; turning a login or plan off
+in its owner's Personal workspace answers `422`.
+
+**My things** (account menu, or Settings under Your account) lists all of a
+person's own logins, plans and machines in the organization together, each
+with where it works, and opens the same switches.
+`GET /v1/workspaces/:workspaceId/own-resources` returns that list: logins, then
+plans, then machines, each with the same workspace rows as the reach endpoint.
+
+Logins that existed before this rule start on in every shared workspace their
+owner belonged to, so nothing that worked stops working.
+
+One account is one login. Before connecting reused an existing login, turning a
+connector on in a second workspace could save a second login to the same
+account, with its tool choices split between the two. Migration
+`1226_merge_duplicate_personal_logins.sql` merges those: logins of the same
+person to the same server (exact MCP URL, provider, authorization server and
+client) whose service verified the same account identity (Slack, Gmail, Google
+Calendar, Google Drive and Atlassian) keep one login. The kept login is a working
+one with the most scopes; another merges into it only when the kept login has
+every scope it has. Its tool choices join the kept login's (strictest wins),
+the kept login is turned on wherever it was, schedule pins and connector
+references move to the kept login, and it is revoked with
+`metadata.mergedIntoConnectionId`. A login whose identity is unknown, or that an
+event trigger, vault, Knowledge sync, Site tool allowance or API Integration
+depends on, is left for its owner to remove. Accepted turns and their audit
+records keep the login they ran with.
+
 An exact `connectionRef.connectionId` remains pinned to that account, including
 custom API instances. Multi-account selectors are unpinned; the explicit
 `accountSelection: "all_eligible"` mode cannot be combined with a connection ID,

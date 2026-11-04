@@ -228,6 +228,77 @@ test("a sub-page brings its own header", async () => {
   }
 });
 
+/** Classes that would paint an opaque panel over the rail surface. */
+const OPAQUE_FILL = /^(?:bg-(?:bg|canvas|surface(?:-\d)?)|og-rail-glow)$/;
+
+test("the docked settings rail is the main rail's sidebar: same column, clear surface, brand row", async () => {
+  narrow = false;
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(shell()));
+    const nav = container.querySelector<HTMLElement>('nav[aria-label="Settings"]')!;
+    // The docked column the macOS app turns into window glass, with the shared
+    // rail surface (the rail glow) as the only background.
+    const column = nav.closest<HTMLElement>("[data-shell-rail]");
+    expect(column).not.toBeNull();
+    expect(column!.classList.contains("border-r")).toBe(true);
+    const surface = nav.closest<HTMLElement>("[data-rail-surface]");
+    expect(surface).not.toBeNull();
+    expect(column!.contains(surface)).toBe(true);
+    expect(surface!.classList.contains("og-rail-glow")).toBe(true);
+    // Nothing inside the surface paints over it: an opaque fill there is the
+    // flat panel, and its edge under the clear window bar the line under the bar.
+    const filled = [nav, ...nav.querySelectorAll<HTMLElement>("*")]
+      .filter((element) => !element.closest("[data-settings-search], [aria-haspopup]"))
+      .flatMap((element) => [...element.classList].filter((name) => OPAQUE_FILL.test(name)));
+    expect(filled).toEqual([]);
+    // The brand row is the main rail's: its empty space moves the desktop window.
+    const brand = nav.querySelector<HTMLElement>("[data-rail-brand]");
+    expect(brand?.hasAttribute("data-window-drag")).toBe(true);
+    expect(brand?.querySelector('a[aria-label="Opengeni home"]')).not.toBeNull();
+    // As wide as the main rail (its default here, without the app's rail state).
+    const frame = container.querySelector<HTMLElement>("[data-window-frame]")!;
+    const { RAIL_DEFAULT_WIDTH } = await import("@opengeni/react/app/components/rail/rail-context");
+    expect(frame.style.getPropertyValue("--og-settings-rail-width")).toBe(
+      `${RAIL_DEFAULT_WIDTH}px`,
+    );
+    expect(frame.className).toContain(
+      "lg:grid-cols-[var(--og-settings-rail-width,15rem)_minmax(0,1fr)]",
+    );
+    expect(frame.className).toContain(
+      "desktop-wide:grid-cols-[var(--og-settings-rail-width,18rem)_minmax(0,1fr)]",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("the settings drawer shows the rail on the same surface", async () => {
+  narrow = true;
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(shell()));
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Open settings menu"]')!
+        .click();
+    });
+    const nav = document.querySelector<HTMLElement>('[role="dialog"] nav[aria-label="Settings"]')!;
+    expect(nav.closest("[data-rail-surface]")?.classList.contains("og-rail-glow")).toBe(true);
+    expect([...nav.classList].filter((name) => OPAQUE_FILL.test(name))).toEqual([]);
+    // Not a docked column: the drawer keeps its own glow on macOS too.
+    expect(nav.closest("[data-shell-rail]")).toBeNull();
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 test("search finds settings by name and keeps the keyboard in the rail", async () => {
   narrow = false;
   const container = document.createElement("div");
@@ -303,6 +374,8 @@ test("search finds settings by name and keeps the keyboard in the rail", async (
     await type("voice");
     expect(results().map((result) => result.textContent)).toEqual([
       "Voice inputWorkspace · General",
+      "Default voice modelOrganization · Models",
+      "ElevenLabsOrganization · Models",
     ]);
     expect(results()[0]?.getAttribute("aria-current")).toBeNull();
     // The page you're on is marked as current.
@@ -312,7 +385,7 @@ test("search finds settings by name and keeps the keyboard in the rail", async (
 
     // Down moves into the results, up returns to the field, Escape clears.
     await type("models");
-    expect(results()).toHaveLength(2);
+    expect(results()).toHaveLength(4);
     await key(field(), "ArrowDown");
     expect(document.activeElement).toBe(results()[0]!);
     await key(results()[0]!, "ArrowDown");

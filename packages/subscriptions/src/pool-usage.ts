@@ -34,8 +34,12 @@ export type SubscriptionUsagePoolInput = {
     resetsAt: number | null;
     observedAt: number;
   }>;
-  /** Attributed, estimated API-equivalent usage; used only for calibration and shape. */
-  calls: Array<{ connectionId: string; at: number; units: number }>;
+  /**
+   * Attributed, estimated API-equivalent usage; used only for calibration and shape.
+   * An entry may total `count` calls (default 1) that fall between the same two
+   * readings and in the same hour, with `at` the last of them.
+   */
+  calls: Array<{ connectionId: string; at: number; units: number; count?: number }>;
   historyStart: number | null;
 };
 
@@ -105,6 +109,26 @@ function median(values: number[]): number {
   const middle = Math.floor(sorted.length / 2);
   return sorted.length % 2 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
 }
+const callCount = (call: Call) => call.count ?? 1;
+/** Five-minute slots from the Unix epoch, as the history read keeps readings. */
+const slot = (at: number) => Math.floor(at / (HOUR / 12));
+const countCalls = (calls: Call[]) => sum(calls.map(callCount));
+/** The median single call, counting a total of several calls as that many average calls. */
+function medianCallUnits(calls: Call[]): number {
+  const sorted = calls
+    .map((call) => ({ units: call.units / callCount(call), count: callCount(call) }))
+    .sort((a, b) => a.units - b.units);
+  const total = sum(sorted.map((call) => call.count));
+  const at = (position: number) => {
+    let seen = 0;
+    for (const call of sorted) {
+      seen += call.count;
+      if (position < seen) return call.units;
+    }
+    return sorted.at(-1)!.units;
+  };
+  return (at(Math.floor((total - 1) / 2)) + at(Math.floor(total / 2))) / 2;
+}
 function hourOfWeek(at: number): number {
   const date = new Date(at);
   return ((date.getUTCDay() + 6) % 7) * 24 + date.getUTCHours();
@@ -145,7 +169,9 @@ export function buildSubscriptionUsagePool(
       call.at < since ||
       call.at > input.now ||
       !finite(call.units) ||
-      call.units <= 0
+      call.units <= 0 ||
+      !Number.isSafeInteger(callCount(call)) ||
+      callCount(call) < 1
     )
       continue;
     const calls = callsByAccount.get(call.connectionId) ?? [];
@@ -417,7 +443,10 @@ function stableSegments(readings: Reading[], calls: Call[], duration: number): S
     }
     // Polling more often than five minutes accumulates into a sample, rather than
     // dropping every adjacent pair. A correction/reset still breaks the chain above.
-    if (after.observedAt - before.observedAt < HOUR / 12) continue;
+    // A sample ends at the first reading two or more five-minute slots (UTC) after
+    // the one it starts in, so it spans at least five minutes and a history read
+    // that keeps only each slot's first reading and every change samples the same.
+    if (slot(after.observedAt) < slot(before.observedAt) + 2) continue;
     while (callIndex < calls.length && calls[callIndex]!.at <= before.observedAt) callIndex++;
     const start = callIndex;
     while (callIndex < calls.length && calls[callIndex]!.at <= after.observedAt) callIndex++;
@@ -466,7 +495,7 @@ function calibratedCapacity(segments: Segment[]): number | null {
   if (
     stable.length < 3 ||
     stable.length < paired.length * 0.6 ||
-    sum(stable.map(({ segment }) => segment.calls.length)) < 6 ||
+    sum(stable.map(({ segment }) => countCalls(segment.calls))) < 6 ||
     sum(stable.map(({ segment }) => segment.fraction)) < 0.1 ||
     sum(stable.map(({ segment }) => segment.end - segment.start)) < HOUR ||
     sum(stable.map(({ segment }) => segment.fraction)) <
@@ -493,13 +522,15 @@ function buildPace(
   for (const segment of segments) {
     const hours = (segment.end - segment.start) / HOUR;
     const shape = new Map<number, number>();
-    const reliableCalls = segment.calls.length >= 3 && segment.fraction > 0;
+    const reliableCalls = countCalls(segment.calls) >= 3 && segment.fraction > 0;
     if (reliableCalls) {
-      const cap = median(segment.calls.map((call) => call.units)) * 3;
+      const cap = medianCallUnits(segment.calls) * 3;
       for (const call of segment.calls) {
         // An endpoint call belongs to the interval ending there, not a future hour.
         const hour = Math.floor(Math.min(call.at, segment.end - 1) / HOUR) * HOUR;
-        shape.set(hour, (shape.get(hour) ?? 0) + Math.min(call.units, cap));
+        // A total of several calls is capped per call, at its average.
+        const units = call.units / callCount(call) <= cap ? call.units : callCount(call) * cap;
+        shape.set(hour, (shape.get(hour) ?? 0) + units);
       }
     }
     const shapeTotal = sum([...shape.values()]);

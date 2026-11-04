@@ -116,11 +116,17 @@ export async function withSubscriptionCoreProviderPlacementWorld<T>(
                 session.visibility,
                 ${provider.sessionCompactionLock ?? sql`false`} as compaction_locked,
                 get_workspace_kind(workspace.account_id, workspace.id) as workspace_kind,
-                -- The workspace's own policy, else its organization's default.
-                case when policy.workspace_id is not null then policy.allowed_providers
-                  else organization_defaults.allowed_providers end as allowed_providers,
-                case when policy.workspace_id is not null then policy.allowed_models
-                  else organization_defaults.allowed_models end as allowed_models
+                -- The workspace's own lists narrowed within its organization's.
+                case when policy.allowed_providers is null then organization_defaults.allowed_providers
+                  when organization_defaults.allowed_providers is null then policy.allowed_providers
+                  else array(select allowed from unnest(policy.allowed_providers) allowed
+                    where allowed = any(organization_defaults.allowed_providers)) end
+                  as allowed_providers,
+                case when policy.allowed_models is null then organization_defaults.allowed_models
+                  when organization_defaults.allowed_models is null then policy.allowed_models
+                  else array(select allowed from unnest(policy.allowed_models) allowed
+                    where allowed = any(organization_defaults.allowed_models)) end
+                  as allowed_models
               from sessions session
               join session_turns turn on turn.account_id = session.account_id
                 and turn.workspace_id = session.workspace_id and turn.session_id = session.id
@@ -185,25 +191,10 @@ export async function withSubscriptionCoreProviderPlacementWorld<T>(
 
     let people: PlacementInput["people"] = [];
     if (session.owner_membership_id) {
-      const [preference] = await rawRows<{ personal_fallback_opt_in: boolean }>(
-        tx,
-        sql`select personal_fallback_opt_in
-              from subscription_person_preferences
-              where account_id = ${request.accountId}::uuid
-                and organization_membership_id = ${session.owner_membership_id}::uuid
-              limit 1`,
-      );
       // The exact accepted-turn gate above established that a non-null owner
       // membership is active. Runtime roles intentionally cannot read the
-      // organization_memberships table directly; preferences remain
-      // independently scoped by FORCE RLS and default to false when absent.
-      people = [
-        {
-          membershipId: session.owner_membership_id,
-          active: true,
-          personalFallbackOptIn: preference?.personal_fallback_opt_in ?? false,
-        },
-      ];
+      // organization_memberships table directly.
+      people = [{ membershipId: session.owner_membership_id, active: true }];
     }
 
     if (
@@ -213,14 +204,7 @@ export async function withSubscriptionCoreProviderPlacementWorld<T>(
     ) {
       // The personal-access SQL gate proved this accepting human's live
       // membership. Do not replace the independently verified chat owner.
-      people = [
-        ...people,
-        {
-          membershipId: personalAuthority.ownerMembershipId,
-          active: true,
-          personalFallbackOptIn: false,
-        },
-      ];
+      people = [...people, { membershipId: personalAuthority.ownerMembershipId, active: true }];
     }
     const workspaceKind = session.workspace_kind === "personal" ? "personal" : "shared";
     const workspaceAllowedModelIds =

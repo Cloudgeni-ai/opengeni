@@ -6,6 +6,7 @@ import {
   OrganizationWorkspaceScope,
   Permission,
   isReadOnlyPermissionSet,
+  normalizePermission,
   normalizeOrganizationAccessPolicy,
   organizationAccessPresetPermissions,
 } from "../src";
@@ -25,8 +26,8 @@ describe("organization access policy", () => {
       Permission.options.filter(
         (permission) =>
           /:(read|list|view|search)$/.test(permission) &&
-          permission !== "secrets:read" &&
-          permission !== "variable-sets:read",
+          normalizePermission(permission) === permission &&
+          permission !== "secrets:read",
       ),
     );
     for (const permission of [
@@ -52,12 +53,16 @@ describe("organization access policy", () => {
 
   test("full contains every nondeprecated scope and custom is never implicitly expanded", () => {
     expect(organizationAccessPresetPermissions("full")).toEqual(
-      Permission.options.filter((p) => !p.startsWith("environments:")),
+      Permission.options.filter(
+        (p) => !p.startsWith("environments:") && !p.startsWith("variable-sets:"),
+      ),
     );
+    for (const permission of organizationAccessPresetPermissions("full"))
+      expect(normalizePermission(permission)).toBe(permission);
     expect(organizationAccessPresetPermissions("custom")).toEqual([]);
     const permissions = organizationAccessPresetPermissions("full");
     permissions.pop();
-    expect(organizationAccessPresetPermissions("full").length).toBe(Permission.options.length - 2);
+    expect(organizationAccessPresetPermissions("full").length).toBe(Permission.options.length - 8);
   });
 
   test("normalization maps aliases, deduplicates, orders and recomputes preset without granting", () => {
@@ -77,7 +82,7 @@ describe("organization access policy", () => {
     });
     expect(policy).toEqual({
       preset: "custom",
-      permissions: ["sessions:read", "variable-sets:use"],
+      permissions: ["sessions:read", "secrets:use"],
       workspaceScope: { kind: "selected", workspaceIds: [first, second] },
     });
     expect(input.workspaceScope.workspaceIds).toEqual([second, first]);
@@ -98,6 +103,18 @@ describe("organization access policy", () => {
         workspaceScope: { kind: "all" },
       }).preset,
     ).toBe("custom");
+    // A full key saved with the legacy names next to the canonical ones is still full.
+    expect(
+      normalizeOrganizationAccessPolicy({
+        preset: "custom",
+        permissions: [...Permission.options],
+        workspaceScope: { kind: "all" },
+      }),
+    ).toEqual({
+      preset: "full",
+      permissions: organizationAccessPresetPermissions("full"),
+      workspaceScope: { kind: "all" },
+    });
   });
 
   test("selected scope validates unique normalized UUIDs, up to 500; empty reaches nothing", () => {

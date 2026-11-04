@@ -11,6 +11,7 @@ export const ORGANIZATION_ADMIN_SECTIONS = [
   "people",
   "workspaces",
   "identity",
+  "shared",
   "models",
   "integrations",
   "agents",
@@ -50,6 +51,7 @@ export type OrganizationAdminResource =
   | "privacy"
   | "inference-residency"
   | "agent-admin-access"
+  | "own-machines"
   | "members"
   | "admin-invitations"
   | "incoming-invitations"

@@ -2,12 +2,14 @@ import type {
   CreateRecordingPersonRequest,
   ListRecordingModelsResponse,
   Recording,
+  RecordingCreateTitleSource,
   RecordingLiveSegment,
   RecordingNote,
   RecordingNoteKind,
   RecordingPerson,
   RecordingVoiceprintConsent,
   RecordingSpeaker,
+  RecordingCalendarEventRef,
   RecordingTranscriptionRequest,
   RecordingTranscriptPage,
   RecordingTranscriptSegment,
@@ -27,6 +29,7 @@ import {
   type SystemAudioKind,
   type RecordingTransport,
   type OpenGeniRecordingsTransport,
+  uploadRecordingAudio,
 } from "@opengeni/sdk/recordings";
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { OpenGeniContext } from "../session-context";
@@ -162,11 +165,16 @@ export function useRecordingsClient(options: RecordingsClientOverride = {}): {
 // --- Capture -------------------------------------------------------------------
 
 export type UseRecorderOptions = RecordingsClientOverride & {
+  /** Leave it out unless the person gave one; Opengeni then names the meeting. */
   title?: string;
+  /** `app` when `title` is your app's guess, such as "Zoom meeting", for Opengeni to replace. */
+  titleSource?: RecordingCreateTitleSource;
   visibility?: RecordingVisibility;
   /** Your own id for what this recording belongs to, to find it again with `useRecordings`. */
   externalRef?: string;
   metadata?: Record<string, unknown>;
+  /** The owner's calendar event the meeting is of, such as one they joined; it names the meeting. */
+  calendarEvent?: RecordingCalendarEventRef;
   transcription?: RecordingTranscriptionRequest;
   /**
    * The person recording's name, as your app knows it: their microphone's
@@ -228,6 +236,7 @@ export type UseRecorderResult = RecorderSnapshot & {
     overrides?: Pick<
       UseRecorderOptions,
       | "title"
+      | "titleSource"
       | "systemAudio"
       | "microphone"
       | "visibility"
@@ -235,6 +244,7 @@ export type UseRecorderResult = RecorderSnapshot & {
       | "transcription"
       | "externalRef"
       | "metadata"
+      | "calendarEvent"
       | "ownerName"
     >,
   ) => Promise<void>;
@@ -246,6 +256,34 @@ export type UseRecorderResult = RecorderSnapshot & {
   rename: (title: string) => Promise<void>;
   /** Input level per track number, 0 to 1. Read it from an animation frame for a meter. */
   levels: () => Record<number, number>;
+  /**
+   * Make a meeting from audio recorded somewhere else, such as a phone's call
+   * recording or a voice memo. It goes the way a capture does: saved on this
+   * device first, then uploaded in the background and transcribed, and it
+   * shows in `uploads` while it uploads. Resolves with the new recording's id
+   * once the audio is saved here; a capture under way is not affected.
+   */
+  importAudio: (input: ImportRecordingAudioInput) => Promise<string>;
+};
+
+export type ImportRecordingAudioInput = {
+  /** One audio file: M4A (MP4), WebM, Ogg or ADTS AAC. */
+  audio: Blob;
+  /** Its type; the blob's own type by default. */
+  mimeType?: string;
+  /** The meeting's name. Opengeni names it when omitted. */
+  title?: string;
+  /** `app` when `title` is a guess, such as the file's name, for Opengeni to replace. */
+  titleSource?: RecordingCreateTitleSource;
+  /**
+   * When it was recorded, if known. By default the date an M4A file states,
+   * otherwise it ended just now.
+   */
+  startedAt?: Date;
+  /** How long it plays. Read from an M4A file when omitted. */
+  durationMilliseconds?: number;
+  /** Recorded with this id (a project, a customer). The hook's `externalRef` otherwise. */
+  externalRef?: string;
 };
 
 const IDLE_SNAPSHOT: RecorderSnapshot = {
@@ -292,7 +330,9 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
       finalizeRecording: (...args) => clientRef.current.finalizeRecording(...args),
       deleteRecording: (...args) => clientRef.current.deleteRecording(...args),
       ...(typeof methods.updateRecording === "function"
-        ? { updateRecording: (...args) => clientRef.current.updateRecording(...args) }
+        ? {
+            updateRecording: (...args) => clientRef.current.updateRecording(...args),
+          }
         : {}),
       // Only a client that has the live calls can show a live transcript.
       ...(typeof methods.createRecordingLiveSession === "function" &&
@@ -339,7 +379,10 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
         ...(isCaptureActive ? { isCaptureActive: (id: string) => isCaptureActive(id) } : {}),
         onStatus: (status) => {
           if (status.finalized) optionsRef.current.onFinished?.(status.recordingId);
-          setUploads((previous) => ({ ...previous, [status.recordingId]: status }));
+          setUploads((previous) => ({
+            ...previous,
+            [status.recordingId]: status,
+          }));
           if (status.finalized || status.discarded || status.failed) {
             setRecovered((previous) =>
               previous.includes(status.recordingId)
@@ -406,10 +449,19 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
       const merged = {
         ...optionsRef.current,
         ...overrides,
+        // A title given at start is the person's unless the start says otherwise.
+        ...(overrides.title !== undefined && overrides.titleSource === undefined
+          ? { titleSource: undefined }
+          : {}),
         // A start can set one transcription option, such as the language, and
         // keep the rest the hook was given.
         ...(overrides.transcription
-          ? { transcription: { ...optionsRef.current.transcription, ...overrides.transcription } }
+          ? {
+              transcription: {
+                ...optionsRef.current.transcription,
+                ...overrides.transcription,
+              },
+            }
           : {}),
       };
       // Earlier recorders stay subscribed to the shared uploader for their own
@@ -421,9 +473,11 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
         store: store(),
         uploader: uploader(),
         ...(merged.title ? { title: merged.title } : {}),
+        ...(merged.title && merged.titleSource ? { titleSource: merged.titleSource } : {}),
         ...(merged.visibility ? { visibility: merged.visibility } : {}),
         ...(merged.externalRef ? { externalRef: merged.externalRef } : {}),
         ...(merged.metadata ? { metadata: merged.metadata as never } : {}),
+        ...(merged.calendarEvent ? { calendarEvent: merged.calendarEvent } : {}),
         ...(merged.transcription ? { transcription: merged.transcription } : {}),
         ...(merged.ownerName?.trim() ? { ownerName: merged.ownerName } : {}),
         ...(merged.microphone !== undefined ? { microphone: merged.microphone } : {}),
@@ -474,6 +528,37 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
       await recorder.rename(title);
     }, []),
     levels: useCallback(() => recorderRef.current?.levels() ?? {}, []),
+    importAudio: useCallback(
+      async (input: ImportRecordingAudioInput) => {
+        const current = optionsRef.current;
+        const title = input.title?.trim();
+        const externalRef = input.externalRef ?? current.externalRef;
+        return await new Promise<string>((resolve, reject) => {
+          uploadRecordingAudio({
+            uploader: uploader(),
+            workspaceId,
+            audio: input.audio,
+            source: "upload",
+            ...(input.mimeType ? { mimeType: input.mimeType } : {}),
+            ...(input.durationMilliseconds !== undefined
+              ? { durationMilliseconds: input.durationMilliseconds }
+              : {}),
+            create: {
+              purpose: "meeting",
+              ...(title ? { title } : {}),
+              ...(title && input.titleSource ? { titleSource: input.titleSource } : {}),
+              ...(input.startedAt ? { startedAt: input.startedAt.toISOString() } : {}),
+              ...(current.visibility ? { visibility: current.visibility } : {}),
+              ...(externalRef ? { externalRef } : {}),
+              ...(current.metadata ? { metadata: current.metadata as never } : {}),
+              ...(current.transcription ? { transcription: current.transcription } : {}),
+            },
+            onStored: resolve,
+          }).catch(reject);
+        });
+      },
+      [uploader, workspaceId],
+    ),
   };
 }
 

@@ -23,6 +23,7 @@ import {
   type EstablishedSandboxSession,
   type ProviderCommandSession,
   type RoutingRetainedProcess,
+  type TurnToolCancellationFence,
 } from "@opengeni/runtime";
 import { ModalRouterProviderCommand } from "@opengeni/contracts";
 import { isDeepStrictEqual } from "node:util";
@@ -64,6 +65,36 @@ export type SandboxTurnRuntimeDeps = {
 };
 
 export type SandboxTurnRuntime = ReturnType<typeof createSandboxTurnRuntime>;
+
+export type WorkspaceMutationOptions = {
+  /** Every write this mutation makes runs as a command through this fence
+   * (platform setup passes it as its command runner). Once the attempt's
+   * writer drain has cancelled and quiesced this same fence, the mutation can
+   * no longer write, so the proof-bearing release may settle its admission
+   * even while the mutation itself has not returned yet. */
+  commandFence?: TurnToolCancellationFence;
+};
+
+type PendingWorkspaceMutation = {
+  operation: string;
+  /** Set once the provider outcome is unknown; such a mutation stays fenced. */
+  cause?: unknown;
+  commandFence?: TurnToolCancellationFence;
+};
+
+/** Whether the attempt's writer drain proves that none of these in-flight
+ * mutations can still write: each writes only through the exact fence the
+ * drain cancelled and quiesced, and none has an unknown provider outcome. */
+export function pendingMutationsCoveredByWriterDrain(
+  pending: Iterable<PendingWorkspaceMutation>,
+  drainedCommandFence: TurnToolCancellationFence | null,
+): boolean {
+  if (!drainedCommandFence) return false;
+  for (const mutation of pending) {
+    if ("cause" in mutation || mutation.commandFence !== drainedCommandFence) return false;
+  }
+  return true;
+}
 
 const retainInternalProviderCommand = createProviderCommandRetainer(
   retainWorkspaceMutationProcess,
@@ -215,10 +246,18 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
   // The exact existing private release closure is the holder authority. Keep
   // its ordinary eager release, but never pass a false writer-drain proof that
   // would let releaseLeaseHolder settle an ambiguous null-outcome admission.
+  //
+  // A mutation still in flight is covered by the writer drain only when every
+  // write it makes runs as a command through the fence that drain cancelled
+  // and quiesced (platform setup): the drain stopped or durably handed off
+  // each of its commands, and the cancelled fence refuses any later one, so
+  // whatever the mutation still waits on (a read, an agent that stopped
+  // answering) cannot write to the box. Any other in-flight or outcome-unknown
+  // mutation keeps its admission fenced.
   const releaseGuards = new WeakMap<
     ResumedTurnSandbox["release"],
     {
-      pending: Map<string, { operation: string; cause?: unknown }>;
+      pending: Map<string, PendingWorkspaceMutation>;
       release: ResumedTurnSandbox["release"];
     }
   >();
@@ -227,9 +266,13 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
     const original = sandbox.release;
     let guard = releaseGuards.get(original);
     if (!guard) {
-      const pending = new Map<string, { operation: string; cause?: unknown }>();
+      const pending = new Map<string, PendingWorkspaceMutation>();
       const release: ResumedTurnSandbox["release"] = async (options) => {
-        if (options?.workspaceWritersQuiesced && pending.size) {
+        if (
+          options?.workspaceWritersQuiesced &&
+          pending.size &&
+          !pendingMutationsCoveredByWriterDrain(pending.values(), sandboxState.drainedCommandFence)
+        ) {
           await original();
           throw new RoutingMutationOutcomeUnknownError(
             "internalWorkspaceMutationDrain",
@@ -363,6 +406,7 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
       outcome: "completed" | "failed";
       durationSeconds: number;
     }) => void,
+    options: WorkspaceMutationOptions = {},
   ): Promise<T> => {
     const observeMutationPhase = (
       phase: "admission" | "provider" | "settlement" | "snapshot_wait",
@@ -489,7 +533,10 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
     };
     let result: T;
     const releaseGuard = guardSandboxRelease(sandbox);
-    releaseGuard?.pending.set(admission.id, { operation });
+    releaseGuard?.pending.set(admission.id, {
+      operation,
+      ...(options.commandFence ? { commandFence: options.commandFence } : {}),
+    });
     const providerStartedAt = performance.now();
     let providerOutcome: "completed" | "failed" = "failed";
     try {

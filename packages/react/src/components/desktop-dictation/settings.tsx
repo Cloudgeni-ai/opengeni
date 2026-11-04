@@ -8,6 +8,7 @@ import {
   type DesktopDictationAction,
   type DesktopDictationHistoryEntry,
   type DesktopDictationKeys,
+  type DesktopDictationModel,
   type DesktopDictationModifier,
   type DesktopDictationOutput,
   type DesktopDictationPasteBlocker,
@@ -31,12 +32,14 @@ import { Section } from "../../ui/section";
 import { SelectMenu, type SelectOption } from "../../ui/select-menu";
 import { SettingRow } from "../../ui/setting-row";
 import { Switch } from "../../ui/switch";
-import { Textarea } from "../../ui/textarea";
+import { WordListRow } from "../../ui/word-list-row";
 import { acceleratorFromKey, desktopShortcutLabel, sameDesktopShortcut } from "./shortcuts";
 
 /** At most this many shortcuts, as the app keeps them. */
 const PROFILES_MAX = 8;
 const DETECT = "auto";
+/** A shortcut without a model of its own: the workspace's voice input model. */
+const WORKSPACE_MODEL = "workspace";
 const CUSTOM = "custom";
 /** Modifier keys held together that make a good shortcut on a Mac, the usual one first. */
 const CHORDS: DesktopDictationModifier[][] = [
@@ -58,8 +61,6 @@ const ACTION_PREFIX = "action:";
 const NONE = "none";
 const KEYS = "keys";
 /** As the app keeps them. */
-const VOCABULARY_MAX = 100;
-const VOCABULARY_TERM_MAX = 50;
 
 export type UseDesktopDictationResult = {
   /** The app's dictation, or null outside a desktop app that offers it. */
@@ -167,7 +168,21 @@ export type DesktopDictationSettingsProps = {
   dictation?: DesktopDictation | null | undefined;
   /** Languages offered for each shortcut, as ISO codes. Common languages by default. */
   languages?: readonly string[] | undefined;
+  /**
+   * The speech-to-text models a shortcut can pick, such as one for English
+   * and another for Norwegian: the signed-in workspace's
+   * `clientConfig.voiceInput.models`. Without them each shortcut uses the
+   * workspace's voice input model and no model is offered.
+   */
+  models?: readonly DictationModelChoice[] | undefined;
   className?: string | undefined;
+};
+
+/** A model a dictation shortcut can pick, as the workspace's voice input lists it. */
+export type DictationModelChoice = DesktopDictationModel & {
+  providerName: string;
+  /** The model's name, such as "MAI-Transcribe-2". */
+  name: string;
 };
 
 /**
@@ -178,6 +193,7 @@ export type DesktopDictationSettingsProps = {
 export function DesktopDictationSettings({
   dictation: given,
   languages = MEETING_LANGUAGES,
+  models = NO_MODELS,
   className,
 }: DesktopDictationSettingsProps) {
   const t = useOpenGeniText();
@@ -267,6 +283,40 @@ export function DesktopDictationSettings({
     );
   };
 
+  const modelOptions = (current: DesktopDictationModel | null | undefined): SelectOption[] => [
+    { value: WORKSPACE_MODEL, label: t("desktopDictation.settings.workspaceModel") },
+    ...(current && !models.some((entry) => sameModel(entry, current))
+      ? [
+          {
+            value: modelValue(current),
+            label: current.model,
+            disabled: true,
+            disabledReason: t("desktopDictation.settings.modelUnavailable"),
+          },
+        ]
+      : []),
+    ...models.map((entry) => ({
+      value: modelValue(entry),
+      label: `${entry.providerName} · ${entry.name}`,
+    })),
+  ];
+
+  const setModel = (id: string, value: string) => {
+    const chosen = models.find((entry) => modelValue(entry) === value);
+    saveProfiles(
+      profiles.map((profile) =>
+        profile.id === id
+          ? {
+              ...profile,
+              model: chosen ? { providerId: chosen.providerId, model: chosen.model } : null,
+            }
+          : profile,
+      ),
+    );
+  };
+  // Offered once there is a choice, and always while a shortcut has one picked.
+  const offerModels = models.length > 0 || profiles.some((profile) => profile.model);
+
   const addProfile = () => {
     const used = new Set(profiles.map((profile) => profile.language));
     const language = [...languages].find((code) => !used.has(code)) ?? null;
@@ -346,6 +396,8 @@ export function DesktopDictationSettings({
                     )
                   }
                   languageOptions={languageOptions(profile.language)}
+                  modelOptions={offerModels ? modelOptions(profile.model) : null}
+                  onModel={(value) => setModel(profile.id, value)}
                   onRecord={(recording) => {
                     setKeysError(null);
                     setRecordingFor(recording ? profile.id : null);
@@ -445,7 +497,7 @@ export function DesktopDictationSettings({
                   control={
                     accessibility.granted ? (
                       <span className="inline-flex items-center gap-1.5 text-sm text-fg-muted">
-                        <CheckIcon className="size-4 text-success" aria-hidden />
+                        <CheckIcon className="size-4 text-status-success" aria-hidden />
                         {t("desktopDictation.settings.allowed")}
                       </span>
                     ) : (
@@ -484,9 +536,21 @@ export function DesktopDictationSettings({
                   ))
                 : null}
               {settings.vocabulary !== undefined ? (
-                <VocabularyRow
-                  vocabulary={settings.vocabulary}
+                <WordListRow
+                  words={settings.vocabulary}
                   saving={saving}
+                  text={{
+                    label: t("desktopDictation.settings.vocabularyLabel"),
+                    description: t("desktopDictation.settings.vocabularyDescription"),
+                    placeholder: t("desktopDictation.settings.vocabularyPlaceholder"),
+                    termTooLong: (term, max) =>
+                      t("desktopDictation.settings.vocabularyTermTooLong", {
+                        term,
+                        max: String(max),
+                      }),
+                    tooMany: (max) =>
+                      t("desktopDictation.settings.vocabularyTooMany", { max: String(max) }),
+                  }}
                   onChange={(vocabulary) => void update({ vocabulary })}
                 />
               ) : null}
@@ -597,7 +661,11 @@ function CopyText({ text, label }: { text: string; label: string }) {
         });
       }}
     >
-      {copied ? <CheckIcon className="text-success" aria-hidden /> : <CopyIcon aria-hidden />}
+      {copied ? (
+        <CheckIcon className="text-status-success" aria-hidden />
+      ) : (
+        <CopyIcon aria-hidden />
+      )}
     </Button>
   );
 }
@@ -680,80 +748,6 @@ function ActionShortcutRow({
   );
 }
 
-/** The names and words dictation listens for, one per line. */
-function VocabularyRow({
-  vocabulary,
-  saving,
-  onChange,
-}: {
-  vocabulary: string[];
-  saving: boolean;
-  onChange: (vocabulary: string[]) => void;
-}) {
-  const t = useOpenGeniText();
-  const saved = vocabulary.join("\n");
-  const [draft, setDraft] = useState(saved);
-  const editing = useRef(false);
-  // The app's list wins while the person isn't typing in it.
-  useEffect(() => {
-    if (!editing.current) setDraft(saved);
-  }, [saved]);
-  const terms = vocabularyTerms(draft);
-  const tooLong = terms.find((term) => term.length > VOCABULARY_TERM_MAX);
-  const tooMany = terms.length > VOCABULARY_MAX;
-  return (
-    <SettingRow
-      variant="stacked"
-      label={t("desktopDictation.settings.vocabularyLabel")}
-      description={t("desktopDictation.settings.vocabularyDescription")}
-      error={
-        tooLong
-          ? t("desktopDictation.settings.vocabularyTermTooLong", {
-              term: tooLong.slice(0, 20),
-              max: String(VOCABULARY_TERM_MAX),
-            })
-          : tooMany
-            ? t("desktopDictation.settings.vocabularyTooMany", { max: String(VOCABULARY_MAX) })
-            : null
-      }
-      control={
-        <Textarea
-          rows={3}
-          value={draft}
-          disabled={saving && !editing.current}
-          placeholder={t("desktopDictation.settings.vocabularyPlaceholder")}
-          aria-label={t("desktopDictation.settings.vocabularyLabel")}
-          aria-invalid={tooLong || tooMany ? true : undefined}
-          onFocus={() => {
-            editing.current = true;
-          }}
-          onChange={(event) => setDraft(event.target.value)}
-          onBlur={() => {
-            editing.current = false;
-            if (tooLong || tooMany) return;
-            if (terms.join("\n") !== saved) onChange(terms);
-            else setDraft(saved);
-          }}
-        />
-      }
-    />
-  );
-}
-
-/** The terms in what the person typed: one per line or between commas, without repeats. */
-export function vocabularyTerms(text: string): string[] {
-  const seen = new Set<string>();
-  const terms: string[] = [];
-  for (const part of text.split(/[\n,;]/u)) {
-    const term = part.trim().replace(/\s+/gu, " ");
-    const key = term.toLocaleLowerCase();
-    if (!term || seen.has(key)) continue;
-    seen.add(key);
-    terms.push(term);
-  }
-  return terms;
-}
-
 /** Plays one kept dictation's speech at a time. */
 function usePlayback(dictation: DesktopDictation | null): {
   playing: string | null;
@@ -814,9 +808,11 @@ function ProfileRows({
   recording,
   error,
   languageOptions,
+  modelOptions,
   onRecord,
   onShortcut,
   onLanguage,
+  onModel,
   onRemove,
 }: {
   profile: DesktopDictationProfile;
@@ -827,9 +823,12 @@ function ProfileRows({
   recording: boolean;
   error: string | null;
   languageOptions: SelectOption[];
+  /** Null when there is no model to pick. */
+  modelOptions: SelectOption[] | null;
   onRecord: (recording: boolean) => void;
   onShortcut: (shortcut: DesktopDictationShortcut) => void;
   onLanguage: (value: string) => void;
+  onModel: (value: string) => void;
   onRemove: () => void;
 }) {
   const t = useOpenGeniText();
@@ -907,8 +906,37 @@ function ProfileRows({
           />
         }
       />
+      {modelOptions ? (
+        <SettingRow
+          label={t("desktopDictation.settings.modelLabel")}
+          description={t("desktopDictation.settings.modelDescription")}
+          controlWidth="select"
+          control={
+            <SelectMenu
+              size="sm"
+              className="w-56"
+              align="end"
+              disabled={saving}
+              aria-label={t("desktopDictation.settings.modelLabel")}
+              options={modelOptions}
+              value={profile.model ? modelValue(profile.model) : WORKSPACE_MODEL}
+              onValueChange={onModel}
+            />
+          }
+        />
+      ) : null}
     </>
   );
+}
+
+const NO_MODELS: readonly DictationModelChoice[] = [];
+
+function modelValue(model: DesktopDictationModel): string {
+  return `${model.providerId}::${model.model}`;
+}
+
+function sameModel(a: DesktopDictationModel, b: DesktopDictationModel): boolean {
+  return a.providerId === b.providerId && a.model === b.model;
 }
 
 /** The shortcuts a profile can pick: modifier keys first where they work, then any combination. */

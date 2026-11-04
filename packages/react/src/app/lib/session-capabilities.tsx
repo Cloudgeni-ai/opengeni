@@ -54,7 +54,7 @@ const CONNECTED_APP_GROUPS: CapabilityGroupDefinition[] = [
     name: "Opengeni Slack bot",
     description: "Use the installed bot to read conversations and post as Opengeni.",
     kind: "connected_app",
-    matches: (tool) => tool.startsWith("slack_bot_"),
+    matches: (tool) => tool.startsWith("slack_bot_") || tool.startsWith("slack_agent_"),
   },
   {
     id: "social",
@@ -113,6 +113,7 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
       tool === "set_other_session_title" ||
       tool === "bot_template_save" ||
       tool === "notify_user" ||
+      tool === "call_user" ||
       tool === "notification_withdraw" ||
       tool === "inbox_tidy" ||
       tool === "wait_for_input" ||

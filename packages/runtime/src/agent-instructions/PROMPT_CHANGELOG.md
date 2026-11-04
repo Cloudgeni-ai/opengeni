@@ -1,5 +1,271 @@
 # Modular prompt changelog
 
+Finished background commands report themselves. When a command the agent
+left running finishes during the turn, its exit status and the start and end
+of its output follow the next plain-text tool result, and the durable
+`background_command_result` input now carries the same output, so the agent
+no longer needs a `command_read` only to learn that a command finished.
+When a sandbox is active and cut polling is on (new `commandCompletionDelivery`
+resource fact), Background commands gains one sentence (about 170 bytes)
+saying so, in every tool-availability variant; with
+`OPENGENI_EXPERIMENT_CUT_POLLING=false` the section is unchanged. The
+`command_read` and `command_wait` descriptions say that a finished command's
+result reaches the session on its own. The legacy text is unchanged.
+
+```diff
++ A command that finishes while you work reports its exit status and output on its own, after a later tool result or as input, so do not poll only to learn that it finished.
+```
+
+Fixed guidance that rides on every request is shorter where it cannot help:
+
+- The Codemode directive (legacy and modular, about 630 to 520 o200k tokens)
+  says the same things more compactly: catalog scope, when to prefer Codemode,
+  which client to run (native client, a compatible `ogtool` from PATH, or
+  the pinned package), the list/show/call/declarations commands, the Bun module import,
+  and the approval-pending and outcome-unknown rules. It drops the misplaced
+  "Keep ordinary running commands alive with `command_wait`/`command_read`"
+  sentence (command guidance lives in Runtime mechanics) and the
+  `environmentCodemodeClient()` method names (`ogtool read` observes the same
+  operation from any authorized attempt of the same turn). The legacy locks for the two cases with Codemode change.
+- With Knowledge learning Off, which refuses every Knowledge write, the
+  guidance for the save-only Knowledge tools is omitted; with
+  workspace-instruction learning Off, the instruction-change clause is omitted
+  (see Tool-availability variants). The learning-mode rule, retrieval and
+  grounding stay. Skills learning Off changes nothing: it does not disable
+  installed Skills, so the Skill index and reading guidance stay.
+- The `browser_open` description keeps what matters before opening (placement,
+  the user's Chrome, headed or headless, storage, screenshots, Code Mode for
+  bulk work with its browser API, the CAPTCHA rule). How to work with the
+  open session (act on the outline, the family tools, the dedicated attached
+  tab) now follows the first `browser_open` result the model reads in an
+  attempt (`BROWSER_OPEN_RESULT_GUIDANCE`); later opens and Code Mode callers
+  get the plain result.
+
+A session that cannot spawn children no longer reads how to delegate to them.
+When the session's nesting depth has reached its frozen maximum, the
+first-party MCP server already hides `session_create`; the prompt's tool
+availability now proves it absent too and records `childSessionsImpossible`
+(the worker passes the session's `nestedAgentDepth` and
+`effectiveMaxNestedAgentDepth`, both frozen on the session, so the prefix stays
+stable across turns). Without `session_create`, Session coordination drops the
+delegation-judgment sentences. When the session can never have children, it
+also drops the "After spawning" child-integration paragraph and the
+`child_requires_action` paragraph (together about 470 o200k tokens for a
+session at its maximum depth). A turn that merely lacks `session_create` (for
+example a scheduled turn with a narrower selection) keeps the integration
+rules, because the session may already own children. Session coordination
+keeps the child-session delivery rule, session management, session links,
+targets, Send/Steer receipt and supervision rules, the "do not repurpose" and
+"handle what you can in this session" sentences, and the short-wait guidance.
+Sessions that can still spawn render byte for byte as before. The bundled
+`projects` Skill is listed only when `project_list` is selected, because it
+only explains the project tools.
+
+Goal completion can carry the final answer. `goal_complete` gains an optional
+`reply`: once the completion succeeds, the runtime ends the turn at that tool
+batch with the reply as its final answer, shown exactly as written, the way
+`wait_for_input` ends a turn with its `reply`. Completion plus answer is one
+model call instead of two. A `reply` passed together with other tool calls in
+one response is refused before anything is completed (at most twice per
+attempt); after that the completion runs but the reply does not end the turn,
+so the model sees those results first. When a reply does not end the turn,
+its receipt tells the model to answer. The goals module's handoff paragraph
+and the goal continuation say so (about 200 bytes more). The goal an API
+create now gives an unattended request carries its own note that it needs no
+restating, in its success criteria, so the instructions gain no unattended
+sentence and the legacy locks do not change. The goal tool schemas drop the
+spacing and ledger boilerplate each text field repeated; each tool
+description states that rule once, and the schemas still enforce the byte
+limits.
+
+Goal pauses name what was tried. The goals module's pause paragraph gains one
+sentence (about 230 bytes): a task that seems infeasible, missing data or a
+result the agent cannot verify is not by itself a reason to pause; it tries
+the plausible in-scope alternatives and, if it still pauses, names the ones it
+tried in the rationale. A definitive missing permission or required human
+decision still justifies an immediate pause. The `goal_pause` tool
+description and the goal continuation's blocked audit say the same, and
+`wait_for_input`'s description is shortened without dropping a rule the
+instructions do not also state.
+
+```diff
+- After goal_complete succeeds, finish the same turn with the requested answer, or a concise summary and retained artifact link.
++ Put the requested answer, or a concise summary and retained artifact link, in goal_complete's reply: it is shown exactly as written and ends the turn, so call goal_complete on its own once you have seen your last results.
++ Without a reply, finish the same turn with that answer after goal_complete succeeds.
++ A task that seems infeasible, missing data or a result you cannot verify is not by itself a reason to pause: try the plausible in-scope alternatives, and if you still pause, name the ones you tried in the rationale.
+```
+
+The sandbox preamble (`sandboxBaseInstructions`, the SDK default that every
+sandbox and Connected Machine agent receives ahead of the modular contract)
+extends two existing lines in place; nothing is added for sessions without a
+sandbox, and the legacy and modular locks are unchanged because they do not
+include the preamble. The "Make changes inside the workspace" line adds that
+the agent keeps its own scratch work (throwaway scripts and tests, and
+browsers, runtimes or libraries installed only for its checks) in a temporary
+directory outside the user's project and removes it when done, while tests the
+user asked for or the project expects stay in the project. The "Verify changes
+when practical" line adds that a change to something already running (a
+service, worker or scheduled job) is checked on the running instance: restart
+or reload the process that serves it, exercise the real entry point and check
+what the user asked about, asking first only when a restart could disrupt
+others or lose work in progress. The preamble grows from 349 to 471 tokens
+(o200k), +122 tokens per call in sandbox sessions, static so the cached prefix
+stays stable. The preamble is in neither the legacy nor the modular prompt, so
+the lines are shown as text, not as a sentence diff:
+
+```text
+- Make changes inside the workspace unless the user explicitly asks for another location. Keep your own scratch work out of the user's project: put throwaway scripts and tests, and browsers, runtimes or libraries installed only for your checks, in a temporary directory outside it, and remove them when done. Tests the user asked for or the project expects belong in it.
+- Verify changes when practical, especially after editing code, tests, build scripts, generated artifacts, or configuration. For a change to something already running, such as a service, worker or scheduled job, restart or reload the process that actually serves it, exercise the real entry point and check what the user asked about; unit tests alone do not show it works. Ask first only if a restart could disrupt others or lose work in progress.
+```
+
+The agent knows both GitHub identities. When personal GitHub sign-in is
+enabled on the deployment (new `personalGitHub` resource fact) and
+`github_connect_link` is available, the admin module adds one sentence (about
+195 bytes) mapping "connect my GitHub" or "do it as me" to the person's own
+account (Your GitHub) and "install the GitHub app" to the Opengeni app. The
+repositories module gains a "GitHub identity per mounted repository:" block
+only when a repository is mounted as the person: one bullet per GitHub
+repository (as the person, with their login when known, or as the Opengeni
+app), plus a sentence saying to use plain git and the github_personal__* tools
+on personal repositories because gh and raw GitHub API calls do not act as the
+person, and, with both identities, a sentence pointing to the github_app__*
+tools. With a personal repository, the gh sentence is limited to repositories
+not mounted as the person. Deployments without personal sign-in and sessions
+that mount only Opengeni app repositories render byte-for-byte as before. The
+`github_connect_link` description and response add the `personal` identity
+(see docs/github-app.md).
+
+```diff
++ For GitHub, `github_connect_link` reports both identities: 'connect my GitHub' or 'do it as me' means the person's own account (Your GitHub), and 'install the GitHub app' means the Opengeni app.
+```
+
+Automatic chat titles are written in the language the person writes in, and
+a chat that has only a greeting, thanks or small talk stays untitled until it
+has a task, question or subject. The title request's instructions
+(`SESSION_TITLE_GENERATION_INSTRUCTIONS`, a separate single call outside the
+agent's conversation) say so and answer exactly `NO_TITLE` when there is
+nothing to name yet. That answer saves no title, so a later turn titles the
+chat. On a later turn the title request also receives that turn's message
+after the chat's first message. The descriptions of the agent's
+`opengeni__set_session_title` tool and the first-party MCP `set_session_title`
+tool gain the same two rules: write the label in the person's language, and
+call it once the chat has a task, question or subject, not while it holds only
+a greeting or small talk. Nothing else in the instructions or tool list
+changes.
+
+Privacy questions are answered from server facts. One bullet joins "Rules for
+getting work done" in both the legacy CORE and the modular base behavior (about
+210 bytes): answer questions about privacy, retention, training, the model or
+provider, or where data is processed only from `privacy_facts`, link its
+policies, say what is unknown, and never claim more than it states. The tool
+description says when to call it. `privacy_facts` joins the always-visible
+first-request tools.
+Before, agents answered these questions from general knowledge and could
+over-claim. The legacy locks change by that one bullet; legacy and modular stay
+sentence-identical.
+
+The Skill index lists every installed Skill. Its last header sentence changes
+from "Use the id when names are ambiguous." to "Read a Skill by its name; an
+entry shows an id only when several Skills share that name, and then you read
+it by that id." Entries drop their id unless two Skills share a name, and the
+32 KB / 128-entry cut that silently dropped the Skills sorting last is
+replaced by a 96 KB bound that shortens only the longest descriptions. The
+index is delivered as a context item that replaces earlier indexes, so an
+existing session receives the new index as one appended item and nothing an
+earlier request sent changes. The legacy lock for a prompt with an empty
+Skill index grows by 85 characters for the new header sentence.
+
+Chats that start unattended through their setting say so from the first
+request, and nothing a chat started with changes later. A chat that a scheduled
+task or event trigger starts unattended (by default, or because the task says
+so) gets the same unattended paragraph and tool list as a session created with
+`unattended: true`; that it started unattended is frozen at create. The **Work
+without me** switch, and a person writing in an automation's chat, change only
+whether approvals and questions wait for a person, never the instructions or
+tools an earlier request already sent. So a chat switched to unattended after
+it started keeps `request_human_input` and `interaction_request_human`, and a
+call to either returns at once with the tool result "Not sent: this chat is now
+set to work without a person, so no one will answer until the task ends.
+Settle open choices with the most conventional option and continue. Do not take
+anything destructive, outside the workspace or needing authority you were not
+given; list it, with any step only a person can take, among the steps left for
+a person." (about 330 bytes, appended as that call's result like the approval
+refusal). When a turn's attendance differs from how the chat started, that
+turn's input (not the system prompt) carries an `[Opengeni attendance]` note:
+the unattended paragraph itself when the chat was switched to work without a
+person, or "A person is now present in this chat and will see and can answer
+questions, so the unattended-session guidance no longer applies. Follow the
+ordinary guidance on when to ask, asking in your reply." when a chat that
+started unattended has a person again (about 200 bytes). Its approvals then
+wait for that person. Interactive chats, and chats whose setting matches how
+they started, get no note and keep their bytes.
+
+Unattended sessions say so. A session created with `unattended: true` (no
+person will see or answer a question until the task ends) adds one paragraph,
+in the legacy CORE and as the last modular module (`unattended`, "# Unattended
+session"): asking, or waiting for human input, ends the work unanswered, so
+where any guidance says to ask, settle open choices with the most conventional
+option and finish the reversible work inside the workspace; never take or stand
+in for a step only a person can take, and leave it undone with anything
+destructive, outside the workspace or needing authority not given; end with
+the result, the assumptions made and the steps left for a person. Such a
+session is not given `request_human_input` or `interaction_request_human`, so
+the modular prompt also drops the clauses that offer them. A setup check of the
+general Autonomy principle alone still saw headless runs end with a question,
+because nothing told the model that no one would answer. Interactive sessions
+keep their bytes; the legacy lock adds an `unattended` case.
+
+A voice handoff answers in the user's language. When a person ends a realtime
+voice session, the remaining transcript reaches the agent as a message whose
+`<input>` is a fixed English note about the handoff. That note gains one last
+sentence (about 85 bytes): "Reply in the language the user spoke in the
+transcript, not the language of this note." Before, when the handoff was the
+only person message in a chat, the agent sometimes answered in English a
+person who spoke another language, following the note instead of the
+transcript. No system
+prompt or tool text changes, and earlier messages are unaffected. The
+timeline also shows the handoff's stored notice, "Voice session ended…", in
+the reader's language instead of always in English.
+
+Tool search returns the right tool on every route. No system prompt or tool
+description text changes; what changes is what a `tool_search` result carries,
+always appended after that result, so nothing an earlier request sent changes.
+
+- Native routes (OpenAI/Azure Responses and Codex) carry only loaded
+  definitions, so the candidates the generic output lists were dropped, and a
+  search that loaded nothing read as "No matching tools found". A developer
+  message right after the result now lists what the search did not load:
+  `No authorized tool is named "<name>".` for requested names no authorized
+  tool has, then `Close candidates this search did not load:` (or
+  `No tool loaded. Close candidates:`), one `- name: preview` line per
+  candidate with the 160-character preview `tool_list` shows, and
+  `Load one that fits with tool_search names:["<exact name>"] and query:"".`
+- A search that names or clearly matches a tool every request already carries
+  (such as `request_human_input` or `exec_command`) adds `alreadyAvailable`:
+  `<name> is already in your tool list; call it directly.`, instead of listing
+  it as unavailable.
+- Names resolve in the forms agents write them: the full model name, the
+  published `server.tool` form, and `projects.search`, `projects_search` or
+  `projects-search`, including for tools whose model names are shortened digest
+  aliases. A name several shortened aliases could stand for becomes candidates
+  instead of loading all of them.
+- A query is split into its requests (semicolons or new lines). Without a
+  decision model, the best candidate for each request is loaded and the next
+  ones listed; before, only a single clear keyword match was loaded. With one,
+  every candidate it judges to belong to the requested actions is loaded, with
+  no cap below the search's `limit`, the next candidates are listed when the
+  choice was unclear, and the keyword shortcut past the decision model is
+  removed. A search never comes back empty while candidates exist.
+- When the deployment has a document embedding model, ranking matches meaning
+  as well as keywords.
+- A load by exact name now carries the once-per-turn `connectedAccounts`
+  notice, and every tool a result shows, loaded or listed, counts as shown for
+  it, so loading Gmail tools after browsing a group still names Outlook Mail.
+  With several accounts of one connector, ranking reads past each tool's
+  `Account: … Use only this account…` first line (the same tool ranks the same
+  with or without it), and previews read `Account: <label>.` then the tool's
+  own text instead of being cut inside the account guidance.
+
 A blocked routine, reversible step no longer ends the turn with a question.
 Autonomy and persistence adds one general principle: take the conventional
 default without changing user or machine configuration, say which default was
@@ -656,6 +922,10 @@ When a named tool is proven absent, only the clauses naming it change:
   `session_send_message` follow-up clause, the `wait_for_input` long-wait and
   `finalAnswer` sentences, the `session_wait` join and short-wait sentences,
   and the `session_get` contrasts each need their tools.
+  Without `session_create` the delegation-judgment sentences are dropped; the
+  "After spawning" paragraph and the `child_requires_action` paragraph are
+  dropped only with `childSessionsImpossible` (a session at its maximum
+  nesting depth, which can have no children).
 - Runtime mechanics and base behavior: without `wait_for_input` the in-flight
   and already-waiting sentences and the three base-behavior `wait_for_input`
   clauses are dropped, and `## Waiting` keeps only its tool-neutral sentence
@@ -680,9 +950,16 @@ Tool discovery, media, accepted user/workspace/Skill instructions, active-goal
 continuation input, and the Codemode/code-search/Git-binding attempt
 directives are unchanged.
 
-Known exception: the Codemode directive's observation clause still names
-`command_wait`/`command_read` when those tools are proven absent; a test pins
-it as the only surviving prompt-named tool.
+The Codemode directive no longer names `command_wait`/`command_read`, so with
+every prompt-named tool proven absent no instruction layer names one (pinned by
+a test).
+
+Learning modes: with the accepted turn's effective Knowledge learning mode Off,
+the Knowledge authoring tools (`knowledge_save`, `knowledge_prepare_save`,
+`knowledge_retain_message`, `knowledge_retain_file`, `knowledge_archive`,
+`task_note_promote_knowledge`) render as absent, and with workspace-instruction
+learning Off so does `instruction_policy_save`. Their tools stay in the catalog
+and still refuse; only the guidance for calls that cannot succeed is omitted.
 
 Linked turns: the permission ceiling of a turn acting for a linked external
 identity is that turn's own snapshot. A session mixing linked and unlinked

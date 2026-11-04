@@ -24,6 +24,7 @@ interface KubernetesMetadata {
   name: string;
   labels?: Record<string, string>;
   annotations?: Record<string, string>;
+  deletionTimestamp?: string;
 }
 
 interface ConfigMap {
@@ -435,6 +436,8 @@ function verifyDashboardSidecarFiles(
   sidecarDirectory: string,
   dashboardSources: Map<string, { filename: string; content: string }>,
 ): void {
+  // Only the pod serving now: a node restart can leave a finished pod of
+  // the same ReplicaSet behind, and a rollout has the old one terminating.
   const pods = kubectlJson<KubernetesList<{ metadata: KubernetesMetadata }>>([
     "-n",
     namespace,
@@ -442,9 +445,11 @@ function verifyDashboardSidecarFiles(
     "pods",
     "-l",
     podSelector,
+    "--field-selector",
+    "status.phase=Running",
     "-o",
     "json",
-  ]).items;
+  ]).items.filter((pod) => !pod.metadata.deletionTimestamp);
   assert(pods.length === 1, `expected one Grafana pod, found ${pods.length}`);
   const podName = pods[0]?.metadata.name;
   assert(podName, "Grafana pod has no name");

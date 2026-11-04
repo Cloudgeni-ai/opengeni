@@ -120,9 +120,11 @@ describe("settings search", () => {
 
   test("ranks the name over other words, and every word must match", () => {
     expect(labels("api keys")[0]).toBe("API keys");
-    expect(labels("voice")).toEqual(["Voice input"]);
+    expect(labels("voice")).toEqual(["Voice input", "Default voice model", "ElevenLabs"]);
     expect(labels("transcription")).toEqual(["Voice input"]);
     expect(labels("password")[0]).toBe("Password");
+    expect(labels("passkeys")[0]).toBe("Passkeys");
+    expect(labels("elevenlabs")).toEqual(["ElevenLabs"]);
     expect(labels("models claude")).toEqual(["Models"]);
     expect(labels("voice billing")).toEqual([]);
   });
@@ -172,5 +174,73 @@ describe("settings search", () => {
     expect(found("vocabulary")).toEqual(["Dictation (Workspace · Computer use)"]);
     // Outside the desktop app there is no Computer use page, so no Dictation either.
     expect(labels("dictation")).toEqual(["Voice input"]);
+  });
+
+  describe("Security & data", () => {
+    const security: SettingsRailSection[] = [
+      ...SECTIONS,
+      {
+        id: "organization",
+        label: "Organization",
+        groups: [
+          {
+            items: [
+              {
+                id: "organization:security",
+                label: "Security & data",
+                icon: ShieldCheckIcon,
+                link: link({ section: "security" }),
+              },
+            ],
+          },
+        ],
+      },
+    ];
+    const securityEntries = settingsSearchEntries(security);
+    const found = (query: string) => searchSettings(securityEntries, query);
+
+    test("EU finds the EU-only inference switch first, by any word for it", () => {
+      for (const query of [
+        "EU",
+        "eu-only",
+        "Europe",
+        "data residency",
+        "residency",
+        "GDPR",
+        "region",
+      ]) {
+        const first = found(query)[0]!;
+        expect(first.label).toBe("EU-only inference");
+        expect(first.location).toBe("Organization · Security & data");
+        expect((first.link.props as { search: unknown }).search).toEqual({
+          section: "security",
+        });
+      }
+    });
+
+    test("every row title on the page finds its setting first; every section title finds the page", async () => {
+      const source = await Bun.file(`${import.meta.dir}/../organization/security-page.tsx`).text();
+      const rows = [...source.matchAll(/<SettingRow\s+label="([^"]+)"/g)].map((match) => match[1]!);
+      const sections = [...source.matchAll(/<Section\s+title="([^"]+)"/g)].map(
+        (match) => match[1]!,
+      );
+      expect(rows).toContain("EU-only inference");
+      expect(sections).toContain("Data residency");
+      const inPage = (title: string) =>
+        found(title)
+          .filter((entry) => entry.id.split("#")[0] === "organization:security")
+          .map((entry) => entry.label);
+      for (const row of rows) {
+        expect({ row, first: inPage(row)[0] }).toEqual({ row, first: row });
+        expect(found(row)[0]?.label).toBe(row);
+      }
+      // Recovery's title carries an "Owners only" chip, so it isn't a plain string.
+      for (const section of [...sections, "Recovery"]) {
+        expect({ section, found: inPage(section).length > 0 }).toEqual({
+          section,
+          found: true,
+        });
+      }
+    });
   });
 });

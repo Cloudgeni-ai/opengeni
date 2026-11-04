@@ -23,3 +23,22 @@ case "$COMPUTE_STORE" in
   gs://* | az://* | s3://*) ;;
   *) fail "COMPUTE_STORE must be object storage (gs://, az:// or s3://) in a fleet" ;;
 esac
+# A shared machine's guard feeds systemd's watchdog of its service, and the
+# service's stop hook kills the VMs (compute-guard-shared.conf, ADR 26):
+# without both, a guard that stalls or ends leaves VMs running past their
+# lease.
+if [ "${COMPUTE_MACHINE:-dedicated}" = shared ]; then
+  [ -n "${COMPUTE_MEMORY_TOTAL_MIB:-}" ] ||
+    fail "a shared machine sets COMPUTE_MEMORY_TOTAL_MIB, the sandboxes' share of its memory"
+  guard=$(systemctl show -p ExecStart -p ExecStopPost compute-guard.service)
+  case "$guard" in *"guard --watchdog service"*) ;;
+    *) fail "compute-guard.service does not feed its service's watchdog on this shared machine (compute-guard-shared.conf)" ;;
+  esac
+  case "$guard" in *guard-stopped*) ;;
+    *) fail "compute-guard.service has no stop hook (ExecStopPost=compute-host guard-stopped) on this shared machine" ;;
+  esac
+  # The guard itself refuses one longer than the lease terms' 3 s.
+  case "$(systemctl show -p WatchdogUSec --value compute-guard.service)" in
+    '' | 0 | infinity) fail "compute-guard.service sets no WatchdogSec= on this shared machine" ;;
+  esac
+fi

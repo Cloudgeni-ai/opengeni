@@ -1,6 +1,7 @@
 import {
   canonicalLanguageTag,
   RecordingTranscriptionError,
+  transcriptionProviderOutOfCredit,
   type RecordingLiveSessionGrant,
   type RecordingLiveSessionRequest,
 } from "../../recording-transcription";
@@ -38,8 +39,14 @@ export function openAiLanguage(tag: string | undefined): string | undefined {
   return primary === "nb" || primary === "nn" ? "no" : primary;
 }
 
-function mintError(providerName: string, status: number, detail: string) {
+function mintError(
+  providerName: string,
+  status: number,
+  failure: { detail: string; outOfCredit: boolean },
+) {
+  const { detail } = failure;
   const message = `${providerName} could not start a live transcript (HTTP ${status}${detail ? `: ${detail}` : ""})`;
+  if (failure.outOfCredit) return new RecordingTranscriptionError(message, "quota_exceeded", false);
   if (status === 401 || status === 403) {
     return new RecordingTranscriptionError(message, "unauthorized", false);
   }
@@ -52,14 +59,15 @@ function mintError(providerName: string, status: number, detail: string) {
   return new RecordingTranscriptionError(message, "provider", false);
 }
 
-async function errorDetail(response: Response): Promise<string> {
-  try {
-    const body = (await response.json()) as { error?: { message?: unknown } };
-    const message = body.error?.message;
-    return typeof message === "string" ? message.slice(0, 300) : "";
-  } catch {
-    return "";
-  }
+async function mintFailure(response: Response): Promise<{ detail: string; outOfCredit: boolean }> {
+  const body: unknown = await response.json().catch(() => null);
+  const error = body && typeof body === "object" ? (body as { error?: unknown }).error : undefined;
+  const message =
+    error && typeof error === "object" ? (error as { message?: unknown }).message : undefined;
+  return {
+    detail: typeof message === "string" ? message.slice(0, 300) : "",
+    outOfCredit: transcriptionProviderOutOfCredit(body),
+  };
 }
 
 export async function createOpenAiRealtimeLiveSession(input: {
@@ -106,7 +114,7 @@ export async function createOpenAiRealtimeLiveSession(input: {
     );
   }
   if (!response.ok)
-    throw mintError(input.providerName, response.status, await errorDetail(response));
+    throw mintError(input.providerName, response.status, await mintFailure(response));
   const body = (await response.json().catch(() => null)) as {
     value?: unknown;
     expires_at?: unknown;

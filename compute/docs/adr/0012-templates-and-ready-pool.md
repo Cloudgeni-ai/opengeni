@@ -60,10 +60,16 @@ sandboxes created at once all pay it at the same time.
   ([14](0014-requests-limits-and-admission.md)): the decision core counts
   each against the admission budget, and a fill or build starts only in
   room the core says no wake wants, so a fill and a wake never take the
-  same memory. When a wake, the buffer or memory pressure needs room, the
-  core ends ready clones first, oldest first. They fill a few at a time and
-  stop when sandbox users run out. Status shows their count and resident
-  memory per shape.
+  same memory. A fill also leaves room in the budget, above its buffer,
+  for creates to claim every ready clone kept, itself included, each at
+  what a create of its shape asking for the default guarantees books: all
+  its memory less what it holds, and the default processor request. A
+  fill never takes the room such a claim of one kept already needs, so
+  overlapping creates each claim one, and a pool keeps no more clones than
+  creates could claim. When a wake, the
+  buffer or memory pressure needs room, the core ends ready clones first,
+  oldest first. They fill a few at a time and stop when sandbox users run
+  out. Status shows their count and resident memory per shape.
 - A fill is booked by what it will hold, not its whole shape: the bytes of
   the template's memory image that are not zeros (counted in whole 256 KiB
   chunks when the template is built or found), plus 64 MiB for the VMM and
@@ -88,6 +94,20 @@ sandboxes created at once all pay it at the same time.
   are rare (one per shape and base image). Its disk is booked at its full
   length, since its guest writes to its copy while it boots, with its kernel
   copy and snapshot.
+- Creates the host took come before builds and fills. A create that finds
+  no template asks for its build, which starts only once the create has
+  booked its own first wake, in the room left; without room the sandbox
+  boots cold and the build waits, as after a failed one. A create waiting
+  for its image or for a disk reading keeps its first wake's memory and
+  processor time booked meanwhile, so no build, fill or later create takes
+  them. The hold is renewed while the create still waits, however long its
+  image takes, and only while it still fits; it lapses on its own only for
+  a create the agent lost track of. It counts as taken memory, like any
+  booked first wake: ready sandboxes make way for it and a wake of an
+  existing sandbox that would not fit beside it waits, from the moment the
+  host takes the create rather than once its VM starts. (Booked ahead of
+  the create that asked for it, a build once had that create refused on an
+  otherwise empty host.)
 - A create claims a ready clone whenever it asks for the clone's processors
   and memory, whatever its request: before the claim is recorded, the
   clone's VM is given the request's guarantees (`cpu.weight` at once,
@@ -97,6 +117,11 @@ sandboxes created at once all pay it at the same time.
   the new length through its VMM, which it takes up, growing its file
   system, as it next runs; a template's copy for a fresh create is
   lengthened the same way, its guest told before the first wake's resume.
+  The guest's kernel handles that change a moment after the resume, which
+  can be after the restore notice arrives, so the notice says the disk's
+  length too, and the guest answers it only once its kernel sees that
+  length and its file system fills it: the create's answer, and the first
+  command, find all the room it asked for.
   So templates stay per image and shape whatever disk a create asks for.
   These are the only VM settings a claim changes; sleep settings and the rest
   live in the record, and the identity and reseed contract is unchanged,

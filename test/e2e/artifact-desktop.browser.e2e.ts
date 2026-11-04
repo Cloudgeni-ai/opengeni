@@ -78,7 +78,17 @@ test("expanded Sites start below the desktop window bar", async () => {
         expect(bounds!.x).toBeLessThan(30);
         const fullWindow = (await page.locator("[data-artifact-fullscreen]").boundingBox())!;
         expect(fullWindow.y).toBe(desktopBar ? WINDOW_BAR_HEIGHT : 0);
-        expect(fullWindow.y + fullWindow.height).toBe(700);
+        // An open full-window layer marks the document, so the host's window
+        // chrome (the macOS app's sidebar toggle) can step aside.
+        const layerOpen = () =>
+          page.evaluate(() => document.documentElement.hasAttribute("data-window-layer-open"));
+        expect(await layerOpen()).toBe(true);
+        // On macOS it is the window's inset, rounded main panel: 4px in from
+        // the window's sides and bottom, like the pane it covers.
+        const inset = platform === "macos" ? 4 : 0;
+        expect(fullWindow.x).toBe(inset);
+        expect(fullWindow.x + fullWindow.width).toBe(width - inset);
+        expect(fullWindow.y + fullWindow.height).toBe(700 - inset);
         const header = page.locator("[data-artifact-fullscreen] > [data-window-drag]");
         expect(await header.evaluate((el) => el.getBoundingClientRect().height)).toBe(48);
         await expectWindowTop(page, platform);
@@ -103,6 +113,7 @@ test("expanded Sites start below the desktop window bar", async () => {
         // Pointer and keyboard both exit; neither remounts the live Site.
         await back.click();
         expect(await page.locator("dialog").evaluate((el) => el.matches(":modal"))).toBe(false);
+        expect(await layerOpen()).toBe(false);
         await frame.getByRole("button", { name: "Site state preserved" }).waitFor();
         expect(
           await page.locator("iframe").evaluate((el, original) => el === original, originalIframe),
@@ -357,7 +368,8 @@ test("app notices start below the desktop window bar", async () => {
         await open("&update=0&paused");
         const banner = page.locator("[data-canvas] > [data-slot='notice']");
         await banner.getByText("Agent work is paused").waitFor();
-        expect((await banner.boundingBox())!.y).toBe(top);
+        // On macOS the page is an inset panel: the banner starts inside its 1px border.
+        expect((await banner.boundingBox())!.y).toBe(top + (platform === "macos" ? 1 : 0));
         await expectWindowTop(page, platform);
         // Beside the open rail the banner keeps its usual spacing.
         await open("&update=0&paused&rail=open");

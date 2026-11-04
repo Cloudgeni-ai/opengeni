@@ -172,6 +172,52 @@ describe("IntegrationPage", () => {
   });
 });
 
+describe("IntegrationPage sections", () => {
+  test("GitHub's two identities each show what they mean, their state, and one action", async () => {
+    const connect = mock(() => {});
+    const view = await render(
+      <IntegrationPage
+        model={model({
+          id: "github",
+          name: "GitHub",
+          description: "Work on repositories, issues, and pull requests.",
+          footer: { kind: "actions" },
+          sections: [
+            {
+              id: "github-personal",
+              title: "Your GitHub",
+              description:
+                "Work appears under your name. Only in chats you start, on repos you choose.",
+              action: { label: "Connect", onClick: connect, primary: true },
+            },
+            {
+              id: "github-app",
+              title: "Opengeni app",
+              description: "Work appears as the Opengeni bot, shared with the workspace.",
+              status: "Installed on Cloudgeni-ai",
+              note: "A workspace admin manages the Opengeni app.",
+            },
+          ],
+        })}
+        onBack={() => {}}
+      />,
+    );
+    const text = view.container.textContent ?? "";
+    expect(text).toContain("Your GitHub");
+    expect(text).toContain("Work appears under your name.");
+    expect(text).toContain("Opengeni app");
+    expect(text).toContain("Installed on Cloudgeni-ai");
+    expect(text).toContain("A workspace admin manages the Opengeni app.");
+    expect(text.indexOf("Your GitHub")).toBeLessThan(text.indexOf("Opengeni app"));
+    const actions = view.container.querySelectorAll("[data-integration-section-action]");
+    expect(actions).toHaveLength(1);
+    expect(actions[0]!.getAttribute("data-integration-section-action")).toBe("github-personal");
+    await act(async () => (actions[0] as HTMLButtonElement).click());
+    expect(connect).toHaveBeenCalledTimes(1);
+    await view.unmount();
+  });
+});
+
 describe("CatalogItemPage", () => {
   const common = {
     workspaceId: "ws",
@@ -182,6 +228,7 @@ describe("CatalogItemPage", () => {
     socialConnections: [],
     canManageSocial: true,
     canManageSkills: true,
+    canTurnOnOrOff: true,
     onBack: () => {},
   };
 
@@ -405,7 +452,7 @@ describe("CatalogItemPage", () => {
     await view.unmount();
   });
 
-  test("a member asks an admin to turn on a custom server before anything is signed in", async () => {
+  test("a member gets the admin setup page for a custom server that is not on yet", async () => {
     const custom = item({
       id: "mcp:team-tools",
       source: "manual",
@@ -434,10 +481,9 @@ describe("CatalogItemPage", () => {
       />,
     );
     const text = visibleText(view.container);
-    expect(text).toContain("Ask an admin to turn on Team tools");
-    expect(text).not.toContain("You choose when you connect");
-    expect(buttons(view.container, "Connect Team tools")).toHaveLength(0);
-    expect(onConnectAccount).not.toHaveBeenCalled();
+    expect(text).not.toContain("Ask an admin to turn on Team tools");
+    // The same page an admin gets: the member chooses who can use it when connecting.
+    expect(text).toContain("You choose when you connect");
     await view.unmount();
   });
 

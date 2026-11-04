@@ -297,7 +297,7 @@ export function registerSiteDataTools(
           .optional()
           .describe("Base64-encoded binary content."),
         scope: SiteDataFileScope.optional().describe(
-          "shared (default): every viewer can open it. private: only the uploader and the Site's managers.",
+          "shared (default): every viewer can open it, including signed-out guests of a public Site. private: only the uploader and the Site's managers.",
         ),
       },
     },

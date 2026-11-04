@@ -51,6 +51,9 @@ const COPIED = [
   "sandbox_os",
   "channel_id",
   "keep_live",
+  "unattended_setting",
+  // Kept as recorded; a fork reads as attended regardless (see the session read).
+  "started_unattended",
   "rig_id",
   "rig_version_id",
   "initial_xai_provider_account_authority_snapshot",
@@ -62,6 +65,9 @@ const COPIED = [
   // only to that same person's fork, a policy pin never does.
   "codex_pinned_credential_id",
   "codex_pin_source",
+  // The fork's first request repeats the source's history, so it keeps the
+  // source's search-record form (docs/web-search.md).
+  "search_records_as_input",
 ] as const;
 
 const fresh = (value: unknown) => () => value;
@@ -118,6 +124,12 @@ const OWN: Record<string, { why: string; expected: (context: Context) => unknown
     why: "the source creator's credential bindings are stripped",
     expected: ({ source }) => source.resources,
   },
+  // The fork routines start from the source row (migration 1140): a
+  // repository a person removed from the source stays removed in the fork.
+  removed_repositories: {
+    why: "the source's repository removals",
+    expected: ({ source }) => source.removed_repositories,
+  },
   create_idempotency_key: { why: "the source's create request", expected: fresh(null) },
   agent_creation_attempt_id: { why: "the source's create request", expected: fresh(null) },
   imported_archive_import_id: { why: "the source's import", expected: fresh(null) },
@@ -163,6 +175,12 @@ const OWN: Record<string, { why: string; expected: (context: Context) => unknown
   codex_last_credential_id: { why: "its own measurements", expected: fresh(null) },
   last_input_tokens: { why: "its own measurements", expected: fresh(null) },
   compact_requested: { why: "its own measurements", expected: fresh(false) },
+  // The fork routines start from the source row and clear only the request;
+  // its label is inert without one (migration 1102), so it may ride along.
+  compact_request_trigger: {
+    why: "a label read only while compact_requested is true",
+    expected: ({ source }) => source.compact_request_trigger,
+  },
   direct_control_state: { why: "its own controls", expected: fresh("active") },
   direct_pause_revision: { why: "its own controls", expected: fresh(null) },
   subtree_run_override_revision: { why: "its own controls", expected: fresh(null) },
@@ -186,6 +204,8 @@ const OWN: Record<string, { why: string; expected: (context: Context) => unknown
   content_archived_at: { why: "its own archive", expected: fresh(null) },
   content_archive: { why: "its own archive", expected: fresh(null) },
   content_archive_purged_at: { why: "its own archive", expected: fresh(null) },
+  archived_at: { why: "its own archive", expected: fresh(null) },
+  archive_requested_by: { why: "its own archive", expected: fresh(null) },
   tool_policy_version: { why: "edit counter of this row's policy", expected: fresh(1) },
   variable_set_ids: { why: "retired; only explicit fork runtime", expected: fresh([]) },
   variable_set_id: { why: "retired; only explicit fork runtime", expected: fresh(null) },
@@ -370,6 +390,7 @@ async function configuredSource(org: Org) {
   // Settings changed after creation carry over too.
   await shared.admin`update sessions set keep_live = true, title = 'Release plan',
     title_source = 'user', description = 'Owns the release checklist',
+    search_records_as_input = true,
     avatar = ${shared.admin.json({ kind: "emoji", emoji: "🚀", hue: 210 })}
     where id = ${session.id}`;
   return session.id;
@@ -488,6 +509,7 @@ describe("a fork is the same agent as its source", () => {
       "keep_live",
       "instructions",
       "max_nested_agent_depth_override",
+      "search_records_as_input",
     ]) {
       expect({ column, value: source[column] }).not.toEqual({ column, value: blank[column] });
     }

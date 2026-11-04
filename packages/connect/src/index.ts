@@ -56,6 +56,8 @@ export class ConnectController {
     finishInPopup?: true;
     idempotencyKey: string;
     reconnectAccountId?: string;
+    /** Additional provider access to ask for; only with `reconnectAccountId`. */
+    requestedScopes?: string[];
     installationTarget?: import("./types").ConnectInstallationTarget;
     mcpSetup?: import("./types").PreparedMcpSetup;
   }): Promise<ConnectAttempt> {

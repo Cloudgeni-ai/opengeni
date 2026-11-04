@@ -59,10 +59,11 @@ to check:
    print it: `chromium --headless --no-sandbox --log-level=3
    --user-data-dir=/tmp/pdf-profile --no-pdf-header-footer
    --print-to-pdf=out.pdf in.html`.
-   Managed sandboxes already include python-docx and Chromium, and no
-   LibreOffice, pandoc or PDF library, so do not check for tools or install any
-   for a new file; run `pip install <package>` only if an import fails or a
-   sent PDF needs a library.
+   Managed sandboxes already include python-docx, Chromium and the
+   `pdftotext`/`pdfinfo` readers, and no LibreOffice, pandoc or PDF editing
+   library, so do not check for tools or install any for a new file; run
+   `pip install <package>` only if an import fails or a sent PDF needs a
+   library.
 2. When editing a sent file, open the original and change only what was asked,
    keeping its other content, formatting and objects.
 3. Read the result back to check the content. For a PDF made from HTML, check

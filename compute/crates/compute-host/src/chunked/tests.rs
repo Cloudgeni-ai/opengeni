@@ -11,6 +11,12 @@ use crate::image::overlaps;
 use crate::protocol::Id;
 use futures::TryStreamExt as _;
 
+/// The key `chunk` is stored under by an archive of `store` this hour.
+fn stored_key(store: &Chunked, chunk: &EncodedChunk) -> String {
+    let period = compute_storage::fresh::period_of(store.chunks.now());
+    chunk.reference.on_day(period).key()
+}
+
 fn id(value: &str) -> Id {
     value.parse().unwrap()
 }
@@ -27,6 +33,8 @@ fn sparse(path: &Path, length: u64, writes: &[(u64, &[u8])]) {
 
 /// The runtime the test images say made them.
 const RUNTIME: &str = "Firecracker v1.0.0 on a test processor";
+/// The virtual processors the test images say they were saved with.
+const VCPUS: u8 = 3;
 
 fn files(dir: &Path, memory: bool) -> SavedFiles {
     SavedFiles {
@@ -36,6 +44,7 @@ fn files(dir: &Path, memory: bool) -> SavedFiles {
             memory: dir.join("memory"),
             chunks: None,
             runtime: Some(RUNTIME.to_owned()),
+            vcpus: Some(VCPUS),
         }),
         profile: None,
         image: None,
@@ -99,6 +108,11 @@ async fn a_former_owner_writes_nothing_once_a_later_one_claims_the_copy() {
             receipt: receipt.clone(),
             memory: true,
             disk_bytes: CHUNK_BYTES,
+            // What it was saved with: its memory's length from its manifest.
+            made_at: MadeAt {
+                vcpus: Some(VCPUS),
+                memory_bytes: Some(CHUNK_BYTES),
+            },
         }
     );
     assert!(
@@ -552,11 +566,13 @@ async fn a_sandbox_comes_back_byte_for_byte_and_unchanged_chunks_are_not_stored_
         manifest,
         prefilled,
         runtime,
+        vcpus,
     } = store.fetch(sandbox, &into).await.unwrap()
     else {
         panic!("memory should stay in the store");
     };
     assert_eq!(runtime.as_deref(), Some(RUNTIME), "the runtime comes back");
+    assert_eq!(vcpus, Some(VCPUS), "and how many processors it had");
     assert_eq!(memory_len, big);
     assert!(prefilled.is_none(), "an unusable profile packs nothing");
     assert_eq!(
@@ -861,7 +877,7 @@ async fn a_copy_missing_a_chunk_fails_verification_until_archived_again() {
         ZSTD_LEVEL,
     )
     .unwrap();
-    let key = ObjectPath::from(format!("t/{}", memory_chunk.object_key()));
+    let key = ObjectPath::from(format!("t/{}", stored_key(&store, &memory_chunk)));
     backend.delete(&key).await.unwrap();
     assert!(!store.verify(sandbox, &first).await.unwrap());
 
@@ -918,7 +934,9 @@ async fn a_sweep_keeps_what_stored_copies_name() {
         .unwrap()
         .unwrap();
     let pack = parse_head("test", &pointer).unwrap().pack.unwrap();
-    let parts = working_set::parts(&chunks, &pack).await.unwrap();
+    let parts = compute_storage::copy::pack_parts(&chunks, &pack)
+        .await
+        .unwrap();
     let named = store.names(&pointer).await.unwrap();
     assert_ne!(parts.len(), 0);
     for kept in parts.iter().chain([&pack]) {
@@ -976,7 +994,8 @@ async fn a_sweep_keeps_what_stored_copies_name() {
     assert_eq!((none.named, none.unnamed), (0, none.stored));
 }
 
-/// A host reads only the current stored-copy format: a copy of any other
+/// A host reads the current stored-copy format and the one before it,
+/// whose manifests are named by their digest alone: a copy of any other
 /// version is refused, both by a wake and by a sweep's accounting.
 #[tokio::test]
 async fn a_stored_copy_of_another_version_is_refused() {
@@ -992,11 +1011,10 @@ async fn a_stored_copy_of_another_version_is_refused() {
         }))
         .unwrap()
     };
-    assert_eq!(
-        parse_head("test", &head(HEAD_VERSION)).unwrap().version,
-        HEAD_VERSION
-    );
-    for version in [0, 1, HEAD_VERSION - 1, HEAD_VERSION + 1] {
+    for version in [copy::VERSION_DIGESTS, copy::VERSION] {
+        assert_eq!(parse_head("test", &head(version)).unwrap().version, version);
+    }
+    for version in [0, 1, 2, copy::VERSION + 1] {
         assert!(
             parse_head("test", &head(version)).is_err(),
             "version {version}"
@@ -1239,9 +1257,9 @@ async fn reused_chunks_are_asked_about_again_after_a_day_or_a_failed_verificatio
         ],
     );
     let later = Arc::new(AtomicU64::new(0));
+    let start = SystemTime::now();
     let clock = {
         let later = Arc::clone(&later);
-        let start = SystemTime::now();
         compute_storage::fresh::Clock::from_fn(move || {
             start + Duration::from_secs(later.load(Ordering::SeqCst))
         })
@@ -1273,9 +1291,14 @@ async fn reused_chunks_are_asked_about_again_after_a_day_or_a_failed_verificatio
         ZSTD_LEVEL,
     )
     .unwrap();
+    // Stored by the first archive, in the first hour.
+    let first_hour = compute_storage::fresh::period_of(start);
     backend
         .inner
-        .delete(&ObjectPath::from(format!("t/{}", lost.object_key())))
+        .delete(&ObjectPath::from(format!(
+            "t/{}",
+            lost.reference.on_day(first_hour).key()
+        )))
         .await
         .unwrap();
     let blind = archived(&store, sandbox, &saved).await;
@@ -1308,7 +1331,7 @@ async fn a_chunk_an_image_lost_is_stored_again_once_a_verification_finds_it() {
         ZSTD_LEVEL,
     )
     .unwrap();
-    let key = ObjectPath::from(format!("t/{}", boot.object_key()));
+    let key = ObjectPath::from(format!("t/{}", stored_key(&store, &boot)));
     backend.inner.delete(&key).await.unwrap();
     assert!(!store.verify(a, &first).await.unwrap());
     backend.take();
@@ -1325,4 +1348,52 @@ async fn a_chunk_an_image_lost_is_stored_again_once_a_verification_finds_it() {
     let b_files = made_from(dir.path(), &path, image, "b", &[]);
     archived(&store, b, &b_files).await;
     assert_eq!(backend.take(), (4, 0));
+}
+
+/// What an archive stores is held until it publishes, and carried into each
+/// new hour meanwhile; a published archive leaves nothing held.
+#[tokio::test]
+async fn an_archive_holds_what_it_stores_until_it_publishes() {
+    use compute_storage::fresh::Clock;
+    use compute_storage::store::Kept;
+
+    let now = Arc::new(std::sync::Mutex::new(SystemTime::now()));
+    let clock = {
+        let now = Arc::clone(&now);
+        Clock::from_fn(move || *now.lock().unwrap())
+    };
+    let chunks =
+        ChunkStore::new(Arc::new(InMemory::new()), ObjectPath::from("t")).with_clock(clock);
+    let store = Chunked::new(chunks.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let saved = files(dir.path(), false);
+    sparse(
+        saved.disk.path(),
+        3 * CHUNK_BYTES,
+        &[(0, b"one"), (CHUNK_BYTES, b"two")],
+    );
+    let sandbox = id("0123456789abcdef0123456789abcdef");
+
+    let held = store.held(sandbox);
+    let holding = store.holding(&held);
+    holding
+        .archive_once(sandbox, save(), &saved, &CancellationToken::new())
+        .await
+        .unwrap()
+        .stored()
+        .unwrap();
+    assert_eq!(held.len(), 2, "both chunks, not the zeros");
+    *now.lock().unwrap() += Duration::from_secs(3_600);
+    let kept = chunks.keep(&held).await;
+    assert_eq!((kept.copied, kept.lost, kept.failed), (2, 0, 0), "{kept:?}");
+    assert_eq!(chunks.keep(&held).await, Kept::default(), "carried already");
+    drop((holding, held));
+
+    store
+        .archive(sandbox, save(), &saved, &CancellationToken::new())
+        .await
+        .unwrap()
+        .stored()
+        .unwrap();
+    assert!(store.in_flight.lock().unwrap().is_empty());
 }

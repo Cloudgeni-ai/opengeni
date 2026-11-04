@@ -2117,8 +2117,7 @@ describe("capability catalog helpers", () => {
     const copy = capabilityErrorToast(refused, "Couldn't remove Skill");
     expect(copy).toEqual({
       title: "Couldn't remove Skill",
-      description:
-        "You don't have permission to do this. Ask an admin for access. Reference: 0f0e0d0c-0b0a-4908-8706-050403020100.",
+      description: "You don't have permission to do this. Ask an admin for access.",
     });
     expect(
       capabilityErrorToast(new Error("This Skill is awaiting review."), "Couldn't enable")
@@ -2711,14 +2710,7 @@ describe("GitHub repository resources", () => {
       });
     });
 
-    test("custom hosts, unattached drafts and other installations are left alone", () => {
-      const otherInstallation = githubRepository({
-        id: 5,
-        installationId: 999,
-        fullName: "other/lib",
-        name: "lib",
-        cloneUrl: "https://github.com/other/lib.git",
-      });
+    test("custom hosts and unattached drafts are left alone", () => {
       const state = {
         manualRepos: [
           {
@@ -2728,14 +2720,33 @@ describe("GitHub repository resources", () => {
             attached: true,
           },
           { id: 2, url: "https://github.com/Cloudgeni-ai/opengeni", ref: "main", attached: false },
-          { id: 3, url: "https://github.com/other/lib", ref: "main", attached: true },
         ],
+        selectedRepoIds: new Set([opengeni.id]),
+        selectedRepoRefs: { [opengeni.id]: "dev" },
+      };
+      expect(reconcileManualRepositoriesWithCatalog(state, [opengeni], true)).toBeNull();
+    });
+
+    test("a row from another installation joins the selection", () => {
+      const otherInstallation = githubRepository({
+        id: 5,
+        installationId: 999,
+        fullName: "other/lib",
+        name: "lib",
+        cloneUrl: "https://github.com/other/lib.git",
+      });
+      const state = {
+        manualRepos: [{ id: 3, url: "https://github.com/other/lib", ref: "main", attached: true }],
         selectedRepoIds: new Set([opengeni.id]),
         selectedRepoRefs: { [opengeni.id]: "dev" },
       };
       expect(
         reconcileManualRepositoriesWithCatalog(state, [opengeni, otherInstallation], true),
-      ).toBeNull();
+      ).toEqual({
+        manualRepos: [],
+        selectedRepoIds: new Set([opengeni.id, 5]),
+        selectedRepoRefs: { [opengeni.id]: "dev", 5: "main" },
+      });
     });
 
     test("a retained identity the ready catalog no longer contains is dropped", () => {

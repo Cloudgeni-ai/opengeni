@@ -25,6 +25,7 @@ import {
   type SessionEventMutation,
   attachOpenSuffixToPendingToolCalls,
   isSessionCompactionRequested,
+  sessionCompactionRequestTrigger,
   hasPendingSteerForTurn,
   nextSessionHistoryPosition,
   persistModelContextSnapshot,
@@ -38,6 +39,8 @@ import { startSteerWatch, type SteerWatch } from "./steer-watch";
 import { recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
 import {
   AssistantMessagePhaseTracker,
+  HostedSearchEvidenceEchoGuard,
+  isHostedSearchEvidenceEchoText,
   normalizeModelCallUsage,
   normalizeSdkEvent,
   withMcpToolDisplayMetadata,
@@ -45,12 +48,15 @@ import {
   extractOpenSuffixFromRunState,
   assertOpenSuffixResumable,
   interruptionKindForCallItem,
+  mcpInputRequestOf,
   releaseMcpResultCustomDataFromSdkEvent,
   findCompactionNeededError,
+  compactionThresholdTokens,
   findAnthropicRequestSizeError,
   type AnthropicRequestSizeError,
   ANTHROPIC_REQUEST_MAX_BYTES,
   compactionProviderRejection,
+  modelResponseClientToolCallCount,
   modelResponseHasProgressUpdate,
   modelResponseHasVisibleText,
   ModelStepHandover,
@@ -66,6 +72,7 @@ import {
   type NormalizedRunCredentialMaterial,
   type RunCredentialCommandSession,
   type CodemodeTokenWriterSession,
+  withoutAppendedCommandCompletions,
 } from "@opengeni/runtime";
 import {
   environmentsEncryptionKeyBytes,
@@ -117,6 +124,7 @@ import {
 import { programmaticApproval, programmaticContinuationNote } from "../programmatic-approvals";
 import { CodemodeAttemptDispatcher } from "../codemode-dispatcher";
 import { ToolResultSpill } from "./tool-result-spill";
+import type { WorkspaceMutationOptions } from "./sandbox-runtime";
 import { ownedTurnSandboxForAgent } from "./turn-sandbox-access";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
@@ -134,6 +142,7 @@ import {
 import {
   modelCallProcessingResidency,
   OPEN_SUFFIX_RUN_STATE_BLOB,
+  approvalIdentifier,
   resolveWorkspaceAgentHumanInputEnabled,
   withPublicApprovalFields,
   type RetainedArtifactMetadata,
@@ -174,6 +183,7 @@ import {
   modelUsageSourceKey,
   recordCompletedModelCallBeforeOwnershipFences,
   TurnEventPublisher,
+  publishStartupProgress,
   createModelResponseEventState,
   createSessionTitleModelUsageEventState,
   modelResponseContextSignal,
@@ -198,6 +208,8 @@ import {
   requireAgentStreamFinalOutput,
 } from "./quiescence";
 import {
+  goalCompleteReplyMessage,
+  goalCompleteReplyDecision,
   inputWaitReply,
   inputWaitReplyMessage,
   inputWaitReplyRefusal,
@@ -215,6 +227,7 @@ import type {
 } from "@opengeni/contracts";
 import type { BoundRunCredentialResolver } from "../run-credentials";
 import type { ModelHistoryAttachmentProjector } from "../run-input";
+import type { TurnSearchRecords } from "../search-record-form";
 import type {
   AttemptIdentityState,
   BillingState,
@@ -228,6 +241,10 @@ import { sdkResponseHasMeaningfulOutput } from "./meaningful-output";
 import { subscriptionCoreTurnOf } from "./turn-context";
 import { currentAttemptSecretValues } from "./secret-values";
 import { admitIndependentSessionTitle } from "../independent-session-title";
+import {
+  requestIdleCompactionAfterCompletedTurn,
+  resolveCompactionRequestLabel,
+} from "./idle-compaction-request";
 
 export type TurnStreamAttemptDeps = {
   input: RunAgentTurnInput;
@@ -271,6 +288,7 @@ export type TurnStreamAttemptDeps = {
       outcome: "completed" | "failed";
       durationSeconds: number;
     }) => void,
+    options?: WorkspaceMutationOptions,
   ) => Promise<T>;
   throwIfWorkerShuttingDown: () => void;
   throwIfTurnCancelled: () => void;
@@ -306,6 +324,8 @@ export type TurnStreamAttemptDeps = {
   unavailableSandboxFilesNote: string | undefined;
   runCredentialsNote: string | undefined;
   mcpAvailabilityNote: string | undefined;
+  /** Turn-scoped note when the chat's attendance differs from how it started. */
+  attendanceNote?: string | undefined;
   knowledgeSourcePreparationNote?: string | undefined;
   fileAuthoritySubjectId: string | null;
   activeSandboxBackend: Settings["sandboxBackend"] | undefined;
@@ -337,6 +357,8 @@ export type TurnStreamAttemptDeps = {
     items: Array<Record<string, unknown>>,
   ) => Promise<Array<Record<string, unknown>>>;
   modelHistoryProjector: ModelHistoryAttachmentProjector;
+  /** The turn's hosted web-search record form; turn input settles it. */
+  searchRecords: TurnSearchRecords;
   compactionModeOptions: NonNullable<Parameters<typeof maybeCompactContext>[5]>;
   initialRunCredentialMaterial: NormalizedRunCredentialMaterial | null;
   initialGitCredentials: MintedRunGitCredentials | undefined;
@@ -461,6 +483,7 @@ export async function runTurnStreamAttempt(
     unavailableSandboxFilesNote,
     runCredentialsNote,
     mcpAvailabilityNote,
+    attendanceNote,
     knowledgeSourcePreparationNote,
     fileAuthoritySubjectId,
     activeSandboxBackend,
@@ -482,6 +505,7 @@ export async function runTurnStreamAttempt(
     compactionModelHistoryProjector,
     generatedImageHistoryProjector,
     modelHistoryProjector,
+    searchRecords,
     compactionModeOptions,
     initialRunCredentialMaterial,
     sandboxEnvironment,
@@ -569,6 +593,7 @@ export async function runTurnStreamAttempt(
         externallyBilled: billingState.isExternallyBilledTurn,
         chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
         countsTowardTokenCap: billingState.countsTowardTokenCap,
+        ...(billingState.isByokTurn !== undefined ? { byok: billingState.isByokTurn } : {}),
         servingCredentialId: providerTurn.effectiveCodexCredentialId,
         priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
         subscriptionConnectionId: subscriptionCoreTurnOf(providerTurn)?.connectionId ?? null,
@@ -648,6 +673,7 @@ export async function runTurnStreamAttempt(
         ...(unavailableSandboxFilesNote ? { unavailableSandboxFilesNote } : {}),
         ...(runCredentialsNote ? { runCredentialsNote } : {}),
         ...(mcpAvailabilityNote ? { mcpAvailabilityNote } : {}),
+        ...(attendanceNote ? { attendanceNote } : {}),
         ...(knowledgeSourcePreparationNote ? { knowledgeSourcePreparationNote } : {}),
         mountedFileResources: turn.resources.filter((resource) => resource.kind === "file"),
         providerApi,
@@ -662,6 +688,7 @@ export async function runTurnStreamAttempt(
         projectCanonicalHistory: generatedImageHistoryProjector,
         materializeModelHistory: media.materializeScreenshotHistory,
         projectModelHistory: modelHistoryProjector,
+        searchRecords,
         onPreparationPhase: (measurement) => {
           recordTurnStartupPhase(observability, {
             phase: `history_${measurement.phase}`,
@@ -748,6 +775,17 @@ export async function runTurnStreamAttempt(
     recoverySignalTokens: number | null,
     requestSizeError?: AnthropicRequestSizeError | null,
   ) => {
+    // "operator" here means the compaction consumes the durable request. Its
+    // event and metric label is whoever asked: /compact, or the worker's own
+    // idle checkpoint request (proactive). A request that vanished keeps the
+    // operator label; the replacement transaction still requires it. The
+    // label is display truth only, so a failed read never fails compaction.
+    const label =
+      triggerLabel === "operator"
+        ? await resolveCompactionRequestLabel(() =>
+            sessionCompactionRequestTrigger(db, input.workspaceId, input.sessionId),
+          )
+        : triggerLabel;
     const outcome = await waitForTurnOperation(
       maybeCompactContext(
         db,
@@ -770,7 +808,7 @@ export async function runTurnStreamAttempt(
         {
           force: true,
           ...(triggerLabel === "operator" ? { clearRequestedCompaction: true } : {}),
-          trigger: triggerLabel,
+          trigger: label,
           ...(requestSizeError
             ? {
                 requestSizeRecovery: {
@@ -794,7 +832,7 @@ export async function runTurnStreamAttempt(
     );
     if (outcome.events.length > 0) {
       if (outcome.compacted) {
-        recordContextCompaction(observability, triggerLabel);
+        recordContextCompaction(observability, label);
       }
       await publishCompactionOutcomeEvents(outcome.events);
     }
@@ -811,6 +849,8 @@ export async function runTurnStreamAttempt(
   let latestAssistantMessageText: string | null = null;
   // Waits refused because they would leave a person's message unanswered.
   let inputWaitReplyRefusals = 0;
+  // Goal completions with a reply refused because sibling results would go unseen.
+  let goalCompleteReplyRefusals = 0;
   // The accepted wait's verbatim reply was handled once (published, or found
   // to repeat the latest message), across every stream of this activity.
   let waitReplyPublished = false;
@@ -857,6 +897,9 @@ export async function runTurnStreamAttempt(
         countsTowardTokenCap: billingState.countsTowardTokenCap,
         initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
         sessionId: input.sessionId,
+        ...(billingState.isByokTurn ? { byok: true } : {}),
+        ...(billingState.isOwnSubscriptionTurn ? { ownSubscription: true } : {}),
+        ...(billingState.billingOrigin ? { billingOrigin: billingState.billingOrigin } : {}),
       }),
       checkSteer
         ? hasPendingSteerForTurn(db, {
@@ -890,6 +933,7 @@ export async function runTurnStreamAttempt(
       throw new Error("Run input was not prepared");
     }
     steerHandover = false;
+    let compactionHandover: Error | undefined;
     // Keep the fence in step with a Steer the watch already noticed.
     eventing.toolCancellationFenceRef.current?.setForegroundWaitYield(
       steerWatch?.signal().aborted === true,
@@ -932,6 +976,7 @@ export async function runTurnStreamAttempt(
     // undeclared messages the SDK runs past (same response asks for tools)
     // are commentary. Every SDK event of this stream is normalized once.
     const messagePhases = new AssistantMessagePhaseTracker();
+    const evidenceEchoGuard = new HostedSearchEvidenceEchoGuard();
     // Text of the newest assistant message this stream completed durably.
     let latestStreamedAssistantText: string | null = null;
     // Actual input tokens of the most recent model response this turn; the
@@ -1045,7 +1090,9 @@ export async function runTurnStreamAttempt(
       // before this line.
       recordCompanyBrainContributionReceiptOnce();
       if (!eventing.firstModelRequestPreparationRecorded) {
-        await eventing.publish!([
+        // The request audit below is an awaited append, so it commits after
+        // this receipt without the preparation waiting on it.
+        await publishStartupProgress(eventing, [
           {
             type: "turn.startup.phase.started",
             payload: { phase: "model_preparation" },
@@ -1074,6 +1121,9 @@ export async function runTurnStreamAttempt(
         }
         attempt.modelRequestStarted = true;
         return await runtime.runStream(agent, runInput!, eventing.modelRunSettings, {
+          onCompactionHandover: (error) => {
+            compactionHandover = error;
+          },
           beforeModelRequest: (point) => {
             streamTiming.onModelRequestEntry(point);
             return modelCallAdmission.beforeModelRequest(point);
@@ -1090,6 +1140,8 @@ export async function runTurnStreamAttempt(
           ...(attemptSecretValues
             ? { secretMaskingInputFilter: secretValueModelInputFilter(attemptSecretValues) }
             : {}),
+          // Settled by turn input above; the same for every model call of the run.
+          searchRecordForm: searchRecords.form,
           onModelVisibleContext: async (rawSnapshot) => {
             const snapshot = attemptSecretValues
               ? attemptSecretValues.mask(rawSnapshot, "model_context_snapshot")
@@ -1251,6 +1303,16 @@ export async function runTurnStreamAttempt(
       eventing.stream = await withProviderRequestContext(runStreamOnce);
       const stream = eventing.stream;
       eventing.inputWaitReplyGuard = async (request) => {
+        if (request.kind === "goal_complete") {
+          const decision = goalCompleteReplyDecision({
+            refusalsSoFar: goalCompleteReplyRefusals,
+            toolCallCount: modelResponseClientToolCallCount(
+              (stream.state as { _lastTurnResponse?: unknown })._lastTurnResponse,
+            ),
+          });
+          if (typeof decision === "string") goalCompleteReplyRefusals += 1;
+          return decision;
+        }
         const refusal = await inputWaitReplyRefusal({
           turn,
           refusalsSoFar: inputWaitReplyRefusals,
@@ -1391,6 +1453,7 @@ export async function runTurnStreamAttempt(
           externallyBilled: billingState.isExternallyBilledTurn,
           chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
           countsTowardTokenCap: billingState.countsTowardTokenCap,
+          ...(billingState.isByokTurn !== undefined ? { byok: billingState.isByokTurn } : {}),
           servingCredentialId: providerTurn.effectiveCodexCredentialId,
           priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
           subscriptionConnectionId: subscriptionCoreTurnOf(providerTurn)?.connectionId ?? null,
@@ -1687,7 +1750,18 @@ export async function runTurnStreamAttempt(
                     toolOutputTransform: (output) =>
                       retainedToolImagesEventOutput(output, retainedToolImages),
                   }
-                : { messagePhases },
+                : eventing.commandCompletionNotices && eventing.commandCompletionNotices.size > 0
+                  ? {
+                      // The model reads finished commands after this tool's
+                      // result; the timeline shows the tool's own output.
+                      messagePhases,
+                      toolOutputTransform: (output) =>
+                        withoutAppendedCommandCompletions(
+                          output,
+                          eventing.commandCompletionNotices ?? new Set(),
+                        ),
+                    }
+                  : { messagePhases },
           );
           const normalizedToolOutput = normalizedSdkEvents.find(
             (event) =>
@@ -1786,7 +1860,8 @@ export async function runTurnStreamAttempt(
                 }
               : { messagePhases },
           );
-        for (const event of normalized) {
+        // A model-written copy of a search record is never shown as chat text.
+        for (const event of evidenceEchoGuard.filter(normalized)) {
           if (event.type === "agent.toolCall.created") {
             const preparedServers = eventing.preparedTools?.mcpServers ?? [];
             // Display metadata and the content-free analytics family are
@@ -1838,7 +1913,10 @@ export async function runTurnStreamAttempt(
             // own text, so an approval pause or a retried activity cannot lose
             // it. Settlement and later activities then find it as the turn's
             // latest message and do not publish it again.
-            const acceptedReply = eventing.preparedTools?.inputWaitYield?.reply ?? null;
+            // A goal completion's reply is the turn's final output instead:
+            // settlement publishes it once, with the turn's completion.
+            const gate = eventing.preparedTools?.inputWaitYield;
+            const acceptedReply = gate?.finalReply === null ? (gate?.reply ?? null) : null;
             if (acceptedReply !== null && !waitReplyPublished) {
               waitReplyPublished = true;
               const message = inputWaitReplyMessage({
@@ -2013,6 +2091,9 @@ export async function runTurnStreamAttempt(
       temporalCancellationSignal: cancellationSignal,
       runtimeCancellationSignal,
     });
+    // SDK handover preserves queued events; only compact once their outputs
+    // and receipts have crossed the ordinary durable publication boundary.
+    if (compactionHandover) throw compactionHandover;
     // External Codemode stays reachable until finalization. Close wait
     // admission before any terminal output/history decision, and drain an
     // already-admitted wait before consulting the actual runner-yield latch.
@@ -2082,6 +2163,7 @@ export async function runTurnStreamAttempt(
               externallyBilled: billingState.isExternallyBilledTurn,
               chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
               countsTowardTokenCap: billingState.countsTowardTokenCap,
+              ...(billingState.isByokTurn !== undefined ? { byok: billingState.isByokTurn } : {}),
               usage: aggregateUsage,
               normalizedUsage: normalizedAggregateUsage,
               sourceKey: aggregateSourceKey,
@@ -2246,6 +2328,14 @@ export async function runTurnStreamAttempt(
       });
       assertOpenSuffixResumable(suffixMembers, interruptionCallIds);
       const suffixByCallId = new Map(suffixMembers.map((member) => [member.callId, member]));
+      // A call its MCP server paused with a question keeps that question
+      // (with the server's state) so a later attempt can retry it answered.
+      const mcpInputRequests = new Map<string, Record<string, unknown>>();
+      for (const interruption of eventing.stream.interruptions) {
+        const request = mcpInputRequestOf(interruption);
+        const callId = approvalIdentifier(interruption);
+        if (request && callId) mcpInputRequests.set(callId, request);
+      }
       const attached =
         interruptionCallIds.length === 0
           ? { accepted: true }
@@ -2264,6 +2354,9 @@ export async function runTurnStreamAttempt(
                     member.callItem as Record<string, unknown>,
                   ),
                   reasoningItems: member.reasoningItems as Array<Record<string, unknown>>,
+                  ...(mcpInputRequests.has(callId)
+                    ? { mcpInputRequest: mcpInputRequests.get(callId)! }
+                    : {}),
                 };
               }),
             });
@@ -2293,7 +2386,12 @@ export async function runTurnStreamAttempt(
                                 eventing.preparedTools?.mcpServers ?? [],
                                 approval,
                               ),
-                              { workspaceId: input.workspaceId, sessionId: input.sessionId },
+                              {
+                                workspaceId: input.workspaceId,
+                                sessionId: input.sessionId,
+                                settings: eventing.modelRunSettings,
+                                cards: eventing.appActionApprovalCards,
+                              },
                             ),
                           ),
                         ),
@@ -2386,10 +2484,23 @@ export async function runTurnStreamAttempt(
       control.activityStatus = "idle";
       return claimedResult({ status: "idle" });
     }
-    const inputWaitYielded = eventing.preparedTools?.inputWaitYield?.yielded === true;
-    const finalOutput = String(
-      requireAgentStreamFinalOutput(eventing.stream.finalOutput, inputWaitYielded),
-    );
+    // A goal completion that carried a reply ends the turn at the tool
+    // boundary like a wait, but that reply is the turn's final answer: it
+    // settles exactly like an answered turn, never as a wait.
+    const completionReply =
+      eventing.preparedTools?.inputWaitYield?.yielded === true
+        ? (eventing.preparedTools.inputWaitYield.finalReply ?? null)
+        : null;
+    const inputWaitYielded =
+      eventing.preparedTools?.inputWaitYield?.yielded === true && completionReply === null;
+    const streamFinalOutput =
+      completionReply ??
+      String(requireAgentStreamFinalOutput(eventing.stream.finalOutput, inputWaitYielded));
+    // A copied web-search record is not a reply: treat it as empty so the
+    // turn asks for a real answer instead of publishing the copy.
+    const suppressedEcho =
+      completionReply === null && isHostedSearchEvidenceEchoText(streamFinalOutput);
+    const finalOutput = suppressedEcho ? "" : streamFinalOutput;
     const durableReplyFacts =
       !inputWaitYielded && finalOutput.trim().length === 0
         ? await sessionTurnFinalReplyFacts(db, input.workspaceId, input.sessionId, activeTurnId)
@@ -2404,6 +2515,7 @@ export async function runTurnStreamAttempt(
         maintenance: turn.source === "compaction",
         toolsExecuted: toolsExecuted || finalReplyNudged || durableReplyFacts.toolsExecuted,
         completedGoal: durableReplyFacts.completedGoal,
+        suppressedEcho,
       })
     ) {
       await historySink.reconcileConversationTruth({ requireDurable: true });
@@ -2489,7 +2601,15 @@ export async function runTurnStreamAttempt(
         events: [
           ...(inputWaitYielded || finalOutputAlreadyCompleted
             ? []
-            : [{ type: "agent.message.completed" as const, payload: { text: finalOutput } }]),
+            : [
+                {
+                  type: "agent.message.completed" as const,
+                  payload:
+                    completionReply === null
+                      ? { text: finalOutput }
+                      : goalCompleteReplyMessage(finalOutput, input.attemptId),
+                },
+              ]),
           ...(waitReplyMessage
             ? [{ type: "agent.message.completed" as const, payload: waitReplyMessage }]
             : []),
@@ -2523,6 +2643,20 @@ export async function runTurnStreamAttempt(
       turnId: activeTurnId,
       turnAttemptId: input.attemptId,
       idempotencyKey: `usage:agent_run.completed:${activeTurnId}`,
+    });
+    // The turn is durably complete. If it left the session at the automatic
+    // threshold, ask for the checkpoint now: this workflow's next work peek
+    // claims it as standalone maintenance while the prompt cache is warm,
+    // instead of the person's next message waiting for it. Best effort.
+    await requestIdleCompactionAfterCompletedTurn({
+      db,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: activeTurnId,
+      enabled: settings.idleContextCompactionEnabled,
+      turn: { source: turn.source ?? "", initiatorKind: turn.initiator.kind },
+      thresholdTokens: compactionThresholdTokens(eventing.modelRunSettings),
+      logger: observability,
     });
     control.activityStatus = "idle";
     return claimedResult({ status: "idle" });
@@ -2672,6 +2806,7 @@ export async function runTurnStreamAttempt(
             externallyBilled: billingState.isExternallyBilledTurn,
             chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
             countsTowardTokenCap: billingState.countsTowardTokenCap,
+            ...(billingState.isByokTurn !== undefined ? { byok: billingState.isByokTurn } : {}),
             ...(serviceTier ? { serviceTier } : {}),
           });
         })().catch((error) => {

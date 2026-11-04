@@ -717,7 +717,8 @@ describe("usage allowance DB lifecycle", () => {
       grantsRemaining: 90,
       limit: 200,
     });
-    expect(usage.members[0]!.limit).toBe(95);
+    // A share of the whole pool: spending a grant doesn't lower it.
+    expect(usage.members[0]!.limit).toBe(100);
     const grants =
       await shared.admin`select operation_id,remaining::integer from opengeni_private.workspace_allowance_grants
       where workspace_id=${scope.workspaceId} order by operation_id`;
@@ -731,6 +732,102 @@ describe("usage allowance DB lifecycle", () => {
       code: "allowance_exhausted",
       scope: "workspace",
     });
+  });
+
+  test("equal shares of grant credits stay steady as they are spent and grow on a top-up", async () => {
+    const scope = await fixture();
+    const workspaceScope = { accountId: scope.accountId, workspaceId: scope.workspaceId };
+    const other = `user:other:${crypto.randomUUID()}`;
+    await shared.admin`insert into workspace_memberships (account_id,workspace_id,subject_id)
+      values (${scope.accountId},${scope.workspaceId},${other})`;
+    const otherPersonal = crypto.randomUUID();
+    await shared.admin`insert into workspaces(id,account_id,name) values(${otherPersonal},${scope.accountId},'Other Personal')`;
+    await shared.admin`insert into organization_memberships(account_id,subject_id,role,status,personal_workspace_id)
+      values(${scope.accountId},${other},'member','active',${otherPersonal})`;
+    await setWorkspaceAllowance(app.db, {
+      ...scope,
+      includedCredits: 0,
+      period: "monthly",
+      memberDefault: "equal_share",
+      expectedVersion: 0,
+    });
+    await shared.admin`insert into workspace_webhooks (account_id,workspace_id,url,secret_encrypted,event_types)
+      values (${scope.accountId},${scope.workspaceId},'https://example.test/webhook','sealed',
+        array['usage.threshold_reached','usage.exhausted'])`;
+    await grantWorkspaceCredits(app.db, { ...scope, operationId: "bought", credits: 40_000 });
+    const limits = async () =>
+      Object.fromEntries(
+        (await getWorkspaceUsage(app.db, workspaceScope)).members.map((m) => [
+          m.subjectId,
+          m.limit,
+        ]),
+      );
+    expect(await limits()).toEqual({ [scope.subjectId]: 20_000, [other]: 20_000 });
+
+    // Spending from the grant leaves every share where it was.
+    await charge(scope, 2);
+    expect(await limits()).toEqual({ [scope.subjectId]: 20_000, [other]: 20_000 });
+    expect((await getWorkspaceUsage(app.db, workspaceScope)).workspace).toMatchObject({
+      limit: 40_000,
+      used: 2,
+      grantsRemaining: 39_998,
+    });
+
+    // One member spends 80% of their share: one threshold notice, with the
+    // same ceiling the usage read shows, and not yet exhausted.
+    const session = await createSession(app.db, {
+      ...scope,
+      initialMessage: "test",
+      resources: [],
+      metadata: {},
+      model: "scripted",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId: scope.subjectId },
+      createdByContext: {},
+    });
+    await initializeSessionStartAtomically(app.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      sessionId: session.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const [turn] =
+      await shared.admin`select id from session_turns where session_id=${session.id} order by created_at limit 1`;
+    const spend = async (micros: number) =>
+      await applyCreditDebitAfterUse(app.db, {
+        ...scope,
+        type: "model",
+        amountMicros: micros,
+        sourceType: "model_response",
+        sourceId: `${turn!.id}:response:${crypto.randomUUID()}`,
+        idempotencyKey: crypto.randomUUID(),
+      });
+    await spend(16_000);
+    await maintainWorkspaceAllowances(app.db, { limit: 100 });
+    const notices = await shared.admin`select threshold::text, payload->>'limit' as limit
+      from opengeni_private.workspace_allowance_notifications
+      where workspace_id=${scope.workspaceId} and subject_id=${scope.subjectId} order by threshold`;
+    expect([...notices]).toEqual([{ threshold: "0.8", limit: "20000" }]);
+    expect(await checkWorkspaceAllowance(app.db, scope)).toBeNull();
+
+    // The share is spent at exactly half of what was bought.
+    await spend(3_999);
+    expect(await checkWorkspaceAllowance(app.db, scope)).toBeNull();
+    await spend(1);
+    expect(await checkWorkspaceAllowance(app.db, scope)).toMatchObject({
+      scope: "member",
+      subjectId: scope.subjectId,
+    });
+    expect(await checkWorkspaceAllowance(app.db, { ...scope, subjectId: other })).toBeNull();
+    expect(await limits()).toEqual({ [scope.subjectId]: 20_000, [other]: 20_000 });
+
+    // Buying more raises every share.
+    await grantWorkspaceCredits(app.db, { ...scope, operationId: "more", credits: 1_000 });
+    expect(await limits()).toEqual({ [scope.subjectId]: 20_500, [other]: 20_500 });
+    expect(await checkWorkspaceAllowance(app.db, scope)).toBeNull();
   });
 
   test("frozen initiating human, not service or session creator, receives the debit", async () => {

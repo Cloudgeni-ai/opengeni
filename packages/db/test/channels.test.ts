@@ -184,4 +184,65 @@ describe("channels (real PostgreSQL + FORCE RLS)", () => {
       }),
     ).rejects.toBeInstanceOf(ChannelNotFoundError);
   });
+
+  test("a project's avatar is stored, updated alone, cleared and bounded", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const project = await createChannel(db, {
+      ...workspace,
+      name: "design",
+      description: "Interface polish",
+      avatar: { kind: "emoji", emoji: "🎨", hue: 275 },
+    });
+    expect(project.avatar).toEqual({ kind: "emoji", emoji: "🎨", hue: 275 });
+    expect((await createChannel(db, { ...workspace, name: "plain" })).avatar).toBeNull();
+
+    const iconed = await updateChannel(db, workspace.workspaceId, project.id, {
+      avatar: { kind: "icon", icon: "rocket", hue: 215 },
+    });
+    expect(iconed).toMatchObject({
+      name: "design",
+      description: "Interface polish",
+      avatar: { kind: "icon", icon: "rocket", hue: 215 },
+    });
+    // A rename leaves the avatar alone.
+    await updateChannel(db, workspace.workspaceId, project.id, { name: "design system" });
+    expect((await getChannel(db, workspace.workspaceId, project.id))?.avatar).toEqual({
+      kind: "icon",
+      icon: "rocket",
+      hue: 215,
+    });
+    expect(
+      (await listChannels(db, workspace.workspaceId)).find((row) => row.id === project.id)?.avatar,
+    ).toEqual({ kind: "icon", icon: "rocket", hue: 215 });
+    expect(
+      (await updateChannel(db, workspace.workspaceId, project.id, { avatar: null }))?.avatar,
+    ).toBeNull();
+
+    // The column refuses non-objects and oversized values, like a chat's avatar.
+    // Awaited inside a function: the admin query only runs once it is awaited.
+    const refused = async (write: () => Promise<unknown>) => {
+      try {
+        await write();
+      } catch (error) {
+        return String(error);
+      }
+      return "accepted";
+    };
+    expect(
+      await refused(
+        () => admin`update channels set avatar = '"folder"'::jsonb where id = ${project.id}`,
+      ),
+    ).toContain("channels_avatar_bounds");
+    expect(
+      await refused(
+        () => admin`update channels
+          set avatar = jsonb_build_object('kind', 'emoji', 'emoji', repeat('x', 2000))
+          where id = ${project.id}`,
+      ),
+    ).toContain("channels_avatar_bounds");
+    // A stored value the app can't read shows the folder instead of failing the list.
+    await admin`update channels set avatar = ${admin.json({ kind: "unknown" })} where id = ${project.id}`;
+    expect((await getChannel(db, workspace.workspaceId, project.id))?.avatar).toBeNull();
+  }, 180_000);
 });

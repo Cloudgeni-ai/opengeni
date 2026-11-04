@@ -17,7 +17,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
-import { createManagedAuth } from "../src/auth/managed-auth";
+import { createManagedAuth, findManagedAuthOAuthState } from "../src/auth/managed-auth";
 
 let shared: SharedTestDatabase;
 let client: DbClient;
@@ -203,9 +203,7 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
       const state = new URL(((await start.json()) as { url: string }).url).searchParams.get(
         "state",
       )!;
-      const stored = await (
-        await managedAuth.$context
-      ).internalAdapter.findVerificationValue(state);
+      const stored = await findManagedAuthOAuthState(managedAuth, state);
       return JSON.parse(stored!.value) as Record<string, unknown>;
     };
 

@@ -66,7 +66,16 @@ enabling it changes no session's backend.
 
    The password reaches the service in a variable of its own, so it needs
    no quoting. The service creates its tables at start and upgrades them
-   in place, recording their version. It also takes two Postgres advisory
+   in place, recording their version. For a managed database set
+   `database.sslmode: require` (the service takes `disable`, `prefer` and
+   `require`): the service, its sweep and every other `compute-control`
+   command then connect over TLS and check the database's certificate
+   against the image's system authorities, as `verify-full` would. For a
+   private authority, mount it and name it as `COMPUTE_CONTROL_DATABASE_CA`
+   in `extraEnv`, which reaches the sweep too (`--database-ca` on the
+   command line). Without `require` and without an authority the
+   connection is unencrypted, for a database beside the service. It also
+   takes two Postgres advisory
    locks (7231401 for its schema, and its leader lock); keep them free in
    a shared database.
    Its connections give up on a database the network stops answering:
@@ -79,8 +88,8 @@ enabling it changes no session's backend.
    `keepalives_idle` of exactly 7200 (the library's default, which reads
    as unset), get the bound. `keepalives=0` still turns keepalives off,
    and `keepalives_retries=0` is kept as given. A
-   replica that has read no hosts from the database for a lease term
-   cannot tell which hosts renew: it answers creates and wakes 503
+   replica that has read no hosts from the database for three renewal
+   intervals (10 s) cannot tell which hosts renew: it answers creates and wakes 503
    `unavailable` ("has not read its hosts from the store"), not
    `no_capacity`.
 2. **Its keys.** API keys are `team key` lines in a Secret
@@ -241,10 +250,14 @@ computeControl:
       iam.gke.io/gcp-service-account: opengeni-compute-control@example.iam.gserviceaccount.com
 ```
 
-The daily sweep of the store (ADR 17) runs as a CronJob from the same
-image and identity (`computeControl.sweep`). It deletes only from Google
-Cloud Storage; with an `az://` or `s3://` archive turn it off
-(`sweep.enabled: false`), which the chart requires.
+The hourly sweep of the store (ADR 17, 25, 28, 29) runs as a CronJob from the
+same image, identity and database (`computeControl.sweep`), as
+`compute-control sweep`: it reads the pointers the service keeps. It deletes on
+any archive, `gs://`, `az://` or `s3://`. Each run lists only the hours that
+became old enough since the last run, and deletes what replaced copies alone
+named; once a day it lists everything. It keeps its progress under `sweep/` in
+the store, gives up starting new listings after 40 minutes, leaves what failed
+to the next run, and logs each step, so a run that is slow shows where it is.
 
 ### Hosts
 
@@ -335,7 +348,8 @@ installs three units:
   the software watchdog (3 s, `nowayout`) where the machine has no
   hardware one, and no suspend;
 - `compute-guard.service`, never restarted on failure: it stops every VM
-  when the host's lease runs out, and the watchdog resets the machine if
+  that is not its sandbox's only copy when the host's lease runs out
+  (ADR 18), and the watchdog resets the machine if
   the guard itself ends or stalls. So that a host short of processors or
   memory (guests holding more than it has, the swap file busy) does not
   stall it into that reset, it runs at real-time priority, locks its own
@@ -347,7 +361,59 @@ installs three units:
 - `compute-host.service`, the agent, which checks before every start that
   the mounted state volume is the recorded one and that its certificate,
   Firecracker, kernel and base image are there (`check-host`), and runs
-  with `KillMode=process` so a restart leaves its VMs running.
+  with `KillMode=process` so a restart leaves its VMs running. Each start
+  records what it uses (`agent-inputs`: the release, `installed.env`,
+  `host.env`, `ca.pem`, the base image and the unit as systemd loaded it)
+  under `/run`, with the start's invocation id, and `install.sh` restarts
+  an agent only when that changed, when the running agent's start is not
+  the one recorded (a start by an earlier release's unit after a rollback
+  records nothing), or when the agent does not answer within a minute of
+  being left running; it logs why it restarts. So the startup script that
+  installs again at every boot on GCP leaves the agent systemd just
+  started running, rather than stopping its lease renewals and cutting
+  short the wakes it began. Files `host.env` names (such as credentials)
+  and `systemctl set-environment` are not part of what is recorded: after
+  changing only those, restart the agent yourself.
+
+#### A host that shares its machine
+
+A host can run directly on a hypervisor, or any machine, that also runs
+other work ([ADR 26](adr/0026-a-host-that-shares-its-machine.md)): its
+sandboxes then get bare-metal memory faults and the Compressed level,
+with no host VM in between. Set `COMPUTE_MACHINE=shared` and the
+sandboxes' share of memory, `COMPUTE_MEMORY_TOTAL_MIB`, in `host.env`;
+leave the machine's other work room outside the share. Then:
+
+- the guard feeds systemd's watchdog of its own service instead of the
+  machine's, whose reset would end the other work too: `install.sh`
+  installs `compute-guard-shared.conf` as the guard's drop-in
+  (`WatchdogSec=3s`, `WatchdogSignal=SIGKILL`). systemd kills a guard that
+  stops feeding it, and after every end of the guard its stop hook
+  (`compute-host guard-stopped`) kills every VM, as a reset would, and
+  restarts the agent if it runs, which starts a new guard. An upgrade
+  hands the guard over instead (`compute-host hand-over-guard`), and the
+  VMs stay. The hook says in the guard's journal what it did;
+- `host-setup` loads no watchdog, leaves transparent huge pages as the
+  machine has them unless they are `always` (then `madvise`), and sizes
+  the swap file and zswap's pool from the share;
+- `check-host` refuses to start the agent while the guard's service lacks
+  the watchdog or the hook, and the guard refuses a `WatchdogSec=` longer
+  than 3 s.
+
+Let systemd feed the machine's hardware watchdog (`RuntimeWatchdogSec=`,
+for example `30s`): the guarantee rests on systemd running the guard's
+watchdog and hook, and a hardware watchdog resets the machine only if
+systemd itself stops. The other work can swap into compute's swap file
+under pressure; memory pinned for device passthrough never does, and a
+service kept out with `MemorySwapMax=0` does not. On a NixOS machine,
+or any machine whose own configuration owns its systemd units, the
+configuration installs and enables the bundle's units (on a shared
+machine with `compute-guard-shared.conf` as the guard's drop-in), straight
+from the bundle it names, and mounts the state volume itself; then
+`install.sh --units-installed` (no `--state-device`) checks that the units
+in place are the bundle's, writes none, and does the rest, handing the
+guard over and restarting the agent. Keep a configuration switch from
+restarting the guard, which would kill the VMs.
 
 ### Opengeni's settings
 
@@ -480,6 +546,18 @@ to hosts that offer them; other pools' teams reach none.
   on meanwhile (its lease lapsed, or it was fenced) and registers again:
   it comes back draining, so a host on its way out never takes new
   sandboxes.
+- **Resizing a sandbox.** A deployment that creates sandboxes at a new
+  shape leaves older ones at theirs. `POST /v1/sandboxes/<id>/resize`
+  with any of `vcpus`, `memory_mib`, `memory_request_mib`,
+  `cpu_request_millis` and `disk_mib` (each omitted stays) moves the
+  sandbox off its host as `/move` does and gives it the new shape, which
+  its next wake places and books (ADR 27). Its files stay. A new `vcpus`
+  or `memory_mib` ends its running programs: it boots afresh from its
+  disk. New requests or a longer disk keep them; its file system grows to
+  fill the disk as it wakes. `disk_mib` may only grow. A sandbox held
+  awake is refused as `busy` unless the body has `"awake": true`; one
+  woken again each time it is handed off answers `unavailable`, and
+  asking again is safe.
 - **Removing a host.** Drain it to zero, then delete the machine (on GCP,
   `gcloud compute instance-groups managed delete-instances` so the group
   does not replace it). Never delete a host that still owns sandboxes: the
@@ -780,22 +858,81 @@ before users move to compute from Modal:
 
 - **Deleting a sandbox: its pointer goes last, its bytes later.** Removal
   records the intent, stops the VM, removes its network and then deletes
-  the pointer in object storage; a step that fails is tried again, and the
-  sandbox shows as removing (or blocked) until all are done. A daily sweep
-  (`compute-host sweep --store ... --delete`) then deletes the chunks and
-  manifests no pointer names that were stored more than about a week
-  before it began ([ADR 17](adr/0017-sweeping-unnamed-chunks.md)). Age
-  counts from when an object was last stored, so a copy archived long ago
-  goes at the first sweep after nothing names it. A chunk another sandbox
-  still names stays: identical content is shared.
+  its pointer; a step that fails is tried again, and the sandbox shows as
+  removing (or blocked) until all are done. An hourly sweep then deletes
+  the chunks and manifests no pointer names whose hour ended at least an
+  hour before it began, two to three hours after the last pointer naming
+  them went ([ADR 25](adr/0025-pointers-in-the-control-service-and-objects-by-day.md),
+  [28](adr/0028-stored-objects-carry-their-hour.md)); one named with a day,
+  by a host of an earlier release, once its day ended an hour before.
+  Objects in the old layout (`chunks/v1`, `manifests/v1`) go once they
+  were last stored more than a week before the sweep. A chunk another
+  sandbox still names stays: identical content is shared.
+- **Where pointers live.** In a fleet the control service keeps them, in
+  its database (`compute_pointers`); the sweep runs from the control image
+  (`compute-control sweep --store ... --delete`) with that database.
+  Upgrade the Helm chart together with the control image: the image no
+  longer carries `compute-host`, so an earlier chart's sweep job fails
+  against it rather than sweeping by the object store's pointers. A
+  host on its own keeps them in its object store, which must enforce
+  conditional writes (GCS, Azure, S3 itself; not Garage), and sweeps with
+  `compute-host sweep`. When a fleet first runs a release that keeps them
+  in the service, the service moves them in by itself once no host of an
+  earlier release is live, and marks the object store so that nothing
+  sweeps by the pointers left there; until then hosts of the new release
+  neither archive nor restore and the sweep refuses to start, so upgrade
+  every host soon after the service. `compute_control_pointers_imported`
+  says whether the move happened and
+  `compute_control_pointers_waiting_hosts` how many hosts of an earlier
+  release it waits for; `OpenGeniComputePointersWaiting` fires when that
+  stays above zero for 30 minutes. Right after the move, again a few
+  times over the next hour, and before each sweep that deletes, the
+  service adopts any pointer the object store still holds that it has
+  none of (one an import missed on a store that listed it late), and says
+  so. Objects of the old layout, which only those pointers name, are not
+  swept until a week after the move.
+- **Moving a fleet's archive to another store.** The pointers stay in the
+  service, so only chunks and manifests move: `compute-control
+  copy-archive --from <store> --to <store>` copies every one a pointer
+  names, checking each against its name as it reads it, and skips what
+  the other store holds already. What no pointer names (a sweep's
+  garbage), quarantined copies and the pointers an object store kept
+  stay behind, so it copies less than a whole-bucket copy and never
+  writes to the store it copies from. It needs the fleet's pointers in
+  the service, adopts any the import missed first, marks the other store
+  as one whose pointers the service keeps, and prints a report; it fails
+  if the other store lacks anything a pointer names, saying which
+  pointers or objects, and copying again picks up where it stopped. Each
+  store takes its provider's usual settings from the environment; for two
+  stores of one kind, such as two S3 stores, give the one copied to its
+  own in a file with `--to-env` (`AWS_ENDPOINT`, `AWS_ACCESS_KEY_ID`,
+  `AWS_SECRET_ACCESS_KEY`, one `NAME=value` a line). `--at-once` (16)
+  bounds the objects copied at a time; lower it when the stores serve
+  other traffic. To move: copy while hosts still archive to the old
+  store, which can take hours for a large archive; stop the service and
+  every host (or drain them) so no archive is in flight; copy again,
+  which copies only what was stored since; point `serve --archive` and
+  every host's `--store` at the new store; start them, wake a few
+  sandboxes, and run `compute-control sweep --store <new>` without
+  `--delete`, whose `stored` should equal its `named`. Keep the old store
+  until wakes from the new one have run for a while.
+- **One clock.** Hosts in a fleet name the day of what they store by the
+  fleet's clock, the database's, which the service tells with every
+  pointer answer, moved on between answers by the host's monotonic clock,
+  so a step of its system clock changes nothing; the sweep starts by it
+  too. A host or replica whose own clock is more than a minute from it
+  logs a warning, but stores safely.
+- **The archive store must keep what it acknowledges.** A host drops its
+  local copy once the store holds the chunks, so a store that acknowledges
+  a write before it is durable (Garage in its `dangerous` consistency
+  mode, which acknowledges once one node has it) can lose a stored copy if
+  a node fails in the moment before it passed a write on.
 - **Forgotten memory images** (30 days after last use by default) lose
   their pointer entry together with their working-set pack, and their
   chunks go at a following sweep under the same rule.
-- **Only GCS sweeps delete.** A sweep that deletes needs deletes on
-  condition, which we use on GCS; on Azure and S3 it refuses and only
-  reports, so unnamed chunks stay there until conditional deletes are
-  built for those stores. Deleting a pointer there leaves an empty one,
-  which reads as no copy.
+- **Every store's sweep deletes.** No delete is conditional: a host writes
+  only names of its current hour (a day on an earlier release), so a late
+  delete of an older name never takes a newer write.
 - **Provider retention comes on top.** GCS soft delete keeps deleted
   objects 7 days by default; set the bucket's policy to what we promise.
 - **Quarantined objects** (stored copies that failed their checksum, kept
@@ -803,8 +940,9 @@ before users move to compute from Modal:
   lifecycle rule, for example deletion after 30 days.
 - **Watch the sweep.** It stops before deleting anything when a pointer or
   manifest cannot be read, by design: deleting around an unreadable entry
-  could take chunks it names. Alert when no sweep has succeeded for two
-  days; its error names the key that stopped it.
+  could take chunks it names. Alert when no sweep has succeeded for three
+  hours: what replaced copies named piles up meanwhile. Its error names
+  the key that stopped it.
 
 ## Observing
 
@@ -866,18 +1004,94 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   - any increase of `compute.alarm.count`. Each occurrence also writes a
     `compute.alarm` event naming the sandbox (or the stored object's key),
     so group alerts on that.
+    A `programs_lost` alarm for a VM the host did not end on purpose
+    comes with a `compute.vm.lost` event for the same sandbox, written
+    before the VM is torn down, since its logs may go with it.
+    `compute.vm.end` says how it was lost: `vm_exited` (its process ended
+    on its own: the guest rebooted, which its kernel does on a panic, or
+    the VMM failed or was killed), `memory_lost` (its memory could no
+    longer be served), `guest_stopped` (it took no connection: halted,
+    powered off or hung), `ended_for_memory` or `fenced` (the host's
+    guard killed it because the host's lease ran out before it froze;
+    that also raises the `fenced` alarm). `compute.vm.guest_said`,
+    `.vmm_said` and `.pager_said` hold the last lines of the guest's
+    console, the VMM's own messages and its pager's log, which usually
+    say why.
+  - any `fenced` alarm, and the host log's warning `renewals to the
+    control service go unanswered`: a host whose renewals went
+    unanswered for most of its lease term (30 s) freezes its VMs three
+    seconds before the term runs out, and kills those that do not freeze
+    in time, all but those that are their sandbox's only copy (never
+    archived, such as a CI runner's), which run on. The service's histogram
+    `compute_fleet_host_renewal_gap_seconds`, by host, records how long
+    each host went unheard; gaps of more than 15 s say the link or the
+    host is close to that.
   - `compute.canary.count` with outcome `failed` or `timed_out`, and a
     `compute.canary.last_run` older than one rotation plus a period for
     any path, which also catches an agent that died or hangs. A rotation
     is four periods (three on a host without a store), since each run
     takes the next path, so with `--canary-every 5m` that is 25 minutes.
-  - `compute.sample.age` above a minute: the agent's loop is stuck.
+  - `compute.sample.age` above a minute: the agent's loop is stuck. In a
+    fleet the agent's process then stops itself for systemd to start it
+    again (log line `the agent has not said what the host can take on
+    for a minute`), keeping the VMs and the lease; repeated restarts mean
+    a host that needs a person. A stop that hangs a minute more ends the
+    process at once (log line `the stuck agent's process has not stopped
+    in a minute`).
   - `compute.step.oldest_age` above the step's usual time, for example
     ten minutes for an archive.
   - `compute.sandbox.unhealthy` above zero: sandboxes broken, blocked or
-    unsavable need a person.
+    unsavable need a person. A sandbox blocked as `not recovered, tried
+    again later` after an agent restart is tried again on its own, about
+    every five minutes once earlier tries failed, for as long as it stays
+    blocked (log lines `sandbox still not recovered` and `recovered a
+    sandbox on a later try`); `not recovered` alone is not tried again.
+    While its VM may still run, a blocked sandbox holds its full size on
+    the host, and a host the service gave up does not register again
+    while anything is blocked. Each round of tries holds the agent up to
+    the two seconds a VMM is given to answer.
   - any increase of `compute.export.dropped`: the collector is slow, away
     or refusing; events are still in the journal.
+  - `compute.memory.stalled` above zero in its `severe` bucket (40 % and
+    up) for ten minutes: sandboxes that spend most of their time waiting
+    on memory. Two alarms belong to the memory rule
+    ([ADR 24](adr/0024-busy-sandboxes-are-slowed-never-frozen.md)):
+    `ended_for_memory`, a VM ended because its guest could not be shrunk
+    while the host was short, and `oom_killed`, the kernel ending VM
+    processes at the VMs' wall. Either should be rare; repeated ones mean
+    requests too low for the work or a host packed too tightly.
+- **Tune requests and packing from the memory metrics.** With the memory
+  rule on (4 KiB pages, zswap and a swap device), each host reports what
+  running sandboxes requested, borrowed above that, compressed and keep
+  out of RAM (`compute.memory.requested`, `.borrowed`, `.compressed`,
+  `.swapped`), how many stall on memory by how much
+  (`compute.memory.stalled`), the level of borrowed memory idle and busy
+  sandboxes may keep and how many it holds back (`compute.memory.level`,
+  `.held_back`), how many the kernel cannot hold to their bound while the
+  host is pressed, such as sandboxes full of data that does not compress
+  (`compute.memory.over_bound`), how many it is still bringing down to it
+  then, slow to start because it ages a VM's pages before it compresses
+  any (`compute.memory.bringing_down`; a sandbox counts there for up to a
+  minute without coming down before it counts over its bound and its
+  guest is shrunk), what sandboxes being put to sleep and
+  spares ending are giving back (`compute.memory.relief`, which the levels
+  count as available), the shortfall even with everyone at their request
+  and that counted, which guests are shrunk for
+  (`compute.memory.shortfall`), and the guest shrinks by answer,
+  what they freed and the programs they ended (`compute.memory.shrink.*`,
+  `compute.memory.processes.ended`). Each shrink is a `compute.memory.shrink`
+  event naming its sandbox, the programs ended and its cause
+  (`compute.memory.cause`): `short`, the host short of memory with every
+  sandbox held to its request, which says the host is too full for what it
+  runs, or `over_bound`, a sandbox the kernel could not hold to its bound,
+  which says that sandbox's memory does not compress. The log line asking
+  the guest names the same cause, with the shortfall or what it holds over
+  its bound. Each running
+  sandbox's summary carries its peak use, request, compressed and swapped
+  memory and its stall: a kind of job that keeps peaking far above its
+  request, or stalling, wants a larger request. A sandbox that only stalls
+  itself is never shrunk for it: the severe-stall alert names the host,
+  and the sandbox summaries there show which one.
 - **Find a slow sandbox** by querying `compute.step` and `compute.request`
   events for its `compute.sandbox.id`. Steps carry time per phase, bytes,
   cause and the host-side pressure the sandbox saw since its previous
@@ -936,6 +1150,16 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   A release that lets hosts leave out something they used to send, which
   an older service would refuse, says so, and then the service goes
   first.
+  A release that changes the lease terms (as the one that raised T from
+  10 s to 30 s did) also goes service first, and every host follows
+  promptly: a host's VMs must stop before the service gives up on it, so
+  a host must never hold a longer term than the service it renews with.
+  Until it is upgraded, a host renews the lease it holds but cannot
+  register again, since hosts only register under terms equal to their
+  own: one whose lease runs out meanwhile (cut off, or an agent restart
+  longer than its term) keeps its VMs frozen until it is upgraded. Never
+  roll the service back below such a release while hosts run it: roll
+  the hosts back first.
 - **The agent** can be replaced at any time; running VMs keep running
   ([ADR 9](adr/0009-vms-outlive-the-agent.md)), and a host in a fleet
   keeps its lease however many sandboxes it has: the old agent renews
@@ -958,7 +1182,8 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   `--config`, the installed
   configuration stays):
   it installs the release beside the old ones, points
-  `/opt/compute/current` at it and restarts the agent; VMs keep running.
+  `/opt/compute/current` at it and restarts the agent (unless it runs all
+  of that already); VMs keep running.
   A release whose binary does not run on the host is refused first, and
   the running release, guard and agent are left as they are: the guard
   handed over to a binary that cannot start would let the watchdog reset
@@ -977,6 +1202,11 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   moment it ended, so it is not handed over: it runs on until the host
   starts again from a template naming a release with the store (see
   below) or is replaced by a host made from one.
+  On a shared machine (Hosts, A host that shares its machine) the guard
+  feeds systemd's watchdog instead, and `install.sh` hands it over with
+  `compute-host hand-over-guard`: it marks the hand-over, so that the
+  guard's stop hook leaves the VMs to the new guard, and restarts the
+  service.
   Installing such an earlier release over a later one (a rollback)
   installs its unit, which keeps no descriptors, so systemd drops the
   stored one; the running guard then keeps the watchdog itself, like an
@@ -1023,10 +1253,16 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   image needs it. Status shows the runtime the agent launches new VMs
   under, not the runtime of every saved image; each image records its own.
 - **The host kernel**: Firecracker does not promise that a memory image
-  restores under another host kernel. Before rolling a new host image out,
-  save sandboxes on the old one and wake them on the new one (with the
-  `save_wake` and `lab` tests and a store both hosts share), and keep the
-  old image to roll back to.
+  restores under another host kernel, and one made under a newer kernel
+  can be refused under an older one (KVM saved registers the older one
+  does not set). The runtime names the kernel, so warm templates are
+  rebuilt after a kernel change, and a saved image refused for another
+  kernel or processor is given up after a few wakes in a row: the sandbox
+  boots from its disk and its programs are lost, which the host alarms on.
+  So prefer kernel upgrades to rollbacks. Before rolling a new host image
+  out, save sandboxes on the old one and wake them on the new one (with
+  the `save_wake` and `lab` tests and a store both hosts share), and keep
+  the old image to roll back to.
 - **The guest kernel** a VM booted with stays through every save and wake;
   only a fresh boot picks up a new one. A sandbox's own disk then boots
   with the newest kernel, so a new guest kernel must be tested against the
@@ -1170,9 +1406,30 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
 - **Bursting sandboxes stop short of the host's own memory.** On 4 KiB
   pages with relief, the agent sets `memory.high` on the VMs' group
   (`--cgroup`) to the host's memory less the high watermark, and logs it
-  (`memory the VMs may hold together`) as it starts. Sandboxes above
-  their request that reach it together are slowed while relief pauses and
-  saves them, instead of taking the agent's and the guard's memory.
+  (`memory the VMs may hold together`) as it starts, and `memory.max` to
+  the host's memory less the midpoint of the two watermarks, the wall
+  they never pass together. Relief pushes idle sandboxes out and asks balloons; a sandbox
+  in use is never paused for memory
+  ([ADR 24](adr/0024-busy-sandboxes-are-slowed-never-frozen.md)). With
+  zswap and a swap device (never written to: writeback is off), each
+  running VM keeps its request protected and gets its own `memory.high`,
+  so the sandboxes that borrowed the most are compressed and slowed
+  first, then shrunk from inside (their largest programs end), and only
+  as a last resort ended. A sandbox the kernel cannot hold to its
+  `memory.high` while the host is pressed (memory that does not compress,
+  a full pool) is shrunk after 10 s as if the host were short. The agent
+  never sets a VM's `memory.high` below what it holds, so such a VM's
+  `memory.high` stays where the kernel could bring it, above its bound;
+  `cat /sys/fs/cgroup/compute/<sandbox id>/memory.high` shows it. A sandbox
+  guaranteed all of its memory is never compressed. Give the host swap of at least a quarter of its
+  memory and a zswap pool of at least 20 %; the agent warns at start when
+  either is smaller, and on a host without swap running sandboxes are
+  never compressed. On a host shared with VMs or services beyond compute,
+  `--memory-total-mib` says how much of its memory compute may use: the
+  capacity, the watermarks, both limits and the levels come from that
+  share, so sandboxes never take memory promised to the rest. Keep the
+  `MemoryMin=` the agent's unit ships with, so host-wide reclaim never
+  takes its pages first.
   A warning at start says the memory capacity is above the limit, which
   the defaults never do (their headroom is the high watermark): with
   `--memory-capacity-mib`, `--memory-headroom-mib` or the watermarks
@@ -1203,14 +1460,17 @@ Four layers, each a superset of what the one before cannot reach:
 GitHub's hosted x64 Linux runners are VMs with nested virtualization that
 expose `/dev/kvm` (root, group `kvm`, mode 0660); the job grants the runner
 user access with an ACL, makes an XFS lab directory on a loop file,
-reserves a quarter of the runner's memory as huge pages for the nested
+reserves half of the runner's memory as huge pages for the nested
 profile, and caches the downloaded Firecracker, kernel and base image by
-the pins' hash. It runs four sandboxes where the lab gate runs twelve.
+the pins' hash. A runner that restores them from the cache still gets swap
+and zswap from `lab/host-boot.sh`, which the gate's lab-setup step runs
+either way. It runs four sandboxes where the lab gate runs twelve.
 
 Run the gate on a lab host:
 
 ```sh
 bash lab/host-setup.sh                       # once
+bash lab/host-boot.sh                        # after each reboot: swap and zswap (the gate's lab-setup step runs it)
 PROFILE=nested bash ci/gate.sh               # all steps
 STEPS="engine save_wake" STORE=gs://bucket/gate bash ci/gate.sh
 ```

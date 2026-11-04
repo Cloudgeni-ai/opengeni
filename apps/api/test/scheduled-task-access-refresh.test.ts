@@ -553,7 +553,7 @@ describe("scheduled task access drift and refresh", () => {
       )[0]?.accountPlan;
     const sharedAccount = (connectionId: string) => ({
       connectionId,
-      label: expect.stringContaining("This workspace"),
+      label: expect.stringContaining("Shared"),
       scope: "shared",
     });
     expect(await plan(workspace.owner)).toEqual({

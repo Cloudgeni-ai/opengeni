@@ -4,11 +4,15 @@ import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  utimesSync,
   readFileSync,
   readdirSync,
   readlinkSync,
   rmSync,
   statSync,
+  symlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -95,6 +99,77 @@ afterAll(async () => {
 });
 
 describe("session-owned Docker/local processes", () => {
+  test("slow retained-run cleanup cannot delay commands and has one owner", async () => {
+    const root = mkdtempSync(join(shellTempRoot, "cleanup-"));
+    const bin = join(root, "bin");
+    mkdirSync(bin);
+    const entered = join(root, "entered");
+    const release = join(root, "release");
+    // Exercise the real SDK/shell with a stalled directory scan, as with a
+    // large retained history on a busy disk. No model or provider is mocked.
+    writeFileSync(
+      join(bin, "find"),
+      `#!/bin/sh
+case "$1" in
+  *opengeni-exec-*)
+    echo entered >> '${entered}'
+    while [ ! -f '${release}' ]; do /bin/sleep 0.02; done
+    ;;
+esac
+exec /usr/bin/find "$@"
+`,
+      { mode: 0o755 },
+    );
+    const session = await client.create(
+      new Manifest({
+        environment: {
+          PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+          TMPDIR: root,
+        },
+      }),
+    );
+    opened.push(session);
+    const ns = createHash("sha256")
+      .update(session.state.workspaceRootPath)
+      .digest("hex")
+      .slice(0, 16);
+    const runs = join(root, `opengeni-exec-${process.getuid?.() ?? 0}`, ns);
+    const old = join(runs, "1000001");
+    const recent = join(runs, "1000002");
+    const active = join(runs, "1000003");
+    for (const d of [old, recent, active]) mkdirSync(d, { recursive: true });
+    for (const d of [old, recent]) writeFileSync(join(d, "reported"), "exited");
+    utimesSync(join(old, "reported"), 0, 0);
+    // An earlier worker/host can disappear while retention is running.
+    symlinkSync("2147483647 missing-owner", join(runs, "cleanup.lock"));
+    let first: Promise<string> | undefined;
+    let second: Promise<string> | undefined;
+    try {
+      first = session.execCommand({ cmd: "printf first", login: false, yieldTimeMs: 100 });
+      for (let i = 0; i < 100 && !existsSync(entered); i++) await Bun.sleep(20);
+      expect(existsSync(entered)).toBe(true);
+      second = (await reopen(session)).execCommand({
+        cmd: "printf second",
+        login: false,
+        yieldTimeMs: 100,
+      });
+      const results = await Promise.race([
+        Promise.all([first, second]),
+        Bun.sleep(2_000).then(() => null),
+      ]);
+      expect(results).not.toBeNull();
+      expect(results!.map(output)).toEqual(["first", "second"]);
+      expect(readFileSync(entered, "utf8").trim().split("\n")).toHaveLength(1);
+    } finally {
+      writeFileSync(release, "");
+      await Promise.allSettled([first, second]);
+    }
+    for (let i = 0; i < 100 && existsSync(old); i++) await Bun.sleep(20);
+    expect(existsSync(old)).toBe(false);
+    expect(existsSync(recent)).toBe(true);
+    expect(existsSync(active)).toBe(true);
+  });
+
   test("a short command still returns inline with its exit code", async () => {
     const session = await workspace();
     expect(hasDurableShellProcesses(session)).toBe(true);

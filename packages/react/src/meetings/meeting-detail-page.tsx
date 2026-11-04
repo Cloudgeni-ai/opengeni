@@ -22,6 +22,7 @@ import {
   ChevronDownIcon,
   CreditCardIcon,
   GlobeIcon,
+  LayersIcon,
   LoaderCircleIcon,
   LockIcon,
   PencilIcon,
@@ -29,6 +30,7 @@ import {
   Trash2Icon,
 } from "lucide-react";
 import { toast } from "sonner";
+import { userErrorText } from "../ui/api-error";
 import type {
   Recording,
   RecordingNote,
@@ -94,6 +96,11 @@ import { SegmentedControl } from "../ui/segmented-control";
 import { NativeSelect, type SelectOption } from "../ui/select-menu";
 import { Skeleton } from "../ui/skeleton";
 import { cn } from "../app/lib/utils";
+import {
+  WorkspaceReachFields,
+  type ReachWorkspace,
+  type WorkspaceReach,
+} from "../app/components/workspace-reach";
 
 import { DeleteMeetingDialog } from "./delete-meeting-dialog";
 import { DETECT_LANGUAGE, meetingLanguageOptions } from "./meeting-languages";
@@ -112,34 +119,45 @@ import {
 } from "./meeting-transcript";
 import { liveSpeakerName, RecordingBar, recorderLiveLines, useOnline } from "./recorder-panel";
 import { LiveTranscript, liveStatus } from "./live-transcript";
-import { MeetingAsk, type MeetingAskResult } from "./meeting-ask";
+import { MeetingAsk, type MeetingAskRequest, type MeetingAskResult } from "./meeting-ask";
 import { meetingMentionResolver } from "./meeting-mentions";
+import { useAnnounceMeetingOnScreen } from "./meeting-on-screen";
+import { useUiEventTarget } from "../app/lib/ui-events";
 import { MeetingNotepad, MeetingNotesSection, MeetingSummary } from "./meeting-notes";
 import { useMeetingRecorder, type MeetingRecorder } from "./recorder-context";
 import { MeetingsOverlayScope } from "./overlay-scope";
+import { StickyBarEdge, useStuckToTop } from "./sticky-bar-edge";
 
 const defaultText = createOpenGeniText();
 
 function errorText(error: unknown): string | undefined {
-  return error instanceof Error ? error.message : undefined;
+  return error instanceof Error ? userErrorText(error) : undefined;
 }
 
 function isNotFound(error: Error | null): boolean {
   return Boolean(error && /not found|404/iu.test(error.message));
 }
 
-/** Fresh playback links for every prepared track. Links expire, so a failed one refetches. */
+/**
+ * Fresh playback links for every prepared track. Links expire, so a failed one refetches.
+ * While the meeting is processed, the player waits until every recorded track can
+ * play: the first track alone sounds as if the rest (the call's side) was never recorded.
+ */
 function useTrackSources(
   recording: Recording | null,
   getAudio: (trackNumber: number) => Promise<{ url: string }>,
 ): { sources: MeetingPlayerSource[]; reload: () => void } {
   const [sources, setSources] = useState<MeetingPlayerSource[]>([]);
   const [generation, setGeneration] = useState(0);
-  const playable = useMemo(
-    () =>
-      (recording?.tracks ?? []).filter((track) => track.playable).map((track) => track.trackNumber),
-    [recording?.tracks],
-  );
+  const state = recording?.state;
+  const playable = useMemo(() => {
+    const tracks = recording?.tracks ?? [];
+    const partial =
+      state === "processing" && tracks.some((track) => track.chunkCount > 0 && !track.playable);
+    return partial
+      ? []
+      : tracks.filter((track) => track.playable).map((track) => track.trackNumber);
+  }, [recording?.tracks, state]);
   const key = playable.join(",");
   const getAudioRef = useRef(getAudio);
   getAudioRef.current = getAudio;
@@ -227,6 +245,106 @@ function RenameDialog({
 }
 
 /**
+ * Where the owner's own Only me meeting works: the workspace that stores it
+ * and their Personal workspace always, plus the ones they pick, or all of
+ * their workspaces in the organization. Only they, and agent turns they
+ * start, see it in any of them.
+ */
+function MeetingReachDialog({
+  open,
+  recording,
+  hereId,
+  workspaces,
+  organizationName,
+  onClose,
+  onSave,
+}: {
+  open: boolean;
+  recording: Recording;
+  /** The workspace the page was opened from. */
+  hereId: string;
+  workspaces: readonly ReachWorkspace[];
+  organizationName: string;
+  onClose: () => void;
+  /** Saves the other workspaces it works in (null for all), and says whether it still works here. */
+  onSave: (reachWorkspaceIds: string[] | null, leavesHere: boolean) => Promise<void>;
+}) {
+  const msg = useOpenGeniText();
+  const saved = recording.reachWorkspaceIds ?? null;
+  const savedKey = saved === null ? null : saved.join(",");
+  const [value, setValue] = useState<WorkspaceReach>({
+    workspaceIds: saved,
+    personalWorkspaces: true,
+  });
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (open) {
+      setValue({
+        workspaceIds: savedKey === null ? null : savedKey.split(",").filter(Boolean),
+        personalWorkspaces: true,
+      });
+      setError(null);
+    }
+  }, [open, savedKey]);
+  const home = recording.workspaceId;
+  const here = workspaces.find((workspace) => workspace.id === hereId);
+  const chosen =
+    value.workspaceIds === null ? null : value.workspaceIds.filter((id) => id !== home).sort();
+  // Opened from another workspace it was turned on in, which it would leave.
+  const leavesHere =
+    hereId !== home && here?.personal !== true && chosen !== null && !chosen.includes(hereId);
+  const unchanged =
+    chosen === null
+      ? saved === null
+      : saved !== null && [...saved].sort().join(",") === chosen.join(",");
+  return (
+    <FormDialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) onClose();
+      }}
+      title={msg("meetings.detailPage.availableIn")}
+      description={msg("meetings.detailPage.onlyYouSeeItInThese")}
+      submitLabel={msg("meetings.detailPage.save")}
+      pendingLabel={msg("meetings.detailPage.saving")}
+      submitDisabled={unchanged}
+      error={error}
+      onSubmit={async () => {
+        try {
+          await onSave(chosen, leavesHere);
+        } catch (cause) {
+          setError(errorText(cause) ?? msg("meetings.detailPage.couldnTChangeWhereItWorks"));
+          return false;
+        }
+      }}
+      onSubmitted={onClose}
+    >
+      <div className="flex min-w-0 flex-col gap-4">
+        <WorkspaceReachFields
+          owner={{ kind: "person" }}
+          organizationName={organizationName}
+          label={msg("meetings.detailPage.availableIn")}
+          labelHidden
+          value={value}
+          onChange={setValue}
+          workspaces={workspaces}
+          hereId={hereId}
+          alwaysIncluded={{ [home]: msg("meetings.detailPage.recordedThereAlwaysIncluded") }}
+          // Switching from All keeps the workspace it was opened from.
+          seedSelected={() => (hereId !== home && here?.personal !== true ? [hereId] : [])}
+          personalWorkspaces="always"
+        />
+        {leavesHere ? (
+          <Notice tone="info" live="polite">
+            {msg("meetings.detailPage.itWillNoLongerShowHere")}
+          </Notice>
+        ) : null}
+      </div>
+    </FormDialog>
+  );
+}
+
+/**
  * The models "Transcribe again" offers. One that can't be used says why:
  * "Not supported in EU" when EU-only switched it off, otherwise what to connect.
  */
@@ -258,6 +376,27 @@ export function transcribeAgainModelOptions(
   }));
 }
 
+/**
+ * What transcribing a meeting again costs at a model's hourly price. Each
+ * recorded track (a microphone beside computer audio, say) is transcribed and
+ * billed on its own, so a two-track hour costs two hours.
+ */
+export function transcribeAgainEstimate(
+  recording: Pick<Recording, "durationMilliseconds" | "tracks">,
+  usdPerHour: number | null | undefined,
+): { usd: number; tracks: number } | null {
+  if (usdPerHour == null) return null;
+  const recorded = recording.tracks.filter(
+    (track) => track.chunkCount > 0 && track.durationMilliseconds > 0,
+  );
+  const milliseconds =
+    recorded.length > 0
+      ? recorded.reduce((total, track) => total + track.durationMilliseconds, 0)
+      : recording.durationMilliseconds;
+  if (milliseconds <= 0) return null;
+  return { usd: (usdPerHour * milliseconds) / 3_600_000, tracks: Math.max(1, recorded.length) };
+}
+
 function TranscribeAgainDialog({
   open,
   recording,
@@ -276,7 +415,8 @@ function TranscribeAgainDialog({
     model: string;
     /** Null detects it, even when the workspace names a meeting language. */
     language: string | null;
-    maxSpeakers?: number;
+    /** How many people speak; speaker detection finds that many. */
+    speakers?: number;
   }) => Promise<void>;
 }) {
   const msg = useOpenGeniText();
@@ -290,9 +430,8 @@ function TranscribeAgainDialog({
   const [language, setLanguage] = useState<string>(
     recording.transcription.language ?? DETECT_LANGUAGE,
   );
-  const [speakers, setSpeakers] = useState(
-    recording.transcription.maxSpeakers ? String(recording.transcription.maxSpeakers) : "",
-  );
+  const initialSpeakers = recording.transcription.speakers ?? recording.transcription.maxSpeakers;
+  const [speakers, setSpeakers] = useState(initialSpeakers ? String(initialSpeakers) : "");
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     if (open) {
@@ -302,15 +441,17 @@ function TranscribeAgainDialog({
   }, [open, initialModel]);
   const modelOptions = transcribeAgainModelOptions(models, msg);
   const selected = models.find((entry) => `${entry.providerId}/${entry.model}` === model);
-  const estimate =
-    selected?.usdPerHour != null && recording.durationMilliseconds > 0
-      ? (selected.usdPerHour * recording.durationMilliseconds) / 3_600_000
-      : null;
+  const estimate = transcribeAgainEstimate(recording, selected?.usdPerHour);
+  const duration = formatDuration(recording.durationMilliseconds, msg);
   const languageOptions = meetingLanguageOptions(language, undefined, msg);
   const speakerCount = speakers.trim() ? Number(speakers) : undefined;
   const speakersInvalid =
     speakerCount !== undefined &&
     (!Number.isInteger(speakerCount) || speakerCount < 1 || speakerCount > 32);
+  // Speakers come from the model, or from Opengeni's own speaker detection
+  // when this deployment has it (it made the current transcript's).
+  const tellsSpeakersApart =
+    selected?.capabilities.diarization === true || current?.diarization === "ours";
   return (
     <FormDialog
       open={open}
@@ -318,7 +459,7 @@ function TranscribeAgainDialog({
         if (!next) onClose();
       }}
       title={msg("meetings.detailPage.transcribeAgain")}
-      description={msg("meetings.detailPage.makesANewVersionFrom")}
+      description={msg("meetings.detailPage.makesANewTranscriptNotesToo")}
       submitLabel={msg("meetings.detailPage.transcribe")}
       pendingLabel={msg("meetings.detailPage.starting")}
       submitDisabled={!selected || !selected.available || speakersInvalid}
@@ -330,7 +471,7 @@ function TranscribeAgainDialog({
             providerId: selected.providerId,
             model: selected.model,
             language: language === DETECT_LANGUAGE ? null : language,
-            ...(speakerCount !== undefined ? { maxSpeakers: speakerCount } : {}),
+            ...(speakerCount !== undefined && tellsSpeakersApart ? { speakers: speakerCount } : {}),
           });
         } catch (cause) {
           setError(errorText(cause) ?? msg("meetings.detailPage.couldnTStartTranscribing"));
@@ -344,14 +485,18 @@ function TranscribeAgainDialog({
           label={msg("meetings.detailPage.model")}
           hint={
             estimate !== null
-              ? estimate < 0.01
-                ? msg("meetings.detailPage.aboutLessThan001", {
-                    duration: formatDuration(recording.durationMilliseconds, msg),
-                  })
-                : msg("meetings.detailPage.aboutEstimateForThisDuration", {
-                    estimate: estimate.toFixed(2),
-                    duration: formatDuration(recording.durationMilliseconds, msg),
-                  })
+              ? estimate.usd < 0.01
+                ? msg("meetings.detailPage.aboutLessThan001", { duration })
+                : estimate.tracks > 1
+                  ? msg("meetings.detailPage.aboutEstimateForTracks", {
+                      estimate: estimate.usd.toFixed(2),
+                      duration,
+                      count: estimate.tracks,
+                    })
+                  : msg("meetings.detailPage.aboutEstimateForThisDuration", {
+                      estimate: estimate.usd.toFixed(2),
+                      duration,
+                    })
               : undefined
           }
         >
@@ -363,9 +508,9 @@ function TranscribeAgainDialog({
         >
           <NativeSelect options={languageOptions} value={language} onValueChange={setLanguage} />
         </Field>
-        {selected?.capabilities.diarization ? (
+        {tellsSpeakersApart ? (
           <Field
-            label={msg("meetings.detailPage.maximumNumberOfSpeakers")}
+            label={msg("meetings.detailPage.numberOfSpeakers")}
             optional
             hint={msg("meetings.detailPage.leaveEmptyToLetThe")}
             error={speakersInvalid ? msg("meetings.detailPage.enterAWholeNumberFrom") : undefined}
@@ -790,6 +935,14 @@ type MeetingDetailPageProps = {
    * transcript, such as the project it belongs to.
    */
   details?: ((recording: Recording) => readonly MeetingDetail[]) | undefined;
+  /**
+   * The viewer's workspaces in this organization, their Personal workspace
+   * marked, so they can choose where their own Only me meetings work
+   * ("Available in"). Without it the page doesn't offer that choice.
+   */
+  reachWorkspaces?: readonly ReachWorkspace[] | undefined;
+  /** The organization's name, for "Available in". */
+  organizationName?: string | undefined;
   /** Opens a chat, such as the one whose agent wrote the notes. */
   onOpenChat?: ((sessionId: string) => void) | undefined;
   /**
@@ -827,6 +980,8 @@ function MeetingDetailPageForRecording({
   onOpenBilling,
   onConnectModels,
   details,
+  reachWorkspaces,
+  organizationName,
   onOpenChat,
   onAsk,
 }: MeetingDetailPageProps) {
@@ -867,13 +1022,33 @@ function MeetingDetailPageForRecording({
     enabled: previewing && !recordingHere,
   });
   const player = useRef<MeetingPlayerHandle>(null);
+  // The player's bar pins to the top while the page scrolls; pinned, it covers
+  // the host scroller's top padding too (sticky-bar-edge.tsx).
+  const [playerBar, setPlayerBar] = useState<HTMLDivElement | null>(null);
+  const playerPinned = useStuckToTop(playerBar);
   const [position, setPosition] = useState(0);
   const [renaming, setRenaming] = useState(false);
+  const [choosingReach, setChoosingReach] = useState(false);
   const [rerunning, setRerunning] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [namingFromAside, setNamingFromAside] = useState<string | null>(null);
   const [rememberingVoice, setRememberingVoice] = useState<RecordingPerson | null>(null);
   const notes = useRecordingNotes(recordingId, override);
+  // The notes name a meeting nobody named: show that name once they arrive.
+  // The name is written just after the notes, so it is read again shortly.
+  const notesRevision = notes.notes?.revision ?? 0;
+  const refreshMeeting = meeting.refresh;
+  const awaitingName = Boolean(recording && recording.titleSource !== "person");
+  const seenNotesRevision = useRef<number | null>(null);
+  useEffect(() => {
+    if (notes.loading) return;
+    const seen = seenNotesRevision.current;
+    seenNotesRevision.current = notesRevision;
+    if (seen === null || seen === notesRevision || !awaitingName) return;
+    void refreshMeeting();
+    const again = window.setTimeout(() => void refreshMeeting(), 3_000);
+    return () => window.clearTimeout(again);
+  }, [notes.loading, notesRevision, awaitingName, refreshMeeting]);
   // Summary when the meeting has written notes, else Transcript: decided once
   // the notes load, so notes written later don't move the reader.
   const [openingTab, setOpeningTab] = useState<MeetingTab | null>(null);
@@ -882,6 +1057,23 @@ function MeetingDetailPageForRecording({
     setOpeningTab(openingMeetingTab(notes.notes));
   }
   const tab = chosenTab ?? openingTab;
+  // The ⌘K menu's "Ask about this meeting": the Ask field shows on Summary and
+  // Transcript, so a question from the Notepad tab moves to Summary first.
+  const [askRequest, setAskRequest] = useState<MeetingAskRequest | null>(null);
+  const tabRef = useRef(tab);
+  tabRef.current = tab;
+  const askFromMenu = useCallback((question: string | null) => {
+    if (tabRef.current === "notepad") setChosenTab("summary");
+    setAskRequest((current) => ({ question, nonce: (current?.nonce ?? 0) + 1 }));
+  }, []);
+  const recordingOnScreenHere =
+    recording?.state === "capturing" &&
+    ["recording", "paused"].includes(meetingHereStatus(recorder, recordingId, online) ?? "");
+  useAnnounceMeetingOnScreen(
+    useUiEventTarget("document"),
+    recordingId,
+    onAsk && recording && !recordingOnScreenHere ? askFromMenu : null,
+  );
   const slots = useMemo(() => speakerColorSlots(transcript.segments), [transcript.segments]);
   const mentionTracks = recording?.tracks;
   const mentions = useMemo(
@@ -1186,6 +1378,13 @@ function MeetingDetailPageForRecording({
   }
 
   const owner = recording.ownerSubjectId === viewerSubjectId;
+  // The owner's own Only me meeting, on a server that keeps where it works.
+  const reachable =
+    owner &&
+    recording.visibility === "private" &&
+    recording.purpose === "meeting" &&
+    recording.reachWorkspaceIds !== undefined &&
+    reachWorkspaces !== undefined;
   // The person recording, as the transcript will name their microphone.
   const ownerName =
     peopleList.find((person) => person.memberSubjectId === recording.ownerSubjectId)?.displayName ??
@@ -1423,6 +1622,12 @@ function MeetingDetailPageForRecording({
               <PencilIcon aria-hidden="true" />
               {msg("meetings.detailPage.rename")}
             </DropdownMenuItem>
+            {reachable ? (
+              <DropdownMenuItem onSelect={() => setChoosingReach(true)}>
+                <LayersIcon aria-hidden="true" />
+                {msg("meetings.detailPage.availableInMenu")}
+              </DropdownMenuItem>
+            ) : null}
             {recording.state !== "capturing" ? (
               <DropdownMenuItem disabled={!canRerun} onSelect={() => setRerunning(true)}>
                 <RefreshCwIcon aria-hidden="true" />
@@ -1457,7 +1662,20 @@ function MeetingDetailPageForRecording({
         ))}
         {speakerLabels.length > 0 ? (
           <DetailAsideItem label={msg("meetings.detailPage.speakers")}>
-            <ul className="grid w-full min-w-0 gap-1">{speakerButtons("list")}</ul>
+            <div className="grid w-full min-w-0 gap-1">
+              <ul className="grid w-full min-w-0 gap-1">{speakerButtons("list")}</ul>
+              {canRerun ? (
+                <Button
+                  type="button"
+                  variant="link"
+                  size="xs"
+                  onClick={() => setRerunning(true)}
+                  className="h-auto w-fit px-0 text-fg-muted pointer-coarse:h-11"
+                >
+                  {msg("meetings.detailPage.wrongNumberOfSpeakers")}
+                </Button>
+              ) : null}
+            </div>
           </DetailAsideItem>
         ) : null}
         {meeting.versions.length > 0 ? (
@@ -1676,7 +1894,8 @@ function MeetingDetailPageForRecording({
       </div>
       {sources.length > 0 && !recording.audioDeletedAt ? (
         // A direct child of the page, so it stays in view through the whole transcript.
-        <div className="sticky top-0 z-10 -mx-1 mt-4 bg-bg px-1 pt-2 pb-2">
+        <div ref={setPlayerBar} className="sticky top-0 z-10 -mx-1 mt-4 bg-bg px-1 pt-2 pb-2">
+          {playerPinned ? <StickyBarEdge edge="top" /> : null}
           <MeetingPlayer
             ref={player}
             sources={sources}
@@ -1719,7 +1938,11 @@ function MeetingDetailPageForRecording({
               </>
             )}
             {askable && onAsk && tab !== "notepad" ? (
-              <MeetingAsk onAsk={(question) => onAsk(recording.id, question)} />
+              <MeetingAsk
+                onAsk={(question) => onAsk(recording.id, question)}
+                request={askRequest}
+                onRequestTaken={() => setAskRequest(null)}
+              />
             ) : null}
           </div>
         ) : (
@@ -1745,6 +1968,26 @@ function MeetingDetailPageForRecording({
           await update({ title }, msg("meetings.detailPage.couldnTRenameThisMeeting2"))
         }
       />
+      {reachable ? (
+        <MeetingReachDialog
+          open={choosingReach}
+          recording={recording}
+          hereId={workspaceId}
+          workspaces={reachWorkspaces ?? []}
+          organizationName={organizationName ?? msg("meetings.detailPage.thisOrganization")}
+          onClose={() => setChoosingReach(false)}
+          onSave={async (reachWorkspaceIds, leavesHere) => {
+            if (!leavesHere) {
+              await meeting.update({ reachWorkspaceIds });
+              return;
+            }
+            // It no longer works here: save without reading it back, then leave.
+            await client.updateRecording(workspaceId, recording.id, { reachWorkspaceIds });
+            toast.success(msg("meetings.detailPage.itNoLongerShowsHere"));
+            onBack();
+          }}
+        />
+      ) : null}
       <TranscribeAgainDialog
         open={rerunning}
         recording={recording}

@@ -60,4 +60,33 @@ describe("autoApprovedTools governance", () => {
       ),
     ).toThrow(HTTPException);
   });
+
+  test("a member installs without choosing auto-approved tools, never with them", () => {
+    const member = {
+      ...grant,
+      permissions: ["connections:read", "connections:write"],
+    } as AccessGrant;
+    for (const autoApprovedTools of [["drive_files_update"], []]) {
+      let status = 0;
+      try {
+        validatedIntegrationInstallInput(
+          member,
+          member.workspaceId,
+          request(autoApprovedTools),
+          resolved("curated"),
+        );
+      } catch (error) {
+        status = (error as { status?: number }).status ?? -1;
+      }
+      expect(status).toBe(403);
+    }
+    const { autoApprovedTools: _omitted, ...withoutChoice } = request([]);
+    const input = validatedIntegrationInstallInput(
+      member,
+      member.workspaceId,
+      withoutChoice as InstallApiIntegrationRequest,
+      resolved("curated"),
+    );
+    expect(input.autoApprovedTools).toBeUndefined();
+  });
 });

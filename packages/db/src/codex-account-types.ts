@@ -34,6 +34,12 @@ export type WorkspaceCodexSubscriptionSource = {
 export type CodexAccountStatus = {
   allowedModelIds?: string[] | null;
   /**
+   * The workspace whose own account this is, or null for the organization's
+   * and personal accounts. In another workspace's list it was shared there
+   * by its owner (D-52), and that workspace can only remove it.
+   */
+  ownerWorkspaceId?: string | null;
+  /**
    * Organization list only: shared workspaces that list the account among
    * their own (it was connected there).
    */

@@ -381,7 +381,7 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
           aria-label={messages.label}
           aria-description={selectedDescription}
           className={cn(
-            "og-root inline-flex h-8 min-w-[180px] max-w-full items-center gap-2 rounded-og-md border border-og-border bg-og-surface px-2.5 text-sm text-og-fg outline-hidden transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50",
+            "og-root inline-flex h-8 min-w-[180px] max-w-full items-center gap-2 rounded-og-md border border-og-border bg-og-surface-1 px-2.5 text-sm text-og-fg outline-hidden transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50",
             props.className,
           )}
         >

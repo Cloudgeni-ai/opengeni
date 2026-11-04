@@ -21,7 +21,10 @@ export interface VaultServiceDeps {
  */
 export interface VaultRequestActor {
   grant: AccessGrant;
-  /** The caller holds `account:admin` on the organization (organization vaults). */
+  /**
+   * The caller administers the organization (its owner or an admin, see
+   * `authorizationHoldsOrganizationAdministration`): organization vaults.
+   */
   accountAdmin: boolean;
   /**
    * The request comes from the person's own Opengeni sign-in (browser,

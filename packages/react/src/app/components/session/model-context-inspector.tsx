@@ -9,6 +9,7 @@ import { Input } from "../../../ui/input";
 import { ScrollArea } from "../../../ui/scroll-area";
 import { useAppContext } from "../../app-context";
 import { userErrorText } from "../../../ui/api-error";
+import { ErrorText } from "../../../ui/error-text";
 import type { SessionEvent } from "../../types";
 
 const PAGE_SIZE = 30;
@@ -362,7 +363,7 @@ export function ModelContextInspectorPane(props: {
         <div className="min-w-0 p-3">
           {error ? (
             <p role="alert" className="text-xs text-status-waiting">
-              Could not refresh context. {error}
+              Could not refresh context. <ErrorText>{error}</ErrorText>
             </p>
           ) : null}
           {loading && !snapshot ? <p className="text-xs text-fg-subtle">Loading context…</p> : null}
@@ -467,7 +468,7 @@ export function ModelContextInspectorPane(props: {
                   type="button"
                   data-instruction-section={row.key}
                   className={
-                    "group flex w-full min-w-0 items-center gap-3 border-b border-border py-3 text-left hover:bg-bg-muted focus-visible:outline focus-visible:outline-2 " +
+                    "group flex w-full min-w-0 items-center gap-3 border-b border-border py-3 text-left hover:bg-surface-2 focus-visible:outline focus-visible:outline-2 " +
                     (row.depth === 1 ? "pl-4" : "")
                   }
                   onClick={() => setInstructionSection(row.key)}

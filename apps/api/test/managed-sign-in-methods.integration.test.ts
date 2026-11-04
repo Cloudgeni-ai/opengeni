@@ -144,6 +144,11 @@ async function cookie(rt: ReturnType<typeof runtime>, token: string) {
     .map((c) => c.split(";", 1)[0])
     .join("; ");
 }
+// The provider's own profile carries the account subject: Google's `sub`,
+// GitHub's `id`.
+function providerSubject(subject: string) {
+  return { sub: subject, id: subject };
+}
 async function oauth(
   rt: ReturnType<typeof runtime>,
   email: string,
@@ -158,8 +163,8 @@ async function oauth(
     tokenType: "Bearer",
   });
   configured.getUserInfo = async () => ({
-    user: { id: accountId, name: "Provider Human", email, emailVerified: verified },
-    data: {},
+    user: { name: "Provider Human", email, emailVerified: verified },
+    data: providerSubject(accountId),
   });
   const start = await rt.auth.api.signInSocial({
     returnHeaders: true,
@@ -225,12 +230,11 @@ describe("managed sign-in methods restricted PostgreSQL and Better Auth", () => 
       });
       provider.getUserInfo = async () => ({
         user: {
-          id: crypto.randomUUID(),
           name: "Test",
           email: condition === "email_mismatch" ? "different@example.test" : user.email,
           emailVerified: true,
         },
-        data: {},
+        data: providerSubject(crypto.randomUUID()),
       });
       if (condition === "stale")
         await admin`update auth_sessions set created_at=now()-interval '6 minutes' where id=${user.sessionId}`;
@@ -711,8 +715,8 @@ describe("managed sign-in methods restricted PostgreSQL and Better Auth", () => 
       tokenType: "Bearer",
     });
     provider.getUserInfo = async () => ({
-      user: { id: providerAccountId, name: "Test", email: user.email, emailVerified: true },
-      data: {},
+      user: { name: "Test", email: user.email, emailVerified: true },
+      data: providerSubject(providerAccountId),
     });
     const stateCookies =
       (await cookie(rt, user.token)) +
@@ -770,8 +774,8 @@ describe("managed sign-in methods restricted PostgreSQL and Better Auth", () => 
       tokenType: "Bearer",
     });
     provider.getUserInfo = async () => ({
-      user: { id: crypto.randomUUID(), name: "Test", email: user.email, emailVerified: false },
-      data: {},
+      user: { name: "Test", email: user.email, emailVerified: false },
+      data: providerSubject(crypto.randomUUID()),
     });
     const result = await rt.app.request(
       `/v1/auth/callback/github?state=${url.searchParams.get("state")}&code=simulated-provider-code`,
@@ -852,8 +856,8 @@ describe("managed sign-in methods restricted PostgreSQL and Better Auth", () => 
         tokenType: "Bearer",
       });
       provider.getUserInfo = async () => ({
-        user: { id: crypto.randomUUID(), name: "Test", email: user.email, emailVerified: true },
-        data: {},
+        user: { name: "Test", email: user.email, emailVerified: true },
+        data: providerSubject(crypto.randomUUID()),
       });
       const result = await rt.app.request(
         `/v1/auth/callback/google?state=${url.searchParams.get("state")}&code=simulated-provider-code`,
@@ -928,8 +932,8 @@ describe("managed sign-in methods restricted PostgreSQL and Better Auth", () => 
         tokenType: "Bearer",
       });
       provider.getUserInfo = async () => ({
-        user: { id: crypto.randomUUID(), name: "Test", email: user.email, emailVerified: true },
-        data: {},
+        user: { name: "Test", email: user.email, emailVerified: true },
+        data: providerSubject(crypto.randomUUID()),
       });
       await rt.app.request(
         `/v1/auth/callback/github?state=${url.searchParams.get("state")}&code=simulated-provider-code`,

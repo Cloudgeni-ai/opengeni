@@ -29,6 +29,7 @@ import {
   type SecretMoveInput,
   type SecretMoveOutput,
   type SecretPrincipal,
+  type SecretSaveFieldNote,
   type SecretSaveInput,
   type SecretSaveOutput,
   type SecretSearchInput,
@@ -66,6 +67,7 @@ import {
   listVaultItems,
   listSecretApprovalRules,
   listVaultsForSubject,
+  listOrganizationVaults,
   vaultItemCursor,
   moveVaultItem,
   readVaultFieldCiphertext,
@@ -97,6 +99,7 @@ import {
   type VaultCallerAuthority,
 } from "./mapping";
 import { vaultErrorCodeForProvider } from "./provider-registry";
+import { plainFieldKind } from "./plain-field-hints";
 import {
   LINKED_VAULT_OPEN_WAIT_MS,
   LINKED_VAULT_SEARCH_MAX_AGE_MS,
@@ -140,6 +143,15 @@ export type SecretCaptureInput = {
 
 export interface VaultService {
   list(actor: VaultRequestActor, workspaceId: string): Promise<VaultSummary[]>;
+  /**
+   * Every organization vault, wherever it works, for account administrators.
+   * `complete` is false while the routine is not granted yet: the list then
+   * holds only the organization vaults that work in this workspace.
+   */
+  listOrganization(
+    actor: VaultRequestActor,
+    workspaceId: string,
+  ): Promise<{ vaults: VaultSummary[]; complete: boolean }>;
   get(actor: VaultRequestActor, workspaceId: string, vaultId: string): Promise<VaultSummary>;
   create(
     actor: VaultRequestActor,
@@ -338,6 +350,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     type: VaultItemType,
     resolveReference: (raw: string) => Promise<string>,
     generated: string[],
+    fieldNotes?: SecretSaveFieldNote[],
   ): Promise<VaultFieldWrite> {
     const current = existing?.fields.find(
       (field) =>
@@ -371,6 +384,18 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       plaintext = input.value ?? "";
       size = utf8Size(plaintext);
     }
+    kind = plainFieldKind(
+      {
+        name: input.name,
+        value: plaintext,
+        kind,
+        chosen:
+          input.kind !== undefined ||
+          current !== undefined ||
+          standardFieldKind(type, input.name) === "text",
+      },
+      fieldNotes,
+    );
     if (kind === "totp") {
       if (!isValidTotpInput(plaintext)) {
         throw new VaultError(
@@ -451,6 +476,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     resolveReference: (raw: string) => Promise<string>,
     createdBy: VaultVersionCreatedByKind,
     generated: string[] = [],
+    fieldNotes?: SecretSaveFieldNote[],
   ): Promise<VaultItemWrite> {
     const write: VaultItemWrite = { createdByKind: createdBy };
     if (req.name !== undefined) write.name = req.name;
@@ -464,7 +490,9 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       const fields = await prepareTypedFields(type, req.fields, resolveReference, generated);
       write.fields = [];
       for (const field of fields) {
-        write.fields.push(await fieldWrite(field, existing, type, resolveReference, generated));
+        write.fields.push(
+          await fieldWrite(field, existing, type, resolveReference, generated, fieldNotes),
+        );
       }
     }
     return write;
@@ -945,6 +973,25 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       return rows.map((row) => toVaultSummary(row, authority));
     },
 
+    async listOrganization(actor, workspaceId) {
+      if (!actor.accountAdmin) {
+        throw new VaultError("vault_permission_denied", "organization vaults need account:admin");
+      }
+      const context = subjectContext(actor, workspaceId);
+      const authority = authorityOf(actor);
+      const everywhere = await listOrganizationVaults(deps.db, context, { workspaceId });
+      if (everywhere) {
+        return { vaults: everywhere.map((row) => toVaultSummary(row, authority)), complete: true };
+      }
+      const here = await listVaultsForSubject(deps.db, context, { workspaceId });
+      return {
+        vaults: here
+          .filter((row) => row.ownerKind === "organization")
+          .map((row) => toVaultSummary(row, authority)),
+        complete: false,
+      };
+    },
+
     async get(actor, workspaceId, vaultId) {
       const rows = await listVaultsForSubject(deps.db, subjectContext(actor, workspaceId), {
         workspaceId,
@@ -1385,6 +1432,8 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         fields.unshift({ name: "username", kind: "text", value: input.username });
       }
       const generated: string[] = [];
+      const fieldNotes: SecretSaveFieldNote[] = [];
+      const notes = () => (fieldNotes.length > 0 ? { fieldNotes } : {});
       if (vault.source !== "opengeni") {
         // W5: secret_save into a read-write connected vault writes through its provider.
         const itemId = await writeProviderVaultItem(
@@ -1414,6 +1463,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
               fields,
             },
             generated,
+            fieldNotes,
           },
         );
         const saved = await getVaultItem(deps.db, context, { itemId });
@@ -1421,6 +1471,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
           item: toVaultItemSummary(saved, key()),
           references: vaultItemReferences(saved),
           generatedFields: generated,
+          ...notes(),
         };
       }
       const write = await itemWrite(
@@ -1434,6 +1485,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         (raw) => resolveTextReference(principal, raw, "secret_save"),
         "agent",
         generated,
+        fieldNotes,
       );
       const row = await upsertVaultItem(
         deps.db,
@@ -1443,7 +1495,12 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
           : { ...write, vaultId: vault.id, mode: "create" },
       );
       const summary = toVaultItemSummary(row, key());
-      return { item: summary, references: vaultItemReferences(row), generatedFields: generated };
+      return {
+        item: summary,
+        references: vaultItemReferences(row),
+        generatedFields: generated,
+        ...notes(),
+      };
     },
 
     async captureForAgent(principal, input) {

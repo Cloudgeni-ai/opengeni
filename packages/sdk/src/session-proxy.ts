@@ -16,6 +16,7 @@ import type {
 import { mintToolToken, resolveToolTokenSecret } from "./tool-auth";
 import { getSessionProxyWorkspaceGrant } from "./session-proxy-client";
 import { normalizeMessageTimeZone } from "@opengeni/contracts/message-time-zone";
+import type { ExternalActorStatedMembership } from "@opengeni/contracts/external-identities";
 export {
   getSessionProxyArtifactAssociation,
   getSessionProxyWorkspaceGrant,
@@ -70,6 +71,15 @@ export type SessionProxyResolution = (
   user: string;
   /** External identity source. Defaults to the facade's `source`, else `"default"`. */
   source?: string | undefined;
+  /**
+   * The user's membership as your app knows it right now, forwarded as
+   * `asUser(user, { membership })`. On every workspace-scoped request the
+   * user's grant in that shared workspace becomes exactly these permissions
+   * before the request is authorized (created if missing, changed only when
+   * it differs). Omit it to use the stored grant. Removing a user stays an
+   * explicit revoke.
+   */
+  membership?: ExternalActorStatedMembership | undefined;
   /**
    * The user is an anonymous visitor your product has not signed in, for
    * example a website visitor keyed by a cookie. Visitors cannot upload
@@ -614,7 +624,10 @@ export function createSessionProxyHandler(
       }
       const source = resolved.source ?? defaultSource;
       const workspaceId = await resolveWorkspace(target, resolved, source, chats);
-      const client = service.asUser(resolved.user, { source });
+      const client = service.asUser(resolved.user, {
+        source,
+        ...(resolved.membership ? { membership: resolved.membership } : {}),
+      });
       const context: SessionProxyContext = {
         request,
         workspaceId,
@@ -1073,9 +1086,12 @@ export function createSessionProxyHandler(
               modelSelection,
             );
             if (modelSelection) return await forward(message);
-            // Save requires explicit policy fields. Use this actor's durable draft,
-            // not browser choices. The API's expectedRevision fence rejects races.
+            // Use this actor's durable draft, not browser choices. A draft that
+            // follows the chat's settings is saved without them so it keeps
+            // following; an older API (no such flag) requires them. The API's
+            // expectedRevision fence rejects races.
             const draft = await client.getComposerDraft(workspaceId, sessionId, call);
+            if (draft.policyFollowsSession) return await forward(message);
             return await forward({
               ...message,
               model: draft.model,

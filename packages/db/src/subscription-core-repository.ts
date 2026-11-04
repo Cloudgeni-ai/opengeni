@@ -9,9 +9,27 @@ import type {
   SubscriptionQuota,
   SubscriptionSettingValues,
 } from "@opengeni/subscriptions";
-import { quotaAfterRateLimitReset, storedQuotaDocument } from "@opengeni/subscriptions";
+import {
+  quotaAfterRateLimitReset,
+  storedQuotaDocument,
+  withSubscriptionCoreModelIdForms,
+} from "@opengeni/subscriptions";
 import { rawRows, type Database } from "./database";
-import { subscriptionCoreProvider } from "./subscription-core-providers";
+import {
+  subscriptionCoreProvider,
+  subscriptionCoreProviderIds,
+} from "./subscription-core-providers";
+
+/**
+ * A connection's model list read in every id form of its models (the
+ * provider adapter's `modelIdFormsFor`). A provider this binary does not
+ * register keeps its list as stored.
+ */
+function modelIdsInEveryForm(providerId: string, modelIds: readonly string[]): string[] {
+  return subscriptionCoreProviderIds().includes(providerId)
+    ? withSubscriptionCoreModelIdForms(subscriptionCoreProvider(providerId).adapter, modelIds)
+    : [...modelIds];
+}
 
 export type EffectiveSubscriptionSettingsRow = {
   values: SubscriptionSettingValues;
@@ -123,6 +141,7 @@ export async function listSubscriptionConnectionsForPlacement(
     allocator_enabled: boolean;
     entitled_model_ids: string[] | null;
     observed_model_slugs: string[] | null;
+    last_observed_model_slugs: string[] | null;
     model_catalog_observed_at: Date | string | null;
     model_catalog_expires_at: Date | string | null;
     excluded_models: string[];
@@ -149,6 +168,9 @@ export async function listSubscriptionConnectionsForPlacement(
         and quota.model_catalog_observed_at <= ${now}::timestamptz
         and quota.model_catalog_expires_at > ${now}::timestamptz
         then quota.model_catalog_slugs else null end as observed_model_slugs,
+      case when quota.model_catalog_refresh_generation = connection.refresh_generation
+        and quota.model_catalog_observed_at <= ${now}::timestamptz
+        then quota.model_catalog_slugs else null end as last_observed_model_slugs,
       quota.model_catalog_observed_at, quota.model_catalog_expires_at,
       connection.allowed_model_ids, connection.refresh_generation,
       connection.scope_kind, connection.allow_personal_workspaces,
@@ -231,14 +253,20 @@ export async function listSubscriptionConnectionsForPlacement(
       allocatorEnabled: row.allocator_enabled,
       entitledModelIds: row.entitled_model_ids,
       observedModelSlugs: row.observed_model_slugs,
+      lastObservedModelSlugs: row.last_observed_model_slugs,
       modelCatalogObservedAt: row.model_catalog_observed_at
         ? new Date(row.model_catalog_observed_at).getTime()
         : null,
       modelCatalogExpiresAt: row.model_catalog_expires_at
         ? new Date(row.model_catalog_expires_at).getTime()
         : null,
-      excludedModelIds: row.excluded_models,
-      allowedModelIds: row.allowed_model_ids,
+      // Read in every id form of their models, so placement and every
+      // catalog reader treat a model listed under one form as listed.
+      excludedModelIds: modelIdsInEveryForm(row.provider, row.excluded_models),
+      allowedModelIds:
+        row.allowed_model_ids === null
+          ? null
+          : modelIdsInEveryForm(row.provider, row.allowed_model_ids),
       refreshGeneration: Number(row.refresh_generation),
       quota: decodeSubscriptionQuota(row),
     };

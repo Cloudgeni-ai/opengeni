@@ -84,3 +84,10 @@ passes these as `readOnlyOperations` to `compileOpenApiRevision`; provider
 documents and custom APIs cannot relax the method's safety default themselves.
 An entry's `description` replaces the provider's generic text with reviewed
 guidance for the agent.
+
+OpenAPI query arrays declared with `style: form` (also the query default) and
+`explode: false` serialize as one comma-separated parameter, including Graph
+`$select`, `$expand`, and `$orderby`. Default or explicitly exploded arrays keep
+repeated parameter names. The corrected bindings receive a new immutable revision
+identity. Refresh an existing integration catalog to adopt them; already accepted
+revisions retain their original bindings and behavior.

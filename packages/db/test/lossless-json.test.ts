@@ -1,11 +1,12 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, spyOn, test } from "bun:test";
+import { toJsonSafeValue } from "@opengeni/contracts/json-safe";
+import { fingerprint, hostileGraph } from "../../contracts/test/hostile-values";
 import {
   LEGACY_LOSSLESS_JSON_ENVELOPE_KEY,
   LEGACY_LOSSLESS_TEXT_PREFIX,
   LOSSLESS_CONTENT_CODEC_VERSION,
   LOSSLESS_JSON_STRING_PREFIX,
   LOSSLESS_TEXT_PREFIX,
-  UnsupportedCanonicalValueError,
   fromPostgresLosslessJson,
   fromPostgresLosslessText,
   toPostgresLosslessJson,
@@ -190,34 +191,87 @@ describe("lossless PostgreSQL content boundaries", () => {
     );
   });
 
-  test("rejects non-JSON graphs and executable/accessor values before persistence", () => {
-    const cyclic: Record<string, unknown> = {};
-    cyclic.self = cyclic;
-    expect(() => toPostgresLosslessJson(cyclic)).toThrow(UnsupportedCanonicalValueError);
-    expect(() => toPostgresLosslessJson({ bigint: 2n })).toThrow(UnsupportedCanonicalValueError);
-    expect(() => toPostgresLosslessJson({ callback: () => undefined })).toThrow(
-      UnsupportedCanonicalValueError,
-    );
-    const accessor = Object.defineProperty({}, "value", {
-      enumerable: true,
-      get: () => "not invoked",
-    });
-    expect(() => toPostgresLosslessJson(accessor)).toThrow(UnsupportedCanonicalValueError);
+  test("converts non-JSON graphs and executable/accessor values instead of failing the write", () => {
+    const warn = spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const cyclic: Record<string, unknown> = { id: "c" };
+      cyclic.self = cyclic;
+      const getter = mock(() => "not invoked");
+      const accessor = Object.defineProperty({ kept: true }, "value", {
+        enumerable: true,
+        get: getter,
+      });
+      const arrayWithExtraProperty = ["safe\u0000value"] as unknown[] & {
+        sourceKey?: string;
+      };
+      arrayWithExtraProperty.sourceKey = "dropped";
+      const arrayWithHiddenProperty = Object.defineProperty(["safe"], "hidden", {
+        value: "dropped",
+        enumerable: false,
+      });
+      const cases: Array<[unknown, unknown, string]> = [
+        [cyclic, { id: "c", self: null }, "cycle"],
+        [{ bigint: 2n }, { bigint: 2 }, "bigint"],
+        [{ callback: () => undefined, kept: 1 }, { kept: 1 }, "function"],
+        [accessor, { kept: true }, "accessor"],
+        [arrayWithExtraProperty, ["safe\u0000value"], "array_property"],
+        [arrayWithHiddenProperty, ["safe"], "array_property"],
+        [{ [Symbol("mark")]: 1, kept: 1 }, { kept: 1 }, "symbol_key"],
+        [
+          Object.defineProperty([1, 2], 0, { value: 1, enumerable: false }),
+          [1, 2],
+          "array_property",
+        ],
+      ];
+      const loggedKinds = new Set<string>();
+      for (const [value, expected] of cases) {
+        warn.mockClear();
+        const encoded = toPostgresLosslessJson(value);
+        // The stored form still carries PostgreSQL-unsafe strings losslessly.
+        expect(fromPostgresLosslessJson(encoded, LOSSLESS_CONTENT_CODEC_VERSION)).toEqual(expected);
+        for (const [message, summary] of warn.mock.calls as Array<[string, { kinds: object }]>) {
+          expect(message).toBe("Canonical JSON value adjusted");
+          for (const kind of Object.keys(summary.kinds)) loggedKinds.add(kind);
+        }
+      }
+      // Each lossy change is logged (repeats of the same kinds are rate
+      // limited); a request-local symbol-keyed mark alone is not.
+      for (const [, , kind] of cases) {
+        if (kind === "symbol_key") expect(loggedKinds.has(kind)).toBe(false);
+        else expect(loggedKinds.has(kind)).toBe(true);
+      }
+      expect(getter).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
 
-    const arrayWithExtraProperty = ["safe\u0000value"] as unknown[] & {
-      sourceKey?: string;
-    };
-    arrayWithExtraProperty.sourceKey = "must-not-disappear";
-    expect(() => toPostgresLosslessJson(arrayWithExtraProperty)).toThrow(
-      UnsupportedCanonicalValueError,
-    );
-
-    const arrayWithHiddenProperty = Object.defineProperty(["safe"], "hidden", {
-      value: "must-not-disappear",
-      enumerable: false,
-    });
-    expect(() => toPostgresLosslessJson(arrayWithHiddenProperty)).toThrow(
-      UnsupportedCanonicalValueError,
-    );
+describe("lossless PostgreSQL content on seeded hostile graphs", () => {
+  test("every write succeeds and reads back as the converted JSON value", () => {
+    const warn = spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      for (let index = 0; index < 300; index += 1) {
+        const seed = index * 104_729 + 3;
+        const graph = hostileGraph(seed);
+        const before = fingerprint(graph.value);
+        let encoded: unknown;
+        try {
+          encoded = toPostgresLosslessJson(graph.value);
+        } catch (error) {
+          throw new Error(`seed ${seed} failed the write`, { cause: error });
+        }
+        // What PostgreSQL stores is plain JSON text.
+        expect(() => JSON.stringify(encoded)).not.toThrow();
+        const stored = JSON.parse(JSON.stringify(encoded));
+        expect(fromPostgresLosslessJson(stored, LOSSLESS_CONTENT_CODEC_VERSION)).toEqual(
+          JSON.parse(JSON.stringify(toJsonSafeValue(graph.value))),
+        );
+        expect(fingerprint(graph.value)).toBe(before);
+        expect(graph.getterCalls()).toBe(0);
+      }
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

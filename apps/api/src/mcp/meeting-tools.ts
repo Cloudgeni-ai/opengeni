@@ -33,7 +33,9 @@ import {
   listRecordingsWithOwnElsewhere,
   listRecordingTranscriptVersions,
   meetingSummarySessionScope,
+  nameRecording,
   ownRecordingHome,
+  ownMeetingsReaching,
   ownRecordingWorkspaces,
   recordingVisible,
   RecordingConflictError,
@@ -226,6 +228,11 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
     return workspaces.filter((workspace) => hasPermission(workspace.permissions, permission));
   }
 
+  /** This workspace, or null when it is the person's Personal workspace (see `ownMeetingsReaching`). */
+  async function reachingHere(who: RecordingActor): Promise<string | null> {
+    return await ownMeetingsReaching(deps.db, { ...who, accountId: grant.accountId });
+  }
+
   /**
    * The person, in the workspace storing the meeting: this one, or for their
    * own Only me meeting, another workspace of this organization where they
@@ -245,6 +252,7 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
       subjectId: who.subjectId,
       recordingId: meetingId,
       workspaces: await ownElsewhere(who, permission),
+      reachingWorkspaceId: await reachingHere(who),
     });
     return home
       ? { who: { ...who, workspaceId: home.id }, recordedIn: home.name }
@@ -306,6 +314,7 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
       const page = await listRecordingsWithOwnElsewhere(deps.db, {
         ...who,
         elsewhere: await ownElsewhere(who, "sessions:read"),
+        reachingWorkspaceId: await reachingHere(who),
         query: request.query?.trim() || undefined,
         person: request.person?.trim() || undefined,
         startedFrom: request.startedFrom ? new Date(request.startedFrom) : undefined,
@@ -519,7 +528,7 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
     "meeting_notes_save",
     {
       description:
-        "Save a meeting's notes: its written-up summary, decisions and action items in Markdown, shown on the meeting page to everyone who can see the meeting. This replaces the notes as a whole. Read the meeting with meeting_read first and pass the notes' revision as expectedRevision (0 when it has none), so edits someone made meanwhile are not overwritten. The notepad people wrote during the meeting is never changed.",
+        "Save a meeting's notes: its written-up summary, decisions and action items in Markdown, shown on the meeting page to everyone who can see the meeting. This replaces the notes as a whole. Read the meeting with meeting_read first and pass the notes' revision as expectedRevision (0 when it has none), so edits someone made meanwhile are not overwritten. The notepad people wrote during the meeting is never changed. Pass title to name the meeting after what it was about; it is used only while nobody gave the meeting a name and no calendar event named it.",
       inputSchema: {
         meetingId: z.uuid().describe("A meeting id from meetings_search."),
         notes: z
@@ -532,6 +541,13 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
           .int()
           .min(0)
           .describe("The notes' revision from meeting_read, or 0 when it showed none."),
+        title: z
+          .string()
+          .max(1_000)
+          .optional()
+          .describe(
+            'A short name for the meeting saying what it was about, in the language it was held in, such as "Q3 pricing review with Acme". Kept only while the meeting has no name from a person or a calendar event.',
+          ),
       },
     },
     async (request) => {
@@ -563,7 +579,25 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
           expectedRevision: request.expectedRevision,
           sessionId,
         });
-        return json({ saved: true, revision: saved.revision });
+        // Named from the conversation only over a date or app name; a
+        // person's or a calendar event's name stays. The notes are saved
+        // whatever happens to the name: a blank one is ignored, a long one
+        // shortened, and a failure only means the name isn't used.
+        const named = request.title?.trim()
+          ? await nameRecording(deps.db, {
+              ...who,
+              recordingId: request.meetingId,
+              title: request.title,
+              source: "conversation",
+            }).catch(() => ({ renamed: false }))
+          : request.title === undefined
+            ? null
+            : { renamed: false };
+        return json({
+          saved: true,
+          revision: saved.revision,
+          ...(named ? { titleUsed: named.renamed } : {}),
+        });
       } catch (error) {
         if (error instanceof RecordingNotFoundError) return notVisible();
         if (error instanceof RecordingConflictError && error.code === "notes_changed") {

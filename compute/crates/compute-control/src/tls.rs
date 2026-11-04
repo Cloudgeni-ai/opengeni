@@ -247,12 +247,37 @@ pub fn public_server(cert: &Path, key: &Path) -> anyhow::Result<Arc<ServerConfig
     Ok(Arc::new(server))
 }
 
-/// A TLS client that trusts the authorities in `ca`, for the database.
-pub fn database_client(ca: &Path) -> anyhow::Result<ClientConfig> {
+/// A TLS client for the database that trusts the authorities in `ca`, or
+/// the system's without one.
+///
+/// # Errors
+///
+/// When `ca` cannot be read, or the system trusts no authority.
+pub fn database_client(ca: Option<&Path>) -> anyhow::Result<ClientConfig> {
+    let roots = match ca {
+        Some(ca) => authority(ca)?,
+        None => Arc::new(system_authorities()?),
+    };
     Ok(ClientConfig::builder_with_provider(provider())
         .with_safe_default_protocol_versions()?
-        .with_root_certificates(authority(ca)?)
+        .with_root_certificates(roots)
         .with_no_client_auth())
+}
+
+/// The authorities the system trusts (its certificate store, or the file
+/// `SSL_CERT_FILE` names).
+fn system_authorities() -> anyhow::Result<RootCertStore> {
+    let found = rustls_native_certs::load_native_certs();
+    for error in &found.errors {
+        tracing::warn!(%error, "could not read some of the system's authorities");
+    }
+    let mut roots = RootCertStore::empty();
+    let (added, _) = roots.add_parsable_certificates(found.certs);
+    anyhow::ensure!(
+        added > 0,
+        "the system trusts no authority to check the database by; give one with --database-ca"
+    );
+    Ok(roots)
 }
 
 /// The DNS names a verified peer certificate is valid for.

@@ -1,6 +1,7 @@
 import {
   isValidSecretName,
   isValidTotpInput,
+  plainFieldSecretHint,
   VAULT_DEFAULT_PRIMARY_FIELD,
   VAULT_ITEM_CATEGORIES,
   VAULT_ITEM_TYPE_FIELDS,
@@ -550,6 +551,23 @@ export function ItemEditorPage({
       );
       if (type === "ssh_key" && draft.name === "public key" && !draft.custom)
         hint = "Filled in from the private key. Only needed for a passphrase-protected PEM key.";
+      else {
+        // A secret pasted into a plain field is shown and searched as written.
+        const looksSecret = plainFieldSecretHint(draft.name, draft.value);
+        if (looksSecret)
+          hint = (
+            <>
+              {looksSecret.message}{" "}
+              <button
+                type="button"
+                className="og-link font-medium"
+                onClick={() => update(draft.key, { kind: "concealed" })}
+              >
+                Make concealed
+              </button>
+            </>
+          );
+      }
     } else if (draft.kind === "totp") {
       control = (
         <SecretInput

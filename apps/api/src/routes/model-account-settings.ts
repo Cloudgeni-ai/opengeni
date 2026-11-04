@@ -8,8 +8,9 @@ import {
 } from "@opengeni/contracts";
 import {
   MissingPermissionRefusal,
-  requireAccessGrant,
+  requireAccessGrantAuthorization,
   requireWorkspaceSettingsGrant,
+  workspaceSettingsAuthorized,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
@@ -34,8 +35,10 @@ import { z } from "zod";
 
 import { ApiHttpError } from "../http/api-error";
 import { requestValidationError } from "../http/request-body";
-import { requireOrganizationCodexHuman } from "./codex";
-import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
+import {
+  requireOrganizationSubscriptionAdministrator,
+  requireOrganizationSubscriptionMutationOrigin,
+} from "./codex";
 
 const Uuid = z.string().uuid();
 
@@ -126,19 +129,24 @@ async function jsonBody(c: Context): Promise<unknown> {
  */
 export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps): void {
   const organizationPath = "/v1/organizations/:organizationId/model-account-settings";
+  // Whether this deployment switches models at all; the setting does nothing without it.
+  const availability = {
+    crossProviderFailoverAvailable: deps.settings.subscriptionCrossProviderFailoverEnabled,
+  };
 
   app.get(organizationPath, async (c) => {
     c.header("cache-control", "private, no-store");
     const organizationId = parseId(c.req.param("organizationId"), "organization");
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
     try {
       return c.json(
-        OrganizationModelAccountSettings.parse(
-          await readOrganizationSubscriptionSettings(deps.db, {
+        OrganizationModelAccountSettings.parse({
+          ...(await readOrganizationSubscriptionSettings(deps.db, {
             organizationId,
             actorSubjectId: human.subjectId,
-          }),
-        ),
+          })),
+          ...availability,
+        }),
       );
     } catch (error) {
       refused(error, "account:admin");
@@ -146,9 +154,9 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
   });
 
   app.patch(organizationPath, async (c) => {
-    requireSameOriginBrowserMutation(c, deps);
+    requireOrganizationSubscriptionMutationOrigin(c, deps);
     const organizationId = parseId(c.req.param("organizationId"), "organization");
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
     const parsed = UpdateOrganizationModelAccountSettingsRequest.safeParse(await jsonBody(c));
     if (!parsed.success) {
       throw requestValidationError(parsed.error, "body", {
@@ -165,7 +173,9 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
         ...(expectedVersion === undefined ? {} : { expectedVersion }),
       });
       await wake(deps, result.wake);
-      return c.json(OrganizationModelAccountSettings.parse(result.settings));
+      return c.json(
+        OrganizationModelAccountSettings.parse({ ...result.settings, ...availability }),
+      );
     } catch (error) {
       refused(error, "account:admin");
     }
@@ -174,7 +184,7 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
   app.get(`${organizationPath}/overview`, async (c) => {
     c.header("cache-control", "private, no-store");
     const organizationId = parseId(c.req.param("organizationId"), "organization");
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
     const after = c.req.query("after");
     if (after !== undefined && !Uuid.safeParse(after).success) {
       throw new HTTPException(422, { message: "invalid cursor" });
@@ -185,15 +195,17 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
       throw new HTTPException(422, { message: "limit must be between 1 and 500" });
     }
     try {
+      const overview = await readSubscriptionSettingsOverview(deps.db, {
+        organizationId,
+        actorSubjectId: human.subjectId,
+        after: after ?? null,
+        ...(limit === undefined ? {} : { limit }),
+      });
       return c.json(
-        ModelAccountSettingsOverview.parse(
-          await readSubscriptionSettingsOverview(deps.db, {
-            organizationId,
-            actorSubjectId: human.subjectId,
-            after: after ?? null,
-            ...(limit === undefined ? {} : { limit }),
-          }),
-        ),
+        ModelAccountSettingsOverview.parse({
+          ...overview,
+          organization: { ...overview.organization, ...availability },
+        }),
       );
     } catch (error) {
       refused(error, "account:admin");
@@ -205,16 +217,29 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
   app.get(workspacePath, async (c) => {
     c.header("cache-control", "private, no-store");
     const workspaceId = parseId(c.req.param("workspaceId"), "workspace");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "workspace:read",
+    );
+    const grant = authorization.grant;
     try {
       return c.json(
-        WorkspaceModelAccountSettings.parse(
-          await readWorkspaceSubscriptionSettings(deps.db, {
+        WorkspaceModelAccountSettings.parse({
+          ...(await readWorkspaceSubscriptionSettings(deps.db, {
             accountId: grant.accountId,
             workspaceId,
             subjectId: grant.subjectId,
-          }),
-        ),
+            // In a Personal workspace `canEdit` is its owner's, acting as themselves.
+            personalWorkspaceOwnerVerified: await workspaceSettingsAuthorized(
+              deps,
+              authorization,
+              workspaceId,
+            ),
+          })),
+          ...availability,
+        }),
       );
     } catch (error) {
       refused(error, "workspace:admin");
@@ -223,8 +248,9 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
 
   app.patch(workspacePath, async (c) => {
     const workspaceId = parseId(c.req.param("workspaceId"), "workspace");
-    // The owner of a Personal workspace may ask too; it then follows the
-    // organization's settings, a plain 409 rather than an admin refusal.
+    // The owner of a Personal workspace, acting as themselves, changes its
+    // unlocked settings (1233). A Personal workspace without an owner row
+    // (a local one) follows the organization's settings: a plain 409.
     const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const parsed = UpdateWorkspaceModelAccountSettingsRequest.safeParse(await jsonBody(c));
     if (!parsed.success) {
@@ -239,11 +265,12 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
         accountId: grant.accountId,
         workspaceId,
         subjectId: grant.subjectId,
+        personalWorkspaceOwnerVerified: true,
         patch,
         ...(expectedVersion === undefined ? {} : { expectedVersion }),
       });
       await wake(deps, result.wake);
-      return c.json(WorkspaceModelAccountSettings.parse(result.settings));
+      return c.json(WorkspaceModelAccountSettings.parse({ ...result.settings, ...availability }));
     } catch (error) {
       refused(error, "workspace:admin");
     }

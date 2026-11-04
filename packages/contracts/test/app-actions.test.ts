@@ -304,6 +304,49 @@ test("a tool approval change asks about the tools it names and the approval it s
   ).toBe("Set this MCP server's default tool approval to Ask in this workspace?");
 });
 
+test("turning video on or off asks in plain words, and says how it's paid", () => {
+  const turnOn = {
+    id: "updateVideoGenerationPolicy",
+    pathParameters: { workspaceId: "ws-1" },
+    body: {
+      expectedRevision: 7,
+      fundingSource: "opengeni_credits",
+      enabledModelIds: ["bytedance/seedance-2.5"],
+      defaultModelId: "bytedance/seedance-2.5",
+    },
+  };
+  expect(appActionConfirmationTitle(turnOn, here)).toBe(
+    "Let every chat in this workspace make videos?",
+  );
+  expect(
+    appActionConfirmationTitle({ ...turnOn, pathParameters: { workspaceId: "ws-2" } }, here),
+  ).toBe("Let every chat in another workspace make videos?");
+  expect(
+    appActionConfirmationTitle(
+      { ...turnOn, body: { ...turnOn.body, enabledModelIds: [], defaultModelId: null } },
+      here,
+    ),
+  ).toBe("Turn off video for every chat in this workspace?");
+  // The second line names the payer in words, never the stored code.
+  expect(appActionReviewSummary(turnOn)).toBe("Paid with: Opengeni credits");
+  expect(
+    appActionReviewSummary({
+      ...turnOn,
+      body: { ...turnOn.body, fundingSource: "workspace_gateway" },
+    }),
+  ).toBe("Paid with: The workspace's Vercel AI Gateway");
+  expect(
+    appActionReviewSummary({
+      ...turnOn,
+      body: { ...turnOn.body, fundingSource: "supergrok_subscription" },
+    }),
+  ).toBe("Paid with: A connected SuperGrok account");
+  // An unknown code is still shown as it is.
+  expect(appActionReviewSummary({ id: "x", body: { fundingSource: "something_new" } })).toBe(
+    "Funding source: something_new",
+  );
+});
+
 test("an app action's card answers its question with Allow", () => {
   const context = {
     kind: "generic" as const,
@@ -432,7 +475,16 @@ test("the card's second line shows the key values; raw arguments stay in Details
     kind: "generic",
     title: "Invite anna@example.com to your organization as an admin?",
   });
-  expect(review.consequence).toBe("Email: anna@example.com · Role: admin");
+  // The agent's values are labelled as sent, never read as the server's facts.
+  expect(review.consequence).toBe("Sent by the agent: Email: anna@example.com · Role: admin");
+  // Beside the server's facts about its target they're left to Details.
+  expect(
+    toolReviewAction("admin_action_call", invite, {
+      kind: "generic",
+      title: "Remove the Gmail connection?",
+      targetFacts: [{ label: "Added", value: "14 Oct 2026, 07:41 UTC" }],
+    }).consequence,
+  ).toBeUndefined();
   expect(toolReviewFields(invite, undefined, "admin_action_call")).toEqual({
     fields: [],
     moreFields: 0,

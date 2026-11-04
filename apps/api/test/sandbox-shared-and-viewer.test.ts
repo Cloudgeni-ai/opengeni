@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -24,8 +24,10 @@ import {
 } from "@opengeni/db";
 import type { AccessGrant } from "@opengeni/contracts";
 import { createSessionForRequest } from "@opengeni/core";
+import { UNSERVED_HOST_SANDBOX_BACKEND_MESSAGE } from "@opengeni/config";
 import {
   establishSandboxSessionFromEnvelope,
+  PROVIDER_REGISTRY,
   SandboxResumeStateUnavailableError,
   serializeEstablishedSandboxEnvelope,
   type EstablishedSandboxSession,
@@ -79,6 +81,10 @@ const settings = testSettings({
   // env-aware grouping tests attach a workspace Environment/Variable Set at create.
   environmentsEncryptionKey: Buffer.alloc(32, 7).toString("base64"),
 });
+
+// The viewer-lifecycle tests run real `local` boxes, so their deployment
+// default is `local`: a host backend is served only as the deployment default.
+const localDeploymentSettings = testSettings({ ...settings, sandboxBackend: "local" });
 
 async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
   const [a] = await admin<{ id: string }[]>`
@@ -920,7 +926,7 @@ async function seedWarmBox(
     leaseTtlMs: 5_000,
   });
   expect(acquired.role).toBe("spawner");
-  const established = await establishSandboxSessionFromEnvelope(settings, null, {
+  const established = await establishSandboxSessionFromEnvelope(localDeploymentSettings, null, {
     sessionId: session.id,
     recovery: "create-or-restore",
     backendOverride: "local",
@@ -1119,7 +1125,7 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     expect(legacy?.recovery.workspace.status).toBe("unknown");
 
     const attached = await attachViewer(
-      { db, settings },
+      { db, settings: localDeploymentSettings },
       {
         accountId,
         workspaceId,
@@ -1140,7 +1146,7 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     // Refresh the viewer holder so its heartbeat stays fresh across the sweep,
     // then run the reaper. With a live viewer holder the box must NOT drain.
     await heartbeatViewer(
-      { db, settings },
+      { db, settings: localDeploymentSettings },
       {
         accountId,
         workspaceId,
@@ -1178,7 +1184,10 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
 
     let blocked: unknown;
     try {
-      await attachViewer({ db, settings }, { accountId, workspaceId, session: session! });
+      await attachViewer(
+        { db, settings: localDeploymentSettings },
+        { accountId, workspaceId, session: session! },
+      );
     } catch (error) {
       blocked = error;
     }
@@ -1199,7 +1208,7 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
       idleGraceMs: settings.sandboxIdleGraceMs,
     });
     const attached = await attachViewer(
-      { db, settings },
+      { db, settings: localDeploymentSettings },
       { accountId, workspaceId, session: session! },
     );
     expect(attached.liveness).toBe("warm");
@@ -1217,7 +1226,7 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     const session = await getSession(db, workspaceId, sessionId);
     const readinessSubject = `user:fleet-${crypto.randomUUID()}`;
     const hold = await ensureSessionGroupReady(
-      { db, settings },
+      { db, settings: localDeploymentSettings },
       { accountId, workspaceId, session: session!, subjectId: readinessSubject },
     );
 
@@ -1280,13 +1289,13 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     const { sandboxGroupId, sessionId } = await seedWarmBox(accountId, workspaceId);
     const session = await getSession(db, workspaceId, sessionId);
     const attached = await attachViewer(
-      { db, settings },
+      { db, settings: localDeploymentSettings },
       { accountId, workspaceId, session: session! },
     );
 
     // Detach the viewer → refcount 0, warm->draining (guarded turn_holders=0).
     const released = await detachViewer(
-      { db, settings },
+      { db, settings: localDeploymentSettings },
       {
         accountId,
         workspaceId,
@@ -1313,7 +1322,7 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     const { sandboxGroupId, sessionId } = await seedWarmBox(accountId, workspaceId);
     const session = await getSession(db, workspaceId, sessionId);
     const attached = await attachViewer(
-      { db, settings },
+      { db, settings: localDeploymentSettings },
       { accountId, workspaceId, session: session! },
     );
     expect(attached.liveness).toBe("warm");
@@ -1337,12 +1346,12 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     const { sandboxGroupId, leaseEpoch, sessionId } = await seedWarmBox(accountId, workspaceId);
     const session = await getSession(db, workspaceId, sessionId);
     const attached = await attachViewer(
-      { db, settings },
+      { db, settings: localDeploymentSettings },
       { accountId, workspaceId, session: session! },
     );
     // A heartbeat on the WRONG (superseded) epoch is rejected.
     const stale = await heartbeatViewer(
-      { db, settings },
+      { db, settings: localDeploymentSettings },
       {
         accountId,
         workspaceId,
@@ -1354,7 +1363,7 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     expect(stale).toBe(false);
     // A heartbeat on the CURRENT epoch succeeds.
     const fresh = await heartbeatViewer(
-      { db, settings },
+      { db, settings: localDeploymentSettings },
       {
         accountId,
         workspaceId,
@@ -1392,6 +1401,96 @@ function hasModalCredentials(): boolean {
   }
   return false;
 }
+
+describe("a stored host-backend session the deployment does not serve", () => {
+  // Rows stored before the create-time gate (or shared-box children of one)
+  // may still name `local` or `docker` on a cloud deployment. Every API-direct
+  // surface (terminal exec, files, browser, computer through Channel A, and
+  // viewer attach) must refuse with a plain 409 before building a box on the
+  // API host. The local provider is runnable in this process, so the refusal
+  // comes from deployment configuration, not a missing runtime.
+  const modalDeployment = testSettings({
+    ...settings,
+    sandboxBackend: "modal",
+    modalTokenId: "ak-test",
+    modalTokenSecret: "as-test",
+  });
+
+  async function storedHostSession(backend: "local" | "docker") {
+    const { accountId, workspaceId } = await freshWorkspace();
+    const session = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "stored before the create gate",
+      resources: [],
+      metadata: {},
+      model: "m",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: backend,
+    });
+    return { accountId, workspaceId, session };
+  }
+
+  async function refusal(run: () => Promise<unknown>): Promise<HTTPException> {
+    let caught: unknown;
+    try {
+      await run();
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(HTTPException);
+    return caught as HTTPException;
+  }
+
+  for (const backend of ["local", "docker"] as const) {
+    test(`a ${backend} row gets 409 from a Channel A command and from viewer attach, with no box`, async () => {
+      if (!available) return;
+      const { accountId, workspaceId, session } = await storedHostSession(backend);
+      const build = spyOn(PROVIDER_REGISTRY[backend], "build");
+      let ran = false;
+      try {
+        const exec = await refusal(() =>
+          withChannelA(
+            { db, settings: modalDeployment, bus: new MemoryEventBus() },
+            { accountId, workspaceId, session: session as never, subjectId: "terminal-exec" },
+            async () => {
+              ran = true;
+              return "ran on the API host";
+            },
+          ),
+        );
+        expect(exec.status).toBe(409);
+        expect(exec.message).toBe(UNSERVED_HOST_SANDBOX_BACKEND_MESSAGE);
+
+        const viewer = await refusal(() =>
+          attachViewer({ db, settings: modalDeployment }, { accountId, workspaceId, session }),
+        );
+        expect(viewer.status).toBe(409);
+        expect(viewer.message).toBe(UNSERVED_HOST_SANDBOX_BACKEND_MESSAGE);
+
+        expect(ran).toBe(false);
+        expect(build).not.toHaveBeenCalled();
+        expect(await readLease(db, workspaceId, session.sandboxGroupId)).toBeNull();
+      } finally {
+        build.mockRestore();
+      }
+    }, 60_000);
+  }
+
+  test("the deployment's own host backend still attaches", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const { sessionId } = await seedWarmBox(accountId, workspaceId);
+    const session = await getSession(db, workspaceId, sessionId);
+    const result = await withChannelA(
+      { db, settings: localDeploymentSettings, bus: new MemoryEventBus() },
+      { accountId, workspaceId, session: session as never, subjectId: "terminal-exec" },
+      async () => "ran in the deployment's own box",
+    );
+    expect(result).toBe("ran in the deployment's own box");
+  }, 60_000);
+});
 
 const liveGate = process.env.OPENGENI_P14_LIVE_MODAL === "1" && hasModalCredentials();
 

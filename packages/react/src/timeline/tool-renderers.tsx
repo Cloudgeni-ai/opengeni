@@ -23,7 +23,8 @@ import {
   PanelsTopLeftIcon,
   VideoIcon,
 } from "lucide-react";
-import { lazy, useContext, useState, type ReactNode } from "react";
+import { lazy, useContext, useMemo, useState, type ReactNode } from "react";
+import { redactDeep, signedValuesDeep } from "./credential-redaction";
 import { formatBytes, tryParseJson } from "../lib/format";
 import { useTimelineComputeLabel } from "./compute-label";
 import { useToolDetails } from "./tool-details";
@@ -190,7 +191,7 @@ function PresentedBody({ body }: { body: ToolBody }) {
     case "term":
       return (
         <>
-          {/* Exec rows pass command={null}: the row title already carries `$ cmd`. */}
+          {/* A command row's title says what it did; the command itself heads its output here. */}
           <TermBlock
             command={body.command}
             {...(body.workdir !== null || body.command === null ? { workdir: body.workdir } : {})}
@@ -1991,7 +1992,19 @@ const REVIEW_CHIP = (msg: OpenGeniText): Partial<Record<ToolReviewStatus, Disclo
 function ReviewedGenericRenderer(props: ToolRendererProps) {
   const msg = useOpenGeniText();
   const { item } = props;
-  const { review, onViewDetails } = useRecordedToolReview(item.callId);
+  const { review: savedReview, onViewDetails } = useRecordedToolReview(item.callId);
+  // The saved review comes from the approval history, not the tool call, so it
+  // gets the same credential redaction before it is shown in the timeline.
+  const review = useMemo(
+    () =>
+      savedReview
+        ? redactDeep(
+            savedReview,
+            signedValuesDeep([savedReview, item.arguments, item.output, item.raw]),
+          )
+        : null,
+    [savedReview, item.arguments, item.output, item.raw],
+  );
   const logo = useToolConnectorLogo(item.display);
   if (!review) return <UnreviewedGenericRenderer {...props} />;
   const ReviewIcon = toolIcon(genericToolIconKind(item.name));
@@ -2098,7 +2111,8 @@ function KnowledgeSaveRenderer({ item }: ToolRendererProps) {
   );
 }
 
-const BASE_ENTRIES: ToolRegistryEntry[] = [
+/** Every built-in tool renderer entry (exported for the renderer-wide redaction test). */
+export const BASE_ENTRIES: ToolRegistryEntry[] = [
   ...[
     "knowledge_save",
     "knowledge_archive",

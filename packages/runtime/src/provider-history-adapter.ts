@@ -1,6 +1,12 @@
 import { collapseRepeatedSessionGoalContexts } from "@opengeni/contracts";
+import { isAnthropicWebSearchItem } from "./anthropic-web-search";
 import { chatReasoning, chatReasoningDetails, chatReasoningDetailsText } from "./chat-reasoning";
-import { projectHostedSearchEvidence } from "./hosted-search-evidence";
+import {
+  projectHostedSearchEvidence,
+  withSearchRecordForm,
+  withSearchRecordsAfterOpenCalls,
+  type SearchRecordForm,
+} from "./hosted-search-evidence";
 
 export type HistoryProviderApi = "responses" | "chat" | "anthropic-messages";
 
@@ -18,9 +24,18 @@ export type ProviderHistoryOptions = {
    * same declaration as a developer message carrying the definitions as text.
    */
   declaresAdditionalTools?: boolean;
+  /**
+   * The session's {@link SearchRecordForm} for earlier hosted searches. Without
+   * it, each search keeps the form marked on it, else the original `assistant`.
+   * Claude's own searches that stay native for the Claude transport are marked
+   * with it, so that transport projects them in the same form when it cannot
+   * replay them natively.
+   */
+  searchRecordForm?: SearchRecordForm;
 };
 
-const CHAT_FUNCTION_NAME = /^[a-zA-Z0-9_-]+$/;
+/** The one tool-name format every Chat route and gateway accepts. */
+const CHAT_FUNCTION_NAME = /^[a-zA-Z0-9_-]{1,64}$/;
 const HISTORICAL_FACT_MAX_CHARS = 32_000;
 
 /** Marks a request-local item that declares tools newly available to the model. */
@@ -309,11 +324,25 @@ export function projectHistoryForProvider(
   const nativeClaude = providerApi === "anthropic-messages";
   // Each distinct session goal context reaches the model once per request.
   const goalOnce = collapseRepeatedSessionGoalContexts(items);
-  const projected = goalOnce.map((item) => {
-    const evidence = projectHostedSearchEvidence(item, { preserveAnthropicNative: nativeClaude });
-    return nativeClaude ? evidence : withoutClaudeCitationMetadata(evidence);
-  });
+  // A search record never separates a tool call from its result on any API.
+  const projected = withSearchRecordsAfterOpenCalls(
+    goalOnce.map((item) => {
+      const form = options.searchRecordForm;
+      const evidence = projectHostedSearchEvidence(item, {
+        preserveAnthropicNative: nativeClaude,
+        ...(form ? { form } : {}),
+      });
+      if (nativeClaude && form && isAnthropicWebSearchItem(evidence))
+        return withSearchRecordForm(evidence, form);
+      return nativeClaude ? evidence : withoutClaudeCitationMetadata(evidence);
+    }),
+  );
   const input = projected.every((item, index) => item === items[index]) ? items : projected;
+  // Tool names a provider would reject are made valid on the wire by the
+  // outbound guard (provider-request-tool-names.ts), one alias per name in
+  // every position. Chat keeps its own treatment of history: a call with an
+  // invalid name replays as a historical fact (isChatIncompatibleCall) rather
+  // than as a native call to a tool the request never declares.
   return projectWireHistory(withWireValidFunctionCallArguments(input), providerApi, options);
 }
 

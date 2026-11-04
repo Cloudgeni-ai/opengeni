@@ -355,9 +355,10 @@ test("an API install failure says what to do instead of the raw API string", asy
     await openDiscovery(rendered.container);
     await act(async () => button("Install plugin")!.click());
     expect(document.querySelector('[data-capability-page] [role="alert"]')?.textContent).toBe(
-      "It changed since this page loaded. Reload the page and try again. Reference: req-plugin-install.",
+      "It changed since this page loaded. Reload the page and try again.",
     );
     expect(document.body.textContent).not.toContain("Opengeni API");
+    expect(document.body.textContent).not.toContain("req-plugin-install");
   } finally {
     await rendered.unmount();
   }
@@ -381,5 +382,57 @@ test("install errors remain on the page and do not mark discovery as installed",
     expect(button("Install plugin")?.disabled).toBe(false);
   } finally {
     await rendered.unmount();
+  }
+});
+
+test("the server's canRemove decides whether the page offers Remove plugin", async () => {
+  const { api } = client();
+  const onRemove = mock(() => {});
+  const view = (plugin: PluginInstallationSummary, canManage: boolean) => (
+    <PluginDiscovery
+      client={api}
+      workspaceId="workspace"
+      query=""
+      canManage={canManage}
+      installedPlugins={[plugin]}
+      manage={(installed) => ({
+        busy: false,
+        onUpdate: () => {},
+        onRemove,
+        canRemove: installed.canRemove ?? canManage,
+        updateUnavailableReason: "Only an admin can update this plugin.",
+      })}
+    />
+  );
+  const moreActions = () =>
+    document.querySelector<HTMLButtonElement>(
+      `[data-capability-page] button[aria-label="More actions for ${item.displayName}"]`,
+    );
+  const askAdmin = () =>
+    page()?.textContent?.includes("Ask a workspace admin to update or remove this plugin.");
+  const open = async (container: HTMLElement) => {
+    const row = container.querySelector<HTMLButtonElement>(".og-connection-installed button")!;
+    await act(async () => {
+      row.focus();
+      row.click();
+    });
+  };
+  // A member's own plugin: Remove stays, even when adding plugins is kept for admins.
+  const own = await render(view({ ...installedPlugin, canRemove: true }, false));
+  try {
+    await open(own.container);
+    expect(moreActions()).not.toBeNull();
+    expect(askAdmin()).toBe(false);
+  } finally {
+    await own.unmount();
+  }
+  // An admin's or another person's plugin: no Remove, and the page says who can.
+  const theirs = await render(view({ ...installedPlugin, canRemove: false }, true));
+  try {
+    await open(theirs.container);
+    expect(moreActions()).toBeNull();
+    expect(askAdmin()).toBe(true);
+  } finally {
+    await theirs.unmount();
   }
 });

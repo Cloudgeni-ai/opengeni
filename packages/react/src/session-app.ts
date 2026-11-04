@@ -9,10 +9,11 @@ export {
   type SessionAppSurfaces,
 } from "./app/embed/session-app";
 export type { MessageContextInput, MessageContextItem } from "./app/lib/message-context";
-export type { SessionAppStarter, SessionViewState } from "./app/lib/app-host";
+export type { SessionViewState } from "./app/lib/app-host";
 export {
   SESSION_UI_PRESETS,
   type SessionUiFeatures,
   type SessionUiPreset,
 } from "./app/lib/session-ui-features";
 export type { SessionShellSlots } from "./app/components/rail/rail-sections";
+export type { SessionStarter } from "./app/components/new-session-starters";

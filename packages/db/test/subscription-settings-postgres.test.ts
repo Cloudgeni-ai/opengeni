@@ -187,18 +187,20 @@ describe.skipIf(!realDb)("subscription settings with lockable workspace override
     expect(initial.locked).toEqual([]);
     expect(initial.values.personalConnectionsAllowed).toBe(true);
     expect(initial.values.personalFallbackAllowed).toBe(false);
+    // A new organization starts with switching models on (OR-4).
+    expect(initial.values.crossProviderFailover).toBe(true);
 
     const { settings } = await updateOrganizationSubscriptionSettings(client!.db, {
       ...organization(f),
       patch: {
-        crossProviderFailover: true,
+        crossProviderFailover: false,
         fallbackOrder: { "codex/gpt-5.5": ["claude/claude-opus-4", "codex/gpt-5.4"] },
         personalFallbackAllowed: true,
         rotation: { codex: { mode: "primary_first" } },
       },
       expectedVersion: initial.version,
     });
-    expect(settings.values.crossProviderFailover).toBe(true);
+    expect(settings.values.crossProviderFailover).toBe(false);
     expect(settings.values.fallbackOrder).toEqual({
       "codex/gpt-5.5": ["claude/claude-opus-4", "codex/gpt-5.4"],
     });
@@ -230,14 +232,14 @@ describe.skipIf(!realDb)("subscription settings with lockable workspace override
     const refused = await asApp(f, f.alphaId, f.workspaceAdminSubjectId, async (tx) => {
       const rows = await rawRows<{ id: string }>(
         tx,
-        sql`update subscription_settings set locked_settings = '{}', cross_provider_failover = false
+        sql`update subscription_settings set locked_settings = '{}', cross_provider_failover = true
           where account_id = ${f.accountId}::uuid and workspace_id is null returning id::text as id`,
       );
       if (rows.length > 0) throw new Error("organization row was writable");
     });
     expect(refused).toBeNull();
     const after = await readOrganizationSubscriptionSettings(client!.db, organization(f));
-    expect(after.values.crossProviderFailover).toBe(true);
+    expect(after.values.crossProviderFailover).toBe(false);
 
     expect(
       await rejected(

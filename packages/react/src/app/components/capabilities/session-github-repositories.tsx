@@ -48,10 +48,8 @@ export type GitHubRepositoryChatState =
   | { kind: "attached" }
   | {
       kind: "blocked";
-      cause: "other_account" | "mount_conflict";
+      cause: "mount_conflict";
       reason: string;
-      /** The account whose App token this chat already uses. */
-      usingAccount?: string | undefined;
     };
 
 function repositoryResources(resources: readonly ResourceRef[]): RepositoryResource[] {
@@ -64,14 +62,13 @@ function repositoryResources(resources: readonly ResourceRef[]): RepositoryResou
  * What "Use in this chat" may do for one workspace App repository. It applies
  * the composer picker's own rules to the chat's mounted resources: a repository
  * already mounted (by App identity, or as the member's personal identity) is
- * already usable, one GitHub App token per chat, and resources are additive, so
- * a mount-path collision is refused here instead of by the server.
+ * already usable, repositories from any number of App installations mix in one
+ * chat, and resources are additive, so a mount-path collision is refused here
+ * instead of by the server.
  */
 export function gitHubRepositoryChatState(
   repository: GitHubRepository,
   mounted: readonly ResourceRef[],
-  accountLabel: (installationId: number) => string,
-  catalog: readonly GitHubRepository[],
 ): GitHubRepositoryChatState {
   const repositories = repositoryResources(mounted);
   if (repositories.some((resource) => isRepositoryResourceForGitHubRepo(resource, repository))) {
@@ -85,23 +82,6 @@ export function gitHubRepositoryChatState(
     )
   ) {
     return { kind: "attached" };
-  }
-  // As in the composer picker, only a mount the catalog still lists holds the
-  // chat's App token; a revoked mount does not block another account.
-  const otherInstallation = repositories.find(
-    (resource) =>
-      resource.githubInstallationId !== undefined &&
-      resource.githubInstallationId !== repository.installationId &&
-      catalog.some((candidate) => isRepositoryResourceForGitHubRepo(resource, candidate)),
-  )?.githubInstallationId;
-  if (otherInstallation !== undefined) {
-    const usingAccount = accountLabel(otherInstallation);
-    return {
-      kind: "blocked",
-      cause: "other_account",
-      usingAccount,
-      reason: `This chat already uses ${usingAccount}'s repositories. Start a new chat to use this one.`,
-    };
   }
   const resource = gitHubRepositoryResource(repository, repository.defaultBranch);
   const mountKey = resourceMountPathCollisionKey(resourceMountPath(resource));

@@ -152,6 +152,7 @@ async fn restart_with<S: Store>(
         base_image: lab.join("base.ext4"),
         policy: HostPolicy::default(),
         sample_every: Duration::from_secs(1),
+        first_wake_within: HostConfig::FIRST_WAKE_WITHIN,
         disk_reading: None,
         stream_idle: HostConfig::STREAM_IDLE,
         guest_ports: Vec::new(),
@@ -172,6 +173,7 @@ async fn restart_with<S: Store>(
         guard_freezes: None,
         observer: setup.observer,
         summary_every: HostConfig::SUMMARY_EVERY,
+        recovery_retry: HostConfig::RECOVERY_RETRY,
         agent_link: None,
         processor_share: None,
         prepare: None,
@@ -622,6 +624,123 @@ async fn a_paged_guest_survives_its_agent_restarting() {
     }
 }
 
+/// A paged guest whose VMM does not answer when a new agent starts, as
+/// one the guard holds frozen does, is blocked while its pager is served
+/// in the background, then taken back by a later try once the VMM answers
+/// again: the guest reads its memory exactly as saved, and the pager is
+/// served by one connection at a time until it leaves.
+#[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "one scenario, step by step")]
+async fn a_paged_guest_frozen_at_restart_is_taken_back_later() {
+    const UID: u32 = (1 << 30) + 3000;
+    let Some(lab) = lab() else { return };
+    let Some((deepest, store)) = paged_wake("frozen") else {
+        return;
+    };
+    let store = store.as_deref();
+    let name = format!("f{}", short());
+    let id: Id = "00000000-0000-4000-8000-0000000000b4".parse().unwrap();
+    let _ = std::fs::remove_dir_all(lab.join("ht").join(&name));
+    let agent = Process::start(&lab, &name, UID, store, RECORD_FOR).await;
+    let config = SandboxConfig {
+        disk_mib: None,
+        reach: Vec::new(),
+        image: None,
+        vcpus: 2,
+        memory_mib: 512,
+        memory_request_mib: None,
+        cpu_request_millis: None,
+        sleep: ladder(deepest),
+        link: None,
+    };
+    let created = agent
+        .client
+        .call(&Request::Create { id, config })
+        .await
+        .unwrap();
+    assert!(matches!(created, Reply::Done), "{created:?}");
+    let setup = exec(&agent.client, id, SETUP).await;
+    let pid = field(&setup, "pid").to_owned();
+    let sum = field(&setup, "sum").to_owned();
+    wait_for(&agent.client, id, deepest).await;
+    let later = format!(
+        "\
+kill -0 {pid} && echo alive=yes
+setsid sh -c 'sleep 2; md5sum < /dev/shm/blob | cut -d\" \" -f1 > /dev/shm/later' \
+  </dev/null >/dev/null 2>&1 &
+echo started=yes"
+    );
+    let output = exec(&agent.client, id, &later).await;
+    assert_eq!(field(&output, "alive"), "yes", "{output}");
+    agent.kill();
+
+    let vmm = group_processes(id)
+        .into_iter()
+        .find(|pid| {
+            std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                .is_ok_and(|comm| comm.trim() == "firecracker")
+        })
+        .expect("the VMM runs on");
+    let signal = |name: &str| {
+        let status = std::process::Command::new("kill")
+            .arg(format!("-{name}"))
+            .arg(vmm.to_string())
+            .status()
+            .unwrap();
+        assert!(status.success(), "kill -{name} {vmm}");
+    };
+    signal("STOP");
+    let agent = Process::start(&lab, &name, UID, store, RECORD_FOR).await;
+    let blocked = loop {
+        let status = status(&agent.client).await;
+        if !status.blocked.is_empty() || status.sandboxes.iter().any(|s| s.id == id) {
+            break status;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    signal("CONT");
+    assert_eq!(blocked.blocked.len(), 1, "{blocked:?}");
+    assert!(pagers(id).len() <= 1, "one pager at most: {:?}", pagers(id));
+
+    let started = Instant::now();
+    loop {
+        let status = status(&agent.client).await;
+        if status.blocked.is_empty() && status.sandboxes.iter().any(|s| s.id == id) {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(240),
+            "never taken back: {status:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let read = "\
+for _ in $(seq 100); do [ -s /dev/shm/later ] && break; sleep 0.1; done
+echo later=$(cat /dev/shm/later)";
+    let output = exec(&agent.client, id, read).await;
+    assert_eq!(
+        field(&output, "later"),
+        sum,
+        "memory read while the VMM was frozen differs"
+    );
+    let output = exec(
+        &agent.client,
+        id,
+        &format!("kill -0 {pid} && echo alive=yes"),
+    )
+    .await;
+    assert_eq!(field(&output, "alive"), "yes", "{output}");
+    let removed = agent
+        .client
+        .call(&Request::Remove {
+            id,
+            generation: None,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(removed, Reply::Done), "{removed:?}");
+}
+
 /// The deepest level whose wake goes through a pager on this host, and the
 /// store it needs (under `prefix`), or `None` when the test cannot run.
 fn paged_wake(prefix: &str) -> Option<(LevelName, Option<String>)> {
@@ -1057,4 +1176,182 @@ async fn adopt_checkpointed(
         "0",
         "nothing done after it: {output}"
     );
+}
+
+/// Hands `id`, held under `owner_epoch`, off from `agent` once it is
+/// saved, as the fleet does for a move or a resize.
+async fn saved_and_handed_off(agent: &Agent, id: Id, owner_epoch: u64) {
+    let slept = agent
+        .client
+        .call(&Request::Sleep {
+            id,
+            generation: None,
+            level: LevelName::Saved,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(slept, Reply::Done), "{slept:?}");
+    wait_for(&agent.client, id, LevelName::Saved).await;
+    let handed_off = agent
+        .client
+        .call(&Request::HandOff {
+            id,
+            owner_epoch,
+            awake: false,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(handed_off, Reply::Done), "{handed_off:?}");
+}
+
+/// Has `agent` take `id` up under `owner_epoch` at the shape `config`
+/// gives, as after a resize: `whole` as the service sends it, only while
+/// the machine stays the same.
+async fn adopt_resized(
+    agent: &Agent,
+    id: Id,
+    owner_epoch: u64,
+    config: SandboxConfig,
+    whole: bool,
+) {
+    let adopted = agent
+        .client
+        .call(&Request::Adopt {
+            id,
+            config,
+            owner_epoch,
+            whole,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(adopted, Reply::Done), "{adopted:?}");
+}
+
+/// How long, in MiB, the guest sees the drive its root file system is on.
+/// This lab's guests take no restore notices, so they do not grow their
+/// file system when their drive grows: the guest tests check that.
+async fn root_drive_mib(agent: &Agent, id: Id) -> u64 {
+    let output = exec(
+        &agent.client,
+        id,
+        "echo sectors=$(cat /sys/dev/block/$(awk '$5 == \"/\" {print $3}' /proc/self/mountinfo | tail -1)/size)",
+    )
+    .await;
+    let sectors: u64 = field(&output, "sectors")
+        .parse()
+        .unwrap_or_else(|_| panic!("{output}"));
+    (sectors * 512) >> 20
+}
+
+/// A sandbox resized as the fleet resizes one (ADR 27): handed off, then
+/// adopted at its new shape. Given a longer disk and a new request, it is
+/// restored with its programs and its VM told its drive grew; given more
+/// processors and memory, it boots from its disk at that machine, its
+/// programs gone and its files and disk kept.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resized_sandbox_keeps_its_files_and_its_programs_only_on_the_same_machine() {
+    const UID: u32 = (1 << 30) + 5000;
+    let Some(lab) = lab() else { return };
+    let store = Chunked::new(ChunkStore::new(Arc::new(InMemory::new()), "resize".into()));
+    let id: Id = "00000000-0000-4000-8000-0000000000b8".parse().unwrap();
+    let one = start(&lab, &format!("z{}", short()), UID, store.clone()).await;
+    let two = start_with(
+        &lab,
+        &format!("y{}", short()),
+        UID + 1000,
+        store,
+        Setup {
+            cgroup: "/sys/fs/cgroup/compute-host-test-2".into(),
+            ..Setup::default()
+        },
+    )
+    .await;
+    let mut config = SandboxConfig {
+        disk_mib: None,
+        reach: Vec::new(),
+        vcpus: 1,
+        memory_mib: 512,
+        memory_request_mib: None,
+        cpu_request_millis: None,
+        sleep: SleepConfig::default(),
+        image: None,
+        link: None,
+    };
+    let created = one
+        .client
+        .call(&Request::Create {
+            id,
+            config: config.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(created, Reply::Done), "{created:?}");
+    let setup = exec(
+        &one.client,
+        id,
+        &format!("{SETUP}\necho kept > /kept; sync"),
+    )
+    .await;
+    let sum = field(&setup, "sum").to_owned();
+    let before = root_drive_mib(&one, id).await;
+
+    // A longer disk and a new request: the same machine.
+    saved_and_handed_off(&one, id, 1).await;
+    let base = std::fs::metadata(lab.join("base.ext4")).unwrap().len() >> 20;
+    let longer = before.max(base) + 512;
+    config.disk_mib = Some(u32::try_from(longer).unwrap());
+    config.memory_request_mib = Some(256);
+    adopt_resized(&two, id, 2, config.clone(), true).await;
+    let output = exec(
+        &two.client,
+        id,
+        "echo count=$(cat /dev/shm/count)\n\
+         echo was=$(md5sum < /dev/shm/blob | cut -d' ' -f1)\n\
+         echo disk=$(cat /kept)",
+    )
+    .await;
+    assert!(
+        field(&output, "count").parse::<u64>().is_ok(),
+        "its programs carried on: {output}"
+    );
+    assert_eq!(field(&output, "was"), sum, "{output}");
+    assert_eq!(field(&output, "disk"), "kept", "{output}");
+    assert_eq!(
+        root_drive_mib(&two, id).await,
+        longer,
+        "its drive grew from {before} MiB before it ran on"
+    );
+
+    // More processors and memory: another machine, booted from its disk.
+    // This lab's agents have no notice port to ask the guest to write its
+    // disks out before a save, as hosts do, so the test asks.
+    exec(&two.client, id, "sync").await;
+    saved_and_handed_off(&two, id, 2).await;
+    config.vcpus = 2;
+    config.memory_mib = 1024;
+    adopt_resized(&one, id, 3, config, false).await;
+    let output = exec(
+        &one.client,
+        id,
+        "echo count=$(cat /dev/shm/count 2>/dev/null)\n\
+         echo cpus=$(nproc)\n\
+         echo memory=$(awk '/MemTotal/ {print $2}' /proc/meminfo)\n\
+         echo disk=$(cat /kept)",
+    )
+    .await;
+    assert_eq!(field(&output, "count"), "", "its programs ended: {output}");
+    assert_eq!(field(&output, "cpus"), "2", "{output}");
+    let memory_kib: u64 = field(&output, "memory").parse().unwrap();
+    assert!(memory_kib > 768 * 1024, "{output}");
+    assert_eq!(field(&output, "disk"), "kept", "{output}");
+    assert_eq!(root_drive_mib(&one, id).await, longer, "it kept its disk");
+    let removed = one
+        .client
+        .call(&Request::Remove {
+            id,
+            generation: None,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(removed, Reply::Done), "{removed:?}");
 }

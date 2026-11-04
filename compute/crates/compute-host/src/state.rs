@@ -94,9 +94,11 @@ pub(crate) struct Allocation {
     pub gid: u32,
     /// Its link to the host, when it is networked.
     pub link: Option<LinkAddresses>,
-    /// Its disk's length, from when its first files were written. A disk
-    /// keeps its length, in object storage too, whatever base image the
-    /// host has since; unknown only until then, before it is recorded.
+    /// Its disk's length, from when its first files were written, or for
+    /// one adopted, its stored copy's grown to the length its config asks
+    /// for, which its first fetch makes it. A disk keeps its length, in
+    /// object storage too, whatever base image the host has since; unknown
+    /// only until then, before it is recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_bytes: Option<u64>,
 }
@@ -136,6 +138,19 @@ pub(crate) struct Record {
     pub image: bool,
     /// The store holds a copy matching the local files.
     pub archived: bool,
+    /// No copy of the sandbox was ever put in the store, nor taken from
+    /// it: it was created or claimed here, and nothing has begun an
+    /// archive of it since. The control service gives a sandbox to another
+    /// host only from such a copy, so this host's VM of it is the only one
+    /// that can ever run, and it is marked so for the guard, which then
+    /// never stops it to fence it while the agent that marked it runs (see
+    /// [`compute_engine::Engine::set_only_copy`]). An agent of an earlier
+    /// release drops the field when it rewrites the record, as it does
+    /// before any archive, which leaves it cleared.
+    /// Cleared, the VM's mark first, before any archive begins, and never
+    /// set again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub only_copy: bool,
     /// Removal has begun; it finishes even across a restart.
     pub removing: bool,
     /// Whether its guest knows it is this sandbox.
@@ -204,6 +219,7 @@ impl Record {
             disk: Disk::Local,
             image: false,
             archived: false,
+            only_copy: false,
             removing: false,
             identity: Identity::Known,
             last_used_ms: None,
@@ -290,6 +306,7 @@ pub(crate) struct Change {
     disk: Option<Disk>,
     image: Option<bool>,
     archived: Option<bool>,
+    copied: bool,
     execution: bool,
     removing: bool,
     identity: Option<Identity>,
@@ -321,6 +338,13 @@ impl Change {
 
     pub fn archived(mut self, archived: bool) -> Self {
         self.archived = Some(archived);
+        self
+    }
+
+    /// A copy of the sandbox may be put in the store from now on: it is no
+    /// longer its only copy (see [`Record::only_copy`]).
+    pub fn copied(mut self) -> Self {
+        self.copied = true;
         self
     }
 
@@ -399,6 +423,9 @@ impl Change {
         }
         if let Some(archived) = self.archived {
             record.archived = archived;
+        }
+        if self.copied {
+            record.only_copy = false;
         }
         if let Some(identity) = self.identity {
             record.identity = identity;
@@ -985,6 +1012,8 @@ impl Records {
                     owner_epoch: owner.0,
                     saves: 0,
                     handed_off: false,
+                    // Made from a ready sandbox, which is never saved.
+                    only_copy: true,
                     first_wake_by_ms: Some(first_wake_by_ms),
                     ..current
                 };

@@ -28,6 +28,7 @@ import {
   sessionTitleReasoningEffort,
   sessionTitleRoute,
   sessionTitleToolPlan,
+  sessionTitlePromptFor,
   shouldRequestMissingSessionTitle,
   startParallelSessionTitleGeneration,
 } from "../src/activities/agent-turn/session-title";
@@ -39,6 +40,31 @@ const minimalAgentConfig = resolveAgentConfig({
   workspace: { defaults: null, humanInputEnabled: true },
   goal: false,
 }).config!;
+
+describe("sessionTitlePromptFor", () => {
+  test("the first turn titles from the first message, as before", () => {
+    expect(sessionTitlePromptFor("Fix the login bug", "Fix the login bug")).toBe(
+      "Fix the login bug",
+    );
+    // A first turn whose message wraps the first message adds nothing.
+    expect(
+      sessionTitlePromptFor("Fix the login bug", "[Attached: log.txt]\nFix the login bug"),
+    ).toBe("Fix the login bug");
+  });
+
+  test("a later turn of an untitled session adds its own message after the first", () => {
+    expect(sessionTitlePromptFor("hei hei", "Kan du lage et tilbud på et nytt bad?")).toBe(
+      "hei hei\n\nKan du lage et tilbud på et nytt bad?",
+    );
+  });
+
+  test("a session without a first message titles from the turn's message", () => {
+    expect(sessionTitlePromptFor("", "Summarize the quarterly report")).toBe(
+      "Summarize the quarterly report",
+    );
+    expect(sessionTitlePromptFor("Plan the release", "  ")).toBe("Plan the release");
+  });
+});
 
 describe("shouldRequestMissingSessionTitle", () => {
   test("configured sessions title without opting into the first-party title tool", () => {

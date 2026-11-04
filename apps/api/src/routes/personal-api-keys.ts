@@ -15,7 +15,7 @@ import {
   type PersonalApiKeyRecord,
 } from "@opengeni/db";
 import {
-  hasPermission,
+  holdsOrganizationAdministration,
   PERSONAL_API_KEY_TOKEN_PREFIX,
   requireAccessContext,
   type ApiRouteDeps,
@@ -26,6 +26,7 @@ import { z } from "zod";
 
 import { isAgentActingAsPerson, requireFullAccessIfAgent } from "../http/acting-person";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
+import { othersAnAdministratorMayManage } from "../http/organization-owner-protection";
 import { parseRequestBody } from "../http/request-body";
 import { sha256Hex } from "@opengeni/contracts/values";
 
@@ -37,8 +38,9 @@ import { sha256Hex } from "@opengeni/contracts/values";
    once; leaving the organization revokes the keys.
 
    Everyone manages their own; owners and admins also see everyone's and can
-   revoke them. An agent acting as the person can do this only with their full
-   access, so a limited agent or key can never mint a broader one.
+   revoke them, except that only an owner revokes an owner's. An agent acting
+   as the person can do this only with their full access, so a limited agent
+   or key can never mint a broader one.
    -------------------------------------------------------------------------- */
 
 export function registerPersonalApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -48,10 +50,16 @@ export function registerPersonalApiKeyRoutes(app: Hono, deps: ApiRouteDeps): voi
       accountId: organizationId,
       ...(admin ? {} : { ownerSubjectId: context.subjectId }),
     });
+    const mayManage = admin
+      ? await othersAnAdministratorMayManage(deps, context, organizationId)
+      : () => false;
     c.header("cache-control", "no-store");
     return c.json(
       ListPersonalApiKeysResponse.parse({
-        apiKeys: await projectKeys(deps, keys),
+        apiKeys: (await projectKeys(deps, keys)).map((key) => ({
+          ...key,
+          canRevoke: key.owner.subjectId === context.subjectId || mayManage(key.owner.subjectId),
+        })),
         canManageAll: admin,
       }),
     );
@@ -105,6 +113,16 @@ export function registerPersonalApiKeyRoutes(app: Hono, deps: ApiRouteDeps): voi
     if (!existing || (existing.ownerSubjectId !== context.subjectId && !admin)) {
       throw new HTTPException(404, { message: "API key not found" });
     }
+    if (
+      existing.ownerSubjectId !== context.subjectId &&
+      !(await othersAnAdministratorMayManage(deps, context, organizationId))(
+        existing.ownerSubjectId,
+      )
+    ) {
+      throw new HTTPException(403, {
+        message: "Only the organization owner can revoke the owner's personal API keys.",
+      });
+    }
     await revokePersonalApiKey(deps.db, { accountId: organizationId, apiKeyId });
     return c.body(null, 204);
   });
@@ -135,7 +153,12 @@ async function requireOrganizationPerson(
   if (context.mode !== "managed" || !context.subjectId.startsWith("user:") || !grant) {
     throw new HTTPException(404, { message: "organization not found" });
   }
-  return { context, organizationId, admin: hasPermission(grant.permissions, "account:admin") };
+  // Owners and admins of this organization see and revoke everyone's keys.
+  return {
+    context,
+    organizationId,
+    admin: holdsOrganizationAdministration(context, organizationId),
+  };
 }
 
 async function projectKeys(

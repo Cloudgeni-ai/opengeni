@@ -11,7 +11,7 @@ import {
   removeWorkspaceMember,
   updateSessionTitle,
   setSessionPin,
-  setSessionArchive,
+  requestSessionArchive,
   withWorkspaceRls,
 } from "@opengeni/db";
 import { sql } from "drizzle-orm";
@@ -361,11 +361,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
           subjectId,
           pinned: true,
         });
-        await setSessionArchive(dbClient.db, {
+        await requestSessionArchive(dbClient.db, {
+          accountId: session.accountId,
           workspaceId,
           sessionId: archived.id,
           subjectId,
-          archived: true,
         });
         await shared.admin`delete from sessions where id=${deleted.id}`;
         await row
@@ -2125,10 +2125,13 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const archivedResponse = page.waitForResponse(
         (response) => new URL(response.url()).pathname === archivePath && response.ok(),
       );
+      // No question first: the chat leaves the list at once, with Undo.
       await row.getByRole("button", { name: "Archive session", exact: true }).press("Enter");
-      await confirmPauseAndArchive(page);
-      const notification = page.locator("[data-sonner-toast]").filter({ hasText: "Chat archived" });
+      const notification = page
+        .locator("[data-sonner-toast]")
+        .filter({ hasText: "Archived “Archive undo target”" });
       await notification.waitFor();
+      await notification.getByText(/can't be restored/).waitFor();
       const undoRequest = page.waitForRequest(
         (request) => new URL(request.url()).pathname === archivePath,
       );
@@ -2136,14 +2139,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await notification.getByRole("button", { name: "Undo", exact: true }).click();
       const archived = await (await archivedResponse).json();
       expect(archived.archived).toBe(true);
-      expect((await undoRequest).postDataJSON()).toMatchObject({
-        archived: false,
-        expectedVersion: archived.archiveVersion,
-      });
+      expect((await undoRequest).postDataJSON()).toEqual({ archived: false });
       const toaster = page.locator("[data-sonner-toaster]");
       expect(await toaster.getAttribute("data-x-position")).toBe("right");
       expect(await toaster.getAttribute("data-y-position")).toBe("bottom");
-      await page.getByText("Chat restored", { exact: true }).waitFor();
+      await page.getByText("Archive undone.", { exact: true }).waitFor();
       await row.getByRole("button", { name: "Archive session", exact: true }).waitFor();
       const restored = await page.request.get(
         `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${target.id}`,
@@ -2219,7 +2219,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
           await page
             .locator("[data-sonner-toast]")
             .filter({
-              hasText: /Chat archived|Couldn't archive the chat/,
+              hasText: /Archived “|Couldn't archive the chat/,
             })
             .count(),
         ).toBe(0);
@@ -2231,7 +2231,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }, 90_000);
   }
 
-  test("Undo does not overwrite a newer archive decision from another client", async () => {
+  test("Undo after the undo window says the archive is final", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
       extraHTTPHeaders: ownerHeaders,
@@ -2240,43 +2240,29 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     try {
       await page.goto(webBaseUrl);
       const workspaceId = await workspaceFromPage(page);
-      const target = await createSessionThroughApi(
-        page,
-        apiBaseUrl,
-        workspaceId,
-        "Archive conflict",
-      );
+      const target = await createSessionThroughApi(page, apiBaseUrl, workspaceId, "Archive final");
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${target.id}`);
       await page
         .locator(`a[data-session-row="${target.id}"]`)
         .locator("xpath=..")
         .getByRole("button", { name: "Archive session", exact: true })
         .press("Enter");
-      await confirmPauseAndArchive(page);
-      const notification = page.locator("[data-sonner-toast]").filter({ hasText: "Chat archived" });
+      const notification = page.locator("[data-sonner-toast]").filter({ hasText: "Archived “" });
       await notification.waitFor();
-      // Keep the notification alive while another device makes two real writes.
+      // Keep the notification open while the window passes.
       await notification.hover();
+      await shared.admin`update sessions set archived_at = archived_at - interval '1 minute'
+        where id = ${target.id}`;
       const sessionUrl = `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${target.id}`;
-      let latest = await (await page.request.get(sessionUrl)).json();
-      for (const archived of [false, true]) {
-        const response = await page.request.put(`${sessionUrl}/archive`, {
-          // The chat is already paused; the other client only moves the archive.
-          data: { archived, expectedVersion: latest.archiveVersion, mode: "hide_for_me" },
-        });
-        expect(response.ok()).toBe(true);
-        latest = await response.json();
-      }
       const conflict = page.waitForResponse(
         (response) => response.url() === `${sessionUrl}/archive` && response.status() === 409,
       );
       await notification.getByRole("button", { name: "Undo", exact: true }).click();
       await conflict;
-      await page.getByText("Couldn't restore the chat.", { exact: true }).waitFor();
+      await page.getByText("Couldn't undo the archive.", { exact: true }).waitFor();
       const current = await (await page.request.get(sessionUrl)).json();
       expect(current.archived).toBe(true);
-      expect(current.archiveVersion).toBe(latest.archiveVersion);
-      expect(await page.getByText("Chat restored", { exact: true }).count()).toBe(0);
+      expect(await page.getByText("Archive undone.", { exact: true }).count()).toBe(0);
     } finally {
       await context.close();
     }
@@ -4590,13 +4576,6 @@ async function workspaceFromPage(
       .waitFor();
   }
   return page.url().match(/\/workspaces\/([^/]+)\/sessions/)![1]!;
-}
-
-// A fixture chat keeps its queued first turn (no worker runs it), so archiving
-// it as someone who can pause asks to pause its active work first.
-async function confirmPauseAndArchive(page: Page) {
-  const dialog = page.getByRole("dialog", { name: /^Pause and archive “.+”\?$/ });
-  await dialog.getByRole("button", { name: "Pause and archive", exact: true }).click();
 }
 
 async function createSessionThroughApi(

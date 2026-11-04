@@ -10,7 +10,13 @@
     "",
     "`featured` promotes an entry to the top of the connector catalog. `official` means the MCP",
     "server is published by the provider on its own domain. Neither is a security review, and",
-    "neither may be presented as one."
+    "neither may be presented as one.",
+    "",
+    "`identities` sets only a well-known service's display name and logo source, so it never",
+    "shows a raw hostname or a generated letter. An identity does not curate, feature or promote",
+    "the row, does not change its tier, auth or tools, and keeps its Community label. Back each",
+    "name with the provider's own site or documentation and each logo with a licensed source,",
+    "recorded in `notes`. Identity logos are vendored like curated ones (catalog:vendor-logos)."
   ],
   "entries": [
     {
@@ -23,11 +29,7 @@
       "tier": "verified",
       "provenance": "first-party:opengeni-gmail-rest",
       "authKind": "oauth2",
-      "scopesHint": [
-        "https://www.googleapis.com/auth/gmail.readonly",
-        "https://www.googleapis.com/auth/gmail.compose",
-        "https://www.googleapis.com/auth/gmail.modify"
-      ],
+      "scopesHint": ["https://www.googleapis.com/auth/gmail.readonly"],
       "allowedTools": [
         "create_draft",
         "send_message",
@@ -119,7 +121,7 @@
             "description": "Read mailbox changes, account settings and configuration. Optional notifications use an operator-configured Pub/Sub topic."
           }
         ],
-        "permissionSummary": "Google asks for read, compose, and organize access to the mailbox you approve. Choose Allow, Ask first, or Block for the available tools in Approvals. Models paid with Opengeni credits do not train on your mail. If agents run on your own AI subscription, turn off model training in that provider's settings first.",
+        "permissionSummary": "Google first asks only to read the mailbox you approve. If you later ask an agent to draft, send or organize mail, it asks you in the chat to allow that too. Choose Allow, Ask first, or Block for the available tools in Approvals. Models paid with Opengeni credits do not train on your mail. If agents run on your own AI subscription, turn off model training in that provider's settings first.",
         "scopeLabels": {
           "https://www.googleapis.com/auth/gmail.readonly": {
             "label": "Read your mail",
@@ -140,7 +142,7 @@
       "installUrl": "https://developers.google.com/identity/protocols/oauth2/web-server",
       "documentationUrl": "https://developers.google.com/workspace/gmail/api/reference/rest",
       "notes": [
-        "scopesHint keeps consent to the reviewed Gmail REST tools. OAuth discovery uses pinned Google metadata and verifies the consenting mailbox with Gmail users/me/profile, without depending on the Developer Preview MCP server. Gmail connections are personal-only; every member connects their own mailbox.",
+        "scopesHint is what a first connection asks for: read access only. gmail.compose and gmail.modify are asked for later through incremental consent, when a tool call needs them, and never beyond the reviewed Gmail REST tools. OAuth discovery uses pinned Google metadata and verifies the consenting mailbox with Gmail users/me/profile, without depending on the Developer Preview MCP server. Gmail connections are personal-only; every member connects their own mailbox.",
         "allowedTools freezes the reviewed tool surface. Every tool call executes through Opengeni's first-party Gmail REST bridge (packages/runtime/src/gmail-rest-mcp.ts), never Google's Developer Preview MCP endpoint directly; this connection's mcpUrl identity is unchanged so existing consents and reconnect flows keep working. send_message and send_draft use the selected account's approval choices; requireApproval supplies the recommendation when no choice is saved.",
         "logoSourceUrl is null because Google has not published a reusable Gmail MCP logo asset. Keep the self-hosted monogram rather than hotlinking a brand asset."
       ]
@@ -452,16 +454,46 @@
       ]
     },
     {
-      "mcpUrl": "https://mcp.atlassian.com/v1/mcp/authv2",
+      "mcpUrl": "https://mcp.atlassian.com/v2/mcp?tools=all",
       "name": "Atlassian",
-      "description": "Jira issues and Confluence pages through Atlassian's hosted Rovo MCP server, scoped to what you can already see.",
+      "description": "Jira, Confluence, Jira Service Management, Bitbucket, Loom and Compass through Atlassian's hosted MCP server, scoped to what you can already see.",
       "category": "project-management",
       "featured": true,
+      "tier": "verified",
+      "provenance": "vendor-hosted:developer.atlassian.com/cloud/rovo-mcp/guides/getting-started",
+      "presentation": {
+        "providerName": "Atlassian",
+        "introduction": "Let agents work with the Atlassian sites and apps you can already access.",
+        "capabilities": [
+          {
+            "title": "Find and understand work",
+            "description": "Search Jira, Confluence, Jira Service Management, Bitbucket, Loom and Compass, and use what you find as context."
+          },
+          {
+            "title": "Update your work",
+            "description": "Create and update issues, add comments, and create or edit pages. You choose which actions need approval."
+          }
+        ],
+        "permissionSummary": "Atlassian asks you to approve access to the sites you choose. Agents only see what your Atlassian account can see. If connecting fails with a domain or policy error, an Atlassian organization admin must allow the Opengeni domain for the Rovo MCP server in Atlassian Administration."
+      },
+      "documentationUrl": "https://developer.atlassian.com/cloud/rovo-mcp/guides/getting-started/",
+      "notes": [
+        "Atlassian's recommended v2 endpoint. ?tools=all is Atlassian's documented, non-secret switch to a flat tool list instead of discover and execute gateway tools, so every tool keeps its own approval policy; it is the one reviewed query string in REVIEWED_QUERY_MCP_URLS.",
+        "Same authorization server as v1. A v1 token can't call v2, so v1 and v2 connections stay separate resources; the v1 row stays for existing connections.",
+        "Keyed to jira.com like the v1 row. Not marked official for the same reason: mcp.atlassian.com is not mechanically checkable against the snapshot domain jira.com."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.atlassian.com/v1/mcp/authv2",
+      "name": "Atlassian (v1)",
+      "description": "Atlassian's earlier MCP endpoint, kept so existing connections keep working. Connect Atlassian to use the current endpoint.",
+      "category": "project-management",
+      "featured": false,
       "tier": "verified",
       "provenance": "vendor-hosted:support.atlassian.com/rovo/docs/getting-started-with-the-atlassian-remote-mcp-server",
       "presentation": {
         "providerName": "Atlassian",
-        "introduction": "Let agents work with the Jira and Confluence sites you can already access.",
+        "introduction": "Atlassian's earlier endpoint, for connections made before the current one. New connections should use Atlassian.",
         "capabilities": [
           {
             "title": "Find and understand work",
@@ -476,6 +508,7 @@
       },
       "documentationUrl": "https://support.atlassian.com/rovo/docs/getting-started-with-the-atlassian-remote-mcp-server/",
       "notes": [
+        "Superseded by https://mcp.atlassian.com/v2/mcp?tools=all. Kept enabled because catalog rows are keyed by MCP URL and connections are bound to their URL: dropping it would disable existing installations. Atlassian switches v1 connections to v2 tools on 1 March 2027.",
         "Snapshot name was the bare domain 'jira.com'. Upstream discovery for atlassian.com no longer lists an MCP surface, so the Rovo server row is keyed to jira.com; the earlier atlassian.net row for the same endpoint is superseded by this one.",
         "Not marked official: the server is Atlassian's own but lives on mcp.atlassian.com, which is not mechanically checkable against the snapshot domain jira.com. official must stay a checkable claim."
       ]
@@ -616,6 +649,1411 @@
         "scopesHint is the least-privilege set for the reviewed tools: calendar-list read, events read/write and free/busy. The broad calendar and calendar.readonly scopes are deliberately not requested. OAuth discovery uses pinned Google metadata and verifies the consenting account with calendarList/primary. Google Calendar connections are personal-only; every member connects their own calendar.",
         "allowedTools freezes the reviewed tool surface. Every tool call executes through Opengeni's first-party Calendar REST bridge (packages/runtime/src/google-calendar-rest-mcp.ts) against the Calendar v3 API, never Google's hosted Calendar MCP endpoint, whose URL is kept only as the connection identity. create_event, update_event and delete_event use the selected account's approval choices; requireApproval supplies the recommendation when no choice is saved.",
         "logoSourceUrl is null because Google has not published a reusable Calendar MCP logo asset. Keep the self-hosted icon rather than hotlinking a brand asset."
+      ]
+    }
+  ],
+  "identities": [
+    {
+      "mcpUrl": "https://accessapproval.googleapis.com/mcp",
+      "name": "Google Cloud Access Approval",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "homepageUrl": "https://cloud.google.com/assured-workloads/access-approval/docs",
+      "notes": [
+        "Name: Google's API Discovery directory lists accessapproval.googleapis.com as \"Access Approval API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"googlecloud\" (Google Cloud), the Google Cloud mark, because Simple Icons has no separate mark for this product. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://ah-api.merge.dev/mcp",
+      "name": "Merge",
+      "notes": [
+        "Name: as the provider presents the service on https://merge.dev (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://analyticsadmin.googleapis.com/mcp",
+      "name": "Google Analytics Admin",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googleanalytics",
+      "homepageUrl": "https://code.google.com/apis/analytics/docs/mgmt/home.html",
+      "notes": [
+        "Name: Google's API Discovery directory lists analyticsadmin.googleapis.com as \"Google Analytics Admin API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"googleanalytics\" (Google Analytics), its own product mark. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://androidmanagement.googleapis.com/mcp",
+      "name": "Android Management",
+      "logoSourceUrl": "https://cdn.simpleicons.org/android",
+      "homepageUrl": "https://developers.google.com/android/management",
+      "notes": [
+        "Name: Google's API Discovery directory lists androidmanagement.googleapis.com as \"Android Management API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"android\" (Android), its own product mark. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://api.arcjet.com/mcp",
+      "name": "Arcjet",
+      "notes": [
+        "Name: as the provider presents the service on https://arcjet.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://api.checklyhq.com/mcp",
+      "name": "Checkly",
+      "notes": [
+        "Name: as the provider presents the service on https://checklyhq.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://api.cobaltpf.com/api/mcp",
+      "name": "Cobalt",
+      "notes": [
+        "Name: as the provider presents the service on https://cobaltpf.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://api.fullstory.com/mcp/fullstory",
+      "name": "Fullstory",
+      "notes": [
+        "Name: as the provider presents the service on https://fullstory.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://api.heffl.com/api/mcp",
+      "name": "Heffl",
+      "notes": [
+        "Name: as the provider presents the service on https://heffl.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://api.hindsight.vectorize.io/mcp",
+      "name": "Vectorize",
+      "notes": [
+        "Name: as the provider presents the service on https://vectorize.io (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://api.pumadb.ai/mcp",
+      "name": "pumaDB",
+      "notes": [
+        "Name: as the provider presents the service on https://pumadb.ai (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://api.redoxengine.com/mcp",
+      "name": "Redox",
+      "notes": [
+        "Name: as the provider presents the service on https://redoxengine.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://api.tally.so/mcp",
+      "name": "Tally",
+      "notes": [
+        "Name: as the provider presents the service on https://tally.so (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://api.tray.io/mcp",
+      "name": "Tray.ai",
+      "notes": [
+        "Name: as the provider presents the service on https://tray.ai (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://api.x.com/mcp",
+      "name": "X MCP",
+      "notes": [
+        "Name: X's documentation at https://docs.x.com/tools/mcp calls this hosted server \"X MCP\" (checked 2026-11-02); integrations.sh lists it only as its domain. The MCP suffix keeps it apart from the built-in X provider (api:x), which shares the x.com domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://apigee.googleapis.com/mcp",
+      "name": "Apigee",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "homepageUrl": "https://cloud.google.com/apigee-api-management/",
+      "notes": [
+        "Name: Google's API Discovery directory lists apigee.googleapis.com as \"Apigee API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"googlecloud\" (Google Cloud), the Google Cloud mark, because Simple Icons has no separate mark for this product. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://apis.despegar.com/api-b2b-flights-mcp/mcp",
+      "name": "Decolar",
+      "notes": [
+        "Name: as the provider presents the service on https://decolar.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://app.docsie.io/mcp",
+      "name": "Docsie",
+      "notes": [
+        "Name: as the provider presents the service on https://docsie.io (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://app.flarehawk.com/mcp",
+      "name": "Flarehawk",
+      "notes": [
+        "Name: as the provider presents the service on https://flarehawk.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://app.fullstackgtm.com/mcp",
+      "name": "CanonCRM",
+      "notes": [
+        "Name: as the provider presents the service on https://app.fullstackgtm.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://app.kit.com/mcp",
+      "name": "Kit",
+      "notes": [
+        "Name: as the provider presents the service on https://kit.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://app.lemlist.com/mcp",
+      "name": "lemlist",
+      "notes": [
+        "Name: as the provider presents the service on https://lemlist.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://app.quiver.ai/mcp",
+      "name": "QuiverAI",
+      "notes": [
+        "Name: as the provider presents the service on https://quiver.ai (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://be.skipcalls.com/mcp",
+      "name": "SkipCalls",
+      "notes": [
+        "Name: as the provider presents the service on https://skipcalls.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://bigquery.googleapis.com/mcp",
+      "name": "Google BigQuery",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googlebigquery",
+      "homepageUrl": "https://cloud.google.com/bigquery/",
+      "notes": [
+        "Name: Google's API Discovery directory lists bigquery.googleapis.com as \"BigQuery API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"googlebigquery\" (Google BigQuery), its own product mark. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://bigquerydatatransfer.googleapis.com/mcp",
+      "name": "BigQuery Data Transfer Service",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googlebigquery",
+      "homepageUrl": "https://cloud.google.com/bigquery-transfer/",
+      "notes": [
+        "Name: Google's API Discovery directory lists bigquerydatatransfer.googleapis.com as \"BigQuery Data Transfer API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"googlebigquery\" (Google BigQuery), its own product mark. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://bigtableadmin.googleapis.com/mcp",
+      "name": "Google Cloud Bigtable",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googlebigtable",
+      "homepageUrl": "https://cloud.google.com/bigtable/",
+      "notes": [
+        "Name: Google's API Discovery directory lists bigtableadmin.googleapis.com as \"Cloud Bigtable Admin API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"googlebigtable\" (Google Bigtable), its own product mark. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://billingbudgets.googleapis.com/mcp",
+      "name": "Google Cloud Billing Budgets",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "homepageUrl": "https://cloud.google.com/billing/docs/how-to/budget-api-overview",
+      "notes": [
+        "Name: Google's API Discovery directory lists billingbudgets.googleapis.com as \"Cloud Billing Budget API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"googlecloud\" (Google Cloud), the Google Cloud mark, because Simple Icons has no separate mark for this product. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://box.main-kill-isr.mintlify.me/mcp",
+      "name": "Box Developer Docs",
+      "notes": [
+        "Name: as the provider presents the service on https://box.dev (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "The endpoint serves the provider's developer documentation, so the name says Docs rather than suggesting access to the product itself. MCP host: box.main-kill-isr.mintlify.me.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://buf.build/mcp",
+      "name": "Buf",
+      "notes": [
+        "Name: as the provider presents the service on https://buf.build (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://bugsnag.mcp.smartbear.com/mcp",
+      "name": "BugSnag",
+      "notes": [
+        "Name: as the provider presents the service on https://smartbear.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "The endpoint is SmartBear's BugSnag MCP server (bugsnag.mcp.smartbear.com).",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://buildwithfern.com/learn/_mcp/server",
+      "name": "Fern Docs",
+      "notes": [
+        "Name: as the provider presents the service on https://buildwithfern.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "The endpoint serves the provider's developer documentation, so the name says Docs rather than suggesting access to the product itself. MCP host: buildwithfern.com.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://cloudasset.googleapis.com/mcp",
+      "name": "Google Cloud Asset Inventory",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "homepageUrl": "https://cloud.google.com/asset-inventory/docs/quickstart",
+      "notes": [
+        "Name: Google's API Discovery directory lists cloudasset.googleapis.com as \"Cloud Asset API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"googlecloud\" (Google Cloud), the Google Cloud mark, because Simple Icons has no separate mark for this product. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://clouderrorreporting.googleapis.com/mcp",
+      "name": "Google Cloud Error Reporting",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "homepageUrl": "https://cloud.google.com/error-reporting/",
+      "notes": [
+        "Name: Google's API Discovery directory lists clouderrorreporting.googleapis.com as \"Error Reporting API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"googlecloud\" (Google Cloud), the Google Cloud mark, because Simple Icons has no separate mark for this product. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://cloudresourcemanager.googleapis.com/mcp",
+      "name": "Google Cloud Resource Manager",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "homepageUrl": "https://cloud.google.com/resource-manager",
+      "notes": [
+        "Name: Google's API Discovery directory lists cloudresourcemanager.googleapis.com as \"Cloud Resource Manager API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"googlecloud\" (Google Cloud), the Google Cloud mark, because Simple Icons has no separate mark for this product. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://cloudsupport.googleapis.com/mcp",
+      "name": "Google Cloud Support",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "homepageUrl": "https://cloud.google.com/support/docs/apis",
+      "notes": [
+        "Name: Google's API Discovery directory lists cloudsupport.googleapis.com as \"Google Cloud Support API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"googlecloud\" (Google Cloud), the Google Cloud mark, because Simple Icons has no separate mark for this product. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://cloudtrace.googleapis.com/mcp",
+      "name": "Google Cloud Trace",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "homepageUrl": "https://cloud.google.com/trace/",
+      "notes": [
+        "Name: Google's API Discovery directory lists cloudtrace.googleapis.com as \"Cloud Trace API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"googlecloud\" (Google Cloud), the Google Cloud mark, because Simple Icons has no separate mark for this product. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://cockroachlabs.cloud/mcp",
+      "name": "CockroachDB Cloud",
+      "notes": [
+        "Name: as the provider presents the service on https://cockroachlabs.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "The endpoint is on cockroachlabs.cloud, the CockroachDB Cloud console.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://compute.googleapis.com/mcp",
+      "name": "Google Compute Engine",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "homepageUrl": "https://developers.google.com/compute/docs/reference/latest/",
+      "notes": [
+        "Name: Google's API Discovery directory lists compute.googleapis.com as \"Compute Engine API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"googlecloud\" (Google Cloud), the Google Cloud mark, because Simple Icons has no separate mark for this product. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://contactcenterinsights.googleapis.com/mcp",
+      "name": "Google Cloud Conversational Insights",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "homepageUrl": "https://cloud.google.com/contact-center/insights/docs",
+      "notes": [
+        "Name: Google's API Discovery directory still lists contactcenterinsights.googleapis.com as \"Contact Center AI Insights API\", but Google's documentation at the homepage URL now titles the product Conversational Insights, formerly Contact Center AI Insights (checked 2026-11-02).",
+        "Logo: Simple Icons \"googlecloud\" (Google Cloud), the Google Cloud mark, because Simple Icons has no separate mark for this product. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://container.googleapis.com/mcp",
+      "name": "Google Kubernetes Engine",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "homepageUrl": "https://cloud.google.com/kubernetes-engine/docs/",
+      "notes": [
+        "Name: Google's API Discovery directory lists container.googleapis.com as \"Kubernetes Engine API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"googlecloud\" (Google Cloud), the Google Cloud mark, because Simple Icons has no separate mark for this product. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://crewai.com/mcp",
+      "name": "CrewAI",
+      "notes": [
+        "Name: as the provider presents the service on https://crewai.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://dataflow.googleapis.com/mcp",
+      "name": "Google Cloud Dataflow",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googledataflow",
+      "homepageUrl": "https://cloud.google.com/dataflow",
+      "notes": [
+        "Name: Google's API Discovery directory lists dataflow.googleapis.com as \"Dataflow API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"googledataflow\" (Google Dataflow), its own product mark. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://dataplex.googleapis.com/mcp",
+      "name": "Google Cloud Knowledge Catalog",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "homepageUrl": "https://docs.cloud.google.com/dataplex/docs/catalog-overview",
+      "notes": [
+        "Name: Google's API Discovery directory still lists dataplex.googleapis.com as \"Cloud Dataplex API\", but Google renamed Dataplex Universal Catalog to Knowledge Catalog on April 10, 2026, as its documentation at the homepage URL writes it; the API host is unchanged (checked 2026-11-02).",
+        "Logo: Simple Icons \"googlecloud\" (Google Cloud), the Google Cloud mark, because Simple Icons has no separate mark for this product. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://dataproc.googleapis.com/mcp",
+      "name": "Google Cloud Dataproc",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googledataproc",
+      "homepageUrl": "https://cloud.google.com/dataproc/",
+      "notes": [
+        "Name: Google's API Discovery directory lists dataproc.googleapis.com as \"Cloud Dataproc API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"googledataproc\" (Google Dataproc), its own product mark. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://datastream.googleapis.com/mcp",
+      "name": "Google Cloud Datastream",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "homepageUrl": "https://cloud.google.com/datastream/",
+      "notes": [
+        "Name: Google's API Discovery directory lists datastream.googleapis.com as \"Datastream API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"googlecloud\" (Google Cloud), the Google Cloud mark, because Simple Icons has no separate mark for this product. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://developer.spreedly.com/mcp",
+      "name": "Spreedly Docs",
+      "notes": [
+        "Name: as the provider presents the service on https://spreedly.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "The endpoint serves the provider's developer documentation, so the name says Docs rather than suggesting access to the product itself. MCP host: developer.spreedly.com.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://developers.bump.sh/doc/portal/mcp",
+      "name": "Bump.sh Docs",
+      "notes": [
+        "Name: as the provider presents the service on https://bump.sh (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "The endpoint serves the provider's developer documentation, so the name says Docs rather than suggesting access to the product itself. MCP host: developers.bump.sh.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://developers.glean.com/mcp",
+      "name": "Glean Developer Docs",
+      "notes": [
+        "Name: as the provider presents the service on https://glean.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "The endpoint serves the provider's developer documentation, so the name says Docs rather than suggesting access to the product itself. MCP host: developers.glean.com.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://developers.llamaindex.ai/mcp",
+      "name": "LlamaIndex Docs",
+      "notes": [
+        "Name: as the provider presents the service on https://llamaindex.ai (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "The endpoint serves the provider's developer documentation, so the name says Docs rather than suggesting access to the product itself. MCP host: developers.llamaindex.ai.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://dialogflow.googleapis.com/mcp",
+      "name": "Dialogflow",
+      "logoSourceUrl": "https://cdn.simpleicons.org/dialogflow",
+      "homepageUrl": "https://cloud.google.com/dialogflow/",
+      "notes": [
+        "Name: Google's API Discovery directory lists dialogflow.googleapis.com as \"Dialogflow API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"dialogflow\" (Dialogflow), its own product mark. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://docs.reducto.ai/mcp",
+      "name": "Reducto Docs",
+      "notes": [
+        "Name: as the provider presents the service on https://reducto.ai (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "The endpoint serves the provider's developer documentation, so the name says Docs rather than suggesting access to the product itself. MCP host: docs.reducto.ai.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://e2b.dev/mcp",
+      "name": "E2B",
+      "notes": [
+        "Name: as the provider presents the service on https://e2b.dev (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://file.googleapis.com/mcp",
+      "name": "Google Cloud Filestore",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "homepageUrl": "https://cloud.google.com/filestore/",
+      "notes": [
+        "Name: Google's API Discovery directory lists file.googleapis.com as \"Cloud Filestore API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"googlecloud\" (Google Cloud), the Google Cloud mark, because Simple Icons has no separate mark for this product. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://financialmodelingprep.com/mcp",
+      "name": "Financial Modeling Prep",
+      "notes": [
+        "Name: as the provider presents the service on https://financialmodelingprep.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://firestore.googleapis.com/mcp",
+      "name": "Google Cloud Firestore",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "homepageUrl": "https://cloud.google.com/firestore",
+      "notes": [
+        "Name: Google's API Discovery directory lists firestore.googleapis.com as \"Cloud Firestore API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"googlecloud\" (Google Cloud), the Google Cloud mark, because Simple Icons has no separate mark for this product. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://framagit.org/api/v4/mcp",
+      "name": "Framagit",
+      "notes": [
+        "Name: as the provider presents the service on https://framagit.org (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://gogs.io/mcp",
+      "name": "Gogs Docs",
+      "notes": [
+        "Name: as the provider presents the service on https://gogs.io (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "The endpoint serves the provider's developer documentation, so the name says Docs rather than suggesting access to the product itself. MCP host: gogs.io.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://gpt.main.komoot.net/mcp",
+      "logoSourceUrl": "https://cdn.simpleicons.org/komoot",
+      "notes": [
+        "Logo: integrations.sh serves only a generated letter for this row. Simple Icons \"komoot\" (komoot) is CC0-1.0 icon data, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://help.sigmacomputing.com/mcp",
+      "name": "Sigma Docs",
+      "notes": [
+        "Name: as the provider presents the service on https://sigmacomputing.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "The endpoint serves the provider's developer documentation, so the name says Docs rather than suggesting access to the product itself. MCP host: help.sigmacomputing.com.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://hercules.app/mcp",
+      "name": "Hercules",
+      "notes": [
+        "Name: as the provider presents the service on https://hercules.app (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://homegraph.googleapis.com/mcp",
+      "name": "Google Home Graph",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googlehome",
+      "homepageUrl": "https://developers.home.google.com/cloud-to-cloud/get-started",
+      "notes": [
+        "Name: Google's API Discovery directory lists homegraph.googleapis.com as \"HomeGraph API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"googlehome\" (Google Home), its own product mark. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://langfuse.com/api/mcp",
+      "name": "Langfuse",
+      "notes": [
+        "Name: as the provider presents the service on https://langfuse.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://lobehub.com/api/mcp",
+      "name": "LobeHub",
+      "notes": [
+        "Name: as the provider presents the service on https://lobehub.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://logging.googleapis.com/mcp",
+      "name": "Google Cloud Logging",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "homepageUrl": "https://cloud.google.com/logging/docs/",
+      "notes": [
+        "Name: Google's API Discovery directory lists logging.googleapis.com as \"Cloud Logging API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"googlecloud\" (Google Cloud), the Google Cloud mark, because Simple Icons has no separate mark for this product. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://lucid-developer-docs.readme.io/mcp",
+      "name": "Lucid Developer Docs",
+      "notes": [
+        "Name: as the provider presents the service on https://lucid.co (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "The endpoint serves the provider's developer documentation, so the name says Docs rather than suggesting access to the product itself. MCP host: lucid-developer-docs.readme.io.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp-test.glama.ai/mcp",
+      "name": "Glama",
+      "notes": [
+        "Name: as the provider presents the service on https://glama.ai (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.agilitycms.com/api/mcp",
+      "name": "Agility CMS",
+      "notes": [
+        "Name: as the provider presents the service on https://agilitycms.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.airbyte.ai/mcp",
+      "name": "Airbyte",
+      "notes": [
+        "Name: as the provider presents the service on https://airbyte.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.algolia.com/mcp",
+      "name": "Algolia",
+      "notes": [
+        "Name: as the provider presents the service on https://algolia.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.articlegalaxy.com/ag/mcp",
+      "name": "Article Galaxy",
+      "notes": [
+        "Name: as the provider presents the service on https://researchsolutions.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "The endpoint is Research Solutions' Article Galaxy service (mcp.articlegalaxy.com).",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.avo.app/mcp",
+      "name": "Avo",
+      "notes": [
+        "Name: as the provider presents the service on https://avo.app (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.axiom.co/mcp",
+      "name": "Axiom",
+      "notes": [
+        "Name: as the provider presents the service on https://axiom.co (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.betterstack.com/",
+      "name": "Better Stack",
+      "notes": [
+        "Name: as the provider presents the service on https://betterstack.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.brevo.com/v1/brevo/mcp",
+      "name": "Brevo",
+      "notes": [
+        "Name: as the provider presents the service on https://brevo.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.cal.com/mcp",
+      "name": "Cal.com",
+      "notes": [
+        "Name: as the provider presents the service on https://cal.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.carbonarc.ai/",
+      "name": "Carbon Arc",
+      "notes": [
+        "Name: as the provider presents the service on https://carbonarc.ai (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.cartesia.ai/mcp",
+      "name": "Cartesia",
+      "notes": [
+        "Name: as the provider presents the service on https://cartesia.ai (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.chartmogul.com/",
+      "name": "ChartMogul",
+      "notes": [
+        "Name: as the provider presents the service on https://chartmogul.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.checkr.com/",
+      "name": "Checkr",
+      "notes": [
+        "Name: as the provider presents the service on https://checkr.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.dataforseo.com/mcp",
+      "name": "DataForSEO",
+      "notes": [
+        "Name: as the provider presents the service on https://dataforseo.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.datocms.com/",
+      "name": "DatoCMS",
+      "notes": [
+        "Name: as the provider presents the service on https://datocms.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.descope.com/",
+      "name": "Descope",
+      "notes": [
+        "Name: as the provider presents the service on https://descope.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.domotz.com/mcp",
+      "name": "Domotz",
+      "notes": [
+        "Name: as the provider presents the service on https://domotz.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.envoy.com/mcp",
+      "name": "Envoy",
+      "notes": [
+        "Name: as the provider presents the service on https://envoy.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.eodhd.com/v2/mcp",
+      "name": "EODHD",
+      "notes": [
+        "Name: as the provider presents the service on https://eodhd.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.facebook.com/devtools",
+      "name": "Meta Social Technologies MCP",
+      "logoSourceUrl": "https://cdn.simpleicons.org/meta",
+      "homepageUrl": "https://developers.facebook.com/documentation/mcp/devtools-mcp",
+      "notes": [
+        "Name: Meta's documentation at the homepage URL calls this server Meta Social Technologies MCP, formerly Meta Developer Tools MCP (checked 2026-11-02); integrations.sh lists it only as its domain, facebook.com.",
+        "Logo: Simple Icons \"meta\" (Meta), the mark of the company that publishes the server; integrations.sh serves the Facebook app icon. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.faces.app/mcp",
+      "name": "Faces",
+      "notes": [
+        "Name: as the provider presents the service on https://faces.app (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.fal.ai/mcp",
+      "name": "fal",
+      "notes": [
+        "Name: as the provider presents the service on https://fal.ai (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.flagsmith.com/",
+      "name": "Flagsmith",
+      "notes": [
+        "Name: as the provider presents the service on https://flagsmith.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.frankfurter.dev/",
+      "name": "Frankfurter",
+      "notes": [
+        "Name: as the provider presents the service on https://frankfurter.dev (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.gorgias.com/mcp",
+      "name": "Gorgias",
+      "notes": [
+        "Name: as the provider presents the service on https://gorgias.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.groundcover.com/api/mcp",
+      "name": "groundcover",
+      "notes": [
+        "Name: as the provider presents the service on https://groundcover.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.incident.io/mcp",
+      "name": "incident.io",
+      "notes": [
+        "Name: as the provider presents the service on https://incident.io (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.inline.chat/mcp",
+      "name": "Inline",
+      "notes": [
+        "Name: as the provider presents the service on https://inline.chat (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.jaz.ai/mcp",
+      "name": "Jaz",
+      "notes": [
+        "Name: as the provider presents the service on https://jaz.ai (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.logrocket.com/mcp",
+      "name": "LogRocket",
+      "notes": [
+        "Name: as the provider presents the service on https://logrocket.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.mailersend.com/mcp",
+      "name": "MailerSend",
+      "notes": [
+        "Name: as the provider presents the service on https://mailersend.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.massive.com/",
+      "name": "Massive",
+      "notes": [
+        "Name: as the provider presents the service on https://massive.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.meetgeek.ai/mcp",
+      "name": "MeetGeek",
+      "notes": [
+        "Name: as the provider presents the service on https://meetgeek.ai (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.mem0.ai/mcp",
+      "name": "Mem0",
+      "notes": [
+        "Name: as the provider presents the service on https://mem0.ai (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.mollie.com/mcp",
+      "name": "Mollie",
+      "notes": [
+        "Name: as the provider presents the service on https://mollie.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.mux.com/",
+      "name": "Mux",
+      "notes": [
+        "Name: as the provider presents the service on https://mux.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.natural.co/",
+      "name": "Natural",
+      "notes": [
+        "Name: as the provider presents the service on https://natural.co (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.newrelic.com/mcp",
+      "name": "New Relic",
+      "notes": [
+        "Name: as the provider presents the service on https://newrelic.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.onkernel.com/mcp",
+      "name": "Kernel",
+      "notes": [
+        "Name: as the provider presents the service on https://kernel.sh (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.openrouter.ai/mcp",
+      "name": "OpenRouter",
+      "notes": [
+        "Name: as the provider presents the service on https://openrouter.ai (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.pandadoc.com/v1/mcp",
+      "name": "PandaDoc",
+      "notes": [
+        "Name: as the provider presents the service on https://pandadoc.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.plain.com/mcp",
+      "name": "Plain",
+      "notes": [
+        "Name: as the provider presents the service on https://plain.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.polar.sh/mcp/polar-mcp",
+      "name": "Polar",
+      "notes": [
+        "Name: as the provider presents the service on https://polar.sh (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.prisma.io/mcp",
+      "name": "Prisma",
+      "notes": [
+        "Name: as the provider presents the service on https://prisma.io (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.prismic.io/mcp",
+      "name": "Prismic",
+      "notes": [
+        "Name: as the provider presents the service on https://prismic.io (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.productboard.com/",
+      "name": "Productboard",
+      "notes": [
+        "Name: as the provider presents the service on https://productboard.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.pubnub.com/",
+      "name": "PubNub",
+      "notes": [
+        "Name: as the provider presents the service on https://pubnub.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.qovery.com/mcp",
+      "name": "Qovery",
+      "notes": [
+        "Name: as the provider presents the service on https://qovery.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.remote.com/mcp",
+      "name": "Remote",
+      "notes": [
+        "Name: as the provider presents the service on https://remote.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.resend.com/",
+      "name": "Resend",
+      "notes": [
+        "Name: as the provider presents the service on https://resend.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.rootly.com/mcp",
+      "name": "Rootly",
+      "notes": [
+        "Name: as the provider presents the service on https://rootly.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.semaphoreci.com/mcp",
+      "name": "Semaphore",
+      "notes": [
+        "Name: as the provider presents the service on https://semaphoreci.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.shortcut.com/mcp",
+      "name": "Shortcut",
+      "notes": [
+        "Name: as the provider presents the service on https://shortcut.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.slidesgpt.com/mcp",
+      "name": "SlidesGPT",
+      "notes": [
+        "Name: as the provider presents the service on https://slidesgpt.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.storage.dev/mcp",
+      "name": "Tigris",
+      "notes": [
+        "Name: as the provider presents the service on https://tigrisdata.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.substack.com/api/v1/mcp",
+      "name": "Substack",
+      "notes": [
+        "Name: as the provider presents the service on https://substack.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.synapse.org/mcp",
+      "name": "Synapse",
+      "notes": [
+        "Name: as the provider presents the service on https://synapse.org (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.turso.ai/mcp",
+      "name": "Turso",
+      "notes": [
+        "Name: as the provider presents the service on https://turso.tech (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.upsun.com/mcp",
+      "name": "Upsun",
+      "notes": [
+        "Name: as the provider presents the service on https://upsun.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.uptimerobot.com/mcp",
+      "name": "UptimeRobot",
+      "notes": [
+        "Name: as the provider presents the service on https://uptimerobot.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.us.signoz.cloud/mcp",
+      "name": "SigNoz",
+      "notes": [
+        "Name: as the provider presents the service on https://signoz.io (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.usenotra.com/mcp",
+      "name": "Notra",
+      "notes": [
+        "Name: as the provider presents the service on https://usenotra.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.webexapis.com/mcp/vidcast",
+      "name": "Webex Vidcast",
+      "notes": [
+        "Name: as the provider presents the service on https://webex.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "The endpoint path is /mcp/vidcast, Webex Vidcast.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.workos.com/mcp",
+      "name": "WorkOS",
+      "notes": [
+        "Name: as the provider presents the service on https://workos.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://migma.ai/mcp",
+      "name": "Migma",
+      "notes": [
+        "Name: as the provider presents the service on https://migma.ai (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://mintlify.com/mcp",
+      "name": "Mintlify",
+      "notes": [
+        "Name: as the provider presents the service on https://mintlify.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://netlify-mcp.netlify.app/mcp",
+      "logoSourceUrl": "https://cdn.simpleicons.org/netlify",
+      "notes": [
+        "Logo: integrations.sh serves only a generated letter for this row. Simple Icons \"netlify\" (Netlify) is CC0-1.0 icon data, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://networkmanagement.googleapis.com/mcp",
+      "name": "Google Cloud Network Management",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "homepageUrl": "https://cloud.google.com/network-intelligence-center/docs",
+      "notes": [
+        "Name: Google's API Discovery directory lists networkmanagement.googleapis.com as \"Network Management API\", the API behind Network Intelligence Center, whose documentation is the homepage URL; the name is Google's product name without the API suffix (checked 2026-11-02).",
+        "Logo: Simple Icons \"googlecloud\" (Google Cloud), the Google Cloud mark, because Simple Icons has no separate mark for this product. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://nuxt.com/mcp",
+      "name": "Nuxt",
+      "notes": [
+        "Name: as the provider presents the service on https://nuxt.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://oneuptime.com/mcp",
+      "name": "OneUptime",
+      "notes": [
+        "Name: as the provider presents the service on https://oneuptime.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://openlens.com/mcp",
+      "name": "OpenLens",
+      "notes": [
+        "Name: as the provider presents the service on https://openlens.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://orgpolicy.googleapis.com/mcp",
+      "name": "Google Cloud Organization Policy",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "homepageUrl": "https://cloud.google.com/orgpolicy/docs/reference/rest/index.html",
+      "notes": [
+        "Name: Google's API Discovery directory lists orgpolicy.googleapis.com as \"Organization Policy API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"googlecloud\" (Google Cloud), the Google Cloud mark, because Simple Icons has no separate mark for this product. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://paddlehq.mcp.kapa.ai/",
+      "name": "Paddle Docs",
+      "notes": [
+        "Name: as the provider presents the service on https://paddle.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "The endpoint serves the provider's developer documentation, so the name says Docs rather than suggesting access to the product itself. MCP host: paddlehq.mcp.kapa.ai.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://people.googleapis.com/mcp/v1",
+      "name": "Google People API",
+      "logoSourceUrl": "https://cdn.simpleicons.org/google",
+      "homepageUrl": "https://developers.google.com/people/",
+      "notes": [
+        "Name: Google's API Discovery directory lists people.googleapis.com as \"People API\", and Google's documentation at the homepage URL writes it the same way; the API suffix stays because the product is the API itself (checked 2026-11-02).",
+        "Logo: Simple Icons \"google\" (Google), the Google mark. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://playdeveloperreporting.googleapis.com/mcp",
+      "name": "Google Play Developer Reporting",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googleplay",
+      "homepageUrl": "https://developers.google.com/play/developer/reporting",
+      "notes": [
+        "Name: Google's API Discovery directory lists playdeveloperreporting.googleapis.com as \"Google Play Developer Reporting API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"googleplay\" (Google Play), its own product mark. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://policytroubleshooter.googleapis.com/mcp",
+      "name": "Google Cloud Policy Troubleshooter",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "homepageUrl": "https://cloud.google.com/iam/",
+      "notes": [
+        "Name: Google's API Discovery directory lists policytroubleshooter.googleapis.com as \"Policy Troubleshooter API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"googlecloud\" (Google Cloud), the Google Cloud mark, because Simple Icons has no separate mark for this product. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://pubsub.googleapis.com/mcp",
+      "name": "Google Cloud Pub/Sub",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googlepubsub",
+      "homepageUrl": "https://cloud.google.com/pubsub/docs",
+      "notes": [
+        "Name: Google's API Discovery directory lists pubsub.googleapis.com as \"Cloud Pub/Sub API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"googlepubsub\" (Google Pub/Sub), its own product mark. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://recommender.googleapis.com/mcp",
+      "name": "Google Cloud Recommender",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "homepageUrl": "https://cloud.google.com/recommender/docs/",
+      "notes": [
+        "Name: Google's API Discovery directory lists recommender.googleapis.com as \"Recommender API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"googlecloud\" (Google Cloud), the Google Cloud mark, because Simple Icons has no separate mark for this product. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://redis.googleapis.com/mcp",
+      "name": "Memorystore for Redis",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "homepageUrl": "https://cloud.google.com/memorystore/docs/redis/",
+      "notes": [
+        "Name: Google's API Discovery directory lists redis.googleapis.com as \"Google Cloud Memorystore for Redis API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"googlecloud\" (Google Cloud), the Google Cloud mark, because Simple Icons has no separate mark for this product. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://redocly.com/mcp",
+      "name": "Redocly",
+      "notes": [
+        "Name: as the provider presents the service on https://redocly.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://run.googleapis.com/mcp",
+      "name": "Google Cloud Run",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "homepageUrl": "https://cloud.google.com/run/",
+      "notes": [
+        "Name: Google's API Discovery directory lists run.googleapis.com as \"Cloud Run Admin API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"googlecloud\" (Google Cloud), the Google Cloud mark, because Simple Icons has no separate mark for this product. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://scalar.com/mcp",
+      "name": "Scalar",
+      "notes": [
+        "Name: as the provider presents the service on https://scalar.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://searchconsole.googleapis.com/mcp",
+      "name": "Google Search Console",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googlesearchconsole",
+      "homepageUrl": "https://developers.google.com/webmaster-tools/about",
+      "notes": [
+        "Name: Google's API Discovery directory lists searchconsole.googleapis.com as \"Google Search Console API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"googlesearchconsole\" (Google Search Console), its own product mark. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://services.leadconnectorhq.com/mcp",
+      "name": "HighLevel",
+      "notes": [
+        "Name: as the provider presents the service on https://gohighlevel.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "The endpoint is on leadconnectorhq.com, the HighLevel API host.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://services.leadconnectorhq.com/mcp/chatgpt",
+      "name": "HighLevel (ChatGPT endpoint)",
+      "notes": [
+        "Name: integrations.sh already names this row HighLevel, the same as the main https://services.leadconnectorhq.com/mcp server; the qualifier, taken from the endpoint path, keeps the two rows apart in lists and search (checked 2026-11-02).",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://sourcegraph.com/.api/mcp",
+      "name": "Sourcegraph",
+      "notes": [
+        "Name: as the provider presents the service on https://sourcegraph.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://spanner.googleapis.com/mcp",
+      "name": "Google Cloud Spanner",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googlecloudspanner",
+      "homepageUrl": "https://cloud.google.com/spanner/",
+      "notes": [
+        "Name: Google's API Discovery directory lists spanner.googleapis.com as \"Cloud Spanner API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"googlecloudspanner\" (Google Cloud Spanner), its own product mark. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://sqladmin.googleapis.com/mcp",
+      "name": "Google Cloud SQL",
+      "logoSourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "homepageUrl": "https://cloud.google.com/sql/docs",
+      "notes": [
+        "Name: Google's API Discovery directory lists sqladmin.googleapis.com as \"Cloud SQL Admin API\"; the name is Google's product name without the API suffix, as Google's documentation at the homepage URL writes it (checked 2026-11-02).",
+        "Logo: Simple Icons \"googlecloud\" (Google Cloud), the Google Cloud mark, because Simple Icons has no separate mark for this product. Simple Icons icon data is CC0-1.0, the source already used for the Reddit and X marks; the mark remains the property of its owner and identifies the service by nominative use. Fetched from the Simple Icons CDN, which applies the brand colour Simple Icons records, and vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://strapi-docs.mcp.kapa.ai/",
+      "name": "Strapi Docs",
+      "notes": [
+        "Name: as the provider presents the service on https://strapi.io (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "The endpoint serves the provider's developer documentation, so the name says Docs rather than suggesting access to the product itself. MCP host: strapi-docs.mcp.kapa.ai.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://tuist.dev/mcp",
+      "name": "Tuist",
+      "notes": [
+        "Name: as the provider presents the service on https://tuist.dev (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://ubersuggest-mcp.neilpatelapi.com/mcp",
+      "name": "Ubersuggest",
+      "notes": [
+        "Name: as the provider presents the service on https://ubersuggest.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://ui.nuxt.com/mcp",
+      "name": "Nuxt UI",
+      "notes": [
+        "Name: as the provider presents the service on https://ui.nuxt.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://www.berlin-group.org/_api/mcp",
+      "name": "Berlin Group",
+      "notes": [
+        "Name: as the provider presents the service on https://berlin-group.org (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://www.getperseuss.com/_api/mcp",
+      "name": "Perseuss",
+      "notes": [
+        "Name: as the provider presents the service on https://getperseuss.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://www.kaggle.com/mcp",
+      "name": "Kaggle",
+      "notes": [
+        "Name: as the provider presents the service on https://kaggle.com (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://www.perplexity.ai/rest/computer/mcp",
+      "name": "Perplexity",
+      "notes": [
+        "Name: as the provider presents the service on https://perplexity.ai (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
+      ]
+    },
+    {
+      "mcpUrl": "https://www.trykopi.ai/mcp",
+      "name": "Kopi AI",
+      "notes": [
+        "Name: as the provider presents the service on https://trykopi.ai (checked 2026-11-02); integrations.sh lists it only as its domain.",
+        "Logo: the row keeps its integrations.sh mark, now vendored by catalog:vendor-logos."
       ]
     }
   ]

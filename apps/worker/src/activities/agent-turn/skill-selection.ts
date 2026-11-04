@@ -19,7 +19,8 @@ export function configuredBundledSkillNames(context: BundledSkillConfiguration):
     { name: "visualize", include: () => true },
     { name: "document-parsing", include: () => true },
     { name: "skill-management", include: () => true },
-    { name: "projects", include: () => true },
+    // The Skill only explains the project tools; without them it is noise.
+    { name: "projects", include: () => tools.has("project_list") },
     { name: "schedules", include: () => tools.has("scheduled_tasks_create") },
     {
       name: "event-triggers",

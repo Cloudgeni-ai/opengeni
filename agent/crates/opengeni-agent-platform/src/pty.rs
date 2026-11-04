@@ -241,6 +241,15 @@ pub fn spawn_pty(req: &v1::PtyOpenRequest, default_shell: &[String]) -> Platform
             crate::run_as::on_identity_thread(identity, spawn)?
         }
     };
+    // A terminal's commands are work the supervisor runs, like an exec: give
+    // the shell (and whatever it starts) the same kernel OOM victim preference,
+    // so a memory-heavy command typed into a terminal is killed before the
+    // supervisor that carries the terminal. Best-effort and post-spawn: the
+    // shell is interactive, so its commands start after this write.
+    #[cfg(target_os = "linux")]
+    if let Some(pid) = child.process_id() {
+        crate::cgroup::raise_exec_oom_score_adj(pid, crate::cgroup::exec_oom_score_adj());
+    }
     let child = OwnedChild {
         child: Some(child),
         reservation: crate::current_work_reservation(),
@@ -494,5 +503,33 @@ mod tests {
         // Resize should not error on a freshly spawned pty.
         proc.resize(100, 40).expect("resize");
         let _ = proc.kill();
+    }
+
+    /// A terminal shell gets the same OOM victim preference as an exec child.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pty_shell_gets_the_command_oom_score_adj() {
+        let req = v1::PtyOpenRequest {
+            command: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "sleep 30".to_string(),
+            ],
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        };
+        let mut proc = spawn_pty_resilient(&req, &default_shell()).expect("spawn pty");
+        let pid = proc
+            .child
+            .child
+            .as_ref()
+            .and_then(|child| child.process_id())
+            .expect("pty child pid");
+        let observed = std::fs::read_to_string(format!("/proc/{pid}/oom_score_adj"))
+            .expect("read pty child OOM score");
+        let _ = proc.kill();
+        let expected = crate::cgroup::exec_oom_score_adj().expect("supervisor OOM score");
+        assert_eq!(observed.trim(), expected.to_string());
     }
 }

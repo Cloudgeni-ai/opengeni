@@ -15,7 +15,6 @@ import {
 } from "lucide-react";
 import { linearLogo, slackLogo } from "./new-session-starter-logos";
 import { Button } from "../../ui/button";
-import type { SessionAppStarter } from "../lib/app-host";
 
 // Plain editable prompts, not service identifiers or a connector resolver.
 export const NEW_SESSION_STARTERS = [
@@ -144,39 +143,53 @@ const PRODUCT_GENERAL_IDS = ["github", "create", "research", "schedule"] as cons
 
 export type StarterSet = "everyday" | "general" | "product";
 
+/**
+ * A suggestion a host shows under the new-chat composer in place of
+ * Opengeni's own, such as tasks that fit the app the chat sits in.
+ */
+export type SessionStarter = Readonly<{
+  id: string;
+  title: string;
+  description?: string | undefined;
+  /** The text put in the composer, which the person can edit before sending. */
+  prompt: string;
+  /** A small decorative icon (about 20 px) before the title. */
+  icon?: ReactNode;
+}>;
+
 const STARTER_CLASS =
   "h-full min-h-16 justify-start gap-3 whitespace-normal px-3 py-3 text-left hover:bg-surface hover:hover-layer";
 
 /**
  * Six starters under the new-chat composer. The set follows the signup
- * answer: people adding agents to a product get their own agent and the
- * playground demo first; people running agents in the cloud get the general
- * six; everyone else gets six everyday asks. A host that passes its own
- * starters (such as the Excel add-in's workbook tasks) gets those instead.
+ * answer: people who want help with everyday things get six everyday asks;
+ * people adding agents to a product get their own agent and the playground
+ * demo first; everyone else gets the general six. A host's own starters
+ * replace all of them.
  */
 export function NewSessionStarters({
   onSelect,
   disabled = false,
   set = "general",
-  host,
+  hostStarters,
   workspaceId,
   fileUploads = false,
 }: {
   onSelect: (prompt: string) => void;
   disabled?: boolean | undefined;
   set?: StarterSet | undefined;
-  /** The host's own starters, in place of the set's. Empty shows none. */
-  host?: readonly SessionAppStarter[] | undefined;
+  /** The host's suggestions, shown instead of the set's. */
+  hostStarters?: readonly SessionStarter[] | undefined;
   /** The deployment accepts attachments, so an everyday ask may offer a photo. */
   fileUploads?: boolean | undefined;
   /** Where the playground demo opens (product set). */
   workspaceId?: string | undefined;
 }) {
-  if (host) {
-    if (host.length === 0) return null;
+  if (hostStarters) {
+    if (hostStarters.length === 0) return null;
     return (
       <StarterSection>
-        {host.map((starter) => (
+        {hostStarters.map((starter) => (
           <Button
             key={starter.id}
             type="button"
@@ -186,6 +199,11 @@ export function NewSessionStarters({
             data-starter={starter.id}
             onClick={() => onSelect(starter.prompt)}
           >
+            {starter.icon ? (
+              <span aria-hidden="true" className="flex size-5 shrink-0 text-fg-subtle">
+                {starter.icon}
+              </span>
+            ) : null}
             <StarterText title={starter.title} description={starter.description} />
           </Button>
         ))}

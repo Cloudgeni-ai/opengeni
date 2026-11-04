@@ -32,9 +32,14 @@ each hosted field keeps encrypted **versions**.
   default **Private** vault is always available everywhere. Vaults created
   before this setting existed stay available everywhere until narrowed.
 - **Workspace** vaults are usable by members of that workspace.
-- **Organization** vaults are managed with `account:admin`; their reach is set
-  by "Available in" (all workspaces or a list, and optionally personal
-  workspaces).
+- **Organization** vaults are managed by the organization's owner or an admin
+  (or a credential holding `account:admin`); their reach is set
+  by "Available in": every shared workspace (`allowedWorkspaceIds: null`) or a
+  list of them, and separately whether members' Personal workspaces have it
+  (`allowPersonalWorkspaces`). The switch alone decides Personal workspaces,
+  whichever workspace choice is made (migration 1171; before it, a vault with
+  a list never reached a Personal workspace, so 1171 turned the switch off on
+  those vaults to keep their reach).
 - **Task** vaults hold secrets created during one task. There is one per root
   session, and it is deleted with that session.
 - Default hosted vaults are created on first use: **Private** (Only me),
@@ -55,6 +60,28 @@ each hosted field keeps encrypted **versions**.
 - Limits: 2,000 items per vault, 50 fields per item, 64 KiB per text value,
   256 KiB per file value, names up to 120 characters without `/ { } # \` or
   control characters. A field cannot be named `otp`.
+
+### Field kinds
+
+Only `concealed`, `totp` and `file` fields are secret: their values are
+hidden on the page and masked in agent output. A `text` field (a username,
+a host, an account name) is shown and searched as written, and its value is
+never masked. A secret saved in a text field by mistake is therefore
+exposed, so saving one is made hard without ever refusing the save:
+
+- A value looks secret when it has a well-known token or key format (the
+  shape detectors under Masking), or it is at least 20 characters with three
+  kinds of characters and about 80 bits of randomness and is not a path, URL,
+  email or UUID, or the field's name says it holds a credential (`api token`,
+  `client_secret`, but not `public key` or `api key id`).
+- The item editor shows one line under such a text field, for example
+  "Looks like a GitHub token.", with **Make concealed**.
+- `secret_save` (hosted and connected vaults) saves a new field whose kind
+  would default to text as concealed when its value looks secret, and says
+  so in `fieldNotes`. An explicit `kind: "text"`, and an existing text field,
+  are kept as text with a note instead.
+- Item create and update requests over the HTTP API keep the kind they
+  send (a missing kind is text), so a kind never changes without a note.
 
 ## Who can use what
 
@@ -161,7 +188,7 @@ implementation: `packages/contracts/src/secret-references.ts`,
 | `{{secretfile:…}}` | Written to a 0600 file under `/tmp/opengeni-private/secrets/` and replaced by its path; removed at attempt end. Use it for binary values and anything over 100 KiB. |
 | MCP connectors, Codex apps, Codemode `ogtool` | Arguments are resolved after approval and passed only to the executing call; the journal, approval and receipts keep the reference. `secretfile` is not allowed in ordinary tool arguments; Opengeni's `run_on` retains its exec delivery boundary through these callers. Inside a shell command, `ogtool call` arguments are command text: escape a reference there (`\{{secret:Item}}`) or the shell resolves it before the tool sees it. |
 | Opengeni's hand-off tools: sessions, messages, Steer, goals, schedules, task notes, Knowledge, instructions, Skills, artifacts, Sites data, notifications, and every Opengeni tool not named in the next row | Never resolved. The tool receives the reference text and stores or forwards it; the session, scheduled run or goal continuation that receives it resolves it only when it executes something (a shell command, `run_on`, browser typing, a connector call), under its own vault policy. A missing or malformed reference does not fail the call, and `secretfile` stays text. An escaped reference (`\{{secret:Item}}`) still arrives as `{{secret:Item}}`, so escaping here is optional. Opengeni tools added later are hand-off tools by default. Opengeni's built-in tools that send text to outside systems (Slack bot messages, X, Reddit and social replies, Fiken contacts and invoices, `web_fetch` URLs) are hand-off tools too: the recipient gets the reference text, never the value. |
-| Opengeni tools that need a value | Only `excel_run` (runs code in the person's open workbook) and `admin_action_call` when the call fills a request field the action marks as a credential, such as a password manager's API key or an MCP server's headers: only that field resolves, and the rest of the body (a chat's first message, a note) stays reference text. Creating or updating a vault item resolves its body, which the vault keeps. Other `admin_action_call` calls, including actions that return a secret and `tools/invoke`, are hand-off. These resolve like connectors. The `secret_*` tools take references as names and never resolve them. The list and the reason for each entry live in `secretArgumentMode` (`packages/runtime/src/secret-argument-resolution.ts`). |
+| Opengeni tools that need a value | Only `excel_run` (runs code in the person's open workbook) and `admin_action_call` when the call fills a request field the action marks as a credential, such as a password manager's API key or an MCP server's headers: only that field resolves, and the rest of the body (a chat's first message, a note) stays reference text. Creating or updating a vault item resolves its body, which the vault keeps. Other `admin_action_call` calls, including actions that return a secret and `tools/invoke`, are hand-off. `event_sources_create_webhook` and `event_sources_update` resolve only `signingSecret`, which the webhook source keeps encrypted; a name or format next to it stays reference text. These resolve like connectors. The `secret_*` tools take references as names and never resolve them. The list and the reason for each entry live in `secretArgumentMode` (`packages/runtime/src/secret-argument-resolution.ts`). |
 | Sites | Tool calls from a Site resolve with the viewer's authority (no task vault) and audit the Site. Hand-off tools keep reference text for Sites too. |
 | Browser and desktop | `fill`, `type`, clipboard writes and key presses resolve for agent callers. Receipts keep the reference. `type` with `mode: "keys"` handles split one-time-code boxes. Resolved values are never pasted on the desktop. |
 | Passkeys | Registering a passkey in the managed browser saves a `passkey` item; later logins use it from the vault and write the sign count back. A login in a connected password manager that holds a passkey (Bitwarden, Vaultwarden, Keeper, Proton Pass) shows `hasPasskey`, matches a `passkey` search and signs in the same way; its key is read live from the provider and never stored. See [external vaults](external-vaults.md). |
@@ -320,8 +347,9 @@ level. Changes are audited as `credential_profile.updated` or
 `credential_profile.cleared` with variable names only.
 
 **Configuring.** Reading needs `secrets:list`. Changing needs `secrets:write`
-plus `workspace:admin` for the workspace profile, or `sessions:control` and
-the chat's tool-policy access for a chat profile. Use the HTTP routes below or
+plus `workspace:admin` for the workspace profile (the owner of a Personal
+workspace changes its profile too), or `sessions:control` and the chat's
+tool-policy access for a chat profile. Use the HTTP routes below or
 the `secret_profile_get` and `secret_profile_set` agent tools; there is no web
 UI yet. Profiles hold references, never values.
 
@@ -369,9 +397,16 @@ Each agent attempt keeps one memory of secret values (`SecretValueMemory`):
   (environment values whose names say they are secret and that are at least
   12 characters long, and single-line credential files) and MCP header
   values of at least 12 characters whose names say they carry credentials
-  (`Authorization`, `Proxy-Authorization`, `Cookie`, and names containing
-  token, key, secret, auth, password, session or signature). Headers such as
-  `Accept` are not remembered. The label is a marker such as
+  (`Authorization`, `Proxy-Authorization`, `Cookie`, and names with a word
+  such as token, key, secret, auth, password, session or signature). These
+  names match a credential word anywhere, even inside another word
+  (`PRIVATEKEYPEM`, `AUTHHEADER`, `SESSIONDATA`, `X-Authz`), once ordinary
+  words that contain one are set aside (`author`, `keyboard`, `monkey`,
+  `tokenizer`), so `GIT_AUTHOR_NAME` is not a credential, and neither is a
+  name whose last word says the value is a name or label (`SESSION_NAME`).
+  Names ending in `_FILE`, `_PATH`, `_DIR`, `_URL` or `_ENDPOINT` locate a
+  credential and are skipped. Headers
+  such as `Accept` are not remembered. The label is a marker such as
   `[opengeni credential: codemode token]`.
 - Best effort, the hosted vault values of secrets the session's root tree
   used before, found through the `vault.secret.used` audit rows. They are read
@@ -402,6 +437,73 @@ field) reveals both the encoded and the decoded text. Only Opengeni's own
 
 ### Matching
 
+- Each value is first rated by strength. Distinctive values (tokens, keys,
+  random or strong passwords, passphrases of three or more words,
+  digit-only card and account numbers) almost never appear in unrelated
+  text and are searched for anywhere, in every form below. Weak values do
+  appear in unrelated text: one or two words with up to four digits and a
+  symbol (`admin123`, `Password1!`), a camelCase name, a snake_case or
+  kebab-case name of two parts (or three with a number, `deploy-bot-01`), a
+  host, email, URL or path made only of such names and numbers. A value in
+  a known token format is always distinctive. Letters count as words only
+  when their letter pairs and triples are mostly common English ones (at
+  most one uncommon pair, and one uncommon triple, in five; in the parts of
+  a host, URL or path, runs of fewer than four letters are skipped and a
+  little more is allowed), so random letters such as `qkzvmxbtwe` and
+  `rdabaootck` stay distinctive. Random single-case letters still pass as
+  words about once in two thousand at 10 to 12 characters (about once in
+  250 at 8), and a random lowercase host, URL or path part about once in
+  300 at 10 characters and once in two thousand at 12; such a value is
+  then replaced only in credential positions. Short word-like values with
+  a tail are weak a little more often by chance: about 1% for seven random
+  letters and a symbol, and 0.6% for six letters and two digits. A word that
+  fails the test (an unusual name), and a value with letters outside A to Z
+  (`Müller`, Cyrillic), stays distinctive and is masked everywhere, as
+  before.
+  A weak value is replaced only where it is the credential:
+  - alone on its line, or as the password of a URL (`scheme://user:<value>@`);
+  - as a whole token that a credential name leads into: `password=…`,
+    `PGPASSWORD: …`, `"token": "…"`, `Server=db;Password=…;Database=app`,
+    `--password …`, "the password is …", `requirepass …`, `password …`
+    (netrc), `Authorization: Bearer …`, `Cookie: sid=…`,
+    `<password>…</password>`, `<add key="Password" value="…" />`,
+    `IDENTIFIED BY '…'`. The name is read word by word (`_`, `-`, `.` and
+    camelCase separate words; a word may end in a credential word, as in
+    `PGPASSWORD`, `DBPWD` or `masterauth`, or start with one, as in
+    `TOKENVALUE`). `session` and `private` do not count on their own
+    (`--session main`), `key` counts only next to a word that makes it a
+    credential (`API_KEY`, `accessKey`, `LICENSE_KEY`, not `--key
+    reports.csv`, `cacheKey` or `STORAGE_KEY`), and ordinary words such as
+    `bypass` and names whose last word says the value names something
+    (`rpId`, `SESSION_NAME`) do not count. A password word with no `=` or
+    `:` (`requirepass …`, `password …`) counts when the value ends the line
+    or the line is a netrc entry, not in prose. `;`, `,` and `&` end a
+    token;
+  - after a password option of a program that takes one: `mysql -p…`,
+    `7z -p…`, `sshpass -p …`, `docker login -p …` (also `podman`,
+    `nerdctl`, `oc` and `az login`), `mongosh -p …`, `redis-cli -a …`,
+    `ldapsearch -w …`, `sqlcmd -P …`, `zip -P …`, `smbclient -U user%…`,
+    `curl -u user:…`, `htpasswd -b file user …` (`mkdir -p` and `ls -a` are
+    not);
+  - as the last field of a `.pgpass` line (`host:5432:db:user:…`);
+  - printed into the next command when that command reads a password:
+    `echo '…' | docker login --password-stdin`, `echo 'app:…' | chpasswd`,
+    `echo … | sudo -S`. Only the next command's name and option names count,
+    so a table row, `||`, `| grep token` or a credential word in a comment
+    does not;
+  - as the value of a key whose line follows one naming a credential
+    (`- name: DB_PASSWORD` then `value: …`, `credentials:` then `admin: …`),
+    unless the key itself names something (`name:`, `host:`);
+  - inside a base64 run (a Basic auth header) after a credential word on
+    its line. The whole base64 encoding of a weak value (a Kubernetes
+    Secret's data) is replaced wherever it is a base64 run of its own.
+
+  A weak value is never replaced inside an identifier, a file name, a path,
+  a host or a URL segment, or as a word on a line that only mentions a key or
+  token, so a saved dictionary word no longer rewrites unrelated paths, code
+  and prose. In tool output, the shape detectors below also catch a weak
+  password inside a URL or a connection string. Browser and desktop typed
+  values and the history scrub search weak values anywhere, as before.
 - Each value is searched as written, trimmed, line by line, JSON-escaped (once and twice), percent-encoded (URI
   component, `+` for spaces, form encoding) and base64 (standard and URL-safe,
   standalone and inside a longer base64 run such as a Basic auth header).
@@ -418,6 +520,25 @@ field) reveals both the encoded and the decoded text. Only Opengeni's own
   the `[opengeni credential: …]`, `[masked …]` and `[secret]` markers are
   kept; a value that appears inside text that merely looks like a reference
   is still masked.
+- Known-value masking keeps a tool's identity in conversation structure: the
+  `name` or `namespace` of a call or result item (`function_call`,
+  `function_call_result`, `custom_tool_call`, `mcp_call`,
+  `mcp_approval_request`) or of a definition listed under `tools`
+  (`function`, `custom`, `namespace`), when it is a valid tool name
+  (`^[a-zA-Z0-9_-]{1,64}$`) and no data key such as `output`, `arguments`,
+  `content` or `result` lies above it. Tool names are catalog data the
+  provider already receives unmasked in the request's tools. A known value
+  inside one (a password that is a plain word) would otherwise become a
+  reference, which providers reject as a tool name and which no longer maps
+  the call to its tool. This applies only to model input and stored
+  conversation history. Tool output and browser or desktop results are data,
+  so they are masked in full even where a record looks like a call.
+  Arguments, outputs and descriptions are still masked, and shape detection
+  masks a secret-shaped token everywhere, tool-name positions included. The operator
+  history scrub ([Removing secrets from stored history](#removing-secrets-from-stored-history))
+  removes the value everywhere, tool names included. A tool name stored masked
+  or scrubbed is repaired on replay (see
+  [Tool names in history](model-providers.md)).
 - A value cut off just before a truncation mark (`...` or `…`), or at the
   end of a text of at least 1,024 characters (output clipped to a size), has
   its visible start replaced too, when at least 16 characters and at least
@@ -430,7 +551,13 @@ field) reveals both the encoded and the decoded text. Only Opengeni's own
   most 256 marks per text (a run of marks such as `......` counts once), at
   most 200,000 index entries in total (the longest values beyond that are
   matched whole only), and values longer than 8,192 characters are matched
-  whole only.
+  whole only. Weak values have no index of starts.
+- The worker counts occurrences in
+  `opengeni_secret_mask_matches_total{outcome,strength,entropy,position}`:
+  `masked` or `kept` (a weak value outside a credential position), the
+  value's strength, its entropy bucket (`lt32`, `32_64`, `64_128`,
+  `ge128` bits) and where it sat (`token`, `identifier`, `path`, `url` or
+  `encoded`). Never the value or the text.
 - File and image payloads keep their exact bytes: a string that is entirely
   a base64 data URL (`data:<type>;base64,<base64>`) and `data` fields beside
   a MIME type. A payload of a text type (`text/*`, JSON, XML, YAML and
@@ -506,7 +633,21 @@ secret part is replaced:
   `xoxe` rotated tokens), Stripe secret and restricted keys, npm,
   GitLab, Google `AIza`, 1Password service account tokens, Opengeni's own
   bearers (`ogk_` and `ogp_` keys, and the signed `ogd_`, `oge_`, `ogr_` and
-  `ogs_` envelopes) and JWTs. URLs are also found inside JSON-escaped text.
+  `ogs_` envelopes), Google OAuth client secrets (`GOCSPX-`), Hugging Face
+  (`hf_`, mixed case), SendGrid (`SG.`), Shopify (`shpat_`, `shpss_`,
+  `shpca_`, `shppa_`), PyPI, Databricks (`dapi`), DigitalOcean (`dop_v1_`,
+  `doo_v1_`, `dor_v1_`), Linear (`lin_api_`), Doppler (`dp.pt.` and
+  similar), Atlassian (`ATATT3`) and JWTs. URLs are also found inside
+  JSON-escaped text. AWS access key IDs (`AKIA…`) are identifiers, not
+  secrets, and are not detected.
+- AWS secret access keys (40 base64 characters) only right after their name
+  (`aws_secret_access_key = …`, `"SecretAccessKey": "…"`).
+- Authorization values: `Bearer <token>` and `Authorization: token <token>`
+  of at least 16 characters with a digit that are mixed case, 32 or more
+  characters or a quarter digits (code such as `Bearer this.session.token`,
+  a lower-case path such as `tokens/session-2024/abc`, an ALL_CAPS
+  placeholder and prose are not), and `Basic <base64>` when it
+  decodes to `user:password`. A token with its own format keeps that kind.
 
 Tokens must contain a digit, and placeholders such as `${PASSWORD}` (or any
 `${…}` template), `$(cat file)`, `<password>`, `%(password)s`, `@Password`,
@@ -541,9 +682,13 @@ for it. Up to 16 values are saved per result, four at a time; the rest are
 saved from a later result. A value that got a marker is detected and saved
 again from the next result that contains it. An attempt captures into its root session's Task vault only
 while it holds fewer than 200 captured items (attempts running at the same
-time in one session tree can go slightly over). When saving is not possible (the secrets capability is off,
-the attempt cannot write to the Task vault, the capture or vault limit is
-reached, any error), the value is replaced by a marker such as
+time in one session tree can go slightly over). A session whose first-party
+permissions are narrowed to a list without `secrets:use`,
+`variable-sets:use`, `variable-sets:attach` or `environments:use` has no Task
+vault, so its attempts do not try to save and use markers from the start.
+When saving is not possible (the secrets capability is off, the agent may not
+use secrets, the attempt cannot write to the Task vault, the capture or vault
+limit is reached, any error), the value is replaced by a marker such as
 `[masked url password]` and the tool call still succeeds. After three failed
 saves in a row an attempt stops trying and writes markers. A save that
 finishes after the wait upgrades the marker to the reference from the next
@@ -563,6 +708,11 @@ known).
   whole (the tool result and model input), not in the stored chunks.
 - Output a background command produces while no attempt is running is stored
   as written and masked when a later attempt reads it.
+- A weak value alone on a line is still replaced, for example a directory
+  name in `ls` output that is the same word as a saved password.
+- A weak value is kept as written in positions not listed above, such as a
+  positional argument (`connect(host, "app", "…")`) or a lone `key` option
+  (`--key …`).
 - Multi-line credential files, values shorter than 8 characters and earlier
   values from connected vaults are not searched.
 - A value the agent read with `secret_get` stays readable for the rest of
@@ -849,8 +999,9 @@ Managed runtimes refuse to start with it set.
 
 A secret that already reached a session's stored history (pasted into a
 message, printed by a command, or resolved into a hand-off before references
-were kept) stays there until it is removed. A workspace owner or admin removes
-it with `POST /v1/workspaces/:workspaceId/secret-redactions`:
+were kept) stays there until it is removed. A workspace admin, or the owner of
+a Personal workspace, removes it with
+`POST /v1/workspaces/:workspaceId/secret-redactions`:
 
 ```json
 {
@@ -993,12 +1144,13 @@ All routes are under `/v1/workspaces/:workspaceId`.
 | Route | Purpose |
 |---|---|
 | `GET, POST /vaults`; `GET, PATCH, DELETE /vaults/:vaultId` | Vaults |
+| `GET /organization-vaults` | Every organization vault, wherever it works, for account administrators (`account:admin` and `secrets:list`). `complete: false` while the server can list only the ones that work in this workspace |
 | `GET, POST /vaults/:vaultId/items`; `GET, PATCH, DELETE /vaults/:vaultId/items/:itemId` | Items |
 | `POST /vaults/:vaultId/items/:itemId/restore`, `/move` | Restore an archived item; move or copy |
 | `POST …/fields/:fieldId/reveal`; `GET …/fields/:fieldId/versions`; `POST …/fields/:fieldId/restore` | Plaintext, history, version restore |
 | `GET, PUT /vaults/:vaultId/items/:itemId/approval`; `POST …/approval/grants/:grantId/revoke` | "Ask me each time" marks and the approvals in force |
 | `PUT /sessions/:sessionId/vault-policy`; `GET /sessions/:sessionId/secrets` | Session policy and the secrets a session has used |
-| `GET, PUT /credential-profile` | The workspace [credential profile](#credential-profiles): `{profile}`; `PUT` takes `{entries, gitHelper?}` and needs `workspace:admin` and `secrets:write` |
+| `GET, PUT /credential-profile` | The workspace [credential profile](#credential-profiles): `{profile}`; `PUT` takes `{entries, gitHelper?}` and needs `secrets:write` plus `workspace:admin` (or owning the Personal workspace) |
 | `GET, PUT /sessions/:sessionId/credential-profile` | A chat's own profile and its effective profile `{profile, effective}`; `PUT` needs `sessions:control` and `secrets:write` |
 | `POST /connections/1password/install`; `GET /connections/1password/service-accounts`; `GET /connections/:connectionId/provider-vaults` | 1Password connections |
 | `PUT /connections/:connectionId/1password/token`; `DELETE /connections/:connectionId/1password` | Replace a 1Password token; disconnect (unlinks its vaults) |
@@ -1007,7 +1159,7 @@ All routes are under `/v1/workspaces/:workspaceId`.
 | `PUT /vault-providers/connections/:connectionId/credentials` | Reconnect without changing linked vault identities |
 | `POST /vault-providers/connections/:connectionId/verify` | Finish pending setup using saved credentials, without replaying a bootstrap token |
 | `DELETE /vault-providers/connections/:connectionId` | Unlink locally and revoke stored access; never delete upstream items |
-| `POST /secret-redactions` | Remove a secret from chosen sessions' stored history (admin; counts only) |
+| `POST /secret-redactions` | Remove a secret from chosen sessions' stored history (admin or Personal owner; counts only) |
 
 Errors use `{error, message, details?}` with the codes in `VaultErrorCode`
 (`packages/contracts/src/vaults.ts`).

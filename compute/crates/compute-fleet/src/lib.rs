@@ -37,7 +37,7 @@ mod scale;
 pub use answers::{AnsweredAt, Next, Op, Outcome, Sends, answered};
 pub use compute_core::{At, SandboxId};
 pub use fence::{Fence, Found, Mutation, Stamp, fence};
-pub use guard::{Guard, GuardAction, GuardStep, Observed, Vms};
+pub use guard::{Group, Guard, GuardAction, GuardStep, Observed, Plan, Vms};
 pub use ids::{ClassId, HostEpoch, HostId, Offers, OwnerEpoch, ShapeKey, ZoneId};
 pub use lease::{Expiry, HostLease, LeaseError, LeaseRecord, LeaseTerms, Renewal};
 pub use own::{Change, Listed, Ownership, Verdict, reconcile};

@@ -3,8 +3,12 @@ import type { ConnectionMetadata } from "@opengeni/sdk";
 import { useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@opengeni/react/ui/button";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { useAppContext } from "@opengeni/react/app/app-context";
-import { DirectModelProviderForm } from "./direct-model-provider-connection";
+import {
+  DIRECT_MODEL_PROVIDER_LABELS,
+  DirectModelProviderForm,
+} from "./direct-model-provider-connection";
 import { applyConnectedModelToNewSessionDraft } from "@opengeni/react/app/lib/model-access-onboarding";
 import {
   invalidateModelSettingsQueries,
@@ -41,7 +45,7 @@ export function DirectModelProviderConnections({
       await client.deleteConnection(workspaceId, connection.id);
       refresh();
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Could not disconnect");
+      toast.error(userErrorText(e, "Could not disconnect"));
     } finally {
       setBusy(false);
     }
@@ -72,10 +76,11 @@ export function DirectModelProviderConnections({
         </div>
       ))}
       {canManage
-        ? (["openai", "azure_openai"] as const).map((provider) => (
+        ? (["openai", "azure_openai", "openai_compatible"] as const).map((provider) => (
             <details key={provider} className="py-3">
               <summary className="cursor-pointer text-sm font-medium">
-                Connect {provider === "openai" ? "OpenAI" : "Azure OpenAI"}
+                Connect {provider === "openai_compatible" ? "an " : ""}
+                {DIRECT_MODEL_PROVIDER_LABELS[provider]}
               </summary>
               <div className="pb-2 pt-4">
                 <DirectModelProviderForm

@@ -568,12 +568,17 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     expect(graph).toEqual({
       memberships: 1,
       personalWorkspaces: 1,
-      workspaceMemberships: 0,
+      // The owner's own row in their Personal workspace, and nothing else.
+      workspaceMemberships: 1,
       controls: 1,
       activations: 1,
       evidence: 1,
       privateSettings: 1,
     });
+    const ownerRows = await owned.admin<Array<{ workspaceId: string; subjectId: string }>>`
+      select workspace_id as "workspaceId", subject_id as "subjectId"
+      from workspace_memberships where account_id = ${organizationId}`;
+    expect(ownerRows).toEqual([{ workspaceId: personalWorkspaceId, subjectId: ownerSubjectId }]);
 
     const session = await owner.createSession(personalWorkspaceId, {
       initialMessage: "Onboarding immediate private session",
@@ -816,6 +821,8 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
         personalWorkspaces: number;
         initialSharedMemberships: number;
         otherPersonalMemberships: number;
+        ownPersonalMemberships: number;
+        personalMembers: number;
         completedIntents: number;
         deliveryAttempts: number;
       }>
@@ -824,7 +831,9 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
         (select count(*)::int from organization_memberships where subject_id = ${invitedSubjectId}) as organizations,
         (select count(*)::int from workspaces where account_id = ${organizationId} and id = ${invitedPersonalWorkspaceId}) as "personalWorkspaces",
         (select count(*)::int from workspace_memberships where subject_id = ${invitedSubjectId} and workspace_id = ${sharedWorkspaceId}) as "initialSharedMemberships",
-        (select count(*)::int from workspace_memberships membership where membership.subject_id = ${invitedSubjectId} and membership.workspace_id in (select personal_workspace_id from organization_memberships where personal_workspace_id is not null)) as "otherPersonalMemberships",
+        (select count(*)::int from workspace_memberships membership where membership.subject_id = ${invitedSubjectId} and membership.workspace_id <> ${invitedPersonalWorkspaceId} and membership.workspace_id in (select personal_workspace_id from organization_memberships where personal_workspace_id is not null)) as "otherPersonalMemberships",
+        (select count(*)::int from workspace_memberships membership where membership.workspace_id = ${invitedPersonalWorkspaceId} and membership.subject_id = ${invitedSubjectId}) as "ownPersonalMemberships",
+        (select count(*)::int from workspace_memberships membership where membership.workspace_id = ${invitedPersonalWorkspaceId}) as "personalMembers",
         (select count(*)::int from organization_user_setup_intents where invitation_id = ${invitation.id} and status = 'completed') as "completedIntents",
         (select count(*)::int from organization_user_setup_delivery_attempts attempt join organization_user_setup_deliveries delivery on delivery.id = attempt.delivery_id where delivery.invitation_id = ${invitation.id}) as "deliveryAttempts"`;
     expect(joined).toEqual({
@@ -832,6 +841,9 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       personalWorkspaces: 1,
       initialSharedMemberships: 1,
       otherPersonalMemberships: 0,
+      // Their own Personal workspace has exactly one member: them.
+      ownPersonalMemberships: 1,
+      personalMembers: 1,
       completedIntents: 1,
       deliveryAttempts: expect.any(Number),
     });

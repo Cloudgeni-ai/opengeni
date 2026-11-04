@@ -6,6 +6,7 @@ import {
   DEFAULT_AGENT_INSTRUCTIONS,
   DEFAULT_TURN_WORKER_SHUTDOWN_GRACE_MS,
   DEFAULT_TURN_WORKER_SHUTDOWN_FORCE_MS,
+  DEFAULT_BILLING_LEGACY_ACCOUNT_IDS,
 } from "./defaults";
 export {
   DEFAULT_OPENROUTER_MODEL_ID,
@@ -16,6 +17,7 @@ export {
   DEFAULT_AGENT_INSTRUCTIONS,
   DEFAULT_TURN_WORKER_SHUTDOWN_GRACE_MS,
   DEFAULT_TURN_WORKER_SHUTDOWN_FORCE_MS,
+  DEFAULT_BILLING_LEGACY_ACCOUNT_IDS,
 } from "./defaults";
 export { managedUserEmailAllowed } from "./managed-user-admission";
 export * from "./realtime-voice-pricing";
@@ -31,6 +33,8 @@ import {
 import {
   WebSearchProviderCredentialsSchema,
   webSearchProviderCredentialsFromEnv,
+  webSearchCreditBillingActive,
+  type WebSearchSettings,
 } from "./web-search";
 import { EnvCreditPromotionPolicy } from "./credit-promotions";
 export {
@@ -42,6 +46,7 @@ import { isRetiredNativeAtlassianTool } from "@opengeni/contracts/atlassian-nati
 import { modelLogoUrl } from "@opengeni/contracts/model-display";
 import {
   directModelConnectionSpec,
+  isDirectModelProviderId,
   BillingMode,
   CAPABILITY_DESCRIPTORS,
   agentConfigDeploymentLimitsFromAllowlist,
@@ -87,6 +92,17 @@ import {
   modelResidencyClaim,
   modelResidencyRouteProblems,
 } from "@opengeni/contracts";
+import {
+  CLAUDE_SUBSCRIPTION_MODEL_ID_PREFIX,
+  CLAUDE_SUBSCRIPTION_PROVIDER_ID,
+  LEGACY_ORGANIZATION_CLAUDE_SUBSCRIPTION_PROVIDER_ID,
+  LEGACY_WORKSPACE_CLAUDE_SUBSCRIPTION_PROVIDER_ID,
+  claudeSubscriptionModelIdForms,
+  claudeSubscriptionUpstreamModelId,
+  isClaudeSubscriptionModelId,
+  isClaudeSubscriptionProviderId,
+  sameModelId,
+} from "@opengeni/contracts/claude-subscription-model-ids";
 import type { CodeSearchDeploymentPolicy } from "@opengeni/contracts/code-search";
 import { CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS } from "@opengeni/codex";
 import {
@@ -340,6 +356,48 @@ export const McpOperationRecoverySchema = z
 export const DEFAULT_MODAL_IMAGE_REF =
   "opengenipublicneuacr.azurecr.io/opengeni-desktop@sha256:5bb54a1a6d0c6e99f058290718e55c13193fde3dcbcb54568ce95ddef0768805";
 
+/**
+ * Whether this account keeps the billing terms from before the app/API split:
+ * any credit pays any use, no own-key platform fee, no newly metered tools.
+ */
+export function isLegacyBillingAccount(
+  settings: Pick<Settings, "billingLegacyAccountIds">,
+  accountId: string | null | undefined,
+): boolean {
+  return (
+    typeof accountId === "string" &&
+    (settings.billingLegacyAccountIds ?? DEFAULT_BILLING_LEGACY_ACCOUNT_IDS).includes(
+      accountId.toLowerCase(),
+    )
+  );
+}
+
+/**
+ * THE single check point where the paid-hosted-tool charges start. True
+ * when the model of a response or turn is billed in Opengeni credits (cost
+ * class `credits`), credit billing is active and the account is not a legacy
+ * billing account. Every new charge depends on it: Opengeni's billed
+ * `web_search`/`web_fetch` replacing hosted search, the list-price charge for
+ * hosted searches a response reports, and the priced Gateway image tool
+ * replacing OpenAI hosted image generation on the deployment key. Turns on
+ * the user's own keys or subscriptions, free models, billing-off deployments
+ * and legacy accounts (CloudGeni's host account) are false and keep today's
+ * free hosted tools, as is every turn when the operator turned the charges
+ * off (`OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING=false`).
+ */
+export function paidHostedToolsChargeCredits(
+  settings: Pick<WebSearchSettings, "billingMode" | "usageLimitsMode"> &
+    Partial<Pick<Settings, "billingLegacyAccountIds" | "paidHostedToolsCreditBilling">>,
+  input: { accountId: string; chargesOpenGeniCredits: boolean },
+): boolean {
+  if (settings.paidHostedToolsCreditBilling === false) return false;
+  const billingLegacyAccountIds = settings.billingLegacyAccountIds ?? [
+    ...DEFAULT_BILLING_LEGACY_ACCOUNT_IDS,
+  ];
+  if (isLegacyBillingAccount({ billingLegacyAccountIds }, input.accountId)) return false;
+  return input.chargesOpenGeniCredits && webSearchCreditBillingActive(settings);
+}
+
 const SettingsSchema = z.object({
   serviceName: z.string().default("opengeni"),
   environment: z.string().default("local"),
@@ -469,6 +527,12 @@ const SettingsSchema = z.object({
   // on the signed-out page and in the Help menu. Unset by default for the same
   // reason as the legal links.
   supportEmail: z.string().trim().email().max(254).optional(),
+  // Optional operator statements the agent's privacy_facts tool reports: where
+  // the app's data (database, files, backups) is hosted, in plain words, and a
+  // published subprocessor list. Unset by default, so a self-hosted deployment
+  // claims nothing and the tool says unknown.
+  dataHostingLocation: z.string().trim().min(1).max(200).optional(),
+  legalSubprocessorsUrl: PublicHttpUrl.optional(),
   publicBaseUrl: z.string().url().optional(),
   // Where other services send webhooks (event sources, the GitHub App's event
   // webhook, MCP Events webhook delivery), when that is a different public
@@ -853,6 +917,12 @@ const SettingsSchema = z.object({
   // pauses event dispatch; stored sources, triggers and events are kept.
   // Env: OPENGENI_EVENT_TRIGGERS_ENABLED.
   eventTriggersEnabled: EnvBoolean.default(false),
+  // The deepest chain of automations waking each other through Opengeni's own
+  // events: a run is one level deeper than the deepest event it carries, and
+  // events that would start a deeper run are left out. It stops accidental
+  // loops; it is not meant to be tuned.
+  // Env: OPENGENI_AUTOMATION_MAX_CHAIN_DEPTH.
+  automationMaxChainDepth: z.coerce.number().int().min(1).max(100).default(3),
   // Per-segment ceiling on agent loop turns (model calls) within a single
   // session turn. Effectively unbounded by default for the same reason as
   // above; the graceful max-turns valve (idle + goal continuation, never a
@@ -868,6 +938,12 @@ const SettingsSchema = z.object({
   // when absent, retain the deployment-level window-minus-reserved-output
   // behavior.
   contextEffectiveWindowTokens: z.coerce.number().int().positive().optional(),
+  // Env: OPENGENI_IDLE_CONTEXT_COMPACTION_ENABLED. When a human/API turn in a
+  // root session ends at its automatic compaction threshold, request the
+  // checkpoint right away (labeled proactive) so it runs while the person is
+  // away instead of in front of their next message. Off restores compaction
+  // only at the next model boundary.
+  idleContextCompactionEnabled: EnvBoolean.default(true),
   // Proactive compaction threshold as a ratio of the model context window.
   // Defaults to 90%: compact as late as possible — retained context beats early
   // headroom now that per-model windows are declared honestly (input-effective,
@@ -1300,6 +1376,13 @@ const SettingsSchema = z.object({
   decisionModelId: z.string().trim().min(1).optional(),
   decisionModelApiKey: z.string().optional(),
   decisionModelBaseUrl: z.string().url().optional(),
+  // How an explicit decision model signs in. `deployment_identity` is for an
+  // Azure OpenAI v1 resource (provider openai with its /openai/v1 base URL):
+  // a Microsoft Entra token for the deployment's own identity, the standard
+  // AZURE_TENANT_ID and AZURE_CLIENT_ID with AZURE_FEDERATED_TOKEN_FILE or
+  // AZURE_CLIENT_SECRET, instead of a static key.
+  // OPENGENI_DECISION_MODEL_AUTH
+  decisionModelAuth: z.enum(["api_key", "deployment_identity"]).default("api_key"),
   // Decision-observability fence. When enabled, the worker emits one
   // bounded, metadata-only adaptive-policy replay record alongside the unchanged
   // sticky-sharded decision. It never changes placement/admission/failover.
@@ -1432,6 +1515,15 @@ const SettingsSchema = z.object({
   azureAuthorityHost: z.string().trim().url().optional(),
   disableOpenaiTracing: EnvBoolean.default(false),
   sandboxBackend: SandboxBackend.default("docker"),
+  /**
+   * The deployment's configured default backend (`OPENGENI_SANDBOX_BACKEND`),
+   * fixed once by getSettings. Per-session code rebinds `sandboxBackend` to a
+   * session's stored backend (`{...settings, sandboxBackend}`); this field
+   * survives that spread, so the host-backend rule can still tell what the
+   * deployment chose. Read it through `deploymentSandboxBackend(settings)`;
+   * hand-built settings without it fall back to `sandboxBackend`.
+   */
+  deploymentSandboxBackend: SandboxBackend.optional(),
   dockerImage: z.string().default("opengeni-sandbox:local"),
   // Explicit deployment contract: the configured base sandbox image contains
   // the verified, self-contained native artifact runtime at its fixed image
@@ -1679,6 +1771,10 @@ const SettingsSchema = z.object({
   // Guaranteed shares below the ceilings above; omitted, the whole ceiling.
   computeMemoryRequestMib: z.coerce.number().int().min(128).max(262_144).optional(),
   computeCpuRequestMillis: z.coerce.number().int().min(10).max(64_000).optional(),
+  // How long each new sandbox's disk is, in MiB; omitted, its image's own
+  // length. Its host books the whole length while it runs, and a disk at rest
+  // holds only what its files use. The control service accepts up to 1 TiB.
+  computeDiskMib: z.coerce.number().int().min(1).max(1_048_576).optional(),
   // The agent gateway's public WebSocket URL (wss://). Compute hosts dial it,
   // and it is the exact audience of their host tokens and sandbox tickets, so
   // it must equal the URL the control service is configured with for Opengeni's team.
@@ -1987,6 +2083,14 @@ const SettingsSchema = z.object({
   documentEmbeddingDimensions: z.coerce.number().int().positive().default(3072),
   documentEmbeddingApiKey: z.string().optional(),
   documentEmbeddingBaseUrl: z.string().url().optional(),
+  // How OpenAI-compatible document embeddings sign in. `deployment_identity`
+  // is for an Azure OpenAI v1 resource (OPENGENI_DOCUMENT_EMBEDDING_BASE_URL
+  // set to its /openai/v1 URL, the deployment name as the model): a Microsoft
+  // Entra token for the deployment's own identity, the standard
+  // AZURE_TENANT_ID and AZURE_CLIENT_ID with AZURE_FEDERATED_TOKEN_FILE or
+  // AZURE_CLIENT_SECRET, instead of a static key.
+  // OPENGENI_DOCUMENT_EMBEDDING_AUTH
+  documentEmbeddingAuth: z.enum(["api_key", "deployment_identity"]).default("api_key"),
   documentEmbeddingBillingMode: z.enum(["usage_only", "shadow", "credits"]).default("usage_only"),
   // Site SQL: optional per-Site Cloudflare storage (one SQLite Durable Object
   // per Site, docs/site-data.md). Off unless enabled here, the gateway's
@@ -2273,6 +2377,37 @@ const SettingsSchema = z.object({
   stripeCreditsProductId: z.string().optional(),
   // Enables subscription service paths only; top-up billing remains independent.
   subscriptionPlansEnabled: EnvBoolean.default(false),
+  // Internal accounts billed on the terms from before the app/API split
+  // (docs/billing-origin.md#internal-accounts-cloudgeni-and-our-team): any
+  // credit pays any use, no own-key platform fee, no newly metered tool
+  // charges. Defaults to DEFAULT_BILLING_LEGACY_ACCOUNT_IDS (CloudGeni's host
+  // account and our own team's organizations); "none" lists no account.
+  billingLegacyAccountIds: z.preprocess(
+    (value) =>
+      typeof value === "string"
+        ? value.trim().toLowerCase() === "none"
+          ? []
+          : value
+              .split(",")
+              .map((id) => id.trim().toLowerCase())
+              .filter(Boolean)
+        : value,
+    z.array(z.string().uuid()).default([...DEFAULT_BILLING_LEGACY_ACCOUNT_IDS]),
+  ),
+  /**
+   * Platform fee on bring-your-own-key use (own API keys; connected
+   * subscriptions pay no fee and need a paid plan of at least $20/month
+   * instead), in basis points of each call's list-price equivalent.
+   * Charged only while credit billing is active, and payable only from paid
+   * credit. 0 turns the fee off.
+   */
+  byokPlatformFeeBps: z.coerce.number().int().min(0).max(10_000).default(500),
+  // On turns whose model Opengeni pays for while credit billing is active,
+  // paid tools the model provider hosts cost credit: Opengeni's billed web
+  // tools replace hosted search (or reported hosted searches are charged) and
+  // the priced Gateway image tool replaces OpenAI hosted image generation on
+  // the deployment key. False restores free hosted search and images.
+  paidHostedToolsCreditBilling: EnvBoolean.default(true),
   mcpServers: z
     .array(
       z.object({
@@ -2575,7 +2710,32 @@ export type DecisionModelSettings = Pick<
   Settings,
   "decisionModelProvider" | "decisionModelId" | "decisionModelApiKey" | "decisionModelBaseUrl"
 > &
+  Partial<
+    Pick<
+      Settings,
+      | "decisionModelAuth"
+      | "azureTenantId"
+      | "azureClientId"
+      | "azureFederatedTokenFile"
+      | "azureClientSecret"
+      | "azureAuthorityHost"
+    >
+  > &
   SideFeatureResidencySettings;
+
+/**
+ * A configured decision model. It signs in with a static key, or with a
+ * Microsoft Entra token for the deployment's own identity (Azure OpenAI only).
+ */
+export type DecisionModelConfiguration =
+  | { provider: "jev" | "openai" | "openrouter"; model: string; apiKey: string; baseUrl?: string }
+  | {
+      provider: "openai";
+      model: string;
+      baseUrl: string;
+      azureEntra: NonNullable<ReturnType<typeof deploymentAzureEntraCredential>>;
+    };
+
 /**
  * Explicit deployment credentials only. Compatibility is code-search-only.
  * Under EU-only inference a decision model whose route is not EU is not
@@ -2585,9 +2745,7 @@ export function decisionModelConfiguration(
   settings: DecisionModelSettings &
     Partial<Pick<Settings, "jevApiKey" | "jevModel" | "jevBaseUrl">>,
   allowLegacyCodeSearch = false,
-):
-  | { provider: "jev" | "openai" | "openrouter"; model: string; apiKey: string; baseUrl?: string }
-  | undefined {
+): DecisionModelConfiguration | undefined {
   const config = unrestrictedDecisionModelConfiguration(settings, allowLegacyCodeSearch);
   return config && sideFeatureRouteAllowed(settings, decisionModelTarget(config))
     ? config
@@ -2625,9 +2783,24 @@ function unrestrictedDecisionModelConfiguration(
   settings: DecisionModelSettings &
     Partial<Pick<Settings, "jevApiKey" | "jevModel" | "jevBaseUrl">>,
   allowLegacyCodeSearch: boolean,
-):
-  | { provider: "jev" | "openai" | "openrouter"; model: string; apiKey: string; baseUrl?: string }
-  | undefined {
+): DecisionModelConfiguration | undefined {
+  if (settings.decisionModelAuth === "deployment_identity") {
+    // Azure OpenAI v1 only: it needs the resource's base URL and the deployment identity.
+    const azureEntra = deploymentAzureEntraCredential(settings);
+    if (
+      settings.decisionModelProvider !== "openai" ||
+      !settings.decisionModelId ||
+      !settings.decisionModelBaseUrl ||
+      !azureEntra
+    )
+      return undefined;
+    return {
+      provider: "openai",
+      model: settings.decisionModelId,
+      baseUrl: settings.decisionModelBaseUrl,
+      azureEntra,
+    };
+  }
   const explicit =
     settings.decisionModelProvider !== undefined ||
     settings.decisionModelId !== undefined ||
@@ -3475,6 +3648,7 @@ export const RegistryProviderKind = z.enum([
   "vercel-gateway-organization",
   "direct-openai-workspace",
   "direct-azure-workspace",
+  "direct-compatible-workspace",
   "direct-openai-organization",
   "direct-azure-organization",
   "openrouter-workspace",
@@ -3485,6 +3659,10 @@ export const RegistryProviderKind = z.enum([
   "claude-subscription-organization",
   "anthropic-workspace",
   "claude-subscription-workspace",
+  // The one Claude subscription provider (`claude/<upstream>` model ids).
+  // The two scoped kinds above are its legacy forms; every form is served by
+  // the same subscription core and the same connections.
+  "claude-subscription",
 ]);
 export type RegistryProviderKind = z.infer<typeof RegistryProviderKind>;
 
@@ -3512,6 +3690,7 @@ const RegistryModelSchema = z
     toolOutputTruncationTokens: z.number().int().positive().optional(),
     reasoningEffort: z.boolean().optional(), // legacy compatibility input/projection
     hostedWebSearch: z.boolean().optional(), // legacy compatibility input/projection
+    hostedWebSearchContextSize: z.enum(["low", "medium", "high"]).optional(),
     capabilities: ModelCapabilitiesV1Schema.optional(),
     pricing: z.union([ModelPricingSchema, ModelPricingScheduleSchema]).optional(),
     // Where this route processes data, overriding the provider's declaration.
@@ -3646,6 +3825,19 @@ const RegistryProviderSchema = z
     models: z.array(RegistryModelSchema).min(1),
   })
   .superRefine((provider, ctx) => {
+    provider.models.forEach((model, index) => {
+      if (model.hostedWebSearchContextSize === undefined) return;
+      const hostedSearchEnabled =
+        model.capabilities?.hostedTools.webSearch.runnable ?? model.hostedWebSearch ?? false;
+      if (provider.api !== "responses" || !hostedSearchEnabled) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["models", index, "hostedWebSearchContextSize"],
+          message:
+            "hostedWebSearchContextSize requires a Responses route with hosted web search enabled",
+        });
+      }
+    });
     if (!operatorDeclaresResidency(provider.kind)) {
       if (provider.residency !== undefined) {
         ctx.addIssue({
@@ -3778,6 +3970,7 @@ const RESERVED_MODEL_PROVIDER_IDS = new Set<string>([
   "organization-claude-subscription",
   "workspace-anthropic",
   "workspace-claude-subscription",
+  CLAUDE_SUBSCRIPTION_PROVIDER_ID,
 ]);
 
 export const ModelCostClass = z.enum(["free", "credits"]);
@@ -4045,11 +4238,7 @@ export const ModelCatalogDocument = z
       });
     }
     document.registryProviders.forEach((provider, providerIndex) => {
-      if (
-        RESERVED_MODEL_PROVIDER_IDS.has(provider.id) ||
-        provider.id.startsWith("workspace-openai-") ||
-        provider.id.startsWith("workspace-azure-openai-")
-      ) {
+      if (RESERVED_MODEL_PROVIDER_IDS.has(provider.id) || isDirectModelProviderId(provider.id)) {
         context.addIssue({
           code: "custom",
           path: ["registryProviders", providerIndex, "id"],
@@ -4486,6 +4675,8 @@ export interface ConfiguredModel {
   toolOutputTruncationTokens?: number | undefined;
   reasoningEffort: boolean;
   hostedWebSearch: boolean;
+  /** Operator route setting; absent preserves the hosted-search SDK default. */
+  hostedWebSearchContextSize?: "low" | "medium" | "high" | undefined;
 }
 
 /**
@@ -5509,6 +5700,106 @@ export function requiredSandboxEnvForBackend(backend: z.infer<typeof SandboxBack
   return (SANDBOX_REQUIRED_ENV[backend] ?? []).map((entry) => entry.env);
 }
 
+// Backends whose boxes run directly on the worker or API host (in-process
+// processes, or the host's Docker daemon). They carry no credentials, so the
+// credential table cannot tell whether an operator chose them: only the
+// configured default backend may select one.
+const HOST_SANDBOX_BACKENDS: ReadonlySet<z.infer<typeof SandboxBackend>> = new Set([
+  "local",
+  "docker",
+]);
+
+/**
+ * Whether boxes on `backend` run directly on the worker or API host (as host
+ * processes, or in the host's Docker daemon) rather than on a remote provider.
+ * Such a backend is served only as the deployment default.
+ */
+export function isHostSandboxBackend(backend: z.infer<typeof SandboxBackend>): boolean {
+  return HOST_SANDBOX_BACKENDS.has(backend);
+}
+
+/**
+ * The deployment's configured default backend, even when `settings` has been
+ * rebound to a session's stored backend for one session's work.
+ */
+export function deploymentSandboxBackend(
+  settings: Pick<Settings, "sandboxBackend" | "deploymentSandboxBackend">,
+): z.infer<typeof SandboxBackend> {
+  return settings.deploymentSandboxBackend ?? settings.sandboxBackend;
+}
+
+/**
+ * Whether a box on `backend` must not be built here: it is a host backend
+ * (`local`, `docker`) that this deployment does not serve, judged by
+ * `sandboxBackendServed` against the deployment's own default rather than a
+ * session's rebound `sandboxBackend`. Remote providers are never refused here;
+ * they keep their own credential validation.
+ */
+export function hostSandboxBackendRefused(
+  settings: Settings,
+  backend: z.infer<typeof SandboxBackend>,
+): boolean {
+  if (!HOST_SANDBOX_BACKENDS.has(backend)) return false;
+  const deploymentBackend = deploymentSandboxBackend(settings);
+  return !sandboxBackendServed({ ...settings, sandboxBackend: deploymentBackend }, backend);
+}
+
+/** The user-facing reason a session on a refused host backend gets no box. */
+export const UNSERVED_HOST_SANDBOX_BACKEND_MESSAGE =
+  "This chat is set up to run its sandbox directly on the server, which this deployment " +
+  "does not allow, so no sandbox was started and nothing ran. Start a new chat to use " +
+  "this deployment's sandbox.";
+
+/**
+ * Whether this deployment serves NEW sessions on `backend`. The single source
+ * of truth for every session-creation path (REST/SDK, `session_create`,
+ * scheduled and event-triggered runs):
+ *
+ * - the configured default (`OPENGENI_SANDBOX_BACKEND`) is always served;
+ * - `none` (a boxless session) is always served, it executes nothing;
+ * - `selfhosted` is served when Connected Machines are enabled;
+ * - a provider backend is served when the operator configured its credentials
+ *   (every `SANDBOX_REQUIRED_ENV` entry is set), the same table that boot
+ *   validation requires for the default backend;
+ * - a host backend (`local`, `docker`) is served only as the default.
+ *
+ * Existing sessions and shared-box children keep their stored backend; this
+ * gate only decides what a create request may newly select.
+ */
+export function sandboxBackendServed(
+  settings: Settings,
+  backend: z.infer<typeof SandboxBackend>,
+): boolean {
+  if (backend === settings.sandboxBackend || backend === "none") return true;
+  if (backend === "selfhosted") return settings.sandboxSelfhostedEnabled === true;
+  if (HOST_SANDBOX_BACKENDS.has(backend)) return false;
+  const required = SANDBOX_REQUIRED_ENV[backend];
+  if (!required || required.length === 0) return false;
+  return required.every((entry) => {
+    const value = settings[entry.field];
+    return typeof value === "string"
+      ? value.trim().length > 0
+      : value !== undefined && value !== null;
+  });
+}
+
+/** Every backend this deployment serves for new sessions, in enum order. */
+export function servedSandboxBackends(settings: Settings): z.infer<typeof SandboxBackend>[] {
+  return SandboxBackend.options.filter((backend) => sandboxBackendServed(settings, backend));
+}
+
+/** The actionable create-time error for a backend this deployment does not serve. */
+export function unservedSandboxBackendMessage(
+  settings: Settings,
+  backend: z.infer<typeof SandboxBackend>,
+): string {
+  return (
+    `sandboxBackend "${backend}" is not available in this deployment. ` +
+    `Available: ${servedSandboxBackends(settings).join(", ")}. ` +
+    `Omit sandboxBackend to use the deployment default ("${settings.sandboxBackend}").`
+  );
+}
+
 function objectStorageConfiguredForWorkspaceArchives(settings: Settings): boolean {
   switch (settings.objectStorageBackend) {
     case "azure-blob":
@@ -5616,6 +5907,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     legalPrivacyPolicyUrl: optional("OPENGENI_LEGAL_PRIVACY_POLICY_URL"),
     legalTermsOfServiceUrl: optional("OPENGENI_LEGAL_TERMS_OF_SERVICE_URL"),
     supportEmail: optional("OPENGENI_SUPPORT_EMAIL"),
+    dataHostingLocation: optional("OPENGENI_DATA_HOSTING_LOCATION"),
+    legalSubprocessorsUrl: optional("OPENGENI_LEGAL_SUBPROCESSORS_URL"),
     publicBaseUrl: optional("OPENGENI_PUBLIC_BASE_URL"),
     webhookBaseUrl: optional("OPENGENI_WEBHOOK_BASE_URL"),
     documentationUrl: optional("OPENGENI_DOCUMENTATION_URL"),
@@ -5726,9 +6019,11 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     sessionUsageLimitsEnabled: optional("OPENGENI_SESSION_USAGE_LIMITS_ENABLED"),
     slackWorkspaceRoutingEnabled: optional("OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED"),
     eventTriggersEnabled: optional("OPENGENI_EVENT_TRIGGERS_ENABLED"),
+    automationMaxChainDepth: optional("OPENGENI_AUTOMATION_MAX_CHAIN_DEPTH"),
     agentMaxModelCallsPerTurn: optional("OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN"),
     contextWindowTokens: optional("OPENGENI_CONTEXT_WINDOW_TOKENS"),
     contextEffectiveWindowTokens: optional("OPENGENI_CONTEXT_EFFECTIVE_WINDOW_TOKENS"),
+    idleContextCompactionEnabled: optional("OPENGENI_IDLE_CONTEXT_COMPACTION_ENABLED"),
     contextCompactionThresholdRatio: optional("OPENGENI_COMPACTION_THRESHOLD_RATIO"),
     contextReservedOutputTokens: optional("OPENGENI_CONTEXT_RESERVED_OUTPUT_TOKENS"),
     contextAutoCompactThresholdTokens: optional("OPENGENI_CONTEXT_AUTO_COMPACT_THRESHOLD_TOKENS"),
@@ -5857,6 +6152,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     decisionModelId: optional("OPENGENI_DECISION_MODEL_ID"),
     decisionModelApiKey: optional("OPENGENI_DECISION_MODEL_API_KEY"),
     decisionModelBaseUrl: optional("OPENGENI_DECISION_MODEL_BASE_URL"),
+    decisionModelAuth: optional("OPENGENI_DECISION_MODEL_AUTH"),
     codexFleetPolicyShadowEnabled: optional("OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED"),
     subscriptionCoreShadowEnabled: optional("OPENGENI_SUBSCRIPTION_CORE_SHADOW_ENABLED"),
     subscriptionCrossProviderFailoverEnabled: optional(
@@ -6012,6 +6308,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     computeMemoryMib: optional("OPENGENI_COMPUTE_MEMORY_MIB"),
     computeMemoryRequestMib: optional("OPENGENI_COMPUTE_MEMORY_REQUEST_MIB"),
     computeCpuRequestMillis: optional("OPENGENI_COMPUTE_CPU_REQUEST_MILLIS"),
+    computeDiskMib: optional("OPENGENI_COMPUTE_DISK_MIB"),
     computeLinkUrl: optional("OPENGENI_COMPUTE_LINK_URL"),
     computeAgentReadyTimeoutMs: optional("OPENGENI_COMPUTE_AGENT_READY_TIMEOUT_MS"),
     sandboxOwnershipEnabled: optional("OPENGENI_SANDBOX_OWNERSHIP_ENABLED"),
@@ -6086,6 +6383,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     documentEmbeddingDimensions: optional("OPENGENI_DOCUMENT_EMBEDDING_DIMENSIONS"),
     documentEmbeddingApiKey: optional("OPENGENI_DOCUMENT_EMBEDDING_API_KEY"),
     documentEmbeddingBaseUrl: optional("OPENGENI_DOCUMENT_EMBEDDING_BASE_URL"),
+    documentEmbeddingAuth: optional("OPENGENI_DOCUMENT_EMBEDDING_AUTH"),
     documentEmbeddingBillingMode: optional("OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE"),
     sitesCloudflareStorageEnabled: optional("OPENGENI_SITES_CLOUDFLARE_STORAGE_ENABLED"),
     sitesGatewayInternalOrigin: optional("OPENGENI_SITES_GATEWAY_INTERNAL_ORIGIN"),
@@ -6271,11 +6569,15 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     stripeWebhookSecret: optional("OPENGENI_STRIPE_WEBHOOK_SECRET"),
     stripeCreditsProductId: optional("OPENGENI_STRIPE_CREDITS_PRODUCT_ID"),
     subscriptionPlansEnabled: optional("OPENGENI_SUBSCRIPTION_PLANS_ENABLED"),
+    billingLegacyAccountIds: optional("OPENGENI_BILLING_LEGACY_ACCOUNT_IDS"),
+    byokPlatformFeeBps: optional("OPENGENI_BYOK_PLATFORM_FEE_BPS"),
+    paidHostedToolsCreditBilling: optional("OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING"),
     mcpServers: parseMcpServers(optional("OPENGENI_MCP_SERVERS")),
   };
   const parsed = SettingsSchema.parse(raw);
   const settings = {
     ...parsed,
+    deploymentSandboxBackend: parsed.sandboxBackend,
     sandboxIdleGraceMs:
       raw.sandboxIdleGraceMs === undefined && parsed.sandboxBackend === "modal"
         ? Math.min(60_000, Math.floor((parsed.modalTimeoutSeconds * 1000) / 2))
@@ -6408,10 +6710,13 @@ const EDITABLE_ARTIFACT_EXPORT_TOOLS: readonly FirstPartyMcpToolNameType[] = [
   "editable_artifact_export_status",
 ];
 
-/** Tools that read event sources and events; they exist only where event triggers run. */
+/** Tools for event sources and events; they exist only where event triggers run. */
 const EVENT_TRIGGER_TOOLS: readonly FirstPartyMcpToolNameType[] = [
   "event_sources_list",
   "events_get",
+  "event_sources_create_webhook",
+  "event_sources_update",
+  "event_sources_delete",
 ];
 
 /**
@@ -7348,7 +7653,10 @@ function configuredRegistryProviders(settings: Settings): InternalRegistryProvid
   return injected;
 }
 
-/** Customer-owned OpenAI/Azure routes, bound to immutable connection identity. */
+/**
+ * Customer-owned OpenAI, Azure OpenAI and OpenAI-compatible routes, each bound
+ * to one immutable workspace connection identity.
+ */
 export function withDirectModelProviders(
   settings: Settings,
   connections: readonly {
@@ -7363,13 +7671,35 @@ export function withDirectModelProviders(
   }[],
 ): Settings {
   const providers = parseModelProvidersJson(settings.modelProvidersJson).filter(
-    (provider) =>
-      !provider.id.startsWith("workspace-openai-") &&
-      !provider.id.startsWith("workspace-azure-openai-"),
+    (provider) => !isDirectModelProviderId(provider.id),
   );
   for (const connection of connections) {
     const spec = directModelConnectionSpec(connection);
     if (!spec) continue;
+    if (spec.provider === "openai_compatible") {
+      // A workspace's own OpenAI-compatible server: text in and out with
+      // function calling over SSE, the capabilities every such API shares.
+      // Its requests are DNS-pinned to public addresses by the runtime.
+      providers.push({
+        kind: "direct-compatible-workspace",
+        id: spec.providerId,
+        label: spec.label ?? new URL(spec.baseUrl).hostname,
+        api: spec.api ?? "chat",
+        wireProfile: "openai",
+        baseUrl: spec.baseUrl,
+        ...(connection.apiKey ? { apiKey: connection.apiKey } : {}),
+        models: [
+          {
+            id: spec.modelId,
+            upstreamModelId: spec.model,
+            label: spec.model,
+            capabilities: openRouterCustomModelCapabilities(settings),
+            toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
+          },
+        ],
+      });
+      continue;
+    }
     providers.push({
       kind: spec.provider === "openai" ? "direct-openai-workspace" : "direct-azure-workspace",
       id: spec.providerId,
@@ -8209,10 +8539,12 @@ function registryCredentialSource(provider: InternalRegistryProvider): Credentia
       return { kind: "connected_subscription", provider: "xai" };
     case "claude-subscription-workspace":
     case "claude-subscription-organization":
+    case "claude-subscription":
       return { kind: "connected_subscription", provider: "claude" };
     case "vercel-gateway-workspace":
     case "direct-openai-workspace":
     case "direct-azure-workspace":
+    case "direct-compatible-workspace":
     case "openrouter-workspace":
     case "opper-workspace":
     case "anthropic-workspace":
@@ -8245,10 +8577,12 @@ function registryBilling(provider: InternalRegistryProvider): BillingAttribution
     case "xai-subscription":
     case "claude-subscription-workspace":
     case "claude-subscription-organization":
+    case "claude-subscription":
       return { upstreamPayer: "connected_subscription", metering: "external" };
     case "vercel-gateway-workspace":
     case "direct-openai-workspace":
     case "direct-azure-workspace":
+    case "direct-compatible-workspace":
     case "openrouter-workspace":
     case "opper-workspace":
     case "anthropic-workspace":
@@ -8390,6 +8724,7 @@ export function registryModelResidency(
       );
     case "claude-subscription-workspace":
     case "claude-subscription-organization":
+    case "claude-subscription":
       return builtInResidencyRule(
         "global",
         "subscription",
@@ -8439,6 +8774,12 @@ export function registryModelResidency(
         "unknown",
         "unknown",
         "The connection does not record the Azure deployment type, which can be GlobalStandard.",
+      );
+    case "direct-compatible-workspace":
+      return builtInResidencyRule(
+        "unknown",
+        "unknown",
+        "A workspace's own OpenAI-compatible endpoint; where it processes data is not recorded.",
       );
     default: {
       const _exhaustive: never = provider.kind;
@@ -8694,6 +9035,9 @@ function definitionVersionFor(
     // changing it; it is intentionally not a second executable-definition
     // freeze inside TurnExecutionPolicyV1.
     ...(model.requestPolicy ? { requestPolicy: model.requestPolicy } : {}),
+    ...(model.hostedWebSearchContextSize === undefined
+      ? {}
+      : { hostedWebSearchContextSize: model.hostedWebSearchContextSize }),
     pricing: model.pricing ?? null,
     // Where an operator declares a route processes data is executable
     // identity: moving it fails accepted turns instead of silently moving them.
@@ -9192,6 +9536,11 @@ export function policyProviderIdForModel(settings: Settings, modelId: string): s
   if (canonicalModelId.startsWith(XAI_SUBSCRIPTION_MODEL_ID_PREFIX)) {
     return XAI_SUBSCRIPTION_PROVIDER_ID;
   }
+  // A `claude/` id the catalog does not resolve still names a Claude
+  // subscription model, never the built-in fallback.
+  if (canonicalModelId.startsWith(CLAUDE_SUBSCRIPTION_MODEL_ID_PREFIX)) {
+    return CLAUDE_SUBSCRIPTION_PROVIDER_ID;
+  }
   if (canonicalModelId.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)) {
     return WORKSPACE_GATEWAY_PROVIDER_ID;
   }
@@ -9226,6 +9575,7 @@ const NON_CREDIT_POLICY_PROVIDER_IDS = new Set<string>([
   "organization-anthropic",
   "workspace-claude-subscription",
   "organization-claude-subscription",
+  CLAUDE_SUBSCRIPTION_PROVIDER_ID,
 ]);
 
 /**
@@ -9245,13 +9595,13 @@ export function policyChargesCreditsForModel(settings: Settings, modelId: string
   if (configured) return configured.cost === "credits";
   if (canonicalModelId.startsWith(CODEX_MODEL_ID_PREFIX)) return false;
   if (canonicalModelId.startsWith(XAI_SUBSCRIPTION_MODEL_ID_PREFIX)) return false;
+  if (isClaudeSubscriptionModelId(canonicalModelId)) return false;
   const slash = canonicalModelId.indexOf("/");
   const providerPrefix = slash > 0 ? canonicalModelId.slice(0, slash) : "";
   if (
     NON_CREDIT_POLICY_PROVIDER_IDS.has(providerPrefix) ||
-    // Direct workspace OpenAI / Azure OpenAI keys (`workspace-openai-<id>/…`).
-    providerPrefix.startsWith("workspace-openai-") ||
-    providerPrefix.startsWith("workspace-azure-openai-")
+    // A workspace's own direct model connections (`workspace-openai-<id>/…`).
+    isDirectModelProviderId(providerPrefix)
   ) {
     return false;
   }
@@ -9484,6 +9834,9 @@ export function configuredModels(
             : { toolOutputTruncationTokens: model.toolOutputTruncationTokens }),
           reasoningEffort: capabilities.reasoning.runnable,
           hostedWebSearch: capabilities.hostedTools.webSearch.runnable,
+          ...(model.hostedWebSearchContextSize === undefined
+            ? {}
+            : { hostedWebSearchContextSize: model.hostedWebSearchContextSize }),
         }),
       );
     }
@@ -9812,8 +10165,16 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
   const catalogSettings = settingsForTurnExecutionPolicy(settings, parsed.productModelId);
   const canonicalExpectedModel = canonicalizeConfiguredModelId(catalogSettings, expected.modelId);
   const expectedLatencyMode = expected.latencyMode ?? parsed.latencyMode;
+  // A Claude subscription policy may name its model in any id form (an older
+  // or newer release accepted it); every form is the same model.
+  const claudeForms =
+    isClaudeSubscriptionProviderId(parsed.providerId) &&
+    isClaudeSubscriptionModelId(parsed.productModelId);
+  const isAcceptedProductModel = (modelId: string) =>
+    modelId === parsed.productModelId ||
+    (claudeForms && sameModelId(modelId, parsed.productModelId));
   if (
-    parsed.productModelId !== canonicalExpectedModel ||
+    !isAcceptedProductModel(canonicalExpectedModel) ||
     parsed.reasoningEffort !== expected.reasoningEffort ||
     parsed.latencyMode !== expectedLatencyMode
   ) {
@@ -9824,15 +10185,18 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
   assertLatencyModeRunnable(catalogSettings, parsed.productModelId, parsed.latencyMode);
   if (
     parsed.requestedModelId !== null &&
-    canonicalizeConfiguredModelId(catalogSettings, parsed.requestedModelId) !==
-      parsed.productModelId
+    !isAcceptedProductModel(canonicalizeConfiguredModelId(catalogSettings, parsed.requestedModelId))
   ) {
     throw new Error("Turn execution policy requested model does not match its product model");
   }
-  const resolved = resolveModelProvider(catalogSettings, parsed.productModelId);
-  if (!resolved) {
+  const executable = resolveModelProvider(catalogSettings, parsed.productModelId);
+  if (!executable) {
     throw new Error("Turn execution policy model is no longer configured");
   }
+  // The definition the policy froze, in the policy's own id form.
+  const resolved = claudeForms
+    ? claudeSubscriptionPolicyForm(executable, parsed.productModelId, parsed.providerId)
+    : executable;
   // The individual-account cutover corrects subscription accounting labels.
   // Preserve an already accepted legacy policy only if its complete original
   // executable digest matches; this exception cannot compose with other drift.
@@ -9895,10 +10259,64 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
   if (!definitionVersionMatches && !legacyClaudeAccountingMatches) {
     throw new TurnExecutionPolicyDefinitionMismatchError();
   }
+  const accepted = configuredModelForAcceptedTurnExecutionPolicy(
+    resolved.model,
+    resolved.provider,
+    parsed,
+  );
   return {
     policy: parsed,
-    provider: resolved.provider,
-    model: configuredModelForAcceptedTurnExecutionPolicy(resolved.model, resolved.provider, parsed),
+    provider: executable.provider,
+    model:
+      resolved === executable
+        ? accepted
+        : {
+            ...accepted,
+            id: executable.model.id,
+            aliases: executable.model.aliases,
+            providerId: executable.model.providerId,
+            providerLabel: executable.model.providerLabel,
+          },
+  };
+}
+
+/** The registry kind of each Claude subscription provider id form. */
+function claudeSubscriptionProviderKind(providerId: string): RegistryProviderKind {
+  return providerId === LEGACY_WORKSPACE_CLAUDE_SUBSCRIPTION_PROVIDER_ID
+    ? "claude-subscription-workspace"
+    : providerId === LEGACY_ORGANIZATION_CLAUDE_SUBSCRIPTION_PROVIDER_ID
+      ? "claude-subscription-organization"
+      : "claude-subscription";
+}
+
+/**
+ * A configured Claude subscription model restated in another id form (the
+ * model id, provider id and registry kind an accepted policy names). Every
+ * form shares the same executable definition, so a policy accepted under
+ * one form verifies against the model configured under another; nothing
+ * else of the definition changes.
+ */
+function claudeSubscriptionPolicyForm(
+  resolved: { provider: ResolvedModelProvider; model: ConfiguredModel },
+  modelId: string,
+  providerId: string,
+): { provider: ResolvedModelProvider; model: ConfiguredModel } {
+  if (
+    !isClaudeSubscriptionProviderId(resolved.provider.id) ||
+    (resolved.model.id === modelId && resolved.provider.id === providerId)
+  ) {
+    return resolved;
+  }
+  const provider = {
+    ...resolved.provider,
+    id: providerId,
+    kind: claudeSubscriptionProviderKind(providerId),
+  };
+  const { definitionVersion: _definitionVersion, ...model } = resolved.model;
+  const restated = { ...model, id: modelId, providerId, aliases: [] };
+  return {
+    provider,
+    model: { ...restated, definitionVersion: definitionVersionFor(restated, provider) },
   };
 }
 
@@ -10016,6 +10434,7 @@ function reviewedProviderModelPricing(
     case "anthropic-organization":
     case "claude-subscription-workspace":
     case "claude-subscription-organization":
+    case "claude-subscription":
       if (claudeNativeModelProfile(upstream)) {
         priceId = upstream;
         nativeClaude = true;
@@ -10521,6 +10940,7 @@ function nativeClaudeListWriteContext(
       provider.kind === "anthropic-organization" ||
       provider.kind === "claude-subscription-workspace" ||
       provider.kind === "claude-subscription-organization" ||
+      provider.kind === "claude-subscription" ||
       (provider.kind === "api-key" &&
         provider.baseUrl.replace(/\/$/u, "") === "https://api.anthropic.com/v1");
     const published = reviewedModelListPricing[upstream]?.default;
@@ -11050,32 +11470,36 @@ export function hasGitCredentialRepositorySelection(
 /**
  * TOKEN-BROKER (B1) parity: the STABLE git-auth POINTER environment a
  * repo-attached run declares — GIT_ASKPASS (a fixed path under HOME; the script
- * itself is provisioned at box setup), GIT_TERMINAL_PROMPT, and the GitHub-App
- * bot identity fallbacks. NO rotating value rides here (the token lives in the
- * file behind the askpass), so the layer is attach-reproducible and MUST be
- * applied identically by the worker turn (sandboxEnvironmentForRun) AND every
- * API-direct attach surface that can cold-create the box (viewer attach,
- * channel-A ops). A box cold-created WITHOUT this layer kills the next repo
- * turn: the turn's manifest declares these keys, the box's env lacks them, and
- * the SDK's provided-session guard throws "Live sandbox sessions cannot change
- * manifest environment variables" (observed live: an open session page's viewer
- * attach won the cold-create race and the first turn died).
+ * itself is provisioned at box setup) and GIT_TERMINAL_PROMPT. NO rotating value
+ * rides here (the token lives in the file behind the askpass), so the layer is
+ * attach-reproducible and MUST be applied identically by the worker turn
+ * (sandboxEnvironmentForRun) AND every API-direct attach surface that can
+ * cold-create the box (viewer attach, channel-A ops). A box cold-created
+ * WITHOUT this layer kills the next repo turn: the turn's manifest declares
+ * these keys, the box's env lacks them, and the SDK's provided-session guard
+ * throws "Live sandbox sessions cannot change manifest environment variables"
+ * (observed live: an open session page's viewer attach won the cold-create race
+ * and the first turn died).
  *
- * Mutates and returns `environment`. Identity fallbacks preserve values already
- * present (the deployment git-identity allowlist wins over the bot identity).
+ * Commit identity is deliberately NOT part of this layer. One session can mix
+ * repositories that commit as different identities (the GitHub App bot and the
+ * person's own GitHub account), and a live box keeps its creation-time manifest
+ * env for its whole life, so a box-wide GIT_AUTHOR_* value would be both wrong
+ * for mixed sessions and frozen to whichever surface cold-created the box. The
+ * repository-clone hook writes each repository's identity into that
+ * repository's local Git config instead. Only a deployment-configured identity
+ * (`collectGitIdentityEnvironment`, part of the stable base) remains box-wide,
+ * as the default for repositories without their own identity.
+ *
+ * Mutates and returns `environment`.
  */
 export function applyGitAuthPointerEnvironment(
   environment: Record<string, string>,
-  identity: { name: string; email: string } | null,
+  /** @deprecated Ignored: commit identity is per repository, written by the clone hook. */
+  _identity?: { name: string; email: string } | null,
 ): Record<string, string> {
   environment.GIT_ASKPASS = `${environment.HOME ?? "/workspace"}/.opengeni/askpass`;
   environment.GIT_TERMINAL_PROMPT = "0";
-  if (identity) {
-    environment.GIT_AUTHOR_NAME = environment.GIT_AUTHOR_NAME || identity.name;
-    environment.GIT_AUTHOR_EMAIL = environment.GIT_AUTHOR_EMAIL || identity.email;
-    environment.GIT_COMMITTER_NAME = environment.GIT_COMMITTER_NAME || identity.name;
-    environment.GIT_COMMITTER_EMAIL = environment.GIT_COMMITTER_EMAIL || identity.email;
-  }
   return environment;
 }
 
@@ -11503,6 +11927,17 @@ function positiveInt(value: unknown): number {
  */
 export const FIRST_PARTY_MCP_SETUP_TIMEOUT_MS = 30_000;
 
+/**
+ * Call bound for Opengeni's own tools. The API bounds each of them itself;
+ * some, like publishing a large file, rightly take minutes. The client's
+ * 60-second default gave up on those while the API went on to finish them,
+ * leaving the agent an ambiguous timeout for work that succeeded. Four
+ * minutes stays inside the API server's 255-second idle timeout, which ends a
+ * response that sends nothing for longer. A cancelled turn still aborts a
+ * call at once.
+ */
+export const FIRST_PARTY_MCP_CALL_TIMEOUT_MS = 4 * 60_000;
+
 function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
   const existing = settings.mcpServers.filter((server) => server.id !== "opengeni");
   const firstPartyMcpUrl = firstPartyMcpServerUrl(settings);
@@ -11527,6 +11962,7 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
       // permission-invariant tool and docs is already uncached, so both stay
       // safe to cache / leave as-is.)
       cacheToolsList: false,
+      timeoutMs: FIRST_PARTY_MCP_CALL_TIMEOUT_MS,
       setupTimeoutMs: FIRST_PARTY_MCP_SETUP_TIMEOUT_MS,
       // App actions act as a person. The worker decides per call whether one
       // waits for the person's confirmation in the chat (a change without full
@@ -12619,6 +13055,7 @@ export function validateModelCatalogSettings(
       provider.kind === "vercel-gateway-organization" ||
       provider.kind === "direct-openai-workspace" ||
       provider.kind === "direct-azure-workspace" ||
+      provider.kind === "direct-compatible-workspace" ||
       provider.kind === "direct-openai-organization" ||
       provider.kind === "direct-azure-organization" ||
       provider.kind === "openrouter-workspace" ||
@@ -12629,6 +13066,7 @@ export function validateModelCatalogSettings(
       provider.kind === "anthropic-workspace" ||
       provider.kind === "claude-subscription-workspace" ||
       provider.kind === "claude-subscription-organization" ||
+      provider.kind === "claude-subscription" ||
       provider.kind === "xai-subscription"
     ) {
       throw new Error(
@@ -13107,11 +13545,10 @@ const CLAUDE_NATIVE_MODEL_PROFILES: Readonly<
       autoCompactTokenLimit?: number;
       prefixBoundThinking?: boolean;
       /**
-       * The model writes its notes for the person between tool calls as
+       * The model may write its notes for the person between tool calls as
        * progress-update `thinking` blocks instead of `text` blocks. Requests
-       * use `thinking.display: "updates"` so those blocks, and only those,
-       * carry readable text (Anthropic's documented way to tell them apart
-       * from reasoning).
+       * ask for summarized thinking, so such a note comes back only as a
+       * summary; its signature tells it apart from reasoning.
        */
       progressUpdates?: boolean;
     }>
@@ -13269,7 +13706,61 @@ export function withClaudeConnectionCatalog(
       }),
     });
   }
-  return { ...settings, modelProvidersJson: JSON.stringify(providers) };
+  return {
+    ...settings,
+    modelProvidersJson: JSON.stringify(withClaudeSubscriptionModelAliases(providers)),
+  };
+}
+
+/**
+ * Every id form of one Claude subscription model names one configured model
+ * (docs/design/subscription-model-ids-without-pools.md): the workspace
+ * list's model when the workspace list defines that upstream model, else the
+ * organization list's. That model accepts the canonical `claude/<upstream>`
+ * id and any legacy form no configured model owns, so a stored id in any
+ * form resolves wherever the model is offered. Recomputed whenever a Claude
+ * list changes, so the result does not depend on overlay order.
+ */
+function withClaudeSubscriptionModelAliases<
+  Provider extends {
+    id: string;
+    models: Array<{ id: string; aliases?: string[] | undefined }>;
+  },
+>(providers: Provider[]): Provider[] {
+  const claudeProviders = providers.filter((provider) =>
+    isClaudeSubscriptionProviderId(provider.id),
+  );
+  if (claudeProviders.length === 0) return providers;
+  const ownedIds = new Set(
+    claudeProviders.flatMap((provider) => provider.models.map((model) => model.id)),
+  );
+  const workspaceUpstreams = new Set(
+    claudeProviders
+      .filter((provider) => provider.id === LEGACY_WORKSPACE_CLAUDE_SUBSCRIPTION_PROVIDER_ID)
+      .flatMap((provider) =>
+        provider.models.map((model) => claudeSubscriptionUpstreamModelId(model.id)),
+      ),
+  );
+  return providers.map((provider) =>
+    isClaudeSubscriptionProviderId(provider.id)
+      ? {
+          ...provider,
+          models: provider.models.map((model) => {
+            const upstream = claudeSubscriptionUpstreamModelId(model.id);
+            const own =
+              upstream !== null &&
+              (provider.id !== LEGACY_ORGANIZATION_CLAUDE_SUBSCRIPTION_PROVIDER_ID ||
+                !workspaceUpstreams.has(upstream));
+            return {
+              ...model,
+              aliases: own
+                ? claudeSubscriptionModelIdForms(model.id).filter((id) => !ownedIds.has(id))
+                : [],
+            };
+          }),
+        }
+      : provider,
+  );
 }
 export function withClaudeConnectionCredential(
   settings: Settings,

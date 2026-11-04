@@ -11,6 +11,18 @@ import {
 import { maskSecretValues, type SecretValueMaskOptions } from "./secret-value-masking";
 
 export const INTERACTION_PROTOCOL_VERSION = 1 as const;
+/** Controller-only display metadata. Never a routing or authorization identity. */
+export const ComputerCursorIdentity = /* @__PURE__ */ defineSchema(() =>
+  z.strictObject({
+    label: z.string().min(1).max(200),
+    avatarPng: z
+      .string()
+      .max(48 * 1024)
+      .regex(/^[A-Za-z0-9+/]*={0,2}$/u)
+      .optional(),
+  }),
+);
+export type ComputerCursorIdentity = z.infer<typeof ComputerCursorIdentity>;
 export const BROWSER_CONTROL_PROTOCOL_VERSION = INTERACTION_PROTOCOL_VERSION;
 export const BROWSER_CONTROL_WEBSOCKET_PROTOCOL = "opengeni.browser.v1" as const;
 export const COMPUTER_CONTROL_WEBSOCKET_PROTOCOL = "opengeni.computer.v1" as const;
@@ -2339,8 +2351,9 @@ export const ComputerLocator = /* @__PURE__ */ defineSchema(() =>
 );
 export type ComputerLocator = z.infer<typeof ComputerLocator>;
 
-/** Web-platform permissions which a managed browser can set for the exact
- * top-level origin currently fenced by a BrowserActionCommand. Names remain
+/** Web-platform permissions which a browser can set for the exact top-level
+ * origin currently fenced by a BrowserActionCommand (attached Chrome: camera,
+ * microphone, geolocation and notifications only). Names remain
  * provider-neutral; drivers map them to their native permission descriptors. */
 export const BrowserPermission = /* @__PURE__ */ defineSchema(() =>
   z.enum([
@@ -3371,6 +3384,12 @@ export type BrowserActionResolvedTarget = z.infer<typeof BrowserActionResolvedTa
  * and callers that do not send it receive receipts without the field. */
 export const BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER = "receiptTargets";
 
+/** Query parameter by which a caller tells a browser controller it can take
+ * a created session with no observation (`observation: null`): one that
+ * continued in the person's own browser with no tab of its own. Controllers
+ * that predate it ignore it; callers that do not send it get a new tab. */
+export const BROWSER_SESSION_NO_OBSERVATION_PARAMETER = "acceptsNoObservation";
+
 /** Something an action did that its completed state alone does not say. A
  * `network_busy` note is a network_idle wait on a page that loaded but whose
  * network never went quiet (it keeps polling or holds requests open): the wait
@@ -3495,6 +3514,9 @@ export const ComputerSessionCapabilities = /* @__PURE__ */ defineSchema(() =>
       /** Accepts a ComputerActionBatch as one operation. */
       actionBatches: primitives.optionalBoolean,
       parallelApps: primitives.boolean,
+      /** A focus action brings a target's window to the front. Absent means
+       * not reported. */
+      targetFocus: primitives.optionalBoolean,
     })
     .strict(),
 );
@@ -4341,16 +4363,16 @@ export function withoutInteractionSecretValues<T extends { secretValues?: unknow
 
 export const INTERACTION_REDACTED_SECRET = "[secret]";
 /** Values shorter than this are not searched for: they would redact noise. */
-export const INTERACTION_MIN_REDACTED_SECRET_CHARS = 4;
+export const INTERACTION_MIN_REDACTED_SECRET_CHARS = 3;
 
 /** Identifier-like keys keep their strings untouched (generations, refs,
  * digests, image payloads, timestamps): redacting inside them would corrupt
  * the result rather than protect anything. URLs are text: a page can put a
- * typed value into its address. */
+ * typed value into its address, though an address keeps its host and port. */
 const NON_TEXT_KEY = /^(id|ref|data|digest|mimeType|type)$|(Id|Ids|Ref|Generation|Digest|At)$/u;
 
 /** How browser and desktop results are masked: the shared known-value engine
- * with the `[secret]` marker, a four-character minimum (typed values are
+ * with the `[secret]` marker, a three-character minimum (including CVCs; typed values are
  * often short) for values, their lines and clipped starts (at the end of any
  * text too), and identifier keys left alone. */
 export const INTERACTION_SECRET_MASK_OPTIONS: SecretValueMaskOptions = {
@@ -4359,11 +4381,21 @@ export const INTERACTION_SECRET_MASK_OPTIONS: SecretValueMaskOptions = {
   lines: "all",
   // Typed values are short: every form (lines, percent-encoded) may be clipped.
   clippedForms: "all",
-  clippedMinChars: INTERACTION_MIN_REDACTED_SECRET_CHARS,
+  // A complete CVC may have three digits; a three-character prefix of a
+  // longer password is not distinctive enough to remove from ordinary text.
+  clippedMinChars: 4,
   clippedMinShare: 0,
   // An observed field or label clipped to its width ends partway through.
   clippedTextEndMinChars: 0,
   skipKey: (key) => NON_TEXT_KEY.test(key),
+  // A short code inside a host or port would leave a tab with no valid address.
+  keepUrlHosts: true,
+  // Results are data, not conversation: a tool-shaped record is masked in full.
+  keepToolIdentities: false,
+  // Typed values belong to one session and were typed on purpose: a page
+  // shows them in fields, labels and clipped text with no credential word
+  // beside them, so even a weak typed value is replaced wherever it appears.
+  weakValues: "anywhere",
 };
 
 /** Deep copy with every occurrence of a supplied secret value in a text
@@ -4411,6 +4443,8 @@ export const BrowserPasskeyCredentialMaterial = /* @__PURE__ */ defineSchema(() 
       userDisplayName: z.string().max(512).nullable(),
       privateKey: passkeyBinary,
       signCount: z.number().int().nonnegative().max(0xffff_ffff),
+      backupEligibility: z.boolean().optional(),
+      backupState: z.boolean().optional(),
     })
     .strict(),
 );
@@ -4483,6 +4517,8 @@ export const BrowserPasskeySyncResponse = /* @__PURE__ */ defineSchema(() =>
       /** Page targets that currently host a virtual authenticator. */
       authenticators: primitives.nonnegativeInteger,
       events: z.array(BrowserPasskeyEvent).max(BROWSER_MAX_PASSKEY_EVENTS),
+      /** Sent only when the caller opts into backup-flag negotiation. */
+      supportsBackupFlags: z.literal(true).optional(),
     })
     .strict(),
 );

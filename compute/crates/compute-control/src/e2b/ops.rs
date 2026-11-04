@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use compute_guest::envd::InitData;
-use compute_protocol::host::{Id, LevelName, PriorityName};
+use compute_protocol::host::{Id, LevelName, PriorityName, SleepConfig};
 use tokio::time::Instant;
 
 use super::lifecycle::{self, Due, OnConnect, OnPause, OnTimeout, Record, State};
@@ -144,16 +144,21 @@ pub async fn create<S: Store>(
         default_workdir: None,
         agent: None,
     };
-    // E2B's running sandbox sleeps like any other fleet sandbox whose
-    // create says nothing, and reaches every offer its team is given:
-    // E2B's API cannot name one. One killed at its timeout is never
-    // resumed, so it is not copied to object storage while it runs: a
-    // sandbox its host loses is lost, as on E2B, and a checkpoint would
-    // only stop its programs for nothing.
-    let mut sleep = front.service.settings().sleep;
-    if !auto_pause {
-        sleep.checkpoint_every_ms = None;
-    }
+    // E2B's running sandbox that pauses at its timeout sleeps like any
+    // other fleet sandbox whose create says nothing, and every one reaches
+    // every offer its team is given: E2B's API cannot name one. One killed
+    // at its timeout runs until then, as on E2B, and never sleeps: nothing
+    // it does on its own (a timer, a connection it opened, such as a CI
+    // runner's to its server) wakes a sleeping sandbox, so sleeping would
+    // stop such work for good. It is never resumed either, so it is not
+    // copied to object storage while it runs: a sandbox its host loses is
+    // lost, as on E2B, and a checkpoint would only stop its programs for
+    // nothing.
+    let sleep = if auto_pause {
+        front.service.settings().sleep
+    } else {
+        SleepConfig::default()
+    };
     let spec = Spec {
         image: template.image.clone(),
         config: template

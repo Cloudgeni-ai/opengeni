@@ -100,6 +100,11 @@ export function useRail(): RailContextValue {
   return value;
 }
 
+/** The rail's state where a page may be outside it (personal settings), else null. */
+export function useOptionalRail(): RailContextValue | null {
+  return useContext(RailContext);
+}
+
 function readStoredCollapsed(): boolean {
   if (typeof window === "undefined") {
     return false;

@@ -10,13 +10,15 @@
 //! (their images stay while sandboxes use them). A failed refresh leaves
 //! the last good template in use. The clone's token is given to that one
 //! command in its environment, never written to the disk the template
-//! keeps.
+//! keeps. The builder takes one of the pool's places ([`crate::room`]),
+//! so the pool and its builder never hold more sandboxes than its
+//! maximum.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use tokio::sync::watch;
@@ -24,6 +26,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::compute::{Compute, Created, NewSandbox, Snapshot};
 use crate::github::Github;
+use crate::room::Room;
 
 /// The metadata key a template builder's sandbox carries, naming its
 /// pool's key.
@@ -133,13 +136,18 @@ fn clone_script(web: &str, repo: &str, commit: &str, dir: &str) -> String {
 /// taking over it adopts the newest template, which the replica that led
 /// before may have made, and refreshes nothing until it has: what it had
 /// as a standby may be gone, and a refresh failing then would keep it for
-/// as long as refreshes wait.
+/// as long as refreshes wait. A refresh waits for a place in `room`, is
+/// put off when this replica stops leading first, then builds the branch's
+/// head as it is once the place is taken; it ends, its builder with it,
+/// if this replica stops leading while it builds, since the replica
+/// leading next counts no builder of ours among its places.
 pub async fn keep(
     settings: Settings,
     github: Arc<Github>,
     compute: Compute,
+    room: Room,
     current: watch::Sender<String>,
-    leading: watch::Receiver<bool>,
+    mut leading: watch::Receiver<bool>,
     stop: CancellationToken,
 ) {
     let mut have: Option<Ours> = None;
@@ -157,10 +165,35 @@ pub async fn keep(
                 && tried.is_none_or(|at| now_s() >= at.saturating_add(settings.every.as_secs()));
             if due {
                 match look(&settings, &github, &mut branch, have.as_ref()).await {
-                    Ok(Some(commit)) => {
-                        tried = Some(now_s());
-                        tokio::select! {
-                            refreshed = refresh(&settings, &github, &compute, &commit) => match refreshed {
+                    Ok(Some(_)) => {
+                        let place = tokio::select! {
+                            place = room.take() => Some(place),
+                            _ = leading.wait_for(|leads| !*leads) => None,
+                            () = stop.cancelled() => return,
+                        };
+                        let Some(place) = place else {
+                            continue;
+                        };
+                        // The head may have moved while the place was
+                        // awaited.
+                        let commit = look(&settings, &github, &mut branch, have.as_ref())
+                            .await
+                            .unwrap_or_else(|error| {
+                                tracing::warn!(
+                                    error = format!("{error:#}"),
+                                    "reading the branch's head failed"
+                                );
+                                None
+                            });
+                        if let Some(commit) = commit {
+                            tried = Some(now_s());
+                            let refreshed =
+                                refresh(&settings, &github, &compute, &commit, &mut leading, &stop)
+                                    .await;
+                            if stop.is_cancelled() {
+                                return;
+                            }
+                            match refreshed {
                                 Ok(made) => {
                                     tracing::info!(template = %made.name, "runners start from a fresh warm template");
                                     current.send_replace(made.name.clone());
@@ -171,9 +204,9 @@ pub async fn keep(
                                     error = format!("{error:#}"),
                                     "refreshing the warm template failed; runners keep the last one"
                                 ),
-                            },
-                            () = stop.cancelled() => return,
+                            }
                         }
+                        drop(place);
                     }
                     Ok(None) => {}
                     Err(error) => tracing::warn!(
@@ -258,16 +291,24 @@ async fn clear_builders(compute: &Compute, pool: &str) {
     }
 }
 
-/// Prepares a template at `commit` and saves it.
+/// Prepares a template at `commit` and saves it, unless this replica stops
+/// leading or is stopped first. The builder goes either way. Saving is
+/// never cut short: the template it makes is whole, and the replica
+/// leading next adopts it.
 async fn refresh(
     settings: &Settings,
     github: &Github,
     compute: &Compute,
     commit: &str,
+    leading: &mut watch::Receiver<bool>,
+    stop: &CancellationToken,
 ) -> Result<Ours> {
     let short = &commit[..COMMIT_DIGITS];
     let at = now_s();
     let name = format!("{}-{at}-{short}", settings.pool);
+    if !*leading.borrow() {
+        bail!("this replica no longer leads");
+    }
     tracing::info!(%commit, template = %name, "preparing a warm template");
     let builder = compute
         .create(&NewSandbox {
@@ -278,7 +319,18 @@ async fn refresh(
         })
         .await
         .context("starting a template builder")?;
-    let made = prepare(settings, github, compute, &builder, commit, &name).await;
+    let prepared = tokio::select! {
+        prepared = prepare(settings, github, compute, &builder, commit) => prepared,
+        _ = leading.wait_for(|leads| !*leads) => Err(anyhow!("this replica stopped leading")),
+        () = stop.cancelled() => Err(anyhow!("stopping")),
+    };
+    let made = match prepared {
+        Ok(()) if *leading.borrow() && !stop.is_cancelled() => {
+            compute.snapshot(&builder.id, &name).await
+        }
+        Ok(()) => Err(anyhow!("this replica stopped leading, or is stopping")),
+        Err(error) => Err(error),
+    };
     if let Err(error) = compute.kill(&builder.id).await {
         tracing::warn!(sandbox = %builder.id, error = format!("{error:#}"), "killing a template builder failed");
     }
@@ -291,14 +343,15 @@ async fn refresh(
     })
 }
 
+/// Clones the repository at `commit` in `builder`, runs the prepare command
+/// there and writes the disk out.
 async fn prepare(
     settings: &Settings,
     github: &Github,
     compute: &Compute,
     builder: &Created,
     commit: &str,
-    name: &str,
-) -> Result<Snapshot> {
+) -> Result<()> {
     let started = tokio::time::Instant::now();
     let repo_name = settings.repo.rsplit('/').next().unwrap_or(&settings.repo);
     let dir = format!(
@@ -363,7 +416,7 @@ async fn prepare(
     if synced.exit_code != 0 {
         bail!("sync exited {}", synced.exit_code);
     }
-    compute.snapshot(&builder.id, name).await
+    Ok(())
 }
 
 /// Deletes the pool's templates older than `kept`.

@@ -1,11 +1,23 @@
 import { configuredStaticUsageLimits, type Settings } from "@opengeni/config";
-import type { EntitlementsPort } from "@opengeni/contracts";
 import {
+  API_CREDITS_REQUIRED_MESSAGE,
+  SUBSCRIPTION_PLAN_REQUIRED_MESSAGE,
+  type BillingOrigin,
+  type EntitlementsPort,
+} from "@opengeni/contracts";
+import {
+  chargeBillingOrigin,
   checkWorkspaceAllowance,
+  getByokFeeSpendableBalance,
   getSpendableCreditBalance,
   sumUsageQuantity,
   type Database,
 } from "@opengeni/db";
+import {
+  byokPaidCreditRefusalMessage,
+  byokPlatformFeeActive,
+  ownSubscriptionPlanAllows,
+} from "./byok-platform-fee";
 
 export type ModelCallAdmissionDenial =
   | "insufficient_credits"
@@ -15,7 +27,17 @@ export type ModelCallAdmissionDenial =
 
 export type ModelCallAdmission =
   | { allowed: true; creditPolicyRevision: number | undefined }
-  | { allowed: false; denial: ModelCallAdmissionDenial; message: string };
+  | {
+      allowed: false;
+      denial: ModelCallAdmissionDenial;
+      message: string;
+      /** API work found no credits: plan credit never pays for it. */
+      apiCreditsRequired?: true;
+      /** The person's own key needs paid credit for its platform fee. */
+      byokPaidCreditRequired?: true;
+      /** The person's own subscription needs a paid plan (Pro or higher). */
+      subscriptionPlanRequired?: true;
+    };
 
 /**
  * Admission for one stateless model call, with the same funding rules as an
@@ -24,7 +46,8 @@ export type ModelCallAdmission =
  * static monthly caps apply. Admission is a read, never a reservation or an
  * estimate of the call's cost; settlement charges actual usage afterwards.
  * Externally funded calls (subscriptions, workspace or organization keys)
- * skip the credit gate and the token cap.
+ * skip the credit gate and the token cap; an own key needs paid credit for
+ * its platform fee, and an own subscription needs a paid plan.
  */
 export async function admitModelCall(
   services: { db: Database; settings: Settings; entitlements?: EntitlementsPort | null },
@@ -36,11 +59,44 @@ export async function admitModelCall(
     chargesOpenGeniCredits: boolean;
     countsTowardTokenCap: boolean;
     subjectId: string | null;
+    /** Who pays: API work needs credits; plan credit never pays for it. */
+    billingOrigin?: BillingOrigin | null;
+    /** Served by the person's own API key (pays the platform fee). */
+    byok?: boolean;
+    /** Served by the person's own subscription (needs a paid plan, no fee). */
+    ownSubscription?: boolean;
   },
 ): Promise<ModelCallAdmission> {
   const { settings, db } = services;
   const metered = settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
   let creditPolicyRevision: number | undefined;
+  if (
+    !input.chargesOpenGeniCredits &&
+    input.ownSubscription &&
+    !(await ownSubscriptionPlanAllows(db, settings, input.accountId))
+  ) {
+    return {
+      allowed: false,
+      denial: "insufficient_credits",
+      message: SUBSCRIPTION_PLAN_REQUIRED_MESSAGE,
+      subscriptionPlanRequired: true,
+    };
+  }
+  if (
+    !input.chargesOpenGeniCredits &&
+    input.byok &&
+    byokPlatformFeeActive(settings, input.accountId)
+  ) {
+    const balance = await getByokFeeSpendableBalance(db, input.accountId, input.billingOrigin);
+    if (balance.balanceMicros <= 0) {
+      return {
+        allowed: false,
+        denial: "insufficient_credits",
+        message: byokPaidCreditRefusalMessage(balance, chargeBillingOrigin(input.billingOrigin)),
+        byokPaidCreditRequired: true,
+      };
+    }
+  }
   if (input.chargesOpenGeniCredits && metered) {
     if (services.entitlements) {
       const decision = await services.entitlements.admitRun({
@@ -57,13 +113,23 @@ export async function admitModelCall(
         };
       }
     } else {
-      const balance = await getSpendableCreditBalance(db, input.accountId, input.model);
+      const origin = chargeBillingOrigin(input.billingOrigin);
+      const balance = await getSpendableCreditBalance(
+        db,
+        input.accountId,
+        input.model,
+        undefined,
+        undefined,
+        origin,
+      );
       creditPolicyRevision = balance.creditPolicyRevision;
       if (balance.balanceMicros <= 0) {
         return {
           allowed: false,
           denial: "insufficient_credits",
-          message: "Insufficient workspace credits.",
+          ...(origin === "api"
+            ? { message: API_CREDITS_REQUIRED_MESSAGE, apiCreditsRequired: true as const }
+            : { message: "Insufficient workspace credits." }),
         };
       }
     }

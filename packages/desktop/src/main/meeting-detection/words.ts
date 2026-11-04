@@ -1,4 +1,5 @@
-// The words of the card that asks whether to record a call. English unless
+// The words of the card that asks whether to record a call, or offers to
+// join a calendar meeting about to start. English unless
 // the app gives its own, so an app in another language passes `words` to
 // `createMeetingDetection`.
 
@@ -23,9 +24,34 @@ export interface MeetingWords {
   stop: string;
   /** Closes the question and keeps recording. */
   keepRecording: string;
+  /**
+   * Said when a call started recording without asking. Added later, so an
+   * app's own words may lack it and the English is shown.
+   */
+  recordingStarted?: string;
+  /** Why it is recording. `{app}` is the call's app. */
+  callRecording?: string;
+  /** Closes the card and keeps recording. */
+  ok?: string;
+  /**
+   * A reminder before a calendar meeting. Added later, so an app's own words
+   * may lack them and the English is shown. When it starts: `{minutes}`.
+   */
+  startsIn?: string;
+  startingNow?: string;
+  /** It started `{minutes}` ago. */
+  startedAgo?: string;
+  /** The reminder's title for an event without one. */
+  untitledMeeting?: string;
+  /** The reminder card's window title, read out by screen readers. */
+  reminderTitle?: string;
+  /** Opens the meeting and starts recording it. */
+  joinAndStart?: string;
+  /** Opens the meeting, stops the recording going on and starts this one's. */
+  joinAndSwitch?: string;
 }
 
-export const ENGLISH_MEETING_WORDS: MeetingWords = {
+export const ENGLISH_MEETING_WORDS: Required<MeetingWords> = {
   title: "Meeting detected",
   recordQuestion: "Record this meeting?",
   browserStarted: "{app} is using your microphone.",
@@ -36,6 +62,16 @@ export const ENGLISH_MEETING_WORDS: MeetingWords = {
   callEnded: "{app} stopped using your microphone. Still recording.",
   stop: "Stop recording",
   keepRecording: "Keep recording",
+  recordingStarted: "Recording this call",
+  callRecording: "A call in {app} started, so it's being recorded.",
+  ok: "OK",
+  startsIn: "Starts in {minutes} min",
+  startingNow: "Starting now",
+  startedAgo: "Started {minutes} min ago",
+  untitledMeeting: "Meeting",
+  reminderTitle: "Upcoming meeting",
+  joinAndStart: "Join and start recording",
+  joinAndSwitch: "Join and record this one",
 };
 
 /** `template` with each `{name}` replaced. */

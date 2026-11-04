@@ -12,10 +12,22 @@
 //! background, and a resize runs without it, since with it a resize zeroes
 //! them at once; the zeroing it would then queue is dropped as the option
 //! comes back.
+//!
+//! A guest restored from memory, as a clone of a template or a claimed
+//! ready sandbox, may find its disk longer than that memory knew. Its
+//! kernel learns of it only once it handles the disk's change after the
+//! resume, a moment after the host's restore notice may arrive, so the
+//! notice says how long the disk is ([`grow_to`]): the guest waits for its
+//! kernel to see that length and grows the file system before it answers,
+//! and the sandbox is never used with less room than it asked for.
 
 use std::fs::{self, File};
 use std::io;
 use std::os::unix::fs::{FileExt, MetadataExt};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use super::{log, spawn, sys};
 
@@ -29,6 +41,28 @@ const EXT4_MAGIC: u16 = 0xEF53;
 
 /// `EXT4_FEATURE_INCOMPAT_64BIT`: block counts have a high half.
 const INCOMPAT_64BIT: u32 = 0x80;
+
+/// How long a restore notice waits for the kernel to see the disk as long
+/// as the host says. The kernel handles the change within milliseconds of
+/// the resume; this bounds a guest whose kernel never does, which then
+/// grows its file system once it does, as it always has.
+pub const LENGTH_WAIT: Duration = Duration::from_secs(5);
+
+/// How often [`grow_to`] looks at the disk's length meanwhile.
+const LENGTH_LOOK: Duration = Duration::from_millis(5);
+
+/// Whether the guest keeps the root file system as large as its disk: set
+/// once [`keep_root_grown`] has set it up.
+static KEEPING: AtomicBool = AtomicBool::new(false);
+
+/// The disk length the root file system was last grown to, or found to
+/// fill, in bytes: a restore notice whose disk is no longer reads nothing
+/// more of the disk.
+static GROWN_TO: AtomicU64 = AtomicU64::new(0);
+
+/// Held while the root file system is looked at and grown: the device
+/// events and a restore notice may both ask at once.
+static GROWING: Mutex<()> = Mutex::new(());
 
 /// How large an ext4 file system is, as its superblock says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,9 +129,46 @@ pub fn keep_root_grown() {
     // missed.
     let events = sys::DeviceEvents::open()
         .inspect_err(|error| log(&format!("disk: device events: {error}")));
+    KEEPING.store(true, Ordering::Relaxed);
     report(grow_root());
     if let Ok(events) = events {
         spawn("disk", move || watch(&events));
+    }
+}
+
+/// Grows the root file system to fill its disk, which the host says is
+/// `length` bytes long, before a restore notice is answered: it waits up
+/// to `within` for the kernel to see the disk that long (a whole disk; a
+/// partition never is), then grows the file system if the disk grew since
+/// it was last grown. Nothing if the guest does not keep the root grown
+/// ([`keep_root_grown`]).
+pub fn grow_to(length: u64, within: Duration) {
+    if !KEEPING.load(Ordering::Relaxed) {
+        return;
+    }
+    // The kernel counts a disk in sectors of 512 bytes.
+    let wanted = length / 512 * 512;
+    let until = Instant::now() + within;
+    let seen = loop {
+        match root_device() {
+            Ok(device) if device.length >= wanted || !device.whole => break device.length,
+            Ok(device) if Instant::now() >= until => {
+                log(&format!(
+                    "disk: the host made the disk {} MiB, the kernel still sees {} MiB",
+                    wanted >> 20,
+                    device.length >> 20
+                ));
+                break device.length;
+            }
+            Ok(_) => std::thread::sleep(LENGTH_LOOK),
+            Err(error) => {
+                log(&format!("disk: could not read its length: {error}"));
+                return;
+            }
+        }
+    };
+    if seen > GROWN_TO.load(Ordering::Relaxed) {
+        report(grow_root());
     }
 }
 
@@ -134,7 +205,8 @@ fn report(grown: io::Result<Option<(u64, u64)>>) {
 /// Grows the root file system to fill its disk if the disk is longer, and
 /// returns its length in bytes before and after.
 fn grow_root() -> io::Result<Option<(u64, u64)>> {
-    let (length, node) = root_device()?;
+    let _growing = GROWING.lock().unwrap_or_else(PoisonError::into_inner);
+    let Device { length, node, .. } = root_device()?;
     let mut superblock = [0; SUPERBLOCK_LEN];
     File::open(node)?.read_exact_at(&mut superblock, SUPERBLOCK_AT)?;
     let Some(found) = Ext4::parse(&superblock) else {
@@ -142,6 +214,7 @@ fn grow_root() -> io::Result<Option<(u64, u64)>> {
     };
     let blocks = length / found.block_size;
     if blocks <= found.blocks {
+        GROWN_TO.fetch_max(length, Ordering::Relaxed);
         return Ok(None);
     }
     sys::remount_root("init_itable")?;
@@ -149,14 +222,26 @@ fn grow_root() -> io::Result<Option<(u64, u64)>> {
     let deferred = sys::remount_root("noinit_itable");
     resized?;
     deferred?;
+    GROWN_TO.fetch_max(length, Ordering::Relaxed);
     Ok(Some((
         found.blocks * found.block_size,
         blocks * found.block_size,
     )))
 }
 
-/// The root file system's device: its length in bytes, and its node.
-fn root_device() -> io::Result<(u64, String)> {
+/// The root file system's device.
+struct Device {
+    /// Its length in bytes.
+    length: u64,
+    /// Its node, such as `/dev/vda`.
+    node: String,
+    /// Whether it is a whole disk rather than a partition of one, whose
+    /// length is never the disk's.
+    whole: bool,
+}
+
+/// The root file system's device.
+fn root_device() -> io::Result<Device> {
     let device = fs::metadata("/")?.dev();
     let sys = format!(
         "/sys/dev/block/{}:{}",
@@ -173,7 +258,11 @@ fn root_device() -> io::Result<(u64, String)> {
         .lines()
         .find_map(|line| line.strip_prefix("DEVNAME="))
         .ok_or_else(invalid)?;
-    Ok((sectors.saturating_mul(512), format!("/dev/{name}")))
+    Ok(Device {
+        length: sectors.saturating_mul(512),
+        node: format!("/dev/{name}"),
+        whole: !Path::new(&format!("{sys}/partition")).exists(),
+    })
 }
 
 #[cfg(test)]

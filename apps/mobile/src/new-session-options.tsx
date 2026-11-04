@@ -67,6 +67,8 @@ const EMPTY_CHOICES: NewSessionChoices = {
 
 export interface NewSessionOptions {
   visibility: SessionVisibility;
+  /** True once the person (or their restored draft) picked who can see the chat. */
+  visibilityChosen: boolean;
   canCreatePrivate: boolean;
   setVisibility(next: SessionVisibility): void;
   repositories: GitHubRepository[];
@@ -107,13 +109,17 @@ export interface NewSessionOptions {
  */
 export function useNewSessionOptions(workspaceId: string | null): NewSessionOptions {
   const { client } = useAccount();
-  const [state, setState] = useState<NewSessionChoices & { workspaceId: string | null }>({
+  const [state, setState] = useState<
+    NewSessionChoices & { workspaceId: string | null; visibilityChosen: boolean }
+  >({
     workspaceId,
+    visibilityChosen: false,
     ...EMPTY_CHOICES,
   });
   const [catalog, setCatalog] = useState<{
     workspaceId: string | null;
     canCreatePrivate: boolean;
+    defaultVisibility: SessionVisibility;
     repositories: GitHubRepository[];
     machines: MachineView[];
     projects: Channel[];
@@ -121,6 +127,7 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
   }>({
     workspaceId: null,
     canCreatePrivate: false,
+    defaultVisibility: "workspace",
     repositories: [],
     machines: [],
     projects: [],
@@ -135,8 +142,11 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
     void Promise.all([
       client
         .getSessionTenancyCreateCapabilities(workspaceId)
-        .then((caps) => caps.canCreatePrivate)
-        .catch(() => false),
+        .then((caps) => ({
+          canCreatePrivate: caps.canCreatePrivate,
+          defaultVisibility: caps.defaultVisibility ?? ("workspace" as const),
+        }))
+        .catch(() => ({ canCreatePrivate: false, defaultVisibility: "workspace" as const })),
       client
         .listGitHubRepositories(workspaceId)
         .then((response) => response.repositories.filter((repo) => !repo.archived))
@@ -160,11 +170,11 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
           ),
         )
         .catch(() => [] as NewSessionConnector[]),
-    ]).then(([canCreatePrivate, repositories, machines, projects, connectors]) => {
+    ]).then(([tenancy, repositories, machines, projects, connectors]) => {
       if (current) {
         setCatalog({
           workspaceId,
-          canCreatePrivate,
+          ...tenancy,
           repositories,
           machines,
           projects,
@@ -177,7 +187,10 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
     };
   }, [client, workspaceId]);
 
-  const own = state.workspaceId === workspaceId ? state : { workspaceId, ...EMPTY_CHOICES };
+  const own =
+    state.workspaceId === workspaceId
+      ? state
+      : { workspaceId, ...EMPTY_CHOICES, visibilityChosen: false };
   const ready = catalog.workspaceId === workspaceId;
   const repositories = ready ? catalog.repositories : [];
   const machines = ready ? catalog.machines : [];
@@ -187,13 +200,24 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
   const patch = useCallback(
     (next: Partial<NewSessionChoices>) =>
       setState((current) => ({
-        ...(current.workspaceId === workspaceId ? current : { workspaceId, ...EMPTY_CHOICES }),
+        ...(current.workspaceId === workspaceId
+          ? current
+          : { workspaceId, ...EMPTY_CHOICES, visibilityChosen: false }),
         ...next,
+        ...(next.visibility !== undefined ? { visibilityChosen: true } : {}),
         workspaceId,
       })),
     [workspaceId],
   );
-  const visibility = canCreatePrivate ? own.visibility : "workspace";
+  // Match the web: show the server's actual default until the person chooses.
+  const visibility = canCreatePrivate
+    ? own.visibilityChosen
+      ? own.visibility
+      : catalog.defaultVisibility
+    : "workspace";
+  // Only a choice the person made is sent; otherwise the server's default
+  // applies, so a failed capability read can never widen a private default.
+  const visibilityChosen = canCreatePrivate && own.visibilityChosen;
   const targetSandboxId = machines.some((machine) => machine.sandboxId === own.targetSandboxId)
     ? own.targetSandboxId
     : null;
@@ -218,6 +242,7 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
 
   return {
     visibility,
+    visibilityChosen,
     canCreatePrivate,
     setVisibility: (next) => patch({ visibility: next }),
     repositories,
@@ -237,7 +262,8 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
     choices,
     apply: (next) => patch(next),
     request: () => ({
-      ...(visibility === "private" ? { visibility } : {}),
+      // An explicit Workspace must not silently fall back to an Only me default.
+      ...(visibilityChosen ? { visibility } : {}),
       ...(targetSandboxId ? { targetSandboxId } : {}),
       ...(channelId ? { channelId } : {}),
       ...(excludedConnectorIds.length > 0 ? { excludedMcpServerIds: excludedConnectorIds } : {}),
@@ -246,12 +272,16 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
         .map(gitHubRepositoryResource),
     }),
     // A new chat starts in the same project, as web keeps the selected project.
+    // Who can see it returns to the server's default.
     reset: () =>
-      patch({
+      setState((current) => ({
+        ...(current.workspaceId === workspaceId ? current : { workspaceId, ...EMPTY_CHOICES }),
         repositoryIds: [],
         excludedConnectorIds: [],
-        visibility: "workspace",
-      }),
+        visibility: EMPTY_CHOICES.visibility,
+        visibilityChosen: false,
+        workspaceId,
+      })),
   };
 }
 

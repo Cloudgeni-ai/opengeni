@@ -1,5 +1,162 @@
 # @opengeni/agent-host
 
+## 6.8.0
+
+### Patch Changes
+
+- Updated dependencies [feaecf8]
+  - @opengeni/sdk@6.8.0
+
+## 6.7.0
+
+### Patch Changes
+
+- Updated dependencies [c08233e]
+- Updated dependencies [cb37e4d]
+- Updated dependencies [0d04cf4]
+- Updated dependencies [cf35731]
+  - @opengeni/sdk@6.7.0
+
+## 6.6.0
+
+### Patch Changes
+
+- Updated dependencies [fb49abf]
+- Updated dependencies [2c76a2a]
+- Updated dependencies [09bc485]
+- Updated dependencies [3cb05f9]
+  - @opengeni/sdk@6.6.0
+
+## 6.5.1
+
+### Patch Changes
+
+- Updated dependencies [7a9c492]
+- Updated dependencies [e4484f1]
+- Updated dependencies [7f3d037]
+- Updated dependencies [f4f82c0]
+- Updated dependencies [317fb4d]
+- Updated dependencies [033cd63]
+- Updated dependencies [b18bd6c]
+- Updated dependencies [83ccc2b]
+- Updated dependencies [da9b7e5]
+- Updated dependencies [0f7f559]
+- Updated dependencies [0f7f559]
+- Updated dependencies [de8fc61]
+- Updated dependencies [dd7759c]
+- Updated dependencies [4682263]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [abb4af1]
+- Updated dependencies [86e35f1]
+- Updated dependencies [0f7f559]
+  - @opengeni/sdk@6.5.0
+
+## 6.4.0
+
+### Patch Changes
+
+- Updated dependencies [92f419c]
+- Updated dependencies [bc5c6d5]
+- Updated dependencies [b4e780e]
+- Updated dependencies [ace882b]
+- Updated dependencies [dcb2352]
+- Updated dependencies [f3e6835]
+- Updated dependencies [0b19c29]
+- Updated dependencies [b098518]
+- Updated dependencies [a853c7a]
+- Updated dependencies [a99a7d6]
+- Updated dependencies [c2f978b]
+- Updated dependencies [c59d7f8]
+- Updated dependencies [237329e]
+- Updated dependencies [bf3cf84]
+- Updated dependencies [d55f740]
+- Updated dependencies [0d409a7]
+- Updated dependencies [cf9415d]
+- Updated dependencies [4bd54f1]
+- Updated dependencies [3b9a997]
+- Updated dependencies [1efa378]
+- Updated dependencies [237329e]
+- Updated dependencies [af8a173]
+  - @opengeni/sdk@6.4.0
+
+## 6.3.1
+
+### Patch Changes
+
+- Updated dependencies [d5db2de]
+- Updated dependencies [d91058a]
+- Updated dependencies [32bc3e9]
+- Updated dependencies [d872b12]
+- Updated dependencies [d010825]
+- Updated dependencies [c35704f]
+- Updated dependencies [c0b945b]
+- Updated dependencies [d0295f8]
+- Updated dependencies [f4ad926]
+- Updated dependencies [a550481]
+- Updated dependencies [1afdda0]
+  - @opengeni/sdk@6.3.0
+
+## 6.2.1
+
+### Patch Changes
+
+- Updated dependencies [cbfd911]
+- Updated dependencies [7c94b6e]
+  - @opengeni/sdk@6.2.0
+
+## 6.1.1
+
+### Patch Changes
+
+- Updated dependencies [0422c7b]
+- Updated dependencies [6573dc7]
+- Updated dependencies [9cf4bc0]
+  - @opengeni/sdk@6.1.0
+
+## 6.0.2
+
+### Minor Changes
+
+- f2e1953: Turning on computer use in the desktop app no longer spins forever. When it is on but still not usable after a minute, the switch stops saying "Turning on…" and says why in one line: the server isn't accepting the computer's sign-in, the server can't see it yet, the agent isn't starting, another copy of the agent is in the way, or moving the agent into the app is taking too long, with the agent's own words below when it gave some, and **Try again**. Try again restarts an agent that is already running (its service, or the app's helper), so it signs in and connects right away instead of after its backoff. An agent that has stopped retrying because the server needs it connected again is a problem at once, and turning it on reconnects it. The app's own agent is no longer shown as on, and the menu bar no longer calls the computer available, while the server refuses its sign-in; a connection the agent stopped retrying is enrolled afresh on turning on, even while the server still lists it. `parseConnections` reads each connection's `authentication` state from `opengeni-agent connections`; `ThisComputerStatus` gains `waitingOn` and `waitingDetail`, and `ThisComputerErrorCode` gains `reconnect_required`; `useThisComputer` gains `stalled` and a `turnOnLimitMs` option; `@opengeni/react/this-computer` exports `computerUseStalledText`; `ComputerUseProblem` gains `stalled`.
+- e669e43: Turning on computer use in a workspace that uses a connection made in another workspace now reconnects it when the server stopped accepting its sign-in, as it already did for a connection made in the same workspace. While that workspace still lists the computer, it is connected again there, since the server keeps one live connection of a personal computer, and every workspace that used it keeps using it. A computer removed where it was made is never put back there, and one the person can no longer set up there is set up in this workspace instead. The menu bar now says the computer needs reconnecting, with **Reconnect This Computer…**, instead of "connecting…" forever. `ThisComputer.summary()` gains `needsReconnect`.
+
+### Patch Changes
+
+- d7fb082: When credential renewal fails with a server error, the machine agent's log now includes the deployment's correlation id, so the failure can be matched to the server's log entry. Only a plain id is logged, never the response body.
+- 1ea8bd6: An agent can commit where nobody configured a Git identity. Commands in a managed sandbox run as a uid with no account entry, and a container connected as a machine usually has no `user.email` and a hostname Git cannot turn into an address, so `git commit` failed with "Author identity unknown" and agents stopped to ask the person for a name and email. The sandbox and desktop images now set `Opengeni Agent <agent@opengeni.invalid>` at Git's system level. On a Connected Machine where Git cannot guess an address and the agent's environment has no `EMAIL`, its commands receive `EMAIL=agent@opengeni.invalid`; a laptop whose hostname gives Git an address keeps it. Both are Git's lowest-precedence sources, so an identity the deployment, the person or the repository configured still wins.
+- Updated dependencies [44ba53b]
+- Updated dependencies [f385091]
+- Updated dependencies [7a5395e]
+- Updated dependencies [aa6b340]
+- Updated dependencies [f2e1953]
+- Updated dependencies [12b773f]
+- Updated dependencies [1271da5]
+- Updated dependencies [f6c6c0f]
+- Updated dependencies [dfc7190]
+- Updated dependencies [09972b5]
+- Updated dependencies [cebc433]
+- Updated dependencies [0ba40f0]
+- Updated dependencies [449bcae]
+- Updated dependencies [37538aa]
+- Updated dependencies [c6ba725]
+- Updated dependencies [5a3ed41]
+- Updated dependencies [a02dca4]
+- Updated dependencies [60c6c56]
+- Updated dependencies [6c5a6b5]
+- Updated dependencies [accee33]
+- Updated dependencies [399757b]
+- Updated dependencies [ce001ee]
+- Updated dependencies [3c0113c]
+- Updated dependencies [71bcf11]
+- Updated dependencies [a744c56]
+- Updated dependencies [a895f0b]
+- Updated dependencies [ad1dc82]
+- Updated dependencies [670913f]
+- Updated dependencies [3aaf6ed]
+- Updated dependencies [77f483f]
+- Updated dependencies [a1e75dc]
+  - @opengeni/sdk@6.0.0
+
 ## 5.5.1
 
 ### Patch Changes

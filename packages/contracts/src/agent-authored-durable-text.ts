@@ -21,7 +21,7 @@ import { WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS } from "./workspace-inst
  *   across the whole organization. Historical company-profile list fields stay
  *   in the storage contract for compatibility; nonempty values on an already-
  *   active historical revision remain composed with an explicit compatibility
- *   label until an organization owner replaces the profile.
+ *   label until an organization owner or admin replaces the profile.
  * - Knowledge is retrieval evidence and never joins the always-composed prefix.
  *
  * Instruction writes share the human limit so localized edits can preserve

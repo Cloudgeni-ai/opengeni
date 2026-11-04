@@ -1,4 +1,5 @@
 import {
+  boolean,
   jsonb,
   pgTable,
   primaryKey,
@@ -60,4 +61,22 @@ export const skillConfigConversionReceipts = pgTable(
       columns: [table.workspaceId, table.sourceKind, table.sourceId, table.conversionVersion],
     }),
   ],
+);
+
+/**
+ * Where an organization Skill works (migration 1195): every shared workspace
+ * (null) or the listed ones, plus members' Personal workspaces when switched
+ * on. No row means every workspace, Personal ones included.
+ */
+export const organizationSkillReach = pgTable(
+  "organization_skill_reach",
+  {
+    accountId: uuid("account_id").notNull(),
+    preferenceId: uuid("preference_id").notNull(),
+    allowedWorkspaceIds: uuid("allowed_workspace_ids").array(),
+    allowPersonalWorkspaces: boolean("allow_personal_workspaces").notNull().default(true),
+    updatedBySubjectId: text("updated_by_subject_id").notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.accountId, table.preferenceId] })],
 );

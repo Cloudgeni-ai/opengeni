@@ -17,6 +17,28 @@ The extension privacy notice is [PRIVACY.md](PRIVACY.md). Store descriptions
 must disclose the local agent requirement and the forwarding of browser data
 to the configured deployment.
 
+## Site permissions
+
+`contentSettings` is an optional permission. The extension asks for it only when
+the person clicks Allow on its own `site-permissions.html` page, which an agent's
+first permission action opens. Agents can then set camera, microphone,
+geolocation and notifications for the exact `scheme://host:port/*` of a tab the
+session opened and no other session is using, never a secondary pattern.
+browserd checks the tab; the extension sets the permission only while that
+tab's attachment lasts and the tab shows that site. Every change is recorded in local
+storage and listed in the popup with Remove; setting a type back to prompt
+clears it and re-applies the remaining changes. Turning it off clears every
+change before giving the permission back, because Chrome keeps an extension's
+rules after the permission is removed but no longer lets it clear them.
+
+Store permission justification for `contentSettings`: optional, requested only
+when the user clicks Allow on the extension's own page. It lets agents the user
+directs allow or block camera, microphone, location and notifications for the
+exact site (scheme, host and port) open in a tab the agent opened, for example to
+test a video call. Every change is listed in the popup where the user can
+remove it; turning it off removes all changes. No other content settings are
+read or changed.
+
 ## Branding and listing ownership
 
 - `manifest.json` owns the extension name, summary and icon paths. Chrome Web

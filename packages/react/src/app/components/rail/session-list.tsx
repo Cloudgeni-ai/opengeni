@@ -1,8 +1,4 @@
-import {
-  archiveActionLabel,
-  requestSessionArchive,
-  useArchiveConfirmation,
-} from "../../lib/archive-session";
+import { archiveActionLabel, requestSessionArchive } from "../../lib/archive-session";
 // The session list — the rail's home. Uses workspace discovery for search and
 // independently paged project folders for browsing, with pins above the tree.
 // Supports ArrowUp/Down + Enter keyboard navigation. Each row is a status
@@ -11,6 +7,7 @@ import {
 import { t } from "../../lib/console-text";
 import { useSessionListHintRefresh } from "../../lib/use-session-list-hint-refresh";
 import { useSiteOpenedListener } from "../../lib/site-opened";
+import { publishSiteSidebarBridge } from "../../lib/site-sidebar-bridge";
 import { useOpenGeni } from "../../../session-context";
 import { useChannels } from "../../../hooks/use-channels";
 import { useSessionLineage } from "../../../hooks/use-session-lineage";
@@ -47,8 +44,8 @@ import {
   EllipsisIcon,
   FolderIcon,
   FolderPlusIcon,
-  FolderOpenIcon,
   ListFilterIcon,
+  LockIcon,
   MailIcon,
   MailOpenIcon,
   MessagesSquareIcon,
@@ -58,9 +55,12 @@ import {
   PlusIcon,
   SearchIcon,
   Trash2Icon,
+  UsersIcon,
   LinkIcon,
 } from "lucide-react";
 import { SessionAvatar } from "../session/session-avatar";
+import { ProjectGlyph } from "./project-glyph";
+import { ProjectProfileDialog } from "./project-profile";
 import {
   SessionProfileEditorDialog,
   useCanEditSessionProfile,
@@ -117,7 +117,8 @@ import {
   DropdownMenuTrigger,
 } from "../../../ui/dropdown-menu";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "../../../ui/hover-card";
-import { ChannelCreateDialog } from "./channel-create-dialog";
+import { ChannelCreateDialog, type ProjectAudience } from "./channel-create-dialog";
+import { useCanLimitToMe } from "../../lib/use-can-limit-to-me";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../../ui/tooltip";
 import { useAppContext } from "../../app-context";
 import {
@@ -226,6 +227,7 @@ import {
   visibleForestRows,
   visibleTreeRows,
   summarizeRailNodes,
+  summarizeRailRow,
   summarizeRailStatusCounts,
   sessionProjectTotals,
   type RailStatusCounts,
@@ -243,6 +245,7 @@ import {
   sessionBrowsePreferencesCustomized,
   type SessionBrowsePreferences,
   sessionBrowsePreferenceStorageId,
+  useCollapsedSessionSections,
   writeSessionBrowsePreferences,
 } from "../../lib/session-browse-preferences";
 import { railRowCreator } from "../../lib/creator-initials";
@@ -270,17 +273,22 @@ import {
 } from "../../lib/session-branch-cache";
 import { cn } from "../../lib/utils";
 import type { Channel, Session as SessionDetails } from "../../types";
+import type { UpdateChannelRequest } from "@opengeni/sdk";
 import type { RailSession as Session } from "../../lib/session-list-entry";
 import { useUiEventTarget } from "../../lib/ui-events";
 import { useActionShortcut } from "../../lib/actions/actions-provider";
 import { chordLabel, currentPlatform } from "../../lib/actions/chords";
 import { useHeldModifier } from "../../lib/actions/held-modifier";
 import { requestCommandMenu } from "../../lib/actions/events";
-import { rememberChats, setSidebarOrder } from "../../lib/actions/chat-directory";
+import {
+  readChatDirectory,
+  rememberChats,
+  setSidebarOrder,
+} from "../../lib/actions/chat-directory";
 import { rememberSidebarSites } from "../../lib/actions/site-directory";
 import { useChatOperations } from "../../lib/actions/chat-operations";
 import { TooltipWithKeys } from "../command-menu/keycaps";
-import { errorMessage } from "@opengeni/contracts/values";
+import { userErrorText } from "../../../ui/api-error";
 
 /** True when the browser should own navigation (new tab / window / modified click). */
 function isModifiedNavigationClick(
@@ -390,7 +398,6 @@ export function SessionList() {
   const windowEvents = useUiEventTarget("window");
   const rail = useRail();
   const context = useAppContext();
-  const confirmArchive = useArchiveConfirmation();
   const { workspaceSessionListEvent, workspaceControlEvent } = useOpenGeni();
   const listHintsAvailable =
     workspaceSessionListEvent?.workspaceId === rail.workspaceId &&
@@ -529,9 +536,21 @@ export function SessionList() {
   } = channelsQuery;
   const [channelDialogOpen, setChannelDialogOpen] = useState(false);
   const [channelNameDraft, setChannelNameDraft] = useState("");
-  const [projectPendingRename, setProjectPendingRename] = useState<Channel | null>(null);
-  const [projectRenameDraft, setProjectRenameDraft] = useState("");
+  const [channelAudienceDraft, setChannelAudienceDraft] = useState<ProjectAudience>("workspace");
+  // Only me projects are offered only where this person may make Only me work:
+  // never in a Personal workspace, where everything is theirs anyway.
+  const personalRailWorkspace = isPersonalWorkspace(
+    context.workspaces?.find((workspace) => workspace.id === rail.workspaceId) ?? null,
+    null,
+  );
+  const canMakeOnlyMeProject = useCanLimitToMe(
+    context.client,
+    rail.workspaceId,
+    channelDialogOpen && !personalRailWorkspace,
+  );
+  const [projectPendingEdit, setProjectPendingEdit] = useState<Channel | null>(null);
   const [projectPendingDelete, setProjectPendingDelete] = useState<Channel | null>(null);
+  const [projectPendingShare, setProjectPendingShare] = useState<Channel | null>(null);
   const [sessionPendingDelete, setSessionPendingDelete] = useState<Session | null>(null);
   const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
   const [dragOverProjectId, setDragOverProjectId] = useState<string | null>(null);
@@ -1764,33 +1783,37 @@ export function SessionList() {
       pageGeneration,
     ],
   );
-  // Workstreams open on first paint. A user collapse is local interaction
-  // state; new or newly loaded sections therefore remain open by default.
-  const [collapsedChannelSections, setCollapsedChannelSections] = useState<ReadonlySet<string>>(
-    () => new Set(),
+  // Sections open by default. The ones this person collapsed are remembered
+  // per workspace on this device, so they stay collapsed after a reload while
+  // new or newly loaded sections still open.
+  const [collapsedChannelSections, setCollapsedChannelSections] =
+    useCollapsedSessionSections(browsePreferenceStorageId);
+  const toggleChannelSection = useCallback(
+    (sectionKey: string) => {
+      setCollapsedChannelSections((current) => {
+        const next = new Set(current);
+        if (next.has(sectionKey)) next.delete(sectionKey);
+        else next.add(sectionKey);
+        return next;
+      });
+    },
+    [setCollapsedChannelSections],
   );
-  useEffect(() => {
-    setCollapsedChannelSections(new Set());
-  }, [rail.workspaceId]);
-  const toggleChannelSection = useCallback((sectionKey: string) => {
-    setCollapsedChannelSections((current) => {
-      const next = new Set(current);
-      if (next.has(sectionKey)) next.delete(sectionKey);
-      else next.add(sectionKey);
-      return next;
-    });
-  }, []);
   const submitCreateChannel = useCallback(async () => {
     const name = channelNameDraft.trim();
     if (!name) return;
-    const created = await requestCreateChannel({ name });
+    const created = await requestCreateChannel({
+      name,
+      ...(canMakeOnlyMeProject ? { visibility: channelAudienceDraft } : {}),
+    });
     if (created) {
       setChannelDialogOpen(false);
       setChannelNameDraft("");
+      setChannelAudienceDraft("workspace");
     } else {
       toast.error("Couldn't create the project. The name may already be in use.");
     }
-  }, [channelNameDraft, requestCreateChannel]);
+  }, [canMakeOnlyMeProject, channelAudienceDraft, channelNameDraft, requestCreateChannel]);
   const onMoveToChannel = useCallback(
     async (
       session: Session,
@@ -1871,7 +1894,15 @@ export function SessionList() {
           setChannelMoveOverrides((current) =>
             rollbackSessionChannelMove(current, session.id, operation),
           );
-          toast.error("Couldn't move the workstream. Its previous project was restored.");
+          // Rows don't carry a chat's audience, so name the likely reason here.
+          const onlyMeTarget =
+            channels.find((project) => project.id === channelId)?.visibility === "private";
+          toast.error(
+            "Couldn't move the workstream. Its previous project was restored.",
+            onlyMeTarget
+              ? { description: "An Only me project holds only your own Only me chats." }
+              : undefined,
+          );
         }
         await refreshSessionPages();
       } finally {
@@ -1883,22 +1914,22 @@ export function SessionList() {
         }
       }
     },
-    [context, refreshSessionPages, verifySessionChannelMove],
+    [channels, context, refreshSessionPages, setCollapsedChannelSections, verifySessionChannelMove],
   );
-  const submitRenameProject = useCallback(async () => {
-    const name = projectRenameDraft.trim();
-    if (!projectPendingRename || !name || channelsQuery.mutating) return;
-    if (name === projectPendingRename.name) {
-      setProjectPendingRename(null);
-      return;
-    }
-    const updated = await updateProject(projectPendingRename.id, { name });
-    if (updated) {
-      setProjectPendingRename(null);
-    } else {
-      toast.error("Couldn't rename the project. The name may already be in use.");
-    }
-  }, [projectRenameDraft, projectPendingRename, channelsQuery.mutating, updateProject]);
+  const saveProjectProfile = useCallback(
+    async (project: Channel, change: UpdateChannelRequest): Promise<boolean> => {
+      const updated = await updateProject(project.id, change);
+      if (!updated) {
+        toast.error(
+          change.name !== undefined
+            ? "Couldn't save the project. The name may already be in use."
+            : "Couldn't save the project.",
+        );
+      }
+      return updated !== null;
+    },
+    [updateProject],
+  );
   const onToggleProjectPin = useCallback(
     async (project: Channel) => {
       const updated = await updateProject(project.id, { pinned: !project.pinned });
@@ -1916,6 +1947,17 @@ export function SessionList() {
     await refreshSessionPages();
     return true;
   }, [projectPendingDelete, refreshSessionPages, removeProject]);
+  const onShareProject = useCallback(async (): Promise<boolean> => {
+    if (!projectPendingShare) return false;
+    const shared = await updateProject(projectPendingShare.id, { visibility: "workspace" });
+    if (!shared) {
+      toast.error(
+        "Couldn't share the project. A shared project may already use this name; rename it and try again.",
+      );
+      return false;
+    }
+    return true;
+  }, [projectPendingShare, updateProject]);
   const onReorderProjects = useCallback(
     async (sourceProjectId: string, targetProjectId: string) => {
       if (sourceProjectId === targetProjectId) return;
@@ -1971,7 +2013,7 @@ export function SessionList() {
         await refreshSessionPages();
       } catch (attentionError) {
         toast.error("Couldn't update the session status.", {
-          description: errorMessage(attentionError),
+          description: userErrorText(attentionError),
         });
         await refreshSessionPages();
       }
@@ -1991,9 +2033,7 @@ export function SessionList() {
             .getSession(session.workspaceId, session.rootSessionId)
             .catch((): SessionDetails | null => null));
         if (!root || root.parentSessionId !== null) {
-          toast.error(
-            archived ? "Couldn't archive the workstream." : "Couldn't restore the workstream.",
-          );
+          toast.error(archived ? "Couldn't archive the workstream." : "Couldn't undo the archive.");
           return;
         }
         return await archiveSession(root, archived, restoreFocusTo);
@@ -2021,25 +2061,11 @@ export function SessionList() {
           context,
           session,
           archived,
-          {
-            page: confirmArchive.page,
-            confirm: async (input) => {
-              // A confirmation is not an archive: retain the row and its window while deciding.
-              if (archived) preserveArchiveWindow(session.id, false);
-              setArchiveTransitions((current) => {
-                const next = new Set(current);
-                next.delete(session.id);
-                return next;
-              });
-              const confirmed = await confirmArchive.confirm(input);
-              if (confirmed) {
-                if (archived) preserveArchiveWindow(session.id, true, archiveWindowKeys);
-                setArchiveTransitions((current) => new Set(current).add(session.id));
-              }
-              return confirmed;
-            },
-          },
           sessionDisplayTitle(session),
+          (next) => {
+            if (!context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)) return;
+            void archiveSession({ ...session, archived: !next }, next);
+          },
         );
         if (!updated) return;
         if (!context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)) return;
@@ -2060,12 +2086,14 @@ export function SessionList() {
           sessionId: session.id,
           archived: updated.archived,
         });
+        // Recent chats drop it now too, not on a later read.
+        rememberChats(context.accessContext.subjectId, [updated]);
         archivedResult = updated;
         await refreshSessionPages();
       } catch (archiveError) {
         if (!context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)) return;
-        toast.error(archived ? "Couldn't archive the chat." : "Couldn't restore the chat.", {
-          description: errorMessage(archiveError),
+        toast.error(archived ? "Couldn't archive the chat." : "Couldn't undo the archive.", {
+          description: userErrorText(archiveError),
         });
         await refreshSessionPages();
       } finally {
@@ -2084,30 +2112,9 @@ export function SessionList() {
           next.delete(session.id);
           return next;
         });
-        if (
-          archivedResult &&
-          context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)
-        ) {
-          const updated = archivedResult;
-          toast.success(archived ? "Chat archived" : "Chat restored", {
-            ...(archived
-              ? {
-                  duration: 8000,
-                  action: {
-                    label: "Undo",
-                    onClick: () => {
-                      if (!context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition))
-                        return;
-                      void archiveSession(updated, false);
-                    },
-                  },
-                }
-              : {}),
-          });
-        }
       }
     },
-    [context, rail.workspaceId, refreshSessionPages, confirmArchive, preserveArchiveWindow],
+    [context, rail.workspaceId, refreshSessionPages, preserveArchiveWindow],
   );
   // Site rows pin and archive for this person only, like sessions: a pin
   // moves the row to Pinned and archive only hides it from this sidebar.
@@ -2142,7 +2149,7 @@ export function SessionList() {
       } catch (pinError) {
         if (!context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition)) return;
         toast.error(nextPinned ? "Couldn't pin the Site." : "Couldn't unpin the Site.", {
-          description: errorMessage(pinError),
+          description: userErrorText(pinError),
         });
       } finally {
         setSitePinOverrides((current) => {
@@ -2227,7 +2234,7 @@ export function SessionList() {
         if (!context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition)) return;
         setArchived(!archived);
         toast.error(archived ? "Couldn't archive the Site." : "Couldn't restore the Site.", {
-          description: errorMessage(archiveError),
+          description: userErrorText(archiveError),
         });
       } finally {
         const remaining = (inFlight.get(origin.siteId) ?? 1) - 1;
@@ -2262,9 +2269,12 @@ export function SessionList() {
           channelId,
         });
         moved = true;
-      } catch {
+      } catch (moveError) {
+        // Says why, for example that an Only me project takes only Only me Sites.
         if (context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition))
-          toast.error("Couldn't move the Site. Its previous project was restored.");
+          toast.error("Couldn't move the Site. Its previous project was restored.", {
+            description: userErrorText(moveError),
+          });
       }
       try {
         if (context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition) && moved)
@@ -2278,7 +2288,7 @@ export function SessionList() {
         });
       }
     },
-    [context, rail.workspaceId, refreshSessionPages],
+    [context, rail.workspaceId, refreshSessionPages, setCollapsedChannelSections],
   );
   const siteRowActions = useMemo<SiteRowActions | null>(
     () =>
@@ -2297,6 +2307,25 @@ export function SessionList() {
         : null,
     [context.client, onArchiveSite, onMoveSite, onPinSite],
   );
+  // The open Site's page offers the same Pin and Archive as its row.
+  const pinnedSiteIds = useMemo(
+    () =>
+      new Set(
+        (siteGroups ?? [])
+          .filter((group) => "pinned" in group && group.pinned === true)
+          .map((group) => group.siteId),
+      ),
+    [siteGroups],
+  );
+  useEffect(() => {
+    if (!siteRowActions) return;
+    return publishSiteSidebarBridge({
+      workspaceId: rail.workspaceId,
+      pinnedSiteIds,
+      pin: siteRowActions.pin,
+      archive: siteRowActions.archive,
+    });
+  }, [pinnedSiteIds, rail.workspaceId, siteRowActions]);
   const onDeleteSession = useCallback(async (): Promise<boolean> => {
     if (!sessionPendingDelete) return false;
     try {
@@ -2358,7 +2387,7 @@ export function SessionList() {
       return true;
     } catch (deleteError) {
       toast.error("Couldn't delete the chat.", {
-        description: errorMessage(deleteError),
+        description: userErrorText(deleteError),
       });
       return false;
     }
@@ -2788,6 +2817,33 @@ export function SessionList() {
     () => new Map(pinnedChatNodes.slice(0, 9).map((node, index) => [node.session.id, index + 1])),
     [pinnedChatNodes],
   );
+  // A pinned sub-agent chat sits in Pinned away from its parent, so its row
+  // says which chat it belongs to, when that chat is known here.
+  const pinnedParentTitlesRef = useRef<ReadonlyMap<string, string>>(new Map());
+  const pinnedParentTitles = useMemo(() => {
+    const titles = new Map<string, string>();
+    const pinnedChildren = pinnedChatNodes.filter((node) => node.session.parentSessionId !== null);
+    if (pinnedChildren.length > 0) {
+      const loaded = new Map([...allSessions, ...pinned].map((session) => [session.id, session]));
+      const known = readChatDirectory(directorySubject, rail.workspaceId).rows;
+      for (const { session } of pinnedChildren) {
+        const parentId = session.parentSessionId!;
+        const parent = loaded.get(parentId);
+        const title = parent ? sessionDisplayTitle(parent) : known.get(parentId)?.title;
+        if (title) titles.set(session.id, title);
+      }
+    }
+    // The same titles keep the same map, so pinned rows don't re-render for nothing.
+    const previous = pinnedParentTitlesRef.current;
+    if (
+      previous.size === titles.size &&
+      [...titles].every(([id, title]) => previous.get(id) === title)
+    ) {
+      return previous;
+    }
+    pinnedParentTitlesRef.current = titles;
+    return titles;
+  }, [allSessions, directorySubject, pinned, pinnedChatNodes, rail.workspaceId]);
 
   useLayoutEffect(() => {
     const pending = pendingSessionFocus.current;
@@ -3939,21 +3995,17 @@ export function SessionList() {
                     updateBrowsePreferences({ showEmptyGroups: show })
                   }
                 />
-                {context.clientConfig.sessionArchive ? (
-                  <>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem
-                      onSelect={() =>
-                        void navigate({
-                          to: "/workspaces/$workspaceId/read-only-chats",
-                          params: { workspaceId: rail.workspaceId },
-                        })
-                      }
-                    >
-                      Read-only chats
-                    </DropdownMenuItem>
-                  </>
-                ) : null}
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  onSelect={() =>
+                    void navigate({
+                      to: "/workspaces/$workspaceId/archived",
+                      params: { workspaceId: rail.workspaceId },
+                    })
+                  }
+                >
+                  Archived
+                </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
@@ -4034,26 +4086,28 @@ export function SessionList() {
                 {pinnedNodes.length > 0 ? (
                   <>
                     <PinnedJumpNumbers.Provider value={pinnedJumpNumbers}>
-                      <SessionGroup
-                        label="Pinned"
-                        nodes={pinnedNodes}
-                        localDeliveryAttention={localDeliveryAttention}
-                        flat={flat}
-                        activeSessionId={activeSessionId}
-                        focusIndex={focusIndex}
-                        onFocusSession={setFocusedSessionId}
-                        expanded={expanded}
-                        onToggleExpand={toggleExpand}
-                        childPages={childPages}
-                        onLoadMoreChildren={loadChildPage}
-                        onRename={context.updateSessionTitle}
-                        onPin={onPin}
-                        channels={channels}
-                        onMoveToChannel={onMoveToChannel}
-                        onUpdateAttention={onUpdateAttention}
-                        onArchive={onArchive}
-                        onRequestDelete={setSessionPendingDelete}
-                      />
+                      <PinnedParentTitles.Provider value={pinnedParentTitles}>
+                        <SessionGroup
+                          label="Pinned"
+                          nodes={pinnedNodes}
+                          localDeliveryAttention={localDeliveryAttention}
+                          flat={flat}
+                          activeSessionId={activeSessionId}
+                          focusIndex={focusIndex}
+                          onFocusSession={setFocusedSessionId}
+                          expanded={expanded}
+                          onToggleExpand={toggleExpand}
+                          childPages={childPages}
+                          onLoadMoreChildren={loadChildPage}
+                          onRename={context.updateSessionTitle}
+                          onPin={onPin}
+                          channels={channels}
+                          onMoveToChannel={onMoveToChannel}
+                          onUpdateAttention={onUpdateAttention}
+                          onArchive={onArchive}
+                          onRequestDelete={setSessionPendingDelete}
+                        />
+                      </PinnedParentTitles.Provider>
                     </PinnedJumpNumbers.Provider>
                     {pinnedTruncated ? (
                       <p className="px-2 pb-2 text-[11px] text-fg-subtle" role="status">
@@ -4090,10 +4144,8 @@ export function SessionList() {
                           : undefined
                       }
                       onToggleProjectPin={onToggleProjectPin}
-                      onRenameProject={(project) => {
-                        setProjectRenameDraft(project.name);
-                        setProjectPendingRename(project);
-                      }}
+                      onEditProject={setProjectPendingEdit}
+                      onShareProject={setProjectPendingShare}
                       onDeleteProject={setProjectPendingDelete}
                       draggedProjectId={draggedProjectId}
                       dragOverProjectId={dragOverProjectId}
@@ -4294,26 +4346,33 @@ export function SessionList() {
               </>
             )}
           </div>
-          <ChannelCreateDialog
-            key={projectPendingRename?.id ?? "rename-project"}
-            mode="rename"
-            open={projectPendingRename !== null}
-            name={projectRenameDraft}
-            busy={channelsQuery.mutating}
-            onNameChange={setProjectRenameDraft}
-            onOpenChange={(open) => {
-              if (!open) setProjectPendingRename(null);
-            }}
-            onSubmit={() => void submitRenameProject()}
-          />
+          {projectPendingEdit ? (
+            <ProjectProfileDialog
+              key={projectPendingEdit.id}
+              project={projectPendingEdit}
+              open
+              onOpenChange={(open) => {
+                if (!open) setProjectPendingEdit(null);
+              }}
+              update={(change) => saveProjectProfile(projectPendingEdit, change)}
+            />
+          ) : null}
           <ChannelCreateDialog
             open={channelDialogOpen}
             name={channelNameDraft}
             busy={channelsQuery.mutating}
+            audience={
+              canMakeOnlyMeProject
+                ? { value: channelAudienceDraft, onChange: setChannelAudienceDraft }
+                : undefined
+            }
             onNameChange={setChannelNameDraft}
             onOpenChange={(open) => {
               setChannelDialogOpen(open);
-              if (!open) setChannelNameDraft("");
+              if (!open) {
+                setChannelNameDraft("");
+                setChannelAudienceDraft("workspace");
+              }
             }}
             onSubmit={() => void submitCreateChannel()}
           />
@@ -4344,6 +4403,17 @@ export function SessionList() {
             confirmLabel="Delete project"
             cancelAutoFocus
             onConfirm={onDeleteProject}
+          />
+          <ConfirmDialog
+            open={projectPendingShare !== null}
+            onOpenChange={(open) => {
+              if (!open) setProjectPendingShare(null);
+            }}
+            title={<>Share “{projectPendingShare?.name}” with the workspace?</>}
+            description="Everyone in this workspace will see the project and can file their chats in it. Your Only me chats and Sites in it stay Only me. A shared project can't be made Only me again."
+            confirmLabel="Share project"
+            cancelAutoFocus
+            onConfirm={onShareProject}
           />
         </div>
       </WorkstreamRootsContext.Provider>
@@ -4538,7 +4608,9 @@ function SessionGroup(props: {
   allowNewSession?: boolean | undefined;
   project?: Channel | undefined;
   onToggleProjectPin?: ((project: Channel) => void) | undefined;
-  onRenameProject?: ((project: Channel) => void) | undefined;
+  onEditProject?: ((project: Channel) => void) | undefined;
+  /** Offered on the owner's Only me project: share it with the workspace. */
+  onShareProject?: ((project: Channel) => void) | undefined;
   onDeleteProject?: ((project: Channel) => void) | undefined;
   draggedProjectId?: string | null | undefined;
   dragOverProjectId?: string | null | undefined;
@@ -4594,6 +4666,45 @@ function SessionGroup(props: {
       ? [collapsedSelection]
       : [];
   const treeExpanded = sectionExpanded ? props.expanded : EMPTY_SESSION_IDS;
+  const projectDescription = props.project?.description?.trim() || null;
+  const projectDescriptionId = useId();
+  const sectionToggle = (
+    <button
+      id={sectionId}
+      type="button"
+      aria-expanded={sectionExpanded}
+      aria-controls={renderedNodes.length > 0 ? `${sectionId}-sessions` : undefined}
+      onClick={props.onToggleSection}
+      // A described project explains itself in a tooltip instead.
+      title={projectDescription ? undefined : `${summary.label} · ${summary.total} total`}
+      aria-describedby={projectDescription ? projectDescriptionId : undefined}
+      className="flex h-full min-w-0 flex-1 items-center gap-1.5 py-1 pl-1.5 text-left text-sm font-normal text-fg"
+    >
+      <span className="flex w-4 shrink-0 items-center">
+        <ProjectGlyph project={props.project} open={sectionExpanded} />
+      </span>
+      <span className="min-w-0 flex-1 truncate">{props.label}</span>
+      {props.project?.visibility === "private" ? (
+        <>
+          <LockIcon aria-hidden="true" className="size-3 shrink-0 text-fg-subtle" />
+          <span className="sr-only">Only me</span>
+        </>
+      ) : null}
+      {props.showSummary !== false ? (
+        // The row's actions sit where the summary is, on the translucent
+        // hover wash, so the summary steps aside while they show.
+        <span
+          className={cn(
+            "inline-flex shrink-0",
+            (props.project || props.allowNewSession !== false) &&
+              "group-hover/section:invisible group-focus-within/section:invisible pointer-coarse:invisible",
+          )}
+        >
+          <RailTrailingMetadata summary={summary} />
+        </span>
+      ) : null}
+    </button>
+  );
   return (
     <div role="group" aria-label={props.label} className="mb-1.5 min-w-0">
       {props.channelHeader ? (
@@ -4667,37 +4778,21 @@ function SessionGroup(props: {
               "ring-1 ring-inset ring-accent",
           )}
         >
-          <button
-            id={sectionId}
-            type="button"
-            aria-expanded={sectionExpanded}
-            aria-controls={renderedNodes.length > 0 ? `${sectionId}-sessions` : undefined}
-            onClick={props.onToggleSection}
-            title={`${summary.label} · ${summary.total} total`}
-            className="flex h-full min-w-0 flex-1 items-center gap-1.5 py-1 pl-1.5 text-left text-sm font-normal text-fg"
-          >
-            <span className="flex w-4 shrink-0 items-center">
-              {sectionExpanded ? (
-                <FolderOpenIcon aria-hidden="true" className="size-3.5 shrink-0" />
-              ) : (
-                <FolderIcon aria-hidden="true" className="size-3.5 shrink-0" />
-              )}
+          {projectDescription ? (
+            <Tooltip delayDuration={400}>
+              <TooltipTrigger asChild>{sectionToggle}</TooltipTrigger>
+              <TooltipContent side="right" className="max-w-72 whitespace-pre-line text-pretty">
+                {projectDescription}
+              </TooltipContent>
+            </Tooltip>
+          ) : (
+            sectionToggle
+          )}
+          {projectDescription ? (
+            <span id={projectDescriptionId} hidden>
+              {projectDescription}
             </span>
-            <span className="min-w-0 flex-1 truncate">{props.label}</span>
-            {props.showSummary !== false ? (
-              // The row's actions sit where the summary is, on the translucent
-              // hover wash, so the summary steps aside while they show.
-              <span
-                className={cn(
-                  "inline-flex shrink-0",
-                  (props.project || props.allowNewSession !== false) &&
-                    "group-hover/section:invisible group-focus-within/section:invisible pointer-coarse:invisible",
-                )}
-              >
-                <RailTrailingMetadata summary={summary} />
-              </span>
-            ) : null}
-          </button>
+          ) : null}
           {props.project ? (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -4713,10 +4808,16 @@ function SessionGroup(props: {
                 </button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" side="right">
-                <DropdownMenuItem onSelect={() => props.onRenameProject?.(props.project!)}>
+                <DropdownMenuItem onSelect={() => props.onEditProject?.(props.project!)}>
                   <PencilIcon aria-hidden="true" />
-                  Rename project
+                  Edit project…
                 </DropdownMenuItem>
+                {props.project.visibility === "private" && props.onShareProject ? (
+                  <DropdownMenuItem onSelect={() => props.onShareProject?.(props.project!)}>
+                    <UsersIcon aria-hidden="true" />
+                    Share with workspace…
+                  </DropdownMenuItem>
+                ) : null}
                 <DropdownMenuItem onSelect={() => props.onToggleProjectPin?.(props.project!)}>
                   <PinIcon
                     aria-hidden="true"
@@ -4904,7 +5005,7 @@ function SessionTreeRow(props: {
   const childCount = Math.max(node.session.treeStats?.totalDescendants ?? 0, node.children.length);
   const childCountTruncated = node.session.treeStats?.truncated ?? false;
   const hasChildren = directChildCount > 0 || node.children.length > 0;
-  const aggregateStatus = summarizeRailNodes([node], props.localDeliveryAttention);
+  const aggregateStatus = summarizeRailRow(node, props.localDeliveryAttention);
   const isExpanded = props.expanded.has(node.session.id);
   const childPage = props.childPages.get(node.session.id);
   // A collapsed branch keeps only its selected descendant visible, rendered as
@@ -5045,6 +5146,8 @@ function TreeLoadRow({
 
 /** The ⌘1 to ⌘9 number of each top-level pinned row; absent outside the Pinned section. */
 const PinnedJumpNumbers = createContext<ReadonlyMap<string, number> | null>(null);
+/** The parent chat's title for each pinned sub-agent row; absent outside the Pinned section. */
+const PinnedParentTitles = createContext<ReadonlyMap<string, string> | null>(null);
 
 /** "⌘3" while ⌘ is held on a pinned row that ⌘3 opens; otherwise nothing. */
 function usePinnedJumpKey(sessionId: string, depth: number, mobile: boolean): string | undefined {
@@ -5101,6 +5204,9 @@ function SessionRow(props: {
   const focusEvents = useUiEventTarget("window");
   const creator = railRowCreator(props.session);
   const jumpKey = usePinnedJumpKey(props.session.id, props.depth, rail.isMobile);
+  const pinnedParentTitles = useContext(PinnedParentTitles);
+  const parentTitle =
+    props.depth === 0 ? (pinnedParentTitles?.get(props.session.id) ?? null) : null;
   // A key press puts the person's attention elsewhere (⌘K right after opening a
   // chat, with the pointer still on its row), so the hover card gives way, as
   // tooltips do.
@@ -5272,7 +5378,7 @@ function SessionRow(props: {
                 tabIndex={props.focused ? 0 : -1}
                 aria-current={props.active ? "page" : undefined}
                 aria-label={sessionRowAccessibleName({
-                  title,
+                  title: parentTitle ? `${title}, in ${parentTitle}` : title,
                   stateLabel,
                   pinned: Boolean(props.session.pinned),
                   statusLabel: props.aggregateStatus.label,
@@ -5361,6 +5467,7 @@ function SessionRow(props: {
                     ) : null
                   }
                   title={title}
+                  parentTitle={parentTitle}
                   stateLabel={stateLabel}
                   depthLabel={depthLabel}
                   descendantLabel={descendantLabel}
@@ -5477,12 +5584,12 @@ function SessionRow(props: {
             </ContextMenuItem>
           </>
         ) : null}
-        <ContextMenuItem
-          onSelect={() => void props.onArchive(archiveTarget, !archiveTarget.archived)}
-        >
-          <ArchiveIcon className="size-4" />
-          {rowArchiveLabel(context, props.session, archiveTarget)}
-        </ContextMenuItem>
+        {rowArchiveLabel(context, props.session, archiveTarget) ? (
+          <ContextMenuItem onSelect={() => void props.onArchive(archiveTarget, true)}>
+            <ArchiveIcon className="size-4" />
+            {rowArchiveLabel(context, props.session, archiveTarget)}
+          </ContextMenuItem>
+        ) : null}
         {props.session.parentSessionId === null && props.session.archived ? (
           <ContextMenuItem
             variant="destructive"
@@ -5510,7 +5617,11 @@ function SessionRow(props: {
                     void props.onMoveToChannel(props.session, channel.id, "row");
                   }}
                 >
-                  <FolderIcon aria-hidden="true" />
+                  {channel.id === null ? (
+                    <FolderIcon aria-hidden="true" />
+                  ) : (
+                    <ProjectGlyph project={channel} className="size-4" />
+                  )}
                   <span className="min-w-0 flex-1 truncate">{channel.name}</span>
                   <DropdownMenuCheck checked={current} />
                 </ContextMenuItem>
@@ -5556,15 +5667,15 @@ function useWorkstreamArchiveTarget(session: Session): Session {
     : (roots?.get(session.rootSessionId) ?? session);
 }
 
-/** "Archive", "Hide for me" or "Restore", naming the workstream on a spawned row. */
+/** "Archive" (or "Archive workstream" on a spawned row) where allowed, otherwise null. */
 function rowArchiveLabel(
   context: Parameters<typeof archiveActionLabel>[0],
   session: Session,
   target: Session,
-): string {
+): string | null {
   const label = archiveActionLabel(context, target);
-  if (session.parentSessionId === null) return label;
-  return label === "Hide for me" ? "Hide workstream for me" : `${label} workstream`;
+  if (label === null || session.parentSessionId === null) return label;
+  return `${label} workstream`;
 }
 
 /**
@@ -5599,24 +5710,18 @@ export function RowQuickActions({
           <PinIcon className={session.pinned ? "size-3.5 fill-current" : "size-3.5"} />
         </RailRowQuickAction>
       ) : null}
-      <RailRowQuickAction
-        label={
-          session.parentSessionId !== null
-            ? archiveLabel
-            : archiveLabel === "Hide for me"
-              ? "Hide for me"
-              : session.archived
-                ? "Restore session"
-                : "Archive session"
-        }
-        tooltip={archiveLabel}
-        data-session-actions={session.id}
-        data-session-actions-mode="quick"
-        data-session-action="archive"
-        onActivate={() => void onArchive(target, !target.archived, "actions")}
-      >
-        <ArchiveIcon className="size-3.5" />
-      </RailRowQuickAction>
+      {archiveLabel ? (
+        <RailRowQuickAction
+          label={session.parentSessionId !== null ? archiveLabel : "Archive session"}
+          tooltip={archiveLabel}
+          data-session-actions={session.id}
+          data-session-actions-mode="quick"
+          data-session-action="archive"
+          onActivate={() => void onArchive(target, true, "actions")}
+        >
+          <ArchiveIcon className="size-3.5" />
+        </RailRowQuickAction>
+      ) : null}
     </div>
   );
 }
@@ -5736,13 +5841,15 @@ function RowActionsMenu({
             </DropdownMenuItem>
           </>
         ) : null}
-        <DropdownMenuItem
-          onSelect={() => void onArchive(archiveTarget, !archiveTarget.archived)}
-          onClick={(event) => event.stopPropagation()}
-        >
-          <ArchiveIcon className="size-4" />
-          {rowArchiveLabel(archiveContext, session, archiveTarget)}
-        </DropdownMenuItem>
+        {rowArchiveLabel(archiveContext, session, archiveTarget) ? (
+          <DropdownMenuItem
+            onSelect={() => void onArchive(archiveTarget, true)}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <ArchiveIcon className="size-4" />
+            {rowArchiveLabel(archiveContext, session, archiveTarget)}
+          </DropdownMenuItem>
+        ) : null}
         {session.parentSessionId === null && session.archived ? (
           <DropdownMenuItem
             variant="destructive"
@@ -5773,7 +5880,11 @@ function RowActionsMenu({
                   }}
                   onClick={(event) => event.stopPropagation()}
                 >
-                  <FolderIcon aria-hidden="true" />
+                  {channel.id === null ? (
+                    <FolderIcon aria-hidden="true" />
+                  ) : (
+                    <ProjectGlyph project={channel} className="size-4" />
+                  )}
                   <span className="min-w-0 flex-1 truncate">{channel.name}</span>
                   <DropdownMenuCheck checked={current} />
                 </DropdownMenuItem>

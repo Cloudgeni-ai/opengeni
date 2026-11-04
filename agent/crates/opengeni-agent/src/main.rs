@@ -54,6 +54,8 @@ mod handover;
 mod instance_lock;
 mod inventory;
 mod job;
+#[cfg(target_os = "linux")]
+mod keeper;
 mod log_file;
 mod metrics;
 mod ops;
@@ -114,10 +116,25 @@ fn main() -> std::process::ExitCode {
     #[cfg(unix)]
     let inherited = handover::inherit_from_env();
     let cli = Cli::parse();
+    // A foreground Linux agent that nothing would start again becomes a small
+    // keeper that runs the real agent as its child and starts it again when
+    // the kernel kills it (see `keeper`). Decided before any thread exists.
+    // An image continuing handed-over commands keeps serving them itself.
+    #[cfg(target_os = "linux")]
+    if !keeper::kept_by_parent()
+        && matches!(inherited, Ok(false))
+        && keeper::wanted(&cli, hosted_by_desktop_app())
+    {
+        if let Some(code) = update::installed_executable().ok().and_then(keeper::keep) {
+            return code;
+        }
+    }
     // Only the long-running agent persists its log; one-shot CLI commands
     // print to the terminal and must not interleave with the service's file.
     let persistent = matches!(cli.command, None | Some(Command::Run(_)));
     init_tracing(persistent);
+    #[cfg(target_os = "linux")]
+    keeper::report_restart();
     #[cfg(unix)]
     if let Err(error) = caught {
         error!(%error, "could not catch SIGUSR1 while this image starts: it stays blocked, in the commands this agent runs too");
@@ -1072,6 +1089,12 @@ fn restart_after_verified_update(handover: &CarriedHandover) -> anyhow_lite::Res
             entry.push(b'=');
             entry.extend(value.as_bytes());
             envp.push(c_string(entry)?);
+        }
+        // The successor replaces this process, so it is still the child of
+        // this agent's keeper, which `main` removed from the environment.
+        #[cfg(target_os = "linux")]
+        if let Some((name, value)) = keeper::successor_env() {
+            envp.push(c_string(format!("{name}={value}").into_bytes())?);
         }
         if let Some(handover) = handover {
             // Last step before exec: nothing else spawns from here, so only

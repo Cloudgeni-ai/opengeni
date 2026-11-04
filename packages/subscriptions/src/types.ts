@@ -77,6 +77,12 @@ export type SubscriptionConnection = {
   entitledModelIds: readonly ModelId[] | null;
   /** Fresh adapter catalog; the chat adapter maps the accepted upstream model to its product id. */
   observedModelSlugs?: readonly string[] | null;
+  /**
+   * The latest catalog observed under the current credential generation, even
+   * once expired. Display reads only (pickers, page loads); placement uses
+   * the fresh catalog above.
+   */
+  lastObservedModelSlugs?: readonly string[] | null;
   /** Observation times for the fresh catalog above; never extended by a read. */
   modelCatalogObservedAt?: number | null;
   modelCatalogExpiresAt?: number | null;
@@ -159,6 +165,11 @@ export type SubscriptionSettingValues = {
   /** Ordered fallback models for a preferred model, possibly on other providers. */
   fallbackOrder: Readonly<Record<ModelId, readonly ModelId[]>>;
   personalConnectionsAllowed: boolean;
+  /**
+   * @deprecated Since D-53 a person's own subscription serves their turns in
+   * the workspaces where they turned it on, first; placement no longer reads
+   * this. Kept so existing settings and API clients stay valid.
+   */
   personalFallbackAllowed: boolean;
 };
 
@@ -219,7 +230,6 @@ export type PlacementPerson = {
   membershipId: string;
   /** False once the person left the organization or lost access. */
   active: boolean;
-  personalFallbackOptIn: boolean;
 };
 
 /** The session's chat binding (design 3.4). */

@@ -14,7 +14,11 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import type { SessionWorkflowClient } from "@opengeni/core";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import {
+  acquireSharedTestDatabase,
+  grantDeferredRuntimeAccess,
+  type SharedTestDatabase,
+} from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
@@ -126,7 +130,13 @@ async function fixture() {
   const member = await person("member", "member", PEOPLE_PERMISSIONS);
   const viewer = await person("viewer", "member", ["sessions:read", "secrets:list"]);
   const orgAdmin = await person("admin", "admin", PEOPLE_PERMISSIONS);
-  return { accountId, workspaceId, member, viewer, orgAdmin };
+  // The organization's owner, in the workspace their sign-up created.
+  const owner = {
+    accountId,
+    workspaceId: access.workspaceGrants[0]!.workspaceId,
+    subjectId: `user:${userId}`,
+  };
+  return { accountId, workspaceId, member, viewer, orgAdmin, owner };
 }
 
 async function call(
@@ -148,6 +158,61 @@ async function call(
 }
 
 describe("vault routes", () => {
+  test("organization vaults: every one for account administrators, wherever it works", async () => {
+    if (!available) return;
+    const f = await fixture();
+    const asOwner = await bearer(f.owner, [...PEOPLE_PERMISSIONS, "account:admin"]);
+    const ownerBase = `/v1/workspaces/${f.owner.workspaceId}`;
+    const elsewhere = await call("POST", `${ownerBase}/vaults`, asOwner, {
+      name: "Only the team workspace",
+      ownerKind: "organization",
+      availability: { allowedWorkspaceIds: [f.workspaceId], allowPersonalWorkspaces: false },
+    });
+    expect(elsewhere.status).toBe(201);
+    const everywhere = await call("POST", `${ownerBase}/vaults`, asOwner, {
+      name: "Every workspace",
+      ownerKind: "organization",
+    });
+    expect(everywhere.status).toBe(201);
+
+    // The workspace's own list holds only what reaches it.
+    const here = await call("GET", `${ownerBase}/vaults`, asOwner);
+    expect(here.json.vaults.map((vault: { id: string }) => vault.id)).not.toContain(
+      elsewhere.json.id,
+    );
+
+    // Anyone without account:admin is refused.
+    const denied = await call(
+      "GET",
+      `/v1/workspaces/${f.workspaceId}/organization-vaults`,
+      await bearer(f.member, PEOPLE_PERMISSIONS),
+    );
+    expect(denied.status).toBe(403);
+
+    // Until the routine is granted: the ones that work here, marked incomplete.
+    const before = await call("GET", `${ownerBase}/organization-vaults`, asOwner);
+    expect(before.status).toBe(200);
+    expect(before.json.complete).toBe(false);
+    const beforeIds = before.json.vaults.map((vault: { id: string }) => vault.id);
+    expect(beforeIds).toContain(everywhere.json.id);
+    expect(beforeIds).not.toContain(elsewhere.json.id);
+
+    await grantDeferredRuntimeAccess(shared!.admin);
+    const after = await call("GET", `${ownerBase}/organization-vaults`, asOwner);
+    expect(after.status).toBe(200);
+    expect(after.json.complete).toBe(true);
+    expect(after.json.vaults.map((vault: { id: string }) => vault.id)).toEqual(
+      expect.arrayContaining([everywhere.json.id, elsewhere.json.id]),
+    );
+    const listed = after.json.vaults.find(
+      (vault: { id: string }) => vault.id === elsewhere.json.id,
+    );
+    expect(listed).toMatchObject({
+      ownerKind: "organization",
+      availability: { allowedWorkspaceIds: [f.workspaceId], allowPersonalWorkspaces: false },
+    });
+  });
+
   test("CRUD, error envelope, Only-me privacy and reveal authority", async () => {
     if (!available) return;
     const f = await fixture();

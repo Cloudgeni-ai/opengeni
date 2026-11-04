@@ -883,13 +883,24 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
       ? siteDataGuestModifyReach(collection, collection.guestAccess)
       : siteDataModifyReach(collection, caller.role);
 
-  /** Guests never reach Site Data files. */
-  const refuseGuestFiles = (caller: SiteDataCaller) => {
+  /**
+   * Guests (anonymous viewers of a public Site) read the Site's shared files,
+   * as every other viewer does, but never upload, delete or see private ones.
+   */
+  const refuseGuestFileWrites = (caller: SiteDataCaller) => {
     if (caller.guest === true)
       throw new SiteDataError("forbidden", "Sign in to use this Site's files", {
         reason: "guest_access",
       });
   };
+
+  /** The files a caller may see: managers all, guests shared only, viewers shared and their own. */
+  const visibleFiles = (caller: SiteDataCaller): SQL =>
+    caller.role === "manager"
+      ? sql``
+      : caller.guest === true
+        ? sql`and f.scope = 'shared'`
+        : sql`and (f.scope = 'shared' or f.owner_principal = ${caller.principal})`;
 
   /**
    * The write windows a caller counts against: managers share one generous
@@ -1933,7 +1944,6 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
     },
 
     async listFiles(caller, options = {}) {
-      refuseGuestFiles(caller);
       return scoped(caller, async (tx) => {
         const limit = Math.min(
           Math.max(1, Math.trunc(options.limit ?? 100) || 100),
@@ -1949,7 +1959,7 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
             tx,
             sql`select f.*, to_jsonb(f.created_at) #>> '{}' as cursor_at from site_data_files f
               where f.workspace_id = ${caller.workspaceId} and f.site_id = ${caller.siteId}
-                ${caller.role === "manager" ? sql`` : sql`and (f.scope = 'shared' or f.owner_principal = ${caller.principal})`}
+                ${visibleFiles(caller)}
                 ${after ? sql`and ${after}` : sql``}
               order by f.created_at desc, f.id desc
               limit ${limit + 1}`,
@@ -1966,27 +1976,20 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
     },
 
     async getFile(caller, fileId) {
-      refuseGuestFiles(caller);
       if (!UUID.test(fileId)) return null;
       return scoped(caller, async (tx) => {
         const [row] = await rawRows<FileRow>(
           tx,
-          sql`select * from site_data_files
-            where workspace_id = ${caller.workspaceId} and site_id = ${caller.siteId} and id = ${fileId}`,
+          sql`select f.* from site_data_files f
+            where f.workspace_id = ${caller.workspaceId} and f.site_id = ${caller.siteId} and f.id = ${fileId}
+              ${visibleFiles(caller)}`,
         );
-        if (!row) return null;
-        if (
-          caller.role !== "manager" &&
-          row.scope === "private" &&
-          row.owner_principal !== caller.principal
-        )
-          return null;
-        return toFile(row);
+        return row ? toFile(row) : null;
       });
     },
 
     async checkFileQuota(caller, sizeBytes, limits) {
-      refuseGuestFiles(caller);
+      refuseGuestFileWrites(caller);
       await scoped(caller, async (tx) => {
         const [row] = await rawRows<UsageRow>(
           tx,
@@ -1998,7 +2001,7 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
     },
 
     async insertFile(caller, file, options) {
-      refuseGuestFiles(caller);
+      refuseGuestFileWrites(caller);
       return scoped(caller, async (tx) => {
         const usage = await lockUsage(tx, caller);
         await assertWritableSite(tx, caller);
@@ -2025,7 +2028,7 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
     },
 
     async deleteFile(caller, fileId) {
-      refuseGuestFiles(caller);
+      refuseGuestFileWrites(caller);
       if (!UUID.test(fileId)) throw new SiteDataError("not_found", "File not found");
       return scoped(caller, async (tx) => {
         await lockUsage(tx, caller);

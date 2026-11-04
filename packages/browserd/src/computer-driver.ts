@@ -284,10 +284,8 @@ export class ComputerDriver implements ComputerInteractionDriver {
         .catch(async (error: unknown) => {
           // A pasted value stays on the seat clipboard, where clipboard reads
           // would expose it; text with resolved secrets is never pasted.
-          const text =
-            this.capabilities.clipboard && command.secretValues === undefined
-              ? untypeableText(materialized, error)
-              : null;
+          if (command.secretValues !== undefined) throw secretInputError(error);
+          const text = this.capabilities.clipboard ? untypeableText(materialized, error) : null;
           if (text === null) throw error;
           return await pasteText(client, native, text);
         });
@@ -878,6 +876,35 @@ function materializeNativeCommandSecrets(command: ComputerNativeCommand): Comput
 }
 
 const UNTYPEABLE_CHARACTER = /keymap cannot type Unicode scalar U\+[0-9A-F]+; use clipboard paste/u;
+/** Every layout refusal that names a character; for a secret, that character
+ * is part of the secret. */
+const UNTYPEABLE_ANY_CHARACTER =
+  /cannot type (?:Unicode scalar )?U\+[0-9A-F]+; use clipboard paste/u;
+const LAYOUT_NOT_READY = ", or use clipboard paste";
+const UNTYPEABLE_SECRET =
+  "the desktop keyboard layout cannot type every character of this secret, and secrets are never pasted; nothing was typed, so ask the person to enter it";
+
+/** A refusal of text that carries a resolved secret, without the character it
+ * stopped at and without suggesting the clipboard. */
+function secretInputError(error: unknown): unknown {
+  if (!(error instanceof ComputerBackendError) || error.dispatched) return error;
+  if (error.code === "unsupported" && UNTYPEABLE_ANY_CHARACTER.test(error.message)) {
+    const refusal = new ComputerBackendError("unsupported", UNTYPEABLE_SECRET, false, false);
+    refusal.details = error.details;
+    return refusal;
+  }
+  if (error.message.includes(LAYOUT_NOT_READY)) {
+    const refusal = new ComputerBackendError(
+      error.code,
+      error.message.replace(LAYOUT_NOT_READY, ""),
+      error.retryable,
+      false,
+    );
+    refusal.details = error.details;
+    return refusal;
+  }
+  return error;
+}
 
 /** Text the native keymap refused before emitting any key, so all of it is
  * still untyped. Line breaks and tabs are keys with their own effect (submit,
@@ -903,13 +930,39 @@ function untypeableText(command: ComputerActionCommand, error: unknown): string 
   return text;
 }
 
-/** Types `text` by writing the seat clipboard and pasting it into the same
- * target. Both steps are validated before the clipboard changes. */
+/** The Linux helper's paste that carries its own text: it pastes `text` into
+ * the target and then puts the person's previous clipboard text back once the
+ * target has read it. */
+const RESTORING_PASTE_ADAPTER = "opengeni.native.linux.v1";
+
+/** Types `text` by pasting it into the same target. The Linux helper restores
+ * the previous clipboard afterwards; elsewhere, or with an older helper that
+ * refuses text on a paste, the seat clipboard is written and keeps the text.
+ * Every step is validated before the clipboard changes. */
 async function pasteText(
   client: ComputerBackend,
   command: ComputerBackendActionCommand,
   text: string,
 ): Promise<ComputerBackendObservation | null> {
+  if (client.identity.adapterId === RESTORING_PASTE_ADAPTER) {
+    const restoring = {
+      ...command,
+      action: { type: "clipboard", operation: "paste", text },
+    } as const;
+    const supported = await client.validate(restoring).then(
+      () => true,
+      (error: unknown) => {
+        if (
+          error instanceof ComputerBackendError &&
+          (error.code === "invalid_action" || error.code === "unsupported")
+        ) {
+          return false;
+        }
+        throw error;
+      },
+    );
+    if (supported) return await client.dispatch(restoring);
+  }
   const write = { ...command, action: { type: "clipboard", operation: "write", text } } as const;
   const paste = { ...command, action: { type: "clipboard", operation: "paste" } } as const;
   await client.validate(write);

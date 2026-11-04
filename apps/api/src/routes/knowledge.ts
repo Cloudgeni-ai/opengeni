@@ -12,9 +12,12 @@ import {
   KnowledgeEntryReviewRequest,
   KnowledgeEntryRestoreRequest,
   KnowledgeEntrySaveRequest,
+  KnowledgeEntryReachRecord,
   KnowledgeOriginalFileDownload,
+  UpdateKnowledgeEntryReachRequest,
 } from "@opengeni/contracts";
 import {
+  changeKnowledgeEntryReach,
   prepareKnowledgeFile,
   prepareKnowledgeSave,
   searchKnowledgeEntries,
@@ -25,6 +28,7 @@ import {
   knowledgeContextForAccess,
   requireAccessGrantAuthorization,
   requireSessionAuthorization,
+  requireWorkspaceContributorGrant,
   requireWorkspaceSettingsGrant,
   type ApiRouteDeps,
 } from "@opengeni/core";
@@ -34,6 +38,7 @@ import {
   archiveKnowledgeEntry,
   getAgentLearningSettings,
   getKnowledgeEntry,
+  getKnowledgeEntryReach,
   listAgentLearningOverrides,
   listKnowledgeEntryHistory,
   listKnowledgeReviewBatches,
@@ -407,6 +412,38 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
       );
     }),
   );
+  // Where an organization or personal entry works besides the workspace it
+  // was added in. Readable by anyone who can open the entry here; changed by
+  // whoever may write its scope (the owner, for a personal entry).
+  app.get(`${base}/:entryId/reach`, (c) =>
+    run(c, false, async (context) => {
+      if (context.actor.kind === "agent")
+        throw new HTTPException(403, { message: "Only people choose where Knowledge works." });
+      const reach = await getKnowledgeEntryReach(
+        deps.db,
+        context,
+        Id.parse(c.req.param("entryId")),
+      );
+      if (!reach) throw new HTTPException(404, { message: "Knowledge entry not found" });
+      return c.json(KnowledgeEntryReachRecord.parse(reach));
+    }),
+  );
+  app.put(`${base}/:entryId/reach`, (c) =>
+    run(c, true, async (context) => {
+      if (context.actor.kind === "agent")
+        throw new HTTPException(403, { message: "Only people choose where Knowledge works." });
+      const request = await parseRequestJson(
+        c,
+        UpdateKnowledgeEntryReachRequest,
+        KNOWLEDGE_REQUEST,
+      );
+      return c.json(
+        KnowledgeEntryReachRecord.parse(
+          await changeKnowledgeEntryReach(deps, context, Id.parse(c.req.param("entryId")), request),
+        ),
+      );
+    }),
+  );
 
   const learning = "/v1/workspaces/:workspaceId/agent-learning";
   async function instructionReviewContext(
@@ -417,7 +454,9 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
       throw new HTTPException(403, {
         message: "Instruction review requires an authenticated person",
       });
-    await requireWorkspaceSettingsGrant(c, deps, context.workspaceId);
+    // Whoever may edit the workspace's instructions reviews the agent's
+    // proposed changes to them; the learning settings stay with admins.
+    await requireWorkspaceContributorGrant(c, deps, context.workspaceId);
     context.actor.settingsScopes = ["workspace"];
     return context;
   }

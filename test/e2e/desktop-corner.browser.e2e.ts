@@ -4,7 +4,17 @@ import { chromium, type Browser, type Page } from "playwright";
 import { freePort } from "@opengeni/testing/compose";
 import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 
-import { expectWindowTop, simulateWindowsTitleBar, WINDOW_BAR_HEIGHT } from "./desktop-window-bar";
+import {
+  expectWindowTop,
+  LEGACY_MAC_TRAFFIC_LIGHT_POSITION,
+  MAC_TRAFFIC_LIGHT_POSITION,
+  MACOS_BAR_CONTROLS_LEFT,
+  MACOS_BAR_ROW_LEFT,
+  simulateWindowsTitleBar,
+  trafficLightCentre,
+  WINDOW_BAR_HEIGHT,
+  windowBar,
+} from "./desktop-window-bar";
 
 const PLATFORMS = ["browser", "windows", "macos"] as const;
 type Platform = (typeof PLATFORMS)[number];
@@ -87,21 +97,135 @@ describe("the desktop window bar", () => {
     expect(new Set(backTop.values()).size).toBe(1);
   }, 180_000);
 
+  test("the settings rail is the main rail's sidebar on every platform", async () => {
+    // Its column, surface and brand row are the main rail's (rail-surface.tsx),
+    // as the content view's real main rail draws them here. In the macOS app
+    // both are clear window glass under a clear bar, with no line between
+    // them; elsewhere both show the same rail glow.
+    const transparent = "rgba(0, 0, 0, 0)";
+    const treatment = (page: Page, rail: string) =>
+      page.locator(rail).evaluate((element) => {
+        const column = element.closest<HTMLElement>("[data-shell-rail]")!;
+        const surface = element.closest<HTMLElement>("[data-rail-surface]")!;
+        const brand = column.querySelector<HTMLElement>("[data-rail-brand]")!;
+        const background = (node: Element) => {
+          const style = getComputedStyle(node);
+          return `${style.backgroundColor} ${style.backgroundImage}`;
+        };
+        const painted = (node: Element) => background(node) !== "rgba(0, 0, 0, 0) none";
+        const ancestors: Element[] = [];
+        for (let node = column.parentElement; node && node !== document.body;) {
+          ancestors.push(node);
+          node = node.parentElement;
+        }
+        return {
+          width: Math.round(column.getBoundingClientRect().width),
+          hairline: getComputedStyle(column).borderRightColor,
+          surface: background(surface),
+          // Between the surface and the rail's items nothing paints a background.
+          fills: [...surface.querySelectorAll<HTMLElement>("*")]
+            .filter((node) => node.contains(element) || node === element)
+            .filter(painted)
+            .map(background),
+          // Nor do the column and the frame around it, up to the page.
+          frame: [column, ...ancestors].filter(painted).map(background),
+          brandTop: Math.round(brand.getBoundingClientRect().top),
+          brandDrag: getComputedStyle(brand).getPropertyValue("-webkit-app-region"),
+        };
+      });
+    for (const platform of PLATFORMS) {
+      // One page for both views, so a cold dev server settles once.
+      const { page, errors } = await open(platform, "&view=content&railwidth=340", 1280, 600);
+      await page.getByRole("link", { name: "Opengeni home" }).waitFor({ timeout: 90_000 });
+      const main = await treatment(page, "[data-rail-scroll-viewport]");
+      await page.goto(`${url}?platform=${platform}&railwidth=340`);
+      await page.locator("[data-settings-rail]").waitFor({ timeout: 90_000 });
+      const rail = await treatment(page, "[data-settings-rail]");
+      // As wide as the main rail, at the width the person dragged it to.
+      expect({ platform, ...rail, fills: [], frame: [] }).toEqual({
+        platform,
+        ...main,
+        fills: [],
+        frame: [],
+      });
+      expect({ platform, fills: rail.fills }).toEqual({ platform, fills: [] });
+      expect(rail.width).toBe(340);
+      expect(rail.brandDrag).toBe(platform === "browser" ? "none" : "drag");
+      if (platform === "macos") {
+        expect(rail.surface).toBe(`${transparent} none`);
+        expect(rail.hairline).toBe(transparent);
+        expect({ frame: rail.frame }).toEqual({ frame: [] });
+      } else {
+        expect(rail.surface).toContain("radial-gradient");
+      }
+      expect(errors).toEqual([]);
+      await page.close();
+    }
+    // Without the app's rail (personal settings), the main rail's default width.
+    const personal = await open("macos", "&apprail=none", 1280, 600);
+    await personal.page.locator("[data-settings-rail]").waitFor({ timeout: 90_000 });
+    expect((await treatment(personal.page, "[data-settings-rail]")).width).toBe(288);
+    await personal.page.close();
+  }, 180_000);
+
   test("content pages start below the bar beside the open and collapsed rail", async () => {
     const title = new Map<string, { x: number; y: number }>();
+    const description = new Map<string, { x: number; y: number }>();
     for (const platform of PLATFORMS) {
       for (const width of [720, 900, 1280]) {
         const { page, errors } = await open(platform, "&view=content", width, 600);
         const heading = page.getByRole("heading", { name: "Automations", exact: true });
         await heading.waitFor({ timeout: 90_000 });
+        const intro = page.locator("[data-slot=page-header-description]");
         for (const rail of ["expanded", "collapsed"]) {
           if (rail === "collapsed") {
             await page.getByRole("button", { name: "Collapse sidebar", exact: true }).click();
             await page.getByRole("button", { name: "Expand sidebar", exact: true }).waitFor();
           }
-          const box = (await heading.boundingBox())!;
-          title.set(`${platform}-${width}-${rail}`, { x: box.x, y: box.y - pageTop(platform) });
+          // In the macOS app the title is in the window bar (see below).
+          if (platform !== "macos") {
+            const box = (await heading.boundingBox())!;
+            title.set(`${platform}-${width}-${rail}`, { x: box.x, y: box.y - pageTop(platform) });
+          }
+          const line = (await intro.boundingBox())!;
+          description.set(`${platform}-${width}-${rail}`, { x: line.x, y: line.y });
           await expectWindowTop(page, platform);
+          // In the macOS app the page is an inset, rounded panel on the
+          // window's material, flush with the rail and 4px in from the
+          // window's right and bottom edges, like native Mac apps.
+          const canvas = page.locator("[data-canvas]");
+          const panel = await canvas.evaluate((element) => {
+            const style = getComputedStyle(element);
+            const rect = element.getBoundingClientRect();
+            const nav = element.previousElementSibling!.getBoundingClientRect();
+            return {
+              radius: style.borderTopLeftRadius,
+              border: style.borderTopWidth,
+              gapLeft: rect.left - nav.right,
+              gapRight: innerWidth - rect.right,
+              gapBottom: innerHeight - rect.bottom,
+              top: rect.top,
+            };
+          });
+          expect(panel).toEqual(
+            platform === "macos"
+              ? {
+                  radius: "10px",
+                  border: "1px",
+                  gapLeft: 0,
+                  gapRight: 4,
+                  gapBottom: 4,
+                  top: WINDOW_BAR_HEIGHT,
+                }
+              : {
+                  radius: "0px",
+                  border: "0px",
+                  gapLeft: 0,
+                  gapRight: 0,
+                  gapBottom: 0,
+                  top: pageTop(platform),
+                },
+          );
           // The collapsed rail stays 56px wide on every platform.
           if (rail === "collapsed") {
             expect((await page.locator("nav[data-collapsed='true']").boundingBox())!.width).toBe(
@@ -113,12 +237,20 @@ describe("the desktop window bar", () => {
         await page.close();
       }
     }
-    // Below the bar the layout is the web app's own: same places on every platform.
-    for (const platform of ["windows", "macos"]) {
-      for (const [key, box] of title) {
-        if (!key.startsWith("browser-")) continue;
-        expect({ key, ...title.get(key.replace("browser", platform))! }).toEqual({ key, ...box });
-      }
+    // Below the bar the layout is the web app's own: same places on Windows,
+    // and on macOS the same across within the panel's 1px border and its 4px
+    // inset (a centred column moves by half of it, plus the border), with the
+    // title in the bar instead of above the description.
+    for (const [key, box] of title) {
+      if (!key.startsWith("browser-")) continue;
+      expect({ key, ...title.get(key.replace("browser", "windows"))! }).toEqual({ key, ...box });
+      const browserDescription = description.get(key)!;
+      const mac = description.get(key.replace("browser", "macos"))!;
+      expect({ key, near: Math.abs(mac.x - box.x) <= 3 }).toEqual({ key, near: true });
+      expect({ key, near: Math.abs(mac.x - browserDescription.x) <= 3 }).toEqual({
+        key,
+        near: true,
+      });
     }
     // And the web app is unchanged: 24px past the rail below 1024px, then the
     // centred column with its 32px inset.
@@ -174,4 +306,85 @@ describe("the desktop window bar", () => {
     expect(offsets.get("windows")).toEqual(offsets.get("browser")!);
     expect(offsets.get("macos")).toEqual(offsets.get("browser")!);
   }, 180_000);
+
+  test("every macOS page has the same window bar as a chat", async () => {
+    // A chat's bar (desktop-rail.browser.e2e.ts): the sidebar toggle 84
+    // window points from the left and the page's title line from the
+    // canvas's left edge (never before 120), both centred on the traffic
+    // lights, in a bar of the same height, with the title shown once. Here
+    // the settings shell (also without the app's rail, as personal settings),
+    // a list page, a form page and a detail page, with the current shell and
+    // one that doesn't report its bar (0.1.33 and older), open and collapsed.
+    const views = [
+      { view: "", title: "General" },
+      { view: "&apprail=none", title: "General" },
+      { view: "&view=content", title: "Automations" },
+      { view: "&view=content&page=form", title: "New automation" },
+      { view: "&view=content&page=detail", title: "Nightly report" },
+    ];
+    const shells = [
+      { bar: "44", lights: MAC_TRAFFIC_LIGHT_POSITION },
+      { bar: "none", lights: LEGACY_MAC_TRAFFIC_LIGHT_POSITION },
+    ];
+    for (const { bar, lights } of shells) {
+      const centre = trafficLightCentre(lights);
+      for (const { view, title } of views) {
+        const { page, errors } = await open("macos", `${view}&bar=${bar}`, 1280, 600);
+        for (const rail of ["open", "collapsed"]) {
+          const where = `${view || "settings"} bar=${bar} ${rail}`;
+          if (rail === "collapsed") {
+            await page.getByRole("button", { name: "Collapse sidebar", exact: true }).click();
+          }
+          const toggle = page.getByRole("button", {
+            name: rail === "collapsed" ? "Expand sidebar" : "Collapse sidebar",
+            exact: true,
+          });
+          await toggle.waitFor({ timeout: 90_000 });
+          const toggleBox = (await toggle.boundingBox())!;
+          expect(toggleBox.x, where).toBe(MACOS_BAR_CONTROLS_LEFT);
+          expect(Math.abs(toggleBox.y + toggleBox.height / 2 - centre), where).toBeLessThanOrEqual(
+            0.5,
+          );
+          expect((await windowBar(page))!.height, where).toBe(centre * 2);
+          // The row follows the canvas's edge from a ResizeObserver, which
+          // runs before the next paint: let that frame happen first.
+          await page.evaluate(
+            () =>
+              new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+          );
+          // The page's title line is the bar's row, as a chat's header is.
+          const row = await page.evaluate(() => {
+            const rows = [
+              ...document.querySelectorAll<HTMLElement>("[data-window-bar-row] > [data-titlebar]"),
+            ];
+            const header = rows[0];
+            const canvas = header?.parentElement;
+            if (!header || !canvas) return { count: rows.length };
+            const text = header.querySelector("span")!.getBoundingClientRect();
+            const box = header.getBoundingClientRect();
+            return {
+              count: rows.length,
+              text: header.textContent,
+              left: box.left,
+              canvasLeft: canvas.getBoundingClientRect().left,
+              textCentre: text.top + text.height / 2,
+              drag: getComputedStyle(header).getPropertyValue("-webkit-app-region"),
+            };
+          });
+          expect(row.count, where).toBe(1);
+          expect(row.text, where).toBe(title);
+          expect(row.left, where).toBe(Math.max(row.canvasLeft!, MACOS_BAR_ROW_LEFT));
+          expect(Math.abs(row.textCentre! - centre), where).toBeLessThanOrEqual(0.5);
+          expect(row.drag, where).toBe("drag");
+          // Shown once: the page's own heading stays for assistive tech only.
+          const heading = page.getByRole("heading", { name: title, exact: true });
+          expect(await heading.count(), where).toBe(1);
+          expect((await heading.boundingBox())!.width, where).toBeLessThanOrEqual(1);
+          if (bar === "44") await expectWindowTop(page, "macos");
+        }
+        expect(errors).toEqual([]);
+        await page.close();
+      }
+    }
+  }, 420_000);
 });

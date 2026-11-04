@@ -362,7 +362,7 @@ describe("Bundles section browser acceptance", () => {
       await openInstalledPackages(page);
       await expectText(
         page.locator('section[aria-label="Skills and plugins"]'),
-        "Workspace administrators can install, update, and remove these items.",
+        "Ask a workspace admin to install or update these items.",
       );
       expect(await page.getByRole("button", { name: "New skill", exact: true }).count()).toBe(0);
       await page.getByRole("tab", { name: "Plugins", exact: true }).click();
@@ -372,7 +372,7 @@ describe("Bundles section browser acceptance", () => {
       // A viewer who cannot act is told so, rather than shown buttons that do
       // nothing when pressed.
       const pluginPage = await openPluginPage(page);
-      await expectText(pluginPage, "Only workspace admins can install, update and remove plugins.");
+      await expectText(pluginPage, "Ask a workspace admin to update or remove this plugin.");
       expect(
         await pluginPage.getByRole("button", { name: "Check for update", exact: true }).count(),
       ).toBe(0);

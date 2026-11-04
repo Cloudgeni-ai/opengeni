@@ -109,6 +109,20 @@ export type SessionWorkflowClient = {
     deleteAfter: Date;
   }) => Promise<void>;
   /**
+   * Durably runs the step after an Archive's undo window (stopping the chat's
+   * remaining work so it can be stored) at `runAt`. Repeating one Archive is a
+   * no-op. Optional for embedded clients; without it an archived chat is
+   * stored once it goes idle on its own.
+   */
+  scheduleSessionArchive?: (input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    subjectId: string;
+    archivedAt: string;
+    runAt: Date;
+  }) => Promise<void>;
+  /**
    * Start a recording's transcript or deletion workflow. Starting one that is
    * already running does nothing. Optional for embedded clients; the worker's
    * recovery sweep starts any it misses.
@@ -289,6 +303,8 @@ export type AppDependencies = {
   /** Injectable bounded MCP initialization/tools-list probe for Connect tests. */
   mcpCapabilityProbe?: import("./domain/capabilities").McpCapabilityProbe;
   atlassianFetch?: typeof fetch;
+  /** Injectable calendar transport for naming meetings after calendar events, for tests. */
+  meetingCalendarFetch?: typeof fetch;
   /** Injectable MCP OAuth setup deadline for deterministic stalled-provider tests. */
   oauthStartDeadlineMs?: number;
   /** Injectable MCP OAuth callback deadline for deterministic stalled-provider tests. */

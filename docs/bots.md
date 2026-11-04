@@ -39,9 +39,32 @@ image is refused, because everyone else would see only initials; the agent is
 told to share the image first. Each viewer opens the image with their own
 access, and anyone who cannot sees the name's initials instead.
 
+Avatars are mostly seen small: 16 pixels in the sidebar list and 20 in the
+chat header. Detailed pictures, such as characters told apart by a hat or a
+held object, all look alike at that size. The tools therefore ask the agent to
+make an image avatar a flat icon that fills the square: one bold symbol for the
+chat's job on a solid, strong colour that differs from other bots' avatars,
+with no frame, faces, fine detail or text.
+
 Forking a chat copies its description and avatar along with its title and
 agent settings (the fork routines copy the whole source row), so forking a bot
 is the simple way to clone one together with its history.
+
+## Project profiles
+
+A project (the sidebar group chats are filed in) has the same profile: its
+name, a description (up to 2000 characters, as before) and an avatar of the
+same kinds. The avatar replaces the folder icon in the sidebar, the new-chat
+project picker and the Move to project lists; pointing at a project's header
+shows its description. People edit all three with **Edit project…** in the
+project's menu, the same dialog as a chat's **Edit profile…**. Agents set them
+with `project_create` and `project_update`.
+
+The avatar lives on the `channels` row (migration `1100_project_avatar.sql`)
+and goes through `POST`/`PATCH /v1/workspaces/:workspaceId/channels`. Changing a
+project's profile needs the same permission as renaming it
+(`sessions:create`). Projects are shared with the whole workspace, so an image
+avatar must be one everyone in the workspace can open, as in a shared chat.
 
 ## Bot templates
 
@@ -66,10 +89,10 @@ ids `plugin:marketplace/<provider>/<name>`). When setup names a plugin, the
 agent asks for it with `capability_authorization_request` exactly as for a
 connector. The chat shows a plugin card with the agent's reason, who made the
 plugin and what it adds; **Review plugin** lists its Skills and MCP servers and
-installs it for the workspace. Installing needs the same `capabilities:manage`
-permission as the Plugins page. Someone without it sees that a workspace admin
-has to install it, and the agent is told the same, so it does not send them to
-the card. The agent continues once the plugin is installed, and a plugin that
+installs it for the workspace. Installing needs the same permission as the
+Plugins page: `connections:write`, which members hold, or `capabilities:manage`.
+Someone without it sees that they can't install it here, and the agent is told
+the same, so it does not send them to the card. The agent continues once the plugin is installed, and a plugin that
 is already installed shows as done.
 
 Templates are stored per workspace (`bot_templates`, visibility in migration
@@ -77,9 +100,13 @@ Templates are stored per workspace (`bot_templates`, visibility in migration
 shared with the workspace, so everyone can start bots from it, or **Only me**,
 so only whoever saved it can see, find or use it. A template the agent saves
 from an Only me chat is Only me; one saved from a shared chat is shared. People
-choose in the template dialog and can change it later. Whoever saved a shared
-template, a workspace admin, or a workspace-level (service) caller may change
-or delete it; an Only me template belongs to the person who saved it. Routes:
+choose in the template dialog and can change it later. A shared template is
+shared work, like a shared Skill or Site: anyone who may start chats in the
+workspace (`sessions:create`) may change or delete it, but only whoever saved
+it or a workspace admin may make it Only me; each template's
+`viewerCanMakePrivate` says whether the reader may, and the Edit dialog offers
+Only me only then. An Only me template belongs to the
+person who saved it. Routes:
 
 | Route | Needs |
 | --- | --- |

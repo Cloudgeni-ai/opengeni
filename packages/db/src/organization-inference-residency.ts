@@ -26,12 +26,7 @@ export type InferenceResidencyActorKind = "browser_person" | "agent" | "api_key"
 
 export class InferenceResidencyChangeRefusedError extends Error {
   constructor(
-    readonly reason:
-      | "forbidden"
-      | "version_conflict"
-      | "operation_reused"
-      | "invalid"
-      | "unavailable",
+    readonly reason: "forbidden" | "version_conflict" | "operation_reused" | "invalid",
     message: string,
   ) {
     super(message);
@@ -46,9 +41,6 @@ export class WorkspaceInferenceResidencyUnknownError extends Error {
     this.name = "WorkspaceInferenceResidencyUnknownError";
   }
 }
-
-const CHANGE_ROUTINE =
-  "opengeni_private.update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)";
 
 /** The organization's EU-only inference setting. Readable by any member. */
 export async function getOrganizationInferenceResidency(
@@ -127,24 +119,6 @@ export async function isWorkspaceEuOnlyInScope(
   return row.eu_only === true;
 }
 
-/**
- * Whether the runtime may change the setting yet. 1060 withholds EXECUTE on
- * the change function until a later migration grants it (the previous release
- * rejects a runtime grant on a definer it doesn't know); until then the
- * setting stays off. A separate statement: EXECUTE is checked when a
- * statement starts.
- */
-export async function inferenceResidencyChangeAvailable(
-  db: Pick<Database, "execute">,
-): Promise<boolean> {
-  const [row] = await rawRows<{ granted: boolean | null }>(
-    db,
-    sql`select has_function_privilege(to_regprocedure(${CHANGE_ROUTINE})::oid, 'EXECUTE')
-      as granted`,
-  );
-  return row?.granted === true;
-}
-
 const REFUSALS: Record<string, [InferenceResidencyChangeRefusedError["reason"], string]> = {
   "42501": ["forbidden", "Only an owner or admin can change EU-only."],
   "40001": ["version_conflict", "The EU-only setting changed. Reload and try again."],
@@ -175,12 +149,6 @@ export async function updateOrganizationInferenceResidency(
     db,
     { accountId: input.organizationId, workspaceId: null },
     async (scopedDb) => {
-      if (!(await inferenceResidencyChangeAvailable(scopedDb))) {
-        throw new InferenceResidencyChangeRefusedError(
-          "unavailable",
-          "EU-only can't be changed yet.",
-        );
-      }
       await setSubjectRlsContext(scopedDb, input.actorSubjectId);
       let result: unknown;
       try {

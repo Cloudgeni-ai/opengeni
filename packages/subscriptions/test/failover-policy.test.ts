@@ -111,7 +111,6 @@ function input(
     workspace?: Partial<PlacementInput["workspace"]>;
     models?: readonly ModelDescriptor[];
     connections?: SubscriptionConnection[];
-    personalFallbackOptIn?: boolean;
   } = {},
 ): PlacementInput {
   return {
@@ -142,7 +141,6 @@ function input(
       {
         membershipId: "member-a",
         active: true,
-        personalFallbackOptIn: patch.personalFallbackOptIn ?? false,
       },
     ],
     models: patch.models ?? MODELS,
@@ -408,13 +406,18 @@ describe("placement over the derived order", () => {
     });
   });
 
-  test("SUB-FAIL-03: the same model on an opted-in personal account still comes before a derived model (D-12, D-42)", () => {
+  test("SUB-FAIL-03: the same model on the turn person's own account turned on here comes before a derived model (D-12, D-42, D-53)", () => {
     const decision = decideChecked(
       input({
-        personalFallbackOptIn: true,
         session: {
           visibility: "private",
-          personalAuthority: [{ provider: "alpha", ownerMembershipId: "member-a" }],
+          personalAuthority: [
+            {
+              provider: "alpha",
+              ownerMembershipId: "member-a",
+              sharedSessionChoice: { sessionId: "session-1", connectionId: "alpha-personal" },
+            },
+          ],
         },
         connections: [
           connection("alpha-1", "alpha", { quota: exhaustedUntil(NOW + 600_000) }),

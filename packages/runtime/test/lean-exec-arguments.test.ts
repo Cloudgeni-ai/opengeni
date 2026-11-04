@@ -1,9 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import type { Tool } from "@openai/agents";
+import { Agent, run as runAgent, type Tool } from "@openai/agents";
+import { ScriptedModel } from "@opengeni/testing/scripted-model";
 import { testSettings } from "@opengeni/testing/settings";
 import {
   LEAN_EXEC_COMMAND_DEFAULTS,
   LEAN_EXEC_COMMAND_PARAMETERS,
+  LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_FINISH_FLOOR,
+  LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_WRITE_STDIN,
+  LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_WRITE_STDIN_OR_FINISH_FLOOR,
   canonicalizeLeanExecCommandInput,
   withLeanExecCommandArguments,
 } from "../src/sandbox/lean-exec-arguments";
@@ -95,13 +99,90 @@ describe("withLeanExecCommandArguments", () => {
       yield_time_ms: 10_000,
     });
   });
+
+  test("names write_stdin in the tty hint only when the same list offers it", () => {
+    const exec = {
+      type: "function",
+      name: "exec_command",
+      description: "original",
+      parameters: { type: "object", properties: {}, required: [] },
+      strict: true,
+      invoke: async () => "ok",
+    } as unknown as Tool<unknown>;
+    const stdin = {
+      type: "function",
+      name: "write_stdin",
+      description: "untouched",
+      parameters: { type: "object" },
+      strict: true,
+      invoke: async () => "stdin",
+    } as unknown as Tool<unknown>;
+    const [withStdin] = withLeanExecCommandArguments([exec, stdin]) as FunctionTool[];
+    const [withoutStdin] = withLeanExecCommandArguments([exec]) as FunctionTool[];
+    expect(withStdin!.parameters as unknown).toBe(LEAN_EXEC_COMMAND_PARAMETERS);
+    expect(withoutStdin!.parameters as unknown).toBe(
+      LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_WRITE_STDIN,
+    );
+    // The two schemas differ only in that one hint; every other byte is shared.
+    expect(JSON.stringify(LEAN_EXEC_COMMAND_PARAMETERS.properties.tty)).toBe(
+      '{"type":"boolean","description":"Allocate a TTY (needed to interrupt the process later with Ctrl-C through write_stdin). Omit for the default of false."}',
+    );
+    expect(JSON.stringify(LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_WRITE_STDIN.properties.tty)).toBe(
+      '{"type":"boolean","description":"Allocate a TTY. Omit for the default of false."}',
+    );
+    expect(
+      JSON.stringify({
+        ...LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_WRITE_STDIN,
+        properties: { ...LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_WRITE_STDIN.properties, tty: null },
+      }),
+    ).toBe(
+      JSON.stringify({
+        ...LEAN_EXEC_COMMAND_PARAMETERS,
+        properties: { ...LEAN_EXEC_COMMAND_PARAMETERS.properties, tty: null },
+      }),
+    );
+  });
 });
 
 describe("composed shell capability", () => {
-  async function execTool(
+  test("the finish-floor variant describes the floor and offers background; the other keeps today's schema", () => {
+    expect(LEAN_EXEC_COMMAND_PARAMETERS.properties.yield_time_ms.description).toContain(
+      "Omit for 10000. Unless `tty` or `background` is true, it waits at least 60000.",
+    );
+    expect(LEAN_EXEC_COMMAND_PARAMETERS.properties).toHaveProperty("background");
+    expect(LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_WRITE_STDIN.properties).toHaveProperty(
+      "background",
+    );
+    for (const parameters of [
+      LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_FINISH_FLOOR,
+      LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_WRITE_STDIN_OR_FINISH_FLOOR,
+    ]) {
+      expect(parameters.properties).not.toHaveProperty("background");
+      expect(parameters.properties.yield_time_ms.description).toBe(
+        "How long to wait (in milliseconds) for output before yielding. Omit for the default of 10000.",
+      );
+    }
+    const exec = {
+      type: "function",
+      name: "exec_command",
+      description: "original",
+      parameters: { type: "object", properties: {}, required: [] },
+      strict: true,
+      invoke: async () => "ok",
+    } as unknown as Tool<unknown>;
+    const [withoutFloor] = withLeanExecCommandArguments([exec], {
+      finishFloor: false,
+    }) as FunctionTool[];
+    expect(withoutFloor!.parameters as unknown).toBe(
+      LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_WRITE_STDIN_OR_FINISH_FLOOR,
+    );
+  });
+
+  async function shellTools(
     lean: boolean,
     options: Parameters<typeof buildAgentCapabilities>[2] = {},
-  ): Promise<FunctionTool> {
+    sessionOverrides: Record<string, unknown> = {},
+  ): Promise<Tool<unknown>[]> {
     const settings = testSettings({
       sandboxBackend: "local",
       webSearchEnabled: false,
@@ -112,17 +193,48 @@ describe("composed shell capability", () => {
     };
     const session = await client.create({});
     sessions.push(session);
+    Object.assign(session, sessionOverrides);
     const capability = buildAgentCapabilities(settings, [], options).find(
       (cap) => cap.type === "shell",
     )!;
-    const tools = capability
+    return capability
       .clone()
       .bind(session as never)
       .tools();
+  }
+
+  async function execTool(
+    lean: boolean,
+    options: Parameters<typeof buildAgentCapabilities>[2] = {},
+  ): Promise<FunctionTool> {
+    const tools = await shellTools(lean, options);
     return tools.find(
       (tool): tool is FunctionTool => tool.type === "function" && tool.name === "exec_command",
     )!;
   }
+
+  /** The tool block one provider request carries for these tools. */
+  async function requestToolBlock(tools: Tool<unknown>[]): Promise<string> {
+    const model = new ScriptedModel("done");
+    await runAgent(new Agent({ name: "turn", model, tools }), "hi");
+    return JSON.stringify(model.requests[0]!.tools);
+  }
+
+  test("a session without write_stdin sends a tool block that never names it", async () => {
+    const interactive = await requestToolBlock(await shellTools(true));
+    const noStdin = await requestToolBlock(
+      await shellTools(true, {}, { supportsPty: () => false }),
+    );
+    expect(interactive).toContain('"name":"write_stdin"');
+    expect(interactive).toContain("Ctrl-C through write_stdin");
+    expect(noStdin).not.toContain("write_stdin");
+    expect(noStdin).toContain('"description":"Allocate a TTY. Omit for the default of false."');
+    // Every later request of the same placement repeats the block byte for byte.
+    expect(await requestToolBlock(await shellTools(true, {}, { supportsPty: () => false }))).toBe(
+      noStdin,
+    );
+    expect(await requestToolBlock(await shellTools(true))).toBe(interactive);
+  });
 
   test("disabled keeps the strict SDK schema that requires every argument", async () => {
     const exec = await execTool(false);
@@ -168,6 +280,43 @@ describe("composed shell capability", () => {
     expect(explicit).toContain("LOGIN-SHELL");
     expect(explicit).not.toContain("NON-LOGIN-SHELL");
   });
+
+  test("the finish floor applies exactly where the schema offers background", async () => {
+    const command = "sleep 3; echo floor-done";
+    // Lean schema and cut polling: a 1 s yield still returns the finished command.
+    const abort = new AbortController();
+    const lean = await execTool(true, { turnCancellationSignal: abort.signal });
+    const floored = String(
+      await lean.invoke(
+        {} as never,
+        JSON.stringify({ cmd: command, yield_time_ms: 1_000, max_output_tokens: 200 }),
+      ),
+    );
+    expect(floored).toContain("floor-done");
+    expect(floored).toContain("Process exited with code 0");
+    // Strict SDK schema (no `background` to opt out): the requested wait is kept.
+    const strict = await execTool(false, { turnCancellationSignal: abort.signal });
+    expect(strict.parameters as unknown as { properties: object }).not.toHaveProperty(
+      "properties.background",
+    );
+    const kept = String(
+      await strict.invoke(
+        {} as never,
+        JSON.stringify({
+          cmd: command,
+          login: false,
+          max_output_tokens: 200,
+          shell: "bash",
+          tty: false,
+          workdir: null,
+          yield_time_ms: 1_000,
+        }),
+      ),
+    );
+    expect(kept).not.toContain("floor-done");
+    expect(kept).toContain("Process running with session ID");
+    abort.abort(new Error("test done"));
+  }, 30_000);
 
   test("with the turn cancellation fence an omitted tty still runs without a TTY", async () => {
     const abort = new AbortController();

@@ -13,6 +13,8 @@ import { createRoot } from "react-dom/client";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const missingUuid = "22222222-2222-4222-8222-222222222222";
+const salesId = "33333333-3333-4333-8333-333333333333";
+const personalId = "44444444-4444-4444-8444-444444444444";
 let artifactId = "does-not-exist";
 let artifactKind = "generated_image";
 const playback = mock(async () => ({ url: "https://media.example/video.mp4" }));
@@ -31,17 +33,38 @@ const updateFileVisibility = mock(
     file: { ...fileAsset, scope: request.visibility === "private" ? "personal" : "workspace" },
   }),
 );
+const updateFileReach = mock(
+  async (
+    _workspaceId: string,
+    _fileId: string,
+    request: { reachWorkspaceIds: string[] | null },
+  ) => ({
+    file: { ...fileAsset, reachWorkspaceIds: request.reachWorkspaceIds },
+  }),
+);
 
 const context = {
   accessKeyVersion: 0,
-  workspaces: [{ id: workspaceId, accountId: "acct-1", kind: "shared", name: "Design" }],
+  workspaces: [
+    { id: workspaceId, accountId: "acct-1", kind: "shared", name: "Design" },
+    { id: salesId, accountId: "acct-1", kind: "shared", name: "Sales" },
+    { id: personalId, accountId: "acct-1", kind: "personal", name: "Ingrid" },
+    {
+      id: "55555555-5555-4555-8555-555555555555",
+      accountId: "acct-2",
+      kind: "shared",
+      name: "Elsewhere",
+    },
+  ],
   managedSelfContext: null,
   accessContext: {
     subjectId: "user-owner",
+    accountGrants: [{ accountId: "acct-1", metadata: { accountName: "Acme" } }],
     workspaceGrants: [{ workspaceId, permissions: ["files:read", "files:upload"] }],
   },
   client: {
     updateFileVisibility,
+    updateFileReach,
     getSessionTenancyCreateCapabilities: async () => ({ canCreatePrivate: true }),
     createVideoArtifactPlaybackSource: playback,
     createRetainedArtifactDownloadUrl: async () => ({
@@ -329,6 +352,96 @@ test("a file's owner sees Only me and can share it with the workspace", async ()
       visibility: "workspace",
     });
     expect(rendered.container.textContent).toContain("Workspace");
+  } finally {
+    await rendered.unmount();
+    fileAsset = null;
+    artifactKind = "generated_image";
+  }
+});
+
+test("the owner turns their Only me file on in another of their workspaces", async () => {
+  artifactId = missingUuid;
+  artifactKind = "file";
+  loadError = null;
+  const owned = {
+    id: missingUuid,
+    workspaceId,
+    filename: "plan.pdf",
+    scope: "personal",
+    ownerSubjectId: "user-owner",
+  };
+  const openMenu = async (container: HTMLElement) => {
+    const trigger = container.querySelector<HTMLElement>(
+      "[aria-label^='Who can open this file: Only me']",
+    );
+    expect(trigger).not.toBeNull();
+    await act(async () => {
+      trigger!.dispatchEvent(
+        new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerType: "mouse" }),
+      );
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    return [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+  };
+  const isAvailableIn = (item: HTMLElement) =>
+    item.textContent?.trim().startsWith("Available in…") === true;
+
+  // A server that doesn't keep where a file works offers no choice.
+  fileAsset = owned;
+  const bare = await renderRoute(false, "/?browse=true");
+  try {
+    expect((await openMenu(bare.container)).some(isAvailableIn)).toBe(false);
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+  } finally {
+    await bare.unmount();
+  }
+
+  fileAsset = { ...owned, reachWorkspaceIds: [] };
+  updateFileReach.mockClear();
+  const rendered = await renderRoute(false, "/?browse=true");
+  try {
+    const item = (await openMenu(rendered.container)).find(isAvailableIn);
+    expect(item).toBeDefined();
+    await act(async () => item!.click());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+    expect(dialog.textContent).toContain("“plan.pdf” stays Only me");
+    const box = (label: string) => {
+      const element = [...dialog.querySelectorAll("label")].find(
+        (each) => each.textContent === label,
+      );
+      return element ? (document.getElementById(element.htmlFor) as HTMLInputElement) : null;
+    };
+    // It's stored here, so here is always ticked; Personal always has it, and
+    // another organization's workspace isn't offered.
+    expect(box("Design (this workspace)")?.checked).toBe(true);
+    expect(box("Design (this workspace)")?.disabled).toBe(true);
+    expect(box("Your Personal workspace")).toBeNull();
+    expect(dialog.textContent).not.toContain("Elsewhere");
+    const save = () =>
+      [...dialog.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent?.trim() === "Save",
+      )!;
+    expect(save().disabled).toBe(true);
+    await act(async () => box("Sales")!.click());
+    expect(save().disabled).toBe(false);
+    await act(async () => {
+      save().click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(updateFileReach).toHaveBeenCalledWith(workspaceId, missingUuid, {
+      reachWorkspaceIds: [salesId],
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
   } finally {
     await rendered.unmount();
     fileAsset = null;

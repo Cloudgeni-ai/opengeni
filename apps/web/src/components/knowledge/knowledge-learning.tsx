@@ -34,7 +34,7 @@ import { errorText } from "./knowledge-data";
    Agent learning: what agents may change on their own, and what waits for
    your OK. One control, "Automatic | Review first | Off", worded the same
    everywhere. Shared chats and your private chats are two labelled groups;
-   organization owners also get the organization identity here, in the same
+   organization owners and admins also get the organization identity here, in the same
    words. Each change saves at once, so the page has no footer. It is a
    workspace settings page (Settings > Agent learning); Knowledge's ⋯ menu,
    Review and the chat Agent tab link to it.
@@ -73,10 +73,11 @@ const CONSEQUENCE: Record<AgentLearningCategory, Record<AgentLearningMode, strin
 };
 
 const IDENTITY_CONSEQUENCE: Record<AgentLearningMode, string> = {
-  automatic: "Agents apply identity and mission changes an owner asks for in a chat right away.",
+  automatic:
+    "Agents apply identity and mission changes an owner or admin asks for in a chat right away.",
   review_first:
-    "Agents draft identity and mission changes an owner asks for, and that owner confirms them in the chat.",
-  off: "Agents can't change the organization identity. Owners still can.",
+    "Agents draft identity and mission changes an owner or admin asks for, and that person confirms them in the chat.",
+  off: "Agents can't change the organization identity. Owners and admins still can.",
 };
 
 const MODES: AgentLearningMode[] = ["automatic", "review_first", "off"];
@@ -90,7 +91,7 @@ export interface IdentityLearningPolicy {
 }
 
 /**
- * Whether agents may change the organization identity (owner-only). Reads
+ * Whether agents may change the organization identity (owners and admins). Reads
  * nothing when `enabled` is false and returns null, so callers render no row.
  */
 export function useIdentityLearningPolicy(
@@ -352,7 +353,7 @@ function IdentityRow({ policy }: { policy: IdentityLearningPolicy }) {
   if (!policy.mode) {
     return isPermissionDenied(policy.error) ? (
       <p className="text-sm text-fg-muted">
-        Only organization owners can change this. Ask an owner for access.
+        Only organization owners and admins can change this. Ask one of them for access.
       </p>
     ) : (
       <Notice
@@ -412,7 +413,7 @@ function reviewValue(review: LearningReviewSummary): string | null {
 
 /**
  * Agent learning, the body of its settings page: shared chats and your private
- * chats as two labelled groups, the organization identity for owners, and a
+ * chats as two labelled groups, the organization identity for owners and admins, and a
  * way into Review, where Review first changes wait.
  */
 export function LearningSettings({
@@ -427,59 +428,46 @@ export function LearningSettings({
 }: {
   workspaceName: string;
   organizationName: string | null;
+  /** A Personal workspace: its chats that aren't Only me are only its owner's. */
   personal: boolean;
   canManageWorkspace: boolean;
-  /** Defaults for shared chats in this workspace. */
+  /** Defaults for this workspace's chats that aren't Only me. */
   shared: LearningDefaults;
   /** Defaults for your private chats. */
   mine: LearningDefaults;
-  /** Organization owners only: whether agents may change the organization identity. */
+  /** Organization owners and admins: whether agents may change the organization identity. */
   identity?: IdentityLearningPolicy | null;
   /** Where Review first changes wait. */
   review?: LearningReviewSummary | null;
 }) {
   return (
     <SectionStack>
-      {!personal ? (
-        <Section
-          title={`Shared chats in ${workspaceName}`}
-          description={
-            canManageWorkspace
-              ? "Everyone's shared chats and automations here."
-              : "Everyone's shared chats and automations here. Only workspace admins can change this."
-          }
-        >
-          <GroupRows
-            defaults={shared}
-            categories={LEARNING_DESTINATIONS}
-            canEdit={canManageWorkspace}
-          />
-        </Section>
-      ) : null}
       <Section
-        title={personal ? "Your chats" : "Your private chats (all workspaces)"}
+        title={personal ? `Chats in ${workspaceName}` : `Shared chats in ${workspaceName}`}
         description={
           personal
-            ? "Chats in your Personal workspace, and your Only me chats in every workspace."
-            : `Only me chats and your Personal workspace, anywhere in ${organizationName ?? "your organization"}.`
+            ? "Your chats and automations here that aren't Only me. Only you are in this workspace."
+            : canManageWorkspace
+              ? "Everyone's shared chats and automations here."
+              : "Everyone's shared chats and automations here. Only workspace admins can change this."
         }
       >
         <GroupRows
-          defaults={mine}
-          categories={personal ? LEARNING_DESTINATIONS : ["knowledge", "skills"]}
-          canEdit
+          defaults={shared}
+          categories={LEARNING_DESTINATIONS}
+          canEdit={canManageWorkspace}
         />
-        {!personal ? (
-          <InlineHelp icon className="mt-3">
-            Instructions for private chats only apply in your Personal workspace, so they're set
-            there.
-          </InlineHelp>
-        ) : null}
+      </Section>
+      <Section
+        title="Your private chats (all workspaces)"
+        description={`Your Only me chats, anywhere in ${organizationName ?? "your organization"}.`}
+      >
+        <GroupRows defaults={mine} categories={LEARNING_DESTINATIONS} canEdit />
       </Section>
       {identity ? (
         <Section
           title={`All of ${organizationName ?? "your organization"}`}
-          description="Only organization owners see and change this."
+          description="Only organization owners and admins see and change this."
         >
           <IdentityRow policy={identity} />
         </Section>

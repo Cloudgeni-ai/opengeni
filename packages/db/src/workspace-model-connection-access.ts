@@ -15,8 +15,9 @@ import { connectionModelAllowed } from "./model-connection-access";
 
 export type ConnectionModelRestrictions = Record<string, string[] | null>;
 
-/** Claude's two model restrictions, as its core route projects them. */
+/** Claude's model restrictions per id form, as its core route projects them (one answer). */
 export type ClaudeCoreModelRestrictions = {
+  readonly "claude/": readonly string[] | null;
   readonly "organization-claude-subscription/": readonly string[] | null;
   readonly "workspace-claude-subscription/": readonly string[] | null;
 };
@@ -45,7 +46,7 @@ async function listDirectModelConnections(db: Database, workspaceId: string, sub
           isNull(connections.subjectId),
           eq(connections.kind, "api_key"),
           eq(connections.status, "active"),
-          sql`${connections.metadata}->>'credentialRole' IN ('direct_openai', 'direct_azure_openai')`,
+          sql`${connections.metadata}->>'credentialRole' IN ('direct_openai', 'direct_azure_openai', 'direct_openai_compatible')`,
         ),
       ),
   );
@@ -90,6 +91,7 @@ export async function getWorkspaceConnectionModelRestrictions(
     "workspace-openrouter/": [],
     "workspace-opper/": [],
     "workspace-anthropic/": [],
+    "claude/": claudeCoreRestrictions ? copied(claudeCoreRestrictions["claude/"]) : [],
     "workspace-claude-subscription/": claudeCoreRestrictions
       ? copied(claudeCoreRestrictions["workspace-claude-subscription/"])
       : [],
@@ -171,11 +173,12 @@ export async function assertModelConnectionAllowsTurn(
     );
     if (!connection)
       throw new Error(
-        "This OpenAI or Azure OpenAI connection is no longer available; reconnect and select its model",
+        "This model connection is no longer available; reconnect and select its model",
       );
     return;
   }
   if (
+    model.startsWith("claude/") ||
     model.startsWith("workspace-claude-subscription/") ||
     model.startsWith("organization-claude-subscription/") ||
     model.startsWith("codex/") ||

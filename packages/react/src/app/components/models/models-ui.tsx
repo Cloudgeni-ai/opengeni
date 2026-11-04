@@ -141,7 +141,14 @@ export function accountReachLabel(
 ): string {
   if (reach.ownerWorkspaceId !== null) {
     const owner = workspaceName(reach.ownerWorkspaceId);
-    return owner ? `Belongs to ${owner}` : "Belongs to a workspace";
+    const belongs = owner ? `Belongs to ${owner}` : "Belongs to a workspace";
+    // It can also serve chosen shared workspaces, staying its owner's.
+    const others = reach.workspaceIds.filter((id) => id !== reach.ownerWorkspaceId);
+    if (others.length === 0) return belongs;
+    const other = others.length === 1 ? workspaceName(others[0]!) : undefined;
+    return other
+      ? `${belongs}, also ${other}`
+      : `${belongs}, also ${others.length} ${others.length === 1 ? "workspace" : "workspaces"}`;
   }
   if (reach.people !== null)
     return reach.people === 0

@@ -10,13 +10,12 @@ different "manage and fix problems as soon as they arise" question:
 | `worker-fleet.json` | **Opengeni · Worker Fleet** | Is the fleet keeping up — turns inflight/queued, worker memory vs. limit, HPA replicas, sandbox leases, and whether compaction is firing against context pressure? |
 | `sandbox-health.json` | **Opengeni · Sandbox Health** | Are provider operations, creates, lease recovery, checkpoint GC, deadline rotation, draining, and retained-process reconciliation healthy? |
 | `turn-startup.json` | **Opengeni · Turn Startup** | Where does queue-to-first-byte time go — worker queue, sandbox/rig/repository/file/tool/model preparation, provider dispatch, or provider response? |
-| `google-drive-sync.json` | **Opengeni · Google Drive Sync** | Are scheduled Drive runs succeeding within their persisted quotas, or failing on provider retry, reconnect, and explicit resource limits? |
 | `api-latency.json` | **Opengeni · API Latency** | Is each interactive API route meeting 500 ms P95 for successful requests, with enough samples and without increasing failures? Compares the selected window with the preceding equal window and keeps all-status history separate. |
 | `runtime-failures.json` | **Opengeni · Runtime Failures** | Are alerts firing, scrape targets healthy, synthetic probes fresh, turn workers restarting, recovery exhausted, turns failing or recovering, MCP connections or tool calls broken or slow, sandboxes/providers failing, the API returning 5xx, or the durable write path saturated? |
 | `compute.json` | **Opengeni · Compute** | Is Opengeni compute healthy and does it have room — hosts by state with the memory, processors and disk they can still promise, lease renewals and the host group as the control service's leader sees them, the control service's API by route and outcome, and each host's sandboxes, memory, pressure, operations and alarms from the metrics it passes on? Host panels follow the release's hosts through `compute_fleet_host_info`. |
 | `meetings-transcription.json` | **Opengeni · Meetings & Transcription** | What do meetings and dictation cost the deployment — CPU, memory and time per audio hour for each stage (audio preparation, conversion, our speaker models, provider wait, dictation cutting), provider spend and stored audio priced per meeting hour at editable cloud rates, how much of the servers meetings take next to everything else, and quality signals (failures, re-runs, diarization fallbacks) next to the cost of each provider path? |
 
-All ten are theme-agnostic, tagged `opengeni` + `observability`, and carry a
+All nine are theme-agnostic, tagged `opengeni` + `observability`, and carry a
 `$datasource` template variable — pick your Prometheus datasource on import; no UID
 is hardcoded. The Turn Startup dashboard additionally requires one exact
 `$namespace`, `$environment`, and `$release` selection so a shared Prometheus
@@ -152,7 +151,6 @@ App series used here (non-exhaustive): `opengeni_stream_ttft_seconds`,
 `opengeni_mcp_lifecycle_operation_duration_seconds`, `opengeni_mcp_tool_calls_total`,
 `opengeni_mcp_tool_call_duration_seconds`,
 `opengeni_turn_worker_death_recoveries_total`,
-`opengeni_knowledge_source_sync_*`, `opengeni_google_drive_provider_*`,
 `opengeni_turn_worker_memory_guard_utilization_ratio`,
 `opengeni_turn_worker_memory_guard_target_ratio`,
 `opengeni_turn_worker_memory_guard_emergency_ratio`,

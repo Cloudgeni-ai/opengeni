@@ -1,3 +1,9 @@
+/**
+ * @deprecated Integration Knowledge sync is retired and nothing in Opengeni
+ * calls these helpers any more. They stay exported only so the published
+ * `@opengeni/documents/atlassian` subpath keeps working until the next major
+ * release.
+ */
 import type { ScopedKnowledgeScope } from "@opengeni/contracts";
 import {
   connectorDestinationDocumentAuthority,

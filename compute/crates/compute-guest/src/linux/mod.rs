@@ -4,6 +4,7 @@
 mod agent;
 mod disk;
 mod guest;
+mod shrink;
 mod supervise;
 mod sys;
 mod system;

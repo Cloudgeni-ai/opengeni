@@ -1,5 +1,6 @@
 import { createHash, createHmac } from "node:crypto";
 import {
+  authorizationHoldsOrganizationAdministration,
   verifyDirectModelAccess,
   MissingPermissionRefusal,
   WORKSPACE_SETTINGS_REFUSAL,
@@ -55,6 +56,7 @@ import {
   API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
   ApiIntegrationOAuthStartRequest,
   DirectModelProviderMetadata,
+  directModelBaseUrl,
   ConnectionResponse,
   CreateConnectionRequest,
   FikenInstallRequest,
@@ -132,13 +134,14 @@ import {
   type SlackBotInstallCallbackFailureStage,
 } from "@opengeni/db";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { ATLASSIAN_NATIVE_RETIRED_MESSAGE } from "@opengeni/contracts/atlassian-native-retirement";
+import { GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE } from "@opengeni/contracts/google-drive-native-retirement";
+import { pinnedFetch } from "@opengeni/network";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import {
-  browseGoogleDrive,
   completeGoogleDriveOAuthCallback,
   disconnectGoogleDrive,
-  saveGoogleDriveSource,
   startGoogleDriveOAuth,
   transitionGoogleDriveLifecycle,
 } from "../integrations/google-drive";
@@ -154,10 +157,8 @@ import {
 import { offerClaudeDefaultModels } from "../claude-default-models";
 import { disconnectPersonalGitHub } from "../integrations/personal-github";
 import {
-  browseAtlassianSources,
   completeAtlassianOAuthCallback,
   disconnectAtlassian,
-  saveAtlassianSources,
   startAtlassianOAuth,
   transitionAtlassianLifecycle,
 } from "../integrations/atlassian";
@@ -193,6 +194,7 @@ import {
 } from "@opengeni/contracts";
 import { readSignedState } from "@opengeni/github";
 import { oauthStateTtlMs, requireIntegrationsStateSecret } from "../integrations/oauth-client";
+import { withAccountIdentityState } from "../integrations/oauth-account-identity";
 import { parseRequestBody, parseRequestJson, requestValidationError } from "../http/request-body";
 import { disconnectAuditActor } from "../http/disconnect-audit-actor";
 import { parsePathParam } from "../http/path-identifier";
@@ -228,10 +230,11 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(
       ListConnectionsResponse.parse({
         // The personal setup permission sees only the caller's own accounts.
-        connections:
+        connections: withAccountIdentityState(
           reach === "all"
             ? connections
             : connections.filter((connection) => connection.subjectId === grant.subjectId),
+        ),
       }),
     );
   });
@@ -250,11 +253,13 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     return c.json(
       ListConnectionsResponse.parse({
-        connections: (
-          await listOwnConnectionAccountsForGrant(db, grant, {
-            includeInactive: includeInactive === "true",
-          })
-        ).filter((connection) => reach === "all" || connection.subjectId === grant.subjectId),
+        connections: withAccountIdentityState(
+          (
+            await listOwnConnectionAccountsForGrant(db, grant, {
+              includeInactive: includeInactive === "true",
+            })
+          ).filter((connection) => reach === "all" || connection.subjectId === grant.subjectId),
+        ),
       }),
     );
   });
@@ -301,9 +306,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       String(payload.metadata?.credentialRole ?? "").startsWith("direct_")
     ) {
       const config = DirectModelProviderMetadata.safeParse(payload.metadata?.directModelProvider);
-      const domain = config.success
-        ? new URL(config.data.endpoint ?? "https://api.openai.com/v1").hostname
-        : null;
+      const domain = config.success ? new URL(directModelBaseUrl(config.data)).hostname : null;
       if (
         !config.success ||
         payload.subjectId !== null ||
@@ -317,7 +320,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       ) {
         throw new HTTPException(422, {
           message:
-            "Invalid OpenAI or Azure OpenAI connection: provide a key, model, and official provider endpoint",
+            "Invalid model connection: provide a key, a model, and the provider’s endpoint (an official OpenAI or Azure OpenAI endpoint, or a public HTTPS base URL for an OpenAI-compatible API)",
         });
       }
       payload.metadata = { ...payload.metadata, directModelProvider: config.data };
@@ -327,12 +330,19 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         await verifyDirectModelAccess(
           config.data,
           payload.credential.apiKey as string,
-          deps.directModelFetch,
+          deps.directModelFetch ??
+            (config.data.provider === "openai_compatible"
+              ? (((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) =>
+                  pinnedFetch(input as string | URL | Request, init, settings, {
+                    label: "Model endpoint",
+                    requireHttpsOutsideLocalTest: true,
+                  })) as typeof fetch)
+              : undefined),
         );
       }
     } else if (payload.verifyModelAccess) {
       throw new HTTPException(422, {
-        message: "Model checks require an OpenAI or Azure OpenAI connection",
+        message: "Model checks require a model provider connection",
       });
     }
     const directModelKey = payload.metadata?.directModelProvider !== undefined;
@@ -897,44 +907,16 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/connections/atlassian/:connectionId/browse", async (c) => {
     assertIntegrationsEnabled();
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:read");
-    return c.json(
-      await browseAtlassianSources(deps, {
-        workspaceId,
-        subjectId: grant.subjectId,
-        connectionId: c.req.param("connectionId"),
-      }),
-    );
+    await requireAccessGrant(c, deps, workspaceId, "connections:read");
+    // Knowledge sync from integrations is retired; the route stays for old clients.
+    throw new HTTPException(410, { message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
   });
 
   app.post("/v1/workspaces/:workspaceId/connections/atlassian/:connectionId/source", async (c) => {
     assertIntegrationsEnabled();
     const workspaceId = c.req.param("workspaceId");
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "connections:write",
-    );
-    const { grant } = authorization;
-    const connection = await saveAtlassianSources(deps, {
-      accountId: grant.accountId,
-      workspaceId,
-      subjectId: grant.subjectId,
-      grant,
-      connectionId: c.req.param("connectionId"),
-      payload: await c.req.json(),
-      canManageOrganizationDestination:
-        authorization.accountGrant?.permissions.includes("account:admin") === true,
-      canManageWorkspaceDestination: await workspaceSettingsAuthorized(
-        deps,
-        authorization,
-        workspaceId,
-      ),
-      canManagePersonalDestination:
-        authorization.contextIntegrity && authorization.authenticatedSubjectId === grant.subjectId,
-    });
-    return c.json(ConnectionResponse.parse({ connection }));
+    await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
+    throw new HTTPException(410, { message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
   });
 
   app.get("/v1/integrations/google-drive/callback", async (c) => {
@@ -980,16 +962,9 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     async (c) => {
       assertIntegrationsEnabled();
       const workspaceId = c.req.param("workspaceId");
-      const grant = await requireAccessGrant(c, deps, workspaceId, "connections:read");
-      return c.json(
-        await browseGoogleDrive(deps, {
-          workspaceId,
-          subjectId: grant.subjectId,
-          connectionId: c.req.param("connectionId"),
-          parentId: c.req.query("parentId") ?? "root",
-          ...(c.req.query("pageToken") ? { pageToken: c.req.query("pageToken") } : {}),
-        }),
-      );
+      await requireAccessGrant(c, deps, workspaceId, "connections:read");
+      // Knowledge sync from integrations is retired; the route stays for old clients.
+      throw new HTTPException(410, { message: GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE });
     },
   );
 
@@ -998,32 +973,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     async (c) => {
       assertIntegrationsEnabled();
       const workspaceId = c.req.param("workspaceId");
-      const authorization = await requireAccessGrantAuthorization(
-        c,
-        deps,
-        workspaceId,
-        "connections:write",
-      );
-      const { grant } = authorization;
-      const connection = await saveGoogleDriveSource(deps, {
-        accountId: grant.accountId,
-        workspaceId,
-        subjectId: grant.subjectId,
-        grant,
-        connectionId: c.req.param("connectionId"),
-        payload: await c.req.json(),
-        canManageOrganizationDestination:
-          authorization.accountGrant?.permissions.includes("account:admin") === true,
-        canManageWorkspaceDestination: await workspaceSettingsAuthorized(
-          deps,
-          authorization,
-          workspaceId,
-        ),
-        canManagePersonalDestination:
-          authorization.contextIntegrity &&
-          authorization.authenticatedSubjectId === grant.subjectId,
-      });
-      return c.json(ConnectionResponse.parse({ connection }));
+      await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
+      throw new HTTPException(410, { message: GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE });
     },
   );
 
@@ -1079,8 +1030,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
             String(payload.metadata?.credentialRole ?? "").startsWith("direct_")
           ) {
             throw new HTTPException(422, {
-              message:
-                "Disconnect and reconnect OpenAI or Azure OpenAI to replace its key or deployment",
+              message: "Disconnect and reconnect this model connection to replace its key or model",
             });
           }
           // Model-key rotation owns an advisory -> credential-row prefix. Do
@@ -1129,7 +1079,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
             const destinationSelection = destination.data;
             if (
               destinationSelection.authorityKind === "organization" &&
-              authorization.accountGrant?.permissions.includes("account:admin") !== true
+              !authorizationHoldsOrganizationAdministration(authorization)
             ) {
               throw new MissingPermissionRefusal("account:admin");
             }

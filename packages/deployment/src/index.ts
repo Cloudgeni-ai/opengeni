@@ -157,6 +157,7 @@ export const SANDBOX_REQUIRED_ENV: Record<SandboxBackend, SandboxEnvBackendSpec>
       "OPENGENI_COMPUTE_MEMORY_MIB",
       "OPENGENI_COMPUTE_MEMORY_REQUEST_MIB",
       "OPENGENI_COMPUTE_CPU_REQUEST_MILLIS",
+      "OPENGENI_COMPUTE_DISK_MIB",
       "OPENGENI_COMPUTE_LINK_URL",
       "OPENGENI_COMPUTE_AGENT_READY_TIMEOUT_MS",
     ],
@@ -231,10 +232,13 @@ export const SESSION_USAGE_LIMITS_PASSTHROUGH_ENV: readonly string[] = [
  * @opengeni/config; a valueEnv passthrough emitted only when set. Enable only
  * after every API and worker image understands the `event` run trigger.
  * OPENGENI_WEBHOOK_BASE_URL is the public address webhooks are sent to when it
- * is not OPENGENI_PUBLIC_BASE_URL. */
+ * is not OPENGENI_PUBLIC_BASE_URL.
+ * OPENGENI_AUTOMATION_MAX_CHAIN_DEPTH caps chains of automations waking each
+ * other (default 3). */
 export const EVENT_TRIGGERS_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_EVENT_TRIGGERS_ENABLED",
   "OPENGENI_WEBHOOK_BASE_URL",
+  "OPENGENI_AUTOMATION_MAX_CHAIN_DEPTH",
 ];
 
 /** Agent configuration rollout switches (sessions.agent_config, migration
@@ -284,6 +288,7 @@ export const JEV_CODE_SEARCH_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_DECISION_MODEL_ID",
   "OPENGENI_DECISION_MODEL_API_KEY",
   "OPENGENI_DECISION_MODEL_BASE_URL",
+  "OPENGENI_DECISION_MODEL_AUTH",
   "OPENGENI_JEV_API_KEY",
   "OPENGENI_JEV_BASE_URL",
   "OPENGENI_JEV_MODEL",
@@ -329,6 +334,11 @@ export const WEB_SEARCH_PROVIDER_PASSTHROUGH_ENV: readonly string[] = [
 /** Optional deployment-wide margin for provider-rate credit charges. */
 export const CREDIT_MARGIN_BPS_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE",
+];
+
+/** Optional switch for credit billing of provider-hosted tools (default on). */
+export const PAID_HOSTED_TOOLS_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING",
 ];
 
 /** Public workspace MCP OAuth rollout settings. The enable switch is
@@ -2563,6 +2573,8 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_LEGAL_PRIVACY_POLICY_URL", env.OPENGENI_LEGAL_PRIVACY_POLICY_URL),
     valueEnv("OPENGENI_LEGAL_TERMS_OF_SERVICE_URL", env.OPENGENI_LEGAL_TERMS_OF_SERVICE_URL),
     valueEnv("OPENGENI_SUPPORT_EMAIL", env.OPENGENI_SUPPORT_EMAIL),
+    valueEnv("OPENGENI_DATA_HOSTING_LOCATION", env.OPENGENI_DATA_HOSTING_LOCATION),
+    valueEnv("OPENGENI_LEGAL_SUBPROCESSORS_URL", env.OPENGENI_LEGAL_SUBPROCESSORS_URL),
     valueEnv("OPENGENI_INTEGRATIONS_ENABLED", env.OPENGENI_INTEGRATIONS_ENABLED),
     valueEnv("OPENGENI_INTEGRATIONS_STATE_SECRET", env.OPENGENI_INTEGRATIONS_STATE_SECRET),
     valueEnv("OPENGENI_MCP_OAUTH_ENABLED", env.OPENGENI_MCP_OAUTH_ENABLED),
@@ -2963,6 +2975,9 @@ function runtimeEnvValues(
   for (const key of CREDIT_MARGIN_BPS_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
+  for (const key of PAID_HOSTED_TOOLS_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
 
   return dedupeRuntimeEnv(entries);
 }
@@ -3145,6 +3160,8 @@ function addRuntimeConfigHelmValues(
     "OPENGENI_LEGAL_PRIVACY_POLICY_URL",
     "OPENGENI_LEGAL_TERMS_OF_SERVICE_URL",
     "OPENGENI_SUPPORT_EMAIL",
+    "OPENGENI_DATA_HOSTING_LOCATION",
+    "OPENGENI_LEGAL_SUBPROCESSORS_URL",
     "OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS",
     "OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS",
     "OPENGENI_MCP_OAUTH_ENABLED",

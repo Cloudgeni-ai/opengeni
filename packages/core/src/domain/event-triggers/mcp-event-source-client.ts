@@ -21,11 +21,17 @@ import {
   withMcpEventNameHeader,
 } from "./mcp-events-protocol";
 import { EventSourceBlockedError, eventStatusReason } from "./status-reason";
+import {
+  eventSubscriptionCredentialHeaders,
+  type EventSubscriptionCredentialDeps,
+} from "./event-subscription-credentials";
 
 /**
  * Connects to the MCP server behind an event source as the source's owner:
  * the same server configuration and the same sign-in the owner's chats use.
- * An MCP source always belongs to one person, so nothing here widens access.
+ * A connector source belongs to one person, so nothing here widens access. A
+ * workspace source that listens by URL is signed in by the workspace
+ * credential provider instead.
  */
 
 export type McpEventsFetch = (url: string | URL, init?: RequestInit) => Promise<Response>;
@@ -35,7 +41,7 @@ export type McpEventSourceClientDeps = {
   settings: Settings;
   /** Replaces the pinned integration transport, for tests. */
   fetch?: McpEventsFetch;
-};
+} & Pick<EventSubscriptionCredentialDeps, "providerFetch">;
 
 /** The source cannot reach its server until a person acts; its reason says what to do. */
 export class McpEventSourceUnavailableError extends EventSourceBlockedError {
@@ -55,7 +61,7 @@ export function mcpServerDisplayName(server: Pick<McpServerConfig, "id" | "name"
 export type McpEventSourceTarget = Pick<
   EventSourceRecord,
   "kind" | "accountId" | "workspaceId" | "ownerSubjectId" | "mcpServerId" | "connectionId"
->;
+> & { id?: string; mcpServerUrl?: string | null };
 
 /** What a connection reached: the server and the owner's account it signed in with. */
 export type McpEventSourceConnection = {
@@ -147,6 +153,28 @@ async function resolveServer(
 ): Promise<ResolvedServer> {
   const serverId = source.mcpServerId;
   const owner = source.ownerSubjectId;
+  if (source.kind === "mcp" && serverId && source.mcpServerUrl) {
+    const server: McpServerConfig = {
+      id: serverId,
+      name: serverId,
+      url: source.mcpServerUrl,
+      cacheToolsList: false,
+    };
+    const target = {
+      // A source being created is signed in under its server URL alone.
+      sourceId: source.id ?? "new",
+      accountId: source.accountId,
+      workspaceId: source.workspaceId,
+      serverId,
+      serverUrl: source.mcpServerUrl,
+    };
+    return {
+      server,
+      connectionId: null,
+      refreshable: true,
+      headers: (forceRefresh) => eventSubscriptionCredentialHeaders(deps, target, forceRefresh),
+    };
+  }
   if (source.kind !== "mcp" || !serverId || !owner) {
     throw new McpEventSourceUnavailableError("unavailable", "This source is not an MCP connector");
   }

@@ -409,8 +409,8 @@ test("catalog projection and encrypted frontiers retain pins across the global p
 test("catalog is read-only and redacts unauthorized provenance before projection", async () => {
   const { request, queries } = fixture([
     [
-      candidate("site-one", "site", { site_visibility: "workspace_shared" }),
-      candidate("site-two", "site", { site_visibility: "user_private" }),
+      candidate("site-one", "site", { visibility: "workspace_shared" }),
+      candidate("site-two", "site", { visibility: "user_private" }),
     ],
   ]);
   const response = await request();
@@ -548,6 +548,50 @@ test("every editable candidate passes the injected non-mutating application, wit
   expect(reads.every((read) => read.actor.kind === "human" && !("sessionId" in read.actor))).toBe(
     true,
   );
+});
+
+test("documents list the workspace's and the viewer's own Only me ones, saying which is which", async () => {
+  const ownId = "3".repeat(32);
+  const sharedId = "4".repeat(32);
+  const { request, queries } = fixture(
+    [
+      [
+        candidate(ownId, "document", {
+          visibility: "user_private",
+          owner_subject_id: "user:catalog",
+        }),
+        candidate(sharedId, "spreadsheet", {
+          visibility: "workspace_shared",
+          owner_subject_id: null,
+        }),
+      ],
+    ],
+    {
+      read: async (input) =>
+        ({
+          scope: input.scope,
+          id: input.artifactId,
+          modality: input.artifactId === ownId ? "document" : "spreadsheet",
+          title: "Plan",
+          lifecycle: "active",
+          createdAt,
+          updatedAt: createdAt,
+        }) as never,
+    },
+  );
+  const response = await request("kind=document&kind=spreadsheet");
+  expect(response.status, await response.clone().text()).toBe(200);
+  const items = (await response.json()).items as Array<Record<string, unknown>>;
+  expect(
+    items.map(({ id, visibility, ownedByViewer }) => ({ id, visibility, ownedByViewer })),
+  ).toEqual([
+    { id: ownId, visibility: "private", ownedByViewer: true },
+    { id: sharedId, visibility: "workspace", ownedByViewer: false },
+  ]);
+  // The candidate read itself keeps other people's Only me documents out.
+  const candidates = queries.find((query) => query.sql.includes("WITH candidates AS"));
+  expect(candidates?.sql).toContain("a.owner_subject_id = ");
+  expect(candidates?.params).toContain("user:catalog");
 });
 
 test("application cross-tenant metadata and unavailability fail closed", async () => {

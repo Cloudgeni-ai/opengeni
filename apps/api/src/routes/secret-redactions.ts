@@ -9,7 +9,7 @@ import {
 import {
   createSecretResolver,
   hasPermission,
-  requireAccessGrant,
+  requireWorkspaceSettingsGrant,
   requireSessionAuthorizations,
   runSessionSecretRedaction,
   secretRedactionMatchersForPatterns,
@@ -41,7 +41,7 @@ import { vaultProviderRegistryFor } from "./vault-providers";
    Remove secrets from stored session history (docs/secrets.md, "Removing
    secrets from stored history").
 
-   A workspace owner or admin names sessions and what to look for: a vault
+   A workspace admin, or the owner of a Personal workspace, names sessions and what to look for: a vault
    reference (its value is read in memory for matching and never returned,
    logged or audited; this also needs `secrets:use` on the item) or built-in
    patterns. Every stored copy in those sessions, and in their archives, is
@@ -176,7 +176,8 @@ export function registerSecretRedactionRoutes(app: Hono, deps: ApiRouteDeps): vo
     // Bearer callers carry no ambient browser credentials; cookie sessions must be same-origin.
     if (!c.req.header("authorization")) requireSameOriginBrowserMutation(c, deps);
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    // Workspace admins, and the owner of a Personal workspace.
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const request = parseRequestBody(SecretRedactionRequest, await c.req.json().catch(() => null), {
       status: 422,
       message: "invalid secret redaction request",

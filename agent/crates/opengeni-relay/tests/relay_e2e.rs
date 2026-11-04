@@ -13,6 +13,10 @@
 //!   4. CROSS-CHANNEL ISOLATION: channel A's viewer never sees channel B's frames.
 //!   5. RATE LIMIT / BACKPRESSURE: a frame over the per-token byte budget is shed +
 //!      observable on the metrics.
+//!   6. BROWSER VIEWS: through the agent's relay hub, a view opened while its
+//!      page is busy pairs at once and gets its first frame once the page
+//!      answers; a view that never becomes ready, or is closed, leaves no
+//!      browserd subscription or relay channel behind.
 //!
 //! The tokens are minted with the SAME HMAC envelope the relay verifies (the §10.5
 //! contract — the cross-stack agreement with the TS mint is proven separately in
@@ -999,5 +1003,256 @@ async fn a_reconnect_leaves_only_the_live_viewer_driving_the_terminal() {
     match producer_next(&mut producer, Duration::from_secs(5)).await {
         Some(RelayMessage::Frame(f)) => assert_eq!(&f.data[..], b"live-keystroke"),
         other => panic!("expected the live viewer's keystroke, got {other:?}"),
+    }
+}
+
+// ===========================================================================
+// Browser live views through the agent's relay hub, against a browserd
+// frame-source double: a page busy when its view opens sends its first frame
+// only once it answers, and a stream that never becomes ready leaves nothing
+// behind.
+
+/// What browserd sends on a frame socket once it has opened the subscription
+/// (the wire value both ends agree on).
+const FRAMES_SUBSCRIBED_PING: &[u8] = b"opengeni.frames.subscribed";
+
+/// A browserd frame source double. Every subscription optionally gets the
+/// subscribed ping at once and one frame after `first_frame_after`; `open`
+/// counts the frame sockets still connected.
+struct BrowserdFrames {
+    port: u16,
+    open: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[allow(clippy::result_large_err)] // tungstenite's handshake callback owns this type.
+async fn browserd_frames(
+    subscribed_ping: bool,
+    first_frame_after: Option<Duration>,
+) -> BrowserdFrames {
+    use std::sync::atomic::Ordering;
+    use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+    use tokio_tungstenite::tungstenite::http::{header::SEC_WEBSOCKET_PROTOCOL, HeaderValue};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let open = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = open.clone();
+    tokio::spawn(async move {
+        while let Ok((tcp, _)) = listener.accept().await {
+            let open = counter.clone();
+            tokio::spawn(async move {
+                let Ok(mut socket) = tokio_tungstenite::accept_hdr_async(
+                    tcp,
+                    |_: &Request, mut response: Response| {
+                        response.headers_mut().insert(
+                            SEC_WEBSOCKET_PROTOCOL,
+                            HeaderValue::from_static("opengeni.browser.v1"),
+                        );
+                        Ok(response)
+                    },
+                )
+                .await
+                else {
+                    return;
+                };
+                open.fetch_add(1, Ordering::SeqCst);
+                if subscribed_ping {
+                    let _ = socket
+                        .send(WsMessage::Ping(FRAMES_SUBSCRIBED_PING.to_vec()))
+                        .await;
+                }
+                let frame_due = tokio::time::sleep(first_frame_after.unwrap_or(Duration::MAX / 4));
+                tokio::pin!(frame_due);
+                let mut frame_sent = first_frame_after.is_none();
+                loop {
+                    tokio::select! {
+                        message = socket.next() => match message {
+                            None | Some(Err(_) | Ok(WsMessage::Close(_))) => break,
+                            Some(Ok(_)) => {}
+                        },
+                        () = &mut frame_due, if !frame_sent => {
+                            frame_sent = true;
+                            if socket.send(WsMessage::Binary(b"first-frame".to_vec())).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                open.fetch_sub(1, Ordering::SeqCst);
+            });
+        }
+    });
+    BrowserdFrames { port, open }
+}
+
+impl BrowserdFrames {
+    fn open(&self) -> usize {
+        self.open.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+fn browser_frames_request() -> v1::BrowserFramesOpenRequest {
+    v1::BrowserFramesOpenRequest {
+        browser_session_id: "session".to_string(),
+        controller_generation: "controller".to_string(),
+        target_id: "target".to_string(),
+        view_token: "v".repeat(32),
+        // A view grant is at most minutes long.
+        expires_at_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_millis()
+            .saturating_add(60_000)
+            .try_into()
+            .expect("expiry"),
+        format: "jpeg".to_string(),
+        quality: 70,
+        max_width: 1_440,
+        max_height: 900,
+        every_nth_frame: 1,
+        ..Default::default()
+    }
+}
+
+fn relay_hub(base: &str) -> opengeni_agent_stream::RelayHub {
+    opengeni_agent_stream::RelayHub::new(opengeni_agent_stream::RelayHubConfig {
+        workspace_id: WORKSPACE.to_string(),
+        agent_id: AGENT.to_string(),
+        credential: opengeni_agent_stream::RelayCredential::fixed(base, agent_token()),
+        allow_screen_control: false,
+    })
+}
+
+/// A view viewer on the exact channel the hub registered.
+async fn view_channel(base: &str, channel: &v1::StreamChannel) -> Viewer {
+    let url = format!(
+        "{base}?ws={WORKSPACE}&agent={AGENT}&port={}&channel={}",
+        channel.port, channel.channel_id
+    );
+    let (mut socket, _resp) = tokio_tungstenite::connect_async(&url).await.expect("dial");
+    let open = RelayMessage::Open(v1::StreamOpen {
+        channel: Some(channel.clone()),
+        token: bound_viewer_token(channel.port, AGENT, &channel.channel_id),
+        role: v1::StreamRole::Client as i32,
+        resume_from_seq: 0,
+    });
+    socket
+        .send(WsMessage::Binary(open.encode()))
+        .await
+        .expect("send open");
+    match next_msg(&mut socket).await {
+        Some(RelayMessage::OpenAck(ack)) => assert!(ack.accepted, "the viewer pairs"),
+        other => panic!("expected OpenAck, got {other:?}"),
+    }
+    Viewer {
+        socket,
+        channel_id: channel.channel_id.clone(),
+    }
+}
+
+/// Waits up to `within` for `done`.
+async fn eventually(within: Duration, done: impl Fn() -> bool) -> bool {
+    let deadline = tokio::time::Instant::now() + within;
+    while tokio::time::Instant::now() < deadline {
+        if done() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    done()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_browser_view_opened_on_a_busy_page_pairs_at_once_and_gets_its_first_frame_later() {
+    use opengeni_agent_platform::StreamRegistry as _;
+    let (base, _shutdown, _metrics) = start_relay(|_| {}).await;
+    // The page answers 6 s after the view opens, past the hub's 5 s ready wait.
+    let browserd = browserd_frames(true, Some(Duration::from_secs(6))).await;
+    let hub = relay_hub(&base);
+
+    let opened = std::time::Instant::now();
+    let channel = hub
+        .register_browser_frames(browserd.port, &browser_frames_request())
+        .await
+        .expect("the view opens while its page is busy");
+    assert!(
+        opened.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        opened.elapsed()
+    );
+
+    let mut viewer = view_channel(&base, &channel).await;
+    let frame = tokio::time::timeout(Duration::from_secs(10), viewer.recv_frame())
+        .await
+        .expect("the first frame arrives once the page answers")
+        .expect("a frame");
+    assert_eq!(&frame.data[..], b"first-frame");
+    assert!(
+        opened.elapsed() >= Duration::from_secs(5),
+        "{:?}",
+        opened.elapsed()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_browser_view_that_never_becomes_ready_leaves_no_pump_behind() {
+    use opengeni_agent_platform::StreamRegistry as _;
+    let (base, _shutdown, metrics) = start_relay(|_| {}).await;
+    // A browserd that never confirms the subscription (an old one, on a page
+    // that never answers): every try gives up, and none stays behind.
+    let browserd = browserd_frames(false, None).await;
+    let hub = relay_hub(&base);
+    for attempt in 0..3 {
+        let error = hub
+            .register_browser_frames(browserd.port, &browser_frames_request())
+            .await
+            .expect_err("a stream that never becomes ready fails to open");
+        assert_eq!(
+            error.code(),
+            v1::ErrorCode::Timeout,
+            "attempt {attempt}: {error:?}"
+        );
+        assert!(
+            eventually(Duration::from_secs(1), || browserd.open() == 0).await,
+            "attempt {attempt}: the browserd subscription stays open ({} open)",
+            browserd.open()
+        );
+        assert!(
+            eventually(Duration::from_secs(1), || metrics.live_channels() == 0).await,
+            "attempt {attempt}: the relay channel stays open ({} live)",
+            metrics.live_channels()
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn closing_a_view_whose_page_never_answers_ends_its_browserd_stream() {
+    use opengeni_agent_platform::StreamRegistry as _;
+    let (base, _shutdown, metrics) = start_relay(|_| {}).await;
+    let browserd = browserd_frames(true, None).await;
+    let hub = relay_hub(&base);
+    for attempt in 0..3 {
+        let channel = hub
+            .register_browser_frames(browserd.port, &browser_frames_request())
+            .await
+            .expect("the view opens");
+        let mut viewer = view_channel(&base, &channel).await;
+        assert_eq!(browserd.open(), 1, "attempt {attempt}");
+        viewer
+            .send(&RelayMessage::Close(v1::StreamClose {
+                channel_id: channel.channel_id.clone(),
+                reason: v1::StreamCloseReason::Normal as i32,
+                message: "view closed".to_string(),
+            }))
+            .await;
+        assert!(
+            eventually(Duration::from_secs(2), || browserd.open() == 0).await,
+            "attempt {attempt}: the browserd subscription stays open"
+        );
+        assert!(
+            eventually(Duration::from_secs(2), || metrics.live_channels() == 0).await,
+            "attempt {attempt}: the relay channel stays open ({} live)",
+            metrics.live_channels()
+        );
     }
 }

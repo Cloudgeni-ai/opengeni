@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { latestGreenMain } from "./latest-green-main";
 import { fullGreenAuditBase, verifyMergeContent } from "./verify-merge-content";
 
 test("recomputes a merge and rejects a provider merge that silently drops earlier content", () => {
@@ -65,6 +66,57 @@ test("recomputes a merge and rejects a provider merge that silently drops earlie
         throw new Error("provider unavailable");
       }),
     ).toThrow("provider unavailable");
+    // Re-verifying an older head after a newer main went green: the newest
+    // green run is a descendant, so the base is the newest green strict
+    // ancestor, not bootstrap. Runs on a descendant or on head itself are
+    // skipped before their statuses are read.
+    git("commit", "--allow-empty", "-m", "later");
+    const later = git("rev-parse", "HEAD");
+    const statusReads: string[] = [];
+    const runs = [later, head, before, base].map((sha, index) => ({
+      head_sha: sha,
+      id: 10 - index,
+      run_attempt: 1,
+      html_url: `https://example.invalid/runs/${10 - index}`,
+    }));
+    const greenApi = (path: string) => {
+      if (path.includes("/runs?")) return { workflow_runs: runs };
+      statusReads.push(path);
+      const run = runs.find((candidate) => path.includes(`/commits/${candidate.head_sha}/`))!;
+      return [
+        {
+          context: "Full CI",
+          state: "success",
+          target_url: `${run.html_url}/attempts/1`,
+          creator: { login: "github-actions[bot]" },
+        },
+      ];
+    };
+    const discoverGreen = (accept: (sha: string) => boolean) =>
+      latestGreenMain("owner/repo", greenApi, undefined, accept);
+    expect(fullGreenAuditBase(head, cwd, discoverGreen)).toBe(before);
+    expect(statusReads).toEqual([`repos/owner/repo/commits/${before}/statuses?per_page=100`]);
+    // The newest green run on head's history still wins when it is an ancestor.
+    expect(fullGreenAuditBase(later, cwd, discoverGreen)).toBe(head);
+    // Only descendants and head itself are green: bootstrap, as before.
+    const onlyNewer = (accept: (sha: string) => boolean) =>
+      latestGreenMain(
+        "owner/repo",
+        (path) => (path.includes("/runs?") ? { workflow_runs: runs.slice(0, 2) } : greenApi(path)),
+        undefined,
+        accept,
+      );
+    expect(fullGreenAuditBase(head, cwd, onlyNewer)).toBe(base);
+    // A discovery that ignores the filter still never yields a descendant base.
+    expect(
+      fullGreenAuditBase(head, cwd, () => ({
+        schemaVersion: 1,
+        sha: later,
+        runId: 10,
+        runAttempt: 1,
+        url: "test",
+      })),
+    ).toBe(base);
     const corrupt = git(
       "commit-tree",
       `${pr}^{tree}`,

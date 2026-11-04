@@ -155,6 +155,44 @@ test("installs one ctap2.1 internal authenticator per tab holding the desired se
   expect((await sync(null)).authenticators).toBe(0);
 });
 
+test.each([
+  { backupEligibility: false, backupState: false },
+  { backupEligibility: true, backupState: false },
+  { backupEligibility: true, backupState: true },
+])("preserves per-credential backup flags on import and counter propagation: %j", async (flags) => {
+  const { cdp, manager, sync } = setup();
+  await manager.attachTarget(cdp, { targetId: "tab-a", sessionId: "a" });
+  const credential = vaultCredential(flags);
+  await sync([credential]);
+  await manager.attachTarget(cdp, { targetId: "tab-b", sessionId: "b" });
+  cdp.emit("a", "WebAuthn.credentialAsserted", {
+    authenticatorId: "authenticator-a",
+    credential: { credentialId: STANDARD_ID, rpId: credential.rpId, signCount: 5 },
+  });
+  await sync(null);
+  const installs = cdp.calls.filter((call) => call.method === "WebAuthn.addCredential");
+  expect(installs).toHaveLength(3);
+  for (const install of installs) expect(install.params.credential).toMatchObject(flags);
+});
+
+test("refreshes backup state even when the signature counter has not changed", async () => {
+  const { cdp, manager, sync } = setup();
+  await manager.attachTarget(cdp, { targetId: "tab-a", sessionId: "a" });
+  const credential = vaultCredential({ backupEligibility: true, backupState: false });
+  await sync([credential]);
+  cdp.calls.length = 0;
+  await sync([{ ...credential, backupState: true }]);
+  expect(cdp.calls.map((call) => call.method)).toEqual([
+    "WebAuthn.removeCredential",
+    "WebAuthn.addCredential",
+  ]);
+  expect(cdp.calls[1]!.params.credential).toMatchObject({
+    backupEligibility: true,
+    backupState: true,
+    signCount: 4,
+  });
+});
+
 test("withdraws passkey autofill in a tab before its authenticator exists, or gives it none", async () => {
   const { cdp, manager, sync } = setup();
   expect(await manager.attachTarget(cdp, { targetId: "tab-a", sessionId: "a" })).toBe(true);

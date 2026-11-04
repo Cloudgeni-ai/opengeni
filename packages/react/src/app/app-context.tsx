@@ -47,6 +47,20 @@ import type {
   Workspace,
 } from "./types";
 
+export type GitHubRefreshOptions = {
+  /** Re-sync the repository list from GitHub instead of reading the catalog. */
+  sync?: boolean | undefined;
+  /**
+   * The person started this refresh (connect, disconnect, an explicit
+   * Refresh or Retry), so a failure is told with a toast. Background
+   * refreshes on load and focus only record the failure: the repository
+   * picker, the GitHub card and the GitHub integration show it where GitHub
+   * is used. A background read that failed because Opengeni was briefly
+   * unreachable (a deploy, a network drop) tries again by itself.
+   */
+  userInitiated?: boolean | undefined;
+};
+
 export type AppContextValue = {
   client: OpenGeniBrowserClient;
   clientConfig: ClientConfig;
@@ -112,8 +126,6 @@ export type AppContextValue = {
   selectedPersonalGitHubRepoRefs: Record<string, string>;
   setSelectedPersonalGitHubRepoRefs: Dispatch<SetStateAction<Record<string, string>>>;
   personalGitHubAuthority: McpConnectionAccountSelection | null;
-  githubAppOpen: boolean;
-  setGithubAppOpen: Dispatch<SetStateAction<boolean>>;
   githubOrg: string;
   setGithubOrg: Dispatch<SetStateAction<string>>;
   selectedCapabilityToolIds: Set<string>;
@@ -121,7 +133,6 @@ export type AppContextValue = {
   busy: boolean;
   repoBusy: boolean;
   githubAppBusy: boolean;
-  selectedInstallationId: number | null;
   repositoryGroups: RepositoryGroup[];
   toolMcpServers: McpServerOption[];
   /** Capability MCP servers currently enabled as the workspace default. */
@@ -132,6 +143,8 @@ export type AppContextValue = {
   workspaceMcpCatalogLoadedSuccessfully: boolean;
   /** The authoritative workspace catalog, shared by tool policy and timeline presentation. */
   workspaceCapabilityCatalog: CapabilityCatalogItem[];
+  /** Who the organization lets turn integrations on (undefined: members, or not loaded). */
+  workspaceMemberIntegrationSetup?: "members" | "admins" | undefined;
   currentResources: ResourceRef[];
   repositoryValidationError: string | null;
   /**
@@ -200,9 +213,13 @@ export type AppContextValue = {
   refreshGitHub: (
     workspaceId: string,
     signal?: AbortSignal,
-    options?: { sync?: boolean | undefined },
+    options?: GitHubRefreshOptions,
   ) => Promise<void>;
-  refreshPersonalGitHub: (workspaceId: string, signal?: AbortSignal) => Promise<void>;
+  refreshPersonalGitHub: (
+    workspaceId: string,
+    signal?: AbortSignal,
+    options?: Pick<GitHubRefreshOptions, "userInitiated">,
+  ) => Promise<void>;
   connectPersonalGitHub: (workspaceId: string) => Promise<void>;
   reconnectPersonalGitHub: (workspaceId: string) => Promise<void>;
   disconnectPersonalGitHub: (workspaceId: string) => Promise<boolean>;

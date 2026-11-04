@@ -1,3 +1,4 @@
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { SessionBrowseGroupBy, SessionBrowseSortBy } from "./sessions-group";
 
 /** "needs-you" is the Active list narrowed to workstreams waiting on the person. */
@@ -126,6 +127,75 @@ export function writeSessionBrowsePreferences(
 
 function groupByStorageKey(preferenceStorageId: string): string {
   return `${preferenceStorageId}:group-by`;
+}
+
+/** Far above any real number of projects; only bounds what a bad value can cost. */
+const MAX_REMEMBERED_COLLAPSED_SECTIONS = 1000;
+
+/**
+ * The list sections (projects and other groups) this person collapsed in this
+ * workspace on this device. Only collapses are remembered, so a new project
+ * still opens by default.
+ */
+export function readCollapsedSessionSections(
+  id: string,
+  storage: BrowsePreferenceStorage | null = browserStorage(),
+): ReadonlySet<string> {
+  try {
+    const parsed: unknown = JSON.parse(storage?.getItem(`${id}:collapsed-sections`) ?? "[]");
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(
+      parsed
+        .filter((key): key is string => typeof key === "string" && key.length > 0)
+        .slice(0, MAX_REMEMBERED_COLLAPSED_SECTIONS),
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+export function writeCollapsedSessionSections(
+  id: string,
+  keys: ReadonlySet<string>,
+  storage: BrowsePreferenceStorage | null = browserStorage(),
+): void {
+  try {
+    storage?.setItem(
+      `${id}:collapsed-sections`,
+      JSON.stringify([...keys].slice(0, MAX_REMEMBERED_COLLAPSED_SECTIONS)),
+    );
+  } catch {
+    /* Storage may be unavailable; collapsing still works for this visit. */
+  }
+}
+
+/**
+ * The collapsed list sections for one person and workspace (`id` from
+ * `sessionBrowsePreferenceStorageId`). Sections open by default; the ones the
+ * person collapses are remembered on this device, so they stay collapsed after
+ * a reload while new sections still open. Switching `id` loads that
+ * workspace's own set.
+ */
+export function useCollapsedSessionSections(
+  id: string,
+  storage: BrowsePreferenceStorage | null = browserStorage(),
+): [ReadonlySet<string>, (update: (current: ReadonlySet<string>) => ReadonlySet<string>) => void] {
+  const target = useRef({ id, storage });
+  const [collapsed, setCollapsed] = useState(() => readCollapsedSessionSections(id, storage));
+  useEffect(() => {
+    if (target.current.id === id && target.current.storage === storage) return;
+    target.current = { id, storage };
+    setCollapsed(readCollapsedSessionSections(id, storage));
+  }, [id, storage]);
+  const update = useCallback((change: (current: ReadonlySet<string>) => ReadonlySet<string>) => {
+    setCollapsed((current) => {
+      const next = change(current);
+      if (next !== current)
+        writeCollapsedSessionSections(target.current.id, next, target.current.storage);
+      return next;
+    });
+  }, []);
+  return [collapsed, update];
 }
 
 function browserStorage(): Storage | null {

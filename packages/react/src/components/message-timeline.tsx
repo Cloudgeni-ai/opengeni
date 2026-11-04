@@ -7,6 +7,7 @@ import {
   durationBetween,
   flattenActivityItems,
   isPreparingWork,
+  timelineTurnsWithOutput,
   readableWorkDefaultOpen,
   readableWorkHasDetails,
   readableWorkShowsPreview,
@@ -24,6 +25,7 @@ import {
   type TimelineSearchTarget,
 } from "./timeline-search";
 import { GenieLoadingOptionsContext, type GenieLoadingOptions } from "../timeline/genie-loading";
+import { useTimelinePauses } from "../timeline/use-timeline-pauses";
 import { ChildSessionLink } from "./child-session-link";
 import { useStartupDetails } from "../timeline/startup-preference";
 import {
@@ -98,7 +100,7 @@ import {
   TimelineBeforeLayout,
   captureTimelineAnchor,
   timelineAnchorCorrection,
-  timelineHasReader,
+  timelineHasSelection,
   type TimelineAnchor,
 } from "./timeline-anchor";
 import { useReadingProgress } from "./timeline-reading-progress";
@@ -132,6 +134,7 @@ import {
   defaultToolRegistry,
   groupTimeline,
   LightboxProvider,
+  type TimelineLivePause,
   type ActivityItem,
   type AgentMessageItem,
   type AuthNeededItem,
@@ -234,6 +237,14 @@ export type MessageTimelineProps = {
   items?: TimelineItem[] | undefined;
   /** Current session status (reserved; tip "Working…" chrome removed for now). */
   status?: SessionStatus | null | undefined;
+  /**
+   * The session's live Pause, from its effective control
+   * (`timelineLivePause(session.effectiveControl)`). A turn still open under a
+   * pause reads "Paused" with its clock stopped, and paused time is not
+   * counted as work. Omit to rely on the session's events alone, which do not
+   * show a pause of an ancestor or the workspace that interrupted nothing.
+   */
+  pause?: TimelineLivePause | null | undefined;
   /** Host-owned controls beside Copy and the timestamp on settled message rows. */
   renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
   /**
@@ -400,6 +411,11 @@ export type MessageTimelineProps = {
  * - While pinned, tip-debt from growth/collapse must NEVER unpin — only
  *   wheel/keys/pointer-armed scroll-up, or a settled scrollend away from the
  *   tip while the tip-follow camera is idle (Vimium / unfocused PageUp).
+ *   Moving the view is the only reader signal for follow: focus and clicks
+ *   inside the conversation (a card's buttons, Copy, a menu) never unpin, so
+ *   answering one approval after another keeps the newest card in view. A
+ *   text selection (content must not move under it) and an in-place
+ *   disclosure toggle (it keeps its place) are the two non-scroll exceptions.
  *   Height shrink compensates scrollTop by Δh (collapse owns motion); tip-ease
  *   pauses briefly so the two don't fight. Programmatic camera writes are
  *   tagged so their scroll echoes never count as leave.
@@ -524,6 +540,22 @@ function maxScrollOf(node: HTMLElement): number {
 }
 
 /**
+ * React bubbles events from portaled content (a card's setup dialog, a menu)
+ * through the timeline's handlers although that content is outside the
+ * scroller. Only events from the scroller's own DOM are reader intent.
+ */
+function eventFromScrollerDom(event: {
+  target: EventTarget | null;
+  currentTarget: EventTarget | null;
+}): boolean {
+  return (
+    event.currentTarget instanceof Node &&
+    event.target instanceof Node &&
+    event.currentTarget.contains(event.target)
+  );
+}
+
+/**
  * Wheel bubbled from a nested overflow scroller that can still move up — not
  * timeline intent (code blocks / notice `<pre>`).
  */
@@ -629,6 +661,7 @@ export function MessageTimeline({
   events,
   items,
   status: _status,
+  pause,
   renderMessageActions,
   renderMessageSender,
   renderMessageText,
@@ -798,9 +831,10 @@ export function MessageTimeline({
   const olderPageBudgetRef = useRef(0);
   const [olderDemand, setOlderDemand] = useState(0);
   const readableTurns = turnSummary?.rolling === true;
+  const pauses = useTimelinePauses(events, pause, readableTurns);
   const projectedGroups = useMemo(
-    () => groupTimeline(t, resolvedItems, { readableTurns }),
-    [resolvedItems, readableTurns, t],
+    () => groupTimeline(t, resolvedItems, { readableTurns, pauses }),
+    [resolvedItems, readableTurns, pauses, t],
   );
   // A new timeline revision (including session/turn replacement) owns layout.
   // Never leave an old decorative transform running on its retained rows.
@@ -855,10 +889,10 @@ export function MessageTimeline({
   const questionNavMinViewportRef = useRef(questionNavMinViewportHeight);
   questionNavMinViewportRef.current = questionNavMinViewportHeight;
   const scheduleQuestionNavRef = useRef<() => void>(() => {});
-  // Unpinned is not the same as away from the tip: focusing a control in the
-  // conversation (Copy, a connection card) hands the view to the reader while
-  // they are still at the bottom. Offer the jump only once there is something
-  // below them, or a newer window / catch-up to skip.
+  // Unpinned is not the same as away from the tip: selecting text or opening a
+  // disclosure hands the view to the reader while they are still at the
+  // bottom. Offer the jump only once there is something below them, or a newer
+  // window / catch-up to skip.
   const [awayFromTip, setAwayFromTip] = useState(false);
   const jumpPillShown = autoFollow && ((!pinned && awayFromTip) || hasNewer || canSkipTipCatchup);
   const firstGroupKey = allGroups[0] ? timelineGroupKey(allGroups[0]) : null;
@@ -1156,20 +1190,7 @@ export function MessageTimeline({
   useLayoutEffect(() => {
     liveNoteIdsByWorkRef.current = liveNoteIdsByWork;
   }, [liveNoteIdsByWork]);
-  const turnsWithOutput = useMemo(
-    () =>
-      new Set(
-        resolvedItems.flatMap((item) =>
-          "turnId" in item &&
-          item.turnId &&
-          (item.kind === "tool-call" ||
-            ((item.kind === "agent-message" || item.kind === "reasoning") && item.text.trim()))
-            ? [item.turnId]
-            : [],
-        ),
-      ),
-    [resolvedItems],
-  );
+  const turnsWithOutput = useMemo(() => timelineTurnsWithOutput(resolvedItems), [resolvedItems]);
 
   const applyCanSkipTipCatchup = useCallback((value: boolean) => {
     if (canSkipTipCatchupRef.current !== value) {
@@ -1369,6 +1390,9 @@ export function MessageTimeline({
     // timeline reader intent. A real timeline wheel in either direction
     // releases the disclosure fence; downward movement may then re-pin
     // naturally when it reaches the bottom.
+    if (!eventFromScrollerDom(event)) {
+      return;
+    }
     if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) {
       return;
     }
@@ -1396,7 +1420,7 @@ export function MessageTimeline({
     currentTarget: EventTarget | null;
   }) => {
     // Primary button / touch / pen only. Ignore right-click etc.
-    if (event.button && event.pointerType === "mouse") {
+    if ((event.button && event.pointerType === "mouse") || !eventFromScrollerDom(event)) {
       return;
     }
     stopSettlement();
@@ -1418,7 +1442,14 @@ export function MessageTimeline({
       : null;
   };
 
-  const onKeyDown = (event: { key: string; currentTarget: EventTarget | null }) => {
+  const onKeyDown = (event: {
+    key: string;
+    target: EventTarget | null;
+    currentTarget: EventTarget | null;
+  }) => {
+    if (!eventFromScrollerDom(event)) {
+      return;
+    }
     if (
       event.key === "ArrowUp" ||
       event.key === "ArrowDown" ||
@@ -2676,11 +2707,15 @@ export function MessageTimeline({
                             touchPositionRef.current = null;
                           }}
                           onClickCapture={(event) => {
+                            if (!eventFromScrollerDom(event)) return;
                             const target =
                               event.target instanceof Element
                                 ? event.target.closest("button[aria-expanded]")
                                 : null;
-                            if (target) {
+                            // An in-place disclosure keeps its toggle where the reader
+                            // left it. A menu or dialog opener changes nothing here.
+                            const popup = target?.getAttribute("aria-haspopup");
+                            if (target && (popup === null || popup === "false")) {
                               if (target.hasAttribute("data-og-work-header")) {
                                 releaseProgress(
                                   target
@@ -2693,10 +2728,17 @@ export function MessageTimeline({
                             }
                           }}
                           onFocusCapture={(event) => {
-                            if (readableTurns && event.target !== event.currentTarget) {
+                            // Focus is not reading position: pressing a card's button
+                            // (Chromium focuses it) or a card handing focus to the next
+                            // one leaves follow alone. Focus that scrolls the view away
+                            // from the tip unpins through the scroll path like any
+                            // other navigation. Only a settle ease yields to it.
+                            if (
+                              readableTurns &&
+                              event.target !== event.currentTarget &&
+                              eventFromScrollerDom(event)
+                            ) {
                               stopSettlement();
-                              releasePinFromReader();
-                              disclosureKeepsUnpinnedRef.current = true;
                             }
                           }}
                           onPointerDown={onPointerDown}
@@ -2715,7 +2757,9 @@ export function MessageTimeline({
                         >
                           <TimelineBeforeLayout
                             capture={() => {
-                              if (readableTurns && timelineHasReader(scrollRef.current)) {
+                              // Selectionchange can arrive after this commit: a fresh
+                              // selection still owns the view before React moves it.
+                              if (readableTurns && timelineHasSelection(scrollRef.current)) {
                                 releasePinFromReader();
                               }
                               readingAnchorRef.current =
@@ -3227,7 +3271,7 @@ function TimelineGroupRenderError() {
     <div
       data-testid="timeline-group-render-error"
       role="status"
-      className="flex items-start gap-2 rounded-lg border border-og-border bg-og-surface-muted px-3 py-2 text-og-menu text-og-fg-muted"
+      className="flex items-start gap-2 rounded-lg border border-og-border bg-og-surface-2 px-3 py-2 text-og-menu text-og-fg-muted"
     >
       <TriangleAlertIcon aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
       <div>
@@ -5306,7 +5350,7 @@ function VideoGenerationResultRow({
         </div>
         <CheckCircle2Icon
           aria-label={t("messageTimeline.ready")}
-          className="size-4 shrink-0 text-og-status-success"
+          className="size-4 shrink-0 text-og-status-idle"
         />
       </div>
     </section>

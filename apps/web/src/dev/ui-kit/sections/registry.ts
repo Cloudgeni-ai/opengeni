@@ -88,11 +88,16 @@ export const SECTION_KEYS = [
   "list-row",
   "detail-sheet",
   "empty-state",
+  "available-here",
+  "shared-overview",
   // Selection
   "setting-row",
+  "own-where-it-works",
+  "my-things",
   "switch",
   "segmented-control",
   "choice-cards",
+  "workspace-reach",
   "select",
   "disclosure",
   // Status
@@ -105,11 +110,13 @@ export const SECTION_KEYS = [
   "secret-values",
   "secret-ask-card",
   "secret-approval",
+  "mcp-question",
   "cadence-picker",
   // People
   "access-list",
   // Chat
   "chat-approvals",
+  "chat-app-actions",
   "chat-questions",
   "chat-connect",
   "chat-answers",
@@ -130,13 +137,17 @@ export const SECTION_KEYS = [
   "page-service-accounts",
   "page-models",
   "page-models-cache",
+  "page-models-sharing",
   "page-schedules",
   "page-schedule-form",
   "page-meetings",
+  "page-meeting-reminders",
   "page-dictation",
   "page-knowledge",
   "page-org-people",
+  "page-org-connectors",
   "page-eu-only",
+  "page-github-integration",
 ] as const;
 
 export type SectionKey = (typeof SECTION_KEYS)[number];
@@ -357,6 +368,26 @@ export const SECTIONS: readonly SectionMeta[] = [
     load: () => import("./empty-state"),
   },
 
+  {
+    key: "available-here",
+    group: "Lists",
+    title: "Available here",
+    purpose:
+      "What agents in one workspace can use, grouped by who it belongs to, with who manages each.",
+    usedOn: "Workspace settings › Available here",
+    load: () => import("./available-here"),
+  },
+
+  {
+    key: "shared-overview",
+    group: "Lists",
+    title: "Shared",
+    purpose:
+      "Everything an organization shares with its workspaces, and where each works, with who manages it.",
+    usedOn: "Organization settings › Shared",
+    load: () => import("./shared-overview"),
+  },
+
   // ---------------------------------------------------------------- Selection
   {
     key: "setting-row",
@@ -385,6 +416,24 @@ export const SECTIONS: readonly SectionMeta[] = [
       },
     ],
     load: () => import("./setting-row"),
+  },
+  {
+    key: "own-where-it-works",
+    group: "Selection",
+    title: "Where it works",
+    purpose:
+      "Your own login, model plan or machine: each workspace you belong to, with a switch for your own messages there.",
+    usedOn: "Connector page, model plan page, machine page",
+    load: () => import("./own-where-it-works"),
+  },
+  {
+    key: "my-things",
+    group: "Selection",
+    title: "My things",
+    purpose:
+      "Every one of your own logins, model plans and machines in the organization, each with where it works.",
+    usedOn: "Settings › Your account › My things",
+    load: () => import("./my-things"),
   },
   {
     key: "switch",
@@ -470,6 +519,16 @@ export const SECTIONS: readonly SectionMeta[] = [
       },
     ],
     load: () => import("./choice-cards"),
+  },
+  {
+    key: "workspace-reach",
+    group: "Selection",
+    title: "Available in",
+    purpose:
+      "Where a thing an organization, a workspace or a person shares can be used, with its owner and who manages it, in the same words for every kind.",
+    usedOn:
+      "Model account Available in, Connect provider, vault Available in, Slack bot, organization keys and connected agents (workspace list)",
+    load: () => import("./workspace-reach"),
   },
   {
     key: "select",
@@ -712,6 +771,14 @@ export const SECTIONS: readonly SectionMeta[] = [
     load: () => import("./chat-approvals"),
   },
   {
+    key: "chat-app-actions",
+    group: "Chat",
+    title: "App action approvals",
+    purpose: "Ask the person to allow a change in Opengeni itself, naming exactly what it changes.",
+    usedOn: "Chat, embedded chat, inbox, phone and Slack",
+    load: () => import("./chat-app-actions"),
+  },
+  {
     key: "chat-questions",
     group: "Chat",
     title: "Agent questions",
@@ -754,6 +821,14 @@ export const SECTIONS: readonly SectionMeta[] = [
       "Say what a waiting approval does and where it runs, in the inbox and in notifications.",
     usedOn: "Inbox on web, desktop and phone; phone and desktop notifications",
     load: () => import("./inbox-approvals"),
+  },
+  {
+    key: "mcp-question",
+    group: "Chat",
+    title: "MCP server question",
+    purpose: "Answer a question an MCP server asks in the middle of a tool call.",
+    usedOn: "Chat approvals",
+    load: () => import("./mcp-question"),
   },
   {
     key: "cadence-picker",
@@ -955,6 +1030,15 @@ export const SECTIONS: readonly SectionMeta[] = [
     load: () => import("./page-models-cache"),
   },
   {
+    key: "page-models-sharing",
+    group: "Pages",
+    title: "Sharing a workspace's own account",
+    purpose:
+      "A workspace's own subscription account shared with other workspaces keeps its owner; going wider moves it to the organization.",
+    usedOn: "Settings > Models > account > Where it can be used",
+    load: () => import("./page-models-sharing"),
+  },
+  {
     key: "page-schedules",
     group: "Pages",
     title: "Schedules",
@@ -977,6 +1061,15 @@ export const SECTIONS: readonly SectionMeta[] = [
     purpose: "Record a meeting, then read its transcript and name who spoke.",
     usedOn: "Main rail",
     load: () => import("./page-meetings"),
+  },
+  {
+    key: "page-meeting-reminders",
+    group: "Pages",
+    title: "Meeting reminders",
+    purpose:
+      "A minute before a calendar meeting, the desktop app offers to join it and start recording: the switch, and the one-time offer to connect a calendar.",
+    usedOn: "Desktop app: Settings → Computer use, and Meetings",
+    load: () => import("./page-meeting-reminders"),
   },
   {
     key: "page-dictation",
@@ -1003,6 +1096,15 @@ export const SECTIONS: readonly SectionMeta[] = [
     load: () => import("./page-org-people"),
   },
   {
+    key: "page-org-connectors",
+    group: "Pages",
+    title: "Organization connectors",
+    purpose:
+      "Connectors an organization adds once for the workspaces it chooses: how people sign in, where each works, turning it off and replacing its key.",
+    usedOn: "Organization settings > Integrations",
+    load: () => import("./page-org-connectors"),
+  },
+  {
     key: "page-eu-only",
     group: "Pages",
     title: "EU-only inference",
@@ -1010,6 +1112,15 @@ export const SECTIONS: readonly SectionMeta[] = [
       "The organization setting and what an EU-only workspace switches off, in production components.",
     usedOn: "Organization settings > Security & data, model pickers, feature settings",
     load: () => import("./page-eu-only"),
+  },
+  {
+    key: "page-github-integration",
+    group: "Pages",
+    title: "GitHub integration",
+    purpose:
+      "GitHub's two identities, Your GitHub and the Opengeni app, each with one action, in production components.",
+    usedOn: "Capabilities > GitHub",
+    load: () => import("./page-github-integration"),
   },
 ];
 

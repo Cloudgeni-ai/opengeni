@@ -16,6 +16,29 @@ export const PERSONAL_GITHUB_USER_URL = "https://api.github.com/user" as const;
 export const PERSONAL_GITHUB_API_ORIGIN = "https://api.github.com" as const;
 export const PERSONAL_GITHUB_REPOSITORY_CATALOG_MAX = 100 as const;
 
+/**
+ * The in-chat setup card for the person's own GitHub identity ("Your GitHub").
+ * Distinct from the workspace GitHub App card (`api:github-app`): this one
+ * connects the signed-in person's account, which only they can do.
+ */
+export const PERSONAL_GITHUB_CAPABILITY_ID = "api:github-personal" as const;
+
+/**
+ * Query value that opens the GitHub integration page on the "Your GitHub"
+ * section: its Connect action, or the repository chooser once connected.
+ */
+export const PERSONAL_GITHUB_SETUP_QUERY_VALUE = "personal" as const;
+
+/**
+ * Console path that lands on the personal GitHub connect action. A link
+ * target only: it grants nothing, and the person still confirms on GitHub.
+ */
+export function personalGitHubSetupPath(workspaceId: string): string {
+  return `/workspaces/${encodeURIComponent(workspaceId)}/plugins?open=${encodeURIComponent(
+    "integration:github",
+  )}&github=${PERSONAL_GITHUB_SETUP_QUERY_VALUE}`;
+}
+
 export const PersonalGitHubRepositoryId = /* @__PURE__ */ defineSchema(() =>
   primitives.string.regex(/^[1-9]\d*$/u),
 );
@@ -297,6 +320,28 @@ export function isPersonalGitHubConnection(
     connection.providerDomain.toLowerCase() === PERSONAL_GITHUB_PROVIDER_DOMAIN &&
     connection.kind === "oauth2" &&
     PersonalGitHubConnectionMetadata.safeParse(connection.metadata).success
+  );
+}
+
+/** What agents and Git see when GitHub stopped accepting the person's stored grant. */
+export const PERSONAL_GITHUB_RECONNECT_MESSAGE =
+  "GitHub no longer accepts this person's connection. They need to reconnect it in Opengeni (GitHub settings, Your GitHub, Reconnect).";
+
+/**
+ * A personal GitHub connection whose grant GitHub refused (a failed token
+ * refresh): it stays the person's, but only reconnecting makes it work again.
+ * Nothing sets `error` on personal GitHub today; it is included so a future
+ * failure state also asks for a reconnect instead of failing silently.
+ */
+export function personalGitHubConnectionNeedsReconnect(
+  connection: Pick<
+    z.infer<typeof ConnectionMetadata>,
+    "providerDomain" | "kind" | "metadata" | "status"
+  >,
+): boolean {
+  return (
+    (connection.status === "needs_reauth" || connection.status === "error") &&
+    isPersonalGitHubConnection(connection)
   );
 }
 

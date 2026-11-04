@@ -18,6 +18,7 @@ import {
   type UsageFilterField,
   type UsageFilters,
   type UsageQuery,
+  type UsageRange,
   type UsageResponse,
   type UsageScope,
 } from "./usage-contract";
@@ -54,9 +55,12 @@ const ALL_CAPABILITIES: UsageResponse["capabilities"] = {
     "scheduleId",
     "source",
   ],
-  ranges: ["today", "week", "month", "30d", "90d", "ytd", "custom"],
+  ranges: ["1h", "3h", "24h", "today", "week", "month", "30d", "90d", "ytd", "custom"],
   seriesGroups: true,
 };
+
+/** What a server that predates `availableRanges` answers. */
+const CALENDAR_PRESETS: UsageRange[] = ["today", "week", "month", "30d", "90d", "ytd"];
 
 function queryParams(query: UsageQuery): Record<string, string> {
   const params: Record<string, string> = {
@@ -130,9 +134,13 @@ export async function loadUsage(
   // Dev only: `localStorage["opengeni.insights.fixture"] = "1"` previews the
   // full usage API shape before a local stack serves it.
   if (import.meta.env.DEV && globalThis.localStorage?.getItem("opengeni.insights.fixture")) {
-    const { fixtureUsage } = await import("./usage-fixtures");
+    const [{ fixtureUsage }, { resolveInsightsUsageWindow }] = await Promise.all([
+      import("./usage-fixtures"),
+      import("@opengeni/contracts/insights-usage"),
+    ]);
+    const window = resolveInsightsUsageWindow(query, new Date());
     return {
-      usage: { ...fixtureUsage({ scope, groupBy: query.groupBy }), range: query.range },
+      usage: { ...fixtureUsage({ scope, groupBy: query.groupBy, window }), range: query.range },
       calls: null,
       source: "usage",
       ignoredFilters: [],
@@ -144,14 +152,20 @@ export async function loadUsage(
       const usage = await client.requestJson<
         InsightsUsageResponse & { capabilities?: UsageResponse["capabilities"] }
       >("GET", `${basePath(scope)}/usage`, undefined, queryParams(query), { signal });
-      // The source dimension and custom ranges arrived together; a server that
-      // lists no source facet answers neither (its query schema is strict).
+      // The source dimension arrived with a source facet; a server that lists
+      // none can't group or filter by it (its query schema is strict). Servers
+      // list the ranges they answer; older ones answer the six presets, plus
+      // custom when they also answer sources.
       const extended = Array.isArray(usage.facets?.sources);
+      const ranges =
+        usage.availableRanges?.filter((range): range is UsageRange =>
+          (ALL_CAPABILITIES.ranges as readonly string[]).includes(range),
+        ) ?? (extended ? [...CALENDAR_PRESETS, "custom" as const] : CALENDAR_PRESETS);
       const capabilities = usage.capabilities ?? {
         ...ALL_CAPABILITIES,
         groupBy: ALL_CAPABILITIES.groupBy.filter((group) => extended || group !== "source"),
         filters: ALL_CAPABILITIES.filters.filter((field) => extended || field !== "source"),
-        ranges: ALL_CAPABILITIES.ranges.filter((range) => extended || range !== "custom"),
+        ranges,
       };
       return {
         usage: usageResponseForGrouping(usage, query.groupBy, capabilities),

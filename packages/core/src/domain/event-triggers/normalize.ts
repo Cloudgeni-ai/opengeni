@@ -20,6 +20,8 @@ export type NormalizedEventInput = {
   actor: EventActor;
   data: unknown;
   gapBefore?: boolean;
+  /** The chain depth of the automation run that caused it; 0 or absent when none did. */
+  chainDepth?: number;
 };
 
 /** An event ready to store: every field fits its column. */
@@ -141,6 +143,10 @@ export function boundEvent(input: NormalizedEventInput, receivedAt: Date): Bound
     data,
     dataTruncated: truncated,
     gapBefore: input.gapBefore ?? false,
+    chainDepth:
+      typeof input.chainDepth === "number" && Number.isFinite(input.chainDepth)
+        ? Math.max(0, Math.min(32_767, Math.floor(input.chainDepth)))
+        : 0,
   };
 }
 

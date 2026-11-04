@@ -306,6 +306,59 @@ describe("IntegrationSheet", () => {
     }
   });
 
+  test("named sections render their copy, state and single action", async () => {
+    const choose = mock(() => {});
+    const rendered = await render(
+      <Sheet open>
+        <IntegrationSheetBody
+          model={model({
+            id: "github",
+            name: "GitHub",
+            connection: [],
+            access: undefined,
+            options: [],
+            footer: { kind: "actions" },
+            sections: [
+              {
+                id: "github-personal",
+                title: "Your GitHub",
+                description: "Work appears under your name.",
+                status: "Connected as @octocat · 0 repos",
+                action: { label: "Choose repos", onClick: choose, primary: true },
+              },
+              {
+                id: "github-app",
+                title: "Opengeni app",
+                description: "Work appears as the Opengeni bot, shared with the workspace.",
+                action: { label: "Install on another account", onClick: () => {}, busy: true },
+              },
+            ],
+          })}
+        />
+      </Sheet>,
+    );
+    try {
+      const sheet = document.querySelector('[data-integration-sheet="github"]')!;
+      expect([...sheet.querySelectorAll("h3")].map((node) => node.textContent)).toEqual([
+        "Your GitHub",
+        "Opengeni app",
+      ]);
+      expect(sheet.textContent).toContain("Connected as @octocat · 0 repos");
+      const personal = sheet.querySelector<HTMLButtonElement>(
+        '[data-integration-section-action="github-personal"]',
+      )!;
+      expect(personal.textContent).toBe("Choose repos");
+      await act(async () => personal.click());
+      expect(choose).toHaveBeenCalledTimes(1);
+      const app = sheet.querySelector<HTMLButtonElement>(
+        '[data-integration-section-action="github-app"]',
+      )!;
+      expect(app.disabled).toBe(true);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   test("renders the closed footer set for setup and locked states", async () => {
     const onSetup = mock(() => {});
     const setup = await render(

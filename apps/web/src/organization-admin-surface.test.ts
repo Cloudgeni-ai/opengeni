@@ -171,8 +171,8 @@ describe("organization administration surface", () => {
     expect(workspaceCodexSource).toContain("organization.openAccount(account.id)");
     expect(routeSource).toContain("canManageOrganizationKnowledge");
     expect(accessSource).toContain('accountGrant?.role === "owner"');
-    expect(accessSource).toContain('"account:admin"');
-    // Identity shows its agent policy as one row; owners change it on Agent learning,
+    expect(accessSource).toContain("canAdministerOrganization(input)");
+    // Identity shows its agent policy as one row; owners and admins change it on Agent learning,
     // in the same words as the workspace's modes.
     expect(identitySource).toContain(".getCompanyProfileAgentPolicy(workspaceId)");
     expect(identitySource).not.toContain("updateCompanyProfileAgentPolicy(");

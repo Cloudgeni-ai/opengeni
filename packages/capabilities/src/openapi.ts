@@ -40,6 +40,8 @@ export interface OpenApiParameterBinding {
   readonly required: boolean;
   readonly schema: JsonSchema;
   readonly description?: string;
+  readonly style?: string;
+  readonly explode?: boolean;
 }
 
 export interface OpenApiOperationBinding {
@@ -257,6 +259,11 @@ export function compileOpenApiRevision(
   const contentSha256 = sha256Hex(
     canonicalJson({
       document,
+      // Older compilers discarded serialization metadata. A refreshed catalog
+      // must not collide with their immutable stored bindings for the same spec.
+      ...(Object.values(bindings).some((binding) => binding.parameters.some(isNonExplodedFormQuery))
+        ? { queryArraySerializationVersion: 1 }
+        : {}),
       ...(options.schemaMode ? { schemaMode: options.schemaMode } : {}),
       // Reviewed read-only overrides change tool safety, so they are part of the
       // executable identity. Absent overrides keep existing digests unchanged.
@@ -666,6 +673,13 @@ function readParameters(
         name: parameter.name,
         location,
         required: location === "path" || parameter.required === true,
+        // Retain the supported non-default encoding. Unchanged encodings keep
+        // their old binding shape as well as their old immutable revision ID.
+        ...(location === "query" &&
+        (parameter.style ?? "form") === "form" &&
+        parameter.explode === false
+          ? { style: "form", explode: false }
+          : {}),
         schema: dereferenceSchema(document, parameter.schema),
         ...(stringValue(parameter.description)
           ? { description: stringValue(parameter.description)! }
@@ -838,7 +852,12 @@ function buildOperationUrl(binding: OpenApiOperationBinding, args: Record<string
     base.toString().endsWith("/") ? base : new URL(`${base}/`),
   );
   const query = objectValue(args.query);
-  for (const [name, value] of Object.entries(query)) appendQueryValue(url, name, value);
+  for (const [name, value] of Object.entries(query)) {
+    const parameter = binding.parameters.find(
+      (entry) => entry.location === "query" && entry.name === name,
+    );
+    appendQueryValue(url, name, value, parameter);
+  }
   return url;
 }
 
@@ -892,9 +911,26 @@ function buildOperationBody(
   );
 }
 
-function appendQueryValue(url: URL, name: string, value: unknown): void {
+function isNonExplodedFormQuery(parameter: OpenApiParameterBinding | undefined): boolean {
+  return (
+    parameter?.location === "query" &&
+    (parameter.style ?? "form") === "form" &&
+    parameter.explode === false
+  );
+}
+
+function appendQueryValue(
+  url: URL,
+  name: string,
+  value: unknown,
+  parameter: OpenApiParameterBinding | undefined,
+): void {
   if (Array.isArray(value)) {
-    for (const entry of value) url.searchParams.append(name, scalarString(entry));
+    if (isNonExplodedFormQuery(parameter)) {
+      url.searchParams.append(name, value.map(scalarString).join(","));
+    } else {
+      for (const entry of value) url.searchParams.append(name, scalarString(entry));
+    }
   } else if (value !== undefined && value !== null) {
     url.searchParams.append(name, scalarString(value));
   }

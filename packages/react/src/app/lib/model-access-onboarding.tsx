@@ -1,3 +1,4 @@
+import { directModelProviderOfProviderId } from "@opengeni/contracts";
 import { t } from "./console-text";
 import { checkoutPageReturnUrl } from "./credit-checkout";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -41,14 +42,15 @@ export type ConnectedModelFamily =
   | "opper"
   | "credits"
   | "openai"
-  | "azure_openai";
+  | "azure_openai"
+  | "openai_compatible";
 
 function rowMatchesFamily(row: PickerModelRow, family: ConnectedModelFamily): boolean {
   switch (family) {
     case "openai":
-      return row.provider.startsWith("workspace-openai-");
     case "azure_openai":
-      return row.provider.startsWith("workspace-azure-openai-");
+    case "openai_compatible":
+      return directModelProviderOfProviderId(row.provider) === family;
     case "codex":
       return row.billingClass === "codex_subscription";
     case "supergrok":

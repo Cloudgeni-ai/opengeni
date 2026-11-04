@@ -284,20 +284,28 @@ them, so a call site sets a width and nothing else.
   and the title in 14/500 `fg`, over a hairline. Radix side submenus use the same panel.
 - **Empty, unavailable:** one plain sentence (or a 14px line plus one 12px reason) in
   the panel, never a card, dashed box or icon tile. Say it once, and hide an action that can't
-  work (no disabled "Refresh list" when GitHub is unavailable).
+  work. A failed load or background update adds one inline "Try again" link to that sentence.
+- **Lists refresh themselves; a menu has no Refresh row.** Opening a menu shows the kept rows at
+  once and updates them in the background (throttled, at most once per 30 seconds). When the
+  person leaves for another flow that changes the list (GitHub installs, choosing repositories,
+  the GitHub settings page), the list refreshes as soon as they are back, without the throttle.
 - **Loading never shows inside an action menu.** A menu opens at its final size: its data and
   code are fetched before it opens (the composer warms every "+" drill-in when "+" is hovered,
   focused or idle, via `lazyComposerPanel`) and kept, so a reopen shows the last rows and a
   refresh updates them in place. Only a true first load shows skeleton rows at the final row
   height (`ComposerMenuRowsSkeleton`), never a "Loading…" sentence, and nothing behind the menu
   on the page says it is loading.
-- **Per-chat settings live under "+".** The composer bar holds only "+", voice, the model and
-  Send. Where the chat runs (managed sandbox and its Sandbox Environment, or a connected machine
-  and its folder), who can see it, variable sets, repositories and chat settings are "+" rows
-  with the current value as right-side meta, each opening a drill-in. The project chip above the
-  message stays: it says where the new chat is filed, not how it runs. A running chat's header
-  names its compute only when it runs on someone's own machine. Workspace defaults for these
-  are on workspace General > New session defaults.
+- **A new chat's setup sits above the message; the rest of its settings live under "+".** The
+  composer bar holds only "+", voice, the model and Send. The strip above a new chat's message
+  holds the choices people make once, before they type: the project it is filed in, where it
+  runs (managed sandbox and its Sandbox Environment, or a connected machine and its folder) and
+  who can see it. Each is a chip (icon, current value, chevron; the setting's name is its
+  tooltip and accessible name) opening the same menu body "+" uses, shown only when there is
+  something to choose. Repositories, connectors, secrets, usage limit and chat settings are "+"
+  rows with the current value as right-side meta, each opening a drill-in. In a running chat,
+  "+" > Runs on moves the chat to another computer, and the header names its compute only when
+  it runs on someone's own machine. Workspace defaults for these are on workspace General > New
+  session defaults.
 - Tiles and logos in rows (workspace initials, organization, apps) fit the 16px icon slot so
   labels align; richer rows (connectors with a logo, name and account) keep the same padding,
   radius and hover and have no dividers between them.
@@ -436,6 +444,14 @@ Learned on Settings > Models, 27 Sep 2026.
   genuinely needed, with the reason in place: Codex Apps, usage limit resets, an API key in a
   Personal workspace. Nobody else adds accounts; someone who can change a workspace's own account
   may still sign it in again or replace its key.
+- **One "Available in" for every shared thing.** Model accounts, Connect provider, vaults and the
+  Slack bot all use `WorkspaceReachFields`, which opens with its owner line ("Belongs to Acme.
+  Organization owners and admins manage it.") and offers "All workspaces in Acme" or "Selected
+  workspaces". A workspace's own thing always includes its home workspace, shown locked with the
+  reason. Your own thing always works in your Personal workspace, which is never a row; you choose
+  "All my workspaces" or "Selected workspaces". Organization things add a "Personal workspaces"
+  checkbox where the provider supports them. Pickers that choose an owner (rigs, machines) or where
+  a key or connected agent may act keep their own choices and reuse only `WorkspaceChecklist`.
 - **Who sees Models.** Organization owners and admins: everything. Workspace admins: the
   workspaces they administer plus their own Personal workspace and, read-only, the accounts those
   use, with "Only organization owners and admins can add accounts." Members: only their own

@@ -4,6 +4,8 @@ import type { AccessGrantAuthorization } from "@opengeni/core";
 import { HTTPException } from "hono/http-exception";
 import {
   machineScopeRefusal,
+  OWN_MACHINE_REFUSALS,
+  ownMachineConnectRefusal,
   requireMachineAudienceAuthority,
   requireMachineScopeAuthority,
 } from "../src/sandbox/machine-authority";
@@ -18,6 +20,7 @@ const SUBJECT = "user:teammate";
 function authorization(input: {
   permissions: Permission[];
   accountPermissions?: Permission[];
+  role?: "owner" | "admin" | "member";
   signedIn?: boolean;
   principalKind?: "human_session" | "api_key" | "service" | "agent_attempt";
   delegated?: boolean;
@@ -36,6 +39,7 @@ function authorization(input: {
     accountGrant: {
       accountId: "00000000-0000-4000-8000-000000000001",
       subjectId,
+      ...(input.role ? { role: input.role } : {}),
       permissions: input.accountPermissions ?? [],
     },
     authenticatedSubjectId: subjectId,
@@ -143,5 +147,71 @@ describe("Connected Machine scope rule", () => {
     expect(() =>
       requireMachineAudienceAuthority(authorization({ permissions: ["enrollments:manage"] })),
     ).not.toThrow();
+  });
+});
+
+describe("the organization's Members connect their own machines switch", () => {
+  const on = { membersConnectOwnMachines: true, personalWorkspace: false };
+  const offShared = { membersConnectOwnMachines: false, personalWorkspace: false };
+  const offPersonal = { membersConnectOwnMachines: false, personalWorkspace: true };
+  const memberRole = authorization({
+    permissions: ["enrollments:read"],
+    role: "member",
+  });
+  // A Personal workspace's owner manages machines there, and a shared
+  // workspace admin manages its machines: neither lifts the switch.
+  const workspaceManager = authorization({
+    permissions: ["enrollments:read", "enrollments:manage"],
+    role: "member",
+  });
+
+  test("on, the default, refuses nobody", () => {
+    for (const scope of ["user", "workspace", "organization"] as const) {
+      expect(ownMachineConnectRefusal(memberRole, scope, on)).toBeNull();
+    }
+  });
+
+  test("off, members can't connect an Only me machine, whatever their workspace rights", () => {
+    expect(ownMachineConnectRefusal(memberRole, "user", offShared)).toBe(
+      OWN_MACHINE_REFUSALS.shared,
+    );
+    expect(ownMachineConnectRefusal(workspaceManager, "user", offShared)).toBe(
+      OWN_MACHINE_REFUSALS.shared,
+    );
+    expect(OWN_MACHINE_REFUSALS.shared).toContain(
+      "A workspace admin can connect a machine for the whole workspace.",
+    );
+    // A role the grant doesn't name is no exemption.
+    expect(
+      ownMachineConnectRefusal(
+        authorization({ permissions: ["enrollments:read"] }),
+        "user",
+        offShared,
+      ),
+    ).toBe(OWN_MACHINE_REFUSALS.shared);
+  });
+
+  test("off, a shared workspace's machines keep their own rule", () => {
+    expect(ownMachineConnectRefusal(workspaceManager, "workspace", offShared)).toBeNull();
+    expect(ownMachineConnectRefusal(workspaceManager, "organization", offShared)).toBeNull();
+  });
+
+  test("off, any machine in a Personal workspace counts as one's own", () => {
+    expect(ownMachineConnectRefusal(workspaceManager, "workspace", offPersonal)).toBe(
+      OWN_MACHINE_REFUSALS.personal,
+    );
+    expect(ownMachineConnectRefusal(workspaceManager, "user", offPersonal)).toBe(
+      OWN_MACHINE_REFUSALS.personal,
+    );
+    // Nobody else connects machines there, so there's no one to point at.
+    expect(OWN_MACHINE_REFUSALS.personal).not.toContain("workspace admin");
+  });
+
+  test("off, the organization's owners and admins still connect their own", () => {
+    for (const role of ["owner", "admin"] as const) {
+      const caller = authorization({ permissions: ["enrollments:read"], role });
+      expect(ownMachineConnectRefusal(caller, "user", offShared)).toBeNull();
+      expect(ownMachineConnectRefusal(caller, "workspace", offPersonal)).toBeNull();
+    }
   });
 });

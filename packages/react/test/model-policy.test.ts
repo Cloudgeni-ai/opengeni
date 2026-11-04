@@ -1,4 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import {
+  DirectModelProvider,
+  directModelProviderOfProviderId,
+  type ClientModelResidencyV1,
+} from "@opengeni/contracts";
 import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
 
 import {
@@ -6,13 +11,16 @@ import {
   billingClassForModel,
   coerceReasoningEffortForModel,
   compactModelPill,
+  connectedSubscriptionProvider,
   effortOptionsForModel,
   groupPickerRowsByBillingClass,
   payerSummaryForModel,
   modelUsesCredits,
+  projectClientModelRows,
   projectPickerRows,
 } from "../src/model-policy";
 import { createOpenGeniText } from "../src/messages/runtime";
+import { modelPickerMenuView } from "../src/model-picker-model";
 
 const englishText = createOpenGeniText();
 
@@ -298,6 +306,63 @@ describe("model-policy", () => {
     );
     expect(billingClassForModel(deploymentModel)).toBe("opengeni_credits");
     expect(payerSummaryForModel(englishText, deploymentModel)).toBe("Free in this deployment");
+  });
+
+  test("bills every kind of workspace direct model connection to the workspace", () => {
+    const providerIds = [
+      "workspace-openai-c1",
+      "workspace-azure-openai-c2",
+      "workspace-compatible-c3",
+    ];
+    // The picker inlines these prefixes; every direct provider kind must be covered.
+    expect(providerIds.map((id) => directModelProviderOfProviderId(id)).sort()).toEqual(
+      [...DirectModelProvider.options].sort(),
+    );
+    for (const provider of providerIds) {
+      const model = catalogModel({ id: `${provider}/some-model`, label: "Some model", provider });
+      expect(billingClassForModel(model)).toBe("byok");
+    }
+  });
+
+  test("names the subscription of catalog models, which carry no credential source", () => {
+    const subscription = { upstreamPayer: "connected_subscription", metering: "external" } as const;
+    const claude = catalogModel({
+      id: "organization-claude-subscription/claude-opus-5-5",
+      label: "Claude Opus 5.5",
+      provider: "organization-claude-subscription",
+      providerLabel: "Claude subscription",
+      cost: "subscription",
+      billing: subscription,
+    });
+    const supergrok = catalogModel({
+      id: "supergrok/grok-4.7",
+      label: "Grok 4.7",
+      provider: "supergrok",
+      providerLabel: "SuperGrok",
+      source: "supergrok",
+      cost: "subscription",
+      billing: subscription,
+    });
+    const codex = catalogModel({
+      id: "codex/gpt-6-astra",
+      label: "GPT-6 Astra",
+      provider: "codex",
+      providerLabel: "Codex",
+      source: "codex",
+      cost: "subscription",
+      billing: subscription,
+    });
+    expect(connectedSubscriptionProvider(claude)).toBe("claude");
+    expect(connectedSubscriptionProvider(supergrok)).toBe("xai");
+    expect(connectedSubscriptionProvider(codex)).toBe("codex");
+    expect(payerSummaryForModel(englishText, claude)).toBe(
+      "Claude subscription · external billing",
+    );
+    expect(payerSummaryForModel(englishText, { ...claude, cost: undefined })).toBe(
+      "Claude subscription · external billing",
+    );
+    expect(advancedSourceSummary(englishText, claude)).toBe("Connected Claude subscription");
+    expect(advancedSourceSummary(englishText, codex)).toBe("Connected Codex subscription");
   });
 
   test("keeps workspace and organization Opper billing separate from deployment Opper", () => {
@@ -692,5 +757,126 @@ describe("scope collapse never merges different accounts", () => {
     ]);
     const groups = groupPickerRowsByBillingClass(englishText, rows, { collapseScopes: false });
     expect(groups.map((group) => group.billingClass)).toEqual(["byok", "organization_byok"]);
+  });
+});
+
+describe("models listed under the same name", () => {
+  const eu: ClientModelResidencyV1 = {
+    geography: "eu",
+    deploymentType: "azure_data_zone",
+    regions: ["swedencentral"],
+    evidenceSource: "operator_declaration",
+    eu: true,
+  };
+  const unknown: ClientModelResidencyV1 = {
+    geography: "unknown",
+    deploymentType: "unknown",
+    regions: [],
+    evidenceSource: "none",
+    eu: false,
+  };
+  const sol = (id: string, residency: ClientModelResidencyV1) =>
+    catalogModel({
+      id,
+      label: "GPT-6.1 Sol",
+      shortLabel: "6.1 Sol",
+      provider: "opengeni",
+      providerLabel: "Opengeni",
+      cost: "credits",
+      residency,
+    });
+
+  test("an EU route of a model says so, and the other keeps its name", () => {
+    const rows = projectPickerRows(englishText, [
+      sol("azure-sol/gpt-6.1-sol", unknown),
+      sol("azure-eu/gpt-6.1-sol", eu),
+      catalogModel({ id: "azure-terra/gpt-6.1-terra", label: "GPT-6.1 Terra", cost: "credits" }),
+    ]);
+    expect(rows.map((row) => [row.id, row.label, row.shortLabel])).toEqual([
+      ["azure-sol/gpt-6.1-sol", "GPT-6.1 Sol", "6.1 Sol"],
+      ["azure-eu/gpt-6.1-sol", "GPT-6.1 Sol (EU)", "6.1 Sol (EU)"],
+      ["azure-terra/gpt-6.1-terra", "GPT-6.1 Terra", undefined],
+    ]);
+    expect(
+      groupPickerRowsByBillingClass(englishText, rows)[0]!.rows.map((row) => row.label),
+    ).toEqual(["GPT-6.1 Sol", "GPT-6.1 Sol (EU)", "GPT-6.1 Terra"]);
+  });
+
+  test("the picker finds the EU route by its hint and keeps it in the scoped settings view", () => {
+    const models = [sol("azure-sol/gpt-6.1-sol", unknown), sol("azure-eu/gpt-6.1-sol", eu)];
+    const input = {
+      models,
+      model: "azure-eu/gpt-6.1-sol",
+      effort: "medium",
+      latencyMode: "standard",
+    } as const;
+    const view = modelPickerMenuView(englishText, input, "sol eu");
+    expect(view.matchCount).toBe(1);
+    expect(view.groups[0]!.rows.map((row) => row.label)).toEqual(["GPT-6.1 Sol (EU)"]);
+    expect(view.selected?.label).toBe("GPT-6.1 Sol (EU)");
+    const scoped = modelPickerMenuView(englishText, { ...input, collapseScopes: false }, "");
+    expect(scoped.rows.map((row) => row.label)).toEqual(["GPT-6.1 Sol", "GPT-6.1 Sol (EU)"]);
+  });
+
+  test("an EU-only workspace still tells the restricted twin from the EU one", () => {
+    const rows = projectClientModelRows(englishText, [
+      {
+        ...sol("azure-sol/gpt-6.1-sol", unknown),
+        availability: {
+          status: "unavailable",
+          selectable: false,
+          reason: "region_restricted",
+          checkedAt: null,
+        },
+      },
+      sol("azure-eu/gpt-6.1-sol", eu),
+    ]);
+    expect(rows.map((row) => [row.label, row.selectable, row.unavailableReason])).toEqual([
+      ["GPT-6.1 Sol", false, "Not supported in EU"],
+      ["GPT-6.1 Sol (EU)", true, null],
+    ]);
+  });
+
+  test("the same model through two connections names each connection", () => {
+    const key = (id: string, provider: string, providerLabel: string) =>
+      catalogModel({ id, label: "claude-sonnet-4-6", provider, providerLabel, cost: "workspace" });
+    const rows = projectPickerRows(englishText, [
+      key(
+        "workspace-openrouter/anthropic/claude-sonnet-4-6",
+        "workspace-openrouter",
+        "Your OpenRouter",
+      ),
+      key(
+        "organization-anthropic/claude-sonnet-4-6",
+        "organization-anthropic",
+        "Organization Anthropic",
+      ),
+      key("workspace-anthropic/claude-sonnet-4-6", "workspace-anthropic", "Anthropic"),
+    ]);
+    expect(rows.map((row) => row.label)).toEqual([
+      "Sonnet 4.6 (Your OpenRouter)",
+      "Sonnet 4.6 (Organization Anthropic)",
+      "Sonnet 4.6 (Anthropic)",
+    ]);
+  });
+
+  test("organization and workspace copies of one model are one choice and keep the plain name", () => {
+    const rows = projectPickerRows(englishText, [
+      catalogModel({
+        id: "organization-anthropic/claude-sonnet-4-6",
+        label: "claude-sonnet-4-6",
+        provider: "organization-anthropic",
+        providerLabel: "Organization Anthropic",
+        cost: "organization",
+      }),
+      catalogModel({
+        id: "workspace-anthropic/claude-sonnet-4-6",
+        label: "claude-sonnet-4-6",
+        provider: "workspace-anthropic",
+        providerLabel: "Anthropic",
+        cost: "workspace",
+      }),
+    ]);
+    expect(rows.map((row) => row.label)).toEqual(["Sonnet 4.6", "Sonnet 4.6"]);
   });
 });

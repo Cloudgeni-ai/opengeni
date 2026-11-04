@@ -131,6 +131,19 @@ spec:
             value: '{{ "{{ printf `%.0f` $value }}" }} refusal(s) (10 min)'
             user_impact: 'New sandboxes or wakes fail, so some chats cannot run commands.'
             next_step: 'Check whether the host group is at its maximum size, and raise it or the hosts'' size.'
+        - alert: OpenGeniComputePointersWaiting
+          expr: |
+            max(compute_control_pointers_waiting_hosts{ {{- $scope }}}) > 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'The control service has not moved the fleet''s stored-copy pointers in, because hosts of an earlier release are still live.'
+            headline: 'Compute upgrade waiting on old hosts'
+            value: '{{ "{{ printf `%.0f` $value }}" }} host(s) of an earlier release'
+            user_impact: 'Hosts of the new release cannot save or restore sandboxes, so sandboxes on them stay awake and cannot move.'
+            next_step: 'Upgrade or drain the hosts the replicas'' logs name as keeping their pointers in the object store.'
+            runbook_url: {{ printf "%s#the-control-service" $runbook }}
         - alert: OpenGeniComputeApiErrors
           expr: |
             (
@@ -211,11 +224,24 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: 'Something that must never happen happened on a compute host: a copy lost, failing verification or quarantined, or a sandbox broken or its programs lost.'
+            summary: 'Something that must never happen happened on a compute host: a copy lost, failing verification or quarantined, a sandbox broken or its programs lost, or a VM ended for host memory.'
             headline: 'Compute alarm {{ "{{ $labels.compute_alarm }}" }} on {{ "{{ $labels.host_name }}" }}'
             value: '{{ "{{ printf `%.0f` $value }}" }} time(s) (15 min)'
             user_impact: 'A sandbox may have lost work or become unusable.'
             next_step: 'Find the compute.alarm event in the host''s journal; it names the sandbox or stored object.'
+            runbook_url: {{ printf "%s#observing" $runbook }}
+        - alert: OpenGeniComputeSandboxesStalledOnMemory
+          expr: |
+            max by (host_name) (compute_memory_stalled{compute_stall="severe"} and on (host_name) {{ $hosts }}) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'Running sandboxes on a compute host have spent over 40 % of their time waiting for memory for ten minutes.'
+            headline: 'Sandboxes stalled on memory on {{ "{{ $labels.host_name }}" }}'
+            value: '{{ "{{ printf `%.0f` $value }}" }} sandbox(es)'
+            user_impact: 'Their commands and builds run far slower than they should.'
+            next_step: 'See the Sandbox memory row of the compute dashboard: which sandboxes borrow, and whether the host is short; raise their requests or add memory.'
             runbook_url: {{ printf "%s#observing" $runbook }}
         - alert: OpenGeniComputeSandboxesUnhealthy
           expr: |

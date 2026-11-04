@@ -20,6 +20,7 @@ import {
   ProviderCommandInputOutcomeUnknownError,
 } from "../provider-command-session";
 import type { ModalCommandControl, ModalProviderCommand } from "./modal-command-control";
+import { MODAL_ROUTER_READ_MAX_WAIT_MS } from "./modal-command-router-wire";
 import { verifyModalMaterializedPath } from "./modal-materialization-verification";
 
 type Entry = {
@@ -38,6 +39,21 @@ function sameExecution(a: ModalProviderCommand, b: ModalProviderCommand): boolea
       "supervision" in b ? b.supervision : undefined,
     ) &&
     Boolean(a.pty) === Boolean(b.pty)
+  );
+}
+
+const SLICE_PAUSE_MS = 25;
+
+/** True when a router page moved neither output cursor: nothing was read. */
+function unchangedCursor(page: ProviderCommandOutput): boolean {
+  const { command, expected } = page;
+  return (
+    command.kind === "modal-router-v1" &&
+    expected?.kind === "modal-router-v1" &&
+    command.streams.stdout.byteOffset === expected.streams.stdout.byteOffset &&
+    command.streams.stderr.byteOffset === expected.streams.stderr.byteOffset &&
+    command.streams.stdout.utf8Remainder === expected.streams.stdout.utf8Remainder &&
+    command.streams.stderr.utf8Remainder === expected.streams.stderr.utf8Remainder
   );
 }
 
@@ -210,19 +226,46 @@ export function installModalCommandSession(
       // unavailable. Terminal exposure below remains fenced by durable proof.
       await supervise(entry).catch(() => undefined);
     }
-    let page = await control.read(entry.command, yieldTimeMs, signal);
-    if (entry.persistence && page.command.kind === "modal-router-v1") {
-      // A stale concurrent observer must reread from the committed cursor before
-      // exposing a terminal receipt; its uncommitted tail is not settlement proof.
-      let captured = false;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        if (await captureRouterPage(entry, page)) {
-          captured = true;
-          break;
+    // One provider read waits at most MODAL_ROUTER_READ_MAX_WAIT_MS. Honor a
+    // longer requested wait (a large upload, for example) with further reads
+    // while the command is still running and has produced nothing new.
+    const deadline = performance.now() + yieldTimeMs;
+    const readSlice = () =>
+      control.read(
+        entry.command,
+        Math.min(
+          MODAL_ROUTER_READ_MAX_WAIT_MS,
+          Math.max(0, Math.ceil(deadline - performance.now())),
+        ),
+        signal,
+      );
+    let page: ProviderCommandOutput;
+    while (true) {
+      page = await readSlice();
+      if (entry.persistence && page.command.kind === "modal-router-v1") {
+        // A stale concurrent observer must reread from the committed cursor before
+        // exposing a terminal receipt; its uncommitted tail is not settlement proof.
+        let captured = false;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          if (await captureRouterPage(entry, page)) {
+            captured = true;
+            break;
+          }
+          if (attempt < 2) page = await readSlice();
         }
-        if (attempt < 2) page = await control.read(entry.command, yieldTimeMs, signal);
+        if (!captured)
+          throw new Error("Modal command output cursor changed during bounded capture");
       }
-      if (!captured) throw new Error("Modal command output cursor changed during bounded capture");
+      if (
+        page.exitCode !== null ||
+        page.chunks.length > 0 ||
+        !unchangedCursor(page) ||
+        deadline - performance.now() <= SLICE_PAUSE_MS
+      )
+        break;
+      // A read normally blocks for its slice; avoid a hot loop if one returns
+      // early without output (for example EOF seen before exit evidence).
+      await new Promise((resolve) => setTimeout(resolve, SLICE_PAUSE_MS));
     }
     if (page.command.kind === "modal-router-v1" && page.command.supervision) {
       const receipt = await entry.persistence?.loadSupervisionReceipt?.();

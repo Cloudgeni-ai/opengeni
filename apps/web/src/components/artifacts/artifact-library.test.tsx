@@ -512,6 +512,56 @@ test("Only me files and images are marked in the gallery and the list; shared on
   }
 });
 
+test("Only me documents and spreadsheets are marked in the list; shared ones are not", async () => {
+  localStorage.setItem("opengeni:artifact-library:view:v1", "list");
+  const documents: ArtifactCatalogItem[] = [
+    {
+      id: "a".repeat(32),
+      kind: "document",
+      title: "Private plan",
+      status: "active",
+      createdAt: "2026-09-01T00:00:00Z",
+      updatedAt: "2026-09-02T00:00:00Z",
+      visibility: "private",
+      ownedByViewer: true,
+    },
+    {
+      id: "b".repeat(32),
+      kind: "spreadsheet",
+      title: "Team budget",
+      status: "active",
+      createdAt: "2026-09-01T00:00:00Z",
+      updatedAt: "2026-09-01T00:00:00Z",
+      visibility: "workspace",
+      ownedByViewer: false,
+    },
+  ];
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await renderInRouter(root, () => (
+      <ArtifactLibrary
+        workspaceId="workspace"
+        items={documents}
+        filters={defaultArtifactFilters}
+        onFiltersChange={() => {}}
+        loading={false}
+        onRetry={() => {}}
+      />
+    ));
+    const marked = [...container.querySelectorAll("ul[aria-label=Artifacts] > li")].map((entry) => [
+      entry.textContent?.includes("Private plan") ? "plan" : "budget",
+      entry.textContent?.includes("Only me") ?? false,
+    ]);
+    expect(Object.fromEntries(marked)).toEqual({ plan: true, budget: false });
+  } finally {
+    await act(async () => root.unmount());
+    localStorage.removeItem("opengeni:artifact-library:view:v1");
+    container.remove();
+  }
+});
+
 test("a Site in the Artifacts list opens in the Site view; other artifacts keep their page", async () => {
   localStorage.setItem("opengeni:artifact-library:view:v1", "list");
   const container = document.createElement("div");

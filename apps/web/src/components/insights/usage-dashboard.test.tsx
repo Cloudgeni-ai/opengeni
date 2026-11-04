@@ -124,6 +124,22 @@ function rowAction(container: HTMLElement, title: string): HTMLButtonElement | n
   );
 }
 
+/** The browser's local YYYY-MM-DDTHH:MM for an instant, as a datetime-local input shows it. */
+function localInput(iso: string): string {
+  const date = new Date(iso);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/** Types into a controlled input; happy-dom's input events do not reach React, so call its handler. */
+function typeInto(input: HTMLInputElement, value: string) {
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+  const key = Object.keys(input).find((property) => property.startsWith("__reactProps$"))!;
+  (input as unknown as Record<string, { onChange: (event: { target: HTMLInputElement }) => void }>)[
+    key
+  ]!.onChange({ target: input });
+}
+
 describe("Insights usage dashboard", () => {
   test("asks the usage API with the selection and shows KPIs with token classes", async () => {
     const view = await render({
@@ -294,6 +310,74 @@ describe("Insights usage dashboard", () => {
         from: "2026-09-01",
         to: "2026-09-15",
       });
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("the last hour charts 5-minute buckets and compares with the hour before", async () => {
+    const base = fixtureUsage();
+    const start = Date.parse("2026-10-30T10:25:00Z");
+    nextUsage = {
+      ...base,
+      range: "1h",
+      bucket: "five_minutes",
+      windowStart: new Date(start).toISOString(),
+      windowEnd: new Date(start + 59 * 60_000).toISOString(),
+      priorWindowStart: new Date(start - 59 * 60_000).toISOString(),
+      priorWindowEnd: new Date(start).toISOString(),
+      series: Array.from({ length: 12 }, (_, index) => ({
+        start: new Date(start + index * 300_000).toISOString(),
+        measures: base.totals,
+      })),
+    };
+    const view = await render({ range: "1h" });
+    try {
+      expect(requests[0]?.query).toMatchObject({ range: "1h" });
+      expect(requests[0]?.query.from).toBeUndefined();
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("per 5 minutes");
+      expect(text).toContain("vs the hour before");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a custom range sends exact instants and keeps its edges in order", async () => {
+    const view = await render({
+      range: "custom",
+      start: "2026-10-30T09:00Z",
+      end: "2026-10-30T11:00Z",
+    });
+    try {
+      expect(requests[0]?.query).toMatchObject({
+        range: "custom",
+        from: "2026-10-30T09:00Z",
+        to: "2026-10-30T11:00Z",
+      });
+      const startInput = view.container.querySelector<HTMLInputElement>(
+        'input[aria-label="Start"]',
+      );
+      const endInput = view.container.querySelector<HTMLInputElement>('input[aria-label="End"]');
+      expect(startInput?.getAttribute("type")).toBe("datetime-local");
+      expect(startInput?.value).toBe(localInput("2026-10-30T09:00:00Z"));
+      expect(endInput?.value).toBe(localInput("2026-10-30T11:00:00Z"));
+      // A start after the end moves the end, keeping the window's length.
+      await act(async () => typeInto(startInput!, localInput("2026-10-30T12:00:00Z")));
+      expect(view.changes.at(-1)).toEqual({
+        range: "custom",
+        start: "2026-10-30T12:00Z",
+        end: "2026-10-30T14:00Z",
+      });
+      await act(async () => typeInto(endInput!, localInput("2026-10-30T10:30:00Z")));
+      expect(view.changes.at(-1)).toEqual({
+        range: "custom",
+        start: "2026-10-30T09:00Z",
+        end: "2026-10-30T10:30Z",
+      });
+      // A half-typed value is ignored.
+      await act(async () => typeInto(endInput!, ""));
+      expect(view.changes).toHaveLength(2);
     } finally {
       await view.unmount();
     }

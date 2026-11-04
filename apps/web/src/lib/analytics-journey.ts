@@ -28,6 +28,7 @@ const PAGES = new Set([
   "secrets",
   "rigs",
   "playground",
+  "archived",
   "read-only-chats",
   "inbox",
   "sites",
@@ -85,6 +86,9 @@ const SECTIONS = new Set([
   "access",
   "identity",
   "capabilities",
+  "available",
+  "shared",
+  "mine",
 ]);
 
 /** Every `page` value `journeyPage` can report. */

@@ -20,7 +20,7 @@ const IMPORT_HASH_DOMAIN = new TextEncoder().encode("OpenGeni editable artifact 
 
 /** Canonical identity of caller-controlled create semantics only. */
 export function hashEditableArtifactCreateRequest(
-  request: Pick<CreateEditableArtifactRequest, "modality" | "title">,
+  request: Pick<CreateEditableArtifactRequest, "modality" | "title" | "audience">,
 ): EditableArtifactRequestHash {
   if (
     request.modality !== "spreadsheet" &&
@@ -34,6 +34,7 @@ export function hashEditableArtifactCreateRequest(
   digest.update(CREATE_HASH_DOMAIN);
   updateLengthFramedUtf8(digest, request.modality);
   updateLengthFramedUtf8(digest, request.title);
+  updateOnlyMeAudience(digest, request.audience);
   return editableArtifactRequestHash(`sha256:${digest.digest("hex")}`);
 }
 
@@ -66,7 +67,22 @@ export function hashEditableArtifactImportRequest(
   } else {
     updateLengthFramedUtf8(digest, String(request.snapshot.nativeRevision));
   }
+  updateOnlyMeAudience(digest, request.audience);
   return editableArtifactRequestHash(`sha256:${digest.digest("hex")}`);
+}
+
+/**
+ * An Only me request is a different request from a workspace one. Workspace
+ * requests hash exactly as before audiences existed, so a retry that spans a
+ * deploy still replays its original creation.
+ */
+function updateOnlyMeAudience(
+  digest: ReturnType<typeof createHash>,
+  audience: CreateEditableArtifactRequest["audience"],
+): void {
+  if (audience?.visibility !== "user_private" || audience.ownerSubjectId === null) return;
+  updateLengthFramedUtf8(digest, "user_private");
+  updateLengthFramedUtf8(digest, audience.ownerSubjectId);
 }
 
 function assertImportRequestShape(

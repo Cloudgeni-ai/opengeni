@@ -8,6 +8,7 @@ const debit = mock(async (_db: unknown, _input: unknown) => undefined);
 const preflight = mock(async (_db: unknown, _input: unknown) => refusal);
 const defer = mock(async () => undefined);
 const embed = mock(async () => [[1, 0, 0]]);
+const spendable = mock(async (..._args: unknown[]) => ({ balanceMicros: 100 }));
 
 // mock.module is process-wide and survives mock.restore(). Each replacement
 // below is active only while this file runs; afterwards, later files in the
@@ -70,7 +71,15 @@ mock.module("@opengeni/db", () =>
       mode: "credits",
       rateMicrosPerMillionBytes: 1,
     }),
-    getSpendableCreditBalance: async () => ({ balanceMicros: 100 }),
+    getSpendableCreditBalance: spendable,
+    // The billing record's own origin; the real one reads a turn's in PostgreSQL.
+    billingOriginForAttribution: async (
+      _db: unknown,
+      input: { attribution?: CreditDebitAttribution | null },
+    ) =>
+      input.attribution && input.attribution.kind !== "unknown"
+        ? (input.attribution.billingOrigin ?? "app")
+        : "app",
     checkWorkspaceAllowance: preflight,
     guardPaidKnowledgeIndexPublication: async () => "published",
     appendKnowledgeIndexChunks: async () => ({ status: "running" }),
@@ -140,6 +149,15 @@ test("index debit/preflight reuse claimed frozen initiator, never the async work
       metadata: { ...metadata, model: "embedding", bytes: 4, chunks: 1 },
     });
   }
+});
+
+test("a document added with an API key is indexed on credits", async () => {
+  attribution = { kind: "service", billingOrigin: "api" };
+  expect((await worker().indexKnowledge()).completed).toBe(1);
+  expect(spendable.mock.calls.at(-1)?.[5]).toBe("api");
+  attribution = { kind: "human", initiatingHumanSubjectId: "human:root" };
+  expect((await worker().indexKnowledge()).completed).toBe(1);
+  expect(spendable.mock.calls.at(-1)?.[5]).toBe("app");
 });
 
 test("unknown attribution and exhausted allowance defer before paid provider use", async () => {

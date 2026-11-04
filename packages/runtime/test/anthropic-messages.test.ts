@@ -59,12 +59,9 @@ test.each(["low", "medium", "high", "xhigh", "max"] as const)(
       const req = request();
       req.modelSettings = { reasoning: { effort } };
       const body = buildAnthropicRequest(req, model, provider, false);
-      // Models that write progress updates need display "updates" to tell
-      // them apart from reasoning; the others keep reasoning summaries.
-      expect(body.thinking).toEqual({
-        type: "adaptive",
-        display: model === "claude-haiku-5-5" ? "summarized" : "updates",
-      });
+      // Every model asks for reasoning summaries, so thinking stays readable
+      // in the timeline, including models that write progress updates.
+      expect(body.thinking).toEqual({ type: "adaptive", display: "summarized" });
       expect(body.output_config.effort).toBe(effort);
       expect(body.max_tokens).toBe(128_000);
     }
@@ -603,6 +600,40 @@ test("streamed cache creation TTL details survive SDK usage without double count
 });
 
 describe("Claude full-history Messages adapter", () => {
+  test("an empty reply recorded by another provider is left out instead of sent as an empty text block", () => {
+    const messages = anthropicMessages([
+      { type: "message", role: "user", content: "Check the accounts" },
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Checking." }],
+      },
+      { type: "message", role: "developer", content: "A goal update" },
+      // Another provider's final answer with no words in it.
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "" }],
+        providerData: { phase: "final_answer" },
+      },
+      { type: "message", role: "developer", content: "Another update" },
+      { type: "message", role: "user", content: "Continue" },
+    ] as any);
+    for (const message of messages)
+      for (const block of message.content)
+        if (block.type === "text") expect(block.text.length).toBeGreaterThan(0);
+    expect(messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+      "system",
+      "user",
+    ]);
+    expect(messages[2]!.content.map((block) => block.text)).toEqual([
+      "A goal update",
+      "Another update",
+    ]);
+  });
+
   test("stable tool/system prefixes, three cache breakpoints, no thread references or mutation", () => {
     const req = request();
     req.tools = [
@@ -668,6 +699,42 @@ describe("Claude full-history Messages adapter", () => {
     expect(messages[2]!.content[0]!.content[0].source.type).toBe("base64");
     expect(messages[2]!.content[1]!.is_error).toBe(true);
     expect(() => anthropicMessages(input.slice(0, 3))).toThrow("missing");
+  });
+
+  test("a system message inside an unfinished tool step moves after the step's results when more of the reply follows", () => {
+    // Another provider ran two tool searches between a call and its result,
+    // and a search notice followed the first search.
+    const search = (id: string) => [
+      { type: "tool_search_call", id: `ts_${id}`, arguments: { query: id }, callId: id },
+      { type: "tool_search_output", id: `to_${id}`, tools: [], callId: id },
+    ];
+    const notice = { type: "message", role: "developer", content: "Search notice" };
+    const input: any[] = [
+      { type: "message", role: "user", content: "check" },
+      { type: "function_call", callId: "a", name: "list", arguments: "{}" },
+      ...search("s1"),
+      notice,
+      ...search("s2"),
+      { type: "function_call_result", callId: "a", output: "listed" },
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "done" }] },
+    ];
+    const messages = anthropicMessages(input);
+    expect(messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "system",
+      "assistant",
+    ]);
+    expect(messages[1]!.content[0]).toMatchObject({ type: "tool_use", id: "a" });
+    expect(messages[2]!.content).toEqual([
+      { type: "tool_result", tool_use_id: "a", content: [{ type: "text", text: "listed" }] },
+    ]);
+    expect(JSON.stringify(messages[3]!.content)).toContain("Search notice");
+
+    // Followed directly by the results, it keeps its place, as before.
+    const direct = anthropicMessages([input[0], input[1], notice, input[7]]);
+    expect(direct.map((message) => message.role)).toEqual(["user", "assistant", "system", "user"]);
   });
 
   test("signed thinking round trips exactly, including redacted blocks", () => {

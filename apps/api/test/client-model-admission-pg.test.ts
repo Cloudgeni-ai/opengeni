@@ -293,6 +293,57 @@ test("PG: ready Codex model permissions and workspace policy affect list and cre
   ]);
 }, 180_000);
 
+test("PG: a workspace's own list only narrows its organization's, in list, create and settings", async () => {
+  if (!client || !shared) return;
+  const f = await fixture();
+  await connectCoreCodex(f.grant);
+  const organizationModels = ["gpt-5.6-sol", "codex/gpt-6-sol"];
+  await shared.admin`
+    insert into organization_model_defaults (account_id, allowed_models)
+    values (${f.grant.accountId}::uuid, ${organizationModels}::text[])`;
+  // Listing a model the organization doesn't allow doesn't let it run here.
+  await upsertWorkspaceModelPolicy(client.db, {
+    accountId: f.grant.accountId,
+    workspaceId: f.grant.workspaceId,
+    allowedProviders: null,
+    allowedModels: ["gpt-5.6-sol", "gpt-5.6-luna"],
+  });
+  expect((await f.parity(["gpt-5.6-luna", "codex/gpt-6-sol"])).allowedModels).toEqual([
+    "gpt-5.6-sol",
+  ]);
+  // Allowing every model allows exactly what the organization allows.
+  await upsertWorkspaceModelPolicy(client.db, {
+    accountId: f.grant.accountId,
+    workspaceId: f.grant.workspaceId,
+    allowedProviders: null,
+    allowedModels: null,
+  });
+  expect((await f.parity(["gpt-5.6-luna"])).allowedModels.toSorted()).toEqual(
+    organizationModels.toSorted(),
+  );
+  // Settings read the workspace's own list back as saved, and the catalog
+  // says per model where the organization rules one out.
+  const policy = await f.request(`/v1/workspaces/${f.grant.workspaceId}/model-policy`);
+  expect(await policy.json()).toMatchObject({
+    allowedProviders: null,
+    allowedModels: null,
+    source: "workspace",
+    organization: { allowedProviders: null, allowedModels: organizationModels },
+  });
+  const catalog = (await (
+    await f.request(`/v1/workspaces/${f.grant.workspaceId}/model-catalog`)
+  ).json()) as { models: { id: string; policyAllowed?: boolean; organizationAllowed?: boolean }[] };
+  const byId = new Map(catalog.models.map((model) => [model.id, model]));
+  expect(byId.get("gpt-5.6-luna")).toMatchObject({
+    policyAllowed: false,
+    organizationAllowed: false,
+  });
+  expect(byId.get("gpt-5.6-sol")).toMatchObject({
+    policyAllowed: true,
+    organizationAllowed: true,
+  });
+}, 180_000);
+
 test("PG: an explicit Codex draft creates with zero credits without refreshing its near-expiry token", async () => {
   if (!client || !shared) return;
   const encryptionKey = Buffer.alloc(32, 82);
@@ -584,9 +635,16 @@ test("PG: turning Opengeni credits off blocks every credit model but keeps subsc
     tools: [],
   });
   expect(refused.status).toBe(422);
-  const refusal = (await refused.json()).message;
+  const refusedBody = await refused.json();
+  const refusal = refusedBody.message;
   expect(refusal).toContain("uses credits, which are turned off in this workspace");
   expect(refusal).not.toMatch(/opengeni/i);
+  // Typed, so a refused new chat words the rule instead of showing this text.
+  expect(refusedBody.details).toEqual({
+    code: "model_policy",
+    modelId: expect.any(String),
+    reason: "credits",
+  });
 
   // An omitted model never falls back to a credit model.
   const implicit = await f.request(`/v1/workspaces/${f.grant.workspaceId}/sessions`, {

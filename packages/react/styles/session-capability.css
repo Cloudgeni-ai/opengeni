@@ -61,6 +61,7 @@
 .og-session-capability-shell[data-state="complete"] .og-session-capability-header > svg,
 .og-session-capability-shell[data-state="complete"] .og-session-capability-copy { color:var(--og-color-status-idle); }
 .og-session-capability-shell[data-state="complete"] .og-session-capability-copy { font-weight:500; }
+.og-session-capability-shell[data-state="complete"] .og-session-capability-copy:focus { outline:none; }
 .og-session-capability-setup fieldset { display:grid; gap:10px; margin:0; padding:0; border:0; min-width:0; }
 .og-session-capability-setup legend { padding:0 0 10px; font-weight:600; }
 .og-session-capability-setup input { margin-top:4px; accent-color:var(--og-color-accent-deep); }

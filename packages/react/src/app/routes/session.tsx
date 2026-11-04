@@ -4,12 +4,21 @@ import {
   createSessionRetainedScreenshotLoader,
   createWorkspaceRetainedArtifactLoader,
   createWorkspaceRetainedVideoLoader,
+  timelineLivePause,
 } from "../../timeline";
-import { isModelUnavailableSubmissionError } from "../../lib/format";
+import { isModelUnavailableSubmissionError, type CreditRefusalKind } from "../../lib/format";
 import { inertProps } from "../../lib/inert";
 import { retainedImageId } from "../../components/markdown";
 import { LazyPart } from "../../components/lazy-part";
 import { useConnectionAccounts } from "../components/capabilities/use-connection-accounts";
+import {
+  stopOwnLoginsHere,
+  turnOnOwnLoginsHere,
+} from "../components/capabilities/own-login-turned-on";
+import {
+  OwnLoginsSharedHeadsUp,
+  ownLoginsInUse,
+} from "../components/capabilities/own-logins-shared-heads-up";
 import { sessionAuthRecommendation } from "../../session-auth-recommendation";
 import { completeSessionCapabilityOAuth } from "../components/capabilities/attach-session-capability";
 import { finishMcpCapabilityOAuthReturn } from "./session-capability-oauth-return";
@@ -37,10 +46,19 @@ import {
 } from "../lib/failed-session-retry";
 import { useSessionStartupTimeline } from "../../lib/session-startup-timeline";
 import { useComposerWithStreamState } from "../../lib/use-calm-service-failure";
-import { failedSessionCopy } from "../lib/failed-session-copy";
+import {
+  chatComposerPlaceholder,
+  failedSessionCopy,
+  failureFallbackReason,
+} from "../lib/failed-session-copy";
 import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
+import {
+  pickerPolicyRunnable,
+  ComposerSendBlockerNotice,
+  composerSendBlockerNotice,
+} from "../lib/composer-send-blocking";
 import { ChatPaymentPages } from "../components/chat-payment-pages";
-import { isPaymentRequiredError } from "../lib/model-access";
+import { creditRefusalRecord, type CreditRefusalRecord } from "../lib/model-access";
 import { timelineShowsFailure } from "../lib/timeline-failure-owner";
 import { sessionDisplayTitle } from "../lib/session-rename";
 import { waitingDescendants } from "../lib/descendant-requests";
@@ -73,7 +91,12 @@ import {
 // honest (reason + retry history) and revivable from the same composer.
 import { LightboxProvider } from "../../timeline";
 import { connectorLogo, connectorLogoIndex } from "../../timeline/connector-logo-index";
-import { sessionAdmissionBlocked, sessionDisplayStatus } from "../../session-status-model";
+import {
+  promptSendDestination,
+  sessionAdmissionBlocked,
+  sessionDisplayStatus,
+  sessionTurnKeepsRunControl,
+} from "../../session-status-model";
 import { useSessionSecrets } from "../../hooks/use-vaults";
 import { useQueuedPromptRecall } from "../../hooks/use-queued-prompt-recall";
 import type { WorkspaceTab } from "../../components/workspace-dock";
@@ -112,7 +135,9 @@ import { expireArtifactCatalog } from "../lib/artifact-catalog-cache";
 import { useArtifactCatalogMutationInvalidation } from "../lib/use-artifact-catalog-mutation-invalidation";
 import {
   creditExhaustedFromEvents,
+  creditRefusalFromEvents,
   conversationTimeline,
+  approvalsDecidable,
   projectPendingApprovals,
   useComposer,
   useFileAttachments,
@@ -216,7 +241,11 @@ import type {
 } from "../components/session/editable-artifacts-workspace";
 import { startMcpOAuthWithTimeout } from "../lib/mcp-oauth";
 import { useSessionRouteMemory } from "../lib/last-session-memory";
-import { hasAccountPermission, hasWorkspacePermission } from "../lib/permissions";
+import {
+  canConnectWorkspaceMcpFromChat,
+  hasAccountPermission,
+  hasWorkspacePermission,
+} from "../lib/permissions";
 import { secretSaveTargets } from "../lib/secrets-ui";
 import { chatLearningScope } from "../lib/chat-learning-scope";
 import { currentModelRecovery } from "../lib/model-recovery";
@@ -234,11 +263,7 @@ import {
   type ComposerLaunchSearch,
 } from "../lib/composer-launch";
 import { connectableSubscriptions, isDeploymentFreeModel } from "../lib/deployment-free-model";
-import {
-  effortOptionsForModel,
-  findPickerRow,
-  runnableLatencyModesForModel,
-} from "../lib/model-policy";
+import { findPickerRow } from "../lib/model-policy";
 import { sessionTimelineEmptyStateCopy } from "../lib/session-empty-state";
 import {
   isCodexUsageLimitFailure,
@@ -299,6 +324,7 @@ import {
   sessionPolicyPickerIds,
 } from "../lib/session-tools";
 import { resolveWorkspaceBusySend, stableJson } from "@opengeni/contracts";
+import { connectProviderAcceptsRequestedScopes } from "@opengeni/contracts/connect";
 import { useFollowUpRepositories } from "../lib/use-follow-up-repositories";
 import type { ChatSendContext } from "../components/capabilities/session-github-repositories";
 import { githubAppConnectRequest } from "../lib/github-app-connect";
@@ -315,6 +341,7 @@ import { isPersonalMachine, moveChatToMachine } from "../lib/move-chat-to-machin
 import type { MachineView } from "../../machines";
 import { useWorkspaceModelCatalog } from "../lib/use-workspace-model-catalog";
 import type {
+  McpElicitationAnswer,
   LineageNode,
   SessionRealtimeModel,
   UpdateSessionToolPolicyRequest,
@@ -700,6 +727,8 @@ export function SessionRoute({
   // healthy-looking. Track the terminal credit state from the last turn-end so
   // the banner shows for idle-but-broke sessions too, not only failed ones.
   const creditExhausted = useMemo(() => creditExhaustedFromEvents(events), [events]);
+  // The one fix (own-key fee or API use) that stop names, from the same turn end.
+  const creditRefusal = useMemo(() => creditRefusalFromEvents(events), [events]);
   const failure = useMemo(
     () =>
       session && (session.status === "failed" || creditExhausted)
@@ -1090,14 +1119,25 @@ export function SessionRoute({
   // calm inline error on the reconnect card.
   const reconnectTransport = useMemo(() => context.client.connectTransport(), [context.client]);
   const [reconnectRequest, setReconnectRequest] = useState<NativeConnectRequest | null>(null);
+  // The account whose card in this chat opened each reconnect: once it is
+  // done, the agent continues the request that stopped, as after a first
+  // setup. Kept per request, since a reconnect can finish after its dialog
+  // closed and another one opened.
+  const reconnectCardConnections = useRef(new WeakMap<NativeConnectRequest, string>());
   // Workspace GitHub App setup from the follow-up repository menu uses this
   // route-level Connect dialog: the menu closes when GitHub's authorization
   // popup takes focus, which would unmount a dialog hosted inside it.
-  const connectGitHubApp = useCallback(
-    () =>
-      setReconnectRequest(githubAppConnectRequest(workspaceId, reconnectTransport, page.href())),
-    [page, reconnectTransport, workspaceId],
-  );
+  const connectGitHubApp = useCallback(() => {
+    setReconnectRequest(githubAppConnectRequest(workspaceId, reconnectTransport, page.href()));
+  }, [page, reconnectTransport, workspaceId]);
+  const connectPersonalGitHub = context.connectPersonalGitHub;
+  const reconnectPersonalGitHub = context.reconnectPersonalGitHub;
+  const personalGitHubConnection = context.personalGitHubStatus?.connection ?? null;
+  // An existing connection that needs reauthorization reconnects; otherwise connect.
+  const personalGitHubNeedsReconnect =
+    personalGitHubConnection !== null &&
+    personalGitHubConnection.status !== "active" &&
+    personalGitHubConnection.status !== "revoked";
   const onReconnect = useCallback(
     async (item: AuthNeededItem) => {
       if (item.authoritySource === "host") {
@@ -1116,15 +1156,25 @@ export function SessionRoute({
           item.connectionId,
         );
         if (account) {
-          setReconnectRequest({
+          const request: NativeConnectRequest = {
             scope: { workspaceId, transport: reconnectTransport },
             providerId: account.providerId,
             ownership: account.ownership,
             reconnectAccountId: account.id,
+            // A tool needed more access than the account was connected with:
+            // the reconnect asks the provider for exactly that (incremental consent).
+            // Other providers keep their fixed permission set.
+            ...(item.reason === "insufficient_scope" &&
+            item.scopes.length > 0 &&
+            connectProviderAcceptsRequestedScopes(account.providerId)
+              ? { requestedScopes: [...item.scopes] }
+              : {}),
             displayName: account.label,
             returnUrl: page.href(),
             idempotencyKey: crypto.randomUUID(),
-          });
+          };
+          reconnectCardConnections.current.set(request, item.connectionId);
+          setReconnectRequest(request);
           return;
         }
       }
@@ -1149,6 +1199,12 @@ export function SessionRoute({
           page.assign(status.linkUrl);
           return;
         }
+        if (item.capability.id === "api:github-personal") {
+          await (personalGitHubNeedsReconnect ? reconnectPersonalGitHub : connectPersonalGitHub)(
+            workspaceId,
+          );
+          return;
+        }
         if (item.capability.id === "mcp:codex_apps") {
           page.assign(`/workspaces/${encodeURIComponent(workspaceId)}/settings`);
           return;
@@ -1156,9 +1212,12 @@ export function SessionRoute({
         const catalogItem = context.workspaceCapabilityCatalog.find(
           (candidate) => candidate.id === item.capability?.id,
         );
-        const canInstall =
-          hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin") &&
-          hasWorkspacePermission(context.accessContext, workspaceId, "connections:write");
+        const canInstall = canConnectWorkspaceMcpFromChat(
+          context.accessContext,
+          workspaceId,
+          catalogItem,
+          context.workspaceMemberIntegrationSetup,
+        );
         const mcpUrl = catalogItem?.mcpUrl ?? catalogItem?.endpointUrl ?? null;
         if (
           canInstall &&
@@ -1222,7 +1281,11 @@ export function SessionRoute({
       page,
       context.accessContext,
       context.client,
+      connectPersonalGitHub,
+      reconnectPersonalGitHub,
+      personalGitHubNeedsReconnect,
       context.workspaceCapabilityCatalog,
+      context.workspaceMemberIntegrationSetup,
       workspaceId,
       reconnectTransport,
     ],
@@ -1411,6 +1474,7 @@ export function SessionRoute({
       humanInput={humanInput}
       failure={failure}
       creditExhausted={creditExhausted}
+      creditRefusal={creditRefusal}
       goal={goal}
       queue={queue}
       agentNodes={agentNodes}
@@ -1482,7 +1546,14 @@ export function SessionRoute({
             params: { workspaceId },
           }))
       }
-      onApprove={(approvalId) => approve(approvalId, "approve")}
+      onContinueInNewSession={() =>
+        void navigate({
+          to: "/workspaces/$workspaceId/sessions",
+          params: { workspaceId },
+          search: { continueSessionId: sessionId },
+        })
+      }
+      onApprove={(approvalId, answer) => approve(approvalId, "approve", answer)}
       onReject={(approvalId) => approve(approvalId, "reject")}
       onReconnect={onReconnect}
       onConnectGitHubApp={connectGitHubApp}
@@ -1507,12 +1578,29 @@ export function SessionRoute({
             request={reconnectRequest}
             onClose={() => setReconnectRequest(null)}
             onComplete={() => {
-              setReconnectRequest(null);
+              // Setup can finish after its dialog closed: leave a newer one open.
+              setReconnectRequest((current) => (current === reconnectRequest ? null : current));
               if (reconnectRequest.providerId === "github-app") {
                 toast.success("GitHub connected");
-                void context.refreshGitHub(workspaceId, undefined, { sync: true });
+                void context.refreshGitHub(workspaceId, undefined, {
+                  sync: true,
+                  userInitiated: true,
+                });
                 return;
               }
+              // Same continuation as after a first setup from a card: the
+              // server checks the account now has what its card asked for,
+              // wakes the agent at most once per card, and not at all once
+              // the person has written since. Never fails the finished setup.
+              const connectionId = reconnectCardConnections.current.get(reconnectRequest);
+              if (connectionId)
+                void Promise.resolve()
+                  .then(() =>
+                    context.client.continueAfterCapabilitySetup(workspaceId, sessionId, {
+                      connectionId,
+                    }),
+                  )
+                  .catch(() => undefined);
               toast.success("Connection updated", {
                 description: "New tool calls can use the updated connection.",
               });
@@ -1558,11 +1646,16 @@ export function SessionRoute({
     <SessionStartupProvider session={session}>{routeView}</SessionStartupProvider>
   );
 
-  async function approve(approvalId: string, decision: "approve" | "reject") {
+  async function approve(
+    approvalId: string,
+    decision: "approve" | "reject",
+    answer?: McpElicitationAnswer,
+  ) {
     try {
       await context.client.sendApprovalDecision(workspaceId, sessionId, {
         approvalId,
         decision,
+        ...answer,
       });
     } catch (error) {
       toast.error("Couldn't submit the decision", {
@@ -2038,6 +2131,11 @@ function useSessionEditableArtifactSummaries(input: {
     : { artifacts: [], status: "loading", retry, applyPin };
 }
 
+/** One decision per approval and question round: a new round under the same id is new. */
+function approvalDecisionKey(approval: PendingApproval): string {
+  return `${approval.id}\u0000${approval.elicitation?.round ?? ""}`;
+}
+
 function SessionChatPane(props: {
   session: Session;
   /** A narrow panel beside another view gets narrower gutters. */
@@ -2063,6 +2161,8 @@ function SessionChatPane(props: {
   failure: ReturnType<typeof summarizeSessionFailure> | null;
   /** The last turn ended budget_exhausted — the workspace is out of credits. */
   creditExhausted: boolean;
+  /** The one-fix refusal (own-key fee or API use) the last turn ended on, if any. */
+  creditRefusal: CreditRefusalKind | null;
   goal: ReturnType<typeof useGoal>;
   queue: ReturnType<typeof useTurnQueue>;
   /** Spawned-worker lineage children — feeds SessionChrome agents segment. */
@@ -2092,7 +2192,9 @@ function SessionChatPane(props: {
   /** Opens where a person can make a refused Skill, instruction, or Knowledge change. */
   onLearningRefusalOpen: (place: LearningRefusalPlace) => void;
   onNewSession: () => void;
-  onApprove: (approvalId: string) => Promise<void>;
+  /** Starts a new chat that continues this archived chat's work. */
+  onContinueInNewSession: () => void;
+  onApprove: (approvalId: string, answer?: McpElicitationAnswer) => Promise<void>;
   onReject: (approvalId: string) => Promise<void>;
   onReconnect: (item: AuthNeededItem) => void | Promise<void>;
   /** Opens workspace GitHub App setup in the route-level Connect dialog. */
@@ -2230,7 +2332,7 @@ function SessionChatPane(props: {
     [context.client, props.session.workspaceId],
   );
   const cancelled = isTerminalSessionStatus(props.session.status);
-  // Moved to long-term storage after a long idle period: readable, not continuable.
+  // Archived (moving to or in long-term storage): readable, not continuable.
   const readOnlyArchive = sessionReadOnlyArchive(props.session);
   const terminal = cancelled || readOnlyArchive !== null;
   const answerStore = useMemo(() => browserInteractiveAnswerStore(), []);
@@ -2245,11 +2347,9 @@ function SessionChatPane(props: {
   );
   // The API's credit refusal of a Send: no remaining credit pays for that model.
   // It stays above the composer until a message is accepted or it is dismissed.
-  const [creditRefusal, setCreditRefusal] = useState<{
+  const [creditRefusal, setCreditRefusal] = useState<CreditRefusalRecord<{
     sessionId: string;
-    model: string;
-    message: string;
-  } | null>(null);
+  }> | null>(null);
   useEffect(() => {
     const onFocusRequest = (event: Event) => {
       const detail = (event as CustomEvent<SessionComposerFocusIntent>).detail;
@@ -2326,10 +2426,32 @@ function SessionChatPane(props: {
     terminal,
   ]);
   const agentsSignal = useMemo(() => sessionAgentsSignal(t, props.agentNodes), [props.agentNodes]);
-  const waitingSubSessions = useMemo(
-    () => waitingDescendants(props.agentNodes),
-    [props.agentNodes],
+  // Sub-sessions resuming from an approval decided on their card here: kept
+  // in the list so the pause's other approvals stay decidable meanwhile.
+  const [resumingSubSessions, setResumingSubSessions] = useState<ReadonlySet<string>>(
+    () => new Set(),
   );
+  const onSubSessionResumingChange = useCallback((sessionId: string, resuming: boolean) => {
+    setResumingSubSessions((current) => {
+      if (current.has(sessionId) === resuming) return current;
+      const next = new Set(current);
+      if (resuming) next.add(sessionId);
+      else next.delete(sessionId);
+      return next;
+    });
+  }, []);
+  const waitingSubSessions = useMemo(
+    () => waitingDescendants(props.agentNodes, resumingSubSessions),
+    [props.agentNodes, resumingSubSessions],
+  );
+  // A sub-session whose turn ended (idle, failed) is no longer resuming.
+  useEffect(() => {
+    if (resumingSubSessions.size === 0) return;
+    const live = new Set(waitingSubSessions.map((session) => session.id));
+    for (const id of resumingSubSessions) {
+      if (!live.has(id)) onSubSessionResumingChange(id, false);
+    }
+  }, [onSubSessionResumingChange, resumingSubSessions, waitingSubSessions]);
   const codexConnected = modelCatalog.models.some(
     (candidate) =>
       candidate.provider === "codex-subscription" &&
@@ -2382,34 +2504,52 @@ function SessionChatPane(props: {
   );
   const [approvalPending, setApprovalPending] = useState<Record<string, "approve" | "reject">>({});
   const [approvalSettled, setApprovalSettled] = useState<Record<string, "approve" | "reject">>({});
-  // Decision state is scoped to ONE requires_action pause. Once the session
-  // resumes, both maps reset — otherwise a later approval that reuses an id
-  // (including the index-fallback ids) would render permanently disabled, and
-  // long sessions would accumulate stale entries.
+  // Decision state is scoped to ONE turn's pauses. A decision resumes the turn
+  // while the pause's other approvals stay decidable, so the maps reset only
+  // when the turn ends, and each entry is keyed by the question round it
+  // decided: an MCP server asking again under the same call id asks anew.
   useEffect(() => {
-    if (props.session.status !== "requires_action") {
+    if (!approvalsDecidable(props.session.status)) {
       setApprovalPending((current) => (Object.keys(current).length ? {} : current));
       setApprovalSettled((current) => (Object.keys(current).length ? {} : current));
     }
   }, [props.session.status]);
+  // An approval no longer waiting drops its entry, so long sessions never
+  // accumulate stale ones.
+  useEffect(() => {
+    const waiting = new Set(props.approvals.map(approvalDecisionKey));
+    setApprovalSettled((current) => {
+      const kept = Object.entries(current).filter(([key]) => waiting.has(key));
+      return kept.length === Object.keys(current).length ? current : Object.fromEntries(kept);
+    });
+  }, [props.approvals]);
+  // Rapid clicks land before React re-renders with the pending state, so the
+  // in-flight fence is a ref: one request per approval, however fast.
+  const approvalInFlightRef = useRef(new Set<string>());
   const decideApproval = useCallback(
-    async (approvalId: string, decision: "approve" | "reject") => {
-      if (approvalPending[approvalId] || approvalSettled[approvalId]) {
+    async (approvalId: string, decision: "approve" | "reject", answer?: McpElicitationAnswer) => {
+      const approval = props.approvals.find((candidate) => candidate.id === approvalId);
+      const key = approval ? approvalDecisionKey(approval) : approvalId;
+      if (approvalInFlightRef.current.has(key) || approvalPending[key] || approvalSettled[key]) {
         return;
       }
-      setApprovalPending((current) => ({ ...current, [approvalId]: decision }));
+      approvalInFlightRef.current.add(key);
+      setApprovalPending((current) => ({ ...current, [key]: decision }));
       // A failure propagates so the approval surface releases its fence and
       // the buttons stay live for a retry.
       try {
-        await (decision === "approve" ? props.onApprove(approvalId) : props.onReject(approvalId));
+        await (decision === "approve"
+          ? props.onApprove(approvalId, answer)
+          : props.onReject(approvalId));
         setApprovalSettled((current) => ({
           ...current,
-          [approvalId]: decision,
+          [key]: decision,
         }));
       } finally {
+        approvalInFlightRef.current.delete(key);
         setApprovalPending((current) => {
           const next = { ...current };
-          delete next[approvalId];
+          delete next[key];
           return next;
         });
       }
@@ -2420,9 +2560,7 @@ function SessionChatPane(props: {
   // the workspaceId, so the hook needs no positional argument.
   const attachments = useFileAttachments({
     scope:
-      props.session.tenancy?.visibility === "private" ||
-      props.session.memoryScope === "user" ||
-      context.workspaces.find((w) => w.id === props.session.workspaceId)?.kind === "personal"
+      props.session.tenancy?.visibility === "private" || props.session.memoryScope === "user"
         ? "personal"
         : "workspace",
   });
@@ -2458,6 +2596,16 @@ function SessionChatPane(props: {
     runsOn.fleet.sessionMachineAccess,
     props.session.activeSandboxId,
   );
+  // The chat is shared with other people in the workspace, so the owner of
+  // the personal machine it runs on gets a heads-up that they see the work on
+  // it. A Personal workspace has nobody else in it.
+  const sharedChat =
+    props.session.tenancy?.visibility === "workspace" &&
+    !isPersonalWorkspace(
+      context.workspaces.find((candidate) => candidate.id === props.session.workspaceId) ?? null,
+      context.managedSelfContext,
+    );
+  const showMachineAccess = machineAccess !== null && (!machineAccess.isOwner || sharedChat);
   const connectionAccounts = useConnectionAccounts(
     context.client,
     {
@@ -2790,10 +2938,25 @@ function SessionChatPane(props: {
       personalAttachment.loading ||
       personalAttachment.refreshing ||
       connectionAccounts.loading,
-    loadFailed: connectionAccounts.error !== null,
+    loadFailed:
+      connectionAccounts.error === null
+        ? false
+        : connectionAccounts.accessDenied
+          ? "denied"
+          : connectionAccounts.unavailable
+            ? "updating"
+            : "failed",
   };
   const composerSendBlocker = () => sendGate.blocker(sendState);
+  const workspaceAccountId = context.workspaces.find(
+    (candidate) => candidate.id === props.session.workspaceId,
+  )?.accountId;
+  const canBuyCredits =
+    context.clientConfig.billingMode === "stripe" &&
+    Boolean(workspaceAccountId) &&
+    hasAccountPermission(context.accessContext, workspaceAccountId ?? "", "billing:manage");
   const composer = useComposer(props.session.id, {
+    canBuyCredits,
     events: props.events,
     sendExtras: () => ({
       ...withHostMessageContext(hostMessageContext, props.messageContext),
@@ -2816,7 +2979,12 @@ function SessionChatPane(props: {
     sendBlocked: () => composerSendBlocker() !== null,
     effectiveControl: props.queue.effectiveControl ?? props.session.effectiveControl,
     sendDestination: () =>
-      props.session.activeTurnId !== null || props.queue.queue.length > 0 ? "queue" : "chat",
+      promptSendDestination({
+        status: props.session.status,
+        activeTurnId: props.session.activeTurnId,
+        queuedPrompts: props.queue.queue.length,
+        admissionBlock: props.session.admissionBlock,
+      }),
     busySend: resolveWorkspaceBusySend(workspace?.settings),
     ...(props.initialDraft ? { initialDraft: props.initialDraft } : {}),
     // The console always offers the other choice beside Send.
@@ -2858,12 +3026,13 @@ function SessionChatPane(props: {
         setModelPickerSession(props.session.id);
       }
       // Re-read funding so the notice and picker name what the credit covers now.
-      if (isPaymentRequiredError(error)) {
-        setCreditRefusal({
-          sessionId: props.session.id,
-          model: refusedModelId(error, input) ?? props.session.model,
-          message: error.message,
-        });
+      const refusal = creditRefusalRecord(
+        error,
+        { sessionId: props.session.id },
+        refusedModelId(error, input) ?? props.session.model,
+      );
+      if (refusal) {
+        setCreditRefusal(refusal);
         void modelCatalog.refresh();
       }
     },
@@ -2908,7 +3077,7 @@ function SessionChatPane(props: {
     blocked: isTerminalSessionStatus(props.session.status)
       ? "This chat has ended. Start a new chat to use a repository."
       : sessionReadOnlyArchive(props.session)
-        ? "This chat is read-only. Start a new chat to use a repository."
+        ? "This chat is archived. Continue in a new chat to use a repository."
         : connectionAccounts.requiresAccountChoice
           ? "Choose an account for this chat's connected tools in the composer first."
           : personalAttachment.requiresDecision
@@ -2916,9 +3085,10 @@ function SessionChatPane(props: {
             : null,
     awaitingHuman:
       props.session.status === "requires_action" && !sessionAdmissionBlocked(props.session),
-    personalMachineIntent: personalMachineUseIntent(props.session.tenancy),
+    // Moving the chat onto the person's own machine turns it on in this workspace.
+    personalMachineIntent: personalMachineUseIntent(props.session.tenancy, "always"),
     extras: {
-      ...(composer.policy ?? {}),
+      ...(composer.sendPolicy ?? {}),
       ...((props.queue.effectiveControl ?? props.session.effectiveControl)?.controlEtag
         ? {
             controlEtag: (props.queue.effectiveControl ?? props.session.effectiveControl)!
@@ -2957,27 +3127,32 @@ function SessionChatPane(props: {
   const modelPickerDisabled =
     composer.sending || composer.draftLoading || !hasComposerPolicy || Boolean(pendingRetryInput);
   const canChooseRecoveryModel = !modelPickerDisabled;
+  // An own-key or API stop names its one fix; no model choice or free credit fixes it.
+  const stopRefusal = props.creditExhausted ? props.creditRefusal : null;
   // Free credit can still cover other models after this model's credit ran out.
-  const creditGap = props.creditExhausted
-    ? freeCreditGap(modelCatalog.rows, props.session.model, {
-        selectedModel: composerPolicy?.model,
-        preferredModel: modelCatalog.defaultSelection?.model,
-      })
-    : null;
+  const creditGap =
+    props.creditExhausted && !stopRefusal
+      ? freeCreditGap(modelCatalog.rows, props.session.model, {
+          selectedModel: composerPolicy?.model,
+          preferredModel: modelCatalog.defaultSelection?.model,
+        })
+      : null;
   // Shown while the banner chunk loads or if it fails. On the free model the
   // generic daily-limit line then gives way to the free-model copy; that brief
   // text change keeps the free-model copy out of the direct session bundle.
   const failureFallback = props.failure ? (
     <div role="alert" className={cn("mx-auto my-2 w-full max-w-3xl text-sm text-fg-muted", gutter)}>
-      {
+      {failureFallbackReason(
         failedSessionCopy(
           props.failure,
           props.creditExhausted && !props.failure.structuralSandboxFailure,
           Boolean(composerPolicy && composerPolicy.model !== props.session.model),
           canChooseRecoveryModel && !props.failure.structuralSandboxFailure,
           creditGap,
-        ).reason
-      }
+          stopRefusal,
+        ),
+        canBuyCredits,
+      )}
     </div>
   ) : null;
   const model = composerPolicy?.model ?? props.session.model;
@@ -3000,12 +3175,7 @@ function SessionChatPane(props: {
     composerPolicy.reasoningEffort === props.session.reasoningEffort &&
     composerPolicy.latencyMode === props.session.latencyMode,
   );
-  const catalogComboValid = Boolean(
-    selectedPolicyRow?.selectable &&
-    effortOptionsForModel(selectedPolicyRow.catalog).includes(reasoningEffort) &&
-    (latencyMode === "standard" ||
-      runnableLatencyModesForModel(selectedPolicyRow.catalog).includes(latencyMode)),
-  );
+  const catalogComboValid = pickerPolicyRunnable(selectedPolicyRow, reasoningEffort, latencyMode);
   // A model the catalog no longer lists (retired or removed) is refused by the
   // API, so the frozen session policy stops counting as sendable for it.
   const refusedSessionModel =
@@ -3105,6 +3275,34 @@ function SessionChatPane(props: {
         replacementLabel={composerModelUnavailable ? null : (selectedPolicyRow?.label ?? null)}
       />
     ) : null;
+
+  // Send's blocker as one visible line, unless the composer is still
+  // preparing or the unavailable-model notice or picker already explains it.
+  const sendBlocker = composerSendBlocker();
+  const visibleSendBlocker =
+    terminal || composerDelivery.preparing
+      ? null
+      : sendBlocker === "policy" && (unavailableModelNotice || noRunnableModel || !composerPolicy)
+        ? null
+        : sendBlocker === "policy" && selectedPolicyRow?.selectable !== true
+          ? "model_unavailable"
+          : sendBlocker;
+  const sendBlockerNotice = composerSendBlockerNotice(visibleSendBlocker) ? (
+    <ComposerSendBlockerNotice
+      blocker={visibleSendBlocker}
+      className="px-2 pt-2"
+      // While the picker is locked (sending, draft loading) the fix can't
+      // apply, so the line shows no action rather than one that does nothing.
+      onAction={
+        modelPickerDisabled && visibleSendBlocker === "policy"
+          ? undefined
+          : (action) => {
+              if (action === "fix_model_settings") chooseCoveredModel(model);
+              else if (visibleSendBlocker === "accounts") void connectionAccounts.refresh();
+            }
+      }
+    />
+  ) : null;
 
   useEffect(() => {
     if (
@@ -3500,9 +3698,41 @@ function SessionChatPane(props: {
   const modelSwitchHeadsUp = chosenModelHeadsUp ? (
     <ModelSwitchHeadsUp text={chosenModelHeadsUp} className="px-3.5 pt-2.5 md:px-4" />
   ) : null;
-  const workspaceAccountId = context.workspaces.find(
-    (candidate) => candidate.id === props.session.workspaceId,
-  )?.accountId;
+  // Your own logins in a chat shared with the workspace (D-54): one quiet line
+  // for you only, never a gate. A Personal workspace has nobody else. It stays
+  // mounted while none are on, so one turned off here can go back on.
+  const ownLoginsApply =
+    !terminal &&
+    props.session.tenancy?.visibility === "workspace" &&
+    !isPersonalWorkspace(workspace, context.managedSelfContext);
+  const ownLoginsHeadsUp = ownLoginsApply ? (
+    <OwnLoginsSharedHeadsUp
+      key={props.session.id}
+      // While the accounts can't be read, the line keeps what it last knew.
+      logins={
+        connectionAccounts.loading || connectionAccounts.error
+          ? null
+          : ownLoginsInUse(
+              // Only the connectors this chat uses.
+              connectionAccounts.accountGroups,
+              connectionAccounts.accountChoices,
+              context.accessContext.subjectId,
+            )
+      }
+      className="px-3.5 pt-2.5 md:px-4"
+      logoFor={(login) => props.resolveProviderLogo(login.accounts[0]!.providerDomain)}
+      onChange={async (login, on) => {
+        try {
+          if (on)
+            await turnOnOwnLoginsHere(context.client, props.session.workspaceId, login.accounts);
+          else await stopOwnLoginsHere(context.client, props.session.workspaceId, login.accounts);
+        } finally {
+          // Some connections may have changed even when one failed.
+          await connectionAccounts.refresh();
+        }
+      }}
+    />
+  ) : null;
   // The chat's Secrets row: hidden when its agent can't use secrets.
   const sessionSecrets = useSessionSecrets(props.session.id, {
     enabled: workspacePermissions.includes("secrets:list"),
@@ -3691,18 +3921,22 @@ function SessionChatPane(props: {
     ],
   );
 
-  const canBuyCredits =
-    context.clientConfig.billingMode === "stripe" &&
-    Boolean(workspaceAccountId) &&
-    hasAccountPermission(context.accessContext, workspaceAccountId ?? "", "billing:manage");
   const [creditTopupOpen, setCreditTopupOpen] = useState(false);
   const openCreditTopup = canBuyCredits ? () => setCreditTopupOpen(true) : undefined;
+  // Opened beside an own-key refusal, the top-up hides coupons: their credit
+  // can't pay the own-key fee.
+  const topupRefusal =
+    ((creditRefusal?.sessionId === props.session.id ? creditRefusal.code : null) ?? stopRefusal) ===
+    "byok_paid_credit_required"
+      ? "byok_paid_credit_required"
+      : null;
   const creditTopupPrompt =
     canBuyCredits && workspaceAccountId ? (
       <Suspense fallback={null}>
         {creditTopupOpen ? (
           <LazyCreditTopupPrompt
             purpose="topup"
+            refusalCode={topupRefusal}
             open
             workspaceId={props.session.workspaceId}
             accountId={workspaceAccountId}
@@ -3718,8 +3952,10 @@ function SessionChatPane(props: {
     props.session.workspaceId,
     "connections:write",
   );
+  // An archived chat is read-only: there is nothing to retry or recover.
   const failureRecovery =
     !props.hasNewer &&
+    !readOnlyArchive &&
     props.failure &&
     (props.session.status === "failed" ||
       (props.creditExhausted && props.session.status === "idle")) ? (
@@ -3743,6 +3979,7 @@ function SessionChatPane(props: {
             subscriptions={connectableSubscriptions(context.clientConfig.models)}
             modelChanged={Boolean(composerPolicy && composerPolicy.model !== props.session.model)}
             creditExhausted={props.creditExhausted}
+            creditRefusal={stopRefusal}
             freeCreditGap={creditGap}
             onChooseModel={chooseCoveredModel}
             workspaceId={props.session.workspaceId}
@@ -3829,6 +4066,7 @@ function SessionChatPane(props: {
             preferredModel: modelCatalog.defaultSelection?.model,
           })}
           message={sessionCreditRefusal.message}
+          refusalCode={sessionCreditRefusal.code}
           workspaceId={props.session.workspaceId}
           accountId={workspaceAccountId}
           canReadBilling={
@@ -3913,8 +4151,7 @@ function SessionChatPane(props: {
             <div className={cn("mx-auto w-full max-w-3xl pt-6", gutter)}>
               <ReadOnlySessionNotice
                 session={props.session}
-                idleDays={context.clientConfig.sessionArchive?.idleDays}
-                onNewSession={props.onNewSession}
+                onContinue={props.onContinueInNewSession}
               />
             </div>
           ) : null}
@@ -3956,15 +4193,19 @@ function SessionChatPane(props: {
                               {/* Recovery follows the failed request, only in the latest history window.
                         Credit exhaustion also surfaces on idle sessions. */}
                               {failureRecovery}
+                              {/* The pause's other approvals stay up while a decision
+                        resumes the turn: deciding them never waits for it. */}
                               {props.approvals.length > 0 &&
-                                props.session.status === "requires_action" && (
+                                approvalsDecidable(props.session.status) && (
                                   <ApprovalSurface
                                     approvals={props.approvals}
                                     selectedApprovalId={selectedApprovalId}
                                     onSelectedApprovalChange={setSelectedApprovalId}
                                     loadReview={loadToolReview}
                                     onViewDetails={viewToolReviewDetails}
-                                    onApprove={(approval) => decideApproval(approval.id, "approve")}
+                                    onApprove={(approval, answer) =>
+                                      decideApproval(approval.id, "approve", answer)
+                                    }
                                     onReject={(approval) => decideApproval(approval.id, "reject")}
                                   />
                                 )}
@@ -4013,6 +4254,7 @@ function SessionChatPane(props: {
                           focusSequence={momentSequence}
                           events={props.events}
                           status={props.session.status}
+                          pause={timelineLivePause(admissionControl)}
                           computeLabel={computeLabel}
                           renderMessageText={renderMessageText}
                           renderMessageActions={renderMessageActions}
@@ -4113,6 +4355,8 @@ function SessionChatPane(props: {
             </LazyPart>
           ) : null}
 
+          {repositories.removalDialog}
+
           {modelRecovery ? <ModelRecoveryNotice recovery={modelRecovery} /> : null}
 
           {/* One slim status row above the composer: the agent's wait, queue,
@@ -4190,6 +4434,7 @@ function SessionChatPane(props: {
                       events={props.events}
                       waiting={waitingSubSessions}
                       onResolved={props.onDescendantResolved}
+                      onResumingChange={onSubSessionResumingChange}
                       refreshSignal={props.descendantRefreshSignal}
                       loadSkillReview={loadSkillReview}
                       allowedSaveTo={secretSaveTargets(
@@ -4260,7 +4505,11 @@ function SessionChatPane(props: {
                 effectiveControl={composer.effectiveControl}
                 queuedAheadCount={props.queue.queue.length}
                 queuedRecall={queuedRecall}
-                running={usageLimitTreeActive || props.pendingWake}
+                running={
+                  usageLimitTreeActive ||
+                  sessionTurnKeepsRunControl(props.session.status) ||
+                  props.pendingWake
+                }
                 canControlWorkspace={workspacePermissions.includes("workspace:admin")}
                 controlLinks={{
                   workspaceHref: `/workspaces/${props.session.workspaceId}`,
@@ -4269,12 +4518,14 @@ function SessionChatPane(props: {
                 }}
                 disabled={terminal}
                 header={
+                  ownLoginsHeadsUp ||
                   unavailableModelNotice ||
                   codexUsageNotice ||
                   modelSwitchHeadsUp ||
                   usageLimitNotice ||
                   creditRefusalNotice ||
-                  (machineAccess && !machineAccess.isOwner) ? (
+                  sendBlockerNotice ||
+                  showMachineAccess ? (
                     <>
                       {!sessionAdmissionNeedsDifferentMachine(
                         sessionAdmissionReason(props.session),
@@ -4282,12 +4533,15 @@ function SessionChatPane(props: {
                       ) ? (
                         <SessionMachineAccessNotice
                           access={machineAccess}
+                          shared={sharedChat}
+                          className="px-3.5 pt-2.5 md:px-4"
                           action={
                             <SessionMachinePickerAction
                               runsOn={runsOn}
                               workspaceId={props.session.workspaceId}
                               rigId={props.session.rigId}
                               move={moveRunsOn}
+                              compact={machineAccess?.isOwner === true}
                             />
                           }
                         />
@@ -4299,6 +4553,8 @@ function SessionChatPane(props: {
                       {creditRefusalNotice ? (
                         <div className="px-2 pt-2">{creditRefusalNotice}</div>
                       ) : null}
+                      {ownLoginsHeadsUp}
+                      {sendBlockerNotice}
                     </>
                   ) : null
                 }
@@ -4330,10 +4586,7 @@ function SessionChatPane(props: {
                           ? {
                               workspaceId: props.session.workspaceId,
                               sessionId: props.session.id,
-                              scope: chatLearningScope(
-                                props.session,
-                                isPersonalWorkspace(workspace, context.managedSelfContext),
-                              ),
+                              scope: chatLearningScope(props.session),
                               canEdit: workspacePermissions.includes("sessions:control"),
                               onOpen: props.onOpenAgentSettings,
                             }
@@ -4448,21 +4701,15 @@ function SessionChatPane(props: {
                     </LazyPart>
                   ) : null
                 }
-                placeholder={
-                  props.session.status === "cancelled"
-                    ? "This session was cancelled."
-                    : props.creditExhausted &&
-                        (props.session.status === "failed" || props.session.status === "idle")
-                      ? // "Send a message to revive" is a dead end without credits —
-                        // the reply turn dies the same budget death. With free
-                        // credit left for other models, a covered model revives it.
-                        creditGap
-                        ? creditGap.selectionUsable
-                          ? "Send a follow-up…"
-                          : "Your free credits don't cover this model — choose another model or add credits."
-                        : "Out of Opengeni credits — add credits to continue."
-                      : "Send a follow-up…"
-                }
+                placeholder={chatComposerPlaceholder({
+                  cancelled: props.session.status === "cancelled",
+                  creditStopped:
+                    Boolean(props.creditExhausted) &&
+                    (props.session.status === "failed" || props.session.status === "idle"),
+                  stopRefusal,
+                  creditGap,
+                  canBuyCredits,
+                })}
                 controls={
                   <div className="@container/model-controls flex min-w-0 flex-1 items-center gap-1.5">
                     <ModelPicker

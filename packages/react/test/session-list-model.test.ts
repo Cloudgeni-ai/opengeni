@@ -9,6 +9,7 @@ import {
   recentSessionModelPresentation,
   recentSessionStatus,
   recentSessionsForHome,
+  recentSessionsWithOpened,
   relativeTimeLabel,
   sessionAutomationWait,
   sessionHasPendingWake,
@@ -105,7 +106,7 @@ describe("session-list-model", () => {
     ).toEqual(["Today", "Older"]);
   });
 
-  test("home leaves sub-agents to their parent, so they never crowd out conversations", () => {
+  test("home leaves sub-agents to their parent, unless pinned, so they never crowd out conversations", () => {
     const mine = session("mine", { updatedAt: "2026-10-03T10:00:00Z" });
     const agents = Array.from({ length: 8 }, (_, index) =>
       session(`agent-${index}`, {
@@ -119,10 +120,52 @@ describe("session-list-model", () => {
       recentSessionsForHome(englishText, [...agents, mine, pinnedAgent], [pinnedAgent], 6, now).map(
         (row) => row.id,
       ),
-    ).toEqual(["mine"]);
+    ).toEqual(["pinned-agent", "mine"]);
   });
 
-  test("phone home sections: every pin, then recent work that pins never crowd out", () => {
+  test("home leads with the chats opened here, so busy running sessions never hide them", () => {
+    const runningOthers = Array.from({ length: 8 }, (_, index) =>
+      session(`running-${index}`, { status: "running", updatedAt: "2026-10-03T11:50:00Z" }),
+    );
+    const listedOpened = session("opened-listed", { updatedAt: "2026-10-03T09:00:00Z" });
+    const pinned = session("p", { pinned: true });
+    const entries = recentSessionsWithOpened(
+      englishText,
+      [...runningOthers, listedOpened, pinned],
+      [pinned],
+      [
+        {
+          id: "opened-unlisted",
+          title: "Ledger audit",
+          openedAt: Date.parse("2026-10-03T11:00:00Z"),
+        },
+        { id: "opened-listed", title: "Old title", openedAt: Date.parse("2026-10-03T10:00:00Z") },
+        { id: "opened-unlisted", title: "Ledger audit", openedAt: 1 },
+      ],
+      6,
+      now,
+    );
+    const ids = entries.map((entry) =>
+      entry.kind === "session" ? entry.session.id : `~${entry.chat.id}`,
+    );
+    expect(ids.slice(0, 3)).toEqual(["~opened-unlisted", "opened-listed", "p"]);
+    expect(ids.slice(3).every((id) => id.startsWith("running-"))).toBe(true);
+    expect(ids).toHaveLength(6);
+    // A listed chat shows as its row, with its live status.
+    expect(entries[1]).toEqual({ kind: "session", session: listedOpened });
+    // Nothing opened here: the list is the plain home order.
+    expect(
+      recentSessionsWithOpened(englishText, [...runningOthers, pinned], [pinned], [], 3, now).map(
+        (entry) => (entry.kind === "session" ? entry.session.id : entry.chat.id),
+      ),
+    ).toEqual(
+      recentSessionsForHome(englishText, [...runningOthers, pinned], [pinned], 3, now).map(
+        (row) => row.id,
+      ),
+    );
+  });
+
+  test("phone home sections: every pin (pinned sub-agents too), then recent work that pins never crowd out", () => {
     const pins = Array.from({ length: 7 }, (_, index) =>
       session(`pin-${index}`, { pinned: true, updatedAt: "2026-10-03T11:40:00Z" }),
     );
@@ -138,7 +181,10 @@ describe("session-list-model", () => {
       15,
       now,
     );
-    expect(sections.pinned.map((row) => row.id)).toEqual(pins.map((pin) => pin.id));
+    expect(sections.pinned.map((row) => row.id)).toEqual([
+      ...pins.map((pin) => pin.id),
+      "pinned-agent",
+    ]);
     expect(sections.recent.map((row) => row.id)).toEqual(["r", "a", "b"]);
     expect(
       homeSessionSections(englishText, [older, recent, running], [], 2, now).recent.map(
