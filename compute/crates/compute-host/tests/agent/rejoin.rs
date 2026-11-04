@@ -6,7 +6,7 @@
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -33,7 +33,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{Instant, sleep, timeout};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
-use super::{Delays, Fake, Lab, NEVER, World, id};
+use super::{Delays, Fake, Lab, NEVER, World, id, vm_name};
 
 /// The registration the fake service gives.
 const HOST: u64 = 1;
@@ -114,10 +114,17 @@ struct Heard {
 }
 
 /// A control service that registers the host under [`EPOCH`], keeping
-/// everything it lists, and accepts every renewal of that registration.
+/// everything it lists but what it `moved`, and accepts every renewal of
+/// that registration unless it `forgot` the host.
 struct Service {
     heard: Mutex<Heard>,
     terms: LeaseTerms,
+    /// Sandboxes it gave other hosts: a registration that lists them is
+    /// told to drop them.
+    moved: Mutex<Vec<compute_host::protocol::Id>>,
+    /// It gave the host up, as once its lease ran out: renewals are
+    /// refused until the host registers again.
+    forgot: AtomicBool,
 }
 
 impl Service {
@@ -127,6 +134,8 @@ impl Service {
         let service = Arc::new(Self {
             heard: Mutex::default(),
             terms,
+            moved: Mutex::default(),
+            forgot: AtomicBool::new(false),
         });
         let acceptor = TlsAcceptor::from(Arc::clone(&tls.server));
         let serving = Arc::clone(&service);
@@ -164,17 +173,7 @@ impl Service {
         match path.as_str() {
             REGISTER_PATH => {
                 let register: Register = serde_json::from_slice(&body).unwrap();
-                let rulings = register
-                    .held
-                    .iter()
-                    .map(|held| Ruling {
-                        id: held.id,
-                        verdict: Verdict::Keep {
-                            owner_epoch: held.owner_epoch,
-                        },
-                        link: None,
-                    })
-                    .collect();
+                let rulings = self.rule(&register);
                 heard.registers.push(register);
                 json(
                     serde_json::to_vec(&Registered::Registered {
@@ -188,7 +187,9 @@ impl Service {
             }
             RENEW_PATH => {
                 let renew: Renew = serde_json::from_slice(&body).unwrap();
-                let renewed = if (renew.host, renew.epoch) == (HOST, EPOCH) {
+                let renewed = if (renew.host, renew.epoch) == (HOST, EPOCH)
+                    && !self.forgot.load(Ordering::SeqCst)
+                {
                     Renewed::Renewed {
                         epoch: renew.epoch,
                         seq: renew.seq,
@@ -253,6 +254,28 @@ impl Service {
                 response
             }
         }
+    }
+
+    /// Registers the host again: everything it lists stays but what was
+    /// moved, and it renews again.
+    fn rule(&self, register: &Register) -> Vec<Ruling> {
+        let moved = self.moved.lock().unwrap();
+        self.forgot.store(false, Ordering::SeqCst);
+        register
+            .held
+            .iter()
+            .map(|held| Ruling {
+                id: held.id,
+                verdict: if moved.contains(&held.id) {
+                    Verdict::Drop
+                } else {
+                    Verdict::Keep {
+                        owner_epoch: held.owner_epoch,
+                    }
+                },
+                link: None,
+            })
+            .collect()
     }
 
     /// The last renewal number heard.
@@ -555,6 +578,174 @@ async fn a_restarted_agent_keeps_its_lease_while_it_takes_back_its_sandboxes() {
         world.boots.load(Ordering::Relaxed),
         boots,
         "nothing rebooted"
+    );
+    joined.abort();
+    drop(handle);
+}
+
+/// A fleet's view of a host at `root` that listens on `listen`, under
+/// `terms`, with the service at `port` and certificates from `authority`.
+fn fleet_config(
+    root: &Path,
+    authority: &Authority,
+    port: u16,
+    listen: SocketAddr,
+    terms: LeaseTerms,
+) -> FleetConfig {
+    FleetConfig {
+        guest: None,
+        control: format!("https://localhost:{port}"),
+        info: HostInfo {
+            name: "host-a.example".into(),
+            address: listen.to_string(),
+            zone: "zone-a".into(),
+            profile: "nested".into(),
+            cpu_template: "test".into(),
+            memory_mib: 4096,
+            cpu_millis: 4000,
+            disk_mib: 4096,
+            offers: Vec::new(),
+            boot: None,
+        },
+        image: "base".into(),
+        listen,
+        tls: authority.issue(root, "host"),
+        lease_file: root.join("run/lease"),
+        guard_lock: root.join("guard.lock"),
+        terms,
+        agent_link_ca: None,
+        boot: None,
+    }
+}
+
+/// A host whose agent was down past its lease finds its VMs frozen by the
+/// guard when it starts again, their VMMs unable to answer. It registers
+/// all the same, listing them, and the guard thaws them only once the
+/// service's rulings are carried out: the VM of the sandbox the service
+/// gave another host has ended by then, and the one it kept is taken
+/// back with its guest running, never started again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[expect(clippy::too_many_lines, reason = "one scenario, step by step")]
+async fn a_host_back_after_its_lease_ran_out_registers_with_its_frozen_vms() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let (kept, moved) = (id(1), id(2));
+    for sandbox in [kept, moved] {
+        lab.create(sandbox, NEVER).await;
+        lab.run(sandbox, &["set alive"]).await;
+    }
+    let (root, world) = lab.stop().await;
+    let boots = world.boots.load(Ordering::Relaxed);
+
+    let terms = terms();
+    let authority = Authority::new();
+    let service_tls = Tls::load(&authority.issue(&root, "service")).unwrap();
+    let (service, port) = Service::start(&service_tls, terms).await;
+    let listen = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let fleet = fleet_config(&root, &authority, port, listen, terms);
+    let _guard = hold_lock(&ready_lock(&fleet.guard_lock)).unwrap();
+
+    // The first run registers and renews.
+    let (handle, agent, mut joined) = join(&fleet, &root, &world).await;
+    let within = Instant::now() + Duration::from_secs(10);
+    let renewed = async {
+        while service.heard.lock().unwrap().renewals.len() < 3 {
+            assert!(Instant::now() < within, "the first run never renewed");
+            sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::select! {
+        result = joined.run() => panic!("left the fleet: {result:?}"),
+        () = renewed => {}
+    }
+
+    // Its agent goes down and renews nothing past the lease: the service
+    // gives the host up and one of its sandboxes to another host, and
+    // the guard freezes the VMs.
+    drop(joined);
+    drop(handle);
+    timeout(Duration::from_secs(5), agent)
+        .await
+        .expect("the first run stops")
+        .unwrap();
+    service.forgot.store(true, Ordering::SeqCst);
+    service.moved.lock().unwrap().push(moved);
+    sleep(terms.term + terms.margin).await;
+    world
+        .held_frozen
+        .lock()
+        .unwrap()
+        .extend([kept, moved].map(vm_name));
+
+    // It starts again, its lease run out.
+    let prepared = fleet.clone().prepare().unwrap();
+    let gate = prepared.gate.clone();
+    assert!(!gate.is_open(), "the lease ran out");
+    let mut config = Lab::config(&root, HostPolicy::default());
+    config.lease = Some(gate.clone());
+    let engine = Fake {
+        world: Arc::clone(&world),
+        delays: Delays::default(),
+    };
+    let start = fleet
+        .clone()
+        .start(prepared, HostAgent::start(config, engine, NoStore));
+    let ((handle, _agent), mut joined) = Box::pin(start).await.unwrap();
+    let status = handle.status().await.unwrap();
+    assert_eq!(status.blocked.len(), 2, "{status:?}");
+
+    // The guard thaws the VMs once the lease runs again, and not before.
+    let thawed = async {
+        let within = Instant::now() + Duration::from_secs(15);
+        while !gate.is_open() {
+            assert!(Instant::now() < within, "it never registered");
+            sleep(Duration::from_millis(1)).await;
+        }
+        assert!(
+            !world.live.lock().unwrap().contains(&vm_name(moved)),
+            "the lease would thaw a VM the service gave another host"
+        );
+        world.held_frozen.lock().unwrap().clear();
+    };
+    tokio::select! {
+        result = joined.run() => panic!("left the fleet: {result:?}"),
+        () = thawed => {}
+    }
+    let joined = tokio::spawn(async move { joined.run().await });
+    {
+        let heard = service.heard.lock().unwrap();
+        // A registration waiting for its answer is sent again, as one copy
+        // of the same attempt.
+        let mut held: Vec<_> = heard
+            .registers
+            .last()
+            .unwrap()
+            .held
+            .iter()
+            .map(|held| held.id)
+            .collect();
+        held.sort();
+        assert_eq!(held, [kept, moved], "it listed its frozen VMs");
+    }
+
+    // The kept one is taken back as soon as it is thawed.
+    let within = Instant::now() + Duration::from_secs(5);
+    loop {
+        let status = handle.status().await.unwrap();
+        if status.blocked.is_empty() && status.sandboxes.iter().any(|sandbox| sandbox.id == kept) {
+            assert_eq!(status.sandboxes.len(), 1, "{status:?}");
+            break;
+        }
+        assert!(Instant::now() < within, "never taken back: {status:?}");
+        sleep(Duration::from_millis(20)).await;
+    }
+    assert!(world.live.lock().unwrap().contains(&vm_name(kept)));
+    assert_eq!(
+        world.boots.load(Ordering::Relaxed),
+        boots,
+        "nothing started again"
     );
     joined.abort();
     drop(handle);

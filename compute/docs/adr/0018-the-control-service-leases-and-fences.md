@@ -403,7 +403,16 @@ can be built and tested.
   the Unix socket stays for local tools, which
   on a host in a fleet never create, adopt, hand off or remove sandboxes.
   A host with sandboxes it cannot read (blocked) does not register until
-  they are readable or removed, since it cannot rule on them.
+  they are readable or removed, since it cannot rule on them. The
+  exception is a sandbox whose record is sound but whose VM the agent
+  could not take back because the guard holds it frozen, as it does
+  after the lease ran out: only the deadline a registration brings thaws
+  it, so waiting for it to answer would wait for good. The host lists it
+  under the owner epoch its record names. The service rules on it like
+  any other: a drop or a refetch ends its VM (a kill works on a frozen
+  process) before the host answers, and a keep leaves it frozen, taken
+  back once the guard thaws it. Since the deadline is written only after
+  that, nothing the service gave another host thaws here.
 - **Requests.** A create is placed (two random hosts that fit, preferring
   one with a ready clone of the shape, then the larger share of its room
   free (the smaller of the shares of its memory and processor time it can
