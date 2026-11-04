@@ -47463,6 +47463,10 @@ type LeaseRow = {
   archive_capture_published_at: Date | string | null;
   archive_capture_concurrent_capture_id?: string | null;
   untracked_writer_since?: Date | string | null;
+  drain_capture_failures?: number | string | null;
+  drain_capture_failure_epoch?: number | string | null;
+  drain_capture_first_failed_at?: Date | string | null;
+  drain_capture_last_failed_at?: Date | string | null;
   deadline_forced_admission_ids?: string[] | null;
   reaper_hold_id: string | null;
   reaper_hold_until: Date | string | null;
@@ -47539,6 +47543,9 @@ export interface LeaseSnapshot {
    * generation admissions) that no capture taken with none attached has
    * covered yet. Null when every such write is in the archive. */
   untrackedWriterSince: Date | null;
+  /** Consecutive settled drain snapshot failures of THIS lease epoch (zero
+   * after a new box). Drives the drain retry backoff and its alerts. */
+  drainCaptureFailures?: SandboxDrainCaptureFailures;
   /** Exact provider capture currently holding the lease-local admission gate. */
   archiveCapture: {
     id: string;
@@ -48331,6 +48338,7 @@ function mapLeaseRow(row: LeaseRow): LeaseSnapshot {
                   ? row.archive_capture_published_at
                   : new Date(row.archive_capture_published_at),
           },
+    drainCaptureFailures: drainCaptureFailuresFromLeaseRow(row),
     reaperHold:
       row.reaper_hold_id === null ||
       row.reaper_hold_until === null ||
@@ -48372,6 +48380,32 @@ function mapLeaseRow(row: LeaseRow): LeaseSnapshot {
     currentCheckpointArtifactId: row.current_checkpoint_artifact_id,
     previousCheckpointArtifactId: row.previous_checkpoint_artifact_id,
     expiresAt: row.expires_at instanceof Date ? row.expires_at : new Date(row.expires_at),
+  };
+}
+
+export type SandboxDrainCaptureFailures = {
+  count: number;
+  firstFailedAt: Date | null;
+  lastFailedAt: Date | null;
+};
+
+function drainCaptureFailuresFromLeaseRow(row: LeaseRow): SandboxDrainCaptureFailures {
+  const count = Number(row.drain_capture_failures ?? 0);
+  if (
+    row.drain_capture_failure_epoch === null ||
+    row.drain_capture_failure_epoch === undefined ||
+    Number(row.drain_capture_failure_epoch) !== Number(row.lease_epoch) ||
+    !Number.isSafeInteger(count) ||
+    count <= 0
+  ) {
+    return { count: 0, firstFailedAt: null, lastFailedAt: null };
+  }
+  const date = (value: Date | string | null | undefined) =>
+    value === null || value === undefined ? null : value instanceof Date ? value : new Date(value);
+  return {
+    count,
+    firstFailedAt: date(row.drain_capture_first_failed_at),
+    lastFailedAt: date(row.drain_capture_last_failed_at),
   };
 }
 
@@ -63575,6 +63609,10 @@ export async function releaseWorkspaceArchiveCapture(
      * without this a dead checkpoint worker's claim fenced every later turn
      * and checkpoint until the provider deadline. */
     onlyExpiredWarmTakeover?: boolean;
+    /** The released draining capture settled as a failure: count it toward
+     * this lease epoch's consecutive drain snapshot failures, atomically with
+     * the release (a fenced, already replaced claim counts nothing). */
+    recordDrainCaptureFailure?: boolean;
   },
 ): Promise<boolean> {
   return await withRlsContext(
@@ -63614,6 +63652,30 @@ export async function releaseWorkspaceArchiveCapture(
           archive_capture_started_at = null,
           archive_capture_deadline_at = null,
           archive_capture_published_at = null,
+          ${
+            input.recordDrainCaptureFailure === true
+              ? sql`drain_capture_failures = case
+                  when sandbox_leases.liveness <> 'draining' then sandbox_leases.drain_capture_failures
+                  when sandbox_leases.drain_capture_failure_epoch = sandbox_leases.lease_epoch
+                    then sandbox_leases.drain_capture_failures + 1
+                  else 1
+                end,
+                drain_capture_first_failed_at = case
+                  when sandbox_leases.liveness <> 'draining' then sandbox_leases.drain_capture_first_failed_at
+                  when sandbox_leases.drain_capture_failure_epoch = sandbox_leases.lease_epoch
+                    then coalesce(sandbox_leases.drain_capture_first_failed_at, now())
+                  else now()
+                end,
+                drain_capture_last_failed_at = case
+                  when sandbox_leases.liveness <> 'draining' then sandbox_leases.drain_capture_last_failed_at
+                  else now()
+                end,
+                drain_capture_failure_epoch = case
+                  when sandbox_leases.liveness <> 'draining' then sandbox_leases.drain_capture_failure_epoch
+                  else sandbox_leases.lease_epoch
+                end,`
+              : sql``
+          }
           rotation_requested_at = case
             when rotation_reason = 'teardown_claim' then null
             else rotation_requested_at

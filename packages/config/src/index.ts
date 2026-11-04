@@ -1994,6 +1994,20 @@ const SettingsSchema = z.object({
     .positive()
     .max(SANDBOX_SNAPSHOT_MAX_TIMEOUT_MS)
     .optional(),
+  // Hard provider-side timeout of a zero-holder drain snapshot. It is separate
+  // from the drain WAIT above: the wait only bounds how long one reaper attempt
+  // waits before retrying, while the snapshot itself keeps running and
+  // publishes late under its claim. When both were the same value, a
+  // workspace whose snapshot needed longer than the wait could never finish
+  // and the box stayed draining until the provider deadline. The effective
+  // value is never below the drain wait. Knob:
+  // OPENGENI_SANDBOX_DRAIN_PROVIDER_SNAPSHOT_TIMEOUT_MS. Default 10min.
+  sandboxDrainProviderSnapshotTimeoutMs: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(SANDBOX_SNAPSHOT_MAX_TIMEOUT_MS)
+    .default(600_000),
   // Begin a controlled snapshot/quiesce/drain/rematerialize transition this far
   // ahead of a finite provider deadline. Modal's 24h creation clock cannot be
   // extended; the logical sandbox outlives it by moving to one successor box.
@@ -6342,6 +6356,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     sandboxSnapshotIntervalMs: optional("OPENGENI_SANDBOX_SNAPSHOT_INTERVAL_MS"),
     sandboxSnapshotTimeoutMs: optional("OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS"),
     sandboxDrainSnapshotTimeoutMs: optional("OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS"),
+    sandboxDrainProviderSnapshotTimeoutMs: optional(
+      "OPENGENI_SANDBOX_DRAIN_PROVIDER_SNAPSHOT_TIMEOUT_MS",
+    ),
     sandboxRotationLeadMs: optional("OPENGENI_SANDBOX_ROTATION_LEAD_MS"),
     sandboxRotationBatchSize: optional("OPENGENI_SANDBOX_ROTATION_BATCH_SIZE"),
     sandboxLeaseTtlMs: optional("OPENGENI_SANDBOX_LEASE_TTL_MS"),
@@ -6878,6 +6895,20 @@ export function effectiveSandboxDrainSnapshotTimeoutMs(
   settings: Pick<Settings, "sandboxSnapshotTimeoutMs" | "sandboxDrainSnapshotTimeoutMs">,
 ): number {
   return settings.sandboxDrainSnapshotTimeoutMs ?? settings.sandboxSnapshotTimeoutMs;
+}
+
+/** Hard provider-side timeout for one zero-holder drain snapshot. Never below
+ * the drain wait, so the wait (not the provider) is what ends an attempt, and
+ * a slow but finite snapshot keeps running and publishes late under its
+ * claim. `drainWaitMs` is the wait the durable drain child froze. */
+export function effectiveSandboxDrainProviderSnapshotTimeoutMs(
+  settings: Pick<Settings, "sandboxDrainProviderSnapshotTimeoutMs">,
+  drainWaitMs: number,
+): number {
+  return Math.min(
+    SANDBOX_SNAPSHOT_MAX_TIMEOUT_MS,
+    Math.max(settings.sandboxDrainProviderSnapshotTimeoutMs, drainWaitMs),
+  );
 }
 
 /**

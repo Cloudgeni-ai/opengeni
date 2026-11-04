@@ -10713,6 +10713,18 @@ export const sandboxLeases = pgTable(
     archiveCaptureLastAttemptAt: timestamp("archive_capture_last_attempt_at", {
       withTimezone: true,
     }),
+    // Consecutive settled drain snapshot failures of one lease epoch (migration
+    // 1253). Valid only while drain_capture_failure_epoch equals lease_epoch,
+    // so a new box starts from zero without every epoch writer resetting it.
+    // Drives the drain retry backoff and the snapshot-failure alerts.
+    drainCaptureFailures: integer("drain_capture_failures").notNull().default(0),
+    drainCaptureFailureEpoch: integer("drain_capture_failure_epoch"),
+    drainCaptureFirstFailedAt: timestamp("drain_capture_first_failed_at", {
+      withTimezone: true,
+    }),
+    drainCaptureLastFailedAt: timestamp("drain_capture_last_failed_at", {
+      withTimezone: true,
+    }),
     // The reaper's idle checkpoint sweep last tried this box, whatever the
     // outcome, so refused or failing boxes yield the batch to others.
     idleCheckpointAttemptedAt: timestamp("idle_checkpoint_attempted_at", {
