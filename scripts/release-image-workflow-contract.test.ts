@@ -1385,6 +1385,9 @@ describe("release image workflow contract", () => {
     expect(publish).toContain('git merge-base --is-ancestor "$SOURCE_SHA" origin/production');
     expect(publish).not.toContain('test "$(git rev-parse origin/production)" = "$SOURCE_SHA"');
     expect(publish).toContain("else max_by(.id)");
+    expect(publish).toContain(
+      'select(.name == $name and .app.slug == "github-actions" and .conclusion != "skipped")',
+    );
     expect(publish).toContain('.status == "completed" and .conclusion == "success"');
     expect(publish).not.toContain("| length == 1");
     for (const required of [
