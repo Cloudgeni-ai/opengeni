@@ -4,8 +4,9 @@
 // meeting notes app does. Only the active account's calendar is read (from
 // its server, `GET …/upcoming-meetings`), so only that account reminds, and
 // the meeting is recorded there. Each meeting is offered once: choosing it,
-// closing the card or letting it time out all end the offer, and a meeting
-// already under way for a while is not offered at all.
+// closing the card or letting it time out all end the offer. A meeting
+// already under way for a while is not offered at all, nor is one whose call
+// the person already turned down recording (Not now) and is still on.
 
 import type { MeetingPromptOutcome, ShownPrompt } from "./index";
 
@@ -43,6 +44,8 @@ export const POLL_SOON_MS = 60_000;
 const SOON_MS = 3 * 60_000;
 /** A recording started this long before a meeting's start is of that meeting, joined early. */
 export const EARLY_JOIN_MS = 10 * 60_000;
+/** A calendar entry longer than this is a block of time, not the call going on. */
+export const LONGEST_CALL_MS = 4 * 60 * 60_000;
 /** Run about this often: the cards depend on the time. */
 export const REMINDER_TICK_MS = 15_000;
 /** The shortest a card stays up, however late it shows. */
@@ -139,6 +142,13 @@ export interface CalendarReminderOptions {
   enabled(): boolean;
   /** Since when the page has been recording a meeting, or null when it isn't. */
   recordingSince(): number | null;
+  /**
+   * Where `appId`'s call is: "on" the microphone (allowing for a short
+   * mute), "away" from it for a while (a long mute, or the call ended; can't
+   * tell yet), or "ended". A meeting whose call the person turned down
+   * recording is offered only once that call has ended.
+   */
+  callState?(appId: string): "on" | "away" | "ended";
   /** Another question is on the card that a reminder must not replace (a call just started). */
   busy(): boolean;
   /** Put a reminder on the card; `done` runs once when the person acts or it times out. */
@@ -167,6 +177,8 @@ export class CalendarReminders {
   /** Bumped when the account changes, so a read for the one before is ignored. */
   private generation = 0;
   private readonly offered = new Set<string>();
+  /** Meetings whose call the person turned down recording: the call's app, by meeting. */
+  private readonly declined = new Map<string, string>();
   private shown: { key: string; reminder: JoinReminder; handle: ShownPrompt } | null = null;
 
   constructor(private readonly options: CalendarReminderOptions) {}
@@ -254,10 +266,27 @@ export class CalendarReminders {
     }
     if (this.options.busy()) return;
     const since = this.options.recordingSince();
+    const waiting = new Set<string>();
+    for (const meeting of meetings) {
+      const meetingKey = key(accountId, meeting);
+      const app = this.declined.get(meetingKey);
+      if (app === undefined || !reminderDue(meeting, now)) continue;
+      const state = this.options.callState?.(app) ?? "ended";
+      // Turned down and still on that call: the person is in it and said no.
+      // Away from it: wait to see whether it comes back (a mute) or not.
+      // Ended (a short call before the meeting): the reminder is offered.
+      if (state === "away") {
+        waiting.add(meetingKey);
+        continue;
+      }
+      this.declined.delete(meetingKey);
+      if (state === "on") this.remember(meetingKey);
+    }
     const due = meetings.filter(
       (meeting) =>
         reminderDue(meeting, now) &&
         !this.offered.has(key(accountId, meeting)) &&
+        !waiting.has(key(accountId, meeting)) &&
         // Recording since just before it started: the person joined it early.
         !(since !== null && since >= meeting.startsAt - EARLY_JOIN_MS),
     );
@@ -309,6 +338,34 @@ export class CalendarReminders {
   /** The reminder on the card, if any. */
   showing(): JoinReminder | null {
     return this.shown?.reminder ?? null;
+  }
+
+  /**
+   * The person turned down recording `appId`'s call at `now`. Returns the
+   * calendar meeting that call is (started, or starting within
+   * {@link EARLY_JOIN_MS}; not a long block), or null. While that call goes
+   * on, the meeting's reminder doesn't ask again.
+   */
+  declinedCall(now: number, appId: string): CalendarMeeting | null {
+    const accountId = this.accountId;
+    if (!accountId || !this.upcoming) return null;
+    const current = this.upcoming.meetings.filter(
+      (meeting) =>
+        meeting.startsAt - EARLY_JOIN_MS <= now &&
+        now < meeting.endsAt &&
+        meeting.endsAt - meeting.startsAt <= LONGEST_CALL_MS,
+    );
+    // The one that started last, or else the next to start.
+    const started = current.filter((meeting) => meeting.startsAt <= now);
+    const meeting = started.at(-1) ?? current[0] ?? null;
+    if (!meeting) return null;
+    this.declined.set(key(accountId, meeting), appId);
+    // Only today's matter; keep the map small.
+    if (this.declined.size > 50) {
+      const oldest = this.declined.keys().next().value;
+      if (oldest !== undefined) this.declined.delete(oldest);
+    }
+    return meeting;
   }
 
   private pollInterval(now: number): number {

@@ -995,4 +995,259 @@ describe("the card outlives its page", () => {
     c.view.destroy();
     FakeWebContents.answer = async () => 200;
   });
+
+  test("closed from outside while asking counts as Not now, and the next question still shows", async () => {
+    const c = card(unanswered);
+    const outcomes: MeetingPromptOutcome[] = [];
+    c.view.show(call, (outcome) => outcomes.push(outcome));
+    await settle();
+    FakeBrowserWindow.made[0]!.destroy();
+    expect(outcomes).toEqual(["dismissed"]);
+    expect(c.showing()).toEqual([]);
+
+    c.view.show(call, () => undefined);
+    await settle();
+    expect(c.showing()).toEqual([FakeBrowserWindow.made[1]!]);
+    c.view.destroy();
+  });
+
+  test("a Not now heard while the card is being shown again still hides it", async () => {
+    let answered: (answer: string) => void = () => undefined;
+    const c = card((code) =>
+      code === "answer()"
+        ? new Promise<unknown>((resolve) => (answered = resolve))
+        : Promise.resolve(120),
+    );
+    const outcomes: MeetingPromptOutcome[] = [];
+    c.view.show(call, (outcome) => outcomes.push(outcome));
+    await settle();
+    const first = answered;
+    // The page stops responding just as Not now is pressed: a fresh window is on its way.
+    FakeBrowserWindow.made[0]!.webContents.emit("unresponsive");
+    first("dismiss/1");
+    await settle();
+
+    expect(outcomes).toEqual(["dismissed"]);
+    expect(c.showing()).toEqual([]);
+    expect(FakeBrowserWindow.made.every((window) => window.shows <= 1)).toBe(true);
+    c.view.destroy();
+  });
+});
+
+/** The card's page script, run against just enough of a document to press its buttons. */
+function cardPage(options: { afterHoverMs?: number } = {}) {
+  let script = /<script>([\s\S]*)<\/script>/u.exec(MEETING_CARD_HTML)![1]!;
+  // How long the card stays once the pointer leaves it, shortened for a test.
+  if (options.afterHoverMs !== undefined) {
+    script = script.replace(
+      /const AFTER_HOVER_MS = \d+;/u,
+      `const AFTER_HOVER_MS = ${options.afterHoverMs};`,
+    );
+  }
+  class Element extends EventTarget {
+    textContent = "";
+    hidden = false;
+    src = "";
+    offsetWidth = 0;
+    classList = { add() {}, remove() {} };
+    getBoundingClientRect() {
+      return { height: 120 };
+    }
+  }
+  const elements = new Map<string, Element>();
+  const body = new Element();
+  const document = Object.assign(new EventTarget(), {
+    body,
+    title: "",
+    getElementById(id: string) {
+      if (!elements.has(id)) elements.set(id, new Element());
+      return elements.get(id)!;
+    },
+  });
+  const page = new Function(
+    "document",
+    `${script}\nreturn { render, answer, hold: typeof hold === "function" ? hold : () => {} };`,
+  )(document) as {
+    render(state: Record<string, unknown>): number;
+    answer(): Promise<string | null>;
+    hold(on: boolean): void;
+  };
+  const ask = (token: number, timeoutMs = 20) => {
+    page.render({
+      token,
+      title: "Opengeni",
+      question: "Record this call?",
+      reason: "A call in Zoom started.",
+      action: "Record",
+      dismiss: "Not now",
+      icon: null,
+      timeoutMs,
+    });
+    return page.answer();
+  };
+  return {
+    ask,
+    hold: (on: boolean) => page.hold(on),
+    press: (id: "act" | "dismiss") => document.getElementById(id).dispatchEvent(new Event("click")),
+    /** What Chromium replays when the window shows again: the pointer where it last was. */
+    replay: () => {
+      for (const type of ["mouseover", "mouseenter", "mousemove"]) {
+        body.dispatchEvent(new Event(type));
+      }
+    },
+    key: (key: string) => document.dispatchEvent(Object.assign(new Event("keydown"), { key })),
+    /** The pointer leaves the page, as the page itself sees it. */
+    leave: () => body.dispatchEvent(new Event("mouseleave")),
+  };
+}
+
+/** What a page's answer is after `ms`: its value, or "pending". */
+async function after(answer: Promise<string | null>, ms: number) {
+  return Promise.race([answer, new Promise((resolve) => setTimeout(() => resolve("pending"), ms))]);
+}
+
+describe("the card's page", () => {
+  test("Not now under the pointer doesn't hold the next card: it still times out", async () => {
+    const page = cardPage();
+    const first = page.ask(1);
+    // The pointer goes to the card to press Not now; the card hides under it.
+    page.replay();
+    page.hold(true);
+    page.press("dismiss");
+    expect(await first).toBe("dismiss/1");
+
+    // The next card shows with the pointer elsewhere, though Chromium replays it on the card.
+    const next = page.ask(2);
+    page.replay();
+    expect(await after(next, 80)).toBe("expire/2");
+  });
+
+  test("every way out answers the same way: the buttons, Escape and the time running out", async () => {
+    const page = cardPage();
+    const chosen = page.ask(3, 0);
+    page.press("act");
+    expect(await chosen).toBe("act/3");
+    const escaped = page.ask(4, 0);
+    page.key("Escape");
+    expect(await escaped).toBe("dismiss/4");
+    expect(await after(page.ask(5), 80)).toBe("expire/5");
+    // A key that isn't Escape leaves the question.
+    const asking = page.ask(6, 0);
+    page.key("Enter");
+    expect(await after(asking, 30)).toBe("pending");
+  });
+
+  test("the pointer on the card, as the app sees it, holds it", async () => {
+    const page = cardPage();
+    const held = page.ask(7);
+    page.hold(true);
+    expect(await after(held, 80)).toBe("pending");
+    page.press("dismiss");
+    expect(await held).toBe("dismiss/7");
+  });
+
+  test("the pointer leaving lets the card go, even where the app can't see it leave", async () => {
+    // Under Wayland the app knows the cursor only over its own windows, so
+    // the main process never sees it leave; the page does.
+    const page = cardPage({ afterHoverMs: 20 });
+    const held = page.ask(8);
+    page.hold(true);
+    expect(await after(held, 60)).toBe("pending");
+    page.leave();
+    expect(await after(held, 80)).toBe("expire/8");
+  });
+});
+
+describe("the card watches the real pointer", () => {
+  test("holds while the cursor is on the card, and stops looking once it hides", async () => {
+    FakeBrowserWindow.made = [];
+    const sent: string[] = [];
+    FakeWebContents.answer = (code) => {
+      if (code.startsWith("hold(")) sent.push(code);
+      return code === "answer()" ? new Promise(() => undefined) : Promise.resolve(120);
+    };
+    const cursor = { x: 0, y: 0 };
+    const real = electronStub.screen.getCursorScreenPoint;
+    electronStub.screen.getCursorScreenPoint = () => ({ ...cursor });
+    const view = new MeetingPromptCard({ platform: "darwin", icon: () => null, pointerMs: 2 });
+    try {
+      const handle = view.show(
+        { kind: "record", app: { id: "zoom", name: "Zoom", browser: false, title: "Zoom" } },
+        () => undefined,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const bounds = FakeBrowserWindow.made[0]!.getBounds();
+      cursor.x = bounds.x + 20;
+      cursor.y = bounds.y + 20;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(sent).toEqual(["hold(true)"]);
+      // Moving on it again holds it again, in case the page let go meanwhile.
+      cursor.x += 1;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      cursor.x = 0;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(sent).toEqual(["hold(true)", "hold(true)", "hold(false)"]);
+      handle.close();
+      cursor.x = bounds.x + 20;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(sent).toHaveLength(3);
+
+      // A card that shows where the cursor rests (or where a stale cursor
+      // says it is) isn't held until the pointer moves on it.
+      view.show(
+        { kind: "record", app: { id: "zoom", name: "Zoom", browser: false, title: "Zoom" } },
+        () => undefined,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(sent).toHaveLength(3);
+      cursor.y += 1;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(sent).toEqual(["hold(true)", "hold(true)", "hold(false)", "hold(true)"]);
+    } finally {
+      view.destroy();
+      electronStub.screen.getCursorScreenPoint = real;
+      FakeWebContents.answer = async () => 200;
+    }
+  });
+});
+
+describe("Not now", () => {
+  /** Off the microphone this long after Not now, an app's next call is another call. */
+  const OFF_MIC_GAP_MS = 5 * 60_000;
+
+  test("isn't asked again during that call, however long a mute; a call after a long break is", () => {
+    const { subject, cards, call, microphone } = detection();
+    call(zoom, 0);
+    expect(cards.map((card) => card.prompt.kind)).toEqual(["record"]);
+    cards[0]!.done("dismissed");
+    // Muted, or the device switched: off the microphone long enough to end a call.
+    microphone([], 10_000);
+    microphone([], 10_000 + ENDED_AFTER_MS + 1);
+    microphone([zoom], 10_000 + OFF_MIC_GAP_MS - 1);
+    microphone([zoom], 10_000 + OFF_MIC_GAP_MS - 1 + PROMPT_AFTER_MS);
+    expect(cards).toHaveLength(1);
+
+    // Gone for longer: another call, which is asked about.
+    const left = 10_000 + OFF_MIC_GAP_MS + 10_000;
+    microphone([], left);
+    microphone([], left + ENDED_AFTER_MS + 1);
+    microphone([zoom], left + OFF_MIC_GAP_MS);
+    microphone([zoom], left + OFF_MIC_GAP_MS + PROMPT_AFTER_MS);
+    expect(cards.map((card) => card.prompt.kind)).toEqual(["record", "record"]);
+    subject.stop();
+  });
+
+  test("only turns down that app's call, and a question that timed out asks again as before", () => {
+    const { subject, cards, call, microphone } = detection();
+    call(zoom, 0);
+    cards[0]!.done("dismissed");
+    call(chrome, 20_000);
+    expect(cards.map((card) => card.prompt.app.id)).toEqual(["zoom", "chrome"]);
+    cards[1]!.done("expired");
+    microphone([], 30_000);
+    microphone([], 30_000 + ENDED_AFTER_MS + 1);
+    call(chrome, 60_000);
+    expect(cards.map((card) => card.prompt.app.id)).toEqual(["zoom", "chrome", "chrome"]);
+    subject.stop();
+  });
 });
