@@ -16,6 +16,7 @@ import {
   AGENT_CAPABILITY_IDS,
   allAgentCapabilities,
   noneAgentCapabilities,
+  savedRequestBaseCapabilities,
   type AgentCapabilities,
   type AgentCapabilityId,
   type AgentCapabilityStartingPoint,
@@ -38,7 +39,11 @@ export type AgentCapabilityGroup = {
 
 /** Three groups, in the order people scan them. Every capability appears once. */
 export const AGENT_CAPABILITY_GROUPS: readonly AgentCapabilityGroup[] = [
-  { id: "conversation", label: "Conversation", capabilities: ["humanInput", "webSearch", "media"] },
+  {
+    id: "conversation",
+    label: "Conversation",
+    capabilities: ["humanInput", "notifications", "webSearch", "media"],
+  },
   {
     id: "work",
     label: "Work",
@@ -53,6 +58,7 @@ export const AGENT_CAPABILITY_GROUPS: readonly AgentCapabilityGroup[] = [
       "workspaceFiles",
       "workspaceConnectors",
       "workspaceAdmin",
+      "privacyFacts",
     ],
   },
 ];
@@ -131,7 +137,16 @@ export function capabilityAvailability(
   };
 }
 
-export function baseCapabilities(from: AgentCapabilityStartingPoint): ResolvedAgentCapabilities {
+/**
+ * A request's starting capabilities. `saved` is a workspace default or a
+ * schedule's stored request, which keeps its earlier meaning (see
+ * `savedRequestBaseCapabilities`), matching the server.
+ */
+export function baseCapabilities(
+  from: AgentCapabilityStartingPoint,
+  options: { saved?: boolean | undefined } = {},
+): ResolvedAgentCapabilities {
+  if (options.saved) return savedRequestBaseCapabilities(from);
   return from === "all" ? allAgentCapabilities() : noneAgentCapabilities();
 }
 
@@ -151,6 +166,11 @@ function applyToggles(
     if (id === "skills") next.skills = value as AgentSkillsCapability;
     else next[id] = value as boolean;
   }
+  // Matches the server: turning human input off also turns notifications off
+  // unless the toggles name them.
+  if (toggles.humanInput === false && toggles.notifications === undefined) {
+    next.notifications = false;
+  }
   return next;
 }
 
@@ -161,7 +181,7 @@ function applyToggles(
  */
 export function draftFromRequest(
   capabilities: AgentCapabilities | undefined,
-  options: { legacyHumanInputOff?: boolean | undefined } = {},
+  options: { legacyHumanInputOff?: boolean | undefined; saved?: boolean | undefined } = {},
 ): AgentCapabilityDraft {
   const from: AgentCapabilityStartingPoint =
     capabilities === undefined
@@ -173,8 +193,11 @@ export function draftFromRequest(
     capabilities === undefined || typeof capabilities === "string"
       ? {}
       : (({ from: _from, ...rest }) => rest)(capabilities);
-  const values = applyToggles(baseCapabilities(from), toggles);
-  if (options.legacyHumanInputOff && toggles.humanInput === undefined) values.humanInput = false;
+  const values = applyToggles(baseCapabilities(from, { saved: options.saved }), toggles);
+  if (options.legacyHumanInputOff && toggles.humanInput === undefined) {
+    values.humanInput = false;
+    if (toggles.notifications === undefined) values.notifications = false;
+  }
   return { from, values };
 }
 
@@ -191,8 +214,9 @@ export function draftFromResolved(config: ResolvedAgentConfig): AgentCapabilityD
 export function requestFromDraft(
   draft: AgentCapabilityDraft,
   availability?: CapabilityAvailability,
+  options: { saved?: boolean | undefined } = {},
 ): AgentCapabilities {
-  const base = baseCapabilities(draft.from);
+  const base = baseCapabilities(draft.from, options);
   const toggles: AgentCapabilityToggles = {};
   for (const id of AGENT_CAPABILITY_IDS) {
     const value = draft.values[id];
@@ -264,7 +288,10 @@ export function workspaceAgentDefaultsDraft(input: {
   capabilities: AgentCapabilities | undefined;
   legacyHumanInputOff: boolean;
 }): AgentCapabilityDraft {
-  return draftFromRequest(input.capabilities, { legacyHumanInputOff: input.legacyHumanInputOff });
+  return draftFromRequest(input.capabilities, {
+    legacyHumanInputOff: input.legacyHumanInputOff,
+    saved: true,
+  });
 }
 
 /** Tool owner in product words, for the Technical details list. */

@@ -15,6 +15,10 @@ use crate::{Error, Result};
 /// were stored in (`<period>/<digest>`, ADR 25 and 28).
 pub const VERSION: u32 = 4;
 
+/// The format whose chunk references may name a chunk in a pack (ADR 31).
+/// Written only once every reader reads it ([`ChunkStore::writes_packs`]).
+pub const VERSION_PACKS: u32 = 5;
+
 /// The format before, whose manifests are named by their digest alone.
 /// Read, never written.
 pub const VERSION_DIGESTS: u32 = 3;
@@ -52,7 +56,7 @@ impl Head {
     /// The head `bytes` hold, in a format this build reads.
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         let head: Self = serde_json::from_slice(bytes)?;
-        if head.version != VERSION && head.version != VERSION_DIGESTS {
+        if ![VERSION_DIGESTS, VERSION, VERSION_PACKS].contains(&head.version) {
             return Err(Error::Invalid("a stored copy of an unknown version"));
         }
         Ok(head)

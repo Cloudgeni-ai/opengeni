@@ -1,4 +1,5 @@
 import type { CallToolResultContent, MCPCallToolOptions, MCPServer } from "@openai/agents";
+import { ResponseBodyLimitError } from "@opengeni/network";
 import { load as parseYaml } from "js-yaml";
 
 import { applyCredentialPlacements } from "./auth";
@@ -42,6 +43,8 @@ export interface OpenApiParameterBinding {
   readonly description?: string;
   readonly style?: string;
   readonly explode?: boolean;
+  /** A path parameter expanded as a path: `/` is kept and each segment encoded. */
+  readonly allowReserved?: true;
 }
 
 export interface OpenApiOperationBinding {
@@ -264,6 +267,13 @@ export function compileOpenApiRevision(
       ...(Object.values(bindings).some((binding) => binding.parameters.some(isNonExplodedFormQuery))
         ? { queryArraySerializationVersion: 1 }
         : {}),
+      // Older compilers ignored allowReserved, so the same document compiled
+      // to different bindings.
+      ...(Object.values(bindings).some((binding) =>
+        binding.parameters.some((parameter) => parameter.allowReserved),
+      )
+        ? { reservedPathExpansionVersion: 1 }
+        : {}),
       ...(options.schemaMode ? { schemaMode: options.schemaMode } : {}),
       // Reviewed read-only overrides change tool safety, so they are part of the
       // executable identity. Absent overrides keep existing digests unchanged.
@@ -415,11 +425,16 @@ export async function invokeOpenApiOperation(
   }
   assertSearchEntityTypes(binding, args);
   const firstCredential = await resolveOpenApiCredential(options, binding, toolId, args, false);
+  let credential = firstCredential;
+  // Redirect hops share the deadline of the request that answered with them.
+  let startedAt = Date.now();
   let response = await sendOpenApiRequest(options, binding, args, firstCredential, signal);
   if (response.status === 401 && options.credentialResolver && options.authority.connectionRef) {
     const refreshed = await resolveOpenApiCredential(options, binding, toolId, args, true);
     if (isReplaySafeMethod(binding.method) && refreshed) {
       await response.body?.cancel().catch(() => undefined);
+      credential = refreshed;
+      startedAt = Date.now();
       response = await sendOpenApiRequest(options, binding, args, refreshed, signal);
     } else {
       await response.body?.cancel().catch(() => undefined);
@@ -432,27 +447,43 @@ export async function invokeOpenApiOperation(
       );
     }
   }
-  if (response.status >= 300 && response.status < 400) {
-    await response.body?.cancel().catch(() => undefined);
+  const redirected = response.status >= 300 && response.status < 400;
+  if (redirected) {
+    response = await followCredentialFreeRedirects(
+      options,
+      binding,
+      buildOperationUrl(binding, args),
+      response,
+      credential,
+      startedAt,
+      signal,
+    );
+  }
+  let payload: Awaited<ReturnType<typeof readIntegrationResponse>>;
+  try {
+    payload = await readIntegrationResponse(
+      response,
+      options.maxResponseBytes ?? DEFAULT_INTEGRATION_RESPONSE_BYTES,
+    );
+  } catch (error) {
+    if (!(error instanceof ResponseBodyLimitError)) throw error;
     throw new IntegrationInvocationError(
-      "redirect_rejected",
-      "Integration attempted to redirect a credential-bearing request",
+      "response_too_large",
+      `The provider's response is larger than the ${error.maxBytes}-byte limit; ask for less, for example a smaller page or fewer fields`,
       binding.method === "get" || binding.method === "head" ? "failed" : "unknown",
       false,
       response.status,
     );
   }
-  const payload = await readIntegrationResponse(
-    response,
-    options.maxResponseBytes ?? DEFAULT_INTEGRATION_RESPONSE_BYTES,
-  );
   const result = {
     ok: response.ok,
     status: response.status,
     contentType: payload.contentType,
     data: payload.data,
   };
-  if (!response.ok && (response.status === 401 || response.status === 403)) {
+  // A redirect target (a pre-signed URL) answers for itself, not for the
+  // connected account, so its refusal is the provider's result.
+  if (!redirected && !response.ok && (response.status === 401 || response.status === 403)) {
     throw new IntegrationInvocationError(
       "authorization_rejected",
       "The connected account is no longer authorized for this operation",
@@ -553,6 +584,97 @@ async function resolveOpenApiCredential(
     );
   }
   return credential;
+}
+
+/** Redirect hops a safe read may follow, e.g. Graph `/content` to its download URL. */
+export const MAX_INTEGRATION_REDIRECTS = 3;
+const FOLLOWED_REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/**
+ * Follow a safe read's redirects without its credentials. Providers commonly
+ * answer a download with a redirect to a pre-signed URL (Microsoft Graph
+ * `/content`, file exports, archives); the URL itself authorizes the read.
+ * Each hop goes through the same pinned transport and deadline, carries no
+ * Authorization or other credential header, cookie or credential query
+ * parameter, and never downgrades from https. A mutation's redirect is still
+ * rejected: its side effect may already have happened.
+ */
+async function followCredentialFreeRedirects(
+  options: OpenApiServerOptions,
+  binding: OpenApiOperationBinding,
+  requestUrl: URL,
+  first: Response,
+  credential: Awaited<ReturnType<IntegrationCredentialResolver["resolve"]>>,
+  startedAt: number,
+  signal?: AbortSignal,
+): Promise<Response> {
+  const safe = binding.method === "get" || binding.method === "head";
+  const credentialQueryNames = (credential?.placements ?? [])
+    .filter((placement) => placement.carrier === "query")
+    .map((placement) => placement.name);
+  // The hops share the original request's deadline rather than each getting a new one.
+  const deadline = startedAt + (options.timeoutMs ?? DEFAULT_INTEGRATION_TIMEOUT_MS);
+  let response = first;
+  let current = requestUrl;
+  for (let hop = 0; response.status >= 300 && response.status < 400; hop++) {
+    const location = response.headers.get("location");
+    await response.body?.cancel().catch(() => undefined);
+    const target = location && URL.canParse(location, current) ? new URL(location, current) : null;
+    const reason = !safe
+      ? "Integration attempted to redirect a credential-bearing request"
+      : !FOLLOWED_REDIRECT_STATUSES.has(response.status)
+        ? `Integration answered with HTTP ${response.status}, which is not a redirect it can follow`
+        : !target
+          ? "Integration answered with a redirect that has no usable Location"
+          : hop >= MAX_INTEGRATION_REDIRECTS
+            ? `Integration redirected more than ${MAX_INTEGRATION_REDIRECTS} times`
+            : (current.protocol === "https:" && target.protocol !== "https:") ||
+                target.username ||
+                target.password
+              ? "Integration redirected to an insecure destination"
+              : undefined;
+    if (reason || !target) {
+      throw new IntegrationInvocationError(
+        "redirect_rejected",
+        reason ?? "Integration answered with a redirect that has no usable Location",
+        safe ? "failed" : "unknown",
+        false,
+        response.status,
+      );
+    }
+    target.hash = "";
+    // Deleting re-serializes the whole query, which could break a signed
+    // URL, so only a query that names a credential parameter is touched.
+    for (const name of credentialQueryNames)
+      if (target.searchParams.has(name)) target.searchParams.delete(name);
+    try {
+      response = await fetchWithDeadline(
+        options.transport,
+        target,
+        {
+          method: binding.method.toUpperCase(),
+          headers: new Headers({ accept: "*/*" }),
+          ...(signal ? { signal } : {}),
+        },
+        Math.max(1, deadline - Date.now()),
+      );
+    } catch (error) {
+      if (!(error instanceof IntegrationInvocationError)) throw error;
+      const timedOut = error.code === "request_timeout";
+      throw new IntegrationInvocationError(
+        timedOut ? "request_timeout" : "redirect_failed",
+        timedOut
+          ? "Integration request timed out while following its redirect"
+          : "Following the integration's redirect failed; the destination may be unreachable or not allowed",
+        error.outcome,
+        // A destination the network policy refuses fails the same way again.
+        timedOut && error.retryable,
+        error.status,
+      );
+    }
+    current = target;
+  }
+  return response;
 }
 
 async function sendOpenApiRequest(
@@ -679,6 +801,12 @@ function readParameters(
         (parameter.style ?? "form") === "form" &&
         parameter.explode === false
           ? { style: "form", explode: false }
+          : {}),
+        // Reserved expansion (OpenAPI allowReserved, RFC 6570 `{+name}`), as
+        // reviewed definitions mark it. Other bindings keep their old shape
+        // and immutable revision ID.
+        ...(location === "path" && parameter.allowReserved === true
+          ? { allowReserved: true as const }
           : {}),
         schema: dereferenceSchema(document, parameter.schema),
         ...(stringValue(parameter.description)
@@ -832,6 +960,48 @@ function isReplaySafeMethod(method: OpenApiHttpMethod): boolean {
   return method === "get" || method === "head" || method === "options";
 }
 
+/**
+ * A path parameter's value as a path: each segment is encoded and `/` kept.
+ * Leading, trailing and repeated slashes are dropped, so `/sites/hr` and
+ * `sites/hr` mean the same. A segment that is already percent-encoded (a
+ * path copied from a browser) is decoded once first, so `R%26D%20Team` and
+ * `R&D Team` send the same bytes. A `.` or `..` segment, in either form,
+ * would be resolved away by URL parsing, so it is refused instead of
+ * silently reaching another path.
+ */
+function reservedPathValue(name: string, value: string): string {
+  return value
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => pathSegment(name, decodedOnce(segment)))
+    .join("/");
+}
+
+function decodedOnce(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
+}
+
+/** One encoded path segment; `.` and `..` would move the request elsewhere. */
+function pathSegment(name: string, segment: string): string {
+  const invalid = (reason: string) =>
+    new IntegrationInvocationError(
+      "parameter_invalid",
+      `The path parameter ${JSON.stringify(name)} ${reason}`,
+      "not_started",
+      false,
+    );
+  if (segment === "." || segment === "..") throw invalid("cannot be or contain . or ..");
+  try {
+    return encodeURIComponent(segment);
+  } catch {
+    throw invalid("is not valid Unicode text");
+  }
+}
+
 function buildOperationUrl(binding: OpenApiOperationBinding, args: Record<string, unknown>): URL {
   const pathArgs = objectValue(args.path);
   const path = binding.pathTemplate.replace(/\{([^}]+)\}/g, (_match, name: string) => {
@@ -839,16 +1009,22 @@ function buildOperationUrl(binding: OpenApiOperationBinding, args: Record<string
     if (value === undefined || value === null) {
       throw new IntegrationInvocationError(
         "path_parameter_missing",
-        "A required integration path parameter is missing",
+        `The required path parameter ${JSON.stringify(name)} is missing`,
         "not_started",
         false,
       );
     }
-    return encodeURIComponent(scalarString(value));
+    const parameter = binding.parameters.find(
+      (entry) => entry.location === "path" && entry.name === name,
+    );
+    return parameter?.allowReserved
+      ? reservedPathValue(name, scalarString(value))
+      : pathSegment(name, scalarString(value));
   });
   const base = new URL(binding.serverUrl);
+  // `./` keeps a first segment with a colon (`{drive-id}:/…`) from reading as a scheme.
   const url = new URL(
-    path.replace(/^\//, ""),
+    `./${path.replace(/^\//, "")}`,
     base.toString().endsWith("/") ? base : new URL(`${base}/`),
   );
   const query = objectValue(args.query);

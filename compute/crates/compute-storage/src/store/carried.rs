@@ -36,8 +36,12 @@ const KEEPS: usize = 32;
 /// How soon carrying is tried again after a request failed.
 const RETRY: Duration = Duration::from_secs(60);
 
-/// A chunk by the bytes stored: its stored hash and codec.
+/// A chunk by the bytes stored: its stored hash and codec; or a pack by
+/// its digest, with [`PACK`] for a codec.
 type Key = ([u8; 32], u8);
+
+/// What stands for a codec in a pack's [`Key`].
+const PACK: u8 = u8::MAX;
 
 pub(super) struct Stored {
     /// The period each chunk this store wrote was last stored in.
@@ -65,13 +69,30 @@ impl Stored {
         self.periods.get(&key(reference)?).copied()
     }
 
+    /// The period this store last stored the pack whose digest is `digest`
+    /// in.
+    pub(super) fn pack_period(&self, digest: &str) -> Option<u32> {
+        self.periods.get(&(hex32(digest)?, PACK)).copied()
+    }
+
+    /// Remembers that this store stored the pack whose digest is `digest`
+    /// in `period`, as [`Self::remember`] does a chunk.
+    pub(super) fn remember_pack(&mut self, digest: &str, period: u32) {
+        if let Some(hash) = hex32(digest) {
+            self.insert((hash, PACK), period);
+        }
+    }
+
     /// Remembers that this store stored `reference`'s bytes in `period`.
     /// When full, it forgets the oldest period's chunks first; it does not
     /// forget this period's to make room.
     pub(super) fn remember(&mut self, reference: &ChunkRef, period: u32) {
-        let Some(key) = key(reference) else {
-            return;
-        };
+        if let Some(key) = key(reference) {
+            self.insert(key, period);
+        }
+    }
+
+    fn insert(&mut self, key: Key, period: u32) {
         if !self.periods.contains_key(&key) && self.periods.len() >= self.most {
             match self.periods.values().min().copied() {
                 Some(oldest) if oldest < period => {
@@ -97,7 +118,25 @@ impl fmt::Debug for Stored {
 /// each by its latest name. It holds about as much as the archive's own
 /// references to what it stored, a few hundred bytes a chunk.
 #[derive(Debug, Default)]
-pub struct Held(Mutex<HashMap<Key, ChunkRef>>);
+pub struct Held(Mutex<HashMap<HeldKey, ChunkRef>>);
+
+/// A held chunk whatever period names it: by its bytes when stored on its
+/// own, by its pack's digest and its place there when in a pack. The same
+/// bytes may be in two packs, and each is held.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum HeldKey {
+    Chunk(Key),
+    Packed([u8; 32], u64),
+}
+
+impl HeldKey {
+    fn of(reference: &ChunkRef) -> Option<Self> {
+        match &reference.pack {
+            Some(pack) => Some(Self::Packed(hex32(&pack.digest)?, pack.offset)),
+            None => key(reference).map(Self::Chunk),
+        }
+    }
+}
 
 impl Held {
     #[must_use]
@@ -116,13 +155,13 @@ impl Held {
         self.chunks().is_empty()
     }
 
-    fn chunks(&self) -> std::sync::MutexGuard<'_, HashMap<Key, ChunkRef>> {
+    fn chunks(&self) -> std::sync::MutexGuard<'_, HashMap<HeldKey, ChunkRef>> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Holds `reference`, unless it holds a later name of the same bytes.
     pub(super) fn hold(&self, reference: &ChunkRef) {
-        let Some(key) = key(reference) else {
+        let Some(key) = HeldKey::of(reference) else {
             return;
         };
         let mut chunks = self.chunks();
@@ -134,7 +173,7 @@ impl Held {
     /// Stops holding `reference`, unless it holds a later name of the same
     /// bytes.
     fn release(&self, reference: &ChunkRef) {
-        let Some(key) = key(reference) else {
+        let Some(key) = HeldKey::of(reference) else {
             return;
         };
         let mut chunks = self.chunks();
@@ -156,18 +195,20 @@ impl Held {
     }
 }
 
-/// What carrying an archive's chunks into a new hour did.
+/// What carrying an archive's chunks into a new hour did, counted in
+/// objects: a chunk stored on its own, or a pack.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Kept {
-    /// Chunks copied within the store under the new hour's name.
+    /// Objects copied within the store under the new hour's name.
     pub copied: usize,
     pub copied_bytes: u64,
-    /// Chunks another write stored under the new hour's name already.
+    /// Objects another write stored under the new hour's name already.
     pub found: usize,
-    /// Chunks gone, or not as stored, so not carried: a sweep took them.
-    /// They are no longer held; the archive's next try uploads them.
+    /// Objects gone, or not as stored, so not carried: a sweep took them.
+    /// Their chunks are no longer held; the archive's next try stores
+    /// them again.
     pub lost: usize,
-    /// Chunks not carried because a request failed; tried again soon.
+    /// Objects not carried because a request failed; tried again soon.
     pub failed: usize,
 }
 
@@ -185,36 +226,50 @@ impl ChunkStore {
     /// Carries every chunk `held` holds under an earlier period's name into
     /// this period's, by a copy within the store checked as a write's is,
     /// and holds it by that name instead.
+    ///
+    /// A pack is carried once, whatever number of its chunks are held, and
+    /// counts as one: what is copied is objects.
     pub async fn keep(&self, held: &Held) -> Kept {
         let period = period_of(self.clock.now());
-        let carried: Vec<_> = stream::iter(held.before(period))
-            .map(|from| async move {
-                let to = from.on_day(period);
-                let carried = self.carry(&from.key(), &to).await;
-                (from, to, carried)
+        let mut objects: HashMap<String, Vec<ChunkRef>> = HashMap::new();
+        for from in held.before(period) {
+            objects.entry(from.key()).or_default().push(from);
+        }
+        let carried: Vec<_> = stream::iter(objects.into_values())
+            .map(|chunks| async move {
+                let to = chunks[0].on_day(period);
+                let carried = self.carry(&chunks[0].key(), &to).await;
+                (chunks, to, carried)
             })
             .buffer_unordered(KEEPS)
             .collect()
             .await;
         let mut kept = Kept::default();
-        for (from, to, carried) in carried {
+        for (chunks, to, carried) in carried {
             match carried {
                 Ok(Some(copied)) => {
                     if copied {
-                        self.stored().remember(&to, period);
+                        match &to.pack {
+                            Some(pack) => self.stored().remember_pack(&pack.digest, period),
+                            None => self.stored().remember(&to, period),
+                        }
                         kept.copied += 1;
-                        kept.copied_bytes += u64::from(to.stored_len);
+                        kept.copied_bytes += to.object_len();
                     } else {
                         kept.found += 1;
                     }
-                    held.hold(&to);
+                    for from in &chunks {
+                        held.hold(&from.on_day(period));
+                    }
                 }
                 Ok(None) => {
-                    held.release(&from);
+                    for from in &chunks {
+                        held.release(from);
+                    }
                     kept.lost += 1;
                 }
                 Err(error) => {
-                    tracing::warn!(chunk = %from.key(), %error, "chunk not carried into the new hour; trying again");
+                    tracing::warn!(object = %to.key(), %error, "object not carried into the new hour; trying again");
                     kept.failed += 1;
                 }
             }
@@ -262,7 +317,16 @@ impl ChunkStore {
 
 /// `reference`'s key; `None` for a stored hash that is not 64 hex digits.
 fn key(reference: &ChunkRef) -> Option<Key> {
-    let hex = reference.stored_hash.as_bytes();
+    let codec = match reference.codec {
+        Codec::Raw => 0,
+        Codec::Zstd => 1,
+    };
+    Some((hex32(&reference.stored_hash)?, codec))
+}
+
+/// The 32 bytes 64 hex digits spell.
+fn hex32(hex: &str) -> Option<[u8; 32]> {
+    let hex = hex.as_bytes();
     if hex.len() != 64 {
         return None;
     }
@@ -270,11 +334,7 @@ fn key(reference: &ChunkRef) -> Option<Key> {
     for (byte, pair) in hash.iter_mut().zip(hex.as_chunks::<2>().0) {
         *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
     }
-    let codec = match reference.codec {
-        Codec::Raw => 0,
-        Codec::Zstd => 1,
-    };
-    Some((hash, codec))
+    Some(hash)
 }
 
 #[cfg(test)]

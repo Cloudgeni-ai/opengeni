@@ -2110,6 +2110,15 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 2
             : 0) +
+          // 1257 automatic top-ups: three FORCE-RLS tables; two mutable journals
+          // and one append-only consent/mutation receipt table, never DELETE.
+          (tables === FORCE_RLS_TABLES || tables === RUNTIME_DML_TABLES
+            ? 3
+            : tables === RUNTIME_READ_INSERT_UPDATE_TABLES
+              ? 2
+              : tables === RUNTIME_READ_INSERT_TABLES
+                ? 1
+                : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -2184,7 +2193,8 @@ describe("runtime database posture evaluator", () => {
         2 + // 1150 Slack agents and their per-person state: full-DML, FORCE-RLS.
         2 + // 1152 Slack agent proposals and Ask forms: full-DML, FORCE-RLS.
         3 + // 1153 Slack agent update settings, recipients and deliveries: full-DML, FORCE-RLS.
-        2; // 1235 Slack agent intro posts and suggestions: full-DML, FORCE-RLS.
+        2 + // 1235 Slack agent intro posts and suggestions: full-DML, FORCE-RLS.
+        3; // 1257 automatic top-ups: two read/insert/update and one read/insert, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");

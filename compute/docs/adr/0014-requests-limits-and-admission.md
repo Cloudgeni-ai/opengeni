@@ -372,8 +372,9 @@ pick a VM.
     disk's length in whole units plus 1/256 of it for the blocks that map
     it (ext4 maps 340 data blocks per 4 KiB of extent tree), less what the
     disk already holds alone. Until a VM is first measured it books the
-    whole bound. The agent measures every sample, before its disk
-    reading: on ext4 every allocated block counts; on XFS, where a disk
+    whole bound. The agent measures every sample, after its free-space
+    reading with the concurrent-write allowance from ADR 6: on ext4 every
+    allocated block counts; on XFS, where a disk
     copied from its template or the base image shares their blocks and a
     write to a shared block takes a new one, only blocks the disk holds
     alone count (`FS_IOC_FIEMAP`), and of those only extents stored as
@@ -381,10 +382,20 @@ pick a VM.
     blocks. On btrfs no block counts and the whole bound stays booked:
     every write there takes new blocks, and the old ones are freed only
     once nothing in their extent is used. A sleeping VM books no growth:
-    no guest writes to its disk.
+    no guest writes to its disk. Its headroom is nevertheless measured
+    while no step holds it, at admission and after a successful pause,
+    so a local wake need not assume the file is empty. A missing or
+    unreadable file keeps the whole bound; an in-flight step is never
+    measured as a resting disk.
   - A wake from object storage books its local copy from admission until
-    the copy is whole: its disk at that bound, its memory image (what the
-    pager fills while the guest runs) and 64 MiB of device state. A failed
+    the copy is whole: its memory image (what the pager fills while the
+    guest runs) and 64 MiB of device state, besides the one disk booking
+    above. Fetching the disk and guest writes fill the same file: they
+    share its bound, not two added reservations. A remote wake replaces
+    the file, so it starts at the whole bound regardless of an earlier
+    local copy's measured headroom; after Fetch it keeps that bound until
+    measured again. The disk is fetched whole before Restore; only memory
+    keeps hydrating alongside the guest. A failed
     fetch keeps it for its retry; a wake that gives up gives it up. The
     agent reports the end of the fill, measured every sample, and a
     restarted agent reports a fill it finds still running. A fill that
@@ -437,6 +448,50 @@ pick a VM.
   least recently used first. A step that fails, such as a save the disk
   cannot hold, shows in the sandbox's status as `failed_step` until the
   same step succeeds on a retry.
+
+### Amendment: count the disk file once (2026-11-04)
+
+`Size.disk` bounds the disk file, and `DiskGrowth` measures what it can
+still allocate. `Size.fetch` now holds only fetched memory and device
+state. The same decomposition applies to first-wake/adopt checks and to
+ongoing reservations. While hydration lasts, the disk's reservation falls
+with measured headroom, rather than retaining a second full disk inside
+`fetch`. Pauses and checkpoints still book the whole disk: trim can free
+blocks the guest immediately reuses, and a checkpoint clone makes formerly
+exclusive extents shared. Missing readings and unsupported extent proofs
+remain conservative. Failed fetches still carry their possible disk and
+memory writes until the next free-space reading, separately from the
+retry's future writes; this is not a second future copy of the disk.
+
+The two memory reservations are **not** the same bytes. Save and checkpoint
+first wait for the fetched base image to be whole (`Job::settled`), but
+that base remains allocated while the snapshot and merge are written.
+With shared extents, changed snapshot pages and their merged image share
+blocks (`copy_file_range`), so the save adds at most one memory image;
+they do not share changed pages with the fetched base. Without shared
+extents, the diff and separate merged output can each take an image, so
+the save needs two. Serializing hydration before the save therefore does
+not allow taking the maximum of the two bookings: the fetched image is
+not removed before the save writes. Keep `save + fetch`, with a 64 MiB
+allowance for each. No save/archive representation changes are needed.
+
+For a 32 GiB disk and 16 GiB memory, with 4 KiB allocation units:
+
+| Reservation | Before | After |
+| --- | ---: | ---: |
+| Remote wake, shared extents | 96.375 GiB / 103.48 GB | 64.25 GiB / 68.99 GB |
+| Remote wake, no shared extents | 112.375 GiB / 120.66 GB | 80.25 GiB / 86.17 GB |
+| Local wake, shared extents, disk holds 24 GiB exclusively after trim | 48.1875 GiB / 51.74 GB | 24.1875 GiB / 25.97 GB |
+
+The disk bound is 32.125 GiB (length plus 1/256); one memory allowance is
+16.0625 GiB. The remote shared-extents case is therefore
+`32.125 + 16.0625 + 16.0625`, not twice the disk plus those images.
+If that disk subsequently holds 24 GiB exclusively while memory still
+hydrates, its future booking is 40.25 GiB / 43.22 GB. A checkpoint during
+hydration restores the whole-disk booking, 64.25 GiB, until the step ends
+and a reading accounts for what it wrote. Local-wake savings depend on
+exclusive allocated blocks, not logical file length or guest-used space;
+shared extents and btrfs may still require the whole disk bound.
 
 ## Consequences
 

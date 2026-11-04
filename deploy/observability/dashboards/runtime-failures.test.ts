@@ -49,8 +49,6 @@ describe("runtime failures dashboard", () => {
       "opengeni_session_event_publish_seconds_bucket",
       "opengeni_model_calls_total",
       "opengeni_model_invalid_requests_total",
-      "opengeni_model_tool_name_repairs_total",
-      "opengeni_model_tool_name_retries_total",
       "alertmanager_notifications_failed_total",
       "kube_deployment_status_replicas_available",
       "kube_cronjob_status_last_successful_time",

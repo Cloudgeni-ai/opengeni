@@ -41,10 +41,12 @@ fn capacity() -> Capacity {
         cpu_millis: 4000,
         cpu_free_millis: 4000,
         disk_free_mib: 1024,
+        disk_reclaimable_mib: 0,
         ready: Vec::new(),
         awake: 0,
         sandboxes: 0,
         pointers_in_service: true,
+        reads_packs: true,
         info: None,
     }
 }
@@ -2107,6 +2109,7 @@ fn earlier(name: &str) -> Register {
     Register {
         capacity: Capacity {
             pointers_in_service: false,
+            reads_packs: false,
             ..capacity()
         },
         ..register(name, random(), Vec::new())

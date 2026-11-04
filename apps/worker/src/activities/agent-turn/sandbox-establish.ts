@@ -83,6 +83,7 @@ import {
   sandboxEstablishPolicyDecision,
   shouldPrefetchManagedSandbox,
   reconcileActiveSandboxPointer,
+  readTurnRouteFact,
   sandboxSettingsForRoute,
 } from "./sandbox-route";
 import type { ClaimTurnOk } from "./claim";
@@ -204,14 +205,20 @@ export async function resolveSandboxRoute(deps: SandboxRouteDeps): Promise<Sandb
   // home box for a machine-primary turn), buildAgent (skip the repository clone
   // hook so a private repo is never `git clone`d onto the user's real disk), and
   // the warm-rate (a machine accrues ZERO cloud warm-seconds). The active pointer
-  // + its sandbox row are loaded ONCE here (best-effort, never throwing) and the
+  // + its sandbox row are loaded ONCE here and the
   // SAME values feed resolveActiveSandboxBackend (the tested gate) AND the
   // machine-primary establish branch (enrollmentId/epoch/workingDir) below — no
   // double read, no read-skew between the gate decision and the establish. With
   // routing OFF this is byte-for-byte the legacy path: no reads, undefined backend.
+  // These reads decide which box the turn uses, so they fail CLOSED: a read that
+  // still fails after a brief retry throws before anything touches a sandbox, and
+  // the attempt is retried. Reading a failure as "no machine" would start setup,
+  // credential seeding and file downloads on the managed home of a chat whose
+  // route names a Connected Machine, and the attempt would then be discarded the
+  // moment the routing proxy saw the real pointer.
   const routingOn = routingEnabled(settings);
   let activeSandboxPointer = routingOn
-    ? await readActiveSandbox(db, input.workspaceId, input.sessionId).catch(() => null)
+    ? await readTurnRouteFact(() => readActiveSandbox(db, input.workspaceId, input.sessionId))
     : null;
   // TURN-START RECONCILE (issue #341 invariant B / Shapes 1+2): a persisted
   // pointer whose target is STRUCTURALLY unestablishable at turn start would strand
@@ -219,9 +226,9 @@ export async function resolveSandboxRoute(deps: SandboxRouteDeps): Promise<Sandb
   // emit a visible event, honoring a concurrent higher-epoch swap. The sandbox row
   // is loaded HERE, inside reconcile, via a NON-swallowing lookup: a null decision
   // then means the row is genuinely absent, never a suppressed transient DB error
-  // (which would wrongly clear a healthy user-chosen pointer). On a lookup throw the
-  // reconcile fails open — pointer untouched, record null (machinePrimary:false),
-  // no event — and the establish branch below reads the returned values.
+  // (which would wrongly clear a healthy user-chosen pointer). A lookup that still
+  // throws after its brief retry propagates — pointer untouched, no event, no box —
+  // and the establish branch below reads only values that were actually loaded.
   let activeSandboxRecord: SandboxRecord | null = null;
   if (routingOn) {
     const reconciled = await reconcileActiveSandboxPointer(
@@ -233,18 +240,20 @@ export async function resolveSandboxRoute(deps: SandboxRouteDeps): Promise<Sandb
       },
       activeSandboxPointer,
       (sandboxId) =>
-        getSandboxForAttempt(
-          db,
-          {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            subjectId: fileAuthoritySubjectId,
-            sessionId: input.sessionId,
-            turnId: turn.id,
-            attemptId: input.attemptId,
-            executionGeneration: turn.executionGeneration,
-          },
-          sandboxId,
+        readTurnRouteFact(() =>
+          getSandboxForAttempt(
+            db,
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              subjectId: fileAuthoritySubjectId,
+              sessionId: input.sessionId,
+              turnId: turn.id,
+              attemptId: input.attemptId,
+              executionGeneration: turn.executionGeneration,
+            },
+            sandboxId,
+          ),
         ),
       eventing.publish
         ? async (events) => {

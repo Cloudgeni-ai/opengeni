@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { type Permission, signDelegatedAccessToken } from "@opengeni/contracts";
-import type { TranscriptionService } from "@opengeni/core";
+import { TranscriptionServiceError, type TranscriptionService } from "@opengeni/core";
 import * as dbModule from "@opengeni/db";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
@@ -68,6 +68,40 @@ afterEach(() => {
 });
 
 describe("transcription routes", () => {
+  test.each(["subscription_api_unavailable", "subscription_plan_required"] as const)(
+    "preserves actionable %s admission errors",
+    async (subscriptionCode) => {
+      spyOn(dbModule, "getWorkspace").mockResolvedValue({ settings: {} } as never);
+      const transcription = service(false);
+      transcription.selectProvider = async () => {
+        throw new TranscriptionServiceError({
+          code: "unavailable",
+          subscriptionCode,
+          status: subscriptionCode === "subscription_api_unavailable" ? 403 : 402,
+          message:
+            subscriptionCode === "subscription_api_unavailable"
+              ? "Choose a credit-billed model for API use."
+              : "Upgrade to Pro to use your own subscription.",
+        });
+      };
+      const response = await app(transcription).request(
+        `/v1/workspaces/${WORKSPACE}/transcriptions`,
+        {
+          method: "POST",
+          headers: { authorization: await bearer(), "content-type": "audio/webm" },
+          body: new Uint8Array([1]),
+        },
+      );
+      expect(response.status).toBe(subscriptionCode === "subscription_api_unavailable" ? 403 : 402);
+      const body = await response.json();
+      expect(body.error?.details ?? body.details).toMatchObject({
+        code: subscriptionCode,
+        ...(subscriptionCode === "subscription_plan_required"
+          ? { action: { type: "upgrade_plan" } }
+          : {}),
+      });
+    },
+  );
   test("does not advertise unscoped subscription capability", async () => {
     expect((await app(service(true)).request("/v1/config/client")).status).toBe(200);
     expect(await (await app(service(true)).request("/v1/config/client")).json()).toMatchObject({

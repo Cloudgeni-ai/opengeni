@@ -19,7 +19,9 @@ To hear when work finishes, or to give each run short-lived credentials from you
 
 ## Understand costs
 
-On [app.opengeni.ai](https://app.opengeni.ai), usage is paid with prepaid credits, or billed by your provider when you connect your own model subscription or key. When credits run out, the turn ends and the session continues after a top-up.
+API and embedded-product usage spends prepaid credits, not monthly plan credit. Connected AI subscriptions cannot serve API requests, even on a paid plan. Choose a credit-billed model, or connect your own provider API key; own-key fees follow the deployment's configuration and are currently paused at 0% on [app.opengeni.ai](https://app.opengeni.ai). Your provider still bills its own key usage.
+
+In the Opengeni apps, Free provides eligible accounts $10 monthly trial credit. Pro starts at $20/month; Pro, Max and Enterprise include connected AI subscriptions with no usage fee, within the provider's limits. When credits run out on a credit-billed model, add credits before continuing.
 
 - One turn can include several model calls and tool calls. Long goals and large tool schemas cost more.
 - `getBillingUsage` returns usage for accounting (requires billing permission).

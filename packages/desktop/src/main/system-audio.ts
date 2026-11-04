@@ -18,6 +18,7 @@ import {
   type DesktopSystemAudioError,
   type DesktopSystemAudioErrorCode,
 } from "../contract";
+import { onPageLeft } from "./page-left";
 
 /** How often samples go to the page: a tenth of a second. */
 const BATCHES_PER_SECOND = 10;
@@ -300,7 +301,8 @@ export function systemAudioHelperName(platform: NodeJS.Platform = process.platfo
  * Answer the preload's system audio calls (`@opengeni/desktop/preload/system-audio`)
  * with these captures. `allow` throws for a sender that may not record, such
  * as a page on another origin or a subframe. A page's capture ends when it
- * navigates away or closes.
+ * leaves its document (see `onPageLeft`) or closes; a navigation that is
+ * cancelled, such as a link opened in the browser, keeps it.
  */
 export function handleSystemAudioIpc(input: {
   ipcMain: Pick<IpcMain, "handle">;
@@ -315,9 +317,7 @@ export function handleSystemAudioIpc(input: {
       pages.add(page);
       const end = () => input.captures.stopFor(page);
       page.once("destroyed", end);
-      page.on("did-start-navigation", (details) => {
-        if (details.isMainFrame && !details.isSameDocument) end();
-      });
+      onPageLeft(page, end);
     }
     try {
       return { ok: true as const, ...(await input.captures.start(page)) };
