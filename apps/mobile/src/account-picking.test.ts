@@ -247,13 +247,20 @@ test("a sheet that failed to open does not block the next pick", async () => {
 
 test("an account whose credential is missing shows as signed out from launch", async () => {
   const { probe, view } = await mount(
-    { accounts: [work, personal], activeId: "work" },
+    { accounts: [work, personal, account("home")], activeId: "work" },
     { work: "ogapp_work" },
   );
   try {
     expect(probe.state.status).toBe("ready");
     expect(probe.state.accounts.find((each) => each.id === "personal")?.signedOut).toBe(true);
+    expect(probe.state.accounts.find((each) => each.id === "home")?.signedOut).toBe(true);
     expect(probe.state.accounts.find((each) => each.id === "work")?.signedOut).toBeUndefined();
+    // Both marks in one save, so a slower write can't undo the other.
+    expect(saved).toHaveLength(1);
+    expect(saved[0]?.accounts.filter((each) => each.signedOut).map((each) => each.id)).toEqual([
+      "personal",
+      "home",
+    ]);
   } finally {
     await view.unmount();
   }
@@ -318,6 +325,14 @@ test("a retry from the sheet makes the readable account the one in use", async (
     expect(probe.state.account?.id).toBe("personal");
     expect(probe.state.status).toBe("ready");
     expect(probe.state.previousAccountId).toBe("work");
+    // An account removed while its read ran has nothing to go to.
+    await act(async () => {
+      outcome = await probe.state.retrySignIn("gone");
+      await flush();
+    });
+    expect(outcome).toBe("signIn");
+    expect(probe.state.account?.id).toBe("personal");
+    expect(probe.state.status).toBe("ready");
   } finally {
     await view.unmount();
   }

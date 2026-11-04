@@ -86,7 +86,7 @@ export default function RootLayout() {
                   <Stack.Screen
                     name="add-account"
                     // One sign-in sheet at a time: pushing it again goes to the open one.
-                    getId={() => "add-account"}
+                    dangerouslySingular
                     options={{ headerShown: false, presentation: "modal" }}
                   />
                   <Stack.Screen name="call" options={{ headerShown: false }} />

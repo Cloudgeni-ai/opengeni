@@ -59,7 +59,9 @@ export function SignInScreen({
     : signInSwitchChoices(accounts, account?.id ?? null, previousAccountId);
   const [server, setServer] = useState(expired?.baseUrl ?? DEFAULT_SERVER_URL);
   const [editingServer, setEditingServer] = useState(false);
-  const [busy, setBusy] = useState(false);
+  // The action in progress, so its own button shows it.
+  const [running, setRunning] = useState<"signIn" | "retry" | null>(null);
+  const busy = running !== null;
   const [problem, setProblem] = useState<string | null>(null);
   // A successful sign-in replaces this screen before the flow settles.
   const mounted = useRef(true);
@@ -76,29 +78,27 @@ export function SignInScreen({
       setProblem("Enter the address you open Opengeni at, like app.opengeni.ai.");
       return;
     }
-    setBusy(true);
+    setRunning("signIn");
     setProblem(null);
     try {
       const result = await addAccount(baseUrl);
       if (result.kind === "signedIn") onDone?.();
       else if (result.kind === "failed" && mounted.current) setProblem(result.message);
     } finally {
-      if (mounted.current) setBusy(false);
+      if (mounted.current) setRunning(null);
     }
   };
 
   const retry = async () => {
     if (!expired) return;
-    setBusy(true);
+    setRunning("retry");
     setProblem(null);
     try {
       const outcome = await retrySignIn(expired.id);
       if (outcome === "ready") onDone?.();
-      else if (outcome === "unreadable" && mounted.current) {
-        setProblem("Still couldn't read it. Try again, or sign in again.");
-      }
+      else if (outcome === "unreadable" && mounted.current) setProblem("Still couldn't read it.");
     } finally {
-      if (mounted.current) setBusy(false);
+      if (mounted.current) setRunning(null);
     }
   };
 
@@ -192,7 +192,7 @@ export function SignInScreen({
                 variant="primary"
                 size="form"
                 label="Try again"
-                busy={busy}
+                busy={running === "retry"}
                 disabled={busy}
                 onPress={() => void retry()}
                 style={{ height: 44 }}
@@ -200,7 +200,7 @@ export function SignInScreen({
               <Button
                 variant="ghost"
                 size="form"
-                label="Sign in again"
+                label={running === "signIn" ? "Waiting for the browser…" : "Sign in again"}
                 disabled={busy}
                 onPress={() => void start()}
               />

@@ -244,6 +244,32 @@ test("the list waits while a sign-in is in progress", async () => {
   }
 });
 
+test("in the unreadable sheet, each action shows its own progress and the list stays away", async () => {
+  state = { ...state, account: work, unreadable: new Set(["home"]), previousAccountId: null };
+  let finish: (value: { kind: string }) => void = () => undefined;
+  state.signIn = new Promise((resolve) => {
+    finish = resolve;
+  });
+  const view = await renderComponent(
+    createElement(SignInScreen, { target: home, onCancel: () => undefined }),
+  );
+  try {
+    expect(view.container.textContent).toContain("Couldn't read your sign-in");
+    expect(button(view.container, "Cancel")).toBeDefined();
+    expect(switchRows(view.container)).toEqual([]);
+    await act(async () => button(view.container, "Sign in again")?.click());
+    expect(button(view.container, "Waiting for the browser…")).toBeDefined();
+    expect(button(view.container, "Try again")).toBeDefined();
+    await act(async () => {
+      finish({ kind: "cancelled" });
+      await state.signIn;
+    });
+    expect(button(view.container, "Sign in again")).toBeDefined();
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("the sheet for an account that is no longer on the device adds an account instead", async () => {
   state = { ...state, account: work, accounts: [work, home], previousAccountId: null };
   params = { account: "gone" };

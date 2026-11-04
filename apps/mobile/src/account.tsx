@@ -175,25 +175,64 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       return next;
     });
   }, []);
+  /** Mark accounts signed out, all in one save so no write undoes another. */
+  const markSignedOut = useCallback(
+    (ids: readonly string[]) => {
+      const current = snapshotRef.current;
+      if (!current || ids.length === 0) return;
+      const marks = new Set(
+        ids.filter((id) => current.accounts.some((each) => each.id === id && !each.signedOut)),
+      );
+      if (marks.size === 0) return;
+      void persist({
+        ...current,
+        accounts: current.accounts.map((each) =>
+          marks.has(each.id) ? { ...each, signedOut: true } : each,
+        ),
+      });
+    },
+    [persist],
+  );
+  // Reads of one account can overlap; only the newest one may mark it.
+  const readGenerations = useRef(new Map<string, number>());
   /**
-   * Read an account's saved sign-in. A missing one marks the account signed
+   * Read accounts' saved sign-ins. A missing one marks the account signed
    * out, so every menu and list shows it as it is; one that couldn't be read
    * is only noted, since the read may work next time.
    */
+  const checkCredentials = useCallback(
+    async (ids: readonly string[]) => {
+      const generations = ids.map((id) => {
+        const next = (readGenerations.current.get(id) ?? 0) + 1;
+        readGenerations.current.set(id, next);
+        return next;
+      });
+      const reads = await Promise.all(
+        ids.map((id) =>
+          readAccountToken(id).then(
+            (credential) => ({ credential, failed: false }),
+            () => ({ credential: null, failed: true }),
+          ),
+        ),
+      );
+      const missing: string[] = [];
+      ids.forEach((id, index) => {
+        const read = reads[index];
+        if (!read || readGenerations.current.get(id) !== generations[index]) return;
+        noteRead(id, read.failed);
+        if (!read.failed && !read.credential) missing.push(id);
+      });
+      markSignedOut(missing);
+      return reads;
+    },
+    [markSignedOut, noteRead],
+  );
   const checkCredential = useCallback(
     async (id: string) => {
-      const read = await readAccountToken(id).then(
-        (credential) => ({ credential, failed: false }),
-        () => ({ credential: null, failed: true }),
-      );
-      noteRead(id, read.failed);
-      if (!read.failed && !read.credential) {
-        const known = snapshotRef.current?.accounts.find((each) => each.id === id);
-        if (known && !known.signedOut) updateAccount(id, { signedOut: true });
-      }
-      return read;
+      const [read] = await checkCredentials([id]);
+      return read ?? { credential: null, failed: true };
     },
-    [noteRead, updateAccount],
+    [checkCredentials],
   );
 
   useEffect(() => {
@@ -215,10 +254,11 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const current = snapshotRef.current;
     if (!loaded || !current) return;
-    for (const each of current.accounts) {
-      if (each.id !== current.activeId && !each.signedOut) void checkCredential(each.id);
-    }
-  }, [loaded, checkCredential]);
+    const others = current.accounts.filter(
+      (each) => each.id !== current.activeId && !each.signedOut,
+    );
+    if (others.length > 0) void checkCredentials(others.map((each) => each.id));
+  }, [loaded, checkCredentials]);
 
   const [accessContext, setAccessContext] = useState<AccessContext | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -391,9 +431,11 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       const read = await checkCredential(id);
       if (read.failed) return "unreadable";
       if (!read.credential) return "signIn";
-      setToken({ id, value: read.credential });
       const current = snapshotRef.current;
-      if (current && current.activeId !== id && current.accounts.some((each) => each.id === id)) {
+      // Removed while the read ran: nothing to go to.
+      if (!current?.accounts.some((each) => each.id === id)) return "signIn";
+      setToken({ id, value: read.credential });
+      if (current.activeId !== id) {
         rememberWayBack(current, id);
         await persist({ ...current, activeId: id });
       }
