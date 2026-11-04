@@ -14305,7 +14305,7 @@ export const organizationConnectors = pgTable(
   }),
 );
 
-// --- MCP auto-connect (1246) -------------------------------------------------
+// --- MCP auto-connect (1260) -------------------------------------------------
 // Inbound: issuers an organization trusts to vouch for its members (ID-JAG).
 export const organizationMcpTrustedIssuers = pgTable(
   "organization_mcp_trusted_issuers",
