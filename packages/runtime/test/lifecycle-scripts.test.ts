@@ -1778,7 +1778,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(recovered).toBeDefined();
       expect(readFileSync(join(recovered!, "WORK.md"), "utf8")).toBe("agent work\n");
       expect(third.output).toContain(
-        `Notice: moved repository folder aside: ${target}\t${recovered}\tit was not a readable Git work tree`,
+        `Notice: moved repository folder aside []: ${target}\t${recovered}\tunreadable`,
       );
       // no tmp clone leaked beside the target
       expect(
@@ -1787,7 +1787,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   /** The `<target>.opengeni-recovered-*` siblings of a repository folder. */
   function recoveredSiblings(target: string): string[] {
@@ -1874,7 +1874,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(readFileSync(join(recovered[0]!, "dc-uncommitted.txt"), "utf8")).toBe("uncommitted\n");
       expect(readFileSync(join(recovered[0]!, ".git", "HEAD"), "utf8")).toBe("not a ref\n");
       expect(run.output).toContain(
-        `Notice: moved repository folder aside: ${target}\t${recovered[0]}\tit was not a readable Git work tree`,
+        `Notice: moved repository folder aside []: ${target}\t${recovered[0]}\tunreadable`,
       );
       // A fresh, readable clone took its place.
       expect(execFileSync("git", ["-C", target, "status", "--porcelain"])).toBe("");
@@ -1924,6 +1924,30 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(execFileSync("git", ["-C", target, "rev-parse", "HEAD"]).trim()).toBe(agentHead);
       expect(readFileSync(join(target, "dc-uncommitted.txt"), "utf8")).toBe("uncommitted\n");
       expect(recoveredSiblings(target)).toEqual([]);
+
+      // The clone records the commit it materialized, so the agent's own
+      // branches stay in place while the pin is unchanged, even off the pin.
+      expect(
+        execFileSync("git", ["-C", target, "config", "--get", "opengeni.materializedCommit"]),
+      ).toBe(`${first}\n`);
+      execFileSync("git", ["-C", target, "checkout", "-q", "--orphan", "rewrite"]);
+      execFileSync("git", ["-C", target, "commit", "-qm", "rewrite"], { env: commitEnv });
+      const branched = runScript(pinned(first), { HOME: home });
+      expect(branched.status).toBe(0);
+      expect(branched.output).toContain(`Repository resource already present at ${target}`);
+      expect(recoveredSiblings(target)).toEqual([]);
+
+      // A folder cloned before the record existed counts while HEAD is built on
+      // the pin, and gets the record.
+      execFileSync("git", ["-C", target, "checkout", "-q", agentHead]);
+      execFileSync("git", ["-C", target, "config", "--unset", "opengeni.materializedCommit"]);
+      const legacy = runScript(pinned(first), { HOME: home });
+      expect(legacy.status).toBe(0);
+      expect(legacy.output).toContain(`Repository resource already present at ${target}`);
+      expect(
+        execFileSync("git", ["-C", target, "config", "--get", "opengeni.materializedCommit"]),
+      ).toBe(`${first}\n`);
+      expect(recoveredSiblings(target)).toEqual([]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -1967,10 +1991,120 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         agentHead,
       );
       expect(moved.output).toContain(
-        `Notice: moved repository folder aside: ${target}\t${recovered[0]}\tits checked-out commit is not the pinned commit ${second}`,
+        `Notice: moved repository folder aside []: ${target}\t${recovered[0]}\tpin`,
       );
       expect(execFileSync("git", ["-C", target, "rev-parse", "HEAD"]).trim()).toBe(second);
       expect(readFileSync(join(target, "README.md"), "utf8")).toBe("second\n");
+
+      // A pin that moves back to an older commit is enforced too: the folder
+      // holding the newer pin is moved aside.
+      const back = runScript(
+        cloneScriptWithTarget(
+          target,
+          `file://${origin}`,
+          {
+            kind: "repository",
+            uri: "https://github.com/opengeni/test-fixture.git",
+            ref: first,
+            expectedCommitSha: first,
+          },
+          first,
+        ),
+        { HOME: home },
+      );
+      expect(back.status).toBe(0);
+      expect(recoveredSiblings(target)).toHaveLength(2);
+      expect(execFileSync("git", ["-C", target, "rev-parse", "HEAD"]).trim()).toBe(first);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a pinned subpath extract is kept on later turns", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-clone-pinned-subpath-"));
+    try {
+      const origin = makeOrigin(root);
+      mkdirSync(join(origin, "docs"));
+      writeFileSync(join(origin, "docs", "guide.md"), "guide\n");
+      execFileSync("git", ["-C", origin, "add", "docs"]);
+      execFileSync("git", ["-C", origin, "commit", "-qm", "docs"], { env: commitEnv });
+      const sha = execFileSync("git", ["-C", origin, "rev-parse", "HEAD"]).trim();
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      const target = join(root, "ws", "docs");
+      const script = cloneScriptWithTarget(
+        target,
+        `file://${origin}`,
+        {
+          kind: "repository",
+          uri: "https://github.com/opengeni/test-fixture.git",
+          ref: "main",
+          expectedCommitSha: sha,
+          subpath: "docs",
+        },
+        "main",
+        "docs",
+      );
+      expect(runScript(script, { HOME: home }).status).toBe(0);
+      writeFileSync(join(target, "notes.md"), "agent notes\n");
+      const again = runScript(script, { HOME: home });
+      expect(again.status).toBe(0);
+      expect(again.output).toContain(`Repository resource already present at ${target}`);
+      expect(readFileSync(join(target, "notes.md"), "utf8")).toBe("agent notes\n");
+      expect(recoveredSiblings(target)).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a mount point that cannot be renamed has its entries moved aside, or is left whole", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-clone-mount-"));
+    try {
+      const origin = makeOrigin(root);
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      const target = join(root, "ws", "repos", "acme", "mounted");
+      // A mount point refuses rename, like `mv` of a mounted directory.
+      const shim = join(root, "shim");
+      mkdirSync(shim);
+      const realMv = execFileSync("sh", ["-c", "command -v mv"]).trim();
+      const sq = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+      writeFileSync(
+        join(shim, "mv"),
+        [
+          "#!/bin/sh",
+          'src="$1"; [ "$src" = "--" ] && src="$2"',
+          `case "$src" in ${sq(target)}|*/stuck.txt) echo "mv: Device or resource busy" >&2; exit 1 ;; esac`,
+          `exec ${sq(realMv)} "$@"`,
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      const env = { HOME: home, PATH: `${shim}:${process.env.PATH ?? "/usr/bin:/bin"}` };
+      const script = cloneScriptWithTarget(target, `file://${origin}`);
+      mkdirSync(target, { recursive: true });
+      writeFileSync(join(target, "dc-uncommitted.txt"), "uncommitted\n");
+      mkdirSync(join(target, "src"));
+      writeFileSync(join(target, "src", "work.ts"), "work\n");
+
+      const moved = runScript(script, env);
+      expect(copiesHolding(target, "dc-uncommitted.txt")).toHaveLength(1);
+      expect(moved.status).toBe(0);
+      const [copy] = recoveredSiblings(target);
+      expect(readFileSync(join(copy!, "dc-uncommitted.txt"), "utf8")).toBe("uncommitted\n");
+      expect(readFileSync(join(copy!, "src", "work.ts"), "utf8")).toBe("work\n");
+      expect(readFileSync(join(target, "README.md"), "utf8")).toBe("hello\n");
+
+      // One entry that cannot move: everything is put back and nothing re-cloned.
+      writeFileSync(join(target, ".git", "HEAD"), "not a ref\n");
+      writeFileSync(join(target, "stuck.txt"), "stuck\n");
+      writeFileSync(join(target, "dc-uncommitted.txt"), "second\n");
+      const stuck = runScript(script, env);
+      expect(stuck.status).not.toBe(0);
+      expect(stuck.output).toContain("Nothing was deleted.");
+      expect(readFileSync(join(target, "dc-uncommitted.txt"), "utf8")).toBe("second\n");
+      expect(readFileSync(join(target, ".git", "HEAD"), "utf8")).toBe("not a ref\n");
+      expect(readFileSync(join(target, "stuck.txt"), "utf8")).toBe("stuck\n");
+      expect(recoveredSiblings(target)).toEqual([copy]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -2166,10 +2300,15 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       const uri = `file://${empty}`;
       const untouched = join(root, "ws", "untouched");
       const worked = join(root, "ws", "worked");
-      for (const target of [untouched, worked]) {
+      const staged = join(root, "ws", "staged");
+      for (const target of [untouched, worked, staged]) {
         expect(runScript(cloneScriptWithTarget(target, uri), { HOME: home }).status).toBe(0);
       }
       writeFileSync(join(worked, "NOTES.md"), "agent work\n");
+      // Work that exists only in the index still counts as work.
+      writeFileSync(join(staged, "STAGED.md"), "staged work\n");
+      execFileSync("git", ["-C", staged, "add", "STAGED.md"]);
+      rmSync(join(staged, "STAGED.md"));
 
       // Someone else pushes the first commit (for example the user's backup).
       // Commits on another branch only keep the stub; the mount's branch is
@@ -2189,6 +2328,17 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(refilled.status).toBe(0);
       expect(refilled.output).toContain("now has commits; rematerializing");
       expect(readFileSync(join(untouched, "README.md"), "utf8")).toBe("hello\n");
+      expect(recoveredSiblings(untouched)).toEqual([]);
+
+      const stagedRun = runScript(cloneScriptWithTarget(staged, uri), { HOME: home });
+      expect(stagedRun.status).toBe(0);
+      const [stagedCopy] = recoveredSiblings(staged);
+      expect(stagedCopy).toBeDefined();
+      expect(execFileSync("git", ["-C", stagedCopy!, "show", ":STAGED.md"])).toBe("staged work\n");
+      expect(stagedRun.output).toContain(
+        `Notice: moved repository folder aside []: ${staged}\t${stagedCopy}\tremote-commits`,
+      );
+      expect(readFileSync(join(staged, "README.md"), "utf8")).toBe("hello\n");
 
       // A mount with agent work is never replaced.
       const kept = runScript(cloneScriptWithTarget(worked, uri), { HOME: home });
