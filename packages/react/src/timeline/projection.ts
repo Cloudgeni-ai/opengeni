@@ -76,6 +76,8 @@ import type {
 } from "./types";
 import { type OpenGeniText } from "../messages/runtime";
 
+/** Folders a reduced-save notice lists by path; a longer list names kinds. */
+const SAVED_WITHOUT_FOLDERS_SHOWN = 20;
 export { toolDisplayName, mcpToolLeaf, toolMatchesLeaf } from "./tool-display-name";
 
 /** Message identity only: queue placement needs the surrounding turn history. */
@@ -1408,8 +1410,16 @@ export function buildTimeline(
               kind: "notice",
               id: event.id,
               tone: "input",
+              // A long list would bury the notice: past a few folders, name
+              // each kind once (node_modules, .venv, ...), a short list by
+              // construction.
               text: t("timeline.projection.savedWithoutRebuildableFolders", {
-                folders: paths.join(", "),
+                folders:
+                  paths.length > SAVED_WITHOUT_FOLDERS_SHOWN
+                    ? [...new Set(paths.map((path) => path.slice(path.lastIndexOf("/") + 1)))]
+                        .slice(0, SAVED_WITHOUT_FOLDERS_SHOWN)
+                        .join(", ")
+                    : paths.join(", "),
               }),
               occurredAt: event.occurredAt,
             });

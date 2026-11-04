@@ -964,4 +964,19 @@ test("a reduced save names the left-out folders; an ordinary shutdown says nothi
   expect(
     buildTimeline(englishText, [event(2, "sandbox.box.terminated", { persisted: true })]),
   ).toEqual([]);
+  // Hundreds of folders name each kind once instead of burying the notice.
+  const many = [
+    ...Array.from({ length: 300 }, (_, index) => `pkg${index}/__pycache__`),
+    "node_modules",
+    "web/node_modules",
+  ];
+  expect(
+    buildTimeline(englishText, [
+      event(3, "sandbox.box.terminated", { persisted: true, omittedPaths: many }),
+    ]),
+  ).toEqual([
+    expect.objectContaining({
+      text: "This chat's files were saved without folders that can be rebuilt: __pycache__, node_modules.",
+    }),
+  ]);
 });

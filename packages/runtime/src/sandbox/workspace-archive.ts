@@ -114,7 +114,9 @@ export type WorkspaceArchiveIntegrityCode =
   | "workspace_changed_during_capture"
   | "workspace_fingerprint_mismatch"
   | "native_snapshot_reference_invalid"
-  | "native_snapshot_fallback_unverified";
+  | "native_snapshot_fallback_unverified"
+  /** A reduced save (paths left out) did not finish within its hard bound. */
+  | "workspace_capture_timeout";
 
 export class WorkspaceArchiveIntegrityError extends Error {
   readonly name = "WorkspaceArchiveIntegrityError";
@@ -408,19 +410,29 @@ export function workspaceArchiveExcludedPaths(session: unknown): string[] {
   return workspaceFingerprintExcludes(session as WorkspaceSession);
 }
 
+/** A literal path as a glob pattern: `*`, `?`, `[`, `]` and `\` match only
+ * themselves. The Agents SDK escapes its tar `--exclude` patterns the same
+ * way, so the fingerprint leaves out exactly what the archive leaves out. */
+function escapeGlobPattern(path: string): string {
+  return path.replace(/([*?[\]\\])/gu, "\\$1");
+}
+
 function findPruneExpression(excludedPaths: readonly string[]): string {
   const findExcludes = excludedPaths.flatMap((path) => [
-    `-path ${shellQuote(`./${path}`)}`,
-    `-path ${shellQuote(`./${path}/*`)}`,
+    `-path ${shellQuote(`./${escapeGlobPattern(path)}`)}`,
+    `-path ${shellQuote(`./${escapeGlobPattern(path)}/*`)}`,
   ]);
   return findExcludes.length === 0 ? "" : `\\( ${findExcludes.join(" -o ")} \\) -prune -o `;
 }
 
 function workspaceFingerprintCommand(excludedPaths: readonly string[]): string {
-  const tarExcludes = excludedPaths.flatMap((path) => [
-    shellQuote(`--exclude=${path}`),
-    shellQuote(`--exclude=./${path}`),
-  ]);
+  // Exactly the SDK's archive exclusions (`workspaceTarExcludeArgs`): one
+  // escaped pattern anchored at `./`. A bare `--exclude=<name>` would also
+  // match the same name deeper in the tree (`docs/target` for a top-level
+  // `target`), which the archive keeps, so a restore could never verify.
+  const tarExcludes = excludedPaths.map((path) =>
+    shellQuote(`--exclude=./${escapeGlobPattern(path)}`),
+  );
   const findPrefix = findPruneExpression(excludedPaths);
   const script = String.raw`set -eu
 cd /workspace
@@ -533,6 +545,13 @@ export const REBUILDABLE_WORKSPACE_DIRECTORY_NAMES = [
   ".gradle",
 ] as const;
 
+function isRebuildableWorkspaceFolderName(path: string): boolean {
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  return (
+    name === "target" || (REBUILDABLE_WORKSPACE_DIRECTORY_NAMES as readonly string[]).includes(name)
+  );
+}
+
 /** A workspace with more rebuildable folders than this is not reduced: the
  * walk could not size what the save keeps. */
 export const REBUILDABLE_WORKSPACE_PATHS_MAX = 2048;
@@ -562,9 +581,12 @@ export async function findRebuildableWorkspacePaths(
   if (!target || !run) return null;
   const seconds = Math.max(1, Math.floor(timeoutSeconds));
   const names = REBUILDABLE_WORKSPACE_DIRECTORY_NAMES.map((name) => `-name ${shellQuote(name)}`);
+  // A name with a newline in it could forge a "D <path>" line, so any such
+  // path is reported as unparseable (X) instead and the walk is unavailable.
   const script = String.raw`set -u
 cd /workspace 2>/dev/null || exit 0
-out=$(timeout ${seconds} find . -xdev \( -path "*/.git" -o -path "*/.git/*" \) \( -type f -printf "F %s\n" -o -true \) -o -type d \( ${names.join(" -o ")} \) -printf "D %P\n" -prune -o -type d -name target -execdir test -f Cargo.toml \; -printf "D %P\n" -prune -o -type f -printf "F %s\n" 2>/dev/null | awk '/^D / {d+=1; if (d <= ${REBUILDABLE_WORKSPACE_PATHS_MAX}) dl[d]=$0} /^F / {n+=1; s+=$2} END {printf "OPENGENI_REBUILDABLE_V1 %d %.0f %d\n", n, s, d; for (i = 1; i <= d && i <= ${REBUILDABLE_WORKSPACE_PATHS_MAX}; i++) print dl[i]}')
+nl=$(printf '*\n*')
+out=$(timeout ${seconds} find . -xdev \( -path "*/.git" -o -path "*/.git/*" \) \( -type f -printf "F %s\n" -o -true \) -o -path "$nl" -prune -printf "X\n" -o -type d \( ${names.join(" -o ")} \) -printf "D %P\n" -prune -o -type d -name target -execdir test -f Cargo.toml \; -printf "D %P\n" -prune -o -type f -printf "F %s\n" 2>/dev/null | awk '/^D / {d+=1; if (d <= ${REBUILDABLE_WORKSPACE_PATHS_MAX}) dl[d]=$0; next} /^F / {n+=1; s+=$2; next} {x+=1} END {printf "OPENGENI_REBUILDABLE_V1 %d %.0f %d %d\n", n, s, d, x; for (i = 1; i <= d && i <= ${REBUILDABLE_WORKSPACE_PATHS_MAX}; i++) print dl[i]}')
 rc=$?
 [ "$rc" -le 1 ] || exit 0
 printf "%s\n" "$out"`;
@@ -582,23 +604,36 @@ printf "%s\n" "$out"`;
     ]);
     const lines = stdoutFromExecResult(result).split(/\r?\n/u);
     const summary = lines
-      .map((line) => line.trim().match(/^OPENGENI_REBUILDABLE_V1 ([0-9]+) ([0-9]+) ([0-9]+)$/u))
+      .map((line) =>
+        line.trim().match(/^OPENGENI_REBUILDABLE_V1 ([0-9]+) ([0-9]+) ([0-9]+) ([0-9]+)$/u),
+      )
       .find((match) => match !== null);
     if (!summary) return null;
     const fileCount = Number(summary[1]);
     const totalFileBytes = Number(summary[2]);
     const folderCount = Number(summary[3]);
+    const unparseable = Number(summary[4]);
     if (
       !Number.isSafeInteger(fileCount) ||
       !Number.isFinite(totalFileBytes) ||
       !Number.isSafeInteger(folderCount) ||
-      folderCount > REBUILDABLE_WORKSPACE_PATHS_MAX
+      folderCount > REBUILDABLE_WORKSPACE_PATHS_MAX ||
+      unparseable !== 0
     ) {
       return null;
     }
-    const paths = normalizedOmitPaths(
-      lines.filter((line) => line.startsWith("D ")).map((line) => line.slice(2)),
-    );
+    const listed = lines.filter((line) => line.startsWith("D ")).map((line) => line.slice(2));
+    const paths = normalizedOmitPaths(listed);
+    // Every listed folder must be one the walk was asked for, and the list
+    // must be complete (not cut off by the exec's output limit): the kept size
+    // counts none of them, so a folder dropped here would be saved uncounted.
+    if (
+      listed.length !== folderCount ||
+      paths.length !== folderCount ||
+      !paths.every(isRebuildableWorkspaceFolderName)
+    ) {
+      return null;
+    }
     return { paths, kept: { fileCount, totalFileBytes } };
   } catch {
     return null;
@@ -1130,13 +1165,36 @@ async function captureVerifiedWorkspaceArchiveExclusive(
   const ownProperty = Object.hasOwn(manifest, "ephemeralPersistencePaths");
   manifest.ephemeralPersistencePaths = () =>
     new Set<unknown>([...configured.call(manifest), ...omitPaths]);
+  // The SDK's tar has no provider-side timeout of its own. Bound the reduced
+  // save by the caller's hard provider budget so it always settles: a drain
+  // that waits on one that never ends could neither retry nor stop the box.
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const { omitPaths: _omitted, ...captureOptions } = options ?? { requestId: "" };
-    const archive = await captureVerifiedWorkspaceArchiveWithManifestExclusions(
+    const capture = captureVerifiedWorkspaceArchiveWithManifestExclusions(
       session,
       capturedAtMs,
       options ? captureOptions : undefined,
     );
+    const boundMs = options?.providerTimeoutMs;
+    const archive =
+      boundMs !== undefined && Number.isFinite(boundMs) && boundMs > 0
+        ? await Promise.race([
+            capture,
+            new Promise<never>((_resolve, reject) => {
+              timer = setTimeout(
+                () =>
+                  reject(
+                    new WorkspaceArchiveIntegrityError(
+                      "workspace_capture_timeout",
+                      `a workspace capture that leaves paths out did not finish within ${boundMs} ms`,
+                    ),
+                  ),
+                boundMs,
+              );
+            }),
+          ])
+        : await capture;
     if (archive.kind !== "tar" || archive.descriptor.version !== 1) {
       throw new WorkspaceArchiveIntegrityError(
         "native_snapshot_fallback_unverified",
@@ -1145,6 +1203,7 @@ async function captureVerifiedWorkspaceArchiveExclusive(
     }
     return { ...archive, descriptor: { ...archive.descriptor, omittedPaths: omitPaths } };
   } finally {
+    if (timer) clearTimeout(timer);
     if (ownProperty) manifest.ephemeralPersistencePaths = configured;
     else delete manifest.ephemeralPersistencePaths;
   }

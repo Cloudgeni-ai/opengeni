@@ -1066,22 +1066,31 @@ of being cut off by Modal at the wait. After a settled failure, the next full dr
 snapshot of the same lease epoch waits 30 s, doubling up to 10 minutes; a backoff
 never runs past the start of the mandatory pre-deadline save window, and there is
 none inside it. The count lives on the lease (`drain_capture_failures`, migration
-1253): failures since the box's last successful save, reset by a published save
-or a new epoch.
-When Modal native drain snapshots of one lease epoch have failed three times, or
-once inside the pre-deadline save window, the next drain saves a portable tar
-that leaves rebuildable folders out instead (`REBUILDABLE_WORKSPACE_DIRECTORY_NAMES`
-in `packages/runtime/src/sandbox/workspace-archive.ts`: dependency installs and
+1253): failures of the current drain since the box's last successful save,
+reset by a published save, a re-arm to warm, or a new epoch.
+When Modal native drain snapshots of one lease epoch have failed three times over
+at least 15 minutes, or once inside the pre-deadline save window, the next drain
+saves a portable tar that leaves rebuildable folders out instead
+(`REBUILDABLE_WORKSPACE_DIRECTORY_NAMES` in
+`packages/runtime/src/sandbox/workspace-archive.ts`: dependency installs and
 tool caches such as `node_modules`, `.next`, `.venv` and `__pycache__`, plus
 `target` next to a `Cargo.toml`; never `.git`, `dist` or `build`). One bounded
-`find` lists them and sizes what is kept, capped at 512 MiB with object storage
-and 16 MiB inline. The descriptor records `omittedPaths`; the timeline says which
-folders were left out, and the next turns' model input carries a workspace note
-until a full save replaces it. If that reduced save fails or cannot be tried
-inside the save window, or after an hour of failures, the drain stops the box
-deliberately (`captureAbandoned`): its `sandbox.box.terminated` event names the
-last save's time (`unsavedSince`) for the timeline notice, the loss record skips
-the later older-save notice, and the model's restore discontinuity is unchanged.
+`find` lists them and sizes what is kept, capped at 256 MiB with object storage
+and 16 MiB inline; a walk with more than 2048 such folders, a name it cannot
+report safely (a newline), or an incomplete list means no reduced save. The tar
+and its fingerprint leave out exactly the same anchored, glob-escaped `./path`
+patterns, and the tar is bounded by the drain's provider timeout. The
+descriptor records `omittedPaths`; the timeline says which folders were left
+out, and the next turns' model input carries a workspace note until a full save
+replaces it. The drain stops the box deliberately (`captureAbandoned`) when a
+reduced save fails, times out or cannot be stored inside the save window or
+after an hour of failures, or when no reduced save can be tried inside the save
+window; outside the window a box with nothing to leave out keeps retrying full
+snapshots. The cold commit that records the loss also appends its
+`sandbox.box.terminated` event, naming the last save's time (`unsavedSince`)
+for the timeline notice; the loss record keeps `unsavedSince`, so a later
+restore of exactly that save adds no second notice while a restore of any other
+save is announced. The model's restore discontinuity is unchanged.
 Only Modal qualifies; other backends keep their existing retry path.
 Warm-capture reclamation/heartbeat cleanup retain holders through the original
 deadline after turn closure: no takeover or authority extension.

@@ -48790,8 +48790,12 @@ type ProviderLossRecord = {
   deathProof?: ProviderDeathProof;
   /** The drain stopped the box itself after its saves kept failing (it did
    * not vanish). The people in the chat were told when it stopped, so the
-   * later restore does not announce the loss a second time. */
+   * later restore of the save made at `unsavedSince` does not announce the
+   * loss a second time. */
   captureAbandoned?: true;
+  /** With `captureAbandoned`: the time of the last good save the stop notice
+   * named, or null when there was none. Absent on records that predate it. */
+  unsavedSince?: string | null;
 };
 
 type ProviderDeathProof = {
@@ -49575,6 +49579,21 @@ async function acquireLeaseOnce(
             // Re-armed: whatever group end was requested did not happen.
             await tx.execute(sql`
               update sandbox_leases set group_end_requested_at = null, updated_at = now()
+              where id = ${row.id}
+            `);
+          }
+          if (Number(row.drain_capture_failures ?? 0) > 0) {
+            // Re-armed: the drain ended without a save, so its failures no
+            // longer describe the next one. A later drain starts with a full
+            // snapshot and no backoff, and only failures of that drain can
+            // lead to a reduced save or a stop (sandboxDrainCaptureFallback).
+            await tx.execute(sql`
+              update sandbox_leases set
+                drain_capture_failures = 0,
+                drain_capture_failure_epoch = null,
+                drain_capture_first_failed_at = null,
+                drain_capture_last_failed_at = null,
+                updated_at = now()
               where id = ${row.id}
             `);
           }
@@ -52989,7 +53008,7 @@ export async function commitWarmingToWarm(
             ? (automatic as Record<string, unknown>).capturedAt
             : undefined;
         const restoredNotice =
-          typeof restoredFrom === "string" && loss?.captureAbandoned !== true
+          typeof restoredFrom === "string" && !stopNoticeNamedSave(loss, restoredFrom)
             ? {
                 operationId: (automatic as Record<string, unknown>).operationId,
                 mode: "checkpoint" as const,
@@ -53032,6 +53051,18 @@ export async function commitWarmingToWarm(
     }
   }
   return outcome;
+}
+
+/** The drain's stop notice already told the people in the chat that changes
+ * after exactly this save were not kept. A restore of any other save, or a
+ * loss without that notice, is announced on its own. */
+function stopNoticeNamedSave(
+  loss: ProviderLossRecord | undefined,
+  restoredCapturedAt: string,
+): boolean {
+  if (loss?.captureAbandoned !== true || typeof loss.unsavedSince !== "string") return false;
+  const named = Date.parse(loss.unsavedSince);
+  return Number.isFinite(named) && named === Date.parse(restoredCapturedAt);
 }
 
 /** Persist before provider dispatch. This is deliberately not replayable: a
@@ -58883,6 +58914,12 @@ export async function reArmDrainingLease(
           liveness = 'warm',
           -- Re-armed: whatever group end was requested did not happen.
           group_end_requested_at = null,
+          -- The drain ended without a save; its failures do not carry over to
+          -- the next drain (see sandboxDrainCaptureFallback).
+          drain_capture_failures = 0,
+          drain_capture_failure_epoch = null,
+          drain_capture_first_failed_at = null,
+          drain_capture_last_failed_at = null,
           resume_state = resume_state #- '{opengeniWarmBilling,stopChargeAt}',
           expires_at = now() + (${String(input.leaseTtlMs)} || ' milliseconds')::interval,
           updated_at = now()
@@ -58945,6 +58982,11 @@ export async function confirmDrainCold(
     /** With `providerMissingBeforeCapture`: the drain stopped the box itself
      * after its saves kept failing. Its failed capture can never publish late. */
     captureAbandoned?: boolean;
+    /** With `captureAbandoned`: the `sandbox.box.terminated` record telling
+     * the people in the chat which changes were not saved (since the last
+     * good save, `unsavedSince`). Appended in the same commit as the loss, so
+     * a later restore of exactly that save never announces it again. */
+    captureAbandonedNotice?: { unsavedSince: string | null; payload: Record<string, unknown> };
   },
 ): Promise<{
   wentCold: boolean;
@@ -59263,7 +59305,12 @@ export async function confirmDrainCold(
                         input.providerMaxRemainingLifetimeMs,
                       ),
                       ...(input.captureAbandoned === true
-                        ? { captureAbandoned: true as const }
+                        ? {
+                            captureAbandoned: true as const,
+                            ...(input.captureAbandonedNotice
+                              ? { unsavedSince: input.captureAbandonedNotice.unsavedSince }
+                              : {}),
+                          }
                         : {}),
                     }
                   : undefined,
@@ -59341,6 +59388,20 @@ export async function confirmDrainCold(
           );
           await tx.execute(sql`select opengeni_private.record_sandbox_recovery_operator_event(
             ${eventId}::uuid, 'provider_missing_before_capture')`);
+        }
+        if (
+          rows.length > 0 &&
+          workspaceLost &&
+          input.captureAbandoned === true &&
+          input.captureAbandonedNotice
+        ) {
+          const notice = input.captureAbandonedNotice;
+          await withCompleteSandboxGroupScope(tx, () =>
+            appendSessionEventToSandboxGroup(tx, input.workspaceId, input.sandboxGroupId, {
+              type: "sandbox.box.terminated",
+              payload: notice.payload,
+            }),
+          );
         }
         if (rows.length > 0 && row.rotation_requested_at !== null) {
           await wakeSandboxLifecycleWaitersTx(tx, input);
@@ -65313,7 +65374,8 @@ async function foldWorkspaceArchiveOntoLease(
       current_checkpoint_artifact_id = ${input.checkpointArtifactId}::uuid,
       previous_checkpoint_artifact_id = ${input.previousCheckpointArtifactId}::uuid,
       -- A published save ends any run of drain snapshot failures: the count
-      -- means failures since this box's last successful save.
+      -- means failures of this drain since this box's last successful save
+      -- (a re-arm to warm resets it too).
       drain_capture_failures = 0,
       drain_capture_failure_epoch = null,
       drain_capture_first_failed_at = null,

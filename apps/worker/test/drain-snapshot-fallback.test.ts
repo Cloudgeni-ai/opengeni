@@ -11,11 +11,13 @@ import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "b
 import { createHash } from "node:crypto";
 import { Context } from "@temporalio/activity";
 import {
+  acquireLease,
   bootstrapWorkspace,
   createDb,
   createSession,
   readLease,
   readSandboxReducedSave,
+  reArmDrainingLease,
   type Database,
   type DbClient,
 } from "@opengeni/db";
@@ -29,7 +31,7 @@ import type { ActivityServices } from "../src/activities/types";
 
 const TEST_WORKSPACE_FINGERPRINT =
   "OPENGENI_WORKSPACE_FINGERPRINT_V1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 3 2 17\n";
-const REBUILDABLE = "OPENGENI_REBUILDABLE_V1 12 3456 2\nD node_modules\nD apps/web/.next\n";
+const REBUILDABLE = "OPENGENI_REBUILDABLE_V1 12 3456 2 0\nD node_modules\nD apps/web/.next\n";
 const WAIT_MS = 5_000;
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
@@ -176,7 +178,10 @@ async function drainingNativeModalBox(
 
 /** Modal-like client: native snapshots always fail; a capture that leaves
  * folders out goes through the portable tar, which `tar` decides. */
-function nativeSnapshotsFailingClient(tar: "succeeds" | "fails") {
+function nativeSnapshotsFailingClient(
+  tar: "succeeds" | "fails",
+  rebuildable: string = REBUILDABLE,
+) {
   const captures: string[][] = [];
   const sessions: Array<{ state: { manifest: { ephemeralPersistencePaths(): Set<string> } } }> = [];
   let deletes = 0;
@@ -192,7 +197,7 @@ function nativeSnapshotsFailingClient(tar: "succeeds" | "fails") {
         },
       },
       exec: async ({ cmd }: { cmd: string }) => ({
-        stdout: cmd.includes("OPENGENI_REBUILDABLE_V1") ? REBUILDABLE : TEST_WORKSPACE_FINGERPRINT,
+        stdout: cmd.includes("OPENGENI_REBUILDABLE_V1") ? rebuildable : TEST_WORKSPACE_FINGERPRINT,
       }),
       persistWorkspace: async () => {
         const excluded = [...session.state.manifest.ephemeralPersistencePaths()];
@@ -395,4 +400,138 @@ describe("drain snapshot fallback", () => {
     });
     expect(provider.captures).toEqual([["apps/web/.next", "node_modules"]]);
   }, 60_000);
+  test("three quick failures are not enough: the drain retries a full snapshot", async () => {
+    if (!available) return;
+    const epoch = 7;
+    const instanceId = "sb-quick-failures";
+    const ids = await drainingNativeModalBox(epoch, instanceId, {
+      count: 3,
+      failingForMinutes: 5,
+    });
+    const provider = nativeSnapshotsFailingClient("succeeds");
+    const { drainSandboxLease } = createSandboxLeaseActivities(services(), {
+      createClientForBackend: (() => provider.client) as never,
+      probeDrainableProvider: async () => "ready",
+    });
+    currentAttempt = 2;
+    await expect(drainSandboxLease(drainInput(ids, epoch, instanceId))).rejects.toThrow(
+      "snapshot_directory persistence failed",
+    );
+    // A full snapshot, nothing left out, and the box keeps draining.
+    expect(provider.captures).toEqual([[]]);
+    expect(provider.deletes).toBe(0);
+  }, 60_000);
+
+  test("with nothing a reduced save could leave out, the box is not stopped before the save window", async () => {
+    if (!available) return;
+    const epoch = 8;
+    const instanceId = "sb-unavailable-outside-window";
+    const ids = await drainingNativeModalBox(
+      epoch,
+      instanceId,
+      { count: 4, failingForMinutes: 90 },
+      priorSave("2026-11-04T00:56:00.000Z"),
+    );
+    const provider = nativeSnapshotsFailingClient(
+      "succeeds",
+      "OPENGENI_REBUILDABLE_V1 12 3456 0 0\n",
+    );
+    const { drainSandboxLease } = createSandboxLeaseActivities(services(), {
+      createClientForBackend: (() => provider.client) as never,
+      probeDrainableProvider: async () => "ready",
+    });
+    currentAttempt = 2;
+    await expect(drainSandboxLease(drainInput(ids, epoch, instanceId))).rejects.toThrow(
+      "snapshot_directory persistence failed",
+    );
+    expect(provider.captures).toEqual([[]]);
+    expect(provider.deletes).toBe(0);
+    expect((await readLease(db, ids.workspaceId, ids.groupId))?.liveness).toBe("draining");
+    expect(await terminatedEvents(ids.sessionId)).toEqual([]);
+  }, 60_000);
+
+  test("inside the save window with no reduced save possible, the box is stopped and the loss explained", async () => {
+    if (!available) return;
+    const epoch = 9;
+    const instanceId = "sb-unavailable-in-window";
+    const prior = priorSave("2026-11-04T01:10:00.000Z");
+    const ids = await drainingNativeModalBox(
+      epoch,
+      instanceId,
+      { count: 1, failingForMinutes: 5 },
+      prior,
+    );
+    const leadMs = sandboxDeadlineMandatoryCaptureLeadMs(SETTINGS);
+    await shared!.admin`
+      update sandbox_leases
+      set provider_created_at = now() - interval '23 hours',
+          provider_deadline_at = now() + ${`${Math.max(1_000, leadMs - 60_000)} milliseconds`}::interval
+      where sandbox_group_id = ${ids.groupId}`;
+    const provider = nativeSnapshotsFailingClient(
+      "succeeds",
+      "OPENGENI_REBUILDABLE_V1 12 3456 0 0\n",
+    );
+    const { drainSandboxLease } = createSandboxLeaseActivities(services(), {
+      createClientForBackend: (() => provider.client) as never,
+      probeDrainableProvider: async () => "ready",
+    });
+    currentAttempt = 2;
+    expect(await drainSandboxLease(drainInput(ids, epoch, instanceId))).toEqual({
+      status: "terminated",
+    });
+    expect(provider.captures).toEqual([]);
+    expect(provider.deletes).toBe(1);
+    const [row] = await shared!.admin<{ loss: Record<string, unknown> | null }[]>`
+      select resume_state -> 'opengeniProviderLoss' as loss
+      from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
+    expect(row?.loss).toMatchObject({
+      captureAbandoned: true,
+      unsavedSince: prior.workspaceArchiveMeta.capturedAt,
+    });
+    // Written in the cold commit itself, together with the loss.
+    expect(await terminatedEvents(ids.sessionId)).toEqual([
+      expect.objectContaining({
+        captureAbandoned: true,
+        unsavedSince: prior.workspaceArchiveMeta.capturedAt,
+      }),
+    ]);
+  }, 60_000);
+
+  for (const rearm of ["arrival", "reArmDrainingLease"] as const) {
+    test(`a re-arm (${rearm}) clears the drain's failures, so a later drain starts with a full snapshot`, async () => {
+      if (!available) return;
+      const epoch = rearm === "arrival" ? 10 : 11;
+      const instanceId = `sb-rearm-${rearm}`;
+      const ids = await drainingNativeModalBox(epoch, instanceId, {
+        count: 5,
+        failingForMinutes: 90,
+      });
+      const group = {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.groupId,
+      };
+      if (rearm === "arrival") {
+        const acquired = await acquireLease(db, {
+          ...group,
+          kind: "turn",
+          holderId: `turn-${crypto.randomUUID()}`,
+          backend: "modal",
+          leaseTtlMs: 60_000,
+        });
+        expect(acquired.role).toBe("rearmed");
+      } else {
+        expect(await reArmDrainingLease(db, { ...group, leaseTtlMs: 60_000 })).toEqual({
+          rearmed: true,
+        });
+      }
+      const lease = await readLease(db, ids.workspaceId, ids.groupId);
+      expect(lease?.liveness).toBe("warm");
+      expect(lease?.drainCaptureFailures).toEqual({
+        count: 0,
+        firstFailedAt: null,
+        lastFailedAt: null,
+      });
+    }, 60_000);
+  }
 });

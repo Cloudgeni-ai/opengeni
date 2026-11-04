@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   captureVerifiedWorkspaceArchive,
   findRebuildableWorkspacePaths,
+  fingerprintSandboxWorkspace,
   REBUILDABLE_WORKSPACE_PATHS_MAX,
   type WorkspaceTreeFingerprint,
 } from "../src/sandbox/workspace-archive";
@@ -130,11 +131,11 @@ describe("reduced workspace saves", () => {
 
   test("findRebuildableWorkspacePaths parses the folders and the kept size", async () => {
     const output = [
+      "OPENGENI_REBUILDABLE_V1 7 4096 4 0",
       "D node_modules",
       "D web/.next",
       "D web/node_modules",
-      "D ../outside",
-      "OPENGENI_REBUILDABLE_V1 7 4096 4",
+      "D crate/target",
       "",
     ].join("\n");
     const result = await findRebuildableWorkspacePaths({
@@ -143,9 +144,26 @@ describe("reduced workspace saves", () => {
       },
     });
     expect(result).toEqual({
-      paths: ["node_modules", "web/.next", "web/node_modules"],
+      paths: ["crate/target", "node_modules", "web/.next", "web/node_modules"],
       kept: { fileCount: 7, totalFileBytes: 4096 },
     });
+  });
+
+  test("a folder list that is incomplete, unsafe or not rebuildable means no reduced save", async () => {
+    const walk = (lines: string[]) =>
+      findRebuildableWorkspacePaths({
+        async exec() {
+          return { stdout: lines.join("\n"), exitCode: 0 };
+        },
+      });
+    // Cut off by the exec's output limit: a folder left out uncounted.
+    expect(await walk(["OPENGENI_REBUILDABLE_V1 7 4096 2 0", "D node_modules"])).toBeNull();
+    // A path that would leave the workspace.
+    expect(await walk(["OPENGENI_REBUILDABLE_V1 7 4096 1 0", "D ../node_modules"])).toBeNull();
+    // A user folder: never something the walk was asked to find.
+    expect(await walk(["OPENGENI_REBUILDABLE_V1 7 4096 1 0", "D src"])).toBeNull();
+    // A name the walk could not report safely (a newline in it).
+    expect(await walk(["OPENGENI_REBUILDABLE_V1 7 4096 1 1", "D node_modules"])).toBeNull();
   });
 
   test("findRebuildableWorkspacePaths returns null without its summary line or a session", async () => {
@@ -204,7 +222,7 @@ describe("reduced workspace saves", () => {
         "D crate/target",
         "D node_modules",
         "D web/.next",
-        "OPENGENI_REBUILDABLE_V1 5 23 4",
+        "OPENGENI_REBUILDABLE_V1 5 23 4 0",
       ]);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -220,7 +238,7 @@ describe("reduced workspace saves", () => {
       findRebuildableWorkspacePaths({
         async exec() {
           return {
-            stdout: [`OPENGENI_REBUILDABLE_V1 1 1 ${count}`, ...listed(count)].join("\n"),
+            stdout: [`OPENGENI_REBUILDABLE_V1 1 1 ${count} 0`, ...listed(count)].join("\n"),
             exitCode: 0,
           };
         },
@@ -256,11 +274,105 @@ describe("reduced workspace saves", () => {
       );
       expect(Buffer.from(result.stdout).toString("utf8").trim().split("\n").sort()).toEqual([
         "D node_modules",
-        "OPENGENI_REBUILDABLE_V1 1 3 1",
+        "OPENGENI_REBUILDABLE_V1 1 3 1 0",
       ]);
     } finally {
       chmodSync(join(root, "locked"), 0o700);
       rmSync(root, { recursive: true, force: true });
     }
+  });
+  linuxTest(
+    "a folder named to forge a line is never reported as a folder to leave out",
+    async () => {
+      let script = "";
+      await findRebuildableWorkspacePaths({
+        async exec(input: { cmd: string }) {
+          script = input.cmd;
+          return { stdout: "", exitCode: 0 };
+        },
+      });
+      const root = mkdtempSync(join(tmpdir(), "opengeni-rebuildable-"));
+      try {
+        mkdirSync(join(root, "src"));
+        writeFileSync(join(root, "src", "main.ts"), "user code");
+        mkdirSync(join(root, "x\nD src\ny", "node_modules"), { recursive: true });
+        const run = (cmd: string) => {
+          const result = Bun.spawnSync(
+            ["/bin/bash", "-c", cmd.replace("cd /workspace", `cd ${root}`)],
+            {
+              stdout: "pipe",
+              stderr: "pipe",
+            },
+          );
+          return { stdout: Buffer.from(result.stdout).toString("utf8"), exitCode: result.exitCode };
+        };
+        const raw = run(script).stdout;
+        expect(raw).not.toContain("D src");
+        // Through the parser the whole walk is unavailable, so nothing is left out.
+        expect(
+          await findRebuildableWorkspacePaths({
+            async exec(input: { cmd: string }) {
+              return run(input.cmd);
+            },
+          }),
+        ).toBeNull();
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  linuxTest(
+    "a reduced save's fingerprint matches its restore when the name recurs deeper",
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), "opengeni-reduced-fp-"));
+      try {
+        const file = (path: string, body: string) => {
+          mkdirSync(join(root, path, ".."), { recursive: true });
+          writeFileSync(join(root, path), body);
+        };
+        file("Cargo.toml", "[package]");
+        file("target/debug/bin", "rust-build");
+        file("docs/target/plan.md", "kept");
+        file("odd[1]*/node_modules/x", "kept too");
+        const manifest = {
+          ephemeralPersistencePaths: () => new Set<unknown>(),
+        };
+        const exec = async (input: { cmd: string }) => {
+          const result = Bun.spawnSync(
+            ["/bin/bash", "-c", input.cmd.replace("cd /workspace", `cd ${root}`)],
+            { stdout: "pipe", stderr: "pipe" },
+          );
+          return { stdout: Buffer.from(result.stdout).toString("utf8"), exitCode: result.exitCode };
+        };
+        // Captured with the top-level folder left out, as a reduced save does.
+        manifest.ephemeralPersistencePaths = () => new Set<unknown>(["target"]);
+        const captured = await fingerprintSandboxWorkspace({ state: { manifest }, exec });
+        // Restored: the folder is absent and the new box leaves nothing out.
+        rmSync(join(root, "target"), { recursive: true, force: true });
+        manifest.ephemeralPersistencePaths = () => new Set<unknown>();
+        const restored = await fingerprintSandboxWorkspace({ state: { manifest }, exec });
+        expect(restored).toEqual(captured);
+        // A glob character in a left-out name matches only itself.
+        manifest.ephemeralPersistencePaths = () => new Set<unknown>(["odd[1]*/node_modules"]);
+        const withGlob = await fingerprintSandboxWorkspace({ state: { manifest }, exec });
+        expect(withGlob.fileCount).toBe(restored.fileCount - 1);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test("a reduced save that never finishes is rejected within its bound", async () => {
+    const fake = reducibleSession();
+    fake.session.persistWorkspace = () => new Promise<never>(() => undefined);
+    fake.session.persistWorkspaceTar = fake.session.persistWorkspace;
+    const error = await captureVerifiedWorkspaceArchive(fake.session, 1_900_000_000_004, {
+      requestId: "reduced-hung",
+      omitPaths: ["node_modules"],
+      providerTimeoutMs: 50,
+    }).catch((caught) => caught);
+    expect(error).toMatchObject({ code: "workspace_capture_timeout" });
+    expect(fake.manifest.ephemeralPersistencePaths).toBe(fake.ownConfigured);
   });
 });
