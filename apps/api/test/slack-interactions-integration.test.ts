@@ -12078,6 +12078,23 @@ describe("Slack agents", () => {
         agent: "Ops Desk",
       }),
     ).toMatchObject({ status: "refused" });
+    // A later message in the thread that names the agent which passed it on is
+    // still not handed back: the server refuses it, so the chat's instructions
+    // need not say so.
+    await mention(
+      value,
+      "C_HANDOFF",
+      "1765000003.000200",
+      "can you ask ops desk about this instead?",
+      "1765000003.000100",
+    );
+    const handBack = await handOffSlackAgentChat(value.deps, {
+      grant: routedGrant,
+      sessionId: analyticsChat!.session_id!,
+      agent: "Ops Desk",
+    });
+    expect(handBack).toMatchObject({ status: "refused" });
+    expect(JSON.stringify(handBack)).toContain("Do not hand it back");
 
     // Same-agent chats are listed by agent, and only that agent's.
     const listed = await listSlackAgentChatsForSession(value.deps, {

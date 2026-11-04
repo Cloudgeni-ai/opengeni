@@ -577,8 +577,8 @@ describe("what people read", () => {
     expect(named).not.toContain("named no agent");
   });
 
-  test("a long roster describes the first 20 agents and names up to 30 more", () => {
-    const many = Array.from({ length: 60 }, (_, index) => ({
+  const rosterOf = (count: number) => {
+    const many = Array.from({ length: count }, (_, index) => ({
       id: `agent-${index + 1}`,
       accountId: ACCOUNT,
       workspaceId: HOME.workspaceId,
@@ -598,11 +598,15 @@ describe("what people read", () => {
       createdAt: new Date(0),
       updatedAt: new Date(0),
     }));
-    const text = slackAgentSessionInstructions({
+    return slackAgentSessionInstructions({
       loaded: { records: many, routing: [], labels: new Map([[ACME.workspaceId, "Acme"]]) },
       agent: null,
       handedOffBy: null,
     });
+  };
+
+  test("a long roster describes the first 20 agents and names up to 30 more", () => {
+    const text = rosterOf(60);
     // The rule comes before the list.
     expect(text.indexOf("slack_agent_handoff")).toBeLessThan(text.indexOf("- Agent 1 "));
     expect(text).toContain("- Agent 20 (Acme): Does job 20.");
@@ -610,6 +614,20 @@ describe("what people read", () => {
     expect(text).toContain("Also: Agent 21, Agent 22,");
     expect(text).toContain("Agent 50, and 10 more.");
     expect(text).not.toContain("Agent 51");
+  });
+
+  test("roster edges: 20, 21 and 50 agents", () => {
+    const twenty = rosterOf(20);
+    expect(twenty).toContain("- Agent 20 (Acme): Does job 20.");
+    expect(twenty).not.toContain("Also:");
+
+    const twentyOne = rosterOf(21);
+    expect(twentyOne).not.toContain("Does job 21.");
+    expect(twentyOne).toContain("Also: Agent 21.");
+
+    const fifty = rosterOf(50);
+    expect(fifty).toContain("Agent 49, Agent 50.");
+    expect(fifty).not.toContain("more.");
   });
 });
 

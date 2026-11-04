@@ -55,7 +55,7 @@ export const SLACK_AGENT_PROPOSE_TOOL_DESCRIPTION = [
   'Propose a new Slack agent when someone in Slack asks to create one: a named teammate people ask with "@Opengeni" and its name, working in one shared workspace with its own Memory.',
   "Posts a card in this thread; nothing is created until an admin of that workspace presses Create, so never say it was created.",
   'name: what people call it, ideally two words like "Data team". description: one line. instructions: how it should work, written to the agent, at most 2500 characters. workspace: a shared workspace by name; omit for this chat\'s workspace.',
-  'avatar is required: with an image-generation tool, generate a flat icon filling the square (one bold symbol on a solid, strong colour; no frame, faces, fine detail or text), publish it in the agent\'s workspace and pass {kind:"image",artifactId}; otherwise ask which emoji to use and pass {kind:"emoji",emoji,hue} with hue 0-359.',
+  'avatar is required: when the agent works in this workspace and you have an image-generation tool, generate a flat icon filling the square (one bold symbol on a solid, strong colour; no frame, faces, fine detail or text), publish it and pass {kind:"image",artifactId}; otherwise ask which emoji to use and pass {kind:"emoji",emoji,hue} with hue 0-359.',
   "Ask for anything missing before calling.",
 ].join(" ");
 
@@ -319,7 +319,7 @@ export async function proposeSlackAgentFromChat(
     // An image icon is a file the agent's own workspace shows to everyone.
     if (target.workspaceId !== input.grant.workspaceId) {
       return refuse(
-        `An image icon must be a file in ${target.label}, the agent's workspace. Use an emoji or a built-in icon instead.`,
+        `An image icon must be a file in ${target.label}, the agent's workspace. Use an emoji instead.`,
       );
     }
     try {

@@ -2940,7 +2940,11 @@ function registerSlackBotTools(
         "Pass the Slack request this chat is answering to the Slack agent the person asked for by name. It works only when the message names that agent; otherwise answer yourself and use slack_agent_suggest. That agent answers in the same thread. After status passed_on, make your entire final response exactly NO_REPLY.",
       inputSchema: {
         agent: z4.string().min(1).max(120),
-        note: z4.string().max(1000).optional(),
+        note: z4
+          .string()
+          .max(1000)
+          .optional()
+          .describe("Context the other agent needs; it starts a new chat and can't see this one."),
         reason: z4.string().max(500).optional().describe("Why, in a few words. Logged only."),
       },
     },

@@ -116,8 +116,8 @@ function slackAgentHandoffRule(input: {
   return [
     ...(how ? [how] : []),
     "Answer yourself by default.",
-    'Call slack_agent_handoff only when the person asks for one of the agents below by name (typos and a dropped word like "team" are fine); then make your entire final response exactly NO_REPLY.',
-    "Greetings, tests, small talk, questions about Opengeni or its agents, and words that merely match an agent's name are not such requests.",
+    'Call slack_agent_handoff only when the person asks for one of the agents below by name (typos and a dropped word like "team" are fine); if it returns passed_on, make your entire final response exactly NO_REPLY.',
+    "Never hand off greetings, tests, small talk, questions about Opengeni or its agents, or words that merely match an agent's name.",
     "When a request fits an agent the person did not ask for, answer it yourself and call slack_agent_suggest with that agent's name; don't mention the suggestion.",
   ].join(" ");
 }
