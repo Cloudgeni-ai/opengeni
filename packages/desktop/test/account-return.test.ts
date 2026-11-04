@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { accountToReturnTo, type StoredAccount } from "../src/main/accounts";
+import { accountToReturnTo, cameFromAfterShowing, type StoredAccount } from "../src/main/accounts";
 
 const account = (id: string, signedOut = false): StoredAccount => ({
   id,
@@ -26,5 +26,15 @@ describe("Cancel on the sign-in page", () => {
     expect(accountToReturnTo({ accounts: [account("picked", true)], activeId: null }, null)).toBe(
       null,
     );
+  });
+
+  test("remembers the signed-in account left for a signed-out one, through a chain of them", () => {
+    const [signedIn, picked, other] = [account("a"), account("b", true), account("c", true)];
+    expect(cameFromAfterShowing(signedIn, picked, null)).toBe("a");
+    // Then another signed-out account from the welcome page: still back to a.
+    expect(cameFromAfterShowing(picked, other, "a")).toBe("a");
+    // Reaching a signed-in account (a switch or a finished sign-in) forgets it.
+    expect(cameFromAfterShowing(picked, account("d"), "a")).toBe(null);
+    expect(cameFromAfterShowing(null, picked, null)).toBe(null);
   });
 });

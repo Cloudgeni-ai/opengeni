@@ -1,4 +1,4 @@
-import { expect, mock, test } from "bun:test";
+import { beforeEach, expect, mock, test } from "bun:test";
 import * as React from "../../../packages/react/node_modules/react";
 import * as JsxDevRuntime from "../../../packages/react/node_modules/react/jsx-dev-runtime";
 import * as JsxRuntime from "../../../packages/react/node_modules/react/jsx-runtime";
@@ -70,11 +70,17 @@ const work = account("work");
 const picked = account("picked", { signedOut: true, baseUrl: "https://staging.opengeni.ai" });
 const home = account("home");
 const switched: string[] = [];
-let state = {
-  account: picked as StoredAccount | null,
-  accounts: [home, picked, work],
-  previousAccountId: "work" as string | null,
+type State = {
+  account: StoredAccount | null;
+  accounts: StoredAccount[];
+  previousAccountId: string | null;
 };
+let state: State;
+beforeEach(() => {
+  // Each test starts on the signed-out pick, having come from "work".
+  state = { account: picked, accounts: [home, picked, work], previousAccountId: "work" };
+  switched.length = 0;
+});
 mock.module("@/account", () => ({
   DEFAULT_SERVER_URL: "https://app.opengeni.ai",
   useAccount: () => ({
@@ -92,7 +98,6 @@ const switchRows = (container: HTMLElement) =>
   );
 
 test("a signed-out pick lists the other accounts, and one tap goes back to where you were", async () => {
-  switched.length = 0;
   const view = await renderComponent(createElement(SignInScreen, { target: picked }));
   try {
     expect(view.container.textContent).toContain("Sign in again");

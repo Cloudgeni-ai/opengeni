@@ -1,6 +1,11 @@
 import { expect, test } from "bun:test";
 import type { AccountsSnapshot, StoredAccount } from "./account-store";
-import { accountMenuTitle, planAccountPick, signInSwitchChoices } from "./account-switching";
+import {
+  accountMenuTitle,
+  planAccountPick,
+  signInSwitchChoices,
+  wayBackWhenLeaving,
+} from "./account-switching";
 
 const account = (id: string, patch: Partial<StoredAccount> = {}): StoredAccount => ({
   id,
@@ -46,4 +51,13 @@ test("account menus say which accounts must sign in again", () => {
   expect(accountMenuTitle(work, 1)).toBe("work@example.com");
   expect(accountMenuTitle(old, 1)).toBe("old@example.com · Signed out");
   expect(accountMenuTitle(old, 2)).toBe("old@example.com · staging.opengeni.ai · Signed out");
+});
+
+test("the way back is the signed-in account you left, kept through signed-out ones", () => {
+  // On work, picking home: work is the way back.
+  expect(wayBackWhenLeaving(snapshot, "home", null)).toBe("work");
+  // On signed-out old (came from work), picking another: still work.
+  const onOld = { ...snapshot, activeId: "old" };
+  expect(wayBackWhenLeaving(onOld, "home", "work")).toBe("work");
+  expect(wayBackWhenLeaving(snapshot, "work", "home")).toBe("home");
 });

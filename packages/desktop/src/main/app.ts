@@ -58,7 +58,13 @@ import {
   type ThisComputerPermissionId,
   type WelcomeState,
 } from "../contract";
-import { AccountStore, accountToReturnTo, readInstalledFrom, type StoredAccount } from "./accounts";
+import {
+  AccountStore,
+  accountToReturnTo,
+  cameFromAfterShowing,
+  readInstalledFrom,
+  type StoredAccount,
+} from "./accounts";
 import { AppShots, AppShotSettingsStore, MacAppShots } from "./app-shots";
 import type { Dictation } from "./dictation";
 import { createDesktopDictation } from "./dictation/electron";
@@ -799,10 +805,7 @@ export class DesktopShell {
     const account = this.store.get(accountId);
     if (!account) return;
     if (!this.window) this.openWindow();
-    const from = this.store.active();
-    if (account.signedOut && from && from.id !== accountId && !from.signedOut) {
-      this.cameFromId = from.id;
-    }
+    this.cameFromId = cameFromAfterShowing(this.store.active(), account, this.cameFromId);
     this.store.setActive(accountId);
     this.addingAccount = false;
     if (account.signedOut) {
@@ -1037,7 +1040,6 @@ export class DesktopShell {
       await this.establishWebSession(account.id);
       this.pending = null;
       this.welcomeError = null;
-      this.cameFromId = null;
       this.window?.removeAccount(account.id);
       this.showAccount(account.id);
       if (pending.computerLink) await this.connectFromLink(account, pending.computerLink);

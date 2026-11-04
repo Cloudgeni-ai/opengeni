@@ -40,7 +40,7 @@ import {
   type StoredAccount,
   writeAccountToken,
 } from "@/account-store";
-import { planAccountPick } from "@/account-switching";
+import { planAccountPick, wayBackWhenLeaving } from "@/account-switching";
 import { openLinkFromApp } from "@/app-link-registry";
 import { recordingRequests } from "@/feedback/recent-errors";
 import { signInThroughWeb, type WebSignInResult } from "@/web-sign-in";
@@ -109,6 +109,10 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   const snapshotRef = useRef<AccountsSnapshot | null>(null);
   snapshotRef.current = snapshot;
   const [previousAccountId, setPreviousAccountId] = useState<string | null>(null);
+  // The way back is a signed-in account: leaving a signed-out one keeps it.
+  const rememberWayBack = useCallback((current: AccountsSnapshot, nextId: string) => {
+    setPreviousAccountId((way) => wayBackWhenLeaving(current, nextId, way));
+  }, []);
 
   useEffect(() => {
     void loadAccounts().then(setSnapshot);
@@ -287,7 +291,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
         workspaceId: existing?.workspaceId ?? null,
       };
       setToken({ id, value: result.accessToken });
-      if (current.activeId && current.activeId !== id) setPreviousAccountId(current.activeId);
+      rememberWayBack(current, id);
       await persist({
         accounts: existing
           ? current.accounts.map((each) => (each.id === id ? stored : each))
@@ -296,7 +300,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       });
       return result;
     },
-    [persist],
+    [persist, rememberWayBack],
   );
 
   const switchAccount = useCallback(
@@ -304,25 +308,30 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       const current = snapshotRef.current;
       if (!current || current.activeId === id) return;
       if (!current.accounts.some((each) => each.id === id)) return;
-      setPreviousAccountId(current.activeId);
+      rememberWayBack(current, id);
       void persist({ ...current, activeId: id });
     },
-    [persist],
+    [persist, rememberWayBack],
   );
 
   const chooseAccount = useCallback(
     async (id: string): Promise<"stay" | "switched" | "signIn"> => {
-      const hasCredential = Boolean(await readAccountToken(id));
+      // An unreadable credential is a missing one: the account signs in again.
+      const hasCredential = Boolean(await readAccountToken(id).catch(() => null));
       const current = snapshotRef.current;
       if (!current) return "stay";
       const pick = planAccountPick(current, id, hasCredential);
-      if (pick.kind === "signIn") return "signIn";
+      if (pick.kind === "signIn") {
+        // Mark it, so the menus and lists show it as signed out from now on.
+        if (!pick.account.signedOut) updateAccount(id, { signedOut: true });
+        return "signIn";
+      }
       if (pick.kind === "stay") return "stay";
-      setPreviousAccountId(current.activeId);
+      rememberWayBack(current, id);
       await persist(pick.next);
       return "switched";
     },
-    [persist],
+    [persist, rememberWayBack, updateAccount],
   );
 
   const signOut = useCallback(
@@ -431,13 +440,21 @@ export function useAccount(): AccountState {
  */
 export function usePickAccount(): (id: string, onInUse?: () => void) => void {
   const { chooseAccount } = useAccount();
+  // A second tap while the first pick settles would open a second sheet.
+  const picking = useRef(false);
   return useCallback(
     (id: string, onInUse?: () => void) => {
-      void chooseAccount(id).then((outcome) => {
-        if (outcome === "signIn")
-          router.push({ pathname: "/add-account", params: { account: id } });
-        else onInUse?.();
-      });
+      if (picking.current) return;
+      picking.current = true;
+      void chooseAccount(id)
+        .then((outcome) => {
+          if (outcome === "signIn") {
+            router.push({ pathname: "/add-account", params: { account: id } });
+          } else onInUse?.();
+        })
+        .finally(() => {
+          picking.current = false;
+        });
     },
     [chooseAccount],
   );

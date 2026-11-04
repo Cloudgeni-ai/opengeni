@@ -44,6 +44,20 @@ export function planAccountPick(
   return { kind: "switch", next: { ...snapshot, activeId: id } };
 }
 
+/**
+ * The account to offer first as the way back when leaving the active one: it,
+ * if it is signed in. Leaving a signed-out account keeps the earlier way back.
+ */
+export function wayBackWhenLeaving(
+  snapshot: AccountsSnapshot,
+  nextId: string,
+  current: string | null,
+): string | null {
+  const leaving = snapshot.accounts.find((each) => each.id === snapshot.activeId);
+  if (!leaving || leaving.id === nextId || leaving.signedOut) return current;
+  return leaving.id;
+}
+
 export interface SignInSwitchChoice {
   account: StoredAccount;
   signedIn: boolean;
