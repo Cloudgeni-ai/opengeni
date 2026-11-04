@@ -189,6 +189,8 @@ export class SandboxProcessStartFailedError extends Error {
     input: {
       machine: SandboxProcessStartMachine;
       restartedThisTurn: boolean;
+      /** A restart was tried and failed (not merely skipped). */
+      restartAttemptFailed?: boolean;
       restartFailure?: string;
     },
   ) {
@@ -198,9 +200,15 @@ export class SandboxProcessStartFailedError extends Error {
     const agentMessage = sanitizeProcessStartFailureMessage(
       found?.message ?? (cause instanceof Error ? cause.message : String(cause)),
     ).slice(0, 2_000);
-    super(processStartFailedCopy(input.machine, input.restartedThisTurn, agentMessage), {
-      cause,
-    });
+    super(
+      processStartFailedCopy(
+        input.machine,
+        input.restartedThisTurn,
+        input.restartAttemptFailed ?? false,
+        agentMessage,
+      ),
+      { cause },
+    );
     this.machine = input.machine;
     this.detail = input.restartFailure
       ? `${agentMessage} (restart failed: ${input.restartFailure})`
@@ -211,6 +219,7 @@ export class SandboxProcessStartFailedError extends Error {
 function processStartFailedCopy(
   machine: SandboxProcessStartMachine,
   restartedThisTurn: boolean,
+  restartAttemptFailed: boolean,
   agentMessage: string,
 ): string {
   if (machine === "connected_machine") {
@@ -222,7 +231,10 @@ function processStartFailedCopy(
   if (restartedThisTurn) {
     return "The workspace machine still can't start programs after it was restarted, so this turn stopped. Retry once more, or start a new chat if it keeps failing.";
   }
-  return "The workspace machine can't start programs and couldn't be restarted, so this turn stopped. Retry in a moment, or start a new chat if it keeps failing.";
+  if (restartAttemptFailed) {
+    return "The workspace machine can't start programs and couldn't be restarted, so this turn stopped. Retry in a moment, or start a new chat if it keeps failing.";
+  }
+  return "The workspace machine can't start programs, so this turn stopped. Retry, or start a new chat if it keeps failing.";
 }
 
 /** A sandbox session that can boot its box afresh (compute). */
@@ -337,6 +349,7 @@ export async function recoverSandboxSetupFailure(
     return new SandboxProcessStartFailedError(error, {
       machine: "compute",
       restartedThisTurn: false,
+      restartAttemptFailed: true,
       restartFailure: errorText(restartError),
     });
   }

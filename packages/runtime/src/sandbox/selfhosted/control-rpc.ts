@@ -137,12 +137,12 @@ export class SelfhostedControlError extends Error {
   readonly draining: boolean;
   readonly agentOffline: boolean;
   readonly osNotFound: boolean;
-  /** The machine itself cannot start programs (a missing `/dev/null`, an
-   *  older agent's shell that would not start, exhausted resources). Its
+  /** The machine itself cannot start programs (a missing or replaced
+   *  `/dev/null`, or an older agent's shell that would not start). Its
    *  message names only the started program, never the command text, and it
    *  is never a missing-path answer, so `osNotFound` stays false. Any other
-   *  failed start (one missing program) keeps its ordinary mapping, also
-   *  with the command text removed. */
+   *  failed start (one missing program, brief resource pressure) keeps its
+   *  ordinary mapping, also with the command text removed. */
   readonly processStartFailed: boolean;
   /** The reply exceeded the transport's max payload (a distinguishing flag so the
    *  fault renderer can name the size wall + recovery instead of a generic OS error). */

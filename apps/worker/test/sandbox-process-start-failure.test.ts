@@ -29,11 +29,14 @@ if (crypto.createHash('\\''sha256'\\'').update(raw).digest('\\''hex'\\'') !== "f
 /** A newer agent names the missing device. */
 const NULL_DEVICE_MISSING = " (the null device /dev/null is missing)";
 
-/** The agent's answer when it cannot start a program. */
+/** The agent's answer when it cannot start a program. A newer agent quotes
+ * the program it started; an older one (up to 0.1.150) wrote the first
+ * command element unquoted, which for a shell command was the whole script. */
 function processStartError(program: string, note = "") {
+  const reported = program === INSTALL_SCRIPT ? program : `program "${program}"`;
   return agentErrorToControlError({
     code: ErrorCode.ERROR_CODE_NOT_FOUND,
-    message: `not found: spawn or apply execution containment for ${program}${note}: No such file or directory (os error 2)`,
+    message: `not found: spawn or apply execution containment for ${reported}${note}: No such file or directory (os error 2)`,
     retryable: false,
     detail: {},
   });
@@ -151,6 +154,7 @@ describe("a sandbox that cannot start programs", () => {
     ]);
     const failure = agentRunFailurePayload(inToolCall(error));
     expect(failure).toMatchObject({ code: "sandbox_process_start_failed", retryable: false });
+    expect(failure.error).toContain("couldn't be restarted");
     expect(String(failure.detail)).toContain("restart failed");
   });
 
@@ -175,6 +179,10 @@ describe("a sandbox that cannot start programs", () => {
     );
     expect(error).toBeInstanceOf(SandboxProcessStartFailedError);
     expect(turn.restarts()).toBe(0);
+    // No restart was tried, so the copy never says one failed.
+    expect(agentRunFailurePayload(inToolCall(error)).error).toBe(
+      "The workspace machine can't start programs, so this turn stopped. Retry, or start a new chat if it keeps failing.",
+    );
   });
 
   test("a connected machine is never restarted and its copy says what to do", async () => {
@@ -234,8 +242,13 @@ describe("a sandbox that cannot start programs", () => {
 
   test("one missing or forbidden program never restarts the machine", async () => {
     for (const message of [
+      'not found: spawn or apply execution containment for program "/nonexistent/opengeni-missing-program": No such file or directory (os error 2)',
+      'spawn or apply execution containment for program "/usr/local/bin/tool": Permission denied (os error 13)',
+      'not found: spawn or apply execution containment for program "C:\\Windows\\System32\\cmd.exe": The system cannot find the file specified. (os error 2)',
+      // An older agent's plain program name.
       "not found: spawn or apply execution containment for /nonexistent/opengeni-missing-program: No such file or directory (os error 2)",
-      "spawn or apply execution containment for /usr/local/bin/tool: Permission denied (os error 13)",
+      // Brief resource pressure: several sessions can share one box.
+      'spawn or apply execution containment for program "/bin/sh": Resource temporarily unavailable (os error 11)',
     ]) {
       const turn = computeTurn();
       const error = agentErrorToControlError({
@@ -254,21 +267,6 @@ describe("a sandbox that cannot start programs", () => {
       expect(turn.restarts()).toBe(0);
       expect(turn.events).toEqual([]);
     }
-  });
-
-  test("a machine out of processes is restarted like one without /dev/null", async () => {
-    const turn = computeTurn();
-    const error = agentErrorToControlError({
-      code: ErrorCode.ERROR_CODE_OS,
-      message:
-        "spawn or apply execution containment for /bin/sh: Resource temporarily unavailable (os error 11)",
-      retryable: false,
-      detail: { errno: "11" },
-    });
-    expect(
-      await recoverSandboxSetupFailure(createSandboxSetupReplayGuard(), error, turn.recovery),
-    ).toBeInstanceOf(SandboxMachineRestartingError);
-    expect(turn.restarts()).toBe(1);
   });
 
   test("a fenced attempt stops as such and restarts nothing", async () => {

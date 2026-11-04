@@ -1137,7 +1137,12 @@ fn describe_program(program: &std::ffi::OsStr) -> String {
     let text = program.to_string_lossy();
     let line: String = text
         .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| match c {
+            c if c.is_control() => ' ',
+            // The message quotes the name, so it never holds a `"` itself.
+            '"' => '\'',
+            c => c,
+        })
         .collect();
     let line = line.trim();
     if line.chars().count() > PROGRAM_NAME_LIMIT {
@@ -1279,7 +1284,9 @@ impl Platform for NativePlatform {
             run_as.as_ref(),
         )
         .map_err(|e| {
-            let context = format!("spawn or apply execution containment for {program}");
+            // Quoted, so the runtime can tell a program name (which may hold
+            // spaces or backslashes) from an older agent's command text.
+            let context = format!("spawn or apply execution containment for program \"{program}\"");
             #[cfg(unix)]
             let context = match crate::null_device::spawn_failure_note() {
                 Some(note) => format!("{context} ({note})"),
@@ -1906,8 +1913,8 @@ mod tests {
     const HIDDEN_NULL_DEVICE_PARENT_NS_ENV: &str = "OPENGENI_TEST_HIDDEN_NULL_DEVICE_PARENT_NS";
 
     /// The `unshare` arguments that give a child a private mount namespace it
-    /// may mount in: a rootless user namespace, or a plain mount namespace when
-    /// the tests already run as root. `None` where neither is permitted.
+    /// may mount in: a plain mount namespace when the tests run as root, else a
+    /// rootless user namespace. `None` where neither is permitted.
     #[cfg(target_os = "linux")]
     fn private_mount_namespace_args() -> Option<&'static [&'static str]> {
         const ROOTLESS: &[&str] = &["--user", "--map-root-user", "--mount"];
@@ -1922,10 +1929,12 @@ mod tests {
                 .status()
                 .is_ok_and(|status| status.success())
         };
-        if works(ROOTLESS) {
-            Some(ROOTLESS)
-        } else if nix::unistd::geteuid().is_root() && works(ROOT) {
+        // Real root tries its own form first: in a rootless user namespace it
+        // would no longer be real root, so the repair would never be checked.
+        if nix::unistd::geteuid().is_root() && works(ROOT) {
             Some(ROOT)
+        } else if works(ROOTLESS) {
+            Some(ROOTLESS)
         } else {
             None
         }
@@ -2042,6 +2051,10 @@ mod tests {
             "{described}"
         );
         assert_eq!(describe_program(std::ffi::OsStr::new("/bin/sh")), "/bin/sh");
+        assert_eq!(
+            describe_program(std::ffi::OsStr::new("/opt/a \"b\"/run")),
+            "/opt/a 'b'/run"
+        );
     }
 
     #[tokio::test]
@@ -2060,7 +2073,7 @@ mod tests {
         let message = error.to_string();
         assert!(
             message.contains(
-                "spawn or apply execution containment for /nonexistent/opengeni-missing-program"
+                "spawn or apply execution containment for program \"/nonexistent/opengeni-missing-program\""
             ),
             "{message}"
         );

@@ -142,9 +142,8 @@ pub(crate) enum RepairOutcome {
 }
 
 #[cfg(target_os = "linux")]
-fn repair(path: &Path, observed: NullDeviceState) -> RepairOutcome {
+fn repair(path: &Path, _observed: NullDeviceState) -> RepairOutcome {
     use nix::sys::stat::{makedev, mknod, Mode, SFlag};
-    use std::os::unix::fs::PermissionsExt;
 
     if !nix::unistd::geteuid().is_root() {
         return RepairOutcome::NotRepaired("the agent is not running as root".to_string());
@@ -157,19 +156,19 @@ fn repair(path: &Path, observed: NullDeviceState) -> RepairOutcome {
     if state == NullDeviceState::Healthy {
         return RepairOutcome::Repaired;
     }
-    if state == NullDeviceState::Replaced || observed == NullDeviceState::Replaced {
-        match std::fs::symlink_metadata(path) {
-            // Never delete a directory someone made there: it may hold data.
-            Ok(meta) if meta.is_dir() => {
-                return RepairOutcome::NotRepaired("a directory is at the path".to_string());
-            }
-            Ok(_) => {
-                if let Err(error) = std::fs::remove_file(path) {
-                    return RepairOutcome::NotRepaired(format!("remove the replacement: {error}"));
-                }
-            }
-            Err(_) => {}
+    // Whatever is at the path itself, not what it points to: a dangling
+    // symlink reads as missing, yet blocks mknod until it is removed.
+    match std::fs::symlink_metadata(path) {
+        // Never delete a directory someone made there: it may hold data.
+        Ok(meta) if meta.is_dir() => {
+            return RepairOutcome::NotRepaired("a directory is at the path".to_string());
         }
+        Ok(_) => {
+            if let Err(error) = std::fs::remove_file(path) {
+                return RepairOutcome::NotRepaired(format!("remove the replacement: {error}"));
+            }
+        }
+        Err(_) => {}
     }
     let created = mknod(
         path,
@@ -180,12 +179,11 @@ fn repair(path: &Path, observed: NullDeviceState) -> RepairOutcome {
     match created {
         Ok(()) => {
             // mknod applies the umask; the device must be usable by every
-            // user. Only the node made here is changed: something that raced
-            // in at the path (a symlink) is never followed.
-            if let Err(error) =
-                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666))
-            {
-                return RepairOutcome::NotRepaired(format!("chmod: {error}"));
+            // user. The node is opened without following a symlink, checked to
+            // be the null device, and changed through that handle, so
+            // something that raced in at the path is never changed.
+            if let Err(reason) = make_usable_by_everyone(path) {
+                return RepairOutcome::NotRepaired(reason);
             }
         }
         Err(nix::errno::Errno::EEXIST) => {}
@@ -196,6 +194,29 @@ fn repair(path: &Path, observed: NullDeviceState) -> RepairOutcome {
     } else {
         RepairOutcome::NotRepaired("the path still does not hold the null device".to_string())
     }
+}
+
+/// Sets mode 0666 on the null device just made at `path`, through a handle
+/// opened without following a symlink (and without blocking on a FIFO), only
+/// once that handle is confirmed to be the null device.
+#[cfg(target_os = "linux")]
+fn make_usable_by_everyone(path: &Path) -> Result<(), String> {
+    use nix::fcntl::OFlag;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let node = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags((OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK).bits())
+        .open(path)
+        .map_err(|error| format!("open the new node: {error}"))?;
+    let meta = node
+        .metadata()
+        .map_err(|error| format!("inspect the new node: {error}"))?;
+    if !is_null_device(&meta) {
+        return Err("something other than the null device is at the path".to_string());
+    }
+    node.set_permissions(std::fs::Permissions::from_mode(0o666))
+        .map_err(|error| format!("chmod: {error}"))
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -287,5 +308,19 @@ mod tests {
             RepairOutcome::Repaired
         );
         assert_eq!(inspect(&replaced), NullDeviceState::Healthy);
+
+        // A dangling symlink reads as missing but blocks mknod.
+        let dangling = dir.path().join("dangling");
+        std::os::unix::fs::symlink(dir.path().join("nowhere"), &dangling).expect("symlink");
+        assert_eq!(inspect(&dangling), NullDeviceState::Missing);
+        assert_eq!(
+            repair(&dangling, NullDeviceState::Missing),
+            RepairOutcome::Repaired
+        );
+        assert_eq!(inspect(&dangling), NullDeviceState::Healthy);
+        assert!(!std::fs::symlink_metadata(&dangling)
+            .expect("metadata")
+            .file_type()
+            .is_symlink());
     }
 }

@@ -6,7 +6,7 @@
   "workflows": [
     {
       "path": ".github/workflows/agent-ci.yml",
-      "sha256": "c400134f67f0c7a8d7311d71019c8550b7b131ed4225aae562ba0cd73504dd07"
+      "sha256": "ad34a9de238ee57b91291ce8792acb5e10e86300aebf63a2841f3f8ab6283fb5"
     },
     {
       "path": ".github/workflows/agent-release.yml",
@@ -306,6 +306,12 @@
     {
       "workflow": ".github/workflows/agent-ci.yml",
       "job": "test",
+      "step": "Allow unprivileged user namespaces for the agent's namespace tests",
+      "sha256": "0a1a20a7c4c58d02d5102702566514003267dffe4733afe6d11230900653a143"
+    },
+    {
+      "workflow": ".github/workflows/agent-ci.yml",
+      "job": "test",
       "step": "cargo build --release --workspace",
       "sha256": "edf73b5fcb65b446c151c1bef82227f31164cbf8a4321051d2f1f535ffa4e2f6"
     },
@@ -313,7 +319,7 @@
       "workflow": ".github/workflows/agent-ci.yml",
       "job": "test",
       "step": "cargo test --workspace",
-      "sha256": "0472457afcd7d85cf00dddf60b569a51a0e4a670237f69eed4789634ca1c9e96"
+      "sha256": "c6713d108b004717903c7303c4e999f824dc4502a0ebba25ae6e562f19a1095e"
     },
     {
       "workflow": ".github/workflows/agent-ci.yml",

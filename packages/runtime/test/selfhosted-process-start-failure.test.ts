@@ -26,10 +26,21 @@ function sanitizeProcessStartFailureMessage(message: string): string {
   }).message;
 }
 
+/** A newer agent's message, which quotes the program it started. */
 function spawnError(program: string, note = "", code = ErrorCode.ERROR_CODE_NOT_FOUND) {
   return agentErrorToControlError({
     code,
-    message: `not found: spawn or apply execution containment for ${program}${note}: ${OS}`,
+    message: `not found: spawn or apply execution containment for program "${program}"${note}: ${OS}`,
+    retryable: false,
+    detail: {},
+  });
+}
+
+/** An older agent's message, which put the first command element there unquoted. */
+function legacySpawnError(reported: string, code = ErrorCode.ERROR_CODE_NOT_FOUND) {
+  return agentErrorToControlError({
+    code,
+    message: `not found: spawn or apply execution containment for ${reported}: ${OS}`,
     retryable: false,
     detail: {},
   });
@@ -44,13 +55,13 @@ describe("process-start failures from the machine agent", () => {
     ).toBe(`not found: spawn or apply execution containment for a shell command: ${OS}`);
   });
 
-  test("a program name and a newer agent's null-device note are kept", () => {
+  test("a quoted program, its null-device note and an old agent's plain name are kept", () => {
     expect(
       sanitizeProcessStartFailureMessage(
-        `spawn or apply execution containment for /bin/bash (the null device /dev/null is missing): ${OS}`,
+        `spawn or apply execution containment for program "/bin/bash" (the null device /dev/null is missing): ${OS}`,
       ),
     ).toBe(
-      `spawn or apply execution containment for /bin/bash (the null device /dev/null is missing): ${OS}`,
+      `spawn or apply execution containment for program "/bin/bash" (the null device /dev/null is missing): ${OS}`,
     );
     expect(
       sanitizeProcessStartFailureMessage(`spawn or apply execution containment for git: ${OS}`),
@@ -58,34 +69,55 @@ describe("process-start failures from the machine agent", () => {
   });
 
   test("sanitizing is idempotent and leaves other messages alone", () => {
-    const once = sanitizeProcessStartFailureMessage(
+    for (const message of [
       `spawn or apply execution containment for ${SCRIPT}: ${OS}`,
-    );
-    expect(sanitizeProcessStartFailureMessage(once)).toBe(once);
+      `spawn or apply execution containment for program "/bin/sh" (the null device /dev/null is missing): ${OS}`,
+      `spawn or apply execution containment for echo: TOKEN=sk-live-123; curl x: ${OS}`,
+    ]) {
+      const once = sanitizeProcessStartFailureMessage(message);
+      expect(sanitizeProcessStartFailureMessage(once)).toBe(once);
+    }
     expect(sanitizeProcessStartFailureMessage("exit status 1")).toBe("exit status 1");
   });
 
-  test("command text that is not a plain program name is never kept", () => {
-    // An old agent's short shell command with a secret and no spaces.
-    const leaked = sanitizeProcessStartFailureMessage(
-      `spawn or apply execution containment for TOKEN=sk-live-abc123;curl: ${OS}`,
+  test("an old agent's command text is never kept, around a plain name or not", () => {
+    for (const reported of [
+      // A short shell command with a secret and no spaces.
+      "TOKEN=sk-live-abc123;curl",
+      // A name followed by command text that is not the null-device note.
+      "deploy (TOKEN=sk-live-123)",
+    ]) {
+      const kept = sanitizeProcessStartFailureMessage(
+        `spawn or apply execution containment for ${reported}: ${OS}`,
+      );
+      expect(kept).toBe(`spawn or apply execution containment for a shell command: ${OS}`);
+      expect(kept).not.toContain("sk-live");
+    }
+    // A plain first word, then the rest of the script before the OS error.
+    const afterName = sanitizeProcessStartFailureMessage(
+      `spawn or apply execution containment for echo: TOKEN=sk-live-123; curl x: ${OS}`,
     );
-    expect(leaked).toBe(`spawn or apply execution containment for a shell command: ${OS}`);
-    expect(leaked).not.toContain("sk-live");
+    expect(afterName).toBe(`spawn or apply execution containment for echo: ${OS}`);
+    // Without an OS error nothing after an old agent's name is kept.
+    expect(
+      sanitizeProcessStartFailureMessage(
+        "spawn or apply execution containment for echo: TOKEN=sk-live-123; curl x",
+      ),
+    ).toBe("spawn or apply execution containment for echo");
   });
 
-  test("a program name keeps the rest of the agent's message on one line", () => {
+  test("a quoted program keeps the rest of the agent's message on one line", () => {
     expect(
       sanitizeProcessStartFailureMessage(
-        "spawn or apply execution containment for /bin/sh: run_as requires Linux",
+        'spawn or apply execution containment for program "/bin/sh": run_as requires Linux',
       ),
-    ).toBe("spawn or apply execution containment for /bin/sh: run_as requires Linux");
+    ).toBe('spawn or apply execution containment for program "/bin/sh": run_as requires Linux');
     expect(
       sanitizeProcessStartFailureMessage(
-        "spawn or apply execution containment for /bin/sh: write /sys/fs/cgroup/op-1/cgroup.procs:\nPermission denied (os error 13)",
+        'spawn or apply execution containment for program "/bin/sh": write /sys/fs/cgroup/op-1/cgroup.procs:\nPermission denied (os error 13)',
       ),
     ).toBe(
-      "spawn or apply execution containment for /bin/sh: write /sys/fs/cgroup/op-1/cgroup.procs: Permission denied (os error 13)",
+      'spawn or apply execution containment for program "/bin/sh": write /sys/fs/cgroup/op-1/cgroup.procs: Permission denied (os error 13)',
     );
   });
 
@@ -94,19 +126,51 @@ describe("process-start failures from the machine agent", () => {
     expect(missing.processStartFailed).toBe(false);
     expect(missing.osNotFound).toBe(true);
     expect(selfhostedFaultClass(missing)).toBe("not_found");
+    expect(legacySpawnError("/nonexistent/opengeni-missing-program").processStartFailed).toBe(
+      false,
+    );
     const denied = spawnError("/usr/local/bin/tool", "", ErrorCode.ERROR_CODE_OS);
     expect(denied.processStartFailed).toBe(false);
+    // Brief resource pressure never restarts a machine other sessions may share.
     const exhausted = agentErrorToControlError({
       code: ErrorCode.ERROR_CODE_OS,
       message:
-        "spawn or apply execution containment for /bin/sh: Resource temporarily unavailable (os error 11)",
+        'spawn or apply execution containment for program "/bin/sh": Resource temporarily unavailable (os error 11)',
       retryable: false,
       detail: { errno: "11" },
     });
-    expect(exhausted.processStartFailed).toBe(true);
+    expect(exhausted.processStartFailed).toBe(false);
+    // Program names that are not plain path characters are still names.
+    for (const program of [
+      "C:\\Windows\\System32\\cmd.exe",
+      "C:\\Program Files\\Tool\\tool.exe",
+      "/opt/my tools/run",
+      "/usr/bin/café",
+      `/usr/bin/${"x".repeat(160)}…`,
+    ]) {
+      const error = spawnError(program);
+      expect(error.processStartFailed).toBe(false);
+      expect(error.osNotFound).toBe(true);
+    }
+    for (const program of [
+      "C:\\Windows\\System32\\cmd.exe",
+      "C:\\Program Files\\Tool\\tool.exe",
+      "\\\\server\\share\\tool.exe",
+      "/usr/bin/café",
+    ]) {
+      expect(legacySpawnError(program).processStartFailed).toBe(false);
+    }
     expect(
       spawnError("/bin/bash", " (the null device /dev/null is missing)").processStartFailed,
     ).toBe(true);
+    expect(
+      spawnError(
+        "/bin/sh",
+        " (/dev/null has been replaced by something other than the null device)",
+      ).processStartFailed,
+    ).toBe(true);
+    // An old agent that could not start its shell reported the script.
+    expect(legacySpawnError(SCRIPT).processStartFailed).toBe(true);
   });
 
   test("an old agent's command text is removed from the error's detail too", () => {
@@ -123,7 +187,7 @@ describe("process-start failures from the machine agent", () => {
 
   test("the error is typed, short, and never a missing path", () => {
     for (const code of [ErrorCode.ERROR_CODE_NOT_FOUND, ErrorCode.ERROR_CODE_OS]) {
-      const error = spawnError(SCRIPT, "", code);
+      const error = legacySpawnError(SCRIPT, code);
       expect(error.processStartFailed).toBe(true);
       expect(error.osNotFound).toBe(false);
       expect(isDefinitePathNotFoundError(error)).toBe(false);
@@ -149,7 +213,7 @@ describe("process-start failures from the machine agent", () => {
     expect(rendered).toContain("the machine could not start the program");
     expect(rendered).toContain("nothing ran; the command never started.");
     expect(rendered).toContain("Restart the machine");
-    expect(renderSelfhostedFault(spawnError(SCRIPT))).not.toContain("node -e");
+    expect(renderSelfhostedFault(legacySpawnError(SCRIPT))).not.toContain("node -e");
   });
 });
 

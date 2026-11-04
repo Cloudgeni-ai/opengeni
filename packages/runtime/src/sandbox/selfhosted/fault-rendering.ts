@@ -228,7 +228,7 @@ export function renderSelfhostedFault(error: SelfhostedControlError): string {
       preserved: "nothing ran; the command never started.",
       tryNext: nullDevice
         ? `${nullDevice}, so the machine cannot start programs. Restart the machine (or its Opengeni agent) before running more commands.`
-        : "check that the program exists on the machine and the machine has free memory and process slots; if every command fails this way, restart the machine or its Opengeni agent.",
+        : "the machine could not start its shell, so it cannot start programs. Restart the machine (or its Opengeni agent) before running more commands.",
     });
   }
 
