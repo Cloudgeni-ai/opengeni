@@ -609,31 +609,47 @@ describe("surface-level rules", () => {
 });
 
 describe("breaking-change allowlist", () => {
-  const entry = {
+  const historical = {
     ids: ["route:GET /v1/b", "schema:Res:*"],
     deprecation: ".changeset/remove-b.md",
     removedInMajor: 8,
     sunset: "2027-01-01",
     reason: "Replaced by /v1/c; announced in the 7.4 changelog.",
   };
+  const approved = {
+    ids: ["route:GET /v1/b", "schema:Res:*"],
+    approval: "https://github.com/Cloudgeni-ai/opengeni/pull/1#issuecomment-1",
+    reason: "Owner-approved exception logged in the compatibility policy.",
+  };
 
-  test("entries must reference a deprecation, a removal major, a sunset, and a reason", () => {
-    expect(validateAllowlist([entry])).toHaveLength(1);
-    expect(() => validateAllowlist([{ ...entry, deprecation: "trust me" }])).toThrow(/deprecation/);
-    expect(() => validateAllowlist([{ ...entry, removedInMajor: "8" }])).toThrow(/removedInMajor/);
-    expect(() => validateAllowlist([{ ...entry, sunset: "later" }])).toThrow(/sunset/);
-    expect(() => validateAllowlist([{ ...entry, ids: [] }])).toThrow(/ids/);
+  test("new entries must record a security exception or a linked owner approval", () => {
+    expect(validateAllowlist([historical, approved])).toHaveLength(2);
+    expect(
+      validateAllowlist([{ ...approved, approval: undefined, securityException: true }]),
+    ).toHaveLength(1);
+    expect(() => validateAllowlist([{ ...approved, approval: undefined }])).toThrow(
+      /does not authorize a breaking change/,
+    );
+    expect(() => validateAllowlist([{ ...approved, approval: "trust me" }])).toThrow(/approval/);
+    expect(() => validateAllowlist([{ ...historical, deprecation: "trust me" }])).toThrow(
+      /deprecation/,
+    );
+    expect(() => validateAllowlist([{ ...historical, removedInMajor: "8" }])).toThrow(
+      /removedInMajor/,
+    );
+    expect(() => validateAllowlist([{ ...historical, sunset: "later" }])).toThrow(/sunset/);
+    expect(() => validateAllowlist([{ ...approved, ids: [] }])).toThrow(/ids/);
     expect(() => validateAllowlist({})).toThrow(/array/);
   });
 
-  test("matches exact ids and prefixes, only for a later major unless a security exception", () => {
-    const [valid] = validateAllowlist([entry]);
+  test("a major release never admits a breaking change; only an exception does", () => {
+    const [old, valid] = validateAllowlist([historical, approved]);
     const finding = (id: string) => ({ id, breaking: true, message: id });
-    expect(allowlisted(finding("route:GET /v1/b"), [valid!], 7)).toBe(valid!);
-    expect(allowlisted(finding("schema:Res:$.id"), [valid!], 7)).toBe(valid!);
-    expect(allowlisted(finding("route:GET /v1/z"), [valid!], 7)).toBeNull();
-    expect(allowlisted(finding("route:GET /v1/b"), [valid!], 8)).toBeNull();
-    const security = { ...valid!, removedInMajor: 7, securityException: true };
-    expect(allowlisted(finding("route:GET /v1/b"), [security], 7)).toBe(security);
+    expect(allowlisted(finding("route:GET /v1/b"), [old!])).toBeNull();
+    expect(allowlisted(finding("route:GET /v1/b"), [valid!])).toBe(valid!);
+    expect(allowlisted(finding("schema:Res:$.id"), [valid!])).toBe(valid!);
+    expect(allowlisted(finding("route:GET /v1/z"), [valid!])).toBeNull();
+    const security = { ...old!, securityException: true };
+    expect(allowlisted(finding("route:GET /v1/b"), [security])).toBe(security);
   });
 });

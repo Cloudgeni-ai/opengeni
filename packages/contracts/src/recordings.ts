@@ -136,7 +136,11 @@ const jsonValue: z.ZodType<unknown> = z.lazy(() =>
     z.record(z.string().max(128), jsonValue),
   ]),
 );
-/** Product-owned metadata; Opengeni stores and filters on it but never interprets it. */
+/**
+ * Product-owned metadata; Opengeni stores and filters on it but never
+ * interprets it. One key is Opengeni's: `calendarEvent`, the calendar event
+ * a recording was started for (`calendarEvent` on create), which it writes.
+ */
 const recordingMetadata = z
   .record(z.string().min(1).max(128), jsonValue)
   .refine((value) => JSON.stringify(value).length <= 16_384, "metadata is too large");
@@ -299,6 +303,20 @@ export function resolveWorkspaceRecordingSettings(settings: unknown): WorkspaceR
   return WorkspaceRecordingSettings.safeParse(value ?? {}).data ?? {};
 }
 
+/** One event on the owner's calendar, named by its provider's id. */
+export const RecordingCalendarEventRef = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** The calendar it is on. */
+      provider: z.enum(["google", "microsoft"]),
+      id: z.string().trim().min(1).max(1024),
+    })
+    .strict(),
+);
+export type RecordingCalendarEventRef = z.infer<typeof RecordingCalendarEventRef>;
+/** The calendar a meeting's event is on. */
+export type RecordingCalendarProvider = RecordingCalendarEventRef["provider"];
+
 export const CreateRecordingRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -364,10 +382,61 @@ export const CreateRecordingRequest = /* @__PURE__ */ defineSchema(() =>
        * for them (their profile or membership label).
        */
       ownerName: z.string().trim().min(1).max(200).optional(),
+      /**
+       * The owner's calendar event the meeting is of, such as one from
+       * `GET …/upcoming-meetings` that the person chose to join. Without a
+       * title from the person, the meeting is named after that event; it is
+       * kept in the recording's `metadata.calendarEvent`.
+       */
+      calendarEvent: RecordingCalendarEventRef.optional(),
     })
     .strict(),
 );
 export type CreateRecordingRequest = z.infer<typeof CreateRecordingRequest>;
+
+/** A meeting on the caller's own calendar that starts soon, with the link that joins it. */
+export const UpcomingMeeting = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    /** The provider's event id; pass it back as `calendarEvent` when recording it. */
+    id: z.string(),
+    provider: z.enum(["google", "microsoft"]),
+    /** The event's title; may be empty. */
+    title: z.string(),
+    /**
+     * Private, personal or confidential. Show its title only to the caller,
+     * and don't name a recording after it.
+     */
+    private: z.boolean(),
+    startsAt: z.string(),
+    endsAt: z.string(),
+    /** An https link on Google Meet, Zoom, Microsoft Teams or Webex. */
+    joinUrl: z.string(),
+    /** The service the link joins, e.g. "Google Meet"; "Meeting" when unknown. */
+    service: z.string(),
+    /** The caller hasn't answered the invitation. */
+    unanswered: z.boolean(),
+  }),
+);
+export type UpcomingMeeting = z.infer<typeof UpcomingMeeting>;
+
+/**
+ * `GET /v1/workspaces/:workspaceId/upcoming-meetings`: the caller's meetings
+ * with a join link that start in the next 20 minutes or started in the last 5,
+ * soonest first. `calendar` is `none` when the caller has no calendar this
+ * deployment can read (Google Calendar or Outlook, connected as themselves).
+ */
+export const UpcomingMeetingsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    calendar: z.enum(["connected", "none"]),
+    /**
+     * False when a calendar couldn't be read in time: the list may be
+     * missing meetings, so a reminder already showing stays.
+     */
+    complete: z.boolean().optional(),
+    meetings: z.array(UpcomingMeeting),
+  }),
+);
+export type UpcomingMeetingsResponse = z.infer<typeof UpcomingMeetingsResponse>;
 
 export const RecordingChunkDescriptor = /* @__PURE__ */ defineSchema(() =>
   z

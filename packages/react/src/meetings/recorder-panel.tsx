@@ -28,6 +28,7 @@ import {
   SquareIcon,
 } from "lucide-react";
 import { toast } from "sonner";
+import { userErrorText } from "../ui/api-error";
 
 import { Button } from "../ui/button";
 import {
@@ -47,7 +48,7 @@ import { Notice } from "../ui/notice";
 import { cn } from "../app/lib/utils";
 
 import { formatClock, ownerLiveLaneName } from "../recordings";
-import type { MeetingRecorder } from "./recorder-context";
+import type { MeetingRecorder, MeetingStartRequest } from "./recorder-context";
 import { canStartRecording } from "./recorder-state";
 import { LiveTranscript, liveStatus, type LiveTranscriptLine } from "./live-transcript";
 import { DETECT_LANGUAGE, meetingLanguageOptions } from "./meeting-languages";
@@ -349,7 +350,7 @@ function RecordingTitle({ recorder }: { recorder: MeetingRecorder }) {
         setEditing(false);
       } catch (error) {
         toast.error(msg("meetings.recorderPanel.couldnTRenameThisMeeting"), {
-          description: error instanceof Error ? error.message : undefined,
+          description: error instanceof Error ? userErrorText(error) : undefined,
         });
       } finally {
         setSaving(false);
@@ -617,7 +618,7 @@ function RecorderPanelContent({
    */
   autoStart?: {
     pending: boolean;
-    take: () => { title: string; titleSource?: "person" | "app" } | null;
+    take: () => MeetingStartRequest | null;
   } | null;
   /** The host's own id for what new recordings belong to, such as a project. */
   externalRef?: string | null | undefined;
@@ -644,8 +645,15 @@ function RecorderPanelContent({
   const state = recorder?.state ?? "idle";
   const live = state === "recording" || state === "paused" || state === "stopping";
 
-  /** `guess` is the app's name for the meeting, used only when nobody typed one. */
-  const start = async (titleText: string = title, guess?: string) => {
+  /**
+   * `guess` is the app's name for the meeting, used only when nobody typed
+   * one; `calendarEvent` the calendar event it is of, which names it.
+   */
+  const start = async (
+    titleText: string = title,
+    guess?: string,
+    calendarEvent?: MeetingStartRequest["calendarEvent"],
+  ) => {
     if (!recorder) return;
     setErrorDismissed(false);
     const name = titleText.trim();
@@ -657,6 +665,7 @@ function RecorderPanelContent({
       systemAudio: tabAudio,
       ...(liveOn ? { liveTranscript: true } : {}),
       ...(externalRef ? { externalRef } : {}),
+      ...(calendarEvent ? { calendarEvent } : {}),
       // Names their microphone in the transcript when Opengeni has no name for them.
       ...(viewerName?.trim() ? { ownerName: viewerName } : {}),
       // Sent even when it's the workspace's, so this meeting keeps it.
@@ -678,7 +687,7 @@ function RecorderPanelContent({
     if (!request) return;
     // The call app's name is a guess: a title already typed wins over it.
     if (request.titleSource === "app") {
-      void startRef.current(undefined, request.title);
+      void startRef.current(undefined, request.title, request.calendarEvent);
       return;
     }
     // A start without a title (the Start recording key) keeps one already typed, as the button does.
