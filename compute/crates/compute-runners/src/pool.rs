@@ -92,6 +92,18 @@ pub struct Pool {
     runners: BTreeMap<String, Runner>,
     /// The jobs GitHub has assigned the scale set, as it last said.
     assigned: u32,
+    /// Fresh runners owed to jobs GitHub took back. A job it assigned the
+    /// scale set that no runner took in time (a start that failed for want
+    /// of room, say) is reported completed, `canceled` with no runner, and
+    /// drops out of `assigned`; but it stays queued, and GitHub offers it
+    /// again only once something changes, such as a runner registering.
+    /// An idle runner that was there already changes nothing. So each job
+    /// taken back wants a runner started after it: owed, at most
+    /// [`Settings::max`], until a scale starts every runner it lacks; the
+    /// starts that fail stay owed. Once GitHub offers the jobs again they
+    /// are assigned, and scaled for as any. In memory only: a restart
+    /// forgets it.
+    owed: u32,
 }
 
 fn now_s() -> u64 {
@@ -153,6 +165,7 @@ impl Pool {
             scaled_for_builder: false,
             runners: BTreeMap::new(),
             assigned: 0,
+            owed: 0,
         }
     }
 
@@ -163,12 +176,13 @@ impl Pool {
     }
 
     /// Says what the pool holds, and returns how many runners it wants:
-    /// the jobs assigned and the idle runners asked for, within the places
-    /// a builder leaves, and whether a builder held one. The runners it
-    /// lacks count as held from now on.
+    /// the jobs assigned, the fresh runners owed and the idle runners
+    /// asked for, within the places a builder leaves, and whether a
+    /// builder held one. The runners it lacks count as held from now on.
     fn want(&self) -> (usize, bool) {
-        let wanted = self.assigned.saturating_add(self.settings.min_idle);
-        self.room.hold(self.runners.len(), self.assigned, |places| {
+        let demand = self.assigned.saturating_add(self.owed);
+        let wanted = demand.saturating_add(self.settings.min_idle);
+        self.room.hold(self.runners.len(), demand, |places| {
             usize::try_from(wanted.min(places)).unwrap_or(usize::MAX)
         })
     }
@@ -185,14 +199,26 @@ impl Pool {
             }
         }
         for completed in message.of("JobCompleted") {
-            if let Some(name) = &completed.runner_name {
-                tracing::info!(
-                    runner = %name,
-                    result = completed.result.as_deref().unwrap_or("?"),
-                    job = completed.job_display_name.as_deref().unwrap_or("?"),
-                    "a job ended; its sandbox goes"
-                );
-                self.end(name).await;
+            let result = completed.result.as_deref().unwrap_or("?");
+            let job = completed.job_display_name.as_deref().unwrap_or("?");
+            match completed
+                .runner_name
+                .as_deref()
+                .filter(|name| !name.is_empty())
+            {
+                Some(name) => {
+                    tracing::info!(runner = %name, result, job, "a job ended; its sandbox goes");
+                    self.end(name).await;
+                }
+                None => {
+                    self.owed = self.owed.saturating_add(1).min(self.settings.max);
+                    tracing::info!(
+                        result,
+                        job,
+                        owed = self.owed,
+                        "GitHub took back a job no runner took in time; a fresh runner starts for it"
+                    );
+                }
             }
         }
         if let Some(statistics) = message.statistics {
@@ -211,12 +237,14 @@ impl Pool {
         let missing = target.saturating_sub(self.runners.len());
         if missing > 0 {
             let started = futures::future::join_all((0..missing).map(|_| self.start())).await;
+            let mut failed = 0;
             for result in started {
                 match result {
                     Ok((name, runner)) => {
                         self.runners.insert(name, runner);
                     }
                     Err(error) => {
+                        failed += 1;
                         tracing::warn!(
                             error = format!("{error:#}"),
                             "starting a runner failed; the next scale tries again"
@@ -224,6 +252,7 @@ impl Pool {
                     }
                 }
             }
+            self.owed = self.owed.min(failed);
         }
         let settled = now_s().saturating_sub(SETTLE.as_secs());
         let idle: Vec<(String, u64)> = self
