@@ -840,7 +840,7 @@ async fn sweep(database: &StoreArgs, url: &str, delete: bool) -> anyhow::Result<
     let moved = std::time::UNIX_EPOCH + std::time::Duration::from_millis(imported.at_ms);
     let report = compute_storage::sweep::sweep(
         chunks,
-        |pointer| async move { compute_storage::copy::names(chunks, &pointer).await },
+        &compute_storage::copy::Copies(chunks),
         delete,
         moved,
     )

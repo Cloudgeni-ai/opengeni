@@ -158,6 +158,7 @@
     "check:migration-test-budgets": "bun scripts/check-migration-test-budgets.ts",
     "check:public-api": "bun scripts/public-api/check.ts",
     "public-api:refresh": "bun scripts/public-api/check.ts --write",
+    "public-api:published-refresh": "bun scripts/public-api/published-sdk.ts",
     "migration:renumber": "bun scripts/renumber-migration.ts",
     "check:variable-set-removal": "bun scripts/check-variable-set-removal.ts",
     "check:workspace-billing": "bun run typecheck && bun run test:unit && bun run test:integration && bun scripts/check-workspace-billing-static.ts && cd apps/web && bun run build && cd ../.. && bun run test:e2e",

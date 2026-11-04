@@ -11,11 +11,11 @@
 
 ## External API impact
 
-See `docs/design/api-compatibility-policy.md`. Pick one:
+Existing integrations must keep working. See `docs/design/api-compatibility-policy.md`. Pick one:
 
-- [ ] None: no public route, request/response shape, event type, or `@opengeni/sdk`/`@opengeni/react` export changes (internal cutovers, web-only routes, and migrations count as none).
-- [ ] Additive only: `bun run public-api:refresh` committed.
-- [ ] Breaking: deprecation announced with `Deprecation`/`Sunset` headers, old behaviour kept at least 90 days on the managed service, entry in `scripts/public-api/breaking-changes.json`, and an `"@opengeni/sdk": major` changeset with migration notes.
+- [ ] None: no public route, request/response shape, event type, documented behaviour, or `@opengeni/sdk`/`@opengeni/react` export changes (internal cutovers, web-only routes, and migrations count as none).
+- [ ] Additive only: old behaviour and defaults unchanged; `bun run public-api:refresh` committed.
+- [ ] Approved exception (security fix or recorded owner approval): linked in `scripts/public-api/breaking-changes.json`, the policy's exception log and the changeset, with migration notes.
 
 ## Delivery integrity
 
