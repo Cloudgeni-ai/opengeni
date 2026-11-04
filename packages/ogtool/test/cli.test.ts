@@ -927,44 +927,47 @@ describe("ogtool CLI", () => {
       return list;
     };
 
-    test("a host that does not resolve points at resolv.conf", async () => {
+    /** stderr and exit code of `ogtool list` against `url`, per runtime. */
+    const listFailures = async (url: string) => {
+      const results: Record<string, { exitCode: number; stderr: string }> = {};
       for (const [runtime, client] of await clients()) {
         const result = await run(
           ["list"],
-          {
-            OPENGENI_CODEMODE_URL: "https://opengeni-codemode.invalid/v1/workspaces/ws/codemode",
-            OPENGENI_CODEMODE_TOKEN: "test",
-          },
+          { OPENGENI_CODEMODE_URL: url, OPENGENI_CODEMODE_TOKEN: "test" },
           client,
         );
-        expect({ runtime, exitCode: result.exitCode }).toEqual({ runtime, exitCode: 1 });
-        expect({ runtime, stderr: result.stderr }).toEqual({
-          runtime,
-          stderr: expect.stringMatching(
-            /^Can't reach Opengeni: DNS lookup for opengeni-codemode\.invalid failed \((ENOTFOUND|EAI_AGAIN)\)\. Check \/etc\/resolv\.conf\.\n$/u,
-          ),
-        });
+        results[runtime] = { exitCode: result.exitCode, stderr: result.stderr };
       }
+      return results;
+    };
+
+    test("a host that does not resolve points at resolv.conf", async () => {
+      const results = await listFailures(
+        "https://opengeni-codemode.invalid/v1/workspaces/ws/codemode",
+      );
+      const expected = {
+        exitCode: 1,
+        stderr: expect.stringMatching(
+          /^Can't reach Opengeni: DNS lookup for opengeni-codemode\.invalid failed \((ENOTFOUND|EAI_AGAIN)\)\. Check \/etc\/resolv\.conf\.\n$/u,
+        ),
+      };
+      expect(results).toEqual(
+        Object.fromEntries(Object.keys(results).map((key) => [key, expected])),
+      );
     });
 
     test("a refused connection names the host and port", async () => {
       const closed = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response() });
       const port = closed.port;
       closed.stop(true);
-      for (const [runtime, client] of await clients()) {
-        const result = await run(
-          ["list"],
-          {
-            OPENGENI_CODEMODE_URL: `http://127.0.0.1:${port}/codemode`,
-            OPENGENI_CODEMODE_TOKEN: "test",
-          },
-          client,
-        );
-        expect({ runtime, stderr: result.stderr }).toEqual({
-          runtime,
-          stderr: `Can't reach Opengeni: the connection to 127.0.0.1:${port} was refused (ECONNREFUSED). Check this machine's network, firewall and proxy settings.\n`,
-        });
-      }
+      const results = await listFailures(`http://127.0.0.1:${port}/codemode`);
+      const expected = {
+        exitCode: 1,
+        stderr: `Can't reach Opengeni: the connection to 127.0.0.1:${port} was refused (ECONNREFUSED). Check this machine's network, firewall and proxy settings.\n`,
+      };
+      expect(results).toEqual(
+        Object.fromEntries(Object.keys(results).map((key) => [key, expected])),
+      );
     });
   });
 
