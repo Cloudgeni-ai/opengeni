@@ -149,7 +149,12 @@ describe("model-scoped weeks", () => {
 });
 
 describe("the shared usage display", () => {
-  beforeAll(() => GlobalRegistrator.register());
+  beforeAll(() => {
+    GlobalRegistrator.register();
+    (
+      globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
+    ).IS_REACT_ACT_ENVIRONMENT = true;
+  });
   afterAll(() => GlobalRegistrator.unregister());
 
   test("every reported window has its label, share left and reset, and nothing truncates", async () => {
