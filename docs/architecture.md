@@ -1743,8 +1743,7 @@ Opt-in credential profiles (workspace, plus session additions children inherit)
 name variables whose references the attempt's resolver turns into values for
 each command's own environment at the same boundary
 (`packages/runtime/src/sandbox/credential-profile-delivery.ts`); nothing is
-written to config or kept on the box, and the values are masked like any other
-resolved value.
+written to config or kept on the box.
 Connected-vault refreshes commit their mirror and status atomically against the
 pre-I/O cache epoch; late overlapping results cannot overwrite a settled check.
 The mirror encrypts the provider's optional username display hint separately
@@ -2374,23 +2373,17 @@ Lightpanda is semantic-only.
 policy for DOM reads, editable-value confirmation and accessibility reads.
 Chromium DOM snapshots find protected nodes in child documents and flattened
 shadow roots; out-of-process frames are read through their own sessions.
-Snapshots stay inside the controller. Known values are masked before semantic
-normalization and on result delivery, including digit-grouped numeric secrets
-and three-digit CVCs. Protection discovery or masking failure withholds output.
-Only primary password/card-field values are remembered; hidden metadata and
-expiry options are protected in place. Card values do not age out of memory.
-After a browser tab encounters payment fields or known card data, its screenshots,
-live frames and recordings are refused (semantic controls and unrelated tabs
-remain usable). This state is shared across controllers for that tab in the
-browserd process; it is not
-a claim of pixel-level redaction or arbitrary canvas/OCR protection.
-Transient pixels between DOM checks and desktop captures of the browser are
-outside that per-tab guarantee. Attached Chrome admits the read-only snapshot
-through the matching extension method allowlist.
-The extension advertises that read-only capability in its existing handshake;
-an agent needing it refuses an older extension as `extension_outdated`, which
-starts Chrome's existing update check. Older agents ignore the additive field,
-so extension-first rollout remains compatible.
+Snapshots stay inside the controller. Only standard markup protects a field
+(`type=password`, the password, one-time-code and `cc-*` autocomplete tokens,
+`type=hidden` and explicit private attributes); it stays present, labelled and
+fillable while its value is left out. Nothing is guessed from names or labels,
+no value is remembered, and a failed snapshot reads the page without marks
+rather than withholding output. Screenshots, live frames, recordings and
+clipboard copies are never refused (docs/secrets.md, "Agent-visible content").
+Attached Chrome admits the read-only snapshot through the matching extension
+method allowlist. The extension still advertises its former privacy capability
+in its handshake, so older agents keep accepting it; newer agents no longer
+require it.
 
 Computer cursor badges carry the source chat's display title and a bounded PNG
 of its existing sidebar avatar. The API resolves image access as the caller and
@@ -3012,20 +3005,13 @@ content API/SDK and replayable lifecycle. See [`skills-lifecycle.md`](skills-lif
   pause inheritance. MCP credentials bind URLs; identity is informational.
 - **Secrets and arbitrary content are different.** Configured credentials are
   authenticated-encrypted and read through explicit capability boundaries.
-  Known secret values (what an attempt's references resolve to and the
-  credentials Opengeni injects) are replaced by their references in tool
-  results, model input and stored conversation text before storage and before
-  the model sees them (docs/secrets.md, Masking). Other conversation, source,
-  tool, and error text is not regex-redacted, with one narrow exception: tool
-  results and their stored copies also mask high-precision secret shapes (URL
-  passwords, connection-string passwords, Azure keys, PEM private keys and
-  well-known token formats), capture each value into the root session's Task
-  vault and write its reference, or a `[masked <kind>]` marker when capture is
-  not possible. Known-value and shape masking supersede the 5 August 2026
-  "keep content exact" decision for these two cases, approved on 26 October
-  2026. A workspace admin can remove a known secret or a built-in secret
-  shape from chosen sessions' stored history afterwards; see
-  docs/secrets.md, "Removing secrets from stored history".
+  Agents use them by reference, resolved only where a tool runs. Model
+  context is append-only and agent-visible content is never rewritten or
+  masked for secrecy; no heuristic guesses whether text is secret
+  (docs/secrets.md, "Agent-visible content"). A workspace admin can remove a
+  known secret or a built-in secret shape from chosen sessions' stored
+  history with the explicit scrub; see docs/secrets.md, "Removing secrets
+  from stored history".
 - **Tool visibility is not permission.** Session selection, capability state,
   connection ownership, action policy, approval, exact attempt, and live
   provider authority all participate in execution.

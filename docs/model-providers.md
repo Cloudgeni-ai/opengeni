@@ -1618,77 +1618,32 @@ existing route-specific projection: the verified Codex route accepts
 `additional_tools`; other Responses routes use text plus native exact-name loading.
 No new live-provider compatibility claim is made.
 
-**Tool names on the wire.** Providers validate tool names in the request's
-tools and `tool_choice` and in every history item that carries definitions
-(`tool_search_output`, `additional_tools`, `mcp_list_tools`) or names a tool
-(a Responses `function_call`, `custom_tool_call` or MCP call, a Chat tool
-call, a Claude `tool_use`); one invalid name fails the whole request, and
-every Retry of it. One outbound guard (`provider-request-tool-names.ts`)
-runs on every model request as the last step before its body is serialized:
-in `ReplayableJsonOpenAI` for Responses (HTTP, the Codex WebSocket
-`response.create` payload, xAI, Azure) and Chat Completions, after every
-route and gateway policy, and in `AnthropicMessagesModel` for Claude
-Messages. It visits each of those positions. A name every provider and
-gateway accepts, `^[a-zA-Z0-9_-]{1,64}$`, is sent byte for byte, and a
-request without any other name is sent unchanged, so prompt caches never
-move. Any other name gets its stable alias (`providerToolNameAlias`: the
-readable part, starting with a letter, and a digest of the whole name, at
-most 57 characters of letters, digits and `_`). It is the same in every
-position of the request, never takes another name of the request (a
-numeric suffix settles the rare clash), and a definition that comes to
-repeat an earlier name in the same list is dropped. A namespace and the
-names inside it are aliased within the namespace; Claude's own server tools
-keep their fixed names. The aliases are kept for the request, and the
-provider's answer (a response, every stream event) is mapped back before
-the SDK reads it, so a call to an alias runs, is approved and is shown as
-the original tool, and its stored history keeps the original name. This
-does not depend on any provider's current rules, and nothing a user names
-or connects is restricted.
-
-If a provider still answers 400 because a tool name breaks its string
-constraints (a `…name` or `…namespace` path, or `tool_choice`, with a
-pattern or length error), the request is sent once more in strict mode:
-every tool name, valid or not, gets its alias, and nothing else changes.
-That resend is a single step and is never repeated; a later send of the
-same request (an SDK retry) stays strict. It carries its own request
-identity (`:tool-names` is appended to `x-opengeni-request-id` and any
-`Idempotency-Key`), so an idempotency cache never answers it with the
-rejection. Its answer is final: if it is rejected too, the turn fails with
-the provider's message, and Retry applies the same repair. Any other 400,
-an unreadable or oversized error body, and a request without a tool name
-to alias are returned as they are. When the resend succeeds, the client
-remembers the one name at the path the provider's error named, for that
-model (at most 1,024 names, oldest first out), and aliases it on later
-requests for that model, so the route does not pay the rejection on every
-call. Every other name, and every name sent to another model through the
-same client, stays byte for byte.
-
-Stored history can hold an invalid name: a known secret value inside a tool
-name was masked into a reference before tool identities were exempt from
-masking ([Secrets](secrets.md#matching)), and an agent can name a tool in
-its published `server.tool` form. Before the guard, the lazy tool transport
-binds such names to the authorized catalog with `withProviderValidToolNames`
-(`provider-tool-names.ts`), deferred tools included: a flat name becomes the
-one tool it denotes, so a later call still binds to it, when exactly one
-does (dotted `server.tool`, a published short name, or the one tool that
-fits where a masking label stands for at least eight characters) and any
-stored definition of it has that tool's parameters. Every other name is left
-for the guard. Chat Completions routes and their gateways keep their own
-treatment of history: a call whose name is not `^[a-zA-Z0-9_-]{1,64}$`
-replays as a historical fact rather than as a native call to a tool the
-request never declares. Stored history is not rewritten; it is repaired on
-every request, so Retry works on a chat that already failed. Names inside
-text (a disclosure's or search result's text) are not rewritten.
+**Tool names in history.** Providers validate tool names in the request's
+tools and in every history item that carries definitions (`tool_search_output`,
+`additional_tools`) or names a tool (a Responses `function_call`, a Chat tool
+call, a Claude `tool_use`); one invalid name fails the whole request. The one
+format every provider and gateway accepts is `^[a-zA-Z0-9_-]{1,64}$`, and
+top-level names already use it, but a model can call a tool by its published
+`server.tool` form. The lazy tool transport names such a call once, when the
+model's output item is received and before it is stored
+(`providerValidCallName` in `provider-tool-names.ts`): the one authorized
+tool it denotes (dotted `server.tool`, or a published short name), deferred
+tools included, else a stable alias with a digest of the whole name, so
+distinct names never collide. The call is stored and replayed with that name,
+and history is never rewritten later, so every later request repeats the
+earlier items byte for byte. Chat Completions routes keep their own treatment
+of any other invalid name: such a call replays as a historical fact rather
+than as a native call to a tool the request never declares. Names stored
+invalid by earlier releases (secret masking once rewrote a value inside a tool
+name, and dotted calls were stored as written) are fixed once with
+`bun run db:repair-invalid-tool-names`, a dry-run count by default and
+`--apply` to write.
 
 Provider 400 invalid-request answers are counted, for monitoring only, as
 `opengeni_model_invalid_requests_total{provider,path,code}` with the request
 path the provider names and every index collapsed (`input[].tools[].name`).
 A new path is a new class of malformed request; the Runtime Failures
-dashboard shows it. Nothing is blocked because of it. The guard's work is
-counted as `opengeni_model_tool_name_repairs_total{provider,api,field}`
-(once per request and field: `tools`, `tool_choice`, `history`) and
-`opengeni_model_tool_name_retries_total{provider,api,outcome}`; neither
-carries a name or value.
+dashboard shows it. Nothing is blocked or retried because of it.
 
 Static prompt/control-schema changes at upgrade invalidate the old cached prefix
 once for existing sessions; this is not a zero-cache-miss deployment. After that

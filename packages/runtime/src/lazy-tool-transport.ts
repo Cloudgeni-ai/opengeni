@@ -43,7 +43,7 @@ import {
 } from "./tool-discovery-meaning";
 import { toolDescriptor, toolGroup, toolGroups } from "./tool-discovery-catalog";
 import { toolDisclosureItem } from "./provider-history-adapter";
-import { invalidHistoryToolNames, withProviderValidToolNames } from "./provider-tool-names";
+import { isProviderToolName, providerValidCallName } from "./provider-tool-names";
 import { restoreDeferredToolArgumentTypes } from "./deferred-tool-arguments";
 import { isAliasedMcpToolName, prefixedMcpToolName } from "./mcp-model-tool-name";
 import {
@@ -2225,10 +2225,11 @@ export function transformGenericDispatchResponse(
 
 /** Apply the transport's response rewrites to one model output item. */
 async function transformResponseItem(
-  item: unknown,
+  received: unknown,
   runtime: LazyToolRuntime,
   signal?: AbortSignal,
 ): Promise<unknown[]> {
+  const item = await withProviderValidCallName(received, runtime);
   if (isRecord(item) && item.type === "tool_search_call") {
     const providerData = isRecord(item.providerData) ? item.providerData : {};
     if ((item.execution ?? providerData.execution) === "client") {
@@ -2267,6 +2268,32 @@ async function transformResponseItem(
     search ? await runtime.prepareSearch(item.arguments, signal) : undefined,
   );
   return items.map((candidate) => withFamilyDisclosure(candidate, runtime));
+}
+
+/**
+ * A model-written call whose name a provider would reject (a published
+ * `server.tool` form) named, once and before it is stored, as the authorized
+ * tool it denotes or by its stable alias, so the history replays valid on
+ * every later request (see provider-tool-names.ts). Deferred tools are only
+ * in the catalog once preparation ran; after a preparation failure the
+ * catalog is partial, so the call keeps an alias rather than a guess.
+ */
+async function withProviderValidCallName(
+  item: unknown,
+  runtime: LazyToolRuntime,
+): Promise<unknown> {
+  if (!isRecord(item) || item.type !== "function_call" || typeof item.name !== "string")
+    return item;
+  if (isProviderToolName(item.name)) return item;
+  let known: string[] = [];
+  try {
+    await runtime.ensurePrepared();
+    known = runtime.knownFunctionToolNames();
+  } catch {
+    known = [];
+  }
+  const name = providerValidCallName(item.name, known);
+  return name === item.name ? item : { ...item, name };
 }
 
 async function transformResponseOutput(
@@ -2489,40 +2516,6 @@ function prepareLazyToolRequest(request: ModelRequest, runtime: LazyToolRuntime)
   };
 }
 
-/**
- * The request with every history tool name a provider would reject mapped to
- * the authorized tool it denotes (see withProviderValidToolNames), so a
- * replayed `tool_search_output`, disclosure or call names the same tool the
- * request's tools do and a later call binds to it. Deferred tools are only
- * in the catalog once preparation ran, so an affected request prepares
- * first. After a preparation failure the catalog is partial, so no name is
- * bound to a tool. A name that is not bound is left for the route's
- * projection: an alias on Responses and Claude, a historical fact on Chat.
- */
-async function withAuthorizedHistoryToolNames(
-  request: ModelRequest,
-  runtime: LazyToolRuntime,
-): Promise<ModelRequest> {
-  if (typeof request.input === "string") return request;
-  if (invalidHistoryToolNames(request.input).length === 0) return request;
-  let complete = true;
-  try {
-    await runtime.ensurePrepared();
-  } catch {
-    complete = false;
-  }
-  const input = withProviderValidToolNames(request.input, {
-    names: runtime.knownFunctionToolNames(),
-    denote: complete,
-    aliasUnbound: false,
-    parametersOf: (name) => {
-      const tool = runtime.resolveFunctionTool(name);
-      return tool && isFunctionTool(tool) ? tool.parameters : undefined;
-    },
-  });
-  return input === request.input ? request : { ...request, input };
-}
-
 /** Whether a request starts its turn: nothing but instructions after the last user message. */
 function startsTurn(input: ModelRequest["input"]): boolean {
   if (typeof input === "string") return true;
@@ -2556,10 +2549,7 @@ class LazyToolModel implements Model {
     const opening = await this.openingToolLoad(request);
     if (opening) return opening;
     await beforeModelRequest("model_entry");
-    const prepared = prepareLazyToolRequest(
-      await withAuthorizedHistoryToolNames(request, this.runtime),
-      this.runtime,
-    );
+    const prepared = prepareLazyToolRequest(request, this.runtime);
     rememberPreparedModelRequest(prepared);
     void notifyModelRequestCapture(prepared);
     const response = await this.inner.getResponse(prepared);
@@ -2588,10 +2578,7 @@ class LazyToolModel implements Model {
       return;
     }
     await beforeModelRequest("model_entry");
-    const prepared = prepareLazyToolRequest(
-      await withAuthorizedHistoryToolNames(request, this.runtime),
-      this.runtime,
-    );
+    const prepared = prepareLazyToolRequest(request, this.runtime);
     rememberPreparedModelRequest(prepared);
     void notifyModelRequestCapture(prepared);
     let responseStartedPreparation = false;

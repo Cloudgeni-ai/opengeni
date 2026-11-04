@@ -76,10 +76,6 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import {
-  conversationLosslessJsonb,
-  conversationLosslessOrderedJson,
-  conversationLosslessText,
-  conversationRunStateText,
   losslessCodecVersion,
   losslessJsonb,
   losslessOrderedJson,
@@ -5286,7 +5282,7 @@ export const sessions = pgTable(
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
     status: text("status").notNull().default("queued"),
-    initialMessage: conversationLosslessText("initial_message").notNull(),
+    initialMessage: losslessText("initial_message").notNull(),
     initialMessageCodecVersion: losslessCodecVersion("initial_message_codec_version"),
     // Model-visible application context frozen with the winning create. The
     // initial turn copies it into the canonical user message so an idempotent
@@ -6136,12 +6132,9 @@ export const sessionRealtimeEntries = pgTable(
     // result/error to the same ordinary turn. It never denotes a child/fork
     // session.
     turnId: uuid("turn_id"),
-    text: conversationLosslessText("text"),
+    text: losslessText("text"),
     textCodecVersion: losslessCodecVersion("text_codec_version"),
-    payload: conversationLosslessJsonb("payload")
-      .$type<Record<string, unknown>>()
-      .notNull()
-      .default({}),
+    payload: losslessJsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
     payloadCodecVersion: losslessCodecVersion("payload_codec_version"),
     // Application context for an exact provider-in delegation or finalized
     // transcript. It is materialized as ordinary user-role message content.
@@ -7800,7 +7793,7 @@ export const sessionTurns = pgTable(
     // turns, and is projected conservatively as visible queue work.
     promptRouting: text("prompt_routing"),
     position: bigint("position", { mode: "number" }).notNull(),
-    prompt: conversationLosslessText("prompt").notNull(),
+    prompt: losslessText("prompt").notNull(),
     promptCodecVersion: losslessCodecVersion("prompt_codec_version"),
     annotations: jsonb("annotations").$type<TimelineAnnotation[]>().notNull().default([]),
     // Application context for this exact user message. It is copied into the
@@ -9420,12 +9413,9 @@ export const sessionSystemUpdates = pgTable(
     classification: text("classification").notNull().default("info"),
     sourceId: text("source_id").notNull(),
     dedupeKey: text("dedupe_key").notNull(),
-    summary: conversationLosslessText("summary").notNull(),
+    summary: losslessText("summary").notNull(),
     summaryCodecVersion: losslessCodecVersion("summary_codec_version"),
-    payload: conversationLosslessJsonb("payload")
-      .$type<Record<string, unknown>>()
-      .notNull()
-      .default({}),
+    payload: losslessJsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
     payloadCodecVersion: losslessCodecVersion("payload_codec_version"),
     lineage: jsonb("lineage").$type<Record<string, unknown>>().notNull().default({}),
     // Private immutable authority frozen when this machine input is accepted.
@@ -9545,12 +9535,9 @@ export const sessionSystemUpdateOutbox = pgTable(
     kind: text("kind").notNull(),
     classification: text("classification").notNull(),
     sourceId: text("source_id").notNull(),
-    summary: conversationLosslessText("summary").notNull(),
+    summary: losslessText("summary").notNull(),
     summaryCodecVersion: losslessCodecVersion("summary_codec_version"),
-    payload: conversationLosslessJsonb("payload")
-      .$type<Record<string, unknown>>()
-      .notNull()
-      .default({}),
+    payload: losslessJsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
     payloadCodecVersion: losslessCodecVersion("payload_codec_version"),
     lineage: jsonb("lineage").$type<Record<string, unknown>>().notNull().default({}),
     // Exact private authority copied from the causal parent turn in the source
@@ -9947,7 +9934,7 @@ export const sessionEvents = pgTable(
     duplicateReason: text("duplicate_reason"),
     sequence: integer("sequence").notNull(),
     type: text("type").notNull(),
-    payload: conversationLosslessJsonb("payload").$type<unknown>().notNull().default({}),
+    payload: losslessJsonb("payload").$type<unknown>().notNull().default({}),
     payloadCodecVersion: losslessCodecVersion("payload_codec_version"),
     clientEventId: text("client_event_id"),
     producerId: text("producer_id"),
@@ -10189,7 +10176,7 @@ export const agentRunStates = pgTable("agent_run_states", {
     onDelete: "set null",
   }),
   stateVersion: integer("state_version").notNull(),
-  serializedRunState: conversationRunStateText("serialized_run_state").notNull(),
+  serializedRunState: losslessText("serialized_run_state").notNull(),
   serializedRunStateCodecVersion: losslessCodecVersion("serialized_run_state_codec_version"),
   pendingApprovals: losslessJsonb("pending_approvals").$type<unknown[]>().notNull().default([]),
   pendingApprovalsCodecVersion: losslessCodecVersion("pending_approvals_codec_version"),
@@ -10324,9 +10311,7 @@ export const sessionHistoryItems = pgTable(
     // positions; only the summary uses the half-step. `mode: "number"` maps the
     // postgres.js string back to a JS number so every reader stays numeric.
     position: numeric("position", { mode: "number" }).notNull(),
-    item: conversationLosslessOrderedJson("item_ordered")
-      .$type<Record<string, unknown>>()
-      .notNull(),
+    item: losslessOrderedJson("item_ordered").$type<Record<string, unknown>>().notNull(),
     itemCodecVersion: losslessCodecVersion("item_codec_version"),
     // Live-row flag for client-side context compaction. The read path selects
     // only active rows; a compaction supersedes the summarized prefix (sets this
@@ -14023,10 +14008,6 @@ export const auditEvents = pgTable(
       table.workspaceId,
       table.occurredAt,
     ),
-    // Earlier secret uses of a session tree, for known-value masking (1023).
-    secretUsed: index("audit_events_secret_used_idx")
-      .on(table.workspaceId, table.occurredAt)
-      .where(sql`${table.action} = 'vault.secret.used'`),
   }),
 );
 
