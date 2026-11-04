@@ -635,7 +635,7 @@ describe("reminders before calendar meetings", () => {
     run.subject.shutdown();
   });
 
-  test("Not now on a short call before a meeting: the call ended, so the meeting's reminder shows", async () => {
+  test("Not now on a short call before a meeting: once it has clearly ended, the meeting's reminder shows", async () => {
     const run = reminders();
     await run.at(START - 6 * MINUTE);
     run.microphone([zoom], START - 6 * MINUTE);
@@ -643,8 +643,29 @@ describe("reminders before calendar meetings", () => {
     run.cards[0]!.done("dismissed");
     run.microphone([], START - 4 * MINUTE);
     run.microphone([], START - 4 * MINUTE + ENDED_AFTER_MS + 1);
+    // Off the microphone 3 minutes: a long mute or the end; it waits to tell.
     await run.at(START - REMIND_BEFORE_MS);
+    expect(run.shown()).toHaveLength(0);
+    // Off 5 minutes: that call ended, and the meeting is still to join.
+    await run.at(START + MINUTE + 15_000);
     expect(run.shown()).toHaveLength(1);
+    run.subject.shutdown();
+  });
+
+  test("Not now, then muted just as the reminder comes due: no reminder once the call is back", async () => {
+    const run = reminders();
+    await run.at(START - 5 * MINUTE);
+    run.microphone([zoom], START - 5 * MINUTE);
+    run.microphone([zoom], START - 5 * MINUTE + PROMPT_AFTER_MS);
+    run.cards[0]!.done("dismissed");
+    run.microphone([], START - 2 * MINUTE);
+    run.microphone([], START - 2 * MINUTE + ENDED_AFTER_MS + 1);
+    await run.at(START - REMIND_BEFORE_MS);
+    await run.at(START);
+    run.microphone([zoom], START + 30_000);
+    await run.at(START + 2 * MINUTE);
+    await run.at(START + 4 * MINUTE);
+    expect(run.cards.map((card) => card.prompt.kind)).toEqual(["record"]);
     run.subject.shutdown();
   });
 

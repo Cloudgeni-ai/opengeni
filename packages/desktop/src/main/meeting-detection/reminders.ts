@@ -143,11 +143,12 @@ export interface CalendarReminderOptions {
   /** Since when the page has been recording a meeting, or null when it isn't. */
   recordingSince(): number | null;
   /**
-   * Whether `appId`'s call (an app on the microphone, allowing for a short
-   * mute) is still going on. A meeting whose call the person turned down
+   * Where `appId`'s call is: "on" the microphone (allowing for a short
+   * mute), "away" from it for a while (a long mute, or the call ended; can't
+   * tell yet), or "ended". A meeting whose call the person turned down
    * recording is offered only once that call has ended.
    */
-  inCall?(appId: string): boolean;
+  callState?(appId: string): "on" | "away" | "ended";
   /** Another question is on the card that a reminder must not replace (a call just started). */
   busy(): boolean;
   /** Put a reminder on the card; `done` runs once when the person acts or it times out. */
@@ -265,19 +266,27 @@ export class CalendarReminders {
     }
     if (this.options.busy()) return;
     const since = this.options.recordingSince();
+    const waiting = new Set<string>();
     for (const meeting of meetings) {
       const meetingKey = key(accountId, meeting);
       const app = this.declined.get(meetingKey);
       if (app === undefined || !reminderDue(meeting, now)) continue;
+      const state = this.options.callState?.(app) ?? "ended";
       // Turned down and still on that call: the person is in it and said no.
+      // Away from it: wait to see whether it comes back (a mute) or not.
       // Ended (a short call before the meeting): the reminder is offered.
+      if (state === "away") {
+        waiting.add(meetingKey);
+        continue;
+      }
       this.declined.delete(meetingKey);
-      if (this.options.inCall?.(app)) this.remember(meetingKey);
+      if (state === "on") this.remember(meetingKey);
     }
     const due = meetings.filter(
       (meeting) =>
         reminderDue(meeting, now) &&
         !this.offered.has(key(accountId, meeting)) &&
+        !waiting.has(key(accountId, meeting)) &&
         // Recording since just before it started: the person joined it early.
         !(since !== null && since >= meeting.startsAt - EARLY_JOIN_MS),
     );

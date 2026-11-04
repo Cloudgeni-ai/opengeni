@@ -523,9 +523,15 @@ export class MeetingPrompter {
     this.declinedCalls.set(app.id, { until, lastSeen: now });
   }
 
-  /** Whether `appId`'s call is going on: on the microphone, or off it only briefly (a mute). */
-  inCall(appId: string): boolean {
-    return this.calls.has(appId);
+  /**
+   * Where `appId`'s call is: "on" the microphone, or off it only briefly (a
+   * mute); "away" when a call the person turned down has been off it for
+   * less than {@link DECLINED_GAP_MS} (a long mute, or it ended); else "ended".
+   */
+  callState(appId: string, now: number): "on" | "away" | "ended" {
+    if (this.calls.has(appId)) return "on";
+    const declined = this.declinedCalls.get(appId);
+    return declined && now - declined.lastSeen < DECLINED_GAP_MS ? "away" : "ended";
   }
 
   /** The call apps holding the microphone now. */
@@ -869,7 +875,7 @@ export class MeetingDetection {
           // switched; one in another account goes on.
           recordingSince: () => (this.targetRecords() ? this.recordingSince : null),
           // A meeting whose call the person turned down isn't offered while it goes on.
-          inCall: (appId) => this.prompter.inCall(appId),
+          callState: (appId) => this.prompter.callState(appId, this.now()),
           // A call that just started, or one that ended, is asked about first.
           busy: () => this.onCard?.prompt.kind === "record" || this.onCard?.prompt.kind === "stop",
           present: (reminder, done) => this.showCard(joinPrompt(reminder), done),
