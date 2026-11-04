@@ -217,6 +217,11 @@ export interface DesktopAccount {
   workspaceId: string | null;
   /** The server rejected the credential; the person has to sign in again. */
   signedOut: boolean;
+  /**
+   * The account's page records a meeting. Absent from apps made before it
+   * existed.
+   */
+  recording?: boolean;
 }
 
 export interface DesktopAccountsSnapshot {
