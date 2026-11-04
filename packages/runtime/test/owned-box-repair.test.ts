@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { ScriptedModel } from "@opengeni/testing/scripted-model";
 import { testSettings } from "@opengeni/testing/settings";
 import { buildManifest, buildOpenGeniAgent, runOwnedSandboxSetup } from "../src/index";
+import { TurnSandboxCommandCancelledError } from "../src/sandbox";
 import {
   ownedBoxRepairCommand,
   ownedBoxRepairHost,
@@ -42,7 +43,16 @@ if [ "$1 $2" = "-u -s" ]; then
 fi
 exit 2`,
   );
-  stub("getent", `grep -qx 'nameserver 169.254.0.22' "${box}/resolv.conf" 2>/dev/null`);
+  // glibc getent: 0 when the name resolves, 2 when it does not.
+  stub(
+    "getent",
+    `[ "$1" = hosts ] || exit 1
+[ -f "${box}/getent-exit" ] && exit "$(cat "${box}/getent-exit")"
+[ -f "${box}/dns-down" ] && exit 2
+grep -qx 'nameserver 169.254.0.22' "${box}/resolv.conf" 2>/dev/null || exit 2`,
+  );
+  // No usable node lookup unless a test provides one: it cannot tell.
+  stub("node", "exit 3");
   stub("id", `cat "${box}/uid"`);
   // Never reach a real sudo (or the real clock) from a test.
   stub("sudo", "exit 1");
@@ -155,17 +165,58 @@ describe("a cloud computer's clock and resolver are repaired at turn setup", () 
       }),
     ).toBe(
       [
-        "[Opengeni repaired this chat's cloud computer before this turn]",
+        "[Opengeni checked the cloud computer this chat runs on before this turn]",
         "- Its clock said 2001-01-01 00:00 UTC, so Opengeni set it to 2026-11-04 13:46 UTC.",
         "- It could not look up staging.app.opengeni.ai, so Opengeni restored /etc/resolv.conf to the platform name servers (169.254.0.22); the previous file is /etc/resolv.conf.opengeni-replaced.",
       ].join("\n"),
     );
     expect(ownedBoxRepairNote({})).toBeNull();
+  });
+
+  test("the model is told what is still broken when it could not be repaired", () => {
     expect(
       ownedBoxRepairNote({
         clock: { set: false, fromEpochSeconds: BOX_2001, toEpochSeconds: WORKER_EPOCH },
+        dns: { outcome: "unrepaired", reason: "platform-server-fails", host: HOST },
       }),
-    ).toBeNull();
+    ).toBe(
+      [
+        "[Opengeni checked the cloud computer this chat runs on before this turn]",
+        "- Its clock says 2001-01-01 00:00 UTC, but the time is 2026-11-04 13:46 UTC, and Opengeni could not set it; TLS and git may fail until it is fixed.",
+        "- It cannot look up staging.app.opengeni.ai, and Opengeni left /etc/resolv.conf unchanged because it already lists the platform name server, so the network itself is failing.",
+      ].join("\n"),
+    );
+  });
+
+  test("a lookup that cannot tell (musl getent, no node) never rewrites a resolver", () => {
+    writeFileSync(join(box, "getent-exit"), "1\n");
+    const result = runOnBox({ clock: WORKER_EPOCH, resolv: "nameserver 192.0.2.1\n" });
+    expect(result.resolv).toBe("nameserver 192.0.2.1\n");
+    expect(result.report).toEqual({});
+  });
+
+  test("a failing lookup with the platform server already listed leaves the file alone", () => {
+    writeFileSync(join(box, "dns-down"), "");
+    const custom = "nameserver 169.254.0.22\noptions ndots:2\n";
+    const result = runOnBox({ clock: WORKER_EPOCH, resolv: custom });
+    expect(result.resolv).toBe(custom);
+    expect(result.replaced).toBeNull();
+    expect(result.report.dns).toEqual({
+      outcome: "unrepaired",
+      reason: "platform-server-fails",
+      host: HOST,
+    });
+  });
+
+  test("a stale temp file or backup is replaced, never followed", () => {
+    const victim = join(box, "victim");
+    writeFileSync(victim, "keep\n");
+    spawnSync("ln", ["-s", victim, join(box, "resolv.conf.opengeni-new")]);
+    spawnSync("ln", ["-s", victim, join(box, "resolv.conf.opengeni-replaced")]);
+    const result = runOnBox({ clock: WORKER_EPOCH, resolv: "nameserver 192.0.2.1\n" });
+    expect(readFileSync(victim, "utf8")).toBe("keep\n");
+    expect(result.resolv).toBe("nameserver 169.254.0.22\n");
+    expect(result.replaced).toBe("nameserver 192.0.2.1\n");
   });
 
   test("the host comes from the Codemode URL", () => {
@@ -180,14 +231,19 @@ describe("a cloud computer's clock and resolver are repaired at turn setup", () 
 });
 
 describe("owned setup repairs only the chat's own cloud computer", () => {
+  type Exec = (args: { cmd: string }) => Promise<{ exitCode: number; output: string }>;
+
+  /** Production sets activeSandboxBackend only for a Connected Machine; a
+   * compute or Modal turn is known by its configured backend alone. */
   async function setup(
-    backend: "compute" | "modal" | "selfhosted",
-    repairOutput: string,
-    configuredBackend: "compute" | "modal" = backend === "modal" ? "modal" : "compute",
+    target: "compute" | "modal" | "connected machine in a compute chat",
+    exec: Exec,
   ) {
-    // A chat on compute can move to a Connected Machine; its configured
-    // backend stays compute while the active one is selfhosted.
-    const settings = testSettings({ sandboxBackend: configuredBackend, webSearchEnabled: false });
+    const connectedMachine = target === "connected machine in a compute chat";
+    const settings = testSettings({
+      sandboxBackend: target === "modal" ? "modal" : "compute",
+      webSearchEnabled: false,
+    });
     const environment = {
       HOME: "/workspace",
       OPENGENI_CODEMODE_URL: "https://staging.app.opengeni.ai/v1/workspaces/w/codemode",
@@ -195,18 +251,18 @@ describe("owned setup repairs only the chat's own cloud computer", () => {
     const agent = buildOpenGeniAgent(settings, [], {
       model: new ScriptedModel([]),
       sandboxEnvironment: environment,
-      activeSandboxBackend: backend,
-      ...(backend === "selfhosted" ? { sandboxWorkspaceRoot: "/Users/me" } : {}),
+      ...(connectedMachine
+        ? { activeSandboxBackend: "selfhosted" as const, sandboxWorkspaceRoot: "/Users/me" }
+        : {}),
     });
     const commands: string[] = [];
     const session = {
       state: { manifest: buildManifest(settings, [], environment) },
       exec: async (args: { cmd: string }) => {
         commands.push(args.cmd);
-        return {
-          exitCode: 0,
-          output: args.cmd.includes("opengeni-box-repair:") ? repairOutput : "",
-        };
+        return args.cmd.includes("opengeni-box-repair:")
+          ? await exec(args)
+          : { exitCode: 0, output: "" };
       },
     };
     const preparedInput = { input: "hello", persistedHistoryCount: 0 };
@@ -217,14 +273,18 @@ describe("owned setup repairs only the chat's own cloud computer", () => {
     });
     return {
       repairCommands: commands.filter((cmd) => cmd.includes("opengeni-box-repair:")),
+      commands,
       input: preparedInput.input,
     };
   }
+  const answer =
+    (output: string): Exec =>
+    async () => ({ exitCode: 0, output });
 
   test("a compute box is checked, and the model hears what was repaired", async () => {
     const result = await setup(
       "compute",
-      `opengeni-box-repair: clock=set from=${BOX_2001} to=${WORKER_EPOCH}\n`,
+      answer(`opengeni-box-repair: clock=set from=${BOX_2001} to=${WORKER_EPOCH}\n`),
     );
     expect(result.repairCommands).toHaveLength(1);
     expect(result.repairCommands[0]).toContain(`host='${HOST}'`);
@@ -233,15 +293,31 @@ describe("owned setup repairs only the chat's own cloud computer", () => {
   });
 
   test("a healthy compute box leaves the input unchanged", async () => {
-    const result = await setup("compute", "");
+    const result = await setup("compute", answer(""));
     expect(result.repairCommands).toHaveLength(1);
     expect(result.input).toBe("hello");
   });
 
-  test.each(["modal", "selfhosted"] as const)(
-    "a %s box's clock and resolver are never touched",
-    async (backend) => {
-      const result = await setup(backend, "");
+  test("a check that fails never fails setup", async () => {
+    const result = await setup("compute", async () => {
+      throw new Error("the box did not answer");
+    });
+    expect(result.repairCommands).toHaveLength(1);
+    expect(result.input).toBe("hello");
+  });
+
+  test("a Steer or Pause during the check still stops setup", async () => {
+    const cancelled = new TurnSandboxCommandCancelledError(new Error("paused"));
+    const error = await setup("compute", async () => {
+      throw cancelled;
+    }).catch((caught: unknown) => caught);
+    expect(error).toBe(cancelled);
+  });
+
+  test.each(["modal", "connected machine in a compute chat"] as const)(
+    "a %s is never checked",
+    async (target) => {
+      const result = await setup(target, answer(""));
       expect(result.repairCommands).toEqual([]);
     },
   );

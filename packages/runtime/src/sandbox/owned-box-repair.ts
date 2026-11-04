@@ -75,9 +75,12 @@ as_root() {
   elif command -v sudo >/dev/null 2>&1; then sudo -n "$@"
   else return 1; fi
 }
-bounded() {
-  if command -v timeout >/dev/null 2>&1; then timeout 5 "$@"; else "$@"; fi
-}
+# Whether timeout 5 works here (old busybox wants timeout -t 5).
+if command -v timeout >/dev/null 2>&1 && timeout 5 true >/dev/null 2>&1; then
+  has_timeout=1
+else
+  has_timeout=
+fi
 worker_epoch=${workerEpoch}
 max_drift=${maxDrift}
 host=${shellQuote(lookupHost(options.host))}
@@ -100,31 +103,58 @@ case "\${box_epoch#-}" in
     ;;
 esac
 
+# 0: resolves; 1: does not resolve (not found or timed out); 2: cannot tell.
+# Only a bounded lookup counts, and only "not found" or "timed out" is a
+# failure: any other exit (an unsupported option, a missing program) is not
+# evidence that the resolver is broken.
 lookup() {
-  if command -v getent >/dev/null 2>&1; then
-    bounded getent ahosts "$host" >/dev/null 2>&1
-  elif command -v node >/dev/null 2>&1; then
-    bounded node -e 'require("dns").lookup(process.argv[1], (e) => process.exit(e ? 1 : 0))' "$host" >/dev/null 2>&1
-  else
-    return 99
+  if [ -n "$has_timeout" ] && command -v getent >/dev/null 2>&1; then
+    timeout 5 getent hosts "$host" >/dev/null 2>&1
+    case $? in
+      0) return 0 ;;
+      2|124) return 1 ;;
+    esac
   fi
+  if command -v node >/dev/null 2>&1; then
+    node -e '
+      setTimeout(() => process.exit(124), 5000).unref();
+      require("dns").lookup(process.argv[1], (error) => {
+        if (!error) process.exit(0);
+        process.exit(["ENOTFOUND", "EAI_AGAIN", "EAI_FAIL", "EAI_NODATA", "EAI_NONAME"].includes(error.code) ? 2 : 3);
+      });
+    ' "$host" >/dev/null 2>&1
+    case $? in
+      0) return 0 ;;
+      2|124) return 1 ;;
+    esac
+  fi
+  return 2
 }
 if [ -n "$host" ]; then
   lookup
-  status=$?
-  if [ "$status" != 0 ] && [ "$status" != 99 ]; then
-    servers=$(tr ' ' '\\n' < "$cmdline" 2>/dev/null | sed -n 's/^ip=//p' | head -n 1 \\
+  if [ "$?" = 1 ]; then
+    # The last ip= wins, as in the guest's own parser.
+    servers=$(tr ' ' '\\n' < "$cmdline" 2>/dev/null | sed -n 's/^ip=//p' | tail -n 1 \\
       | awk -F: '{ print $8; print $9 }' \\
       | grep -E '^[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}$')
     wanted=$(for server in $servers; do printf 'nameserver %s\\n' "$server"; done)
+    listed_platform_server() {
+      for server in $servers; do
+        grep -Eq "^[[:space:]]*nameserver[[:space:]]+$server([[:space:]]|\\$)" "$resolv" 2>/dev/null && return 0
+      done
+      return 1
+    }
     if [ -z "$wanted" ]; then
       report "dns=unrepaired reason=no-platform-servers host=$host"
     elif [ "$(readlink "$resolv" 2>/dev/null)" = /proc/net/pnp ]; then
       report "dns=unrepaired reason=kernel-list host=$host"
-    elif [ -f "$resolv" ] && [ ! -L "$resolv" ] && [ "$(cat "$resolv" 2>/dev/null)" = "$wanted" ]; then
-      report "dns=unrepaired reason=already-platform host=$host"
+    elif listed_platform_server; then
+      # Rewriting cannot help: the platform's own server already fails (an
+      # upstream outage or blocked egress), so the person's file stays.
+      report "dns=unrepaired reason=platform-server-fails host=$host"
     else
       if as_root sh -c '
+        rm -f "$1.opengeni-new" "$1${OWNED_BOX_REPLACED_RESOLV_CONF_SUFFIX}" || exit 1
         if [ -e "$1" ] || [ -L "$1" ]; then cp -P "$1" "$1${OWNED_BOX_REPLACED_RESOLV_CONF_SUFFIX}" || exit 1; fi
         printf "%s\\n" "$2" > "$1.opengeni-new" && chmod 644 "$1.opengeni-new" && mv -f "$1.opengeni-new" "$1"
       ' sh "$resolv" "$wanted" >/dev/null 2>&1; then
@@ -200,15 +230,28 @@ function utc(epochSeconds: number): string {
     : "an invalid time";
 }
 
+const UNREPAIRED_DNS_REASONS: Record<string, string> = {
+  "no-platform-servers": "no platform name servers are known",
+  "kernel-list": "it is the kernel's own list",
+  "platform-server-fails":
+    "it already lists the platform name server, so the network itself is failing",
+  "write-failed": "it could not be written",
+};
+
 /**
- * A short note for the model when setup changed the box, so it knows why its
- * clock or resolv.conf differs from what it left. Null when nothing changed.
+ * A short note for the model when setup found the box's clock or resolver
+ * broken, so it knows what changed or what will still fail. Null when the
+ * box was healthy.
  */
 export function ownedBoxRepairNote(report: OwnedBoxRepairReport): string | null {
   const lines: string[] = [];
   if (report.clock?.set) {
     lines.push(
       `- Its clock said ${utc(report.clock.fromEpochSeconds)}, so Opengeni set it to ${utc(report.clock.toEpochSeconds)}.`,
+    );
+  } else if (report.clock) {
+    lines.push(
+      `- Its clock says ${utc(report.clock.fromEpochSeconds)}, but the time is ${utc(report.clock.toEpochSeconds)}, and Opengeni could not set it; TLS and git may fail until it is fixed.`,
     );
   }
   if (report.dns?.outcome === "restored" || report.dns?.outcome === "restored-still-failing") {
@@ -218,7 +261,15 @@ export function ownedBoxRepairNote(report: OwnedBoxRepairReport): string | null 
         report.dns.outcome === "restored-still-failing" ? " Lookups still fail." : ""
       }`,
     );
+  } else if (report.dns) {
+    const reason = UNREPAIRED_DNS_REASONS[report.dns.reason ?? ""];
+    lines.push(
+      `- It cannot look up ${report.dns.host ?? "Opengeni"}, and Opengeni left /etc/resolv.conf unchanged${reason ? ` because ${reason}` : ""}.`,
+    );
   }
   if (lines.length === 0) return null;
-  return ["[Opengeni repaired this chat's cloud computer before this turn]", ...lines].join("\n");
+  return [
+    "[Opengeni checked the cloud computer this chat runs on before this turn]",
+    ...lines,
+  ].join("\n");
 }
