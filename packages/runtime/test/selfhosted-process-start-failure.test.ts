@@ -7,12 +7,12 @@ import { ErrorCode } from "@opengeni/agent-proto";
 import {
   ComputeControlClient,
   agentErrorToControlError,
-  isDefinitePathNotFoundError,
   renderSelfhostedFault,
   sanitizeProcessStartFailureMessage,
   selfhostedFaultClass,
   SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES,
 } from "../src/sandbox";
+import { isDefinitePathNotFoundError } from "../src/sandbox/channel-a";
 
 const SCRIPT = `node -e '\nconst fs = require("node:fs");\nthrow Error("Codemode client transfer integrity failure");\n' '/workspace/x.json'`;
 const OS = "No such file or directory (os error 2)";
