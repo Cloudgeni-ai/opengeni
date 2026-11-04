@@ -4644,6 +4644,16 @@ from the committed pointer and binds one exact root for its lifetime. There is
 no new user message, per-turn machine cwd query, silent fallback, path
 reinterpretation, or blind replay of an ambiguous operation.
 
+The turn-start route itself is decided only from facts that were actually
+read. The active pointer and the sandbox row it names are read before any box
+is touched; a failed read is retried briefly and then fails the attempt into
+the exact-attempt database recovery lane. It is never read as "no machine",
+so a chat whose pointer names a Connected Machine never starts setup,
+credential seeding or file downloads on its managed home because a read failed
+(for example while connections are re-established after a redeploy). Only a
+genuinely absent or structurally unestablishable target is reset to home,
+under the epoch fence and with a visible `session.route.reconciled` event.
+
 The same boundary recognizes the home resolver's typed
 `RoutingBackendRecoveryRequiredError` only for `resolve_home_backend` with
 `pending` or `superseded` recovery, before the requested provider operation
