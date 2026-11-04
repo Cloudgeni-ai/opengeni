@@ -101,8 +101,9 @@ export function SignInScreen({
     setProblem(null);
     try {
       const outcome = await retrySignIn(expired.id);
+      if (!mounted.current) return;
       if (outcome === "ready") onDone?.();
-      else if (outcome === "unreadable" && mounted.current) setProblem("Still couldn't read it.");
+      else if (outcome === "unreadable") setProblem("Still couldn't read it.");
     } finally {
       if (mounted.current) setRunning(null);
     }
@@ -223,7 +224,14 @@ export function SignInScreen({
             />
           )}
           {onCancel ? (
-            <Button variant="ghost" size="form" label="Cancel" onPress={onCancel} />
+            // A retry that succeeds switches accounts, so it finishes first.
+            <Button
+              variant="ghost"
+              size="form"
+              label="Cancel"
+              disabled={running === "retry"}
+              onPress={onCancel}
+            />
           ) : null}
           {problem ? (
             <Text

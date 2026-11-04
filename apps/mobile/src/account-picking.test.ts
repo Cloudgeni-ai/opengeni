@@ -36,7 +36,9 @@ let pathname = "/";
 let unreadable = false;
 let pushFails = false;
 // When set, credential reads wait here until the test settles them.
-let heldReads: Array<{ id: string; settle(value: string | null): void }> | null = null;
+let heldReads: Array<{ id: string; settle(value: string | null | Error): void }> | null = null;
+let webSignIn: unknown = { kind: "cancelled" };
+let signedInSubject = "user:work";
 
 mock.module("@/account-store", () => ({
   loadAccounts: async () => structuredClone(stored),
@@ -47,13 +49,22 @@ mock.module("@/account-store", () => ({
     if (unreadable) throw new Error("keychain locked");
     if (heldReads) {
       const held = heldReads;
-      return new Promise<string | null>((settle) => held.push({ id, settle }));
+      return new Promise<string | null>((resolve, reject) =>
+        held.push({
+          id,
+          settle: (value) => (value instanceof Error ? reject(value) : resolve(value)),
+        }),
+      );
     }
     return tokens.get(id) ?? null;
   },
-  writeAccountToken: async (id: string) => tokenWrites.push(`write:${id}`),
+  writeAccountToken: async (id: string, value: string) => {
+    tokenWrites.push(`write:${id}`);
+    tokens.set(id, value);
+  },
   forgetAccountToken: async (id: string) => tokenWrites.push(`forget:${id}`),
-  sameIdentity: () => false,
+  sameIdentity: (a: StoredAccount, b: { baseUrl: string; subjectId: string }) =>
+    a.baseUrl === b.baseUrl && a.subjectId === b.subjectId,
 }));
 mock.module("expo-router", () => ({
   router: {
@@ -79,9 +90,10 @@ mock.module("@opengeni/react/organization-model", () => ({
 mock.module("@opengeni/sdk", () => ({
   OpenGeniApiError: class extends Error {},
   OpenGeniClient: class {
-    getAccessContext = async () => ({ subjectId: "user:work", defaultAccountId: null });
+    getAccessContext = async () => ({ subjectId: signedInSubject, defaultAccountId: null });
     listWorkspaces = async () => [{ id: "workspace", accountId: "org", name: "Work" }];
     getClientConfig = async () => null;
+    signOutNativeApp = async () => undefined;
   },
 }));
 mock.module("@opengeni/react-native", () => ({ createHydratedPersistenceAdapter: () => ({}) }));
@@ -91,7 +103,7 @@ mock.module("@opengeni/react-native/expo", () => ({
 }));
 mock.module("@/app-link-registry", () => ({ openLinkFromApp: () => undefined }));
 mock.module("@/feedback/recent-errors", () => ({ recordingRequests: (each: unknown) => each }));
-mock.module("@/web-sign-in", () => ({ signInThroughWeb: async () => ({ kind: "cancelled" }) }));
+mock.module("@/web-sign-in", () => ({ signInThroughWeb: async () => webSignIn }));
 
 const { AccountProvider, useAccount, usePickAccount } = await import("./account");
 registerDom();
@@ -111,6 +123,8 @@ async function mount(
   unreadable = options.unreadable ?? false;
   pushFails = false;
   heldReads = null;
+  webSignIn = { kind: "cancelled" };
+  signedInSubject = "user:work";
   const probe = {} as Probe;
   function Read() {
     probe.state = useAccount();
@@ -300,6 +314,97 @@ test("only the newest read of an account may mark it", async () => {
     });
     expect(probe.state.account?.id).toBe("personal");
     expect(probe.state.accounts.find((each) => each.id === "personal")?.signedOut).toBeUndefined();
+  } finally {
+    heldReads = null;
+    await view.unmount();
+  }
+});
+
+test("a retry for an account signed out meanwhile goes nowhere", async () => {
+  const { probe, view } = await mount(
+    { accounts: [work, personal], activeId: "work" },
+    { work: "ogapp_work", personal: "ogapp_personal" },
+  );
+  try {
+    const held: NonNullable<typeof heldReads> = [];
+    heldReads = held;
+    let retry: Promise<string> = Promise.resolve("");
+    let signOut: Promise<void> = Promise.resolve();
+    await act(async () => {
+      retry = probe.state.retrySignIn("personal");
+      signOut = probe.state.signOut("personal");
+      await flush();
+    });
+    expect(held.map((each) => each.id)).toEqual(["personal", "personal"]);
+    let outcome = "";
+    await act(async () => {
+      held[1]?.settle("ogapp_personal");
+      await signOut;
+      held[0]?.settle("ogapp_personal");
+      outcome = await retry;
+      await flush();
+    });
+    expect(outcome).toBe("signIn");
+    expect(probe.state.accounts.map((each) => each.id)).toEqual(["work"]);
+    expect(probe.state.account?.id).toBe("work");
+    expect(probe.state.status).toBe("ready");
+    expect(probe.state.unreadable.size).toBe(0);
+  } finally {
+    heldReads = null;
+    await view.unmount();
+  }
+});
+
+test("signing in or out makes reads already in flight for that account count for nothing", async () => {
+  const { probe, view } = await mount(
+    { accounts: [staging, work], activeId: "staging" },
+    { work: "ogapp_work" },
+  );
+  try {
+    expect(probe.state.status).toBe("signedOut");
+    const held: NonNullable<typeof heldReads> = [];
+    heldReads = held;
+    // A retry's read of the signed-out account is still out when it signs in again.
+    let retry: Promise<unknown> = Promise.resolve();
+    await act(async () => {
+      retry = probe.state.retrySignIn("staging");
+      await flush();
+    });
+    webSignIn = { kind: "signedIn", accessToken: "ogapp_staging" };
+    signedInSubject = "user:staging";
+    await act(async () => {
+      await probe.state.addAccount("https://staging.app.opengeni.ai");
+      await flush();
+    });
+    expect(probe.state.status).toBe("ready");
+    await act(async () => {
+      held[0]?.settle(null);
+      await retry;
+      await flush();
+    });
+    expect(probe.state.account?.id).toBe("staging");
+    expect(probe.state.account?.signedOut).toBeUndefined();
+    expect(probe.state.status).toBe("ready");
+    // A read of an account still out when it signs out doesn't mark it unreadable.
+    let read: Promise<unknown> = Promise.resolve();
+    await act(async () => {
+      read = probe.state.chooseAccount("work");
+      await flush();
+    });
+    const workRead = held.find((each) => each.id === "work");
+    await act(async () => {
+      const signingOut = probe.state.signOut("work");
+      await flush();
+      held
+        .filter((each) => each.id === "work" && each !== workRead)
+        .forEach((each) => each.settle("ogapp_work"));
+      await signingOut;
+      workRead?.settle(new Error("keychain locked"));
+      await read;
+      await flush();
+    });
+    expect(probe.state.accounts.map((each) => each.id)).toEqual(["staging"]);
+    expect(probe.state.unreadable.has("work")).toBe(false);
   } finally {
     heldReads = null;
     await view.unmount();

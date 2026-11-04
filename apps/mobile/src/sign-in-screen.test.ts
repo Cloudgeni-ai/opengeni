@@ -49,8 +49,15 @@ mock.module("react-native-safe-area-context", () => ({
   useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }),
 }));
 mock.module("@opengeni/react-native/timeline", () => ({
-  Button: ({ label, onPress }: { label: string; onPress?: () => void }) =>
-    createElement("button", { onClick: onPress }, label),
+  Button: ({
+    label,
+    onPress,
+    disabled,
+  }: {
+    label: string;
+    onPress?: () => void;
+    disabled?: boolean;
+  }) => createElement("button", { onClick: onPress, disabled }, label),
   fontStyle: () => ({}),
   useNativeTimelineTheme: () => ({ colors: {}, radius: { md: 8, lg: 12 } }),
 }));
@@ -87,7 +94,7 @@ type State = {
   accounts: StoredAccount[];
   previousAccountId: string | null;
   unreadable: ReadonlySet<string>;
-  retryOutcome: "ready" | "signIn" | "unreadable";
+  retryOutcome: "ready" | "signIn" | "unreadable" | Promise<"ready" | "signIn" | "unreadable">;
   signIn: Promise<{ kind: string }>;
 };
 let state: State;
@@ -114,7 +121,7 @@ mock.module("@/account", () => ({
     switchAccount: (id: string) => switched.push(id),
     retrySignIn: async (id: string) => {
       retried.push(id);
-      return state.retryOutcome;
+      return await state.retryOutcome;
     },
   }),
 }));
@@ -265,6 +272,34 @@ test("in the unreadable sheet, each action shows its own progress and the list s
       await state.signIn;
     });
     expect(button(view.container, "Sign in again")).toBeDefined();
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("Cancel waits for a retry, since a readable sign-in switches to that account", async () => {
+  state = { ...state, account: work, unreadable: new Set(["home"]), previousAccountId: null };
+  let finish: (value: "ready") => void = () => undefined;
+  state.retryOutcome = new Promise((resolve) => {
+    finish = resolve;
+  });
+  let done = 0;
+  const view = await renderComponent(
+    createElement(SignInScreen, {
+      target: home,
+      onDone: () => done++,
+      onCancel: () => undefined,
+    }),
+  );
+  try {
+    expect(button(view.container, "Cancel")?.disabled).toBe(false);
+    await act(async () => button(view.container, "Try again")?.click());
+    expect(button(view.container, "Cancel")?.disabled).toBe(true);
+    await act(async () => {
+      finish("ready");
+      await state.retryOutcome;
+    });
+    expect(done).toBe(1);
   } finally {
     await view.unmount();
   }
