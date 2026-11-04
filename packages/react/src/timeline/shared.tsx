@@ -1,8 +1,20 @@
-import { CameraIcon, CameraOffIcon, ChevronRightIcon } from "lucide-react";
+import { CameraIcon, CameraOffIcon, CheckIcon, ChevronRightIcon, CopyIcon } from "lucide-react";
 import { useToolDetails } from "./tool-details";
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type MouseEvent,
+  type ReactNode,
+  type RefObject,
+} from "react";
 import { useTimelineSearchReveal } from "../components/timeline-search";
 import { cn } from "../lib/cn";
+import { copyTextToClipboard } from "../lib/clipboard";
 import { stringifyPayload } from "../lib/format";
 import { redactPayload } from "./credential-redaction";
 import { SecretRefText } from "../components/secret-ref-chip";
@@ -197,6 +209,19 @@ export function ActivityDisclosure({
   useEffect(() => {
     if (open && outputPending && !compact) loadOutput?.();
   }, [open, outputPending, loadOutput, compact]);
+  const titleRef = useRef<HTMLSpanElement>(null);
+  const previewRef = useRef<HTMLSpanElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const childBody = expandable && (children != null || truncation != null);
+  // A step with nothing behind it still opens when its one line is cut off,
+  // so its whole title and note can be read (and copied).
+  const clipped = useClippedLine(
+    titleRef,
+    previewRef,
+    !compact && !childBody && !media,
+    open,
+    `${typeof title === "string" ? title : ""}\u0000${typeof preview === "string" ? preview : ""}`,
+  );
   if (compact)
     return (
       <span className="og-rolling-label">
@@ -211,7 +236,8 @@ export function ActivityDisclosure({
         </ShimmerText>
       </span>
     );
-  const hasBody = expandable && (children != null || truncation != null);
+  const hasBody = childBody || clipped;
+  const expanded = open && hasBody;
 
   // The preview is detail-on-demand: it is suppressed once the row is open so a
   // path/stat shown in the body never also sits in the collapsed row.
@@ -256,22 +282,31 @@ export function ActivityDisclosure({
         className={cn("og-command-reel", running && "og-command-reel-running")}
       >
         <span
+          ref={titleRef}
           className={cn(
-            "min-w-0 shrink truncate text-og-base font-medium",
+            "min-w-0 shrink text-og-base font-medium",
+            // Open, the whole title shows; closed, it keeps to one line.
+            expanded ? "whitespace-normal [overflow-wrap:anywhere]" : "truncate",
             titleMono && "font-og-mono text-og-sm font-normal",
           )}
         >
           {title}
         </span>
         {previewVisible && !media ? (
-          <span className="min-w-0 flex-1 truncate text-og-sm text-og-fg-subtle">{preview}</span>
+          <span ref={previewRef} className="min-w-0 flex-1 truncate text-og-sm text-og-fg-subtle">
+            {preview}
+          </span>
         ) : (
           <span className="flex-1" />
         )}
       </ShimmerText>
       {/* The right gutter carries at most ONE signal: the media thumbnail, else a
-          terse settle chip (hidden once expanded — the body owns the detail). */}
-      {media && !open ? (
+          terse settle chip (hidden once expanded — the body owns the detail);
+          an open step keeps it for Copy, which sits beside the row (a button
+          inside the row's own button role would be hidden from AT). */}
+      {expanded ? (
+        <span aria-hidden="true" className="ml-auto size-6 shrink-0 pointer-coarse:size-11" />
+      ) : media && !open ? (
         <span className="ml-auto flex shrink-0 items-center gap-2 pl-2">{media}</span>
       ) : chip && !open ? (
         <span className="ml-auto shrink-0 pl-2">
@@ -285,43 +320,67 @@ export function ActivityDisclosure({
   // settled state regardless of whether the chip slot is occupied by media.
   const dataStatus = cancelled ? "cancelled" : failed ? "failed" : undefined;
 
-  if (!hasBody) {
-    return (
-      <div className={cn(rowClass, "cursor-default")} data-status={dataStatus}>
-        {inner}
-      </div>
-    );
-  }
-
   // Native disclosure (not radix-ui Collapsible): importing `radix-ui` from the
   // timeline registry pulls Popper into the session share-graph and crashes
   // lazy workspace settings (`createPopperScope is not a function`).
+  //
+  // One DOM shape whether or not the row opens, so a row that becomes
+  // expandable (its line got cut off) keeps the same title and note nodes,
+  // which the clipping measurement goes on observing.
   return (
-    <div>
+    <div className="relative">
       <div
-        role="button"
-        tabIndex={0}
-        aria-expanded={open}
-        data-state={open ? "open" : "closed"}
-        onClick={() => setOpen((prev) => !prev)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            setOpen((prev) => !prev);
-          }
-        }}
+        {...(hasBody
+          ? {
+              role: "button",
+              tabIndex: 0,
+              "aria-expanded": open,
+              "data-state": open ? "open" : "closed",
+              onClick: (event: MouseEvent<HTMLDivElement>) => {
+                // Selecting the row's text to copy it leaves the row as it is.
+                if (hasTextSelectionIn(event.currentTarget)) return;
+                setOpen((prev) => !prev);
+              },
+              onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => {
+                if (event.target !== event.currentTarget) return;
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  setOpen((prev) => !prev);
+                }
+              },
+            }
+          : {})}
         data-status={dataStatus}
         className={cn(
           rowClass,
-          "cursor-pointer outline-hidden hover:bg-og-surface-1 hover:text-og-fg",
-          "focus-visible:ring-2 focus-visible:ring-og-accent focus-visible:ring-offset-0",
+          hasBody
+            ? [
+                "cursor-pointer outline-hidden hover:bg-og-surface-1 hover:text-og-fg",
+                "focus-visible:ring-2 focus-visible:ring-og-accent focus-visible:ring-offset-0",
+              ]
+            : "cursor-default",
         )}
       >
         {inner}
       </div>
-      {open ? (
-        <div className="mb-2 ml-7 mt-1.5 flex flex-col gap-2 overflow-hidden animate-og-expand">
-          {outputPreview && loadOutput && outputPreview.state !== "error" ? (
+      {expanded ? (
+        <span className="absolute right-1.5 top-1.5 pointer-coarse:top-2.5">
+          <StepCopyButton titleRef={titleRef} bodyRef={bodyRef} />
+        </span>
+      ) : null}
+      {expanded ? (
+        <div
+          ref={bodyRef}
+          className="mb-2 ml-7 mt-1.5 flex flex-col gap-2 overflow-hidden animate-og-expand empty:hidden"
+        >
+          {!childBody ? (
+            // A step without details: its note, in full.
+            preview != null && !media ? (
+              <div className="whitespace-pre-wrap text-og-sm leading-5 text-og-fg-subtle [overflow-wrap:anywhere]">
+                {preview}
+              </div>
+            ) : null
+          ) : outputPreview && loadOutput && outputPreview.state !== "error" ? (
             // Never show a preview's body as if it were the whole output.
             <div
               data-og-tool-output-loading=""
@@ -344,6 +403,118 @@ export function ActivityDisclosure({
         </div>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * Whether a closed row's one line (its title or note) is cut off. Measured
+ * only while `enabled` and kept while the row is open (when the line wraps),
+ * so opening a clipped row never takes its body away.
+ */
+function useClippedLine(
+  titleRef: RefObject<HTMLElement | null>,
+  previewRef: RefObject<HTMLElement | null>,
+  enabled: boolean,
+  open: boolean,
+  contentKey: string,
+): boolean {
+  const [clipped, setClipped] = useState(false);
+  const holding = open && clipped;
+  useIsomorphicLayoutEffect(() => {
+    if (!enabled || holding) return;
+    const measure = () => {
+      const cut = [titleRef.current, previewRef.current].some(
+        (element) => element != null && element.scrollWidth > element.clientWidth + 1,
+      );
+      setClipped((current) => (current === cut ? current : cut));
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    for (const element of [titleRef.current, previewRef.current]) {
+      if (element) observer.observe(element);
+    }
+    return () => observer.disconnect();
+  }, [enabled, holding, open, contentKey, titleRef, previewRef]);
+  return enabled && clipped;
+}
+
+const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
+
+/** A drag-selection inside the row, which a click must not turn into a toggle. */
+function hasTextSelectionIn(element: HTMLElement): boolean {
+  const selection = typeof window === "undefined" ? null : window.getSelection();
+  if (!selection || selection.isCollapsed || selection.toString().trim() === "") return false;
+  return element.contains(selection.anchorNode) || element.contains(selection.focusNode);
+}
+
+function readableText(element: HTMLElement | null): string {
+  if (!element) return "";
+  // innerText keeps line breaks between blocks where the DOM supports it.
+  const text = typeof element.innerText === "string" ? element.innerText : element.textContent;
+  return (text ?? "").trim();
+}
+
+/** The step's whole text as shown: its title, then what opened below it. */
+export function activityStepText(title: HTMLElement | null, body: HTMLElement | null): string {
+  return [readableText(title), readableText(body)].filter(Boolean).join("\n\n");
+}
+
+const STEP_COPIED_MS = 1600;
+
+/**
+ * Copy for an open step, in the gutter its chip leaves. A plain icon button
+ * (no tooltip layer: the timeline registry stays free of Popper).
+ */
+function StepCopyButton({
+  titleRef,
+  bodyRef,
+}: {
+  titleRef: RefObject<HTMLElement | null>;
+  bodyRef: RefObject<HTMLElement | null>;
+}) {
+  const t = useOpenGeniText();
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (timer.current !== null) clearTimeout(timer.current);
+    },
+    [],
+  );
+  const label = copied ? t("copyButton.copied") : t("timeline.shared.copyStep");
+  return (
+    <button
+      type="button"
+      data-og-copy-step=""
+      data-state={copied ? "copied" : "idle"}
+      aria-label={label}
+      title={label}
+      onClick={(event) => {
+        event.stopPropagation();
+        void copyTextToClipboard(activityStepText(titleRef.current, bodyRef.current)).then((ok) => {
+          if (!ok) return;
+          setCopied(true);
+          if (timer.current !== null) clearTimeout(timer.current);
+          timer.current = setTimeout(() => {
+            timer.current = null;
+            setCopied(false);
+          }, STEP_COPIED_MS);
+        });
+      }}
+      className={cn(
+        "inline-flex size-6 items-center justify-center rounded-og-sm text-og-fg-subtle pointer-coarse:size-11",
+        "transition-colors duration-150 hover:bg-og-surface-2/80 hover:text-og-fg",
+        "focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40",
+        copied && "text-og-accent",
+      )}
+    >
+      {copied ? (
+        <CheckIcon className="size-3.5" aria-hidden />
+      ) : (
+        <CopyIcon className="size-3.5" aria-hidden />
+      )}
+    </button>
   );
 }
 

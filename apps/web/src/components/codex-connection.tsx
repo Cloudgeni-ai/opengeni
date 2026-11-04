@@ -35,6 +35,7 @@ import { codexOverviewUsage } from "@/components/models/codex-overview-usage";
 import { SubscriptionDeviceCodePanel } from "@/components/subscription-device-code-panel";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { planLabel, showCodexConnected } from "@/lib/codex-connect-result";
 
 import { Button } from "@opengeni/react/ui/button";
 import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
@@ -512,11 +513,7 @@ export function codexAccountName(account: CodexAccount): string {
   return account.label ?? account.email ?? account.plan ?? "Codex account";
 }
 
-/** Plans come back lowercase ("pro"); show them as the plan name. */
-export function planLabel(plan: string | null | undefined, provider: string): string {
-  if (!plan) return `${provider} plan`;
-  return `${provider} ${plan.charAt(0).toLocaleUpperCase()}${plan.slice(1)}`;
-}
+export { planLabel };
 
 type ClipboardModule = {
   copyTextToClipboard: (text: string) => Promise<boolean>;
@@ -907,9 +904,7 @@ export function useCodexSubscriptions({
               if (own) await invalidateSharedQueries(client, ["codex-accounts"]);
               if (!cancelled.current) {
                 setPending(null);
-                toast.success(
-                  `Codex connected${result.plan ? ` (${planLabel(result.plan, "ChatGPT")})` : ""}`,
-                );
+                showCodexConnected("Codex connected", result);
                 options?.onConnected?.(
                   "accountId" in result && typeof result.accountId === "string"
                     ? result.accountId

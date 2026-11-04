@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { projectHistoryForProvider, toolDisclosureItem } from "../src/provider-history-adapter";
+import { guardRequestToolNames } from "../src/provider-request-tool-names";
 import {
   invalidHistoryToolNames,
   knownToolNameFor,
@@ -186,54 +187,53 @@ describe("tool names in replayed history", () => {
 });
 
 describe("provider projection", () => {
-  test("a replayed tool_search_output with masked and dotted names reaches the wire valid", () => {
-    const projected = projectHistoryForProvider(storedHistory(), "responses", {
-      knownToolNames: [GOAL_SET],
-    });
-    const names = inputToolNames(projected);
-    for (const name of names) expect(name).toMatch(PROVIDER_TOOL_NAME);
+  test("a replayed tool_search_output reaches the wire with one valid name per tool", () => {
+    // The projection leaves names as stored; the outbound guard names them on the wire.
+    const projected = projectHistoryForProvider(storedHistory(), "responses");
     const tools = projected[2]!.tools as Array<{ name: string }>;
-    // With only the request's tools, nothing is guessed: the dotted name is aliased.
-    expect(tools[3]!.name).toBe(providerToolNameAlias(DOTTED_GOAL_SET));
+    expect(tools[3]!.name).toBe(DOTTED_GOAL_SET);
+    const { body } = guardRequestToolNames("responses", { input: projected });
+    const wire = body.input as Array<Record<string, unknown>>;
+    // A result names no tool on the wire (function_call_output).
+    const named = wire.filter((item) => item.type !== "function_call_result");
+    for (const name of inputToolNames(named)) expect(name).toMatch(PROVIDER_TOOL_NAME);
+    const wireTools = wire[2]!.tools as Array<{ name: string }>;
+    // Nothing is guessed on the wire: the dotted name gets its alias.
+    expect(wireTools[3]!.name).toBe(providerToolNameAlias(DOTTED_GOAL_SET));
     // The call keeps the same name as the definition that declared it.
-    expect(tools[1]!.name).toBe(projected[3]!.name);
+    expect(wireTools[1]!.name).toBe(wire[3]!.name as string);
   });
 
-  test("an additional_tools declaration on the Codex route carries valid names", () => {
+  test("an additional_tools declaration on the Codex route carries valid names on the wire", () => {
     const disclosure = toolDisclosureItem([definition(MASKED_QUERY), definition(GOAL_SET)], {
       viaToolInvoke: true,
     });
     const projected = projectHistoryForProvider(
       [{ type: "message", role: "user", content: "hi" }, disclosure],
       "responses",
-      { declaresAdditionalTools: true, knownToolNames: [QUERY, GOAL_SET] },
+      { declaresAdditionalTools: true },
     );
-    expect(projected[1]).toEqual({
-      type: "unknown",
-      providerData: {
-        type: "additional_tools",
-        role: "developer",
-        tools: [
-          { ...definition(MASKED_QUERY), name: providerToolNameAlias(MASKED_QUERY) },
-          definition(GOAL_SET),
-        ],
-      },
-    });
+    const declaration = projected[1]!.providerData as Record<string, unknown>;
+    expect(declaration.type).toBe("additional_tools");
+    // The SDK sends an unknown item's providerData as the wire item.
+    const { body } = guardRequestToolNames("responses", { input: [declaration] });
+    expect((body.input as Array<Record<string, unknown>>)[0]!.tools).toEqual([
+      { ...definition(MASKED_QUERY), name: providerToolNameAlias(MASKED_QUERY) },
+      definition(GOAL_SET),
+    ]);
   });
 
-  test("Claude replays a valid alias; Chat replays an invalid call as a historical fact", () => {
+  test("Chat replays an invalid call as a historical fact; Claude keeps it for its own naming", () => {
     const history = storedHistory();
-    const alias = providerToolNameAlias(MASKED_SLACK_SEND);
-    const chat = projectHistoryForProvider(history, "chat", { knownToolNames: KNOWN });
+    const chat = projectHistoryForProvider(history, "chat");
     // Chat has no tool search item: it replays as a historical fact.
     expect(chat.some((item) => item.type === "tool_search_output")).toBe(false);
     // No native call to a tool the request never declares.
     expect(chat.some((item) => item.type === "function_call")).toBe(false);
     expect(chat.some((item) => item.type === "function_call_result")).toBe(false);
-    const claude = projectHistoryForProvider(history, "anthropic-messages", {
-      knownToolNames: KNOWN,
-    });
-    expect(claude.find((item) => item.type === "function_call")?.name).toBe(alias);
+    // Claude names every tool on its wire (anthropicToolName).
+    const claude = projectHistoryForProvider(history, "anthropic-messages");
+    expect(claude.find((item) => item.type === "function_call")?.name).toBe(MASKED_SLACK_SEND);
   });
 });
 /** The failed chat's history: a client tool search that loaded a masked tool, then its call. */

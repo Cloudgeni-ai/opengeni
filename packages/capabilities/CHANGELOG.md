@@ -1,5 +1,14 @@
 # @opengeni/capabilities
 
+## 6.8.0
+
+### Patch Changes
+
+- Updated dependencies [58b04d1]
+- Updated dependencies [feaecf8]
+  - @opengeni/contracts@6.8.0
+  - @opengeni/network@6.8.0
+
 ## 6.7.0
 
 ### Patch Changes

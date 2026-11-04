@@ -38,7 +38,8 @@ describe("known-value secret masking", () => {
     // A password that is a plain word inside a tool name, as in a chat whose
     // replayed tool_search_output failed with "tools[1].name does not match
     // pattern" once the name became `…__query_<reference>`.
-    const word = "pelicans";
+    // Distinctive: a weak word is never searched inside a name at all.
+    const word = "Pel1cansQ8";
     const memory = memoryWith(word);
     const toolName = `mcp_0123456789abcdef01234567__query_${word}`;
     const definition = {
@@ -79,7 +80,7 @@ describe("known-value secret masking", () => {
   });
 
   test("a tool-shaped record inside tool data, or a name no tool can have, is still masked", () => {
-    const word = "pelicans";
+    const word = "Pel1cansQ8";
     const memory = memoryWith(word);
     const masked = memory.mask([
       {
@@ -552,6 +553,32 @@ describe("known-value secret masking", () => {
     // An unchanged input keeps its identity, marks included.
     expect(maskSecretValues(item, [{ value: "other-secret-value-0002", label: DB_REF }])).toBe(
       item,
+    );
+  });
+});
+
+describe("weak saved values (the corrupted-repository regression)", () => {
+  // A saved username or password that is a dictionary word, assembled at runtime.
+  const WORD = ["beacon", "house"].join("");
+
+  test("a dictionary-word value no longer alters paths and code", () => {
+    const memory = memoryWith(WORD);
+    for (const text of [
+      `packages/${WORD}/src/index.ts`,
+      `import { ${WORD}Client } from "@acme/${WORD}";`,
+      `const ${WORD}_url = "https://${WORD}.example.com/${WORD}/v1";`,
+      `cd /workspace/repos/${WORD} && ls`,
+    ]) {
+      expect(memory.maskText(text)).toBe(text);
+    }
+  });
+
+  test("the same value is still masked where it is the credential", () => {
+    const memory = memoryWith(WORD);
+    expect(memory.maskText(`password: ${WORD}`)).toBe(`password: ${DB_REF}`);
+    expect(memory.maskText(`${WORD}\n`)).toBe(`${DB_REF}\n`);
+    expect(memory.maskText(JSON.stringify({ token: WORD }))).toBe(
+      JSON.stringify({ token: DB_REF }),
     );
   });
 });

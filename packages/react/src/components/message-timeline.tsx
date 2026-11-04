@@ -99,11 +99,10 @@ import {
   TimelineBeforeLayout,
   captureTimelineAnchor,
   timelineAnchorCorrection,
-  timelineHasReader,
+  timelineHasSelection,
   type TimelineAnchor,
 } from "./timeline-anchor";
 import { useReadingProgress } from "./timeline-reading-progress";
-import { TimelineAnswerFollowContext } from "./timeline-answer-follow";
 import {
   animateTimelineSettlement,
   captureTimelineSettlement,
@@ -402,6 +401,11 @@ export type MessageTimelineProps = {
  * - While pinned, tip-debt from growth/collapse must NEVER unpin — only
  *   wheel/keys/pointer-armed scroll-up, or a settled scrollend away from the
  *   tip while the tip-follow camera is idle (Vimium / unfocused PageUp).
+ *   Moving the view is the only reader signal for follow: focus and clicks
+ *   inside the conversation (a card's buttons, Copy, a menu) never unpin, so
+ *   answering one approval after another keeps the newest card in view. A
+ *   text selection (content must not move under it) and an in-place
+ *   disclosure toggle (it keeps its place) are the two non-scroll exceptions.
  *   Height shrink compensates scrollTop by Δh (collapse owns motion); tip-ease
  *   pauses briefly so the two don't fight. Programmatic camera writes are
  *   tagged so their scroll echoes never count as leave.
@@ -838,8 +842,6 @@ export function MessageTimeline({
     return sources;
   }, [resolvedItems]);
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  /** The card whose answer handed the view back to the tip (see followAfterAnswer). */
-  const answeredCardRef = useRef<HTMLElement | null>(null);
   const topSentinelRef = useRef<HTMLDivElement | null>(null);
   const bottomSentinelRef = useRef<HTMLDivElement | null>(null);
   const previousBulkFirstKeyRef = useRef<string | null | undefined>(undefined);
@@ -848,7 +850,6 @@ export function MessageTimeline({
     projectedGroups,
     autoFollow && pinned && !hasNewer,
     scrollRef.current,
-    answeredCardRef.current,
   );
   const [canSkipTipCatchup, setCanSkipTipCatchup] = useState(false);
   const canSkipTipCatchupRef = useRef(false);
@@ -876,10 +877,10 @@ export function MessageTimeline({
   const questionNavMinViewportRef = useRef(questionNavMinViewportHeight);
   questionNavMinViewportRef.current = questionNavMinViewportHeight;
   const scheduleQuestionNavRef = useRef<() => void>(() => {});
-  // Unpinned is not the same as away from the tip: focusing a control in the
-  // conversation (Copy, a connection card) hands the view to the reader while
-  // they are still at the bottom. Offer the jump only once there is something
-  // below them, or a newer window / catch-up to skip.
+  // Unpinned is not the same as away from the tip: selecting text or opening a
+  // disclosure hands the view to the reader while they are still at the
+  // bottom. Offer the jump only once there is something below them, or a newer
+  // window / catch-up to skip.
   const [awayFromTip, setAwayFromTip] = useState(false);
   const jumpPillShown = autoFollow && ((!pinned && awayFromTip) || hasNewer || canSkipTipCatchup);
   const firstGroupKey = allGroups[0] ? timelineGroupKey(allGroups[0]) : null;
@@ -1274,8 +1275,6 @@ export function MessageTimeline({
 
   /** Reader left the tip — wheel, keyboard, pointer-armed scroll-up, or scrollend. */
   const releasePinFromReader = useCallback(() => {
-    // The reader took over again: focus on the answered card counts once more.
-    answeredCardRef.current = null;
     if (!autoFollow || !pinnedRef.current || hasNewerRef.current) {
       return;
     }
@@ -1486,28 +1485,6 @@ export function MessageTimeline({
       syncScrollBaseline,
       writeScrollTop,
     ],
-  );
-
-  /**
-   * The person answered a card (finished a connection, say) and the agent
-   * continues from that answer: follow the tip as Jump to latest does, while
-   * focus stays on the card for keyboard and screen reader users. Wheel, keys,
-   * a drag or focus elsewhere hand the view back to the reader as usual.
-   */
-  const followAfterAnswer = useCallback(
-    (card: HTMLElement) => {
-      const node = scrollRef.current;
-      if (!autoFollow || !node || !node.contains(card) || hasNewerRef.current) {
-        return;
-      }
-      answeredCardRef.current = card;
-      disclosureKeepsUnpinnedRef.current = false;
-      wantPinRef.current = false;
-      clearPendingReaderLeave();
-      applyPinned(true);
-      snapToBottom(node);
-    },
-    [applyPinned, autoFollow, clearPendingReaderLeave, snapToBottom],
   );
 
   const beginUserMessageDisclosureChange = useCallback(
@@ -2723,7 +2700,10 @@ export function MessageTimeline({
                               event.target instanceof Element
                                 ? event.target.closest("button[aria-expanded]")
                                 : null;
-                            if (target) {
+                            // An in-place disclosure keeps its toggle where the reader
+                            // left it. A menu or dialog opener changes nothing here.
+                            const popup = target?.getAttribute("aria-haspopup");
+                            if (target && (popup === null || popup === "false")) {
                               if (target.hasAttribute("data-og-work-header")) {
                                 releaseProgress(
                                   target
@@ -2736,15 +2716,17 @@ export function MessageTimeline({
                             }
                           }}
                           onFocusCapture={(event) => {
+                            // Focus is not reading position: pressing a card's button
+                            // (Chromium focuses it) or a card handing focus to the next
+                            // one leaves follow alone. Focus that scrolls the view away
+                            // from the tip unpins through the scroll path like any
+                            // other navigation. Only a settle ease yields to it.
                             if (
                               readableTurns &&
                               event.target !== event.currentTarget &&
-                              eventFromScrollerDom(event) &&
-                              !answeredCardRef.current?.contains(event.target)
+                              eventFromScrollerDom(event)
                             ) {
                               stopSettlement();
-                              releasePinFromReader();
-                              disclosureKeepsUnpinnedRef.current = true;
                             }
                           }}
                           onPointerDown={onPointerDown}
@@ -2763,10 +2745,9 @@ export function MessageTimeline({
                         >
                           <TimelineBeforeLayout
                             capture={() => {
-                              if (
-                                readableTurns &&
-                                timelineHasReader(scrollRef.current, answeredCardRef.current)
-                              ) {
+                              // Selectionchange can arrive after this commit: a fresh
+                              // selection still owns the view before React moves it.
+                              if (readableTurns && timelineHasSelection(scrollRef.current)) {
                                 releasePinFromReader();
                               }
                               readingAnchorRef.current =
@@ -2783,11 +2764,7 @@ export function MessageTimeline({
                                 !disclosureKeepsUnpinnedRef.current &&
                                 !prefersReducedMotion() &&
                                 scrollRef.current
-                                  ? captureTimelineSettlement(
-                                      scrollRef.current,
-                                      groups,
-                                      answeredCardRef.current,
-                                    )
+                                  ? captureTimelineSettlement(scrollRef.current, groups)
                                   : null;
                             }}
                           >
@@ -3128,11 +3105,7 @@ export function MessageTimeline({
           resolveSessionTitle={resolveSessionTitle}
           onOpenSession={onOpenSession}
         >
-          <ProviderLogoProvider value={resolveProviderLogo}>
-            <TimelineAnswerFollowContext.Provider value={followAfterAnswer}>
-              {timeline}
-            </TimelineAnswerFollowContext.Provider>
-          </ProviderLogoProvider>
+          <ProviderLogoProvider value={resolveProviderLogo}>{timeline}</ProviderLogoProvider>
         </AgentIdentityProvider>
       </MessageSenderContext.Provider>
     </OpenGeniLinkProvider>

@@ -3,8 +3,8 @@ import { SECRET_VALUE_MASK_MIN_CHARS } from "@opengeni/contracts";
 import { ALIASED_MCP_TOOL_LEAF_LENGTH, isAliasedMcpToolName } from "./mcp-model-tool-name";
 
 /**
- * Tool names in replayed history (docs/model-providers.md, "Tool names in
- * history").
+ * Tool names in replayed history (docs/model-providers.md, "Tool names on
+ * the wire").
  *
  * Providers validate tool names in the request's tools and in every history
  * item that carries tool definitions (`tool_search_output`, `additional_tools`)
@@ -21,9 +21,9 @@ import { ALIASED_MCP_TOOL_LEAF_LENGTH, isAliasedMcpToolName } from "./mcp-model-
  * `withProviderValidToolNames` gives each such name one valid name, the same
  * wherever it appears in the request. With the authorized catalog (the lazy
  * tool transport) a flat name becomes the one tool it denotes, so a later call
- * binds to it, and every other name is left to the provider projection
- * (which sees only the request's tools): a stable alias on Responses and
- * Claude, a historical fact for a Chat call. A request
+ * binds to it, and every other name is left as it is: a Chat call replays as a
+ * historical fact, and the outbound guard (`provider-request-tool-names.ts`)
+ * gives every name still invalid on the wire its stable alias. A request
  * tool's own name is never rewritten. Valid names, and items without an
  * invalid one, are returned unchanged and by identity, and a rewritten item
  * keeps its identity across requests while the mapping is the same, so
@@ -47,12 +47,17 @@ export function isProviderToolName(name: string): boolean {
 }
 
 /**
- * The stable alias of a name no authorized tool answers to: its readable
- * part with every other character replaced, and a digest of the whole name,
- * so two different names never share an alias. At most 57 characters.
+ * The stable alias of a tool name: its readable part with every other
+ * character replaced, starting with a letter, and a digest of the whole
+ * name, so two different names never share an alias. Only letters, digits
+ * and `_`, at most 57 characters: narrower than any provider's own format.
  */
 export function providerToolNameAlias(name: string): string {
-  const readable = name.replace(/[^a-zA-Z0-9_-]+/g, "_").slice(0, ALIAS_READABLE_LENGTH);
+  const replaced = name.replace(/[^a-zA-Z0-9_]+/g, "_");
+  const readable = (/^[a-zA-Z]/.test(replaced) ? replaced : `t${replaced}`).slice(
+    0,
+    ALIAS_READABLE_LENGTH,
+  );
   const digest = createHash("sha256").update(name).digest("hex").slice(0, ALIAS_DIGEST_LENGTH);
   return `${readable}_${digest}`;
 }
@@ -108,17 +113,6 @@ export function knownToolNameFor(name: string, known: readonly string[]): string
     `^${parts.map(escapeRegExp).join(`[a-zA-Z0-9_-]{${SECRET_VALUE_MASK_MIN_CHARS},}`)}$`,
   );
   return uniqueMatch(valid, (candidate) => pattern.test(candidate));
-}
-
-/** The model names of a request's function tools. */
-export function requestFunctionToolNames(tools: readonly unknown[] | undefined): string[] {
-  const names: string[] = [];
-  for (const tool of tools ?? []) {
-    if (isRecord(tool) && tool.type === "function" && typeof tool.name === "string") {
-      names.push(tool.name);
-    }
-  }
-  return names;
 }
 
 /** The tools history names are checked against. */

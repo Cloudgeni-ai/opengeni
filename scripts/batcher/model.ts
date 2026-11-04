@@ -393,12 +393,20 @@ export function nextBatch(
     return { kind: "build", members, pending, ...ahead };
   }
 
-  for (let index = 0; index < pending.length; index++) {
+  // A half holding a priority PR runs before the other halves; the halves are
+  // independent, so their order only decides which PRs land sooner.
+  const holdsPriority = (group: number[]) =>
+    group.some((n) => ready.find((p) => p.number === n)?.priority);
+  const order = [
+    ...pending.flatMap((group, index) => (holdsPriority(group) ? [index] : [])),
+    ...pending.flatMap((group, index) => (holdsPriority(group) ? [] : [index])),
+  ];
+  for (const index of order) {
     const group = pending[index]!.map((n) => ready.find((p) => p.number === n)).filter(
       (p): p is QueuedPull => p !== undefined,
     );
     if (!group.length) continue;
-    const rest = pending.slice(index + 1);
+    const rest = pending.filter((_, other) => other !== index);
     // Only a group of the bisection is judged against what it blamed; a
     // priority or Version PR in between drops it, which costs only retries.
     const carried = blame.length ? { blame } : {};

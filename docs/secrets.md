@@ -61,6 +61,28 @@ each hosted field keeps encrypted **versions**.
   256 KiB per file value, names up to 120 characters without `/ { } # \` or
   control characters. A field cannot be named `otp`.
 
+### Field kinds
+
+Only `concealed`, `totp` and `file` fields are secret: their values are
+hidden on the page and masked in agent output. A `text` field (a username,
+a host, an account name) is shown and searched as written, and its value is
+never masked. A secret saved in a text field by mistake is therefore
+exposed, so saving one is made hard without ever refusing the save:
+
+- A value looks secret when it has a well-known token or key format (the
+  shape detectors under Masking), or it is at least 20 characters with three
+  kinds of characters and about 80 bits of randomness and is not a path, URL,
+  email or UUID, or the field's name says it holds a credential (`api token`,
+  `client_secret`, but not `public key` or `api key id`).
+- The item editor shows one line under such a text field, for example
+  "Looks like a GitHub token.", with **Make concealed**.
+- `secret_save` (hosted and connected vaults) saves a new field whose kind
+  would default to text as concealed when its value looks secret, and says
+  so in `fieldNotes`. An explicit `kind: "text"`, and an existing text field,
+  are kept as text with a note instead.
+- Item create and update requests over the HTTP API keep the kind they
+  send (a missing kind is text), so a kind never changes without a note.
+
 ## Who can use what
 
 Agents act under the authority of the human who started the turn (or the
@@ -375,9 +397,16 @@ Each agent attempt keeps one memory of secret values (`SecretValueMemory`):
   (environment values whose names say they are secret and that are at least
   12 characters long, and single-line credential files) and MCP header
   values of at least 12 characters whose names say they carry credentials
-  (`Authorization`, `Proxy-Authorization`, `Cookie`, and names containing
-  token, key, secret, auth, password, session or signature). Headers such as
-  `Accept` are not remembered. The label is a marker such as
+  (`Authorization`, `Proxy-Authorization`, `Cookie`, and names with a word
+  such as token, key, secret, auth, password, session or signature). These
+  names match a credential word anywhere, even inside another word
+  (`PRIVATEKEYPEM`, `AUTHHEADER`, `SESSIONDATA`, `X-Authz`), once ordinary
+  words that contain one are set aside (`author`, `keyboard`, `monkey`,
+  `tokenizer`), so `GIT_AUTHOR_NAME` is not a credential, and neither is a
+  name whose last word says the value is a name or label (`SESSION_NAME`).
+  Names ending in `_FILE`, `_PATH`, `_DIR`, `_URL` or `_ENDPOINT` locate a
+  credential and are skipped. Headers
+  such as `Accept` are not remembered. The label is a marker such as
   `[opengeni credential: codemode token]`.
 - Best effort, the hosted vault values of secrets the session's root tree
   used before, found through the `vault.secret.used` audit rows. They are read
@@ -408,6 +437,73 @@ field) reveals both the encoded and the decoded text. Only Opengeni's own
 
 ### Matching
 
+- Each value is first rated by strength. Distinctive values (tokens, keys,
+  random or strong passwords, passphrases of three or more words,
+  digit-only card and account numbers) almost never appear in unrelated
+  text and are searched for anywhere, in every form below. Weak values do
+  appear in unrelated text: one or two words with up to four digits and a
+  symbol (`admin123`, `Password1!`), a camelCase name, a snake_case or
+  kebab-case name of two parts (or three with a number, `deploy-bot-01`), a
+  host, email, URL or path made only of such names and numbers. A value in
+  a known token format is always distinctive. Letters count as words only
+  when their letter pairs and triples are mostly common English ones (at
+  most one uncommon pair, and one uncommon triple, in five; in the parts of
+  a host, URL or path, runs of fewer than four letters are skipped and a
+  little more is allowed), so random letters such as `qkzvmxbtwe` and
+  `rdabaootck` stay distinctive. Random single-case letters still pass as
+  words about once in two thousand at 10 to 12 characters (about once in
+  250 at 8), and a random lowercase host, URL or path part about once in
+  300 at 10 characters and once in two thousand at 12; such a value is
+  then replaced only in credential positions. Short word-like values with
+  a tail are weak a little more often by chance: about 1% for seven random
+  letters and a symbol, and 0.6% for six letters and two digits. A word that
+  fails the test (an unusual name), and a value with letters outside A to Z
+  (`Müller`, Cyrillic), stays distinctive and is masked everywhere, as
+  before.
+  A weak value is replaced only where it is the credential:
+  - alone on its line, or as the password of a URL (`scheme://user:<value>@`);
+  - as a whole token that a credential name leads into: `password=…`,
+    `PGPASSWORD: …`, `"token": "…"`, `Server=db;Password=…;Database=app`,
+    `--password …`, "the password is …", `requirepass …`, `password …`
+    (netrc), `Authorization: Bearer …`, `Cookie: sid=…`,
+    `<password>…</password>`, `<add key="Password" value="…" />`,
+    `IDENTIFIED BY '…'`. The name is read word by word (`_`, `-`, `.` and
+    camelCase separate words; a word may end in a credential word, as in
+    `PGPASSWORD`, `DBPWD` or `masterauth`, or start with one, as in
+    `TOKENVALUE`). `session` and `private` do not count on their own
+    (`--session main`), `key` counts only next to a word that makes it a
+    credential (`API_KEY`, `accessKey`, `LICENSE_KEY`, not `--key
+    reports.csv`, `cacheKey` or `STORAGE_KEY`), and ordinary words such as
+    `bypass` and names whose last word says the value names something
+    (`rpId`, `SESSION_NAME`) do not count. A password word with no `=` or
+    `:` (`requirepass …`, `password …`) counts when the value ends the line
+    or the line is a netrc entry, not in prose. `;`, `,` and `&` end a
+    token;
+  - after a password option of a program that takes one: `mysql -p…`,
+    `7z -p…`, `sshpass -p …`, `docker login -p …` (also `podman`,
+    `nerdctl`, `oc` and `az login`), `mongosh -p …`, `redis-cli -a …`,
+    `ldapsearch -w …`, `sqlcmd -P …`, `zip -P …`, `smbclient -U user%…`,
+    `curl -u user:…`, `htpasswd -b file user …` (`mkdir -p` and `ls -a` are
+    not);
+  - as the last field of a `.pgpass` line (`host:5432:db:user:…`);
+  - printed into the next command when that command reads a password:
+    `echo '…' | docker login --password-stdin`, `echo 'app:…' | chpasswd`,
+    `echo … | sudo -S`. Only the next command's name and option names count,
+    so a table row, `||`, `| grep token` or a credential word in a comment
+    does not;
+  - as the value of a key whose line follows one naming a credential
+    (`- name: DB_PASSWORD` then `value: …`, `credentials:` then `admin: …`),
+    unless the key itself names something (`name:`, `host:`);
+  - inside a base64 run (a Basic auth header) after a credential word on
+    its line. The whole base64 encoding of a weak value (a Kubernetes
+    Secret's data) is replaced wherever it is a base64 run of its own.
+
+  A weak value is never replaced inside an identifier, a file name, a path,
+  a host or a URL segment, or as a word on a line that only mentions a key or
+  token, so a saved dictionary word no longer rewrites unrelated paths, code
+  and prose. In tool output, the shape detectors below also catch a weak
+  password inside a URL or a connection string. Browser and desktop typed
+  values and the history scrub search weak values anywhere, as before.
 - Each value is searched as written, trimmed, line by line, JSON-escaped (once and twice), percent-encoded (URI
   component, `+` for spaces, form encoding) and base64 (standard and URL-safe,
   standalone and inside a longer base64 run such as a Basic auth header).
@@ -455,7 +551,13 @@ field) reveals both the encoded and the decoded text. Only Opengeni's own
   most 256 marks per text (a run of marks such as `......` counts once), at
   most 200,000 index entries in total (the longest values beyond that are
   matched whole only), and values longer than 8,192 characters are matched
-  whole only.
+  whole only. Weak values have no index of starts.
+- The worker counts occurrences in
+  `opengeni_secret_mask_matches_total{outcome,strength,entropy,position}`:
+  `masked` or `kept` (a weak value outside a credential position), the
+  value's strength, its entropy bucket (`lt32`, `32_64`, `64_128`,
+  `ge128` bits) and where it sat (`token`, `identifier`, `path`, `url` or
+  `encoded`). Never the value or the text.
 - File and image payloads keep their exact bytes: a string that is entirely
   a base64 data URL (`data:<type>;base64,<base64>`) and `data` fields beside
   a MIME type. A payload of a text type (`text/*`, JSON, XML, YAML and
@@ -531,7 +633,21 @@ secret part is replaced:
   `xoxe` rotated tokens), Stripe secret and restricted keys, npm,
   GitLab, Google `AIza`, 1Password service account tokens, Opengeni's own
   bearers (`ogk_` and `ogp_` keys, and the signed `ogd_`, `oge_`, `ogr_` and
-  `ogs_` envelopes) and JWTs. URLs are also found inside JSON-escaped text.
+  `ogs_` envelopes), Google OAuth client secrets (`GOCSPX-`), Hugging Face
+  (`hf_`, mixed case), SendGrid (`SG.`), Shopify (`shpat_`, `shpss_`,
+  `shpca_`, `shppa_`), PyPI, Databricks (`dapi`), DigitalOcean (`dop_v1_`,
+  `doo_v1_`, `dor_v1_`), Linear (`lin_api_`), Doppler (`dp.pt.` and
+  similar), Atlassian (`ATATT3`) and JWTs. URLs are also found inside
+  JSON-escaped text. AWS access key IDs (`AKIA…`) are identifiers, not
+  secrets, and are not detected.
+- AWS secret access keys (40 base64 characters) only right after their name
+  (`aws_secret_access_key = …`, `"SecretAccessKey": "…"`).
+- Authorization values: `Bearer <token>` and `Authorization: token <token>`
+  of at least 16 characters with a digit that are mixed case, 32 or more
+  characters or a quarter digits (code such as `Bearer this.session.token`,
+  a lower-case path such as `tokens/session-2024/abc`, an ALL_CAPS
+  placeholder and prose are not), and `Basic <base64>` when it
+  decodes to `user:password`. A token with its own format keeps that kind.
 
 Tokens must contain a digit, and placeholders such as `${PASSWORD}` (or any
 `${…}` template), `$(cat file)`, `<password>`, `%(password)s`, `@Password`,
@@ -592,6 +708,11 @@ known).
   whole (the tool result and model input), not in the stored chunks.
 - Output a background command produces while no attempt is running is stored
   as written and masked when a later attempt reads it.
+- A weak value alone on a line is still replaced, for example a directory
+  name in `ls` output that is the same word as a saved password.
+- A weak value is kept as written in positions not listed above, such as a
+  positional argument (`connect(host, "app", "…")`) or a lone `key` option
+  (`--key …`).
 - Multi-line credential files, values shorter than 8 characters and earlier
   values from connected vaults are not searched.
 - A value the agent read with `secret_get` stays readable for the rest of
