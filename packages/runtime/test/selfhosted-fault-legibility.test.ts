@@ -370,8 +370,11 @@ describe("G3-remnant — OpStart heals a never-sent blip and surfaces a real out
 
 // ── G2 — the routing proxy surfaces the rendering as the exec_command result ────
 
-function proxyOverBackend(backend: RoutableBackendSession): RoutingSandboxSession {
-  const resolved = { session: backend, sandboxId: null, kind: "selfhosted" };
+function proxyOverBackend(
+  backend: RoutableBackendSession,
+  kind = "selfhosted",
+): RoutingSandboxSession {
+  const resolved = { session: backend, sandboxId: null, kind };
   return new RoutingSandboxSession({
     defaultResolved: resolved,
     readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
@@ -438,5 +441,63 @@ describe("G2 — RoutingSandboxSession.execCommand renders a terminal fault as i
       execCommand: async () => "hello\n",
     };
     expect(await proxyOverBackend(backend).execCommand({ cmd: "echo hello" })).toBe("hello\n");
+  });
+});
+
+// ── The chat's own cloud computer is named as such, never a Connected Machine ───
+
+describe("a compute box's fault names this chat's cloud computer", () => {
+  test("a restart while the command was dispatched says the cloud computer restarted", async () => {
+    for (const neverSent of [true, false]) {
+      const backend: RoutableBackendSession = {
+        execCommand: async () => {
+          throw offlineErr(neverSent);
+        },
+      };
+      const out = await proxyOverBackend(backend, "compute").execCommand({ cmd: "sleep 30" });
+      const lines = out.split("\n");
+      expect(lines[0]).toBe(
+        "[cloud computer] this chat's cloud computer restarted or is restarting",
+      );
+      expect(lines[1]).toBe(
+        "What happened: this chat's cloud computer did not answer while it restarted (control code ERROR_CODE_AGENT_OFFLINE).",
+      );
+      expect(lines[4]).toStartWith("What to try: retry the command");
+      for (const field of ALL_FIELDS) expect(out).toContain(field);
+      expect(out).not.toContain("connected machine");
+      expect(out).not.toContain("enrolled machine");
+      expect(out).not.toContain("appears offline");
+      expect(out).not.toContain("powered on");
+    }
+  });
+
+  test("an ambiguous restart still says the command may have run", () => {
+    const out = renderSelfhostedFault(offlineErr(false), "cloud_computer");
+    expect(out).toContain("What was preserved: unknown — ");
+    expect(out).toContain("first check whether it already took effect");
+  });
+
+  test("every other fault keeps its fields under the cloud computer's name", () => {
+    for (const error of [
+      agentErrorToControlError(timeoutAgentError()),
+      mapped(ErrorCode.ERROR_CODE_OS, "disk write failed"),
+      mapped(ErrorCode.ERROR_CODE_DRAINING),
+    ]) {
+      const machine = renderSelfhostedFault(error);
+      const cloud = renderSelfhostedFault(error, "cloud_computer");
+      expect(machine).toStartWith("[connected machine] ");
+      expect(cloud).toBe(`[cloud computer] ${machine.slice("[connected machine] ".length)}`);
+    }
+  });
+
+  test("a real Connected Machine keeps its offline copy", async () => {
+    const backend: RoutableBackendSession = {
+      execCommand: async () => {
+        throw offlineErr(true);
+      },
+    };
+    const out = await proxyOverBackend(backend, "selfhosted").execCommand({ cmd: "ls" });
+    expect(out).toStartWith("[connected machine] the machine is unreachable\n");
+    expect(out).toContain("the enrolled machine did not respond; it appears offline");
   });
 });

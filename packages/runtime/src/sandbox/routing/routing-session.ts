@@ -68,7 +68,11 @@ import {
   isConnectedMachineAbsolutePath,
   resolveConnectedMachinePath,
 } from "../selfhosted/workspace-path";
-import { renderSelfhostedFault } from "../selfhosted/fault-rendering";
+import {
+  renderSelfhostedFault,
+  selfhostedFaultPlacement,
+  type SelfhostedFaultPlacement,
+} from "../selfhosted/fault-rendering";
 import {
   ChannelAPartialMutationError,
   isDefinitePathNotFoundError,
@@ -2519,9 +2523,12 @@ export class RoutingSandboxSession implements RoutableBackendSession {
    * turn handles, not a model-facing fault. Any non-selfhosted error (a Modal fault, a
    * `RoutingUnsupportedError`) is re-thrown unchanged.
    */
-  private renderSelfhostedFaultOrThrow(error: unknown): string {
+  private renderSelfhostedFaultOrThrow(
+    error: unknown,
+    placement: SelfhostedFaultPlacement,
+  ): string {
     if (error instanceof SelfhostedControlError && !error.fenced) {
-      return renderSelfhostedFault(error);
+      return renderSelfhostedFault(error, placement);
     }
     throw error;
   }
@@ -2681,11 +2688,15 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   }
 
   async execCommand(args: unknown, options?: RoutingCommandDispatchOptions): Promise<string> {
+    // The box the command was last dispatched to names itself in a rendered
+    // fault: the chat's own cloud computer is not a Connected Machine.
+    let faultPlacement: SelfhostedFaultPlacement | undefined;
     try {
       return await this.dispatch(
         "execCommand",
         true,
         async (s, backend) => {
+          faultPlacement = selfhostedFaultPlacement(backend.kind);
           notifyRemoteOperationTransportSelected(s);
           // Secret delivery happens here, below every recorder: connected
           // machines deliver natively in their own session; every other
@@ -2708,7 +2719,10 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     } catch (error) {
       // Render a terminal selfhosted fault as the tool's result (four fields, correct
       // verdict) instead of letting the SDK mislabel it "Please try again".
-      return this.renderSelfhostedFaultOrThrow(error);
+      return this.renderSelfhostedFaultOrThrow(
+        error,
+        faultPlacement ?? selfhostedFaultPlacement(this.cached?.kind),
+      );
     }
   }
 

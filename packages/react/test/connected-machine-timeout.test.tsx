@@ -18,7 +18,15 @@ const output = [
   "What to try: check whether it already took effect before re-running it.",
 ].join("\n");
 
-function fixture(errorFlag: boolean) {
+const cloudComputerOutput = [
+  "[cloud computer] this chat's cloud computer restarted or is restarting",
+  "What happened: this chat's cloud computer did not answer while it restarted (control code ERROR_CODE_AGENT_OFFLINE).",
+  "Which layer: this chat's cloud computer itself, not your command",
+  "What was preserved: unknown — the cloud computer restarted while the command was in flight, so it may or may not have run.",
+  "What to try: retry the command once the cloud computer is back (usually within seconds); if it changes state, first check whether it already took effect.",
+].join("\n");
+
+function fixture(errorFlag: boolean, toolOutput = output) {
   const events = [
     {
       type: "agent.toolCall.created",
@@ -26,7 +34,7 @@ function fixture(errorFlag: boolean) {
     },
     {
       type: "agent.toolCall.output",
-      payload: { id: "call", output, ...(errorFlag ? { error: true } : {}) },
+      payload: { id: "call", output: toolOutput, ...(errorFlag ? { error: true } : {}) },
     },
   ].map((event, index) => ({
     ...event,
@@ -66,6 +74,15 @@ test.each([false, true])(
     }
   },
 );
+
+test("a cloud computer's restart receipt is an outcome-unknown failure too", () => {
+  const item = fixture(false, cloudComputerOutput);
+  expect(item.status).toBe("failed");
+  const row = toolRowPresentation(t, item, { details: "full" });
+  expect(row.failed).toBe(true);
+  expect(row.chip).toEqual({ tone: "bad", text: "outcome unknown" });
+  expect(JSON.stringify(row.body)).toContain("cloud computer restarted");
+});
 
 test("actual plain production renderer displays uncertainty without command details", async () => {
   const item = fixture(false);

@@ -74,12 +74,27 @@ interface FaultFields {
   tryNext: string;
 }
 
+/**
+ * Which kind of box a selfhosted-protocol fault came from. A Connected Machine
+ * is the person's own computer; a cloud computer is the chat's own compute box,
+ * which speaks the same agent protocol but restarts on its own.
+ */
+export type SelfhostedFaultPlacement = "connected_machine" | "cloud_computer";
+
+/** The placement of a routed backend kind: only `compute` is a cloud computer. */
+export function selfhostedFaultPlacement(kind: string | undefined): SelfhostedFaultPlacement {
+  return kind === "compute" ? "cloud_computer" : "connected_machine";
+}
+
+const CONNECTED_MACHINE_PREFIX = "[connected machine] ";
+const CLOUD_COMPUTER_PREFIX = "[cloud computer] ";
+
 /** Assemble the four-field block. The typed wire code is folded into "what
  *  happened" so the model has both the plain language and the precise code. */
 function assemble(error: SelfhostedControlError, f: FaultFields): string {
   const code = errorCodeToJSON(error.code);
   return [
-    `[connected machine] ${f.headline}`,
+    `${CONNECTED_MACHINE_PREFIX}${f.headline}`,
     `${FAULT_FIELD_WHAT_HAPPENED} ${f.happened} (control code ${code}).`,
     `${FAULT_FIELD_WHICH_LAYER} ${f.layer}`,
     `${FAULT_FIELD_WHAT_PRESERVED} ${f.preserved}`,
@@ -106,7 +121,40 @@ function assemble(error: SelfhostedControlError, f: FaultFields): string {
  *  - FENCED → the active machine session changed (a swap); re-run.
  *  - default (OS/UNSUPPORTED/STREAM/PROTOCOL) → the command/op failed on the machine.
  */
-export function renderSelfhostedFault(error: SelfhostedControlError): string {
+export function renderSelfhostedFault(
+  error: SelfhostedControlError,
+  placement: SelfhostedFaultPlacement = "connected_machine",
+): string {
+  if (placement === "connected_machine") return renderConnectedMachineFault(error);
+  // A cloud computer that stops answering restarted or is restarting (its
+  // agent or the whole box) and comes back on its own within seconds; it is
+  // never "offline" the way a person's own computer can be.
+  if (error.agentOffline || error.code === ErrorCode.ERROR_CODE_AGENT_OFFLINE) {
+    return onCloudComputer(
+      assemble(error, {
+        headline: "this chat's cloud computer restarted or is restarting",
+        happened: "this chat's cloud computer did not answer while it restarted",
+        layer: "this chat's cloud computer itself, not your command",
+        preserved: error.neverSent
+          ? "nothing ran; the command never reached the cloud computer."
+          : "unknown — the cloud computer restarted while the command was in flight, so it may or may not have run.",
+        tryNext: error.neverSent
+          ? "retry the command; the cloud computer is usually back within seconds."
+          : "retry the command once the cloud computer is back (usually within seconds); if it changes state, first check whether it already took effect.",
+      }),
+    );
+  }
+  return onCloudComputer(renderConnectedMachineFault(error));
+}
+
+/** The same four fields, named for the chat's cloud computer. */
+function onCloudComputer(rendered: string): string {
+  return rendered.startsWith(CONNECTED_MACHINE_PREFIX)
+    ? `${CLOUD_COMPUTER_PREFIX}${rendered.slice(CONNECTED_MACHINE_PREFIX.length)}`
+    : rendered;
+}
+
+function renderConnectedMachineFault(error: SelfhostedControlError): string {
   const detail = error.detail;
 
   if (error.code === ErrorCode.ERROR_CODE_PROTOCOL && detail.outcome_unknown === "true") {
