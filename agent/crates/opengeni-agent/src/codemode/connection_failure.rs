@@ -678,7 +678,10 @@ mod tests {
         // A leading "*." is literal for reqwest, so it does not bypass the proxy.
         assert!(environment_proxy(
             &url,
-            environment(&[("HTTPS_PROXY", "proxy.example:3128"), ("NO_PROXY", "*.opengeni.ai")])
+            environment(&[
+                ("HTTPS_PROXY", "proxy.example:3128"),
+                ("NO_PROXY", "*.opengeni.ai")
+            ])
         )
         .is_some());
         // The first of a pair that is set wins, even empty; ALL_PROXY still applies.
@@ -700,7 +703,10 @@ mod tests {
         assert_eq!(
             environment_proxy(
                 &url,
-                environment(&[("HTTPS_PROXY", "ftp://x.example:21"), ("ALL_PROXY", "all.example:2")])
+                environment(&[
+                    ("HTTPS_PROXY", "ftp://x.example:21"),
+                    ("ALL_PROXY", "all.example:2")
+                ])
             )
             .map(|proxy| proxy.variable),
             Some("ALL_PROXY")
@@ -710,7 +716,10 @@ mod tests {
         assert_eq!(
             environment_proxy(
                 &ip,
-                environment(&[("HTTP_PROXY", "proxy.example:3128"), ("NO_PROXY", "127.0.0.0/8")])
+                environment(&[
+                    ("HTTP_PROXY", "proxy.example:3128"),
+                    ("NO_PROXY", "127.0.0.0/8")
+                ])
             ),
             None
         );
@@ -718,7 +727,10 @@ mod tests {
         assert_eq!(
             environment_proxy(
                 &Url::parse("http://app.opengeni.ai/codemode/").unwrap(),
-                environment(&[("HTTP_PROXY", "proxy.example:3128"), ("REQUEST_METHOD", "GET")])
+                environment(&[
+                    ("HTTP_PROXY", "proxy.example:3128"),
+                    ("REQUEST_METHOD", "GET")
+                ])
             ),
             None
         );
@@ -737,7 +749,12 @@ mod tests {
             "Lost contact with Opengeni: the connection to app.opengeni.ai closed unexpectedly. If it keeps happening, check this machine's network and proxy settings."
         );
         assert_eq!(
-            describe_cause(&NetworkCause::AnswerTimedOut, &target, SystemTime::now(), true),
+            describe_cause(
+                &NetworkCause::AnswerTimedOut,
+                &target,
+                SystemTime::now(),
+                true
+            ),
             "Lost contact with Opengeni: the answer from app.opengeni.ai stopped arriving."
         );
     }
