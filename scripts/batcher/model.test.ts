@@ -310,18 +310,36 @@ describe("nextBatch", () => {
     expect(action?.kind === "build" && action.members.map((p) => p.number)).toEqual([2]);
   });
 
-  test("a new priority PR goes unfilled while a failed batch is being split", () => {
+  test("a new priority PR is filled only with PRs a failed batch's split does not hold", () => {
     const action = nextBatch(
       [pull(1), pull(2), pull(3), pull(4), pull(5, { priority: true, queuedAt: NOW })],
       [[1, 2], [3]],
       NOW,
       DEFAULT_SETTINGS,
     );
-    expect(action).toMatchObject({ kind: "build", pending: [[1, 2], [3]] });
-    expect(action?.kind === "build" && action.members.map((p) => p.number)).toEqual([5]);
+    expect(action).toMatchObject({
+      kind: "build",
+      pending: [[1, 2], [3]],
+      aheadOfBisection: true,
+    });
+    expect(action?.kind === "build" && action.members.map((p) => p.number)).toEqual([5, 4]);
   });
 
-  test("a failed filled batch tests its priority PRs alone first, then lands them", () => {
+  test("after a priority batch went ahead of a split, the split's next half goes first", () => {
+    const action = nextBatch(
+      [pull(1), pull(2), pull(3), pull(5, { priority: true, queuedAt: NOW })],
+      [[1, 2], [3]],
+      NOW,
+      DEFAULT_SETTINGS,
+      [],
+      true,
+    );
+    expect(action).toMatchObject({ kind: "build", pending: [[3]] });
+    expect(action).not.toHaveProperty("aheadOfBisection");
+    expect(action?.kind === "build" && action.members.map((p) => p.number)).toEqual([1, 2]);
+  });
+
+  test("a failed filled batch tests its priority PRs alone first, then lands them, and halves the fill", () => {
     const failure = { runs: [run({ conclusion: "failure", attempt: 2 })] };
     const pulls = [pull(1), pull(2), pull(3), pull(5, { priority: true })];
     const actions = decide(observe(pulls, [batch([5, 1, 2, 3], failure)]));
@@ -329,14 +347,91 @@ describe("nextBatch", () => {
       kind: "abandon",
       reason: "its CI failed",
     });
-    expect(actions[1]).toMatchObject({ kind: "build", pending: [[1, 2, 3]] });
+    // The fill most likely broke the batch, so it is split now, not retested whole.
+    expect(actions[1]).toMatchObject({ kind: "build", pending: [[1, 2], [3]] });
     expect(actions[1]?.kind === "build" && actions[1].members.map((p) => p.number)).toEqual([5]);
-    // The priority PR lands one round after the failure; the fill is split next.
-    const passed = batch([5], { runs: [run()] }, [[1, 2, 3]]);
+    // The priority PR lands one round after the failure; the fill's halves follow.
+    const passed = batch([5], { runs: [run()] }, [[1, 2], [3]]);
     const next = decide(observe(pulls, [passed]));
     expect(next[0]).toMatchObject({ kind: "land" });
-    expect(next[1]).toMatchObject({ kind: "build", pending: [] });
-    expect(next[1]?.kind === "build" && next[1].members.map((p) => p.number)).toEqual([1, 2, 3]);
+    expect(next[1]).toMatchObject({ kind: "build", pending: [[3]] });
+    expect(next[1]?.kind === "build" && next[1].members.map((p) => p.number)).toEqual([1, 2]);
+  });
+
+  test("a fill smaller than the priority group of a failed batch stays whole", () => {
+    const urgent = { priority: true };
+    const failed = batch([5, 6, 7, 1, 2], {
+      runs: [run({ conclusion: "failure", attempt: 2 })],
+    });
+    const pulls = [pull(1), pull(2), pull(5, urgent), pull(6, urgent), pull(7, urgent)];
+    const actions = decide(observe(pulls, [failed]));
+    expect(actions[1]).toMatchObject({ kind: "build", pending: [[1, 2]] });
+    expect(actions[1]?.kind === "build" && actions[1].members.map((p) => p.number)).toEqual([
+      5, 6, 7,
+    ]);
+  });
+
+  test("a failed filled batch ahead of a bisection tests its priority PRs, then the older half, then its fill halves", () => {
+    const failed = batch([5, 1, 2, 3, 4], { runs: [run({ conclusion: "failure", attempt: 2 })] }, [
+      [8, 9],
+    ]);
+    failed.manifest.aheadOfBisection = true;
+    const pulls = [1, 2, 3, 4, 8, 9].map((n) => pull(n)).concat(pull(5, { priority: true }));
+    const actions = decide(observe(pulls, [failed]));
+    // The priority group goes first as before; the fill's halves wait behind the older half.
+    expect(actions[1]).toMatchObject({
+      kind: "build",
+      pending: [
+        [8, 9],
+        [1, 2],
+        [3, 4],
+      ],
+    });
+    expect(actions[1]?.kind === "build" && actions[1].members.map((p) => p.number)).toEqual([5]);
+    // Its blame is its own halves', not the older half's.
+    expect(actions[1]).not.toHaveProperty("blame");
+    // Once the priority PR lands, the older half goes next, then the fill halves.
+    const passed = batch([5], { runs: [run()] }, [
+      [8, 9],
+      [1, 2],
+      [3, 4],
+    ]);
+    const next = decide(observe(pulls, [passed]));
+    expect(next[0]).toMatchObject({ kind: "land" });
+    expect(next[1]).toMatchObject({
+      kind: "build",
+      pending: [
+        [1, 2],
+        [3, 4],
+      ],
+    });
+    expect(next[1]?.kind === "build" && next[1].members.map((p) => p.number)).toEqual([8, 9]);
+  });
+
+  test("a fill as large as the priority group is halved; a single fill PR stays alone", () => {
+    const urgent = { priority: true };
+    const failure = { runs: [run({ conclusion: "failure", attempt: 2 })] };
+    const even = decide(
+      observe([pull(1), pull(2), pull(5, urgent), pull(6, urgent)], [batch([5, 6, 1, 2], failure)]),
+    );
+    expect(even[1]).toMatchObject({ kind: "build", pending: [[1], [2]] });
+    expect(even[1]?.kind === "build" && even[1].members.map((p) => p.number)).toEqual([5, 6]);
+    const single = decide(observe([pull(1), pull(5, urgent)], [batch([5, 1], failure)]));
+    expect(single[1]).toMatchObject({ kind: "build", pending: [[1]] });
+    expect(single[1]?.kind === "build" && single[1].members.map((p) => p.number)).toEqual([5]);
+  });
+
+  test("the fill halves of a failed batch carry what it blamed", () => {
+    const failed = batch([5, 1, 2, 3], {
+      runs: [run({ conclusion: "failure", attempt: 2, failedJobs: ["Unit tests (shard 1/12)"] })],
+    });
+    const pulls = [pull(1), pull(2), pull(3), pull(5, { priority: true })];
+    const actions = decide(observe(pulls, [failed]));
+    expect(actions[1]).toMatchObject({
+      kind: "build",
+      pending: [[1, 2], [3]],
+      blame: ["Unit tests (shard 1/12)"],
+    });
   });
 
   test("more priority PRs than half a failed batch are still tested together first", () => {
@@ -497,6 +592,78 @@ describe("decide", () => {
     expect(actions[1]?.kind === "build" && actions[1].members.map((p) => p.number)).toEqual([5]);
   });
 
+  test("priority batches and a bisection take turns while priority PRs keep arriving", () => {
+    const urgent = (n: number) => pull(n, { priority: true, queuedAt: NOW });
+    // A priority batch went ahead of the split [[1, 2], [3]] and passed.
+    const ahead = batch([5], {}, [[1, 2], [3]]);
+    ahead.manifest.aheadOfBisection = true;
+    const turn = decide(observe([pull(1), pull(2), pull(3), urgent(5), urgent(6)], [ahead]));
+    expect(turn.map((a) => a.kind)).toEqual(["land", "build"]);
+    expect(turn[1]).toMatchObject({ kind: "build", pending: [[3]] });
+    expect(turn[1]?.kind === "build" && turn[1].members.map((p) => p.number)).toEqual([1, 2]);
+
+    // That half passed: the waiting priority PR goes next, ahead of [3] again.
+    const half = batch([1, 2], {}, [[3]]);
+    const back = decide(observe([pull(1), pull(2), pull(3), urgent(6)], [half]));
+    expect(back[1]).toMatchObject({ kind: "build", pending: [[3]], aheadOfBisection: true });
+    expect(back[1]?.kind === "build" && back[1].members.map((p) => p.number)).toEqual([6]);
+
+    // A failed priority batch ahead of the split also hands the turn back.
+    const failedAhead = batch([5], { runs: [run({ conclusion: "failure", attempt: 2 })] }, [[3]]);
+    failedAhead.manifest.aheadOfBisection = true;
+    const afterFailure = decide(observe([pull(3), urgent(5), urgent(6)], [failedAhead]));
+    expect(afterFailure.map((a) => a.kind)).toEqual(["abandon", "eject", "build"]);
+    expect(
+      afterFailure[2]?.kind === "build" && afterFailure[2].members.map((p) => p.number),
+    ).toEqual([3]);
+
+    // With no split in progress, a priority batch is not marked.
+    const plain = nextBatch([pull(1), urgent(6)], [], NOW, DEFAULT_SETTINGS, [], true);
+    expect(plain).not.toHaveProperty("aheadOfBisection");
+    expect(plain?.kind === "build" && plain.members.map((p) => p.number)).toEqual([6, 1]);
+  });
+
+  test("a failed batch that went ahead of a bisection queues its halves behind the older halves", () => {
+    const urgent = (n: number) => pull(n, { priority: true });
+    // The older half [1, 2] holds a priority PR too, so only queue order decides.
+    const older = [1, 2];
+    const failedAhead = batch(
+      [5, 6, 7, 8],
+      { runs: [run({ conclusion: "failure", attempt: 2 })] },
+      [older, [3]],
+    );
+    failedAhead.manifest.aheadOfBisection = true;
+    const pulls = [urgent(1), pull(2), pull(3), urgent(5), urgent(6), urgent(7), urgent(8)];
+    const actions = decide(observe(pulls, [failedAhead]));
+    expect(actions.map((a) => a.kind)).toEqual(["abandon", "build"]);
+    expect(actions[1]).toMatchObject({
+      kind: "build",
+      pending: [[3], [5, 6], [7, 8]],
+    });
+    expect(actions[1]).not.toHaveProperty("blame");
+    expect(actions[1]?.kind === "build" && actions[1].members.map((p) => p.number)).toEqual(older);
+  });
+
+  test("a half holding a priority PR runs before the other halves, which keep their order", () => {
+    const pulls = [pull(1), pull(2), pull(3, { priority: true }), pull(4), pull(5)];
+    const pending = [[1], [2, 3], [4], [5]];
+    const first = nextBatch(pulls, pending, NOW, DEFAULT_SETTINGS, [], true);
+    expect(first).toMatchObject({ kind: "build", pending: [[1], [4], [5]] });
+    expect(first?.kind === "build" && first.members.map((p) => p.number)).toEqual([2, 3]);
+
+    // Without a priority PR in any half, the halves run in order.
+    const plain = nextBatch(
+      pulls.map((p) => ({ ...p, priority: false })),
+      pending,
+      NOW,
+      DEFAULT_SETTINGS,
+      [],
+      true,
+    );
+    expect(plain).toMatchObject({ kind: "build", pending: [[2, 3], [4], [5]] });
+    expect(plain?.kind === "build" && plain.members.map((p) => p.number)).toEqual([1]);
+  });
+
   test("ejects a PR that fails alone, keeping the rest of the bisection", () => {
     const failed = batch([3], { runs: [run({ conclusion: "failure", attempt: 2 })] }, [[4]]);
     const actions = decide(observe([pull(3), pull(4), pull(5)], [failed]));
@@ -654,6 +821,11 @@ describe("manifest and titles", () => {
     ).toBeNull();
     expect(
       parseManifest(renderManifest({ ...manifest, blame: "A" as unknown as string[] })),
+    ).toBeNull();
+    const ahead = { ...manifest, aheadOfBisection: true as const };
+    expect(parseManifest(renderManifest(ahead))).toEqual(ahead);
+    expect(
+      parseManifest(renderManifest({ ...manifest, aheadOfBisection: false as unknown as true })),
     ).toBeNull();
     expect(parseManifest("Batch-Manifest: {")).toBeNull();
     expect(parseManifest("no trailer")).toBeNull();

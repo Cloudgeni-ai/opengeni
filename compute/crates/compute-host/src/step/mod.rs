@@ -65,7 +65,8 @@ use files::{
     pager_dir, pager_learned, wake_profile,
 };
 pub(crate) use files::{
-    clear_checkpoint, clear_local, images_of, mark_archived, paged, recover_images, take_written,
+    clear_checkpoint, clear_local, images_of, local_copy, mark_archived, paged, recover_images,
+    take_written,
 };
 pub(crate) use live::{Base, DiskWatch, LiveMemory, Reconnected, recorded_base};
 use live::{lose_base, record_base, withdraw_base};

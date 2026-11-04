@@ -16,6 +16,7 @@ import {
   CODE_SEARCH_DIRECTIVE,
   CODEMODE_PROGRAMMATIC_DIRECTIVE,
   DEFAULT_AGENT_IDENTITY,
+  NEUTRAL_AGENT_IDENTITY,
   INSTRUCTION_PRECEDENCE,
   SESSION_INSTRUCTIONS_PREAMBLE,
   agentPromptResourcesFor,
@@ -235,6 +236,35 @@ describe("modular composer: module selection (AC12)", () => {
         expect(attached).toContain("`command_wait`");
       }
     }
+  });
+
+  test("the do-not-poll sentence renders only when finished commands are delivered", () => {
+    const sentence = "reports its exit status and output on its own";
+    const withoutDelivery = { ...NO_RESOURCES, managedSandbox: true };
+    const withDelivery = { ...withoutDelivery, commandCompletionDelivery: true };
+    for (const capabilities of [allAgentCapabilities(), noneAgentCapabilities()]) {
+      expect(compose(capabilities, withoutDelivery).composed).not.toContain(sentence);
+      const delivered = compose(capabilities, withDelivery).composed;
+      expect(delivered).toContain(sentence);
+      // Follows the terminal-read sentence in the same paragraph.
+      expect(delivered).toContain(
+        "a running read does not. A command that finishes while you work reports",
+      );
+    }
+    expect(
+      compose(allAgentCapabilities(), { ...NO_RESOURCES, commandCompletionDelivery: true })
+        .composed,
+    ).not.toContain(sentence);
+    expect(
+      agentPromptResourcesFor(testSettings({ sandboxBackend: "docker" }), [], {}),
+    ).toHaveProperty("commandCompletionDelivery", true);
+    expect(
+      agentPromptResourcesFor(
+        testSettings({ sandboxBackend: "docker", experimentCutPolling: false }),
+        [],
+        {},
+      ),
+    ).not.toHaveProperty("commandCompletionDelivery");
   });
 
   test("sandbox guidance appears for a Connected Machine alone", () => {
@@ -552,6 +582,7 @@ describe("modular composer: prompt-cache stability", () => {
       connectedMachine: false,
       repositories: true,
       gitCredentials: true,
+      commandCompletionDelivery: true,
     });
     expect(
       agentPromptResourcesFor(settings, [{ kind: "repository", uri: "x" }] as never, {
@@ -562,6 +593,7 @@ describe("modular composer: prompt-cache stability", () => {
       connectedMachine: true,
       repositories: false,
       gitCredentials: false,
+      commandCompletionDelivery: true,
     });
     expect(
       agentPromptResourcesFor(settings, [{ kind: "repository", uri: "x" }] as never, {}),
@@ -587,7 +619,8 @@ describe("modular composer: prompt-cache stability", () => {
       agentConfig: config(noneAgentCapabilities(), { from: "none", renderer: "markdown" }),
     });
     expect(String(legacy.instructions)).toStartWith("You are an agent for the current workspace.");
-    expect(String(modular.instructions)).toStartWith(DEFAULT_AGENT_IDENTITY);
+    // "none" shares no workspace, so the default identity is the neutral one.
+    expect(String(modular.instructions)).toStartWith(NEUTRAL_AGENT_IDENTITY);
     expect(String(modular.instructions)).toContain("# Links and rendering");
     expect(String(modular.instructions)).not.toMatch(MARKERS.knowledge!);
     // A capability-free modular prompt is a little over half the legacy one

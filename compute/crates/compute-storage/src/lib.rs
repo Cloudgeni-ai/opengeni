@@ -11,6 +11,7 @@ pub mod copy;
 mod fake;
 pub mod fresh;
 pub mod manifest;
+pub mod pack;
 pub mod pointer_store;
 pub mod store;
 pub mod sweep;

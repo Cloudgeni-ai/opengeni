@@ -65,13 +65,13 @@ import {
   preemptedResponseCutOffText,
   type SandboxFileDownload,
   type OpenGeniRuntime,
-  secretValueModelInputFilter,
   type GeneratedSessionTitle,
   type HistoryProviderApi,
   type GitCredentialTokenWriterSession,
   type NormalizedRunCredentialMaterial,
   type RunCredentialCommandSession,
   type CodemodeTokenWriterSession,
+  withoutAppendedCommandCompletions,
 } from "@opengeni/runtime";
 import {
   environmentsEncryptionKeyBytes,
@@ -123,6 +123,7 @@ import {
 import { programmaticApproval, programmaticContinuationNote } from "../programmatic-approvals";
 import { CodemodeAttemptDispatcher } from "../codemode-dispatcher";
 import { ToolResultSpill } from "./tool-result-spill";
+import type { WorkspaceMutationOptions } from "./sandbox-runtime";
 import { ownedTurnSandboxForAgent } from "./turn-sandbox-access";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
@@ -237,7 +238,6 @@ import type {
 } from "./turn-context";
 import { sdkResponseHasMeaningfulOutput } from "./meaningful-output";
 import { subscriptionCoreTurnOf } from "./turn-context";
-import { currentAttemptSecretValues } from "./secret-values";
 import { admitIndependentSessionTitle } from "../independent-session-title";
 import {
   requestIdleCompactionAfterCompletedTurn,
@@ -286,6 +286,7 @@ export type TurnStreamAttemptDeps = {
       outcome: "completed" | "failed";
       durationSeconds: number;
     }) => void,
+    options?: WorkspaceMutationOptions,
   ) => Promise<T>;
   throwIfWorkerShuttingDown: () => void;
   throwIfTurnCancelled: () => void;
@@ -1069,7 +1070,6 @@ export async function runTurnStreamAttempt(
     const ownedEstablished = ownedTurnSandboxForAgent(sandboxState);
     const eagerOwnedSandboxSetup =
       deps.eagerOwnedSandboxSetup ?? createEagerOwnedSandboxSetup(deps);
-    const attemptSecretValues = currentAttemptSecretValues();
     const runStreamOnce = async (): ReturnType<OpenGeniRuntime["runStream"]> => {
       // Eager owned sessions must settle the exact platform-setup provider
       // promise before the long model stream starts; otherwise one admission
@@ -1132,17 +1132,9 @@ export async function runTurnStreamAttempt(
           ...(steerWatch ? { modelPreemption: () => steerWatch?.signal() } : {}),
           signal: runtimeCancellationSignal,
           sandboxEnvironment,
-          // Final guard: no known secret value reaches the provider, whatever
-          // path brought it into the model input (docs/secrets.md, Masking).
-          ...(attemptSecretValues
-            ? { secretMaskingInputFilter: secretValueModelInputFilter(attemptSecretValues) }
-            : {}),
           // Settled by turn input above; the same for every model call of the run.
           searchRecordForm: searchRecords.form,
-          onModelVisibleContext: async (rawSnapshot) => {
-            const snapshot = attemptSecretValues
-              ? attemptSecretValues.mask(rawSnapshot, "model_context_snapshot")
-              : rawSnapshot;
+          onModelVisibleContext: async (snapshot) => {
             await persistModelContextSnapshot(db, {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
@@ -1747,7 +1739,18 @@ export async function runTurnStreamAttempt(
                     toolOutputTransform: (output) =>
                       retainedToolImagesEventOutput(output, retainedToolImages),
                   }
-                : { messagePhases },
+                : eventing.commandCompletionNotices && eventing.commandCompletionNotices.size > 0
+                  ? {
+                      // The model reads finished commands after this tool's
+                      // result; the timeline shows the tool's own output.
+                      messagePhases,
+                      toolOutputTransform: (output) =>
+                        withoutAppendedCommandCompletions(
+                          output,
+                          eventing.commandCompletionNotices ?? new Set(),
+                        ),
+                    }
+                  : { messagePhases },
           );
           const normalizedToolOutput = normalizedSdkEvents.find(
             (event) =>

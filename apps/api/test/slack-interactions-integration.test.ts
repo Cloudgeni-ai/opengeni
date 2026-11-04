@@ -5264,6 +5264,8 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
         model: "gpt-5.6-terra",
         sandboxBackend: "none",
       },
+      undefined,
+      { surface: "web" },
     );
     await acceptSessionUserMessage(
       value.deps,
@@ -5273,6 +5275,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
       {
         text: "Switch this session to my connected Codex model",
         model: "codex/gpt-6-sol",
+        surface: "web",
         clientEventId: `browser-model-switch-${crypto.randomUUID()}`,
       },
     );
@@ -5315,6 +5318,8 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
         model: "gpt-5.6-terra",
         sandboxBackend: "none",
       },
+      undefined,
+      { surface: "web" },
     );
     await acceptSessionUserMessage(
       value.deps,
@@ -5324,6 +5329,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
       {
         text: "Choose Codex later in the older session",
         model: "codex/gpt-6-sol",
+        surface: "web",
         clientEventId: `older-session-model-switch-${crypto.randomUUID()}`,
       },
     );
@@ -5336,6 +5342,8 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
         model: "gpt-5.6-luna",
         sandboxBackend: "none",
       },
+      undefined,
+      { surface: "web" },
     );
 
     await shared!.admin`
@@ -5392,6 +5400,8 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
         model: "gpt-5.6-luna",
         sandboxBackend: "none",
       },
+      undefined,
+      { surface: "web" },
     );
     await shared!.admin`
       delete from session_turns
@@ -5423,6 +5433,8 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
         model: "gpt-5.6-terra",
         sandboxBackend: "none",
       },
+      undefined,
+      { surface: "web" },
     );
     const otherGrant = await getWorkspaceGrant(
       client.db,
@@ -5438,6 +5450,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
       {
         text: "Another user chooses Luna",
         model: "gpt-5.6-luna",
+        surface: "web",
         clientEventId: `other-subject-model-switch-${crypto.randomUUID()}`,
       },
     );
@@ -5450,6 +5463,8 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
         model: "codex/gpt-6-sol",
         sandboxBackend: "none",
       },
+      undefined,
+      { surface: "web" },
     );
 
     const crossWorkspace = await bootstrapWorkspace(client.db, {
@@ -5472,6 +5487,8 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
         model: "codex/gpt-6-sol",
         sandboxBackend: "none",
       },
+      undefined,
+      { surface: "web" },
     );
 
     await shared!.admin`
@@ -11289,6 +11306,137 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
   }, 60_000);
 });
 
+/** A DM task waiting on one action whose login belongs to `owner` (default: the requester). */
+async function slackOwnLoginApproval(
+  value: SlackFixture,
+  rootTimestamp: string,
+  owner: string | null,
+) {
+  await postEvent(value.app, {
+    teamId: value.teamId,
+    eventId: `E_OWNER_${crypto.randomUUID()}`,
+    event: {
+      type: "message",
+      channel_type: "im",
+      user: value.ownerSlackUserId,
+      channel: "D_OWNER_REVIEW",
+      ts: rootTimestamp,
+      text: `<@${value.botUserId}> Tidy the synthetic messages`,
+    },
+  });
+  await drainAll(value.deps);
+  const route = (await interactions(value.owner.workspaceId)).find(
+    (row) => row.slack_thread_ts === rootTimestamp,
+  );
+  if (!route) throw new Error("Fixture interaction missing");
+  const attemptId = crypto.randomUUID();
+  const claimed = await claimSessionWorkForAttempt(client.db, value.owner.workspaceId, {
+    sessionId: route.session_id,
+    workflowId: `session-${route.session_id}`,
+    workflowRunId: crypto.randomUUID(),
+    dispatchId: crypto.randomUUID(),
+    attemptId,
+    trigger: { kind: "next" },
+  });
+  if (claimed.action !== "claimed") throw new Error("Fixture claim unavailable");
+  const approvalId = crypto.randomUUID();
+  const connectionId = "session-mcp:mail:own-login";
+  const args = { messageIds: ["synthetic-a"], addLabelIds: ["TRASH"], removeLabelIds: ["INBOX"] };
+  await prepareConnectorActionApproval(
+    client.db,
+    {
+      accountId: value.owner.accountId,
+      workspaceId: value.owner.workspaceId,
+      sessionId: route.session_id,
+      turnId: claimed.turn.id,
+      attemptId,
+      executionGeneration: claimed.turn.executionGeneration,
+      initiator: claimed.turn.initiator,
+    },
+    {
+      approvalId,
+      connectionId,
+      serverId: "mail",
+      toolName: "batch_modify_messages",
+      arguments: args,
+      approvalMode: "session_mcp",
+      reviewContext: { kind: "gmail", accountLabel: "fixture-mail@example.test" },
+    },
+  );
+  // Frozen authority is immutable once accepted, so the fixture skips that
+  // trigger to say whose own login this synthetic call runs on.
+  const runsOn = async (subjectId: string) =>
+    await shared!.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`update session_turns
+        set personal_connection_delegations = ${tx.json([
+          { connectionId, ownerSubjectId: subjectId },
+        ])}
+        where id = ${claimed.turn.id}`;
+    });
+  if (owner) await runsOn(owner);
+  await applySessionTurnSettlement(client.db, value.owner.workspaceId, {
+    sessionId: route.session_id,
+    turnId: claimed.turn.id,
+    triggerEventId: claimed.turn.triggerEventId,
+    attemptId,
+    turnStatus: "requires_action",
+    sessionStatus: "requires_action",
+    activeTurnId: claimed.turn.id,
+    runState: {
+      serializedRunState: "{}",
+      pendingApprovals: [{ id: approvalId, source: "codemode" }],
+      humanInputRequests: [],
+    },
+    events: [
+      {
+        type: "session.requiresAction",
+        payload: {
+          approvals: [{ id: approvalId, name: "mail__batch_modify_messages", arguments: args }],
+        },
+      },
+      { type: "session.status.changed", payload: { status: "requires_action" } },
+    ],
+  });
+  await drainAll(value.deps);
+  const status = async () =>
+    (
+      await shared!
+        .admin`select status from connector_action_requests where approval_id = ${approvalId}`
+    )[0]!.status as string;
+  return { card: value.slack.posts.at(-1)!, runsOn, status };
+}
+
+test("an action on someone else's own login offers Slack only Decline", async () => {
+  if (!available) throw new Error("Real database is required");
+  const value = await fixture({ linkOther: true });
+  const { card } = await slackOwnLoginApproval(value, "1770000000.000101", value.otherSubjectId);
+  const rendered = JSON.stringify(card);
+  expect(rendered).toContain("fixture-mail@example.test");
+  expect(rendered).not.toContain("opengeni.approval.approve");
+  expect(rendered).toContain("opengeni.approval.reject");
+  expect(rendered).toContain("because it runs on their own account. You can decline it.");
+}, 60_000);
+
+test("an older card's Approve on someone else's own login is refused and keeps waiting", async () => {
+  if (!available) throw new Error("Real database is required");
+  const value = await fixture({ linkOther: true });
+  const rootTimestamp = "1770000000.000201";
+  const { card, runsOn, status } = await slackOwnLoginApproval(value, rootTimestamp, null);
+  expect(JSON.stringify(card)).toContain("opengeni.approval.approve");
+  const approve = await pendingHandle(card, "approval_approve");
+  await runsOn(value.otherSubjectId);
+  await pressSlackButton(value, {
+    post: card,
+    rootTimestamp,
+    actionId: "opengeni.approval.approve",
+    handleId: approve,
+    actionTs: "1770000000.200001",
+  });
+  expect(card.text).toContain("Only the person whose own account runs this action can approve it.");
+  expect(await status()).toBe("pending");
+}, 60_000);
+
 for (const audience of ["private", "shared"] as const) {
   test(`portable tool review uses saved facts and signed decisions in ${audience} Slack`, async () => {
     if (!available) throw new Error("Real database is required");
@@ -11772,7 +11920,8 @@ describe("Slack agents", () => {
     });
     expect(session!.instructions).toContain("You are Analytics");
     expect(session!.instructions).toContain("Always sign off as Analytics.");
-    expect(session!.instructions).toContain("- Ops Desk: Handles incidents.");
+    expect(session!.instructions).toContain("Handles incidents.");
+    expect(session!.instructions).toContain("- Ops Desk (");
     expect(session!.instructions).not.toContain("+ops-desk");
 
     const first = value.slack.posts.find((post) => post.text.includes("Analytics is on it"));
@@ -11946,6 +12095,23 @@ describe("Slack agents", () => {
         agent: "Ops Desk",
       }),
     ).toMatchObject({ status: "refused" });
+    // A later message in the thread that names the agent which passed it on is
+    // still not handed back: the server refuses it, so the chat's instructions
+    // need not say so.
+    await mention(
+      value,
+      "C_HANDOFF",
+      "1765000003.000200",
+      "can you ask ops desk about this instead?",
+      "1765000003.000100",
+    );
+    const handBack = await handOffSlackAgentChat(value.deps, {
+      grant: routedGrant,
+      sessionId: analyticsChat!.session_id!,
+      agent: "Ops Desk",
+    });
+    expect(handBack).toMatchObject({ status: "refused" });
+    expect(JSON.stringify(handBack)).toContain("Do not hand it back");
 
     // Same-agent chats are listed by agent, and only that agent's.
     const listed = await listSlackAgentChatsForSession(value.deps, {

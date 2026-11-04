@@ -12,9 +12,11 @@ import { createContext, useContext, useId, useLayoutEffect, useMemo, type ReactN
 export const PageHeaderWindowBarContext = createContext<{
   /**
    * A header's title, or null while it has none to show; keeps its place. A
-   * fallback claim shows only while no other header has a title.
+   * fallback claim shows only while no other header has a title. A copyable
+   * title (a Site's) can be right-clicked in the bar to copy it; others stay
+   * part of the bar's drag region.
    */
-  set(id: string, title: string | null, fallback?: boolean): void;
+  set(id: string, title: string | null, fallback?: boolean, copyable?: boolean): void;
   release(id: string): void;
   /** The header whose title the bar shows. */
   owner: string | null;
@@ -42,7 +44,8 @@ export function WindowBarTitleBoundary({
       fallback && enclosing
         ? {
             ...enclosing,
-            set: (id: string, title: string | null) => enclosing.set(id, title, true),
+            set: (id: string, title: string | null, _fallback?: boolean, copyable?: boolean) =>
+              enclosing.set(id, title, true, copyable),
           }
         : null,
     [fallback, enclosing],
@@ -61,15 +64,19 @@ export function WindowBarTitleBoundary({
  * only until that page names it. Inside a fallback boundary every claim is a
  * fallback already, so there the first one keeps the bar.
  */
-export function useWindowBarTitle(title: ReactNode, fallback = false): boolean {
+export function useWindowBarTitle(
+  title: ReactNode,
+  fallback = false,
+  { copyable = false }: { copyable?: boolean } = {},
+): boolean {
   const windowBar = useContext(PageHeaderWindowBarContext);
   const id = useId();
   const text = typeof title === "string" ? title : null;
   const set = windowBar?.set;
   const release = windowBar?.release;
   useIsomorphicLayoutEffect(() => {
-    set?.(id, text || null, fallback);
-  }, [id, set, text, fallback]);
+    set?.(id, text || null, fallback, copyable);
+  }, [id, set, text, fallback, copyable]);
   useIsomorphicLayoutEffect(() => () => release?.(id), [id, release]);
   return windowBar?.owner === id;
 }

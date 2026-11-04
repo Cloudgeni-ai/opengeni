@@ -27,6 +27,7 @@ describe("runtime failures dashboard", () => {
       "Core workspace and session read p95",
       "Durable append and live publish p99",
       "Model call outcomes",
+      "Provider invalid requests by path",
       "Incident delivery path",
     ]) {
       expect(titles).toContain(title);
@@ -47,6 +48,7 @@ describe("runtime failures dashboard", () => {
       "opengeni_session_event_append_seconds_bucket",
       "opengeni_session_event_publish_seconds_bucket",
       "opengeni_model_calls_total",
+      "opengeni_model_invalid_requests_total",
       "alertmanager_notifications_failed_total",
       "kube_deployment_status_replicas_available",
       "kube_cronjob_status_last_successful_time",

@@ -30,6 +30,7 @@ import {
   Trash2Icon,
 } from "lucide-react";
 import { toast } from "sonner";
+import { userErrorText } from "../ui/api-error";
 import type {
   Recording,
   RecordingNote,
@@ -130,7 +131,7 @@ import { StickyBarEdge, useStuckToTop } from "./sticky-bar-edge";
 const defaultText = createOpenGeniText();
 
 function errorText(error: unknown): string | undefined {
-  return error instanceof Error ? error.message : undefined;
+  return error instanceof Error ? userErrorText(error) : undefined;
 }
 
 function isNotFound(error: Error | null): boolean {
@@ -648,7 +649,9 @@ function FailedTranscriptActions({
     about?.funding !== "deployment"
       ? fixes.onConnectModels
       : undefined;
-  const billing = !switchTo && transcriptNeedsCredits(code) ? fixes.onOpenBilling : undefined;
+  const upgrade = code === "subscription_plan_required";
+  const billing =
+    !switchTo && (transcriptNeedsCredits(code) || upgrade) ? fixes.onOpenBilling : undefined;
   return (
     <span className="flex flex-wrap gap-2">
       {switchTo ? (
@@ -674,7 +677,7 @@ function FailedTranscriptActions({
       ) : billing ? (
         <Button type="button" size="sm" onClick={billing}>
           <CreditCardIcon aria-hidden="true" />
-          {msg("meetings.detailPage.addCredits")}
+          {msg(upgrade ? "meetings.detailPage.upgradeToPro" : "meetings.detailPage.addCredits")}
         </Button>
       ) : connect ? (
         <Button type="button" size="sm" onClick={connect}>

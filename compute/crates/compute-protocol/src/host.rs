@@ -1067,6 +1067,14 @@ pub struct DiskStatus {
     pub reserve: u64,
     /// Bytes more wakes may book.
     pub free: u64,
+    /// Bytes beyond [`DiskStatus::free`] that a new sandbox could book now
+    /// by disk relief (ADR 30): what the host frees without losing
+    /// anything, idle sandboxes' local copies that object storage holds
+    /// and templates and cached images nothing uses, as its admission
+    /// counts it. Missing from what a host of an earlier release wrote,
+    /// which then counts none.
+    #[serde(default)]
+    pub reclaimable: u64,
     /// Inodes available at the last reading.
     pub inodes_available: u64,
     /// Inodes booked for saves.
@@ -1137,6 +1145,13 @@ pub struct BlockedSandbox {
     pub id: Id,
     /// What went wrong.
     pub problem: String,
+    /// For one whose VM was found held frozen, as the guard leaves VMs
+    /// once the lease has run out, so that the agent could not take it
+    /// back: the owner epoch its record names. A registration lists it
+    /// with that epoch, and the service's ruling decides whether its VM
+    /// is ended or taken back once the lease lets it run again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_owner_epoch: Option<u64>,
 }
 
 /// A step's name on the wire.

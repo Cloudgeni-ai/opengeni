@@ -30,6 +30,8 @@ capabilities: { from: "all", browser: false, workspaceAdmin: false }
 | Capability            | Lets the agent                                                                                    | In `"none"` |
 | --------------------- | ------------------------------------------------------------------------------------------------- | ----------- |
 | `humanInput`          | Pause and ask the person for a decision or missing detail                                         | On          |
+| `notifications`       | Notify the person, withdraw notifications, tidy their inbox, and call them                        | Off         |
+| `privacyFacts`        | Answer privacy, retention and provider questions from the deployment's own facts                  | Off         |
 | `webSearch`           | Search the public web                                                                             | Off         |
 | `media`               | Generate images and videos                                                                        | Off         |
 | `goals`               | Work toward a goal across many turns                                                              | Off         |
@@ -47,6 +49,19 @@ capabilities: { from: "all", browser: false, workspaceAdmin: false }
 Your own MCP servers and the integrations you name in `tools` stay available under `"none"`. `"none"` adds no bundled Opengeni guides unless `bundledSkillIds` lists them, so it needs no empty `tools`, `firstPartyMcpTools`, or `bundledSkillIds` lists. Shell, file, and background-command tools come with the sandbox or a Connected Machine; `sandboxBackend: "none"` removes them.
 
 Requesting a capability the server doesn't offer fails with `agent_capability_unavailable`.
+
+### What `"none"` sends on every call
+
+Under `"none"` the agent pays only for what the session can use. Every model call carries the system prompt and the built-in tools, so each one is left out when its feature is absent:
+
+- **Identity:** a neutral introduction instead of the Opengeni workspace assistant, unless you set `identity` or the session shares a workspace (a sandbox, Knowledge, files, connectors, artifacts and similar).
+- **`request_human_input`:** only the question kinds the session can use. The secret question appears only with `secrets`, Skill reviews only with `skills: "manage"`, and the parent-agent guidance only in a child session.
+- **`wait_for_input`:** only when something can resume the agent: a sandbox or Connected Machine, `subagents`, `goals`, `schedules`, `browser`, `media`, or a person who can answer its questions (a turn started by a user). An API-started turn with none of these has nothing to wait for. The waiting guidance follows the tool.
+- **Tool search** (`tool_search`, `tool_invoke`, `tool_list` and their guidance): only when a tool is deferred, for example an MCP server that is not `eager` or a searchable Opengeni tool. List your product server with `eager: true` to keep every tool in the first request; an `optional` or connection-backed server is prepared in the background, so it keeps tool search. Without tool search, Opengeni titles the session itself.
+- **Skill index:** left out when the session has no Skills.
+- **Prompt sections** about web search, learning, monitoring, designing with workspace tools, and goal audits appear only with the capability they describe.
+
+Switch any item back on with its capability, for example `{ from: "none", privacyFacts: true, notifications: true }`, or `schedules: true` for waiting and monitoring. Sessions with a feature get the same prompt as before; outside child sessions, `request_human_input` no longer carries the parent-agent guidance. Saved workspace defaults and schedules that start from `"none"` keep notifications and privacy facts, as they did when saved. `getSessionModelContext` returns the latest request's provider body on every route; on the native Anthropic route it also lists the instructions, their layers and each tool with its size, so you can see what each call costs.
 
 ## Identity and instructions
 

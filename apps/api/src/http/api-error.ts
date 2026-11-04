@@ -4,9 +4,11 @@ import {
   AgentConfigError,
   BYOK_PAID_CREDIT_REQUIRED_CODE,
   SUBSCRIPTION_PLAN_REQUIRED_CODE,
+  SUBSCRIPTION_API_UNAVAILABLE_CODE,
   UPGRADE_PLAN_ACTION,
   byokRefusalAction,
   AllowanceExhaustedRefusal,
+  ModelPolicyRefusedError,
   ModelUnavailableError,
   ScheduledTaskTargetAccessChange,
   type ErrorCode,
@@ -15,6 +17,7 @@ import {
   isDatabaseConnectionLoss,
   SessionUsageLimitUnavailableError,
   nestedPostgresSqlState,
+  SessionApprovalForbiddenError,
   WorkspaceControlBusyError,
   WorkspaceContentFlowRefusedError,
 } from "@opengeni/db";
@@ -23,6 +26,7 @@ import {
   MissingPermissionRefusal,
   SessionUsageLimitHttpError,
   sessionUsageLimitRefusalFromError,
+  TranscriptionServiceError,
 } from "@opengeni/core";
 import { InferenceRegionRestrictedError } from "@opengeni/runtime/model-call";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -62,6 +66,24 @@ export function missingPermissionHttpError(error: unknown): ApiHttpError | null 
     retryable: false,
     outcomeUnknown: false,
     details: error.details,
+  });
+}
+
+/**
+ * Approving an action on someone else's own login: says who can approve, and
+ * keeps the stable code in `details` so clients can tell it from other 403s.
+ */
+export function approvalForbiddenHttpError(error: unknown): ApiHttpError | null {
+  if (!(error instanceof SessionApprovalForbiddenError)) return null;
+  return new ApiHttpError(403, {
+    code: "forbidden",
+    message: error.message,
+    retryable: false,
+    outcomeUnknown: false,
+    details: {
+      code: error.code,
+      ...(error.owner.label ? { accountOwnerLabel: error.owner.label } : {}),
+    },
   });
 }
 
@@ -105,9 +127,28 @@ export function allowanceExhaustedHttpError(error: unknown): ApiHttpError | null
  * callers can tell it from other 402s without matching message text.
  */
 export function insufficientCreditsHttpError(error: unknown): ApiHttpError | null {
-  if (!(error instanceof HTTPException) || error.status !== 402) return null;
+  if (error instanceof TranscriptionServiceError && error.subscriptionCode) {
+    error = new HTTPException(
+      error.subscriptionCode === SUBSCRIPTION_API_UNAVAILABLE_CODE ? 403 : 402,
+      {
+        message: error.message,
+        cause: { allowed: false, code: error.subscriptionCode },
+      },
+    );
+  }
+  if (!(error instanceof HTTPException)) return null;
   const cause = error.cause as { allowed?: unknown; code?: unknown } | null | undefined;
   if (!cause || typeof cause !== "object" || cause.allowed !== false) return null;
+  if (error.status === 403 && cause.code === SUBSCRIPTION_API_UNAVAILABLE_CODE) {
+    return new ApiHttpError(403, {
+      code: "forbidden",
+      message: error.message,
+      retryable: false,
+      outcomeUnknown: false,
+      details: { code: cause.code },
+    });
+  }
+  if (error.status !== 402) return null;
   if (
     cause.code !== "insufficient_credits" &&
     cause.code !== API_CREDITS_REQUIRED_CODE &&
@@ -351,6 +392,28 @@ export function modelUnavailableHttpError(error: unknown): ApiHttpError | null {
     retryable: false,
     outcomeUnknown: false,
     details: { code: cause.code, modelId: cause.modelId },
+  });
+}
+
+/**
+ * A model the workspace's model policy refuses. The same request is refused
+ * again until someone changes the model or the policy, so clients get
+ * `details.code: "model_policy"` with the rule (`reason`) instead of a retry.
+ */
+export function modelPolicyRefusedHttpError(error: unknown): ApiHttpError | null {
+  const cause =
+    error instanceof ModelPolicyRefusedError
+      ? error
+      : error instanceof HTTPException && error.cause instanceof ModelPolicyRefusedError
+        ? error.cause
+        : null;
+  if (!cause) return null;
+  return new ApiHttpError(422, {
+    code: "validation_failed",
+    message: cause.message,
+    retryable: false,
+    outcomeUnknown: false,
+    details: { code: cause.code, modelId: cause.modelId, reason: cause.reason },
   });
 }
 

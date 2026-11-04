@@ -114,6 +114,7 @@ import {
   frozenInitiatorForCommandActor,
   initiatorColumns,
   initiatorFromStorage,
+  sameTurnSender,
   type FrozenTurnInitiator,
 } from "./turn-initiator";
 import {
@@ -122,7 +123,6 @@ import {
 } from "./subscription-core-acceptance-authority";
 import { assertActiveManagedHumanOrganizationMembership } from "./organization-membership-lifecycle";
 import { acceptTurnPersonalResourceAttachmentInTransaction } from "./user-resource-authority";
-import { maskSecretValuesForStorage } from "./secret-value-masking";
 
 type SessionEventInsertWithPayload = typeof schema.sessionEvents.$inferInsert & {
   payload: unknown;
@@ -2230,6 +2230,49 @@ async function promptCausalHuman(
 }
 
 /**
+ * Whether the queued message a queue edit resubmits was sent by its editor.
+ * Only then does the edit keep the message's accepted authority.
+ */
+async function queueEditSourceSentBy(
+  db: SessionActivityDatabase,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    sourceTurnId: string;
+    editor: FrozenTurnInitiator;
+  },
+): Promise<boolean> {
+  const [source] = await db
+    .select({
+      initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+      initiatorKind: schema.sessionTurns.initiatorKind,
+      initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
+      initiatorContext: schema.sessionTurns.initiatorContext,
+    })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, input.workspaceId),
+        eq(schema.sessionTurns.sessionId, input.sessionId),
+        eq(schema.sessionTurns.id, input.sourceTurnId),
+      ),
+    )
+    .limit(1);
+  if (!source) return false;
+  return sameTurnSender(
+    {
+      initiator: initiatorFromStorage(
+        source.initiatorKind,
+        source.initiatorSubjectId,
+        source.initiatorContext ?? {},
+      ),
+      initiatingHumanSubjectId: source.initiatingHumanSubjectId,
+    },
+    input.editor,
+  );
+}
+
+/**
  * Session statuses whose active turn waits with no live attempt and that an
  * ordinary human Send takes over (Steer semantics) instead of queueing behind:
  * a pending decision, or a turn parked on provider capacity such as a used-up
@@ -2318,7 +2361,6 @@ export async function submitHumanPromptInTransaction(
     controlLockTimeoutMs?: number;
   },
 ): Promise<SubmitHumanPromptResult> {
-  input = maskSecretValuesForStorage(input, "message");
   const annotations = TimelineAnnotations.parse(input.annotations ?? []);
   // Send is inert queue admission while paused; Steer deliberately resumes.
   // Tell the lock helper which path may need the exclusive control prefix.
@@ -2484,15 +2526,23 @@ export async function submitHumanPromptInTransaction(
   // message there waits for the owner (`machine-owner-wait.ts`): it is queued
   // as a plain Send that never steers, interrupts or resumes anything, and the
   // owner's next own message takes it in.
-  const actorInitiator =
-    input.delivery === "send" && draft?.sourceTurnId
-      ? null
-      : await frozenInitiatorForCommandActor(
-          db,
-          input.workspaceId,
-          input.actor,
-          input.subjectLabel,
-        );
+  const actorInitiator = await frozenInitiatorForCommandActor(
+    db,
+    input.workspaceId,
+    input.actor,
+    input.subjectLabel,
+  );
+  // A queue edit stays its sender's message only when they resubmit it. When
+  // someone else edits it, it becomes their own new message, run with their
+  // own accounts and allowance, never the original sender's.
+  const editKeepsSourceSender = draft?.sourceTurnId
+    ? await queueEditSourceSentBy(db, {
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        sourceTurnId: draft.sourceTurnId,
+        editor: actorInitiator,
+      })
+    : false;
   const machineOwner = await sessionMachineOwnerSubject(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -2503,7 +2553,7 @@ export async function submitHumanPromptInTransaction(
     (await promptCausalHuman(db, {
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
-      sourceTurnId: draft?.sourceTurnId ?? null,
+      sourceTurnId: editKeepsSourceSender ? (draft?.sourceTurnId ?? null) : null,
       actorInitiator,
     })) !== machineOwner;
 
@@ -2649,6 +2699,9 @@ export async function submitHumanPromptInTransaction(
     editedSourceTurn = sourceTurn;
     editedSourceModelContext = sourceTurn.modelContext ?? null;
   }
+  // The withdrawn message whose accepted authority this prompt keeps: only
+  // its own sender's resubmission. See `editKeepsSourceSender`.
+  const inheritedSourceTurn = editKeepsSourceSender ? editedSourceTurn : undefined;
 
   for (const update of input.mcpCredentialUpdates ?? []) {
     const [server] = await db
@@ -2671,8 +2724,8 @@ export async function submitHumanPromptInTransaction(
 
   const now = new Date();
   let frozenInitiator: FrozenTurnInitiator;
-  if (input.delivery === "send" && draft?.sourceTurnId) {
-    const sourceTurn = editedSourceTurn;
+  if (input.delivery === "send" && draft?.sourceTurnId && editKeepsSourceSender) {
+    const sourceTurn = inheritedSourceTurn;
     if (!sourceTurn) {
       throw new SessionControlInvariantError("Edited prompt source turn is missing");
     }
@@ -2694,9 +2747,11 @@ export async function submitHumanPromptInTransaction(
         input.subjectLabel,
       ));
   }
-  const acceptedInitiatingHumanSubjectId = editedSourceTurn
-    ? (editedSourceTurn.initiatingHumanSubjectId ??
-      (editedSourceTurn.initiatorKind === "subject" ? editedSourceTurn.initiatorSubjectId : null))
+  const acceptedInitiatingHumanSubjectId = inheritedSourceTurn
+    ? (inheritedSourceTurn.initiatingHumanSubjectId ??
+      (inheritedSourceTurn.initiatorKind === "subject"
+        ? inheritedSourceTurn.initiatorSubjectId
+        : null))
     : (frozenInitiator.initiatingHumanSubjectId ??
       (frozenInitiator.initiator.kind === "subject" ? frozenInitiator.initiator.subjectId : null));
   if (
@@ -2730,7 +2785,7 @@ export async function submitHumanPromptInTransaction(
   // no exact accepting human, so they resolve the organization or workspace
   // pool and can never select a personal pool.
   const nonHumanAuthority =
-    editedSourceTurn || input.actor.type === "human"
+    inheritedSourceTurn || input.actor.type === "human"
       ? null
       : input.actor.type === "agent_attempt"
         ? await receiverSubscriptionAuthorityInTransaction(db, {
@@ -2742,17 +2797,17 @@ export async function submitHumanPromptInTransaction(
             claude: authority.claude.snapshot,
           }))
         : await sharedPoolSubscriptionAuthoritySnapshotsInTransaction(db, input.workspaceId);
-  const xaiProviderAccountAuthoritySnapshot = editedSourceTurn
+  const xaiProviderAccountAuthoritySnapshot = inheritedSourceTurn
     ? XaiProviderAccountAuthoritySnapshotV1.parse(
-        editedSourceTurn.xaiProviderAccountAuthoritySnapshot,
+        inheritedSourceTurn.xaiProviderAccountAuthoritySnapshot,
       )
     : // SuperGrok's v1 value is never computed from live state after its
       // cutover: a human's new work writes the column default (design 5.3,
       // "v1 columns after a provider's cutover").
       (nonHumanAuthority?.xai ?? WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1);
-  const claudeProviderAccountAuthoritySnapshot = editedSourceTurn
+  const claudeProviderAccountAuthoritySnapshot = inheritedSourceTurn
     ? ClaudeProviderAccountAuthoritySnapshotV1.parse(
-        editedSourceTurn.claudeProviderAccountAuthoritySnapshot,
+        inheritedSourceTurn.claudeProviderAccountAuthoritySnapshot,
       )
     : (nonHumanAuthority?.claude ?? WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1);
   // Codex v2 accepted authority (M3 PR 2a, 3b): an edit keeps its source
@@ -2762,8 +2817,8 @@ export async function submitHumanPromptInTransaction(
   // other actor (service, operator, API key) freezes none. NULL until the
   // account's Codex cutover is enabled. Reads the cutover row on every
   // non-edit prompt (one indexed lookup).
-  const subscriptionAuthority = editedSourceTurn
-    ? (editedSourceTurn.subscriptionAuthority ?? null)
+  const subscriptionAuthority = inheritedSourceTurn
+    ? (inheritedSourceTurn.subscriptionAuthority ?? null)
     : input.actor.type === "agent_attempt"
       ? await receiverSubscriptionAuthorityV2InTransaction(db, {
           accountId: input.accountId,
@@ -2780,8 +2835,8 @@ export async function submitHumanPromptInTransaction(
         });
   await input.beforeFreshPromptCommit?.(db, {
     claudeProviderAccountAuthoritySnapshot,
-    ...(editedSourceTurn
-      ? { claudeAcceptedSource: { kind: "session_turn" as const, turnId: editedSourceTurn.id } }
+    ...(inheritedSourceTurn
+      ? { claudeAcceptedSource: { kind: "session_turn" as const, turnId: inheritedSourceTurn.id } }
       : input.actor.type === "agent_attempt"
         ? {
             claudeAcceptedSource: {
@@ -2801,8 +2856,8 @@ export async function submitHumanPromptInTransaction(
   const acceptedAccounts = await withoutLapsedWorkspaceAccountBindings(
     db as unknown as Database,
     input.workspaceId,
-    editedSourceTurn
-      ? editedSourceTurn.mcpAccountBindings
+    inheritedSourceTurn
+      ? inheritedSourceTurn.mcpAccountBindings
       : parseAcceptedMcpAccountBindings(input.mcpAccountBindings),
   );
   const acceptedTurnMetadata =
@@ -2906,17 +2961,17 @@ export async function submitHumanPromptInTransaction(
             : (acceptedTurnMetadata ?? {}),
           // An edit names the exact withdrawn turn it copies, so the database
           // resolves the same source for accepted authority (0716).
-          lineage: editedSourceTurn
-            ? { actor: input.actor.type, editedFromTurnId: editedSourceTurn.id }
+          lineage: inheritedSourceTurn
+            ? { actor: input.actor.type, editedFromTurnId: inheritedSourceTurn.id }
             : { actor: input.actor.type },
           ...initiatorColumns(frozenInitiator),
           initiatingHumanSubjectId: acceptedInitiatingHumanSubjectId,
-          personalConnectionDelegations: editedSourceTurn
-            ? editedSourceTurn.personalConnectionDelegations
+          personalConnectionDelegations: inheritedSourceTurn
+            ? inheritedSourceTurn.personalConnectionDelegations
             : (input.personalConnectionDelegations ?? []),
           mcpAccountBindings: acceptedAccounts.bindings,
-          connectionAccountIntent: editedSourceTurn
-            ? parseConnectionAccountIntent(editedSourceTurn.connectionAccountIntent)
+          connectionAccountIntent: inheritedSourceTurn
+            ? parseConnectionAccountIntent(inheritedSourceTurn.connectionAccountIntent)
             : parseConnectionAccountIntent(input.connectionAccountIntent),
           xaiProviderAccountAuthoritySnapshot,
           claudeProviderAccountAuthoritySnapshot,
@@ -3406,7 +3461,6 @@ export async function sendAgentMessageInTransaction(
     controlLockTimeoutMs?: number;
   },
 ): Promise<AgentInternalUpdateCommandResult> {
-  input = maskSecretValuesForStorage(input, "message");
   const workspaceControl = await lockWorkspaceInferenceControl(db, input.workspaceId, "share", {
     ...(input.controlLockTimeoutMs !== undefined
       ? { lockTimeoutMs: input.controlLockTimeoutMs }
@@ -3702,7 +3756,6 @@ export async function steerAgentSessionInTransaction(
     controlLockTimeoutMs?: number;
   },
 ): Promise<AgentInternalUpdateCommandResult> {
-  input = maskSecretValuesForStorage(input, "message");
   const admission = await lockWorkspaceInferenceControlForAdmission(db, {
     workspaceId: input.workspaceId,
     sessionId: input.targetSessionId,

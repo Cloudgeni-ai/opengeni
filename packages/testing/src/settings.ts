@@ -93,6 +93,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     organizationUserSetupQueryEdgeSanitizationConfirmed: false,
     billingMode: "disabled",
     subscriptionPlansEnabled: false,
+    billingAutoTopUpEnabled: false,
     // Off in fixtures; bring-your-own-key fee tests opt in.
     byokPlatformFeeBps: 0,
     verifiedSignupTrialCreditsEnabled: false,

@@ -59,6 +59,32 @@ describe("manual canary chart publication", () => {
     expect(workflow.concurrency["cancel-in-progress"]).toBe(false);
   });
 
+  test("pins the chart's default desktop box to the exact-source main CI desktop image", () => {
+    const steps = workflow.jobs.publish.steps;
+    const resolveIndex = steps.findIndex(
+      (step: { name?: string }) => step.name === "Resolve exact-source desktop image",
+    );
+    const packageIndex = steps.findIndex(
+      (step: { name?: string }) => step.name === "Package exact chart",
+    );
+    const loginIndex = steps.findIndex(
+      (step: { name?: string }) => step.name === "Authenticate publishing authority",
+    );
+    expect(resolveIndex).toBeGreaterThan(-1);
+    expect(resolveIndex).toBeLessThan(packageIndex);
+    // Resolved before any registry login, so the pin is anonymously pullable.
+    expect(resolveIndex).toBeLessThan(loginIndex);
+    const resolveRun = steps[resolveIndex].run as string;
+    expect(resolveRun).toContain(
+      'bun scripts/resolve-optional-oci-manifest.ts "${image}:canary-sha-${SOURCE_SHA}"',
+    );
+    expect(resolveRun).toContain('[[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {');
+    expect(steps[packageIndex].env.DESKTOP_IMAGE_REF).toBe(
+      "${{ steps.desktop.outputs.image_ref }}",
+    );
+    expect(steps[packageIndex].run).toContain('--desktop-image-ref "$DESKTOP_IMAGE_REF"');
+  });
+
   test("only pushes absent references and requires byte/digest readback before a receipt", () => {
     const steps = workflow.jobs.publish.steps;
     const publish = steps.find(

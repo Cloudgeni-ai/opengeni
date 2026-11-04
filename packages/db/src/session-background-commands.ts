@@ -11,7 +11,7 @@ import type { Database, SessionActivityDatabase } from "./database";
 import { withRlsContext, withSessionActivityRlsContext } from "./database";
 import * as schema from "./schema";
 import { lockSessionEventWriteRows } from "./session-control";
-import { fromPostgresLosslessJson } from "./lossless-json";
+import { fromPostgresLosslessJson, fromPostgresLosslessText } from "./lossless-json";
 import { commandOutputClientEventIdPrefix } from "./session-command-output";
 
 export type ConnectedMachineBackgroundCommandProof = {
@@ -1743,6 +1743,8 @@ export function projectCommandOutputPage(input: {
   cursor?: string | undefined;
   maxOutputBytes?: number | undefined;
   rows: CommandOutputRow[];
+  /** Rows one page may use; defaults to COMMAND_OUTPUT_PAGE_ROWS. */
+  pageRows?: number | undefined;
 }) {
   const start = parseCommandOutputCursor(input.cursor, input.commandId);
   const budget = input.maxOutputBytes ?? COMMAND_OUTPUT_DEFAULT_BYTES;
@@ -1756,7 +1758,7 @@ export function projectCommandOutputPage(input: {
   if (start.offset > 0 && input.rows[0]?.sequence !== start.sequence)
     gaps.push("cursor_output_no_longer_retained");
   let consumed = 0;
-  for (const row of input.rows.slice(0, COMMAND_OUTPUT_PAGE_ROWS)) {
+  for (const row of input.rows.slice(0, input.pageRows ?? COMMAND_OUTPUT_PAGE_ROWS)) {
     const { text, stream, streamFidelity, gaps: rowGaps } = commandOutputRowText(row);
     gaps.push(...rowGaps);
     const begin = row.sequence === start.sequence ? start.offset : 0;
@@ -1923,24 +1925,36 @@ export async function commandOutputRowsBetween(
   input: SessionCommandIdentity,
   afterSequence: number,
   beforeSequence: number,
+  /** Count at most this many rows (the result is then a lower bound). */
+  rowLimit?: number,
 ): Promise<number> {
   if (beforeSequence - afterSequence <= 1) return 0;
   const clientIdFrom = commandOutputClientEventIdPrefix(input.commandId);
   const clientIdBefore = `${clientIdFrom.slice(0, -1)};`;
+  const between = and(
+    eq(schema.sessionEvents.workspaceId, input.workspaceId),
+    eq(schema.sessionEvents.sessionId, input.sessionId),
+    sql`${schema.sessionEvents.type} = 'sandbox.command.output.delta'`,
+    sql`${schema.sessionEvents.clientEventId} collate "C" >= ${clientIdFrom}`,
+    sql`${schema.sessionEvents.clientEventId} collate "C" < ${clientIdBefore}`,
+    sql`${schema.sessionEvents.sequence} > ${afterSequence}`,
+    sql`${schema.sessionEvents.sequence} < ${beforeSequence}`,
+  );
+  if (rowLimit !== undefined) {
+    const bounded = tx
+      .select({ sequence: schema.sessionEvents.sequence })
+      .from(schema.sessionEvents)
+      .where(between)
+      .limit(Math.max(1, rowLimit))
+      .as("bounded_output_rows");
+    const [row] = await tx.select({ rows: sql<string | number>`count(*)` }).from(bounded);
+    const rows = Number(row?.rows ?? 0);
+    return Number.isSafeInteger(rows) && rows > 0 ? rows : 0;
+  }
   const [row] = await tx
     .select({ rows: sql<string | number>`count(*)` })
     .from(schema.sessionEvents)
-    .where(
-      and(
-        eq(schema.sessionEvents.workspaceId, input.workspaceId),
-        eq(schema.sessionEvents.sessionId, input.sessionId),
-        sql`${schema.sessionEvents.type} = 'sandbox.command.output.delta'`,
-        sql`${schema.sessionEvents.clientEventId} collate "C" >= ${clientIdFrom}`,
-        sql`${schema.sessionEvents.clientEventId} collate "C" < ${clientIdBefore}`,
-        sql`${schema.sessionEvents.sequence} > ${afterSequence}`,
-        sql`${schema.sessionEvents.sequence} < ${beforeSequence}`,
-      ),
-    );
+    .where(between);
   const rows = Number(row?.rows ?? 0);
   return Number.isSafeInteger(rows) && rows > 0 ? rows : 0;
 }
@@ -1950,6 +1964,7 @@ export function commandOutputPageQuery(
   tx: Database,
   input: SessionCommandIdentity,
   fromSequence: number,
+  pageRows: number = COMMAND_OUTPUT_PAGE_ROWS,
 ) {
   // Bound the scan by the command's client event id prefix in byte order: under
   // row-level security only leakproof comparisons narrow an index scan, and the
@@ -1983,7 +1998,7 @@ export function commandOutputPageQuery(
       ),
     )
     .orderBy(asc(schema.sessionEvents.sequence))
-    .limit(COMMAND_OUTPUT_PAGE_ROWS + 1);
+    .limit(pageRows + 1);
 }
 
 /**
@@ -2004,92 +2019,116 @@ async function readCommandOutputWindow(
   },
   cursor: { sequence: number; offset: number },
 ) {
-  return await withRlsContext(db, input, async (tx) => {
-    const rows = await commandOutputPageQuery(tx, input, cursor.sequence);
-    const page = projectCommandOutputPage({ ...input, rows });
-    if (!input.headAndTail) return page;
-    if (!page.hasMore) return { ...page, endCursor: page.nextCursor };
-    const budget = input.maxOutputBytes ?? COMMAND_OUTPUT_DEFAULT_BYTES;
-    const head = projectCommandOutputPage({
-      ...input,
-      rows: rows.slice(0, Math.floor(COMMAND_OUTPUT_PAGE_ROWS / 2)),
-      maxOutputBytes: Math.max(4, Math.floor(budget / 2)),
-    });
-    const headBytes = head.chunks.reduce(
-      (total, chunk) => total + Buffer.byteLength(chunk.chunk, "utf8"),
-      0,
-    );
-    const headEnd = parseCommandOutputCursor(head.nextCursor, input.commandId);
-    const tailRowLimit = COMMAND_OUTPUT_PAGE_ROWS - head.chunks.length;
-    const tailRows = await commandOutputTailQuery(tx, input, headEnd.sequence, tailRowLimit);
-    const tail = projectCommandOutputTail({
-      commandId: input.commandId,
-      from: headEnd,
-      maxOutputBytes: budget - headBytes,
-      rows: tailRows,
-      rowLimit: tailRowLimit,
-    });
-    const retention = {
-      ...head.retention,
-      gaps: [...new Set([...head.retention.gaps, ...tail.gaps])],
-    };
-    const merged = () => ({
-      ...head,
-      chunks: [...head.chunks, ...tail.chunks],
-      nextCursor: tail.endCursor,
-      hasMore: false,
-      retention,
-      endCursor: tail.endCursor,
-    });
-    // Everything after the head fits: one contiguous window, nothing omitted.
-    if (tail.reachedFrom) return merged();
-    const textAt = (sequence: number) => {
-      const row = [...rows, ...tailRows].find((candidate) => candidate.sequence === sequence);
-      return row ? commandOutputRowText(row).text : "";
-    };
-    let omittedBytes: number;
-    // True only when nothing at all lies between head and tail.
-    let contiguous = false;
-    if (headEnd.sequence === tail.start.sequence) {
-      omittedBytes = Buffer.byteLength(
-        textAt(headEnd.sequence).slice(headEnd.offset, tail.start.offset),
-        "utf8",
-      );
-      contiguous = omittedBytes === 0;
-    } else {
-      // The rest of the head's last row and the start of the tail's first row
-      // are exact; whole rows in between are estimated from the average size
-      // of the rows this read fetched.
-      const fetched = [...rows, ...tailRows];
-      const average =
-        fetched.reduce(
-          (total, row) => total + Buffer.byteLength(commandOutputRowText(row).text, "utf8"),
-          0,
-        ) / Math.max(1, fetched.length);
-      const between = await commandOutputRowsBetween(
-        tx,
-        input,
-        headEnd.sequence,
-        tail.start.sequence,
-      );
-      const boundaryBytes =
-        Buffer.byteLength(textAt(headEnd.sequence).slice(headEnd.offset), "utf8") +
-        Buffer.byteLength(textAt(tail.start.sequence).slice(0, tail.start.offset), "utf8");
-      omittedBytes = boundaryBytes + Math.round(between * average);
-      contiguous = between === 0 && boundaryBytes === 0;
-    }
-    // Nothing separates head and tail: return them as one window. An estimate
-    // of zero over rows that exist (such as gap rows) still pages them.
-    if (contiguous) return merged();
-    return {
-      ...head,
-      hasMore: true,
-      retention,
-      omitted: { bytes: omittedBytes, cursor: head.nextCursor },
-      tail: { chunks: tail.chunks, cursor: tail.startCursor },
-      endCursor: tail.endCursor,
-    };
+  return await withRlsContext(db, input, async (tx) =>
+    readCommandOutputWindowInTransaction(tx, input, cursor),
+  );
+}
+
+/** readCommandOutputWindow on a transaction that already holds the RLS scope.
+ * `pageRows` bounds the rows one window reads (head and tail together). */
+async function readCommandOutputWindowInTransaction(
+  tx: Database,
+  input: SessionCommandIdentity & {
+    cursor?: string | undefined;
+    maxOutputBytes?: number | undefined;
+    headAndTail?: boolean | undefined;
+    pageRows?: number | undefined;
+    /** Count at most this many omitted rows; beyond it the size is not estimated. */
+    omittedRowsCountLimit?: number | undefined;
+  },
+  cursor: { sequence: number; offset: number },
+) {
+  const pageRows = input.pageRows ?? COMMAND_OUTPUT_PAGE_ROWS;
+  const rows = await commandOutputPageQuery(tx, input, cursor.sequence, pageRows);
+  const page = projectCommandOutputPage({ ...input, rows, pageRows });
+  if (!input.headAndTail) return page;
+  if (!page.hasMore) return { ...page, endCursor: page.nextCursor };
+  const budget = input.maxOutputBytes ?? COMMAND_OUTPUT_DEFAULT_BYTES;
+  const head = projectCommandOutputPage({
+    ...input,
+    rows: rows.slice(0, Math.floor(pageRows / 2)),
+    maxOutputBytes: Math.max(4, Math.floor(budget / 2)),
+    pageRows,
   });
+  const headBytes = head.chunks.reduce(
+    (total, chunk) => total + Buffer.byteLength(chunk.chunk, "utf8"),
+    0,
+  );
+  const headEnd = parseCommandOutputCursor(head.nextCursor, input.commandId);
+  const tailRowLimit = pageRows - head.chunks.length;
+  const tailRows = await commandOutputTailQuery(tx, input, headEnd.sequence, tailRowLimit);
+  const tail = projectCommandOutputTail({
+    commandId: input.commandId,
+    from: headEnd,
+    maxOutputBytes: budget - headBytes,
+    rows: tailRows,
+    rowLimit: tailRowLimit,
+  });
+  const retention = {
+    ...head.retention,
+    gaps: [...new Set([...head.retention.gaps, ...tail.gaps])],
+  };
+  const merged = () => ({
+    ...head,
+    chunks: [...head.chunks, ...tail.chunks],
+    nextCursor: tail.endCursor,
+    hasMore: false,
+    retention,
+    endCursor: tail.endCursor,
+  });
+  // Everything after the head fits: one contiguous window, nothing omitted.
+  if (tail.reachedFrom) return merged();
+  const textAt = (sequence: number) => {
+    const row = [...rows, ...tailRows].find((candidate) => candidate.sequence === sequence);
+    return row ? commandOutputRowText(row).text : "";
+  };
+  let omittedBytes: number;
+  // True only when nothing at all lies between head and tail.
+  let contiguous = false;
+  if (headEnd.sequence === tail.start.sequence) {
+    omittedBytes = Buffer.byteLength(
+      textAt(headEnd.sequence).slice(headEnd.offset, tail.start.offset),
+      "utf8",
+    );
+    contiguous = omittedBytes === 0;
+  } else {
+    // The rest of the head's last row and the start of the tail's first row
+    // are exact; whole rows in between are estimated from the average size
+    // of the rows this read fetched.
+    const fetched = [...rows, ...tailRows];
+    const average =
+      fetched.reduce(
+        (total, row) => total + Buffer.byteLength(commandOutputRowText(row).text, "utf8"),
+        0,
+      ) / Math.max(1, fetched.length);
+    const between = await commandOutputRowsBetween(
+      tx,
+      input,
+      headEnd.sequence,
+      tail.start.sequence,
+      input.omittedRowsCountLimit,
+    );
+    const boundaryBytes =
+      Buffer.byteLength(textAt(headEnd.sequence).slice(headEnd.offset), "utf8") +
+      Buffer.byteLength(textAt(tail.start.sequence).slice(0, tail.start.offset), "utf8");
+    // A count stopped at its limit gives no size: the window says "some output".
+    omittedBytes =
+      input.omittedRowsCountLimit !== undefined && between >= input.omittedRowsCountLimit
+        ? 0
+        : boundaryBytes + Math.round(between * average);
+    contiguous = between === 0 && boundaryBytes === 0;
+  }
+  // Nothing separates head and tail: return them as one window. An estimate
+  // of zero over rows that exist (such as gap rows) still pages them.
+  if (contiguous) return merged();
+  return {
+    ...head,
+    hasMore: true,
+    retention,
+    omitted: { bytes: omittedBytes, cursor: head.nextCursor },
+    tail: { chunks: tail.chunks, cursor: tail.startCursor },
+    endCursor: tail.endCursor,
+  };
 }
 
 export async function readSessionBackgroundCommandOutput(
@@ -2130,4 +2169,186 @@ export async function readSessionBackgroundCommandOutput(
       ? { notice: CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE }
       : {}),
   };
+}
+
+/** Output a background command result carries, so a turn woken by it, or a
+ * later turn it is delivered to, has the result without another read. */
+export const BACKGROUND_COMMAND_RESULT_OUTPUT_BYTES = 8_192;
+/** The stored bound (contract: 16 KiB); output plus markers stay well below it. */
+const BACKGROUND_COMMAND_RESULT_OUTPUT_MAX_TEXT_BYTES = 12_288;
+/** Rows that bounded output may read: settlement runs under the session fence. */
+const BACKGROUND_COMMAND_RESULT_OUTPUT_ROWS = 16;
+/** Omitted rows counted for the size estimate, so the read stays bounded for any output. */
+const BACKGROUND_COMMAND_RESULT_OMITTED_ROWS_COUNT_LIMIT = 1_000;
+
+type CommandOutputWindow = Awaited<ReturnType<typeof readCommandOutputWindowInTransaction>>;
+
+function outputChunksText(chunks: ReadonlyArray<{ chunk: string }>): string {
+  return chunks.map((chunk) => chunk.chunk).join("");
+}
+
+/**
+ * One terminal command's output window as plain text, in the words of the
+ * model's `command_read` copy: the start, a marker naming the omitted middle
+ * and the cursor that reads it, then the end. Empty when nothing was retained.
+ */
+export function commandOutputWindowText(window: CommandOutputWindow): string {
+  let text = outputChunksText(window.chunks);
+  if ("omitted" in window && window.omitted && "tail" in window && window.tail) {
+    if (text !== "" && !text.endsWith("\n")) text += "\n";
+    const size = window.omitted.bytes > 0 ? `about ${window.omitted.bytes} bytes` : "some output";
+    text += `[... ${size} omitted; to read them, call command_read with cursor ${window.omitted.cursor} ...]\n`;
+    text += outputChunksText(window.tail.chunks);
+  } else if (window.hasMore) {
+    if (text !== "" && !text.endsWith("\n")) text += "\n";
+    text += `[... more output follows; to read it, call command_read with cursor ${window.nextCursor} ...]`;
+  }
+  if (window.retention.gaps.length > 0) {
+    if (text !== "" && !text.endsWith("\n")) text += "\n";
+    text += `[Some output is not retained (${window.retention.gaps.join(", ")}).]`;
+  }
+  return text;
+}
+
+/**
+ * The bounded start and end of a settling command's retained output, read in
+ * the settlement transaction. A failed read rolls back only its savepoint and
+ * returns null, so output can never block the settlement itself.
+ */
+export async function backgroundCommandResultOutputInTransaction(
+  tx: SessionActivityDatabase,
+  input: SessionCommandIdentity,
+): Promise<string | null> {
+  try {
+    const text = await tx.transaction(async (savepoint) =>
+      commandOutputWindowText(
+        await readCommandOutputWindowInTransaction(
+          savepoint,
+          {
+            ...input,
+            headAndTail: true,
+            maxOutputBytes: BACKGROUND_COMMAND_RESULT_OUTPUT_BYTES,
+            pageRows: BACKGROUND_COMMAND_RESULT_OUTPUT_ROWS,
+            omittedRowsCountLimit: BACKGROUND_COMMAND_RESULT_OMITTED_ROWS_COUNT_LIMIT,
+          },
+          { sequence: 0, offset: 0 },
+        ),
+      ),
+    );
+    return Buffer.byteLength(text, "utf8") <= BACKGROUND_COMMAND_RESULT_OUTPUT_MAX_TEXT_BYTES
+      ? text
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A pending background command result taken for delivery inside a running turn. */
+export type ClaimedBackgroundCommandResult = {
+  updateId: string;
+  commandId: string;
+  summary: string;
+  state: "exited" | "lost";
+  exitCode: number | null;
+  /** Bounded output text, or null when the result predates output in results. */
+  output: string | null;
+  notice: string | null;
+};
+
+const BACKGROUND_COMMAND_RESULT_CLAIM_ROWS = 16;
+/** Bytes a delivered result's framing (label, command ID, separators) adds to its text. */
+const BACKGROUND_COMMAND_RESULT_NOTICE_OVERHEAD_BYTES = 128;
+
+/**
+ * Take this session's pending background command results for delivery with
+ * the tool result the model receives next. Each taken command is observed and
+ * its pending result superseded in one transaction, exactly as a terminal
+ * `command_read` observes it, so the same result is never delivered again by
+ * the inbox. Results are taken oldest first, each one whose text (with its
+ * framing) still fits `maxBytes`. A cheap unlocked probe skips the session
+ * fence when nothing is pending.
+ */
+export async function claimPendingBackgroundCommandResults(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string; maxBytes: number },
+): Promise<ClaimedBackgroundCommandResult[]> {
+  const updates = schema.sessionSystemUpdates;
+  const pendingResults = and(
+    eq(updates.accountId, input.accountId),
+    eq(updates.workspaceId, input.workspaceId),
+    eq(updates.sessionId, input.sessionId),
+    eq(updates.state, "pending"),
+    eq(updates.kind, "background_command_result"),
+    // Only well-formed results: a malformed row skipped in the loop would
+    // otherwise hold a claim slot (and the session fence) forever.
+    sql`${updates.dedupeKey} = 'background-command-result:' || ${updates.sourceId}`,
+  );
+  const probe = await withRlsContext(db, input, async (tx) =>
+    tx.select({ id: updates.id }).from(updates).where(pendingResults).limit(1),
+  );
+  if (probe.length === 0) return [];
+  return await withSessionActivityRlsContext(db, input, async (tx) => {
+    const locks = await lockSessionEventWriteRows(tx, {
+      workspaceId: input.workspaceId,
+      controlLock: "share",
+      sessionIds: [input.sessionId],
+    });
+    if (locks.sessions[0]?.accountId !== input.accountId) return [];
+    const rows = await tx
+      .select()
+      .from(updates)
+      .where(pendingResults)
+      .orderBy(asc(updates.createdAt), asc(updates.id))
+      .limit(BACKGROUND_COMMAND_RESULT_CLAIM_ROWS)
+      .for("update");
+    const claimed: ClaimedBackgroundCommandResult[] = [];
+    let bytes = 0;
+    for (const row of rows) {
+      const commandId = row.sourceId;
+      const identity = and(
+        eq(schema.sessionBackgroundCommands.accountId, input.accountId),
+        eq(schema.sessionBackgroundCommands.workspaceId, input.workspaceId),
+        eq(schema.sessionBackgroundCommands.sessionId, input.sessionId),
+        eq(schema.sessionBackgroundCommands.id, commandId),
+      );
+      const [command] = await tx
+        .select()
+        .from(schema.sessionBackgroundCommands)
+        .where(identity)
+        .for("update")
+        .limit(1);
+      if (!command || (command.state !== "exited" && command.state !== "lost")) continue;
+      const payload = fromPostgresLosslessJson(row.payload, row.payloadCodecVersion) as Record<
+        string,
+        unknown
+      > | null;
+      const summary = fromPostgresLosslessText(row.summary, row.summaryCodecVersion);
+      const output = typeof payload?.output === "string" ? payload.output : null;
+      const notice = typeof payload?.notice === "string" ? payload.notice : null;
+      const size =
+        BACKGROUND_COMMAND_RESULT_NOTICE_OVERHEAD_BYTES +
+        Buffer.byteLength(summary, "utf8") +
+        Buffer.byteLength(output ?? "", "utf8") +
+        Buffer.byteLength(notice ?? "", "utf8");
+      // One that does not fit stays pending for a result with more room, or
+      // arrives as input; smaller later ones may still go now.
+      if (bytes + size > input.maxBytes) continue;
+      bytes += size;
+      await tx
+        .update(schema.sessionBackgroundCommands)
+        .set({ completionObservedAt: command.completionObservedAt ?? new Date() })
+        .where(identity);
+      await tx.update(updates).set({ state: "superseded" }).where(eq(updates.id, row.id));
+      claimed.push({
+        updateId: row.id,
+        commandId,
+        summary,
+        state: command.state,
+        exitCode: command.exitCode ?? null,
+        output,
+        notice,
+      });
+    }
+    return claimed;
+  });
 }

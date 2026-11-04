@@ -216,6 +216,141 @@ describe("isolated browser account authentication", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  test("Google gets a background challenge token without a Create a new account switch", async () => {
+    const originalFetch = globalThis.fetch;
+    const socialBodies: Array<Record<string, unknown>> = [];
+    const widgets: Record<string, unknown>[] = [];
+    let socialReplies = 0;
+    window.turnstile = {
+      render: (_element, options) => {
+        widgets.push(options);
+        return String(widgets.length);
+      },
+      execute: () => undefined,
+      remove: () => undefined,
+    };
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url =
+        input instanceof Request ? input.url : input instanceof URL ? input.toString() : input;
+      if (new URL(url, "https://opengeni.test").pathname === "/v1/config/client") {
+        return Response.json({
+          auth: {
+            mode: "managedSession",
+            session: "cookie",
+            socialProviders: ["google"],
+            signupChallengeSiteKey: "test-key",
+          },
+        });
+      }
+      if ((init?.method ?? "GET") === "GET") return Response.json(projection("1"));
+      socialBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      socialReplies++;
+      // The first start loses its response; the retry must replay the same command.
+      if (socialReplies === 1) throw new TypeError("response lost after commit");
+      return Response.json({ code: "unavailable", message: "unavailable" }, { status: 503 });
+    }) as typeof fetch;
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const google = () =>
+      Array.from(container.querySelectorAll("button")).find((button) =>
+        button.textContent?.includes("Continue with Google"),
+      )!;
+    try {
+      await act(async () => root.render(<AccountAuthRoute transactionId={TRANSACTION_ID} />));
+      await flush();
+      expect(container.textContent).not.toContain("Create a new account");
+      expect(container.querySelector('[role="switch"]')).toBeNull();
+      expect(widgets).toHaveLength(0);
+
+      await act(async () => google().click());
+      expect(widgets[0]).toMatchObject({ execution: "execute", appearance: "interaction-only" });
+      expect(socialBodies).toHaveLength(0);
+      await act(async () => (widgets[0]!.callback as (token: string) => void)("popup-token"));
+      await flush();
+      expect(socialBodies).toHaveLength(1);
+      expect(socialBodies[0]).toMatchObject({
+        provider: "google",
+        signupChallengeToken: "popup-token",
+        expectedGeneration: "1",
+      });
+
+      await act(async () => google().click());
+      await flush();
+      expect(widgets).toHaveLength(1);
+      expect(socialBodies[1]).toEqual(socialBodies[0]);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      globalThis.fetch = originalFetch;
+      delete window.turnstile;
+    }
+  });
+
+  test("an email sign-in while the challenge waits for a person cancels the Google click", async () => {
+    const originalFetch = globalThis.fetch;
+    const posts: Array<Record<string, unknown>> = [];
+    const widgets: Record<string, unknown>[] = [];
+    window.turnstile = {
+      render: (_element, options) => {
+        widgets.push(options);
+        return String(widgets.length);
+      },
+      execute: () => undefined,
+      remove: () => undefined,
+    };
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url =
+        input instanceof Request ? input.url : input instanceof URL ? input.toString() : input;
+      if (new URL(url, "https://opengeni.test").pathname === "/v1/config/client") {
+        return Response.json({
+          auth: {
+            mode: "managedSession",
+            session: "cookie",
+            socialProviders: ["google"],
+            signupChallengeSiteKey: "test-key",
+          },
+        });
+      }
+      if ((init?.method ?? "GET") === "GET") return Response.json(projection("1"));
+      posts.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return Response.json({ code: "unavailable", message: "unavailable" }, { status: 503 });
+    }) as typeof fetch;
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const google = () =>
+      Array.from(container.querySelectorAll("button")).find((button) =>
+        button.textContent?.includes("Continue with Google"),
+      )!;
+    try {
+      await act(async () => root.render(<AccountAuthRoute transactionId={TRANSACTION_ID} />));
+      await flush();
+      await act(async () => google().click());
+      await act(async () => (widgets[0]!["before-interactive-callback"] as () => void)());
+      // While a person solves the challenge, the email form stays usable.
+      const email = container.querySelector<HTMLInputElement>("#account-auth-email")!;
+      const password = container.querySelector<HTMLInputElement>("#account-auth-password")!;
+      expect(email.disabled).toBe(false);
+      await enter(email, "existing@example.test");
+      await enter(password, "correct horse battery staple");
+      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+      await flush();
+      await act(async () => (widgets[0]!.callback as (token: string) => void)("too-late"));
+      await flush();
+      expect(posts.some((body) => body.provider === "google")).toBe(false);
+      expect(posts.length).toBeGreaterThan(0);
+      expect(google().disabled).toBe(false);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      globalThis.fetch = originalFetch;
+      delete window.turnstile;
+    }
+  });
 });
 
 describe("add-account failure messages", () => {

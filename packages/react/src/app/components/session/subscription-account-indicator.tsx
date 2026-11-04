@@ -19,6 +19,7 @@ import {
   type UseSessionModelAccountResult,
 } from "../../../hooks/use-session-model-account";
 import { Skeleton } from "../../../ui/skeleton";
+import { codexWindowInputs } from "../../lib/subscription-accounts";
 import { BillingClassMark } from "../billing-class-mark";
 import {
   showsSubscriptionAccountMenu,
@@ -201,37 +202,21 @@ export function codexUsage(
   live: CodexUsageMap[string] | undefined,
   now = Date.now(),
 ): SubscriptionAccountUsage | null {
-  const window = (
-    id: string,
-    reading: CodexAccount["fiveHour"],
-  ): SubscriptionAccountUsage["windows"] => {
-    if (!reading) return [];
-    const usedPercent =
-      typeof reading.percent === "number"
-        ? reading.percent
-        : typeof reading.remaining === "number"
-          ? 100 - reading.remaining
-          : null;
-    return [
-      {
-        id,
-        usedPercent,
-        resetsAt: reading.resetAt ?? null,
-        status:
-          usedPercent === null
-            ? "unknown"
-            : usedPercent >= 100
-              ? "exhausted"
-              : usedPercent >= 90
-                ? "warning"
-                : "ok",
-      },
-    ];
-  };
-  const windows = [
-    ...window("five_hour", account.fiveHour),
-    ...window("seven_day", account.weekly),
-  ];
+  // Only the windows the endpoint reported: a Pro plan without a 5-hour limit has none.
+  const windows: SubscriptionAccountUsage["windows"] = codexWindowInputs(account).map((input) => ({
+    id: input.id,
+    usedPercent: input.usedPercent,
+    resetsAt:
+      typeof input.resetsAt === "number" ? new Date(input.resetsAt).toISOString() : input.resetsAt,
+    status:
+      input.usedPercent === null
+        ? "unknown"
+        : input.usedPercent >= 100
+          ? "exhausted"
+          : input.usedPercent >= 90
+            ? "warning"
+            : "ok",
+  }));
   // The endpoint reports a cooldown even after it ended; only a future one applies.
   const exhaustedUntil =
     account.exhaustedUntil && Date.parse(account.exhaustedUntil) > now

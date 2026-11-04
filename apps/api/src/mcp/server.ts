@@ -106,10 +106,6 @@ import {
   type SessionStatus,
   SubmitHumanInputResponseRequest,
   FIRST_PARTY_MCP_CALLER_META_KEY,
-  firstPartySecretValuesFromMeta,
-  maskSecretValuesInError,
-  rememberingSecretResolver,
-  SecretValueMemory,
 } from "@opengeni/contracts";
 import {
   SessionCreateConnectionSelectionUnavailableError,
@@ -413,7 +409,6 @@ import {
   hasPendingSteerForTurn,
   listOutstandingSessionSystemUpdatesForAttempt,
   recordConsumedChildAnswers,
-  withSecretValueMasking,
 } from "@opengeni/db";
 import {
   SESSION_WAIT_COMPLETION_EVENT_TYPES,
@@ -1065,23 +1060,7 @@ class PolicyMcpServer extends McpServer {
     this.registeredToolCount += 1;
     const handler = cb as (...args: unknown[]) => unknown;
     return super.registerTool(name, config, ((...args: unknown[]) => {
-      const dispatch = () => dispatchWithSessionAuthorizationReadReuse(() => handler(...args));
-      // A worker call whose arguments carried resolved secret values names
-      // them in `_meta`: everything this call stores and returns has them
-      // replaced by their references (docs/secrets.md, Masking).
-      // Only an agent attempt's worker sends them.
-      const memory =
-        this.grant.principalKind === "agent_attempt"
-          ? firstPartyCallSecretValues(args.at(-1))
-          : null;
-      if (!memory) return dispatch();
-      return withSecretValueMasking(memory, async () => {
-        try {
-          return memory.mask(await dispatch(), "first_party_result");
-        } catch (error) {
-          throw maskSecretValuesInError(error, memory);
-        }
-      });
+      return dispatchWithSessionAuthorizationReadReuse(() => handler(...args));
     }) as ToolCallback<InputArgs>);
   }
 
@@ -1099,23 +1078,6 @@ class PolicyMcpServer extends McpServer {
         }),
       )
       .disable();
-  }
-}
-
-/** The masking memory for one first-party call's resolved values, if it has any. */
-function firstPartyCallSecretValues(extra: unknown): SecretValueMemory | null {
-  try {
-    const meta =
-      extra !== null && typeof extra === "object"
-        ? (extra as { _meta?: unknown })._meta
-        : undefined;
-    const entries = firstPartySecretValuesFromMeta(meta);
-    if (entries.length === 0) return null;
-    const memory = new SecretValueMemory();
-    for (const entry of entries) memory.remember(entry.value, entry.label);
-    return memory.size > 0 ? memory : null;
-  } catch {
-    return null;
   }
 }
 
@@ -2936,15 +2898,15 @@ function registerSlackBotTools(
     "slack_agent_handoff",
     {
       description:
-        "Pass the Slack request this chat is answering on to another Slack agent the person asked for by name. Name the agent; the chat's own Slack thread and requester are used, never a destination you choose. Only works when the message names that agent (one typo allowed for longer names; a last word like team may be left out); otherwise answer yourself and use slack_agent_suggest. The receiving agent starts a new chat in its own workspace and answers in the same thread. At most one hand-off per message, never to yourself and never back to the agent that passed it to you. If the requester cannot use that agent they are told privately and nothing is passed on. After status passed_on, make your entire final response exactly NO_REPLY.",
+        "Pass the Slack request this chat is answering to the Slack agent the person asked for by name. It works only when the message names that agent; otherwise answer yourself and use slack_agent_suggest. That agent answers in the same thread. After status passed_on, make your entire final response exactly NO_REPLY.",
       inputSchema: {
         agent: z4.string().min(1).max(120),
-        note: z4.string().max(1000).optional(),
-        reason: z4
+        note: z4
           .string()
-          .max(500)
+          .max(1000)
           .optional()
-          .describe("Why you hand off, in a few words. Logged only; nobody sees it."),
+          .describe("Context the other agent needs; it starts a new chat and can't see this one."),
+        reason: z4.string().max(500).optional().describe("Why, in a few words. Logged only."),
       },
     },
     async ({ agent, note, reason }) => {
@@ -2958,7 +2920,7 @@ function registerSlackBotTools(
     "slack_agent_suggest",
     {
       description:
-        'After answering a Slack request yourself, suggest a Slack agent that handles requests like it when the person did not ask for one. Name the agent. Opengeni then posts one line under your answer ("<Agent> handles questions like this.") with a button that sends the same message to that agent. Only agents the person can use are shown, and only one suggestion per answer. Do not mention the suggestion in your answer.',
+        "After answering a Slack request yourself, name the Slack agent that handles requests like it when the person did not ask for one. Opengeni adds a button under your answer to ask that agent. Don't mention the suggestion in your answer.",
       inputSchema: { agent: z4.string().min(1).max(120) },
     },
     async ({ agent }) => {
@@ -2972,7 +2934,7 @@ function registerSlackBotTools(
     "slack_agent_chats",
     {
       description:
-        "List this Slack agent's other recent chats in its workspace, newest first, so you can recover context people did not repeat (for example when they do not reply in a thread). Read a relevant chat with session_events. Only chats of this same agent are listed.",
+        "List this Slack agent's other recent chats, newest first, to recover context people did not repeat. Read one with session_events.",
       inputSchema: { limit: z4.number().int().min(1).max(50).optional() },
     },
     async ({ limit }) => {
@@ -4846,7 +4808,6 @@ function registerFleetTools(
       },
     },
     async ({ target, op }) => {
-      const resolvedValues = new SecretValueMemory();
       try {
         const typedOp = op as RunOnOp;
         const transientExecEnvironment = await oneOffCodemodeEnvironment(typedOp, target);
@@ -4854,51 +4815,38 @@ function registerFleetTools(
         const claims = exactAgentAttemptClaims(grant);
         const secretResolver =
           claims && claims.sessionId === sessionId && typedOp.kind !== "read"
-            ? rememberingSecretResolver(
-                await createRunOnSecretResolver(
-                  deps,
-                  { accountId: grant.accountId, workspaceId: grant.workspaceId, ...claims },
-                  (subjectId) =>
-                    vaultProviderRegistryFor(deps, { workspaceId: grant.workspaceId, subjectId }),
-                ),
-                resolvedValues,
+            ? await createRunOnSecretResolver(
+                deps,
+                { accountId: grant.accountId, workspaceId: grant.workspaceId, ...claims },
+                (subjectId) =>
+                  vaultProviderRegistryFor(deps, { workspaceId: grant.workspaceId, subjectId }),
               )
             : null;
-        // Output that shows a value this call resolved shows its reference
-        // instead, here and in anything the call stores (docs/secrets.md, Masking).
-        // Profile values resolve through the same remembering resolver, so
-        // they are masked too.
-        return await withSecretValueMasking(resolvedValues, async () =>
-          json(
-            resolvedValues.mask(
-              await withUserSetupCard(
-                await runOnSandbox(services, await fleetContext(), target, typedOp, {
-                  ...(transientExecEnvironment ? { transientExecEnvironment } : {}),
-                  ...(secretResolver ? { secretResolver } : {}),
-                  // The session's credential profile reaches run_on commands too.
-                  ...(secretResolver && claims && typedOp.kind === "exec"
-                    ? {
-                        credentials: createSessionCredentialEnvironment({
-                          db: deps.db,
-                          workspaceId: grant.workspaceId,
-                          sessionId: claims.sessionId,
-                          resolver: secretResolver,
-                        }),
-                      }
-                    : {}),
-                }),
-                userSetupCard("run_on", target),
-              ),
-              "run_on_result",
-            ),
+        return json(
+          await withUserSetupCard(
+            await runOnSandbox(services, await fleetContext(), target, typedOp, {
+              ...(transientExecEnvironment ? { transientExecEnvironment } : {}),
+              ...(secretResolver ? { secretResolver } : {}),
+              // The session's credential profile reaches run_on commands too.
+              ...(secretResolver && claims && typedOp.kind === "exec"
+                ? {
+                    credentials: createSessionCredentialEnvironment({
+                      db: deps.db,
+                      workspaceId: grant.workspaceId,
+                      sessionId: claims.sessionId,
+                      resolver: secretResolver,
+                    }),
+                  }
+                : {}),
+            }),
+            userSetupCard("run_on", target),
           ),
         );
       } catch (error) {
         if (isSecretReferenceError(error)) {
           return { isError: true, content: [{ type: "text", text: error.toModelOutput() }] };
         }
-        // A failure that quotes a value this call resolved shows its reference.
-        throw maskSecretValuesInError(error, resolvedValues);
+        throw error;
       }
     },
   );
@@ -6488,7 +6436,7 @@ function registerWorkspaceOrchestrationTools(
 
     if (callerSessionId !== null) {
       const commandReadNotes =
-        "Output larger than maxOutputBytes (default 16384) returns its start and its end, with the size of the omitted middle and a cursor to read it; a read with a cursor pages on from there (pass waitSeconds 0 to page without waiting), and the end cursor continues after the newest output. Output remains readable after the process exits. A terminal read observes completion and suppresses only its still-pending inbox notification; running reads and already claimed history are unchanged. These execution-wait limits do not cap wait_for_input: use it for long out-of-turn waits, except pending Codemode calls require observation in the same live attempt. Neither tool sends stdin or cancels the command.";
+        "Output larger than maxOutputBytes (default 16384) returns its start and its end, with the size of the omitted middle and a cursor to read it; a read with a cursor pages on from there (pass waitSeconds 0 to page without waiting), and the end cursor continues after the newest output. Output remains readable after the process exits. A terminal read observes completion and suppresses only its still-pending inbox notification; running reads and already claimed history are unchanged. A finished command's result, with its exit status and output, also reaches the session on its own, so there is no need to read only to learn that it finished. These execution-wait limits do not cap wait_for_input: use it for long out-of-turn waits, except pending Codemode calls require observation in the same live attempt. Neither tool sends stdin or cancels the command.";
       for (const toolName of ["command_read", "command_wait"] as const) {
         const multi = toolName === "command_wait";
         server.registerTool(

@@ -83,6 +83,7 @@ import {
   sandboxEstablishPolicyDecision,
   shouldPrefetchManagedSandbox,
   reconcileActiveSandboxPointer,
+  readTurnRouteFact,
   sandboxSettingsForRoute,
 } from "./sandbox-route";
 import type { ClaimTurnOk } from "./claim";
@@ -90,6 +91,7 @@ import type { GovernanceModelOk } from "./governance-model";
 import type { SandboxTurnRuntime } from "./sandbox-runtime";
 import type { AttemptIdentityState, EventingState, SandboxRuntimeState } from "./turn-context";
 import { createSharedRigSetupCoordinator } from "./sandbox-shared-preparation";
+import { createSandboxSetupReplayGuard, sandboxSetupFailure } from "./sandbox-setup-agent-failure";
 import { sandboxStartupPhaseObserver } from "./sandbox-startup-phase";
 import { errorMessage } from "@opengeni/contracts/values";
 
@@ -203,14 +205,20 @@ export async function resolveSandboxRoute(deps: SandboxRouteDeps): Promise<Sandb
   // home box for a machine-primary turn), buildAgent (skip the repository clone
   // hook so a private repo is never `git clone`d onto the user's real disk), and
   // the warm-rate (a machine accrues ZERO cloud warm-seconds). The active pointer
-  // + its sandbox row are loaded ONCE here (best-effort, never throwing) and the
+  // + its sandbox row are loaded ONCE here and the
   // SAME values feed resolveActiveSandboxBackend (the tested gate) AND the
   // machine-primary establish branch (enrollmentId/epoch/workingDir) below — no
   // double read, no read-skew between the gate decision and the establish. With
   // routing OFF this is byte-for-byte the legacy path: no reads, undefined backend.
+  // These reads decide which box the turn uses, so they fail CLOSED: a read that
+  // still fails after a brief retry throws before anything touches a sandbox, and
+  // the attempt is retried. Reading a failure as "no machine" would start setup,
+  // credential seeding and file downloads on the managed home of a chat whose
+  // route names a Connected Machine, and the attempt would then be discarded the
+  // moment the routing proxy saw the real pointer.
   const routingOn = routingEnabled(settings);
   let activeSandboxPointer = routingOn
-    ? await readActiveSandbox(db, input.workspaceId, input.sessionId).catch(() => null)
+    ? await readTurnRouteFact(() => readActiveSandbox(db, input.workspaceId, input.sessionId))
     : null;
   // TURN-START RECONCILE (issue #341 invariant B / Shapes 1+2): a persisted
   // pointer whose target is STRUCTURALLY unestablishable at turn start would strand
@@ -218,9 +226,9 @@ export async function resolveSandboxRoute(deps: SandboxRouteDeps): Promise<Sandb
   // emit a visible event, honoring a concurrent higher-epoch swap. The sandbox row
   // is loaded HERE, inside reconcile, via a NON-swallowing lookup: a null decision
   // then means the row is genuinely absent, never a suppressed transient DB error
-  // (which would wrongly clear a healthy user-chosen pointer). On a lookup throw the
-  // reconcile fails open — pointer untouched, record null (machinePrimary:false),
-  // no event — and the establish branch below reads the returned values.
+  // (which would wrongly clear a healthy user-chosen pointer). A lookup that still
+  // throws after its brief retry propagates — pointer untouched, no event, no box —
+  // and the establish branch below reads only values that were actually loaded.
   let activeSandboxRecord: SandboxRecord | null = null;
   if (routingOn) {
     const reconciled = await reconcileActiveSandboxPointer(
@@ -232,18 +240,20 @@ export async function resolveSandboxRoute(deps: SandboxRouteDeps): Promise<Sandb
       },
       activeSandboxPointer,
       (sandboxId) =>
-        getSandboxForAttempt(
-          db,
-          {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            subjectId: fileAuthoritySubjectId,
-            sessionId: input.sessionId,
-            turnId: turn.id,
-            attemptId: input.attemptId,
-            executionGeneration: turn.executionGeneration,
-          },
-          sandboxId,
+        readTurnRouteFact(() =>
+          getSandboxForAttempt(
+            db,
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              subjectId: fileAuthoritySubjectId,
+              sessionId: input.sessionId,
+              turnId: turn.id,
+              attemptId: input.attemptId,
+              executionGeneration: turn.executionGeneration,
+            },
+            sandboxId,
+          ),
         ),
       eventing.publish
         ? async (events) => {
@@ -567,6 +577,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
             onOp: machineOpObserver.observer,
             onSandboxOperation: sandboxOperationObserver,
             onSandboxCaptureWait: sandboxCaptureWaitMetricObserver(observability),
+            observability,
             opJournal,
           },
           {
@@ -643,6 +654,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
               onOp: machineOpObserver.observer,
               onSandboxOperation: sandboxOperationObserver,
               onSandboxCaptureWait: sandboxCaptureWaitMetricObserver(observability),
+              observability,
               onHomeSandboxRebound,
               ...(runtimeCancellationSignal ? { waitSignal: runtimeCancellationSignal } : {}),
             },
@@ -672,16 +684,6 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                 sandboxId: activeSandboxPointer!.activeSandboxId!,
                 epoch: activeSandboxPointer!.activeEpoch,
               },
-              // HOME semantics for a mid-turn clear-to-null: only a genuine
-              // machine-HOME session (its home IS this machine, session.sandboxBackend
-              // === "selfhosted") resolves null back to the pinned machine. A Modal-HOME
-              // session merely PINNED to a machine this turn never established its group
-              // box, so defaultIsHome:false makes a clear-to-null fail typed
-              // (`home_unavailable_this_turn`) rather than silently serving the machine.
-              // Failure settlement checkpoints the completed detach and continues the same
-              // logical turn in a fresh home-primary attempt; it never serves this machine
-              // after the pointer changed and never invents a cloud lease for machine-only work.
-              defaultIsHome: session.sandboxBackend === "selfhosted",
             },
             established,
           ),
@@ -907,6 +909,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
               opJournal,
               onSandboxOperation: sandboxOperationObserver,
               onSandboxCaptureWait: sandboxCaptureWaitMetricObserver(observability),
+              observability,
               onHomeSandboxLost: publishSandboxLost,
               onHomeSandboxRebound,
               ...(runtimeCancellationSignal ? { waitSignal: runtimeCancellationSignal } : {}),
@@ -1145,6 +1148,7 @@ export async function bindLazySandboxProvisioner(
             publish: eventing.publish,
             publishInBackground: eventing.publishInBackground,
           });
+          const setupReplayGuard = createSandboxSetupReplayGuard();
           try {
             // Post-provision prerequisites: independent authorities and storage.
             // Join every started operation before failure/disposal; in particular
@@ -1192,6 +1196,10 @@ export async function bindLazySandboxProvisioner(
                   input.sessionId,
                 )
               : provisioned.established.session;
+            // Every setup write runs as a command through this fence, which
+            // lets the attempt writer drain settle the setup admission even
+            // when the setup itself never returns (an unanswered agent).
+            const setupCommandFence = eventing.toolCancellationFenceRef.current;
             await runWorkspaceMutationForSandbox(
               provisioned,
               "lazyOwnedSandboxSetup",
@@ -1225,30 +1233,30 @@ export async function bindLazySandboxProvisioner(
                             : {}),
                         }
                       : {}),
-                    ...(eventing.toolCancellationFenceRef.current
+                    ...(setupCommandFence
                       ? {
                           commandRunner:
-                            eventing.toolCancellationFenceRef.current.runSandboxCommand.bind(
-                              eventing.toolCancellationFenceRef.current,
-                            ),
+                            setupCommandFence.runSandboxCommand.bind(setupCommandFence),
                         }
                       : {}),
                     ...(sandboxState.sandboxGroupId && sandboxState.sandboxHolderId
                       ? {
-                          coordinateSharedRigSetup: createSharedRigSetupCoordinator({
-                            db,
-                            accountId: input.accountId,
-                            workspaceId: input.workspaceId,
-                            sandboxGroupId: sandboxState.sandboxGroupId,
-                            attemptId: input.attemptId,
-                            holderId: sandboxState.sandboxHolderId,
-                            sandbox: provisioned,
-                            ...(runtimeCancellationSignal
-                              ? { signal: runtimeCancellationSignal }
-                              : {}),
-                            observe: (measurement) =>
-                              recordSandboxSharedPreparation(observability, measurement),
-                          }),
+                          coordinateSharedRigSetup: setupReplayGuard.trackRigSetup(
+                            createSharedRigSetupCoordinator({
+                              db,
+                              accountId: input.accountId,
+                              workspaceId: input.workspaceId,
+                              sandboxGroupId: sandboxState.sandboxGroupId,
+                              attemptId: input.attemptId,
+                              holderId: sandboxState.sandboxHolderId,
+                              sandbox: provisioned,
+                              ...(runtimeCancellationSignal
+                                ? { signal: runtimeCancellationSignal }
+                                : {}),
+                              observe: (measurement) =>
+                                recordSandboxSharedPreparation(observability, measurement),
+                            }),
+                          ),
                         }
                       : {}),
                   },
@@ -1259,6 +1267,7 @@ export async function bindLazySandboxProvisioner(
                   measurement.durationSeconds * 1_000;
                 sandboxState.firstModelPreparationNestedSandboxPhases.push(measurement);
               },
+              setupCommandFence ? { commandFence: setupCommandFence } : {},
             );
             await attachCodemodeTokenRenewal(
               provisioned.established.session as CodemodeTokenWriterSession,
@@ -1283,6 +1292,11 @@ export async function bindLazySandboxProvisioner(
             }
             await toolResultSpill.materializeDeferred();
             throwIfTurnOperationCancelled(sandboxResumeSignal);
+          } catch (error) {
+            // Nothing the model asked for has reached the box yet, and every
+            // setup step above is idempotent, so an unanswered agent lets the
+            // same turn retry instead of failing it.
+            throw sandboxSetupFailure(setupReplayGuard, error);
           } finally {
             await measure.flush();
           }
@@ -1334,6 +1348,7 @@ export async function bindLazySandboxProvisioner(
         onOp: machineOpObserver.observer,
         onSandboxOperation: sandboxOperationObserver,
         onSandboxCaptureWait: sandboxCaptureWaitMetricObserver(observability),
+        observability,
         onHomeSandboxLost: publishSandboxLost,
         onHomeSandboxRebound,
         ...(runtimeCancellationSignal ? { waitSignal: runtimeCancellationSignal } : {}),

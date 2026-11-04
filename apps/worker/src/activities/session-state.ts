@@ -42,6 +42,7 @@ import {
   validProviderOverloadRecoveryDelay,
 } from "./agent-turn/provider-recovery-policy";
 import { writeSessionUsageReceipts } from "./agent-turn/session-usage-custody";
+import { resolveWorkerShutdownTiming } from "../worker-shutdown";
 import type {
   ControlActivityServices,
   ExpireSessionHumanInputInput,
@@ -506,7 +507,7 @@ export function createSessionStateActivities(
   async function reconcileSessionAttemptQuiescenceActivity(
     input: ReconcileSessionAttemptQuiescenceInput,
   ): Promise<ReconcileSessionAttemptQuiescenceResult> {
-    const { db, bus, inspectSessionAttemptActivity } = await services();
+    const { db, bus, inspectSessionAttemptActivity, settings } = await services();
     const activityRef = await getSessionAttemptActivityRefFn(db, {
       ...input,
       temporalWorkflowId: input.workflowId,
@@ -526,6 +527,9 @@ export function createSessionStateActivities(
       temporalWorkflowRunId: activityRef.workflowRunId,
       temporalActivityId: activityRef.activityId,
       activitySettled: true,
+      // A worker-shutdown closure's process has exited once this has passed.
+      workerProcessExitDeadlineMs: resolveWorkerShutdownTiming("turn", settings)
+        .processExitDeadlineMs,
     });
     if (result.events.length > 0) {
       await publishDurableSessionEventsFn(

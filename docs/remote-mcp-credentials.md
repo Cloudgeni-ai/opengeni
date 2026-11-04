@@ -145,6 +145,25 @@ workspace are not attached to turns there, so the agent sees the connector as
 not connected and offers the Connect card. Accepted turns keep the accounts
 frozen at acceptance. Personal GitHub keeps its own per-chat repository choice.
 
+Editing a queued message keeps its accepted accounts only when its own sender
+resubmits it. When anyone else (another member, a workspace API key) edits and
+sends it, it becomes the editor's own message: it runs as the editor, with the
+editor's own logins and allowance, never the original sender's.
+
+A waiting action runs on the accounts its message froze, whoever decides it,
+so approving an action that runs on someone's own login is that person's
+decision alone. Anyone who can control the chat may decline it, and actions on
+workspace logins keep their ordinary rules. The owner's own requests count as
+the owner: their signed-in session, their personal API key and a token issued
+on their behalf (`asUser`). Another member, a workspace API key with no person
+behind it, or someone else's Slack click gets `403` with
+`details.code: "APPROVAL_REQUIRES_ACCOUNT_OWNER"` (and `details.accountOwnerLabel`
+when known; the SDK's `isApprovalRequiresAccountOwnerError` checks it), whose message names the owner when known
+("Only Alice can approve this action, because it runs on their own account.").
+A tool review tells each viewer the same: `approvedBy: "account_owner"` with
+`accountOwnerLabel` and only `reject` for everyone else, and
+`approvedBy: "you"` for the owner in a chat shared with the workspace.
+
 The same list serves a person's own logins, model subscriptions and machines:
 `GET /v1/workspaces/:workspaceId/own-resources/reach?resourceKind=&resourceId=`
 returns each workspace with `on`, `alwaysOn` and `canChange`, Personal first,

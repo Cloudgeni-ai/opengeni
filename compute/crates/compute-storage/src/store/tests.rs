@@ -524,6 +524,7 @@ async fn gcs_checksums_prove_a_chunk_without_reading_it() {
         settle: Duration::ZERO,
         stored: remembering(carried::REMEMBERED),
         held: None,
+        packs: true,
     };
     let chunk = EncodedChunk::encode(&[9; 16384], 1).unwrap();
     let reference = stored(&chunk);
@@ -547,6 +548,57 @@ async fn gcs_checksums_prove_a_chunk_without_reading_it() {
         store.put_chunk(&forged).await,
         Err(Error::Integrity)
     ));
+}
+
+/// The whole-object reads and the size-and-tag requests `fake` served
+/// since this was last asked.
+fn reads(fake: &crate::fake::Fake) -> (u32, u32) {
+    let gets = std::mem::take(&mut *fake.gets.lock().unwrap());
+    let heads = std::mem::take(&mut *fake.heads.lock().unwrap());
+    (gets, heads)
+}
+
+/// On S3 one request for a chunk's size and entity tag, the MD5 of its
+/// bytes, proves it without reading it. Damage of the same length shows
+/// as another tag, and is read to be sure; another length, or nothing
+/// stored, needs no read. A reference without checksums, or a store whose
+/// tags are not MD5s, is read in full as before.
+#[tokio::test]
+async fn s3_entity_tags_prove_a_chunk_without_reading_it() {
+    use crate::fake::Fake;
+    let fake = Fake::new(Clock::from_fn(stored_at));
+    let store = ChunkStore::over_fake_s3(&fake, "p");
+    let chunk = EncodedChunk::encode(&[9; 16384], 1).unwrap();
+    let reference = stored(&chunk);
+    assert!(!store.has_chunk(&reference).await.unwrap());
+    assert_eq!(reads(&fake), (0, 1), "nothing stored: one HEAD");
+    assert!(store.put_chunk(&chunk).await.unwrap().new);
+    reads(&fake);
+    assert!(store.has_chunk(&reference).await.unwrap());
+    assert_eq!(reads(&fake), (0, 1), "stored: one HEAD, no GET");
+
+    let key = format!("p/{}", reference.key());
+    let mut damaged = chunk.bytes.clone();
+    damaged[1] ^= 0x10;
+    fake.put_raw(&key, Bytes::from(damaged));
+    assert!(!store.has_chunk(&reference).await.unwrap());
+    assert_eq!(reads(&fake), (1, 1), "another tag: read to be sure");
+    fake.put_raw(&key, Bytes::copy_from_slice(&chunk.bytes[1..]));
+    assert!(!store.has_chunk(&reference).await.unwrap());
+    assert_eq!(reads(&fake), (0, 1), "another length");
+    assert!(store.put_chunk(&chunk).await.unwrap().new, "repaired");
+    reads(&fake);
+
+    let unchecked = ChunkRef {
+        checksums: None,
+        ..reference.clone()
+    };
+    assert!(store.has_chunk(&unchecked).await.unwrap());
+    assert_eq!(reads(&fake), (1, 0), "no checksums: read");
+    // Tagged by generation, as a store that does not use MD5s may.
+    *fake.tags_follow_bytes.lock().unwrap() = false;
+    assert!(store.has_chunk(&reference).await.unwrap());
+    assert_eq!(reads(&fake), (1, 1), "a tag that is no MD5: read");
 }
 
 #[tokio::test]
@@ -833,4 +885,209 @@ async fn a_read_waits_while_the_store_catches_up_then_gives_up() {
     let started = tokio::time::Instant::now();
     assert!(writer.get_chunk(&missing).await.is_err());
     assert_eq!(started.elapsed(), Duration::ZERO);
+}
+
+/// How long [`Sequential`] takes to delete each key: a slow store's.
+const PER_KEY: Duration = Duration::from_millis(500);
+/// How long a request to [`Sequential`] may take before its client gives
+/// it up, as `object_store`'s does by default.
+const TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A store whose bulk delete works through its keys one after another, as
+/// Garage's `DeleteObjects` does, [`PER_KEY`] each, and whose requests time
+/// out after [`TIMEOUT`], deleting nothing. A delete of one key is one
+/// request; one of a key with `fails` in it fails.
+#[derive(Debug, Default)]
+struct Sequential {
+    inner: InMemory,
+    requests: AtomicU64,
+    in_flight: AtomicU64,
+    most_in_flight: AtomicU64,
+}
+
+impl Sequential {
+    /// One request deleting `keys`, taking [`PER_KEY`] for each.
+    async fn request(&self, keys: &[Path]) -> object_store::Result<()> {
+        self.requests.fetch_add(1, Ordering::SeqCst);
+        let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.most_in_flight.fetch_max(now, Ordering::SeqCst);
+        let takes = PER_KEY * u32::try_from(keys.len()).unwrap();
+        tokio::time::sleep(takes.min(TIMEOUT)).await;
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        if takes > TIMEOUT {
+            return Err(object_store::Error::Generic {
+                store: "sequential",
+                source: "the request timed out".into(),
+            });
+        }
+        for key in keys {
+            if key.as_ref().contains("fails") {
+                return Err(object_store::Error::Generic {
+                    store: "sequential",
+                    source: "the delete failed".into(),
+                });
+            }
+            self.inner.delete(key).await?;
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Display for Sequential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("sequential")
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for Sequential {
+    async fn put_opts(
+        &self,
+        location: &Path,
+        payload: object_store::PutPayload,
+        opts: PutOptions,
+    ) -> object_store::Result<object_store::PutResult> {
+        self.inner.put_opts(location, payload, opts).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &Path,
+        opts: object_store::PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+        self.inner.put_multipart_opts(location, opts).await
+    }
+
+    async fn get_opts(
+        &self,
+        location: &Path,
+        options: object_store::GetOptions,
+    ) -> object_store::Result<object_store::GetResult> {
+        self.inner.get_opts(location, options).await
+    }
+
+    async fn delete(&self, location: &Path) -> object_store::Result<()> {
+        self.request(std::slice::from_ref(location)).await
+    }
+
+    /// A thousand keys to a request, as `object_store`'s S3 client sends
+    /// `DeleteObjects`.
+    fn delete_stream<'a>(
+        &'a self,
+        locations: futures::stream::BoxStream<'a, object_store::Result<Path>>,
+    ) -> futures::stream::BoxStream<'a, object_store::Result<Path>> {
+        use futures::StreamExt as _;
+        locations
+            .chunks(1_000)
+            .then(move |batch| async move {
+                let paths: Vec<Path> = batch.into_iter().map(|path| path.unwrap()).collect();
+                let request = self.request(&paths).await;
+                let answers: Vec<object_store::Result<Path>> = paths
+                    .into_iter()
+                    .map(|path| match &request {
+                        Ok(()) => Ok(path),
+                        Err(_) => Err(object_store::Error::Generic {
+                            store: "sequential",
+                            source: "the request timed out".into(),
+                        }),
+                    })
+                    .collect();
+                futures::stream::iter(answers)
+            })
+            .flatten()
+            .boxed()
+    }
+
+    fn list(
+        &self,
+        prefix: Option<&Path>,
+    ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&Path>,
+    ) -> object_store::Result<object_store::ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+        self.inner.copy(from, to).await
+    }
+
+    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+        self.inner.copy_if_not_exists(from, to).await
+    }
+}
+
+/// Two thousand chunks stored in `backend` under the prefix `tenant/test`,
+/// by key, and one more whose delete fails.
+async fn many_chunks(backend: &Sequential) -> Vec<String> {
+    let mut keys: Vec<String> = (0..2_000)
+        .map(|n| format!("chunks/v2/500000/{:02x}/{n:04}/zstd", n % 256))
+        .collect();
+    keys.push("chunks/v2/500000/ff/fails/zstd".to_owned());
+    for key in &keys {
+        backend
+            .inner
+            .put(
+                &Path::from(format!("tenant/test/{key}")),
+                Bytes::from_static(b"garbage").into(),
+            )
+            .await
+            .unwrap();
+    }
+    keys
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_bulk_delete_of_a_thousand_keys_on_a_slow_sequential_store_deletes_nothing() {
+    use futures::StreamExt as _;
+    let backend = Sequential::default();
+    let keys = many_chunks(&backend).await;
+    // What the sweep did before: object_store's bulk delete.
+    let paths: Vec<object_store::Result<Path>> = keys
+        .iter()
+        .map(|key| Ok(Path::from(format!("tenant/test/{key}"))))
+        .collect();
+    let deleted = backend
+        .delete_stream(futures::stream::iter(paths).boxed())
+        .filter(|answer| std::future::ready(answer.is_ok()))
+        .count()
+        .await;
+    assert_eq!(deleted, 0);
+    assert_eq!(backend.inner.list(None).count().await, keys.len());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_sweep_deletes_everything_on_a_slow_sequential_store_a_key_at_a_time() {
+    use futures::StreamExt as _;
+    let backend = Arc::new(Sequential::default());
+    let keys = many_chunks(&backend).await;
+    let store = store_at(backend.clone(), "tenant/test");
+    let started = tokio::time::Instant::now();
+    let deleted = store.delete_all(&keys).await.unwrap();
+    let fails = "chunks/v2/500000/ff/fails/zstd".to_owned();
+    assert_eq!(deleted.len(), keys.len() - 1);
+    assert!(!deleted.contains(&fails), "a failed delete stays pending");
+    let left: Vec<String> = backend
+        .inner
+        .list(None)
+        .map(|meta| meta.unwrap().location.to_string())
+        .collect()
+        .await;
+    assert_eq!(left, vec![format!("tenant/test/{fails}")]);
+    // A request to each key, none near the timeout, a bounded number at
+    // once: 2,001 keys at half a second, sixteen at a time, in about a
+    // minute.
+    assert_eq!(backend.requests.load(Ordering::SeqCst), 2_001);
+    assert_eq!(
+        backend.most_in_flight.load(Ordering::SeqCst),
+        u64::try_from(records::DELETES).unwrap()
+    );
+    assert!(started.elapsed() < Duration::from_secs(70));
+    // Gone already counts as deleted.
+    let again = store.delete_all(&keys[..10]).await.unwrap();
+    assert_eq!(again.len(), 10);
 }

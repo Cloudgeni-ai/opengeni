@@ -236,17 +236,20 @@ test("shows the blocked account instead of a healthy default and permits repeati
       ),
     );
     expect(document.body.textContent).toContain("Retry with");
-    const bars = document.querySelectorAll<HTMLElement>('[role="progressbar"]');
-    expect(bars.length).toBe(2);
-    expect(bars[0]!.getAttribute("aria-valuetext")).toBe("100% used");
-    expect(bars[1]!.getAttribute("aria-valuetext")).toBe("10% used");
-    expect((bars[1]!.firstElementChild as HTMLElement).style.width).toBe("10%");
+    const windows = document.querySelectorAll<HTMLElement>(
+      '[data-slot="subscription-usage-window"]',
+    );
+    expect(windows.length).toBe(2);
+    expect(windows[0]!.getAttribute("aria-label")).toBe("5h: Limit reached");
+    expect(windows[0]!.getAttribute("aria-valuenow")).toBe("0");
+    expect(windows[1]!.getAttribute("aria-label")).toBe("Week: 90% left");
+    expect(windows[1]!.getAttribute("aria-valuenow")).toBe("90");
     const blockedOption = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
       (el) => el.textContent?.includes("Blocked account"),
     );
     // The selected account's quota is already shown in the summary above.
     expect(blockedOption).toBeDefined();
-    expect(blockedOption?.textContent).not.toContain("used");
+    expect(blockedOption?.textContent).not.toContain("left");
     const auto = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((el) =>
       el.textContent?.includes("Automatic"),
     );
@@ -339,12 +342,13 @@ test("weekly-only live usage replaces a mislabeled cached 5-hour reading", async
         .querySelector("button")!
         .dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, ctrlKey: false })),
     );
-    const bars = document.querySelectorAll<HTMLElement>('[role="progressbar"]');
-    expect(bars).toHaveLength(1);
-    expect(bars[0]!.getAttribute("aria-label")).toBe("Week used");
-    expect(bars[0]!.getAttribute("aria-valuetext")).toBe("66% used");
+    const windows = document.querySelectorAll<HTMLElement>(
+      '[data-slot="subscription-usage-window"]',
+    );
+    expect(windows).toHaveLength(1);
+    expect(windows[0]!.getAttribute("aria-label")).toBe("Week: 34% left");
     expect(document.body.textContent).not.toContain("5h");
-    expect(document.body.textContent).not.toContain(" 0% used");
+    expect(document.body.textContent).not.toContain("100% left");
     expect(document.body.textContent).toContain("Weekly-only account");
   } finally {
     await act(async () => root.unmount());
@@ -433,7 +437,9 @@ test("navigating back and reopening keeps the last account and live usage on scr
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })),
     );
   const weeklyBar = () =>
-    document.querySelector<HTMLElement>('[role="progressbar"][aria-label="Week used"]');
+    document.querySelector<HTMLElement>(
+      '[data-slot="subscription-usage-window"][aria-label^="Week:"]',
+    );
 
   // The console retains reads for its client above the routed pages, so
   // leaving the session page (and its provider subtree) keeps them.
@@ -443,7 +449,7 @@ test("navigating back and reopening keeps the last account and live usage on scr
   const firstRoot = createRoot(first);
   await act(async () => firstRoot.render(indicator));
   await open(first);
-  expect(weeklyBar()?.getAttribute("aria-valuetext")).toBe("28% used");
+  expect(weeklyBar()?.getAttribute("aria-valuenow")).toBe("72");
   await close();
   // Let the post-check account re-read settle before leaving.
   await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
@@ -472,7 +478,7 @@ test("navigating back and reopening keeps the last account and live usage on scr
     // and does not ask the provider again.
     await open(second);
     expect(document.body.textContent).not.toContain("Checking usage");
-    expect(weeklyBar()?.getAttribute("aria-valuetext")).toBe("28% used");
+    expect(weeklyBar()?.getAttribute("aria-valuenow")).toBe("72");
     expect(usageReads).toBe(1);
     await close();
 
@@ -484,13 +490,13 @@ test("navigating back and reopening keeps the last account and live usage on scr
       await open(second);
       expect(usageReads).toBe(2);
       expect(document.body.textContent).not.toContain("Checking usage");
-      expect(weeklyBar()?.getAttribute("aria-valuetext")).toBe("28% used");
+      expect(weeklyBar()?.getAttribute("aria-valuenow")).toBe("72");
     } finally {
       Date.now = realNow;
     }
     await act(async () => releaseUsage?.());
     await act(async () => undefined);
-    expect(weeklyBar()?.getAttribute("aria-valuetext")).toBe("45% used");
+    expect(weeklyBar()?.getAttribute("aria-valuenow")).toBe("55");
   } finally {
     await act(async () => secondRoot.unmount());
     second.remove();
