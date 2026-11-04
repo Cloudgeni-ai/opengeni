@@ -236,7 +236,12 @@ export type SandboxProcessStartRecovery = {
   /** Restarts this turn already made for this reason (durable). */
   restartsThisTurn: () => Promise<number>;
   /** Publish the restart's `sandbox.operation.*` events (durable). */
-  publish: (events: Array<{ type: string; payload: Record<string, unknown> }>) => Promise<void>;
+  publish: (
+    events: Array<{
+      type: "sandbox.operation.started" | "sandbox.operation.completed" | "sandbox.operation.failed";
+      payload: Record<string, unknown>;
+    }>,
+  ) => Promise<void>;
   /** The operation name the guard counts. */
   operationName: string;
 };
