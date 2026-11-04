@@ -85,7 +85,10 @@ function computeTurn(
         events.filter(
           (event) => event.type === type && event.payload.name === "sandbox.process_start_restart",
         ).length;
-      return { started: of("sandbox.operation.started"), completed: of("sandbox.operation.completed") };
+      return {
+        started: of("sandbox.operation.started"),
+        completed: of("sandbox.operation.completed"),
+      };
     },
     publish: async (published) => {
       events.push(...published);
