@@ -29,6 +29,7 @@ import {
   useState,
 } from "react";
 import { AppState } from "react-native";
+import { router } from "expo-router";
 import {
   forgetAccountToken,
   loadAccounts,
@@ -39,6 +40,7 @@ import {
   type StoredAccount,
   writeAccountToken,
 } from "@/account-store";
+import { planAccountPick } from "@/account-switching";
 import { openLinkFromApp } from "@/app-link-registry";
 import { recordingRequests } from "@/feedback/recent-errors";
 import { signInThroughWeb, type WebSignInResult } from "@/web-sign-in";
@@ -73,6 +75,13 @@ interface AccountState {
   /** Sign in through the deployment's web sign-in and make it the active account. */
   addAccount(baseUrl: string): Promise<WebSignInResult>;
   switchAccount(id: string): void;
+  /**
+   * The person picked an account: a signed-in one becomes active at once; one
+   * that must sign in again stays inactive and answers "signIn".
+   */
+  chooseAccount(id: string): Promise<"stay" | "switched" | "signIn">;
+  /** The account in use before the current one, this run of the app. */
+  previousAccountId: string | null;
   signOut(id: string): Promise<void>;
 }
 
@@ -99,6 +108,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   const [token, setToken] = useState<{ id: string; value: string | null } | null>(null);
   const snapshotRef = useRef<AccountsSnapshot | null>(null);
   snapshotRef.current = snapshot;
+  const [previousAccountId, setPreviousAccountId] = useState<string | null>(null);
 
   useEffect(() => {
     void loadAccounts().then(setSnapshot);
@@ -277,6 +287,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
         workspaceId: existing?.workspaceId ?? null,
       };
       setToken({ id, value: result.accessToken });
+      if (current.activeId && current.activeId !== id) setPreviousAccountId(current.activeId);
       await persist({
         accounts: existing
           ? current.accounts.map((each) => (each.id === id ? stored : each))
@@ -292,7 +303,24 @@ export function AccountProvider({ children }: { children: ReactNode }) {
     (id: string) => {
       const current = snapshotRef.current;
       if (!current || current.activeId === id) return;
+      if (!current.accounts.some((each) => each.id === id)) return;
+      setPreviousAccountId(current.activeId);
       void persist({ ...current, activeId: id });
+    },
+    [persist],
+  );
+
+  const chooseAccount = useCallback(
+    async (id: string): Promise<"stay" | "switched" | "signIn"> => {
+      const hasCredential = Boolean(await readAccountToken(id));
+      const current = snapshotRef.current;
+      if (!current) return "stay";
+      const pick = planAccountPick(current, id, hasCredential);
+      if (pick.kind === "signIn") return "signIn";
+      if (pick.kind === "stay") return "stay";
+      setPreviousAccountId(current.activeId);
+      await persist(pick.next);
+      return "switched";
     },
     [persist],
   );
@@ -359,6 +387,8 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       reload,
       addAccount,
       switchAccount,
+      chooseAccount,
+      previousAccountId,
       signOut,
     }),
     [
@@ -380,6 +410,8 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       reload,
       addAccount,
       switchAccount,
+      chooseAccount,
+      previousAccountId,
       signOut,
     ],
   );
@@ -390,4 +422,23 @@ export function useAccount(): AccountState {
   const value = useContext(AccountContext);
   if (!value) throw new Error("useAccount must be used inside AccountProvider");
   return value;
+}
+
+/**
+ * What the account menus and Settings do with a picked account: switch to a
+ * signed-in one, or open the sign-in for one that is signed out over the
+ * account in use, so Cancel returns to it.
+ */
+export function usePickAccount(): (id: string, onInUse?: () => void) => void {
+  const { chooseAccount } = useAccount();
+  return useCallback(
+    (id: string, onInUse?: () => void) => {
+      void chooseAccount(id).then((outcome) => {
+        if (outcome === "signIn")
+          router.push({ pathname: "/add-account", params: { account: id } });
+        else onInUse?.();
+      });
+    },
+    [chooseAccount],
+  );
 }
