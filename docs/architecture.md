@@ -18,6 +18,9 @@ behind `OPENGENI_SUBSCRIPTION_PLANS_ENABLED`; prepaid credit billing is independ
 Owner-opted automatic top-ups use a separate default-off, tax-inclusive capped
 PaymentIntent journal; see [automatic credit top-ups](automatic-credit-top-ups.md)
 for API, recovery, notification integration and receipt-versus-invoice boundaries.
+Database funding writes live in `packages/db/src/credit-ledger.ts` and provider
+customer reads in `billing-customer.ts`; the root preserves their exports while
+automatic top-ups import these focused modules without a root-barrel cycle.
 New Free monthly grants share signup credit's live model coverage and use explicit
 grant allocations, ahead of other promotions. Pro/Max and existing unrestricted
 periods remain general credit. Expiry removes only the monthly grant's own unused

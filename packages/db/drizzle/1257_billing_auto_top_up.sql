@@ -128,6 +128,9 @@ CREATE TRIGGER billing_auto_top_up_settings_guard BEFORE INSERT OR UPDATE ON bil
 CREATE TRIGGER billing_auto_top_up_operations_guard BEFORE INSERT OR UPDATE ON billing_auto_top_up_operations FOR EACH ROW EXECUTE FUNCTION guard_billing_auto_top_up();
 DO $$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    -- The migration owner can have default runtime grants from prior provisioning.
+    -- Establish the exact posture before the next role-provisioning pass.
+    REVOKE ALL ON billing_auto_top_up_settings, billing_auto_top_up_operations, billing_auto_top_up_mutations FROM opengeni_app;
     GRANT SELECT, INSERT, UPDATE ON billing_auto_top_up_settings, billing_auto_top_up_operations TO opengeni_app;
     GRANT SELECT, INSERT ON billing_auto_top_up_mutations TO opengeni_app;
   END IF;
