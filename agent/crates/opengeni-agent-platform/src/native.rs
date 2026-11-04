@@ -205,19 +205,20 @@ impl NativePlatform {
             .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
         if let Some(kind) = self.recreatable_cwd(&path, identity).filter(|_| missing) {
             match recreate_directory(&path, kind) {
-                Ok(()) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        "the working directory was missing; the agent created it again"
-                    );
-                    metadata = Self::cwd_metadata(&path, identity)?;
-                }
+                Ok(()) => tracing::warn!(
+                    path = %path.display(),
+                    "the working directory was missing; the agent created it again"
+                ),
+                // Another command (or setup) created it meanwhile.
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(error) => tracing::warn!(
                     path = %path.display(),
                     %error,
                     "the working directory is missing and could not be created again"
                 ),
             }
+            // Whatever happened, the directory as it is now decides.
+            metadata = Self::cwd_metadata(&path, identity)?;
         }
         let metadata = metadata.map_err(|error| {
             PlatformError::from_io(
@@ -279,6 +280,7 @@ impl NativePlatform {
 
 /// A missing working directory the agent creates again.
 #[derive(Clone, Copy)]
+#[cfg_attr(not(unix), allow(dead_code))] // only Unix hands a home to its user
 enum RecreatedCwd<'a> {
     /// The workspace root, created with any missing parent, mode 0755 and
     /// owned by the agent so every user the agent runs commands as can enter
@@ -2462,6 +2464,19 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&home).expect("home").permissions().mode();
             assert_eq!(mode & 0o777, 0o700, "{mode:o}");
+        }
+
+        // Commands that find it missing at the same time all run.
+        std::fs::remove_dir(&home).expect("move the home away again");
+        let (first, second, third, fourth) = tokio::join!(
+            platform.exec(&request),
+            platform.exec(&request),
+            platform.exec(&request),
+            platform.exec(&request)
+        );
+        for response in [first, second, third, fourth] {
+            let response = response.expect("every concurrent command runs");
+            assert_eq!(response.exit_code, 0);
         }
 
         // A home is only created inside an existing parent.
