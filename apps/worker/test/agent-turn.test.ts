@@ -3100,22 +3100,26 @@ describe("active sandbox backend resolution (Case B: clone-onto-real-disk gate)"
     ).toBeUndefined();
   });
 
-  test("never throws: a pointer-load failure falls back to the home backend default", async () => {
-    const backend = await resolveActiveSandboxBackend(
-      true,
-      async () => {
-        throw new Error("db unreachable");
-      },
-      selfhostedKind,
-    );
-    expect(backend).toBeUndefined();
+  // A failed load is not "no machine": answering the home default would start a machine
+  // chat's turn on its managed home box.
+  test("a pointer-load failure propagates instead of choosing the home backend", async () => {
+    await expect(
+      resolveActiveSandboxBackend(
+        true,
+        async () => {
+          throw new Error("db unreachable");
+        },
+        selfhostedKind,
+      ),
+    ).rejects.toThrow("db unreachable");
   });
 
-  test("never throws: a sandbox-kind-load failure falls back to the home backend default", async () => {
-    const backend = await resolveActiveSandboxBackend(true, selfhostedPointer, async () => {
-      throw new Error("db unreachable");
-    });
-    expect(backend).toBeUndefined();
+  test("a sandbox-kind-load failure propagates instead of choosing the home backend", async () => {
+    await expect(
+      resolveActiveSandboxBackend(true, selfhostedPointer, async () => {
+        throw new Error("db unreachable");
+      }),
+    ).rejects.toThrow("db unreachable");
   });
 
   test("reuse contract (Stage D hoist): pre-loaded pointer + record memoized closures are each read at most once", async () => {
