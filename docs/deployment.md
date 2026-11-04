@@ -2487,15 +2487,25 @@ tag resolves anonymously, and records the digest as `images.desktop` in the
 `canary-images-<source-sha>` receipt. A deployment that takes its images from
 that receipt should set Helm `desktop.imageRef` to
 `ghcr.io/cloudgeni-ai/opengeni-desktop@<images.desktop.digest>` in the same change.
+Packaged charts do this themselves: `scripts/package-release-chart.ts` requires
+`--desktop-image-ref` and writes it into the packaged `values.yaml` as the default
+`desktop.imageRef`. The release candidate builds `docker/desktop.Dockerfile` from
+the release source as `opengeni-desktop:<candidate tag>` next to the BOM images,
+proves anonymous pull, and fails unless the packaged chart pins exactly that
+digest. The canary chart pins the `canary-sha-<source-sha>` desktop image from
+main CI and fails when that SHA has none. So a published chart's default desktop
+box is always built from the chart's own source.
 `.github/workflows/publish-desktop-image.yml` is dispatch-only. It publishes
 `opengenipublicneuacr.azurecr.io/opengeni-desktop:preview-<source-sha>` through
 the `public-release` OIDC identity, verifies the tag's immutable digest and
 source label after registry logout, pulls anonymously, and runs the installed
 artifact runtime doctor while rejecting `.unavailable`. Use it to refresh the
-default pin below. The workflow retains publication evidence.
+source fallback pin below, which only unpackaged checkouts and runs without the
+chart use. The workflow retains publication evidence.
 Dispatch builds the selected ref's exact SHA; dispatch merged main deliberately.
 Publication does not update deployment pins or rotate existing sandboxes. Opengeni defaults to
-a public, digest-pinned desktop image in both runtime config and Helm. Override
+a public, digest-pinned desktop image in both runtime config and Helm; the
+source `values.yaml` pin and `DEFAULT_MODAL_IMAGE_REF` must stay equal. Override
 Helm `desktop.imageRef` only with another compatible digest
 (`registry/opengeni-desktop@sha256:…`). The chart fails closed when
 `OPENGENI_SANDBOX_BACKEND=modal` and `OPENGENI_SANDBOX_DESKTOP_ENABLED=true`
