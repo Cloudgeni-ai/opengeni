@@ -8,7 +8,6 @@ import {
   ComputeControlClient,
   agentErrorToControlError,
   renderSelfhostedFault,
-  sanitizeProcessStartFailureMessage,
   selfhostedFaultClass,
   SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES,
 } from "../src/sandbox";
@@ -16,6 +15,16 @@ import { isDefinitePathNotFoundError } from "../src/sandbox/channel-a";
 
 const SCRIPT = `node -e '\nconst fs = require("node:fs");\nthrow Error("Codemode client transfer integrity failure");\n' '/workspace/x.json'`;
 const OS = "No such file or directory (os error 2)";
+
+/** The message the runtime keeps for an agent's spawn error message. */
+function sanitizeProcessStartFailureMessage(message: string): string {
+  return agentErrorToControlError({
+    code: ErrorCode.ERROR_CODE_NOT_FOUND,
+    message,
+    retryable: false,
+    detail: {},
+  }).message;
+}
 
 function spawnError(program: string, note = "", code = ErrorCode.ERROR_CODE_NOT_FOUND) {
   return agentErrorToControlError({
