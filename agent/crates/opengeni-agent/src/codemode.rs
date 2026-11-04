@@ -2568,11 +2568,20 @@ mod tests {
             .unwrap_err();
         server.await.unwrap();
         drop(reserved);
-        assert_eq!(
-            error.to_string(),
-            format!(
-                "Codemode operation operation-refused: Can't reach Opengeni: the connection to {address} was refused. Check this machine's network, firewall and proxy settings."
-            )
+        // Under heavy load Linux occasionally resets instead of refusing a
+        // connection to the closed listener's port; both are named causes.
+        let message = error.to_string();
+        let prefix = format!(
+            "Codemode operation operation-refused: Can't reach Opengeni: the connection to {address} "
+        );
+        assert!(
+            [
+                "was refused. Check this machine's network, firewall and proxy settings.",
+                "closed unexpectedly. If it keeps happening, check this machine's network and proxy settings.",
+            ]
+            .iter()
+            .any(|cause| message == format!("{prefix}{cause}")),
+            "{message}"
         );
         let receipt = error.receipt();
         assert_eq!(receipt["error"]["operationId"], "operation-refused");
