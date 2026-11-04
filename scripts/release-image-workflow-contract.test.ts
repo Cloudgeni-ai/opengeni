@@ -733,14 +733,15 @@ describe("release image workflow contract", () => {
     }
     expect(candidate).toContain("docker/setup-qemu-action@");
     expect(candidate.match(/platforms: linux\/amd64,linux\/arm64/g)).toHaveLength(7);
+    // The seven BOM roles plus the amd64 Modal desktop box the chart pins.
     expect(
       candidate.match(/org\.opencontainers\.image\.revision=\$\{\{ inputs\.source_sha \}\}/g),
-    ).toHaveLength(7);
+    ).toHaveLength(8);
     expect(
       candidate.match(
         /org\.opencontainers\.image\.source=https:\/\/github\.com\/\$\{\{ github\.repository \}\}/g,
       ),
-    ).toHaveLength(7);
+    ).toHaveLength(8);
     expect(candidate).toContain(
       "candidate-${SOURCE_SHA}-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}",
     );
@@ -905,6 +906,54 @@ describe("release image workflow contract", () => {
     expect(identity.run).toContain('echo "version=$version" >> "$GITHUB_OUTPUT"');
     expect(identity.run).toContain(
       'echo "candidate_tag=candidate-${SOURCE_SHA}-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"',
+    );
+  });
+
+  test("candidate chart pins the Modal desktop box it built from the same source", async () => {
+    const parsed = Bun.YAML.parse(await workflow("release-candidate.yml")) as ParsedWorkflow;
+    const steps = parsed.jobs.candidate?.steps ?? [];
+    const sourceRevision = "${{ inputs.source_sha }}";
+    const desktopBuilds = steps.filter(
+      (step) =>
+        step.uses?.startsWith("docker/build-push-action@") &&
+        step.with?.file === "docker/desktop.Dockerfile",
+    );
+    expect(desktopBuilds).toHaveLength(1);
+    const build = desktopBuilds[0]!;
+    expect(build.id).toBe("build-desktop");
+    expect(build.with?.context).toBe(".");
+    expect(build.with?.platforms).toBe("linux/amd64");
+    expect(build.with?.push).toBe(true);
+    expect(build.with?.["build-args"]).toBe(`OPENGENI_SOURCE_SHA=${sourceRevision}`);
+    expect(build.with?.tags).toBe(
+      "${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-desktop:${{ steps.meta.outputs.candidate_tag }}",
+    );
+    expect(build.with?.["cache-from"]).toBeUndefined();
+
+    const occupied =
+      steps[stepIndex(parsed, "candidate", "Refuse occupied run-scoped candidate tags")];
+    expect(occupied.run).toContain("artifact-outbox-dispatcher desktop; do");
+    const resolveDigest = steps[stepIndex(parsed, "candidate", "Resolve desktop candidate digest")];
+    expect(resolveDigest.env?.BUILT_DIGEST).toBe("${{ steps.build-desktop.outputs.digest }}");
+    const anonymous =
+      steps[stepIndex(parsed, "candidate", "Verify candidate images support anonymous pull")];
+    expect(anonymous.env?.DESKTOP_DIGEST).toBe("${{ steps.desktop.outputs.digest }}");
+    expect(anonymous.run).toContain("artifact-outbox-dispatcher desktop; do");
+
+    const chart =
+      steps[
+        stepIndex(parsed, "candidate", "Package the deterministic immutable Helm chart candidate")
+      ];
+    expect(steps.indexOf(anonymous)).toBeLessThan(steps.indexOf(chart));
+    expect(chart.env?.DESKTOP_IMAGE_REF).toBe(
+      "${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-desktop@${{ steps.desktop.outputs.digest }}",
+    );
+    expect(chart.run?.match(/--desktop-image-ref "\$DESKTOP_IMAGE_REF"/g)).toHaveLength(2);
+    expect(chart.run).toContain(
+      'helm show values "$chart_path" > .release/chart-proof/values.yaml',
+    );
+    expect(chart.run).toContain(
+      'grep -qxF "  imageRef: \\"${DESKTOP_IMAGE_REF}\\"" .release/chart-proof/values.yaml || {',
     );
   });
 
