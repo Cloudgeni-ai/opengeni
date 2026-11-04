@@ -52605,7 +52605,7 @@ export async function commitWarmingToWarm(
     | "fresh_workspace_required"
     | "fresh_workspace_mismatch";
 }> {
-  return await withRlsContext(
+  const result = await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
@@ -52861,27 +52861,57 @@ export async function commitWarmingToWarm(
           };
         }
         // The model learned of the older snapshot from its receipt when the
-        // restore was authorized. The people in the group are told once, here,
-        // when that restore is verified, so a restore that fails, retries or
-        // ends on an empty workspace never claims their files came back.
-        const restoredFrom = automaticVerified
-          ? (automatic as Record<string, unknown>).capturedAt
-          : undefined;
-        if (typeof restoredFrom === "string") {
-          await withCompleteSandboxGroupScope(tx, () =>
-            appendSessionEventToSandboxGroup(tx, input.workspaceId, input.sandboxGroupId, {
-              type: "sandbox.recovery.selected",
-              payload: {
+        // restore was authorized. The people in the group are told once, after
+        // this commit, when that restore is verified, so a restore that fails,
+        // retries or ends on an empty workspace never claims their files came
+        // back. Only an archive restore qualifies, never an empty workspace or
+        // same-box continuity.
+        const restoredFrom =
+          automaticVerified &&
+          rematerialization !== undefined &&
+          !freshWorkspace &&
+          !continuityRecovery
+            ? (automatic as Record<string, unknown>).capturedAt
+            : undefined;
+        const restoredNotice =
+          typeof restoredFrom === "string"
+            ? {
                 operationId: (automatic as Record<string, unknown>).operationId,
-                mode: "checkpoint",
+                mode: "checkpoint" as const,
                 capturedAt: restoredFrom,
-              },
-            }),
-          );
-        }
-        return { committed: true, lease: mapLeaseRow(updated[0]) };
+              }
+            : null;
+        return { committed: true, lease: mapLeaseRow(updated[0]), restoredNotice };
       }),
   );
+  const { restoredNotice, ...outcome } = result as typeof result & {
+    restoredNotice?: Record<string, unknown> | null;
+  };
+  if (outcome.committed && restoredNotice) {
+    // Its own transaction, after the commit: appending locks every member's
+    // session row, and this commit already holds the lease row, which
+    // recovery authorization takes after its own session row. Best-effort:
+    // the verified restore must never be undone for a notice.
+    try {
+      await withRlsContext(
+        db,
+        { accountId: input.accountId, workspaceId: input.workspaceId },
+        async (scopedDb) =>
+          await scopedDb.transaction(async (txRaw) => {
+            const tx = txRaw as unknown as Database;
+            await withCompleteSandboxGroupScope(tx, () =>
+              appendSessionEventToSandboxGroup(tx, input.workspaceId, input.sandboxGroupId, {
+                type: "sandbox.recovery.selected",
+                payload: restoredNotice,
+              }),
+            );
+          }),
+      );
+    } catch {
+      // The model's restore receipt is durable; only the person's notice is lost.
+    }
+  }
+  return outcome;
 }
 
 /** Persist before provider dispatch. This is deliberately not replayable: a

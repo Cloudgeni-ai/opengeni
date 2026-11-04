@@ -5423,6 +5423,15 @@ export async function terminateProviderBox(
   // matters most: measure it with one bounded walk in the background, so the
   // drain never waits for it.
   const observeFailedCaptureSize = () => {
+    // Inside the pre-deadline save window the next snapshot starts without
+    // backoff; a walk then would compete with the last chance to save.
+    if (
+      lease.providerDeadlineAt &&
+      lease.providerDeadlineAt.getTime() - sandboxDeadlineMandatoryCaptureLeadMs(settings) <=
+        Date.now()
+    ) {
+      return;
+    }
     void probeRemoteWorkspaceSize(session)
       .then((size) => {
         if (size) {
@@ -5479,7 +5488,8 @@ export async function terminateProviderBox(
               session,
               checkpointBinding,
             );
-            recordCapturedSize(archive.descriptor);
+            // A late capture fenced by a successor is not this box's save.
+            if (result.wrote) recordCapturedSize(archive.descriptor);
             observability.info(
               result.wrote
                 ? "sandbox reaper: late workspace capture published under durable claim"

@@ -76,4 +76,30 @@ describe("workspace size probe", () => {
       }
     },
   );
+  linuxTest(
+    "a find that cannot run the walk is no measurement, not an empty workspace",
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), "opengeni-size-probe-"));
+      const bin = mkdtempSync(join(tmpdir(), "opengeni-size-probe-bin-"));
+      try {
+        writeFileSync(join(root, "kept.txt"), "abc");
+        // Like BusyBox find, which rejects -printf: exits 1 and prints nothing.
+        writeFileSync(
+          join(bin, "find"),
+          "#!/bin/sh\necho 'find: unrecognized: -printf' >&2\nexit 1\n",
+        );
+        chmodSync(join(bin, "find"), 0o755);
+        const script = (await probeScript()).replace("cd /workspace", `cd ${root}`);
+        const result = Bun.spawnSync(["/bin/bash", "-c", script], {
+          stdout: "pipe",
+          stderr: "pipe",
+          env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
+        });
+        expect(Buffer.from(result.stdout).toString("utf8").trim()).toBe("");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+        rmSync(bin, { recursive: true, force: true });
+      }
+    },
+  );
 });

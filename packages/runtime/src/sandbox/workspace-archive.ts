@@ -455,6 +455,9 @@ cd /workspace 2>/dev/null || exit 0
 out=$(timeout ${seconds} find . -xdev ${prune}-type f -printf "%s\n" 2>/dev/null | awk "{n+=1; s+=\$1} END {printf \"%d %.0f\", n, s}")
 rc=$?
 [ "$rc" -le 1 ] || exit 0
+# A find that cannot run this walk at all (BusyBox has no -printf) also
+# exits 1, with nothing counted: that is no measurement, not an empty tree.
+case "$rc $out" in "1 0 "*) exit 0 ;; esac
 printf "OPENGENI_WORKSPACE_SIZE_V1 %s\n" "$out"`;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
