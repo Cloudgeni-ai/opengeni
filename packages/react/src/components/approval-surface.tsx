@@ -71,6 +71,17 @@ export type ApprovalSurfaceProps = {
 };
 export type ApprovalField = { key: string; label: string; value: string };
 
+/** Backoff for re-reading a waiting review that offered no decision. */
+const UNDECIDABLE_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 8_000];
+
+function reviewUndecidable(review: ToolActionReview | undefined): review is ToolActionReview {
+  return (
+    review?.status === "pending" &&
+    !review.availableActions.includes("approve") &&
+    !review.availableActions.includes("reject")
+  );
+}
+
 /** Hosts provide decisions; this surface never mutates the approved payload. */
 export function ApprovalSurface({
   approvals,
@@ -107,7 +118,11 @@ export function ApprovalSurface({
     if (pending && !approvals.some((approval) => approval.id === pending.id)) {
       pendingRef.current = null;
       setPending(null);
-      requestAnimationFrame(() => surface.current?.querySelector<HTMLElement>("h3")?.focus());
+      // Hand focus to the next card without moving the view: a reader at the
+      // bottom already sees it, and one who scrolled up keeps their place.
+      requestAnimationFrame(() =>
+        surface.current?.querySelector<HTMLElement>("h3")?.focus({ preventScroll: true }),
+      );
     }
   }, [approvals, pending]);
   if (!approvals.length) return null;
@@ -265,12 +280,26 @@ function ApprovalRequest({
     legacy?: boolean;
     denied?: boolean;
   } | null>(null);
-  // Hide stale facts during render, before passive effect cleanup can run.
-  const current = result?.request === request ? result : null;
+  // Hide stale facts during render, before passive effect cleanup can run. A
+  // re-read of the same undecided action (same facts, same loader) keeps its
+  // notice up meanwhile.
+  const current =
+    result?.request === request ||
+    (result !== null &&
+      result.request.loadReview === request.loadReview &&
+      reviewUndecidable(result.review) &&
+      dequal(result.request.approval, request.approval))
+      ? result
+      : null;
   const loaded = current?.review;
   const failed = current?.failed;
   const legacy = current?.legacy;
   const denied = current?.denied;
+  // Still waiting, yet the saved review offers no decision: it was read while
+  // the chat was between states. Never a silent footer: say so, offer a retry,
+  // and re-read it on its own a few times.
+  const undecidable = reviewUndecidable(loaded);
+  const undecidableRetries = useRef(0);
   const [detailPath, setDetailPath] = useState<string | null>(null);
   useEffect(() => {
     let active = true;
@@ -302,6 +331,22 @@ function ApprovalRequest({
       active = false;
     };
   }, [request]);
+  // Each automatic re-read waits from when the previous read answered.
+  const readSettled = result?.request === request;
+  useEffect(() => {
+    if (
+      !undecidable ||
+      !readSettled ||
+      undecidableRetries.current >= UNDECIDABLE_RETRY_DELAYS_MS.length
+    )
+      return;
+    const delay = UNDECIDABLE_RETRY_DELAYS_MS[undecidableRetries.current]!;
+    const timer = setTimeout(() => {
+      undecidableRetries.current += 1;
+      setRetry((value) => value + 1);
+    }, delay);
+    return () => clearTimeout(timer);
+  }, [undecidable, readSettled, request]);
   const stableApproval = request.approval;
   const { formatToolName, approve: approveLabel } = messages;
   const toolName = approvalToolName(stableApproval);
@@ -381,6 +426,36 @@ function ApprovalRequest({
           </button>
         </p>
       </ToolReviewFrame>
+    );
+  if (undecidable)
+    return (
+      <div data-approval-id={approval.id} data-review-origin="pending">
+        {custom}
+        <ToolReviewFrame
+          tone="waiting"
+          icon={<ShieldCheckIcon className="size-4" aria-hidden="true" />}
+          eyebrow={messages.title}
+          title={loaded.title}
+          subtitle={loaded.accountLabel}
+          data-og-tool-review=""
+          data-og-tool-review-undecidable=""
+        >
+          <p className="m-0 text-og-sm text-og-fg">
+            <span role="status">{t("approvalSurface.thisActionCanTBeDecided")}</span>{" "}
+            <button
+              type="button"
+              className="min-h-8 font-medium underline underline-offset-4 [@media(pointer:coarse)]:min-h-11 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
+              onClick={() => {
+                // Asking again starts a fresh round of automatic re-reads.
+                undecidableRetries.current = 0;
+                setRetry((value) => value + 1);
+              }}
+            >
+              {t("approvalSurface.tryAgain")}
+            </button>
+          </p>
+        </ToolReviewFrame>
+      </div>
     );
   if (!loaded && stableApproval.arguments === undefined)
     return (

@@ -19,9 +19,11 @@
 import {
   rememberingSecretResolver,
   SecretValueMemory,
+  credentialNameMayHoldSecret,
   secretCredentialMaskLabel,
   type SecretPrincipal,
   type SecretResolver,
+  type SecretValueMatchEvent,
 } from "@opengeni/contracts";
 import { createTaskVaultSecretCapturer, loadSessionTreeSecretValues } from "@opengeni/core";
 import { withSecretValueMasking, type Database } from "@opengeni/db";
@@ -29,12 +31,48 @@ import { activeAttemptSecretValues, withAttemptSecretValues } from "@opengeni/ru
 
 type DiagnosticSink = {
   warn(message: string, attributes?: Record<string, unknown>): void;
+  incrementCounter?(input: {
+    name: string;
+    help?: string;
+    labels?: Record<string, string>;
+    amount?: number;
+  }): void;
 };
+
+/**
+ * Occurrences of known secret values, by outcome (masked, or kept because a
+ * weak value was outside a credential position), value strength, entropy
+ * bucket and position. Metrics only: never the value or the text.
+ */
+export const SECRET_MASK_MATCHES_METRIC = {
+  name: "opengeni_secret_mask_matches_total",
+  help: "Known secret value occurrences in masked text, by outcome, value strength, entropy bucket and position.",
+} as const;
+
+function recordMaskMatch(observability: DiagnosticSink | null | undefined) {
+  return (event: SecretValueMatchEvent) => {
+    try {
+      observability?.incrementCounter?.({
+        ...SECRET_MASK_MATCHES_METRIC,
+        labels: {
+          outcome: event.outcome,
+          strength: event.strength,
+          entropy: event.entropy,
+          position: event.position,
+        },
+        amount: event.count,
+      });
+    } catch {
+      // Metrics never affect masking.
+    }
+  };
+}
 
 export function createAttemptSecretValueMemory(
   observability?: DiagnosticSink | null,
 ): SecretValueMemory {
   return new SecretValueMemory({
+    ...(observability?.incrementCounter ? { onMatch: recordMaskMatch(observability) } : {}),
     onDiagnostic: (diagnostic) => {
       try {
         observability?.warn("secret value masking failed; text kept as written", {
@@ -90,16 +128,11 @@ export function rememberingAttemptSecretResolver(
   return rememberingSecretResolver(resolver, () => memory ?? currentAttemptSecretValues());
 }
 
-const SECRET_ENVIRONMENT_NAME =
-  /TOKEN|SECRET|PASSW|PWD|KEY|CREDENTIAL|AUTH|SESSION|COOKIE|BEARER|PRIVATE|SIGNATURE/iu;
 /** Names of variables that hold where a credential is, not the credential. */
 const CREDENTIAL_LOCATION_NAME =
   /(?:_FILE|_PATH|_DIR|_URL|_ENDPOINT)$|^GOOGLE_APPLICATION_CREDENTIALS$/iu;
 /** Values that are file paths are not credentials either. */
 const PATH_VALUE = /^(?:\/|\.{1,2}\/|~\/|[A-Za-z]:\\)[^\s]*$/u;
-/** MCP headers that carry credentials; others (`Accept`, `X-Org`) are not secret. */
-const SECRET_HEADER_NAME =
-  /^(?:authorization|proxy-authorization|cookie)$|token|key|secret|auth|passw|session|signature/iu;
 /** Run-credential environment values are remembered only when long enough
  * to be key material: a region or account name must not be masked. */
 const RUN_CREDENTIAL_MIN_CHARS = 12;
@@ -126,7 +159,7 @@ export function rememberRunCredentialMaterial(
       if (
         typeof value === "string" &&
         value.length >= RUN_CREDENTIAL_MIN_CHARS &&
-        SECRET_ENVIRONMENT_NAME.test(name) &&
+        credentialNameMayHoldSecret(name) &&
         !CREDENTIAL_LOCATION_NAME.test(name) &&
         !PATH_VALUE.test(value)
       ) {
@@ -144,7 +177,7 @@ export function rememberRunCredentialMaterial(
         if (
           typeof value === "string" &&
           value.length >= RUN_CREDENTIAL_MIN_CHARS &&
-          SECRET_HEADER_NAME.test(name)
+          credentialNameMayHoldSecret(name)
         ) {
           rememberAttemptCredential(memory, value, "mcp header");
         }

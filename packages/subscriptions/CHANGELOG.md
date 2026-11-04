@@ -1,5 +1,7 @@
 # @opengeni/subscriptions
 
+## 6.8.0
+
 ## 6.7.0
 
 ### Patch Changes

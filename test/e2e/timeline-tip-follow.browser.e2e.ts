@@ -605,6 +605,100 @@ describe("timeline tip-follow browser regression", () => {
       await context.close();
     }
   }, 60_000);
+
+  async function openApprovalHarness(): Promise<{ context: BrowserContext; page: Page }> {
+    const context = await browser.newContext({ viewport: { width: 1100, height: 760 } });
+    const page = await context.newPage();
+    page.on("pageerror", (error) => browserErrors.push(`pageerror: ${error.message}`));
+    await page.goto(`${baseUrl}/approval-follow-test.html`);
+    await page.waitForFunction(() => window.approvalFollowHarness !== undefined);
+    await page.getByRole("button", { name: "Create draft" }).waitFor({ timeout: 10_000 });
+    await page.waitForFunction(() => window.approvalFollowHarness!.metrics().distanceFromTip <= 1);
+    return { context, page };
+  }
+
+  const approvalMetrics = (page: Page) =>
+    page.evaluate(() => window.approvalFollowHarness!.metrics());
+
+  test("answering queued approvals with a real mouse keeps each next card in view", async () => {
+    const { context, page } = await openApprovalHarness();
+    try {
+      for (let round = 0; round < 4; round += 1) {
+        const before = await approvalMetrics(page);
+        expect(before.approveVisible).toBe(true);
+        // A real press where the person sees the button: Chromium (and so the
+        // Electron desktop app) focuses it on pointerdown.
+        const box = (await page.getByRole("button", { name: "Create draft" }).boundingBox())!;
+        await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+        // The decision resolves, the next card mounts, then its review loads.
+        await page
+          .locator(`[data-approval-id="draft-${round + 1}"]`)
+          .getByRole("button", { name: "Create draft" })
+          .waitFor({ timeout: 5_000 });
+        await page.waitForTimeout(400);
+        const after = await approvalMetrics(page);
+        expect(after.following).toBe(true);
+        expect(after.distanceFromTip).toBeLessThanOrEqual(1);
+        expect(after.approveVisible).toBe(true);
+      }
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
+  test("approval, composer and content height changes keep a pinned reader at the bottom", async () => {
+    const { context, page } = await openApprovalHarness();
+    try {
+      await page.evaluate(() => window.approvalFollowHarness!.setComposerHeight(220));
+      await page.waitForTimeout(300);
+      expect((await approvalMetrics(page)).distanceFromTip).toBeLessThanOrEqual(1);
+      // Paging to another card swaps its height in place.
+      await page.getByRole("button", { name: "Next action" }).click();
+      await page.getByRole("button", { name: "Create draft" }).waitFor();
+      await page.waitForTimeout(400);
+      expect((await approvalMetrics(page)).distanceFromTip).toBeLessThanOrEqual(1);
+      await page.evaluate(() => window.approvalFollowHarness!.setComposerHeight(112));
+      await page.evaluate(() =>
+        window.approvalFollowHarness!.appendAgentText(" Here is one more paragraph. ".repeat(20)),
+      );
+      await page.waitForTimeout(400);
+      const metrics = await approvalMetrics(page);
+      expect(metrics.following).toBe(true);
+      expect(metrics.distanceFromTip).toBeLessThanOrEqual(1);
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
+  test("a reader who scrolled up is never pulled down by approvals or new content", async () => {
+    const { context, page } = await openApprovalHarness();
+    try {
+      await page.mouse.move(550, 300);
+      await page.mouse.wheel(0, -360);
+      await page.waitForTimeout(400);
+      const parked = await approvalMetrics(page);
+      expect(parked.following).toBe(false);
+      expect(parked.distanceFromTip).toBeGreaterThan(200);
+      // A decision lands from elsewhere (another device), content streams and
+      // the composer grows: the reader's place does not move.
+      await page.evaluate(() =>
+        [...document.querySelectorAll<HTMLButtonElement>("[data-approval-id] button")]
+          .find((button) => button.textContent === "Create draft")
+          ?.click(),
+      );
+      await page.locator('[data-approval-id="draft-1"]').waitFor({ state: "attached" });
+      await page.evaluate(() =>
+        window.approvalFollowHarness!.appendAgentText(" A later update. ".repeat(20)),
+      );
+      await page.evaluate(() => window.approvalFollowHarness!.setComposerHeight(180));
+      await page.waitForTimeout(800);
+      const after = await approvalMetrics(page);
+      expect(after.following).toBe(false);
+      expect(Math.abs(after.scrollTop - parked.scrollTop)).toBeLessThanOrEqual(1);
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
 });
 
 declare global {

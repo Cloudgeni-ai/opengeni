@@ -3304,7 +3304,7 @@ describe("defaultIsHome — a machine-pinned attempt's clear-to-null emits the h
     expect((err as Error).message).not.toMatch(/pinned-machine/);
   });
 
-  test("defaultIsHome omitted (machine-home / null-start Modal-home): null resolves to the home default as before", async () => {
+  test("defaultIsHome omitted (a turn established on its group box): null resolves to the home default as before", async () => {
     const home = new FakeBackend("home-box");
     const resolve = makeActiveBackendResolver({
       workspaceId: WS,
@@ -3317,25 +3317,6 @@ describe("defaultIsHome — a machine-pinned attempt's clear-to-null emits the h
     });
     const r = await resolve({ activeSandboxId: null, activeEpoch: 0 });
     expect(r.session).toBe(home);
-    expect(r.sandboxId).toBeNull();
-  });
-
-  test("defaultIsHome:true (a genuine machine-HOME turn): null still resolves to the machine (no regression)", async () => {
-    // A machine-HOME session's home IS the machine, so a clear-to-null resolves right
-    // back to it — the throw is scoped to Modal-home turns pinned to a machine.
-    const machine = new FakeBackend("machine-home");
-    const resolve = makeActiveBackendResolver({
-      workspaceId: WS,
-      defaultBackend: machine,
-      defaultKind: "selfhosted",
-      getSandbox: async () => null,
-      resolveSelfhostedConnection,
-      controlRpcFactory: () => new MockAgentResponder(),
-      relay: RELAY,
-      defaultIsHome: true,
-    });
-    const r = await resolve({ activeSandboxId: null, activeEpoch: 5 });
-    expect(r.session).toBe(machine);
     expect(r.sandboxId).toBeNull();
   });
 

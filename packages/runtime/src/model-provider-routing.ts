@@ -27,7 +27,6 @@ import {
   projectHistoryForProvider,
   responsesRouteDeclaresAdditionalTools,
 } from "./provider-history-adapter";
-import { requestFunctionToolNames } from "./provider-tool-names";
 import {
   appendChatReasoningDetails,
   chatReasoning,
@@ -37,7 +36,7 @@ import {
   withChatReasoning,
   type ChatReasoning,
 } from "./chat-reasoning";
-import { instrumentedModelFetch } from "./model-provider-client";
+import { instrumentedModelFetch, modelToolNameObservers } from "./model-provider-client";
 import { CODEX_MODEL_ID_PREFIX } from "@opengeni/codex";
 import { XAI_SUBSCRIPTION_MODEL_ID_PREFIX } from "@opengeni/xai-subscription";
 
@@ -366,7 +365,6 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
           ? request.input
           : (projectHistoryForProvider(request.input, "responses", {
               declaresAdditionalTools: responsesRouteDeclaresAdditionalTools(this.provider.kind),
-              knownToolNames: requestFunctionToolNames(request.tools),
             }) as ModelRequest["input"]);
       return super._buildResponsesCreateRequest(
         input === request.input ? request : { ...request, input },
@@ -398,6 +396,7 @@ export function buildModelInstance(
       provider,
       modelId,
       instrumentedModelFetch(provider.id, globalThis.fetch, false, residency),
+      modelToolNameObservers(provider.id),
     );
   return provider.api === "chat"
     ? new OpenGeniChatCompletionsModel(client, modelId)

@@ -211,6 +211,8 @@ export * from "./vault-provider-wire";
 export * from "./secret-references";
 export * from "./secret-value-masking";
 export * from "./secret-shape-masking";
+export * from "./credential-names";
+export * from "./secret-field-hints";
 export * from "./secret-resolution";
 export * from "./secret-use-approvals";
 export * from "./secret-generator";
@@ -16734,6 +16736,11 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
         waitingDescendants: z.number().int().nonnegative().optional(),
         attentionDescendants: primitives.nonnegativeInteger,
         pausedDescendants: primitives.nonnegativeInteger,
+        /**
+         * Paused descendants whose work is parked for Resume: a turn still
+         * open, queued or running. Absent from older servers.
+         */
+        pausedWorkDescendants: z.number().int().nonnegative().optional(),
         /** Historical failed lifecycle states, including already-reviewed failures. */
         failedDescendants: primitives.nonnegativeInteger,
         unreadDescendants: z.number().int().nonnegative().optional(),

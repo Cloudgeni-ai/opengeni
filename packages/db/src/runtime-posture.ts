@@ -111,10 +111,9 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * withholds the secret history scrub's
  * reader and cell writer; until they are granted, a scrub reports the cells
  * only they reach as pending. 1103 withheld the subscription
- * account-administrator grant and 1149 granted it. 1107 withholds the agent
+ * account-administrator grant and 1149 granted it. 1107 withheld the agent
  * call routines and the native push v2 functions that carry the iOS VoIP
- * token; until they are granted, native push keeps its v1 functions, no phone
- * takes calls and agents cannot place one.
+ * token; 1239 grants them.
  * 1172 withholds the lock-free external identity read; until it is granted,
  * authenticating an external user takes the organization membership fence
  * exclusively, as before.
@@ -133,12 +132,6 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "summarize_queued_turns_by_hold()",
   "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
   "redact_session_secret_cells_v1(uuid, text, jsonb)",
-  "native_push_device_v2(text)",
-  "register_native_push_device_v2(text, text, text, text, text, text[], text)",
-  "claim_native_push_deliveries_v2(uuid, integer, integer)",
-  "agent_call_device_count_v1(text, boolean)",
-  "agent_call_ringing_v1(text)",
-  "ring_agent_call_v1(uuid, boolean)",
   "read_external_identity_v1(uuid, text, text)",
   "list_organization_vaults_v1(uuid, jsonb)",
   "list_organization_member_names_v1(uuid)",

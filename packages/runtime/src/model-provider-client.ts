@@ -66,6 +66,7 @@ import {
 } from "./model-provider-request-policy";
 import { isModelCallFetch, vercelGatewayRoutingFetch } from "./model-provider-transport";
 import { ReplayableJsonOpenAI } from "./replayable-json-body";
+import type { ToolNameObservers } from "./provider-request-tool-names";
 import {
   recordModelTransportDispatched,
   recordModelTransportStarted,
@@ -86,6 +87,16 @@ let runtimeMetricsHooks: RuntimeMetricsHooks | null = null;
 
 export function configureRuntimeMetricsHooks(hooks: RuntimeMetricsHooks | null | undefined): void {
   runtimeMetricsHooks = hooks ?? null;
+}
+
+/** The outbound tool-name guard's observations for one provider, as metrics. */
+export function modelToolNameObservers(provider: string): ToolNameObservers {
+  return {
+    onToolNameRepair: ({ api, field }) =>
+      runtimeMetricsHooks?.onModelToolNameRepair?.({ provider, api, field }),
+    onToolNameRetry: ({ api, outcome }) =>
+      runtimeMetricsHooks?.onModelToolNameRetry?.({ provider, api, outcome }),
+  };
 }
 
 export function recordRuntimeMcpToolCallMetric(
@@ -176,6 +187,7 @@ export function buildOpenAIClientFromSettings(
         ),
       },
       {
+        ...modelToolNameObservers(providerId),
         modelRequestPolicy: (request) =>
           chatModelRequestPolicy(request) ?? azureModelRequestPolicy(request),
       },
@@ -201,6 +213,7 @@ export function buildOpenAIClientFromSettings(
       ),
     },
     {
+      ...modelToolNameObservers(providerId),
       // Only the OpenAI platform; a compatible server keeps its own contract.
       modelRequestPolicy: isDirectOpenAiApiBaseUrl(settings.openaiBaseUrl)
         ? withStorelessResponses(chatModelRequestPolicy)
@@ -679,6 +692,7 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
             ),
           },
           {
+            ...modelToolNameObservers(provider.id),
             modelRequestPolicy: modelRequestPolicyForProvider(
               provider,
               gatewayPolicies,
@@ -705,6 +719,7 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
               ),
             },
             {
+              ...modelToolNameObservers(provider.id),
               modelRequestPolicy: modelRequestPolicyForProvider(
                 provider,
                 gatewayPolicies,
@@ -788,6 +803,7 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
               ),
             },
             {
+              ...modelToolNameObservers(provider.id),
               modelRequestPolicy: modelRequestPolicyForProvider(
                 provider,
                 gatewayPolicies,

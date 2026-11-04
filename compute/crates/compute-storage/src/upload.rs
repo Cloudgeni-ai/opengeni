@@ -273,6 +273,31 @@ pub(crate) fn checksums(bytes: &[u8]) -> String {
     format!("crc32c={},md5={}", BASE64.encode(crc), BASE64.encode(md5))
 }
 
+/// The MD5 in `checksums`, as [`checksums`] writes them, in lowercase hex:
+/// what S3, and stores like it, give as the entity tag of an object stored
+/// by one plain write or copied from one.
+pub(crate) fn md5_hex(checksums: &str) -> Option<String> {
+    let md5 = checksums
+        .split(',')
+        .find_map(|part| part.strip_prefix("md5="))?;
+    let md5 = BASE64.decode(md5).ok()?;
+    (md5.len() == 16).then(|| {
+        md5.iter().fold(String::with_capacity(32), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        })
+    })
+}
+
+/// Whether the entity tag `tag` is the MD5 `md5` (lowercase hex); `None`
+/// when it is no plain MD5 at all, such as a multipart upload's (`-N` at
+/// its end) or a store's own kind of tag.
+pub(crate) fn tag_is_md5(tag: &str, md5: &str) -> Option<bool> {
+    let tag = tag.trim().trim_matches('"');
+    (tag.len() == 32 && tag.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| tag.eq_ignore_ascii_case(md5))
+}
+
 /// Percent-encodes an object name for a URL path, keeping `/` separators.
 fn encode(name: &str) -> String {
     let mut encoded = String::with_capacity(name.len());
@@ -405,5 +430,24 @@ mod tests {
     #[test]
     fn names_are_encoded_but_keep_their_separators() {
         assert_eq!(encode("p/chunks/v1/a b+c"), "p/chunks/v1/a%20b%2Bc");
+    }
+
+    #[test]
+    fn an_entity_tag_is_matched_against_the_md5_of_the_checksums() {
+        let md5 = md5_hex(&checksums(b"")).unwrap();
+        assert_eq!(md5, "d41d8cd98f00b204e9800998ecf8427e");
+        assert_eq!(md5_hex("crc32c=AAAAAA=="), None);
+        assert_eq!(md5_hex("crc32c=AAAAAA==,md5=AAAA"), None, "not 16 bytes");
+        assert_eq!(
+            tag_is_md5("\"D41D8CD98F00B204E9800998ECF8427E\"", &md5),
+            Some(true)
+        );
+        assert_eq!(
+            tag_is_md5("d41d8cd98f00b204e9800998ecf8427f", &md5),
+            Some(false)
+        );
+        let multipart = "\"d41d8cd98f00b204e9800998ecf8427e-2\"";
+        assert_eq!(tag_is_md5(multipart, &md5), None, "a multipart upload's");
+        assert_eq!(tag_is_md5("17", &md5), None, "a generation");
     }
 }

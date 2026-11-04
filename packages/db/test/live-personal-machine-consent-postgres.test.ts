@@ -10,6 +10,7 @@ import {
   acceptOrganizationInvitation,
   applySessionTurnSettlement,
   claimSessionWorkForAttempt,
+  confirmDrainCold,
   createDb,
   createOrganizationInvitation,
   createSession,
@@ -22,6 +23,8 @@ import {
   initializeSessionStartAtomically,
   isSessionEventPersistenceError,
   issueSelfUserResourceGrant,
+  nestedPostgresMessage,
+  nestedPostgresSqlState,
   peekSessionWork,
   PersonalResourceAttachmentAcceptanceError,
   recoverSessionDispatch,
@@ -1063,6 +1066,84 @@ describe("an agent's move between the owner's personal machines", () => {
       queuedTurnApprovedMachines: [],
     });
     expect((await claim(f.workspaceId, session.id)).turnId).toBeTruthy();
+  }, 120_000);
+});
+
+describe("a running turn on the owner's personal machine", () => {
+  async function runningTurn(f: Fixture) {
+    const session = await chatOnOwnersMachine(f);
+    await submitAs(f, session.id, f.owner, "Fix the build on my desktop", "send", "session");
+    const attempt = await claim(f.workspaceId, session.id);
+    const runtime = {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      sessionId: session.id,
+      subjectId: f.owner,
+      ...attempt,
+      enrollmentId: f.enrollmentId,
+      requireActiveSandbox: true,
+    };
+    expect(await resolvePersonalMachineConnectionForAttempt(client.db, runtime)).toMatchObject({
+      id: f.enrollmentId,
+      connectionInstanceId: "connection-1",
+    });
+    return { session, runtime };
+  }
+
+  test("keeps the machine when the reaper stops the chat's idle managed box", async () => {
+    const f = await fixture();
+    const { session, runtime } = await runningTurn(f);
+    // A viewer opened the chat's own managed box; it idles past its grace and
+    // the reaper stops it while the turn is still working on the machine.
+    await shared.admin`insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        turn_holders, viewer_holders, instance_id, backend, lease_epoch, expires_at)
+      values (${f.accountId}, ${f.workspaceId}, ${session.sandboxGroupId}, 'draining', 0,
+        0, 0, 'box-idle-viewer', 'local', 1, now() - interval '1 second')`;
+    expect(
+      await confirmDrainCold(client.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        sandboxGroupId: session.sandboxGroupId,
+        expectedEpoch: 1,
+        providerStopped: true,
+      }),
+    ).toMatchObject({ wentCold: true });
+    const [pointer] = await shared.admin`select active_sandbox_id, active_epoch
+      from sessions where id = ${session.id}`;
+    expect(pointer).toMatchObject({
+      active_sandbox_id: f.sandboxId,
+      active_epoch: session.activeEpoch + 1,
+    });
+    expect(await resolvePersonalMachineConnectionForAttempt(client.db, runtime)).toMatchObject({
+      id: f.enrollmentId,
+      connectionInstanceId: "connection-1",
+    });
+  }, 120_000);
+
+  test("refuses the machine once the chat moved to its own box, keeping the database reason as the cause", async () => {
+    const f = await fixture();
+    const { session, runtime } = await runningTurn(f);
+    expect(
+      await setActiveSandbox(client.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        sessionId: session.id,
+        subjectId: f.owner,
+        expectedEpoch: session.activeEpoch + 1,
+        targetSandboxId: null,
+      }),
+    ).toMatchObject({ swapped: true });
+    let refused: unknown;
+    try {
+      await resolvePersonalMachineConnectionForAttempt(client.db, runtime);
+    } catch (error) {
+      refused = error;
+    }
+    expect(refused).toBeInstanceOf(Error);
+    expect((refused as Error).cause).toBeDefined();
+    expect(nestedPostgresSqlState(refused)).toBe("42501");
+    expect(nestedPostgresMessage(refused)).toBe("personal machine authority is no longer live");
   }, 120_000);
 });
 

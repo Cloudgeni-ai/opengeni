@@ -235,10 +235,19 @@ export class MeetingPromptCard implements MeetingPromptView {
     const text = promptText(prompt, words);
     const state = {
       token,
-      title: words.title,
+      title:
+        prompt.kind === "join"
+          ? (words.reminderTitle ?? ENGLISH_MEETING_WORDS.reminderTitle)
+          : words.title,
       ...text,
       icon: this.options.icon?.() ?? null,
-      timeoutMs: prompt.kind === "stop" ? 0 : (this.options.timeoutMs ?? MEETING_CARD_TIMEOUT_MS),
+      timeoutMs:
+        prompt.kind === "stop"
+          ? 0
+          : // A reminder stays until a few minutes after its meeting started.
+            prompt.kind === "join"
+            ? prompt.reminder.timeoutMs
+            : (this.options.timeoutMs ?? MEETING_CARD_TIMEOUT_MS),
     };
     const measured = (await pageAnswer(
       window.webContents.executeJavaScript(`render(${JSON.stringify(state)})`),

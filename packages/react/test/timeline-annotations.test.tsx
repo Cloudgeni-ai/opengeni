@@ -955,6 +955,9 @@ describe("timeline annotations", () => {
     const rendered = await renderComponent(<TimelineAnnotationCards annotations={items} />);
     const cards = rendered.container.querySelector<HTMLElement>("[data-og-annotation-cards]");
     expect(cards?.className).toContain("overflow-y-auto");
+    // The stack sits inside the timeline: wheel scrolling over it must chain
+    // to the timeline, so the message never becomes a dead zone.
+    expect(cards?.className).not.toContain("overscroll");
     const notes = rendered.container.querySelectorAll<HTMLElement>("[data-og-annotation-note]");
     expect(notes).toHaveLength(6);
     expect(notes[0]?.className).toContain("line-clamp-4");
