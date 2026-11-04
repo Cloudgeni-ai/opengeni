@@ -2,6 +2,7 @@ import {
   oauthSignupChallengeVerified,
   runWithSignupChallenge,
   verifySignupChallenge,
+  verifySocialSignupChallenge,
 } from "./auth/signup-challenge";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { z } from "zod";
@@ -1317,8 +1318,17 @@ export function createAppComposition(deps: AppDependencies): {
       }
       if (pathname === "/v1/auth/sign-in/social" && c.req.method === "POST") {
         const body = await c.req.raw.clone().json();
-        const verified = deps.settings.signupChallengeEnabled && Boolean(body.signupChallengeToken);
-        if (verified) await verifySignupChallenge(deps.settings, body.signupChallengeToken);
+        const verified = await verifySocialSignupChallenge(
+          deps.settings,
+          body.signupChallengeToken,
+          {
+            onUnverified: (managedAuthCode) =>
+              observability.warn("Social sign-in started without signup challenge proof", {
+                managedAuthCode,
+                provider: body.provider,
+              }),
+          },
+        );
         body.additionalData = {
           ...body.additionalData,
           opengeniSignupChallenge: verified
