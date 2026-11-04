@@ -32,7 +32,9 @@ function revisionHead(revision: number, empty: boolean): string {
  * read as the same context so the channel, the carry and the fold see them.
  */
 const LEGACY_DELETED: readonly string[] = [
+  // This branch's earlier text.
   "The agent this chat belonged to was deleted. Its instructions in the system prompt and in any earlier block like this one no longer apply; continue as a plain chat.",
+  // The stacked agents-contract branch's generic withdrawal text.
   "This chat's agent no longer applies here. Its instructions in the system prompt and in any earlier block like this one no longer apply; continue as a plain chat.",
 ];
 
