@@ -782,10 +782,16 @@ export type TimelineGroup =
         /**
          * Settled time inside this work span in which the agent was not
          * working: capacity waits, and the gap between a failed attempt and
-         * the Retry that reopened the turn. The worked duration and the live
-         * working clock exclude it.
+         * the Retry that reopened the turn, and settled pauses. The worked
+         * duration and the live working clock exclude it.
          */
         pausedMs?: number;
+        /**
+         * Set while a pause is in force over this still-open turn: when it
+         * began. Pause parks the turn for Resume, so it reads as paused with
+         * its clock stopped here, not as working.
+         */
+        pausedAt?: string;
         details: TimelineGroup[];
         /**
          * While the turn is live, its progress notes stay readable above the

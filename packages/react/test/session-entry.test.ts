@@ -211,7 +211,12 @@ describe("session-only entry", () => {
     // Pure send-destination and run-control rules shared with the console and
     // native screens (a turn parked on a usage limit does not hold a Send).
     expect(reactSources.some((id) => id.endsWith("/src/session-status-model.ts"))).toBe(true);
-    expect(reactSources.length).toBe(63);
+    // Pause spans for a custom timeline, from its events and live control:
+    // paused time is not work and a paused turn reads "Paused".
+    expect(reactSources.some((id) => id.endsWith("/src/timeline/use-timeline-pauses.ts"))).toBe(
+      true,
+    );
+    expect(reactSources.length).toBe(64);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

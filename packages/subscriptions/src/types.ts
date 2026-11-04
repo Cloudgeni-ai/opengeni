@@ -77,6 +77,12 @@ export type SubscriptionConnection = {
   entitledModelIds: readonly ModelId[] | null;
   /** Fresh adapter catalog; the chat adapter maps the accepted upstream model to its product id. */
   observedModelSlugs?: readonly string[] | null;
+  /**
+   * The latest catalog observed under the current credential generation, even
+   * once expired. Display reads only (pickers, page loads); placement uses
+   * the fresh catalog above.
+   */
+  lastObservedModelSlugs?: readonly string[] | null;
   /** Observation times for the fresh catalog above; never extended by a read. */
   modelCatalogObservedAt?: number | null;
   modelCatalogExpiresAt?: number | null;

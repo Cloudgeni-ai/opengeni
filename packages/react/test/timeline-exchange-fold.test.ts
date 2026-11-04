@@ -308,6 +308,7 @@ describe("readable per-turn grouping", () => {
     expect(waitingRow?.kind === "activity" && waitingRow.work?.waiting).toEqual({
       label: "Waiting for you",
       since: waiting.occurredAt,
+      waitingOn: "you",
     });
     for (const status of ["cancelled", "failed"]) {
       const terminal = legacy("session.status.changed", { status });

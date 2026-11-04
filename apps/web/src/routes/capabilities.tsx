@@ -144,6 +144,7 @@ import { Button } from "@opengeni/react/ui/button";
 import { DetailPage } from "@opengeni/react/ui/detail-page";
 import { DetailSkeleton } from "@opengeni/react/ui/detail-sheet";
 import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { ErrorText } from "@opengeni/react/ui/error-text";
 import { Notice } from "@opengeni/react/ui/notice";
 import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { useAppContext } from "@opengeni/react/app/app-context";
@@ -1450,10 +1451,10 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       })
       .catch((error: unknown) => {
         if (!active) return;
-        const message =
-          error instanceof Error
-            ? error.message
-            : "Google Drive setup could not be checked. Reload to try again.";
+        const message = userErrorText(
+          error,
+          "Google Drive setup could not be checked. Reload to try again.",
+        );
         setCallbackNotice(message);
         toast.error("Google Drive setup needs attention", { description: message });
       });
@@ -2019,7 +2020,9 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
 
             {callbackNotice ? (
               <Notice tone="failed" title="Couldn't finish connecting" className="mt-4">
-                <p role="alert">{callbackNotice}</p>
+                <p role="alert">
+                  <ErrorText>{callbackNotice}</ErrorText>
+                </p>
                 <div className="mt-2 flex flex-wrap gap-1.5">
                   <Button
                     type="button"

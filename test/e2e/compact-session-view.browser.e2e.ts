@@ -98,6 +98,7 @@ describe("compact session view on the live local workspace route (API fixture)",
         mutationStarted: boolean;
         /** The server refuses the archive (something keeps the chat live). */
         blockArchive?: boolean;
+        retentionRequests?: Array<Record<string, unknown>>;
         readOnly?: boolean;
         adminOnly?: boolean;
         permissionMode?: "legacy" | "explicit";
@@ -248,6 +249,14 @@ describe("compact session view on the live local workspace route (API fixture)",
       if (path === "/v1/workspaces") return json([workspace, otherWorkspace]);
       if (path === `/v1/workspaces/${workspaceId}`) return json(workspace);
       if (path === `/v1/workspaces/${otherWorkspaceId}`) return json(otherWorkspace);
+      if (archiveFixture && path.endsWith(`/sessions/${archiveFixture.root.id}/retention`)) {
+        const fixture = archiveFixture;
+        const request = route.request().postDataJSON();
+        fixture.retentionRequests ??= [];
+        fixture.retentionRequests.push(request);
+        fixture.blockArchive = request.keepLive === true;
+        return json({ ...fixture.root, retention: { keepLive: request.keepLive === true } });
+      }
       if (archiveFixture && path.endsWith(`/sessions/${archiveFixture.root.id}/archive`)) {
         const fixture = archiveFixture;
         const request = route.request().postDataJSON();
@@ -711,7 +720,7 @@ describe("compact session view on the live local workspace route (API fixture)",
     expect(archiveFixture.archiveRequests).toEqual([{ archived: true }]);
   }, 45_000);
 
-  test("a refused archive brings the chat back and says what to change", async () => {
+  test("a chat kept active brings the chat back and offers to turn it off and archive", async () => {
     const root = { ...rows[0]!, title: "Keep me", archived: false, archivedAt: null };
     archiveFixture = {
       root,
@@ -733,10 +742,20 @@ describe("compact session view on the live local workspace route (API fixture)",
       .getByRole("button", { name: "Archive session", exact: true })
       .and(page.locator(`[data-session-actions="${root.id}"]`))
       .click();
-    await page.getByText("Couldn't archive the chat.", { exact: true }).waitFor();
-    await page.getByText(/"Keep this chat active" is on/).waitFor();
+    const refusal = page.locator("[data-sonner-toast]").filter({
+      hasText: "Couldn't archive the chat.",
+    });
+    await refusal.getByText("“Keep this chat active” is on.", { exact: true }).waitFor();
+    // An expected refusal: no status code or request reference, one action.
+    expect(await refusal.innerText()).not.toMatch(/API 409|Reference/u);
     await rootRow.waitFor();
     expect(archiveFixture.mutationStarted).toBe(false);
+
+    await refusal.getByRole("button", { name: "Turn off and archive", exact: true }).click();
+    await page.getByText("Archived “Keep me”", { exact: true }).waitFor();
+    expect(archiveFixture.retentionRequests).toEqual([{ keepLive: false }]);
+    expect(archiveFixture.archiveRequests).toEqual([{ archived: true }, { archived: true }]);
+    expect(archiveFixture.mutationStarted).toBe(true);
   }, 45_000);
 
   for (const permissionMode of ["legacy", "explicit"] as const)

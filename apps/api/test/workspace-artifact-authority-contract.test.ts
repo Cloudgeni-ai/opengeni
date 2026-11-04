@@ -28,8 +28,6 @@ describe("workspace artifact causal-human authority contract", () => {
       expect(workspaceArtifacts).toContain(`| "${tool}"`);
     }
     for (const required of [
-      "turn.initiating_human_subject_id",
-      "case when turn.initiator_kind = 'subject' then turn.initiator_subject_id end",
       "session.first_party_mcp_tools @> jsonb_build_array",
       `session.first_party_mcp_permissions @> '["artifacts:publish"]'::jsonb`,
       "turn.active_attempt_id = ${input.sourceAttemptId}::uuid",
@@ -41,6 +39,8 @@ describe("workspace artifact causal-human authority contract", () => {
     ]) {
       expect(workspaceArtifacts).toContain(required);
     }
+    // A run without a person passes the same exact fences.
+    expect(workspaceArtifacts).not.toContain("turn.initiating_human_subject_id");
   });
 
   test("documents the immutable selector without turning it into standalone authority", () => {

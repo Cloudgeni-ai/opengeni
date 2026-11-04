@@ -1,6 +1,7 @@
 import type { CodexRateLimitResetCreditsAccountResult } from "@opengeni/db";
 import type { CodexResetRedemptionRecovery } from "@opengeni/db";
 import { codexOverviewProviderCall, type CodexProviderCall } from "./codex-overview-budget";
+import { codexCatalogModels, codexConnectOfferedModels } from "./codex-connect-models";
 // Codex (ChatGPT) subscription connect / status / usage routes.
 //
 // Connect uses the device-code flow split into two stateless calls: `start`
@@ -12,10 +13,8 @@ import { codexOverviewProviderCall, type CodexProviderCall } from "./codex-overv
 
 import {
   environmentsEncryptionKeyBytes,
-  configuredModels,
   getSettings,
   productLabelForModelId,
-  withCodexCatalogProvider,
   type Settings,
 } from "@opengeni/config";
 import {
@@ -216,19 +215,13 @@ export function codexModelsForPicker(
   providerLabel: string;
   api: "responses";
 }> {
-  return configuredModels(withCodexCatalogProvider(settings))
-    .filter(
-      (model) =>
-        model.providerId === CODEX_PROVIDER_ID &&
-        (supportedSlugs === undefined || supportedSlugs.includes(model.upstreamModelId)),
-    )
-    .map((model) => ({
-      id: model.id,
-      label: model.label,
-      provider: CODEX_PROVIDER_ID,
-      providerLabel: CODEX_PROVIDER_LABEL,
-      api: "responses" as const,
-    }));
+  return codexCatalogModels(settings, supportedSlugs).map((model) => ({
+    id: model.id,
+    label: model.label,
+    provider: CODEX_PROVIDER_ID,
+    providerLabel: CODEX_PROVIDER_LABEL,
+    api: "responses" as const,
+  }));
 }
 import { createSignedState, readSignedState } from "@opengeni/github";
 import {
@@ -1030,6 +1023,14 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
         label: id.email ?? id.chatgptAccountId ?? null,
         connectedBySubjectId: (await managedCookieHuman(c, deps))?.subjectId ?? null,
       },
+      offeredModels: async () =>
+        await codexConnectOfferedModels({
+          settings: (await resolveCatalogSettings(db, settings)).settings,
+          accessToken: tokens.accessToken,
+          chatgptAccountId: id.chatgptAccountId,
+          isFedramp: id.isFedramp,
+          fetchImpl: deps.codexFetch as CodexFetch | undefined,
+        }),
     });
   });
 
@@ -1290,6 +1291,14 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
         label: id.email ?? id.chatgptAccountId ?? null,
         connectedBySubjectId: connectingHuman?.subjectId ?? null,
       },
+      offeredModels: async () =>
+        await codexConnectOfferedModels({
+          settings: (await resolveCatalogSettings(db, settings)).settings,
+          accessToken: tokens.accessToken,
+          chatgptAccountId: id.chatgptAccountId,
+          isFedramp: id.isFedramp,
+          fetchImpl: deps.codexFetch as CodexFetch | undefined,
+        }),
     });
   });
 

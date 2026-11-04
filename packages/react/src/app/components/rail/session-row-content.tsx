@@ -42,6 +42,29 @@ export function ActiveWorkMark({ className }: { className?: string | undefined }
   );
 }
 
+/**
+ * Lucide's pause glyph (filled, as the header's), drawn inline: importing the
+ * icon module here would pull it into the eager rail chunk's shared icon group.
+ */
+function PausedWorkMark() {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      data-og-rail-paused=""
+      className="size-3 shrink-0 text-fg-subtle"
+    >
+      <rect x="14" y="3" width="5" height="18" rx="1" />
+      <rect x="5" y="3" width="5" height="18" rx="1" />
+    </svg>
+  );
+}
+
 /** The one descendant-aware status marker shared by rows and section headers. */
 function RailAggregateDot({ summary }: { summary: RailAggregateStatus }) {
   if (summary.kind === "neutral") return null;
@@ -60,6 +83,10 @@ function RailAggregateDot({ summary }: { summary: RailAggregateStatus }) {
   if (summary.kind === "waiting") {
     // Parked until input or its wake-up time: nothing is executing, so no spinner.
     return <HourglassIcon aria-hidden="true" className="size-3 shrink-0 text-fg-subtle" />;
+  }
+  if (summary.kind === "paused") {
+    // Work parked by Pause: it resumes where it stopped, so no spinner.
+    return <PausedWorkMark />;
   }
   if (summary.kind === "active_work") {
     return <ActiveWorkMark />;

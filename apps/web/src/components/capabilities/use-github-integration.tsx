@@ -128,8 +128,11 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   const catalogLoading = context.repoBusy || !context.githubCatalogReady;
   const personalConnection = context.personalGitHubStatus?.connection ?? null;
   const personalConnected = personalConnection?.status === "active";
+  // A disconnected (revoked) row offers Connect, not Reconnect.
   const personalNeedsAttention = Boolean(
-    personalConnection && personalConnection.status !== "active",
+    personalConnection &&
+    personalConnection.status !== "active" &&
+    personalConnection.status !== "revoked",
   );
   const bound = status?.status === "bound" && installations.length > 0;
   // Stored installations stay unlinkable even when none is active (suspended,
@@ -429,7 +432,8 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   const personalLogin = personalConnection
     ? String(personalConnection.metadata.githubLogin ?? "connected")
     : null;
-  const personalRepositoryCount = context.personalGitHubSelection?.repositories.length ?? 0;
+  // Unknown until the selection loads: a failed read is not "0 repos".
+  const personalRepositoryCount = context.personalGitHubSelection?.repositories.length ?? null;
   const startPersonalConnect = (reconnecting: boolean) => {
     // Return from GitHub straight into the repository chooser.
     markPersonalGitHubRepositoryChooser(workspaceId);
@@ -441,7 +445,10 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
     ...PERSONAL_GITHUB_SECTION,
     ...(personalConnected
       ? {
-          status: `Connected as @${personalLogin} · ${personalRepositoryCount === 1 ? "1 repo" : `${personalRepositoryCount} repos`}`,
+          status:
+            personalRepositoryCount === null
+              ? `Connected as @${personalLogin}`
+              : `Connected as @${personalLogin} · ${personalRepositoryCount === 1 ? "1 repo" : `${personalRepositoryCount} repos`}`,
         }
       : personalNeedsAttention
         ? { status: `@${personalLogin} needs to reconnect.` }

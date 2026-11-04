@@ -375,6 +375,7 @@ describe("session-state interrupt settlement", () => {
         temporalWorkflowRunId: "run-1",
         temporalActivityId: "activity-1",
         activitySettled: true,
+        workerProcessExitDeadlineMs: 115_000,
       },
     ]);
     expect(publishedEvents).toEqual([
@@ -440,6 +441,7 @@ describe("session-state interrupt settlement", () => {
         temporalWorkflowRunId: "run-quiesced",
         temporalActivityId: "activity-quiesced",
         activitySettled: true,
+        workerProcessExitDeadlineMs: 115_000,
       },
     ]);
   });
