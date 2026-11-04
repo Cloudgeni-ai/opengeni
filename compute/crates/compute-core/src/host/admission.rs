@@ -179,8 +179,12 @@ pub enum CreateRoom {
     Fits,
     /// Only local disk is short, and by no more than what bookings that
     /// ended since the last reading stood for (see
-    /// [`Host::disk_awaits_reading`]): the next reading decides it. Says
-    /// what of the disk is short, what it needs and what is free now.
+    /// [`Host::disk_awaits_reading`]) and what disk relief frees without
+    /// losing anything (see [`Host::reclaimable_disk`]): book what it
+    /// needs with [`crate::Input::Wants`] meanwhile, so relief frees it,
+    /// and check again after each reading, which decides it once relief
+    /// is in. Says what of the disk is short, what it needs and what is
+    /// free now.
     AwaitsReading(Resource, u64, u64),
     /// The resource that is short, what it needs and what is free.
     Short(Resource, u64, u64),
@@ -385,8 +389,9 @@ impl Host {
     /// instant relief a wake may wait for, processor time, and the local
     /// disk the wake books for a sandbox that sleeps by `policy`, from
     /// object storage with `remote`, together with `files`, what is written
-    /// for it before it joins the core (its first files). What it books
-    /// already with [`crate::Input::Creating`] counts as free for it.
+    /// for it before it joins the core (its first files), counting disk
+    /// relief. What it books already with [`crate::Input::Creating`] and
+    /// [`crate::Input::Wants`] counts as free for it.
     #[must_use]
     pub fn create_room(
         &self,
@@ -407,18 +412,16 @@ impl Host {
             }
         }
         let mut awaits_reading = None;
-        if let Some(mut room) = self.disk_room() {
-            for slot in &queued {
-                // What a wake already queued cannot book does not change
-                // whether this one can.
-                let _ = room.take(slot.disk_need());
-            }
+        if let Some((mut room, relief)) = self.queued_disk_room(now) {
             if let Some(own) = own {
                 room.give_back(own.disk());
             }
+            if let Some(wanted) = self.wants.get(&sandbox) {
+                room.give_back(*wanted);
+            }
             let disk = FirstWake::new(size, policy, remote, now).disk().add(files);
             if let Err(short) = room.take(disk) {
-                if !room.may_take(disk, self.disk_spent) {
+                if !room.may_take(disk, relief) {
                     return CreateRoom::Short(short.resource, short.needed, short.free);
                 }
                 awaits_reading = Some(short);
@@ -436,7 +439,7 @@ impl Host {
     }
 
     /// Sandboxes whose wake into memory is queued, in queue order.
-    fn queued_wakes(&self) -> Vec<&Sandbox> {
+    pub(super) fn queued_wakes(&self) -> Vec<&Sandbox> {
         Step::ALL
             .into_iter()
             .filter(|step| needs_memory(*step))
@@ -551,8 +554,9 @@ impl Host {
     /// processor time instantly. A wake the disk cannot book is refused at
     /// once, unless it is short by no more than what bookings that ended
     /// since the last disk reading stood for (see
-    /// [`Host::disk_awaits_reading`]): it waits, queued, for the next
-    /// reading to decide it. One whose memory does not fit waits only if
+    /// [`Host::disk_awaits_reading`]) and what disk relief frees: it
+    /// waits, queued, while [`Host::keep_disk`] frees that, for the
+    /// readings after to decide it. One whose memory does not fit waits only if
     /// ending idle VM processes that are already saved frees enough for it
     /// and every wake waiting before it; otherwise it is refused at once.
     /// Returns whether anything must be reconciled again.
@@ -566,7 +570,7 @@ impl Host {
         let index = step.index();
         let limit = self.policy.limits.get(step);
         let percent = self.compressed_percent();
-        let unread = self.disk_spent;
+        let relief = self.disk_spent.add(self.disk_relief(now));
         let mut changed = false;
         let keys: Vec<QueueKey> = self.queues[index].iter().copied().collect();
         for key in keys {
@@ -599,11 +603,11 @@ impl Host {
             if let Some(disk) = left.disk.as_mut()
                 && let Err(short) = disk.take(save)
             {
-                if disk.may_take(save, unread) {
-                    // Perhaps there is room: the next reading shows. What
-                    // it needs is charged meanwhile, its processor time
-                    // among it, so a later wake does not take room it may
-                    // get.
+                if disk.may_take(save, relief) {
+                    // Perhaps there is room, or disk relief makes it: the
+                    // readings after show. What it needs is charged
+                    // meanwhile, its processor time among it, so a later
+                    // wake does not take room it may get.
                     disk.charge(save);
                     continue;
                 }
@@ -677,7 +681,8 @@ impl Host {
     }
 
     /// Lets sandboxes refused earlier but still held try again once their
-    /// wake fits, memory counting instant relief, processor time and disk,
+    /// wake fits, memory counting instant relief, processor time and disk
+    /// counting disk relief,
     /// next to every wake already queued for memory: a retried wake queues
     /// behind those, and [`Self::admit_measured`] charges it their need
     /// too, so a sandbox let through here is not refused again for the same
@@ -702,12 +707,13 @@ impl Host {
                 .map(|slot| i128::from(slot.cpu_need()))
                 .sum::<i128>();
         }
+        let relief = self.disk_spent.add(self.disk_relief(now));
         let mut disk = self.disk_room();
         if let Some(room) = disk.as_mut() {
             for slot in &queued {
-                // What a wake already queued cannot book does not change
-                // whether a retried one can.
-                let _ = room.take(slot.disk_need());
+                // What a wake already queued cannot book even with disk
+                // relief does not change whether a retried one can.
+                room.book(slot.disk_need(), relief);
             }
         }
         let mut ready = Vec::new();
@@ -731,7 +737,7 @@ impl Host {
                 })
                 && disk
                     .as_mut()
-                    .is_none_or(|room| room.take(slot.disk_need()).is_ok());
+                    .is_none_or(|room| room.book(slot.disk_need(), relief));
             if fits {
                 wanted += need;
                 claimed += returning;

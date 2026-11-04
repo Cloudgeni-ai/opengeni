@@ -149,12 +149,19 @@ export async function startMeetingSummary(
 
   const instructions =
     "Write the notes for exactly the meeting in the first message, as it asks, then stop.";
-  // Off everything but reading this workspace's meetings.
+  // Off everything but reading this workspace's meetings, plus privacy_facts:
+  // the owner can keep talking in this chat and may ask how it is processed.
   const agent = resolveSessionAgentConfigForCreate({
     settings,
     creator: "automation",
     request: {
-      capabilities: { from: "none", knowledge: true, humanInput: false, skills: false },
+      capabilities: {
+        from: "none",
+        knowledge: true,
+        humanInput: false,
+        skills: false,
+        privacyFacts: true,
+      },
     },
     instructions,
     workspaceSettings,

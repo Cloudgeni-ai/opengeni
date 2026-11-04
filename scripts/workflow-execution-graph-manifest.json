@@ -26,7 +26,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "e7484baf15ae658192d9507d5cf6d3741da12d06488ad86139c82183deca6085"
+      "sha256": "2bf9bd2fd7a954c3a7f66eba5e4aca5351c7aeada957b003b3eb758b81df0f61"
     },
     {
       "path": ".github/workflows/compact-session-view.yml",
@@ -102,7 +102,7 @@
     },
     {
       "path": ".github/workflows/publish-packages.yml",
-      "sha256": "a57642df55f10cec17ae9c485355b21a23ee1492590be1200ab937b6f0c53c37"
+      "sha256": "d3ff6b3faeb2fc01ac1e53e5785bf67b16f43afef97f27f4e21d293bbcbe1919"
     },
     {
       "path": ".github/workflows/publish-stable.yml",
@@ -788,6 +788,12 @@
       "job": "deployment",
       "step": "Validate Terraform",
       "sha256": "6d34c2156e766f0928e5d3a9fb18c42909757dd992d3ed0475dbf060f68b40e6"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "desktop-image",
+      "step": "Room on the runner",
+      "sha256": "44c950e02f3afcd144d998d669d3d1458590376898a0581f3de005449b61791e"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -1621,7 +1627,7 @@
       "workflow": ".github/workflows/publish-packages.yml",
       "job": "publish",
       "step": "Require successful protected source CI",
-      "sha256": "e7e60563d07547dbbd75973d2ba0e5dd9e5e0e8627f441b323372c9a5c10de9a"
+      "sha256": "ff44ed1f88c20ad298c21582914aefa5e02631294fa129675510eb4c4f6d89a5"
     },
     {
       "workflow": ".github/workflows/publish-packages.yml",

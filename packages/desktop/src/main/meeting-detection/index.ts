@@ -20,6 +20,12 @@ import {
   type DesktopRecordingMeeting,
 } from "../../contract";
 import { ENGLISH_MEETING_WORDS, fillMeetingWords, type MeetingWords } from "./words";
+import {
+  CalendarReminders,
+  parseUpcomingMeetings,
+  type CalendarMeeting,
+  type JoinReminder,
+} from "./reminders";
 
 /** One process using a microphone, as the helper reports it. */
 export interface MicrophoneUser {
@@ -307,12 +313,34 @@ export function parseWatchLine(line: string): WatchEvent | null {
 export const PROMPT_AFTER_MS = 3_000;
 /** A call app that lets go of the microphone this long has ended its call. */
 export const ENDED_AFTER_MS = 8_000;
+/**
+ * After Not now, an app off the microphone for less than this is still in
+ * the call the person turned down (a long mute, a rejoin), so it isn't asked
+ * about again. A call during a calendar meeting also stays turned down until
+ * that meeting ends.
+ */
+export const DECLINED_GAP_MS = 5 * 60_000;
 
 export type MeetingPrompt =
   | { kind: "record"; app: CallApp }
   | { kind: "stop"; app: CallApp }
   /** Not a question: a call started recording without asking. Its button stops it. */
-  | { kind: "recording"; app: CallApp };
+  | { kind: "recording"; app: CallApp }
+  /**
+   * A calendar meeting about to start: its button joins it and starts its
+   * recording. `app` is the service its link joins.
+   */
+  | { kind: "join"; app: CallApp; reminder: JoinReminder };
+
+/** The prompt for a reminder before a calendar meeting. */
+export function joinPrompt(reminder: JoinReminder): MeetingPrompt {
+  const service = reminder.meeting.service;
+  return {
+    kind: "join",
+    app: { id: "calendar", name: service, browser: false, title: service },
+    reminder,
+  };
+}
 
 export interface ShownPrompt {
   close(): void;
@@ -367,6 +395,12 @@ export class MeetingPrompter {
   private autoStarted: { at: number; app: CallApp } | null = null;
   /** The recording going on was started without asking. */
   private automatic = false;
+  /**
+   * Apps whose call the person turned down with Not now: until when (the end
+   * of the calendar meeting it was, or null for none) and when they last held
+   * the microphone.
+   */
+  private readonly declinedCalls = new Map<string, { until: number | null; lastSeen: number }>();
 
   constructor(
     private readonly own: OwnApp,
@@ -398,18 +432,25 @@ export class MeetingPrompter {
       if (call.active && !active.has(id)) {
         call.active = false;
         call.lastSeen = now;
+        // Turned down: the gap that ends that runs from when it let go.
+        const declined = this.declinedCalls.get(id);
+        if (declined) declined.lastSeen = now;
       }
     }
     for (const [id, app] of active) {
       const call = this.calls.get(id);
       if (!call) {
-        // A call already going on when recording started isn't asked about.
-        this.calls.set(id, { app, since: now, lastSeen: now, active: true, asked: this.recording });
+        // A call already going on when recording started isn't asked about,
+        // nor is the one the person turned down coming back.
+        const asked = this.recording || this.stillDeclined(id, now);
+        this.calls.set(id, { app, since: now, lastSeen: now, active: true, asked });
       } else {
         // Back within the grace period (a mute, a device switch): the same call.
         call.active = true;
         call.lastSeen = now;
       }
+      const declined = this.declinedCalls.get(id);
+      if (declined) declined.lastSeen = now;
     }
     if (this.recording) for (const id of active.keys()) this.recorded.add(id);
     this.evaluate(now);
@@ -472,9 +513,41 @@ export class MeetingPrompter {
     if (this.shown?.prompt === prompt) this.shown = null;
   }
 
+  /**
+   * The person chose Not now on the question about `app`'s call: it isn't
+   * asked about again during that call. `until` is the end of the calendar
+   * meeting it is, if any; otherwise the call lasts while the app comes back
+   * to the microphone within {@link DECLINED_GAP_MS}.
+   */
+  declined(app: CallApp, now: number, until: number | null = null): void {
+    this.declinedCalls.set(app.id, { until, lastSeen: now });
+  }
+
+  /**
+   * Where `appId`'s call is: "on" the microphone, or off it only briefly (a
+   * mute); "away" when a call the person turned down has been off it for
+   * less than {@link DECLINED_GAP_MS} (a long mute, or it ended); else "ended".
+   */
+  callState(appId: string, now: number): "on" | "away" | "ended" {
+    if (this.calls.has(appId)) return "on";
+    const declined = this.declinedCalls.get(appId);
+    return declined && now - declined.lastSeen < DECLINED_GAP_MS ? "away" : "ended";
+  }
+
   /** The call apps holding the microphone now. */
   activeCalls(): string[] {
     return [...this.calls.values()].filter((call) => call.active).map((call) => call.app.id);
+  }
+
+  private stillDeclined(id: string, now: number): boolean {
+    const declined = this.declinedCalls.get(id);
+    if (!declined) return false;
+    // A meeting running over keeps its call turned down through a mute too.
+    const still =
+      now - declined.lastSeen < DECLINED_GAP_MS ||
+      (declined.until !== null && now < declined.until);
+    if (!still) this.declinedCalls.delete(id);
+    return still;
   }
 
   private present(prompt: MeetingPrompt): void {
@@ -500,10 +573,37 @@ export interface MeetingPromptText {
   dismiss: string;
 }
 
+/** When a reminder's meeting starts, as the card says it when it shows. */
+function startsWhen(meeting: CalendarMeeting, at: number, words: MeetingWords): string {
+  const english = ENGLISH_MEETING_WORDS;
+  const left = meeting.startsAt - at;
+  if (left > 30_000) {
+    return fillMeetingWords(words.startsIn ?? english.startsIn, {
+      minutes: String(Math.max(1, Math.round(left / 60_000))),
+    });
+  }
+  if (left > -60_000) return words.startingNow ?? english.startingNow;
+  return fillMeetingWords(words.startedAgo ?? english.startedAgo, {
+    minutes: String(Math.floor(-left / 60_000)),
+  });
+}
+
 export function promptText(
   prompt: MeetingPrompt,
   words: MeetingWords = ENGLISH_MEETING_WORDS,
 ): MeetingPromptText {
+  if (prompt.kind === "join") {
+    const { meeting, replace, shownAt } = prompt.reminder;
+    const english = ENGLISH_MEETING_WORDS;
+    return {
+      question: meeting.title || (words.untitledMeeting ?? english.untitledMeeting),
+      reason: `${startsWhen(meeting, shownAt, words)} · ${meeting.service}`,
+      action: replace
+        ? (words.joinAndSwitch ?? english.joinAndSwitch)
+        : (words.joinAndStart ?? english.joinAndStart),
+      dismiss: words.notNow,
+    };
+  }
   const values = { app: prompt.app.name };
   if (prompt.kind === "record") {
     return {
@@ -532,8 +632,22 @@ export function promptText(
   };
 }
 
-/** The request the page gets when the person acts on a prompt: a recording's card stops it. */
+/**
+ * The request the page gets when the person acts on a prompt: a recording's
+ * card stops it; a reminder's records its calendar event, named after it
+ * unless it is private on the calendar.
+ */
 export function promptRequest(prompt: MeetingPrompt): DesktopMeetingRequest {
+  if (prompt.kind === "join") {
+    const { meeting, replace } = prompt.reminder;
+    return {
+      kind: "record",
+      app: meeting.service,
+      title: meeting.private || !meeting.title ? meeting.service : meeting.title,
+      calendarEvent: { provider: meeting.provider, id: meeting.id },
+      ...(replace ? { replace: true } : {}),
+    };
+  }
   return prompt.kind === "record"
     ? { kind: "record", app: prompt.app.name, title: prompt.app.title }
     : { kind: "stop", app: prompt.app.name };
@@ -566,6 +680,15 @@ export class MeetingDetectionStore {
 
   setAutoRecord(autoRecord: boolean): void {
     this.write({ ...this.file(), recordCallsWithoutAsking: autoRecord });
+  }
+
+  /** Reminders before calendar meetings: on unless turned off. */
+  calendarReminders(): boolean {
+    return this.file().remindBeforeMeetings !== false;
+  }
+
+  setCalendarReminders(on: boolean): void {
+    this.write({ ...this.file(), remindBeforeMeetings: on });
   }
 
   canRecord(): boolean {
@@ -651,6 +774,9 @@ export interface MeetingDetectionOptions {
     /** Recording a call app's calls without asking; off when the store doesn't keep it. */
     autoRecord?(): boolean;
     setAutoRecord?(autoRecord: boolean): void;
+    /** Reminders before calendar meetings; on when the store doesn't keep it. */
+    calendarReminders?(): boolean;
+    setCalendarReminders?(on: boolean): void;
     canRecord(): boolean;
     setCanRecord(canRecord: boolean): void;
   };
@@ -663,10 +789,28 @@ export interface MeetingDetectionOptions {
    * None waits for another page to take it. The newest by default.
    */
   chooseTarget?: (pages: readonly MeetingPage[]) => MeetingPage | undefined;
+  /**
+   * Reminders before the active account's calendar meetings, with one click
+   * to join and start recording. None without it.
+   */
+  calendar?: MeetingCalendar;
   /** What detection did, a line at a time. Lines name the call app's id, nothing about the call. */
   log(message: string, error?: unknown): void;
   spawnProcess?: typeof spawn;
   now?: () => number;
+}
+
+/** Where reminders before calendar meetings come from, and how a meeting is joined. */
+export interface MeetingCalendar {
+  /** The active, signed-in account; only it reminds, and records. */
+  account(): { id: string } | null;
+  /**
+   * The account's upcoming meetings from its server (`GET …/upcoming-meetings`),
+   * as the server sent them; null when they can't be read now.
+   */
+  upcoming(accountId: string): Promise<unknown>;
+  /** Open a meeting's https join link, in its app or the browser. */
+  openUrl(url: string): void;
 }
 
 const RESTART_MIN_MS = 1_000;
@@ -703,6 +847,11 @@ export class MeetingDetection {
   private readonly recordingListeners = new Set<() => void>();
   private pending: { request: DesktopMeetingRequest; timer: NodeJS.Timeout } | null = null;
   private cannotRecord: NodeJS.Timeout | null = null;
+  private readonly reminders: CalendarReminders | null;
+  /** Since when a page here records, or null. */
+  private recordingSince: number | null = null;
+  /** The card's current question, and what to do when another takes its place. */
+  private onCard: { prompt: MeetingPrompt; replaced: () => void } | null = null;
 
   constructor(private readonly options: MeetingDetectionOptions) {
     this.prompter = new MeetingPrompter(options.own, (prompt) => this.present(prompt), {
@@ -716,21 +865,71 @@ export class MeetingDetection {
         this.deliver(promptRequest({ kind: "stop", app }), { quiet: true });
       },
     });
+    const calendar = options.calendar;
+    this.reminders = calendar
+      ? new CalendarReminders({
+          account: () => calendar.account(),
+          upcoming: async (accountId) => parseUpcomingMeetings(await calendar.upcoming(accountId)),
+          enabled: () => this.remindersWanted(),
+          // Only a recording in the account the meeting would record in is
+          // switched; one in another account goes on.
+          recordingSince: () => (this.targetRecords() ? this.recordingSince : null),
+          // A meeting whose call the person turned down isn't offered while it goes on.
+          callState: (appId) => this.prompter.callState(appId, this.now()),
+          // A call that just started, or one that ended, is asked about first.
+          busy: () => this.onCard?.prompt.kind === "record" || this.onCard?.prompt.kind === "stop",
+          present: (reminder, done) => this.showCard(joinPrompt(reminder), done),
+          join: (reminder) => {
+            // Recording starts in the background, and the meeting opens last,
+            // in front, so the window doesn't cover it.
+            this.deliver(promptRequest(joinPrompt(reminder)), { quiet: true });
+            try {
+              calendar.openUrl(reminder.meeting.joinUrl);
+            } catch (error) {
+              this.options.log("Meeting reminders: couldn't open the meeting's link.", error);
+            }
+          },
+          onCalendar: () => this.changed(),
+          log: (message, error) => this.options.log(message, error),
+          ...(options.now ? { now: options.now } : {}),
+        })
+      : null;
   }
 
   status(): DesktopMeetingDetectionStatus {
+    const calendar = this.reminders?.calendar() ?? null;
     return {
       enabled: this.options.store.enabled(),
       autoRecord: this.autoRecord(),
       available: this.usable(),
+      ...(this.reminders ? { calendarReminders: this.calendarRemindersOn() } : {}),
+      ...(this.reminders && calendar ? { calendar } : {}),
       ...(this.problem ? { problem: this.problem } : {}),
     };
   }
 
+  /**
+   * The active account may have changed: a reminder for the one before goes,
+   * and the new one's calendar is read. Call it whenever accounts change.
+   */
+  accountChanged(): void {
+    this.reminders?.accountChanged();
+  }
+
+  /** Read the calendar again soon, e.g. after the computer wakes. */
+  refreshCalendar(): void {
+    this.reminders?.refresh();
+  }
+
+  /** An app window came to the front: without a calendar, check whether one was just connected. */
+  windowFocused(): void {
+    this.reminders?.recheckCalendar();
+  }
+
   update(change: unknown): DesktopMeetingDetectionStatus {
-    const { enabled, autoRecord } =
+    const { enabled, autoRecord, calendarReminders } =
       change && typeof change === "object"
-        ? (change as { enabled?: unknown; autoRecord?: unknown })
+        ? (change as { enabled?: unknown; autoRecord?: unknown; calendarReminders?: unknown })
         : {};
     if (typeof enabled === "boolean" && enabled !== this.options.store.enabled()) {
       this.options.store.setEnabled(enabled);
@@ -747,6 +946,17 @@ export class MeetingDetection {
       this.options.log(
         `Meeting detection: recording without asking turned ${autoRecord ? "on" : "off"}.`,
       );
+      this.changed();
+    }
+    if (
+      typeof calendarReminders === "boolean" &&
+      this.reminders &&
+      calendarReminders !== this.calendarRemindersOn() &&
+      this.options.store.setCalendarReminders
+    ) {
+      this.options.store.setCalendarReminders(calendarReminders);
+      this.options.log(`Meeting reminders: turned ${calendarReminders ? "on" : "off"}.`);
+      this.apply();
       this.changed();
     }
     return this.status();
@@ -806,7 +1016,10 @@ export class MeetingDetection {
         canOpen: false,
       });
     }
-    this.prompter.setRecording(this.recordingPages.size > 0, now);
+    const any = this.recordingPages.size > 0;
+    if (!any) this.recordingSince = null;
+    else this.recordingSince ??= now;
+    this.prompter.setRecording(any, now);
     for (const listener of this.recordingListeners) listener();
   }
 
@@ -878,25 +1091,55 @@ export class MeetingDetection {
     this.prompter.observe([], this.now());
   }
 
+  /** Stop the helper and the reminders, as the app quits. */
+  shutdown(): void {
+    this.stop();
+    this.reminders?.stop();
+  }
+
   private present(prompt: MeetingPrompt): ShownPrompt {
     const app = prompt.app.id;
     this.options.log(`Meeting detection: ${PRESENTED[prompt.kind]} (${app}).`);
-    let open = true;
-    const shown = this.options.view.show(prompt, (outcome) => {
-      if (!open) return;
-      open = false;
+    return this.showCard(prompt, (outcome) => {
       this.prompter.dismissed(prompt);
       this.options.log(`Meeting detection: ${OUTCOMES[outcome]} (${app}).`);
+      if (outcome === "dismissed" && prompt.kind === "record") {
+        // Not now: not during this call, and not for the calendar meeting it is.
+        const now = this.now();
+        const meeting = this.reminders?.declinedCall(now, prompt.app.id) ?? null;
+        this.prompter.declined(prompt.app, now, meeting?.endsAt ?? null);
+      }
       // Stopping a recording that started without asking stays in the background.
       if (outcome === "chosen") {
         this.deliver(promptRequest(prompt), { quiet: prompt.kind === "recording" });
       }
     });
+  }
+
+  /**
+   * One card at a time, for calls and reminders alike: a new question takes
+   * the place of the one showing, which then counts as timed out.
+   */
+  private showCard(
+    prompt: MeetingPrompt,
+    done: (outcome: MeetingPromptOutcome) => void,
+  ): ShownPrompt {
+    this.onCard?.replaced();
+    let open = true;
+    const finish = (outcome: MeetingPromptOutcome) => {
+      if (!open) return;
+      open = false;
+      if (this.onCard?.prompt === prompt) this.onCard = null;
+      done(outcome);
+    };
+    this.onCard = { prompt, replaced: () => finish("expired") };
+    const shown = this.options.view.show(prompt, finish);
     return {
       close: () => {
         if (!open) return;
         open = false;
-        this.options.log(`Meeting detection: took the question back (${app}).`);
+        if (this.onCard?.prompt === prompt) this.onCard = null;
+        this.options.log(`Meeting detection: took the question back (${prompt.app.id}).`);
         shown.close();
       },
     };
@@ -936,6 +1179,14 @@ export class MeetingDetection {
     if (!page) return false;
     page.send(DESKTOP_IPC.meetingDetectionRequest, request);
     return true;
+  }
+
+  /** Whether the page a choice would go to (the active account's) records. */
+  private targetRecords(): boolean {
+    if (this.recordingPages.size === 0) return false;
+    const pages = this.livePages();
+    const page = this.options.chooseTarget ? this.options.chooseTarget(pages) : pages.at(-1);
+    return page !== undefined && this.recordingPages.has(page);
   }
 
   private livePages(): MeetingPage[] {
@@ -993,7 +1244,20 @@ export class MeetingDetection {
     return this.options.store.autoRecord?.() === true;
   }
 
+  private calendarRemindersOn(): boolean {
+    return this.options.store.calendarReminders?.() !== false;
+  }
+
+  /** Reminders run while they're on and a page here can record, whether or not calls are noticed. */
+  private remindersWanted(): boolean {
+    return this.calendarRemindersOn() && this.options.store.canRecord();
+  }
+
   private apply(): void {
+    if (this.reminders) {
+      if (this.remindersWanted()) this.reminders.start();
+      else this.reminders.stop();
+    }
     const wanted = this.usable() && this.options.store.enabled() && this.options.store.canRecord();
     this.prompter.setEnabled(wanted, this.now());
     if (wanted && !this.running) {
@@ -1083,4 +1347,5 @@ const PRESENTED: Record<MeetingPrompt["kind"], string> = {
   record: "asked to record a call",
   stop: "asked to stop recording",
   recording: "said a call is being recorded",
+  join: "offered to join a calendar meeting",
 };

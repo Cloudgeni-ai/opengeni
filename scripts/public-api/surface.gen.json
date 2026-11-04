@@ -9968,6 +9968,17 @@
     },
     {
       "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/upcoming-meetings",
+      "sdk": [
+        "OpenGeniRecordingsClient.listUpcomingMeetings"
+      ],
+      "request": [],
+      "response": [
+        "UpcomingMeetingsResponse"
+      ]
+    },
+    {
+      "method": "GET",
       "path": "/v1/workspaces/:workspaceId/usage",
       "sdk": [
         "OpenGeniEmbeddingClient.getUsage",
@@ -11045,6 +11056,8 @@
         "$|2.humanInput": "boolean?",
         "$|2.knowledge": "boolean?",
         "$|2.media": "boolean?",
+        "$|2.notifications": "boolean?",
+        "$|2.privacyFacts": "boolean?",
         "$|2.schedules": "boolean?",
         "$|2.secrets": "boolean?",
         "$|2.skills": "ref(AgentSkillsCapability)?",
@@ -11060,7 +11073,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"artifacts\\\"\",\"\\\"browser\\\"\",\"\\\"goals\\\"\",\"\\\"humanInput\\\"\",\"\\\"knowledge\\\"\",\"\\\"media\\\"\",\"\\\"schedules\\\"\",\"\\\"secrets\\\"\",\"\\\"skills\\\"\",\"\\\"subagents\\\"\",\"\\\"webSearch\\\"\",\"\\\"workspaceAdmin\\\"\",\"\\\"workspaceConnectors\\\"\",\"\\\"workspaceFiles\\\"\"]"
+        "$": "enum=[\"\\\"artifacts\\\"\",\"\\\"browser\\\"\",\"\\\"goals\\\"\",\"\\\"humanInput\\\"\",\"\\\"knowledge\\\"\",\"\\\"media\\\"\",\"\\\"notifications\\\"\",\"\\\"privacyFacts\\\"\",\"\\\"schedules\\\"\",\"\\\"secrets\\\"\",\"\\\"skills\\\"\",\"\\\"subagents\\\"\",\"\\\"webSearch\\\"\",\"\\\"workspaceAdmin\\\"\",\"\\\"workspaceConnectors\\\"\",\"\\\"workspaceFiles\\\"\"]"
       }
     },
     "AgentCapabilityStartingPoint": {
@@ -13677,7 +13690,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"five_hour\\\"\",\"\\\"overage\\\"\",\"\\\"seven_day\\\"\",\"\\\"seven_day_opus\\\"\",\"\\\"seven_day_overage_included\\\"\",\"\\\"seven_day_sonnet\\\"\"]"
+        "$": "enum=[\"\\\"five_hour\\\"\",\"\\\"overage\\\"\",\"\\\"seven_day\\\"\",\"\\\"seven_day_fable\\\"\",\"\\\"seven_day_opus\\\"\",\"\\\"seven_day_overage_included\\\"\",\"\\\"seven_day_sonnet\\\"\"]"
       }
     },
     "ClearWorkspaceAllowanceRequest": {
@@ -15781,6 +15794,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.calendarEvent": "ref(RecordingCalendarEventRef)?",
         "$.externalRef": "string?",
         "$.metadata": "object?",
         "$.metadata{}": "union null=[\"0\",\"1\",\"2\",\"3\",\"4\"]",
@@ -16089,6 +16103,7 @@
         "$.treeStats.directChildren": "integer!",
         "$.treeStats.failedDescendants": "integer!",
         "$.treeStats.pausedDescendants": "integer!",
+        "$.treeStats.pausedWorkDescendants": "integer?",
         "$.treeStats.queuedDescendants": "integer!",
         "$.treeStats.runningDescendants": "integer!",
         "$.treeStats.totalDescendants": "integer!",
@@ -24716,6 +24731,16 @@
         "$.workspaceId": "string!"
       }
     },
+    "RecordingCalendarEventRef": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.id": "string!",
+        "$.provider": "enum!=[\"\\\"google\\\"\",\"\\\"microsoft\\\"\"]"
+      }
+    },
     "RecordingCapturePurpose": {
       "io": [
         "input"
@@ -25346,6 +25371,8 @@
         "$.humanInput": "boolean!",
         "$.knowledge": "boolean!",
         "$.media": "boolean!",
+        "$.notifications": "boolean!",
+        "$.privacyFacts": "boolean!",
         "$.schedules": "boolean!",
         "$.secrets": "boolean!",
         "$.skills": "ref(AgentSkillsCapability)!",
@@ -26763,6 +26790,7 @@
         "$.treeStats.directChildren": "integer!",
         "$.treeStats.failedDescendants": "integer!",
         "$.treeStats.pausedDescendants": "integer!",
+        "$.treeStats.pausedWorkDescendants": "integer?",
         "$.treeStats.queuedDescendants": "integer!",
         "$.treeStats.runningDescendants": "integer!",
         "$.treeStats.totalDescendants": "integer!",
@@ -27382,6 +27410,7 @@
         "$.treeStats.directChildren": "integer!",
         "$.treeStats.failedDescendants": "integer!",
         "$.treeStats.pausedDescendants": "integer!",
+        "$.treeStats.pausedWorkDescendants": "integer?",
         "$.treeStats.queuedDescendants": "integer!",
         "$.treeStats.runningDescendants": "integer!",
         "$.treeStats.totalDescendants": "integer!",
@@ -30706,6 +30735,35 @@
         "$.skillReleases": "array?",
         "$.skillReleases[]": "ref(SkillSourceReleaseReceipt)",
         "$.status": "enum!=[\"\\\"not_installed\\\"\",\"\\\"retained_by_other_owners\\\"\",\"\\\"uninstalled\\\"\"]"
+      }
+    },
+    "UpcomingMeeting": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.endsAt": "string!",
+        "$.id": "string!",
+        "$.joinUrl": "string!",
+        "$.private": "boolean!",
+        "$.provider": "enum!=[\"\\\"google\\\"\",\"\\\"microsoft\\\"\"]",
+        "$.service": "string!",
+        "$.startsAt": "string!",
+        "$.title": "string!",
+        "$.unanswered": "boolean!"
+      }
+    },
+    "UpcomingMeetingsResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.calendar": "enum!=[\"\\\"connected\\\"\",\"\\\"none\\\"\"]",
+        "$.complete": "boolean?",
+        "$.meetings": "array!",
+        "$.meetings[]": "ref(UpcomingMeeting)"
       }
     },
     "UpdateAutomationTemplateRequest": {
@@ -38145,6 +38203,10 @@
       "Thumbnail": "value",
       "TimelineGroup": "type",
       "TimelineItem": "type",
+      "timelineLivePause": "value",
+      "TimelineLivePause": "type",
+      "TimelinePauseSpan": "type",
+      "timelinePauseSpans": "value",
       "TimelineRow": "value",
       "TimelineSearchTarget": "type",
       "ToolActionReviewCard": "value",
@@ -38306,6 +38368,7 @@
       "useTerminalStream": "value",
       "UseTerminalStreamOptions": "type",
       "UseTerminalStreamResult": "type",
+      "useTimelinePauses": "value",
       "useTranscription": "value",
       "UseTranscriptionOptions": "type",
       "UseTranscriptionResult": "type",
@@ -39621,6 +39684,10 @@
       "TimelineAnnotationSourceDescriptor": "type",
       "TimelineGroup": "type",
       "TimelineItem": "type",
+      "timelineLivePause": "value",
+      "TimelineLivePause": "type",
+      "TimelinePauseSpan": "type",
+      "timelinePauseSpans": "value",
       "ToolCallItem": "type",
       "toolDisplayName": "value",
       "ToolOutputPreview": "type",
@@ -39667,6 +39734,7 @@
       "UseSessionStartOptions": "type",
       "UseSessionStartResult": "type",
       "useSessionStartupTimeline": "value",
+      "useTimelinePauses": "value",
       "useTurnQueue": "value",
       "UseTurnQueueOptions": "type",
       "UseTurnQueueResult": "type",
@@ -40791,6 +40859,7 @@
       "UsageReadout": "value",
       "UsageReset": "type",
       "usageResets": "value",
+      "UsageTrack": "value",
       "usageValueText": "value",
       "UsageWindowReading": "type"
     },
@@ -43582,6 +43651,7 @@
       "listRecordingPeople",
       "listRecordingTranscriptVersions",
       "listRecordings",
+      "listUpcomingMeetings",
       "rememberRecordingPersonVoice",
       "saveRecordingNote",
       "setCurrentRecordingTranscript",
@@ -57104,6 +57174,9 @@
       ],
       "listRecordingTranscriptVersions": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"elementType\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RecordingTranscriptVersion\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSArrayType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "listUpcomingMeetings": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpcomingMeetingsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "rememberRecordingPersonVoice": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RememberRecordingPersonVoiceRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RecordingPerson\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"

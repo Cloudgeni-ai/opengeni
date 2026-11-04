@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Button } from "@opengeni/react/ui/button";
 
 type Turnstile = {
   render(element: HTMLElement, options: Record<string, unknown>): string;
+  execute(widget: string): void;
   remove(id: string): void;
 };
 declare global {
@@ -38,6 +39,116 @@ function load(): Promise<Turnstile> {
     };
     document.head.append(script);
   }));
+}
+
+/** What a background signup challenge produced for one Google or GitHub click. */
+export type SocialSignupChallengeOutcome =
+  | { status: "verified"; token: string }
+  /** No token: continue anyway. Existing people sign in; the server refuses a new account. */
+  | { status: "unverified" }
+  /** A newer click or a different action replaced this one. */
+  | { status: "cancelled" };
+
+/** A challenge that neither finishes nor asks for interaction must not hold up a sign-in. */
+const SOCIAL_CHALLENGE_TIMEOUT_MS = 30_000;
+
+/**
+ * The signup challenge a Google or GitHub click runs before it starts the
+ * provider login, because that login may create an account. It runs
+ * invisibly; only when Cloudflare asks for interaction does the widget appear
+ * where `element` is rendered, and the click continues once it is solved.
+ */
+export function useSocialSignupChallenge(siteKey: string | undefined): {
+  element: ReactNode;
+  interactive: boolean;
+  run: () => Promise<SocialSignupChallengeOutcome>;
+  cancel: () => void;
+} {
+  const container = useRef<HTMLDivElement>(null);
+  const active = useRef<((outcome: SocialSignupChallengeOutcome) => void) | null>(null);
+  const [interactive, setInteractive] = useState(false);
+  const cancel = useCallback(() => active.current?.({ status: "cancelled" }), []);
+  useEffect(() => {
+    // Load the script early so a click doesn't also wait for the download.
+    if (siteKey) void load().catch(() => undefined);
+    return cancel;
+  }, [siteKey, cancel]);
+  const run = useCallback((): Promise<SocialSignupChallengeOutcome> => {
+    active.current?.({ status: "cancelled" });
+    if (!siteKey) return Promise.resolve({ status: "unverified" });
+    return new Promise((resolve) => {
+      let settled = false;
+      let widget: string | undefined;
+      let api: Turnstile | undefined;
+      let timer: number | undefined;
+      const settle = (outcome: SocialSignupChallengeOutcome) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        if (active.current === settle) active.current = null;
+        setInteractive(false);
+        try {
+          if (widget !== undefined) api?.remove(widget);
+        } catch {
+          // The token, if any, is already in hand.
+        }
+        resolve(outcome);
+      };
+      const startTimer = () => {
+        window.clearTimeout(timer);
+        timer = window.setTimeout(
+          () => settle({ status: "unverified" }),
+          SOCIAL_CHALLENGE_TIMEOUT_MS,
+        );
+      };
+      active.current = settle;
+      startTimer();
+      load()
+        .then((turnstile) => {
+          if (settled) return;
+          if (!container.current) {
+            settle({ status: "unverified" });
+            return;
+          }
+          api = turnstile;
+          widget = turnstile.render(container.current, {
+            sitekey: siteKey,
+            action: "signup",
+            theme: "auto",
+            execution: "execute",
+            appearance: "interaction-only",
+            retry: "never",
+            callback: (token: string) => settle({ status: "verified", token }),
+            "error-callback": () => {
+              settle({ status: "unverified" });
+              return true;
+            },
+            "unsupported-callback": () => settle({ status: "unverified" }),
+            "before-interactive-callback": () => {
+              if (settled) return;
+              // A person is solving it now; wait for them, not the timer.
+              window.clearTimeout(timer);
+              setInteractive(true);
+            },
+            "after-interactive-callback": () => {
+              if (settled) return;
+              setInteractive(false);
+              startTimer();
+            },
+          });
+          turnstile.execute(widget);
+        })
+        .catch(() => settle({ status: "unverified" }));
+    });
+  }, [siteKey]);
+  const element = siteKey ? (
+    <div
+      ref={container}
+      aria-label="Signup verification"
+      className={interactive ? "mt-3 flex justify-center" : undefined}
+    />
+  ) : null;
+  return { element, interactive, run, cancel };
 }
 
 export function SignupChallenge({

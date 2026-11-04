@@ -34,6 +34,7 @@ fn host(id: u64, name: &str, state: HostState) -> Known {
             cpu_millis: 6_500,
             cpu_free_millis: 6_372,
             disk_free_mib: 90_000,
+            disk_reclaimable_mib: 4_000,
             ready: Vec::new(),
             awake: 2,
             sandboxes: 5,
@@ -76,6 +77,11 @@ fn only_the_leader_reports_the_fleet() {
         "compute_fleet_host_memory_reclaimable_bytes{host_name=\"hosts-a\"}",
     );
     assert_eq!(reclaimable, Some(3_000.0 * 1_048_576.0));
+    let reclaimable_disk = value(
+        &text,
+        "compute_fleet_host_disk_reclaimable_bytes{host_name=\"hosts-a\"}",
+    );
+    assert_eq!(reclaimable_disk, Some(4_000.0 * 1_048_576.0));
     assert_eq!(
         value(
             &text,

@@ -1798,11 +1798,15 @@ reconsider — they can change with their counterpart, not with the SDK.
 
 ## Compatibility
 
-Clients and servers are compatible within the same **major** version of this
-SDK; evolution is additive within a major and both sides are tolerant readers.
-Official server builds expose `serverVersion` on `/healthz` and
-`/v1/config/client`. A breaking change ships only in a new major, announced in
-the changelog. Full policy: `docs/design/api-compatibility-policy.md`.
+Server updates do not break existing integrations. The API only grows: routes,
+fields, event types and documented behaviour that a published SDK uses keep
+working, so a pinned SDK version keeps working against the managed service.
+Upgrade when you want new features. Replacements for older designs ship beside
+them, and `@deprecated` members keep working. Clients should ignore unknown
+response fields, enum values and event types. Official server builds expose
+`serverVersion` on `/healthz` and `/v1/config/client`. Full policy:
+`docs/design/api-compatibility-policy.md`.
+Rare exceptions (an emergency security fix or an explicit product-owner decision) are announced with migration notes.
 
 ## Proxy through your own API
 

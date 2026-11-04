@@ -35444,6 +35444,7 @@ type SessionTreeStatsRow = {
   waitingDescendants: number | string;
   attentionDescendants: number | string;
   pausedDescendants: number | string;
+  pausedWorkDescendants: number | string;
   failedDescendants: number | string;
   unreadFailedDescendants: number | string;
   unreadDescendants: number | string;
@@ -35465,6 +35466,7 @@ const EMPTY_SESSION_TREE_STATS: SessionTreeStats = {
   waitingDescendants: 0,
   attentionDescendants: 0,
   pausedDescendants: 0,
+  pausedWorkDescendants: 0,
   failedDescendants: 0,
   unreadFailedDescendants: 0,
   unreadDescendants: 0,
@@ -35596,6 +35598,7 @@ export async function sessionTreeStatsForSessions(
         stats."waitingDescendants",
         stats."attentionDescendants",
         stats."pausedDescendants",
+        stats."pausedWorkDescendants",
         stats."failedDescendants",
         stats."unreadFailedDescendants",
         stats."unreadDescendants",
@@ -35609,6 +35612,44 @@ export async function sessionTreeStatsForSessions(
        and root_cursor.session_id = root.id
       join ${schema.workspaceInferenceControls} workspace_control
         on workspace_control.workspace_id = root.workspace_id
+      cross join lateral (
+        -- A sub-chat root inherits its ancestors' pauses. An ancestor's pause
+        -- reaches it unless a subtree resume newer than that pause sits below
+        -- the ancestor; the workspace pause unless one sits anywhere above.
+        with recursive ancestors(id, parent_session_id, override_revision, pause_revision, below, depth) as (
+          select
+            parent.id,
+            parent.parent_session_id,
+            parent.subtree_run_override_revision,
+            case when parent.direct_control_state = 'paused' then parent.direct_pause_revision end,
+            coalesce(root.subtree_run_override_revision, 0),
+            1
+          from ${schema.sessions} parent
+          where parent.workspace_id = ${workspaceId}
+            and parent.id = root.parent_session_id
+            and parent.id <> root.id
+
+          union all
+
+          select
+            parent.id,
+            parent.parent_session_id,
+            parent.subtree_run_override_revision,
+            case when parent.direct_control_state = 'paused' then parent.direct_pause_revision end,
+            greatest(ancestors.below, coalesce(ancestors.override_revision, 0)),
+            ancestors.depth + 1
+          from ancestors
+          join ${schema.sessions} parent
+            on parent.workspace_id = ${workspaceId}
+           and parent.id = ancestors.parent_session_id
+          where ancestors.depth < ${SESSION_TREE_STATS_MAX_DEPTH}
+            and parent.id <> root.id
+        )
+        select
+          max(pause_revision) filter (where pause_revision >= below) as pause_revision,
+          coalesce(max(coalesce(override_revision, 0)), 0) as override_revision
+        from ancestors
+      ) root_lineage
       cross join lateral (
         -- Every node has exactly one parent, so a walk down child links can
         -- only revisit its own start node (when that start sits on a legacy
@@ -35635,13 +35676,14 @@ export async function sessionTreeStatsForSessions(
               case
                 when workspace_control.workspace_state = 'paused'
                   and workspace_control.workspace_pause_revision is not null
-                  and (
-                    root.subtree_run_override_revision is null
-                    or root.subtree_run_override_revision <= workspace_control.workspace_pause_revision
-                  )
+                  and greatest(
+                    coalesce(root.subtree_run_override_revision, 0),
+                    root_lineage.override_revision
+                  ) <= workspace_control.workspace_pause_revision
                   then workspace_control.workspace_pause_revision
                 else null
               end,
+              root_lineage.pause_revision,
               case
                 when root.direct_control_state = 'paused' then root.direct_pause_revision
                 else null
@@ -35755,6 +35797,14 @@ export async function sessionTreeStatsForSessions(
           )::int as "waitingDescendants",
           count(*) filter (where status = 'requires_action')::int as "attentionDescendants",
           count(*) filter (where effective_pause_revision is not null)::int as "pausedDescendants",
+          count(*) filter (
+            where effective_pause_revision is not null
+              and status not in ('requires_action', 'cancelled', 'failed')
+              and (
+                active_turn_id is not null
+                or status in ('running', 'recovering', 'queued', 'waiting_capacity')
+              )
+          )::int as "pausedWorkDescendants",
           count(*) filter (where status = 'failed')::int as "failedDescendants",
           count(*) filter (where status = 'failed' and unread)::int as "unreadFailedDescendants",
           count(*) filter (where unread)::int as "unreadDescendants",
@@ -35813,6 +35863,7 @@ export async function sessionTreeStatsForSessions(
         waitingDescendants: Number(row.waitingDescendants),
         attentionDescendants: Number(row.attentionDescendants),
         pausedDescendants: Number(row.pausedDescendants),
+        pausedWorkDescendants: Number(row.pausedWorkDescendants),
         failedDescendants: Number(row.failedDescendants),
         unreadFailedDescendants: Number(row.unreadFailedDescendants),
         unreadDescendants: Number(row.unreadDescendants),
@@ -43868,14 +43919,21 @@ export async function ensureSessionSkillCatalog(
     expectedExecutionGeneration: number;
     expectedAttemptId: string;
     catalog: string;
+    /**
+     * The catalog lists no Skill: write nothing unless an earlier index must
+     * be replaced, and return "" when the session never saw one.
+     */
+    omitWhenEmpty?: boolean;
   },
 ): Promise<string> {
-  const { catalog, ...scope } = input;
-  return (await ensureSessionContextSnapshot(
-    db,
-    { ...scope, text: catalog },
-    SKILL_CATALOG_CHANNEL,
-  ))!;
+  const { catalog, omitWhenEmpty, ...scope } = input;
+  return (
+    (await ensureSessionContextSnapshot(
+      db,
+      { ...scope, text: catalog, ...(omitWhenEmpty ? { omitWhenAbsent: true } : {}) },
+      SKILL_CATALOG_CHANNEL,
+    )) ?? ""
+  );
 }
 
 /**
