@@ -411,7 +411,7 @@ fn bytes(mib: u64) -> Num {
 }
 
 /// The gauges each host the service counts on has.
-fn host_gauges() -> [HostGauge; 10] {
+fn host_gauges() -> [HostGauge; 11] {
     [
         (
             "compute_fleet_host_memory_bytes",
@@ -452,6 +452,11 @@ fn host_gauges() -> [HostGauge; 10] {
             "compute_fleet_host_disk_free_bytes",
             "Disk free for sandboxes on a host, as it last reported.",
             |host| bytes(host.capacity.disk_free_mib),
+        ),
+        (
+            "compute_fleet_host_disk_reclaimable_bytes",
+            "Disk a host frees for a sandbox without losing anything, idle sandboxes' local copies that object storage holds and templates and cached images nothing uses, which placement counts as free, as it last reported.",
+            |host| bytes(host.capacity.disk_reclaimable_mib),
         ),
         (
             "compute_fleet_host_sandboxes",

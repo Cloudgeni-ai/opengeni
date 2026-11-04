@@ -42,6 +42,12 @@ import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { formatAbsoluteTime } from "@opengeni/react/ui/relative-time";
 import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
 import type { UsageWindowReading } from "@opengeni/react/ui/usage-meter";
+import {
+  codexWindowInputs,
+  subscriptionWindows,
+  type SubscriptionWindow,
+} from "@opengeni/react/app/lib/subscription-accounts";
+import { subscriptionUsageReadings } from "@opengeni/react/app/components/models/subscription-usage";
 import { apiErrorAdvice, userErrorText } from "@opengeni/react/ui/api-error";
 import {
   ApiError,
@@ -240,32 +246,40 @@ function resetDate(window: CodexUsageWindow, now: number): Date | null {
   return null;
 }
 
-/** One provider window as a meter reading: percent LEFT, and when it resets. */
-export function codexUsageReading(
-  label: string,
-  window: CodexUsageWindow | null | undefined,
+type CodexWindows = {
+  fiveHour: CodexUsageWindow | null;
+  weekly: CodexUsageWindow | null;
+};
+
+/**
+ * Only the windows ChatGPT reported for the account, labelled "5h" and
+ * "Week": a Pro plan reports no 5-hour window, so it shows none.
+ */
+export function codexUsageWindows(
+  usage: CodexWindows | null | undefined,
   now: number,
-): UsageWindowReading {
-  if (!window) return { label, percent: null };
-  const reset = resetDate(window, now);
-  return {
-    label,
-    percent: Math.round(Math.min(100, Math.max(0, window.remaining))),
-    ...(reset
-      ? { resetsLabel: formatAbsoluteTime(reset, { now }), resetsAt: reset.getTime() }
-      : {}),
-  };
+): SubscriptionWindow[] {
+  const reading = (window: CodexUsageWindow | null | undefined) =>
+    window
+      ? {
+          percent: window.percent,
+          remaining: window.remaining,
+          resetAt: resetDate(window, now)?.toISOString() ?? null,
+        }
+      : null;
+  return subscriptionWindows(
+    "codex",
+    codexWindowInputs({ fiveHour: reading(usage?.fiveHour), weekly: reading(usage?.weekly) }),
+    now,
+  );
 }
 
-/** Weekly first (the limit people run out of), then the 5-hour window. */
+/** The reported windows as the account page's meters. */
 export function codexUsageReadings(
-  usage: { fiveHour: CodexUsageWindow | null; weekly: CodexUsageWindow | null } | null | undefined,
+  usage: CodexWindows | null | undefined,
   now: number,
 ): UsageWindowReading[] {
-  return [
-    codexUsageReading("Weekly", usage?.weekly, now),
-    codexUsageReading("5-hour", usage?.fiveHour, now),
-  ];
+  return subscriptionUsageReadings(codexUsageWindows(usage, now), now);
 }
 
 /* ----------------------------------------------------------------------------
@@ -1174,7 +1188,7 @@ export function CodexRedemptionDialog({
         if (!open) codex.closeRedemption();
       }}
       title="Redeem this usage limit reset?"
-      description="This uses one usage limit reset from ChatGPT. It can reset this account's 5-hour and weekly limits, and can't be undone."
+      description="This uses one usage limit reset from ChatGPT. It resets this account's current usage limits and can't be undone."
       confirmLabel="Redeem reset"
       cancelLabel="Cancel"
       cancelAutoFocus

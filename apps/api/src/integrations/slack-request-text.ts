@@ -66,10 +66,7 @@ export function slackReadableRequestText(
     text: readable,
     modelContext:
       lines.length > 0
-        ? [
-            "People mentioned in this Slack message, shown by name; mention them in Slack with the id:",
-            ...lines,
-          ].join("\n")
+        ? ["People mentioned, by name; to mention one in Slack, use the id:", ...lines].join("\n")
         : null,
   };
 }

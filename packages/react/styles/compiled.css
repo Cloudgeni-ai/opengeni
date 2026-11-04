@@ -1843,6 +1843,9 @@
 :where(.og-root).max-h-\[min\(36rem\,55dvh\)\],:where(.og-root) .max-h-\[min\(36rem\,55dvh\)\] {
     max-height: min(36rem, 55dvh);
   }
+:where(.og-root).max-h-\[min\(40rem\,var\(--radix-dropdown-menu-content-available-height\)\)\],:where(.og-root) .max-h-\[min\(40rem\,var\(--radix-dropdown-menu-content-available-height\)\)\] {
+    max-height: min(40rem, var(--radix-dropdown-menu-content-available-height));
+  }
 :where(.og-root).max-h-\[min\(480px\,70dvh\)\],:where(.og-root) .max-h-\[min\(480px\,70dvh\)\] {
     max-height: min(480px, 70dvh);
   }
@@ -11478,6 +11481,11 @@
 :where(.og-root).pointer-coarse\:static,:where(.og-root) .pointer-coarse\:static {
     @media (pointer: coarse) {
       position: static;
+    }
+  }
+:where(.og-root).pointer-coarse\:top-2\.5,:where(.og-root) .pointer-coarse\:top-2\.5 {
+    @media (pointer: coarse) {
+      top: calc(var(--spacing) * 2.5);
     }
   }
 :where(.og-root).pointer-coarse\:top-13,:where(.og-root) .pointer-coarse\:top-13 {

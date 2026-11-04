@@ -2,16 +2,24 @@
 // MessageTimeline, the status row above the composer and the composer, with
 // the same wrappers as the session route.
 // Open: http://127.0.0.1:3000/dev/composer-stack?state=all&theme=dark
-//   state = idle | running | waiting | all   (all = waiting + command + goal + attachment)
+//   state = idle | running | paused | waiting | all   (all = waiting + command + goal + attachment)
 //   theme = dark | light
+//   desktop = macos | windows   (the desktop shell's platform attribute)
 // Screenshots and measurements for the composer-stack design review use this page.
-import { MessageTimeline, SessionChrome, type ComposerState } from "@opengeni/react";
+import {
+  MessageTimeline,
+  SessionChrome,
+  timelineLivePause,
+  type ComposerState,
+} from "@opengeni/react";
+import type { SessionEvent } from "@opengeni/sdk";
 import { labScenarios } from "@opengeni/react/testing";
 import { useMemo } from "react";
 
 import { galleryQueue, idleComposer } from "@/dev/composer-chrome-fixtures";
 
 import {
+  PREVIEW_PAUSED_AT,
   PreviewComposer,
   previewAttachments,
   previewGoal,
@@ -32,10 +40,13 @@ export function ComposerStackPreviewRoute() {
   const composer = useMemo<ComposerState>(() => idleComposer({ working: running }), [running]);
   const attachments = useMemo(() => previewAttachments(state === "all"), [state]);
   const pendingWake = session.status === "idle" && session.inputWait != null;
-  const events = useMemo(
-    () => labScenarios().find((entry) => entry.id === (running ? "working" : "long"))!.events,
-    [running],
-  );
+  const paused = state === "paused";
+  const events = useMemo(() => {
+    const scenario = labScenarios().find(
+      (entry) => entry.id === (running || paused ? "working" : "long"),
+    )!.events;
+    return running || paused ? recentWork(scenario, paused) : scenario;
+  }, [running, paused]);
 
   return (
     <main
@@ -47,6 +58,7 @@ export function ComposerStackPreviewRoute() {
           className="h-full"
           events={events}
           status={running ? "running" : "idle"}
+          pause={timelineLivePause(session.effectiveControl)}
           turnSummary={{ rolling: true }}
         />
       </div>
@@ -75,4 +87,38 @@ export function ComposerStackPreviewRoute() {
       </div>
     </main>
   );
+}
+
+/**
+ * The working scenario moved to now: its turn started 2m 14s before the pause
+ * (or before now while it runs). Paused, it ends with the events Pause records.
+ */
+function recentWork(events: SessionEvent[], paused: boolean): SessionEvent[] {
+  const started = events.find((event) => event.type === "turn.started")!;
+  const turnId = started.turnId ?? null;
+  const end = paused ? Date.parse(PREVIEW_PAUSED_AT) : Date.now();
+  const shift = end - 134_000 - Date.parse(started.occurredAt);
+  const moved = events.map((event) => ({
+    ...event,
+    occurredAt: new Date(Date.parse(event.occurredAt) + shift).toISOString(),
+  }));
+  if (!paused) return moved;
+  const at = new Date(end).toISOString();
+  const next = (type: string, payload: unknown, eventTurnId: string | null) => ({
+    ...started,
+    id: `${started.sessionId}-pause-${type}`,
+    sequence: moved.length + 1,
+    type,
+    payload,
+    turnId: eventTurnId,
+    occurredAt: at,
+  });
+  for (const [type, payload, eventTurnId] of [
+    ["session.control.paused", { actor: { kind: "user" }, reason: null, revision: 1 }, null],
+    ["agent.toolCall.output", { id: "c4", output: "Interrupted by Pause" }, turnId],
+    ["turn.recovery.requested", { reason: "session_pause" }, turnId],
+    ["session.status.changed", { status: "idle", reason: "paused_recovery_settled" }, null],
+  ] as const)
+    moved.push(next(type, payload, eventTurnId));
+  return moved;
 }

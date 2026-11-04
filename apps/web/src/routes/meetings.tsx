@@ -12,6 +12,8 @@ import { t } from "@opengeni/react/app/lib/console-text";
 import { orgLabel } from "@opengeni/react/app/lib/org";
 import { ContentPage } from "@opengeni/react/ui/content-layout";
 import { meetingViewerName } from "../components/meetings/viewer-name";
+import { CalendarRemindersOffer } from "../components/meetings/calendar-reminders-offer";
+import { connectCalendarPath } from "../components/desktop/use-meeting-detection";
 
 import { meetingQuestionMessage, meetingQuestionVisibility } from "@/lib/meeting-ask";
 
@@ -32,6 +34,10 @@ export function MeetingsRoute({ workspaceId }: { workspaceId: string }) {
   const recordingRestricted = inferenceFeatureRestriction(t, clientConfig, "meeting_transcription");
   return (
     <ContentPage width="standard" className="pt-6">
+      <CalendarRemindersOffer
+        className="mb-4"
+        onConnect={() => void navigate({ href: connectCalendarPath(workspaceId) })}
+      />
       <MeetingsListPage
         workspaceId={workspaceId}
         defaultLanguage={settings.language ?? null}

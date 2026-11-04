@@ -154,7 +154,10 @@ for (const theme of ["dark", "light"] as const) {
           await dialog.waitFor({ state: "detached" });
           await page.getByText("Claude hasn't reported usage yet.", { exact: true }).waitFor();
           expect(await page.getByText("50% left", { exact: true }).count()).toBe(0);
-          expect(await page.getByText("Not reported yet", { exact: true }).count()).toBe(2);
+          // Only windows Claude reports are shown: a new token has none yet,
+          // so no placeholder 5-hour or weekly meters are drawn.
+          expect(await page.getByText("Not reported yet", { exact: true }).count()).toBe(0);
+          expect(await page.locator('[data-slot="usage-meter"]').count()).toBe(0);
           await page.getByRole("button", { name: "Models", exact: true }).click();
           await page.getByRole("button", { name: "Claude subscription", exact: false }).waitFor();
           expect(errors).toEqual([]);

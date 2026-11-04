@@ -58,7 +58,13 @@ import {
   type ThisComputerPermissionId,
   type WelcomeState,
 } from "../contract";
-import { AccountStore, readInstalledFrom, type StoredAccount } from "./accounts";
+import {
+  AccountStore,
+  accountToReturnTo,
+  cameFromAfterShowing,
+  readInstalledFrom,
+  type StoredAccount,
+} from "./accounts";
 import { AppShots, AppShotSettingsStore, MacAppShots } from "./app-shots";
 import type { Dictation } from "./dictation";
 import { createDesktopDictation } from "./dictation/electron";
@@ -200,6 +206,8 @@ export class DesktopShell {
   private unreachable: Unreachable | null = null;
   /** The welcome page is adding an account, so an unreachable one doesn't take it over. */
   private addingAccount = false;
+  /** The signed-in account the welcome page was opened from; its Cancel returns there. */
+  private cameFromId: string | null = null;
   private readonly redirectUri: string;
   private readonly paths: AppWebPaths;
 
@@ -381,6 +389,43 @@ export class DesktopShell {
         const shown = accountId ? this.window?.contentsFor(accountId) : null;
         return pages.find((page) => page === shown);
       },
+      // Reminders before the active account's calendar meetings; that account records.
+      calendar: {
+        account: () => {
+          const active = this.store.active();
+          return active && !active.signedOut && active.workspaceId ? { id: active.id } : null;
+        },
+        upcoming: async (accountId) => {
+          const workspaceId = this.store.get(accountId)?.workspaceId;
+          const client = workspaceId ? await this.client(accountId) : null;
+          if (!client || !workspaceId) return null;
+          try {
+            return await client.requestJson(
+              "GET",
+              `/v1/workspaces/${encodeURIComponent(workspaceId)}/upcoming-meetings`,
+              undefined,
+              {},
+              { timeoutMs: 15_000 },
+            );
+          } catch (caught) {
+            // A server from before reminders has no such route: nothing to remind of.
+            if ((caught as { status?: number }).status === 404) return null;
+            throw caught;
+          }
+        },
+        openUrl: (url) => {
+          if (new URL(url).protocol === "https:") void shell.openExternal(url);
+        },
+      },
+      // A Stop the recording didn't take: show the account it records in.
+      revealPage: (page) => {
+        const accountId = this.window?.accountFor(page as WebContents);
+        app.focus({ steal: true });
+        if (accountId) this.showAccount(accountId);
+        else this.reveal();
+      },
+      describePage: (page) => this.recordingAccountLabel(page as WebContents),
+      recordingChanged: () => this.broadcast(DESKTOP_IPC.accountsChanged, this.accountsSnapshot()),
       log: (message, caught) => console.warn(message, caught ?? ""),
     });
     this.appShots = new AppShots({
@@ -540,7 +585,13 @@ export class DesktopShell {
       setTimeout(() => migrateMacLoginItem(this.config.appId), 5_000);
     }
     app.on("activate", () => this.reveal());
-    powerMonitor.on("resume", () => this.retryUnreachable());
+    powerMonitor.on("resume", () => {
+      this.retryUnreachable();
+      this.meetings.refreshCalendar();
+    });
+    powerMonitor.on("unlock-screen", () => this.meetings.refreshCalendar());
+    // Back from connecting a calendar in the browser: settings stop offering it.
+    app.on("browser-window-focus", () => this.meetings.windowFocused());
     app.on("before-quit", (event) => {
       if (this.quitConfirmed) {
         this.quitting = true;
@@ -566,7 +617,7 @@ export class DesktopShell {
       this.appShots.stop();
       this.systemAudio.stopAll();
       this.dictation.stop();
-      this.meetings.stop();
+      this.meetings.shutdown();
       this.computer.shutdownNow();
     });
     app.on("window-all-closed", () => {
@@ -763,6 +814,7 @@ export class DesktopShell {
     const account = this.store.get(accountId);
     if (!account) return;
     if (!this.window) this.openWindow();
+    this.cameFromId = cameFromAfterShowing(this.store.active(), account, this.cameFromId);
     this.store.setActive(accountId);
     this.addingAccount = false;
     if (account.signedOut) {
@@ -1180,15 +1232,37 @@ export class DesktopShell {
     const snapshot = this.store.snapshot();
     return {
       activeId: snapshot.activeId,
-      accounts: snapshot.accounts.map((account) => ({
-        id: account.id,
-        baseUrl: account.baseUrl,
-        serverLabel: serverLabel(account.baseUrl),
-        email: account.email,
-        workspaceId: account.workspaceId,
-        signedOut: Boolean(account.signedOut),
-      })),
+      accounts: snapshot.accounts.map((account) => {
+        const contents = this.window?.contentsFor(account.id) ?? null;
+        return {
+          id: account.id,
+          baseUrl: account.baseUrl,
+          serverLabel: serverLabel(account.baseUrl),
+          email: account.email,
+          workspaceId: account.workspaceId,
+          signedOut: Boolean(account.signedOut),
+          recording: Boolean(contents && this.meetings.isRecording(contents)),
+        };
+      }),
     };
+  }
+
+  /**
+   * The account a recording page belongs to, as the stop card names it: its
+   * server, or with the email too when two accounts share a server. Null
+   * with a single signed-in account, where there is nothing to tell apart.
+   */
+  private recordingAccountLabel(page: WebContents): string | null {
+    const accountId = this.window?.accountFor(page);
+    const account = accountId ? this.store.get(accountId) : null;
+    if (!account) return null;
+    const signedIn = this.store.snapshot().accounts.filter((other) => !other.signedOut);
+    if (signedIn.length < 2) return null;
+    const server = serverLabel(account.baseUrl);
+    const shared = signedIn.some(
+      (other) => other.id !== account.id && serverLabel(other.baseUrl) === server,
+    );
+    return shared ? `${account.email} · ${server}` : server;
   }
 
   private welcomeState(): WelcomeState {
@@ -1367,8 +1441,9 @@ export class DesktopShell {
       this.senderWelcome(event);
       this.pending = null;
       this.welcomeError = null;
-      const active = this.store.snapshot().accounts.find((account) => !account.signedOut);
-      if (active) this.showAccount(active.id);
+      const back = accountToReturnTo(this.store.snapshot(), this.cameFromId);
+      this.cameFromId = null;
+      if (back) this.showAccount(back.id);
       else this.pushWelcome();
     });
   }
@@ -1377,6 +1452,8 @@ export class DesktopShell {
     this.pending = null;
     this.welcomeError = null;
     this.addingAccount = true;
+    const from = this.store.active();
+    if (from && !from.signedOut) this.cameFromId = from.id;
     this.clearUnreachable();
     this.window?.showWelcome();
     this.pushWelcome();
@@ -1402,6 +1479,8 @@ export class DesktopShell {
   }
 
   private accountsChanged(): void {
+    // Only the active account reminds of its meetings.
+    this.meetings.accountChanged();
     this.broadcast(DESKTOP_IPC.accountsChanged, this.accountsSnapshot());
     Menu.setApplicationMenu(this.menu());
     void this.refreshTray();

@@ -3890,13 +3890,15 @@ test("published Site models follow the database catalog for members and guests w
       agent: { enabled: true, model },
     });
     const session = await f.signIn(f.member, site.host);
-    const consoleCatalog = await f.api(
+    const apiCatalog = await f.api(
       f.member,
       "GET",
       `/v1/config/client?workspaceId=${f.workspace.id}`,
     );
-    expect(consoleCatalog.status, JSON.stringify(consoleCatalog.json)).toBe(200);
-    expect(consoleCatalog.json.models.map((entry: { id: string }) => entry.id)).toContain(model);
+    expect(apiCatalog.status, JSON.stringify(apiCatalog.json)).toBe(200);
+    // The host's API credential cannot use subscriptions; the signed-in Site
+    // member below is app work and retains their connected subscription.
+    expect(apiCatalog.json.models.map((entry: { id: string }) => entry.id)).toEqual([creditModel]);
     const memberCatalog = await f.gateway(site.host, "GET", "/model-catalog", { session });
     expect(memberCatalog.status, JSON.stringify(memberCatalog.json)).toBe(200);
     expect(memberCatalog.json.models.map((entry: { id: string }) => entry.id)).toContain(model);

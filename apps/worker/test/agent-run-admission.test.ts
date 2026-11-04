@@ -187,7 +187,7 @@ describe("worker agent-run admission funding", () => {
     }
   });
 
-  test("API work without credits gets its own refusal; the origin is read only when credits decide", async () => {
+  test("API work without credits gets its own refusal; origin is read once even without credit billing", async () => {
     const balance = spyOn(opengeniDb, "getSpendableCreditBalance").mockResolvedValue({
       accountId: ACCOUNT,
       balanceMicros: 0,
@@ -220,7 +220,7 @@ describe("worker agent-run admission funding", () => {
         "api_credits_required",
       );
       expect(balance.mock.calls.at(-1)?.[5]).toBe("api");
-      // Without credit billing nothing reads the origin.
+      // Origin still decides subscription eligibility without credit billing.
       let reads = 0;
       expect(
         await agentRunAdmissionDenial(
@@ -234,7 +234,7 @@ describe("worker agent-run admission funding", () => {
           },
         ),
       ).toBeNull();
-      expect(reads).toBe(0);
+      expect(reads).toBe(1);
     } finally {
       restoreCodex();
       balance.mockRestore();
@@ -430,6 +430,7 @@ describe("worker agent-run admission funding", () => {
 
   test("goal activity publishes an allowance pause using locked causal admission", async () => {
     const restoreCodex = mockCodexBilled(false);
+    const origin = spyOn(opengeniDb, "readSessionBillingOrigin").mockResolvedValue("app");
     const settings = testSettings({ billingMode: "disabled", usageLimitsMode: "none" });
     const sessionId = "00000000-0000-4000-8000-000000000004";
     const causalTurnId = "00000000-0000-4000-8000-000000000005";
@@ -525,6 +526,11 @@ describe("worker agent-run admission funding", () => {
         workspaceId: WORKSPACE,
         subjectId: "user:original-goal-human",
       });
+      expect(origin).toHaveBeenCalledWith(lockedDb, {
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        sessionId,
+      });
       expect(materialize).toHaveBeenCalledWith(
         services.db,
         expect.objectContaining({
@@ -541,6 +547,7 @@ describe("worker agent-run admission funding", () => {
       workspace.mockRestore();
       materialize.mockRestore();
       source.mockRestore();
+      origin.mockRestore();
       restoreCodex();
     }
   });

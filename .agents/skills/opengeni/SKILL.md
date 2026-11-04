@@ -160,7 +160,7 @@ Keep these boundaries explicit:
   kind is `"shared"`; Personal workspaces (`"personal"`) are excluded from
   `ensureWorkspace` and must not be selected through a default-workspace
   fallback.
-- Old unscoped operational routes are deleted, not soft-deprecated. Do not add compatibility aliases unless the user explicitly changes that product decision.
+- The old unscoped operational routes were removed before the 2026-11-03 compatibility policy and stay removed; do not reintroduce them. New changes follow Public API compatibility below.
 - Better Auth is only the managed-mode browser human auth resolver. It is not the tenant model and should not appear in core session/file/document/schedule route code.
 - Managed sign-in method changes belong to `apps/api/src/routes/managed-sign-in-methods.ts`
   and its canonical identity/database guards. Discover the current contract in
@@ -251,6 +251,43 @@ Before editing, identify which layer owns the behavior:
 - Scheduling: scheduled task contracts/routes/core domain helpers, Temporal schedule mapping, dispatch activity.
 - Event-triggered automation: automation contracts/routes/core adapter registry, FORCE-RLS source/event/run state, bounded Temporal dispatch, and the provider adapter layered above it.
 - UI: `apps/web` API helpers/types/components.
+
+### Public API compatibility
+
+Canonical policy: `docs/design/api-compatibility-policy.md`. Existing customer
+integrations must keep working across every production update. Before changing
+an API route, a `@opengeni/contracts` schema, the SDK, React exports or
+documented behaviour, decide how the change stays compatible:
+
+- The public surface is every SDK-reachable `/v1` route and its request and
+  response shapes (including every route a **published** SDK calls), session
+  event types and payload fields, `@opengeni/sdk`/`@opengeni/react` exports,
+  public ingress routes, and the defaults, error codes and semantics the docs
+  describe. Web-only routes, worker protocols and the database are internal.
+- Never remove, rename, retype or narrow any of it. A major release, changeset
+  or deprecation period does not permit a break; neither does marking an
+  existing public method `@internal` or retiring a feature.
+- Make it additive: a new optional field whose absence keeps the old behaviour
+  and defaults, a new response field, event type, error code or route.
+- For a redesign, add a new API version beside the old one: thin
+  version-specific adapters (routing, validation, response mapping) over
+  shared `packages/core` logic. Mark the old surface `@deprecated` with its
+  replacement; it keeps working.
+- Run `bun run public-api:refresh` for additive changes and
+  `bun run check:public-api` before pushing. A breaking finding means
+  redesign, not allowlisting. Do not add a `breaking-changes.json` entry, a
+  `Compatibility exception:` changeset line or an `--accept-gaps` reason
+  without a recorded security exception or owner approval for that exact
+  change.
+- The checks cannot see behaviour, defaults or payload semantics; state them in
+  the PR template's "External API impact" section and keep them unchanged
+  unless the caller opts in.
+- Do not declare a major release of any package in a changeset. All published
+  packages share one lockstep version, so any major (including
+  `@opengeni/contracts` or `@opengeni/runtime`) ships `@opengeni/sdk` and
+  `@opengeni/react` majors; CI rejects it without a linked exception.
+- After a stable SDK publication, record it with
+  `bun run public-api:published-refresh` so the check covers that version.
 
 For pull-request delivery, preserve immutable candidates across a moving base:
 
@@ -504,6 +541,8 @@ Update this skill in the same change whenever the repo changes any of these:
 - Product integration boundary: organization API-key administration,
   `ensureWorkspace`, organization-workspace wire kind, Personal-workspace
   exclusion, and external inline Skill ownership.
+- Public API compatibility rules or their checks (keep the summary above in
+  line with `docs/design/api-compatibility-policy.md`).
 - Pluggability model: sandbox backend contract, MCP tool config, model provider config, object storage, GitHub integration.
 - Compute targeting: the Connected Machine (`selfhosted`) primary-compute model, the machines/enrollment routes, per-session `workingDir`, and the `targetSandboxId` create field.
 - Source layout: if important files move or names change.

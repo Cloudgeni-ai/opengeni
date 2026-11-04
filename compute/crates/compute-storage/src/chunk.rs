@@ -8,6 +8,11 @@ use crate::{Error, Result};
 /// Upper bound on decoded chunks, including untrusted manifests.
 pub const MAX_CHUNK: usize = 16 * 1024 * 1024;
 
+/// Upper bound on a pack's length, including untrusted manifests: an
+/// archive closes one at [`crate::pack::PACK_BYTES`], so it holds that
+/// plus at most one chunk.
+pub const MAX_PACK: u64 = 64 * 1024 * 1024;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Chunking {
     Fixed {
@@ -117,18 +122,30 @@ pub struct ChunkRef {
     /// periods were hours, under the same field and key so that every
     /// release reads both. `None` in the old layout, named by its content
     /// alone, and for a chunk not yet stored.
+    /// For a chunk in a pack, the pack's period.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub day: Option<u32>,
+    /// Where it is stored, when it is stored in a pack (ADR 31) rather than
+    /// as an object of its own. `checksums` are then the pack's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pack: Option<Packed>,
+}
+
+/// Where in a pack a chunk is stored: the pack, by the BLAKE3 hash of its
+/// bytes, the chunk's stored bytes' offset in it, and the pack's length.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Packed {
+    pub digest: String,
+    pub offset: u64,
+    pub len: u64,
 }
 
 impl ChunkRef {
     pub fn validate(&self) -> Result<()> {
-        if [&self.hash, &self.stored_hash].iter().any(|hash| {
-            hash.len() != 64
-                || !hash
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        }) || self.plain_len == 0
+        if [&self.hash, &self.stored_hash]
+            .iter()
+            .any(|hash| !is_hex(hash))
+            || self.plain_len == 0
             || self.plain_len as usize > MAX_CHUNK
             || self.stored_len == 0
             || self.stored_len as usize > MAX_CHUNK
@@ -142,11 +159,27 @@ impl ChunkRef {
         if self.codec == Codec::Raw && self.plain_len != self.stored_len {
             return Err(Error::Invalid("raw chunk length"));
         }
+        if let Some(pack) = &self.pack
+            && (!is_hex(&pack.digest)
+                || self.day.is_none()
+                || pack.len > MAX_PACK
+                || pack
+                    .offset
+                    .checked_add(u64::from(self.stored_len))
+                    .is_none_or(|end| end > pack.len))
+        {
+            return Err(Error::Invalid("chunk reference's pack"));
+        }
         Ok(())
     }
 
+    /// The key of the object that holds it, as a listing gives it: its pack,
+    /// or the chunk's own object.
     #[must_use]
     pub fn key(&self) -> String {
+        if let (Some(pack), Some(day)) = (&self.pack, self.day) {
+            return crate::pack::key(day, &pack.digest);
+        }
         let codec = match self.codec {
             Codec::Raw => "raw",
             Codec::Zstd => "zstd",
@@ -157,6 +190,31 @@ impl ChunkRef {
             Some(day) => format!("chunks/v2/{day}/{codec}/{}/{}", self.hash, self.stored_hash),
             None => format!("chunks/v1/{codec}/{}/{}", self.hash, self.stored_hash),
         }
+    }
+
+    /// What tells this chunk's stored bytes apart from every other's where
+    /// they are kept: its key, and for a chunk in a pack its offset there.
+    #[must_use]
+    pub fn id(&self) -> String {
+        match &self.pack {
+            Some(pack) => format!("{}@{}", self.key(), pack.offset),
+            None => self.key(),
+        }
+    }
+
+    /// The range of its object its stored bytes take.
+    #[must_use]
+    pub fn stored_range(&self) -> std::ops::Range<u64> {
+        let start = self.pack.as_ref().map_or(0, |pack| pack.offset);
+        start..start + u64::from(self.stored_len)
+    }
+
+    /// The length of the object that holds it.
+    #[must_use]
+    pub fn object_len(&self) -> u64 {
+        self.pack
+            .as_ref()
+            .map_or(u64::from(self.stored_len), |pack| pack.len)
     }
 
     /// The same chunk as stored under period `day`.
@@ -176,6 +234,14 @@ impl ChunkRef {
             && self.stored_hash == other.stored_hash
             && self.codec == other.codec
     }
+}
+
+/// Whether `hash` is 64 lowercase hex digits.
+fn is_hex(hash: &str) -> bool {
+    hash.len() == 64
+        && hash
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 #[derive(Clone, Debug)]
@@ -206,6 +272,7 @@ impl EncodedChunk {
                 codec,
                 checksums: Some(crate::upload::checksums(&bytes)),
                 day: None,
+                pack: None,
             },
             bytes,
         })

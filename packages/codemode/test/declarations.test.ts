@@ -92,16 +92,17 @@ describe("Codemode declarations", () => {
     expect(jsonSchemaToTypeScript({ const: { ok: true } })).toBe("{ readonly ok: true }");
   });
 
-  test("rejects a namespace/tool prefix collision instead of emitting invalid declarations", () => {
-    expect(() =>
-      createAttemptToolEnvironment({
-        scope,
-        generation: 1,
-        definitions: [
-          definition("one", { codemodePath: ["docs", "search"] }),
-          definition("two", { codemodePath: ["docs", "search", "advanced"] }),
-        ],
-      }),
-    ).toThrow("extends a tool leaf");
+  test("declares both tools of a namespace/tool prefix collision at distinct paths", () => {
+    const { catalog } = createAttemptToolEnvironment({
+      scope,
+      generation: 1,
+      definitions: [
+        definition("one", { codemodePath: ["docs", "search"] }),
+        definition("two", { codemodePath: ["docs", "search", "advanced"] }),
+      ],
+    });
+    const declarations = generateCodemodeDeclarations(catalog);
+    expect(declarations).toContain("readonly search: (");
+    expect(declarations).toMatch(/readonly search_advanced_[0-9a-f]{16}: \(/u);
   });
 });

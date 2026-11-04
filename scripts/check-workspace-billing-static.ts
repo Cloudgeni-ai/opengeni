@@ -227,6 +227,11 @@ export async function checkForbiddenProviderImports(
         "apps/api/src/routes/billing.ts",
         "apps/api/src/billing-stripe-customer.ts",
         "apps/api/src/billing-subscriptions.ts",
+        "apps/api/src/billing-auto-top-up.ts",
+        "apps/api/src/routes/billing-auto-top-up.ts",
+        "apps/api/test/billing-auto-top-up.test.ts",
+        "apps/api/test/billing-auto-top-up-adjustments-postgres.test.ts",
+        "apps/api/test/billing-auto-top-up.stripe-proof.ts",
         "apps/api/test/billing-subscriptions.test.ts",
         "apps/api/test/billing-subscriptions-review-postgres.test.ts",
         "apps/api/test/scoped-credit-checkout.test.ts",
@@ -271,6 +276,9 @@ const billingPortalSurfaceFiles = new Set([
   "packages/sdk/test/client-coverage.test.ts",
   // Generated public API inventory: records the canonical route, never serves it.
   "scripts/public-api/surface.gen.json",
+  // Published-SDK route inventory: records the routes a published SDK calls,
+  // never serves them.
+  "scripts/public-api/published-sdk.gen.json",
   // Generated organization MCP action metadata likewise records, never serves,
   // the billing route; calls dispatch through the canonical route's own guards.
   "packages/contracts/src/app-action-catalog.gen.ts",

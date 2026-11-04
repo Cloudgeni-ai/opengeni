@@ -98,6 +98,8 @@ export type ModelAttemptToolCall = {
   subjectId: string;
   transportMeta?: Record<string, unknown> | null;
   signal?: AbortSignal;
+  /** The identity advertised under `modelName`; a call bound to another tool is not found. */
+  expectedIdentity?: AttemptToolIdentity;
 };
 
 export {
@@ -610,11 +612,20 @@ export function compileCodemodeTools(
 ): CodemodeTools {
   const verified = parseVerifiedAttemptToolCatalog(catalog);
   const root: CodemodeTools = Object.create(null) as CodemodeTools;
-  for (const entry of verified.entries) {
+  entries: for (const entry of verified.entries) {
+    // Catalogs built by the gateway never overlap. Should one still do, keep
+    // the first tool at a path: never replace it or the namespace beneath it
+    // with another tool, and never fail every other tool over one.
+    let probe: CodemodeTools | CodemodeToolFunction | undefined = root;
+    for (const segment of entry.codemodePath) {
+      if (typeof probe === "function") continue entries;
+      probe = probe[segment];
+      if (probe === undefined) break;
+    }
+    if (probe !== undefined) continue;
     let cursor = root;
     for (const segment of entry.codemodePath.slice(0, -1)) {
-      let existing = cursor[segment];
-      if (typeof existing === "function") throw new Error("Codemode path collides with a tool");
+      let existing = cursor[segment] as CodemodeTools | undefined;
       if (!existing) {
         existing = Object.create(null) as CodemodeTools;
         cursor[segment] = existing;
@@ -681,6 +692,18 @@ export function createAttemptToolEnvironment(
           }),
       }),
     ),
+    {
+      onWarnings: (warnings) =>
+        console.warn("[codemode] attempt tool catalog built without some tools as listed", {
+          event: "tool_catalog_degraded",
+          workspaceId: input.scope.workspaceId,
+          sessionId: input.scope.sessionId,
+          turnId: input.scope.turnId,
+          attemptId: input.scope.attemptId,
+          count: warnings.length,
+          warnings: warnings.slice(0, 32),
+        }),
+    },
   );
   const unsigned = {
     version: ATTEMPT_TOOL_CATALOG_VERSION,

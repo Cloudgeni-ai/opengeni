@@ -34,6 +34,8 @@ export const englishMessages = {
   "approvalSurface.sendingAnswer": "Sending answer…",
   /** Above an MCP server's question in the middle of a tool call, e.g. "Linear asks". */
   "approvalSurface.serverAsks": "{server} asks",
+  /** A waiting action whose review offers no decision yet; a Try again button follows. */
+  "approvalSurface.thisActionCanTBeDecided": "This action can't be decided yet.",
   "approvalSurface.tryAgain": "Try again",
   "approvalSurface.viewFullDetails": "View full details",
   "approvalSurface.youDonTHaveAccess":
@@ -2522,6 +2524,7 @@ export const englishMessages = {
   "meetings.detailPage.aboutLessThan001": "Less than $0.01 for this {duration} meeting.",
   "meetings.detailPage.aboutThisTranscript": "About this transcript",
   "meetings.detailPage.addCredits": "Add credits",
+  "meetings.detailPage.upgradeToPro": "Upgrade to Pro",
   "meetings.detailPage.auto": "Auto",
   "meetings.detailPage.backToMeetings": "Back to Meetings",
   "meetings.detailPage.canTLoadThePreview": "Can't show the live text right now",
@@ -2943,6 +2946,8 @@ export const englishMessages = {
     "The credit allowance is used up for now. An admin can raise it, or transcribe with a model that doesn't use credits.",
   "meetings.recordings.errorMonthlyCostLimit":
     "This organization has reached its monthly spending limit. An admin can raise it, or transcribe with a model that doesn't use credits.",
+  "meetings.recordings.errorSubscriptionApiUnavailable":
+    "Connected subscriptions aren't available through the API. Choose a credit-billed model.",
   "meetings.recordings.errorPolicyBlocked":
     "This organization's policy doesn't allow this model. Try another model.",
   "meetings.recordings.errorTimedOut":
@@ -3738,6 +3743,7 @@ export const englishMessages = {
   "native.timeline.messages.onAMachine": "On a machine",
   "native.timeline.messages.output": "Output",
   "native.timeline.messages.pauseGoal": "Pause goal",
+  "native.timeline.messages.paused": "Paused",
   "native.timeline.messages.pin": "Pin",
   "native.timeline.messages.pinned": "Pinned",
   "native.timeline.messages.proposedKnowledge": "Proposed knowledge",
@@ -5570,6 +5576,7 @@ export const englishMessages = {
   "timeline.screenshotLightbox.zoomOut": "Zoom out",
   "timeline.shared.bytesOmitted_one": "{bytes} byte omitted",
   "timeline.shared.bytesOmitted_other": "{bytes} bytes omitted",
+  "timeline.shared.copyStep": "Copy step",
   "timeline.shared.expandScreenshot": "Expand screenshot",
   "timeline.shared.fullEvidence": "full evidence",
   "timeline.shared.imageUnavailable": "image unavailable",
@@ -6078,6 +6085,7 @@ export const englishMessages = {
   "timeline.turnSummary.contextCompactedExpandForDetails": "Context compacted; expand for details",
   "timeline.turnSummary.copyTurn": "Copy turn",
   "timeline.turnSummary.interrupted": "· interrupted",
+  "timeline.turnSummary.paused": "Paused",
   "timeline.turnSummary.preparation": "Preparation",
   "timeline.turnSummary.steps": "Steps",
   "timeline.turnSummary.waiting": "Waiting",

@@ -1,5 +1,38 @@
 # @opengeni/db
 
+## 6.9.0
+
+### Patch Changes
+
+- ff8b164: Grant the agent-call and native push v2 routines withheld by migration 1107. Readiness now requires these grants, phones retain opted-in call rules, and calls use the VoIP-aware push functions without probing privileges or falling back to v1. Existing v1 SQL routines remain available during rolling deployments.
+- 54bf495: A paused chat no longer says it is working. Its turn row reads "Paused" with the clock stopped where the pause began, and switches back to working on Resume; paused time is not counted as work. This covers a chat's own Pause, a parent's and the workspace's. Sidebar rows mark paused work with a pause icon instead of the spinner, including a parent whose workers are paused, through the new `treeStats.pausedWorkDescendants` count. A sub-chat's descendant counts now also respect its ancestors' pauses. `MessageTimeline` in both `@opengeni/react` and `@opengeni/react-native` takes the live pause through its new `pause` prop (`timelineLivePause(session.effectiveControl)`); custom timelines can use `useTimelinePauses`.
+- Updated dependencies [8572155]
+- Updated dependencies [54bf495]
+  - @opengeni/contracts@6.9.0
+  - @opengeni/codemode@6.9.0
+  - @opengeni/codex@6.9.0
+  - @opengeni/config@6.9.0
+  - @opengeni/observability@6.9.0
+  - @opengeni/network@6.9.0
+  - @opengeni/subscriptions@6.9.0
+  - @opengeni/xai-subscription@6.9.0
+
+## 6.8.0
+
+### Patch Changes
+
+- fbb70bc: The chat now stays at the bottom while you work through approvals. Clicking a button, such as Create draft, no longer unpins the view, so the next approval card and any later growth stay in sight. Scrolling up, selecting text or opening an in-place disclosure still lets you read without being pulled down, and finishing a connect card no longer pulls a reader who scrolled up back to the bottom. Each waiting approval also keeps its Decline and approve buttons while the turn resumes, and a card that can't be decided yet says so and retries instead of showing an empty footer.
+- Updated dependencies [58b04d1]
+- Updated dependencies [feaecf8]
+  - @opengeni/contracts@6.8.0
+  - @opengeni/codex@6.8.0
+  - @opengeni/codemode@6.8.0
+  - @opengeni/config@6.8.0
+  - @opengeni/observability@6.8.0
+  - @opengeni/network@6.8.0
+  - @opengeni/subscriptions@6.8.0
+  - @opengeni/xai-subscription@6.8.0
+
 ## 6.7.0
 
 ### Patch Changes

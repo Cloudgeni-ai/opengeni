@@ -170,8 +170,11 @@ config:
 # Digest-pinned Modal Computer/Browser box. Defaults to Opengeni's public image
 # and overwrites config.OPENGENI_MODAL_IMAGE_REF. Override it with another image
 # built from docker/desktop.Dockerfile, never the headless opengeni-sandbox image.
+# Packaged release and canary charts replace this default with the desktop image
+# built from their own source (scripts/package-release-chart.ts); the value here
+# is the fallback for unpackaged checkouts and equals DEFAULT_MODAL_IMAGE_REF.
 desktop:
-  imageRef: "opengenipublicneuacr.azurecr.io/opengeni-desktop@sha256:5bb54a1a6d0c6e99f058290718e55c13193fde3dcbcb54568ce95ddef0768805"
+  imageRef: "opengenipublicneuacr.azurecr.io/opengeni-desktop@sha256:fca875a68cdce099fabaf2ffd97b99fac77578efd6ad0b422425aa2a174e973f"
 
 # Rotate the runtime database login's password without restarting pods. When
 # enabled, the api, worker-control and worker-turns pods mount the optional keys
@@ -1626,11 +1629,12 @@ computeControl:
     nodePort: null
     annotations: {}
     loadBalancerSourceRanges: []
-  # The store's hourly sweep (`compute-control sweep --delete`, ADR 17, 25
-  # and 28), from the same image, with the same identity and database. It
+  # The store's hourly sweep (`compute-control sweep --delete`, ADR 17, 25,
+  # 28 and 29), from the same image, with the same identity and database. It
   # deletes on any archive: gs://, az:// and s3:// alike. Replaced copies
   # (each sandbox's earlier checkpoints) stay stored until a sweep at least
-  # an hour after the hour they were written in, so run it hourly.
+  # an hour after the hour they were written in, so run it hourly. Each run
+  # lists only the hours new since the last, and everything once a day.
   sweep:
     enabled: true
     schedule: "17 * * * *"

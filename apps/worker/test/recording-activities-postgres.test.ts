@@ -14,6 +14,7 @@ import {
 import { DICTATION_RETENTION_MILLISECONDS } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
+  chargeBillingOrigin,
   completeRecordingTranscriptVersion,
   createDb,
   createRecording,
@@ -29,7 +30,9 @@ import {
   reserveRecordingChunks,
   setRecordingTrackPrepared,
   updateWorkspaceSettings,
+  upsertOrganizationPlan,
   type DbClient,
+  type CreditDebitAttribution,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
@@ -113,7 +116,12 @@ function fakeProvider(
 
 async function capturedRecording(
   storage: ReturnType<typeof memoryStorage>,
-  transcription: { providerId: string; model: string; options: Record<string, unknown> } = {
+  transcription: {
+    providerId: string;
+    model: string;
+    options: Record<string, unknown>;
+    creditAttribution?: CreditDebitAttribution;
+  } = {
     providerId: "elevenlabs",
     model: "scribe_v2",
     options: { language: "en" },
@@ -209,13 +217,14 @@ function activities(
   aligner: RecordingWordAligner | null = null,
   now?: () => number,
   startMeetingSummary?: RecordingActivityOptions["startMeetingSummary"],
+  settingsOverrides: Parameters<typeof testSettings>[0] = {},
 ) {
   const warnings: string[] = [];
   const services = async () =>
     ({
       db: client!.db,
       objectStorage: storage.storage,
-      settings: testSettings({ voiceInputFfmpegPath: ffmpegPath }),
+      settings: testSettings({ voiceInputFfmpegPath: ffmpegPath, ...settingsOverrides }),
       observability: { warn: (message: string) => warnings.push(message), info: () => undefined },
       startRecordingWorkflow: null,
     }) as unknown as ControlActivityServices;
@@ -269,6 +278,111 @@ test("a transcript's time budget grows with the audio, up to twelve hours", () =
 });
 
 describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
+  test.each(["app", "api"] as const)(
+    "queued %s subscription recordings preserve actionable refusals before provider dispatch",
+    async (origin) => {
+      if (!client) return;
+      const storage = memoryStorage();
+      const recording = await capturedRecording(
+        storage,
+        {
+          providerId: "elevenlabs",
+          model: "scribe_v2",
+          options: {},
+          creditAttribution: { kind: "service", billingOrigin: origin },
+        },
+        ["microphone"],
+      );
+      const plan = {
+        accountId: recording.input.accountId,
+        planKey: "pro",
+        stripeSubscriptionId: `sub_${crypto.randomUUID()}`,
+        currentPeriodStart: new Date(Date.now() - 1000),
+        currentPeriodEnd: new Date(Date.now() + 3_600_000),
+      };
+      await upsertOrganizationPlan(client.db, { ...plan, status: "active" });
+      if (origin === "app")
+        await upsertOrganizationPlan(client.db, { ...plan, status: "past_due" });
+      let providerCalls = 0;
+      const provider = {
+        ...fakeProvider(async () => {
+          providerCalls++;
+          throw new Error("must not dispatch");
+        }),
+        funding: "workspace_subscription" as const,
+      };
+      const { activities: run } = activities(
+        storage,
+        provider,
+        "key",
+        null,
+        null,
+        undefined,
+        undefined,
+        { billingMode: "stripe", subscriptionPlansEnabled: true, byokPlatformFeeBps: 0 },
+      );
+      const code = origin === "api" ? "subscription_api_unavailable" : "subscription_plan_required";
+      expect(await run.transcribeRecordingVersion(recording.input)).toEqual({
+        outcome: "failed",
+        errorCode: code,
+      });
+      const versions = await listRecordingTranscriptVersions(client.db, {
+        ...recording.actor,
+        recordingId: recording.input.recordingId,
+      });
+      expect(versions.find((version) => version.id === recording.input.versionId)).toMatchObject({
+        state: "failed",
+        errorCode: code,
+      });
+      expect(providerCalls).toBe(0);
+    },
+  );
+  test("API-origin recordings preserve funding origin through transcription and meeting notes", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(
+      storage,
+      {
+        providerId: "elevenlabs",
+        model: "scribe_v2",
+        options: {},
+        creditAttribution: { kind: "service", billingOrigin: "api" },
+      },
+      ["microphone"],
+    );
+    const origins: string[] = [];
+    const provider = fakeProvider(async () => {
+      origins.push(chargeBillingOrigin());
+      return {
+        languages: ["eng"],
+        audioMilliseconds: 2_000,
+        diarized: false,
+        words: [
+          {
+            text: "Hello.",
+            startMilliseconds: 100,
+            endMilliseconds: 400,
+            speaker: null,
+            spaceBefore: false,
+          },
+        ],
+      };
+    });
+    const { activities: run } = activities(
+      storage,
+      provider,
+      "key",
+      null,
+      null,
+      undefined,
+      async () => {
+        origins.push(chargeBillingOrigin());
+        return { started: false, reason: "no_subscription" };
+      },
+    );
+    expect(await run.transcribeRecordingVersion(recording.input)).toEqual({ outcome: "complete" });
+    expect(origins).toEqual(["api", "api"]);
+  });
   test("a meeting's ready transcript starts its summary once; a failure is only logged", async () => {
     if (!client) return;
     const storage = memoryStorage();

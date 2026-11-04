@@ -905,7 +905,7 @@ describe("MessageTimeline pagination affordances", () => {
     }
   });
 
-  test("a control used at the live bottom shows Jump to latest only once something is below", async () => {
+  test("a control used at the live bottom keeps following; a selection shows Jump to latest only once something is below", async () => {
     const events = manyEvents(20);
     const props = { events, turnSummary: { rolling: true } };
     const r = await renderComponent(<MessageTimeline {...props} />);
@@ -921,24 +921,44 @@ describe("MessageTimeline pagination affordances", () => {
       await actRun(() => scroller.dispatchEvent(new Event("scroll")));
       expect(r.container.textContent).not.toContain("Jump to latest");
 
-      // Clicking a control in the conversation (Copy, a Connect card) focuses
-      // it: the reader owns the view, but is still at the bottom.
+      // Clicking a control in the conversation (Copy, a card's button) focuses
+      // it. That is not reading position: the view keeps following the tip.
       await actRun(() =>
         scroller.querySelector<HTMLElement>("[data-og-prompt]")!.focus({ preventScroll: true }),
       );
       await r.rerender(<MessageTimeline {...props} />);
+      expect(scroller.dataset.ogBottomFollow).toBe("true");
+      layout.setContentHeight(2600);
+      const replied = [...events, agentDelta(21, "more below")];
+      await r.rerender(<MessageTimeline {...props} events={replied} />);
+      await flush(50);
+      expect(scroller.dataset.ogBottomFollow).toBe("true");
+      expect(r.container.textContent).not.toContain("Jump to latest");
+
+      // A text selection owns the view while the reader is still at the bottom.
+      layout.syncTipAtBottom();
+      await actRun(() => scroller.dispatchEvent(new Event("scroll")));
+      await actRun(() => {
+        const range = document.createRange();
+        range.selectNodeContents(scroller.querySelector("[data-og-prompt]")!);
+        document.getSelection()!.removeAllRanges();
+        document.getSelection()!.addRange(range);
+        document.dispatchEvent(new Event("selectionchange"));
+      });
+      await r.rerender(<MessageTimeline {...props} events={replied} />);
       expect(scroller.dataset.ogBottomFollow).toBe("false");
       expect(distanceFromBottom(scroller)).toBe(0);
       expect(r.container.textContent).not.toContain("Jump to latest");
 
       // A reply lands below the reader: now there is something to jump to.
-      layout.setContentHeight(2600);
+      layout.setContentHeight(2800);
       await r.rerender(
-        <MessageTimeline {...props} events={[...events, agentDelta(21, "more below")]} />,
+        <MessageTimeline {...props} events={[...replied, agentDelta(22, "even more below")]} />,
       );
       expect(distanceFromBottom(scroller)).toBeGreaterThan(48);
       expect(r.container.textContent).toContain("Jump to latest");
     } finally {
+      document.getSelection()?.removeAllRanges();
       layout.restore();
       await r.unmount();
     }

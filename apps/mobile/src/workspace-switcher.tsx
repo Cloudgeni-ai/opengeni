@@ -10,8 +10,8 @@ import * as Haptics from "expo-haptics";
 import { router } from "expo-router";
 import { useState } from "react";
 import { Platform, Pressable, Text, View } from "react-native";
-import { useAccount } from "@/account";
-import { serverLabel } from "@/account-store";
+import { useAccount, usePickAccount } from "@/account";
+import { accountMenuTitle } from "@/account-switching";
 import { InitialTile } from "@/ui";
 import { openOnWeb, webPaths } from "@/web-links";
 
@@ -213,7 +213,8 @@ export function WorkspaceSwitcherTitle() {
  * server when there are several), Add account and Settings.
  */
 export function AccountMenuButton() {
-  const { accounts, account, switchAccount } = useAccount();
+  const { accounts, account } = useAccount();
+  const pickAccount = usePickAccount();
   const servers = new Set(accounts.map((each) => each.baseUrl)).size;
   const actions: MenuAction[] = [
     {
@@ -222,7 +223,7 @@ export function AccountMenuButton() {
       displayInline: true,
       subactions: accounts.map((each) => ({
         id: `account:${each.id}`,
-        title: servers > 1 ? `${each.email} · ${serverLabel(each.baseUrl)}` : each.email,
+        title: accountMenuTitle(each, servers),
         state: each.id === account?.id ? ("on" as const) : ("off" as const),
       })),
     },
@@ -234,7 +235,7 @@ export function AccountMenuButton() {
       actions={actions}
       onPressAction={({ nativeEvent }) => {
         const event = nativeEvent.event;
-        if (event.startsWith("account:")) switchAccount(event.slice("account:".length));
+        if (event.startsWith("account:")) pickAccount(event.slice("account:".length));
         else if (event === "add-account") router.push("/add-account");
         else if (event === "settings") router.push("/settings");
       }}
