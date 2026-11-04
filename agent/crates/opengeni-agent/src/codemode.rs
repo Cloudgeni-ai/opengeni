@@ -2516,18 +2516,29 @@ mod tests {
 
     #[tokio::test]
     async fn a_call_that_loses_opengeni_after_the_catalog_names_the_cause_and_its_operation() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listen");
-        let address = listener.local_addr().expect("address");
+        // A second socket shares the listener's port from the start and never
+        // listens. Once the listener closes, it keeps the port bound, so the
+        // submission and its read-back that follow the catalog are refused
+        // and no parallel test can take the port in between.
+        let shared_socket = || {
+            let socket = tokio::net::TcpSocket::new_v4().expect("socket");
+            socket.set_reuseaddr(true).expect("reuseaddr");
+            #[cfg(unix)]
+            socket.set_reuseport(true).expect("reuseport");
+            socket
+        };
+        let listening = shared_socket();
+        listening
+            .bind("127.0.0.1:0".parse().unwrap())
+            .expect("bind");
+        let address = listening.local_addr().expect("address");
+        let reserved = shared_socket();
+        reserved.bind(address).expect("share the port");
+        let listener = listening.listen(16).expect("listen");
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("catalog");
             read_request(&mut stream).await;
-            // Stop listening before answering, but keep the port bound, so
-            // the submission and its read-back that follow the catalog are
-            // refused and no parallel test can take the port meanwhile.
             drop(listener);
-            let reserved = tokio::net::TcpSocket::new_v4().expect("socket");
-            reserved.set_reuseaddr(true).expect("reuseaddr");
-            reserved.bind(address).expect("rebind");
             write_response(
                 &mut stream,
                 &json!({
@@ -2540,7 +2551,6 @@ mod tests {
                 }),
             )
             .await;
-            reserved
         });
         let client =
             CodemodeClient::new(&format!("http://{address}/codemode"), "fixture".into()).unwrap();
@@ -2556,7 +2566,8 @@ mod tests {
             )
             .await
             .unwrap_err();
-        drop(server.await.unwrap());
+        server.await.unwrap();
+        drop(reserved);
         assert_eq!(
             error.to_string(),
             format!(
