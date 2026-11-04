@@ -196,7 +196,6 @@ export function typecheckProjects(graph = createWorkspaceGraph()): string[] {
     "scripts/public-api",
     "scripts/release",
     "scripts/agent-behavior-eval",
-    "scripts/integration-eval",
     "scripts/verify",
   ].filter((directory) => existsSync(join(directory, "tsconfig.json")));
   for (const pkg of graph.packages) {
