@@ -266,6 +266,7 @@ import {
   type LazyToolTransport,
 } from "./lazy-tool-transport";
 import { legacyMcpToolDigest, prefixedMcpToolName } from "./mcp-model-tool-name";
+import { uniqueListedMcpTools } from "./mcp-listed-tools";
 export { prefixedMcpToolName } from "./mcp-model-tool-name";
 import { createToolSelector } from "./tool-discovery-decision";
 import { withAccountLine } from "./tool-discovery-ranking";
@@ -9778,13 +9779,21 @@ export class PrefixedMcpServer implements MCPServer {
   private async loadAndFreezeTools(): Promise<RuntimeMcpTool[]> {
     try {
       const tools = assertMcpToolListWithinBounds(await this.inner.listTools()) as RuntimeMcpTool[];
-      const exposed = tools
+      const exposed = uniqueListedMcpTools(this.registryId, tools)
         .filter((tool) => this.isAllowed(tool.name))
         .map((tool) => {
           const name = prefixedMcpToolName(this.registryId, tool.name);
           const prior = this.originalToolNames.get(name);
-          if (prior !== undefined && prior !== tool.name)
-            throw new Error("MCP model tool identity collision");
+          if (prior !== undefined && prior !== tool.name) {
+            // Two different names would share one model name and so one
+            // executor. Keep the first; the other is unavailable this turn.
+            console.warn("[mcp] server listed two tools with one model name; skipping the later", {
+              event: "mcp_tool_model_name_collision",
+              serverId: this.registryId,
+              toolName: tool.name.slice(0, 256),
+            });
+            return null;
+          }
           this.originalToolNames.set(name, tool.name);
           const metaTitle = tool.title ? undefined : displayTitleFromMeta(tool);
           if (metaTitle) this.displayTitles.set(tool.name, metaTitle);
@@ -9812,7 +9821,8 @@ export class PrefixedMcpServer implements MCPServer {
               ? { description: withAccountLine(this.accountLabel.model, tool.description) }
               : {}),
           };
-        });
+        })
+        .filter((tool): tool is NonNullable<typeof tool> => tool !== null);
       const bounded = (this.aggregateToolBudget?.replace(this.aggregateSourceId, exposed) ??
         assertMcpToolListWithinBounds(exposed)) as RuntimeMcpTool[];
       this.listedToolSchemaTokens = estimateSerializedValueTokens(bounded);
