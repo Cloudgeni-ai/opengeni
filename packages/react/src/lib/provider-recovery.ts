@@ -118,6 +118,9 @@ export function parseProviderRecovery(payload: unknown): ProviderRecoveryFacts |
   // A live recovery request is retryable; a spent budget is explicitly marked.
   if (record.recoveryExhausted !== true && record.retryable === false) return null;
   const attempt = count(record.providerRecoveryCount);
+  // A restarting machine is restarted once and the same turn continues when
+  // it is back: a wait, with no retry budget to count.
+  const machineRestart = code === "sandbox_machine_restarting";
   return {
     code,
     condition: condition(record, code),
@@ -134,7 +137,9 @@ export function parseProviderRecovery(payload: unknown): ProviderRecoveryFacts |
           sandboxWait: true,
           sandboxTransition: transition ?? (rotation ? "rotation_in_progress" : null),
         }
-      : {}),
+      : machineRestart
+        ? { sandboxWait: true, sandboxTransition: null }
+        : {}),
   };
 }
 
@@ -168,7 +173,7 @@ export function providerRecoverySubject(t: OpenGeniText, facts: ProviderRecovery
     case "sandbox_command_start_unavailable":
       return t("lib.providerRecovery.theSandboxIsnTReady");
     case "sandbox_machine_restarting":
-      return t("lib.providerRecovery.theWorkspaceMachineIsRestarting");
+      return t("lib.providerRecovery.theWorkspaceMachineWasRestarted");
     case "sandbox_capacity_unavailable":
       return t("lib.providerRecovery.noSandboxCapacityIsAvailable");
     case "sandbox_service_unavailable":

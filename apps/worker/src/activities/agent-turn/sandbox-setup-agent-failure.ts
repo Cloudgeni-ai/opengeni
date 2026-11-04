@@ -159,7 +159,7 @@ export class SandboxMachineRestartingError extends Error {
 
   constructor(cause: unknown) {
     super(
-      "The workspace machine stopped being able to start programs, so it is being restarted. Your files are kept, and the same turn will retry after a short delay.",
+      "The workspace machine stopped being able to start programs, so it was restarted. Your files are kept, and the same turn continues once it is back.",
       { cause },
     );
   }

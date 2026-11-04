@@ -2190,8 +2190,8 @@ export const englishMessages = {
     "The sandbox reached its maximum lifetime, so {product} is moving the workspace to a fresh sandbox",
   "lib.providerRecovery.theSandboxServiceIsTemporarily":
     "The sandbox service is temporarily unavailable",
-  "lib.providerRecovery.theWorkspaceMachineIsRestarting":
-    "The workspace machine couldn't start programs and is being restarted",
+  "lib.providerRecovery.theWorkspaceMachineWasRestarted":
+    "The workspace machine couldn't start programs, so it was restarted",
   "lib.providerRecovery.tryAgainInAFew": "Try again in a few minutes, or switch to another model.",
   "lib.providerRecovery.tryAgainInAFew2": "Try again in a few minutes.",
   "lib.transientRetry.actionMayNotHaveGoneThrough":
