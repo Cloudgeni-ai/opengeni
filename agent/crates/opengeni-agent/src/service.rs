@@ -280,10 +280,10 @@ fn refresh_previous_systemd_unit(
 #[cfg(any(target_os = "linux", test))]
 fn replace_unit_file(unit_path: &Path, contents: &str) -> Result<(), String> {
     use std::io::Write;
-    let file_name = unit_path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| service::ids::SYSTEMD_UNIT.to_owned());
+    let file_name = unit_path.file_name().map_or_else(
+        || service::ids::SYSTEMD_UNIT.to_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    );
     let staged = unit_path.with_file_name(format!(".{file_name}.opengeni-update"));
     let written = std::fs::File::create(&staged).and_then(|mut file| {
         file.write_all(contents.as_bytes())?;
@@ -1687,7 +1687,10 @@ mod tests {
             .expect("list")
             .map(|entry| entry.expect("entry").file_name())
             .collect();
-        assert_eq!(names, vec![std::ffi::OsString::from(service::ids::SYSTEMD_UNIT)]);
+        assert_eq!(
+            names,
+            vec![std::ffi::OsString::from(service::ids::SYSTEMD_UNIT)]
+        );
 
         // A unit that cannot be replaced is reported and leaves no staged file.
         let blocked = dir.path().join("blocked");
