@@ -65,6 +65,62 @@ describe("process-start failures from the machine agent", () => {
     expect(sanitizeProcessStartFailureMessage("exit status 1")).toBe("exit status 1");
   });
 
+  test("command text that is not a plain program name is never kept", () => {
+    // An old agent's short shell command with a secret and no spaces.
+    const leaked = sanitizeProcessStartFailureMessage(
+      `spawn or apply execution containment for TOKEN=sk-live-abc123;curl: ${OS}`,
+    );
+    expect(leaked).toBe(`spawn or apply execution containment for a shell command: ${OS}`);
+    expect(leaked).not.toContain("sk-live");
+  });
+
+  test("a program name keeps the rest of the agent's message on one line", () => {
+    expect(
+      sanitizeProcessStartFailureMessage(
+        "spawn or apply execution containment for /bin/sh: run_as requires Linux",
+      ),
+    ).toBe("spawn or apply execution containment for /bin/sh: run_as requires Linux");
+    expect(
+      sanitizeProcessStartFailureMessage(
+        "spawn or apply execution containment for /bin/sh: write /sys/fs/cgroup/op-1/cgroup.procs:\nPermission denied (os error 13)",
+      ),
+    ).toBe(
+      "spawn or apply execution containment for /bin/sh: write /sys/fs/cgroup/op-1/cgroup.procs: Permission denied (os error 13)",
+    );
+  });
+
+  test("only a machine that cannot start programs is flagged; one missing program is a missing path", () => {
+    const missing = spawnError("/nonexistent/opengeni-missing-program");
+    expect(missing.processStartFailed).toBe(false);
+    expect(missing.osNotFound).toBe(true);
+    expect(selfhostedFaultClass(missing)).toBe("not_found");
+    const denied = spawnError("/usr/local/bin/tool", "", ErrorCode.ERROR_CODE_OS);
+    expect(denied.processStartFailed).toBe(false);
+    const exhausted = agentErrorToControlError({
+      code: ErrorCode.ERROR_CODE_OS,
+      message:
+        "spawn or apply execution containment for /bin/sh: Resource temporarily unavailable (os error 11)",
+      retryable: false,
+      detail: { errno: "11" },
+    });
+    expect(exhausted.processStartFailed).toBe(true);
+    expect(spawnError("/bin/bash", " (the null device /dev/null is missing)").processStartFailed).toBe(
+      true,
+    );
+  });
+
+  test("an old agent's command text is removed from the error's detail too", () => {
+    const error = agentErrorToControlError({
+      code: ErrorCode.ERROR_CODE_OS,
+      message: `spawn or apply execution containment for ${SCRIPT}: Permission denied (os error 13)`,
+      retryable: false,
+      detail: { context: `spawn or apply execution containment for ${SCRIPT}`, errno: "13" },
+    });
+    expect(error.detail.context).toBe("spawn or apply execution containment for a shell command");
+    expect(error.detail.errno).toBe("13");
+    expect(JSON.stringify(error.detail)).not.toContain("node -e");
+  });
+
   test("the error is typed, short, and never a missing path", () => {
     for (const code of [ErrorCode.ERROR_CODE_NOT_FOUND, ErrorCode.ERROR_CODE_OS]) {
       const error = spawnError(SCRIPT, "", code);

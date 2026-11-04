@@ -237,9 +237,19 @@ jobs:
       - name: Install the native transport test broker
         uses: ./.github/actions/setup-agent-test-nats
 
+      # The /dev/null regression test hides /dev in a private mount namespace,
+      # which Ubuntu's AppArmor denies to unprivileged users by default.
+      - name: Allow unprivileged user namespaces for the agent's namespace tests
+        if: runner.os == 'Linux'
+        run: |
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
       - name: cargo test --workspace
         env:
           OPENGENI_AGENT_REQUIRE_NATS: ${{ runner.os == 'Linux' && '1' || '' }}
+          OPENGENI_AGENT_REQUIRE_MOUNT_NAMESPACE: ${{ runner.os == 'Linux' && '1' || '' }}
         run: cargo test --workspace --all-features
 
       - name: Verify publication receipts, websocket dialing and platform roots across reconnects

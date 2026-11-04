@@ -1,8 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { ToolCallError } from "@openai/agents";
 import { ErrorCode } from "@opengeni/agent-proto";
-import { agentErrorToControlError, offlineAgentError } from "@opengeni/runtime/sandbox";
+import {
+  agentErrorToControlError,
+  ComputeSandboxSession,
+  offlineAgentError,
+} from "@opengeni/runtime/sandbox";
 import { agentRunFailurePayload } from "../src/activities/agent-turn/errors";
+import { TurnAttemptFencedError } from "../src/activities/turn-attempt-fenced";
 import {
   createSandboxSetupReplayGuard,
   isSandboxProcessStartFailure,
@@ -209,5 +214,84 @@ describe("a sandbox that cannot start programs", () => {
       await recoverSandboxSetupFailure(createSandboxSetupReplayGuard(), plain, turn.recovery),
     ).toBe(plain);
     expect(turn.restarts()).toBe(0);
+  });
+
+  test("one missing or forbidden program never restarts the machine", async () => {
+    for (const message of [
+      "not found: spawn or apply execution containment for /nonexistent/opengeni-missing-program: No such file or directory (os error 2)",
+      "spawn or apply execution containment for /usr/local/bin/tool: Permission denied (os error 13)",
+    ]) {
+      const turn = computeTurn();
+      const error = agentErrorToControlError({
+        code: message.startsWith("not found")
+          ? ErrorCode.ERROR_CODE_NOT_FOUND
+          : ErrorCode.ERROR_CODE_OS,
+        message,
+        retryable: false,
+        detail: {},
+      });
+      expect(isSandboxProcessStartFailure(error)).toBe(false);
+      expect(isSandboxProcessStartFailure(inToolCall(error))).toBe(false);
+      expect(
+        await recoverSandboxSetupFailure(createSandboxSetupReplayGuard(), error, turn.recovery),
+      ).toBe(error);
+      expect(turn.restarts()).toBe(0);
+      expect(turn.events).toEqual([]);
+    }
+  });
+
+  test("a machine out of processes is restarted like one without /dev/null", async () => {
+    const turn = computeTurn();
+    const error = agentErrorToControlError({
+      code: ErrorCode.ERROR_CODE_OS,
+      message:
+        "spawn or apply execution containment for /bin/sh: Resource temporarily unavailable (os error 11)",
+      retryable: false,
+      detail: { errno: "11" },
+    });
+    expect(
+      await recoverSandboxSetupFailure(createSandboxSetupReplayGuard(), error, turn.recovery),
+    ).toBeInstanceOf(SandboxMachineRestartingError);
+    expect(turn.restarts()).toBe(1);
+  });
+
+  test("a fenced attempt stops as such and restarts nothing", async () => {
+    const turn = computeTurn();
+    const fenced = new TurnAttemptFencedError("turn execution generation was fenced");
+    const error = await recoverSandboxSetupFailure(
+      createSandboxSetupReplayGuard(),
+      processStartError(INSTALL_SCRIPT),
+      {
+        ...turn.recovery,
+        publish: async () => {
+          throw fenced;
+        },
+      },
+    );
+    expect(error).toBe(fenced);
+    expect(turn.restarts()).toBe(0);
+  });
+
+  test("an unrecorded restart is never made", async () => {
+    const turn = computeTurn();
+    const error = await recoverSandboxSetupFailure(
+      createSandboxSetupReplayGuard(),
+      processStartError(INSTALL_SCRIPT),
+      {
+        ...turn.recovery,
+        publish: async () => {
+          throw new Error("database unavailable");
+        },
+      },
+    );
+    expect(error).toBeInstanceOf(SandboxProcessStartFailedError);
+    expect(turn.restarts()).toBe(0);
+  });
+
+  test("the real compute session is the restartable shape the recovery looks for", () => {
+    // Duck-typed in the worker; a rename here would silently stop restarts.
+    const restartable: { readonly backendId: "compute"; restartMachine(): Promise<void> } =
+      Object.create(ComputeSandboxSession.prototype) as ComputeSandboxSession;
+    expect(typeof restartable.restartMachine).toBe("function");
   });
 });

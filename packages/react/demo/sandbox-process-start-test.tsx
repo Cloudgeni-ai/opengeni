@@ -74,7 +74,7 @@ const events: SessionEvent[] = [
     "turn.recovery.requested",
     {
       error:
-        "The workspace machine stopped being able to start programs, so it was restarted. Your files are kept, and the same turn continues once it is back.",
+        "The workspace machine couldn't start programs, so it was restarted. Your files are kept; programs that were running stopped. The same turn continues once it is back.",
       code: "sandbox_machine_restarting",
       retryable: true,
       providerRecoveryCount: 1,

@@ -1302,7 +1302,10 @@ export async function bindLazySandboxProvisioner(
                   turnId: turn.id,
                 }),
               publish: async (events) => {
-                await eventing.publish?.(events, true);
+                // The restart guard counts these events: an unrecorded
+                // restart could repeat, so no publisher means no restart.
+                if (!eventing.publish) throw new Error("no event publisher for this turn");
+                await eventing.publish(events, true);
               },
               operationName: SANDBOX_PROCESS_START_RESTART_OPERATION,
             });

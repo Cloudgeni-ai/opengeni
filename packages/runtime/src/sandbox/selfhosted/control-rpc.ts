@@ -33,6 +33,7 @@ import {
 } from "./control-replay";
 import { errorMessage } from "@opengeni/contracts/values";
 import {
+  isMachineProcessStartFailureMessage,
   isProcessStartFailureMessage,
   sanitizeProcessStartFailureMessage,
 } from "./process-start-failure";
@@ -136,9 +137,12 @@ export class SelfhostedControlError extends Error {
   readonly draining: boolean;
   readonly agentOffline: boolean;
   readonly osNotFound: boolean;
-  /** The machine could not start the program (the agent's spawn failed).
-   *  Its message names only the started program, never the command text, and
-   *  it is never a missing-path answer, so `osNotFound` stays false. */
+  /** The machine itself cannot start programs (a missing `/dev/null`, an
+   *  older agent's shell that would not start, exhausted resources). Its
+   *  message names only the started program, never the command text, and it
+   *  is never a missing-path answer, so `osNotFound` stays false. Any other
+   *  failed start (one missing program) keeps its ordinary mapping, also
+   *  with the command text removed. */
   readonly processStartFailed: boolean;
   /** The reply exceeded the transport's max payload (a distinguishing flag so the
    *  fault renderer can name the size wall + recovery instead of a generic OS error). */
@@ -174,8 +178,13 @@ export class SelfhostedControlError extends Error {
     controlRequestId?: string | null;
     detail?: Record<string, string>;
   }) {
-    const processStartFailed = isProcessStartFailureMessage(input.message);
-    super(processStartFailed ? sanitizeProcessStartFailureMessage(input.message) : input.message);
+    // Every failed process start is reduced to the program's name, so no
+    // command text reaches events, tool output or the person; only one that
+    // says the machine itself cannot start programs is flagged as such.
+    const startFailure = isProcessStartFailureMessage(input.message);
+    const processStartFailed =
+      startFailure && isMachineProcessStartFailureMessage(input.message);
+    super(startFailure ? sanitizeProcessStartFailureMessage(input.message) : input.message);
     this.code = input.code;
     this.reason = input.reason;
     this.retryable = input.retryable;
@@ -190,7 +199,17 @@ export class SelfhostedControlError extends Error {
     this.neverSent = input.neverSent ?? false;
     this.connectionReplaced = input.connectionReplaced ?? false;
     this.controlRequestId = input.controlRequestId ?? null;
-    this.detail = input.detail ?? {};
+    this.detail =
+      startFailure && input.detail
+        ? Object.fromEntries(
+            Object.entries(input.detail).map(([key, value]) => [
+              key,
+              isProcessStartFailureMessage(value)
+                ? sanitizeProcessStartFailureMessage(value)
+                : value,
+            ]),
+          )
+        : (input.detail ?? {});
   }
 }
 

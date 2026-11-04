@@ -22,7 +22,9 @@ export function sandboxRowTitle(
       ? t("timeline.platformActivityPresentation.workspaceMachineRestartFailed")
       : item.status === "running"
         ? t("timeline.platformActivityPresentation.restartingTheWorkspaceMachine")
-        : t("timeline.platformActivityPresentation.workspaceMachineRestarted");
+        : item.status === "cancelled"
+          ? t("timeline.platformActivityPresentation.workspaceMachineRestartInterrupted")
+          : t("timeline.platformActivityPresentation.workspaceMachineRestarted");
   }
   return displayName(item.name);
 }

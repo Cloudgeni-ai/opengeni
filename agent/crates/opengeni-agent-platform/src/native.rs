@@ -332,11 +332,13 @@ fn requested_policy(
 /// anchor's stdin writer open; a runner crash closes it in the kernel, causing
 /// the anchor to kill the operation cgroup when present or its own process group
 /// otherwise. Keeping this private child unreaped also fences numeric PGID reuse.
+/// Its stderr is already the agent's kept null device, so the script never
+/// names `/dev/null`: a removed one would otherwise skip every kill below.
 #[cfg(unix)]
 const UNIX_EXEC_ANCHOR: &str = "\
 while IFS= read -r _; do :; done; \
-if [ -n \"$1\" ] && printf '1' > \"$1\" 2>/dev/null; then exit 0; fi; \
-kill -KILL -- \"-$$\" 2>/dev/null || kill -KILL \"-$$\" 2>/dev/null || true";
+if [ -n \"$1\" ] && printf '1' > \"$1\"; then exit 0; fi; \
+kill -KILL -- \"-$$\" || kill -KILL \"-$$\" || true";
 
 struct ExecOutput {
     exit_code: i32,
@@ -1934,10 +1936,17 @@ mod tests {
     /// execution containment" until the box was rebooted. The agent must keep
     /// starting programs once `/dev/null` is gone, whether or not it can put the
     /// device back (`rw`: repair allowed as real root; `ro`: never repairable).
+    /// Skips where no private mount namespace is permitted, unless
+    /// `OPENGENI_AGENT_REQUIRE_MOUNT_NAMESPACE` is set (Linux agent CI).
     #[cfg(target_os = "linux")]
     #[test]
     fn exec_starts_programs_after_dev_null_is_removed() {
         let Some(namespace) = private_mount_namespace_args() else {
+            assert!(
+                std::env::var_os("OPENGENI_AGENT_REQUIRE_MOUNT_NAMESPACE")
+                    .is_none_or(|value| value.is_empty()),
+                "OPENGENI_AGENT_REQUIRE_MOUNT_NAMESPACE is set, but this machine permits no private mount namespace"
+            );
             eprintln!("skipping: this machine permits no private mount namespace");
             return;
         };
@@ -2008,8 +2017,20 @@ mod tests {
         let state = crate::null_device::inspect(Path::new("/dev/null"));
         if mode == "ro" {
             assert_eq!(state, crate::null_device::NullDeviceState::Missing);
+        } else if nix::unistd::geteuid().is_root() && in_initial_user_namespace() {
+            // Real root may mknod, so the agent puts the device back.
+            assert_eq!(state, crate::null_device::NullDeviceState::Healthy);
         }
         eprintln!("mode {mode}: /dev/null afterwards: {state:?}");
+    }
+
+    /// Whether this process's root is the machine's root, not a user
+    /// namespace's (which may not create device nodes).
+    #[cfg(target_os = "linux")]
+    fn in_initial_user_namespace() -> bool {
+        std::fs::read_to_string("/proc/self/uid_map").is_ok_and(|map| {
+            map.split_whitespace().collect::<Vec<_>>() == ["0", "0", "4294967295"]
+        })
     }
 
     #[test]

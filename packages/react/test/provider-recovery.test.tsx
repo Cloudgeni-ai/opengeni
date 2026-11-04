@@ -392,7 +392,7 @@ test("a workspace machine that can't start programs reads as plain words while r
   // the terminal failure once a restart did not help.
   const restarting = parseProviderRecovery({
     error:
-      "The workspace machine stopped being able to start programs, so it was restarted. Your files are kept, and the same turn continues once it is back.",
+      "The workspace machine couldn't start programs, so it was restarted. Your files are kept; programs that were running stopped. The same turn continues once it is back.",
     code: "sandbox_machine_restarting",
     retryable: true,
     providerRecoveryCount: 1,

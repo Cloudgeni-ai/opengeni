@@ -178,12 +178,18 @@ fn repair(path: &Path, observed: NullDeviceState) -> RepairOutcome {
         makedev(1, 3),
     );
     match created {
-        Ok(()) | Err(nix::errno::Errno::EEXIST) => {}
+        Ok(()) => {
+            // mknod applies the umask; the device must be usable by every
+            // user. Only the node made here is changed: something that raced
+            // in at the path (a symlink) is never followed.
+            if let Err(error) =
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666))
+            {
+                return RepairOutcome::NotRepaired(format!("chmod: {error}"));
+            }
+        }
+        Err(nix::errno::Errno::EEXIST) => {}
         Err(error) => return RepairOutcome::NotRepaired(format!("mknod: {error}")),
-    }
-    // mknod applies the umask; the device must be usable by every user.
-    if let Err(error) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666)) {
-        return RepairOutcome::NotRepaired(format!("chmod: {error}"));
     }
     if inspect(path) == NullDeviceState::Healthy {
         RepairOutcome::Repaired
@@ -249,5 +255,34 @@ mod tests {
             matches!(outcome, RepairOutcome::NotRepaired(_)),
             "{outcome:?}"
         );
+    }
+
+    /// Root only (`mknod` needs it): skipped, and says so, otherwise.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn repair_puts_back_a_missing_or_replaced_device_as_root() {
+        use std::os::unix::fs::PermissionsExt;
+        if !nix::unistd::geteuid().is_root() {
+            eprintln!("skipping: mknod needs root");
+            return;
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("missing");
+        assert_eq!(
+            repair(&missing, NullDeviceState::Missing),
+            RepairOutcome::Repaired
+        );
+        assert_eq!(inspect(&missing), NullDeviceState::Healthy);
+        let mode = std::fs::metadata(&missing).expect("metadata").permissions().mode();
+        assert_eq!(mode & 0o777, 0o666, "{mode:o}");
+
+        // What `> /dev/null` leaves once the device is gone: a regular file.
+        let replaced = dir.path().join("replaced");
+        std::fs::write(&replaced, b"redirected output").expect("write");
+        assert_eq!(
+            repair(&replaced, NullDeviceState::Replaced),
+            RepairOutcome::Repaired
+        );
+        assert_eq!(inspect(&replaced), NullDeviceState::Healthy);
     }
 }

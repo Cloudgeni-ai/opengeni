@@ -10,6 +10,15 @@ export const PROCESS_START_FAILURE_MARKER = "spawn or apply execution containmen
 
 /** The longest program name kept from an agent's message. */
 const PROGRAM_LIMIT = 160;
+/** The longest rest of the message kept after a program name. */
+const TAIL_LIMIT = 300;
+
+/** A program name: path characters only. Anything else (spaces, quotes,
+ * `=`, `;`) is command text an older agent put there, never kept. */
+const PROGRAM_TOKEN = new RegExp(`^([A-Za-z0-9._/+@~-]{1,${PROGRAM_LIMIT}})(?=$|\\s\\(|: )`);
+
+/** Linux errnos for exhausted machine resources: EAGAIN, ENOMEM, ENFILE, EMFILE. */
+const RESOURCE_ERRNOS: ReadonlySet<number> = new Set([11, 12, 23, 24]);
 
 /** The null-device notes newer agents add before the OS error. */
 const NULL_DEVICE_NOTE =
@@ -20,23 +29,50 @@ export function isProcessStartFailureMessage(message: string): boolean {
   return message.includes(PROCESS_START_FAILURE_MARKER);
 }
 
+function programName(rest: string): string | null {
+  return PROGRAM_TOKEN.exec(rest)?.[1] ?? null;
+}
+
 /**
- * The same message with the started program reduced to a bounded single-line
- * name and nothing else from the command. A shell command (old agents) becomes
- * "a shell command"; the OS error and any null-device note are kept. Messages
- * without the marker are returned unchanged.
+ * Whether a failed process start says the machine itself cannot start
+ * programs, rather than that this one program is missing or not permitted:
+ * the agent named a missing or replaced `/dev/null`; an older agent failed to
+ * start its shell for a shell command (it reported the script, no program
+ * name, as in the 4 Nov incident); or the machine is out of processes,
+ * memory or file handles. Only these warrant restarting the machine.
+ */
+export function isMachineProcessStartFailureMessage(message: string): boolean {
+  const at = message.indexOf(PROCESS_START_FAILURE_MARKER);
+  if (at < 0) return false;
+  const rest = message.slice(at + PROCESS_START_FAILURE_MARKER.length);
+  if (NULL_DEVICE_NOTE.test(rest)) return true;
+  if (programName(rest) === null) return true;
+  const errno = /\(os error (\d+)\)\s*$/.exec(rest)?.[1];
+  return errno !== undefined && RESOURCE_ERRNOS.has(Number(errno));
+}
+
+/**
+ * The same message on one bounded line with nothing from the command but the
+ * program's name. A program name keeps the rest of the agent's message (the
+ * OS error and its context); anything that is not a plain name (an older
+ * agent's shell script) becomes "a shell command" with only the null-device
+ * note and the OS error kept. Messages without the marker are unchanged.
  */
 export function sanitizeProcessStartFailureMessage(message: string): string {
   const at = message.indexOf(PROCESS_START_FAILURE_MARKER);
   if (at < 0) return message;
   const before = message.slice(0, at).replace(/\s+/g, " ").slice(-200);
   const rest = message.slice(at + PROCESS_START_FAILURE_MARKER.length);
-  const program = new RegExp(`^([^\\s()]{1,${PROGRAM_LIMIT}})(?=$|\\s\\(|: )`).exec(rest)?.[1];
+  const program = programName(rest);
+  if (program !== null) {
+    const tail = rest.slice(program.length).replace(/\s+/g, " ").trimEnd().slice(0, TAIL_LIMIT);
+    return `${before}${PROCESS_START_FAILURE_MARKER}${program}${tail}`;
+  }
   const note = NULL_DEVICE_NOTE.exec(rest)?.[1];
   const cause = /([^:\n]{1,200}\(os error \d+\))\s*$/.exec(rest)?.[1]?.trim();
-  return `${before}${PROCESS_START_FAILURE_MARKER}${program ?? "a shell command"}${
-    note ? ` (${note})` : ""
-  }${cause ? `: ${cause}` : ""}`;
+  return `${before}${PROCESS_START_FAILURE_MARKER}a shell command${note ? ` (${note})` : ""}${
+    cause ? `: ${cause}` : ""
+  }`;
 }
 
 /** The null-device note in a process-start failure, when the agent named it. */

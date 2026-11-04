@@ -5528,6 +5528,8 @@ export const englishMessages = {
   "timeline.platformActivityPresentation.workspaceMachineRestarted": "Workspace machine restarted",
   "timeline.platformActivityPresentation.workspaceMachineRestartFailed":
     "Workspace machine restart failed",
+  "timeline.platformActivityPresentation.workspaceMachineRestartInterrupted":
+    "Workspace machine restart interrupted",
   "timeline.platformActivityRow.command": "Command",
   "timeline.platformActivityRow.details": "Details",
   "timeline.platformActivityRow.includesOverlappingSandboxStartupCustom":

@@ -598,6 +598,7 @@ export {
 } from "./selfhosted/control-rpc";
 export {
   PROCESS_START_FAILURE_MARKER,
+  isMachineProcessStartFailureMessage,
   isProcessStartFailureMessage,
   sanitizeProcessStartFailureMessage,
   processStartFailureNullDeviceNote,

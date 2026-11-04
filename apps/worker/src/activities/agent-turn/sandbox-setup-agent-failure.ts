@@ -1,8 +1,11 @@
 import {
-  isProcessStartFailureMessage,
+  isMachineProcessStartFailureMessage,
   processStartFailureNullDeviceNote,
+  sanitizeProcessStartFailureMessage,
   SelfhostedControlError,
 } from "@opengeni/runtime";
+import { CancelledFailure } from "@temporalio/activity";
+import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 
 /**
  * Platform sandbox setup (credential hooks, client readiness, repository
@@ -119,9 +122,10 @@ export const SANDBOX_MACHINE_RESTARTING_CODE = "sandbox_machine_restarting";
 /** The terminal code of a turn whose sandbox cannot start programs. */
 export const SANDBOX_PROCESS_START_FAILED_CODE = "sandbox_process_start_failed";
 
-/** Whether the machine's failure to start a program appears anywhere in the
+/** Whether the machine's inability to start programs appears anywhere in the
  * error's cause graph: a typed agent answer, or its stable marker in a
- * wrapper's message (older wrappers keep only the text). */
+ * wrapper's message (older wrappers keep only the text). One missing program
+ * is not that: it keeps its ordinary handling. */
 export function isSandboxProcessStartFailure(error: unknown): boolean {
   return findProcessStartFailure(error) !== null;
 }
@@ -136,7 +140,7 @@ function findProcessStartFailure(error: unknown): Error | null {
       seen.add(node);
       if (node instanceof SelfhostedControlError) {
         if (node.processStartFailed) return node;
-      } else if (node instanceof Error && isProcessStartFailureMessage(node.message)) {
+      } else if (node instanceof Error && isMachineProcessStartFailureMessage(node.message)) {
         return node;
       }
       const record = node as { cause?: unknown; error?: unknown; errors?: unknown };
@@ -159,7 +163,7 @@ export class SandboxMachineRestartingError extends Error {
 
   constructor(cause: unknown) {
     super(
-      "The workspace machine stopped being able to start programs, so it was restarted. Your files are kept, and the same turn continues once it is back.",
+      "The workspace machine couldn't start programs, so it was restarted. Your files are kept; programs that were running stopped. The same turn continues once it is back.",
       { cause },
     );
   }
@@ -189,7 +193,11 @@ export class SandboxProcessStartFailedError extends Error {
     },
   ) {
     const found = findProcessStartFailure(cause);
-    const agentMessage = found?.message ?? (cause instanceof Error ? cause.message : String(cause));
+    // A wrapper keeps the agent's raw text, which older agents filled with
+    // the whole command: only its sanitized form is kept.
+    const agentMessage = sanitizeProcessStartFailureMessage(
+      found?.message ?? (cause instanceof Error ? cause.message : String(cause)),
+    ).slice(0, 2_000);
     super(processStartFailedCopy(input.machine, input.restartedThisTurn, agentMessage), {
       cause,
     });
@@ -306,6 +314,16 @@ export async function recoverSandboxSetupFailure(
     await recovery.publish([
       { type: "sandbox.operation.started", payload: { name, reason: "process_start_failed" } },
     ]);
+  } catch (publishError) {
+    // A fenced or cancelled attempt stops as such; nothing was restarted.
+    if (isAttemptStop(publishError)) return publishError;
+    return new SandboxProcessStartFailedError(error, {
+      machine: "compute",
+      restartedThisTurn: false,
+      restartFailure: `could not record the restart: ${errorText(publishError)}`,
+    });
+  }
+  try {
     await machine.restartMachine();
   } catch (restartError) {
     await recovery
@@ -326,6 +344,16 @@ export async function recoverSandboxSetupFailure(
     .publish([{ type: "sandbox.operation.completed", payload: { name } }])
     .catch(() => undefined);
   return new SandboxMachineRestartingError(error);
+}
+
+/** A lost attempt (fenced, superseded) or a cancelled operation: never
+ * reported as a machine failure. */
+function isAttemptStop(error: unknown): boolean {
+  return (
+    error instanceof TurnAttemptFencedError ||
+    error instanceof CancelledFailure ||
+    (error instanceof Error && error.name === "TurnOperationCancelledError")
+  );
 }
 
 function errorText(error: unknown): string {
