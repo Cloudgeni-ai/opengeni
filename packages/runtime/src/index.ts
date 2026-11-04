@@ -191,6 +191,8 @@ import {
   GenerateVideoToolInput,
   GetVideoGenerationCapabilitiesToolInput,
   RequestHumanInputToolInput,
+  requestHumanInputToolParameters,
+  type HumanInputQuestionFeatures,
   resolveAgentToolFamilies,
   resolveAgentMediaToolSurface,
   type ResolvedAgentConfig,
@@ -447,7 +449,9 @@ import { recordStableSystemPromptPrefix } from "./system-prompt-cache-prefix";
 import { sandboxBaseInstructions } from "./sandbox-base-instructions";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "./operational-instructions";
 import {
+  agentSharesWorkspace,
   composeModularAgentInstructions,
+  NEUTRAL_AGENT_IDENTITY,
   resolveAgentIdentity,
   rigInstructions,
   UNATTENDED_SESSION_GUIDANCE,
@@ -462,6 +466,7 @@ import {
 export {
   AGENT_PROMPT_MODULES,
   DEFAULT_AGENT_IDENTITY,
+  NEUTRAL_AGENT_IDENTITY,
   INSTRUCTION_PRECEDENCE,
   SESSION_INSTRUCTIONS_PREAMBLE,
   composeModularAgentInstructions,
@@ -2356,6 +2361,14 @@ export type BuildAgentOptions = {
   toolSearchMeaningRanker?: import("./tool-discovery-meaning").ToolMeaningRanker | undefined;
   /** Durable router use survives capability and tool-policy changes. */
   toolRouterInHistory?: boolean;
+  /**
+   * `false` when the host proved from frozen facts that nothing this attempt
+   * attaches is deferred (see the worker's `turnToolRouterExpected`). Pending
+   * background preparation alone then exposes no search router, and the
+   * instructions omit tool discovery. Tools that do turn out searchable still
+   * expose it, so nothing becomes unreachable. Omitted keeps today's rule.
+   */
+  toolRouterExpected?: boolean;
   /** Live authority fence for intrinsic sandbox tools outside the MCP gateway. */
   authorizeAttemptExecution?: () => Promise<void> | void;
   /** Trusted attempt-local wait receipt shared with prepared tools. */
@@ -2363,6 +2376,11 @@ export type BuildAgentOptions = {
   model?: Model;
   /** Attach the built-in structured human-input tool. Default: enabled. */
   humanInputEnabled?: boolean;
+  /**
+   * Whether this session has a parent agent (frozen at create). `false` leaves
+   * the parent-agent guidance out of `request_human_input`; omitted keeps it.
+   */
+  subSession?: boolean;
   /**
    * The session is unattended (frozen at create): no person will see or answer
    * a question until the task ends. Both compositions say so, and the
@@ -2859,6 +2877,79 @@ function gitBindingDiscoveryApplies(
  * attachments deliberately select nothing here: a turn with a file must share
  * the cached instructions of a turn without one.
  */
+type HumanInputWireSchemaNode = {
+  properties?: Record<string, HumanInputWireSchemaNode>;
+  required?: string[];
+  enum?: unknown[];
+  items?: HumanInputWireSchemaNode;
+};
+
+let fullHumanInputWireParameters: unknown;
+
+/**
+ * The model-facing schema of a reduced `request_human_input`: the full
+ * contract exactly as the Agents SDK converts it, with only the disabled
+ * fields removed. Converting a reduced zod schema directly would take the
+ * SDK's other converter, which adds length keywords and can make the reduced
+ * schema larger than the full one. The reduced zod schema still parses calls.
+ */
+function humanInputWireParameters(features: HumanInputQuestionFeatures): unknown {
+  fullHumanInputWireParameters ??= agentTool({
+    name: HUMAN_INPUT_TOOL_NAME,
+    description: "",
+    parameters: RequestHumanInputToolInput,
+    execute: () => "",
+  }).parameters;
+  const schema = structuredClone(fullHumanInputWireParameters) as HumanInputWireSchemaNode;
+  if (features.secrets && features.skillReview) return schema;
+  const question = schema.properties?.questions?.items;
+  if (!question?.properties) throw new Error("request_human_input schema has no question object");
+  const drop = (field: string) => {
+    delete question.properties![field];
+    if (question.required) question.required = question.required.filter((name) => name !== field);
+  };
+  if (!features.secrets) {
+    drop("secret");
+    const kind = question.properties.kind;
+    if (kind?.enum) kind.enum = kind.enum.filter((value) => value !== "secret");
+  }
+  if (!features.skillReview) drop("skillReview");
+  return schema;
+}
+
+function withHumanInputWireParameters<T extends { parameters: unknown }>(
+  features: HumanInputQuestionFeatures,
+  built: T,
+): T {
+  if (features.secrets && features.skillReview) return built;
+  return { ...built, parameters: humanInputWireParameters(features) as T["parameters"] };
+}
+
+/**
+ * The tool view the modular composer reads. An attempt that cannot install the
+ * search router (see `lazyToolTransportFor`) has no tool search, so the
+ * composer leaves out its guidance even when the host did not say so.
+ */
+function modularToolAvailability(
+  settings: Settings,
+  options: BuildAgentOptions,
+): { toolAvailability?: AgentPromptToolAvailability } {
+  const view = options.agentPromptToolAvailability;
+  if (lazyToolTransportFor(settings, options)) return view ? { toolAvailability: view } : {};
+  return { toolAvailability: { ...(view ?? { unavailable: [] }), toolSearchAbsent: true } };
+}
+
+/**
+ * The Skill index layer renders unless it is already in history. A configured
+ * session leaves out an empty index: there is nothing to read.
+ */
+function skillCatalogLayerApplies(
+  options: Pick<BuildAgentOptions, "skillCatalog" | "skillCatalogInHistory" | "agentConfig">,
+): boolean {
+  if (!options.skillCatalog || options.skillCatalogInHistory) return false;
+  return !(options.agentConfig && options.skillCatalog.length === 0);
+}
+
 export function agentPromptResourcesFor(
   settings: Settings,
   resources: readonly ResourceRef[],
@@ -2873,6 +2964,7 @@ export function agentPromptResourcesFor(
     | "secrets"
     | "unattended"
     | "personalGitHubLogin"
+    | "skillCatalog"
   >,
 ): AgentPromptResources {
   const backend = options.activeSandboxBackend ?? settings.sandboxBackend;
@@ -2903,6 +2995,8 @@ export function agentPromptResourcesFor(
       ? { commandCompletionDelivery: true }
       : {}),
     ...(repositoryIdentities.length > 0 ? { repositoryIdentities } : {}),
+    // A host-supplied index that lists no Skill: nothing to read this turn.
+    ...(options.skillCatalog?.length === 0 ? { skillsReadable: false } : {}),
   };
 }
 
@@ -2964,12 +3058,15 @@ function inspectModularAgentInstructions(
   config: ResolvedAgentConfig,
   options: BuildAgentOptions,
 ): PersistentAgentInstructionInspection {
+  const resources = options.agentPromptResources ?? agentPromptResourcesFor(settings, [], options);
   const identity = resolveAgentIdentity({
     sessionIdentity: config.identity,
     workspaceIdentity: options.workspaceAgentIdentity ?? options.instructionsTemplate,
     deploymentTemplate: settings.agentInstructionsTemplate,
+    ...(agentSharesWorkspace(config.capabilities, resources)
+      ? {}
+      : { defaultIdentity: NEUTRAL_AGENT_IDENTITY }),
   });
-  const resources = options.agentPromptResources ?? agentPromptResourcesFor(settings, [], options);
   const composed = composeModularAgentInstructions({
     // An unattended session gets no human-input tool, so no clause offers it.
     capabilities: resources.unattended
@@ -2978,17 +3075,15 @@ function inspectModularAgentInstructions(
     renderer: config.renderer,
     identity: appendDeploymentAgentInstructions(identity, settings),
     resources,
-    ...(options.agentPromptToolAvailability
-      ? { toolAvailability: options.agentPromptToolAvailability }
-      : {}),
+    ...modularToolAvailability(settings, options),
     ...agentPromptExperimentsFor(settings),
     ...(codemodeIsAvailable(options) ? { codemode: CODEMODE_PROGRAMMATIC_DIRECTIVE } : {}),
     ...(options.codeSearchAvailable ? { codeSearch: CODE_SEARCH_DIRECTIVE } : {}),
     ...(gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)
       ? { gitBindings: GIT_BINDING_DISCOVERY_DIRECTIVE }
       : {}),
-    ...(options.skillCatalog && !options.skillCatalogInHistory
-      ? { skillCatalog: formatSkillCatalog(options.skillCatalog) }
+    ...(skillCatalogLayerApplies(options)
+      ? { skillCatalog: formatSkillCatalog(options.skillCatalog!) }
       : {}),
     workspaceGovernance: options.workspaceGovernance,
     workspaceMemory: options.workspaceMemory,
@@ -3066,13 +3161,13 @@ export function inspectPersistentAgentInstructions(
       });
     }
     push("workspace_memory", "Workspace memory", options.workspaceMemory);
-    if (options.skillCatalog && !options.skillCatalogInHistory)
-      push("skill_catalog", "Skills", formatSkillCatalog(options.skillCatalog));
+    if (skillCatalogLayerApplies(options))
+      push("skill_catalog", "Skills", formatSkillCatalog(options.skillCatalog!));
     push("session_instructions", "Session instructions", options.sessionInstructions);
   } else {
     push("workspace_governance", "Workspace governance", options.workspaceGovernance);
-    if (options.skillCatalog && !options.skillCatalogInHistory)
-      push("skill_catalog", "Skills", formatSkillCatalog(options.skillCatalog));
+    if (skillCatalogLayerApplies(options))
+      push("skill_catalog", "Skills", formatSkillCatalog(options.skillCatalog!));
     push("session_instructions", "Session instructions", options.sessionInstructions);
     if (codemodeIsAvailable(options)) {
       layers.push({
@@ -3212,7 +3307,11 @@ const agentRigCredentialHooks = new WeakMap<object, SandboxLifecycleHook[]>();
  * properties and asks the model to correct them instead of "Please try again".
  */
 const HUMAN_INPUT_TOOL_DESCRIPTION =
-  "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, multiple questions, explicit skip policy, and an optional expiry. Mark the option you suggest as recommended (it is shown, never pre-selected). Give an option a short preview, such as a code or text sample, when seeing it helps the choice. For a yes/no decision, set confirm on a single_select with exactly two options, the action first and the way out second, so the person answers with your own button labels. Every single-select or multi-select question also gives the person an Other field for an exact free-text answer; interpret that answer normally and make a new request only if genuine clarification is still needed. The person may instead let you decide: the result then has agentDecides true, so make your own best choice, continue, and say in one short sentence what you chose. In a sub-session, your parent agent also sees this request and may answer it; the first answer wins. When what you need is agent work rather than a person's decision (for example starting a reviewer or worker you cannot start yourself), message your parent agent instead if you can; otherwise say in the question that it is for your parent agent.";
+  "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, multiple questions, explicit skip policy, and an optional expiry. Mark the option you suggest as recommended (it is shown, never pre-selected). Give an option a short preview, such as a code or text sample, when seeing it helps the choice. For a yes/no decision, set confirm on a single_select with exactly two options, the action first and the way out second, so the person answers with your own button labels. Every single-select or multi-select question also gives the person an Other field for an exact free-text answer; interpret that answer normally and make a new request only if genuine clarification is still needed. The person may instead let you decide: the result then has agentDecides true, so make your own best choice, continue, and say in one short sentence what you chose.";
+
+/** Rendered only for a session with a parent agent (nested depth above zero). */
+const HUMAN_INPUT_PARENT_DESCRIPTION =
+  "In a sub-session, your parent agent also sees this request and may answer it; the first answer wins. When what you need is agent work rather than a person's decision (for example starting a reviewer or worker you cannot start yourself), message your parent agent instead if you can; otherwise say in the question that it is for your parent agent.";
 
 /** Appended to the tool result when the person chose "Let the agent decide". */
 export const HUMAN_INPUT_AGENT_DECIDES_NOTE =
@@ -3541,79 +3640,94 @@ export function buildOpenGeniAgent(
         },
       })
     : null;
+  const humanInputFeatures: HumanInputQuestionFeatures = {
+    secrets: toolFamilies.secrets,
+    skillReview: toolFamilies.skills === "manage",
+  };
   const humanInputTool = !toolFamilies.humanInput
     ? null
-    : agentTool({
-        name: HUMAN_INPUT_TOOL_NAME,
-        description: toolFamilies.secrets
-          ? `${HUMAN_INPUT_TOOL_DESCRIPTION} ${HUMAN_INPUT_SECRET_DESCRIPTION}`
-          : HUMAN_INPUT_TOOL_DESCRIPTION,
-        parameters: RequestHumanInputToolInput,
-        needsApproval: true,
-        inputGuardrails: [
-          {
-            name: "validate_human_input_request",
-            run: async ({ toolCall }) => {
-              // Switched to work without a person after the chat started: the
-              // tool stays (its list never changes) but nobody would answer.
-              if (options.unattendedNow) {
-                return ToolGuardrailFunctionOutputFactory.rejectContent(
-                  UNATTENDED_PERSON_REFUSAL_TEXT,
-                );
-              }
-              let input: unknown;
-              try {
-                input = JSON.parse(toolCall.arguments);
-              } catch {
-                return ToolGuardrailFunctionOutputFactory.rejectContent(
-                  "Invalid request_human_input arguments. Call the tool again with valid JSON matching its schema.",
-                );
-              }
-              const parsed = RequestHumanInputToolInput.safeParse(input);
-              if (!parsed.success) {
-                return ToolGuardrailFunctionOutputFactory.rejectContent(
-                  "Invalid request_human_input arguments. Call the tool again with an object matching its schema; questions must be an array, not JSON text.",
-                );
-              }
-              const approvalRejection = secretApprovalQuestionRejection(parsed.data);
-              if (approvalRejection) {
-                return ToolGuardrailFunctionOutputFactory.rejectContent(approvalRejection);
-              }
-              const secretRejection = await secretQuestionRejection(parsed.data, {
-                enabled: toolFamilies.secrets,
-                hasActingHuman: options.secrets?.hasActingHuman ?? false,
-                ...(options.secrets?.validateQuestionVault
-                  ? { validateQuestionVault: options.secrets.validateQuestionVault }
-                  : {}),
-              });
-              if (secretRejection) {
-                return ToolGuardrailFunctionOutputFactory.rejectContent(secretRejection);
-              }
-              return ToolGuardrailFunctionOutputFactory.allow();
+    : withHumanInputWireParameters(
+        humanInputFeatures,
+        agentTool({
+          name: HUMAN_INPUT_TOOL_NAME,
+          // Built from the enabled features: the parent-agent text only with a
+          // parent, the secret kind and spec only with secrets, the Skill review
+          // reference only with Skill management. Calls are still validated
+          // against the full contract below.
+          description: [
+            HUMAN_INPUT_TOOL_DESCRIPTION,
+            options.subSession !== false && HUMAN_INPUT_PARENT_DESCRIPTION,
+            toolFamilies.secrets && HUMAN_INPUT_SECRET_DESCRIPTION,
+          ]
+            .filter((part): part is string => typeof part === "string")
+            .join(" "),
+          parameters: requestHumanInputToolParameters(humanInputFeatures),
+          needsApproval: true,
+          inputGuardrails: [
+            {
+              name: "validate_human_input_request",
+              run: async ({ toolCall }) => {
+                // Switched to work without a person after the chat started: the
+                // tool stays (its list never changes) but nobody would answer.
+                if (options.unattendedNow) {
+                  return ToolGuardrailFunctionOutputFactory.rejectContent(
+                    UNATTENDED_PERSON_REFUSAL_TEXT,
+                  );
+                }
+                let input: unknown;
+                try {
+                  input = JSON.parse(toolCall.arguments);
+                } catch {
+                  return ToolGuardrailFunctionOutputFactory.rejectContent(
+                    "Invalid request_human_input arguments. Call the tool again with valid JSON matching its schema.",
+                  );
+                }
+                const parsed = RequestHumanInputToolInput.safeParse(input);
+                if (!parsed.success) {
+                  return ToolGuardrailFunctionOutputFactory.rejectContent(
+                    "Invalid request_human_input arguments. Call the tool again with an object matching its schema; questions must be an array, not JSON text.",
+                  );
+                }
+                const approvalRejection = secretApprovalQuestionRejection(parsed.data);
+                if (approvalRejection) {
+                  return ToolGuardrailFunctionOutputFactory.rejectContent(approvalRejection);
+                }
+                const secretRejection = await secretQuestionRejection(parsed.data, {
+                  enabled: toolFamilies.secrets,
+                  hasActingHuman: options.secrets?.hasActingHuman ?? false,
+                  ...(options.secrets?.validateQuestionVault
+                    ? { validateQuestionVault: options.secrets.validateQuestionVault }
+                    : {}),
+                });
+                if (secretRejection) {
+                  return ToolGuardrailFunctionOutputFactory.rejectContent(secretRejection);
+                }
+                return ToolGuardrailFunctionOutputFactory.allow();
+              },
             },
+          ],
+          // A missing/mismatched durable response is a protocol integrity failure,
+          // not model-visible tool output the agent may reason past.
+          errorFunction: null,
+          execute: (_input, _context, details) => {
+            const settled = options.humanInputResponse;
+            if (!settled) {
+              throw new Error("Human-input tool resumed without a durable response");
+            }
+            const resumedCallId = details?.toolCall?.callId;
+            if (resumedCallId && resumedCallId !== settled.toolCallId) {
+              throw new Error("Human-input response does not belong to the resumed tool call");
+            }
+            return JSON.stringify({
+              requestId: settled.requestId,
+              ...settled.response,
+              ...(settled.response.outcome === "skipped" && settled.response.agentDecides
+                ? { note: HUMAN_INPUT_AGENT_DECIDES_NOTE }
+                : {}),
+            });
           },
-        ],
-        // A missing/mismatched durable response is a protocol integrity failure,
-        // not model-visible tool output the agent may reason past.
-        errorFunction: null,
-        execute: (_input, _context, details) => {
-          const settled = options.humanInputResponse;
-          if (!settled) {
-            throw new Error("Human-input tool resumed without a durable response");
-          }
-          const resumedCallId = details?.toolCall?.callId;
-          if (resumedCallId && resumedCallId !== settled.toolCallId) {
-            throw new Error("Human-input response does not belong to the resumed tool call");
-          }
-          return JSON.stringify({
-            requestId: settled.requestId,
-            ...settled.response,
-            ...(settled.response.outcome === "skipped" && settled.response.agentDecides
-              ? { note: HUMAN_INPUT_AGENT_DECIDES_NOTE }
-              : {}),
-          });
-        },
-      });
+        }),
+      );
   const agentTools = [
     ...hostedTools,
     ...(providerImageGenerationTool ? [providerImageGenerationTool] : []),
@@ -3910,6 +4024,25 @@ export function buildOpenGeniAgent(
 }
 
 /**
+ * The lazy tool transport this attempt installs, or undefined when it has no
+ * search router: no transport, or the deployment turned tool search off and
+ * the session never exposed the router.
+ */
+function lazyToolTransportFor(
+  settings: Settings,
+  options: Pick<BuildAgentOptions, "lazyToolTransport" | "agentConfig" | "toolRouterInHistory">,
+): NonNullable<BuildAgentOptions["lazyToolTransport"]> | undefined {
+  const transport =
+    options.lazyToolTransport ??
+    (options.agentConfig && options.toolRouterInHistory ? "generic_dispatch" : undefined);
+  if (!transport) return undefined;
+  const enabled =
+    transport === "codex_native" ? settings.codexToolSearchEnabled : settings.lazyToolSearchEnabled;
+  if (!enabled && !(options.agentConfig && options.toolRouterInHistory)) return undefined;
+  return transport;
+}
+
+/**
  * Install the explicitly resolved progressive-disclosure transport. The legacy
  * rollout flag remains only an on/off switch; provider selection never depends
  * on the unrelated sandbox structured-tool Boolean.
@@ -3928,13 +4061,8 @@ function maybeInstallLazyToolTransport(
   settings: Settings,
   options: BuildAgentOptions,
 ): void {
-  const transport =
-    options.lazyToolTransport ??
-    (options.agentConfig && options.toolRouterInHistory ? "generic_dispatch" : undefined);
+  const transport = lazyToolTransportFor(settings, options);
   if (!transport) return;
-  const enabled =
-    transport === "codex_native" ? settings.codexToolSearchEnabled : settings.lazyToolSearchEnabled;
-  if (!enabled && !(options.agentConfig && options.toolRouterInHistory)) return;
 
   const mcpServers = options.mcpServers ?? [];
   // Prepared servers use exact model-name mappings, not SDK lifecycle names
@@ -4024,6 +4152,7 @@ function maybeInstallLazyToolTransport(
       }
       return published;
     },
+    options.toolRouterExpected !== false,
   );
   if (options.openingToolNames?.length) lazyRuntime.loadAtOpening(options.openingToolNames);
 }
@@ -11380,6 +11509,8 @@ function runScopedRunner(
 
 export { restoreGenericDispatchHistoryItems } from "./lazy-tool-transport";
 export { isOpeningToolLoadResponse } from "./lazy-tool-transport";
+export { isAlwaysVisibleBaseToolName } from "./lazy-tool-transport";
+export { HARNESS_CONTROL_FIRST_PARTY_TOOLS } from "./codex-tool-search";
 export type { LazyToolTransport } from "./lazy-tool-transport";
 export { createToolSelector } from "./tool-discovery-decision";
 export type {

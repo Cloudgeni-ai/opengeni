@@ -43919,14 +43919,21 @@ export async function ensureSessionSkillCatalog(
     expectedExecutionGeneration: number;
     expectedAttemptId: string;
     catalog: string;
+    /**
+     * The catalog lists no Skill: write nothing unless an earlier index must
+     * be replaced, and return "" when the session never saw one.
+     */
+    omitWhenEmpty?: boolean;
   },
 ): Promise<string> {
-  const { catalog, ...scope } = input;
-  return (await ensureSessionContextSnapshot(
-    db,
-    { ...scope, text: catalog },
-    SKILL_CATALOG_CHANNEL,
-  ))!;
+  const { catalog, omitWhenEmpty, ...scope } = input;
+  return (
+    (await ensureSessionContextSnapshot(
+      db,
+      { ...scope, text: catalog, ...(omitWhenEmpty ? { omitWhenAbsent: true } : {}) },
+      SKILL_CATALOG_CHANNEL,
+    )) ?? ""
+  );
 }
 
 /**

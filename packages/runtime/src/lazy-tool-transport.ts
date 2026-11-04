@@ -123,6 +123,10 @@ const ALWAYS_VISIBLE_BASE_TOOL_NAMES: ReadonlySet<string> = new Set([
   "web_search",
   "web_fetch",
 ]);
+/** True for a base runtime tool that is in the first request on every transport. */
+export function isAlwaysVisibleBaseToolName(name: string): boolean {
+  return ALWAYS_VISIBLE_BASE_TOOL_NAMES.has(name);
+}
 const DISPATCH_MARKER_KEY = "opengeni.lazy_dispatch.v1";
 const SEARCH_MARKER_KEY = "opengeni.lazy_search.v1";
 /** Frozen companion schemas an entry-tool call disclosed, kept on the call itself. */
@@ -567,6 +571,12 @@ export class LazyToolRuntime {
      * siblings a tool is; the decision model reads the full name instead.
      */
     private readonly mcpToolNames: () => ReadonlyMap<string, string> = () => new Map(),
+    /**
+     * False when the host proved nothing this attempt attaches is deferred: a
+     * pending preparation then exposes no router on its own. Tools that turn
+     * out searchable once prepared still expose it.
+     */
+    private readonly pendingPreparationDefers = true,
   ) {
     this.routerWasExposed = routerInHistory;
     this.controlTools =
@@ -609,7 +619,9 @@ export class LazyToolRuntime {
     this.routerWasExposed ||=
       !this.conditionalRouter ||
       this.searchableToolNames.size > 0 ||
-      (this.hasPendingPreparation() && this.pendingMcpServerIds.size > 0);
+      (this.pendingPreparationDefers &&
+        this.hasPendingPreparation() &&
+        this.pendingMcpServerIds.size > 0);
     return this.routerWasExposed ? this.controlTools : [];
   }
 
@@ -1941,6 +1953,7 @@ export function installLazyToolRuntime(
   connectedAccounts?: () => ReadonlyMap<string, ConnectedToolAccount>,
   meaningRanker?: ToolMeaningRanker,
   mcpToolNames?: () => ReadonlyMap<string, string>,
+  pendingPreparationDefers = true,
 ): LazyToolRuntime {
   const runtime = new LazyToolRuntime(
     transport,
@@ -1960,6 +1973,7 @@ export function installLazyToolRuntime(
     connectedAccounts,
     meaningRanker,
     mcpToolNames,
+    pendingPreparationDefers,
   );
   installLazyToolRuntimeOnAgent(agent, runtime);
   return runtime;

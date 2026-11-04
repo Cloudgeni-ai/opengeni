@@ -11546,6 +11546,7 @@ export type UpdateSessionMcpToolPermissionsRequest = {
 export type AgentCapabilityId =
   | "webSearch"
   | "humanInput"
+  | "notifications"
   | "skills"
   | "goals"
   | "subagents"
@@ -11557,7 +11558,8 @@ export type AgentCapabilityId =
   | "media"
   | "workspaceFiles"
   | "workspaceConnectors"
-  | "workspaceAdmin";
+  | "workspaceAdmin"
+  | "privacyFacts";
 
 /** `read` reads installed Skills; `manage` also changes them. */
 export type AgentSkillsCapability = "read" | "manage" | false;
@@ -11565,6 +11567,7 @@ export type AgentSkillsCapability = "read" | "manage" | false;
 export type AgentCapabilityToggles = {
   webSearch?: boolean | undefined;
   humanInput?: boolean | undefined;
+  notifications?: boolean | undefined;
   skills?: AgentSkillsCapability | undefined;
   goals?: boolean | undefined;
   subagents?: boolean | undefined;
@@ -11577,6 +11580,7 @@ export type AgentCapabilityToggles = {
   workspaceFiles?: boolean | undefined;
   workspaceConnectors?: boolean | undefined;
   workspaceAdmin?: boolean | undefined;
+  privacyFacts?: boolean | undefined;
 };
 
 /**
@@ -11613,6 +11617,7 @@ export type WorkspaceAgentDefaults = {
 export type ResolvedAgentCapabilities = {
   webSearch: boolean;
   humanInput: boolean;
+  notifications: boolean;
   skills: AgentSkillsCapability;
   goals: boolean;
   subagents: boolean;
@@ -11625,6 +11630,7 @@ export type ResolvedAgentCapabilities = {
   workspaceFiles: boolean;
   workspaceConnectors: boolean;
   workspaceAdmin: boolean;
+  privacyFacts: boolean;
 };
 
 export type ResolvedAgentConfig = {
