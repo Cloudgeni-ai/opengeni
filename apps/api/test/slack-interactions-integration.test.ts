@@ -5264,6 +5264,8 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
         model: "gpt-5.6-terra",
         sandboxBackend: "none",
       },
+      undefined,
+      { surface: "web" },
     );
     await acceptSessionUserMessage(
       value.deps,
@@ -5273,6 +5275,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
       {
         text: "Switch this session to my connected Codex model",
         model: "codex/gpt-6-sol",
+        surface: "web",
         clientEventId: `browser-model-switch-${crypto.randomUUID()}`,
       },
     );
@@ -5315,6 +5318,8 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
         model: "gpt-5.6-terra",
         sandboxBackend: "none",
       },
+      undefined,
+      { surface: "web" },
     );
     await acceptSessionUserMessage(
       value.deps,
@@ -5324,6 +5329,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
       {
         text: "Choose Codex later in the older session",
         model: "codex/gpt-6-sol",
+        surface: "web",
         clientEventId: `older-session-model-switch-${crypto.randomUUID()}`,
       },
     );
@@ -5336,6 +5342,8 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
         model: "gpt-5.6-luna",
         sandboxBackend: "none",
       },
+      undefined,
+      { surface: "web" },
     );
 
     await shared!.admin`
@@ -5392,6 +5400,8 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
         model: "gpt-5.6-luna",
         sandboxBackend: "none",
       },
+      undefined,
+      { surface: "web" },
     );
     await shared!.admin`
       delete from session_turns
@@ -5423,6 +5433,8 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
         model: "gpt-5.6-terra",
         sandboxBackend: "none",
       },
+      undefined,
+      { surface: "web" },
     );
     const otherGrant = await getWorkspaceGrant(
       client.db,
@@ -5438,6 +5450,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
       {
         text: "Another user chooses Luna",
         model: "gpt-5.6-luna",
+        surface: "web",
         clientEventId: `other-subject-model-switch-${crypto.randomUUID()}`,
       },
     );
@@ -5450,6 +5463,8 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
         model: "codex/gpt-6-sol",
         sandboxBackend: "none",
       },
+      undefined,
+      { surface: "web" },
     );
 
     const crossWorkspace = await bootstrapWorkspace(client.db, {
@@ -5472,6 +5487,8 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
         model: "codex/gpt-6-sol",
         sandboxBackend: "none",
       },
+      undefined,
+      { surface: "web" },
     );
 
     await shared!.admin`

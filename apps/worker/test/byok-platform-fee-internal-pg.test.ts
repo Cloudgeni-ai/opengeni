@@ -72,8 +72,11 @@ async function workspace(externalId: string) {
 }
 
 /** Each own-key admission path, with no paid credit on the account. */
-async function admissions(ids: { accountId: string; workspaceId: string }) {
-  const services = { db: client!.db, settings, entitlements: null };
+async function admissions(
+  ids: { accountId: string; workspaceId: string },
+  configuration = settings,
+) {
+  const services = { db: client!.db, settings: configuration, entitlements: null };
   const run = await checkLimit(services, {
     ...ids,
     action: "agent_run:create",
@@ -82,6 +85,7 @@ async function admissions(ids: { accountId: string; workspaceId: string }) {
   });
   const call = await admitModelCall(services, {
     ...ids,
+    model: OWN_KEY_MODEL,
     chargesOpenGeniCredits: false,
     countsTowardTokenCap: false,
     subjectId: null,
@@ -108,7 +112,10 @@ async function admissions(ids: { accountId: string; workspaceId: string }) {
 }
 
 /** One response on the account's own key and one on its own subscription. */
-async function settleOwnKeyResponses(ids: { accountId: string; workspaceId: string }) {
+async function settleOwnKeyResponses(
+  ids: { accountId: string; workspaceId: string },
+  configuration = settings,
+) {
   const turnId = crypto.randomUUID();
   // The usage event needs a real chat; the fee debit and balances stay real.
   const recorded = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
@@ -118,7 +125,7 @@ async function settleOwnKeyResponses(ids: { accountId: string; workspaceId: stri
       [OWN_KEY_MODEL, "own-key"],
       [SUBSCRIPTION_MODEL, "subscription"],
     ] as const) {
-      await recordModelUsageAndDebitCredits(settings, client!.db, {
+      await recordModelUsageAndDebitCredits(configuration, client!.db, {
         ...ids,
         sessionId: crypto.randomUUID(),
         turnId,
@@ -138,6 +145,17 @@ async function settleOwnKeyResponses(ids: { accountId: string; workspaceId: stri
     select amount_micros::text as "amountMicros" from credit_ledger_entries
     where account_id = ${ids.accountId}::uuid and type = 'byok_platform_fee'`;
 }
+
+test("a configured zero own-key fee admits a normal account without paid credit and writes no fee debit", async () => {
+  if (!client || !shared) return;
+  const ids = await workspace(crypto.randomUUID());
+  const off = { ...settings, byokPlatformFeeBps: 0 };
+  const result = await admissions(ids, off);
+  expect(result.run.allowed).toBe(true);
+  expect(result.call.allowed).toBe(true);
+  expect(result.between).toBeNull();
+  expect(await settleOwnKeyResponses(ids, off)).toEqual([]);
+}, 180_000);
 
 test("our team's internal organization pays no own-key fee and is never refused without paid credit; a normal account is", async () => {
   if (!client || !shared) return;

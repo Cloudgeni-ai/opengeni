@@ -1860,6 +1860,14 @@ Canonical: [`knowledge.md`](knowledge.md),
 
 ### 5.7 Usage, limits, and billing
 
+Connected subscriptions serve app-origin work on qualifying paid plans, with
+no usage fee. API-origin work refuses them at admission and before model calls;
+omitted API models skip subscription defaults. Origin is inherited by children,
+goals and schedules, independently of the own-key fee configuration. A zero
+own-key fee disables both its debit and its paid-credit gate. Existing internal
+legacy funding terms remain unchanged. See [billing origin](billing-origin.md)
+for the canonical admission seams, refusal codes and configured-fee behavior.
+
 Model-scoped promotions retain offer identity and initial eligibility on each grant.
 Audited `credit_promotion_policy_revisions` can update coverage for existing and
 new scoped grants without a restart. Each paid call retains its admitted revision

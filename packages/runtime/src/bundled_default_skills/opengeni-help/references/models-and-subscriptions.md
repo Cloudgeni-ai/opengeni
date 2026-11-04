@@ -20,6 +20,18 @@ request. A subscription account (Codex, Claude, SuperGrok) uses the plan of the
 person who signed in, within that plan's usage limits. Opengeni credits are a
 separate charge; zero Opengeni charge does not mean zero provider cost.
 
+On the hosted service, connected subscriptions are included on Pro
+($20/month), Max and Enterprise, with no inference or platform fee. Free is
+a trial with $10 monthly app credit for eligible accounts; Free, no plan and
+past-due plans cannot use connected subscriptions. They are for Opengeni app
+work, not API keys, SDK integrations or embedded products. API work uses
+credits, never monthly plan credit; choose a credit-billed model or an own
+provider API key. An own-key fee follows deployment configuration and is
+currently paused at 0% in production and staging. Do not promise a fixed
+percentage. At zero there is no fee debit or paid-credit requirement for it.
+The billing page shows historical charges only when the monthly amount is
+positive. Recheck the deployed configuration when answering a rate question.
+
 ## Organization subscription account settings
 
 Each organization subscription account has its own page.
