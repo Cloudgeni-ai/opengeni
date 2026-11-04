@@ -44,6 +44,8 @@ mod process_cleanup;
 mod pty;
 pub mod run_as;
 pub mod service;
+#[cfg(unix)]
+mod system_shell;
 pub mod transactional_write;
 mod work_scope;
 
@@ -857,7 +859,10 @@ pub(crate) fn git_guesses_email() -> Option<bool> {
 pub(crate) fn default_shell() -> Vec<String> {
     #[cfg(unix)]
     {
-        vec![std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())]
+        // `$SHELL`, else `/bin/sh`, else dash or bash when that is gone.
+        vec![system_shell::environment_shell()
+            .to_string_lossy()
+            .into_owned()]
     }
     #[cfg(windows)]
     {
@@ -890,7 +895,7 @@ pub(crate) fn shell_command(parts: &[String]) -> tokio::process::Command {
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         // A generic POSIX fallback for any other unix-like target.
-        let mut cmd = tokio::process::Command::new("/bin/sh");
+        let mut cmd = tokio::process::Command::new(system_shell::environment_shell());
         cmd.arg("-c").arg(parts.join(" "));
         cmd
     }

@@ -313,6 +313,20 @@ describe("a sandbox that cannot start programs", () => {
     expect(agentRunFailurePayload(inToolCall(unnamed)).error).toBe(
       "Your connected machine can't start programs. Restart the machine, then retry.",
     );
+    // No shell left (agent 0.1.152 and later): a restart does not bring it back.
+    const noShell = await recoverSandboxSetupFailure(
+      createSandboxSetupReplayGuard(),
+      processStartError(
+        "/bin/sh",
+        " (the shell /bin/sh is missing and no dash or bash was found)",
+      ),
+      recovery,
+    );
+    expect(events).toEqual([]);
+    expect(noShell).toBeInstanceOf(SandboxProcessStartFailedError);
+    expect(agentRunFailurePayload(inToolCall(noShell)).error).toBe(
+      "Your connected machine can't start programs because the shell /bin/sh is missing and no dash or bash was found. Put /bin/sh back on the machine, then retry.",
+    );
   });
 
   test("an unanswered agent keeps its own recovery", async () => {

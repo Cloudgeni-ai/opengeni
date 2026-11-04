@@ -179,7 +179,12 @@ pub fn spawn_pty(req: &v1::PtyOpenRequest, default_shell: &[String]) -> Platform
         .map_err(|e| PlatformError::os(format!("openpty: {e}")))?;
 
     let argv: Vec<String> = if let (true, Some(identity)) = (req.command.is_empty(), &identity) {
-        vec![identity.shell.to_string_lossy().into_owned()]
+        // The account's login shell, or a fallback when it cannot start.
+        #[cfg(unix)]
+        let shell = crate::system_shell::usable_shell(&identity.shell);
+        #[cfg(not(unix))]
+        let shell = identity.shell.clone();
+        vec![shell.to_string_lossy().into_owned()]
     } else if req.command.is_empty() {
         default_shell.to_vec()
     } else {

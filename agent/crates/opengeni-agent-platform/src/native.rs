@@ -186,6 +186,12 @@ impl NativePlatform {
     /// Resolves and validates a process working directory before spawn. Tokio's
     /// spawn error otherwise reports `ENOENT` against the executable even when
     /// the missing object is actually `current_dir`, which is actively misleading.
+    ///
+    /// A missing workspace root or home directory (the agent's, or the
+    /// requested user's) is created again and the command runs: something on
+    /// the machine moved or deleted it, and every command that starts there
+    /// would otherwise fail. Any other missing directory stays a not-found
+    /// error.
     fn resolve_process_cwd(
         &self,
         cwd: &str,
@@ -193,28 +199,33 @@ impl NativePlatform {
         identity: Option<&RunAsIdentity>,
     ) -> PlatformResult<PathBuf> {
         let path = self.resolve_path(cwd, identity)?;
-        // Checked as the requested user, so a directory only the agent can
-        // reach is reported the same way the user's own chdir would fail.
-        let metadata = match identity {
-            Some(identity) => {
-                let checked = path.clone();
-                let operation = operation.to_string();
-                crate::run_as::on_identity_thread(identity, move || {
-                    std::fs::metadata(&checked).map_err(|error| {
-                        PlatformError::from_io(
-                            &format!("{operation} working directory {}", checked.display()),
-                            &error,
-                        )
-                    })
-                })?
+        let mut metadata = Self::cwd_metadata(&path, identity)?;
+        if metadata
+            .as_ref()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            && self.is_recreatable_cwd(&path, identity)
+        {
+            match recreate_directory(&path, identity) {
+                Ok(()) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        "the working directory was missing; the agent created it again"
+                    );
+                    metadata = Self::cwd_metadata(&path, identity)?;
+                }
+                Err(error) => tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "the working directory is missing and could not be created again"
+                ),
             }
-            None => std::fs::metadata(&path).map_err(|error| {
-                PlatformError::from_io(
-                    &format!("{operation} working directory {}", path.display()),
-                    &error,
-                )
-            })?,
-        };
+        }
+        let metadata = metadata.map_err(|error| {
+            PlatformError::from_io(
+                &format!("{operation} working directory {}", path.display()),
+                &error,
+            )
+        })?;
         if !metadata.is_dir() {
             let mut detail = BTreeMap::new();
             detail.insert("path".to_string(), path.to_string_lossy().into_owned());
@@ -228,6 +239,51 @@ impl NativePlatform {
         }
         Ok(path)
     }
+
+    /// Reads `path`'s metadata, as the requested user when there is one, so a
+    /// directory only the agent can reach is reported the same way the user's
+    /// own chdir would fail. The outer error is a failed switch to that user.
+    fn cwd_metadata(
+        path: &Path,
+        identity: Option<&RunAsIdentity>,
+    ) -> PlatformResult<std::io::Result<std::fs::Metadata>> {
+        match identity {
+            Some(identity) => {
+                let checked = path.to_path_buf();
+                crate::run_as::on_identity_thread(identity, move || Ok(std::fs::metadata(&checked)))
+            }
+            None => Ok(std::fs::metadata(path)),
+        }
+    }
+
+    /// Whether `path` is a directory the agent puts back when it is missing:
+    /// the workspace root, the agent's home, or the requested user's home.
+    fn is_recreatable_cwd(&self, path: &Path, identity: Option<&RunAsIdentity>) -> bool {
+        path == self.workspace_root
+            || self.home_dir.as_deref() == Some(path)
+            || identity.is_some_and(|identity| identity.home == path)
+    }
+}
+
+/// Creates the missing working directory `path` (and any missing parent) with
+/// mode 0755. For a command running as another user the agent creates it and
+/// hands the directory itself to that user, who needs to work in it.
+fn recreate_directory(path: &Path, identity: Option<&RunAsIdentity>) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o755);
+    }
+    builder.create(path)?;
+    #[cfg(unix)]
+    if let Some(identity) = identity {
+        std::os::unix::fs::chown(path, Some(identity.uid), Some(identity.gid))?;
+    }
+    #[cfg(not(unix))]
+    let _ = identity;
+    Ok(())
 }
 
 fn user_home_dir() -> Option<PathBuf> {
@@ -412,7 +468,9 @@ impl ExecProcessGroup {
             None
         };
 
-        let mut anchor_command = tokio::process::Command::new("/bin/sh");
+        // `/bin/sh`, or dash or bash when it was moved away, so a machine
+        // without `/bin/sh` still starts programs.
+        let mut anchor_command = tokio::process::Command::new(crate::system_shell::system_shell());
         #[cfg(target_os = "linux")]
         let cgroup_kill_path = prepared_op
             .as_ref()
@@ -1239,7 +1297,17 @@ impl Platform for NativePlatform {
         let mut cmd = if req.shell {
             crate::shell_command(&req.command)
         } else {
-            let mut command = tokio::process::Command::new(&req.command[0]);
+            // An explicitly requested `/bin/sh` starts a fallback shell when
+            // it is gone, like the default shell does.
+            #[cfg(unix)]
+            let program = crate::system_shell::substitute(std::ffi::OsStr::new(&req.command[0]))
+                .map_or_else(
+                    || std::ffi::OsString::from(&req.command[0]),
+                    PathBuf::into_os_string,
+                );
+            #[cfg(not(unix))]
+            let program = std::ffi::OsString::from(&req.command[0]);
+            let mut command = tokio::process::Command::new(program);
             command.args(&req.command[1..]);
             command
         };
@@ -1288,7 +1356,9 @@ impl Platform for NativePlatform {
             // spaces or backslashes) from an older agent's command text.
             let context = format!("spawn or apply execution containment for program \"{program}\"");
             #[cfg(unix)]
-            let context = match crate::null_device::spawn_failure_note(&e) {
+            let context = match crate::null_device::spawn_failure_note(&e)
+                .or_else(|| crate::system_shell::spawn_failure_note(&e))
+            {
                 Some(note) => format!("{context} ({note})"),
                 None => context,
             };
@@ -2039,6 +2109,298 @@ mod tests {
     fn in_initial_user_namespace() -> bool {
         std::fs::read_to_string("/proc/self/uid_map")
             .is_ok_and(|map| map.split_whitespace().collect::<Vec<_>>() == ["0", "0", "4294967295"])
+    }
+
+    /// Names how the re-executed child hides `/bin/sh`: `rw` (a fallback
+    /// shell remains and `/bin/sh` may be restored), `ro` (a fallback remains,
+    /// nothing may be restored) or `none` (no shell remains).
+    #[cfg(target_os = "linux")]
+    const HIDDEN_SHELL_MODE_ENV: &str = "OPENGENI_TEST_HIDDEN_SHELL_MODE";
+
+    /// Regression: a chat's command ran `mv /bin/sh …` as root on a compute
+    /// box, and every later command failed with "not found: spawn or apply
+    /// execution containment …" (the shell and the exec anchor are both
+    /// `/bin/sh`), across restarts, because the root disk keeps the damage.
+    /// The agent must keep running commands with dash or bash, put `/bin/sh`
+    /// back where it may, and name the missing shell when none is left.
+    /// Skips where no private mount namespace is permitted, unless
+    /// `OPENGENI_AGENT_REQUIRE_MOUNT_NAMESPACE` is set (Linux agent CI).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exec_runs_commands_after_bin_sh_is_moved_away() {
+        let Some(namespace) = private_mount_namespace_args() else {
+            assert!(
+                std::env::var_os("OPENGENI_AGENT_REQUIRE_MOUNT_NAMESPACE")
+                    .is_none_or(|value| value.is_empty()),
+                "OPENGENI_AGENT_REQUIRE_MOUNT_NAMESPACE is set, but this machine permits no private mount namespace"
+            );
+            eprintln!("skipping: this machine permits no private mount namespace");
+            return;
+        };
+        let parent_ns = std::fs::read_link("/proc/self/ns/mnt").expect("own mount namespace");
+        for mode in ["rw", "ro", "none"] {
+            let output = std::process::Command::new("unshare")
+                .args(namespace)
+                .arg(std::env::current_exe().expect("current test executable"))
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "native::tests::hidden_shell_child",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(HIDDEN_SHELL_MODE_ENV, mode)
+                .env(HIDDEN_NULL_DEVICE_PARENT_NS_ENV, &parent_ns)
+                .output()
+                .expect("run the hidden /bin/sh child");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "mode {mode}: the child failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            );
+        }
+    }
+
+    /// Runs only when re-executed by
+    /// [`exec_runs_commands_after_bin_sh_is_moved_away`]: in this private
+    /// mount namespace, hides the directory holding `/bin/sh` (and, on a
+    /// merged-`/usr` system, every shell in it) behind a tmpfs that holds at
+    /// most one fallback shell, then runs commands.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "re-executed inside a private mount namespace by exec_runs_commands_after_bin_sh_is_moved_away"]
+    #[allow(clippy::too_many_lines)] // one ordered scenario per mode
+    async fn hidden_shell_child() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let Ok(mode) = std::env::var(HIDDEN_SHELL_MODE_ENV) else {
+            return;
+        };
+        let parent_ns = std::env::var_os(HIDDEN_NULL_DEVICE_PARENT_NS_ENV)
+            .expect("the parent's mount namespace");
+        let own_ns = std::fs::read_link("/proc/self/ns/mnt").expect("own mount namespace");
+        assert_ne!(
+            own_ns.as_os_str(),
+            parent_ns.as_os_str(),
+            "refusing to hide /bin outside a private mount namespace"
+        );
+        let system = Path::new("/bin/sh");
+        let bin = std::fs::canonicalize(system.parent().expect("/bin")).expect("canonical /bin");
+        // The first fallback that exists now, kept to be put back under the
+        // tmpfs at the same name.
+        let fallback = HIDDEN_SHELL_FALLBACKS
+            .iter()
+            .map(Path::new)
+            .find(|shell| executable_file(shell))
+            .expect("the test machine has dash or bash");
+        let fallback_bytes =
+            std::fs::read(std::fs::canonicalize(fallback).expect("fallback")).expect("read it");
+        let fallback_name = fallback.file_name().expect("a file name");
+        // `mount` itself is usually in the hidden directory: keep a copy.
+        let tools = tempfile::tempdir().expect("tempdir");
+        let mount = tools.path().join("mount");
+        std::fs::copy(
+            std::fs::canonicalize(which("mount")).expect("mount"),
+            &mount,
+        )
+        .expect("copy mount");
+
+        // The agent is up (platform built) before the shell disappears.
+        let (platform, _dir) = rooted();
+        let mounted = std::process::Command::new(&mount)
+            .args(["-t", "tmpfs", "-o", "rw", "none"])
+            .arg(&bin)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("run mount");
+        assert!(mounted.success(), "mount an empty {}", bin.display());
+        assert!(
+            std::fs::symlink_metadata(system).is_err(),
+            "/bin/sh must be gone"
+        );
+        if mode != "none" {
+            let kept = bin.join(fallback_name);
+            std::fs::write(&kept, &fallback_bytes).expect("put the fallback back");
+            std::fs::set_permissions(&kept, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+            assert!(executable_file(fallback));
+        }
+        if mode == "ro" {
+            let remounted = std::process::Command::new(&mount)
+                // Only the mount's flags: a user namespace may not remount
+                // the tmpfs itself.
+                .args(["-o", "remount,ro,bind"])
+                .arg(&bin)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("run mount");
+            assert!(remounted.success(), "remount {} read-only", bin.display());
+        }
+        // The fallback the agent should now pick (on a merged-`/usr` system,
+        // the one just put back; elsewhere one outside the hidden directory).
+        let expected = HIDDEN_SHELL_FALLBACKS
+            .iter()
+            .map(Path::new)
+            .find(|shell| executable_file(shell));
+
+        let explicit = ExecRequest {
+            command: vec![
+                system.display().to_string(),
+                "-c".to_string(),
+                "echo explicit-sh".to_string(),
+            ],
+            ..Default::default()
+        };
+        if mode == "none" {
+            if let Some(left) = expected {
+                eprintln!(
+                    "skipping mode none: {} is outside the hidden directory",
+                    left.display()
+                );
+                return;
+            }
+            let error = platform
+                .exec(&echo_request("no-shell"))
+                .await
+                .expect_err("nothing can start without a shell");
+            let message = error.to_string();
+            assert!(
+                message.contains(&format!(
+                    "spawn or apply execution containment for program \"{}\" ({})",
+                    system.display(),
+                    HIDDEN_SHELL_NOTE
+                )),
+                "{message}"
+            );
+            assert!(!message.contains("echo no-shell"), "{message}");
+            eprintln!("mode {mode}: {message}");
+            return;
+        }
+
+        let response = platform
+            .exec(&echo_request("still-runs"))
+            .await
+            .expect("a shell command runs after /bin/sh was moved away");
+        assert_eq!(
+            String::from_utf8_lossy(&response.stdout).trim(),
+            "still-runs"
+        );
+        let response = platform
+            .exec(&explicit)
+            .await
+            .expect("an explicit /bin/sh command runs after it was moved away");
+        assert_eq!(
+            String::from_utf8_lossy(&response.stdout).trim(),
+            "explicit-sh"
+        );
+
+        let link = std::fs::read_link(system).ok();
+        if mode == "ro" {
+            assert_eq!(link, None, "a read-only /bin is never changed");
+        } else if nix::unistd::geteuid().is_root() {
+            // Root restores /bin/sh as a link to the fallback it used.
+            assert_eq!(link.as_deref(), expected);
+            assert!(executable_file(system));
+        }
+        eprintln!("mode {mode}: /bin/sh afterwards: {link:?}");
+    }
+
+    /// Where the agent looks for a shell once `/bin/sh` is gone, in order.
+    #[cfg(target_os = "linux")]
+    const HIDDEN_SHELL_FALLBACKS: [&str; 4] =
+        ["/bin/dash", "/usr/bin/dash", "/bin/bash", "/usr/bin/bash"];
+    /// The note a start carries when no shell is left.
+    #[cfg(target_os = "linux")]
+    const HIDDEN_SHELL_NOTE: &str = "the shell /bin/sh is missing and no dash or bash was found";
+
+    /// Whether `path` is a file this process may execute.
+    #[cfg(target_os = "linux")]
+    fn executable_file(path: &Path) -> bool {
+        std::fs::metadata(path).is_ok_and(|meta| meta.is_file())
+            && nix::unistd::access(path, nix::unistd::AccessFlags::X_OK).is_ok()
+    }
+
+    /// The first `name` on `PATH`.
+    #[cfg(target_os = "linux")]
+    fn which(name: &str) -> PathBuf {
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|dir| dir.join(name))
+            .find(|candidate| candidate.is_file())
+            .unwrap_or_else(|| panic!("{name} is not on PATH"))
+    }
+
+    /// Regression: a chat moved `/workspace` away on a compute box, and every
+    /// command failed with "not found: exec working directory /workspace"
+    /// until a later turn's setup made it again. A missing workspace root or
+    /// home directory is created again and the command runs there.
+    #[tokio::test]
+    async fn exec_recreates_a_missing_workspace_root_or_home() {
+        let parent = tempfile::tempdir().expect("tempdir");
+        let root = parent.path().join("workspace");
+        let home = parent.path().join("home").join("agent");
+        let mut platform = NativePlatform::with_root(&root);
+        platform.home_dir = Some(home.clone());
+        let pwd = |cwd: &str| ExecRequest {
+            command: vec!["pwd".to_string()],
+            shell: true,
+            cwd: cwd.to_string(),
+            ..Default::default()
+        };
+        let reported = |response: &v1::ExecResponse| {
+            std::fs::canonicalize(String::from_utf8_lossy(&response.stdout).trim())
+                .expect("canonicalize the reported cwd")
+        };
+
+        // The default cwd (the root), then the root named explicitly.
+        for cwd in [String::new(), root.display().to_string()] {
+            if root.exists() {
+                std::fs::remove_dir(&root).expect("move the root away");
+            }
+            let request = pwd(&cwd);
+            let response = retry_transient_spawn(|| platform.exec(&request))
+                .await
+                .expect("a command runs in a missing workspace root");
+            assert_eq!(response.exit_code, 0);
+            assert!(root.is_dir(), "the workspace root is back");
+            assert_eq!(
+                reported(&response),
+                std::fs::canonicalize(&root).expect("root")
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&root).expect("root").permissions().mode();
+            assert_eq!(mode & 0o777, 0o755, "{mode:o}");
+        }
+
+        // The home directory (and its missing parent), through `~`.
+        let request = pwd("~");
+        let response = retry_transient_spawn(|| platform.exec(&request))
+            .await
+            .expect("a command runs in a missing home directory");
+        assert!(home.is_dir(), "the home directory is back");
+        assert_eq!(
+            reported(&response),
+            std::fs::canonicalize(&home).expect("home")
+        );
+
+        // Any other missing directory is still not found, and not created.
+        let other = root.join("missing-project");
+        let error = platform
+            .exec(&pwd(&other.display().to_string()))
+            .await
+            .expect_err("another missing cwd still fails");
+        assert!(matches!(error, PlatformError::NotFound(_)), "{error}");
+        assert!(
+            error.to_string().contains("exec working directory"),
+            "{error}"
+        );
+        assert!(!other.exists());
     }
 
     #[test]
