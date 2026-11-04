@@ -263,7 +263,7 @@ function processStartFailedCopy(
   if (machine === "connected_machine") {
     const note = processStartFailureMachineNote(agentMessage);
     if (note === MISSING_SHELL_NOTE) {
-      return `Your connected machine can't start programs because ${note}. Put /bin/sh back on the machine, then retry.`;
+      return "Your connected machine can't start programs because /bin/sh is missing. Put it back on the machine, then retry.";
     }
     return note
       ? `Your connected machine can't start programs because ${note}. Restart the machine to restore it, then retry.`

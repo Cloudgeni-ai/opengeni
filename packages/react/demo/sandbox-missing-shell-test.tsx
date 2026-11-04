@@ -55,10 +55,15 @@ const AGENT_TEXT = before
   : 'not found: spawn or apply execution containment for program "/bin/sh" (the shell /bin/sh is missing and no dash or bash was found): No such file or directory (os error 2)';
 const COPY = before
   ? "Your connected machine can't start programs. Restart the machine, then retry."
-  : "Your connected machine can't start programs because the shell /bin/sh is missing and no dash or bash was found. Put /bin/sh back on the machine, then retry.";
+  : "Your connected machine can't start programs because /bin/sh is missing. Put it back on the machine, then retry.";
 
 const events: SessionEvent[] = [
-  event("user.message", { text: "Run the test suite on my machine and tell me what fails." }, 0, null),
+  event(
+    "user.message",
+    { text: "Run the test suite on my machine and tell me what fails." },
+    0,
+    null,
+  ),
   event("turn.started", {}, 1),
   event("turn.startup.phase.started", { phase: "credential_seed" }, 1),
   event(
