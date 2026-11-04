@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { Buffer } from "node:buffer";
 import { CODEMODE_ARGUMENTS_MAX_BYTES } from "@opengeni/contracts";
 import {
@@ -620,21 +620,34 @@ describe("MCP network and payload boundary", () => {
 
 describe("tool lists over a limit are trimmed, never fatal", () => {
   const tools = (count: number, prefix = "tool") =>
-    Array.from({ length: count }, (_, index) => ({ name: `${prefix}_${index}` }));
+    Array.from({ length: count }, (_, index) => ({
+      name: `${prefix}_${String(index).padStart(4, "0")}`,
+    }));
 
-  test("a list over the entry limit keeps the first tools, with keepFirst tools ahead", () => {
+  test("a list over the entry limit keeps tools by name, with keepFirst tools ahead", () => {
     const listed = tools(MCP_MAX_AGGREGATE_TOOL_LIST_ENTRIES + 2);
     const pinned = listed.at(-1)!.name;
     const fitted = fitMcpToolListWithinBounds(listed, {
       keepFirst: (tool) => tool.name === pinned,
     });
     expect(fitted.tools).toHaveLength(MCP_MAX_AGGREGATE_TOOL_LIST_ENTRIES);
-    // Listing order is kept; the pinned tool is in, the latest unpinned ones are out.
+    // Listing order is kept; the pinned tool is in, the last unpinned names are out.
     expect(fitted.tools.at(-1)!.name).toBe(pinned);
     expect(fitted.dropped).toEqual([
-      { name: `tool_${MCP_MAX_AGGREGATE_TOOL_LIST_ENTRIES - 1}`, reason: "list_entry_limit" },
-      { name: `tool_${MCP_MAX_AGGREGATE_TOOL_LIST_ENTRIES}`, reason: "list_entry_limit" },
+      { name: "tool_4095", reason: "list_entry_limit" },
+      { name: "tool_4096", reason: "list_entry_limit" },
     ]);
+  });
+
+  test("the kept set does not depend on the order a provider lists its tools in", () => {
+    const listed = tools(MCP_MAX_AGGREGATE_TOOL_LIST_ENTRIES + 50);
+    const shuffled = [...listed].sort(() => Math.random() - 0.5);
+    const kept = (list: typeof listed) =>
+      fitMcpToolListWithinBounds(list)
+        .tools.map((tool) => tool.name)
+        .sort();
+    expect(kept(shuffled)).toEqual(kept(listed));
+    expect(kept([...listed].reverse())).toEqual(kept(listed));
   });
 
   test("an oversized definition is dropped alone and the byte limit is exact", () => {
@@ -648,10 +661,10 @@ describe("tool lists over a limit are trimmed, never fatal", () => {
     expect(Buffer.byteLength(JSON.stringify(fitted.tools))).toBe(exact);
     expect(fitted.dropped).toEqual([
       { name: "huge", reason: "definition_too_large" },
-      { name: "tool_2", reason: "list_byte_limit" },
+      { name: "tool_0002", reason: "list_byte_limit" },
     ]);
     expect(describeMcpToolListDrops(fitted.dropped)).toBe(
-      "connected, but 2 of its tools are unavailable this turn (1 because their definitions are too large or unreadable; 1 because the integration lists more tools than one turn can hold), for example huge, tool_2. Its other tools work.",
+      "connected, but 2 of its tools are unavailable this turn (1 because their definitions are too large or unreadable; 1 because the integration lists more tools than one turn can hold), for example huge, tool_0002. Its other tools work.",
     );
   });
 
@@ -659,7 +672,7 @@ describe("tool lists over a limit are trimmed, never fatal", () => {
     const budget = new McpAggregateToolListBudget("test aggregate", 5, Number.MAX_SAFE_INTEGER);
     expect(budget.admit("one", tools(3, "one")).dropped).toEqual([]);
     const second = budget.admit("two", tools(4, "two"));
-    expect(second.tools.map((tool) => tool.name)).toEqual(["two_0", "two_1"]);
+    expect(second.tools.map((tool) => tool.name)).toEqual(["two_0000", "two_0001"]);
     expect(second.dropped.map((drop) => drop.reason)).toEqual([
       "aggregate_entry_limit",
       "aggregate_entry_limit",
@@ -682,6 +695,66 @@ describe("tool lists over a limit are trimmed, never fatal", () => {
     // Removing the owner releases its names.
     budget.remove("local");
     expect(budget.admit("connector", [{ name: "a__b__c" }]).tools).toEqual([{ name: "a__b__c" }]);
+  });
+
+  test("ordered admission keeps the same tools whichever server finishes listing first", async () => {
+    const run = async (lateFirst: boolean) => {
+      const budget = new McpAggregateToolListBudget("ordered", 3, Number.MAX_SAFE_INTEGER);
+      budget.sequence(["early", "late"]);
+      const early = async () => {
+        if (lateFirst) await new Promise((resolve) => setTimeout(resolve, 20));
+        return budget.admitInOrder("early", [{ name: "shared" }, { name: "e1" }]);
+      };
+      const late = () =>
+        budget.admitInOrder("late", [{ name: "shared" }, { name: "l1" }, { name: "l2" }]);
+      const [first, second] = await Promise.all([early(), late()]);
+      return { early: first.tools, late: second.tools, dropped: second.dropped };
+    };
+    const expected = {
+      early: [{ name: "shared" }, { name: "e1" }],
+      late: [{ name: "l1" }],
+      dropped: [
+        { name: "shared", reason: "model_name_taken" },
+        { name: "l2", reason: "aggregate_entry_limit" },
+      ],
+    };
+    expect(await run(false)).toEqual(expected);
+    expect(await run(true)).toEqual(expected);
+  });
+
+  test("a waiting server starts an earlier server's listing instead of waiting idle", async () => {
+    const budget = new McpAggregateToolListBudget();
+    let started = 0;
+    budget.sequence([
+      {
+        sourceId: "earlier",
+        start: () => {
+          started += 1;
+          budget.admit("earlier", [{ name: "e" }]);
+        },
+      },
+      "later",
+    ]);
+    const fitted = await budget.admitInOrder("later", [{ name: "l" }], {}, 60_000);
+    expect(fitted.tools).toEqual([{ name: "l" }]);
+    expect(started).toBe(1);
+    // A settled predecessor is not started again.
+    await budget.admitInOrder("later", [{ name: "l" }], {}, 60_000);
+    expect(started).toBe(1);
+  });
+
+  test("ordered admission stops waiting on a predecessor that is removed or never settles", async () => {
+    const budget = new McpAggregateToolListBudget();
+    budget.sequence(["gone", "stuck", "next"]);
+    budget.remove("gone");
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const fitted = await budget.admitInOrder("next", [{ name: "x" }], {}, 10);
+      expect(fitted.tools).toEqual([{ name: "x" }]);
+      expect(warn.mock.calls[0]![1]).toMatchObject({ code: "admission_order_timeout" });
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   test("size refusals are recognised through wrapped causes", () => {

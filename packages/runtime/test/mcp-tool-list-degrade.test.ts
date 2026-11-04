@@ -15,7 +15,11 @@ function listed(name: string, description = `${name} tool`): Listed {
   return { name, description, inputSchema: { type: "object", properties: {} } };
 }
 
-function localServer(id: string, list: () => Listed[], calls: string[] = []): MCPServer {
+function localServer(
+  id: string,
+  list: () => Listed[] | Promise<Listed[]>,
+  calls: string[] = [],
+): MCPServer {
   return {
     name: id,
     cacheToolsList: false,
@@ -57,7 +61,7 @@ function degradedWarnings() {
 }
 
 async function prepare(
-  servers: { id: string; list: () => Listed[]; eager?: true | string[] }[],
+  servers: { id: string; list: () => Listed[] | Promise<Listed[]>; eager?: true | string[] }[],
   calls: string[] = [],
 ) {
   const settings = testSettings({
@@ -168,11 +172,18 @@ describe("two connectors producing one model name", () => {
   // Registry ids may contain "__", so `a__b` + `c` and `a` + `b__c` are both
   // `a__b__c`. Before: the SDK's "Duplicate tool names found across MCP
   // servers" (or the runtime's identity-map collision) failed the turn.
-  test("the first listing keeps the name, the other is left out and refused", async () => {
+  test("the server selected first keeps the name, the other is left out and refused", async () => {
     const calls: string[] = [];
     const { settings, prepared } = await prepare(
       [
-        { id: "a__b", list: () => [listed("c"), listed("own_b")] },
+        {
+          id: "a__b",
+          // Lists last; it still keeps the name because it is selected first.
+          list: async () => {
+            await Bun.sleep(50);
+            return [listed("c"), listed("own_b")];
+          },
+        },
         { id: "a", list: () => [listed("b__c"), listed("own_a")] },
       ],
       calls,
@@ -184,8 +195,10 @@ describe("two connectors producing one model name", () => {
       expect(names).toEqual(["a__b__c", "a__b__own_b", "a__own_a"]);
       const catalog = prepared.attemptToolCatalog!.entries;
       expect(catalog.filter((entry) => entry.modelName === "a__b__c")).toHaveLength(1);
+      // Deterministic: admission follows the selection order, not listing speed.
       const winner = catalog.find((entry) => entry.modelName === "a__b__c")!.identity.serverId;
-      const loser = winner === "a" ? "a__b" : "a";
+      expect(winner).toBe("a__b");
+      const loser = "a";
       expect(prepared.unavailableMcpServers.get(loser)).toMatch(
         /1 of its tools are unavailable this turn .*clash with another integration/,
       );
@@ -199,7 +212,7 @@ describe("two connectors producing one model name", () => {
         (server) => (server as { registryId?: string }).registryId === winner,
       )!;
       await winnerServer.callTool("a__b__c", {});
-      expect(calls).toEqual([winner === "a" ? "a/b__c" : "a__b/c"]);
+      expect(calls).toEqual(["a__b/c"]);
     } finally {
       await prepared.close();
     }

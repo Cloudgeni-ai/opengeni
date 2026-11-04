@@ -35,6 +35,8 @@ export const MCP_MAX_CONCURRENT_SERVER_OPERATIONS = 8;
 // transport timeout before that server finishes its own handshake.
 export const MCP_DEFAULT_OUTER_CONNECT_TIMEOUT_MS = 10_000;
 export const MCP_MAX_AGGREGATE_TOOL_LIST_BYTES = 16 * 1024 * 1024;
+// Ordered tool admission never waits longer than this on an earlier server.
+export const MCP_ORDERED_ADMISSION_MAX_WAIT_MS = 120_000;
 
 export const MCP_REPLAY_SAFE_METHODS = [
   "initialize",
@@ -517,9 +519,9 @@ function listedToolName(tool: unknown): string {
 
 /**
  * Fit one tools/list inside the safety limits without failing it: a
- * definition over the per-tool limit is left out, then tools are admitted in
- * listing order (`keepFirst` tools first) while the list stays within its
- * entry and serialized-byte limits. The result keeps the listing order and
+ * definition over the per-tool limit is left out, then tools are admitted
+ * `keepFirst` tools first and otherwise by name while the list stays within
+ * its entry and serialized-byte limits. The result keeps the listing order and
  * names every tool left out, so the caller can warn and tell the model.
  */
 export function fitMcpToolListWithinBounds<T>(
@@ -550,13 +552,18 @@ export function fitMcpToolListWithinBounds<T>(
     sizes[index] = size;
     candidates.push(index);
   });
+  // Choose what to keep by stable names, not listing order: a provider can
+  // list the same tools in a different order (or page) on another turn, and
+  // the kept set must stay the same for the same tools.
   const keepFirst = options.keepFirst;
-  const order = keepFirst
-    ? [
-        ...candidates.filter((index) => keepFirst(tools[index]!)),
-        ...candidates.filter((index) => !keepFirst(tools[index]!)),
-      ]
-    : candidates;
+  const pinned = (index: number) => (keepFirst?.(tools[index]!) ? 0 : 1);
+  const order = [...candidates].sort((left, right) => {
+    const byPin = pinned(left) - pinned(right);
+    if (byPin !== 0) return byPin;
+    const leftName = listedToolName(tools[left]);
+    const rightName = listedToolName(tools[right]);
+    return leftName < rightName ? -1 : leftName > rightName ? 1 : left - right;
+  });
   const accepted = new Set<number>();
   // A JSON array serializes as "[" + items joined by "," + "]", so this is the
   // exact serialized size of the accepted list, not an estimate.
@@ -626,6 +633,14 @@ export class McpAggregateToolListBudget {
   private readonly contributions = new Map<string, McpToolListContribution>();
   /** Model name -> the source that listed it first this run. */
   private readonly modelNameClaims = new Map<string, string>();
+  /** Admission order: a source admits only after every source before it. */
+  private readonly order: string[] = [];
+  /** Starts a source's own listing, so a later source never waits on idle work. */
+  private readonly starters = new Map<string, () => unknown>();
+  private readonly settled = new Map<
+    string,
+    { done: boolean; promise: Promise<void>; resolve: () => void }
+  >();
   private totalEntries = 0;
   private totalBytes = 0;
 
@@ -701,10 +716,96 @@ export class McpAggregateToolListBudget {
       const name = (tool as { name?: unknown } | null)?.name;
       if (typeof name === "string") this.modelNameClaims.set(name, sourceId);
     }
+    this.settlement(sourceId).resolve();
     return { tools: fitted.tools, dropped: [...dropped, ...listed.dropped, ...fitted.dropped] };
   }
 
+  /**
+   * Fix the admission order of these sources (appended after any already
+   * ordered). Servers list concurrently, so first-come admission would make
+   * the kept set depend on network timing; ordered admission makes the same
+   * selection keep the same tools on every turn and replica.
+   */
+  sequence(sources: readonly (string | { sourceId: string; start: () => unknown })[]): void {
+    for (const source of sources) {
+      const sourceId = typeof source === "string" ? source : source.sourceId;
+      if (!this.order.includes(sourceId)) this.order.push(sourceId);
+      if (typeof source !== "string" && !this.starters.has(sourceId)) {
+        this.starters.set(sourceId, source.start);
+      }
+    }
+  }
+
+  /**
+   * `admit` once every source ordered before this one has admitted or been
+   * removed. Waiting starts each unsettled predecessor's own listing (listing
+   * is idempotent), so progress never depends on another caller listing it.
+   * A predecessor that still never settles delays this one by at most
+   * `maxWaitMs`, after which it admits anyway rather than hang the turn.
+   */
+  async admitInOrder<T>(
+    sourceId: string,
+    tools: readonly T[],
+    options: Pick<McpToolListFitOptions<T>, "keepFirst"> = {},
+    maxWaitMs = MCP_ORDERED_ADMISSION_MAX_WAIT_MS,
+  ): Promise<McpToolListFit<T>> {
+    const index = this.order.indexOf(sourceId);
+    if (index > 0) {
+      const predecessors = Promise.all(
+        this.order.slice(0, index).map((id) => {
+          const settlement = this.settlement(id);
+          if (!settlement.done) {
+            try {
+              void Promise.resolve(this.starters.get(id)?.()).catch(() => undefined);
+            } catch {
+              // A failed start settles through the source's own failure path.
+            }
+          }
+          return settlement.promise;
+        }),
+      );
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timedOut = await Promise.race([
+        predecessors.then(() => false),
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(true), maxWaitMs);
+          (timer as { unref?: () => void }).unref?.();
+        }),
+      ]);
+      if (timer) clearTimeout(timer);
+      if (timedOut) {
+        console.warn("[mcp] ordered tool admission waited too long; admitting now", {
+          event: "tool_catalog_degraded",
+          code: "admission_order_timeout",
+          sourceId: sourceId.slice(0, 256),
+        });
+      }
+    }
+    return this.admit(sourceId, tools, options);
+  }
+
+  private settlement(sourceId: string) {
+    let entry = this.settled.get(sourceId);
+    if (!entry) {
+      const created = { done: false } as {
+        done: boolean;
+        promise: Promise<void>;
+        resolve: () => void;
+      };
+      created.promise = new Promise<void>((done) => {
+        created.resolve = () => {
+          created.done = true;
+          done();
+        };
+      });
+      entry = created;
+      this.settled.set(sourceId, entry);
+    }
+    return entry;
+  }
+
   remove(sourceId: string): void {
+    this.settlement(sourceId).resolve();
     for (const [name, owner] of this.modelNameClaims) {
       if (owner === sourceId) this.modelNameClaims.delete(name);
     }

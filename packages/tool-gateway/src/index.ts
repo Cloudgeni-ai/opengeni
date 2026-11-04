@@ -662,8 +662,8 @@ const TOOL_GATEWAY_CATALOG_ENVELOPE_RESERVE_BYTES = 64 * 1024;
 /**
  * Keep the catalog inside its entry and byte limits by leaving tools out
  * instead of failing the build. Built-in tools are kept before connector
- * (`mcp`, `codex_apps`) tools; within each group, tools keep listing order and
- * the later ones are left out first.
+ * (`mcp`, `codex_apps`) tools; within each group, tools are kept in order of
+ * server id and tool name. The catalog keeps its definition order.
  */
 function fitToolGatewayCatalogLimits<T extends AdmittedDefinition & { path: string[] }>(
   candidates: readonly T[],
@@ -674,11 +674,15 @@ function fitToolGatewayCatalogLimits<T extends AdmittedDefinition & { path: stri
   },
 ): T[] {
   const isConnector = (candidate: T) =>
-    candidate.entry.source === "mcp" || candidate.entry.source === "codex_apps";
-  const order = [
-    ...candidates.filter((candidate) => !isConnector(candidate)),
-    ...candidates.filter(isConnector),
-  ];
+    candidate.entry.source === "mcp" || candidate.entry.source === "codex_apps" ? 1 : 0;
+  // Stable ids, not listing or connection order, decide what is kept, so the
+  // same tools give the same catalog on every turn and replica.
+  const order = [...candidates].sort(
+    (left, right) =>
+      isConnector(left) - isConnector(right) ||
+      compareCanonicalStrings(left.entry.identity.serverId, right.entry.identity.serverId) ||
+      compareCanonicalStrings(left.entry.identity.toolName, right.entry.identity.toolName),
+  );
   const kept = new Set<T>();
   let bytes = 2;
   for (const candidate of order) {

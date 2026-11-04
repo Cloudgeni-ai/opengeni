@@ -52,14 +52,20 @@ describe("catalog-wide limits leave tools out instead of failing the catalog", (
     const built = build([...connector, builtIn]);
     expect(built.catalog.entries).toHaveLength(ATTEMPT_TOOL_CATALOG_MAX_ENTRIES);
     expect(built.catalog.entries.at(-1)!.identity).toEqual(builtIn.identity);
+    // Kept by stable id: the connector tool with the last name is left out.
     expect(built.warnings).toEqual([
       {
         code: "catalog_entry_limit",
         serverId: "big",
-        toolName: `tool_${ATTEMPT_TOOL_CATALOG_MAX_ENTRIES - 1}`,
-        modelName: `big__tool_${ATTEMPT_TOOL_CATALOG_MAX_ENTRIES - 1}`,
+        toolName: "tool_999",
+        modelName: "big__tool_999",
       },
     ]);
+    // The same tools in another order give the same catalog.
+    const reordered = build([builtIn, ...[...connector].reverse()]);
+    expect(reordered.catalog.entries.map((entry) => entry.identity.toolName).sort()).toEqual(
+      built.catalog.entries.map((entry) => entry.identity.toolName).sort(),
+    );
   });
 
   test("more bytes than the 16 MB limit: later connector tools are left out", async () => {
@@ -78,12 +84,13 @@ describe("catalog-wide limits leave tools out instead of failing the catalog", (
     const left = built.warnings.filter((warning) => warning.code === "catalog_byte_limit");
     expect(left.length).toBeGreaterThan(0);
     expect(built.catalog.entries.length + left.length).toBe(count + 1);
-    // The tools left out are the latest-listed ones.
-    expect(left.map((warning) => warning.toolName)).toEqual(
-      definitions.slice(definitions.length - left.length).map((d) => d.identity.toolName),
+    // The tools left out are the ones with the last names, whatever the listing order.
+    const byName = definitions.map((d) => d.identity.toolName).sort();
+    expect(left.map((warning) => warning.toolName).sort()).toEqual(
+      byName.slice(byName.length - left.length),
     );
     // A kept tool still runs; a left-out one is not found.
-    const kept = built.catalog.entries[1]!;
+    const kept = built.catalog.entries.find((entry) => entry.identity.toolName === byName[0])!;
     expect(
       await built.gateway.callModel({
         modelName: kept.modelName,

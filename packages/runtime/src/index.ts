@@ -6660,6 +6660,9 @@ export async function prepareAgentTools(
         ...(connectedDeferredRequired?.active ?? []),
         ...(connectedDeferredBestEffort?.active ?? []),
       ];
+      // Eager servers come first here and in the first-request freeze below,
+      // so both fix one consistent admission order.
+      PrefixedMcpServer.sequenceAggregateBudget(aggregateToolBudget, activeMcpServers);
       attemptToolEnvironment = await measureToolPreparationPhase(
         options,
         "attempt_catalog_build",
@@ -6789,12 +6792,15 @@ export async function prepareAgentTools(
   );
   void ready.catch(() => undefined);
   try {
+    const eagerActive = [
+      ...(connectedEagerRequired?.active ?? []),
+      ...(connectedEagerBestEffort?.active ?? []),
+    ];
+    PrefixedMcpServer.sequenceAggregateBudget(aggregateToolBudget, eagerActive);
     await Promise.all(
-      [...(connectedEagerRequired?.active ?? []), ...(connectedEagerBestEffort?.active ?? [])].map(
-        async (server) => {
-          if (server instanceof PrefixedMcpServer) await server.freezeTools();
-        },
-      ),
+      eagerActive.map(async (server) => {
+        if (server instanceof PrefixedMcpServer) await server.freezeTools();
+      }),
     );
   } catch (error) {
     // Publication did not complete, so no caller can own these resources.
@@ -9883,6 +9889,22 @@ export class PrefixedMcpServer implements MCPServer {
     this.aggregateToolBudget?.remove(this.aggregateSourceId);
   }
 
+  /** Fix the order in which these servers' tool lists are admitted to the shared budget. */
+  static sequenceAggregateBudget(
+    budget: McpAggregateToolListBudget,
+    servers: readonly MCPServer[],
+  ) {
+    budget.sequence(
+      servers
+        .filter((server): server is PrefixedMcpServer => server instanceof PrefixedMcpServer)
+        .filter((server) => server.aggregateToolBudget === budget)
+        .map((server) => ({
+          sourceId: server.aggregateSourceId,
+          start: () => server.freezeTools(),
+        })),
+    );
+  }
+
   async listTools(): Promise<RuntimeMcpTool[]> {
     const startedAt = performance.now();
     let outcome: "completed" | "failed" = "completed";
@@ -10039,8 +10061,12 @@ export class PrefixedMcpServer implements MCPServer {
       const keepFirst = (tool: RuntimeMcpTool) =>
         isHarnessControlMcpToolName(this.registryId, tool.name) ||
         this.eagerToolNames.has(this.originalToolNames.get(tool.name) ?? "");
+      // Servers list concurrently; the budget admits them in their configured
+      // order so the same selection keeps the same tools on every turn.
       const fitted = this.aggregateToolBudget
-        ? this.aggregateToolBudget.admit(this.aggregateSourceId, exposed, { keepFirst })
+        ? await this.aggregateToolBudget.admitInOrder(this.aggregateSourceId, exposed, {
+            keepFirst,
+          })
         : fitMcpToolListWithinBounds(exposed, { keepFirst });
       const bounded = fitted.tools;
       if (fitted.dropped.length > 0) {
@@ -10073,6 +10099,8 @@ export class PrefixedMcpServer implements MCPServer {
       // A REQUIRED server's tools/list failure is fatal (fail-loud default): the
       // caller explicitly requested it, so its absence must fail the turn.
       if (!this.bestEffort && !tooLarge) {
+        // Let servers ordered after this one admit without waiting on it.
+        this.releaseAggregateBudget();
         throw mcpTransportErrorWithRetryMetadata(error, {
           recoverySafeSetup: this.recoverySafeSetup,
         });
