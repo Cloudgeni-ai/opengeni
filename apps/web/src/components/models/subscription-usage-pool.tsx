@@ -108,7 +108,7 @@ export function SubscriptionUsagePoolView({
           {blocked
             .map(
               (account) =>
-                `${account.label} is at its 5-hour limit until ${formatShortTime(account.resetsAt!, { now })}`,
+                `${account.label} is at its 5h limit until ${formatShortTime(account.resetsAt!, { now })}`,
             )
             .join("; ")}
           .
