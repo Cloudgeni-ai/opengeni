@@ -18,13 +18,25 @@ const TAIL_LIMIT = 300;
 const CAUSE_LIMIT = 200;
 
 /** The null-device notes newer agents add before the OS error. */
-const NULL_DEVICE_NOTE =
-  /\((the null device \/dev\/null is missing|\/dev\/null has been replaced by something other than the null device)\)/;
+const NULL_DEVICE_NOTE_TEXT =
+  "the null device /dev/null is missing|/dev/null has been replaced by something other than the null device";
+const NULL_DEVICE_NOTE = new RegExp(`\\((${NULL_DEVICE_NOTE_TEXT})\\)`);
 
-/** A newer agent's quoted program: `program "<name>"`, then the end, a note
- * or `: <OS error>`. The agent never puts `"` or a line break in the name and
- * bounds it; any length is still read as a name and cut when kept. */
-const QUOTED_PROGRAM = /^program "([^"\n]*)"(?=$| \(|: )/;
+/** A newer agent's quoted program: `program "<name>"`, then the end, `: <OS
+ * error>`, or exactly one null-device note. The agent never puts `"` or a
+ * line break in the name and bounds it; any length is still read as a name
+ * and cut when kept. */
+const QUOTED_PROGRAM = new RegExp(
+  `^program "([^"\\n]*)"(?=$|: | \\((?:${NULL_DEVICE_NOTE_TEXT})\\)(?:$|: ))`,
+);
+
+/** What an agent puts before the marker ("not found: ") and wrappers add
+ * ("Failed to run function tools: SelfhostedControlError: "): words and
+ * colons only. Anything else is dropped, so no command text survives there. */
+const PLAIN_PREFIX = /^[A-Za-z0-9 _.:-]*$/;
+
+/** The OS error a missing program, shell or `/dev/null` gives (ENOENT). */
+const NOT_FOUND_CAUSE = /\(os error 2\)$/;
 
 /** An older agent's unquoted program name: path characters only, then the
  * end or `: <OS error>`. Anything else (spaces, quotes, `=`, `;`, `(`) is
@@ -102,8 +114,17 @@ export function isMachineProcessStartFailureMessage(message: string): boolean {
     case "legacy-program":
       return false;
     case "legacy-text": {
+      // An older agent's shell that would not start for a shell command: it
+      // reported the script and ENOENT, as in the 4 Nov incident. Memory,
+      // process or permission errors (EAGAIN, ENOMEM, EACCES) never count.
       const reported = parsed.reported.trim();
-      return !WINDOWS_PATH.test(reported) && SHELL_TEXT.test(reported);
+      const cause = legacyCause(parsed.tail);
+      return (
+        cause !== null &&
+        NOT_FOUND_CAUSE.test(cause) &&
+        !WINDOWS_PATH.test(reported) &&
+        SHELL_TEXT.test(reported)
+      );
     }
   }
 }
@@ -119,7 +140,8 @@ export function isMachineProcessStartFailureMessage(message: string): boolean {
 export function sanitizeProcessStartFailureMessage(message: string): string {
   const at = message.indexOf(PROCESS_START_FAILURE_MARKER);
   if (at < 0) return message;
-  const before = message.slice(0, at).replace(/\s+/g, " ").slice(-200);
+  const prefix = message.slice(0, at).replace(/\s+/g, " ").slice(-200);
+  const before = PLAIN_PREFIX.test(prefix) ? prefix : "";
   const rest = message.slice(at + PROCESS_START_FAILURE_MARKER.length);
   const parsed = parse(rest);
   if (parsed.kind === "quoted") {

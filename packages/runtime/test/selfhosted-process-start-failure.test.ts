@@ -174,6 +174,46 @@ describe("process-start failures from the machine agent", () => {
     expect(legacySpawnError(SCRIPT).processStartFailed).toBe(true);
   });
 
+  test("an old agent's script that hit memory, process or permission limits never counts", () => {
+    for (const cause of [
+      "Resource temporarily unavailable (os error 11)",
+      "Cannot allocate memory (os error 12)",
+      "Permission denied (os error 13)",
+      "run_as requires Linux",
+    ]) {
+      const error = agentErrorToControlError({
+        code: ErrorCode.ERROR_CODE_OS,
+        message: `spawn or apply execution containment for set -e; curl -fsSL x | sh: ${cause}`,
+        retryable: false,
+        detail: {},
+      });
+      expect(error.processStartFailed).toBe(false);
+      expect(error.message).not.toContain("curl");
+    }
+  });
+
+  test("a quoted program followed by anything but the exact note is an old agent's text", () => {
+    const kept = sanitizeProcessStartFailureMessage(
+      `spawn or apply execution containment for program "x" (TOKEN=sk-live-123): ${OS}`,
+    );
+    expect(kept).toBe(`spawn or apply execution containment for a shell command: ${OS}`);
+  });
+
+  test("text before the marker is kept only when it is plain words", () => {
+    expect(
+      sanitizeProcessStartFailureMessage(
+        `Failed to run function tools: SelfhostedControlError: not found: spawn or apply execution containment for program "/bin/sh": ${OS}`,
+      ),
+    ).toBe(
+      `Failed to run function tools: SelfhostedControlError: not found: spawn or apply execution containment for program "/bin/sh": ${OS}`,
+    );
+    expect(
+      sanitizeProcessStartFailureMessage(
+        `curl -H 'Authorization: Bearer sk-live-123' x failed: spawn or apply execution containment for program "/bin/sh": ${OS}`,
+      ),
+    ).toBe(`spawn or apply execution containment for program "/bin/sh": ${OS}`);
+  });
+
   test("an old agent's command text is removed from the error's detail too", () => {
     const error = agentErrorToControlError({
       code: ErrorCode.ERROR_CODE_OS,
@@ -213,7 +253,8 @@ describe("process-start failures from the machine agent", () => {
     const rendered = renderSelfhostedFault(error);
     expect(rendered).toContain("the machine could not start the program");
     expect(rendered).toContain("nothing ran; the command never started.");
-    expect(rendered).toContain("Restart the machine");
+    expect(rendered).toContain("the null device /dev/null is missing, so the machine cannot start programs");
+    expect(rendered).toContain("Stop running commands");
     expect(renderSelfhostedFault(legacySpawnError(SCRIPT))).not.toContain("node -e");
   });
 });

@@ -225,9 +225,27 @@ fn repair(_path: &Path, _observed: NullDeviceState) -> RepairOutcome {
 }
 
 /// A short note for a failed process start when the null device is the cause,
-/// so the error names what is actually missing.
-pub(crate) fn spawn_failure_note() -> Option<&'static str> {
-    match inspect(Path::new(NULL_DEVICE_PATH)) {
+/// so the error names what is actually missing. Only a start that could not
+/// find something (`NotFound`) and had no retained handle, so it fell back to
+/// opening `/dev/null` by path, can have failed for that reason; any other
+/// failure (memory, processes, containment) gets no note even while the
+/// device is unhealthy.
+pub(crate) fn spawn_failure_note(error: &std::io::Error) -> Option<&'static str> {
+    if error.kind() != std::io::ErrorKind::NotFound || has_retained_handle() {
+        return None;
+    }
+    note_for(inspect(Path::new(NULL_DEVICE_PATH)))
+}
+
+fn has_retained_handle() -> bool {
+    RETAINED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_some()
+}
+
+fn note_for(state: NullDeviceState) -> Option<&'static str> {
+    match state {
         NullDeviceState::Healthy => None,
         NullDeviceState::Missing => Some("the null device /dev/null is missing"),
         NullDeviceState::Replaced => {
@@ -252,6 +270,25 @@ mod tests {
         std::fs::write(&file, b"redirected output").expect("write");
         assert_eq!(inspect(&file), NullDeviceState::Replaced);
         assert_eq!(inspect(dir.path()), NullDeviceState::Replaced);
+    }
+
+    #[test]
+    fn only_a_not_found_start_without_the_retained_handle_names_the_device() {
+        prime();
+        // A healthy machine retains the device, so no start failure is
+        // blamed on it, whatever the error.
+        for kind in [
+            std::io::ErrorKind::NotFound,
+            std::io::ErrorKind::OutOfMemory,
+            std::io::ErrorKind::PermissionDenied,
+        ] {
+            assert_eq!(spawn_failure_note(&std::io::Error::from(kind)), None);
+        }
+        assert_eq!(note_for(NullDeviceState::Healthy), None);
+        assert_eq!(
+            note_for(NullDeviceState::Missing),
+            Some("the null device /dev/null is missing")
+        );
     }
 
     #[test]

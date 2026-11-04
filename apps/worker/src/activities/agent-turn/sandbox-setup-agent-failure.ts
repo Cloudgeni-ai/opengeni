@@ -237,8 +237,41 @@ function processStartFailedCopy(
   return "The workspace machine can't start programs, so this turn stopped. Retry, or start a new chat if it keeps failing.";
 }
 
-/** A sandbox session that can boot its box afresh (compute). */
-type RestartableMachine = { backendId: "compute"; restartMachine(): Promise<void> };
+/** A sandbox session that can boot its box afresh (compute). `exec` runs a
+ * command on the box, which shows whether it can start programs again. */
+type RestartableMachine = {
+  backendId: "compute";
+  restartMachine(): Promise<void>;
+  exec?: (args: { cmd: string }) => Promise<unknown>;
+};
+
+/** How long the box gets to start one trivial program before a restart. */
+const START_PROBE_TIMEOUT_MS = 30_000;
+
+/**
+ * Whether the box starts a trivial program now. Several sessions can share one
+ * box, so another session's turn may have restarted it since this setup
+ * failed; restarting it again would stop that session's running programs.
+ * Anything but a clean start within the bound (a failure, no answer, no way to
+ * ask) reads as still broken.
+ */
+async function startsProgramsNow(machine: RestartableMachine): Promise<boolean> {
+  if (typeof machine.exec !== "function") return false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      machine.exec({ cmd: "true" }).then(
+        () => true,
+        () => false,
+      ),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), START_PROBE_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 function restartableMachine(session: unknown): RestartableMachine | null {
   if (!session || typeof session !== "object") return null;
@@ -321,10 +354,18 @@ export async function recoverSandboxSetupFailure(
     });
   }
   const name = recovery.operationName;
+  // Checked before the restart: a box another session already restarted is
+  // retried as is. Recorded like a restart, so this turn still gets only one.
+  const alreadyBack = await startsProgramsNow(machine);
   try {
     // Recorded before the restart, so a crash during it still counts.
     await recovery.publish([
-      { type: "sandbox.operation.started", payload: { name, reason: "process_start_failed" } },
+      {
+        type: "sandbox.operation.started",
+        payload: alreadyBack
+          ? { name, reason: "process_start_failed", restarted: false }
+          : { name, reason: "process_start_failed" },
+      },
     ]);
   } catch (publishError) {
     // A fenced or cancelled attempt stops as such; nothing was restarted.
@@ -334,6 +375,12 @@ export async function recoverSandboxSetupFailure(
       restartedThisTurn: false,
       restartFailure: `could not record the restart: ${errorText(publishError)}`,
     });
+  }
+  if (alreadyBack) {
+    await recovery
+      .publish([{ type: "sandbox.operation.completed", payload: { name, restarted: false } }])
+      .catch(() => undefined);
+    return new SandboxMachineRestartingError(error);
   }
   try {
     await machine.restartMachine();

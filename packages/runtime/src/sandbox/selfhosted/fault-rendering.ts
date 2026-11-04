@@ -226,9 +226,9 @@ export function renderSelfhostedFault(error: SelfhostedControlError): string {
       happened: `the machine could not start a process: ${error.message}`,
       layer: "the machine's operating system — not your command",
       preserved: "nothing ran; the command never started.",
-      tryNext: nullDevice
-        ? `${nullDevice}, so the machine cannot start programs. Restart the machine (or its Opengeni agent) before running more commands.`
-        : "the machine could not start its shell, so it cannot start programs. Restart the machine (or its Opengeni agent) before running more commands.",
+      tryNext: `${
+        nullDevice ? `${nullDevice}, so the machine` : "the machine likely"
+      } cannot start programs. Stop running commands and tell the person the machine needs a restart: a connected machine by restarting it or its Opengeni agent; a workspace machine is restarted when a turn's setup finds it broken, or a new chat gets a fresh one.`,
     });
   }
 

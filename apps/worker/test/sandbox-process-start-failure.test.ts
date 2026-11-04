@@ -50,14 +50,22 @@ function inToolCall(error: unknown): Error {
 type Published = Parameters<SandboxProcessStartRecovery["publish"]>[0][number];
 
 /** A compute box and a turn's event log, as the worker sees them. */
-function computeTurn(options: { restartFails?: boolean } = {}) {
+function computeTurn(options: { restartFails?: boolean; startsProgramsNow?: boolean } = {}) {
   const events: Published[] = [];
   let restarts = 0;
+  let probes = 0;
   const session = {
     backendId: "compute" as const,
     restartMachine: async () => {
       restarts += 1;
       if (options.restartFails) throw new Error("compute control: 503 unavailable");
+    },
+    // The box answers the pre-restart probe as it is: broken unless another
+    // session already restarted it.
+    exec: async () => {
+      probes += 1;
+      if (!options.startsProgramsNow) throw processStartError("/bin/sh", NULL_DEVICE_MISSING);
+      return { exitCode: 0 };
     },
   };
   const recovery: SandboxProcessStartRecovery = {
@@ -75,7 +83,7 @@ function computeTurn(options: { restartFails?: boolean } = {}) {
     },
     operationName: "sandbox.process_start_restart",
   };
-  return { recovery, events, restarts: () => restarts };
+  return { recovery, events, restarts: () => restarts, probes: () => probes };
 }
 
 describe("a sandbox that cannot start programs", () => {
@@ -96,6 +104,40 @@ describe("a sandbox that cannot start programs", () => {
     expect(failure).toMatchObject({ code: "sandbox_machine_restarting", retryable: true });
     expect(failure.error).toContain("couldn't start programs, so it was restarted");
     expect(failure.error).toContain("Your files are kept");
+  });
+
+  test("a box another session already restarted is retried as is, once", async () => {
+    const turn = computeTurn({ startsProgramsNow: true });
+    const first = await recoverSandboxSetupFailure(
+      createSandboxSetupReplayGuard(),
+      processStartError(INSTALL_SCRIPT),
+      turn.recovery,
+    );
+    expect(first).toBeInstanceOf(SandboxMachineRestartingError);
+    expect(turn.probes()).toBe(1);
+    expect(turn.restarts()).toBe(0);
+    expect(turn.events).toEqual([
+      {
+        type: "sandbox.operation.started",
+        payload: {
+          name: "sandbox.process_start_restart",
+          reason: "process_start_failed",
+          restarted: false,
+        },
+      },
+      {
+        type: "sandbox.operation.completed",
+        payload: { name: "sandbox.process_start_restart", restarted: false },
+      },
+    ]);
+    // Counted like a restart: a second failure in the same turn stops it.
+    const second = await recoverSandboxSetupFailure(
+      createSandboxSetupReplayGuard(),
+      processStartError(INSTALL_SCRIPT),
+      turn.recovery,
+    );
+    expect(second).toBeInstanceOf(SandboxProcessStartFailedError);
+    expect(turn.restarts()).toBe(0);
   });
 
   test("a box still broken after its restart stops the turn instead of looping", async () => {
@@ -304,8 +346,12 @@ describe("a sandbox that cannot start programs", () => {
 
   test("the real compute session is the restartable shape the recovery looks for", () => {
     // Duck-typed in the worker; a rename here would silently stop restarts.
-    const restartable: { readonly backendId: "compute"; restartMachine(): Promise<void> } =
-      Object.create(ComputeSandboxSession.prototype) as ComputeSandboxSession;
+    const restartable: {
+      readonly backendId: "compute";
+      restartMachine(): Promise<void>;
+      exec(args: { cmd: string }): Promise<unknown>;
+    } = Object.create(ComputeSandboxSession.prototype) as ComputeSandboxSession;
     expect(typeof restartable.restartMachine).toBe("function");
+    expect(typeof restartable.exec).toBe("function");
   });
 });

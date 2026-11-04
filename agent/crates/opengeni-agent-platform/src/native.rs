@@ -1288,7 +1288,7 @@ impl Platform for NativePlatform {
             // spaces or backslashes) from an older agent's command text.
             let context = format!("spawn or apply execution containment for program \"{program}\"");
             #[cfg(unix)]
-            let context = match crate::null_device::spawn_failure_note() {
+            let context = match crate::null_device::spawn_failure_note(&e) {
                 Some(note) => format!("{context} ({note})"),
                 None => context,
             };
