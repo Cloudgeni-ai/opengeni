@@ -538,7 +538,8 @@ export class MeetingPrompter {
     if (!declined) return false;
     // A meeting running over keeps its call turned down through a mute too.
     const still =
-      now - declined.lastSeen < DECLINED_GAP_MS || (declined.until !== null && now < declined.until);
+      now - declined.lastSeen < DECLINED_GAP_MS ||
+      (declined.until !== null && now < declined.until);
     if (!still) this.declinedCalls.delete(id);
     return still;
   }

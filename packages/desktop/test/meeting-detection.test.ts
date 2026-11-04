@@ -1039,7 +1039,10 @@ function cardPage(options: { afterHoverMs?: number } = {}) {
   let script = /<script>([\s\S]*)<\/script>/u.exec(MEETING_CARD_HTML)![1]!;
   // How long the card stays once the pointer leaves it, shortened for a test.
   if (options.afterHoverMs !== undefined) {
-    script = script.replace(/const AFTER_HOVER_MS = \d+;/u, `const AFTER_HOVER_MS = ${options.afterHoverMs};`);
+    script = script.replace(
+      /const AFTER_HOVER_MS = \d+;/u,
+      `const AFTER_HOVER_MS = ${options.afterHoverMs};`,
+    );
   }
   class Element extends EventTarget {
     textContent = "";
