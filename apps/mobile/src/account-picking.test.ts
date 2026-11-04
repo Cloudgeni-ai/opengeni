@@ -15,6 +15,8 @@ mock.module("react", () => React);
 mock.module("react/jsx-dev-runtime", () => JsxDevRuntime);
 mock.module("react/jsx-runtime", () => JsxRuntime);
 const { act, createElement } = React;
+// React Native's development flag, as in a release build.
+Object.assign(globalThis, { __DEV__: false });
 
 const account = (id: string, patch: Partial<StoredAccount> = {}): StoredAccount => ({
   id,
@@ -32,6 +34,7 @@ const pushed: unknown[] = [];
 // The screen on top: a push opens the sign-in sheet, as the router would.
 let pathname = "/";
 let unreadable = false;
+let pushFails = false;
 
 mock.module("@/account-store", () => ({
   loadAccounts: async () => structuredClone(stored),
@@ -49,6 +52,7 @@ mock.module("@/account-store", () => ({
 mock.module("expo-router", () => ({
   router: {
     push: (target: unknown) => {
+      if (pushFails) throw new Error("navigation not ready");
       pushed.push(target);
       pathname = "/add-account";
     },
@@ -87,14 +91,19 @@ const { AccountProvider, useAccount, usePickAccount } = await import("./account"
 registerDom();
 
 type Probe = { state: ReturnType<typeof useAccount>; pick: ReturnType<typeof usePickAccount> };
-async function mount(snapshot: AccountsSnapshot, credentials: Record<string, string>) {
+async function mount(
+  snapshot: AccountsSnapshot,
+  credentials: Record<string, string>,
+  options: { unreadable?: boolean } = {},
+) {
   stored = snapshot;
   tokens = new Map(Object.entries(credentials));
   saved.length = 0;
   tokenWrites.length = 0;
   pushed.length = 0;
   pathname = "/";
-  unreadable = false;
+  unreadable = options.unreadable ?? false;
+  pushFails = false;
   const probe = {} as Probe;
   function Read() {
     probe.state = useAccount();
@@ -103,13 +112,17 @@ async function mount(snapshot: AccountsSnapshot, credentials: Record<string, str
   }
   const view = await renderComponent(createElement(AccountProvider, null, createElement(Read)));
   await act(async () => flush());
+  /** The router moved: screens re-render with the new pathname. */
+  const settle = async () => {
+    await view.rerender(createElement(AccountProvider, null, createElement(Read)));
+  };
   /** Cancel on the sheet: back to the screen underneath. */
   const closeSheet = async () => {
     pathname = "/";
     pushed.length = 0;
-    await view.rerender(createElement(AccountProvider, null, createElement(Read)));
+    await settle();
   };
-  return { probe, view, closeSheet };
+  return { probe, view, settle, closeSheet };
 }
 const pick = async (probe: Probe, id: string, onInUse?: () => void) => {
   await act(async () => {
@@ -137,6 +150,7 @@ test("a signed-out pick opens its sign-in over the account in use and changes no
     // Nothing saved: the list, its order and the pick's own state are unchanged.
     expect(saved).toEqual([]);
     expect(probe.state.accounts).toEqual([work, staging, personal]);
+    expect(probe.state.accounts.find((each) => each.id === "staging")?.signedOut).toBe(true);
     expect(tokenWrites).toEqual([]);
     expect(inUse).toBe(0);
   } finally {
@@ -147,7 +161,7 @@ test("a signed-out pick opens its sign-in over the account in use and changes no
 test("a missing credential opens the sign-in and marks the account; an unreadable one only opens it", async () => {
   const { probe, view, closeSheet } = await mount(
     { accounts: [work, personal], activeId: "work" },
-    { work: "ogapp_work" },
+    { work: "ogapp_work", personal: "ogapp_personal" },
   );
   const personalFlag = () => probe.state.accounts.find((each) => each.id === "personal")?.signedOut;
   try {
@@ -156,12 +170,15 @@ test("a missing credential opens the sign-in and marks the account; an unreadabl
     expect(pushed).toEqual([{ pathname: "/add-account", params: { account: "personal" } }]);
     expect(probe.state.account?.id).toBe("work");
     expect(personalFlag()).toBeUndefined();
+    expect([...probe.state.unreadable]).toEqual(["personal"]);
     await closeSheet();
     unreadable = false;
+    tokens.delete("personal");
     await pick(probe, "personal");
     expect(pushed).toEqual([{ pathname: "/add-account", params: { account: "personal" } }]);
     expect(probe.state.account?.id).toBe("work");
     expect(personalFlag()).toBe(true);
+    expect([...probe.state.unreadable]).toEqual([]);
     expect(tokenWrites).toEqual([]);
   } finally {
     await view.unmount();
@@ -188,7 +205,7 @@ test("a signed-in pick switches at once and remembers the way back", async () =>
 });
 
 test("a second tap does not open a second sign-in sheet; after Cancel a pick works again", async () => {
-  const { probe, view, closeSheet } = await mount(
+  const { probe, view, settle, closeSheet } = await mount(
     { accounts: [work, staging], activeId: "work" },
     { work: "ogapp_work" },
   );
@@ -199,12 +216,108 @@ test("a second tap does not open a second sign-in sheet; after Cancel a pick wor
       await flush();
     });
     expect(pushed).toHaveLength(1);
-    // Later, while the sheet is still on its way up or open.
+    // Later, with the sheet up.
+    await settle();
     await pick(probe, "staging");
     expect(pushed).toHaveLength(1);
     await closeSheet();
     await pick(probe, "staging");
     expect(pushed).toHaveLength(1);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a sheet that failed to open does not block the next pick", async () => {
+  const { probe, view } = await mount(
+    { accounts: [work, staging], activeId: "work" },
+    { work: "ogapp_work" },
+  );
+  try {
+    pushFails = true;
+    await pick(probe, "staging");
+    expect(pushed).toEqual([]);
+    pushFails = false;
+    await pick(probe, "staging");
+    expect(pushed).toEqual([{ pathname: "/add-account", params: { account: "staging" } }]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("an account whose credential is missing shows as signed out from launch", async () => {
+  const { probe, view } = await mount(
+    { accounts: [work, personal], activeId: "work" },
+    { work: "ogapp_work" },
+  );
+  try {
+    expect(probe.state.status).toBe("ready");
+    expect(probe.state.accounts.find((each) => each.id === "personal")?.signedOut).toBe(true);
+    expect(probe.state.accounts.find((each) => each.id === "work")?.signedOut).toBeUndefined();
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("the account in use without a credential lands on its sign-in, marked signed out", async () => {
+  const { probe, view } = await mount({ accounts: [work, personal], activeId: "work" }, {});
+  try {
+    expect(probe.state.status).toBe("signedOut");
+    expect(probe.state.account?.signedOut).toBe(true);
+    expect([...probe.state.unreadable]).toEqual([]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("an unreadable credential for the account in use offers a retry instead of loading forever", async () => {
+  const { probe, view } = await mount(
+    { accounts: [work, personal], activeId: "work" },
+    { work: "ogapp_work", personal: "ogapp_personal" },
+    { unreadable: true },
+  );
+  try {
+    expect(probe.state.status).toBe("signedOut");
+    expect(probe.state.account?.id).toBe("work");
+    expect(probe.state.account?.signedOut).toBeUndefined();
+    expect(probe.state.unreadable.has("work")).toBe(true);
+    // Still unreadable: nothing changes.
+    let outcome = "";
+    await act(async () => {
+      outcome = await probe.state.retrySignIn("work");
+    });
+    expect(outcome).toBe("unreadable");
+    expect(probe.state.status).toBe("signedOut");
+    // Readable again: straight in, with no sign-in.
+    unreadable = false;
+    await act(async () => {
+      outcome = await probe.state.retrySignIn("work");
+      await flush();
+    });
+    expect(outcome).toBe("ready");
+    expect(probe.state.status).toBe("ready");
+    expect(probe.state.unreadable.has("work")).toBe(false);
+    expect(tokenWrites).toEqual([]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a retry from the sheet makes the readable account the one in use", async () => {
+  const { probe, view } = await mount(
+    { accounts: [work, personal], activeId: "work" },
+    { work: "ogapp_work", personal: "ogapp_personal" },
+  );
+  try {
+    let outcome = "";
+    await act(async () => {
+      outcome = await probe.state.retrySignIn("personal");
+      await flush();
+    });
+    expect(outcome).toBe("ready");
+    expect(probe.state.account?.id).toBe("personal");
+    expect(probe.state.status).toBe("ready");
+    expect(probe.state.previousAccountId).toBe("work");
   } finally {
     await view.unmount();
   }

@@ -25,6 +25,10 @@ import { InitialTile } from "@/ui";
  * `target` is an account to sign in to again. Shown full screen (no Cancel),
  * the screen also lists the device's other accounts, so the person can always
  * go back to one they are signed in to.
+ *
+ * When the target's saved sign-in exists but couldn't be read (a locked or
+ * failing keychain), it is not signed out: the screen says so and offers to
+ * try again first, with signing in again as the fallback.
  */
 export function SignInScreen({
   target,
@@ -38,8 +42,18 @@ export function SignInScreen({
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const insets = useSafeAreaInsets();
-  const { account, accounts, previousAccountId, addAccount, switchAccount } = useAccount();
-  const expired = target ?? (account?.signedOut ? account : null);
+  const {
+    account,
+    accounts,
+    previousAccountId,
+    unreadable,
+    addAccount,
+    switchAccount,
+    retrySignIn,
+  } = useAccount();
+  const expired =
+    target ?? (account && (account.signedOut || unreadable.has(account.id)) ? account : null);
+  const cantRead = Boolean(expired && !expired.signedOut && unreadable.has(expired.id));
   const choices = onCancel
     ? []
     : signInSwitchChoices(accounts, account?.id ?? null, previousAccountId);
@@ -68,6 +82,21 @@ export function SignInScreen({
       const result = await addAccount(baseUrl);
       if (result.kind === "signedIn") onDone?.();
       else if (result.kind === "failed" && mounted.current) setProblem(result.message);
+    } finally {
+      if (mounted.current) setBusy(false);
+    }
+  };
+
+  const retry = async () => {
+    if (!expired) return;
+    setBusy(true);
+    setProblem(null);
+    try {
+      const outcome = await retrySignIn(expired.id);
+      if (outcome === "ready") onDone?.();
+      else if (outcome === "unreadable" && mounted.current) {
+        setProblem("Still couldn't read it. Try again, or sign in again.");
+      }
     } finally {
       if (mounted.current) setBusy(false);
     }
@@ -102,7 +131,13 @@ export function SignInScreen({
               textAlign: "center",
             }}
           >
-            {expired ? "Sign in again" : onCancel ? "Add an account" : "Sign in to Opengeni"}
+            {cantRead
+              ? "Couldn't read your sign-in"
+              : expired
+                ? "Sign in again"
+                : onCancel
+                  ? "Add an account"
+                  : "Sign in to Opengeni"}
           </Text>
           <Text
             style={{
@@ -115,9 +150,13 @@ export function SignInScreen({
               maxWidth: 320,
             }}
           >
-            {expired
-              ? `${expired.email} was signed out on ${serverLabel(expired.baseUrl)}.`
-              : "Continue in your browser with any sign-in you use on the web."}
+            {!expired
+              ? "Continue in your browser with any sign-in you use on the web."
+              : cantRead
+                ? `This device couldn't read the saved sign-in for ${expired.email} on ${serverLabel(expired.baseUrl)}.`
+                : expired.signedOut
+                  ? `${expired.email} was signed out on ${serverLabel(expired.baseUrl)}.`
+                  : `Sign in to ${expired.email} on ${serverLabel(expired.baseUrl)}.`}
           </Text>
         </View>
 
@@ -147,15 +186,36 @@ export function SignInScreen({
               }}
             />
           ) : null}
-          <Button
-            variant="primary"
-            size="form"
-            label={busy ? "Waiting for the browser…" : "Continue with web sign-in"}
-            busy={busy}
-            disabled={busy}
-            onPress={() => void start()}
-            style={{ height: 44 }}
-          />
+          {cantRead ? (
+            <>
+              <Button
+                variant="primary"
+                size="form"
+                label="Try again"
+                busy={busy}
+                disabled={busy}
+                onPress={() => void retry()}
+                style={{ height: 44 }}
+              />
+              <Button
+                variant="ghost"
+                size="form"
+                label="Sign in again"
+                disabled={busy}
+                onPress={() => void start()}
+              />
+            </>
+          ) : (
+            <Button
+              variant="primary"
+              size="form"
+              label={busy ? "Waiting for the browser…" : "Continue with web sign-in"}
+              busy={busy}
+              disabled={busy}
+              onPress={() => void start()}
+              style={{ height: 44 }}
+            />
+          )}
           {onCancel ? (
             <Button variant="ghost" size="form" label="Cancel" onPress={onCancel} />
           ) : null}
@@ -175,7 +235,7 @@ export function SignInScreen({
           ) : null}
         </View>
 
-        {editingServer ? null : (
+        {editingServer || cantRead ? null : (
           <Text
             accessibilityRole="button"
             onPress={() => setEditingServer(true)}
