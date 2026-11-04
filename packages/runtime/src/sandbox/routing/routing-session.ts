@@ -2519,9 +2519,9 @@ export class RoutingSandboxSession implements RoutableBackendSession {
    * turn handles, not a model-facing fault. Any non-selfhosted error (a Modal fault, a
    * `RoutingUnsupportedError`) is re-thrown unchanged.
    */
-  private renderSelfhostedFaultOrThrow(error: unknown): string {
+  private renderSelfhostedFaultOrThrow(error: unknown, backendKind?: string): string {
     if (error instanceof SelfhostedControlError && !error.fenced) {
-      return renderSelfhostedFault(error);
+      return renderSelfhostedFault(error, { connectedMachine: backendKind === "selfhosted" });
     }
     throw error;
   }
@@ -2681,11 +2681,15 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   }
 
   async execCommand(args: unknown, options?: RoutingCommandDispatchOptions): Promise<string> {
+    // The backend the failing attempt ran on: a Connected Machine's offline
+    // copy differs from a compute box's.
+    let backendKind: string | undefined;
     try {
       return await this.dispatch(
         "execCommand",
         true,
         async (s, backend) => {
+          backendKind = backend.kind;
           notifyRemoteOperationTransportSelected(s);
           // Secret delivery happens here, below every recorder: connected
           // machines deliver natively in their own session; every other
@@ -2708,7 +2712,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     } catch (error) {
       // Render a terminal selfhosted fault as the tool's result (four fields, correct
       // verdict) instead of letting the SDK mislabel it "Please try again".
-      return this.renderSelfhostedFaultOrThrow(error);
+      return this.renderSelfhostedFaultOrThrow(error, backendKind);
     }
   }
 
