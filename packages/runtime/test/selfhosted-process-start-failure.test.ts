@@ -199,6 +199,19 @@ describe("process-start failures from the machine agent", () => {
     expect(kept).toBe(`spawn or apply execution containment for a shell command: ${OS}`);
   });
 
+  test("a quoted program's tail with shell syntax keeps only the OS error", () => {
+    expect(
+      sanitizeProcessStartFailureMessage(
+        `spawn or apply execution containment for program "foo": rm -rf x; export TOKEN=abc: ${OS}`,
+      ),
+    ).toBe(`spawn or apply execution containment for program "foo": ${OS}`);
+    expect(
+      sanitizeProcessStartFailureMessage(
+        'spawn or apply execution containment for program "foo": rm -rf x; export TOKEN=abc',
+      ),
+    ).toBe('spawn or apply execution containment for program "foo"');
+  });
+
   test("text before the marker is kept only when it is plain words", () => {
     expect(
       sanitizeProcessStartFailureMessage(

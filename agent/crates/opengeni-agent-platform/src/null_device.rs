@@ -227,9 +227,10 @@ fn repair(_path: &Path, _observed: NullDeviceState) -> RepairOutcome {
 /// A short note for a failed process start when the null device is the cause,
 /// so the error names what is actually missing. Only a start that could not
 /// find something (`NotFound`) and had no retained handle, so it fell back to
-/// opening `/dev/null` by path, can have failed for that reason; any other
-/// failure (memory, processes, containment) gets no note even while the
-/// device is unhealthy.
+/// opening `/dev/null` by path, can have failed for that reason, and only
+/// while nothing is at the path: a replacement (a regular file) still opens.
+/// Any other failure (memory, processes, containment) gets no note even while
+/// the device is unhealthy.
 pub(crate) fn spawn_failure_note(error: &std::io::Error) -> Option<&'static str> {
     if error.kind() != std::io::ErrorKind::NotFound || has_retained_handle() {
         return None;
@@ -246,11 +247,8 @@ fn has_retained_handle() -> bool {
 
 fn note_for(state: NullDeviceState) -> Option<&'static str> {
     match state {
-        NullDeviceState::Healthy => None,
         NullDeviceState::Missing => Some("the null device /dev/null is missing"),
-        NullDeviceState::Replaced => {
-            Some("/dev/null has been replaced by something other than the null device")
-        }
+        NullDeviceState::Healthy | NullDeviceState::Replaced => None,
     }
 }
 
@@ -285,6 +283,8 @@ mod tests {
             assert_eq!(spawn_failure_note(&std::io::Error::from(kind)), None);
         }
         assert_eq!(note_for(NullDeviceState::Healthy), None);
+        // A replacement still opens, so it never causes a failed start.
+        assert_eq!(note_for(NullDeviceState::Replaced), None);
         assert_eq!(
             note_for(NullDeviceState::Missing),
             Some("the null device /dev/null is missing")

@@ -5,6 +5,7 @@ import {
   isSandboxProcessStartFailure,
   SANDBOX_MACHINE_RESTARTING_CODE,
   SANDBOX_PROCESS_START_FAILED_CODE,
+  SandboxMachineBackError,
   SandboxMachineRestartingError,
   SandboxProcessStartFailedError,
   SandboxSetupAgentUnavailableError,
@@ -1777,6 +1778,14 @@ function sandboxProcessStartFailure(
 ): ReturnType<typeof baseAgentRunFailurePayload> | null {
   const graph = structuredRecoveryCauseGraph(error);
   const nodes = graph ? [...graph.keys()] : [error];
+  const back = nodes.find((node) => node instanceof SandboxMachineBackError);
+  if (back instanceof SandboxMachineBackError) {
+    const { uncertain } = uncertainMutationOutcome(graph, nodes);
+    if (uncertain === undefined) {
+      // The box was not restarted: an ordinary sandbox wait, not a restart.
+      return { error: back.message, code: "sandbox_command_start_unavailable", retryable: true };
+    }
+  }
   const restarting = nodes.find((node) => node instanceof SandboxMachineRestartingError);
   if (restarting instanceof SandboxMachineRestartingError) {
     const { uncertain } = uncertainMutationOutcome(graph, nodes);
@@ -1797,7 +1806,7 @@ function sandboxProcessStartFailure(
       detail: failed.detail,
     };
   }
-  if (restarting || isSandboxProcessStartFailure(error)) {
+  if (restarting || back || isSandboxProcessStartFailure(error)) {
     return {
       error:
         "The workspace machine can't start programs, so this turn stopped. Retry in a moment, or start a new chat if it keeps failing.",

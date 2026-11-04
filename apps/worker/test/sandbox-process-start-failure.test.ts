@@ -12,6 +12,7 @@ import {
   createSandboxSetupReplayGuard,
   isSandboxProcessStartFailure,
   recoverSandboxSetupFailure,
+  SandboxMachineBackError,
   SandboxMachineRestartingError,
   SandboxProcessStartFailedError,
   SandboxSetupAgentUnavailableError,
@@ -106,38 +107,22 @@ describe("a sandbox that cannot start programs", () => {
     expect(failure.error).toContain("Your files are kept");
   });
 
-  test("a box another session already restarted is retried as is, once", async () => {
+  test("a box another session already restarted is retried as is, never restarted again", async () => {
     const turn = computeTurn({ startsProgramsNow: true });
-    const first = await recoverSandboxSetupFailure(
+    const error = await recoverSandboxSetupFailure(
       createSandboxSetupReplayGuard(),
       processStartError(INSTALL_SCRIPT),
       turn.recovery,
     );
-    expect(first).toBeInstanceOf(SandboxMachineRestartingError);
+    expect(error).toBeInstanceOf(SandboxMachineBackError);
     expect(turn.probes()).toBe(1);
     expect(turn.restarts()).toBe(0);
-    expect(turn.events).toEqual([
-      {
-        type: "sandbox.operation.started",
-        payload: {
-          name: "sandbox.process_start_restart",
-          reason: "process_start_failed",
-          restarted: false,
-        },
-      },
-      {
-        type: "sandbox.operation.completed",
-        payload: { name: "sandbox.process_start_restart", restarted: false },
-      },
-    ]);
-    // Counted like a restart: a second failure in the same turn stops it.
-    const second = await recoverSandboxSetupFailure(
-      createSandboxSetupReplayGuard(),
-      processStartError(INSTALL_SCRIPT),
-      turn.recovery,
-    );
-    expect(second).toBeInstanceOf(SandboxProcessStartFailedError);
-    expect(turn.restarts()).toBe(0);
+    // Nothing was restarted, so nothing says it was, nor counts as a restart.
+    expect(turn.events).toEqual([]);
+    const failure = agentRunFailurePayload(inToolCall(error));
+    expect(failure).toMatchObject({ code: "sandbox_command_start_unavailable", retryable: true });
+    expect(failure.error).not.toContain("restarted");
+    expect(failure.error).not.toContain("node -e");
   });
 
   test("a box still broken after its restart stops the turn instead of looping", async () => {

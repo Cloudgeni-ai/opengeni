@@ -169,6 +169,23 @@ export class SandboxMachineRestartingError extends Error {
   }
 }
 
+/**
+ * Platform setup failed because the sandbox could not start programs, but by
+ * the time the worker checked, it could again (another session sharing the box
+ * had restarted it), so it was not restarted. Nothing the model asked for ran,
+ * so the same turn retries within the ordinary sandbox recovery budget.
+ */
+export class SandboxMachineBackError extends Error {
+  override readonly name = "SandboxMachineBackError";
+
+  constructor(cause: unknown) {
+    super(
+      "The workspace machine couldn't start programs for a moment and can again now, and nothing the model asked for ran. The same turn will retry after a short delay.",
+      { cause },
+    );
+  }
+}
+
 /** Where the machine that cannot start programs runs, for the person's copy. */
 export type SandboxProcessStartMachine = "compute" | "connected_machine" | "other";
 
@@ -317,6 +334,7 @@ export async function recoverSandboxSetupFailure(
   if (mapped !== error) return mapped;
   if (
     error instanceof SandboxMachineRestartingError ||
+    error instanceof SandboxMachineBackError ||
     error instanceof SandboxProcessStartFailedError ||
     !isSandboxProcessStartFailure(error)
   ) {
@@ -353,19 +371,16 @@ export async function recoverSandboxSetupFailure(
       restartedThisTurn: true,
     });
   }
+  // Checked before the restart: a box another session sharing it already
+  // restarted is retried as it is, never restarted again. Nothing was
+  // restarted, so nothing is recorded; the ordinary sandbox recovery budget
+  // bounds these retries.
+  if (await startsProgramsNow(machine)) return new SandboxMachineBackError(error);
   const name = recovery.operationName;
-  // Checked before the restart: a box another session already restarted is
-  // retried as is. Recorded like a restart, so this turn still gets only one.
-  const alreadyBack = await startsProgramsNow(machine);
   try {
     // Recorded before the restart, so a crash during it still counts.
     await recovery.publish([
-      {
-        type: "sandbox.operation.started",
-        payload: alreadyBack
-          ? { name, reason: "process_start_failed", restarted: false }
-          : { name, reason: "process_start_failed" },
-      },
+      { type: "sandbox.operation.started", payload: { name, reason: "process_start_failed" } },
     ]);
   } catch (publishError) {
     // A fenced or cancelled attempt stops as such; nothing was restarted.
@@ -375,12 +390,6 @@ export async function recoverSandboxSetupFailure(
       restartedThisTurn: false,
       restartFailure: `could not record the restart: ${errorText(publishError)}`,
     });
-  }
-  if (alreadyBack) {
-    await recovery
-      .publish([{ type: "sandbox.operation.completed", payload: { name, restarted: false } }])
-      .catch(() => undefined);
-    return new SandboxMachineRestartingError(error);
   }
   try {
     await machine.restartMachine();

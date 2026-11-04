@@ -47,6 +47,8 @@ const LEGACY_PROGRAM = new RegExp(`^([A-Za-z0-9._/+@~-]{1,${PROGRAM_LIMIT}})(?=$
 const WINDOWS_PATH = /^(?:[A-Za-z]:[\\/]|\\\\)/;
 /** Whitespace or shell syntax: what an older agent reported for a script. */
 const SHELL_TEXT = /[\s'"`$;&|<>(){}*?!#=\\]/;
+/** Shell syntax an agent's own note and OS error never hold. */
+const SHELL_SYNTAX = /['"`$;&|<>{}=]/;
 
 /** Whether `message` reports that the machine could not start a program. */
 export function isProcessStartFailureMessage(message: string): boolean {
@@ -146,7 +148,15 @@ export function sanitizeProcessStartFailureMessage(message: string): string {
   const parsed = parse(rest);
   if (parsed.kind === "quoted") {
     const tail = parsed.tail.replace(/\s+/g, " ").trimEnd().slice(0, TAIL_LIMIT);
-    return `${before}${PROCESS_START_FAILURE_MARKER}program "${parsed.program}"${tail}`;
+    // A newer agent's tail is its note and OS error, never shell syntax; one
+    // that has it is reduced to the final OS error, as for older agents.
+    let kept = tail;
+    if (SHELL_SYNTAX.test(tail)) {
+      const note = NULL_DEVICE_NOTE.exec(tail)?.[0];
+      const cause = legacyCause(tail);
+      kept = `${note ? ` ${note}` : ""}${cause ? `: ${cause}` : ""}`;
+    }
+    return `${before}${PROCESS_START_FAILURE_MARKER}program "${parsed.program}"${kept}`;
   }
   const name = parsed.kind === "legacy-program" ? parsed.program : "a shell command";
   const cause = legacyCause(parsed.tail);
