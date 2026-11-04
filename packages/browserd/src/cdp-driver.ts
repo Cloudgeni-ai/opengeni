@@ -10627,6 +10627,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     let errorText =
       typeof result.errorText === "string" && result.errorText ? result.errorText : null;
+    // A javascript: URL runs in the current document instead of loading one,
+    // so Chromium answers it as an aborted load. It ran: the tab keeps its
+    // page (or shows the document the script returned), and that is success.
+    if (errorText === "net::ERR_ABORTED" && /^\s*javascript:/iu.test(url)) errorText = null;
     if (errorText !== null && !isPageLoadError(errorText)) {
       throw new InteractionDefiniteDriverError(
         "resource_unavailable",
