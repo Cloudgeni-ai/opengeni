@@ -299,7 +299,8 @@ fn a_self_update_the_agent_execs_is_kept_once_it_has_run() {
     let ((pid, exited), file) = start_program(&program, false, |at| {
         spawn_child(supervise::command(&at.to_string_lossy()).args([
             "-c",
-            "while [ ! -e \"$1\" ]; do sleep 0.02; done; exec \"$0\" -c 'sleep 30'",
+            // The new program goes on running itself, whichever shell it is.
+            "while [ ! -e \"$1\" ]; do sleep 0.02; done; exec \"$0\" -c 'while :; do sleep 1; done'",
             &path,
             &updated.to_string_lossy(),
         ]))
@@ -394,13 +395,19 @@ fn only_an_agent_ending_at_once_of_its_own_counts_toward_putting_back_the_kept_o
     assert!(!ended_at_once(Some(Exit::Code(1)), Duration::from_secs(30)));
 }
 
+/// Set (as CI sets it) to run a test that needs root again under `sudo -n`.
+const SUDO: &str = "COMPUTE_GUEST_TEST_SUDO";
+
 /// Whether the test `name` (its path in this binary) runs here: when this
-/// process is root. Otherwise it runs again under `sudo -n` where that
-/// needs no password (CI's runners), and must pass there, or is skipped,
-/// and says so.
+/// process is root. Otherwise, with [`SUDO`] set, it runs again under
+/// `sudo -n` and must pass there; else it is skipped, and says so.
 pub(super) fn as_root(name: &str) -> bool {
     if sys::is_root() {
         return true;
+    }
+    if std::env::var_os(SUDO).is_none() {
+        eprintln!("skipping {name}: it needs root (set {SUDO}=1 to run it with sudo -n)");
+        return false;
     }
     let dir = scratch(&format!(
         "as-root-{}",
@@ -408,20 +415,16 @@ pub(super) fn as_root(name: &str) -> bool {
     ));
     let output = dir.join("output");
     let sudo = |args: &[&str]| {
+        let file = std::fs::File::create(&output).unwrap();
         let mut command = supervise::command("sudo");
         command
             .arg("-n")
             .args(args)
             .stdin(std::process::Stdio::null())
-            .stdout(std::fs::File::create(&output).unwrap())
-            .stderr(std::fs::File::create(&output).unwrap());
+            .stderr(file.try_clone().unwrap())
+            .stdout(file);
         spawn_child(&mut command).map(|(_, exited)| exited.recv_timeout(Duration::from_secs(120)))
     };
-    if !matches!(sudo(&["true"]), Ok(Ok(Exit::Code(0)))) {
-        eprintln!("skipping {name}: it needs root, and sudo asks for a password here");
-        let _ = std::fs::remove_dir_all(&dir);
-        return false;
-    }
     let exe = std::env::current_exe().unwrap();
     let ran = sudo(&[
         &exe.to_string_lossy(),

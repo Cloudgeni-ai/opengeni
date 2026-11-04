@@ -83,21 +83,23 @@ pub fn supervise(guest: &Arc<Guest>, children: &Children) {
             // Put back (or already the kept one): counted afresh.
             quick_ends = 0;
         }
-        let exit = match spawned {
+        let (exit, asked) = match spawned {
             Ok(((pid, exited), file)) => {
                 guest.agent_started(pid, wanted);
                 log(&format!("the agent runs as pid {pid}"));
                 let exit = wait_keeping(&program, pid, file, &exited, PROVEN);
-                guest.agent_stopped(pid);
+                let asked = guest.agent_stopped(pid);
                 log(&format!("the agent (pid {pid}) ended: {exit:?}"));
-                exit
+                (exit, asked)
             }
             Err(error) => {
                 log(&format!("the agent did not start: {error}"));
-                None
+                (None, false)
             }
         };
-        if ended_at_once(exit, started.elapsed()) {
+        // The guest's own stop (to start it with other settings) says
+        // nothing about the program, however the agent ends on it.
+        if !asked && ended_at_once(exit, started.elapsed()) {
             quick_ends += 1;
         } else {
             quick_ends = 0;
@@ -111,10 +113,11 @@ pub fn supervise(guest: &Arc<Guest>, children: &Children) {
 }
 
 /// Whether an agent that ended with `exit` after running for `ran` ended at
-/// once of its own: a program that cannot run. Being stopped from outside
-/// (the init stopping an agent with old settings, a `pkill`) and not
-/// starting at all (no memory or process to spare) say nothing about the
-/// program, and do not count.
+/// once of its own: a program that cannot run. Being killed or stopped by
+/// a signal, and not starting at all (no memory or process to spare), say
+/// nothing about the program, and do not count. (The agent handles
+/// `SIGTERM` and exits 0: a stop the guest asked for is told apart by the
+/// guest, see [`Guest::agent_stopped`].)
 pub(super) fn ended_at_once(exit: Option<Exit>, ran: Duration) -> bool {
     ran < QUICK
         && match exit {
@@ -235,7 +238,7 @@ pub(super) fn wait_keeping(
         let Some(file) = proving.proven(running_file(pid), program.current()) else {
             continue;
         };
-        match program.keep(false) {
+        match program.keep_running(&running_path(pid)) {
             Ok(kept) => {
                 proving.kept(file);
                 if kept {
@@ -256,9 +259,15 @@ pub(super) fn wait_keeping(
 
 /// The file process `pid` runs, while it runs.
 fn running_file(pid: i32) -> Option<FileId> {
-    fs::metadata(format!("/proc/{pid}/exe"))
+    fs::metadata(running_path(pid))
         .ok()
         .map(|meta| (meta.dev(), meta.ino()))
+}
+
+/// A path that opens the very file process `pid` runs, whatever has
+/// since been put at the path it started from.
+fn running_path(pid: i32) -> std::path::PathBuf {
+    format!("/proc/{pid}/exe").into()
 }
 
 /// Which program the agent has run for a whole period, looked at once a

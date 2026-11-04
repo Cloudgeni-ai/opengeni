@@ -117,6 +117,20 @@ impl Program {
         Ok(true)
     }
 
+    /// Keeps `running`, a path that opens the file the agent runs (its
+    /// `/proc/<pid>/exe`), unless it already is the one kept: the file
+    /// that ran, never one put at the usual path since. Whether it kept
+    /// it.
+    pub fn keep_running(&self, running: &Path) -> io::Result<bool> {
+        if self.is_kept() && same_content(running, &self.kept) {
+            return Ok(false);
+        }
+        let dir = parent(&self.kept)?;
+        DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        place(running, &self.kept)?;
+        Ok(true)
+    }
+
     /// Puts the kept program at its usual path when that holds no program,
     /// or whenever `force` is set and the one there is not the one kept.
     /// Whether it put it back.

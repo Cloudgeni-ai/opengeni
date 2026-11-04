@@ -134,9 +134,11 @@ Opengeni creates a sandbox with the native API (`POST /v1/sandboxes`,
   is kept a minute or two later. Before each start it puts the copy back
   at the usual path when that holds no program, holds one that cannot be
   run (missing, not a program, not allowed, no interpreter; not for a lack
-  of memory or processes), or holds one other than the copy that ended of
-  its own (not by a stop signal) within ten seconds of starting three
-  starts in a row, and logs that it did. It
+  of memory or processes), or holds one other than the copy that ended
+  within ten seconds of starting three starts in a row (not counting ends
+  by a signal, or the guest's own stop to restart the agent with new
+  settings), and logs that it did. The copy is taken from the very file
+  the agent ran (`/proc/<pid>/exe`). It
   recreates missing core nodes in `/dev` (`null`, `zero`, `full`,
   `random`, `urandom`, `tty`, the `ptmx`, `fd` and standard stream links,
   and the `pts` and `shm` mounts) before each start and every ten seconds,
