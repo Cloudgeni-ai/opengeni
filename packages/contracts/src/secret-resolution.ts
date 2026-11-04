@@ -89,10 +89,7 @@ export interface ResolvedSecretValue {
   itemName: string;
   fieldId: string | null;
   fieldName: string;
-  /**
-   * The field's kind when the vault reports it. A `text` field (a username,
-   * a host) is not secret: known-value masking does not remember it.
-   */
+  /** The field's kind when the vault reports it. */
   fieldKind?: VaultFieldKind | null;
   version: number | null;
   material: SecretMaterial;

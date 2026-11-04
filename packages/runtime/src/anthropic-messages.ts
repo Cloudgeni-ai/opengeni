@@ -26,16 +26,6 @@ import { withClaudeModelRequest } from "./claude-subscription-usage";
 import { createModelImageSizer } from "./model-image-sizing";
 import { isModelPreempted, preemptedResponseDone } from "./model-preemption";
 import { projectHistoryForProvider } from "./provider-history-adapter";
-import {
-  guardRequestToolNames,
-  RejectedToolNames,
-  observeToolNames,
-  rejectsToolName,
-  restoreClaudeToolNames,
-  type ToolNameAliases,
-  type ToolNameObservers,
-} from "./provider-request-tool-names";
-import { parseInvalidRequestText } from "./provider-invalid-request";
 import { projectHostedSearchEvidence } from "./hosted-search-evidence";
 import { splitStableSystemPromptPrefix } from "./system-prompt-cache-prefix";
 import {
@@ -1155,22 +1145,11 @@ export class AnthropicMessagesModel implements Model {
   // The same bound applies from the first image onward. A growing conversation
   // must not resize its old prefix when it crosses the many-image threshold.
   private readonly sizeImage = createModelImageSizer(2000, ANTHROPIC_IMAGE_MAX_ENCODED_BYTES);
-  /** The tool-name aliases each response answers (see provider-request-tool-names.ts). */
-  private readonly toolNameAliases = new WeakMap<Response, ToolNameAliases>();
-  /** Names this model's route rejected (see RejectedToolNames). */
-  private readonly rejectedToolNames = new RejectedToolNames();
   constructor(
     readonly provider: ResolvedModelProvider,
     readonly model: string,
     private readonly fetch: typeof globalThis.fetch = globalThis.fetch,
-    private readonly toolNameObservers: ToolNameObservers = {},
   ) {}
-
-  /** A Claude message or stream event with aliased tool names mapped back. */
-  private restoredToolNames<T>(response: Response, payload: T): T {
-    const aliases = this.toolNameAliases.get(response);
-    return aliases ? restoreClaudeToolNames(payload, aliases) : payload;
-  }
 
   /** Project inline images only; never fetch arbitrary URLs or edit stored history. */
   private async sizeImageBlocks(
@@ -1228,7 +1207,7 @@ export class AnthropicMessagesModel implements Model {
     );
   }
 
-  private async prepare(request: ModelRequest, stream: boolean, strictToolNames = false) {
+  private async prepare(request: ModelRequest, stream: boolean) {
     request.signal?.throwIfAborted();
     const body = buildAnthropicRequest(request, this.model, this.provider, stream);
     const projection = { resized: false };
@@ -1313,20 +1292,8 @@ export class AnthropicMessagesModel implements Model {
         previousRequestId: this.previousRequestId,
       });
     }
-    // The outbound tool-name guard runs last, on the body as it is sent.
-    const guarded = guardRequestToolNames("anthropic-messages", body, {
-      strict: strictToolNames,
-      rejected: this.rejectedToolNames.forModel(body.model),
-    });
-    const serialized = JSON.stringify(guarded.body);
-    return {
-      url,
-      headers,
-      serialized,
-      size: anthropicRequestSize(guarded.body, serialized),
-      toolNames: guarded,
-      unguardedBody: body,
-    };
+    const serialized = JSON.stringify(body);
+    return { url, headers, serialized, size: anthropicRequestSize(body, serialized) };
   }
 
   /** Uses the same final serialization as dispatch, but performs no network I/O. */
@@ -1334,32 +1301,8 @@ export class AnthropicMessagesModel implements Model {
     return (await this.prepare(request, stream)).size;
   }
 
-  /**
-   * Send one request. A 400 that rejects a tool name is answered by sending
-   * the request once more with every tool name aliased (strict mode); that
-   * resend is never repeated, and its own answer is final.
-   */
-  private async send(
-    request: ModelRequest,
-    stream: boolean,
-    strictToolNames = false,
-  ): Promise<Response> {
-    const {
-      url,
-      headers,
-      serialized,
-      size,
-      toolNames: guardedToolNames,
-      unguardedBody,
-    } = await this.prepare(request, stream, strictToolNames);
-    if (!strictToolNames) {
-      for (const field of guardedToolNames.repaired) {
-        observeToolNames(this.toolNameObservers.onToolNameRepair, {
-          api: "anthropic-messages",
-          field,
-        });
-      }
-    }
+  private async send(request: ModelRequest, stream: boolean): Promise<Response> {
+    const { url, headers, serialized, size } = await this.prepare(request, stream);
     if (size.requestBytes > ANTHROPIC_REQUEST_MAX_BYTES)
       throw new AnthropicRequestSizeError(size, "preflight");
     request.signal?.throwIfAborted();
@@ -1385,36 +1328,6 @@ export class AnthropicMessagesModel implements Model {
         Math.min(this.provider.anthropic?.streamIdleTimeoutMs ?? 600000, 5000),
         request.signal,
       );
-      if (
-        !strictToolNames &&
-        response.status === 400 &&
-        rejectsToolName(parseInvalidRequestText(detail)) &&
-        // Without a tool name to alias, a resend would repeat the same request.
-        guardRequestToolNames("anthropic-messages", unguardedBody, { strict: true }).body !==
-          unguardedBody
-      ) {
-        let resent: Response;
-        try {
-          resent = await this.send(request, stream, true);
-        } catch (error) {
-          observeToolNames(this.toolNameObservers.onToolNameRetry, {
-            api: "anthropic-messages",
-            outcome: "failed",
-          });
-          throw error;
-        }
-        observeToolNames(this.toolNameObservers.onToolNameRetry, {
-          api: "anthropic-messages",
-          outcome: "completed",
-        });
-        this.rejectedToolNames.rememberRejection(
-          "anthropic-messages",
-          guardedToolNames.body,
-          guardedToolNames.aliases,
-          parseInvalidRequestText(detail),
-        );
-        return resent;
-      }
       const contextExceeded =
         response.status === 400 &&
         /prompt is too long|context_length_exceeded|exceeds.*context window/i.test(detail);
@@ -1462,8 +1375,6 @@ export class AnthropicMessagesModel implements Model {
       );
     }
     this.previousRequestId = response.headers.get("request-id") ?? undefined;
-    if (guardedToolNames.aliases.size > 0)
-      this.toolNameAliases.set(response, guardedToolNames.aliases);
     return response;
   }
 
@@ -1479,7 +1390,7 @@ export class AnthropicMessagesModel implements Model {
         : request;
       const response = await this.send(current, false);
       requestId = response.headers.get("request-id") ?? undefined;
-      const message = object(this.restoredToolNames(response, await response.json()));
+      const message = object(await response.json());
       if (message.stop_reason === "refusal")
         throw new AnthropicProviderRejection("content_policy_violation", 200, requestId);
       merged = mergePausedMessage(merged, message);
@@ -1596,12 +1507,11 @@ export class AnthropicMessagesModel implements Model {
     partial.blocks = blocks;
     let message: Json | undefined;
     let finalDelta = false;
-    for await (const streamed of anthropicSse(
+    for await (const event of anthropicSse(
       response.body,
       this.provider.anthropic?.streamIdleTimeoutMs ?? 600000,
       request.signal,
     )) {
-      const event = this.restoredToolNames(response, streamed);
       request.signal?.throwIfAborted();
       if (event.type === "error") {
         const kind = event.error?.type;

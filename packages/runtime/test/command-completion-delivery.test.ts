@@ -218,18 +218,6 @@ describe("finished commands follow the next tool result", () => {
     expect(commandCompletionRoomBytes(50_000, 40_000)).toBe(0);
   });
 
-  test("the notice is masked before it is appended, and the timeline strips the masked text", async () => {
-    const results = pendingResults([finished("a", "token=hunter2\n")]);
-    const delivery = new CommandCompletionDelivery({
-      ...results.source,
-      mask: async (text) => text.replaceAll("hunter2", "[masked]"),
-    });
-    const output = String(await invoke(commandCompletionDeliveringTool(textTool("ls"), delivery)));
-    expect(output).toContain("token=[masked]");
-    expect(output).not.toContain("hunter2");
-    expect(withoutAppendedCommandCompletions(output, new Set(results.delivered))).toBe("ls done");
-  });
-
   test("a wait in a step whose results already carried commands is refused; the next step may wait", async () => {
     expect(WAIT_AFTER_UNREAD_COMMAND_RESULTS).toContain("your reply was not shown");
     const results = pendingResults([finished("a")]);

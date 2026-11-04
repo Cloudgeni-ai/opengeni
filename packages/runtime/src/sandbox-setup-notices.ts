@@ -91,7 +91,7 @@ type DeliveringAgent = {
 
 /**
  * Let the agent's function tool results carry held setup notices. Clones share
- * the same notices. Install it before secret masking, which must see the text.
+ * the same notices.
  */
 export function installSandboxSetupNoticeDelivery(
   agent: DeliveringAgent,

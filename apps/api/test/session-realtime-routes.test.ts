@@ -16,6 +16,7 @@ import {
   upsertOrganizationModelProviderConnection,
   withWorkspaceRls,
   withSessionRlsActorContext,
+  withBillingOriginOverride,
   type Database,
   type DbClient,
 } from "@opengeni/db";
@@ -77,6 +78,9 @@ beforeAll(async () => {
     triggerScheduledTask: noop,
   } as unknown as SessionWorkflowClient;
   app = new Hono();
+  // These connection-lifecycle fixtures represent people using the Opengeni app.
+  // API/paid-plan admission is covered by realtime-voice-billing-postgres.test.ts.
+  app.use("*", async (_c, next) => withBillingOriginOverride("app", next));
   const deps = {
     settings,
     db: client.db,

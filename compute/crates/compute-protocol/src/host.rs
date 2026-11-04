@@ -1145,6 +1145,13 @@ pub struct BlockedSandbox {
     pub id: Id,
     /// What went wrong.
     pub problem: String,
+    /// For one whose VM was found held frozen, as the guard leaves VMs
+    /// once the lease has run out, so that the agent could not take it
+    /// back: the owner epoch its record names. A registration lists it
+    /// with that epoch, and the service's ruling decides whether its VM
+    /// is ended or taken back once the lease lets it run again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_owner_epoch: Option<u64>,
 }
 
 /// A step's name on the wire.

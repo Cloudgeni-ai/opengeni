@@ -30,6 +30,9 @@ workspaces, settings and notifications.
   signed out opens its sign-in over the account in use, so Cancel returns to
   it. When the account in use is signed out, the sign-in screen lists the
   other accounts, so one tap goes back to a signed-in one.
+  An account whose saved sign-in is missing shows as signed out everywhere.
+  One whose sign-in exists but can't be read right now isn't signed out: its
+  screen says so and offers Try again, with signing in again as the fallback.
 - **Organizations and workspaces** use the same rules as the web rail
   (`@opengeni/react/organization-model`).
 - Administration stays on the web: Settings links to workspace, organization

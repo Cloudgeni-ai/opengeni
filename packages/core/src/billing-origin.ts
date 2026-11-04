@@ -14,7 +14,8 @@ import { isAppCredentialGrant, type AccessGrantAuthorization } from "./access";
    App work is paid from the monthly plan credit first; API work only from
    credits. The origin is decided from trusted provenance when a turn is
    accepted and frozen on it; sub-agents, tools and continuations inherit it.
-   It never grants or narrows access.
+   It also limits connected subscriptions to app work; it never grants
+   workspace access or credential authority.
    -------------------------------------------------------------------------- */
 
 const requestBillingOrigins = new WeakMap<Request, BillingOrigin>();

@@ -12,6 +12,9 @@ import {
   SUBSCRIPTION_PLAN_REQUIRED_CODE,
   SUBSCRIPTION_PLAN_REQUIRED_MESSAGE,
   planIncludesOwnSubscriptions,
+  SUBSCRIPTION_API_UNAVAILABLE_CODE,
+  SUBSCRIPTION_API_UNAVAILABLE_MESSAGE,
+  type BillingOrigin,
 } from "@opengeni/contracts";
 import {
   admitModelCall,
@@ -212,27 +215,27 @@ describe("own-subscription admission", () => {
   });
 
   /** Every admission path for one own-subscription run or call. */
-  async function admissions(s: Settings, model: string) {
+  async function admissions(s: Settings, model: string, billingOrigin: BillingOrigin = "app") {
     const services = { db, settings: s, entitlements: null };
     const run = await checkLimit(services, {
       accountId: ACCOUNT,
       workspaceId: WORKSPACE,
       model,
       action: "agent_run:create",
-      billingOrigin: "app",
+      billingOrigin,
     });
     const denial = await agentRunAdmissionDenial(services, {
       accountId: ACCOUNT,
       workspaceId: WORKSPACE,
       model,
       requestedAgentRuns: 1,
-      billingOrigin: "app",
+      billingOrigin,
     });
     const goal = await goalRunBudgetBlocked(services, {
       accountId: ACCOUNT,
       workspaceId: WORKSPACE,
       model,
-      billingOrigin: "app",
+      billingOrigin,
     });
     const call = await admitModelCall(services, {
       accountId: ACCOUNT,
@@ -241,7 +244,7 @@ describe("own-subscription admission", () => {
       chargesOpenGeniCredits: false,
       countsTowardTokenCap: false,
       subjectId: null,
-      billingOrigin: "api",
+      billingOrigin,
       ownSubscription: true,
     });
     let between: unknown = null;
@@ -255,7 +258,7 @@ describe("own-subscription admission", () => {
         chargesOpenGeniCredits: false,
         countsTowardTokenCap: false,
         initiatingHumanSubjectId: null,
-        billingOrigin: "app",
+        billingOrigin,
         ownSubscription: true,
       });
     } catch (error) {
@@ -310,6 +313,40 @@ describe("own-subscription admission", () => {
       }
     }
   });
+
+  test.each([CODEX_MODEL, SUPERGROK_MODEL])(
+    "API work never uses a connected subscription, on any plan or fee setting (%s)",
+    async (model) => {
+      for (const key of [null, "free", "pro", "max", "enterprise"]) {
+        const plan = onPlan(key);
+        try {
+          for (const byokPlatformFeeBps of [0, 500]) {
+            const result = await admissions(settings({ byokPlatformFeeBps }), model, "api");
+            expect(result.run).toEqual({
+              allowed: false,
+              code: SUBSCRIPTION_API_UNAVAILABLE_CODE,
+              message: SUBSCRIPTION_API_UNAVAILABLE_MESSAGE,
+            });
+            expect(result.denial).toBe(SUBSCRIPTION_API_UNAVAILABLE_CODE);
+            expect(result.goal).toEqual({
+              pausedReason: "model_unavailable",
+              message: SUBSCRIPTION_API_UNAVAILABLE_MESSAGE,
+            });
+            expect(result.call).toEqual({
+              allowed: false,
+              denial: SUBSCRIPTION_API_UNAVAILABLE_CODE,
+              message: SUBSCRIPTION_API_UNAVAILABLE_MESSAGE,
+            });
+            expect(String(result.between)).toContain(SUBSCRIPTION_API_UNAVAILABLE_MESSAGE);
+          }
+          expect(plan).not.toHaveBeenCalled();
+          expect(balance).not.toHaveBeenCalled();
+        } finally {
+          plan.mockRestore();
+        }
+      }
+    },
+  );
 
   test.each(["pro", "max", "enterprise"])(
     "%s admits unlimited subscription use with no paid credit and no fee read",

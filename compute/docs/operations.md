@@ -1048,8 +1048,11 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
     sandbox on a later try`); `not recovered` alone is not tried again.
     While its VM may still run, a blocked sandbox holds its full size on
     the host, and a host the service gave up does not register again
-    while anything is blocked. Each round of tries holds the agent up to
-    the two seconds a VMM is given to answer.
+    while anything is blocked, except sandboxes whose VMs are held frozen
+    (`not recovered while its VM is held frozen`): it lists those, and
+    the service's rulings end or keep them before the guard thaws them.
+    Each round of tries holds the agent up to the two seconds a VMM is
+    given to answer.
   - any increase of `compute.export.dropped`: the collector is slow, away
     or refusing; events are still in the journal.
   - `compute.memory.stalled` above zero in its `severe` bucket (40 % and

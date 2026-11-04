@@ -134,7 +134,7 @@ export function registerSecretTools(
     "secret_save",
     {
       description:
-        'Save or update a secret item (login, API key, note) and get its references back. For a new password use a field with `generate` (for example {name: "password", generate: {length: 24}}) and save it before typing it anywhere; copy an existing secret with `fromReference`. Put a username in `username`; keys, tokens and passwords belong in concealed fields (a new plain field whose value looks like one is saved as concealed, reported in `fieldNotes`). saveTo picks the vault: user (Only me), task (this task) or workspace; it defaults to Only me when a person started this work, otherwise the workspace. Values are never echoed; avoid putting a literal `value` here unless the task gave you that exact value.',
+        'Save or update a secret item (login, API key, note) and get its references back. For a new password use a field with `generate` (for example {name: "password", generate: {length: 24}}) and save it before typing it anywhere; copy an existing secret with `fromReference`. Put a username in `username`. saveTo picks the vault: user (Only me), task (this task) or workspace; it defaults to Only me when a person started this work, otherwise the workspace. Values are never echoed; avoid putting a literal `value` here unless the task gave you that exact value.',
       inputSchema: SecretSaveInput.shape,
     },
     (input) =>

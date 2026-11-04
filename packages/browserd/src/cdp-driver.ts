@@ -20,7 +20,6 @@ import {
   BrowserDialog,
   InteractionSecretValueError,
   materializeBrowserActionSecrets,
-  redactInteractionSecretValues,
   BrowserDomReadResponse,
   BrowserTargetState,
   BrowserExternalAuthCommand,
@@ -107,12 +106,10 @@ import type {
 } from "./downloads";
 import type { AgentBrowserJsonCommand, OwnedManagedBrowserProcess } from "./runner";
 import type { BrowserPasskeyManager } from "./passkeys";
-import { TypedSecretMemory } from "./typed-secrets";
 import {
   pageProtection,
   protectedNodeKey,
   SENSITIVE_FIELD_REASON_SOURCE,
-  sensitiveFieldReason,
   type PageProtection,
 } from "./page-protection";
 import { reportUnexpectedDispatchError } from "./controller-diagnostics";
@@ -574,16 +571,10 @@ const DIALOG_WORK_SETTLE_MS = 250;
 const DIALOG_GUIDANCE =
   'Accept or dismiss it with browser_act action {type:"handle_dialog"} before anything else in this tab.';
 
-/** Dialog text is page content: it can echo a secret the action typed, so
- * it is redacted before it is shortened. */
-function dialogSummary(
-  dialog: BrowserDialog | null,
-  secretValues?: BrowserActionCommandValue["secretValues"],
-): string {
+/** Dialog text is page content, shown as the page wrote it, shortened. */
+function dialogSummary(dialog: BrowserDialog | null): string {
   if (!dialog) return "A JavaScript dialog is open in this tab.";
-  const message = redactInteractionSecretValues(dialog.message, secretValues)
-    .replace(/\s+/gu, " ")
-    .trim();
+  const message = dialog.message.replace(/\s+/gu, " ").trim();
   const shown = message.length > 300 ? `${message.slice(0, 300)}…` : message;
   return `A JavaScript ${dialog.type} dialog is open in this tab${shown ? `: "${shown}"` : ""}.`;
 }
@@ -1208,8 +1199,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly tabIdsByBrowserId = new Map<string, string>();
   private readonly browserIdsByTabId = new Map<string, string>();
   private readonly windowParking: BrowserWindowParking | null;
-  /** Secret values this controller typed; redacted from everything it returns. */
-  private readonly typedSecrets: TypedSecretMemory;
 
   constructor(options: AgentBrowserDriverOptions) {
     if (
@@ -1223,7 +1212,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     this.browserContextId = options.browserContextId;
     this.browserSessionId = options.browserSessionId;
-    this.typedSecrets = TypedSecretMemory.forSession("browser", options.browserSessionId);
     this.controllerGeneration = options.controllerGeneration;
     this.runner = options.runner;
     this.now = options.now ?? (() => new Date());
@@ -1481,15 +1469,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return process;
   }
 
-  /** Tab inventory with typed secrets hidden in titles and URLs. Saved
-   * snapshots take their tabs from here, so they never keep a typed secret
-   * either; a tab whose address carried one reopens without it. */
+  /** Tab inventory. Saved snapshots take their tabs from here. */
   async listTargets(): Promise<BrowserTargetValue[]> {
     const connection = await this.ensureConnection();
     const infos = visibleTargets(await this.targetInfos(connection));
-    return this.typedSecrets.redact(
-      infos.map((info) => this.targetFromInfo(info, this.states.get(info.targetId) ?? null)),
-    );
+    return infos.map((info) => this.targetFromInfo(info, this.states.get(info.targetId) ?? null));
   }
 
   async openTarget(
@@ -2063,11 +2047,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       state = await this.ensureTargetState(await this.requireTargetInfo(connection, targetId));
       await readFrame(state);
     }
-    return this.typedSecrets.redact(this.targetFromInfo(info, state));
+    return this.targetFromInfo(info, state);
   }
 
   async observe(tabId: string): Promise<BrowserObservationValue> {
-    return this.typedSecrets.redact(await this.observeTarget(this.browserTargetIdOf(tabId)));
+    return await this.observeTarget(this.browserTargetIdOf(tabId));
   }
 
   private async observeTarget(targetId: string): Promise<BrowserObservationValue> {
@@ -2144,15 +2128,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         if (state.dialog) {
           throw new InteractionDefiniteDriverError(
             "resource_unavailable",
-            `${dialogSummary(state.dialog, this.typedSecrets.merged())} Page reads are unavailable until it is handled. ${DIALOG_GUIDANCE}`,
+            `${dialogSummary(state.dialog)} Page reads are unavailable until it is handled. ${DIALOG_GUIDANCE}`,
           );
         }
-        return await this.untilDialog(state, async () => {
-          if (request.kind !== "count") await this.readPageProtection(state);
-          const result = await this.readDomUnlocked(state, request);
-          if (request.kind !== "count") await this.readPageProtection(state);
-          return this.typedSecrets.redact(result);
-        });
+        return await this.untilDialog(
+          state,
+          async () => await this.readDomUnlocked(state, request),
+        );
       },
       { read: true },
     );
@@ -2281,7 +2263,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           : Math.max(afterSequence, state.diagnosticSequence),
         truncated: droppedBeforeCursor || limited,
       });
-      return this.typedSecrets.redact(batch);
+      return batch;
     });
   }
 
@@ -2652,11 +2634,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       );
     }
     const connection = await this.ensureConnection();
-    const recordingState = await this.withTarget(targetId, async (state) => {
-      await this.assertImagesAllowed(state);
-      return state;
-    });
-    const sessionId = recordingState.sessionId;
+    const sessionId = await this.withTarget(targetId, async (state) => state.sessionId);
     let ended = false;
     const timers = new Set<ReturnType<typeof setTimeout>>();
     const end = (error: Error | null) => {
@@ -2683,28 +2661,18 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           typeof params.metadata?.timestamp === "number"
             ? params.metadata.timestamp * 1_000
             : Date.now();
-        void (async () => {
-          try {
-            // Inspect before releasing every frame, not merely when the
-            // recording starts: a checkout may open while it is running.
-            await this.assertImagesAllowed(recordingState);
-            if (!ended) onFrame(Buffer.from(params.data as string, "base64"), at);
-          } catch (error) {
-            end(error instanceof Error ? error : new Error("browser recording redaction failed"));
+        try {
+          if (!ended) onFrame(Buffer.from(params.data, "base64"), at);
+        } finally {
+          const timer = setTimeout(() => {
+            timers.delete(timer);
+            if (ended) return;
             void connection
-              .send("Page.stopScreencast", {}, { sessionId, timeoutMs: 2_000 })
+              .send("Page.screencastFrameAck", { sessionId: frameSession }, { sessionId })
               .catch(() => undefined);
-          } finally {
-            const timer = setTimeout(() => {
-              timers.delete(timer);
-              if (ended) return;
-              void connection
-                .send("Page.screencastFrameAck", { sessionId: frameSession }, { sessionId })
-                .catch(() => undefined);
-            }, RECORDING_FRAME_ACK_DELAY_MS);
-            timers.add(timer);
-          }
-        })();
+          }, RECORDING_FRAME_ACK_DELAY_MS);
+          timers.add(timer);
+        }
       },
       sessionId,
     );
@@ -2892,12 +2860,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     trace?: InteractionDispatchTrace,
   ): Promise<BrowserObservationValue | null> {
     const parsed = BrowserActionCommand.parse(commandInput);
-    // Remembered before dispatch: a failed action can still leave the value typed.
-    this.typedSecrets.remember(parsed.secretValues);
-    if (this.typedSecrets.containsPaymentValue(Object.values(parsed.secretValues ?? {}))) {
-      this.typedSecrets.protectPaymentImages(this.browserTargetIdOf(parsed.targetId));
-    }
-    const secretValues = this.typedSecrets.merged(parsed.secretValues);
     const command = materializeCommandSecrets(parsed);
     // Input counts as sent once an effectful command left browserd, so a later
     // unresponsive-tab deadline must keep the action's outcome uncertain.
@@ -2982,13 +2944,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           else if (action.type !== "wait") onlyCommittedNavigation = false;
           if (state.dialog) {
             if (completedActions < actions.length)
-              throw await this.dialogPause(
-                state,
-                info.targetId,
-                secretValues,
-                actions.length,
-                completedActions,
-              );
+              throw await this.dialogPause(state, info.targetId, actions.length, completedActions);
             break;
           }
         } catch (thrown) {
@@ -3002,13 +2958,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             // what opened the dialog, or it may have had effects before it.
             if (state.actionEffectCount !== effectsBeforeAction) completedActions += 1;
             if (completedActions < actions.length || state.actionEffectCount === initialEffectCount)
-              throw await this.dialogPause(
-                state,
-                info.targetId,
-                secretValues,
-                actions.length,
-                completedActions,
-              );
+              throw await this.dialogPause(state, info.targetId, actions.length, completedActions);
             break;
           }
           if (
@@ -3016,14 +2966,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             completedActions === 0 &&
             state.actionEffectCount === initialEffectCount
           )
-            throw await this.withFailureObservation(
-              state,
-              info.targetId,
-              command,
-              secretValues,
-              error,
-              null,
-            );
+            throw await this.withFailureObservation(state, info.targetId, command, error, null);
           if (
             error instanceof InteractionDefiniteDriverError &&
             action.type === "wait" &&
@@ -3034,7 +2977,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               state,
               info.targetId,
               command,
-              secretValues,
               new InteractionDefiniteDriverError(
                 error.code,
                 `browser action #${actionIndex} (wait) failed after the preceding navigation committed (${error.code}: ${error.message}); the tab shows the committed page`,
@@ -3046,7 +2988,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             state,
             info.targetId,
             command,
-            secretValues,
             error instanceof InteractionDefiniteDriverError
               ? new InteractionOutcomeUnknownDriverError(
                   "outcome_unknown",
@@ -3204,7 +3145,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       async (error: unknown) => {
         const failure = await this.actionFailure(error, effects);
         if (effects) {
-          await this.observeOnNewAttachment(failure, effects.state, command, secretValues);
+          await this.observeOnNewAttachment(failure, effects.state, command);
           // The fill's field holds the requested value on the new attachment:
           // the fill completed, and the receipt shows the page as it left it.
           if (
@@ -3218,7 +3159,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       },
     );
     this.refreshSubscribedFrame(targetId);
-    return redactInteractionSecretValues(observation, secretValues);
+    return observation;
   }
 
   /** What a failed action reports, given whether it already sent input. */
@@ -3271,7 +3212,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     failure: unknown,
     state: TargetState,
     command: BrowserActionCommandValue,
-    secretValues: BrowserActionCommandValue["secretValues"],
   ): Promise<void> {
     if (
       !(
@@ -3286,10 +3226,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       await (await this.ensureConnection()).flushEvents?.();
       if (this.states.get(state.targetId) === state || this.crashedTargets.has(state.targetId))
         return;
-      failure.observation = redactInteractionSecretValues(
-        await this.observe(command.targetId),
-        secretValues,
-      );
+      failure.observation = await this.observe(command.targetId);
     } catch {
       // Optional context only.
     }
@@ -3334,7 +3271,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     state: TargetState,
     targetId: string,
     command: BrowserActionCommandValue,
-    secretValues: BrowserActionCommandValue["secretValues"],
     error: unknown,
     settleAfter: ActionSettleBaseline | null,
   ): Promise<unknown> {
@@ -3350,10 +3286,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (state.dialog) {
       try {
         const info = await this.requireTargetInfo(await this.ensureConnection(), targetId);
-        error.observation = redactInteractionSecretValues(
-          await this.observeUnlocked(state, info),
-          secretValues,
-        );
+        error.observation = await this.observeUnlocked(state, info);
       } catch {
         // Optional context only.
       }
@@ -3366,10 +3299,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         await this.settleFiniteAnimations(state);
       }
       const info = await this.requireTargetInfo(await this.ensureConnection(), targetId);
-      error.observation = redactInteractionSecretValues(
-        await this.observeUnlocked(state, info),
-        secretValues,
-      );
+      error.observation = await this.observeUnlocked(state, info);
     } catch {
       // Optional context only; never replace the action's own failure.
     }
@@ -3382,11 +3312,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private async dialogPause(
     state: TargetState,
     targetId: string,
-    secretValues: BrowserActionCommandValue["secretValues"],
     total: number,
     completed: number,
   ): Promise<Error> {
-    const summary = dialogSummary(state.dialog, secretValues);
+    const summary = dialogSummary(state.dialog);
     const error =
       completed === 0
         ? new InteractionDefiniteDriverError(
@@ -3399,10 +3328,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           );
     try {
       const info = await this.requireTargetInfo(await this.ensureConnection(), targetId);
-      error.observation = redactInteractionSecretValues(
-        await this.observeUnlocked(state, info),
-        secretValues,
-      );
+      error.observation = await this.observeUnlocked(state, info);
     } catch {
       // Optional context only; the failure itself names the dialog.
     }
@@ -3410,7 +3336,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   readClipboard(): BrowserClipboardValue {
-    return this.typedSecrets.redact(this.clipboardValue());
+    return this.clipboardValue();
   }
 
   private clipboardValue(): BrowserClipboardValue {
@@ -5216,7 +5142,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         clip: { x: metrics.viewport.x, y: metrics.viewport.y, width: 1, height: 1, scale: 1 },
       },
       FRAME_CAPTURE_TIMEOUT_MS,
-      { internalDraw: true },
     ).then(
       () => true,
       () => false,
@@ -5290,10 +5215,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     state: TargetState,
     params: Readonly<Record<string, unknown>>,
     timeoutMs: number,
-    options: { frame?: boolean; internalDraw?: boolean } = {},
+    options: { frame?: boolean } = {},
   ): Promise<T> {
     const deadline = Date.now() + timeoutMs;
-    if (!options.internalDraw) await this.assertImagesAllowed(state, deadline);
     while (state.capturesRunning.size > 0) {
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
@@ -5322,7 +5246,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     void running.then(() => state.capturesRunning.delete(running));
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const response = await Promise.race([
+      return await Promise.race([
         answered,
         new Promise<never>((_, reject) => {
           timer = setTimeout(
@@ -5331,8 +5255,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           );
         }),
       ]);
-      if (!options.internalDraw) await this.assertImagesAllowed(state, deadline);
-      return response;
     } finally {
       clearTimeout(timer);
     }
@@ -6073,69 +5995,50 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     throw new CdpFrameTreeUnsettledError();
   }
 
-  /** Read-only renderer snapshot, including closed shadow roots. A failure
-   * withholds output rather than assuming there were no sensitive fields. */
-  private async readPageProtection(state: TargetState, deadline?: number): Promise<PageProtection> {
+  /** Read-only renderer snapshot of the page's password, card and private
+   * fields (see sensitiveFieldReason), including closed shadow roots, so
+   * their values stay out of observations. A frame whose snapshot fails (an
+   * older attached-Chrome extension, a frame gone mid-read) is read without
+   * it: this never withholds a read. */
+  private async readPageProtection(state: TargetState): Promise<PageProtection> {
     this.assertCurrentTargetState(state);
     const connection = await this.ensureConnection();
-    const combined: PageProtection = { nodes: new Map(), values: [], payment: false };
+    const combined: PageProtection = { nodes: new Map() };
     const sessions = [
       state.sessionId,
       ...[...state.oopifs.values()].map((frame) => frame.sessionId),
     ];
     for (const sessionId of new Set(sessions)) {
-      // Ordinary reads retain the connection's existing per-command deadline.
-      // Captures pass their own end-to-end deadline; do not add a shorter
-      // aggregate timeout merely because a page has several child frames.
-      const remaining = deadline === undefined ? undefined : deadline - Date.now();
-      if (remaining !== undefined && remaining <= 0)
-        throw new CdpCommandTimeoutError("DOMSnapshot.captureSnapshot", sessionId);
-      const snapshot = await connection.send(
-        "DOMSnapshot.captureSnapshot",
-        { computedStyles: [] },
-        { sessionId, ...(remaining === undefined ? {} : { timeoutMs: remaining }) },
-      );
-      const protection = pageProtection(snapshot);
-      if (this.typedSecrets.containsPaymentValue((snapshot as { strings: string[] }).strings))
-        combined.payment = true;
+      let protection: PageProtection;
+      try {
+        protection = pageProtection(
+          await connection.send(
+            "DOMSnapshot.captureSnapshot",
+            { computedStyles: [] },
+            { sessionId },
+          ),
+        );
+      } catch {
+        continue;
+      }
       for (const [key, reason] of protection.nodes) combined.nodes.set(key, reason);
-      combined.values.push(...protection.values);
-      combined.payment ||= protection.payment;
     }
-    if (combined.payment) this.typedSecrets.protectPaymentImages(state.targetId);
-    this.typedSecrets.remember(
-      Object.fromEntries(combined.values.map((value, index) => [`protected:${index}`, value])),
-    );
     this.assertCurrentTargetState(state);
     return combined;
   }
 
   private protectAccessibility(nodes: CdpAxNode[], ...protections: PageProtection[]): CdpAxNode[] {
-    return this.typedSecrets.redact(
-      nodes.map((node) => {
-        const key =
-          typeof node.frameId === "string" && typeof node.backendDOMNodeId === "number"
-            ? protectedNodeKey(node.frameId, node.backendDOMNodeId)
-            : null;
-        const reason =
-          (key === null
-            ? undefined
-            : protections.map((protection) => protection.nodes.get(key)).find(Boolean)) ??
-          passwordNamedTextbox(node);
-        return reason ? { ...node, protectedReason: reason } : node;
-      }),
-    );
-  }
-
-  private async assertImagesAllowed(state: TargetState, deadline?: number): Promise<void> {
-    if (!this.typedSecrets.paymentImagesProtected(state.targetId))
-      await this.readPageProtection(state, deadline);
-    if (this.typedSecrets.paymentImagesProtected(state.targetId)) {
-      throw new InteractionDefiniteDriverError(
-        "unsupported",
-        "images of this browser tab are withheld after payment data is encountered; use semantic observation and controls",
-      );
-    }
+    return nodes.map((node) => {
+      const key =
+        typeof node.frameId === "string" && typeof node.backendDOMNodeId === "number"
+          ? protectedNodeKey(node.frameId, node.backendDOMNodeId)
+          : null;
+      const reason =
+        key === null
+          ? undefined
+          : protections.map((protection) => protection.nodes.get(key)).find(Boolean);
+      return reason ? { ...node, protectedReason: reason } : node;
+    });
   }
 
   /**
@@ -8091,7 +7994,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         state,
         `(${COPY_ACTIVE_BROWSER_TEXT_FUNCTION})(${json(content)})`,
       );
-      if (!isRecord(value) || (value.ok !== true && value.error !== "protected")) {
+      if (!isRecord(value) || value.ok !== true) {
         const accessibility = await this.refreshAccessibility(state);
         const focused = accessibility.focusedRef
           ? accessibility.entriesByRef.get(accessibility.focusedRef)
@@ -8111,7 +8014,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       const reason =
         isRecord(value) && typeof value.error === "string" ? value.error : "unavailable";
       throw new InteractionDefiniteDriverError(
-        reason === "protected" ? "permission_denied" : "invalid_action",
+        "invalid_action",
         clipboardCopyFailure(reason, locator !== undefined),
       );
     }
@@ -11882,7 +11785,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         {
           kind: "console",
           level,
-          message: consoleMessage(params.args, (text) => this.typedSecrets.redact(text)),
+          message: consoleMessage(params.args),
           url: null,
           method: null,
           status: null,
@@ -11898,7 +11801,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         {
           kind: "page_error",
           level: "error",
-          message: exceptionMessage(details, (text) => this.typedSecrets.redact(text)),
+          message: exceptionMessage(details),
           url: boundedUrlField(details.url),
           method: null,
           status: null,
@@ -12126,8 +12029,6 @@ function closedTargetListFailure(error: unknown): unknown {
 /** Why a clipboard copy found nothing to copy, and what copies instead. */
 export function clipboardCopyFailure(reason: string, fromElement: boolean): string {
   switch (reason) {
-    case "protected":
-      return "browser clipboard cannot copy a protected field";
     case "no_value":
       return 'browser clipboard copy found no value on this element; copy its text with content "text", or read it with browser_read mode=dom';
     case "no_selection":
@@ -12808,22 +12709,14 @@ const LABEL_SUBTREE_READS = 16;
 const LABEL_SUBTREE_NODES = 256;
 /** Every element SENSITIVE_REASON_FUNCTION can find a reason for: one with an
  * attribute sensitiveFieldReason reads, a form field, or a private element. */
-const SENSITIVE_CANDIDATE_SELECTOR = `[id], [name], [autocomplete], [aria-label], [placeholder], [data-elements-stable-field-name], input, textarea, select, [contenteditable], ${PRIVATE_SELECTOR}`;
+const SENSITIVE_CANDIDATE_SELECTOR = `[autocomplete], input, ${PRIVATE_SELECTOR}`;
 
 /** Why one element is a password, one-time code, payment, hidden or
  * explicitly private field, or null: the shared rule (sensitiveFieldReason in
  * page-protection.ts) that observations, captures and fill verification use,
  * applied to one element in the page. */
 const SENSITIVE_REASON_FUNCTION = `function(node) {
-  // The text of a field's labels, which its attributes do not carry.
-  const parts = Array.from(node.labels || [], (label) => String(label.textContent || ""));
-  const root = node.getRootNode ? node.getRootNode() : null;
-  for (const id of String((node.getAttribute && node.getAttribute("aria-labelledby")) || "").split(/\\s+/)) {
-    if (!id) continue;
-    const named = (root && typeof root.getElementById === "function" ? root.getElementById(id) : null) || node.ownerDocument?.getElementById(id);
-    if (named) parts.push(String(named.textContent || ""));
-  }
-  return (${SENSITIVE_FIELD_REASON_SOURCE})(String(node.tagName || "").toLowerCase(), Object.fromEntries(Array.from(node.attributes || [], (attr) => [attr.name, attr.value])), node.isContentEditable === true, "read", parts.join(" ").slice(0, 512));
+  return (${SENSITIVE_FIELD_REASON_SOURCE})(String(node.tagName || "").toLowerCase(), Object.fromEntries(Array.from(node.attributes || [], (attr) => [attr.name, attr.value])), node.isContentEditable === true);
 }`;
 
 /** Why an element's text or value must not leave the page: it is, sits in, or
@@ -14499,19 +14392,6 @@ const PAGE_FACTS_EXPRESSION = `(() => {
   return facts.revealed.length === 0 ? null : [JSON.stringify(facts), ...nodes];
 })()`;
 
-/** A text box whose accessible name (however the page labels it, shadow
- * roots and custom elements included) calls it a password holds one, even
- * when the page made it an ordinary text input. */
-function passwordNamedTextbox(node: CdpAxNode): "password" | undefined {
-  const role = isRecord(node.role) ? node.role.value : undefined;
-  if (role !== "textbox" && role !== "searchbox") return undefined;
-  const name = isRecord(node.name) ? node.name.value : undefined;
-  if (typeof name !== "string" || name === "") return undefined;
-  return sensitiveFieldReason("input", { "aria-label": name }, false) === "password"
-    ? "password"
-    : undefined;
-}
-
 /**
  * The text a container shows without its protected descendants, for a DOM
  * read of a container that holds some (a page's body nearly always holds a
@@ -14680,7 +14560,6 @@ function assertSafeDomReadSelector(selector: string): void {
 const COPY_BROWSER_TEXT_FUNCTION = `function(content) {
   const element = this && this.nodeType === 1 ? this : this?.parentElement;
   if (!element || element.nodeType !== 1 || !element.isConnected) return { ok: false, error: "detached" };
-  const protectedContent = ${PROTECTED_CONTENT_FUNCTION};
   const tag = String(element.tagName || "").toLowerCase();
   const textField = tag === "input" || tag === "textarea";
   const shown = () => textField
@@ -14695,14 +14574,10 @@ const COPY_BROWSER_TEXT_FUNCTION = `function(content) {
     }
     return { ok: true, text };
   };
-  // A protected text field is refused whatever is asked of it.
-  if (textField && protectedContent(element, null)) return { ok: false, error: "protected" };
-  const whole = () => protectedContent(element, null) ? { ok: false, error: "protected" } : copied(shown());
+  // An explicit copy is never refused: the agent asked for this text.
+  const whole = () => copied(shown());
   if (content === "value") {
-    if (textField) return copied(String(element.value ?? ""));
-    if (tag === "select") {
-      return protectedContent(element, null) ? { ok: false, error: "protected" } : copied(String(element.value ?? ""));
-    }
+    if (textField || tag === "select") return copied(String(element.value ?? ""));
     const role = String(element.getAttribute("role") || "").toLowerCase();
     if (element.isContentEditable === true || ["textbox", "searchbox", "combobox", "spinbutton"].includes(role)) {
       return whole();
@@ -14722,14 +14597,7 @@ const COPY_BROWSER_TEXT_FUNCTION = `function(content) {
       const range = selection.getRangeAt(0);
       if (element === range.commonAncestorContainer || element.contains(range.commonAncestorContainer)) {
         const selected = selection.toString();
-        if (selected !== "") {
-          const common = range.commonAncestorContainer.nodeType === 1
-            ? range.commonAncestorContainer
-            : range.commonAncestorContainer.parentElement;
-          return common && protectedContent(common, range)
-            ? { ok: false, error: "protected" }
-            : copied(selected);
-        }
+        if (selected !== "") return copied(selected);
       }
     }
   }
@@ -14944,10 +14812,10 @@ const CONFIRM_EDITABLE_VALUE_FUNCTION = `async function(expected) {
   if (tag === "input" || tag === "textarea") {
     const actual = String(this.value);
     if (actual === String(expected)) return true;
-    const reason = (${SENSITIVE_FIELD_REASON_SOURCE})(tag, Object.fromEntries(Array.from(this.attributes, attr => [attr.name, attr.value])), this.isContentEditable === true);
-    // Only payment fields may ignore site-added grouping. No stripping of
-    // digits, letters, decimal points, slashes or other meaningful changes.
-    return reason === "payment" && /^[0-9\\s-]+$/.test(actual) && /^[0-9\\s-]+$/.test(String(expected)) &&
+    // A field that groups digits as they are typed (card, phone and account
+    // numbers) holds the same digits. No stripping of digits, letters,
+    // decimal points, slashes or other meaningful changes.
+    return /^[0-9\\s-]+$/.test(actual) && /^[0-9\\s-]+$/.test(String(expected)) &&
       actual.replace(/[\\s-]/g, "") === String(expected).replace(/[\\s-]/g, "");
   }
   if (this.isContentEditable === true) return String(this.textContent || "") === String(expected);
@@ -15047,35 +14915,32 @@ function consoleLevel(value: unknown): BrowserDiagnosticEntry["level"] {
 /** Console text with each argument redacted before it is clipped and joined:
  * a secret clipped mid-argument and followed by more text would otherwise
  * survive as an unrecognizable prefix. */
-function consoleMessage(value: unknown, redact: (text: string) => string): string {
+function consoleMessage(value: unknown): string {
   if (!Array.isArray(value) || value.length === 0) return "Console event";
   const text = value
     .slice(0, 100)
-    .map((entry) => remoteObjectText(entry, redact))
+    .map((entry) => remoteObjectText(entry))
     .filter(Boolean)
     .join(" ")
     .slice(0, 8_192);
   return text || "Console event";
 }
 
-function remoteObjectText(value: unknown, redact: (text: string) => string): string {
+function remoteObjectText(value: unknown): string {
   if (!isRecord(value)) return "";
   if (value.value !== undefined) {
-    if (typeof value.value === "string") return redact(value.value).slice(0, 4_096);
+    if (typeof value.value === "string") return value.value.slice(0, 4_096);
     try {
-      return redact(JSON.stringify(value.value)).slice(0, 4_096);
+      return (JSON.stringify(value.value) ?? "").slice(0, 4_096);
     } catch {
       return "[unserializable value]";
     }
   }
-  if (typeof value.description === "string") return redact(value.description).slice(0, 4_096);
+  if (typeof value.description === "string") return value.description.slice(0, 4_096);
   return typeof value.type === "string" ? `[${value.type.slice(0, 128)}]` : "";
 }
 
-function exceptionMessage(
-  details: Record<string, unknown>,
-  redact: (text: string) => string,
-): string {
+function exceptionMessage(details: Record<string, unknown>): string {
   const exception = isRecord(details.exception) ? details.exception : {};
   const text =
     typeof exception.description === "string"
@@ -15083,7 +14948,7 @@ function exceptionMessage(
       : typeof details.text === "string"
         ? details.text
         : null;
-  return text === null ? "Unhandled page exception" : redact(text).slice(0, 8_192);
+  return text === null ? "Unhandled page exception" : text.slice(0, 8_192);
 }
 
 function boundedTextField(value: unknown, maxLength: number): string | null {

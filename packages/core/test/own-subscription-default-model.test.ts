@@ -3,6 +3,7 @@ import { DEFAULT_OPENROUTER_MODEL_ID, type Settings } from "@opengeni/config";
 import * as opengeniDb from "@opengeni/db";
 import type { Database } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing/settings";
+import type { BillingOrigin } from "@opengeni/contracts";
 import { resolveDefaultSessionModelForSelections } from "../src/default-session-model";
 import { resolveWorkspaceModelSelection } from "../src/model-catalog";
 
@@ -35,11 +36,17 @@ function onPlan(key: string, monthlyPriceMicros: number) {
   return mocked;
 }
 
-async function defaultFor(s: Settings, accountId = crypto.randomUUID()) {
+async function defaultFor(
+  s: Settings,
+  accountId = crypto.randomUUID(),
+  billingOrigin: BillingOrigin = "app",
+  workspaceSettings: unknown = {},
+) {
   return await resolveDefaultSessionModelForSelections({} as Database, {
     settings: s,
     accountId,
-    workspaceSettings: {},
+    workspaceSettings,
+    billingOrigin,
     selections: resolveWorkspaceModelSelection({
       settings: s,
       policy: null,
@@ -67,6 +74,19 @@ test("on Free a connected subscription is not the default; a model the account c
   const chosen = await defaultFor(settings());
   expect(chosen.source).not.toBe("subscription");
   expect(chosen.model).toBe(DEFAULT_OPENROUTER_MODEL_ID);
+});
+
+test("API defaults skip connected subscriptions even on Pro, including a saved workspace default", async () => {
+  const standing = onPlan("pro", 20_000_000);
+  for (const workspaceSettings of [
+    {},
+    { sessionDefaults: { model: "codex/gpt-6-luna", reasoningEffort: "medium" } },
+  ]) {
+    const chosen = await defaultFor(settings(), crypto.randomUUID(), "api", workspaceSettings);
+    expect(chosen.model).toBe(DEFAULT_OPENROUTER_MODEL_ID);
+    expect(chosen.source).not.toBe("subscription");
+  }
+  expect(standing).not.toHaveBeenCalled();
 });
 
 test("without subscription plans the plan is never read and the subscription stays the default", async () => {
