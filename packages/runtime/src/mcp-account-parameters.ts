@@ -58,8 +58,7 @@ export function mcpAccountParametersFor(url: string | undefined): readonly McpAc
 }
 
 /** Appended to a filled parameter's description. The same for every server. */
-export const MCP_ACCOUNT_PARAMETER_NOTE =
-  "Optional: defaults to the connected account's value. If the account has several, the call lists them to choose from.";
+export const MCP_ACCOUNT_PARAMETER_NOTE = "Optional; defaults to the connected account's value.";
 
 const MAX_ACCOUNT_CHOICES = 200;
 const MAX_CHOICE_TEXT = 256;
