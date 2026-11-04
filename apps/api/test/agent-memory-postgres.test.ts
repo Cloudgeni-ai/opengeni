@@ -247,7 +247,7 @@ describe("an agent's Memory (real PostgreSQL)", () => {
       );
       expect(refused.isError).toBe(true);
       expect(errorOf(refused)).toMatchObject({ code: "agent_memory_read_only" });
-      expect(errorOf(refused)!.message).toContain("this chat is private");
+      expect(errorOf(refused)!.message).toContain("nothing from a private chat");
       // ...nor change or archive what is already there...
       const archived = await privateChat.callTool({
         name: "knowledge_archive",
@@ -342,13 +342,13 @@ describe("an agent's Memory (real PostgreSQL)", () => {
         arguments: { query: "mornings", groupId: fixture.collectionId },
       });
       expect(errorOf(unread)).toMatchObject({ code: "agent_memory_off" });
-      expect(errorOf(unread)!.message).toContain("not its owner's Only me chat");
+      expect(errorOf(unread)!.message).toContain("read only in its owner's Only me chats");
       const listed = await listSlackAgentChatsForSession(
         { db: app.db, settings } as unknown as ApiRouteDeps,
         { grant: own.agentGrant, sessionId: own.sessionId },
       );
       expect(listed.chats).toEqual([]);
-      expect(listed.message).toContain("not its owner's Only me chat");
+      expect(listed.message).toContain("only in its owner's Only me chats");
     } finally {
       await own.close();
     }

@@ -4250,8 +4250,7 @@ export async function listSlackAgentChatsForSession(
   if (!agentMemoryAccess(state.agent, state.chat).listChats) {
     return {
       chats: [],
-      message:
-        "This agent is Only me and this chat is not its owner's Only me chat, so it does not read its other chats.",
+      message: "This Only me agent reads its other chats only in its owner's Only me chats.",
     };
   }
   const chats = await listSlackAgentChats(deps.db, {

@@ -31,7 +31,7 @@ its own chat and `set_other_session_title` for another, both of which now also
 take `description` and `avatar`. A rename through either tool is a deliberate
 name, like a person's: the title is cleaned like any model-written title, then
 kept, so automatic titling never replaces it. The tools tell the agent to keep
-a name a person or bot template chose unless the person asks for a new one.
+a name a person or agent chose unless the person asks for a new one.
 
 An image avatar must be a finished image in the workspace that the writer can
 open. In a chat shared with the workspace, and in any bot template, an Only me

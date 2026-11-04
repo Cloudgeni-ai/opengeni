@@ -1382,7 +1382,7 @@ export function buildOpenGeniMcpServer(
       },
     );
   }
-  // A bot saves itself as a template people can start new bots from.
+  // A chat makes itself an agent people can start new chats with.
   if (sessionId !== null) {
     registerBotTemplateTools({
       server,
@@ -3000,7 +3000,7 @@ function registerSlackBotTools(
     "slack_agent_chats",
     {
       description:
-        "List this agent's other recent shared chats in its workspace, newest first, so you can recover context people did not repeat (for example when they do not reply in a thread). Read a relevant chat with session_events. Only chats of this same agent are listed, never private ones, and only while the agent's Memory is on.",
+        "List this agent's other recent shared chats, newest first, to recover context people did not repeat. Read one with session_events.",
       inputSchema: { limit: z4.number().int().min(1).max(50).optional() },
     },
     async ({ limit }) => {

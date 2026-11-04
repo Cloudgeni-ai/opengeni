@@ -101,12 +101,12 @@ export function agentMemoryAccess(
 /** What a refused write into the agent's Memory tells the chat. */
 export function agentMemoryReadOnlyMessage(access: AgentMemoryAccess): string {
   if (!access.saveKnowledge) {
-    return "Not saved: this is a private Slack chat, and Knowledge saved from it would reach everyone in the workspace. Answer without saving.";
+    return "Not saved: nothing from a private Slack chat is saved to Knowledge. Answer without saving.";
   }
   if (access.readOnlyReason === "not_owner_chat")
     return `Not saved. ${AGENT_MEMORY_NOT_THIS_CHAT_MESSAGE}`;
   if (access.readOnlyReason === "private_chat") {
-    return "Not saved: this chat is private, so nothing from it goes into the agent's Memory, which others' chats read. Answer without saving it there.";
+    return "Not saved: nothing from a private chat goes into the agent's Memory. Answer without saving it there.";
   }
   if (access.readOnlyReason === "memory_off_for_chat") {
     return "Not saved: this chat cannot save to the agent's Memory. Answer without saving.";
@@ -116,11 +116,11 @@ export function agentMemoryReadOnlyMessage(access: AgentMemoryAccess): string {
 
 /** What a read of the agent's collection tells a chat that may not read it. */
 export const AGENT_MEMORY_UNREADABLE_MESSAGE =
-  "Memory is off for this agent, so its Memory collection is not read. Answer from this chat.";
+  "Memory is off for this agent. Answer from this chat.";
 
 /** The same for a shared chat with an Only me agent, which runs as a plain chat. */
 export const AGENT_MEMORY_NOT_THIS_CHAT_MESSAGE =
-  "This agent is Only me and this chat is not its owner's Only me chat, so its Memory is not read. Answer from this chat.";
+  "This Only me agent's Memory is read only in its owner's Only me chats. Answer from this chat.";
 
 export function agentMemoryUnreadableMessage(access: AgentMemoryAccess): string {
   return access.readOnlyReason === "not_owner_chat"
@@ -128,8 +128,7 @@ export function agentMemoryUnreadableMessage(access: AgentMemoryAccess): string 
     : AGENT_MEMORY_UNREADABLE_MESSAGE;
 }
 
-const CONTEXT_MISSING =
-  "When context is missing (for example someone continues a topic outside a thread, or refers to something said before)";
+const CONTEXT_MISSING = "When context is missing";
 
 /**
  * What an agent's chat is told about its Memory, or null when Memory is off.
@@ -140,16 +139,15 @@ export function agentMemoryGuidance(access: AgentMemoryAccess): string | null {
     ? null
     : "This chat is private: never save anything from it to Knowledge.";
   if (!access.listChats) return dm;
-  const chats =
-    "list your other chats with slack_agent_chats and read a relevant one with session_events";
+  const chats = "check your other chats with slack_agent_chats";
   const id = access.collectionId;
   if (!id || !access.read) return [`${CONTEXT_MISSING}, ${chats}.`, dm].filter(Boolean).join(" ");
   const lines = [
-    `Your Memory is the Knowledge collection ${id}. ${CONTEXT_MISSING}, search it with knowledge_search (groupId ${id}), also with view needs_review: those entries are unreviewed, so say so when you rely on one. Then ${chats}.`,
+    `Your Memory is Knowledge collection ${id}. ${CONTEXT_MISSING}, search it with knowledge_search (groupId ${id}, also view needs_review; say so when you rely on an unreviewed entry), then ${chats}.`,
   ];
   if (access.write && access.saveKnowledge) {
     lines.push(
-      `Save lasting facts, decisions and preferences people share with you with knowledge_save and groupIds [${id}], so your other chats know them too. Do not save passing chatter.`,
+      `Save lasting facts, decisions and preferences people share with knowledge_save (groupIds [${id}]), not passing chatter.`,
     );
   } else if (dm) {
     lines.push(dm);

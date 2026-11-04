@@ -59,8 +59,8 @@ describe("an agent's Memory", () => {
       expect(access).toMatchObject({ read: false, write: false, listChats: false });
       expect(agentMemoryGuidance(access)).toBeNull();
       expect(access.readOnlyReason).toBe("not_owner_chat");
-      expect(agentMemoryUnreadableMessage(access)).toContain("not its owner's Only me chat");
-      expect(agentMemoryReadOnlyMessage(access)).toContain("not its owner's Only me chat");
+      expect(agentMemoryUnreadableMessage(access)).toContain("its owner's Only me chats");
+      expect(agentMemoryReadOnlyMessage(access)).toContain("its owner's Only me chats");
     }
     expect(agentMemoryAccess(onlyMe, chat({ private: true }))).toMatchObject({
       read: true,
