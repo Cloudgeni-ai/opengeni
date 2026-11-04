@@ -549,6 +549,57 @@ async fn gcs_checksums_prove_a_chunk_without_reading_it() {
     ));
 }
 
+/// The whole-object reads and the size-and-tag requests `fake` served
+/// since this was last asked.
+fn reads(fake: &crate::fake::Fake) -> (u32, u32) {
+    let gets = std::mem::take(&mut *fake.gets.lock().unwrap());
+    let heads = std::mem::take(&mut *fake.heads.lock().unwrap());
+    (gets, heads)
+}
+
+/// On S3 one request for a chunk's size and entity tag, the MD5 of its
+/// bytes, proves it without reading it. Damage of the same length shows
+/// as another tag, and is read to be sure; another length, or nothing
+/// stored, needs no read. A reference without checksums, or a store whose
+/// tags are not MD5s, is read in full as before.
+#[tokio::test]
+async fn s3_entity_tags_prove_a_chunk_without_reading_it() {
+    use crate::fake::Fake;
+    let fake = Fake::new(Clock::from_fn(stored_at));
+    let store = ChunkStore::over_fake_s3(&fake, "p");
+    let chunk = EncodedChunk::encode(&[9; 16384], 1).unwrap();
+    let reference = stored(&chunk);
+    assert!(!store.has_chunk(&reference).await.unwrap());
+    assert_eq!(reads(&fake), (0, 1), "nothing stored: one HEAD");
+    assert!(store.put_chunk(&chunk).await.unwrap().new);
+    reads(&fake);
+    assert!(store.has_chunk(&reference).await.unwrap());
+    assert_eq!(reads(&fake), (0, 1), "stored: one HEAD, no GET");
+
+    let key = format!("p/{}", reference.key());
+    let mut damaged = chunk.bytes.clone();
+    damaged[1] ^= 0x10;
+    fake.put_raw(&key, Bytes::from(damaged));
+    assert!(!store.has_chunk(&reference).await.unwrap());
+    assert_eq!(reads(&fake), (1, 1), "another tag: read to be sure");
+    fake.put_raw(&key, Bytes::copy_from_slice(&chunk.bytes[1..]));
+    assert!(!store.has_chunk(&reference).await.unwrap());
+    assert_eq!(reads(&fake), (0, 1), "another length");
+    assert!(store.put_chunk(&chunk).await.unwrap().new, "repaired");
+    reads(&fake);
+
+    let unchecked = ChunkRef {
+        checksums: None,
+        ..reference.clone()
+    };
+    assert!(store.has_chunk(&unchecked).await.unwrap());
+    assert_eq!(reads(&fake), (1, 0), "no checksums: read");
+    // Tagged by generation, as a store that does not use MD5s may.
+    *fake.tags_follow_bytes.lock().unwrap() = false;
+    assert!(store.has_chunk(&reference).await.unwrap());
+    assert_eq!(reads(&fake), (1, 1), "a tag that is no MD5: read");
+}
+
 #[tokio::test]
 async fn an_upload_finding_a_bad_object_replaces_it() {
     let backend = Arc::new(InMemory::new());
