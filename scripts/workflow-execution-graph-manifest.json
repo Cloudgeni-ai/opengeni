@@ -26,7 +26,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "e7484baf15ae658192d9507d5cf6d3741da12d06488ad86139c82183deca6085"
+      "sha256": "2bf9bd2fd7a954c3a7f66eba5e4aca5351c7aeada957b003b3eb758b81df0f61"
     },
     {
       "path": ".github/workflows/compact-session-view.yml",
@@ -788,6 +788,12 @@
       "job": "deployment",
       "step": "Validate Terraform",
       "sha256": "6d34c2156e766f0928e5d3a9fb18c42909757dd992d3ed0475dbf060f68b40e6"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "desktop-image",
+      "step": "Room on the runner",
+      "sha256": "44c950e02f3afcd144d998d669d3d1458590376898a0581f3de005449b61791e"
     },
     {
       "workflow": ".github/workflows/ci.yml",
