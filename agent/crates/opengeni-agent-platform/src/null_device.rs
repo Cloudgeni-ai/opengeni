@@ -156,44 +156,56 @@ fn repair(path: &Path, _observed: NullDeviceState) -> RepairOutcome {
     if state == NullDeviceState::Healthy {
         return RepairOutcome::Repaired;
     }
-    // Whatever is at the path itself, not what it points to: a dangling
-    // symlink reads as missing, yet blocks mknod until it is removed.
-    match std::fs::symlink_metadata(path) {
-        // Never delete a directory someone made there: it may hold data.
-        Ok(meta) if meta.is_dir() => {
-            return RepairOutcome::NotRepaired("a directory is at the path".to_string());
-        }
-        Ok(_) => {
-            if let Err(error) = std::fs::remove_file(path) {
-                return RepairOutcome::NotRepaired(format!("remove the replacement: {error}"));
-            }
-        }
-        Err(_) => {}
+    // Whatever is at the path itself, not what it points to. Never replace a
+    // directory someone made there: it may hold data.
+    if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()) {
+        return RepairOutcome::NotRepaired("a directory is at the path".to_string());
     }
-    let created = mknod(
-        path,
+    // The device is made under a temporary name beside the path, made usable,
+    // and only then renamed over whatever is there (nothing, a regular file a
+    // redirection created, a dangling symlink). A machine where the device
+    // cannot be made or opened (a user namespace, a `nodev` mount) therefore
+    // keeps what it had instead of losing it.
+    let Some(staged) = staging_path(path) else {
+        return RepairOutcome::NotRepaired("the path has no file name".to_string());
+    };
+    let _ = std::fs::remove_file(&staged);
+    if let Err(error) = mknod(
+        staged.as_path(),
         SFlag::S_IFCHR,
         Mode::from_bits_truncate(0o666),
         makedev(1, 3),
-    );
-    match created {
-        Ok(()) => {
-            // mknod applies the umask; the device must be usable by every
-            // user. The node is opened without following a symlink, checked to
-            // be the null device, and changed through that handle, so
-            // something that raced in at the path is never changed.
-            if let Err(reason) = make_usable_by_everyone(path) {
-                return RepairOutcome::NotRepaired(reason);
-            }
-        }
-        Err(nix::errno::Errno::EEXIST) => {}
-        Err(error) => return RepairOutcome::NotRepaired(format!("mknod: {error}")),
+    ) {
+        return RepairOutcome::NotRepaired(format!("mknod: {error}"));
+    }
+    // mknod applies the umask; the device must be usable by every user. The
+    // node is opened without following a symlink, checked to be the null
+    // device, and changed through that handle, so something that raced in at
+    // the temporary name is never changed.
+    if let Err(reason) = make_usable_by_everyone(&staged) {
+        let _ = std::fs::remove_file(&staged);
+        return RepairOutcome::NotRepaired(reason);
+    }
+    if let Err(error) = std::fs::rename(&staged, path) {
+        let _ = std::fs::remove_file(&staged);
+        return RepairOutcome::NotRepaired(format!("rename the new device into place: {error}"));
     }
     if inspect(path) == NullDeviceState::Healthy {
         RepairOutcome::Repaired
     } else {
         RepairOutcome::NotRepaired("the path still does not hold the null device".to_string())
     }
+}
+
+/// The temporary name, beside `path` so the rename stays on one filesystem,
+/// that a repair makes the new device under.
+#[cfg(target_os = "linux")]
+fn staging_path(path: &Path) -> Option<std::path::PathBuf> {
+    let name = path.file_name()?.to_string_lossy();
+    Some(path.with_file_name(format!(
+        ".{name}.opengeni-repair-{}",
+        std::process::id()
+    )))
 }
 
 /// Sets mode 0666 on the null device just made at `path`, through a handle
@@ -359,5 +371,45 @@ mod tests {
             .expect("metadata")
             .file_type()
             .is_symlink());
+        assert_eq!(
+            std::fs::read_dir(dir.path()).expect("read_dir").count(),
+            3,
+            "no temporary node is left"
+        );
+    }
+
+    /// Root only. On a `nodev` mount the new device is made but cannot be
+    /// opened, so the repair cannot finish: what was at the path must survive,
+    /// and no temporary node may be left behind.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_repair_that_cannot_finish_keeps_what_was_at_the_path() {
+        use nix::sys::statvfs::{statvfs, FsFlags};
+        if !nix::unistd::geteuid().is_root() {
+            eprintln!("skipping: mknod needs root");
+            return;
+        }
+        let shm = Path::new("/dev/shm");
+        if !statvfs(shm).is_ok_and(|stat| stat.flags().contains(FsFlags::ST_NODEV)) {
+            eprintln!("skipping: /dev/shm is not a nodev mount");
+            return;
+        }
+        let dir = tempfile::tempdir_in(shm).expect("tempdir");
+        let replaced = dir.path().join("null");
+        std::fs::write(&replaced, b"redirected output").expect("write");
+        let outcome = repair(&replaced, NullDeviceState::Replaced);
+        assert!(
+            matches!(outcome, RepairOutcome::NotRepaired(_)),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            std::fs::read(&replaced).expect("the replacement is kept"),
+            b"redirected output"
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path()).expect("read_dir").count(),
+            1,
+            "no temporary node is left"
+        );
     }
 }
