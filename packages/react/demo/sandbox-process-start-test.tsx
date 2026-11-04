@@ -5,7 +5,7 @@ import { MessageTimeline } from "@opengeni/react/session-ui";
 import { ModelRecoveryNotice } from "../src/app/components/session/model-recovery-notice";
 import { FailedSessionBanner } from "../src/app/components/session/failed-session-banner";
 import { summarizeSessionFailure } from "../src/app/lib/events";
-import { currentModelRecovery } from "../src/app/lib/model-recovery";
+import { currentProviderRecovery } from "../src/lib/provider-recovery";
 import { timelineShowsFailure } from "../src/app/lib/timeline-failure-owner";
 import "../../../apps/web/src/styles.css";
 import { createOpenGeniText } from "../src/messages/runtime";
@@ -108,8 +108,8 @@ if (stopped) {
 
 const status = stopped ? "failed" : "recovering";
 const items = buildTimeline(englishText, events);
-const recovery = currentModelRecovery(
-  { id: SESSION, status, activeTurnId: stopped ? null : TURN, effectiveControl: undefined },
+const recovery = currentProviderRecovery(
+  { id: SESSION, status, activeTurnId: stopped ? null : TURN },
   events,
 );
 const failedEvent = events.at(-1)!;

@@ -422,6 +422,11 @@ test("a workspace machine that can't start programs reads as plain words while r
       "not found: start the program for a shell command: No such file or directory (os error 2)",
   };
   expect(parseProviderRecovery(payload)).toBeNull();
+  // The agent's own text stays on the event for operators, never in the copy.
+  const presented = presentFailure(englishText, payload);
+  expect(presented).toMatchObject({ reason: error, diagnostic: false });
+  const timeline = buildTimeline(englishText, [event("turn.failed", payload)]);
+  expect(timeline.find((item) => item.kind === "notice")).toMatchObject({ text: error });
   const summary = summarizeSessionFailure([event("turn.failed", payload)], "failed");
   const banner = failedSessionCopy(summary, false, false, true);
   expect(banner.reason).toBe(error);
