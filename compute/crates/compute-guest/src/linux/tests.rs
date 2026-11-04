@@ -3,9 +3,11 @@
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+use super::agent::{start_program, stream_id};
+use super::program::Program;
 use super::supervise::{self, Children};
 use super::sys::{Exit, Signals};
-use super::{Started, start};
+use super::{Started, start, sys};
 
 /// One set of children for every test here, with a reaper as PID 1 has.
 fn children() -> &'static Arc<Children> {
@@ -111,4 +113,145 @@ fn a_daemon_that_never_comes_up_is_stopped_to_start_again() {
         matches!(started, Started::Ended(Some(Exit::Code(3)))),
         "{started:?}"
     );
+}
+
+fn scratch(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("compute-guest-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn write_script(path: &std::path::Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn run(path: &std::path::Path) -> std::io::Result<(i32, std::sync::mpsc::Receiver<Exit>)> {
+    children().spawn(&mut supervise::command(&path.to_string_lossy()))
+}
+
+/// The live repro: `mv /usr/local/bin/opengeni-agent …`, then the agent is
+/// killed. The init starts it again from the program it kept.
+#[test]
+fn an_agent_whose_program_was_moved_away_starts_again() {
+    let dir = scratch("moved-agent");
+    let program = Program::new(
+        dir.join("usr/local/bin/agent"),
+        dir.join("opengeni/kept/agent"),
+    );
+    write_script(program.path(), "exit 7");
+    program.keep(true).unwrap();
+    std::fs::rename(program.path(), dir.join("agent.moved")).unwrap();
+
+    let ((_, exited), file) = start_program(&program, false, run).unwrap();
+    assert_eq!(
+        exited.recv_timeout(Duration::from_secs(10)).unwrap(),
+        Exit::Code(7)
+    );
+    assert!(file.is_some(), "it started from its usual path");
+    assert!(program.holds_kept());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A file that is no program, or a program that keeps ending at once, is
+/// replaced with the kept program; a directory in its place is left, and
+/// the kept program starts where it is.
+#[test]
+fn an_agent_whose_program_cannot_start_starts_from_the_kept_one() {
+    let dir = scratch("broken-agent");
+    let program = Program::new(dir.join("bin/agent"), dir.join("kept/agent"));
+    write_script(program.path(), "exit 7");
+    program.keep(true).unwrap();
+
+    // A program that cannot start: its interpreter is gone.
+    std::fs::remove_file(program.path()).unwrap();
+    std::fs::write(program.path(), "#!/nonexistent/sh\n").unwrap();
+    std::fs::set_permissions(
+        program.path(),
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    assert!(run(program.path()).is_err());
+    let ((_, exited), _) = start_program(&program, false, run).unwrap();
+    assert_eq!(
+        exited.recv_timeout(Duration::from_secs(10)).unwrap(),
+        Exit::Code(7)
+    );
+    assert!(program.holds_kept());
+
+    // One that ends at once each time, put back when its ends are counted.
+    write_script(&dir.join("other"), "exit 3");
+    std::fs::rename(dir.join("other"), program.path()).unwrap();
+    let ((_, exited), _) = start_program(&program, false, run).unwrap();
+    assert_eq!(
+        exited.recv_timeout(Duration::from_secs(10)).unwrap(),
+        Exit::Code(3)
+    );
+    let ((_, exited), _) = start_program(&program, true, run).unwrap();
+    assert_eq!(
+        exited.recv_timeout(Duration::from_secs(10)).unwrap(),
+        Exit::Code(7)
+    );
+
+    // A directory in its place.
+    std::fs::remove_file(program.path()).unwrap();
+    std::fs::create_dir(program.path()).unwrap();
+    let ((_, exited), file) = start_program(&program, false, run).unwrap();
+    assert_eq!(
+        exited.recv_timeout(Duration::from_secs(10)).unwrap(),
+        Exit::Code(7)
+    );
+    assert!(file.is_none(), "it started where it is kept");
+    assert!(program.path().is_dir());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Run in a child process of this test binary, whose root holds nothing,
+/// so there is no `/dev/urandom` to open. It writes what it found to
+/// `result` in that root.
+const NO_DEV_CHILD: &str = "COMPUTE_GUEST_TEST_NO_DEV";
+
+/// The live repro: `/dev/urandom` (and more of `/dev`) removed, then the
+/// agent killed. Each connection the new agent makes to its link needs a
+/// random stream id, and with none the agent could never reach the host.
+#[test]
+fn agent_link_streams_get_ids_without_dev_urandom() {
+    if std::env::var_os(NO_DEV_CHILD).is_some() {
+        let empty = std::env::var(NO_DEV_CHILD).unwrap();
+        if !sys::is_root() && sys::become_root_in_namespace().is_err() {
+            std::fs::write(format!("{empty}/result"), "skipped").unwrap();
+            return;
+        }
+        sys::enter_root(&empty).unwrap();
+        assert!(std::fs::File::open("/dev/urandom").is_err());
+        let ids: Vec<_> = (0..4).map(|_| stream_id().unwrap()).collect();
+        for (i, id) in ids.iter().enumerate() {
+            assert!(ids[i + 1..].iter().all(|other| other != id), "{ids:?}");
+        }
+        std::fs::write("/result", format!("stream ids without /dev: {ids:?}")).unwrap();
+        return;
+    }
+    let empty = scratch("no-dev");
+    let mut child = supervise::command(&std::env::current_exe().unwrap().to_string_lossy());
+    child
+        .args([
+            "--exact",
+            "linux::tests::agent_link_streams_get_ids_without_dev_urandom",
+            "--test-threads=1",
+            "--nocapture",
+        ])
+        .env(NO_DEV_CHILD, &empty);
+    let (_, exited) = children().spawn(&mut child).unwrap();
+    let exit = exited.recv_timeout(Duration::from_secs(60)).unwrap();
+    let found = std::fs::read_to_string(empty.join("result")).unwrap_or_default();
+    assert_eq!(exit, Exit::Code(0), "{found}");
+    if found == "skipped" {
+        eprintln!("skipping: cannot chroot here");
+    } else {
+        assert!(found.starts_with("stream ids without /dev"), "{found}");
+    }
+    let _ = std::fs::remove_dir_all(&empty);
 }

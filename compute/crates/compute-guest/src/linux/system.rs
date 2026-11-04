@@ -1,11 +1,11 @@
 //! Setting up the guest's system: mounts, network, identity and clock.
 
-use std::fs::{self, File, OpenOptions, Permissions};
+use std::fs::{self, OpenOptions, Permissions};
 use std::io::{self, Write};
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use super::{log, sys};
+use super::{devices, log, sys};
 use crate::agent::STATE_DIR;
 use crate::cmdline::Network;
 use crate::given::GIVEN_FILE;
@@ -59,14 +59,6 @@ const MOUNTS: &[(&str, &str, &str, libc::c_ulong, &str)] = &[
     ),
 ];
 
-/// Links in `/dev` that programs expect and `devtmpfs` does not make.
-const DEV_LINKS: &[(&str, &str)] = &[
-    ("/proc/self/fd", "/dev/fd"),
-    ("/proc/self/fd/0", "/dev/stdin"),
-    ("/proc/self/fd/1", "/dev/stdout"),
-    ("/proc/self/fd/2", "/dev/stderr"),
-];
-
 /// Mounts the basics and makes what programs expect around them.
 pub fn mount_basics() {
     for &(source, target, kind, flags, data) in MOUNTS {
@@ -78,14 +70,10 @@ pub fn mount_basics() {
             _ => {}
         }
     }
-    for (target, link) in DEV_LINKS {
-        if fs::symlink_metadata(link).is_err() {
-            let _ = symlink(target, link);
-        }
-    }
-    // Every terminal comes from this instance of devpts.
-    let _ = fs::remove_file("/dev/ptmx");
-    let _ = symlink("pts/ptmx", "/dev/ptmx");
+    // The links programs expect and devtmpfs does not make, and `ptmx`
+    // into this instance of devpts, so every terminal comes from it; and
+    // any device node a kernel did not make.
+    devices::keep();
     for dir in ["/tmp", "/var/tmp"] {
         let _ = fs::create_dir_all(dir);
         let _ = fs::set_permissions(dir, Permissions::from_mode(0o1777));
@@ -94,6 +82,38 @@ pub fn mount_basics() {
     for controller in ["+cpu", "+memory", "+io", "+pids"] {
         let _ = fs::write("/sys/fs/cgroup/cgroup.subtree_control", controller);
     }
+}
+
+/// The file systems under `/dev` that a command can unmount or remove
+/// the mount point of: terminals and shared memory.
+const DEV_MOUNTS: &[&str] = &["/dev/pts", "/dev/shm"];
+
+/// Keeps `/dev` as [`mount_basics`] made it: puts back a device node or
+/// link a command removed or replaced, and mounts again devpts or the
+/// shared memory file system when one is no longer mounted. Cheap enough
+/// to run every few seconds.
+pub fn keep_dev() {
+    let dev = fs::metadata("/dev").map(|meta| meta.dev()).ok();
+    for &(source, target, kind, flags, data) in MOUNTS {
+        if !DEV_MOUNTS.contains(&target) {
+            continue;
+        }
+        // A mount point is on another device than the directory it is in.
+        let mounted = match (dev, fs::metadata(target)) {
+            (Some(dev), Ok(meta)) => meta.dev() != dev,
+            (_, Ok(_)) => true,
+            (_, Err(_)) => false,
+        };
+        if mounted {
+            continue;
+        }
+        let _ = fs::create_dir_all(target);
+        match sys::mount(source, target, kind, flags, data) {
+            Ok(()) => log(&format!("{target} was not mounted; mounted it again")),
+            Err(error) => log(&format!("mount {target}: {error}")),
+        }
+    }
+    devices::keep();
 }
 
 /// Sets up the network from the kernel's `ip=` argument. The lab kernel
@@ -159,7 +179,7 @@ pub fn replace(path: &str, text: &str, mode: u32) -> io::Result<()> {
 pub fn boot_identity(sandbox: &str) {
     let fresh_id = || {
         let mut bytes = [0_u8; 16];
-        io::Read::read_exact(&mut File::open("/dev/urandom")?, &mut bytes)?;
+        sys::random_bytes(&mut bytes)?;
         Ok(identity::random_machine_id(&bytes))
     };
     if let Err(error) = own_disk(Path::new("/"), sandbox, fresh_id) {
@@ -311,6 +331,8 @@ pub fn renew_identity(sandbox: &str, seed_hex: &str) -> io::Result<()> {
 /// Mixes `seed` into the kernel's input pool and reseeds its generator
 /// from it at once. Returns whether it did.
 pub fn reseed(seed: &[u8]) -> bool {
+    // Writing to the pool and asking for a reseed need the device node.
+    devices::keep();
     let result = (|| {
         let mut pool = OpenOptions::new().write(true).open("/dev/urandom")?;
         pool.write_all(seed)?;

@@ -108,8 +108,9 @@ Opengeni creates a sandbox with the native API (`POST /v1/sandboxes`,
 ## 2. In the guest
 
 - `compute-guest` keeps the init on the sandbox's disk before it answers,
-  then, when it has an `agent` section and `/usr/local/bin/opengeni-agent`
-  exists, writes `/run/compute/agent/link.json` (root only):
+  then, when it has an `agent` section and the image has
+  `/usr/local/bin/opengeni-agent` (or the guest kept a copy of it before),
+  writes `/run/compute/agent/link.json` (root only):
 
   ```json
   {"workspace_id": "...", "agent_id": "...", "workspace_root": "/workspace",
@@ -123,6 +124,19 @@ Opengeni creates a sandbox with the native API (`POST /v1/sandboxes`,
   `OPENGENI_CONFIG_DIR=/var/lib/opengeni/agent` unless those name another:
   the agent keeps its state on the sandbox's disk, outside the workspace
   that an image's `HOME` often is.
+- A command in the sandbox runs as root and may move, remove or overwrite
+  the agent's program or the device nodes in `/dev`, then end the agent.
+  The guest copies the agent's program at boot to
+  `/opengeni/kept/opengeni-agent` (a directory only root may enter), and
+  keeps a program that has run for a minute as the new copy, so a verified
+  self-update is kept. Before each start it puts the copy back at the usual
+  path when that holds no program, does not start, or keeps ending at once
+  (three times within ten seconds of starting), and logs that it did. It
+  recreates missing core nodes in `/dev` (`null`, `zero`, `full`,
+  `random`, `urandom`, `tty`, the `ptmx`, `fd` and standard stream links,
+  and the `pts` and `shm` mounts) before each start and every ten seconds,
+  and it takes the link's random stream ids from `getrandom(2)`, which
+  needs no device node.
 - It listens on `127.0.0.1:3958` and forwards each connection to the host,
   vsock CID 2, port 58, as a resumable stream (section 3): Firecracker
   resets every vsock connection when it takes a snapshot, a checkpoint of

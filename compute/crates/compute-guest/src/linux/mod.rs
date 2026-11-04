@@ -2,8 +2,10 @@
 //! them going.
 
 mod agent;
+mod devices;
 mod disk;
 mod guest;
+mod program;
 mod shrink;
 mod supervise;
 mod sys;
@@ -21,6 +23,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use self::guest::{CommandEnv, Guest};
+use self::program::Program;
 use self::supervise::Children;
 use self::sys::{Exit, Signals};
 use crate::cmdline::BootArgs;
@@ -49,6 +52,9 @@ pub(crate) fn spawn(
 
 /// How long the guest gives its processes to end on shutdown.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
+/// How often the guest puts back what a command removed from `/dev`.
+const DEV_UPKEEP: Duration = Duration::from_secs(10);
 
 /// Runs the guest. Never returns: it ends with the machine.
 pub fn run() -> ! {
@@ -122,7 +128,13 @@ pub fn run() -> ! {
         // Nothing to wait for: template builders may snapshot it now.
         listen(READY_PORT, "ready", drop);
     }
-    if Path::new(crate::agent::AGENT_PATH).exists() {
+    // Kept before anything a sandbox runs can move it, so the agent can
+    // always start again (see `program`).
+    let agent_program = Program::agent();
+    if let Err(error) = agent_program.keep(true) {
+        log(&format!("keeping the agent's program: {error}"));
+    }
+    if agent_program.available() {
         spawn("agent", {
             let (guest, children) = (Arc::clone(&guest), Arc::clone(&children));
             move || agent::supervise(&guest, &children)
@@ -140,10 +152,15 @@ pub fn run() -> ! {
         }
     });
     guest.booted(args.sandbox.as_deref());
+    let mut dev_kept = Instant::now();
     loop {
         match signals.wait(Duration::from_secs(1)) {
             Some(libc::SIGTERM | libc::SIGINT | libc::SIGPWR) => shutdown(&signals, &children),
             _ => children.reap(),
+        }
+        if dev_kept.elapsed() >= DEV_UPKEEP {
+            system::keep_dev();
+            dev_kept = Instant::now();
         }
     }
 }
@@ -181,6 +198,7 @@ fn supervise_envd(guest: &Guest, children: &Children) {
     let mut pause = Duration::from_millis(200);
     loop {
         guest.wait_readable();
+        system::keep_dev();
         let started = Instant::now();
         let mut command = supervise::command(config::ENVD_PATH);
         command

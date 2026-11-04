@@ -194,7 +194,7 @@ impl Guest {
         let Some(wanted) = &given.agent else {
             return;
         };
-        if !Path::new(crate::agent::AGENT_PATH).exists() {
+        if !super::program::Program::agent().available() {
             log("the init names an agent, but the image has none");
             return;
         }

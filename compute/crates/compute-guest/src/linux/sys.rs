@@ -220,6 +220,80 @@ pub fn reseed_random(urandom: &File) -> io::Result<()> {
     check(unsafe { libc::ioctl(urandom.as_raw_fd(), RNDRESEEDCRNG) })
 }
 
+/// Fills `bytes` from the kernel's random number generator with
+/// `getrandom(2)`, which needs no device node: a guest whose
+/// `/dev/urandom` was removed still gets random bytes.
+pub fn random_bytes(bytes: &mut [u8]) -> io::Result<()> {
+    let mut filled = 0;
+    while filled < bytes.len() {
+        let rest = &mut bytes[filled..];
+        // SAFETY: a valid, writable buffer of `rest.len()` bytes that
+        // outlives the call.
+        let read = unsafe { libc::getrandom(rest.as_mut_ptr().cast(), rest.len(), 0) };
+        if let Ok(read) = usize::try_from(read) {
+            filled += read;
+        } else {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `mknod(2)` of a character device `major:minor` at `path`, with `mode`
+/// before the umask.
+pub fn make_char_device(path: &str, mode: u32, major: u32, minor: u32) -> io::Result<()> {
+    let path = c_string(path)?;
+    // SAFETY: a valid NUL-terminated string that outlives the call.
+    check(unsafe {
+        libc::mknod(
+            path.as_ptr(),
+            libc::S_IFCHR | mode,
+            libc::makedev(major, minor),
+        )
+    })
+}
+
+/// The `major:minor` of a device number.
+#[must_use]
+pub fn device_numbers(rdev: u64) -> (u32, u32) {
+    (libc::major(rdev), libc::minor(rdev))
+}
+
+/// `chroot(2)` into `path`, then the new root as the working directory.
+#[cfg(test)]
+pub fn enter_root(path: &str) -> io::Result<()> {
+    let path = c_string(path)?;
+    let root = c_string("/")?;
+    // SAFETY: valid NUL-terminated strings that outlive the calls.
+    check(unsafe { libc::chroot(path.as_ptr()) })?;
+    // SAFETY: as above.
+    check(unsafe { libc::chdir(root.as_ptr()) })
+}
+
+/// `unshare(2)` into a new user and mount namespace, mapping this user to
+/// root in it, so a test that is not root may still `chroot`.
+#[cfg(test)]
+pub fn become_root_in_namespace() -> io::Result<()> {
+    // SAFETY: `getuid` and `getgid` take nothing and cannot fail.
+    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+    // SAFETY: no pointers.
+    check(unsafe { libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS) })?;
+    std::fs::write("/proc/self/setgroups", "deny")?;
+    std::fs::write("/proc/self/uid_map", format!("0 {uid} 1"))?;
+    std::fs::write("/proc/self/gid_map", format!("0 {gid} 1"))
+}
+
+/// Whether this process is root.
+#[cfg(test)]
+#[must_use]
+pub fn is_root() -> bool {
+    // SAFETY: `geteuid` takes nothing and cannot fail.
+    unsafe { libc::geteuid() == 0 }
+}
+
 /// `sync(2)`.
 pub fn sync() {
     // SAFETY: no arguments.
