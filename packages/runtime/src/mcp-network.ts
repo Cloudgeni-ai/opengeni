@@ -407,6 +407,21 @@ export class McpPayloadTooLargeError extends Error {
   }
 }
 
+/** A size-limit refusal anywhere in an error's cause chain, across SDK copies. */
+export function isMcpPayloadTooLargeError(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 8 && current !== null && typeof current === "object"; depth += 1) {
+    if (
+      current instanceof McpPayloadTooLargeError ||
+      (current as { name?: unknown }).name === "McpPayloadTooLargeError"
+    ) {
+      return true;
+    }
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 export function mcpSerializedSizeBytes(value: unknown): number {
   let serialized: string;
   try {
@@ -465,6 +480,128 @@ export function assertMcpServerSelectionWithinBounds<T>(servers: readonly T[]): 
   return servers;
 }
 
+/** Why one listed tool was left out of a server's tool list for this attempt. */
+export type McpToolListDropReason =
+  | "definition_unreadable"
+  | "definition_too_large"
+  | "list_entry_limit"
+  | "list_byte_limit"
+  | "aggregate_entry_limit"
+  | "aggregate_byte_limit"
+  | "model_name_taken";
+
+export type McpToolListDrop = {
+  /** The listed name, bounded; empty when the listing had none. */
+  name: string;
+  reason: McpToolListDropReason;
+};
+
+export type McpToolListFit<T> = {
+  tools: T[];
+  dropped: McpToolListDrop[];
+};
+
+export type McpToolListFitOptions<T> = {
+  /** Tools to admit before all others (harness control, eager tools). */
+  keepFirst?: (tool: T) => boolean;
+  maxEntries?: number;
+  maxBytes?: number;
+  /** Reasons recorded for tools that do not fit; list limits by default. */
+  limitReasons?: { entries: McpToolListDropReason; bytes: McpToolListDropReason };
+};
+
+function listedToolName(tool: unknown): string {
+  const name = (tool as { name?: unknown } | null)?.name;
+  return typeof name === "string" ? name.slice(0, 256) : "";
+}
+
+/**
+ * Fit one tools/list inside the safety limits without failing it: a
+ * definition over the per-tool limit is left out, then tools are admitted in
+ * listing order (`keepFirst` tools first) while the list stays within its
+ * entry and serialized-byte limits. The result keeps the listing order and
+ * names every tool left out, so the caller can warn and tell the model.
+ */
+export function fitMcpToolListWithinBounds<T>(
+  tools: readonly T[],
+  options: McpToolListFitOptions<T> = {},
+): McpToolListFit<T> {
+  const maxEntries = options.maxEntries ?? MCP_MAX_TOOL_LIST_ENTRIES;
+  const maxBytes = options.maxBytes ?? MCP_MAX_TOOL_LIST_BYTES;
+  const reasons = options.limitReasons ?? {
+    entries: "list_entry_limit" as const,
+    bytes: "list_byte_limit" as const,
+  };
+  const dropped: McpToolListDrop[] = [];
+  const sizes = new Array<number>(tools.length);
+  const candidates: number[] = [];
+  tools.forEach((tool, index) => {
+    let size: number;
+    try {
+      size = mcpSerializedSizeBytes(tool);
+    } catch {
+      dropped.push({ name: listedToolName(tool), reason: "definition_unreadable" });
+      return;
+    }
+    if (size > MCP_MAX_TOOL_DEFINITION_BYTES) {
+      dropped.push({ name: listedToolName(tool), reason: "definition_too_large" });
+      return;
+    }
+    sizes[index] = size;
+    candidates.push(index);
+  });
+  const keepFirst = options.keepFirst;
+  const order = keepFirst
+    ? [
+        ...candidates.filter((index) => keepFirst(tools[index]!)),
+        ...candidates.filter((index) => !keepFirst(tools[index]!)),
+      ]
+    : candidates;
+  const accepted = new Set<number>();
+  // A JSON array serializes as "[" + items joined by "," + "]", so this is the
+  // exact serialized size of the accepted list, not an estimate.
+  let bytes = 2;
+  for (const index of order) {
+    const added = sizes[index]! + (accepted.size > 0 ? 1 : 0);
+    if (accepted.size + 1 > maxEntries) {
+      dropped.push({ name: listedToolName(tools[index]), reason: reasons.entries });
+    } else if (bytes + added > maxBytes) {
+      dropped.push({ name: listedToolName(tools[index]), reason: reasons.bytes });
+    } else {
+      accepted.add(index);
+      bytes += added;
+    }
+  }
+  return {
+    tools: tools.filter((_, index) => accepted.has(index)),
+    dropped,
+  };
+}
+
+/** One plain sentence for the model about tools left out of one server's list. */
+export function describeMcpToolListDrops(dropped: readonly McpToolListDrop[]): string {
+  const counts = new Map<string, number>();
+  for (const { reason } of dropped) {
+    const why =
+      reason === "model_name_taken"
+        ? "their names clash with another integration's tools"
+        : reason === "definition_too_large" || reason === "definition_unreadable"
+          ? "their definitions are too large or unreadable"
+          : "the integration lists more tools than one turn can hold";
+    counts.set(why, (counts.get(why) ?? 0) + 1);
+  }
+  const parts = [...counts].map(([why, count]) => `${count} because ${why}`);
+  const names = dropped
+    .map(({ name }) => name)
+    .filter(Boolean)
+    .slice(0, 5);
+  return (
+    `connected, but ${dropped.length} of its tools are unavailable this turn (${parts.join("; ")})` +
+    (names.length ? `, for example ${names.join(", ")}` : "") +
+    ". Its other tools work."
+  ).slice(0, 1_000);
+}
+
 export function mcpOuterConnectTimeoutMs(
   configuredTimeouts: readonly (number | undefined)[],
 ): number {
@@ -487,6 +624,8 @@ type McpToolListContribution = {
  */
 export class McpAggregateToolListBudget {
   private readonly contributions = new Map<string, McpToolListContribution>();
+  /** Model name -> the source that listed it first this run. */
+  private readonly modelNameClaims = new Map<string, string>();
   private totalEntries = 0;
   private totalBytes = 0;
 
@@ -520,7 +659,55 @@ export class McpAggregateToolListBudget {
     return tools;
   }
 
+  /**
+   * Admit one source's list without failing it: tools whose model name another
+   * source already listed are left out (first listing wins), then the list is
+   * fitted to the per-list limits and to what is left of the aggregate budget.
+   * This keeps every server's listing disjoint by model name, so one connector
+   * can never take another's name or fail the run with a duplicate. Like
+   * `replace`, a relist replaces this source's earlier contribution and claims.
+   */
+  admit<T>(
+    sourceId: string,
+    tools: readonly T[],
+    options: Pick<McpToolListFitOptions<T>, "keepFirst"> = {},
+  ): McpToolListFit<T> {
+    const dropped: McpToolListDrop[] = [];
+    const unclaimed = tools.filter((tool) => {
+      const name = (tool as { name?: unknown } | null)?.name;
+      if (typeof name !== "string") return true;
+      const owner = this.modelNameClaims.get(name);
+      if (owner === undefined || owner === sourceId) return true;
+      dropped.push({ name: name.slice(0, 256), reason: "model_name_taken" });
+      return false;
+    });
+    const listed = fitMcpToolListWithinBounds(unclaimed, options);
+    const previous = this.contributions.get(sourceId) ?? { entries: 0, bytes: 0 };
+    const fitted = fitMcpToolListWithinBounds(listed.tools, {
+      ...options,
+      maxEntries: this.maxEntries - (this.totalEntries - previous.entries),
+      maxBytes: this.maxBytes - (this.totalBytes - previous.bytes),
+      limitReasons: { entries: "aggregate_entry_limit", bytes: "aggregate_byte_limit" },
+    });
+    this.remove(sourceId);
+    const contribution = {
+      entries: fitted.tools.length,
+      bytes: fitted.tools.length > 0 ? mcpSerializedSizeBytes(fitted.tools) : 0,
+    };
+    this.contributions.set(sourceId, contribution);
+    this.totalEntries += contribution.entries;
+    this.totalBytes += contribution.bytes;
+    for (const tool of fitted.tools) {
+      const name = (tool as { name?: unknown } | null)?.name;
+      if (typeof name === "string") this.modelNameClaims.set(name, sourceId);
+    }
+    return { tools: fitted.tools, dropped: [...dropped, ...listed.dropped, ...fitted.dropped] };
+  }
+
   remove(sourceId: string): void {
+    for (const [name, owner] of this.modelNameClaims) {
+      if (owner === sourceId) this.modelNameClaims.delete(name);
+    }
     const previous = this.contributions.get(sourceId);
     if (!previous) return;
     this.contributions.delete(sourceId);
