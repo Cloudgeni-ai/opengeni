@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -897,6 +897,75 @@ describe("ogtool CLI", () => {
     } finally {
       mock.server.stop(true);
     }
+  });
+
+  describe('names why Opengeni cannot be reached instead of "fetch failed"', () => {
+    // The box runs the Node bundle (Node's fetch says only "fetch failed");
+    // Bun programs import the same client. Check both runtimes.
+    // One bundle for the whole block; the per-test cleanup must not remove it.
+    let bundleDirectory: string | undefined;
+    let built: Promise<Array<[string, string[]]>> | undefined;
+    afterAll(() => {
+      if (bundleDirectory) rmSync(bundleDirectory, { recursive: true, force: true });
+    });
+    const clients = (): Promise<Array<[string, string[]]>> => (built ??= bundleClients());
+    const bundleClients = async (): Promise<Array<[string, string[]]>> => {
+      const list: Array<[string, string[]]> = [["bun", [process.execPath, cliSource]]];
+      const node = Bun.which("node");
+      if (node) {
+        bundleDirectory = mkdtempSync(join(tmpdir(), "ogtool-node-bundle-"));
+        const bundle = await Bun.build({
+          entrypoints: [cliSource],
+          outdir: bundleDirectory,
+          naming: "ogtool.cjs",
+          format: "cjs",
+          target: "node",
+        });
+        if (!bundle.success) throw new Error("ogtool Node bundle failed");
+        list.push(["node", [node, join(bundleDirectory, "ogtool.cjs")]]);
+      }
+      return list;
+    };
+
+    test("a host that does not resolve points at resolv.conf", async () => {
+      for (const [runtime, client] of await clients()) {
+        const result = await run(
+          ["list"],
+          {
+            OPENGENI_CODEMODE_URL: "https://opengeni-codemode.invalid/v1/workspaces/ws/codemode",
+            OPENGENI_CODEMODE_TOKEN: "test",
+          },
+          client,
+        );
+        expect({ runtime, exitCode: result.exitCode }).toEqual({ runtime, exitCode: 1 });
+        expect({ runtime, stderr: result.stderr }).toEqual({
+          runtime,
+          stderr: expect.stringMatching(
+            /^Can't reach Opengeni: DNS lookup for opengeni-codemode\.invalid failed \((ENOTFOUND|EAI_AGAIN)\)\. Check \/etc\/resolv\.conf\.\n$/u,
+          ),
+        });
+      }
+    });
+
+    test("a refused connection names the host and port", async () => {
+      const closed = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response() });
+      const port = closed.port;
+      closed.stop(true);
+      for (const [runtime, client] of await clients()) {
+        const result = await run(
+          ["list"],
+          {
+            OPENGENI_CODEMODE_URL: `http://127.0.0.1:${port}/codemode`,
+            OPENGENI_CODEMODE_TOKEN: "test",
+          },
+          client,
+        );
+        expect({ runtime, stderr: result.stderr }).toEqual({
+          runtime,
+          stderr: `Can't reach Opengeni: the connection to 127.0.0.1:${port} was refused (ECONNREFUSED). Check this machine's network, firewall and proxy settings.\n`,
+        });
+      }
+    });
   });
 
   test("reads a renewed token on the next process", async () => {

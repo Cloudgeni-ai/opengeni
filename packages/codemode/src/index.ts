@@ -38,6 +38,7 @@ import {
   type ToolGatewayCallLifecycle,
   type ToolGatewayDefinition,
 } from "@opengeni/tool-gateway";
+import { CodemodeConnectionError, describeCodemodeConnectionFailure } from "./connection-failure";
 
 import { siteHostWorkspacePath } from "@opengeni/contracts/site-session-http";
 import { materializeCodemodeImages } from "./images";
@@ -354,7 +355,9 @@ export class CodemodeClient {
           } catch (recoveryError) {
             if (options.signal?.aborted) throw recoveryError;
             throw new CodemodeTransportError(
-              `Codemode operation ${operationId} could not be reconciled after its submission response failed`,
+              `Codemode operation ${operationId} could not be reconciled after its submission response failed${
+                recoveryError instanceof CodemodeConnectionError ? `. ${recoveryError.message}` : ""
+              }`,
               null,
               {
                 code: "codemode_operation_recovery_unavailable",
@@ -531,14 +534,25 @@ export class CodemodeClient {
   private async request(path: string, init: RequestInit, throwOnError = true): Promise<Response> {
     const token =
       typeof this.options.token === "function" ? await this.options.token() : this.options.token;
-    const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-      ...init,
-      headers: {
-        ...Object.fromEntries(new Headers(init.headers).entries()),
-        authorization: `Bearer ${token}`,
-        "x-opengeni-codemode-capabilities": "durable-approval-v1",
-      },
-    });
+    const url = `${this.baseUrl}${path}`;
+    let response: Response;
+    try {
+      response = await this.fetchImpl(url, {
+        ...init,
+        headers: {
+          ...Object.fromEntries(new Headers(init.headers).entries()),
+          authorization: `Bearer ${token}`,
+          "x-opengeni-codemode-capabilities": "durable-approval-v1",
+        },
+      });
+    } catch (error) {
+      // "fetch failed" hides why the box cannot reach Opengeni; name the
+      // reason (DNS, clock, refused connection) and keep the original as
+      // the cause. Unknown reasons keep the transport's own error.
+      const failure = describeCodemodeConnectionFailure(error, url);
+      if (!failure) throw error;
+      throw new CodemodeConnectionError(failure.message, failure.networkCode, { cause: error });
+    }
     if (!response.ok && throwOnError) {
       let message = `Codemode request failed with HTTP ${response.status}`;
       let errorOptions: {
@@ -964,6 +978,7 @@ async function abortableDelay(delayMs: number, signal?: AbortSignal): Promise<vo
 }
 
 export * from "./environment";
+export * from "./connection-failure";
 export * from "./interaction";
 export * from "./images";
 export * from "./artifacts";
