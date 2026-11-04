@@ -550,7 +550,11 @@ async function runCapture(
   const readSession = input.openReadSession ? await input.openReadSession() : input.session;
   throwIfCaptureAborted(signal);
   // Reads only — no emitter (we publish the announce ourselves after commit).
-  const svc = new SandboxChannelAService({ session: readSession, leaseEpoch: input.leaseEpoch });
+  const svc = new SandboxChannelAService({
+    session: readSession,
+    leaseEpoch: input.leaseEpoch,
+    signal,
+  });
 
   // Resolve the previous revision before discovery so even a failed discovery
   // can commit a monotonic, explicit degraded marker. That marker becomes the

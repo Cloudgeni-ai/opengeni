@@ -1078,6 +1078,29 @@ describe("Claude citation tags in a reply", () => {
     expect(argumentsOf(response.output as any[]).reply).toBe("Fact: quoted.");
   });
 
+  test("a goal_complete reply is the final answer, so its tags become links too", () => {
+    const evidence = `Checked ${cite("1-1", "kept")}.`;
+    const response = anthropicResponse(
+      message(
+        "msg_1",
+        [
+          call,
+          results,
+          toolUse("opengeni__goal_complete", {
+            evidence,
+            reply: `Done: ${cite("1-1", "Version 2 adds search.")}`,
+          }),
+        ],
+        "tool_use",
+      ),
+    );
+    expect(argumentsOf(response.output as any[])).toEqual({
+      // Evidence is ledger text, not the answer: it keeps its exact text.
+      evidence,
+      reply: "Done: [Version 2 adds search.](https://example.com/notes)",
+    });
+  });
+
   test("other tool arguments keep their exact text", () => {
     const patch = `*** Begin Patch\n+${cite("2-1", "kept")}\n*** End Patch`;
     const response = anthropicResponse(

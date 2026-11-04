@@ -54,10 +54,12 @@ import type {
   StartSandboxReaperWorkflow,
   StartVideoGenerationWorkflow,
   StartRecordingWorkflow,
+  StartRigProviderImageRefresh,
   StartSessionTitleWorkflow,
   WakeSessionWorkflowSignal,
 } from "./activities/types";
 import { turnTaskQueue } from "./workflows/activities";
+import { rigProviderImageRefreshWorkflowId } from "./activities/rig-provider-image-refresh";
 import { createTurnTaskQueueStatsClient } from "./turn-task-queue-reader";
 import { installTemporalRuntimeLogging } from "./temporal-runtime-logger";
 import {
@@ -468,6 +470,7 @@ export async function createWorkerWorkflowSignaler(
   startVideoGenerationWorkflow: StartVideoGenerationWorkflow;
   startSessionTitleWorkflow: StartSessionTitleWorkflow;
   startRecordingWorkflow: StartRecordingWorkflow;
+  startRigProviderImageRefresh: StartRigProviderImageRefresh;
   check: () => Promise<void>;
   close: () => Promise<void>;
 }> {
@@ -677,6 +680,23 @@ export async function createWorkerWorkflowSignaler(
         if (error instanceof WorkflowExecutionAlreadyStartedError) {
           return "already_running";
         }
+        throw error;
+      }
+    },
+    startRigProviderImageRefresh: async ({ workspaceId, versionId, contentHash }) => {
+      try {
+        await temporal.workflow.start("rigVerificationWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          workflowId: rigProviderImageRefreshWorkflowId({ versionId, contentHash }),
+          // One automatic attempt per version, content and day. A failed
+          // rebuild is not retried by every following turn; the next day or
+          // an explicit verify tries again.
+          workflowIdReusePolicy: "REJECT_DUPLICATE",
+          args: [{ workspaceId, versionId }],
+        });
+        return "started";
+      } catch (error) {
+        if (error instanceof WorkflowExecutionAlreadyStartedError) return "already_running";
         throw error;
       }
     },
@@ -904,6 +924,11 @@ export async function createOpenGeniWorkerService(
       options.activityDependencies.startSessionTitleWorkflow ?? signaler?.startSessionTitleWorkflow;
     const startRecordingWorkflow =
       options.activityDependencies.startRecordingWorkflow ?? signaler?.startRecordingWorkflow;
+    // Optional: hosts without a Temporal client simply skip automatic rebuilds.
+    const startRigProviderImageRefresh =
+      options.activityDependencies.startRigProviderImageRefresh ??
+      signaler?.startRigProviderImageRefresh ??
+      null;
     if (
       !wakeSessionWorkflow ||
       !signalSessionAttemptQuiesced ||
@@ -933,6 +958,7 @@ export async function createOpenGeniWorkerService(
         startVideoGenerationWorkflow,
         startSessionTitleWorkflow,
         startRecordingWorkflow,
+        startRigProviderImageRefresh,
         requestWorkerDrain: () => {
           if (!cleanupContainment) throw new Error("worker cleanup containment is not initialized");
           cleanupContainment.request();

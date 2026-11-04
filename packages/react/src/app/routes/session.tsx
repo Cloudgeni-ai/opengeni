@@ -4,13 +4,17 @@ import {
   createSessionRetainedScreenshotLoader,
   createWorkspaceRetainedArtifactLoader,
   createWorkspaceRetainedVideoLoader,
+  timelineLivePause,
 } from "../../timeline";
 import { isModelUnavailableSubmissionError, type CreditRefusalKind } from "../../lib/format";
 import { inertProps } from "../../lib/inert";
 import { retainedImageId } from "../../components/markdown";
 import { LazyPart } from "../../components/lazy-part";
 import { useConnectionAccounts } from "../components/capabilities/use-connection-accounts";
-import { stopOwnLoginHere } from "../components/capabilities/own-login-turned-on";
+import {
+  stopOwnLoginsHere,
+  turnOnOwnLoginsHere,
+} from "../components/capabilities/own-login-turned-on";
 import {
   OwnLoginsSharedHeadsUp,
   ownLoginsInUse,
@@ -48,6 +52,11 @@ import {
   failureFallbackReason,
 } from "../lib/failed-session-copy";
 import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
+import {
+  pickerPolicyRunnable,
+  ComposerSendBlockerNotice,
+  composerSendBlockerNotice,
+} from "../lib/composer-send-blocking";
 import { ChatPaymentPages } from "../components/chat-payment-pages";
 import { creditRefusalRecord, type CreditRefusalRecord } from "../lib/model-access";
 import { timelineShowsFailure } from "../lib/timeline-failure-owner";
@@ -254,11 +263,7 @@ import {
   type ComposerLaunchSearch,
 } from "../lib/composer-launch";
 import { connectableSubscriptions, isDeploymentFreeModel } from "../lib/deployment-free-model";
-import {
-  effortOptionsForModel,
-  findPickerRow,
-  runnableLatencyModesForModel,
-} from "../lib/model-policy";
+import { findPickerRow } from "../lib/model-policy";
 import { sessionTimelineEmptyStateCopy } from "../lib/session-empty-state";
 import {
   isCodexUsageLimitFailure,
@@ -1114,14 +1119,15 @@ export function SessionRoute({
   // calm inline error on the reconnect card.
   const reconnectTransport = useMemo(() => context.client.connectTransport(), [context.client]);
   const [reconnectRequest, setReconnectRequest] = useState<NativeConnectRequest | null>(null);
-  // The account whose card in this chat opened the reconnect: once it is done,
-  // the agent continues the request that stopped, as after a first setup.
-  const reconnectCardConnection = useRef<string | null>(null);
+  // The account whose card in this chat opened each reconnect: once it is
+  // done, the agent continues the request that stopped, as after a first
+  // setup. Kept per request, since a reconnect can finish after its dialog
+  // closed and another one opened.
+  const reconnectCardConnections = useRef(new WeakMap<NativeConnectRequest, string>());
   // Workspace GitHub App setup from the follow-up repository menu uses this
   // route-level Connect dialog: the menu closes when GitHub's authorization
   // popup takes focus, which would unmount a dialog hosted inside it.
   const connectGitHubApp = useCallback(() => {
-    reconnectCardConnection.current = null;
     setReconnectRequest(githubAppConnectRequest(workspaceId, reconnectTransport, page.href()));
   }, [page, reconnectTransport, workspaceId]);
   const connectPersonalGitHub = context.connectPersonalGitHub;
@@ -1150,8 +1156,7 @@ export function SessionRoute({
           item.connectionId,
         );
         if (account) {
-          reconnectCardConnection.current = item.connectionId;
-          setReconnectRequest({
+          const request: NativeConnectRequest = {
             scope: { workspaceId, transport: reconnectTransport },
             providerId: account.providerId,
             ownership: account.ownership,
@@ -1167,7 +1172,9 @@ export function SessionRoute({
             displayName: account.label,
             returnUrl: page.href(),
             idempotencyKey: crypto.randomUUID(),
-          });
+          };
+          reconnectCardConnections.current.set(request, item.connectionId);
+          setReconnectRequest(request);
           return;
         }
       }
@@ -1571,7 +1578,8 @@ export function SessionRoute({
             request={reconnectRequest}
             onClose={() => setReconnectRequest(null)}
             onComplete={() => {
-              setReconnectRequest(null);
+              // Setup can finish after its dialog closed: leave a newer one open.
+              setReconnectRequest((current) => (current === reconnectRequest ? null : current));
               if (reconnectRequest.providerId === "github-app") {
                 toast.success("GitHub connected");
                 void context.refreshGitHub(workspaceId, undefined, {
@@ -1584,8 +1592,7 @@ export function SessionRoute({
               // server checks the account now has what its card asked for,
               // wakes the agent at most once per card, and not at all once
               // the person has written since. Never fails the finished setup.
-              const connectionId = reconnectCardConnection.current;
-              reconnectCardConnection.current = null;
+              const connectionId = reconnectCardConnections.current.get(reconnectRequest);
               if (connectionId)
                 void Promise.resolve()
                   .then(() =>
@@ -2931,7 +2938,14 @@ function SessionChatPane(props: {
       personalAttachment.loading ||
       personalAttachment.refreshing ||
       connectionAccounts.loading,
-    loadFailed: connectionAccounts.error !== null,
+    loadFailed:
+      connectionAccounts.error === null
+        ? false
+        : connectionAccounts.accessDenied
+          ? "denied"
+          : connectionAccounts.unavailable
+            ? "updating"
+            : "failed",
   };
   const composerSendBlocker = () => sendGate.blocker(sendState);
   const workspaceAccountId = context.workspaces.find(
@@ -3161,12 +3175,7 @@ function SessionChatPane(props: {
     composerPolicy.reasoningEffort === props.session.reasoningEffort &&
     composerPolicy.latencyMode === props.session.latencyMode,
   );
-  const catalogComboValid = Boolean(
-    selectedPolicyRow?.selectable &&
-    effortOptionsForModel(selectedPolicyRow.catalog).includes(reasoningEffort) &&
-    (latencyMode === "standard" ||
-      runnableLatencyModesForModel(selectedPolicyRow.catalog).includes(latencyMode)),
-  );
+  const catalogComboValid = pickerPolicyRunnable(selectedPolicyRow, reasoningEffort, latencyMode);
   // A model the catalog no longer lists (retired or removed) is refused by the
   // API, so the frozen session policy stops counting as sendable for it.
   const refusedSessionModel =
@@ -3266,6 +3275,34 @@ function SessionChatPane(props: {
         replacementLabel={composerModelUnavailable ? null : (selectedPolicyRow?.label ?? null)}
       />
     ) : null;
+
+  // Send's blocker as one visible line, unless the composer is still
+  // preparing or the unavailable-model notice or picker already explains it.
+  const sendBlocker = composerSendBlocker();
+  const visibleSendBlocker =
+    terminal || composerDelivery.preparing
+      ? null
+      : sendBlocker === "policy" && (unavailableModelNotice || noRunnableModel || !composerPolicy)
+        ? null
+        : sendBlocker === "policy" && selectedPolicyRow?.selectable !== true
+          ? "model_unavailable"
+          : sendBlocker;
+  const sendBlockerNotice = composerSendBlockerNotice(visibleSendBlocker) ? (
+    <ComposerSendBlockerNotice
+      blocker={visibleSendBlocker}
+      className="px-2 pt-2"
+      // While the picker is locked (sending, draft loading) the fix can't
+      // apply, so the line shows no action rather than one that does nothing.
+      onAction={
+        modelPickerDisabled && visibleSendBlocker === "policy"
+          ? undefined
+          : (action) => {
+              if (action === "fix_model_settings") chooseCoveredModel(model);
+              else if (visibleSendBlocker === "accounts") void connectionAccounts.refresh();
+            }
+      }
+    />
+  ) : null;
 
   useEffect(() => {
     if (
@@ -3661,29 +3698,41 @@ function SessionChatPane(props: {
   const modelSwitchHeadsUp = chosenModelHeadsUp ? (
     <ModelSwitchHeadsUp text={chosenModelHeadsUp} className="px-3.5 pt-2.5 md:px-4" />
   ) : null;
-  // Your own logins in a chat shared with the workspace (D-54): a one-line
-  // heads-up for you only, never a gate. A Personal workspace has nobody else.
-  const ownLoginsHere =
+  // Your own logins in a chat shared with the workspace (D-54): one quiet line
+  // for you only, never a gate. A Personal workspace has nobody else. It stays
+  // mounted while none are on, so one turned off here can go back on.
+  const ownLoginsApply =
     !terminal &&
     props.session.tenancy?.visibility === "workspace" &&
-    !isPersonalWorkspace(workspace, context.managedSelfContext)
-      ? ownLoginsInUse(
-          connectionAccounts.availableAccountGroups,
-          connectionAccounts.accountChoices,
-          context.accessContext.subjectId,
-        )
-      : [];
-  const ownLoginsHeadsUp =
-    ownLoginsHere.length > 0 ? (
-      <OwnLoginsSharedHeadsUp
-        logins={ownLoginsHere}
-        className="px-3.5 pt-2.5 md:px-4"
-        onStop={async (account) => {
-          await stopOwnLoginHere(context.client, props.session.workspaceId, account);
+    !isPersonalWorkspace(workspace, context.managedSelfContext);
+  const ownLoginsHeadsUp = ownLoginsApply ? (
+    <OwnLoginsSharedHeadsUp
+      key={props.session.id}
+      // While the accounts can't be read, the line keeps what it last knew.
+      logins={
+        connectionAccounts.loading || connectionAccounts.error
+          ? null
+          : ownLoginsInUse(
+              // Only the connectors this chat uses.
+              connectionAccounts.accountGroups,
+              connectionAccounts.accountChoices,
+              context.accessContext.subjectId,
+            )
+      }
+      className="px-3.5 pt-2.5 md:px-4"
+      logoFor={(login) => props.resolveProviderLogo(login.accounts[0]!.providerDomain)}
+      onChange={async (login, on) => {
+        try {
+          if (on)
+            await turnOnOwnLoginsHere(context.client, props.session.workspaceId, login.accounts);
+          else await stopOwnLoginsHere(context.client, props.session.workspaceId, login.accounts);
+        } finally {
+          // Some connections may have changed even when one failed.
           await connectionAccounts.refresh();
-        }}
-      />
-    ) : null;
+        }
+      }}
+    />
+  ) : null;
   // The chat's Secrets row: hidden when its agent can't use secrets.
   const sessionSecrets = useSessionSecrets(props.session.id, {
     enabled: workspacePermissions.includes("secrets:list"),
@@ -4205,6 +4254,7 @@ function SessionChatPane(props: {
                           focusSequence={momentSequence}
                           events={props.events}
                           status={props.session.status}
+                          pause={timelineLivePause(admissionControl)}
                           computeLabel={computeLabel}
                           renderMessageText={renderMessageText}
                           renderMessageActions={renderMessageActions}
@@ -4474,6 +4524,7 @@ function SessionChatPane(props: {
                   modelSwitchHeadsUp ||
                   usageLimitNotice ||
                   creditRefusalNotice ||
+                  sendBlockerNotice ||
                   showMachineAccess ? (
                     <>
                       {!sessionAdmissionNeedsDifferentMachine(
@@ -4503,6 +4554,7 @@ function SessionChatPane(props: {
                         <div className="px-2 pt-2">{creditRefusalNotice}</div>
                       ) : null}
                       {ownLoginsHeadsUp}
+                      {sendBlockerNotice}
                     </>
                   ) : null
                 }

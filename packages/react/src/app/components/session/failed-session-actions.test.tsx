@@ -270,7 +270,13 @@ test("own-key and API credit stops offer their one fix, never another model", as
 
 test("a stop between model calls names its refusal from the turn end, not the failure text", async () => {
   // A budget-exhausted completed turn: the failure summary carries no refusal text.
-  const banner = (creditRefusal: "byok_paid_credit_required" | "byok_upgrade_required" | null) => (
+  const banner = (
+    creditRefusal:
+      | "byok_paid_credit_required"
+      | "byok_upgrade_required"
+      | "subscription_upgrade_required"
+      | null,
+  ) => (
     <FailedSessionBanner
       failure={{ ...failure, reason: null }}
       creditExhausted
@@ -295,6 +301,10 @@ test("a stop between model calls names its refusal from the turn end, not the fa
   expect(labels()).toEqual(["Add credits"]);
   await act(async () => root!.render(banner("byok_upgrade_required")));
   expect(row().textContent).toContain("Upgrade to Pro to use your own key.");
+  expect(labels()).toEqual(["Upgrade to Pro"]);
+  await act(async () => root!.render(banner("subscription_upgrade_required")));
+  expect(row().textContent).toContain("Upgrade to Pro to use your own subscription.");
+  expect(row().textContent).not.toContain("Free model");
   expect(labels()).toEqual(["Upgrade to Pro"]);
 });
 
@@ -461,6 +471,10 @@ test("all draft, delivery, work, permission and deliberate pause guards hide Ret
     "policy",
     "personal_decision",
     "personal_loading",
+    // The open chat's connected accounts failed to load, were denied, or are reconnecting.
+    "accounts",
+    "accounts_denied",
+    "updating",
   ] as const) {
     await act(async () =>
       root!.render(<FailedSessionActions {...actions} composerBlocker={composerBlocker} />),

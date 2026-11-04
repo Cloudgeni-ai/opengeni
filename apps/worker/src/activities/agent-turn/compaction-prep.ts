@@ -390,6 +390,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
         entitlements: deps.entitlements,
         sessionId: input.sessionId,
         ...(billingState.isByokTurn ? { byok: true } : {}),
+        ...(billingState.isOwnSubscriptionTurn ? { ownSubscription: true } : {}),
         ...(billingState.billingOrigin ? { billingOrigin: billingState.billingOrigin } : {}),
       });
       return await summarizeModel(s, m);

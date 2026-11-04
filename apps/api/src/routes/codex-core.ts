@@ -33,6 +33,7 @@ import {
   type DisconnectAuditActor,
 } from "@opengeni/db";
 import type { CodexFetch, CodexUsagePayload } from "@opengeni/codex";
+import type { CodexConnectOfferedModel } from "./codex-connect-models";
 import {
   codexAccountJson,
   codexModelsForPicker,
@@ -76,6 +77,8 @@ export async function coreCodexConnected(
     /** The shared workspace the person added their own subscription from (D-53). */
     addedFrom?: string | undefined;
     credential: SubscriptionCoreCodexCredentialInput;
+    /** The account's offered Codex models, read once after it connects. */
+    offeredModels?: (() => Promise<CodexConnectOfferedModel[] | null>) | undefined;
   },
 ) {
   const result = await connectSubscriptionCoreCodexConnection(deps.db, {
@@ -138,11 +141,15 @@ export async function coreCodexConnected(
         ).rotation.activeCredentialId
       : (await projection(deps, input.accountId, input.workspaceId, input.subjectId)).rotation
           .activeCredentialId;
+  // Which Opengeni models it offers, so connecting an account whose plan
+  // offers none (or only some) says so now rather than at Send.
+  const models = input.offeredModels ? await input.offeredModels().catch(() => null) : null;
   return c.json({
     status: "connected",
     plan: input.credential.planType,
     accountId: result.id,
     isActive: activeCredentialId === result.id,
+    ...(models ? { models } : {}),
   });
 }
 

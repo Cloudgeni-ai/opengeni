@@ -2,7 +2,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { FileAsset, RetainedArtifactReference } from "@opengeni/sdk";
 import { LightboxProvider, createWorkspaceRetainedArtifactLoader } from "../../timeline";
 import { PatchApplyCommand, isPatchFilename } from "../../artifacts";
-import { DownloadIcon, LockKeyholeIcon, Maximize2Icon, RefreshCwIcon } from "lucide-react";
+import {
+  DownloadIcon,
+  LinkIcon,
+  LockKeyholeIcon,
+  Maximize2Icon,
+  RefreshCwIcon,
+} from "lucide-react";
 import { useAppContext } from "../app-context";
 import { ArtifactSessionPage } from "../components/session/artifact-session-page";
 import { ArtifactFullView } from "../components/artifacts/artifact-full-view";
@@ -31,6 +37,7 @@ import {
 } from "../lib/retained-artifact-load-error";
 import { FILE_AUDIENCE_COPY, useArtifactAudience } from "../components/artifacts/site-audience";
 import { FileReachDialog } from "../components/artifacts/file-reach-dialog";
+import { useCopyArtifactLink } from "../components/artifacts/copy-artifact-link";
 import { hasWorkspacePermission } from "../lib/permissions";
 import { invalidateArtifactCatalog } from "../lib/use-artifact-catalog";
 import { t } from "../lib/console-text";
@@ -86,6 +93,7 @@ function RetainedArtifactDetail({
   const { client, accessKeyVersion } = context;
   const back = useArtifactsBackLink(workspaceId, fromSession);
   const [fullView, setFullView] = useArtifactFullView();
+  const copyLink = useCopyArtifactLink(workspaceId);
   const key = `${workspaceId}:${artifactId}:${accessKeyVersion}`;
   const [state, setState] = useState<{
     key: string;
@@ -255,6 +263,13 @@ function RetainedArtifactDetail({
       actions={
         <>
           {showAudience ? audience.shareButton : null}
+          {/* In a chat's panel the panel's header has it. */}
+          {embedded ? null : (
+            <RowButton onClick={() => void copyLink({ kind: "file", id: artifactId })}>
+              <LinkIcon aria-hidden="true" />
+              Copy link
+            </RowButton>
+          )}
           {expandable ? (
             <RowButton onClick={() => setFullView(true)}>
               <Maximize2Icon aria-hidden="true" />

@@ -3,14 +3,22 @@
 // traffic lights, and the bar's row, the page's title line. The bar itself is
 // drawn by the app's stylesheet (`html[data-desktop]::before`), as are the
 // rules that lift a row into it (`[data-window-bar-row] > [data-titlebar]`).
-import { ChevronsLeftIcon, ChevronsRightIcon, PanelLeftIcon } from "lucide-react";
-import { useMemo, useState, type ReactNode, type RefObject } from "react";
+import { ChevronsLeftIcon, ChevronsRightIcon, CopyIcon, PanelLeftIcon } from "lucide-react";
+import { useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 
 import { Button } from "../../ui/button";
+import { cn } from "../../lib/cn";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "../../ui/context-menu";
 import { PageHeaderWindowBarContext } from "../../ui/window-bar-title";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../ui/tooltip";
 import { useActionShortcut } from "../lib/actions/actions-provider";
+import { copyTitle } from "../lib/copy-link";
 import { desktopPlatform } from "../lib/desktop";
 import { useWindowBarRowLeft } from "../lib/window-bar-row";
 import { TooltipWithKeys } from "./command-menu/keycaps";
@@ -121,7 +129,17 @@ export function SidebarToggleButton({
  * repeat. Render it as the canvas's first child, with `data-window-bar-row`
  * on the canvas (`useWindowBarRow`).
  */
-export function WindowBarTitle({ children }: { children: ReactNode }) {
+export function WindowBarTitle({
+  copyable = false,
+  children,
+}: {
+  /** A title worth copying (a Site's): right-click it for Copy title. */
+  copyable?: boolean;
+  children: ReactNode;
+}) {
+  const text = useRef<HTMLSpanElement>(null);
+  const className =
+    "min-w-0 truncate text-[15px] font-semibold leading-6 tracking-[-0.01em] text-fg";
   return (
     <header
       data-window-drag
@@ -130,12 +148,34 @@ export function WindowBarTitle({ children }: { children: ReactNode }) {
       className="flex min-w-0 shrink-0 items-center gap-1 pl-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-left))] pr-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-right))]"
     >
       {/* The page's own header keeps the page's heading for assistive tech. */}
-      <span
-        aria-hidden="true"
-        className="min-w-0 truncate text-[15px] font-semibold leading-6 tracking-[-0.01em] text-fg"
-      >
-        {children}
-      </span>
+      {copyable ? (
+        // A copyable title's words leave the drag region, so they can be
+        // right-clicked; the rest of the bar still drags the window.
+        <ContextMenu>
+          <ContextMenuTrigger asChild>
+            <span
+              ref={text}
+              aria-hidden="true"
+              data-window-bar-title-text=""
+              className={cn(className, "[-webkit-app-region:no-drag] [app-region:no-drag]")}
+            >
+              {children}
+            </span>
+          </ContextMenuTrigger>
+          <ContextMenuContent className="min-w-40">
+            <ContextMenuItem
+              onSelect={() => void copyTitle(text.current?.textContent?.trim() ?? "")}
+            >
+              <CopyIcon className="size-4" />
+              Copy title
+            </ContextMenuItem>
+          </ContextMenuContent>
+        </ContextMenu>
+      ) : (
+        <span aria-hidden="true" data-window-bar-title-text="" className={className}>
+          {children}
+        </span>
+      )}
     </header>
   );
 }
@@ -173,16 +213,22 @@ export function WindowBarPageTitle({
   // In the order the headers mounted (the page's order); a header keeps its
   // place while its title is briefly empty.
   const [claims, setClaims] = useState<
-    readonly { id: string; title: string | null; fallback: boolean }[]
+    readonly { id: string; title: string | null; fallback: boolean; copyable: boolean }[]
   >([]);
   const [registry] = useState(() => ({
-    set(id: string, title: string | null, fallback = false) {
+    set(id: string, title: string | null, fallback = false, copyable = false) {
       setClaims((current) => {
         const existing = current.find((claim) => claim.id === id);
-        if (existing?.title === title && existing.fallback === fallback) return current;
+        if (
+          existing?.title === title &&
+          existing.fallback === fallback &&
+          existing.copyable === copyable
+        )
+          return current;
+        const claim = { id, title, fallback, copyable };
         return existing
-          ? current.map((claim) => (claim.id === id ? { id, title, fallback } : claim))
-          : [...current, { id, title, fallback }];
+          ? current.map((other) => (other.id === id ? claim : other))
+          : [...current, claim];
       });
     },
     release(id: string) {
@@ -200,7 +246,9 @@ export function WindowBarPageTitle({
   );
   return (
     <PageHeaderWindowBarContext.Provider value={value}>
-      {enabled && title != null && title !== "" ? <WindowBarTitle>{title}</WindowBarTitle> : null}
+      {enabled && title != null && title !== "" ? (
+        <WindowBarTitle copyable={owner?.copyable ?? false}>{title}</WindowBarTitle>
+      ) : null}
       {children}
     </PageHeaderWindowBarContext.Provider>
   );

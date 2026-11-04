@@ -316,11 +316,13 @@ impl LiveMemory {
     /// and fetching its memory in the background, as
     /// [`Reconnected::serve_detached`] does, so its guest never waits
     /// forever on a page. Dropping the memory instead stops serving it.
-    pub fn serve_detached(self) {
+    /// Returns the task serving it, if its memory is paged.
+    pub fn serve_detached(self) -> Option<tokio::task::JoinHandle<()>> {
         #[cfg(target_os = "linux")]
         if let Some(paging) = self.paging {
-            Reconnected { paging }.serve_detached();
+            return Some(Reconnected { paging }.serve_detached());
         }
+        None
     }
 }
 
@@ -351,12 +353,16 @@ impl Reconnected {
     /// For a VM that may still run but was not taken back: goes on serving
     /// and fetching its memory in the background until the pager holds all
     /// of it, or ends with the VM, so its guest never waits forever on a
-    /// page. The pager needs no agent after that.
-    pub fn serve_detached(self) {
+    /// page. The pager needs no agent after that. Returns the task serving
+    /// it: until it ends, nothing else may connect to the pager, which
+    /// serves one connection at a time and drops the one before.
+    pub fn serve_detached(self) -> tokio::task::JoinHandle<()> {
         #[cfg(target_os = "linux")]
-        tokio::spawn(async move {
+        return tokio::spawn(async move {
             let _ = self.paging.complete().await;
         });
+        #[cfg(not(target_os = "linux"))]
+        tokio::spawn(async {})
     }
 }
 

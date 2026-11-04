@@ -84,7 +84,12 @@ weaker source, in this order:
    others may see. The lookup is bounded to three seconds and any failure
    leaves the title as it was. Capture runs before the server has the
    recording, so it never delays recording; the recorder shows the name
-   once the server has it (`serverTitle` in the upload status).
+   once the server has it (`serverTitle` in the upload status). A create
+   request with `calendarEvent` (`{ provider: "google" | "microsoft", id }`),
+   such as a meeting joined from the desktop app's reminder, prefers that
+   event when it is on the calendar then (a private one names nothing, never
+   another meeting), and keeps it in `metadata.calendarEvent`, the one
+   metadata key Opengeni writes.
 3. `conversation`: written with the meeting's notes. The built-in summary
    (below) passes a short name to `meeting_notes_save` as `title`, in the
    meeting's language; it is kept only while the title is from a weaker
@@ -313,6 +318,39 @@ such as one signed out or for an account without meetings, never shows the
 card. The app remembers the answer, so after a restart it asks before any
 window has loaded; a page that closes doesn't change it, because Record opens
 the window again.
+
+It can also remind the person before a calendar meeting, the way a notetaker
+does. Pass `calendar` to `createMeetingDetection`:
+
+```ts
+calendar: {
+  account: () => activeAccount(), // { id } of the signed-in account, or null
+  // The account's own workspace; null (or a throw) when it can't be read now.
+  upcoming: (accountId) =>
+    new OpenGeniRecordingsClient(clientFor(accountId)).listUpcomingMeetings(workspaceOf(accountId)),
+  openUrl: (url) => void shell.openExternal(url), // an https join link
+},
+```
+
+`GET /v1/workspaces/:workspaceId/upcoming-meetings` returns the caller's own
+meetings from their connected Google Calendar or Outlook Calendar that start
+within twenty minutes (or started up to five minutes ago) and have a Google
+Meet, Zoom, Microsoft Teams or Webex link, skipping declined, cancelled and
+all-day events: `{ calendar: "connected" | "none", complete, meetings: [{ id,
+provider, title, private, startsAt, endsAt, joinUrl, service, unanswered }] }`.
+`complete` is false when a calendar couldn't be read in time, so the list may
+miss meetings; the desktop then keeps the ones it knew. About a minute
+before one starts, the card says "<title> · Starts in 1 min · Google Meet"
+with Join and start recording and Not now. Join opens the link and starts a
+recording with that `calendarEvent`, named after it (after the service for a
+private event). While another meeting is being recorded the button is Join
+and record this one, which stops and keeps that recording first; a recording
+started up to ten minutes before the meeting counts as joining it, so there is
+no card. Each meeting is offered once, only for the active account, and a
+reminder never covers a question to record a call that just started. The
+person turns reminders off with `update({ calendarReminders: false })`;
+`status()` also says whether a calendar is connected (`calendar`), so
+settings can offer to connect one.
 
 On a phone, `@opengeni/react-native/meetings` has the same pieces for React
 Native screens:
@@ -636,10 +674,12 @@ Otherwise, or when the request or `settings.recordings.diarizer` says
 `apps/worker/speakers` is a small Rust executable, `opengeni-speakers`, that
 runs two open ONNX models through ONNX Runtime: pyannote segmentation 3.0
 (MIT) finds who speaks when inside 10 second windows, and 3D-Speaker CAM++
-trained on VoxCeleb (Apache-2.0) turns each window's speakers into voice
-vectors. Vectors are clustered with average linkage at a cosine distance of
-0.55, small clusters are folded into the nearest large one, and every frame
-takes the speakers its window found. The worker image ships the executable
+"common advanced" (Apache-2.0), trained on about 200,000 speakers, turns each
+window's speakers into voice vectors: a fingerprint of the voice itself,
+independent of what is said. Vectors are clustered with average linkage at
+a cosine distance of 0.55, small clusters are folded into the nearest large
+one, and every frame takes the speakers its window found. The worker image
+ships the executable
 in `/opt/opengeni/speakers` with both models and their licenses, pinned by
 checksum. Elsewhere, set `OPENGENI_RECORDING_SPEAKERS_BINARY_PATH` and
 `OPENGENI_RECORDING_SPEAKER_MODELS_DIR`; without them only the model's own
@@ -655,6 +695,29 @@ collar and overlapping speech included), the diarization error rate is
 about 18 percent, which is in the same range as pyannote 3.1. It uses about
 3 CPU minutes per hour of audio, so an hour of meeting takes about 30
 seconds on 8 cores.
+
+The voice model was chosen on real Norwegian meetings recorded on a phone
+and a laptop, with ElevenLabs Scribe v2 and MAI-Transcribe-2 diarization as
+the reference where both agree. Over about 45,000 pairs of 1.5 to 6 second
+speech pieces from four meetings, the equal error rate (how often the same
+voice and two different voices can't be told apart) was:
+
+| Voice model | Equal error rate |
+|---|---|
+| 3D-Speaker CAM++ common advanced (Chinese and English, 200k speakers) | 12 % |
+| 3D-Speaker ERes2NetV2 common (Chinese, 200k speakers) | 14 % |
+| 3D-Speaker CAM++ VoxCeleb (the earlier model) | 22 % |
+| 3D-Speaker ERes2Net VoxCeleb | 24 % |
+| WeSpeaker ResNet34, ResNet293 and CAM++ (VoxCeleb) | 20 to 29 % |
+
+Models trained only on VoxCeleb, celebrity interviews, generalize worse to a
+phone in the middle of a table than models trained on many more speakers
+and recording conditions. Speaker attribution of the words in those meetings
+went from 15.8 to 12.4 percent wrong, and the meeting with three people no
+longer gets a fourth. On AMI the two models score the same (16.4 percent
+either way over eight meetings), and voices across meetings stay as
+distinct (the same person 0.83 median, different people at most 0.46).
+NeMo TitaNet takes other features and is not supported.
 
 It runs on 4 threads unless the worker sets `threads` (fewer on a smaller
 machine). More threads finish little sooner but cost much more: a
@@ -1147,7 +1210,7 @@ this; their `language` option (and `ComposerTranscriptionControl`'s
 `useVoiceInput`'s `keyterms` the words it listens for. Taking
 the text deletes the dictation first and inserts the text only
 if that delete succeeded or couldn't reach the server, so two tabs never
-insert the same speech twice. Cancel or Escape deletes the dictation, while
+insert the same speech twice. Cancel deletes the dictation, while
 it records or while it is being heard, so nothing offers it again; a host
 that keeps speech (the desktop app) gets its copy first, through `onAudio`
 with `cancelled: true`, when it is longer than three seconds. Something
@@ -1181,7 +1244,14 @@ only in the app's recent dictations. The pieces:
 - The person can list a vocabulary (names and terms, one per line) that
   every dictation listens for, and set two more shortcuts: one that
   transcribes the last dictation again and types it, and one that cancels
-  the dictation in progress (Escape always does).
+  the dictation in progress, as the window's Cancel button does. Escape is
+  left to the app the person is typing in.
+- Each shortcut can also pick its own model from the workspace's
+  `voiceInput.models` (client config). A dictation recording may name a
+  `providerId` and `model` in its `transcription`; the server accepts only a
+  model it offers for dictation, and that dictation is heard by exactly
+  that model, with no fallback to another provider. A dictation that names
+  none uses the workspace's voice input provider, as before.
 - The last 50 dictations are kept on the computer, each with its text and
   its speech (up to 32 MB each, readable only by the person). From the
   settings page the person can copy a text, play its speech, or transcribe

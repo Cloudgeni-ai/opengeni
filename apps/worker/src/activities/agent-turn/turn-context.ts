@@ -16,6 +16,7 @@ import type {
 } from "@opengeni/contracts";
 import type {
   EstablishedSandboxSession,
+  InputWaitGuardResult,
   InputWaitRequest,
   InteractionRequestTargetReader,
   OpenGeniRuntime,
@@ -118,13 +119,20 @@ export type BillingState = {
   countsTowardTokenCap: boolean;
   /** The turn's frozen funding origin: API work spends credits only. */
   billingOrigin?: BillingOrigin;
-  /** Served by the person's own key or subscription: pays the platform fee. */
+  /** Served by the person's own API key: pays the platform fee. */
   isByokTurn?: boolean;
+  /** Served by the person's own subscription: no fee, needs a paid plan. */
+  isOwnSubscriptionTurn?: boolean;
 };
 
 export type SandboxRuntimeState = {
   resolvedSandbox: ResumedTurnSandbox | null;
   attemptWritersDrained: boolean;
+  /** The command fence the attempt writer drain cancelled and quiesced. Set
+   * together with `attemptWritersDrained`; a cancelled fence also refuses
+   * every later command, so a workspace mutation that writes only through it
+   * can no longer write once this is set. */
+  drainedCommandFence: TurnToolCancellationFence | null;
   lateSandboxesAwaitingWriterDrain: Set<ResumedTurnSandbox>;
   machinePrimarySession: SelfhostedSession | null;
   lazyOwnedSandbox: EstablishedSandboxSession | null;
@@ -189,7 +197,7 @@ export type EventingState = {
   turnStartedPublished: boolean;
   stream: Awaited<ReturnType<OpenGeniRuntime["runStream"]>> | undefined;
   /** Set by the stream attempt: refuses a wait that would leave a person unanswered. */
-  inputWaitReplyGuard: ((request: InputWaitRequest) => Promise<string | null>) | null;
+  inputWaitReplyGuard: ((request: InputWaitRequest) => Promise<InputWaitGuardResult>) | null;
   /** Reads the target an interaction_request_human pause names, as it is now. */
   interactionRequestTargetReader: InteractionRequestTargetReader | null;
   modelRunSettings: Settings;
@@ -206,6 +214,12 @@ export type EventingState = {
    * same.
    */
   appActionApprovalCards: Map<string, AppActionApprovalCard>;
+  /**
+   * Finished-command text appended to tool results for the model and not yet
+   * matched to its result event; the timeline shows each tool's own output.
+   * Absent means nothing was appended.
+   */
+  commandCompletionNotices?: Set<string> | undefined;
 };
 
 /** Rig telemetry: set once the session loads; empty string for a rig-less
@@ -348,6 +362,7 @@ export function createTurnContext(input: {
     sandboxState: {
       resolvedSandbox: null,
       attemptWritersDrained: false,
+      drainedCommandFence: null,
       lateSandboxesAwaitingWriterDrain: new Set(),
       machinePrimarySession: null,
       lazyOwnedSandbox: null,
@@ -405,6 +420,7 @@ export function createTurnContext(input: {
       companyBrainContextContributions: null,
       modelVisibleSkillIds: null,
       appActionApprovalCards: new Map(),
+      commandCompletionNotices: new Set(),
     },
     workspaceRefs: {
       rigId: "",

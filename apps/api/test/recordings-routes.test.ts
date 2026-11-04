@@ -646,6 +646,111 @@ describe("recording routes", () => {
     expect(asked).toHaveLength(2);
   });
 
+  test("upcoming meetings: the caller's own calendar, with join links; a chosen event names the meeting", async () => {
+    const soon = new Date(Date.now() + 60_000);
+    const later = new Date(Date.now() + 31 * 60_000);
+    const asked: string[] = [];
+    const scope = await fixture({
+      settings: { googleCalendarEnabled: true },
+      meetingCalendarFetch: (async (input: RequestInfo | URL) => {
+        const url = new URL(String(input));
+        asked.push(url.searchParams.get("fields") ?? "");
+        return Response.json({
+          items: [
+            {
+              id: "evt-sync",
+              summary: "Weekly sync",
+              hangoutLink: "https://meet.google.com/abc-defg-hij",
+              start: { dateTime: soon.toISOString() },
+              end: { dateTime: later.toISOString() },
+            },
+            {
+              id: "evt-now",
+              summary: "Running over",
+              start: { dateTime: new Date(Date.now() - 30 * 60_000).toISOString() },
+              end: { dateTime: new Date(Date.now() + 5 * 60_000).toISOString() },
+            },
+            {
+              id: "evt-room",
+              summary: "Lunch in the canteen",
+              start: { dateTime: soon.toISOString() },
+              end: { dateTime: later.toISOString() },
+            },
+          ],
+        });
+      }) as typeof fetch,
+    });
+    // No calendar yet.
+    expect(await scope.owner.call("GET", "/upcoming-meetings")).toEqual({
+      status: 200,
+      body: { calendar: "none", complete: true, meetings: [] },
+    });
+    expect(asked).toHaveLength(0);
+    await createConnection(db.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      subjectId: scope.owner.subjectId,
+      providerDomain: "calendarmcp.googleapis.com",
+      kind: "oauth2",
+      credentialEncrypted: encryptEnvironmentValue(
+        encryptionKey,
+        JSON.stringify({ access_token: "calendar-token", token_type: "Bearer" }),
+      ),
+      metadata: { mcpUrl: "https://calendarmcp.googleapis.com/mcp/v1" },
+      createdBySubjectId: scope.owner.subjectId,
+    });
+    const upcoming = await scope.owner.call("GET", "/upcoming-meetings");
+    expect(upcoming).toMatchObject({
+      status: 200,
+      body: {
+        calendar: "connected",
+        complete: true,
+        meetings: [
+          {
+            id: "evt-sync",
+            provider: "google",
+            title: "Weekly sync",
+            joinUrl: "https://meet.google.com/abc-defg-hij",
+            service: "Google Meet",
+            private: false,
+            unanswered: false,
+          },
+        ],
+      },
+    });
+    expect(upcoming.body.meetings).toHaveLength(1);
+    expect(asked.at(-1)).toContain("hangoutLink");
+    // Someone else in the workspace never sees the owner's calendar.
+    expect(await scope.other.call("GET", "/upcoming-meetings")).toMatchObject({
+      status: 200,
+      body: { calendar: "none", meetings: [] },
+    });
+    // Joined from the reminder: named after that event, not the one running over.
+    const recordingId = crypto.randomUUID();
+    const created = await scope.owner.call("POST", "/recordings", {
+      recordingId,
+      title: "Google Meet",
+      titleSource: "app",
+      calendarEvent: { provider: "google", id: "evt-sync" },
+      tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+    });
+    expect(created.status).toBe(201);
+    expect(created.body.recording ?? created.body).toMatchObject({
+      title: "Weekly sync",
+      titleSource: "calendar",
+      metadata: { calendarEvent: { provider: "google", id: "evt-sync" } },
+    });
+    expect(
+      (
+        await scope.owner.call("POST", "/recordings", {
+          recordingId: crypto.randomUUID(),
+          calendarEvent: { provider: "yahoo", id: "x" },
+          tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+        })
+      ).status,
+    ).toBe(400);
+  });
+
   test("a meeting whose calendar can't be read still starts, named for when it began", async () => {
     const scope = await fixture({
       settings: { googleCalendarEnabled: true },
@@ -734,13 +839,14 @@ describe("recording routes", () => {
         })
       ).status,
     ).toBe(400);
+    // A dictation may name its model, but not how speakers are told apart.
     expect(
       (
         await scope.owner.call("POST", "/recordings", {
           recordingId: crypto.randomUUID(),
           purpose: "dictation",
           tracks: mic,
-          transcription: { providerId: "elevenlabs", model: "scribe_v2" },
+          transcription: { providerId: "elevenlabs", model: "scribe_v2", diarizer: "ours" },
         })
       ).status,
     ).toBe(400);
@@ -907,6 +1013,81 @@ describe("recording routes", () => {
       language: "en",
       keyterms: ["Kubernetes"],
     });
+  });
+
+  test("a dictation that names its provider and model is heard by exactly that one", async () => {
+    let ready = ["openai"];
+    const transcription: TranscriptionService = {
+      limits: () => ({ maxDurationSeconds: 600, maxSizeBytes: 25_000_000, acceptedMimeTypes: [] }),
+      available: () => true,
+      availableProviderIds: async () => ready,
+      // The workspace's voice input would pick another provider.
+      selectProvider: () => "elevenlabs",
+      transcribe: async () => {
+        throw new Error("the worker transcribes dictations");
+      },
+    };
+    const scope = await fixture({ transcription });
+    await shared.admin`
+      update workspaces set settings = settings || '{"voiceInput":{"enabled":true}}'::jsonb
+      where id = ${scope.workspaceId}`;
+    const mic = [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm;codecs=opus" }];
+    const create = (transcriptionRequest: Record<string, unknown>) =>
+      scope.owner.call("POST", "/recordings", {
+        recordingId: crypto.randomUUID(),
+        purpose: "dictation",
+        tracks: mic,
+        transcription: transcriptionRequest,
+      });
+    // A model the deployment doesn't offer for dictation, or one without its provider.
+    expect((await create({ providerId: "openai", model: "no-such-model" })).status).toBe(400);
+    expect((await create({ model: "gpt-transcribe" })).status).toBe(400);
+    // Speakers and the like are still the workspace's to choose.
+    expect((await create({ providerId: "openai", speakers: 2 })).status).toBe(400);
+    const finalize = async (transcriptionRequest: Record<string, unknown>) => {
+      const created = await create(transcriptionRequest);
+      expect(created.status).toBe(201);
+      const recordingId = created.body.id as string;
+      const bytes = new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 1, 2, 3]);
+      const uploads = await scope.owner.call("POST", `/recordings/${recordingId}/uploads`, {
+        trackNumber: 0,
+        chunks: [
+          {
+            chunkNumber: 0,
+            byteLength: bytes.byteLength,
+            sha256: sha(bytes),
+            startMilliseconds: 0,
+            durationMilliseconds: 2_000,
+          },
+        ],
+      });
+      scope.objects.set(new URL(uploads.body.uploads[0].url).pathname.slice(1), bytes);
+      await scope.owner.call("POST", `/recordings/${recordingId}/chunks/complete`, {
+        trackNumber: 0,
+        chunkNumbers: [0],
+      });
+      const finalized = await scope.owner.call("POST", `/recordings/${recordingId}/finalize`, {
+        tracks: [{ trackNumber: 0, chunkCount: 1 }],
+      });
+      const versions = await shared.admin`
+        select provider_id, model, options from recording_transcript_versions
+        where recording_id = ${recordingId}`;
+      return { status: finalized.status, versions };
+    };
+    const named = await finalize({ providerId: "openai", model: "gpt-transcribe", language: "en" });
+    expect(named.status).toBe(200);
+    expect(named.versions).toEqual([
+      { provider_id: "openai", model: "gpt-transcribe", options: { language: "en" } },
+    ]);
+    // Naming only the provider takes its dictation model.
+    expect((await finalize({ providerId: "openai" })).versions).toMatchObject([
+      { provider_id: "openai", model: "gpt-transcribe" },
+    ]);
+    // Its provider isn't ready: refused rather than heard by another.
+    ready = [];
+    const refused = await finalize({ providerId: "openai", model: "gpt-transcribe" });
+    expect(refused.status).toBe(503);
+    expect(refused.versions).toEqual([]);
   });
 
   test("the workspace's meeting language, unless a recording names one or asks to detect", async () => {

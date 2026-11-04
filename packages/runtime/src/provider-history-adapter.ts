@@ -34,7 +34,8 @@ export type ProviderHistoryOptions = {
   searchRecordForm?: SearchRecordForm;
 };
 
-const CHAT_FUNCTION_NAME = /^[a-zA-Z0-9_-]+$/;
+/** The one tool-name format every Chat route and gateway accepts. */
+const CHAT_FUNCTION_NAME = /^[a-zA-Z0-9_-]{1,64}$/;
 const HISTORICAL_FACT_MAX_CHARS = 32_000;
 
 /** Marks a request-local item that declares tools newly available to the model. */
@@ -337,6 +338,11 @@ export function projectHistoryForProvider(
     }),
   );
   const input = projected.every((item, index) => item === items[index]) ? items : projected;
+  // Tool names a provider would reject are made valid on the wire by the
+  // outbound guard (provider-request-tool-names.ts), one alias per name in
+  // every position. Chat keeps its own treatment of history: a call with an
+  // invalid name replays as a historical fact (isChatIncompatibleCall) rather
+  // than as a native call to a tool the request never declares.
   return projectWireHistory(withWireValidFunctionCallArguments(input), providerApi, options);
 }
 

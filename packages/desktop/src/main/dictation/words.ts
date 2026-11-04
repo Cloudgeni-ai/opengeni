@@ -11,7 +11,7 @@ export interface DictationWords {
   transcribing: string;
   /** The button that finishes a dictation and types the text. */
   finish: string;
-  /** The button that cancels a dictation; Escape does the same. */
+  /** The button that cancels a dictation. */
   cancel: string;
   /** The button that closes a message. */
   close: string;
@@ -44,7 +44,7 @@ export const ENGLISH_DICTATION_WORDS: DictationWords = {
   starting: "Starting…",
   transcribing: "Transcribing…",
   finish: "Finish and type it",
-  cancel: "Cancel (Esc)",
+  cancel: "Cancel",
   close: "Close",
   retry: "Try again",
   allow: "Allow",

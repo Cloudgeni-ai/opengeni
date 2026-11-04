@@ -1,5 +1,157 @@
 # @opengeni/runtime
 
+## 6.8.0
+
+### Patch Changes
+
+- 15606f6: A turn working on a Connected Machine no longer keeps sending commands to that machine after the chat is moved to its own managed box mid-turn. Every later tool call used to fail with a raw database query error, because the machine's per-operation authority (correctly) refuses a machine that is no longer the chat's active sandbox. The turn now hands off typed to the chat's managed box and continues there in a fresh attempt, as chats that started on a managed box already did. When a Connected Machine authority check is refused, the worker now logs the database's SQLSTATE, its raised reason and the refusing function, so the next such failure is diagnosable from logs. The tool result text the model sees is unchanged.
+- 3cd5677: Turns no longer fail because a provider rejects a tool name. Just before each model request is sent (OpenAI Responses including the Codex websocket, Chat Completions and gateways, and Anthropic Messages), every tool name in the request is checked: valid names are sent unchanged, and any other name gets a stable alias used consistently across the tools list, tool choice and history. Calls to an alias are mapped back to the original tool. If a provider still rejects a tool name, the request is resent once with portable names, and later requests to that model alias the rejected name straight away. New metrics count these repairs and resends.
+- Updated dependencies [58b04d1]
+- Updated dependencies [feaecf8]
+  - @opengeni/contracts@6.8.0
+  - @opengeni/sdk@6.8.0
+  - @opengeni/codex@6.8.0
+  - @opengeni/capabilities@6.8.0
+  - @opengeni/codemode@6.8.0
+  - @opengeni/config@6.8.0
+  - @opengeni/interaction@6.8.0
+  - @opengeni/observability@6.8.0
+  - @opengeni/tool-gateway@6.8.0
+  - @opengeni/vaults@6.8.0
+  - @opengeni/agent-proto@6.8.0
+  - @opengeni/decisions@6.8.0
+  - @opengeni/network@6.8.0
+  - @opengeni/xai-subscription@6.8.0
+
+## 6.7.0
+
+### Patch Changes
+
+- c08233e: Background commands that finish while the agent is working now report themselves. Their exit status and the start and end of their output follow the agent's next plain-text tool result (including `apply_patch` edits), and are recorded as read exactly like a terminal `command_read`, so the same result is never delivered again. The agent no longer spends a `command_read` only to learn that a command finished. The `background_command_result` input that wakes a waiting session, or reaches its next turn, now carries the same bounded output, so that turn needs no extra read either. Earlier history never changes, JSON and image tool results are left as they were, and results not delivered during a turn still arrive as ordinary input. The timeline keeps showing each tool's own output. Results only use the room a tool's own output leaves in the model's tool-output budget, and are masked for known secret values. `OPENGENI_EXPERIMENT_CUT_POLLING=false` turns the in-turn delivery off, along with the prompt sentence that tells the agent not to poll.
+- 6659742: Agents receive less fixed guidance on every model call: the Codemode guidance is shorter, Knowledge and instruction-saving guidance is left out when that learning is Off for the chat, and how to work with an open browser now comes with the browser_open result instead of its description.
+- 6659742: Sessions that cannot create child sessions (their nesting depth has reached its maximum) no longer receive delegation and child-integration guidance in their instructions, about 470 fewer prompt tokens on every model call. The bundled projects Skill is listed only when the session has the project tools.
+- a064a2a: Publishing a sandbox file larger than about 25 MB works on Modal sandboxes again. The upload asks to wait many minutes, but one Modal output read accepts at most 50 seconds, so the read was refused at once and the publish failed as "completion is pending or unknown". A longer wait is now split into bounded reads until the command exits.
+- 4a7da4c: A chat no longer stops with "Invalid 'input[N].tools[M].name': string does not match pattern" after a saved secret's value happens to appear inside a tool name. Secret masking now leaves tool names alone, and tool names already stored in a chat's history in a form a provider rejects (a masked reference, a dotted `server.tool` name, or any other name outside letters, digits, `_` and `-` up to 64 characters) are mapped back to the tool they denote, or to a stable valid alias, when the history is sent again. This applies to every provider: OpenAI and Codex, Chat Completions routes and gateways, and Claude. Retry works on a chat that already failed. Provider invalid-request errors are now counted by the request path they name (`opengeni_model_invalid_requests_total`, monitoring only) and shown on the Runtime Failures dashboard.
+- Updated dependencies [c08233e]
+- Updated dependencies [cb37e4d]
+- Updated dependencies [0d04cf4]
+- Updated dependencies [57237db]
+- Updated dependencies [cf35731]
+- Updated dependencies [4a7da4c]
+  - @opengeni/contracts@6.7.0
+  - @opengeni/sdk@6.7.0
+  - @opengeni/capabilities@6.7.0
+  - @opengeni/codemode@6.7.0
+  - @opengeni/codex@6.7.0
+  - @opengeni/config@6.7.0
+  - @opengeni/interaction@6.7.0
+  - @opengeni/observability@6.7.0
+  - @opengeni/tool-gateway@6.7.0
+  - @opengeni/vaults@6.7.0
+  - @opengeni/agent-proto@6.7.0
+  - @opengeni/decisions@6.7.0
+  - @opengeni/network@6.7.0
+  - @opengeni/xai-subscription@6.7.0
+
+## 6.6.0
+
+### Patch Changes
+
+- 01b3fcd: An invalid action inside a browser or Desktop batch is now reported at its own field (for example `action.actions.1.deltaX`) instead of claiming the batch's `type`, `actions` and `fenceEachAction` fields are wrong.
+- 3d82830: Claude Opus 5.5 and Sonnet 5.5 ask for summarized thinking again, so their reasoning shows in the chat timeline instead of only occasional progress notes. A progress note is still told apart from reasoning, by the marker in its signature.
+- 074f212: On a Connected Machine, a shell command now waits up to 60 seconds for its exit in the same `exec_command` call, the same finish floor as a managed sandbox (it was 30 seconds), so commands that take between 30 seconds and a minute no longer need a `command_read` afterwards. A Steer no longer waits for that window to end: after a one-second grace the running command returns its background handle, keeps running and reports its result when it finishes. The `yield_time_ms` description no longer mentions a 30-second Connected Machine limit. Pause and cancel still stop it at once. With `OPENGENI_EXPERIMENT_CUT_POLLING=false` the Connected Machine wait stays capped at 30 seconds.
+- 58a7f9f: A chat with a personal GitHub repository attached can now also use repositories whose URL starts with the same name, such as `opengeni` together with `opengeni-demos`. Before, the personal GitHub rewrite also caught the other repository, and repository preparation failed with "Git repository route not found". The `.git` clone URL of a personal GitHub repository now also goes through the broker.
+- 09bc485: An agent can now finish a goal and answer in one step: `goal_complete` takes an optional `reply`, and once the completion succeeds that reply ends the turn as its final answer, shown exactly as written. A session created through the API with `unattended: true` and a first message now gets a goal to complete that message unless the request names a goal. Like any goal, it makes the run continue when the agent stops without completing or pausing it, within the deployment's continuation and budget limits, so such runs can take more turns than before; pass `goal: null` to create one without a goal, as before. A keyed retry of such an unattended create now returns the original session instead of a conflict. A task that seems infeasible, missing data or a result the agent cannot verify is no longer by itself a reason to pause a goal: the agent tries the plausible alternatives first and, if it still pauses, names them in the rationale. The goal tools' and `wait_for_input`'s descriptions are shorter.
+- 538a433: A locator written as `role:button:Save` now finds the button named Save, the same as `button:Save`, instead of looking for a role called "role".
+- 4930632: When no sandbox can be created or woken because the sandbox fleet has no free capacity (compute's "no host can take it now", or E2B's typed busy error), the turn no longer reports the chat model or its provider as unavailable. It now records `sandbox_capacity_unavailable`, shows "No sandbox capacity is available right now" while the same turn retries about once a minute, and says so again if the retries run out. Other retryable sandbox control service failures record `sandbox_service_unavailable`; refusals that retrying cannot fix record `sandbox_service_refused` and stop. A capacity failure inside a tool call, which previously stopped the turn with raw error text, now retries the same way, unless an uncertain sandbox action in the same failure forbids a replay. Other sandbox provider SDK failures that read as a model provider outage are relabelled as the sandbox service. The person-facing text for these failures never includes the sandbox service's raw message.
+- 5a26902: Agents working in a sandbox or on a Connected Machine now check a change to something already running on the running system: the base sandbox instructions say to restart or reload the process that actually serves a change to a service, worker or scheduled job, exercise the real entry point and check what the user asked about, because unit tests alone do not show it works. They ask first only when a restart could disrupt others or lose work in progress. The same instructions now keep the agent's own scratch work out of the user's project: throwaway scripts and tests, and browsers, runtimes or libraries installed only for its own checks, go in a temporary directory outside the project and are removed when done, while tests the user asked for or the project expects still belong in it. Both are one clause appended to an existing line of the sandbox preamble (about 122 tokens), so sessions without a sandbox are unchanged. When the built-in browser cannot start because a machine has no Chrome or Chromium, its error now says to install one system-wide in its standard location, where the browser tool finds it, and not to install a browser or its libraries inside a project folder; when the executable it was set up to use has vanished, the error names that path.
+- c0ba1cc: Opengeni now refuses to build a sandbox on the worker or API host (`local` or `docker`) when that is not the deployment's configured default, for existing sessions too. Creating such sessions is already rejected, but sessions stored before that check, and shared-box children inheriting a parent's backend, could still name one. A turn on such a session now fails before any box, repository clone, setup, Rig or hydration hook or credential is prepared, with the terminal, non-retryable code `sandbox_backend_not_served` and a message telling the person to start a new chat. Terminal, files, browser, computer and viewer requests for it get a 409 with the same message. The deployment default is kept in `Settings.deploymentSandboxBackend`, which per-session settings rebinds preserve, so the sandbox client builder applies the same rule to every other caller, whatever is installed on the host. Remote providers and the default backend are unchanged.
+- Updated dependencies [3d82830]
+- Updated dependencies [fb49abf]
+- Updated dependencies [2c76a2a]
+- Updated dependencies [09bc485]
+- Updated dependencies [2e72a00]
+- Updated dependencies [029497c]
+- Updated dependencies [3cb05f9]
+- Updated dependencies [c0ba1cc]
+  - @opengeni/config@6.6.0
+  - @opengeni/sdk@6.6.0
+  - @opengeni/contracts@6.6.0
+  - @opengeni/codemode@6.6.0
+  - @opengeni/capabilities@6.6.0
+  - @opengeni/codex@6.6.0
+  - @opengeni/interaction@6.6.0
+  - @opengeni/observability@6.6.0
+  - @opengeni/tool-gateway@6.6.0
+  - @opengeni/vaults@6.6.0
+  - @opengeni/agent-proto@6.6.0
+  - @opengeni/decisions@6.6.0
+  - @opengeni/network@6.6.0
+  - @opengeni/xai-subscription@6.6.0
+
+## 6.5.1
+
+### Minor Changes
+
+- 564efe9: A deployment can choose how long the disk of each new compute sandbox is with `OPENGENI_COMPUTE_DISK_MIB`; unset, a sandbox keeps its image's length as before.
+- 3f9ef93: The agent knows both GitHub identities, and the GitHub sheet names them. `github_connect_link` adds a `personal` field for the person's own account ("Your GitHub"): `{ enabled, connected, status, login, repositoryCount, connectUrl, manageUrl }`, with links only for `connections:write` and no token; the App fields are unchanged. `capability_catalog_search` offers a new `api:github-personal` capability ("Your GitHub") when personal OAuth is enabled, and `capability_authorization_request` posts its in-chat card (connect, then choose repos). Agent guidance maps "connect my GitHub" or "do it as me" to Your GitHub and "install the GitHub app" to the Opengeni app. The repositories prompt lists each mounted GitHub repository's identity (as the person, with their login, or as the Opengeni app) and says that `gh` and raw API calls do not act as the person. The GitHub sheet shows two sections, "Your GitHub" and "Opengeni app", each with one action; the header's "Connect another account" is gone, and the repository chooser opens right after connecting. New exports: `PERSONAL_GITHUB_CAPABILITY_ID`, `PERSONAL_GITHUB_SETUP_QUERY_VALUE` and `personalGitHubSetupPath` in `@opengeni/contracts/personal-github`; `AgentPromptRepositoryIdentity`, `repositoryIdentitiesFor` and the `personalGitHubLogin` build option in `@opengeni/runtime`; and `IntegrationSection` with `IntegrationViewModel.sections` in `@opengeni/react`.
+
+### Patch Changes
+
+- b1f7c2c: A shell command without a TTY now waits at least 60 seconds for its exit in the same `exec_command` call (up to the 30-second ceiling on a Connected Machine), even when the model asks for a shorter wait, and still returns the moment it finishes. Tests, builds and linters that used to be pushed to the background after a second, and then polled with `command_read`, now return their result in one call. Commands that should keep running in the background, such as servers, watchers and deliberate parallel runs, pass the new optional `background: true` argument (or use a TTY) to keep the requested short wait. Longer commands still continue in the background and wake the session when they finish. A requested wait above 30 seconds keeps its ordinary quiet-output return. On a Connected Machine, a Steer during a floored wait takes effect when the wait ends; Pause and cancel still stop it at once. The floor applies only where the `exec_command` schema offers `background`, so `OPENGENI_EXPERIMENT_CUT_POLLING=false` or `OPENGENI_EXPERIMENT_OUTPUT_COST=false` turns it off.
+- f1998df: Background-command reads take fewer calls and fewer tokens. `command_read` now waits for a running command to finish (30 seconds by default; pass `waitSeconds: 0` to read at once), and both `command_read` and `command_wait` return when the command finishes or the wait ends, not on each new line of output. `command_wait` can wait on up to eight commands at once with `commandIds` and `waitFor: "all"` or `"any"`. A read without a cursor whose output is larger than the byte budget now returns its start and its end, with the approximate size of the omitted middle and a cursor to read it, instead of only the first page; a read with a cursor pages on from there, so `nextCursor` still pages through every byte, and the new `endCursor` reads only newer output. The model sees these results as plain text (state, exit code and output); Codemode and other programmatic callers keep the structured result.
+- ab9d32d: Drain completed tool events before context compaction so successful tools do not remain unfinished in the chat timeline.
+- 6bdd4d0: Opengeni's own tools get four minutes per call instead of the MCP client's 60-second default. Publishing a large file could take longer than a minute; the client gave up with "Request timed out" while the API went on to publish it, so the agent was left unsure whether the file existed. A server's explicit setup timeout now bounds its setup on its own, so the longer call bound never stretches setup against an unreachable server.
+- 89eabf0: Bound concurrent per-file Git capture reads and stop queued reads after failure or cancellation. Avoid recounting the background-command backlog during each command settlement, keeping large backlogs from blocking session control.
+- 02e68d1: Signed-out guests of a public Site can now open the Site's shared files. Before, every guest file request was refused, so a public Site that kept its images or video in Site files showed without them to signed-out visitors. Guests now list and open files with scope `shared` only: private files stay hidden (opening one returns not found), and uploading, deleting and the quota check stay refused for guests. Existing per-visitor and per-address limits still apply. Signed-in viewers still see shared files plus their own, and managers see every file. The Site runtime API docs, the Sites skill and the `site_files_upload` tool description now say the same.
+- 8a5a03a: Keep slow cleanup of retained local and Docker command history from blocking new commands or causing supervisor timeouts.
+- ebfd447: A value that JSON cannot carry (a symbol key, a function, a bigint, a cycle, a class instance such as a Response, Headers, AbortSignal or Error) no longer fails a turn where it is stored or sent. Every protocol JSON boundary (history, tool receipts, run events, approvals, MCP results and custom data, the sandbox envelope) and the database's canonical JSON encoder now convert or drop such a value as `JSON.stringify` would and log the paths and kinds they changed, never the values. A `JSON.stringify` refusal from any other serializer ends the turn with the same clear, recoverable failure instead of stopping the chat.
+- 1aa4b2d: When a protocol JSON boundary refuses a value a turn prepared (such as "Protocol JSON value at $ cannot contain symbol keys"), the turn now ends with a clear message and the chat takes the next message, instead of the chat stopping with a Retry that fails the same way. A goal does not keep continuing into the same refusal, and a turn whose completed work cannot be saved still stops the chat. As hardening, the history identity check also leaves out request-local marks below the top level of an item.
+- 6099e32: Read large Git review results from one verified temporary capture instead of rerunning the complete Git command for every transport chunk. Preserve bounded output transport, complete branch diffs, and checksum verification, and clean up each capture after reading.
+- Updated dependencies [7de2adf]
+- Updated dependencies [f1998df]
+- Updated dependencies [564efe9]
+- Updated dependencies [6bdd4d0]
+- Updated dependencies [3f9ef93]
+- Updated dependencies [ebfd447]
+- Updated dependencies [7a9c492]
+- Updated dependencies [468e8c3]
+- Updated dependencies [e4484f1]
+- Updated dependencies [7f3d037]
+- Updated dependencies [f4f82c0]
+- Updated dependencies [317fb4d]
+- Updated dependencies [033cd63]
+- Updated dependencies [b18bd6c]
+- Updated dependencies [83ccc2b]
+- Updated dependencies [da9b7e5]
+- Updated dependencies [0f7f559]
+- Updated dependencies [0f7f559]
+- Updated dependencies [de8fc61]
+- Updated dependencies [dd7759c]
+- Updated dependencies [70c726c]
+- Updated dependencies [707c444]
+- Updated dependencies [4682263]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [abb4af1]
+- Updated dependencies [86e35f1]
+- Updated dependencies [0f7f559]
+  - @opengeni/capabilities@6.5.0
+  - @opengeni/contracts@6.5.0
+  - @opengeni/config@6.5.0
+  - @opengeni/sdk@6.5.0
+  - @opengeni/codemode@6.5.0
+  - @opengeni/codex@6.5.0
+  - @opengeni/interaction@6.5.0
+  - @opengeni/observability@6.5.0
+  - @opengeni/tool-gateway@6.5.0
+  - @opengeni/vaults@6.5.0
+  - @opengeni/agent-proto@6.5.0
+  - @opengeni/decisions@6.5.0
+  - @opengeni/network@6.5.0
+  - @opengeni/xai-subscription@6.5.0
+
 ## 6.4.0
 
 ### Minor Changes

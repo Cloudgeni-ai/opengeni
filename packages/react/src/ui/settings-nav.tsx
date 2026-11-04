@@ -22,8 +22,11 @@ import { cn } from "../lib/cn";
  * 44px target.
  *
  * SettingsNav variants:
- * - `rail`: the 240px settings rail that replaces the main rail in settings
- *   mode (back link and scope switcher as header). This is what the app uses.
+ * - `rail`: the settings rail that replaces the main rail in settings mode
+ *   (back link and scope switcher as header). It paints no background: it sits
+ *   on the rail's surface (the app's shared sidebar surface), so in the macOS
+ *   app the window's sidebar glass shows through as it does on the main rail.
+ *   The app sizes it to the main rail's column.
  * - `column` (default): a 200px column inside the content area, kept for the
  *   kit's history.
  */
@@ -265,7 +268,7 @@ export const SettingsNav = /* @__PURE__ */ forwardRef<HTMLElement, SettingsNavPr
         data-variant={variant}
         className={cn(
           "flex min-h-0 min-w-0 flex-col",
-          rail ? "w-60 shrink-0 border-r border-border bg-bg px-3 py-3" : "w-[200px] shrink-0",
+          rail ? "w-60 shrink-0 border-r border-border px-3 py-3" : "w-[200px] shrink-0",
           className,
         )}
         ref={ref}

@@ -1286,6 +1286,7 @@ impl Lab {
             guard_freezes: None,
             observer: compute_host::observe::Observer::default(),
             summary_every: HostConfig::SUMMARY_EVERY,
+            recovery_retry: Duration::from_millis(100),
             agent_link: None,
             processor_share: None,
             prepare: None,

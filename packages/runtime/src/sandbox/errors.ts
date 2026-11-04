@@ -6,6 +6,7 @@
 // the SDK at create() time.
 
 import type { SandboxBackend } from "@opengeni/contracts";
+import { UNSERVED_HOST_SANDBOX_BACKEND_MESSAGE } from "@opengeni/config";
 
 export class SandboxConfigError extends Error {
   readonly backend: SandboxBackend | string;
@@ -14,6 +15,28 @@ export class SandboxConfigError extends Error {
     super(`[sandbox:${backend}] ${message}`);
     this.name = "SandboxConfigError";
     this.backend = backend;
+  }
+}
+
+export const SANDBOX_BACKEND_NOT_SERVED_CODE = "sandbox_backend_not_served";
+
+/**
+ * A box was about to be built on a host backend (`local`, `docker`) that this
+ * deployment does not serve: it is not the configured default. Building it
+ * would run the box as processes on the worker or API host, so nothing is
+ * constructed. A configuration failure: the same answer on every retry, so the
+ * turn fails terminally with this user-facing message.
+ */
+export class SandboxBackendNotServedError extends SandboxConfigError {
+  readonly code = SANDBOX_BACKEND_NOT_SERVED_CODE;
+  readonly deploymentBackend: SandboxBackend | string;
+
+  constructor(backend: SandboxBackend | string, deploymentBackend: SandboxBackend | string) {
+    super(backend, "");
+    this.name = "SandboxBackendNotServedError";
+    this.deploymentBackend = deploymentBackend;
+    // Plain words for the person; the backend IDs stay on the error fields.
+    this.message = UNSERVED_HOST_SANDBOX_BACKEND_MESSAGE;
   }
 }
 

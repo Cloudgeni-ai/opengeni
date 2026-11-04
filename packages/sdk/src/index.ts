@@ -429,6 +429,8 @@ export {
   OpenGeniStreamError,
   formatErrorMessage,
   isMaintenanceError,
+  isApprovalRequiresAccountOwnerError,
+  APPROVAL_REQUIRES_ACCOUNT_OWNER_CODE,
   isRetryableStreamError,
   OPENGENI_MAINTENANCE_ERROR_CODE,
 } from "./errors";
@@ -956,6 +958,7 @@ export type {
   CapabilityUnavailableReason,
   ClientConfig,
   ClientVoiceInputConfig,
+  DictationModelOption,
   ClientModel,
   CodexRealtimeVoice,
   CodexRealtimeWebrtcRequest,

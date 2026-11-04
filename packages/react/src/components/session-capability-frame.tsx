@@ -1,10 +1,9 @@
 import { CheckIcon, InfoIcon, ShieldCheckIcon, XIcon } from "lucide-react";
 import { Dialog } from "radix-ui";
 import { containedPortal } from "../ui/portal-container";
-import { useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useRef, useState, type ReactNode, type RefObject } from "react";
 import { usePortalTokenStyle } from "../lib/use-portal-token-style";
 import { useOpenGeniText } from "../messages/runtime";
-import { useTimelineAnswerFollow } from "./timeline-answer-follow";
 
 const DialogContainedPortal = containedPortal(Dialog.Portal);
 
@@ -100,46 +99,21 @@ export function SessionCapabilityFrame({
   const localCard = useRef<HTMLElement>(null);
   const buttonRef = opener ?? localOpener;
   const sectionRef = cardRef ?? localCard;
-  const rootRef = useRef<HTMLDivElement>(null);
   const portalStyle = usePortalTokenStyle(sectionRef.current);
-  // Finishing the card here is the person's answer and the agent continues
-  // from it: let the conversation follow that answer. Only a completion the
-  // person brought about in this card counts. A card that was already complete
-  // when it appeared, or whose saved completion loads after it appears while
-  // the person reads elsewhere, asks nothing.
-  const followAnswer = useTimelineAnswerFollow();
-  const wasComplete = useRef(complete);
-  const engaged = useRef(false);
-  useLayoutEffect(() => {
-    if (expanded || busy) engaged.current = true;
-  }, [expanded, busy]);
-  const engage = () => {
-    engaged.current = true;
-  };
-  useLayoutEffect(() => {
-    if (complete && !wasComplete.current && engaged.current && rootRef.current)
-      followAnswer?.(rootRef.current);
-    wasComplete.current = complete;
-  }, [complete, followAnswer]);
+  // A row without a better name is titled by its domain; never say it twice.
+  const shownSubtitle = subtitle.trim().toLowerCase() === name.trim().toLowerCase() ? "" : subtitle;
   const identity = (
     <>
       <Mark src={logo} name={name} />
       <div className="og-session-capability-identity">
         <h3>{name}</h3>
-        {subtitle ? <span>{subtitle}</span> : null}
+        {shownSubtitle ? <span>{shownSubtitle}</span> : null}
       </div>
       {badge ? <span className="og-session-capability-type">{badge}</span> : null}
     </>
   );
   return (
-    // React bubbles the setup dialog's portaled events here too.
-    <div
-      ref={rootRef}
-      className="og-session-capability"
-      onPointerDownCapture={engage}
-      onClickCapture={engage}
-      onKeyDownCapture={engage}
-    >
+    <div className="og-session-capability">
       <section
         hidden={dialogOnly}
         style={dialogOnly ? { display: "none" } : undefined}
@@ -237,7 +211,7 @@ export function SessionCapabilityFrame({
               <div>
                 <Dialog.Title>{name}</Dialog.Title>
                 <Dialog.Description>
-                  {[typeLabel, subtitle].filter(Boolean).join(" · ")}
+                  {[typeLabel, shownSubtitle].filter(Boolean).join(" · ")}
                 </Dialog.Description>
               </div>
               {!busy ? (

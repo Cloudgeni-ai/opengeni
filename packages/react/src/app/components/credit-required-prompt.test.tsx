@@ -162,7 +162,11 @@ describe("credit required prompt", () => {
     document.body.append(container);
     root = createRoot(container);
     const render = async (
-      refusalCode: "byok_upgrade_required" | "byok_paid_credit_required" | "api_credits_required",
+      refusalCode:
+        | "byok_upgrade_required"
+        | "subscription_upgrade_required"
+        | "byok_paid_credit_required"
+        | "api_credits_required",
       billingClient: object = client,
     ) =>
       act(async () =>
@@ -180,6 +184,13 @@ describe("credit required prompt", () => {
       );
     await render("byok_upgrade_required");
     expect(container.querySelector("h2")!.textContent).toBe("Upgrade to Pro to use your own key");
+    expect([...container.querySelectorAll("a, button")].map((node) => node.textContent)).toEqual([
+      "Upgrade to Pro",
+    ]);
+    await render("subscription_upgrade_required");
+    expect(container.querySelector("h2")!.textContent).toBe(
+      "Upgrade to Pro to use your own subscription",
+    );
     expect([...container.querySelectorAll("a, button")].map((node) => node.textContent)).toEqual([
       "Upgrade to Pro",
     ]);

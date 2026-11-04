@@ -444,6 +444,163 @@ if (previewParameters.get("scenario") === "hover") {
   );
 }
 
+if (previewParameters.get("scenario") === "unread-reply") {
+  // Managers that answered while their workers still run, next to the same
+  // states without a reply, so the row markers can be compared side by side.
+  const control = {
+    state: "active",
+    controlVersion: 1,
+    controlEtag: "preview",
+    directState: "active",
+    primaryBlocker: null,
+    additionalBlockerCount: 0,
+    blockers: [],
+    resumeOptions: [],
+    override: null,
+    settlement: null,
+  };
+  const tree = (overrides: Record<string, number> = {}) => ({
+    directChildren: 0,
+    totalDescendants: 0,
+    runningDescendants: 0,
+    queuedDescendants: 0,
+    waitingDescendants: 0,
+    attentionDescendants: 0,
+    pausedDescendants: 0,
+    failedDescendants: 0,
+    unreadDescendants: 0,
+    unreadFailedDescendants: 0,
+    truncated: false,
+    ...overrides,
+  });
+  const row = (number: number, title: string, age: number, overrides: Partial<Session>) =>
+    ({
+      ...session(number, title, null, age),
+      effectiveControl: control,
+      treeStats: tree(),
+      ...overrides,
+    }) as Session;
+  const inputWait = {
+    deadlineAt: new Date(now + 30 * 60_000).toISOString(),
+    reason: "Waiting for the workers to finish.",
+  };
+  const replied = row(4001, "Sidebar unread priority", 0, {
+    unread: true,
+    inputWait,
+    treeStats: tree({ directChildren: 2, totalDescendants: 2, runningDescendants: 2 }),
+  });
+  rows.splice(
+    0,
+    rows.length,
+    replied,
+    {
+      ...row(4002, "Implement the rail change", 1, { status: "running" }),
+      parentSessionId: replied.id,
+      rootSessionId: replied.id,
+    } as Session,
+    {
+      ...row(4003, "Review the rail change", 1, { status: "running" }),
+      parentSessionId: replied.id,
+      rootSessionId: replied.id,
+    } as Session,
+    row(4004, "Release notes draft", 3, {
+      unread: true,
+      treeStats: tree({ directChildren: 1, totalDescendants: 1, runningDescendants: 1 }),
+    }),
+    row(4005, "Nightly import check", 5, {
+      unread: true,
+      status: "running",
+    }),
+    row(4006, "Billing migration", 8, {
+      inputWait,
+      treeStats: tree({ directChildren: 1, totalDescendants: 1, runningDescendants: 1 }),
+    }),
+    row(4007, "Staging database approval", 12, {
+      unread: true,
+      treeStats: tree({ directChildren: 1, totalDescendants: 1, attentionDescendants: 1 }),
+    }),
+    row(4008, "Watch CI on the PR", 20, { inputWait }),
+    row(4009, "Quarterly cost report", 180, { unread: true }),
+  );
+}
+
+if (previewParameters.get("scenario") === "paused") {
+  // A working chat beside chats whose work Pause parked: the chat's own pause,
+  // a parent's pause reaching its workers, and a paused chat with nothing left.
+  const control = (state: "active" | "paused", directState: "active" | "paused" = state) => ({
+    state,
+    controlVersion: 1,
+    controlEtag: `preview-${state}`,
+    directState,
+    primaryBlocker: null,
+    additionalBlockerCount: 0,
+    blockers: [],
+    resumeOptions: [],
+    override: null,
+    settlement: null,
+  });
+  const tree = (overrides: Record<string, number> = {}) => ({
+    directChildren: 0,
+    totalDescendants: 0,
+    runningDescendants: 0,
+    queuedDescendants: 0,
+    waitingDescendants: 0,
+    attentionDescendants: 0,
+    pausedDescendants: 0,
+    pausedWorkDescendants: 0,
+    failedDescendants: 0,
+    unreadDescendants: 0,
+    unreadFailedDescendants: 0,
+    truncated: false,
+    ...overrides,
+  });
+  const row = (number: number, title: string, age: number, overrides: Partial<Session>) =>
+    ({
+      ...session(number, title, null, age),
+      effectiveControl: control("active"),
+      treeStats: tree(),
+      ...overrides,
+    }) as Session;
+  const manager = row(5003, "Nightly cost report", 2, {
+    effectiveControl: control("paused"),
+    treeStats: tree({
+      directChildren: 2,
+      totalDescendants: 2,
+      pausedDescendants: 2,
+      pausedWorkDescendants: 2,
+    }),
+  } as Partial<Session>);
+  rows.splice(
+    0,
+    rows.length,
+    row(5001, "Ship the pause indicator", 0, { status: "running", activeTurnId: "turn-1" }),
+    row(5002, "Migrate the staging database", 1, {
+      activeTurnId: "turn-1",
+      effectiveControl: control("paused"),
+    } as Partial<Session>),
+    manager,
+    {
+      ...row(5004, "Collect AWS costs", 2, {
+        activeTurnId: "turn-1",
+        effectiveControl: control("paused", "active"),
+      } as Partial<Session>),
+      parentSessionId: manager.id,
+      rootSessionId: manager.id,
+    } as Session,
+    {
+      ...row(5005, "Collect GCP costs", 2, {
+        status: "queued",
+        effectiveControl: control("paused", "active"),
+      } as Partial<Session>),
+      parentSessionId: manager.id,
+      rootSessionId: manager.id,
+    } as Session,
+    row(5006, "Quarterly cost review", 30, {
+      effectiveControl: control("paused"),
+    } as Partial<Session>),
+  );
+}
+
 type RecordedOptions = Omit<SessionListPageOptions, "signal">;
 export type SessionSidebarEvidence = {
   listCalls: {

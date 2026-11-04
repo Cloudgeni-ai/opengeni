@@ -323,6 +323,23 @@ export function isMaintenanceError(error: unknown): boolean {
   );
 }
 
+/**
+ * Stable `details.code` of the 403 for approving an action that runs on
+ * another person's own (Only me) login: only that person, through their own
+ * session, personal API key or `asUser` token, can approve it. Anyone who can
+ * control the chat may still decline it. The message names who can approve.
+ */
+export const APPROVAL_REQUIRES_ACCOUNT_OWNER_CODE = "APPROVAL_REQUIRES_ACCOUNT_OWNER";
+
+/** True when an approval was refused because only the account's owner can approve it. */
+export function isApprovalRequiresAccountOwnerError(error: unknown): error is OpenGeniApiError {
+  return (
+    error instanceof OpenGeniApiError &&
+    error.status === 403 &&
+    error.details?.code === APPROVAL_REQUIRES_ACCOUNT_OWNER_CODE
+  );
+}
+
 function decodeApiErrorBody(body: string): {
   code: string | undefined;
   message: string | undefined;
@@ -523,6 +540,8 @@ export function formatErrorMessage(
         (error.details.action as { type?: unknown }).type === "upgrade_plan"
           ? "Upgrade to Pro to use your own key."
           : "Add credits to use your own key.";
+    } else if (error.details?.code === "subscription_plan_required") {
+      message = "Upgrade to Pro to use your own subscription.";
     } else if (error.status === 402 || error.code === "payment_required") {
       message = "There are not enough credits to continue.";
     } else if (error.status === 429 || error.code === "rate_limited") {
@@ -544,7 +563,12 @@ export function formatErrorMessage(
     } else {
       message = fallback;
     }
-    return error.correlationId ? `${message} Reference: ${error.correlationId}.` : message;
+    // A refusal the person can act on (a 4xx) is only what to do; the request
+    // reference is for support, so it stays with unexpected failures.
+    const expected = error.status >= 400 && error.status < 500 && !error.outcomeUnknown;
+    return error.correlationId && !expected
+      ? `${message} Reference: ${error.correlationId}.`
+      : message;
   }
   if (
     error instanceof OpenGeniSecureContextRequiredError ||

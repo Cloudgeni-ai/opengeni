@@ -59,12 +59,9 @@ test.each(["low", "medium", "high", "xhigh", "max"] as const)(
       const req = request();
       req.modelSettings = { reasoning: { effort } };
       const body = buildAnthropicRequest(req, model, provider, false);
-      // Models that write progress updates need display "updates" to tell
-      // them apart from reasoning; the others keep reasoning summaries.
-      expect(body.thinking).toEqual({
-        type: "adaptive",
-        display: model === "claude-haiku-5-5" ? "summarized" : "updates",
-      });
+      // Every model asks for reasoning summaries, so thinking stays readable
+      // in the timeline, including models that write progress updates.
+      expect(body.thinking).toEqual({ type: "adaptive", display: "summarized" });
       expect(body.output_config.effort).toBe(effort);
       expect(body.max_tokens).toBe(128_000);
     }

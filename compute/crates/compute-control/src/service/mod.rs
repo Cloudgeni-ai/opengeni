@@ -31,7 +31,7 @@ use crate::store::{SandboxRow, Spec, Store, StoreError, Write, replace};
 use crate::view::{Target, Unplaced, View, shape_key};
 
 pub use holds::Depth;
-pub use moves::Drained;
+pub use moves::{Drained, Resize};
 pub use reach::Reached;
 pub use requests::request_digest;
 pub use templates::{COLLECT_EVERY, TEMPLATE_PREFIX, UNUSED_FOR};

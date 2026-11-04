@@ -67,7 +67,7 @@ export function OrganizationCreditBalance({
         className="mt-3 flex items-center justify-between gap-4 border-t border-border pt-3 pr-6"
       >
         <div className="min-w-0">
-          <p className="text-sm text-fg-muted">Platform fee on your own keys</p>
+          <p className="text-sm text-fg-muted">Platform fee on your own API keys</p>
           <p className="mt-0.5 text-xs leading-[18px] text-fg-subtle">Charged this month</p>
         </div>
         <span className="shrink-0 text-sm text-fg-muted tabular-nums">

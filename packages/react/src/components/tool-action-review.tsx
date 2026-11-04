@@ -82,6 +82,10 @@ const toneText: Record<Tone, string> = {
 };
 /** Shown when an older request's saved values are gone: approval is impossible, decline is not. */
 export const UNRECOVERABLE_TEXT = (t: OpenGeniText) => t("toolActionReview.theDetailsOfThisOlder");
+const ACCOUNT_OWNER_TEXT = (t: OpenGeniText, name: string | undefined) =>
+  name
+    ? t("toolActionReview.onlyNameCanApprove", { name })
+    : t("toolActionReview.onlyTheAccountOwnerCanApprove");
 
 function StatusIcon({ status, busy }: { status: ToolReviewStatus; busy?: boolean }) {
   const className = "size-4";
@@ -459,7 +463,16 @@ export function ToolActionReviewCard({
       }
     >
       {actionable && !canApprove ? (
-        <p className="m-0 mb-3 text-og-sm leading-relaxed text-og-fg">{UNRECOVERABLE_TEXT(t)}</p>
+        <p className="m-0 mb-3 text-og-sm leading-relaxed text-og-fg">
+          {review.approvedBy === "account_owner"
+            ? ACCOUNT_OWNER_TEXT(t, review.accountOwnerLabel)
+            : UNRECOVERABLE_TEXT(t)}
+        </p>
+      ) : null}
+      {actionable && canApprove && review.approvedBy === "you" ? (
+        <p className="m-0 mb-3 text-og-sm leading-relaxed text-og-fg">
+          {t("toolActionReview.onlyYouCanApprove")}
+        </p>
       ) : null}
       <ReviewFacts
         review={review}

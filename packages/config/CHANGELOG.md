@@ -1,5 +1,81 @@
 # @opengeni/config
 
+## 6.8.0
+
+### Patch Changes
+
+- Updated dependencies [58b04d1]
+- Updated dependencies [feaecf8]
+  - @opengeni/contracts@6.8.0
+  - @opengeni/codex@6.8.0
+  - @opengeni/xai-subscription@6.8.0
+
+## 6.7.0
+
+### Patch Changes
+
+- Updated dependencies [c08233e]
+- Updated dependencies [57237db]
+- Updated dependencies [cf35731]
+- Updated dependencies [4a7da4c]
+  - @opengeni/contracts@6.7.0
+  - @opengeni/codex@6.7.0
+  - @opengeni/xai-subscription@6.7.0
+
+## 6.6.0
+
+### Patch Changes
+
+- 3d82830: Claude Opus 5.5 and Sonnet 5.5 ask for summarized thinking again, so their reasoning shows in the chat timeline instead of only occasional progress notes. A progress note is still told apart from reasoning, by the marker in its signature.
+- c0ba1cc: Opengeni now refuses to build a sandbox on the worker or API host (`local` or `docker`) when that is not the deployment's configured default, for existing sessions too. Creating such sessions is already rejected, but sessions stored before that check, and shared-box children inheriting a parent's backend, could still name one. A turn on such a session now fails before any box, repository clone, setup, Rig or hydration hook or credential is prepared, with the terminal, non-retryable code `sandbox_backend_not_served` and a message telling the person to start a new chat. Terminal, files, browser, computer and viewer requests for it get a 409 with the same message. The deployment default is kept in `Settings.deploymentSandboxBackend`, which per-session settings rebinds preserve, so the sandbox client builder applies the same rule to every other caller, whatever is installed on the host. Remote providers and the default backend are unchanged.
+- Updated dependencies [2c76a2a]
+- Updated dependencies [09bc485]
+- Updated dependencies [2e72a00]
+- Updated dependencies [029497c]
+- Updated dependencies [3cb05f9]
+  - @opengeni/contracts@6.6.0
+  - @opengeni/codex@6.6.0
+  - @opengeni/xai-subscription@6.6.0
+
+## 6.5.1
+
+### Minor Changes
+
+- 564efe9: A deployment can choose how long the disk of each new compute sandbox is with `OPENGENI_COMPUTE_DISK_MIB`; unset, a sandbox keeps its image's length as before.
+
+### Patch Changes
+
+- 6bdd4d0: Opengeni's own tools get four minutes per call instead of the MCP client's 60-second default. Publishing a large file could take longer than a minute; the client gave up with "Request timed out" while the API went on to publish it, so the agent was left unsure whether the file existed. A server's explicit setup timeout now bounds its setup on its own, so the longer call bound never stretches setup against an unreachable server.
+- 707c444: Creating a session now fails with a clear 422 when it asks for a sandbox backend the deployment does not serve. Previously any `sandboxBackend` value was accepted, so on a cloud deployment an agent's `session_create`, a REST/SDK create or a schedule could ask for `local` and get a box that ran as processes on the worker host. A deployment serves its configured default backend, `none`, `selfhosted` when Connected Machines are enabled, and any provider whose credentials are configured; `local` and `docker` only as the default. Forks of a session on an unserved backend are refused too. Schedules are checked when saved and again when a run is admitted, and `session_create` advertises only the served backends. A keyed retry of an already-created session still returns it. Shared children, Connected Machine targets and `new` boxes on a served backend are unchanged.
+- Updated dependencies [f1998df]
+- Updated dependencies [3f9ef93]
+- Updated dependencies [ebfd447]
+- Updated dependencies [7a9c492]
+- Updated dependencies [468e8c3]
+- Updated dependencies [e4484f1]
+- Updated dependencies [7f3d037]
+- Updated dependencies [f4f82c0]
+- Updated dependencies [317fb4d]
+- Updated dependencies [033cd63]
+- Updated dependencies [b18bd6c]
+- Updated dependencies [83ccc2b]
+- Updated dependencies [da9b7e5]
+- Updated dependencies [0f7f559]
+- Updated dependencies [0f7f559]
+- Updated dependencies [de8fc61]
+- Updated dependencies [dd7759c]
+- Updated dependencies [70c726c]
+- Updated dependencies [4682263]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [abb4af1]
+- Updated dependencies [86e35f1]
+- Updated dependencies [0f7f559]
+  - @opengeni/contracts@6.5.0
+  - @opengeni/codex@6.5.0
+  - @opengeni/xai-subscription@6.5.0
+
 ## 6.4.0
 
 ### Minor Changes

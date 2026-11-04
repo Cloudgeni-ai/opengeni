@@ -11,7 +11,8 @@ import { usePage } from "../navigation";
 import { applySessionArchiveProjection } from "../session-pagination";
 import { notifySessionListChanged } from "../session-list-invalidation";
 import { toast } from "../toast";
-import { errorMessage } from "@opengeni/contracts/values";
+import { copyLink as copyLinkWithToast } from "../copy-link";
+import { userErrorText } from "../../../ui/api-error";
 
 export type ChatOperations = {
   /** "Archive" where this person can archive the chat, otherwise null. */
@@ -28,24 +29,6 @@ export function chatPath(chat: Pick<SessionListRow, "id" | "workspaceId">): stri
   return `/workspaces/${encodeURIComponent(chat.workspaceId)}/sessions/${encodeURIComponent(chat.id)}`;
 }
 
-async function writeClipboard(text: string): Promise<void> {
-  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
-  }
-  // Older embeds without the async clipboard: a hidden textarea and execCommand.
-  const area = document.createElement("textarea");
-  area.value = text;
-  area.setAttribute("readonly", "");
-  area.style.position = "fixed";
-  area.style.opacity = "0";
-  document.body.append(area);
-  area.select();
-  const copied = document.execCommand("copy");
-  area.remove();
-  if (!copied) throw new Error("The browser blocked copying.");
-}
-
 export function useChatOperations(): ChatOperations {
   const context = useAppContext();
   const page = usePage();
@@ -55,16 +38,7 @@ export function useChatOperations(): ChatOperations {
     [page],
   );
   const copyLink = useCallback(
-    async (chat: Pick<SessionListRow, "id" | "workspaceId">) => {
-      try {
-        await writeClipboard(linkTo(chat));
-        toast.success("Link copied");
-      } catch (error) {
-        toast.error("Couldn't copy the link.", {
-          description: errorMessage(error),
-        });
-      }
-    },
+    (chat: Pick<SessionListRow, "id" | "workspaceId">) => copyLinkWithToast(linkTo(chat)),
     [linkTo],
   );
   const setPinned = useCallback(
@@ -93,7 +67,7 @@ export function useChatOperations(): ChatOperations {
           chat,
           archived,
           sessionDisplayTitle(chat),
-          () => void setArchivedRef.current?.({ ...chat, archived: true }, false),
+          (next) => void setArchivedRef.current?.({ ...chat, archived: !next }, next),
         );
         if (!updated) return;
         if (!context.ownsWorkspaceInvocation(chat.workspaceId, accepted)) return;
@@ -110,7 +84,7 @@ export function useChatOperations(): ChatOperations {
       } catch (error) {
         if (!context.ownsWorkspaceInvocation(chat.workspaceId, accepted)) return;
         toast.error(archived ? "Couldn't archive the chat." : "Couldn't undo the archive.", {
-          description: errorMessage(error),
+          description: userErrorText(error),
         });
       } finally {
         archiving.current.delete(chat.id);
@@ -141,7 +115,7 @@ export function useChatOperations(): ChatOperations {
         toast.success(unread ? "Marked as unread" : "Marked as read");
       } catch (error) {
         toast.error("Couldn't update the chat.", {
-          description: errorMessage(error),
+          description: userErrorText(error),
         });
       }
     },
