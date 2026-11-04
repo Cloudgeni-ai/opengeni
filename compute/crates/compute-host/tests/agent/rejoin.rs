@@ -237,6 +237,7 @@ impl Service {
                             version: 7,
                         }),
                         now_ms: fleet_now_ms(),
+                        packs: false,
                     };
                     json(serde_json::to_vec(&found).unwrap())
                 } else {
@@ -244,6 +245,7 @@ impl Service {
                     let written = PointerWritten {
                         version: (write.on == Some(7)).then_some(8),
                         now_ms: fleet_now_ms(),
+                        packs: false,
                     };
                     json(serde_json::to_vec(&written).unwrap())
                 }

@@ -60,7 +60,7 @@ impl ChunkStore {
     /// their period: one listing by delimiter, which names each period
     /// once however many objects it holds.
     pub async fn periods(&self, area: Area) -> Result<Vec<u32>> {
-        let prefix = self.path(&format!("{}/v2", area.prefix()));
+        let prefix = self.path(area.periodic());
         let listed = self.backend.list_with_delimiter(Some(&prefix)).await?;
         Ok(listed
             .common_prefixes

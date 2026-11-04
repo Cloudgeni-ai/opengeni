@@ -524,6 +524,7 @@ async fn gcs_checksums_prove_a_chunk_without_reading_it() {
         settle: Duration::ZERO,
         stored: remembering(carried::REMEMBERED),
         held: None,
+        packs: true,
     };
     let chunk = EncodedChunk::encode(&[9; 16384], 1).unwrap();
     let reference = stored(&chunk);
