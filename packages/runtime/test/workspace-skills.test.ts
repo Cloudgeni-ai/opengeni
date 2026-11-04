@@ -938,8 +938,8 @@ description: Prepare a safe release.
     ],
   ])("lenient repository metadata keeps a skill with %s", async (_label, markdown, description) => {
     const warnings: unknown[][] = [];
-    const warn = console.warn;
-    console.warn = (...args: unknown[]) => void warnings.push(args);
+    const info = console.info;
+    console.info = (...args: unknown[]) => void warnings.push(args);
     try {
       const capability = workspaceSkills([{ path: ".claude/skills", source: "claude" }]).bind(
         fakeSession({ ".claude/skills/deploy/SKILL.md": markdown }),
@@ -954,9 +954,9 @@ description: Prepare a safe release.
       expect(descriptor).toMatchObject({ name: "deploy", description });
       expect(instructions).not.toContain("Skipped repository skills");
     } finally {
-      console.warn = warn;
+      console.info = info;
     }
-    // The parse reason is logged with key names only, never values.
+    // The parse reason is logged (info: the skill works) with key names only.
     expect(warnings).toHaveLength(1);
     expect(warnings[0]![0]).toBe("Repository skill metadata read with the lenient fallback");
     const detail = warnings[0]![1] as { path: string; reason: string; keys: string[] };
@@ -969,8 +969,8 @@ description: Prepare a safe release.
 
   test("strictly valid repository metadata does not log a fallback", async () => {
     const warnings: unknown[][] = [];
-    const warn = console.warn;
-    console.warn = (...args: unknown[]) => void warnings.push(args);
+    const info = console.info;
+    console.info = (...args: unknown[]) => void warnings.push(args);
     try {
       const capability = workspaceSkills([{ path: ".agents/skills", source: "agents" }]).bind(
         fakeSession({
@@ -980,7 +980,7 @@ description: Prepare a safe release.
       );
       expect(await capability.instructions()).toContain('"description":"Use when: shipping"');
     } finally {
-      console.warn = warn;
+      console.info = info;
     }
     expect(warnings).toEqual([]);
   });

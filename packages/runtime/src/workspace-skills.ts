@@ -405,7 +405,7 @@ async function discoverWorkspaceSkillsUnmeasured(
     }
     if (frontmatter.fallbackReason) {
       // Key names and the bounded parser code only, never values.
-      console.warn("Repository skill metadata read with the lenient fallback", {
+      console.info("Repository skill metadata read with the lenient fallback", {
         path: skillMarkdownPath,
         reason: frontmatter.fallbackReason,
         keys: frontmatter.keys ?? [],

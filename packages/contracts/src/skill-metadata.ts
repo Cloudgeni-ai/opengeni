@@ -86,9 +86,10 @@ export function parseLenientSkillFrontmatter(markdown: string): LenientSkillFron
   } catch (error) {
     strictReason = error instanceof SkillFrontmatterError ? error.reason : "yaml_other";
   }
-  const fields = new Map<string, Array<{ lines: string[]; mode: "plain" | "|" | ">" }>>();
+  type FallbackValue = { inline: string; lines: string[]; mode: "plain" | "|" | ">" };
+  const fields = new Map<string, FallbackValue[]>();
   const keys: string[] = [];
-  let current: { lines: string[]; mode: "plain" | "|" | ">" } | null = null;
+  let current: FallbackValue | null = null;
   for (const line of frontmatterBlock(markdown) ?? []) {
     const key = FALLBACK_KEY.exec(line);
     if (key) {
@@ -97,11 +98,16 @@ export function parseLenientSkillFrontmatter(markdown: string): LenientSkillFron
       const raw = (key[2] ?? "").trim();
       const blockScalar = BLOCK_SCALAR.exec(raw);
       current = blockScalar
-        ? { lines: [], mode: blockScalar[1] as "|" | ">" }
-        : { lines: raw ? [raw] : [], mode: "plain" };
-      fields.set(name, [...(fields.get(name) ?? []), current]);
+        ? { inline: "", lines: [], mode: blockScalar[1] as "|" | ">" }
+        : { inline: raw, lines: [], mode: "plain" };
+      const values = fields.get(name);
+      if (values) values.push(current);
+      else fields.set(name, [current]);
       continue;
     }
+    // Comments never become part of a value: any `#` line in plain text, and
+    // a column-0 `#` line inside a block scalar (indented `#` is block text).
+    if (current?.mode === "plain" ? /^[ \t]*#/u.test(line) : line.startsWith("#")) continue;
     // Anything else continues the open value: indented (spaces or tabs),
     // unindented prose, or a blank line inside a block scalar.
     current?.lines.push(line);
@@ -109,9 +115,7 @@ export function parseLenientSkillFrontmatter(markdown: string): LenientSkillFron
   const names = fields.get("name") ?? [];
   if (names.length > 1)
     throw new SkillFrontmatterError("SKILL.md declares more than one name", "duplicate_name");
-  // A name is one line; stray text after it never becomes part of the name.
-  const nameLine = names[0]?.lines.find((line) => line.trim());
-  const name = nameLine ? unquoteFallbackValue(stripFallbackComment(nameLine.trim())) : "";
+  const name = fallbackName(names[0]);
   if (!name)
     throw new SkillFrontmatterError(
       "SKILL.md header is not valid YAML and no name could be read from it",
@@ -119,7 +123,12 @@ export function parseLenientSkillFrontmatter(markdown: string): LenientSkillFron
     );
   const description = fields.get("description")?.[0];
   const descriptionText = description
-    ? unquoteFallbackValue(foldFallbackValue(description.lines, description.mode))
+    ? unquoteFallbackValue(
+        foldFallbackValue(
+          description.inline ? [description.inline, ...description.lines] : description.lines,
+          description.mode,
+        ),
+      )
     : "";
   return {
     name,
@@ -129,13 +138,29 @@ export function parseLenientSkillFrontmatter(markdown: string): LenientSkillFron
   };
 }
 
+// Unquoted YAML core-schema scalars that are not strings. Strict YAML never
+// reads these as a name, so the fallback must not either.
+const NON_STRING_SCALAR =
+  /^(?:~|null|Null|NULL|true|True|TRUE|false|False|FALSE|[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?|0o[0-7]+|0x[0-9a-fA-F]+|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN))$/u;
+
+/** A name is one line: the inline value, or the first indented line of a
+ * block or continuation. Unindented stray text after an empty `name:` is
+ * never borrowed as the name. */
+function fallbackName(value: { inline: string; lines: string[]; mode: string } | undefined) {
+  if (!value) return "";
+  const raw = value.inline || value.lines.find((line) => /^[ \t]+\S/u.test(line))?.trim() || "";
+  const text = stripFallbackComment(raw);
+  if (value.mode === "plain" && NON_STRING_SCALAR.test(text)) return "";
+  return unquoteFallbackValue(text);
+}
+
 function foldFallbackValue(lines: readonly string[], mode: "plain" | "|" | ">"): string {
   const trimmedEnd = [...lines];
   while (trimmedEnd.length && !trimmedEnd.at(-1)!.trim()) trimmedEnd.pop();
   if (mode === "|") {
-    const indent = Math.min(
-      ...trimmedEnd.filter((line) => line.trim()).map((line) => /^[ \t]*/u.exec(line)![0].length),
-    );
+    let indent = Number.POSITIVE_INFINITY;
+    for (const line of trimmedEnd)
+      if (line.trim()) indent = Math.min(indent, /^[ \t]*/u.exec(line)![0].length);
     return trimmedEnd
       .map((line) => line.slice(Number.isFinite(indent) ? indent : 0).trimEnd())
       .join("\n")
@@ -155,21 +180,55 @@ function foldFallbackValue(lines: readonly string[], mode: "plain" | "|" | ">"):
   return paragraphs.join("\n");
 }
 
+/** Index of the quote closing a value that opens with `"` or `'`, or -1. */
+function closingQuoteIndex(text: string): number {
+  const quote = text[0];
+  for (let index = 1; index < text.length; index += 1) {
+    const char = text[index];
+    if (quote === '"' && char === "\\") index += 1;
+    else if (char === quote) {
+      if (quote === "'" && text[index + 1] === "'") index += 1;
+      else return index;
+    }
+  }
+  return -1;
+}
+
 function stripFallbackComment(value: string): string {
-  if (value.startsWith('"') || value.startsWith("'")) return value;
+  if (value.startsWith('"') || value.startsWith("'")) {
+    const close = closingQuoteIndex(value);
+    return close > 0 && /^[ \t]+#/u.test(value.slice(close + 1))
+      ? value.slice(0, close + 1)
+      : value;
+  }
   return value.replace(/[ \t]+#.*$/u, "").trim();
 }
 
+const DOUBLE_QUOTED_ESCAPES: Record<string, string> = {
+  "0": "\0",
+  t: "\t",
+  n: "\n",
+  r: "\r",
+  '"': '"',
+  "\\": "\\",
+  "/": "/",
+  " ": " ",
+};
+
+/** Unquote only a value that is exactly one quoted scalar; anything with
+ * more text after the closing quote stays as written. */
 function unquoteFallbackValue(value: string): string {
   const text = value.trim();
-  if (text.length >= 2 && text.startsWith('"') && text.endsWith('"'))
-    return text
-      .slice(1, -1)
-      .replace(/\\(["\\])/gu, "$1")
-      .trim();
-  if (text.length >= 2 && text.startsWith("'") && text.endsWith("'"))
-    return text.slice(1, -1).replace(/''/gu, "'").trim();
-  return text;
+  if (
+    !(text.startsWith('"') || text.startsWith("'")) ||
+    closingQuoteIndex(text) !== text.length - 1
+  )
+    return text;
+  const body = text.slice(1, -1);
+  if (text[0] === "'") return body.replace(/''/gu, "'").trim();
+  return body
+    .replace(/\\(.)/gu, (escape, char: string) => DOUBLE_QUOTED_ESCAPES[char] ?? escape)
+    .trim();
 }
 
 export function readSkillMetadata(markdown: string): { name: string; description: string } {

@@ -142,29 +142,92 @@ test.each([
     "---\nname: deploy\ndescription: |\n  Line one: a\n    nested\n\n  Line two\nextra: [\n---\n",
     "deploy",
     "Line one: a\n  nested\n\nLine two",
-    "yaml_",
+    "yaml_bad_indent",
   ],
   [
     "---\nname: 'deploy'\ndescription: 'It''s: fine' and more\n---\n",
     "deploy",
     "'It''s: fine' and more",
-    "yaml_",
+    "yaml_unexpected_token",
   ],
   [
     '---\nname: "deploy"\ndescription: "Say \\"hi\\": now"\nbad: [\n---\n',
     "deploy",
     'Say "hi": now',
-    "yaml_",
+    "yaml_bad_indent",
   ],
-  ["---\nname: deploy\ndescription: % complete\n---\n", "deploy", "% complete", "yaml_"],
-  ["---\nname: deploy\ndescription:\nother: [\n---\n", "deploy", null, "yaml_"],
+  [
+    "---\nname: deploy\ndescription: % complete\n---\n",
+    "deploy",
+    "% complete",
+    "yaml_bad_scalar_start",
+  ],
+  ["---\nname: deploy\ndescription:\nother: [\n---\n", "deploy", null, "yaml_bad_indent"],
+  // Commented-out keys and column-0 comments never leak into the value.
+  [
+    "---\nname: deploy\ndescription: Use when: shipping\n# allowed-tools: Read, Grep\n---\n",
+    "deploy",
+    "Use when: shipping",
+    "yaml_block_as_implicit_key",
+  ],
+  [
+    "---\nname: deploy\ndescription: >\n  Folded: text\n# TODO: tighten\n  more\nbad: [\n---\n",
+    "deploy",
+    "Folded: text more",
+    "yaml_bad_indent",
+  ],
+  // Several quoted parts stay as written instead of being half-unquoted.
+  [
+    '---\nname: deploy\ndescription: "Deploy" skill, use when the user says "ship it"\n---\n',
+    "deploy",
+    '"Deploy" skill, use when the user says "ship it"',
+    "yaml_unexpected_token",
+  ],
+  [
+    "---\nname: deploy\ndescription: 'fast' and 'safe'\n---\n",
+    "deploy",
+    "'fast' and 'safe'",
+    "yaml_unexpected_token",
+  ],
+  // A quoted name may carry a trailing comment; double-quoted escapes decode.
+  [
+    '---\nname: "deploy" # release\ndescription: Use when: x\n---\n',
+    "deploy",
+    "Use when: x",
+    "yaml_block_as_implicit_key",
+  ],
+  [
+    '---\nname: deploy\ndescription: "Line\\nnext: x"\nbad: [\n---\n',
+    "deploy",
+    "Line\nnext: x",
+    "yaml_bad_indent",
+  ],
+  // A quoted "null" is a string; an indented continuation is the name.
+  [
+    '---\nname: "null"\ndescription: Use when: x\n---\n',
+    "null",
+    "Use when: x",
+    "yaml_block_as_implicit_key",
+  ],
+  [
+    "---\nname:\n  deploy\ndescription: Use when: x\n---\n",
+    "deploy",
+    "Use when: x",
+    "yaml_block_as_implicit_key",
+  ],
+  [
+    "\uFEFF---\nname: deploy\ndescription: Use when: x\n---\n",
+    "deploy",
+    "Use when: x",
+    "yaml_block_as_implicit_key",
+  ],
 ])(
   "lenient frontmatter recovers name and description: %#",
   (markdown, name, description, reason) => {
     const parsed = parseLenientSkillFrontmatter(markdown);
     expect(parsed.name).toBe(name);
     expect(parsed.description).toBe(description);
-    expect(parsed.fallbackReason).toStartWith(reason);
+    expect(parsed.fallbackReason).toBe(reason);
     expect(parsed.keys).toContain("name");
   },
 );
@@ -175,6 +238,17 @@ test.each([
   ["---\ndescription: Use when: shipping\n---\n", "yaml_block_as_implicit_key_without_name"],
   ["---\nname:\ndescription: Use when: shipping\n---\n", "yaml_block_as_implicit_key_without_name"],
   ["---\n  name: indented: deploy\n---\n", "yaml_block_as_implicit_key_without_name"],
+  // Unindented stray text after an empty name is never borrowed as the name.
+  [
+    "---\nname:\nhelper\ndescription: Use when: x\n---\n",
+    "yaml_multiline_implicit_key_without_name",
+  ],
+  ["---\nname:\nTODO\ndescription: Use when: x\n---\n", "yaml_multiline_implicit_key_without_name"],
+  // Unquoted YAML null, boolean and number tokens are not names.
+  ["---\nname: null\ndescription: Use when: x\n---\n", "yaml_block_as_implicit_key_without_name"],
+  ["---\nname: ~\ndescription: Use when: x\n---\n", "yaml_block_as_implicit_key_without_name"],
+  ["---\nname: true\ndescription: Use when: x\n---\n", "yaml_block_as_implicit_key_without_name"],
+  ["---\nname: 2048\ndescription: Use when: x\n---\n", "yaml_block_as_implicit_key_without_name"],
 ])("lenient frontmatter never accepts a header without one usable name: %s", (markdown, reason) => {
   let error: unknown;
   try {
