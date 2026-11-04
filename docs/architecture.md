@@ -1068,6 +1068,21 @@ never runs past the start of the mandatory pre-deadline save window, and there i
 none inside it. The count lives on the lease (`drain_capture_failures`, migration
 1253): failures since the box's last successful save, reset by a published save
 or a new epoch.
+When Modal native drain snapshots of one lease epoch have failed three times, or
+once inside the pre-deadline save window, the next drain saves a portable tar
+that leaves rebuildable folders out instead (`REBUILDABLE_WORKSPACE_DIRECTORY_NAMES`
+in `packages/runtime/src/sandbox/workspace-archive.ts`: dependency installs and
+tool caches such as `node_modules`, `.next`, `.venv` and `__pycache__`, plus
+`target` next to a `Cargo.toml`; never `.git`, `dist` or `build`). One bounded
+`find` lists them and sizes what is kept, capped at 512 MiB with object storage
+and 16 MiB inline. The descriptor records `omittedPaths`; the timeline says which
+folders were left out, and the next turns' model input carries a workspace note
+until a full save replaces it. If that reduced save fails or cannot be tried
+inside the save window, or after an hour of failures, the drain stops the box
+deliberately (`captureAbandoned`): its `sandbox.box.terminated` event names the
+last save's time (`unsavedSince`) for the timeline notice, the loss record skips
+the later older-save notice, and the model's restore discontinuity is unchanged.
+Only Modal qualifies; other backends keep their existing retry path.
 Warm-capture reclamation/heartbeat cleanup retain holders through the original
 deadline after turn closure: no takeover or authority extension.
 

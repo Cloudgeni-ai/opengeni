@@ -62,7 +62,8 @@ export async function captureWorkspaceArchiveForStorage(
     process.platform !== "linux" ||
     !root ||
     !objectStorageAvailable ||
-    options.strategy === "portable_tar"
+    options.strategy === "portable_tar" ||
+    (options.omitPaths?.length ?? 0) > 0
   ) {
     return await captureVerifiedWorkspaceArchive(session, capturedAtMs, options);
   }
@@ -175,6 +176,14 @@ export type WorkspaceArchiveCaptureOptions = {
    * capture keeps the provider session's configured timeout.
    */
   providerTimeoutMs?: number;
+  /**
+   * Workspace-relative directories to leave out of this capture: the drain's
+   * reduced save, after full snapshots kept failing. A native snapshot cannot
+   * leave paths out, so these force the session's portable tar path (with the
+   * same paths left out of the archive and of its fingerprint), and the
+   * descriptor records them as `omittedPaths`.
+   */
+  omitPaths?: readonly string[];
   /**
    * Abandons the capture while it still waits for the provider operation gate,
    * and stops a host-backed spool capture mid-read. A provider-native persist
@@ -497,6 +506,105 @@ export function workspaceSizeFromArchiveDescriptor(
   return Number.isFinite(fileCount) && Number.isFinite(totalFileBytes)
     ? { fileCount, totalFileBytes }
     : null;
+}
+
+/**
+ * Directory names a drain's reduced save leaves out: dependency installs,
+ * build caches and tool caches that a project rebuilds from files the save
+ * keeps. Deliberately conservative. Output folders such as `dist` or `build`
+ * are kept, because some projects commit or hand-edit them, and `.git` is
+ * never left out. `target` counts only next to a `Cargo.toml` (Rust build
+ * output); elsewhere it is an ordinary folder.
+ */
+export const REBUILDABLE_WORKSPACE_DIRECTORY_NAMES = [
+  "node_modules",
+  ".next",
+  ".nuxt",
+  ".svelte-kit",
+  ".turbo",
+  ".parcel-cache",
+  ".output",
+  ".cache",
+  "__pycache__",
+  ".pytest_cache",
+  ".mypy_cache",
+  ".ruff_cache",
+  ".venv",
+  ".gradle",
+] as const;
+
+/** A workspace with more rebuildable folders than this is not reduced: the
+ * walk could not size what the save keeps. */
+export const REBUILDABLE_WORKSPACE_PATHS_MAX = 2048;
+
+export type RebuildableWorkspacePaths = {
+  /** Workspace-relative folders a reduced save can leave out, sorted. */
+  paths: string[];
+  /** Regular files and their bytes that a reduced save keeps. */
+  kept: WorkspaceSizeProbe;
+};
+
+/**
+ * Find the rebuildable folders under /workspace (see
+ * `REBUILDABLE_WORKSPACE_DIRECTORY_NAMES`) and size what a save without them
+ * keeps, in one walk that never descends into a found folder and never
+ * matches inside `.git`. Bounded by `timeout` inside the box and by a
+ * wall-clock race here; a timeout, a failure or more than
+ * `REBUILDABLE_WORKSPACE_PATHS_MAX` folders yields null. An unreadable folder
+ * (find exit 1) still sizes the rest: the save could not read it either.
+ */
+export async function findRebuildableWorkspacePaths(
+  session: unknown,
+  timeoutSeconds = WORKSPACE_SIZE_PROBE_TIMEOUT_SECONDS,
+): Promise<RebuildableWorkspacePaths | null> {
+  const target = session as WorkspaceSession | null | undefined;
+  const run = target?.exec ?? target?.execCommand;
+  if (!target || !run) return null;
+  const seconds = Math.max(1, Math.floor(timeoutSeconds));
+  const names = REBUILDABLE_WORKSPACE_DIRECTORY_NAMES.map((name) => `-name ${shellQuote(name)}`);
+  const script = String.raw`set -u
+cd /workspace 2>/dev/null || exit 0
+out=$(timeout ${seconds} find . -xdev \( -path "*/.git" -o -path "*/.git/*" \) \( -type f -printf "F %s\n" -o -true \) -o -type d \( ${names.join(" -o ")} \) -printf "D %P\n" -prune -o -type d -name target -execdir test -f Cargo.toml \; -printf "D %P\n" -prune -o -type f -printf "F %s\n" 2>/dev/null | awk '/^D / {d+=1; if (d <= ${REBUILDABLE_WORKSPACE_PATHS_MAX}) dl[d]=$0} /^F / {n+=1; s+=$2} END {printf "OPENGENI_REBUILDABLE_V1 %d %.0f %d\n", n, s, d; for (i = 1; i <= d && i <= ${REBUILDABLE_WORKSPACE_PATHS_MAX}; i++) print dl[i]}')
+rc=$?
+[ "$rc" -le 1 ] || exit 0
+printf "%s\n" "$out"`;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      run.call(target, {
+        cmd: `bash -o pipefail -c ${shellQuote(script)}`,
+        yieldTimeMs: (seconds + 5) * 1_000,
+        maxOutputTokens: 200_000,
+      }),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), (seconds + 10) * 1_000);
+      }),
+    ]);
+    const lines = stdoutFromExecResult(result).split(/\r?\n/u);
+    const summary = lines
+      .map((line) => line.trim().match(/^OPENGENI_REBUILDABLE_V1 ([0-9]+) ([0-9]+) ([0-9]+)$/u))
+      .find((match) => match !== null);
+    if (!summary) return null;
+    const fileCount = Number(summary[1]);
+    const totalFileBytes = Number(summary[2]);
+    const folderCount = Number(summary[3]);
+    if (
+      !Number.isSafeInteger(fileCount) ||
+      !Number.isFinite(totalFileBytes) ||
+      !Number.isSafeInteger(folderCount) ||
+      folderCount > REBUILDABLE_WORKSPACE_PATHS_MAX
+    ) {
+      return null;
+    }
+    const paths = normalizedOmitPaths(
+      lines.filter((line) => line.startsWith("D ")).map((line) => line.slice(2)),
+    );
+    return { paths, kept: { fileCount, totalFileBytes } };
+  } catch {
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 const HOST_FINGERPRINT_READ_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW;
 
@@ -995,6 +1103,74 @@ export async function captureVerifiedWorkspaceArchive(
 }
 
 async function captureVerifiedWorkspaceArchiveExclusive(
+  session: unknown,
+  capturedAtMs: number,
+  options?: WorkspaceArchiveCaptureOptions,
+): Promise<VerifiedWorkspaceArchive> {
+  const omitPaths = normalizedOmitPaths(options?.omitPaths);
+  if (omitPaths.length === 0) {
+    return await captureVerifiedWorkspaceArchiveWithManifestExclusions(
+      session,
+      capturedAtMs,
+      options,
+    );
+  }
+  // The SDK and the fingerprint both read the manifest's ephemeral paths, so
+  // widening them for this one capture leaves the same paths out of the tar
+  // and of the before/after comparison. Restored right after, so the live
+  // session and its serialized state never keep the reduced exclusions.
+  const manifest = (session as WorkspaceSession).state?.manifest;
+  const configured = manifest?.ephemeralPersistencePaths;
+  if (!manifest || typeof configured !== "function") {
+    throw new WorkspaceArchiveIntegrityError(
+      "workspace_fingerprint_unavailable",
+      "sandbox session cannot leave paths out of a workspace capture",
+    );
+  }
+  const ownProperty = Object.hasOwn(manifest, "ephemeralPersistencePaths");
+  manifest.ephemeralPersistencePaths = () =>
+    new Set<unknown>([...configured.call(manifest), ...omitPaths]);
+  try {
+    const { omitPaths: _omitted, ...captureOptions } = options ?? { requestId: "" };
+    const archive = await captureVerifiedWorkspaceArchiveWithManifestExclusions(
+      session,
+      capturedAtMs,
+      options ? captureOptions : undefined,
+    );
+    if (archive.kind !== "tar" || archive.descriptor.version !== 1) {
+      throw new WorkspaceArchiveIntegrityError(
+        "native_snapshot_fallback_unverified",
+        "a workspace capture that leaves paths out returned a native snapshot",
+      );
+    }
+    return { ...archive, descriptor: { ...archive.descriptor, omittedPaths: omitPaths } };
+  } finally {
+    if (ownProperty) manifest.ephemeralPersistencePaths = configured;
+    else delete manifest.ephemeralPersistencePaths;
+  }
+}
+
+/** Workspace-relative, normalized, de-duplicated and sorted. A path that
+ * could name the workspace root or leave it is dropped, never widened. */
+function normalizedOmitPaths(paths: readonly string[] | undefined): string[] {
+  const accepted = new Set<string>();
+  for (const raw of paths ?? []) {
+    if (typeof raw !== "string") continue;
+    const path = raw.replace(/^\.\/+/u, "").replace(/\/+$/u, "");
+    if (
+      !path ||
+      path.startsWith("/") ||
+      /[\u0000-\u001f\u007f]/u.test(path) ||
+      path.split("/").some((part) => part === "" || part === "." || part === "..")
+    ) {
+      continue;
+    }
+    accepted.add(path);
+  }
+  return [...accepted].sort((left, right) => left.localeCompare(right));
+}
+
+async function captureVerifiedWorkspaceArchiveWithManifestExclusions(
   session: unknown,
   capturedAtMs: number,
   options?: WorkspaceArchiveCaptureOptions,

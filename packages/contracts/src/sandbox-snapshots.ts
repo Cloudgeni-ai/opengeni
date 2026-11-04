@@ -23,6 +23,12 @@ export type TarWorkspaceArchiveDescriptor = {
   archiveBytes: number;
   capturedAt: string;
   workspace: WorkspaceTreeFingerprint;
+  /**
+   * Workspace-relative folders this archive deliberately left out: a drain's
+   * reduced save after full snapshots kept failing (rebuildable dependency
+   * and cache folders). Absent on a complete save.
+   */
+  omittedPaths?: string[];
 };
 
 export type NativeSnapshotProvider =

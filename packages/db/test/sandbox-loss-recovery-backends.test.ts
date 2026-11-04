@@ -18,6 +18,7 @@ import {
   markSandboxRestoreVerifying,
   readLease,
   readPublicSandboxRecovery,
+  readSandboxReducedSave,
   recordWarmingSandboxCreated,
   submitHumanPromptInTransaction,
   withWorkspaceSubjectSessionActivityRls,
@@ -290,6 +291,92 @@ describe("system continuity after a lost sandbox on every backend", () => {
         capturedAt: archive.workspaceArchiveMeta.capturedAt,
       }),
     ]);
+  });
+
+  test("a box the drain stopped after failed saves restores its older save without a second notice", async () => {
+    const archive = tarArchive();
+    const f = await fixture("docker", {
+      archiveGeneration: 10,
+      resumeState: { sessionState: archive, opengeniRecovery: lostRecovery(true) },
+    });
+    await shared.admin`update sandbox_leases set resume_state = jsonb_set(resume_state,
+      '{opengeniProviderLoss}', ${shared.admin.json({ ...lossRecord(f), captureAbandoned: true })}::jsonb)
+      where id = ${f.leaseId}`;
+    const attempt = await claimedAttempt(f);
+    expect(await authorizeAutomaticSandboxCheckpointRecovery(client.db, attempt)).toMatchObject({
+      status: "authorized",
+      lane: "checkpoint",
+    });
+    // The model still learns which save it continues from.
+    expect(await getSandboxRecoveryDiscontinuity(client.db, f.workspaceId, f.sessionId)).toContain(
+      archive.workspaceArchiveMeta.capturedAt,
+    );
+    // The verified restore adds no notice: the person was already told when
+    // the drain stopped the box.
+    const elected = await acquireLease(client.db, {
+      ...f.group,
+      kind: "turn",
+      holderId: "abandoned-recovery",
+      backend: "docker",
+      leaseTtlMs: 60_000,
+    });
+    const rematerializationId = crypto.randomUUID();
+    expect(
+      await beginSandboxRematerialization(client.db, {
+        ...f.group,
+        expectedEpoch: elected.lease.leaseEpoch,
+        rematerializationId,
+      }),
+    ).toMatchObject({ status: "started" });
+    const leaseScope = { ...f.group, expectedEpoch: elected.lease.leaseEpoch };
+    await recordWarmingSandboxCreated(client.db, {
+      ...leaseScope,
+      rematerializationId,
+      instanceId: "restored-abandoned-box",
+      resumeBackendId: "docker",
+      resumeState: { backendId: "docker", sessionState: archive },
+      leaseTtlMs: 60_000,
+    });
+    await markSandboxRestoreVerifying(client.db, { ...leaseScope, rematerializationId });
+    expect(
+      await commitWarmingToWarm(client.db, {
+        ...leaseScope,
+        instanceId: "restored-abandoned-box",
+        leaseTtlMs: 60_000,
+        rematerialization: {
+          id: rematerializationId,
+          verifiedRevision: archive.workspaceArchiveMeta.revision,
+        },
+      }),
+    ).toMatchObject({ committed: true });
+    const notices = await shared.admin`select count(*)::int as n from session_events
+      where session_id = ${f.sessionId} and type = 'sandbox.recovery.selected'`;
+    expect(notices[0]!.n).toBe(0);
+  });
+
+  test("a reduced save is readable for the next turn's note; a full save is not", async () => {
+    const reduced = tarArchive("2026-09-20T03:04:05.000Z");
+    const f = await fixture("docker", {
+      archiveGeneration: 10,
+      resumeState: {
+        sessionState: {
+          ...reduced,
+          workspaceArchiveMeta: {
+            ...reduced.workspaceArchiveMeta,
+            omittedPaths: ["node_modules", "web/.next"],
+          },
+        },
+      },
+    });
+    expect(await readSandboxReducedSave(client.db, f.workspaceId, f.sessionId)).toEqual({
+      capturedAt: "2026-09-20T03:04:05.000Z",
+      omittedPaths: ["node_modules", "web/.next"],
+    });
+    const full = await fixture("docker", {
+      archiveGeneration: 10,
+      resumeState: { sessionState: tarArchive() },
+    });
+    expect(await readSandboxReducedSave(client.db, full.workspaceId, full.sessionId)).toBeNull();
   });
 
   test("a Docker NotFound with nothing to restore never continues on an empty workspace", async () => {

@@ -5550,11 +5550,17 @@ export const englishMessages = {
   "timeline.projection.approvalNeededTheTurnIs":
     "Approval needed — the turn is paused until someone decides.",
   "timeline.projection.details": "Details",
+  "timeline.projection.filesChangedAfterCouldNotBeSaved":
+    "Files changed after {time} couldn't be saved before this chat's workspace machine shut down.",
+  "timeline.projection.filesCouldNotBeSaved":
+    "This chat's files couldn't be saved before its workspace machine shut down.",
   "timeline.projection.interrupted": "Interrupted.",
   "timeline.projection.needsYou": "Needs you",
   "timeline.projection.restoredFromOlderSave":
     "This chat's workspace machine was lost, so its files were restored from a save made at {time}. Changes made after that may be missing.",
   "timeline.projection.returnedToYourPreferredModel": "Returned to your preferred model.",
+  "timeline.projection.savedWithoutRebuildableFolders":
+    "This chat's files were saved without folders that can be rebuilt: {folders}.",
   "timeline.projection.switchedToAFallbackModel": "Switched to a fallback model.",
   "timeline.projection.switchedToAnotherSubscriptionAccount":
     "Switched to another subscription account.",

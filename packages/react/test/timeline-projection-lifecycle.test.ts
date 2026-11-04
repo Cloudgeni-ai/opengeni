@@ -911,3 +911,57 @@ describe("projection lifecycle audit regressions", () => {
     }
   });
 });
+
+test("a shutdown that could not save the files tells the person since when", () => {
+  const unsavedSince = "2026-11-04T08:15:00.000Z";
+  const time = new Date(unsavedSince).toLocaleString(englishText.locale, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+  expect(
+    buildTimeline(englishText, [
+      event(1, "sandbox.box.terminated", {
+        persisted: false,
+        captureAbandoned: true,
+        unsavedSince,
+      }),
+    ]),
+  ).toEqual([
+    expect.objectContaining({
+      kind: "notice",
+      tone: "input",
+      text: `Files changed after ${time} couldn't be saved before this chat's workspace machine shut down.`,
+    }),
+  ]);
+  // Without a known earlier save the notice still appears, without a time.
+  expect(
+    buildTimeline(englishText, [
+      event(2, "sandbox.box.terminated", { persisted: false, captureAbandoned: true }),
+    ]),
+  ).toEqual([
+    expect.objectContaining({
+      kind: "notice",
+      text: "This chat's files couldn't be saved before its workspace machine shut down.",
+    }),
+  ]);
+});
+
+test("a reduced save names the left-out folders; an ordinary shutdown says nothing", () => {
+  expect(
+    buildTimeline(englishText, [
+      event(1, "sandbox.box.terminated", {
+        persisted: true,
+        omittedPaths: ["node_modules", "web/.next"],
+      }),
+    ]),
+  ).toEqual([
+    expect.objectContaining({
+      kind: "notice",
+      tone: "input",
+      text: "This chat's files were saved without folders that can be rebuilt: node_modules, web/.next.",
+    }),
+  ]);
+  expect(
+    buildTimeline(englishText, [event(2, "sandbox.box.terminated", { persisted: true })]),
+  ).toEqual([]);
+});

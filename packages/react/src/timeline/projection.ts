@@ -1373,6 +1373,50 @@ export function buildTimeline(
         break;
       }
 
+      case "sandbox.box.terminated": {
+        // Most shutdowns save the workspace and say nothing. Only a shutdown
+        // that could not save it, or saved it without rebuildable folders,
+        // is worth telling the person.
+        if (payload.captureAbandoned === true) {
+          const unsavedSince =
+            typeof payload.unsavedSince === "string" ? new Date(payload.unsavedSince) : null;
+          items.push({
+            kind: "notice",
+            id: event.id,
+            tone: "input",
+            text:
+              unsavedSince && !Number.isNaN(unsavedSince.getTime())
+                ? t("timeline.projection.filesChangedAfterCouldNotBeSaved", {
+                    time: unsavedSince.toLocaleString(t.locale, {
+                      dateStyle: "medium",
+                      timeStyle: "short",
+                    }),
+                  })
+                : t("timeline.projection.filesCouldNotBeSaved"),
+            occurredAt: event.occurredAt,
+          });
+        } else if (
+          payload.persisted === true &&
+          Array.isArray(payload.omittedPaths) &&
+          payload.omittedPaths.length > 0
+        ) {
+          const paths = payload.omittedPaths.filter(
+            (path): path is string => typeof path === "string" && path.length > 0,
+          );
+          if (paths.length > 0)
+            items.push({
+              kind: "notice",
+              id: event.id,
+              tone: "input",
+              text: t("timeline.projection.savedWithoutRebuildableFolders", {
+                folders: paths.join(", "),
+              }),
+              occurredAt: event.occurredAt,
+            });
+        }
+        break;
+      }
+
       case "subscription.account.switched": {
         // One neutral receipt, not its provider-specific compatibility alias.
         // Never expose connection ids, personal labels, or provider error text.

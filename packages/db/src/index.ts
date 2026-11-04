@@ -48788,6 +48788,10 @@ type ProviderLossRecord = {
    * lifetime, or the compute control plane's own answer) the loss may at most
    * restore a checkpoint, never continue on an empty workspace. */
   deathProof?: ProviderDeathProof;
+  /** The drain stopped the box itself after its saves kept failing (it did
+   * not vanish). The people in the chat were told when it stopped, so the
+   * later restore does not announce the loss a second time. */
+  captureAbandoned?: true;
 };
 
 type ProviderDeathProof = {
@@ -52974,7 +52978,9 @@ export async function commitWarmingToWarm(
         // this commit, when that restore is verified, so a restore that fails,
         // retries or ends on an empty workspace never claims their files came
         // back. Only an archive restore qualifies, never an empty workspace or
-        // same-box continuity.
+        // same-box continuity. A box the drain stopped after failed saves
+        // already told them, when it stopped, which files were not saved.
+        const loss = row.resume_state?.[PROVIDER_LOSS_KEY] as ProviderLossRecord | undefined;
         const restoredFrom =
           automaticVerified &&
           rematerialization !== undefined &&
@@ -52983,7 +52989,7 @@ export async function commitWarmingToWarm(
             ? (automatic as Record<string, unknown>).capturedAt
             : undefined;
         const restoredNotice =
-          typeof restoredFrom === "string"
+          typeof restoredFrom === "string" && loss?.captureAbandoned !== true
             ? {
                 operationId: (automatic as Record<string, unknown>).operationId,
                 mode: "checkpoint" as const,
@@ -58936,6 +58942,9 @@ export async function confirmDrainCold(
      * this commit. Only then may a crashed worker's orphaned request on it be
      * settled; a selfhosted machine or backend-less lease is never stopped. */
     providerStopped?: boolean;
+    /** With `providerMissingBeforeCapture`: the drain stopped the box itself
+     * after its saves kept failing. Its failed capture can never publish late. */
+    captureAbandoned?: boolean;
   },
 ): Promise<{
   wentCold: boolean;
@@ -59147,6 +59156,7 @@ export async function confirmDrainCold(
           input.providerMissingBeforeCapture === true && !unpublishedWarmingLoss;
         const lateArchiveCapture =
           workspaceLost &&
+          input.captureAbandoned !== true &&
           row.archive_capture_id !== null &&
           // A warm claim that ran around commands may predate their writes; a
           // late adoption would publish it as the complete workspace.
@@ -59245,12 +59255,17 @@ export async function confirmDrainCold(
                 row,
                 recovery,
                 workspaceLost
-                  ? providerLossRecordForLostRow(
-                      row,
-                      "drain_probe",
-                      now,
-                      input.providerMaxRemainingLifetimeMs,
-                    )
+                  ? {
+                      ...providerLossRecordForLostRow(
+                        row,
+                        "drain_probe",
+                        now,
+                        input.providerMaxRemainingLifetimeMs,
+                      ),
+                      ...(input.captureAbandoned === true
+                        ? { captureAbandoned: true as const }
+                        : {}),
+                    }
                   : undefined,
               ),
             )
@@ -66438,6 +66453,32 @@ export async function readLease(
       limit 1
     `);
     return rows[0] ? mapLeaseRow(rows[0]) : null;
+  });
+}
+
+/** The session's sandbox group's latest save when it deliberately left
+ * rebuildable folders out (a drain's reduced save, DC-G3), else null. A later
+ * complete save replaces it, so the answer is current on every turn. */
+export async function readSandboxReducedSave(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<{ capturedAt: string; omittedPaths: string[] } | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.execute<LeaseRow>(sql`
+      select lease.* from sandbox_leases lease
+      join sessions session
+        on session.workspace_id = lease.workspace_id
+       and session.sandbox_group_id = lease.sandbox_group_id
+      where session.workspace_id = ${workspaceId} and session.id = ${sessionId}
+      limit 1
+    `);
+    const current = rows[0] ? recoveryStateFromLeaseRow(rows[0]).archive.current : null;
+    if (current?.version !== 1 || !Array.isArray(current.omittedPaths)) return null;
+    const omittedPaths = current.omittedPaths.filter(
+      (path): path is string => typeof path === "string" && path.length > 0,
+    );
+    return omittedPaths.length ? { capturedAt: current.capturedAt, omittedPaths } : null;
   });
 }
 
