@@ -55,11 +55,11 @@ additions. The final `knowledge_index_claim` replacement pins
 `pg_catalog, <data schema>, pg_temp`, so temporary tables cannot shadow its
 accounting sources. Upgrade consumers before enabling producer writes.
 
-## Removing content masking (1239)
+## Removing content masking (1259)
 
 This release stops masking secret values and secret-shaped text in tool
 results, model input and storage (docs/secrets.md, "Agent-visible content").
-`1239_drop_audit_events_secret_used_index.sql` is rolling: it drops the index
+`1259_drop_audit_events_secret_used_index.sql` is rolling: it drops the index
 only masking used; a previous-release worker that still loads earlier secret
 uses during the rollout falls back to the workspace audit index.
 
