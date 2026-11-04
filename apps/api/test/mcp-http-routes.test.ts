@@ -265,7 +265,7 @@ describe("HTTP unexpected error logging through the real router", () => {
   test("a thrown GET 500 logs its safe cause kind and keeps the response correlation", async () => {
     const f = fixture();
     f.app.get("/v1/test/caused-error", () => {
-      throw new TypeError(secret);
+      throw new TypeError(`rollup check failed token=${secret}`);
     });
     const response = await f.app.request(`/v1/test/caused-error?token=${secret}`, {
       headers: {
@@ -288,13 +288,17 @@ describe("HTTP unexpected error logging through the real router", () => {
       status: 500,
       reasonKind: "TypeError",
       errorClass: "HttpOperationError",
+      // An unclassified 500 logs why, scrubbed; the response stays generic.
+      causeMessage: "rollup check failed token=[redacted]",
     });
     expect([...f.errors, ...f.infos].join("\n")).not.toContain(secret);
   });
 
   test("a thrown MCP preparation failure logs once with safe cause and request context", async () => {
     const cause = new TypeError(secret);
-    const f = fixture({ preparationError: new Error(secret, { cause }) });
+    const f = fixture({
+      preparationError: new Error(`prepare failed password=${secret}`, { cause }),
+    });
     const diagnostic = spyOn(f.observability, "recordFailureDiagnostic");
     restorers.push(() => diagnostic.mockRestore());
     const response = await f.app.request(
@@ -324,6 +328,7 @@ describe("HTTP unexpected error logging through the real router", () => {
       errorClass: "HttpOperationError",
       errorCode: "internal_error",
       reasonKind: "Error",
+      causeMessage: "prepare failed password=[redacted]",
     });
     expect(diagnostic).toHaveBeenCalledTimes(1);
     expect(diagnostic.mock.calls[0]![0]).toMatchObject({

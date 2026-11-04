@@ -95,8 +95,11 @@ e2e(
         content: "selection",
       });
       expect(noSelection.error?.message).toContain("nothing selected in this element");
+      // An explicit copy is never refused, a password field included: the
+      // agent asked for exactly this value.
       const secret = await copy({ locator: { kind: "ref", ref: ref("Secret") } });
-      expect(secret.error?.code).toBe("permission_denied");
+      expect(secret.error ?? null).toBeNull();
+      expect(driver.readClipboard().text).toBe("hunter2");
 
       // A DOM read pages through the whole value with offset.
       const fences = {
@@ -139,12 +142,13 @@ e2e(
   90_000,
 );
 
-/** Fields a copy must not take, text around a character outside the basic
- * plane, and text larger than the clipboard. */
+/** Payment, one-time-code, hidden and private fields (an explicit copy takes
+ * them), text around a character outside the basic plane, and text larger
+ * than the clipboard. */
 const GUARDED = `<!doctype html><meta charset="utf-8"><title>Guarded</title><main><label>Card <input name="card-number" value="4111111111111111"></label><label>Code <input autocomplete="one-time-code" value="123456"></label><div role="group" aria-label="Billing"><p>Billing details</p><input type="hidden" name="token" value="t0k3n"></div><div role="group" aria-label="Notes"><p id="note">Visible note</p><input type="hidden" name="token" value="t0k3n"></div><div role="group" aria-label="Account" id="account"><p>Account holder</p><p data-private>Private detail</p></div><label>Emoji <textarea id="emoji"></textarea></label><div id="big" aria-hidden="true"></div><button onclick="getSelection().selectAllChildren(note)">Select note</button><button onclick="getSelection().selectAllChildren(account)">Select account</button></main><script>emoji.value = "a".repeat(1999) + "\u{1F600}" + "b".repeat(10); big.textContent = "x".repeat(1_100_000);</script>`;
 
 e2e(
-  "copy withholds what DOM reads withhold, pages keep characters whole, and oversized copies say how to read",
+  "copy is never refused, pages keep characters whole, and oversized copies say how to read",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-guarded-text-");
     const browserSessionId = randomUUID();
@@ -188,16 +192,28 @@ e2e(
       const label = (text: string) => ({ kind: "label" as const, text });
       const group = (name: string) => ({ kind: "role" as const, role: "group", name, exact: true });
 
-      // Payment and one-time-code fields are withheld whichever way they are copied.
-      for (const field of ["Card", "Code"]) {
-        for (const content of [undefined, "value", "text", "selection"] as const) {
+      // Payment and one-time-code fields copy their value: page reads leave
+      // such values out, but an explicit copy is never refused.
+      for (const [field, value] of [
+        ["Card", "4111111111111111"],
+        ["Code", "123456"],
+      ] as const) {
+        for (const content of [undefined, "value"] as const) {
           const result = await copy(label(field), content);
-          expect(result.error?.code).toBe("permission_denied");
+          expect(result.error ?? null).toBeNull();
+          expect(driver.readClipboard().text).toBe(value);
+        }
+        for (const content of ["text", "selection"] as const) {
+          const result = await copy(label(field), content);
+          expect(result.error?.code).not.toBe("permission_denied");
         }
       }
-      // So is a container holding a hidden or private field.
-      expect((await copy(group("Billing"))).error?.code).toBe("permission_denied");
-      expect((await copy(group("Account"), "text")).error?.code).toBe("permission_denied");
+      // So does a container holding a hidden or private field: it copies
+      // what the page shows.
+      expect((await copy(group("Billing"))).error ?? null).toBeNull();
+      expect(driver.readClipboard().text).toContain("Billing details");
+      expect((await copy(group("Account"), "text")).error ?? null).toBeNull();
+      expect(driver.readClipboard().text).toContain("Private detail");
       // A selection counts only the fields it touches.
       expect(
         (
@@ -214,8 +230,8 @@ e2e(
         type: "click",
         locator: { kind: "role", role: "button", name: "Select account" },
       });
-      expect((await copy(group("Account"), "selection")).error?.code).toBe("permission_denied");
-      expect(driver.readClipboard().text).toBe("Visible note");
+      expect((await copy(group("Account"), "selection")).error ?? null).toBeNull();
+      expect(driver.readClipboard().text).toContain("Account holder");
 
       // A page boundary never splits a character in two.
       const fences = {

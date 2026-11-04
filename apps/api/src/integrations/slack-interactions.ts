@@ -3741,7 +3741,7 @@ export async function suggestSlackAgentForChat(
   return {
     status: "suggested",
     agent: suggested,
-    message: `Opengeni shows "${suggested} handles questions like this." with a button under your answer. Answer the request yourself and don't mention the suggestion.`,
+    message: `Suggested ${suggested}. Answer the request yourself and don't mention the suggestion.`,
   };
 }
 

@@ -22,6 +22,14 @@ pub const POINTER_READ_PATH: &str = "/v1/hosts/pointers/read";
 /// Where a host writes a pointer on condition ([`PointerWrite`]).
 pub const POINTER_WRITE_PATH: &str = "/v1/hosts/pointers/write";
 
+/// The header a host sends with its pointer requests when it reads copies
+/// whose chunks are in packs (ADR 31), and so the
+/// [`PointerFound::packs`] and [`PointerWritten::packs`] the service then
+/// answers with. A service of an earlier release ignores it, and a host of
+/// an earlier release never sends it, so neither is sent a field it would
+/// refuse.
+pub const READS_PACKS_HEADER: &str = "x-compute-reads-packs";
+
 /// A host reads pointer `name`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -59,6 +67,11 @@ pub struct PointerFound {
     /// The fleet's clock when the service answered, in milliseconds since
     /// 1970.
     pub now_ms: u64,
+    /// Whether every live host reads copies whose chunks are in packs, so
+    /// that a host may write them (ADR 31). Answered only to a host that
+    /// sent [`READS_PACKS_HEADER`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub packs: bool,
 }
 
 /// A host keeps `pointer` under the owner stamp it gives as `name`, only if
@@ -88,6 +101,9 @@ pub struct PointerWritten {
     pub version: Option<i64>,
     /// As [`PointerFound::now_ms`].
     pub now_ms: u64,
+    /// As [`PointerFound::packs`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub packs: bool,
 }
 
 mod base64_bytes {
@@ -134,7 +150,8 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&PointerFound {
                 kept: None,
-                now_ms: 7
+                now_ms: 7,
+                packs: false,
             })
             .unwrap(),
             r#"{"now_ms":7}"#
@@ -142,7 +159,8 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&PointerWritten {
                 version: None,
-                now_ms: 7
+                now_ms: 7,
+                packs: false,
             })
             .unwrap(),
             r#"{"now_ms":7}"#,

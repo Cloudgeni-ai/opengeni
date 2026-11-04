@@ -8,7 +8,6 @@ import {
   replaceReferencesDeep,
   tokenizeSecretText,
 } from "./secret-references";
-import { maskSecretValues, type SecretValueMaskOptions } from "./secret-value-masking";
 
 export const INTERACTION_PROTOCOL_VERSION = 1 as const;
 /** Controller-only display metadata. Never a routing or authorization identity. */
@@ -4359,61 +4358,6 @@ export function withoutInteractionSecretValues<T extends { secretValues?: unknow
   if (!("secretValues" in command)) return command;
   const { secretValues: _omitted, ...rest } = command;
   return rest;
-}
-
-export const INTERACTION_REDACTED_SECRET = "[secret]";
-/** Values shorter than this are not searched for: they would redact noise. */
-export const INTERACTION_MIN_REDACTED_SECRET_CHARS = 3;
-
-/** Identifier-like keys keep their strings untouched (generations, refs,
- * digests, image payloads, timestamps): redacting inside them would corrupt
- * the result rather than protect anything. URLs are text: a page can put a
- * typed value into its address, though an address keeps its host and port. */
-const NON_TEXT_KEY = /^(id|ref|data|digest|mimeType|type)$|(Id|Ids|Ref|Generation|Digest|At)$/u;
-
-/** How browser and desktop results are masked: the shared known-value engine
- * with the `[secret]` marker, a three-character minimum (including CVCs; typed values are
- * often short) for values, their lines and clipped starts (at the end of any
- * text too), and identifier keys left alone. */
-export const INTERACTION_SECRET_MASK_OPTIONS: SecretValueMaskOptions = {
-  minChars: INTERACTION_MIN_REDACTED_SECRET_CHARS,
-  base64: false,
-  lines: "all",
-  // Typed values are short: every form (lines, percent-encoded) may be clipped.
-  clippedForms: "all",
-  // A complete CVC may have three digits; a three-character prefix of a
-  // longer password is not distinctive enough to remove from ordinary text.
-  clippedMinChars: 4,
-  clippedMinShare: 0,
-  // An observed field or label clipped to its width ends partway through.
-  clippedTextEndMinChars: 0,
-  skipKey: (key) => NON_TEXT_KEY.test(key),
-  // A short code inside a host or port would leave a tab with no valid address.
-  keepUrlHosts: true,
-  // Results are data, not conversation: a tool-shaped record is masked in full.
-  keepToolIdentities: false,
-  // Typed values belong to one session and were typed on purpose: a page
-  // shows them in fields, labels and clipped text with no credential word
-  // beside them, so even a weak typed value is replaced wherever it appears.
-  weakValues: "anywhere",
-};
-
-/** Deep copy with every occurrence of a supplied secret value in a text
- * string (raw or percent-encoded) replaced by `[secret]`, including a value's
- * start left at the end of a clipped string or before a truncation mark.
- * Used on results a driver returns after dispatching materialized values (CUA
- * tools echo typed text; desktop accessibility trees and page fields expose
- * values). One engine with agent tool-result masking: `maskSecretValues`. */
-export function redactInteractionSecretValues<T>(
-  value: T,
-  secretValues: InteractionSecretValues | undefined,
-): T {
-  if (secretValues === undefined) return value;
-  const entries = Object.values(secretValues).map((secret) => ({
-    value: secret,
-    label: INTERACTION_REDACTED_SECRET,
-  }));
-  return maskSecretValues(value, entries, INTERACTION_SECRET_MASK_OPTIONS);
 }
 
 // ---------------------------------------------------------------------------

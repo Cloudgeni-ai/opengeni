@@ -32,7 +32,7 @@ describe("secret history scrub matchers", () => {
     expect(matcher.marker).not.toContain("{{");
   });
 
-  test("every form masking recognizes is replaced, and only those", () => {
+  test("every listed form is replaced, and only those", () => {
     const text = [
       `plain ${VALUE}`,
       `json ${JSON.stringify(VALUE).slice(1, -1)}`,
@@ -110,27 +110,6 @@ describe("secret history scrub matchers", () => {
     const name = secretRedactionMatcherForValue("alice.admin.user", "secret:V/users/name")!;
     const text = "[redacted: note [redacted: secret:V/alice.admin.user/pw] tail]";
     expect(redactSecretText(text, [name])).toEqual({ text, matches: 0 });
-  });
-
-  test("a clipped value at the end of a long text is found past a long kept marker", () => {
-    const value = "fakeClipValue-0123456789-abcdefgh";
-    const long = secretRedactionMatcherForValue(value, "secret:x/y/z")!;
-    const marker = secretRedactionMarker(
-      `secret:${"v".repeat(90)}/${"i".repeat(90)}/${"f".repeat(90)}`,
-    );
-    expect(marker.length).toBeGreaterThan(250);
-    const clipped = value.slice(0, 24);
-    const filler = (size: number) => "word ".repeat(Math.ceil(size / 5)).slice(0, size);
-    const before = `${filler(300)} ${marker} `;
-    const text = `${before}${filler(1060 - before.length - clipped.length)}${clipped}`;
-    expect(text.length).toBe(1060);
-    // The same text without the marker is the baseline: masking cuts it there.
-    const plain = `${filler(before.length)}${text.slice(before.length)}`;
-    expect(redactSecretText(plain, [long]).matches).toBe(1);
-    const result = redactSecretText(text, [long]);
-    expect(result.matches).toBe(1);
-    expect(result.text).not.toContain(clipped);
-    expect(result.text).toContain(marker);
   });
 
   test("an archived row keeps its exact numbers and keys and decodes its lossless columns", () => {
@@ -239,7 +218,7 @@ describe("secret history scrub pattern matchers", () => {
   });
 
   test("a kept marker is hidden behind protected placeholders of its exact length", () => {
-    // Both masking modules skip exactly this shape.
+    // Every scrub matcher skips exactly this shape.
     const protectedPiece = /^\[masked [a-z0-9 _-]{1,40}\]$/u;
     const seen: string[] = [];
     const spy = {

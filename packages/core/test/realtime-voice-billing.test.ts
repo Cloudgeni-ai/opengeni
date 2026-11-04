@@ -51,7 +51,7 @@ test("live voice pricing: strict JSON, margin rounds up, every started minute", 
   expect(realtimeVoiceStartedMinutes(start, at(-5_000))).toBe(1);
 });
 
-test("only deployment-funded voice is gated; enabled without pricing is unavailable", () => {
+test("only deployment-funded voice is credit-gated; enabled without pricing is unavailable", () => {
   const settings = testSettings({
     billingMode: "stripe",
     vercelAiGatewayApiKey: "key",
@@ -92,6 +92,54 @@ test("only deployment-funded voice is gated; enabled without pricing is unavaila
   expect(malformed.pricing).toBeNull();
   expect(realtimeVoiceOfferProblem(settings, malformed)?.code).toBe("pricing_unconfigured");
 });
+
+test.each(["gpt-live-1-boulder-alpha", "supergrok/grok-voice-think-fast-2.0"])(
+  "%s requires paid app admission even with no fee, and cannot use API funding",
+  async (model) => {
+    const standing = spyOn(db, "getOrganizationPlanStanding");
+    const settings = testSettings({
+      billingMode: "stripe",
+      subscriptionPlansEnabled: true,
+      byokPlatformFeeBps: 0,
+    });
+    const billing = createRealtimeVoiceBilling({
+      db: {} as db.Database,
+      settings,
+      isEuOnly: async () => false,
+    });
+    const input = {
+      accountId: crypto.randomUUID(),
+      workspaceId: crypto.randomUUID(),
+      model: model as never,
+      attribution: { kind: "service", billingOrigin: "app" } as const,
+    };
+    try {
+      for (const [key, status, price, allowed] of [
+        [null, null, null, false],
+        ["free", "active", 0, false],
+        ["pro", "past_due", 20_000_000, false],
+        ["pro", "active", 20_000_000, true],
+        ["max", "active", 100_000_000, true],
+      ] as const) {
+        standing.mockResolvedValue({
+          plan: key ? { key, status } : null,
+          monthlyPriceMicros: price,
+        } as never);
+        if (allowed) await expect(billing.admit(input)).resolves.toBeUndefined();
+        else
+          await expect(billing.admit(input)).rejects.toMatchObject({
+            status: 402,
+            cause: { code: "subscription_plan_required" },
+          });
+        await expect(
+          billing.admit({ ...input, attribution: { kind: "service", billingOrigin: "api" } }),
+        ).rejects.toMatchObject({ status: 403, cause: { code: "subscription_api_unavailable" } });
+      }
+    } finally {
+      standing.mockRestore();
+    }
+  },
+);
 
 test("promotional chat-only credits are named, not reported as no credits", () => {
   expect(voiceCreditStanding({ balanceMicros: 1 })).toBe("spendable");

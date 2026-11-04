@@ -221,29 +221,105 @@ describe("native Codex subscription realtime call", () => {
     [404, "incompatible"],
     [429, "rate_limited"],
     [500, "provider"],
-  ] as const)("maps provider status %s and discards its body", async (status, code) => {
-    let cancelled = false;
-    const body = new ReadableStream({
-      cancel() {
-        cancelled = true;
+  ] as const)(
+    "maps provider status %s and keeps only its error identifiers",
+    async (status, code) => {
+      const promise = createCodexRealtimeCall(
+        auth,
+        { sdp: offer, version: "v3", sessionId: "session-safe" },
+        async () =>
+          Response.json(
+            {
+              error: {
+                code: "model_not_found",
+                type: "invalid_request_error",
+                param: "session.model",
+                message: "provider-secret-body quoting the instructions",
+              },
+            },
+            { status },
+          ),
+        {
+          providerConfig: {
+            architecture: "avas",
+            model: "gpt-live-1-codex",
+            version: "v3",
+            source: "remote",
+            advertisedVersion: "v3",
+          },
+        },
+      );
+      await expect(promise).rejects.toMatchObject({
+        code,
+        providerStatus: status,
+        diagnostics: {
+          stage: "call",
+          providerErrorCode: "model_not_found",
+          providerErrorType: "invalid_request_error",
+          providerErrorParam: "session.model",
+          configSource: "remote",
+          advertisedVersion: "v3",
+          providerModel: "gpt-live-1-codex",
+          providerArchitecture: "avas",
+        },
+      });
+      try {
+        await promise;
+      } catch (error) {
+        expect(error).toBeInstanceOf(CodexRealtimeError);
+        expect(String((error as Error).message)).not.toContain("provider-secret-body");
+        expect(JSON.stringify((error as CodexRealtimeError).diagnostics)).not.toContain(
+          "provider-secret-body",
+        );
+      }
+    },
+  );
+
+  test("keeps a short provider detail but drops free text and oversized bodies", async () => {
+    const call = (response: Response) =>
+      createCodexRealtimeCall(
+        auth,
+        { sdp: offer, version: "v3", sessionId: "session-safe" },
+        async () => response,
+      );
+    await expect(
+      call(Response.json({ detail: "Not Found" }, { status: 404 })),
+    ).rejects.toMatchObject({
+      code: "incompatible",
+      providerStatus: 404,
+      diagnostics: { stage: "call", providerErrorCode: "Not Found", configSource: "fallback" },
+    });
+    const freeText = await call(
+      Response.json({ detail: "Your instructions 'say hello' are invalid" }, { status: 400 }),
+    ).then(
+      () => {
+        throw new Error("expected a provider failure");
       },
-    });
-    const promise = createCodexRealtimeCall(
-      auth,
-      { sdp: offer, version: "v3", sessionId: "session-safe" },
-      async () => new Response(body, { status }),
+      (error: unknown) => error as CodexRealtimeError,
     );
-    await expect(promise).rejects.toMatchObject({
-      code,
-      providerStatus: status,
-    });
+    expect(freeText.diagnostics.providerErrorCode).toBeUndefined();
+    let cancelled = false;
+    const oversized = await call(
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode("x".repeat(17 * 1024)));
+          },
+          cancel() {
+            cancelled = true;
+          },
+        }),
+        { status: 500 },
+      ),
+    ).then(
+      () => {
+        throw new Error("expected a provider failure");
+      },
+      (error: unknown) => error as CodexRealtimeError,
+    );
+    expect(oversized).toMatchObject({ code: "provider", providerStatus: 500 });
+    expect(oversized.diagnostics.providerErrorCode).toBeUndefined();
     expect(cancelled).toBe(true);
-    try {
-      await promise;
-    } catch (error) {
-      expect(error).toBeInstanceOf(CodexRealtimeError);
-      expect(String((error as Error).message)).not.toContain("provider-secret-body");
-    }
   });
 
   test("forwards cancellation to the one provider request and never falls back", async () => {
@@ -333,22 +409,38 @@ describe("Codex realtime remote configuration", () => {
       architecture: "avas-next",
       model: "gpt-live-1-codex",
       version: "v3",
+      source: "remote",
+      advertisedVersion: "v3",
     });
   });
 
-  test("never downgrades when the remote protocol is not V3", async () => {
-    await expect(
-      fetchCodexRealtimeProviderConfig(auth, async () =>
-        Response.json({
-          statsigPayload: JSON.stringify({
-            dynamic_configs: {
-              "3566525122": { value: { model: "legacy", version: "v2" } },
-            },
+  test.each(["v2", "v4"])(
+    "keeps the pinned V3 parameters when the remote configuration advertises %s",
+    async (advertised) => {
+      // The advertised version is the first-party desktop client's preference;
+      // its model and architecture are not V3 values, so they are never used,
+      // and the call is not refused either (the Codex CLI speaks V3 without it).
+      expect(
+        await fetchCodexRealtimeProviderConfig(auth, async () =>
+          Response.json({
+            statsigPayload: JSON.stringify({
+              dynamic_configs: {
+                "3566525122": {
+                  value: { architecture: "other", model: "other-model", version: advertised },
+                },
+              },
+            }),
           }),
-        }),
-      ),
-    ).rejects.toMatchObject({ code: "incompatible" });
-  });
+        ),
+      ).toEqual({
+        architecture: "avas",
+        model: "gpt-live-1-codex",
+        version: "v3",
+        source: "fallback",
+        advertisedVersion: advertised,
+      });
+    },
+  );
 
   test("uses the verified V3 fallback for transient or malformed config responses", async () => {
     expect(
@@ -360,6 +452,7 @@ describe("Codex realtime remote configuration", () => {
       architecture: "avas",
       model: "gpt-live-1-codex",
       version: "v3",
+      source: "fallback",
     });
     expect(
       await fetchCodexRealtimeProviderConfig(auth, async () => Response.json({ nope: true })),
@@ -367,13 +460,18 @@ describe("Codex realtime remote configuration", () => {
       architecture: "avas",
       model: "gpt-live-1-codex",
       version: "v3",
+      source: "fallback",
     });
   });
 
   test("preserves an authentication rejection for the broker's one safe refresh", async () => {
     await expect(
       fetchCodexRealtimeProviderConfig(auth, async () => new Response(null, { status: 401 })),
-    ).rejects.toMatchObject({ code: "authentication", providerStatus: 401 });
+    ).rejects.toMatchObject({
+      code: "authentication",
+      providerStatus: 401,
+      diagnostics: { stage: "config" },
+    });
   });
 });
 

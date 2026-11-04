@@ -10,6 +10,7 @@ use compute_core::{DiskSpace, Durability, Input, Level, Priority, SandboxId, Siz
 use compute_engine::{Engine, EngineError, ErrorKind, Found, VmSpec};
 use futures::StreamExt;
 
+use crate::fleet::LeaseGate;
 use crate::image::Recovered;
 use crate::layout::{Images, Paths, vm_spec};
 use crate::observe::{Alarm, alarm_event};
@@ -18,7 +19,7 @@ use crate::protocol::{
 };
 use crate::state::{Change, Disk, Identity, Record, StateError, Stray};
 use crate::step::{Base, DiskWatch, LiveMemory, Reconnected};
-use crate::store::Store;
+use crate::store::{OwnerEpoch, Store};
 
 use super::holds::{Holds, UNREADABLE, hold_id};
 use super::{HostAgent, HostConfig, HostError, Leftover, unix_ms_now};
@@ -33,6 +34,11 @@ type FoundVm<E> = (<E as Engine>::Vm, Found, Option<Reconnected>);
 pub(super) struct Retry {
     at: tokio::time::Instant,
     failures: u32,
+    /// Its VM was found held frozen (see [`HostAgent::frozen_owner`]).
+    frozen: bool,
+    /// Kept by the service while held frozen: tried again as soon as the
+    /// lease runs again, when the guard thaws it ([`HostAgent::thawing`]).
+    on_thaw: bool,
 }
 
 /// What stops booking sandbox `id`'s VM as one the agent does not manage
@@ -243,6 +249,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // A VM found, or not known to be gone, keeps its memory even if
         // the sandbox cannot be taken back.
         let live = !matches!(vm, Ok(None));
+        // One whose VM could not be looked at may be held frozen.
+        let unanswered = vm.is_err();
+        let spec = vm_spec(&record, &Paths::of(&self.root, &record), &self.images);
         let size = live.then(|| self.record_size(&record));
         let vcpus = record.config.vcpus;
         let result = match broken {
@@ -254,32 +263,103 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
             None => self.recover_one(record, vm, failures > 0).await,
         };
-        result.inspect_err(|error| {
-            let failures = failures.saturating_add(1);
-            // A record whose settings this host refuses stays refused.
-            let retry = !matches!(error, HostError::Invalid(_));
-            if failures == 1 {
-                tracing::error!(%id, %error, retry, "could not recover sandbox; blocking it and leaving it on disk");
-            } else {
-                tracing::info!(%id, %error, failures, "sandbox still not recovered");
+        let Err(error) = &result else {
+            return result;
+        };
+        let failures = failures.saturating_add(1);
+        // A record whose settings this host refuses stays refused.
+        let retry = !matches!(error, HostError::Invalid(_));
+        // Its record is sound and its VM runs nothing until thawed, so the
+        // service may rule on it (see [`Self::frozen_owner`]).
+        let frozen = retry && unanswered && self.found_frozen(id, &spec);
+        if failures == 1 {
+            tracing::error!(%id, %error, retry, frozen, "could not recover sandbox; blocking it and leaving it on disk");
+        } else {
+            tracing::info!(%id, %error, failures, frozen, "sandbox still not recovered");
+        }
+        let problem = match (retry, frozen) {
+            (true, true) => {
+                format!("not recovered while its VM is held frozen, tried again later: {error}")
             }
-            let problem = if retry {
-                format!("not recovered, tried again later: {error}")
-            } else {
-                format!("not recovered: {error}")
-            };
-            self.block(id, problem);
-            match size {
-                Some(size) => self.unmanaged(id, size, vcpus),
-                // Its VM, which an earlier try booked, is known to be gone.
-                None if failures > 1 => self.managed_again(id),
-                None => {}
-            }
-            if retry {
-                let at = self.retry_after(failures);
-                self.retrying.insert(id.0, Retry { at, failures });
-            }
+            (true, false) => format!("not recovered, tried again later: {error}"),
+            (false, _) => format!("not recovered: {error}"),
+        };
+        self.block(id, problem);
+        match size {
+            Some(size) => self.unmanaged(id, size, vcpus),
+            // Its VM, which an earlier try booked, is known to be gone.
+            None if failures > 1 => self.managed_again(id),
+            None => {}
+        }
+        if retry {
+            let at = self.retry_after(failures);
+            self.retrying.insert(
+                id.0,
+                Retry {
+                    at,
+                    failures,
+                    frozen,
+                    on_thaw: false,
+                },
+            );
+        }
+        result
+    }
+
+    /// Whether the VM of sandbox `id`, made from `spec`, is held frozen.
+    /// One that cannot be told is not known to be.
+    fn found_frozen(&self, id: Id, spec: &VmSpec) -> bool {
+        self.engine.held_frozen(spec).unwrap_or_else(|error| {
+            tracing::warn!(%id, %error, "could not tell whether the VM is held frozen");
+            false
         })
+    }
+
+    /// The owner epoch of sandbox `id` if it is blocked only because
+    /// recovery found its VM held frozen, as the guard leaves VMs once the
+    /// lease has run out: its record is sound, and its VM runs nothing
+    /// until the lease lets the guard thaw it, so a registration lists it
+    /// and the service rules on it (see [`Self::reconcile`]). Blocking it
+    /// for any other reason ends that.
+    pub(super) fn frozen_owner(&self, id: SandboxId) -> Option<OwnerEpoch> {
+        let frozen = self.retrying.get(&id).is_some_and(|retry| retry.frozen);
+        if !frozen || !self.blocked.contains_key(&id) {
+            return None;
+        }
+        self.records.get(Id(id)).map(|record| record.owner())
+    }
+
+    /// A blocked sandbox the service cannot rule on: its VM may still run
+    /// a copy another host now runs, so the host cannot register.
+    pub(super) fn unruled_blocked(&self) -> Option<Id> {
+        self.blocked
+            .keys()
+            .find(|id| self.frozen_owner(**id).is_none())
+            .map(|id| Id(*id))
+    }
+
+    /// Takes sandbox `id`, held frozen, back as soon as the lease runs
+    /// again: the service kept it, and the deadline that lets the guard
+    /// thaw it is written once the rest of its rulings are carried out.
+    pub(super) fn take_back_on_thaw(&mut self, id: SandboxId) {
+        if let Some(retry) = self.retrying.get_mut(&id) {
+            retry.on_thaw = true;
+        }
+    }
+
+    /// The lease changed: once it runs, each sandbox held frozen that the
+    /// service kept is tried again now, as the guard thaws it. A VMM given
+    /// [`compute_engine::Engine::adopt`]'s time to answer answers once
+    /// thawed, and one still frozen is tried again later as before.
+    pub(super) fn thawing(&mut self) {
+        if !self.lease.as_ref().is_some_and(LeaseGate::is_open) {
+            return;
+        }
+        let now = tokio::time::Instant::now();
+        for retry in self.retrying.values_mut().filter(|retry| retry.on_thaw) {
+            retry.on_thaw = false;
+            retry.at = now;
+        }
     }
 
     /// When a sandbox whose recovery failed `failures` times in a row is
@@ -322,20 +402,21 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     ///
     /// It runs whether or not the lease holds, as recovery at start does:
     /// while the lease has run out the core plans nothing, and a host the
-    /// service gave up registers again only once nothing is blocked.
+    /// service gave up registers again once nothing is blocked but the
+    /// sandboxes held frozen, which it lists for the service to rule on.
     /// Looking for the VMs holds the agent up to the time a VMM is given
     /// to answer, once per round however many are tried.
     pub(super) async fn retry_recovery(&mut self) {
         let now = tokio::time::Instant::now();
-        let due: Vec<(SandboxId, u32)> = self
+        let due: Vec<(SandboxId, Retry)> = self
             .retrying
             .iter()
             .filter(|(_, retry)| retry.at <= now)
-            .map(|(id, retry)| (*id, retry.failures))
+            .map(|(id, retry)| (*id, *retry))
             .collect();
         let mut records = Vec::new();
         let mut failed = HashMap::new();
-        for (id, failures) in due {
+        for (id, retry) in due {
             match self.records.get(Id(id)) {
                 Some(record)
                     if self.blocked.contains_key(&id)
@@ -344,11 +425,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 {
                     if self.still_serving(id) {
                         tracing::debug!(id = %Id(id), "the VM's pager is still served in the background; trying again later");
-                        let at = self.retry_after(failures);
-                        self.retrying.insert(id, Retry { at, failures });
+                        let at = self.retry_after(retry.failures);
+                        self.retrying.insert(id, Retry { at, ..retry });
                         continue;
                     }
-                    failed.insert(id, failures);
+                    failed.insert(id, retry);
                     records.push(record);
                 }
                 _ => {
@@ -367,12 +448,19 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 .remove(&id.0)
                 .unwrap_or_else(|| Err(HostError::Io("no result from looking for the VM".into())));
             let broken = broken_networks.get(&id.0).cloned();
-            let failures = failed.get(&id.0).copied().unwrap_or(1);
+            let (failures, on_thaw) = failed
+                .get(&id.0)
+                .map_or((1, false), |retry| (retry.failures, retry.on_thaw));
             // Taken back, nothing may refuse it for its old problem.
             let problem = self.blocked.remove(&id.0);
             self.retrying.remove(&id.0);
-            if let Ok(adopted) = self.recover_found(record, vm, broken, failures).await {
-                tracing::info!(%id, adopted, failures, was = problem.as_deref().unwrap_or_default(), "recovered a sandbox on a later try");
+            match self.recover_found(record, vm, broken, failures).await {
+                Ok(adopted) => {
+                    tracing::info!(%id, adopted, failures, was = problem.as_deref().unwrap_or_default(), "recovered a sandbox on a later try");
+                }
+                // Kept by the service, it is still taken back as it thaws.
+                Err(_) if on_thaw => self.take_back_on_thaw(id.0),
+                Err(_) => {}
             }
         }
     }
@@ -431,7 +519,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// files and any VM stay as they are; a recorded sandbox can still be
     /// removed.
     pub(super) fn block(&mut self, id: Id, problem: String) {
-        // Blocked for another reason, recovery is not tried again.
+        // Blocked for another reason, recovery is not tried again, and
+        // the service is not asked to rule on it.
         self.retrying.remove(&id.0);
         self.blocked.insert(id.0, problem);
     }

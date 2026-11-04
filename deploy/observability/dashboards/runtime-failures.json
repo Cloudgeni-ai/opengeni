@@ -994,7 +994,7 @@
       "id": 29,
       "type": "timeseries",
       "title": "Provider invalid requests by path",
-      "description": "Provider 400 invalid-request answers to model calls, by the request path the provider names (indices collapsed, such as input[].tools[].name) and its error code. A new path is a new class of malformed request, usually one failing a chat on every retry. Monitoring only: nothing is blocked because of it. A rejected tool name also gets one strict resend (see Tool-name repairs).",
+      "description": "Provider 400 invalid-request answers to model calls, by the request path the provider names (indices collapsed, such as input[].tools[].name) and its error code. A new path is a new class of malformed request, usually one failing a chat on every retry. Monitoring only: nothing is blocked or retried because of it.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1029,56 +1029,6 @@
       "gridPos": {
         "x": 0,
         "y": 85,
-        "w": 24,
-        "h": 8
-      }
-    },
-    {
-      "id": 30,
-      "type": "timeseries",
-      "title": "Tool-name repairs",
-      "description": "Model requests in which the outbound guard gave a tool name a provider could reject its alias, by provider, wire API and field (tools, tool_choice, history), and the strict resends after a provider still rejected a tool name, by outcome. Repairs are expected for chats whose history holds such names; a failed resend is a tool name no alias satisfied.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": ["last", "sum"]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (provider, api, field) (increase(opengeni_model_tool_name_repairs_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__range]))",
-          "legendFormat": "repaired \u00b7 {{provider}} \u00b7 {{api}} \u00b7 {{field}}",
-          "editorMode": "code",
-          "range": true
-        },
-        {
-          "refId": "B",
-          "expr": "sum by (provider, api, outcome) (increase(opengeni_model_tool_name_retries_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__range]))",
-          "legendFormat": "strict resend \u00b7 {{provider}} \u00b7 {{api}} \u00b7 {{outcome}}",
-          "editorMode": "code",
-          "range": true
-        }
-      ],
-      "gridPos": {
-        "x": 0,
-        "y": 93,
         "w": 24,
         "h": 8
       }

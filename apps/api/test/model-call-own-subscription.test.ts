@@ -39,7 +39,11 @@ const ROUTES = {
   },
 } as const;
 
-function harness(route: keyof typeof ROUTES, admission: Record<string, unknown>) {
+function harness(
+  route: keyof typeof ROUTES,
+  admission?: Record<string, unknown>,
+  origin: "app" | "api" = "app",
+) {
   const settings = testSettings({ billingMode: "stripe", subscriptionPlansEnabled: true });
   const selection = {
     model: {
@@ -55,11 +59,17 @@ function harness(route: keyof typeof ROUTES, admission: Record<string, unknown>)
     "withAccessGrantSessionRlsContext",
     async (_d: unknown, _g: unknown, fn: () => unknown) => fn(),
   );
-  spy(rls, "billingOriginForAccessGrant", async () => "app");
+  spy(rls, "billingOriginForAccessGrant", async () => origin);
   spy(core, "resolveWorkspaceCatalogSettings", async () => ({ settings }));
   spy(core, "resolveCallerWorkspaceModelSelections", async () => [selection]);
   spy(core, "admissibleWorkspaceModel", () => selection);
-  const admit = spy(core, "admitModelCall", async () => admission);
+  const realAdmission = core.admitModelCall;
+  const admit = spy(
+    core,
+    "admitModelCall",
+    async (...args: Parameters<typeof realAdmission>) =>
+      admission ?? (await realAdmission(...args)),
+  );
   const provider = spy(runtimeModelCall, "runSingleModelCall", async () => {
     throw new Error("must not dispatch");
   });
@@ -90,6 +100,17 @@ function harness(route: keyof typeof ROUTES, admission: Record<string, unknown>)
 }
 
 describe("single model calls on the person's own model", () => {
+  test("API callers receive a clear refusal before a subscription credential or provider is used", async () => {
+    const h = harness("subscription", undefined, "api");
+    expect(await h.call()).toMatchObject({
+      status: 403,
+      type: "invalid_request_error",
+      code: "subscription_api_unavailable",
+      message:
+        "Connected subscriptions are only available in the Opengeni apps. Choose a credit-billed model for API use.",
+    });
+    expect(h.provider).not.toHaveBeenCalled();
+  });
   test("an own subscription is admitted as a subscription, never byok, and Free is refused with the upgrade code", async () => {
     const h = harness("subscription", {
       allowed: false,

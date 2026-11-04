@@ -67,6 +67,7 @@ fn of_hour(hour: u32) -> Vec<String> {
     vec![
         format!("p/manifests/v2/{hour}/"),
         format!("p/chunks/v2/{hour}/"),
+        format!("p/packs/v1/{hour}/"),
     ]
 }
 
@@ -296,6 +297,7 @@ async fn a_listing_cut_short_goes_on_where_it_stopped() {
     let found = [
         "p/manifests/v2/".to_owned(),
         "p/chunks/v2/".to_owned(),
+        "p/packs/v1/".to_owned(),
         "p/sweep/v1/within/".to_owned(),
     ];
     assert_eq!(order, [&found[..], &hours, &legacy].concat());

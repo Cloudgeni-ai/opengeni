@@ -4,37 +4,22 @@ Placement-resident browser controller. It launches and owns the managed
 browser, target generations and operation receipts, and exposes only Opengeni
 interaction contracts. CDP endpoints are not product APIs.
 
-Payment fields never expose their values in semantic observations or DOM
-reads. Known numeric secrets remain masked when a widget groups their digits;
-three-digit security codes are remembered as well. A fill accepts only
-formatting-only digit grouping in a classified payment field, not changed
-digits or reformatted ordinary fields. DOM snapshots find protected fields in
-frames and flattened author shadow roots, including closed roots; a failed
-privacy read withholds output rather than assuming a page is public.
-Only password and primary card-field values enter known-value memory; hidden
-metadata, private prose, expiry options and field labels do not. Card numbers
-and security codes remain remembered even when unrelated values age out.
-A text that is a whole address keeps its scheme, host and port (its user info,
-path, query and fragment are still masked), so a tab's address remains a valid
-URL even when a short security code's digits appear in its port. Elsewhere a
-remembered number is masked even where other digits touch it, because pages
-join neighbouring elements (a card number beside its expiry) without spaces.
+Observations and DOM reads leave out the values of fields that standard
+markup marks private: password inputs, the `current-password`,
+`new-password`, `one-time-code` and `cc-*` autocomplete tokens, hidden inputs
+and explicit private markers (`data-private`, `data-sensitive`,
+`data-opengeni-private`). The field stays present, labelled and fillable.
+Nothing is guessed from names, ids, placeholders or labels, and nothing is
+remembered: there is no memory of page-found or typed values. A read-only
+renderer snapshot finds these fields in frames and author shadow roots,
+including closed roots; a frame whose snapshot fails is read without it, so a
+read is never withheld. Screenshots, live-view images, recordings and
+clipboard copies are never refused. A fill accepts formatting-only digit
+grouping (a card widget inserting spaces) in any field.
 
-Once payment fields or known card data are encountered, that browser tab withholds
-screenshots, live-view images and recording frames. Unrelated tabs remain usable.
-Use semantic observation and controls
-to finish the form. This deliberately refuses images rather than promising
-race-free pixel masking. The flag and known-value memory survive controller
-replacement within a browserd process, not a process restart. Arbitrary
-canvas-rendered content is not identified by the DOM policy.
-Before/after DOM checks do not attest transient pixels that appear and vanish
-between checks. Desktop screenshots of a headed browser are a separate surface
-and are not protected by this per-tab guard. Attached Chrome requires the
-extension version that admits the read-only DOMSnapshot privacy method. The
-agent's existing bridge handshake refuses extensions without that capability
-as `extension_outdated`, which starts Chrome's update check before any privacy
-read can run. The additive capability remains compatible with older agents,
-so publish the extension before rolling out the new agent.
+Attached Chrome extensions still advertise the DOMSnapshot privacy
+capability, but the agent no longer requires it: with an older extension the
+snapshot fails and the read continues.
 
 Browserd starts Chrome or Chromium itself with a private profile and a
 loopback-only DevTools port, and is the browser's only CDP client. It connects

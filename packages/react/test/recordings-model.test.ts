@@ -320,6 +320,22 @@ describe("fixing a failed transcript", () => {
   });
 
   test("the refusals say what to fix", () => {
+    expect(transcriptErrorText("subscription_plan_required")).toBe(
+      "Upgrade to Pro to use your own subscription.",
+    );
+    expect(transcriptErrorText("subscription_api_unavailable")).toContain(
+      "Choose a credit-billed model",
+    );
+    expect(
+      transcriptFixModel("subscription_plan_required", failedOn, [mai, eleven, chatgpt]),
+    ).toBeNull();
+    expect(
+      transcriptFixModel(
+        "subscription_api_unavailable",
+        { providerId: "codex-subscription", model: "chatgpt-dictation" },
+        [mai, chatgpt, model("other-subscription", "workspace_subscription")],
+      ),
+    ).toBe(mai);
     expect(transcriptErrorText("insufficient_credits")).toContain("Add credits");
     expect(
       transcriptErrorText("insufficient_credits", undefined, {

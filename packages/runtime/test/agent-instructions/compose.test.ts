@@ -16,6 +16,7 @@ import {
   CODE_SEARCH_DIRECTIVE,
   CODEMODE_PROGRAMMATIC_DIRECTIVE,
   DEFAULT_AGENT_IDENTITY,
+  NEUTRAL_AGENT_IDENTITY,
   INSTRUCTION_PRECEDENCE,
   SESSION_INSTRUCTIONS_PREAMBLE,
   agentPromptResourcesFor,
@@ -618,7 +619,8 @@ describe("modular composer: prompt-cache stability", () => {
       agentConfig: config(noneAgentCapabilities(), { from: "none", renderer: "markdown" }),
     });
     expect(String(legacy.instructions)).toStartWith("You are an agent for the current workspace.");
-    expect(String(modular.instructions)).toStartWith(DEFAULT_AGENT_IDENTITY);
+    // "none" shares no workspace, so the default identity is the neutral one.
+    expect(String(modular.instructions)).toStartWith(NEUTRAL_AGENT_IDENTITY);
     expect(String(modular.instructions)).toContain("# Links and rendering");
     expect(String(modular.instructions)).not.toMatch(MARKERS.knowledge!);
     // A capability-free modular prompt is a little over half the legacy one
