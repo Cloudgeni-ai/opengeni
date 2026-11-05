@@ -26,7 +26,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "2bf9bd2fd7a954c3a7f66eba5e4aca5351c7aeada957b003b3eb758b81df0f61"
+      "sha256": "2bf441bbe96a65a96a1f19d0c7205aa380eab2e9ee9686e8ea35c4514e0e0240"
     },
     {
       "path": ".github/workflows/compact-session-view.yml",
@@ -626,6 +626,12 @@
       "job": "api-image",
       "step": "Bake and sign exact-SHA canary agent",
       "sha256": "03fd91b69ce97d2511822327d8817352c28329ca4a08f876a6598a24517a91e8"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "api-image",
+      "step": "Free runner disk before the image build",
+      "sha256": "5b608cef71bb65718bd85a5a96eb75935244c907961bfda30ef9d4da2300de8a"
     },
     {
       "workflow": ".github/workflows/ci.yml",
