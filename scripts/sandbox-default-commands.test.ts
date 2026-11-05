@@ -94,7 +94,8 @@ describe("default sandbox commands", () => {
   test("the list covers the commands agents reach for, once each", async () => {
     const names = await listed();
     expect(new Set(names).size).toBe(names.length);
-    for (const name of REQUIRED) expect({ name, listed: names.includes(name) }).toEqual({ name, listed: true });
+    for (const name of REQUIRED)
+      expect({ name, listed: names.includes(name) }).toEqual({ name, listed: true });
   });
 
   test("both default images run the check as their last build step", async () => {
