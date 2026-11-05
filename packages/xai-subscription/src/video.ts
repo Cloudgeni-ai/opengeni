@@ -9,7 +9,6 @@ import {
 import {
   XAI_PUBLIC_API_BASE_URL,
   XAI_CLIENT_MODE,
-  XAI_CLIENT_VERSION,
   XAI_VIDEO_DOWNLOAD_TIMEOUT_MS,
   XAI_VIDEO_GENERATION_TIMEOUT_MS,
   XAI_VIDEO_MODEL,
@@ -17,6 +16,7 @@ import {
   XAI_VIDEO_POLL_REQUEST_TIMEOUT_MS,
   XAI_VIDEO_START_TIMEOUT_MS,
 } from "./constants";
+import { currentXaiClientVersion } from "./client-version";
 import { XaiSubscriptionError } from "./errors";
 import type { XaiFetchLike } from "./fetch";
 import type { XaiSubscriptionTokenSnapshot } from "./request-context";
@@ -163,8 +163,8 @@ function publicVideoHeaders(
   return new Headers({
     accept: "application/json",
     authorization: `Bearer ${token.accessToken}`,
-    "user-agent": `opengeni/${XAI_CLIENT_VERSION}`,
-    "x-grok-client-version": XAI_CLIENT_VERSION,
+    "user-agent": `opengeni/${currentXaiClientVersion()}`,
+    "x-grok-client-version": currentXaiClientVersion(),
     "x-grok-client-identifier": "opengeni",
     "x-grok-client-mode": XAI_CLIENT_MODE,
     ...(sessionId ? { "x-grok-session-id": sessionId } : {}),
