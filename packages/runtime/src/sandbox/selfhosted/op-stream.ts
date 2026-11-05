@@ -54,6 +54,7 @@ import {
   agentErrorToControlError,
   commandOutcomeUnknownAfterReplacementAgentError,
   isAgentNotAnswered,
+  AGENT_UNRESPONSIVE_DETAIL_KEY,
   NEVER_SENT_DETAIL_KEY,
   SelfhostedControlError,
   timeoutAgentError,
@@ -83,6 +84,14 @@ export const OP_STREAM_SILENCE_TIMEOUT_MS = 30_000;
  *  the client fails it typed (PROTOCOL liveness rule: hold ≤120s, then only a
  *  definitive answer fails the op). */
 export const OP_STREAM_RECONNECT_HOLD_MS = 120_000;
+/** How long a command's start may go without any answer from the agent
+ *  before the client stops waiting for it and fails it typed
+ *  (`AGENT_UNRESPONSIVE_DETAIL_KEY`). Every answer, a DRAINING refusal included,
+ *  starts the wait again, so a busy agent is never cut off. It covers a compute
+ *  host's 120 s hold of a request to a waking or restarting sandbox, plus a
+ *  reply-recovery round, and stops the start's retries long before their
+ *  15-minute resend horizon. */
+export const OP_START_UNANSWERED_MS = 180_000;
 /** A detached background consumer grants the runner the complete uint64 credit
  * range. Retention remains bounded by the runner's ring/spool quotas, so a noisy
  * command reaches the existing typed OP_OVERFLOW terminal instead of stalling
@@ -148,6 +157,8 @@ export interface OpStreamExecClientDeps {
   ackIntervalMs?: number;
   silenceTimeoutMs?: number;
   reconnectHoldMs?: number;
+  /** See `OP_START_UNANSWERED_MS`; overridable for tests. 0 turns it off. */
+  startUnansweredMs?: number;
   /** Per-connection policy snapshot attached only to OpStart. Lifecycle controls
    * identify an already-admitted operation and must not imply a policy change. */
   resourcePolicy?: OperationResourcePolicy;
@@ -779,6 +790,10 @@ class OpConsumer {
   /** An agent acknowledged this op: it accepted the start or reported the
    *  op's status, through this consumer or an earlier one of its client. */
   private startConfirmed: boolean;
+  /** When the agent last answered this run's start, or refused it as
+   *  DRAINING (or the run began): the start's unanswered wait counts from
+   *  here. */
+  private lastStartAnswerAt = Date.now();
   private readonly acknowledgement: OpAcknowledgement | undefined;
 
   constructor(
@@ -823,6 +838,24 @@ class OpConsumer {
     });
   }
 
+  /** The error of a start the agent left unanswered for `waitedMs`: the agent
+   *  is offline. Never-sent only when no OpStart can have reached an agent. */
+  private startUnansweredError(waitedMs: number): SelfhostedControlError {
+    const neverSent = !(this.startInFlight || this.startMaybeDelivered);
+    return new SelfhostedControlError({
+      message: `the agent did not answer for ${Math.round(waitedMs / 1000)}s`,
+      code: ErrorCode.ERROR_CODE_AGENT_OFFLINE,
+      reason: "agent_offline",
+      retryable: false,
+      agentOffline: true,
+      neverSent,
+      detail: {
+        [AGENT_UNRESPONSIVE_DETAIL_KEY]: String(waitedMs),
+        ...(neverSent ? { [NEVER_SENT_DETAIL_KEY]: "1" } : {}),
+      },
+    });
+  }
+
   readCheckpoint(): OpReadCheckpoint {
     return {
       lastApplied: this.lastApplied,
@@ -840,6 +873,9 @@ class OpConsumer {
   }
   private get reconnectHoldMs(): number {
     return this.deps.reconnectHoldMs ?? OP_STREAM_RECONNECT_HOLD_MS;
+  }
+  private get startUnansweredMs(): number {
+    return this.deps.startUnansweredMs ?? OP_START_UNANSWERED_MS;
   }
 
   teardown(): void {
@@ -882,7 +918,10 @@ class OpConsumer {
     // timeout, never after it.
     const runStartedAt = Date.now();
     const deadlineAt = deadlineMs > 0 ? runStartedAt + deadlineMs : 0;
-    const startWall = this.startWall(wallMs);
+    // A new command's start also ends once its agent has answered nothing for
+    // the unanswered bound, however long its own wall (none by default).
+    this.lastStartAnswerAt = runStartedAt;
+    const startWall = this.startWall(wallMs, exec === null ? 0 : this.startUnansweredMs);
     let startRetries: number;
     try {
       // Subscription BEFORE OpStart (protocol invariant): no frame can be
@@ -1183,6 +1222,7 @@ class OpConsumer {
         );
         this.startInFlight = false;
         this.startMaybeDelivered = true;
+        this.lastStartAnswerAt = Date.now();
         if (result.$case !== "opStart") {
           throw protocolError(`op-stream start: unexpected result ${result.$case}`);
         }
@@ -1230,6 +1270,8 @@ class OpConsumer {
             : agentReplacedOutcomeUnknownError(this.startConfirmed);
         }
         const blip = error.reason === "agent_reconnecting" || error.neverSent;
+        // A DRAINING refusal is the agent's answer: it is there, only busy.
+        if (error.draining) this.lastStartAnswerAt = Date.now();
         if (error.draining && drainingRetries < OP_START_DRAINING_MAX_RETRIES) {
           await this.deps.retryClock.sleep(
             selfhostedRetryBackoffMs(drainingRetries, this.deps.retryClock.jitter()),
@@ -1548,23 +1590,47 @@ class OpConsumer {
     };
   }
 
-  /** The op's wall while its start and first attach are in flight. */
-  private startWall(wallMs: number): {
+  /** The op's wall while its start and first attach are in flight, and the
+   *  start's unanswered bound (`unansweredMs`, 0: none): once the agent has
+   *  answered nothing for that long, the start is abandoned as the wall
+   *  abandons it, and the call fails with the agent offline. */
+  private startWall(
+    wallMs: number,
+    unansweredMs: number,
+  ): {
     race: <T>(work: Promise<T>) => Promise<T>;
     clear: () => void;
   } {
-    if (wallMs <= 0) return { race: (work) => work, clear: () => {} };
+    if (wallMs <= 0 && unansweredMs <= 0) return { race: (work) => work, clear: () => {} };
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let unansweredTimer: ReturnType<typeof setTimeout> | undefined;
     const wall = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => {
-        this.startAbandoned = true;
-        reject(this.startTimeoutError());
-      }, wallMs);
+      if (wallMs > 0) {
+        timer = setTimeout(() => {
+          this.startAbandoned = true;
+          reject(this.startTimeoutError());
+        }, wallMs);
+      }
+      if (unansweredMs > 0) {
+        const check = () => {
+          const waitedMs = Date.now() - this.lastStartAnswerAt;
+          if (waitedMs < unansweredMs) {
+            unansweredTimer = setTimeout(check, unansweredMs - waitedMs);
+            return;
+          }
+          this.startAbandoned = true;
+          reject(this.startUnansweredError(waitedMs));
+        };
+        unansweredTimer = setTimeout(check, unansweredMs);
+      }
     });
     void wall.catch(() => {});
     return {
       race: async (work) => await Promise.race([work, wall]),
-      clear: () => clearTimeout(timer),
+      clear: () => {
+        clearTimeout(timer);
+        clearTimeout(unansweredTimer);
+      },
     };
   }
 

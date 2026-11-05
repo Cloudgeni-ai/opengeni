@@ -96,6 +96,7 @@ import { createSharedRigSetupCoordinator } from "./sandbox-shared-preparation";
 import {
   createSandboxSetupReplayGuard,
   recoverSandboxSetupFailure,
+  recoverUnresponsiveComputeAgent,
 } from "./sandbox-setup-agent-failure";
 import { sandboxStartupPhaseObserver } from "./sandbox-startup-phase";
 import { errorMessage } from "@opengeni/contracts/values";
@@ -470,6 +471,23 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                 attemptId: input.attemptId,
               },
             }),
+            // A command whose agent stopped answering restarts the box, at
+            // most once per turn, before the command fails.
+            recoverUnresponsiveAgent: async (machine) =>
+              await recoverUnresponsiveComputeAgent(machine, {
+                restartsThisTurn: async () =>
+                  await countSessionTurnSandboxProcessStartRestarts(db, input.workspaceId, {
+                    sessionId: input.sessionId,
+                    turnId: turn.id,
+                  }),
+                publish: async (events) => {
+                  // The restart guard counts these events: an unrecorded
+                  // restart could repeat, so no publisher means no restart.
+                  if (!eventing.publish) throw new Error("no event publisher for this turn");
+                  await eventing.publish(events, true);
+                },
+                operationName: SANDBOX_PROCESS_START_RESTART_OPERATION,
+              }),
           }
         : undefined;
     // A committed system recovery decision is rematerialized in this turn even

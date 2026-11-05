@@ -26,6 +26,9 @@ import {
   usesAgentTransport,
   type ComputeAgentConnection,
   type ComputeAgentPlane,
+  type UnresponsiveAgentRecovery,
+  type UnresponsiveComputeMachine,
+  renderSelfhostedFault,
   type ControlRpc,
   type NatsRequestConnection,
   sweepComputeOrphans,
@@ -35,7 +38,14 @@ import {
   wakeComputeSandboxOnNoResponders,
 } from "../src/sandbox";
 import { COMPUTE_ORPHAN_SWEEP_LIMIT } from "../src/sandbox/compute/orphans";
-import { RESPONDER_WAIT_EXHAUSTED_DETAIL_KEY } from "../src/sandbox/selfhosted/control-rpc";
+import {
+  AGENT_UNRESPONSIVE_DETAIL_KEY,
+  AGENT_UNRESPONSIVE_MACHINE_DETAIL_KEY,
+  AGENT_UNRESPONSIVE_RECOVERY_DETAIL_KEY,
+  RESPONDER_WAIT_EXHAUSTED_DETAIL_KEY,
+} from "../src/sandbox/selfhosted/control-rpc";
+import { NO_WAKE_HEADER } from "../src/sandbox/selfhosted/control-replay";
+import { selfhostedFaultContext } from "../src/sandbox/selfhosted/fault-rendering";
 import { applyDiff } from "@openai/agents";
 import { Manifest } from "@openai/agents/sandbox";
 import { setSelfhostedApplyDiff } from "../src/sandbox/selfhosted/session";
@@ -62,6 +72,7 @@ class FakeControlService {
   readonly requests: Array<{ method: string; path: string; body: unknown; apiKey: string | null }> =
     [];
   wakes = 0;
+  restarts = 0;
   /** Answer the next N creates with this status before succeeding. */
   failCreates: number[] = [];
   /** Make the sandbox but never answer a create (every attempt is a 504). */
@@ -77,6 +88,8 @@ class FakeControlService {
   /** Called when the control service wakes a sandbox. */
   onWake: (box: FakeSandbox) => void = () => {};
   onCreate: (box: FakeSandbox) => void = () => {};
+  /** Called when the control service restarts a sandbox. */
+  onRestart: (box: FakeSandbox) => void = () => {};
 
   constructor() {
     this.server = Bun.serve({
@@ -150,6 +163,11 @@ class FakeControlService {
         }
         const box = parts[2] ? this.boxes.get(parts[2]) : undefined;
         if (!box) return Response.json({ code: "not_found", message: "none" }, { status: 404 });
+        if (request.method === "POST" && parts[3] === "restart") {
+          this.restarts += 1;
+          this.onRestart(box);
+          return Response.json(this.view(box));
+        }
         if (request.method === "POST" && parts[3] === "wake") {
           this.wakes += 1;
           this.onWake(box);
@@ -238,6 +256,9 @@ class FakeAgentPlane implements ComputeAgentPlane {
   natsTransport = false;
   /** Every subject a request was sent on over that connection. */
   readonly natsSubjects: string[] = [];
+  /** Every request sent over that connection: its op and whether it asked
+   * the host not to wake the box. */
+  readonly natsRequests: Array<{ op: string | undefined; noWake: boolean }> = [];
   /** Instances whose host still takes requests but whose agent is gone: a
    * request there is held and never answered, so it times out. */
   readonly heldInstances = new Set<string>();
@@ -292,6 +313,10 @@ class FakeAgentPlane implements ComputeAgentPlane {
       supportsHeaders: true,
       request: async (subject, payload, opts) => {
         this.natsSubjects.push(subject);
+        this.natsRequests.push({
+          op: ControlRequest.decode(payload).op?.$case,
+          noWake: opts.headers?.[NO_WAKE_HEADER] === "1",
+        });
         const base = subject.split(".replay.")[0]!;
         if (this.heldInstances.has(base.split(".")[4] ?? "")) {
           await Bun.sleep(opts.timeout);
@@ -491,6 +516,8 @@ function setup(
     desktop?: boolean;
     controlTimeoutMs?: number;
     execTimeoutMs?: number;
+    startUnansweredMs?: number;
+    unresponsiveRecoveryMs?: number;
     diskMib?: number;
   } = {},
 ) {
@@ -520,6 +547,12 @@ function setup(
       ? { controlTimeoutMs: options.controlTimeoutMs }
       : {}),
     ...(options.execTimeoutMs !== undefined ? { execTimeoutMs: options.execTimeoutMs } : {}),
+    ...(options.startUnansweredMs !== undefined
+      ? { startUnansweredMs: options.startUnansweredMs }
+      : {}),
+    ...(options.unresponsiveRecoveryMs !== undefined
+      ? { unresponsiveRecoveryMs: options.unresponsiveRecoveryMs }
+      : {}),
     environment: { FOO: "bar" },
   });
   return { control, plane, client };
@@ -1812,6 +1845,143 @@ describe("an operation whose agent restarts", () => {
     );
     expect(error).toBeDefined();
     expect(Date.now() - startedAt).toBeLessThan(15_000);
+  }, 30_000);
+});
+
+describe("an exec whose agent stops answering and does not come back", () => {
+  // The live repro (staging, 2026-11-04): the agent's program was moved away
+  // and the agent killed. The host keeps the agent's session and holds every
+  // request, and production execs have no deadline, so the next command
+  // waited with no event until the chat was paused 11 minutes later.
+  async function deadAgent(
+    recover: (
+      machine: UnresponsiveComputeMachine,
+      plane: FakeAgentPlane,
+    ) => Promise<UnresponsiveAgentRecovery>,
+    options: { commands?: number; unresponsiveRecoveryMs?: number } = {},
+  ) {
+    const { plane, client, control } = setup({
+      controlTimeoutMs: 300,
+      execTimeoutMs: 0,
+      startUnansweredMs: 1_500,
+      ...(options.unresponsiveRecoveryMs !== undefined
+        ? { unresponsiveRecoveryMs: options.unresponsiveRecoveryMs }
+        : {}),
+    });
+    plane.natsTransport = true;
+    const created = await client.create(undefined, { opengeniCreateIdentity: identity });
+    const session = (created as ComputeSandboxSession).bindTurn({
+      recoverUnresponsiveAgent: async (machine) => await recover(machine, plane),
+    });
+    expect((await session.exec({ cmd: "echo hi" })).exitCode).toBe(0);
+    plane.heldInstances.add(plane.sessions.get(session.state.enrollmentId)!);
+    const startedAt = Date.now();
+    const outcomes = await Promise.all(
+      Array.from({ length: options.commands ?? 1 }, async (_, index) =>
+        Promise.race([
+          session.exec({ cmd: `echo alive-${4 + index}` }).then(
+            () => "answered" as const,
+            (caught: unknown) => caught,
+          ),
+          Bun.sleep(15_000).then(() => "still waiting" as const),
+        ]),
+      ),
+    );
+    return {
+      outcome: outcomes[0],
+      outcomes,
+      elapsedMs: Date.now() - startedAt,
+      control,
+      plane,
+      session,
+    };
+  }
+
+  test("ends after the unanswered bound with the box restarted once, and says to re-run", async () => {
+    const machines: boolean[] = [];
+    const { outcome, elapsedMs, control } = await deadAgent(async (machine) => {
+      machines.push(await machine.agentAnswers());
+      await machine.restartMachine();
+      return "restarted";
+    });
+    expect(outcome).toBeInstanceOf(SelfhostedControlError);
+    const error = outcome as SelfhostedControlError;
+    expect(error.agentOffline).toBe(true);
+    expect(Number(error.detail[AGENT_UNRESPONSIVE_DETAIL_KEY])).toBeGreaterThanOrEqual(1_500);
+    expect(error.detail[AGENT_UNRESPONSIVE_MACHINE_DETAIL_KEY]).toBe("compute");
+    expect(error.detail[AGENT_UNRESPONSIVE_RECOVERY_DETAIL_KEY]).toBe("restarted");
+    // Asked once, after the agent was found silent, and restarted once.
+    expect(machines).toEqual([false]);
+    expect(control.restarts).toBe(1);
+    expect(elapsedMs).toBeLessThan(8_000);
+    // Rendered as the routed session renders a cloud computer's faults.
+    expect(renderSelfhostedFault(error, selfhostedFaultContext("compute"))).toStartWith(
+      "[cloud computer] this chat's cloud computer stopped responding and didn't come back. Opengeni restarted it; re-run the command.",
+    );
+  }, 30_000);
+
+  test("commands that stop together share one recovery: the box restarts once", async () => {
+    let recoveries = 0;
+    const { outcomes, control } = await deadAgent(
+      async (machine) => {
+        recoveries += 1;
+        if (await machine.agentAnswers()) return "answering";
+        await machine.restartMachine();
+        return "restarted";
+      },
+      { commands: 3 },
+    );
+    expect(recoveries).toBe(1);
+    expect(control.restarts).toBe(1);
+    for (const outcome of outcomes) {
+      expect(outcome).toBeInstanceOf(SelfhostedControlError);
+      expect(
+        (outcome as SelfhostedControlError).detail[AGENT_UNRESPONSIVE_RECOVERY_DETAIL_KEY],
+      ).toBe("restarted");
+    }
+  }, 30_000);
+
+  test("a recovery that takes too long leaves the command to say the box is restarting", async () => {
+    const { outcome, elapsedMs } = await deadAgent(
+      async () => await new Promise<UnresponsiveAgentRecovery>(() => {}),
+      { unresponsiveRecoveryMs: 500 },
+    );
+    expect(outcome).toBeInstanceOf(SelfhostedControlError);
+    expect((outcome as SelfhostedControlError).detail[AGENT_UNRESPONSIVE_RECOVERY_DETAIL_KEY]).toBe(
+      "restarting",
+    );
+    expect(elapsedMs).toBeLessThan(8_000);
+  }, 30_000);
+
+  test("checking whether the agent answers never wakes the box or retries", async () => {
+    const { plane, client, control } = setup({ controlTimeoutMs: 300, execTimeoutMs: 0 });
+    plane.natsTransport = true;
+    const created = await client.create(undefined, { opengeniCreateIdentity: identity });
+    const session = (created as ComputeSandboxSession).bindTurn({});
+    expect((await session.exec({ cmd: "echo hi" })).exitCode).toBe(0);
+    plane.heldInstances.add(plane.sessions.get(session.state.enrollmentId)!);
+    const wakes = control.wakes;
+    plane.natsRequests.length = 0;
+    expect(await session.agentAnswers()).toBe(false);
+    await Bun.sleep(300);
+    // One ping, marked for the host not to wake the box, and nothing after.
+    expect(plane.natsRequests).toEqual([{ op: "ping", noWake: true }]);
+    expect(control.wakes).toBe(wakes);
+  }, 30_000);
+
+  test("an agent that answers again by then is not restarted", async () => {
+    const { outcome, control, session } = await deadAgent(async (machine, plane) => {
+      plane.heldInstances.clear();
+      if (await machine.agentAnswers()) return "answering";
+      await machine.restartMachine();
+      return "restarted";
+    });
+    expect(outcome).toBeInstanceOf(SelfhostedControlError);
+    expect((outcome as SelfhostedControlError).detail[AGENT_UNRESPONSIVE_RECOVERY_DETAIL_KEY]).toBe(
+      "answering",
+    );
+    expect(control.restarts).toBe(0);
+    expect((await session.exec({ cmd: "echo after" })).exitCode).toBe(0);
   }, 30_000);
 });
 

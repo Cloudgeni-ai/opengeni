@@ -55,6 +55,7 @@ import {
   SelfhostedControlError,
   subjectFor,
   type ControlRpc,
+  type UnresponsiveAgentRecovery,
 } from "../selfhosted/control-rpc";
 import { SELFHOSTED_FILE_CHUNK_BYTES } from "../selfhosted/file-transfer";
 import {
@@ -122,7 +123,41 @@ export type ComputeTurnDeps = Pick<
   | "transientExecEnvironment"
 > & {
   opJournal?: NonNullable<SelfhostedSessionDeps["opStream"]>["journal"];
+  /** What the turn does about this box when its agent leaves a command's
+   *  start unanswered for the op stream's bound: typically restart it, at most
+   *  once per turn. Absent: nothing is done, and the command fails as offline. */
+  recoverUnresponsiveAgent?: (
+    machine: UnresponsiveComputeMachine,
+  ) => Promise<UnresponsiveAgentRecovery>;
 };
+
+/** The box a turn's `recoverUnresponsiveAgent` acts on. */
+export type UnresponsiveComputeMachine = {
+  /** Whether the box's agent answers one ping now, without waking it. */
+  agentAnswers(): Promise<boolean>;
+  /** Boot the box afresh from its disk (files kept, programs ended). */
+  restartMachine(): Promise<void>;
+};
+
+/** How long a command whose box's agent stopped answering waits for the
+ *  box's recovery (a check, a restart) before it fails; the recovery goes on. */
+export const UNRESPONSIVE_RECOVERY_MS = 60_000;
+
+/** How long one box recovery at most holds later ones back. */
+const UNRESPONSIVE_RECOVERY_HOLD_MS = 10 * 60_000;
+
+/** `work`'s result, or undefined once `ms` passed first. */
+async function withinMs<T>(ms: number, work: () => Promise<T>): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const bound = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), ms);
+  });
+  try {
+    return await Promise.race([work(), bound]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 function agentOfflineError(
   message: string,
@@ -172,6 +207,7 @@ export interface ComputeWakeGateDeps {
  */
 export class ComputeWakeGate {
   private inflight: Promise<ComputeAgentConnection> | null = null;
+  private unresponsiveRecovery: Promise<UnresponsiveAgentRecovery> | null = null;
   private lastWakeAtMs = Number.NEGATIVE_INFINITY;
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
@@ -217,6 +253,37 @@ export class ComputeWakeGate {
       }
       throw error;
     }
+  }
+
+  /** Runs `recover` for the box's agent that stopped answering, one at a
+   *  time: the commands of the sessions sharing this gate (a session and the
+   *  turns bound from it) that hit the bound together share one recovery and
+   *  its outcome, so a turn restarts the box once, not once per command. A
+   *  recovery that has not settled after `UNRESPONSIVE_RECOVERY_HOLD_MS` no
+   *  longer holds later ones back (the turn's durable restart count still
+   *  allows one restart per turn). */
+  async recoverUnresponsiveOnce(
+    recover: () => Promise<UnresponsiveAgentRecovery>,
+  ): Promise<UnresponsiveAgentRecovery> {
+    if (!this.unresponsiveRecovery) {
+      const recovering = recover();
+      this.unresponsiveRecovery = recovering;
+      const release = () => {
+        if (this.unresponsiveRecovery === recovering) this.unresponsiveRecovery = null;
+      };
+      const held = setTimeout(release, UNRESPONSIVE_RECOVERY_HOLD_MS);
+      recovering.then(
+        () => {
+          clearTimeout(held);
+          release();
+        },
+        () => {
+          clearTimeout(held);
+          release();
+        },
+      );
+    }
+    return await this.unresponsiveRecovery;
   }
 
   /** Wait until the agent answers on its current connection, without waking. */
@@ -372,6 +439,12 @@ export interface ComputeSessionDeps {
   readyTimeoutMs: number;
   controlTimeoutMs?: number;
   execTimeoutMs?: number;
+  /** How long a command's start may go unanswered by the agent
+   *  (`OP_START_UNANSWERED_MS` by default). */
+  startUnansweredMs?: number;
+  /** How long a command waits for the box's recovery after its agent left
+   *  the start unanswered (`UNRESPONSIVE_RECOVERY_MS` by default). */
+  unresponsiveRecoveryMs?: number;
   /** Shared by every session bound to the same box in this process. */
   gate?: ComputeWakeGate;
   turn?: ComputeTurnDeps;
@@ -423,6 +496,8 @@ export class ComputeSandboxSession extends SelfhostedSession {
   declare readonly state: SelfhostedSession["state"] & ComputeLiveState;
   private readonly computeDeps: ComputeSessionDeps;
   readonly gate: ComputeWakeGate;
+  /** One ping of an exact connection that never wakes the box. */
+  private readonly pingWithoutWaking: (connection: ComputeAgentConnection) => Promise<boolean>;
   private readonly archiveLimits: SandboxArchiveLimits | null | undefined;
 
   constructor(deps: ComputeSessionDeps) {
@@ -469,6 +544,14 @@ export class ComputeSandboxSession extends SelfhostedSession {
         },
         readyTimeoutMs: deps.readyTimeoutMs,
       });
+    const pingWithoutWaking = async (connection: ComputeAgentConnection): Promise<boolean> => {
+      const res = await rawRpc.request(
+        subjectFor(connection.workspaceId, state.enrollmentId, connection.connectionInstanceId),
+        pingRequest(),
+        { timeoutMs: 5_000, noWake: true },
+      );
+      return !res.error && res.result?.$case === "ping";
+    };
     const transport = plane.opStreamTransport();
     const turn = deps.turn ?? {};
     const resolveOperationAdmission = async (): Promise<SelfhostedOperationAdmission> => {
@@ -487,6 +570,9 @@ export class ComputeSandboxSession extends SelfhostedSession {
                 // connection resolves.
                 outputReleaseSupported: true,
                 connectionGeneration: connection.connectionGeneration,
+                ...(deps.startUnansweredMs !== undefined
+                  ? { startUnansweredMs: deps.startUnansweredMs }
+                  : {}),
               },
             }
           : {}),
@@ -546,6 +632,7 @@ export class ComputeSandboxSession extends SelfhostedSession {
     (this as unknown as { state: ComputeLiveState }).state = state;
     this.computeDeps = deps;
     this.gate = gate;
+    this.pingWithoutWaking = pingWithoutWaking;
     this.archiveLimits = deps.archiveLimits;
   }
 
@@ -566,6 +653,43 @@ export class ComputeSandboxSession extends SelfhostedSession {
 
   /** Nothing to start: a request to a sleeping sandbox wakes it. */
   async start(): Promise<void> {}
+
+  /** Whether the box's agent answers one ping on its live connection now,
+   * within a short bound (10 s at most). One attempt that never wakes the box
+   * and is never retried in the background. */
+  async agentAnswers(): Promise<boolean> {
+    return (
+      (await withinMs(Math.min(10_000, this.gate.readyTimeoutMs), async () => {
+        const connection = await this.gate.current().catch(() => null);
+        return connection ? await this.pingWithoutWaking(connection).catch(() => false) : false;
+      })) ?? false
+    );
+  }
+
+  /** What the turn does about this box when its agent left a command's start
+   *  unanswered: one recovery at a time for the box (see
+   *  `ComputeWakeGate.recoverUnresponsiveOnce`), and the command waits for it
+   *  at most `UNRESPONSIVE_RECOVERY_MS`; a recovery still going then is
+   *  reported as `restarting` and goes on by itself. */
+  protected override async recoverUnresponsiveAgent(): Promise<UnresponsiveAgentRecovery | null> {
+    const recover = this.computeDeps.turn?.recoverUnresponsiveAgent;
+    if (!recover) return null;
+    const recovering = this.gate.recoverUnresponsiveOnce(
+      async () =>
+        await recover({
+          agentAnswers: async () => await this.agentAnswers(),
+          restartMachine: async () => await this.restartMachine(),
+        }),
+    );
+    // Settled even when nobody waits any longer.
+    recovering.catch(() => undefined);
+    return (
+      (await withinMs(
+        this.computeDeps.unresponsiveRecoveryMs ?? UNRESPONSIVE_RECOVERY_MS,
+        async () => await recovering,
+      )) ?? "restarting"
+    );
+  }
 
   /** Boot this box afresh from its disk (files kept, programs ended). Used
    * when its running system can no longer start programs; the next request
@@ -891,6 +1015,10 @@ export interface ComputeSandboxClientOptions {
   readyTimeoutMs: number;
   controlTimeoutMs?: number;
   execTimeoutMs?: number;
+  /** See `ComputeSessionDeps.startUnansweredMs`. */
+  startUnansweredMs?: number;
+  /** See `ComputeSessionDeps.unresponsiveRecoveryMs`. */
+  unresponsiveRecoveryMs?: number;
   environment?: Record<string, string>;
 }
 
@@ -922,6 +1050,12 @@ export class ComputeSandboxClient {
         : {}),
       ...(this.options.execTimeoutMs !== undefined
         ? { execTimeoutMs: this.options.execTimeoutMs }
+        : {}),
+      ...(this.options.startUnansweredMs !== undefined
+        ? { startUnansweredMs: this.options.startUnansweredMs }
+        : {}),
+      ...(this.options.unresponsiveRecoveryMs !== undefined
+        ? { unresponsiveRecoveryMs: this.options.unresponsiveRecoveryMs }
         : {}),
       ...(archiveLimits !== undefined ? { archiveLimits } : {}),
     });
