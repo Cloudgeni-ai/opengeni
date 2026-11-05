@@ -4,10 +4,10 @@ import { GitHubRestAuthorityError } from "@opengeni/runtime/github-rest-mcp";
 import * as parentWake from "../src/activities/parent-wake";
 import { settleTurnFailure } from "../src/activities/agent-turn/failure-settlement";
 
-// Staging, 5 November 2026: the idle compaction checkpoint after Bendik's
-// turn failed while preparing its tools ("Personal GitHub delegation is
-// unavailable"). The generic failure path marked the whole session failed and
-// left the request pending, so it was claimed and failed a second time.
+// The idle compaction checkpoint after a person's turn failed while preparing
+// its tools ("Personal GitHub delegation is unavailable"). The generic failure
+// path marked the whole session failed and left the request pending, so it was
+// claimed and failed a second time.
 
 const COMPACTION_TRIGGER = "session.context.compaction.requested";
 
@@ -104,16 +104,18 @@ function stubDependencies(requestPending: boolean | Error) {
     if (requestPending instanceof Error) throw requestPending;
     return requestPending;
   });
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
   restores.push(
     () => deliver.mockRestore(),
     () => pending.mockRestore(),
+    () => warn.mockRestore(),
   );
-  return { deliver, pending };
+  return { deliver, pending, warn };
 }
 
 describe("a compaction checkpoint that fails", () => {
   test("settles as a failed compaction, keeps the session usable and consumes the request", async () => {
-    const { deliver, pending } = stubDependencies(true);
+    const { deliver, pending, warn } = stubDependencies(true);
     const { deps, control, settle } = failureDeps(delegationUnavailable(), COMPACTION_TRIGGER);
 
     const result = await settleTurnFailure(deps as never);
@@ -143,21 +145,29 @@ describe("a compaction checkpoint that fails", () => {
     expect(settlement.events[1]!.payload).toEqual({ status: "idle" });
     expect(control.activityStatus).toBe("idle");
     expect(control.turnMetricOutcome).toBe("failed");
-    // Maintenance is not a failed child turn for a parent to handle.
+    // Maintenance is not handed to a parent as a failed child turn right away.
     expect(deliver).not.toHaveBeenCalled();
+    // The full diagnostic stays in the log.
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]?.[1]).toMatchObject({ sessionId: "session-1" });
   });
 
-  test("leaves an already consumed or unreadable request alone", async () => {
-    for (const requestPending of [false, new Error("database unavailable")]) {
-      stubDependencies(requestPending);
-      const { deps, settle } = failureDeps(delegationUnavailable(), COMPACTION_TRIGGER);
+  test("leaves an already consumed request alone", async () => {
+    stubDependencies(false);
+    const { deps, settle } = failureDeps(delegationUnavailable(), COMPACTION_TRIGGER);
 
-      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "idle" });
-      const settlement = settle.mock.calls[0]![0] as Settlement;
-      expect(settlement.sessionStatus).toBe("idle");
-      expect(settlement).not.toHaveProperty("consumeRequestedCompactionFailure");
-      for (const restore of restores.splice(0)) restore();
-    }
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "idle" });
+    const settlement = settle.mock.calls[0]![0] as Settlement;
+    expect(settlement.sessionStatus).toBe("idle");
+    expect(settlement).not.toHaveProperty("consumeRequestedCompactionFailure");
+  });
+
+  test("an unreadable request is not settled idle, where it would be claimed again", async () => {
+    stubDependencies(new Error("database unavailable"));
+    const { deps, settle } = failureDeps(delegationUnavailable(), COMPACTION_TRIGGER);
+
+    await expect(settleTurnFailure(deps as never)).rejects.toThrow();
+    expect(settle).not.toHaveBeenCalled();
   });
 
   test("a superseded settlement stays cancelled", async () => {

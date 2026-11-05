@@ -1661,7 +1661,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     await historySink.reconcileConversationTruth();
   }
   if (attempt.triggerType === "session.context.compaction.requested") {
-    return await settleFailedCompactionCheckpoint(deps, error, notStartedToolCallIds);
+    return await settleFailedCompactionCheckpoint(deps, error, failure.code, notStartedToolCallIds);
   }
   if (
     !(await eventing.settle!({
@@ -1705,16 +1705,23 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
 async function settleFailedCompactionCheckpoint(
   deps: TurnFailureDeps,
   error: unknown,
+  failureCode: string | undefined,
   notStartedToolCallIds: readonly string[],
 ): Promise<RunAgentTurnResult> {
   const { input, db, control, eventing, claimedResult } = deps;
+  // The turn's recorded reason is short; keep the full diagnostic in the log.
+  console.warn("Compaction checkpoint failed", {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    attemptId: input.attemptId,
+    failureCode,
+    error: safeErrorDiagnostic(error),
+  });
   // Consuming needs the request to still be pending (settlement is stale
-  // otherwise); a checkpoint that already started has consumed it.
-  const requestPending = await isSessionCompactionRequested(
-    db,
-    input.workspaceId,
-    input.sessionId,
-  ).catch(() => false);
+  // otherwise); a checkpoint that already started has consumed it. A failed
+  // read throws into the post-claim database recovery like any settlement
+  // error: settling idle with the request pending would claim it again.
+  const requestPending = await isSessionCompactionRequested(db, input.workspaceId, input.sessionId);
   if (
     !(await eventing.settle!({
       events: [

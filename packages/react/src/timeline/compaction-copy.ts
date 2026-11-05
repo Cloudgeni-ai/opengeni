@@ -35,8 +35,8 @@ export const COMPACTION_REJECTION_NOTE = (t: OpenGeniText) =>
  * Subtitle for a settled compaction landmark. Kept short: a definitive provider
  * rejection withholds the generic retry promise, names the one recovery step,
  * and moves its identifiers behind Details ({@link compactionFailureDetails}).
- * An automatic checkpoint was not requested by anyone, so its failure does not
- * ask the person to request it again.
+ * An automatic compaction (labelled Auto) was not requested by anyone, so its
+ * failure does not ask the person to request it again.
  */
 export function compactionSkipSubtitle(
   t: OpenGeniText,
@@ -60,9 +60,9 @@ export function compactionSkipSubtitle(
     case "summarization_failed":
       return providerRejection
         ? t("timeline.compactionCopy.chatHistoryIsUnchangedIf")
-        : trigger === "operator" || trigger === null
-          ? t("timeline.compactionCopy.requestItAgainToRetry")
-          : t("timeline.compactionCopy.chatHistoryIsUnchanged");
+        : trigger === "auto" || trigger === "proactive"
+          ? t("timeline.compactionCopy.chatHistoryIsUnchanged")
+          : t("timeline.compactionCopy.requestItAgainToRetry");
     default:
       return t("timeline.compactionCopy.compactionWasNotNeededChat");
   }

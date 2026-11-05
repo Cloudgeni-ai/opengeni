@@ -86,6 +86,21 @@ export async function buildGitHubRestMcpForTurn(input: {
     input.resources,
     input.turn.personalConnectionDelegations,
   );
+  if (
+    personalRepositories.length === 0 &&
+    input.turn.source !== "compaction" &&
+    personalGitHubRepositoryResources(input.resources).length > 0
+  ) {
+    // A compaction checkpoint never carries personal authority. Any other
+    // turn without it (for example a goal continuation with no earlier turn
+    // to copy from) is worth seeing, in case a delegation was dropped.
+    console.warn("Personal GitHub tools left out: the turn has no personal GitHub authority", {
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turn.id,
+      source: input.turn.source,
+    });
+  }
   if (appRepositories.length === 0 && personalRepositories.length === 0) {
     return {
       settings: input.settings,
@@ -210,10 +225,11 @@ function personalRepositoryAuthority(
   const personalResources = personalGitHubRepositoryResources(resources);
   if (personalResources.length === 0) return [];
   // A turn can run without the person's GitHub authority, for example a
-  // background compaction checkpoint or work someone else started. Its
-  // personal GitHub tools are left out instead of failing the whole turn;
-  // they could not act without that authority anyway.
-  if (!delegations.some(isPersonalGitHubDelegation)) return [];
+  // background compaction checkpoint. Its personal GitHub tools are left out
+  // instead of failing the whole turn; they could not act without that
+  // authority anyway. A delegation that only partly matches is malformed and
+  // still fails below.
+  if (!delegations.some(mayBePersonalGitHubDelegation)) return [];
   const delegation = exactPersonalDelegation(delegations);
   const snapshot = delegation.personalGitHubRepositorySelection!;
   const acceptedById = new Map(
@@ -618,6 +634,13 @@ function exactPersonalDelegation(
 function isPersonalGitHubDelegation(delegation: McpPersonalConnectionDelegation): boolean {
   return (
     delegation.serverId === PERSONAL_GITHUB_DELEGATION_SERVER_ID &&
+    delegation.connectionType === "github_personal"
+  );
+}
+
+function mayBePersonalGitHubDelegation(delegation: McpPersonalConnectionDelegation): boolean {
+  return (
+    delegation.serverId === PERSONAL_GITHUB_DELEGATION_SERVER_ID ||
     delegation.connectionType === "github_personal"
   );
 }
