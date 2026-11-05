@@ -624,8 +624,9 @@ async function continueAfterCompaction(w: World, resolver: Resolver) {
   expect(compaction.turn.source).toBe("compaction");
   await finish(w, compaction);
   // The checkpoint's own settlement normally clears the request; without it the
-  // next claim would be another compaction. Leaving the receiving context also
-  // makes the compaction the continuation's causal turn.
+  // next claim would be another compaction. Outside a receiving context, the
+  // child result parented on the compaction makes it the continuation's causal
+  // turn.
   await shared.admin.begin(async (tx) => {
     await tx`set local session_replication_role = replica`;
     await tx`update sessions set compact_requested = false, execution_context_turn_id = null
@@ -634,8 +635,9 @@ async function continueAfterCompaction(w: World, resolver: Resolver) {
   await childResult(w, compaction.turn.id);
   const next = await claim(w, resolver);
   expect(next.turn.source).not.toBe("compaction");
-  const [row] = await shared.admin`select connection_account_intent, mcp_account_bindings
-      from session_turns where id=${next.turn.id}`;
+  const [row] = await shared.admin`select connection_account_intent, mcp_account_bindings,
+      execution_context_turn_id from session_turns where id=${next.turn.id}`;
+  expect(row!.execution_context_turn_id).toBeNull();
   return row!;
 }
 

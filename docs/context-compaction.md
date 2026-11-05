@@ -714,10 +714,11 @@ no intent. Work that later continues the compaction turn, such as a goal
 continuation or a second compaction, then resolves nothing from it. Otherwise
 the compaction turn stores the same intent, and that work resolves it again like
 any continuation. Unlike an internal update, accounts never fail the claim. The
-resolver and the turn's acceptance (its authority-capture and binding-fence
-triggers) each run in a savepoint. If either fails, or the resolver offers an
-account that person may not lend, the claim records `connectionAccountsUnresolved`
-(reason, error class and SQLSTATE, never the message) in the turn's internal
+external-link check, the resolver and the turn's acceptance (its
+authority-capture and binding-fence triggers) each run in a savepoint. If any of
+them fails, or the resolver offers an account that person may not lend, the
+claim records `connectionAccountsUnresolved` (reason, error class and SQLSTATE,
+never the message) in the turn's internal
 metadata, the worker logs it as a warning, and the compaction runs with only the
 session's shared tools. A stored intent the current schema no longer reads is
 recorded the same way, lends nothing and is not stored on the compaction turn.

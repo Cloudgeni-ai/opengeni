@@ -285,8 +285,7 @@ after it, carries the same intent and resolves it again when it is claimed,
 exactly as that person's next message with the same picks would be resolved
 now (a compaction-only turn has a few exceptions of its own, described under
 manual compaction in `docs/context-compaction.md`). A reconnected or newly
-connected account is
-therefore used, and a revoked one is not. A picked account that can no longer
+connected account is therefore used, and a revoked one is not. A picked account that can no longer
 be used is never replaced by another account: that connector is left out of the
 continued turn and recorded in the turn's internal `connectionAccountGaps`
 metadata. A carried intent that names someone other than the continued turn's

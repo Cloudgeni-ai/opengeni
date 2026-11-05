@@ -237,8 +237,8 @@ A turn that carries no personal GitHub delegation leaves the
 compaction logs a warning to worker telemetry (no visible chat warning yet),
 and a compaction whose accounts could not be resolved logs its own warning.
 A compaction checkpoint normally carries the person's current delegation, like
-the turn it compacts after (see `docs/context-compaction.md`), and goes without
-it only when that turn could not lend it. A goal continuation with no earlier
+the turn it compacts after, and goes without it when that turn could not lend
+it or its accounts could not be resolved (see `docs/context-compaction.md`). A goal continuation with no earlier
 turn to copy from also goes without. A delegation that only partly matches, or
 more than one, still fails closed.
 Writes use the attempt-frozen connector Allow/Ask/Block policy. When no explicit
