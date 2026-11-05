@@ -56,6 +56,29 @@ import {
 } from "../src/sandbox/agent-update";
 import { createPublishedAgentReleases, sourceTreeAgentVersion } from "../src/sandbox/agent-release";
 
+test("a failed attempt at a release newer than the target no longer reads as a failed update", () => {
+  const failed = {
+    operationId: "00000000-0000-4000-8000-000000000001",
+    status: "failed" as const,
+    targetVersion: "0.1.152",
+    expectedBinarySha256: null,
+    errorCode: "manifest_download_failed",
+    blockers: [],
+    retryable: true,
+    rolledBack: false,
+    connectionInstanceId: "current",
+    connectionGeneration: 1,
+    requestedAt: "2026-11-05T10:41:00.000Z",
+    updatedAt: "2026-11-05T10:41:05.000Z",
+    completedAt: "2026-11-05T10:41:05.000Z",
+  };
+  // It tried 0.1.152 before it was published; updates now target 0.1.150.
+  expect(agentVersionState("0.1.150", "0.1.150", failed)).toBe("current");
+  expect(agentVersionState("0.1.149", "0.1.150", failed)).toBe("outdated");
+  // A failure at the release still targeted remains a failure.
+  expect(agentVersionState("0.1.150", "0.1.152", failed)).toBe("update_failed");
+});
+
 test("whole-app update bootstrap gate admits fixed Mac builds and preserves other platforms", () => {
   for (const version of [null, "development", "0.1.27", "0.1.28", "0.1.29-beta.1"]) {
     expect(machineUpdateBlockedReason("macos", version)).toContain("official Mac installer");
@@ -2617,19 +2640,19 @@ describe("automatic updates of an older agent whose browsers stay open", () => {
       await olderAgentWithBrowser("running");
     const first = await nextRecord("the first postponement");
     expect(first.errorCode).toBe("update_busy_browsers");
-    const waitingSince = (await machine()).agentUpdatePendingSince;
+    const waitingSince = (await machine()).agentUpdateBrowsersWaitSince;
     expect(waitingSince).not.toBeNull();
 
     // Each postponement is a new operation, but the machine's wait goes on.
     clock.now += 11 * 60_000;
     await nextRecord("the second postponement");
-    expect((await machine()).agentUpdatePendingSince).toBe(waitingSince);
+    expect((await machine()).agentUpdateBrowsersWaitSince).toBe(waitingSince);
     expect((await machine()).agentUpdateBrowsersCloseAt).toBeNull();
     expect(await notice(clock.now)).toBeNull();
 
     // A day into the wait, the next postponement announces a closing time.
     await admin`update enrollments
-      set agent_update_pending_since = agent_update_pending_since - interval '1 day'
+      set agent_update_browsers_wait_since = agent_update_browsers_wait_since - interval '1 day'
       where id = ${enrollment.id}`;
     clock.now += 11 * 60_000;
     await nextRecord("the announcement");
@@ -2653,10 +2676,10 @@ describe("automatic updates of an older agent whose browsers stay open", () => {
     expect((await nextRecord("the refused update")).errorCode).toBe("update_busy_work");
     expect(updateRequests()).toHaveLength(1);
     expect(Date.parse((await machine()).agentUpdateBrowsersCloseAt!)).toBe(closingAt);
-    expect((await machine()).agentUpdatePendingSince).toBe(
+    expect((await machine()).agentUpdateBrowsersWaitSince).toBe(
       new Date(Date.parse(waitingSince!) - 24 * 60 * 60_000).toISOString(),
     );
-    expect(await notice(closingAt + 60_000)).toContain("restarting to update now");
+    expect(await notice(closingAt + 60_000)).toContain("as soon as its running work finishes");
 
     // It is asked again soon, still under the announcement.
     agent.refusal = undefined;
@@ -2665,22 +2688,104 @@ describe("automatic updates of an older agent whose browsers stay open", () => {
     expect(updateRequests()).toHaveLength(2);
   }, 90_000);
 
-  test("a closing time that passed without an update is announced again", async () => {
+  test("a closing time that passed without the update ends the announcement, and the wait starts over", async () => {
     if (!available) return;
     const { enrollment, clock, nextRecord, updateRequests, machine, notice } =
       await olderAgentWithBrowser("running");
     await nextRecord("the first postponement");
     // The announced time passed hours ago while the machine was away.
     await admin`update enrollments
-      set agent_update_pending_since = agent_update_pending_since - interval '2 days',
+      set agent_update_browsers_wait_since = agent_update_browsers_wait_since - interval '2 days',
         agent_update_browsers_close_at = ${new Date(clock.now - 3 * 60 * 60_000)}
       where id = ${enrollment.id}`;
     expect(await notice(clock.now)).toBeNull();
     clock.now += 11 * 60_000;
-    expect((await nextRecord("the new announcement")).errorCode).toBe("update_busy_browsers");
-    expect(Date.parse((await machine()).agentUpdateBrowsersCloseAt!)).toBe(clock.now + 30 * 60_000);
-    expect(await notice(clock.now)).toContain("in 30 min");
+    expect((await nextRecord("the postponement")).errorCode).toBe("update_busy_browsers");
+    const after = await machine();
+    expect(after.agentUpdateBrowsersCloseAt).toBeNull();
+    // The wait restarted with this postponement.
+    expect(after.agentUpdateBrowsersWaitSince).toBe(after.agentUpdate!.requestedAt);
+    expect(await notice(clock.now)).toBeNull();
     expect(updateRequests()).toHaveLength(0);
+  }, 90_000);
+
+  test("a decision made from an older read of the machine never replaces a newer record", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, enrollment, nextRecord, machine } =
+      await olderAgentWithBrowser("running");
+    await nextRecord("the first postponement");
+    const snapshot = await machine();
+    const fence = {
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
+      connectionInstanceId: snapshot.connectionInstanceId!,
+      connectionGeneration: snapshot.connectionGeneration,
+      targetVersion: "0.1.60",
+      expectedOperationId: snapshot.agentUpdate!.operationId,
+    };
+    // Two replicas decide from the same read; only the first one records.
+    const first = await beginEnrollmentAgentUpdate(db, {
+      ...fence,
+      operationId: crypto.randomUUID(),
+    });
+    expect(first?.agentUpdate?.status).toBe("requested");
+    await advanceEnrollmentAgentUpdate(db, {
+      ...fence,
+      operationId: first!.agentUpdate!.operationId,
+      status: "failed",
+      errorCode: "update_busy_browsers",
+      retryable: true,
+    });
+    const second = await beginEnrollmentAgentUpdate(db, {
+      ...fence,
+      operationId: crypto.randomUUID(),
+    });
+    expect(second).toBeNull();
+    expect((await machine()).agentUpdate?.operationId).toBe(first!.agentUpdate!.operationId);
+  }, 90_000);
+
+  test("a new run starts after a non-retryable failure, and a newer target forgets failed attempts", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, enrollment, nextRecord, machine } =
+      await olderAgentWithBrowser("running");
+    await nextRecord("the first postponement");
+    const attempt = async (
+      targetVersion: string,
+      failure: { errorCode: string; retryable: boolean },
+      extra: { newerTarget?: boolean } = {},
+    ) => {
+      const live = await machine();
+      const fence = {
+        accountId,
+        workspaceId,
+        enrollmentId: enrollment.id,
+        connectionInstanceId: live.connectionInstanceId!,
+        connectionGeneration: live.connectionGeneration,
+        operationId: crypto.randomUUID(),
+      };
+      expect(
+        await beginEnrollmentAgentUpdate(db, { ...fence, targetVersion, ...extra }),
+      ).not.toBeNull();
+      await advanceEnrollmentAgentUpdate(db, { ...fence, status: "failed", ...failure });
+      return await machine();
+    };
+    const waitingSince = (await machine()).agentUpdateBrowsersWaitSince;
+    expect(waitingSince).not.toBeNull();
+    const download = { errorCode: "manifest_download_failed", retryable: true };
+    await attempt("0.1.60", download);
+    expect((await attempt("0.1.60", download)).agentUpdateFailedAttempts).toBe(1);
+    // A retryable failure keeps the browsers' wait.
+    expect((await machine()).agentUpdateBrowsersWaitSince).toBe(waitingSince);
+    // A newer target starts counting again, and keeps the browsers' wait.
+    const newer = await attempt("0.1.61", download, { newerTarget: true });
+    expect(newer.agentUpdateFailedAttempts).toBe(0);
+    expect(newer.agentUpdateBrowsersWaitSince).toBe(waitingSince);
+    // A non-retryable failure ends the run: nothing of it carries over.
+    await attempt("0.1.61", { errorCode: "signature_invalid", retryable: false });
+    const fresh = await attempt("0.1.62", download);
+    expect(fresh.agentUpdateFailedAttempts).toBe(0);
+    expect(fresh.agentUpdateBrowsersWaitSince).toBeNull();
   }, 90_000);
 
   test("failed downloads are retried with a growing wait", async () => {

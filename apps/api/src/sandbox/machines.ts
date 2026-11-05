@@ -117,7 +117,12 @@ export function agentVersionState(
   if (
     update?.status === "failed" &&
     !update.errorCode?.startsWith("update_busy") &&
-    !(installedVersion && (compareAgentVersions(installedVersion, update.targetVersion) ?? -1) >= 0)
+    !(
+      installedVersion && (compareAgentVersions(installedVersion, update.targetVersion) ?? -1) >= 0
+    ) &&
+    // A failed attempt at a release newer than the one updates now target
+    // (one that was not published yet) no longer describes the machine.
+    !(desiredVersion && (compareAgentVersions(update.targetVersion, desiredVersion) ?? -1) > 0)
   ) {
     return "update_failed";
   }
@@ -131,11 +136,15 @@ export function agentVersionState(
 }
 
 function runtimeFor(settings: Settings, enrollment: EnrollmentRecord): MachineView["runtime"] {
-  // The release updates target, as the updater last confirmed it published;
-  // the promoted build until a check here has.
-  const desiredVersion =
-    publishedAgentReleasesFor(settings).peek(enrollment.agentUpdateChannel) ??
-    promotedAgentVersion(settings, enrollment.agentUpdateChannel);
+  // The release updates target, as a check in this process last confirmed it
+  // published. Until one has, the promoted build is shown and a check starts
+  // in the background, so a page load never waits for the release host.
+  const releases = publishedAgentReleasesFor(settings);
+  let desiredVersion = releases.peek(enrollment.agentUpdateChannel);
+  if (desiredVersion === undefined) {
+    void releases.resolve(enrollment.agentUpdateChannel).catch(() => undefined);
+    desiredVersion = promotedAgentVersion(settings, enrollment.agentUpdateChannel);
+  }
   const update = enrollment.agentUpdate;
   const versionState = agentVersionState(enrollment.agentVersion, desiredVersion, update);
   const capability = (name: string): boolean => enrollment.agentCapabilities[name] === true;

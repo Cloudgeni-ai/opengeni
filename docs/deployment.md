@@ -3808,20 +3808,23 @@ only at an idle point, so accepted work is never interrupted. An older agent
 that postpones because it is busy is asked again every 10 minutes, and an
 unanswered request is re-sent under the same operation after 10 minutes. Other
 retryable failures, such as a failed download, back off: 10 minutes after the
-first, doubling after each further failure, up to 6 hours. A non-retryable
-failure waits for a newer promotion or an explicit "Update now".
+first, doubling after each further failure for the same release, up to 6
+hours. A non-retryable failure waits for a newer promotion or an explicit
+"Update now".
 
 An agent older than 0.1.58 closes its managed browsers when it updates. The
 automatic updater waits for a moment when none of those browsers belongs to a
 session with a turn underway or waiting for input within its turn (open but
-idle browsers do not hold it, and they close). Once the machine has been trying
-to update for a day, browsers still in use get a closing time 30 minutes later:
-every browser observation an agent gets from that machine until then says when
-its browser will close, and the update is requested at that time. A busy agent
-that refuses it is asked again under the same announcement for 30 minutes;
-after that, browsers still in use get a new announcement first. Only browsers
-opened in the machine's own workspace are counted and told. Newer agents keep
-their browsers across an update. Automatic
+idle browsers do not hold it, and they close). Once browsers in use have held
+the update for a day, they get a closing time 30 minutes later: every browser
+observation an agent gets from that machine until then says when its browser
+will close, and the update is requested at that time. A busy agent that
+refuses it is asked again under the same announcement for 30 minutes. If the
+update has not happened by then (the agent stayed busy, or the machine was
+away), the announcement ends and the wait starts over, so agents are not told
+of a closing that does not come. A non-retryable failure or a success ends the
+wait. Only browsers opened in the machine's own workspace are counted and told.
+Newer agents keep their browsers across an update. Automatic
 updates only move machines forward: rolling the channel back to an older build
 leaves newer machines alone until someone requests the older build per machine.
 Macs that must first bootstrap through the whole-app installer are never updated

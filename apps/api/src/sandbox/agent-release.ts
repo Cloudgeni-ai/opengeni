@@ -108,8 +108,9 @@ export type PublishedAgentReleases = {
   /** The newest published release at or below the channel's promoted build,
    * or null when none can be confirmed now. */
   resolve(channel: string | null): Promise<string | null>;
-  /** The channel's most recent resolution without asking the release host:
-   * undefined when it was never resolved here. */
+  /** The channel's pinned release, or the last release a resolution here
+   * confirmed published, without asking the release host: undefined when
+   * none has yet. */
   peek(channel: string | null): string | null | undefined;
 };
 
@@ -135,8 +136,8 @@ type ReleaseWarning = (message: string, fields: Record<string, string>) => void;
  * the newest published patch release below it is, so machines further
  * behind still move forward. Published releases are immutable and
  * remembered; a missing or unanswered check is repeated after a short
- * interval. While the release host cannot be asked, `warn` is told, at most
- * every 15 minutes.
+ * interval. While the release host cannot be asked, or no release near the
+ * source tree's is published, `warn` is told, at most every 15 minutes.
  */
 export function createPublishedAgentReleases(
   settings: Pick<Settings, "agentStableVersion" | "agentBetaVersion" | "agentReleasesBaseUrl">,
@@ -156,6 +157,12 @@ export function createPublishedAgentReleases(
   const inFlight = new Map<string, Promise<AgentReleaseAvailability>>();
   const resolved = new Map<string, string | null>();
 
+  const report = (message: string, version: string) => {
+    if (!warn || now() - warnedAt < UNCONFIRMED_WARNING_INTERVAL_MS) return;
+    warnedAt = now();
+    warn(message, { version, releasesBaseUrl: settings.agentReleasesBaseUrl });
+  };
+
   const availability = async (version: string): Promise<AgentReleaseAvailability> => {
     const cached = known.get(version);
     if (cached) {
@@ -174,11 +181,10 @@ export function createPublishedAgentReleases(
       .catch((): AgentReleaseAvailability => "unknown")
       .then((result) => {
         known.set(version, { availability: result, checkedAt: now() });
-        if (result === "unknown" && warn && now() - warnedAt >= UNCONFIRMED_WARNING_INTERVAL_MS) {
-          warnedAt = now();
-          warn(
+        if (result === "unknown") {
+          report(
             "Could not check whether an agent release is published; Connected Machine agent updates wait until the release host answers",
-            { version, releasesBaseUrl: settings.agentReleasesBaseUrl },
+            version,
           );
         }
         return result;
@@ -204,6 +210,11 @@ export function createPublishedAgentReleases(
       // published; target nothing until it can.
       if (result === "unknown") return null;
     }
+    // A host that denies every request looks like this too.
+    report(
+      "No published agent release found near this deployment's agent version; Connected Machine agent updates wait until one is published",
+      `${major}.${minor}.${patch}`,
+    );
     return null;
   };
 
