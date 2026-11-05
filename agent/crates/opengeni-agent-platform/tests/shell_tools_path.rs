@@ -30,7 +30,9 @@ mod unix {
         set_shell_tools_directory(agent_tools.clone());
 
         let platform = NativePlatform::with_root(root.path());
-        let request_path = format!("{}:/usr/bin:/bin", system.display());
+        // Only the fixture's own "system" directory: the host may have its
+        // own rg, and the shell's builtins need no PATH.
+        let request_path = system.display().to_string();
         let response = platform
             .exec(&ExecRequest {
                 command: vec!["rg; jq; printf '%s\\n' \"$PATH\"".into()],
@@ -51,7 +53,7 @@ mod unix {
         );
 
         // A command whose PATH already names the directory keeps it as is.
-        let explicit = format!("{}:/usr/bin:/bin", agent_tools.display());
+        let explicit = format!("{}:{}", agent_tools.display(), system.display());
         let response = platform
             .exec(&ExecRequest {
                 command: vec!["printf '%s\\n' \"$PATH\"".into()],

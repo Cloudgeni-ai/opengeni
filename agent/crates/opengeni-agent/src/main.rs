@@ -611,10 +611,7 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
             if removed > 0 {
                 info!(removed, "removed earlier interaction runtime generations");
             }
-            let removed = shell_tools::prune_stale_generations();
-            if removed > 0 {
-                info!(removed, "removed earlier shell tools generations");
-            }
+            prune_shell_tools();
         });
     }
     // Clone connection platforms only after browser control is attached. Existing
@@ -773,6 +770,15 @@ fn install_shell_tools(config_dir: Option<&Path>) {
     }
 }
 
+/// Removes shell tools generations no agent has used for a while. Only the
+/// agent holding the instance lock calls this, off the startup path.
+fn prune_shell_tools() {
+    let removed = shell_tools::prune_stale_generations();
+    if removed > 0 {
+        info!(removed, "removed earlier shell tools generations");
+    }
+}
+
 /// `run --compute`: the agent in an Opengeni compute sandbox, started by the
 /// sandbox's guest init (`compute/docs/agent-link.md`, section 2). It serves
 /// one link, dialed through the sandbox's host with no credential, and keeps
@@ -824,12 +830,7 @@ async fn run_compute(args: &RunArgs, link_file: &Path) -> anyhow_lite::Result {
     let config_dir = config::config_dir().ok();
     install_shell_tools(config_dir.as_deref());
     if instance_lock_guard.is_some() {
-        std::thread::spawn(|| {
-            let removed = shell_tools::prune_stale_generations();
-            if removed > 0 {
-                info!(removed, "removed earlier shell tools generations");
-            }
-        });
+        std::thread::spawn(prune_shell_tools);
     }
     let update_drain = Arc::new(uploads::update_drain::UpdateDrain::default());
     let (platform, browser_sidecars) =
