@@ -77,10 +77,18 @@ describe("text selection", () => {
   test("page, field and editor selections all use the token", () => {
     const pageRule = /::selection\s*\{([^}]*)\}/.exec(app)?.[1] ?? "";
     expect(pageRule).toContain("background: var(--og-color-text-selection)");
-    const editorRule =
-      /\.cm-focused > \.cm-scroller > \.cm-selectionLayer \.cm-selectionBackground\s*\{([^}]*)\}/.exec(
-        index,
-      )?.[1] ?? "";
-    expect(editorRule).toContain("background-color: var(--og-color-text-selection)");
+    // The editor's focused and unfocused selection layers.
+    for (const selector of [
+      ".og-cm-editor .cm-editor .cm-selectionLayer .cm-selectionBackground",
+      ".og-cm-editor .cm-editor.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground",
+    ]) {
+      const rule = [...index.matchAll(/([^{}]+)\{([^}]*)\}/g)].find((match) =>
+        match[1]!.split(",").some((part) => part.trim() === selector),
+      );
+      expect([selector, rule?.[2]?.trim()]).toEqual([
+        selector,
+        "background-color: var(--og-color-text-selection);",
+      ]);
+    }
   });
 });

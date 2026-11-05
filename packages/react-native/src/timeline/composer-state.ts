@@ -55,8 +55,9 @@ export function nativeLoadingPhrases(
  * Selection colors for a text field. Android paints `selectionColor` as the
  * highlight itself, behind the text, so it takes the translucent
  * `text-selection` token while the caret and handles keep the solid accent.
- * iOS derives the highlight from the field's tint, so it keeps the system
- * tint, which is always visible.
+ * iOS derives the caret and highlight from one tint, and a translucent tint
+ * would fade the caret, so iOS uses the app's tint (system blue by default),
+ * which is always visible.
  */
 export function textFieldSelectionColors(
   colors: { accent: string; "text-selection": string },
